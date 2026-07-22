@@ -170,7 +170,7 @@ class NodeInfo:
                 sig=str(d.get("sig", "")),
                 version=int(d.get("v", PROTOCOL_VERSION)),
             )
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return None
 
     def surplus(self) -> float:
@@ -183,7 +183,7 @@ class NodeInfo:
         try:
             return float(self.stats.get("quotaLeft", 0.0)) - float(
                 self.stats.get("usageAvg", 0.0))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return 0.0
 
     def newer_than(self, other: "NodeInfo") -> bool:
@@ -228,7 +228,7 @@ class Job:
                 requested_by=str(d.get("requestedBy", "?")),
                 requested_at=float(d.get("requestedAt", time.time())),
             )
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return None
 
 
@@ -293,7 +293,7 @@ class ClaimRecord:
                 state=str(d.get("state", "active")),
                 sig=str(d.get("sig", "")),
             )
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
 
     @property
