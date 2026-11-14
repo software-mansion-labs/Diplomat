@@ -1,0 +1,1002 @@
+// The protocol core as a network: 2 to 7 hosts built from nothing but src/core, on a
+// transport that delays, reorders, duplicates and drops what they send, partitions them
+// and crashes them. Every schedule is drawn from one seed and must keep five invariants:
+//
+// (a) hosts that reach each other agree, once quiet, on one executor per task;
+// (b) after a partition heals and sync runs, every host holds the same state, and the
+//     claim that stands is the one the conflict rules name;
+// (c) no claim is committed without a grant from every member heard in its round;
+// (d) a lapsed claim frees its task for every host at the same second;
+// (e) every round ends, and in a calm network none ends by timing out.
+//
+// Run: node test/core-sim.mjs
+//   DN_SIM_SCHEDULES=20000   more schedules than the default
+//   DN_SIM_SEED=1234         one schedule, the one a failure names
+
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import os from 'node:os';
+import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
+import { b64u } from '../src/core/canon.js';
+import { ClaimRound, LockTable, buildClaim } from '../src/core/claims.js';
+import { ReplayMemory, buildRequest, buildResponse, verifyRequest, verifyResponse } from '../src/core/envelope.js';
+import { buildPing, endClaim, extendClaim, isActive, pingWindow, verifyPing } from '../src/core/lease.js';
+import { createInvite, inviteToken } from '../src/core/membership.js';
+import { Pool } from '../src/core/pool.js';
+import { EffortMeter, solve } from '../src/core/pow.js';
+import { memberRecord, offerRecord, pingShaped, shaped } from '../src/core/records.js';
+import { POOL, T0, ident, prng } from './lib/core-fixtures.mjs';
+
+async function check(name, fn) {
+  await fn();
+  console.log(`PASS ${name}`);
+}
+
+const IDS = Array.from({ length: 7 }, (_, i) => ident(i));
+const [LEASE, GRACE, DAY] = [7200, 600, 24 * 3600];
+const REQUEST_TIMEOUT_MS = 8000;
+const CALM = { name: 'calm', drop: 0, dup: 0, slow: 300, partition: 0, crash: 0 };
+const PROFILES = [
+  CALM,
+  { name: 'jittery', drop: 0, dup: 0.15, slow: 6000, partition: 0.3, crash: 0.4 },
+  { name: 'lossy', drop: 0.12, dup: 0.1, slow: 2500, partition: 0.5, crash: 0.5 },
+  { name: 'stormy', drop: 0.3, dup: 0.2, slow: 20000, partition: 0.6, crash: 0.6 },
+];
+// A meter whose doublings a schedule reaches with a handful of requests.
+const TINY = { memberBase: 1, memberAllow: 6, memberCap: 5, strangerBase: 4, strangerAllow: 2, strangerCap: 4, windowSecs: 60 };
+
+const taskIdOf = (item) => `${POOL}#review:${item}@octocat`;
+const claimKey = (taskId) => `claim/${taskId}`;
+
+// The conflict rules of PROTOCOL.md section 7, written out apart from the code under test.
+const rankOf = (taskId, pk) => crypto.createHash('sha256')
+  .update(Buffer.concat([Buffer.from(`dn1/rank\0${taskId}\0`), Buffer.from(pk, 'base64url')])).digest('hex');
+// Negative when claim `a` stands over claim `b`.
+function stands(a, b) {
+  if (a.gen !== b.gen) return b.gen - a.gen;
+  if (a.executor !== b.executor) return rankOf(a.taskId, a.executor) < rankOf(b.taskId, b.executor) ? -1 : 1;
+  if (a.round !== b.round) return a.round < b.round ? -1 : 1;
+  return b.seq - a.seq;
+}
+
+// One host: a pool, a lock table and the claim rounds it runs, wired to the world's
+// transport the way a daemon would wire them to Tor.
+class Host {
+  constructor(world, index, accepts) {
+    this.world = world;
+    this.index = index;
+    this.id = IDS[index];
+    this.pk = this.id.pk;
+    this.accepts = accepts;
+    this.pool = new Pool({ id: POOL, self: this.pk });
+    this.locks = new LockTable();
+    this.up = true;
+    this.life = 0;
+    this.joined = false;
+    this.record = null;
+    this.inviter = null;
+    this.runs = new Map(); // taskId -> the round in progress
+    this.wants = new Map(); // taskId -> attempts left
+    this.crashAt = 0; // crash on receiving this many grants
+    this.meter = new EffortMeter(TINY);
+    this.replay = new ReplayMemory();
+    this.owed = new Map(); // pk -> the effort that target last asked for
+  }
+
+  get now() {
+    return this.world.now;
+  }
+
+  // Runs `fn` after `delay` ms unless this host crashed in between.
+  later(delay, fn) {
+    const { life } = this;
+    this.world.at(delay, () => {
+      if (this.up && this.life === life) fn();
+    });
+  }
+
+  others() {
+    return this.pool.members(this.now).map((m) => m.pk).filter((pk) => pk !== this.pk);
+  }
+
+  executing(taskId) {
+    return this.pool.task(taskId, this.now)?.claim?.executor === this.pk;
+  }
+
+  send(to, kind, body, reply = () => {}) {
+    this.world.request(this, this.world.byPk.get(to), kind, body, reply);
+  }
+
+  push(records) {
+    for (const pk of this.others()) this.send(pk, 'push', { records });
+  }
+
+  // Takes records into its own pool, then lets everything that rests on the state catch up.
+  take(records) {
+    const result = this.pool.merge(records, this.now);
+    this.changed();
+    return result;
+  }
+
+  changed() {
+    for (const [taskId] of this.locks.entries()) {
+      const claim = this.pool.get(claimKey(taskId));
+      if (claim) this.locks.release(taskId, claim.executor, claim.round);
+    }
+    // A round confirms the state it will be granted on: when that moved, it starts over.
+    for (const run of [...this.runs.values()]) {
+      if (!run.round.over && this.pool.stateHash(run.snapshot.asOf) !== run.snapshot.hash) this.rebase(run);
+    }
+  }
+
+  handle(from, kind, body) {
+    const { now } = this;
+    if (kind === 'hello') {
+      const answer = this.pool.answerHello(body, from, now);
+      this.changed();
+      return answer;
+    }
+    if (!this.pool.accepts(from, now)) return { error: 'not-member' };
+    if (kind === 'sync') return this.pool.answerSync(body, now);
+    if (kind === 'pull') return this.pool.answerPull(body);
+    if (kind === 'lock') return this.locks.answer({ pool: this.pool, identity: this.id, from, body, now });
+    if (kind === 'unlock') return this.locks.unlock({ from, body });
+    if (kind === 'ping') return this.answerPing(from, body, now);
+    assert.equal(kind, 'push');
+    const answer = this.pool.answerPush(body, now);
+    this.changed();
+    return answer;
+  }
+
+  found() {
+    const { now } = this;
+    this.record = memberRecord(this.id, { pool: POOL, seq: 0, at: now, joinedAt: now, maxAcceptedH: this.accepts });
+    this.pool.merge(this.record, now);
+    this.joined = true;
+  }
+
+  join(inviter, tries = 12) {
+    this.inviter = inviter;
+    if (!this.up || this.joined) return;
+    const { now } = this;
+    if (!this.record) {
+      const voucher = inviteToken(createInvite(inviter.id, { pool: POOL, exp: now + 3600, nonce: this.world.rnd.bytes(16) }));
+      this.record = memberRecord(this.id, { pool: POOL, seq: 0, at: now, joinedAt: now, maxAcceptedH: this.accepts, voucher });
+      this.pool.merge(this.record, now);
+    }
+    this.greet(inviter.pk, (ok) => {
+      if (ok) this.push([this.record]);
+      else if (tries > 1) this.later(2000 + this.world.rnd.int(6000), () => this.join(inviter, tries - 1));
+    });
+  }
+
+  // Introduces itself to a member and pulls what that member holds.
+  greet(pk, done) {
+    this.send(pk, 'hello', { member: this.record }, (result) => {
+      const index = result?.body?.index;
+      if (!index) return done(false);
+      this.joined = true;
+      const plan = this.pool.reconcile(index, this.now);
+      assert.ok(plan, 'a hello was answered with a malformed index');
+      if (plan.pull.length === 0) return done(true);
+      return this.send(pk, 'pull', { keys: plan.pull }, (pulled) => {
+        if (pulled?.body) this.take(pulled.body.records);
+        done(true);
+      });
+    });
+  }
+
+  syncWith(pk, done = () => {}, greeted = false) {
+    const asOf = this.now;
+    this.send(pk, 'sync', { asOf, hash: this.pool.stateHash(asOf) }, (result) => {
+      if (result?.error === 'not-member' && !greeted) {
+        return this.greet(pk, (ok) => (ok ? this.syncWith(pk, done, true) : done()));
+      }
+      const index = result?.body?.index;
+      if (!index) return done();
+      const plan = this.pool.reconcile(index, asOf);
+      assert.ok(plan, 'a sync was answered with a malformed index');
+      const give = () => {
+        const records = this.pool.records(plan.push);
+        if (records.length === 0) return done();
+        return this.send(pk, 'push', { records }, () => done());
+      };
+      if (plan.pull.length === 0) return give();
+      return this.send(pk, 'pull', { keys: plan.pull }, (pulled) => {
+        if (pulled?.body) this.take(pulled.body.records);
+        give();
+      });
+    });
+  }
+
+  offer(task, hours, tries = 8) {
+    if (!this.joined) {
+      if (tries > 1) this.later(5000, () => this.offer(task, hours, tries - 1));
+      return;
+    }
+    const { now } = this;
+    const record = offerRecord(this.id, {
+      pool: POOL, kind: 'review', item: task.item, identity: 'octocat', seq: 0, at: now, title: `Review ${task.item}`,
+      minRequiredH: hours, createdAt: now,
+    });
+    this.take(record);
+    this.push([record]);
+  }
+
+  // Marks its own offer of a task done.
+  close(taskId) {
+    const { sig: _, ...held } = this.pool.get(`offer/${taskId}/${this.pk}`);
+    const record = offerRecord(this.id, { ...held, seq: held.seq + 1, at: this.now, state: 'done' });
+    this.take(record);
+    this.push([record]);
+  }
+
+  want(taskId, tries) {
+    if (!this.up) return;
+    this.wants.set(taskId, tries);
+    this.claim(taskId);
+  }
+
+  claim(taskId) {
+    const left = this.wants.get(taskId) ?? 0;
+    if (!this.joined || this.runs.has(taskId) || left <= 0) return;
+    this.wants.set(taskId, left - 1);
+    const { now } = this;
+    const round = new ClaimRound({ taskId, self: this.pk, round: b64u(this.world.rnd.bytes(8)), now });
+    // A host that granted a rival's lock waits for that round to end.
+    if (!this.locks.hold(taskId, this.pk, round.round, round.deadline, now)) {
+      this.retry(taskId);
+      return;
+    }
+    const run = { host: this, round, taskId, heard: new Set(), snapshot: null, outcome: null, ended: null };
+    this.runs.set(taskId, run);
+    this.world.rounds.push(run);
+    this.rebase(run);
+    const tick = () => {
+      if (run.round.over) return;
+      this.act(run, run.round.tick(this.now));
+      this.later(5000, tick);
+    };
+    this.later(5000, tick);
+  }
+
+  retry(taskId) {
+    if (this.wants.get(taskId) > 0) this.later(5000 + this.world.rnd.int(35000), () => this.claim(taskId));
+  }
+
+  rebase(run) {
+    if (run.round.over) return;
+    const { now } = this;
+    run.snapshot = this.pool.claimSnapshot(run.taskId, now);
+    if (run.round.phase === 'new' && run.snapshot.available && run.snapshot.eligible) this.world.attempted.add(run.taskId);
+    this.act(run, run.round.rebase(run.snapshot, now));
+  }
+
+  act(run, actions) {
+    const { round, taskId } = run;
+    const { rnd } = this.world;
+    for (const action of actions) {
+      if (action.do === 'sync' || action.do === 'lock') {
+        const ask = () => {
+          if (round.over) return;
+          this.send(action.to, action.do, action.body, (result) => {
+            if (round.over) return;
+            if (!result) {
+              this.act(run, round.noAnswer(action.to, action.wave, this.now));
+              return;
+            }
+            run.heard.add(action.to);
+            if (result.body?.grant && this.crashAt > 0 && --this.crashAt === 0) {
+              this.world.crash(this);
+              return;
+            }
+            const answer = action.do === 'sync' ? round.onSync : round.onLock;
+            this.act(run, answer.call(round, action.to, action.wave, result.body ?? null, this.now));
+          });
+        };
+        if (action.retry) this.later(1000 + rnd.int(2000), ask);
+        else ask();
+      } else if (action.do === 'resync') {
+        const { wave } = round;
+        const again = () => {
+          if (round.wave === wave) this.rebase(run);
+        };
+        this.later(500 + rnd.int(1500), () => (action.with ? this.syncWith(action.with, again) : again()));
+      } else if (action.do === 'unlock') {
+        this.send(action.to, 'unlock', action.body);
+      } else if (action.do === 'commit') {
+        this.commit(run, action);
+      } else {
+        assert.equal(action.do, 'stand-down');
+        this.locks.release(taskId, this.pk, round.round);
+        this.runs.delete(taskId);
+        run.outcome = action.reason;
+        run.ended = this.now;
+        this.retry(taskId);
+      }
+    }
+  }
+
+  commit(run, { gen, hours, grants, absent }) {
+    const { now } = this;
+    const { taskId, round } = run;
+    const granted = grants.map((g) => g.by);
+    assert.deepEqual([...granted, ...absent].sort(), [...run.snapshot.members].sort(), `(c) host ${this.index} committed without every member granting or absent`);
+    for (const pk of run.heard) {
+      if (run.snapshot.members.includes(pk)) assert.ok(granted.includes(pk), `(c) host ${this.index} committed without a grant from host ${this.world.byPk.get(pk).index}, which answered in the round`);
+    }
+    assert.ok(now < round.deadline, `(e) host ${this.index} committed past its round's deadline`);
+    const claim = buildClaim(this.id, { pool: POOL, taskId, round: round.round, gen, hours, grants, absent, now });
+    assert.deepEqual(this.pool.merge(claim, now).refused, [], `host ${this.index} cannot hold the claim it committed`);
+    this.locks.release(taskId, this.pk, round.round);
+    this.runs.delete(taskId);
+    run.outcome = 'commit';
+    run.ended = now;
+    this.world.commits.push({ claim, members: run.snapshot.members });
+    this.changed();
+    this.push([claim]);
+  }
+
+  // A requester asks the executor of a task for its next lease and spreads the answer.
+  ping(taskId) {
+    const claim = this.pool.task(taskId, this.now)?.claim;
+    if (!claim) return;
+    this.send(claim.executor, 'ping', { ping: buildPing(this.id, claim, this.now) }, (result) => {
+      const next = result?.body?.claim;
+      if (!next) return;
+      this.take(next);
+      this.push([next]);
+    });
+  }
+
+  answerPing(from, body, now) {
+    if (!shaped(body, { ping: pingShaped })) return { error: 'bad-request' };
+    const claim = this.pool.get(claimKey(body.ping.taskId));
+    if (!claim || claim.executor !== this.pk || body.ping.by !== from) return { error: 'denied' };
+    const verdict = verifyPing(body.ping, claim, this.pool.task(claim.taskId, now)?.offeredBy ?? []);
+    if (!verdict.ok) return verdict.code === 'old' ? { body: { claim } } : { error: 'denied', detail: verdict.code };
+    if (!isActive(claim, now)) return { error: 'denied', detail: 'lapsed' };
+    const next = extendClaim(this.id, claim, body.ping, now);
+    assert.deepEqual(this.take(next).refused, [], `host ${this.index} cannot hold its own extension`);
+    return { body: { claim: next } };
+  }
+
+  // The executor gives its claim up, or reports its task finished.
+  finish(taskId, state) {
+    const ended = endClaim(this.id, this.pool.get(claimKey(taskId)), state, this.now);
+    assert.deepEqual(this.take(ended).refused, []);
+    this.push([ended]);
+  }
+}
+
+// The hosts, the clock they share and everything in flight between them.
+class World {
+  constructor(seed, sealed = false) {
+    this.rnd = prng(seed);
+    this.sealed = sealed;
+    this.ms = 0;
+    this.queue = [];
+    this.steps = 0;
+    this.hosts = [];
+    this.byPk = new Map();
+    this.side = new Map();
+    this.net = CALM;
+    this.busy = false;
+    this.era = 0;
+    this.rounds = [];
+    this.commits = [];
+    this.attempted = new Set();
+    this.seen = { replays: 0, efforts: 0, midRound: 0, splits: 0 };
+  }
+
+  get now() {
+    return T0 + Math.floor(this.ms / 1000);
+  }
+
+  add(accepts) {
+    const host = new Host(this, this.hosts.length, accepts);
+    this.hosts.push(host);
+    this.byPk.set(host.pk, host);
+    this.side.set(host, 0);
+    return host;
+  }
+
+  at(delay, fn) {
+    const event = { t: this.ms + delay, fn };
+    let i = this.queue.length;
+    while (i > 0 && this.queue[i - 1].t > event.t) i -= 1;
+    this.queue.splice(i, 0, event);
+  }
+
+  // Carries out everything due up to `until` ms, or everything there is.
+  async run(until = Infinity) {
+    while (this.queue.length > 0 && this.queue[0].t <= until) {
+      const event = this.queue.shift();
+      this.ms = event.t;
+      assert.ok(++this.steps < 2000000, 'the schedule never comes to rest');
+      const pending = event.fn();
+      if (pending) await pending;
+    }
+    if (until !== Infinity) this.ms = until;
+  }
+
+  // Moves the clock on while nothing is in flight.
+  jump(now) {
+    assert.equal(this.queue.length, 0);
+    assert.ok(now >= this.now);
+    this.ms = (now - T0) * 1000;
+  }
+
+  linked(a, b) {
+    return a.up && b.up && this.side.get(a) === this.side.get(b);
+  }
+
+  split(sides) {
+    this.hosts.forEach((h, i) => this.side.set(h, sides[i]));
+    this.seen.splits += 1;
+  }
+
+  heal() {
+    for (const h of this.hosts) this.side.set(h, 0);
+  }
+
+  crash(host) {
+    if (!host.up) return;
+    host.up = false;
+    host.life += 1;
+    host.crashAt = 0;
+    if (host.runs.size > 0) this.seen.midRound += 1;
+    for (const run of host.runs.values()) run.outcome = 'crashed';
+    host.runs.clear();
+  }
+
+  // Back up with what a daemon keeps on disk: its records and its locks.
+  restart(host) {
+    if (host.up) return;
+    host.up = true;
+    host.locks = new LockTable(host.locks.entries());
+    if (host.inviter) host.join(host.inviter);
+  }
+
+  // One leg of a journey: lost, or late by a random delay.
+  hop(fn) {
+    if (this.rnd.chance(this.net.drop)) return;
+    this.at(5 + this.rnd.int(this.net.slow), fn);
+  }
+
+  // Sends a request and calls `reply` once: with `{ body }` or `{ error }` when an answer
+  // arrives in time, with null when none does. A sender that crashed hears nothing.
+  request(src, dst, kind, body, reply) {
+    const { life } = src;
+    let open = true;
+    const settle = (result) => {
+      if (!open || !src.up || src.life !== life) return;
+      open = false;
+      reply(result);
+    };
+    this.at(REQUEST_TIMEOUT_MS, () => settle(null));
+    if (this.sealed) {
+      this.seal(src, dst, kind, body, settle, 0);
+      return;
+    }
+    const arrive = () => {
+      if (!this.linked(src, dst)) return;
+      const answer = dst.handle(src.pk, kind, body);
+      this.hop(() => {
+        if (this.linked(src, dst)) settle(answer);
+      });
+    };
+    this.hop(arrive);
+    if (this.rnd.chance(this.net.dup)) this.hop(arrive);
+  }
+
+  // The same journey inside signed envelopes, each with its proof of work. A copy of a
+  // request on the wire is a replay, and must never reach a handler twice.
+  seal(src, dst, kind, body, settle, tries) {
+    this.at(0, async () => {
+      if (!src.up) return;
+      const request = await buildRequest(src.id, {
+        pool: POOL, kind, to: dst.pk, ts: this.now, body, nonce: this.rnd.bytes(16), effort: src.owed.get(dst.pk) ?? 1,
+      }, (c, effort) => solve(c, effort).counter);
+      const size = Buffer.byteLength(JSON.stringify(request));
+      let taken = false;
+      const arrive = () => {
+        if (!this.linked(src, dst)) return;
+        const { now } = this;
+        const verdict = verifyRequest(request, {
+          self: dst.pk, now, size, meter: dst.meter, replay: dst.replay, isMember: (pool, pk) => pool === POOL && dst.pool.accepts(pk, now),
+        });
+        if (taken) {
+          assert.equal(verdict.ok, false, 'a replayed request reached a handler');
+          this.seen.replays += 1;
+          return;
+        }
+        taken = verdict.ok;
+        const answer = verdict.ok ? dst.handle(src.pk, kind, body) : { error: verdict.code, detail: verdict.detail };
+        const response = buildResponse(dst.id, {
+          re: verdict.re, effort: verdict.effort,
+          ...(answer.error ? { error: { code: answer.error, detail: answer.detail } } : { body: answer.body }),
+        });
+        this.hop(() => {
+          if (!this.linked(src, dst)) return;
+          const result = verifyResponse(response, { request, from: dst.pk });
+          assert.ok(result, 'a response its asker cannot verify');
+          src.owed.set(dst.pk, result.effort);
+          if (!result.ok && result.code === 'effort' && tries < 3) {
+            this.seen.efforts += 1;
+            this.seal(src, dst, kind, body, settle, tries + 1);
+          } else {
+            settle(result.ok ? { body: result.body } : { error: result.code, detail: result.detail });
+          }
+        });
+      };
+      this.hop(arrive);
+      if (this.rnd.chance(this.net.dup)) this.hop(arrive);
+    });
+  }
+
+  // Every host syncs with a random member every so often, for as long as the world is busy.
+  gossip() {
+    this.busy = true;
+    const era = ++this.era;
+    for (const host of this.hosts) {
+      const loop = () => {
+        if (!this.busy || this.era !== era) return;
+        const others = host.up && host.joined ? host.others() : [];
+        if (others.length > 0) host.syncWith(this.rnd.pick(others));
+        this.at(10000 + this.rnd.int(30000), loop);
+      };
+      this.at(this.rnd.int(20000), loop);
+    }
+  }
+
+  live() {
+    return this.hosts.filter((h) => h.up && h.joined);
+  }
+
+  // The live hosts in groups that can reach each other and take each other's requests.
+  clusters() {
+    const { now } = this;
+    const left = new Set(this.live());
+    const out = [];
+    for (const first of left) {
+      const cluster = [];
+      const queue = [first];
+      left.delete(first);
+      while (queue.length > 0) {
+        const a = queue.pop();
+        cluster.push(a);
+        for (const b of left) {
+          if (this.linked(a, b) && a.pool.accepts(b.pk, now) && b.pool.accepts(a.pk, now)) {
+            left.delete(b);
+            queue.push(b);
+          }
+        }
+      }
+      out.push(cluster);
+    }
+    return out;
+  }
+
+  agreed() {
+    return this.clusters().every((cluster) => new Set(cluster.map((h) => h.pool.stateHash(this.now))).size === 1);
+  }
+
+  // Brings the world to rest: the faults stop, whatever is in flight lands, and the hosts
+  // sync until those that reach each other hold the same state. Partitions and crashed
+  // hosts stay as they are.
+  async settle() {
+    const { net } = this;
+    this.net = CALM;
+    this.busy = false;
+    for (const host of this.hosts) {
+      if (host.inviter) host.join(host.inviter);
+    }
+    await this.run();
+    for (let sweep = 0; !this.agreed(); sweep++) {
+      assert.ok(sweep < 10, '(a) hosts that reach each other still differ after ten rounds of sync');
+      for (const host of this.live()) {
+        for (const pk of host.others()) {
+          if (this.linked(host, this.byPk.get(pk))) host.syncWith(pk);
+        }
+      }
+      await this.run();
+    }
+    this.net = net;
+  }
+
+  // The invariants that hold whenever the world is at rest.
+  inspect(tasks, tally) {
+    const { now } = this;
+    for (const run of this.rounds) {
+      assert.ok(run.outcome, `(e) a round of host ${run.host.index} never ended`);
+      if (run.outcome === 'crashed') continue;
+      assert.ok(run.ended <= run.round.deadline + 5, `(e) a round of host ${run.host.index} outlived its deadline`);
+    }
+    for (const cluster of this.clusters()) {
+      assert.equal(new Set(cluster.map((h) => h.pool.stateHash(now))).size, 1, '(a) hosts that reach each other hold different states');
+      for (const { taskId } of tasks) {
+        const named = new Set(cluster.map((h) => h.pool.task(taskId, now)?.claim?.executor ?? null));
+        assert.equal(named.size, 1, `(a) hosts that reach each other name different executors for ${taskId}`);
+        assert.ok(cluster.filter((h) => h.executing(taskId)).length <= 1, `(a) two hosts that reach each other both run ${taskId}`);
+        if (cluster.length > 1 && !named.has(null)) tally.a += 1;
+      }
+    }
+    for (const host of this.live()) {
+      for (const task of host.pool.tasks(now)) {
+        if (task.state !== 'claimed') continue;
+        const lapse = task.claim.leaseUntil + GRACE;
+        const [before, after] = [host.pool.task(task.taskId, lapse - 1), host.pool.task(task.taskId, lapse)];
+        assert.deepEqual([before.state, before.claim, after.state, after.claim], ['claimed', task.claim, 'available', null],
+          `(d) host ${host.index} does not free ${task.taskId} when its lease and grace run out`);
+      }
+    }
+  }
+}
+
+// Every claim record any host holds.
+const heldClaims = (world) => world.hosts.flatMap((h) => h.pool.records().filter((r) => r.type === 'claim'));
+
+// One whole schedule: hosts join, offer and race for tasks while the network misbehaves;
+// the network heals; leases are extended, given up, cut off and left to lapse.
+async function schedule(seed, tally) {
+  const world = new World(seed, seed % 16 === 5);
+  const r = world.rnd;
+  const profile = r.pick(PROFILES);
+  const n = 2 + r.int(6);
+  const calm = profile === CALM;
+  world.about = `${profile.name}, ${n} hosts${world.sealed ? ', sealed' : ''}`;
+  for (let i = 0; i < n; i++) world.add(r.pick([12, 24, 24, 48]));
+  const { hosts } = world;
+  const tasks = Array.from({ length: 1 + r.int(3) }, (_, j) => {
+    const item = `pr-${seed}.${j}`;
+    const offerers = r.shuffle(hosts.slice(0, 3)).slice(0, r.chance(0.4) ? 2 : 1);
+    return { item, taskId: taskIdOf(item), offers: offerers.map((host) => ({ host, hours: r.pick([12, 12, 24]) })) };
+  });
+  // Several hosts go for each task, most of them within seconds of each other.
+  const storm = (from, tries) => tasks.flatMap(({ taskId }) => {
+    const burst = from + r.int(30000);
+    const claimants = r.shuffle(hosts).slice(0, 1 + r.int(Math.min(n, 4)));
+    for (const host of claimants) world.at(burst + r.int(r.chance(0.6) ? 3000 : 40000), () => host.want(taskId, tries));
+    return claimants;
+  });
+
+  // Joining, offering and the first race, all at once - except in a calm world, where
+  // the race starts from hosts that know each other, so that it must be won.
+  world.net = profile;
+  world.gossip();
+  hosts[0].found();
+  for (let i = 1; i < n; i++) {
+    const inviter = hosts[r.int(i)];
+    world.at(!calm && r.chance(0.2) ? 150000 + r.int(60000) : r.int(40000), () => hosts[i].join(inviter));
+  }
+  for (const task of tasks) {
+    for (const { host, hours } of task.offers) world.at(3000 + r.int(50000), () => host.offer(task, hours));
+  }
+  if (calm) {
+    await world.run(60000);
+    await world.settle();
+    world.gossip();
+  }
+  const claimants = storm(calm ? 0 : 60000, 3);
+  if (r.chance(profile.partition)) {
+    const sides = hosts.map(() => r.int(n > 2 && r.chance(0.3) ? 3 : 2));
+    // Half the time two hosts that offer the same task end up apart, so that each side
+    // can claim it; otherwise any two hosts do.
+    const shared = tasks.find((task) => task.offers.length > 1);
+    const [one, other] = shared && r.chance(0.5) ? shared.offers.map((o) => o.host.index) : [0, 1 + r.int(n - 1)];
+    sides[one] = 0;
+    sides[other] = 1;
+    const from = r.chance(0.5) ? 40000 + r.int(20000) : r.int(120000);
+    world.at(from, () => world.split(sides));
+    if (shared && sides[shared.offers[0].host.index] !== sides[shared.offers[1].host.index]) {
+      for (const { host } of shared.offers) world.at(from + 5000 + r.int(20000), () => host.want(shared.taskId, 3));
+    }
+    if (r.chance(0.5)) world.at(from + 10000 + r.int(150000), () => world.heal());
+  }
+  if (r.chance(profile.crash)) {
+    const victim = r.chance(0.7) ? r.pick(claimants) : r.pick(hosts);
+    if (r.chance(0.6)) victim.crashAt = 1;
+    else world.at(50000 + r.int(70000), () => world.crash(victim));
+    if (r.chance(0.5)) world.at(150000 + r.int(200000), () => world.restart(victim));
+  }
+  await world.run(world.ms + 420000);
+  await world.settle();
+  world.inspect(tasks, tally);
+  if (calm) {
+    assert.ok(world.rounds.every((run) => run.outcome !== 'timeout'), '(e) a round timed out in a calm network');
+    for (const taskId of world.attempted) {
+      for (const host of hosts) assert.equal(host.pool.task(taskId, world.now).state, 'claimed', `(e) nobody won the race for ${taskId}`);
+      tally.won += 1;
+    }
+  }
+
+  // The network heals and every host comes back; a second race runs under the same faults.
+  const before = heldClaims(world);
+  world.heal();
+  for (const host of hosts) {
+    host.crashAt = 0;
+    if (!host.up) world.restart(host);
+    else if (host.inviter) host.join(host.inviter);
+  }
+  world.gossip();
+  storm(0, 2);
+  await world.run(world.ms + 300000);
+  await world.settle();
+  world.inspect(tasks, tally);
+  assert.deepEqual(world.clusters().map((c) => c.length), [n], '(b) a host stays apart after the network healed');
+  for (const claim of [...before, ...world.commits.map((c) => c.claim)]) {
+    const kept = hosts[0].pool.get(claimKey(claim.taskId));
+    assert.ok(kept && stands(kept, claim) <= 0, `(b) the hosts hold a claim for ${claim.taskId} that does not stand over one of them saw`);
+  }
+  for (const { taskId } of tasks) {
+    const rivals = world.commits.map((c) => c.claim).filter((c) => c.taskId === taskId);
+    if (rivals.length === 0) continue;
+    const best = rivals.reduce((a, b) => (stands(a, b) <= 0 ? a : b));
+    const kept = hosts[0].pool.get(claimKey(taskId));
+    assert.deepEqual([kept.executor, kept.round, kept.gen], [best.executor, best.round, best.gen], `(b) the claim that stands for ${taskId} is not the one the rules name`);
+    if (rivals.some((x) => rivals.some((y) => x.gen === y.gen && x.executor !== y.executor))) tally.b += 1;
+  }
+
+  // Leases, one claimed task after another in the order their leases run out.
+  world.net = CALM;
+  const everywhere = (taskId, what) => hosts.map((h) => what(h.pool.task(taskId, world.now), h));
+  const claimed = hosts[0].pool.tasks(world.now).filter((t) => t.state === 'claimed').sort((x, y) => x.claim.leaseUntil - y.claim.leaseUntil);
+  const lapsing = [];
+  // Walks the clock over the second a claim lapses, whichever side of it the clock is on.
+  const lapse = (claim) => {
+    const { taskId } = claim;
+    const at = claim.leaseUntil + GRACE;
+    if (world.now < at) {
+      world.jump(at - 1);
+      assert.deepEqual(everywhere(taskId, (t) => t.claim), hosts.map(() => claim), `(d) ${taskId} was freed before its lease and grace ran out`);
+      world.jump(at);
+      tally.d += 1;
+    }
+    assert.deepEqual(everywhere(taskId, (t, h) => [t.state, t.claim, h.executing(taskId)]), hosts.map(() => ['available', null, false]), `(d) ${taskId} is not free for every host at the second its claim lapses`);
+  };
+  for (const { taskId, claim, offeredBy } of claimed) {
+    const executor = world.byPk.get(claim.executor);
+    const requesters = offeredBy.map((pk) => world.byPk.get(pk)).filter((h) => h !== executor);
+    const window = pingWindow(claim);
+    const fate = world.now >= window.until || requesters.length === 0 ? r.pick(['release', 'complete', 'lapse']) : r.pick(['extend', 'extend', 'cut', 'release', 'complete', 'lapse']);
+    if (fate === 'release' || fate === 'complete') {
+      if (!isActive(claim, world.now)) continue;
+      executor.finish(taskId, fate === 'release' ? 'released' : 'completed');
+      await world.settle();
+      assert.deepEqual(everywhere(taskId, (t) => [t.state, t.claim]), hosts.map(() => ['available', null]), `an ended claim still holds ${taskId} somewhere`);
+      if (fate === 'complete') {
+        for (const pk of offeredBy) world.byPk.get(pk).close(taskId);
+        await world.settle();
+        assert.deepEqual(everywhere(taskId, (t) => t.state), hosts.map(() => 'done'));
+      }
+      tally.ended += 1;
+    } else if (fate === 'extend') {
+      world.jump(Math.max(world.now, window.from + r.int(2 * GRACE)));
+      r.pick(requesters).ping(taskId);
+      await world.settle();
+      const lease = claim.leaseUntil + LEASE;
+      assert.deepEqual(everywhere(taskId, (t) => [t.claim?.seq, t.claim?.leaseUntil]), hosts.map(() => [1, lease]), `the extension of ${taskId} did not reach every host`);
+      world.inspect(tasks, tally);
+      tally.extended += 1;
+    } else if (fate === 'cut') {
+      // The executor is cut off from its requesters for the whole window: no ping
+      // reaches it, and its claim lapses on both sides at once.
+      world.split(hosts.map((h) => (h === executor ? 1 : 0)));
+      world.jump(Math.max(world.now, window.from));
+      for (const requester of requesters) requester.ping(taskId);
+      await world.run();
+      lapse(claim);
+      world.heal();
+      lapsing.push(claim);
+    } else {
+      lapsing.push(claim);
+    }
+  }
+  for (const claim of lapsing) {
+    const { taskId } = claim;
+    lapse(claim);
+    const hours = hosts[0].pool.task(taskId, world.now).hours;
+    const next = r.pick(hosts.filter((h) => h.accepts >= hours));
+    if (!next) continue;
+    next.want(taskId, 2);
+    await world.settle();
+    const kept = hosts.map((h) => h.pool.get(claimKey(taskId)));
+    assert.deepEqual(kept.map((c) => [c.executor, c.gen, c.state]), hosts.map(() => [next.pk, claim.gen + 1, 'held']), `the claim after a lapsed one is not the next generation of ${taskId}`);
+    assert.deepEqual(r.pick(hosts).pool.merge(claim, world.now).refused, [{ key: claimKey(taskId), code: 'older' }]);
+    world.inspect(tasks, tally);
+    tally.regen += 1;
+  }
+
+  // Two claims of one task and one generation by different executors: one of the two
+  // claimants did not have the other among the members it could ask.
+  for (const [i, x] of world.commits.entries()) {
+    for (const y of world.commits.slice(i + 1)) {
+      const [a, b] = [x.claim, y.claim];
+      if (a.taskId !== b.taskId || a.gen !== b.gen || a.executor === b.executor) continue;
+      const blind = a.absent.includes(b.executor) || b.absent.includes(a.executor) || !x.members.includes(b.executor) || !y.members.includes(a.executor);
+      assert.ok(blind, `(c) two executors that granted each other both claimed ${a.taskId}`);
+      tally.blind += 1;
+    }
+  }
+
+  // Long after, with no word exchanged: the same records make the same state at any time.
+  for (const later of [DAY - 1, DAY, 3 * DAY]) {
+    world.jump(world.now + later);
+    assert.equal(new Set(hosts.map((h) => h.pool.stateHash(world.now))).size, 1, 'the same records make different states as time passes');
+  }
+  const hashed = hosts[0].pool.stateHash(world.now);
+  for (const host of hosts) host.pool.prune(world.now);
+  assert.deepEqual(hosts.map((h) => h.pool.stateHash(world.now)), hosts.map(() => hashed));
+
+  tally.schedules += 1;
+  tally.sealed += world.sealed ? 1 : 0;
+  tally.c += world.commits.length;
+  tally.absent += world.commits.filter((c) => c.claim.absent.length > 0).length;
+  tally.e += world.rounds.length;
+  tally.timeouts += world.rounds.filter((run) => run.outcome === 'timeout').length;
+  for (const [key, count] of Object.entries(world.seen)) tally[key] += count;
+  return world;
+}
+
+// A calm world of `n` hosts that know each other, the first of which offers one task.
+async function calmWorld(n, item, offerers = [0]) {
+  const world = new World(1);
+  for (let i = 0; i < n; i++) world.add(24);
+  const { hosts } = world;
+  hosts[0].found();
+  for (const host of hosts.slice(1)) host.join(hosts[0]);
+  await world.settle();
+  const task = { item, taskId: taskIdOf(item) };
+  for (const i of offerers) hosts[i].offer(task, 12);
+  await world.settle();
+  return { world, hosts, ...task };
+}
+const ITEMS = Array.from({ length: 10 }, (_, i) => `pr-${i}`);
+const tally = {
+  schedules: 0, sealed: 0, a: 0, b: 0, c: 0, d: 0, e: 0, absent: 0, blind: 0, won: 0, timeouts: 0, ended: 0, extended: 0, regen: 0,
+  replays: 0, efforts: 0, midRound: 0, splits: 0,
+};
+
+// A worker thread runs its share of the seeds and reports what they exercised, or the
+// first seed that failed.
+if (!isMainThread) {
+  let seed;
+  try {
+    for (seed of workerData.seeds) await schedule(seed, tally);
+    parentPort.postMessage({ tally });
+  } catch (error) {
+    parentPort.postMessage({ seed, stack: error.stack });
+  }
+}
+
+if (isMainThread) {
+
+  await check('two claimants racing in a calm network: the better-ranked one commits, the other stands down, long before a round times out', async () => {
+    const winners = new Set();
+    for (const item of ITEMS) {
+      const { world, hosts, taskId } = await calmWorld(3, item);
+      const started = world.ms;
+      hosts[1].want(taskId, 1);
+      hosts[2].want(taskId, 1);
+      await world.settle();
+      const [best, worst] = rankOf(taskId, hosts[1].pk) < rankOf(taskId, hosts[2].pk) ? [hosts[1], hosts[2]] : [hosts[2], hosts[1]];
+      assert.deepEqual(world.rounds.map((run) => [run.host.index, run.outcome]).sort(), [[best.index, 'commit'], [worst.index, 'outranked']].sort());
+      for (const host of hosts) assert.equal(host.pool.task(taskId, world.now).claim.executor, best.pk);
+      assert.ok(world.ms - started < 30000, 'the race took as long as a round that times out');
+      world.inspect([{ taskId }], tally);
+      winners.add(best.index);
+    }
+    assert.equal(winners.size, 2, 'both rank orders were raced');
+  });
+
+  await check('two sides of a partition each claim the task; once healed every host holds the better-ranked claim and the other executor stops', async () => {
+    const winners = new Set();
+    for (const item of ITEMS) {
+      const { world, hosts, taskId } = await calmWorld(4, item, [0, 2]);
+      world.split([0, 0, 1, 1]);
+      hosts[1].want(taskId, 1);
+      hosts[3].want(taskId, 1);
+      await world.settle();
+      world.inspect([{ taskId }], tally);
+      const [left, right] = [hosts[0], hosts[2]].map((h) => h.pool.get(claimKey(taskId)));
+      assert.deepEqual([left.executor, left.gen, left.absent], [hosts[1].pk, 0, [hosts[2].pk, hosts[3].pk].sort()]);
+      assert.deepEqual([right.executor, right.gen, right.absent], [hosts[3].pk, 0, [hosts[0].pk, hosts[1].pk].sort()]);
+      assert.ok(hosts[1].executing(taskId) && hosts[3].executing(taskId), 'each side runs the task while they are apart');
+      world.heal();
+      await world.settle();
+      world.inspect([{ taskId }], tally);
+      const [best, worst] = rankOf(taskId, hosts[1].pk) < rankOf(taskId, hosts[3].pk) ? [hosts[1], hosts[3]] : [hosts[3], hosts[1]];
+      assert.equal(new Set(hosts.map((h) => h.pool.stateHash(world.now))).size, 1);
+      for (const host of hosts) assert.equal(host.pool.task(taskId, world.now).claim.executor, best.pk);
+      assert.deepEqual([best.executing(taskId), worst.executing(taskId)], [true, false]);
+      winners.add(best.index);
+    }
+    assert.equal(winners.size, 2, 'both sides won at least once');
+  });
+
+  await check('a claimant that crashes holding grants blocks the task until they expire, and no longer', async () => {
+    const { world, hosts, taskId } = await calmWorld(3, 'pr-1');
+    hosts[1].crashAt = 1;
+    hosts[1].want(taskId, 1);
+    world.at(2000, () => hosts[2].want(taskId, 12));
+    await world.settle();
+    const [crashed] = world.rounds;
+    assert.deepEqual([crashed.host.index, crashed.outcome, hosts[1].up], [1, 'crashed', false]);
+    const exp = crashed.snapshot.asOf + 120;
+    const claim = hosts[0].pool.get(claimKey(taskId));
+    assert.deepEqual([claim.executor, claim.absent, claim.grants.map((g) => g.by)], [hosts[2].pk, [hosts[1].pk], [hosts[0].pk]]);
+    assert.ok(claim.claimedAt > exp, 'claimed while the crashed claimant\'s grants could still be committed');
+    assert.ok(claim.claimedAt < exp + 60, 'the task stayed blocked long after the grants expired');
+    assert.ok(world.rounds.slice(1).every((run) => run.outcome === 'commit' || run.outcome === 'outranked'), 'nothing times out waiting for the dead claimant');
+  });
+
+  await check('a lease is extended across the network; cut off from its requester the claim lapses for every host at once, and the next claim is the next generation', async () => {
+    const { world, hosts, taskId } = await calmWorld(3, 'pr-1');
+    const [requester, executor, third] = hosts;
+    executor.want(taskId, 1);
+    await world.settle();
+    const first = requester.pool.get(claimKey(taskId));
+    world.jump(first.leaseUntil - 30);
+    requester.ping(taskId);
+    await world.settle();
+    const second = third.pool.get(claimKey(taskId));
+    assert.deepEqual([second.seq, second.leaseUntil, second.ping.by], [1, first.leaseUntil + LEASE, requester.pk]);
+    world.split([0, 1, 0]);
+    world.jump(second.leaseUntil - GRACE);
+    requester.ping(taskId);
+    await world.run();
+    const lapse = second.leaseUntil + GRACE;
+    world.jump(lapse - 1);
+    assert.deepEqual(hosts.map((h) => h.pool.task(taskId, world.now).state), ['claimed', 'claimed', 'claimed']);
+    world.jump(lapse);
+    assert.deepEqual(hosts.map((h) => h.pool.task(taskId, world.now).state), ['available', 'available', 'available']);
+    assert.equal(executor.executing(taskId), false);
+    world.heal();
+    third.want(taskId, 1);
+    await world.settle();
+    const next = hosts.map((h) => h.pool.get(claimKey(taskId)));
+    assert.deepEqual(next.map((c) => [c.executor, c.gen]), hosts.map(() => [third.pk, 1]));
+    assert.deepEqual(executor.pool.merge(second, world.now).refused, [{ key: claimKey(taskId), code: 'older' }]);
+  });
+
+  const only = process.env.DN_SIM_SEED;
+  const count = Number(process.env.DN_SIM_SCHEDULES) || 2000;
+  const rerun = (seed) => `FAILED schedule seed ${seed} - run it alone with DN_SIM_SEED=${seed} node test/core-sim.mjs`;
+  if (only) {
+    const world = await schedule(Number(only), tally).catch((error) => {
+      console.error(rerun(only));
+      throw error;
+    });
+    console.log(`seed ${only} (${world.about}) holds: ${world.rounds.map((run) => run.outcome).join(' ') || 'no rounds'}`);
+  } else {
+    const started = Date.now();
+    const jobs = Math.min(4, os.availableParallelism(), count);
+    const reports = await Promise.all(Array.from({ length: jobs }, (_, job) => new Promise((resolve, reject) => {
+      const seeds = Array.from({ length: count }, (__, i) => i + 1).filter((seed) => seed % jobs === job);
+      const worker = new Worker(new URL(import.meta.url), { workerData: { seeds } });
+      worker.once('message', resolve);
+      worker.once('error', reject);
+    })));
+    const failed = reports.filter((report) => report.stack).sort((x, y) => x.seed - y.seed);
+    for (const { seed, stack } of failed) console.error(`${rerun(seed)}\n${stack}`);
+    if (failed.length > 0) process.exit(1);
+    for (const report of reports) {
+      for (const [key, n] of Object.entries(report.tally)) tally[key] += n;
+    }
+    console.log(`${tally.schedules} schedules in ${((Date.now() - started) / 1000).toFixed(1)} s: ${tally.e} rounds, ${tally.timeouts} of them timed out, ${tally.splits} partitions`);
+
+    // Every schedule held every invariant, or the run stopped above. What is left to
+    // show is that the schedules reached each of them: a run long enough must have.
+    const shown = (name, counts) => check(`${name} [${Object.entries(counts).map(([what, k]) => `${k} ${what}`).join(', ')}]`, () => {
+      for (const [what, k] of Object.entries(counts)) assert.ok(k > 0 || count < 500, `no schedule reached: ${what}`);
+    });
+    await shown('(a) hosts that reach each other agree on one executor per task', { agreements: tally.a });
+    await shown('(b) healed and synced, every host holds the same state and the claim the conflict rules name', { 'tasks claimed on both sides of a partition': tally.b, 'pairs of rival claims': tally.blind });
+    await shown('(c) no claim is committed without a grant from every member heard in its round', { claims: tally.c, 'with a member absent': tally.absent, 'claimants crashed mid-round': tally.midRound });
+    await shown('(d) a lapsed claim frees its task for every host at the same second', { lapses: tally.d, 'claimed again as the next generation': tally.regen });
+    await shown('(e) every round ends by its deadline, and a calm network never needs the deadline', { rounds: tally.e, 'calm races won': tally.won });
+    await shown('leases are extended, given up and completed for every host alike', { extended: tally.extended, ended: tally.ended });
+    await shown('behind signed envelopes and proof of work no replay reaches a handler', { schedules: tally.sealed, 'replays refused': tally.replays, 'requests redone at a higher effort': tally.efforts });
+  }
+}
