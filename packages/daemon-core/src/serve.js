@@ -102,11 +102,13 @@ export function listenSingleton({ server, socketPath, log, onListening }) {
       }
       try { fs.unlinkSync(socketPath); } catch {}
       takeoverLock = lockFd;
-      server.listen(socketPath, () => {
+      // `onListening` is still registered from the listen that failed, so it is not
+      // passed again: it runs once, after the lock is released.
+      server.prependOnceListener('listening', () => {
         releaseTakeoverLock(lockPath, takeoverLock);
         takeoverLock = null;
-        onListening();
       });
+      server.listen(socketPath);
       return;
     }
     startFailed(log, 'server error', String(e));
