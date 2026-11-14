@@ -1,0 +1,215 @@
+// Whole daemons, one job, end to end: a machine offers a task, another claims it, gets
+// the key, and runs the agent in a container; the agent clones from the executor's
+// mirror and everything it asks of the forge is carried out by the requester, with the
+// requester's credential, under the task's rules. Real daemon processes on scratch
+// directories over the loop transport, with the stand-in docker, forge, adb server and
+// agent.
+// Run: node test/daemon-e2e.mjs
+
+import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import net from 'node:net';
+import { POOL, REPO, check, createBench, fakeAdb, passed, until } from './lib/daemons.mjs';
+
+const bench = await createBench();
+const adb = await fakeAdb();
+// Something else on the host a job is given by name.
+const allocator = net.createServer((socket) => socket.end('allocator\n'));
+await new Promise((resolve) => allocator.listen(0, '127.0.0.1', resolve));
+
+const hex8 = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 8);
+const containerOf = (peer) => `dn-${hex8(POOL)}-${hex8(peer)}`;
+const offerOf = async (m, taskId) => (await m.state()).offers.find((o) => o.taskId === taskId);
+const runOf = async (m, taskId) => (await m.state()).runs.filter((r) => r.taskId === taskId).at(-1) ?? null;
+const ended = (m, taskId) => until(`${taskId} to end`, async () => {
+  const offer = await offerOf(m, taskId);
+  return ['done', 'failed', 'cancelled'].includes(offer.state) ? offer : null;
+});
+// How a step of the stand-in agent went: an API status, or whether a push was taken.
+const went = (steps) => steps.map((s) => [s.verb, s.verb === 'push' ? (s.code === 0 ? 'pushed' : 'refused') : s.status ?? null]);
+// Whose credential a request to the forge carried.
+const sender = (machines) => (r) => machines.find((m) => [`Bearer ${m.token}`, `Basic ${Buffer.from(`x-access-token:${m.token}`).toString('base64')}`].includes(r.headers.authorization))?.name ?? null;
+
+try {
+  const a = bench.machine('a');
+  const b = bench.machine('b', { env: { DN_ADB_SERVER: `127.0.0.1:${adb.port}`, DN_FORWARDS: JSON.stringify({ alloc: `127.0.0.1:${allocator.address().port}`, lan: '192.168.1.1:80' }) } });
+  const c = bench.machine('c');
+  const by = sender([a, b, c]);
+  await Promise.all([a.start(), b.start(), c.start()]);
+  await Promise.all([a.linked(), b.linked(), c.linked()]);
+  const { invite } = await a.ok('/invite', { pool: POOL });
+  await Promise.all([b.ok('/join', { invite }), c.ok('/join', { invite })]);
+  await until('three members everywhere', async () => (await Promise.all([a, b, c].map((m) => m.state()))).every((s) => s.pools[0].members.length === 3));
+  const pk = Object.fromEntries(await Promise.all([a, b, c].map(async (m) => [m.name, (await m.state()).identity.pk])));
+  // Only B takes work.
+  await b.admit(1);
+
+  let first;
+  await check('a task offered on one machine is claimed by another, run there in a container, and done for both, with its cost', async () => {
+    const before = bench.forge.log.length;
+    const { taskId } = await a.ok('/offer', {
+      pool: POOL, kind: 'review', item: 'pr-1', title: 'Review the pull request',
+      prompt: [
+        'wait go', 'api GET /repos/acme/widgets/pulls/1', 'api POST /repos/acme/widgets/pulls/1/reviews {"event":"COMMENT","body":"from a"}',
+        'api DELETE /repos/acme/widgets', 'api POST /repos/acme/gadgets/pulls/1/reviews {"event":"COMMENT","body":"elsewhere"}',
+        'push sneaky', 'adb', 'say reviewed the pull request',
+      ].join('\n'),
+    });
+    assert.equal((await offerOf(a, taskId)).state, 'pooled');
+    const run = await until('B\'s agent', async () => {
+      const r = await runOf(b, taskId);
+      return r && b.agent(r.runId)?.waiting === 'go' ? r : null;
+    });
+    first = run;
+
+    // While it runs: claimed by B for A, on both machines.
+    const offer = await offerOf(a, taskId);
+    assert.deepEqual([offer.state, offer.executor, offer.executorHere, offer.attempt], ['claimed', pk.b, false, 1]);
+    assert.deepEqual([run.state, run.peer, run.container, run.pool, run.endedAt], ['running', pk.a, containerOf(pk.a), POOL, 0]);
+    for (const m of [a, b, c]) {
+      const task = (await m.state()).pools[0].tasks.find((t) => t.taskId === taskId);
+      assert.deepEqual([task.state, task.executor, task.executorHere, task.offeredHere], ['claimed', pk.b, m === b, m === a], m.name);
+    }
+    assert.deepEqual([(await a.state()).runs, (await c.state()).runs], [[], []], 'nobody else runs it');
+
+    b.release('go');
+    const done = await ended(a, taskId);
+    assert.deepEqual([done.state, done.outcome, done.executor], ['done', { ok: true, summary: 'reviewed the pull request', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, '']);
+    assert.deepEqual([done.requests, done.refused], [5, 3], 'four API requests and a push came under the key, and the rules refused three of them');
+    await until('B\'s slot free', async () => (await runOf(b, taskId)).endedAt > 0);
+    assert.deepEqual([(await runOf(b, taskId)).state, (await runOf(b, taskId)).exit], ['finished', 0]);
+    for (const m of [a, b, c]) await until(`done on ${m.name}`, async () => (await m.state()).pools[0].tasks.find((t) => t.taskId === taskId).state === 'done');
+
+    // What the agent got for each thing it asked.
+    const steps = b.agent(run.runId).steps;
+    assert.deepEqual(went(steps), [
+      ['wait', null], ['api', 200], ['api', 201], ['api', 403], ['api', 403], ['push', 'refused'], ['adb', null], ['say', null],
+    ]);
+    assert.equal(steps[1].body.user.login, 'someone', 'the forge\'s own answer came back');
+    assert.deepEqual(steps[3].body, { message: 'no rule of this task allows the request' });
+    assert.deepEqual(steps[4].body, { message: 'no rule of this task allows the request' });
+    assert.match(steps[5].out, /403/, 'a review task pushes nothing');
+
+    // What reached the forge, and as whom: the requester's credential for everything the
+    // task did, the executor's own for nothing but its mirror of the repository.
+    const seen = bench.forge.log.slice(before).filter((r) => r.headers.authorization);
+    assert.deepEqual(seen.filter((r) => r.host === 'api.github.com').map((r) => [by(r), r.method, r.path]), [
+      ['a', 'GET', '/repos/acme/widgets/pulls/1'], ['a', 'POST', '/repos/acme/widgets/pulls/1/reviews'],
+    ]);
+    assert.deepEqual(JSON.parse(seen.find((r) => r.method === 'POST' && r.host === 'api.github.com').body), { event: 'COMMENT', body: 'from a' });
+    assert.deepEqual([...new Set(seen.filter((r) => r.host === 'github.com').map((r) => `${by(r)} ${r.path.replace('/acme/widgets.git/', '')}`))].sort(),
+      ['b git-upload-pack', 'b info/refs?service=git-upload-pack'], 'the clone is the executor\'s mirror, fetched as the executor');
+    assert.equal(bench.branch('sneaky'), null);
+    assert.match(b.log(), /mirror created .* from github\.com\/acme\/widgets/);
+  });
+
+  await check('the job holds no credential, reaches the host only through its forwards, and its container is locked away', async () => {
+    const agent = b.agent(first.runId);
+    const env = Object.entries(agent.env);
+    for (const m of [a, b, c]) assert.ok(!JSON.stringify(agent.env).includes(m.token), `${m.name}'s forge token is not in the job`);
+    assert.deepEqual([agent.env.GH_TOKEN, agent.env.ANTHROPIC_API_KEY], ['dn-placeholder', 'dn-placeholder'], 'placeholders the broker replaces');
+    assert.ok(env.every(([, v]) => !v.includes('sk-ant-api03-stand-in')), 'nor is the model key');
+    assert.match(agent.env.HTTPS_PROXY, /^http:\/\/dn:[0-9a-f]{64}@127\.0\.0\.1:\d+$/);
+    assert.match(agent.prompt, /^[\s\S]+\n---\n\nwait go\n/, 'the container preamble, then the requester\'s words');
+
+    // The adb server and what DN_FORWARDS names, each as the variable its tool reads; a
+    // target off this machine's loopback is no forward.
+    const step = agent.steps.find((s) => s.verb === 'adb');
+    assert.deepEqual([step.version, step.devices], ['OKAY00040029', 'OKAY0015emulator-5554\tdevice\n']);
+    assert.match(agent.env.ADB_SERVER_SOCKET, /^tcp:127\.0\.0\.1:\d+$/);
+    assert.notEqual(agent.env.ADB_SERVER_SOCKET, `tcp:127.0.0.1:${adb.port}`, 'a listener of the job\'s own, not the host\'s port');
+    assert.match(agent.env.DN_FORWARD_ALLOC, /^127\.0\.0\.1:\d+$/);
+    assert.deepEqual([agent.env.DN_FORWARDS, agent.env.DN_FORWARD_LAN], ['alloc adb', undefined]);
+    assert.ok(adb.asked.includes('host:devices'));
+    assert.match(agent.prompt, /forwarded from the host and already in your environment: alloc, adb\./);
+
+    const name = containerOf(pk.a);
+    const made = b.docker('network').find((call) => call[1] === 'create');
+    assert.deepEqual(made.slice(0, 6), ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated']);
+    assert.deepEqual(made.slice(-3), ['--label', `dn.base=${b.base}`, name]);
+    const [ran] = b.docker('run');
+    const at = (flag) => ran[ran.indexOf(flag) + 1];
+    assert.deepEqual([at('--name'), at('--network'), at('--security-opt')], [name, name, 'no-new-privileges']);
+    assert.ok(ran.includes('--cap-drop=ALL') && ran.includes(`dn.base=${b.base}`) && ran.includes(`dn.peer=${pk.a}`) && ran.includes(`dn.pool=${POOL}`));
+    for (const flag of ['--privileged', '-p', '--publish', '--network=host', '-e', '--env']) assert.ok(!ran.includes(flag), flag);
+    assert.deepEqual(ran.filter((arg, i) => ran[i - 1] === '-v').map((v) => v.split(':')[1]), ['/work', '/dn/runs'], 'its volume and its own run records, nothing else of the host');
+    assert.ok(b.docker().every((call) => !JSON.stringify(call).includes(b.token) && !JSON.stringify(call).includes('sk-ant')), 'no credential was ever on docker\'s command line');
+  });
+
+  let second;
+  await check('a second task of the same requester runs in the same container: one that may push, pushes one new branch as the requester and nothing else', async () => {
+    const before = bench.forge.log.length;
+    const main = bench.branch('main');
+    const { taskId } = await a.ok('/offer', {
+      pool: POOL, kind: 'issues', item: 'issue-2', title: 'Fix the issue',
+      prompt: ['api POST /repos/acme/widgets/issues/2/comments {"body":"on it"}', 'push fix-issue-2', 'push main', 'say fixed the issue'].join('\n'),
+    });
+    const done = await ended(a, taskId);
+    assert.equal(done.state, 'done', JSON.stringify(done));
+    second = await runOf(b, taskId);
+    const steps = b.agent(second.runId).steps;
+    assert.deepEqual(went(steps), [['api', 201], ['push', 'pushed'], ['push', 'refused'], ['say', null]], JSON.stringify(steps));
+
+    // The branch is on the forge, its commit authored as the requester's git says and
+    // not as the executor's; main is where it was.
+    assert.deepEqual(steps.map((s) => s.author).filter(Boolean), ['a Operator <a@example.com>', 'a Operator <a@example.com>']);
+    assert.equal(bench.branch('fix-issue-2').author, 'a Operator <a@example.com>');
+    assert.deepEqual(bench.branch('main'), main);
+    const writes = bench.forge.log.slice(before).filter((r) => r.method !== 'GET' && !r.path.endsWith('git-upload-pack')).map((r) => [by(r), r.host, r.path]);
+    assert.deepEqual(writes, [
+      ['a', 'api.github.com', '/repos/acme/widgets/issues/2/comments'], ['a', 'github.com', '/acme/widgets.git/git-receive-pack'],
+    ], 'exactly the writes the rules allow, each sent by the requester');
+
+    assert.equal(second.container, first.container);
+    assert.deepEqual(b.containers().filter((n) => !n.endsWith('-relay')), [containerOf(pk.a)]);
+    assert.equal(b.docker('run').length, 1, 'made once');
+  });
+
+  await check('another requester gets a container of its own, and two jobs at once each act through their own requester', async () => {
+    await b.admit(2);
+    const before = bench.forge.log.length;
+    const prompt = (who) => ['wait both', `api POST /repos/acme/widgets/pulls/1/reviews {"event":"COMMENT","body":"from ${who}"}`, 'adb', `say done for ${who}`].join('\n');
+    const mine = await a.ok('/offer', { pool: POOL, kind: 'review', item: 'pr-1', title: 'Again', prompt: prompt('a') });
+    const theirs = await c.ok('/offer', { pool: POOL, kind: 'review', item: 'pr-1', title: 'Mine', prompt: prompt('c') });
+    assert.notEqual(mine.taskId, theirs.taskId, 'the same pull request as another account is another task');
+    const runs = await until('both agents in B', async () => {
+      const [x, y] = [await runOf(b, mine.taskId), await runOf(b, theirs.taskId)];
+      return x && y && b.agent(x.runId)?.waiting && b.agent(y.runId)?.waiting ? [x, y] : null;
+    });
+    assert.deepEqual(runs.map((r) => [r.peer, r.container]), [[pk.a, containerOf(pk.a)], [pk.c, containerOf(pk.c)]]);
+    assert.deepEqual(b.containers().filter((n) => !n.endsWith('-relay')), [containerOf(pk.a), containerOf(pk.c)].sort());
+
+    b.release('both');
+    assert.equal((await ended(a, mine.taskId)).outcome.summary, 'done for a');
+    assert.equal((await ended(c, theirs.taskId)).outcome.summary, 'done for c');
+    const posts = bench.forge.log.slice(before).filter((r) => r.method === 'POST' && r.host === 'api.github.com');
+    assert.deepEqual(posts.map((r) => `${by(r)}: ${JSON.parse(r.body).body}`).sort(), ['a: from a', 'c: from c'], 'each request left with the credential of the machine that asked for the task');
+    for (const run of runs) assert.equal(b.agent(run.runId).steps.find((s) => s.verb === 'adb').version, 'OKAY00040029', 'each job has the forward it was given');
+    await b.admit(1);
+  });
+
+  await check('a task offered with `now` is run by the machine that offered it, in a container, whatever it admits', async () => {
+    const d = await bench.machine('d').start();
+    await d.linked();
+    await d.ok('/admit', { slots: 0 });
+    const waits = await d.ok('/offer', { pool: POOL, kind: 'review', item: 'pr-1', title: 'Later', prompt: 'say never' });
+    const { taskId } = await d.ok('/offer', { pool: POOL, kind: 'issues', item: 'issue-2', title: 'Now', prompt: 'api GET /repos/acme/widgets/issues/2\nsay ran here', now: true });
+    const done = await ended(d, taskId);
+    const self = (await d.state()).identity.pk;
+    assert.deepEqual([done.state, done.outcome.summary], ['done', 'ran here']);
+    const run = await runOf(d, taskId);
+    assert.deepEqual([run.peer, run.container, run.state], [self, containerOf(self), 'finished']);
+    assert.deepEqual(d.docker('run').map((call) => call[call.indexOf('--name') + 1]), [containerOf(self)], 'its own task still runs in a container');
+    assert.equal(d.agent(run.runId).steps[0].status, 200);
+    assert.equal(d.agent(run.runId).env.ADB_SERVER_SOCKET, undefined, 'no adb server answers on this machine, so none is forwarded');
+    assert.deepEqual([(await offerOf(d, waits.taskId)).state, await runOf(d, waits.taskId)], ['pooled', null], 'what it did not ask to run now waits for a slot');
+    await d.kill();
+  });
+
+  console.log(`\nall ${passed()} checks passed (${REPO})`);
+} finally {
+  allocator.close();
+  await adb.close();
+  await bench.close();
+}
+process.exit(0);

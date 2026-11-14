@@ -98,6 +98,7 @@ function project(doc, vars, selections, data) {
 /// headers, body }`); `forge.data` is what its APIs answer from and may be edited;
 /// `forge.route(host, method, pattern, fn)` adds an answer of the test's own;
 /// `forge.bare(repo)` creates the bare repository smart HTTP serves at `/<repo>.git`;
+/// `forge.tokens` is the set of GitHub tokens it takes, which a test may add to;
 /// `forge.env` is the environment a test must set before it imports the daemon's sources.
 export async function startFakeForge() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-forge-'));
@@ -255,10 +256,13 @@ export async function startFakeForge() {
     child.stdin.end(body);
   }
 
+  // The GitHub tokens this forge takes: its own, and whichever a test adds for a machine
+  // that is to be told apart by the credential it sends.
+  const tokens = new Set([GITHUB_TOKEN]);
   const expected = (host, url) => {
-    if (host === 'api.github.com') return `Bearer ${GITHUB_TOKEN}`;
-    if (host === 'github.com') return `Basic ${Buffer.from(`x-access-token:${GITHUB_TOKEN}`).toString('base64')}`;
-    return url.startsWith('/api/') ? `Bearer ${GITLAB_TOKEN}` : `Basic ${Buffer.from(`oauth2:${GITLAB_TOKEN}`).toString('base64')}`;
+    if (host === 'api.github.com') return [...tokens].map((t) => `Bearer ${t}`);
+    if (host === 'github.com') return [...tokens].map((t) => `Basic ${Buffer.from(`x-access-token:${t}`).toString('base64')}`);
+    return [url.startsWith('/api/') ? `Bearer ${GITLAB_TOKEN}` : `Basic ${Buffer.from(`oauth2:${GITLAB_TOKEN}`).toString('base64')}`];
   };
 
   const server = http.createServer((req, res) => {
@@ -270,7 +274,7 @@ export async function startFakeForge() {
       if (!m || !HOSTS.includes(m[1])) { res.writeHead(404).end(); return; }
       const [, host, url] = m;
       log.push({ host, method: req.method, path: url, headers: { ...req.headers }, body });
-      if (req.headers.authorization !== expected(host, url)) {
+      if (!expected(host, url).includes(req.headers.authorization)) {
         res.writeHead(401, { 'content-type': 'application/json', 'www-authenticate': 'Basic realm="forge"' }).end('{"message":"Bad credentials"}');
         return;
       }
@@ -293,7 +297,7 @@ export async function startFakeForge() {
   const base = `http://127.0.0.1:${port}/h`;
 
   return {
-    port, log, data, root, gitRoot,
+    port, log, data, root, gitRoot, tokens,
     env: {
       ...fakeTools(root),
       DN_FORGE_ORIGINS: JSON.stringify(Object.fromEntries(HOSTS.map((h) => [h, `${base}/${h}`]))),
