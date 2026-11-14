@@ -335,10 +335,11 @@ alone gets a job that installs *only* what that package needs, so a dependency
 creeping back in fails a build instead of going unnoticed:
 the [`szpont`](../packages/szpont/README.md) launcher is tested with nothing but
 pytest installed, and
-[`device-allocator`](../packages/device-allocator/README.md) and
-[`remote-machines`](../packages/remote-machines/README.md) with nothing but Node.
+[`device-allocator`](../packages/device-allocator/README.md),
+[`remote-machines`](../packages/remote-machines/README.md) and
+[`diplomacy-network`](../packages/diplomacy-network/README.md) with nothing but Node.
 
-CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) is seven jobs:
+CI ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml)) is eight jobs:
 `swift-macos` (build both Swift packages + the core smoke + headless panel and
 telemetry renders + the helper self-tests), `swift-core-linux` (proves the core builds on
 Linux, and publishes a static `diplomat-core` binary), `python-linux` (pytest
@@ -346,7 +347,8 @@ against that binary, so the golden-prompt parity is proven across languages),
 `szpont` (the launcher, and the built
 wheel installed into a venv that has never seen the checkout), `szpont-npm` (the
 same launcher in JavaScript, held to the Python one's plan machine shape for
-machine shape), `node-device-allocator`, and `node-remote-machines`.
+machine shape), `node-device-allocator`, `node-remote-machines`, and
+`node-diplomacy-network`.
 
 ```
 packages/
@@ -362,6 +364,9 @@ packages/
                                  machines this one reaches over SSH (ssh config, mDNS, known_hosts; only
                                  hosts whose key is already trusted), their load re-read every minute and
                                  capabilities every 5, and the steering that sends artifact-producing work to them
+
+  diplomacy-network/           ← the Diplomacy Network daemon (see its README): pools over Tor, jobs in
+                                 containers, forge actions in the requester's name
 
   daemon-core/                 ← what both MCP daemons share: the unix-socket client and singleton server,
                                  atomic writes, the Claude Code installer layers, the test runner
@@ -492,7 +497,7 @@ packages/
                                  both and demands the same facts and the same plan
 
 .github/workflows/ci.yml       ← swift-macos · swift-core-linux · python-linux · szpont · szpont-npm ·
-                                 node-device-allocator · node-remote-machines
+                                 node-device-allocator · node-remote-machines · node-diplomacy-network
 .github/workflows/release-szpont.yml     ← every push to main → the next minor on PyPI + npm, from one
                                            verified commit; tag szpont-v* to release what a tree states
 ```

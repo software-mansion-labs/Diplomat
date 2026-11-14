@@ -289,6 +289,9 @@ DIPLOMAT_RENDER=panel DIPLOMAT_RENDER_OUT=/tmp/p.png \
                                                        #   screen: no pool, signing in, away, daemon off)
                                                        #   machines-screen[-idle|-off] (the Machines
                                                        #   screen: daemon running, idle, not installed)
+                                                       #   network-screen[-starting|-down|-off] (the Network
+                                                       #   screen: in pools, daemon coming up, daemon not
+                                                       #   answering, switched off)
 DIPLOMAT_REFRESH_SECS=30 ./diplomat            # faster auto-refresh, for tuning
 ```
 
