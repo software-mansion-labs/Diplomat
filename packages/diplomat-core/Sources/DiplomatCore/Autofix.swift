@@ -180,16 +180,28 @@ public enum AgentDispatchGate {
     /// The disk leads both: an agent on a nearly full disk cannot finish whatever
     /// its bay or budget, and a freed bay frees no space, so it is the hold the feed
     /// should name.
+    ///
+    /// Capacity arrives as its two halves: `atCapacity` is this device running its cap,
+    /// `paused` is the operator holding the work (a paused item, or the queue's auto-run
+    /// off). Either one is `.atCapacity`.
+    ///
+    /// With `network` on the job is offered to a pool and some other machine may run
+    /// it, so nothing about this device as an executor is asked: its disk, its cap and
+    /// its budget reach the daemon through `NetworkAdmit` instead. `paused` still
+    /// holds, being a statement about the work and not about the machine.
     public static func decide(source: Source, banned: Bool, agentOnPR: Bool,
                               atCapacity: Bool,
                               unaffordable: Bool = false,
                               outsideAllowlist: Bool = false,
-                              lowDisk: Bool = false) -> Verdict {
+                              lowDisk: Bool = false,
+                              paused: Bool = false,
+                              network: Bool = false) -> Verdict {
         if banned { return .banned }
         if outsideAllowlist { return .notAllowed }
         if agentOnPR { return .inFlight }
+        if network { return source == .auto && paused ? .atCapacity : .proceed }
         if source == .auto, lowDisk { return .lowDisk }
-        if source == .auto, atCapacity { return .atCapacity }
+        if source == .auto, atCapacity || paused { return .atCapacity }
         if source == .auto, unaffordable { return .unaffordable }
         return .proceed
     }

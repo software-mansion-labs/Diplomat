@@ -2107,6 +2107,7 @@ class Store(QObject):
             # PR spawns nothing either way — so in both of those the answer would
             # be discarded. Finding room is also what re-arms the "deferring" note.
             at_capacity = False
+            full = False
             paused = False
             if (source == autofix.SOURCE_AUTO and not agent_on_pr and not bypass_capacity
                     and not low_disk):
@@ -2117,8 +2118,8 @@ class Store(QObject):
                 # device's, and neither has a switched-off queue — for anything. Both
                 # are modelled as capacity because the answer is the same one in every
                 # respect that matters here — hold the job, write no attempt record,
-                # re-offer it next poll — which keeps two toggles that are the
-                # front-end's own out of the dispatch gate both front-ends mirror.
+                # re-offer it next poll. The gate still takes them apart from the
+                # device's own cap, which holds nothing offered to the network.
                 # The queue switch has to hold HERE and not only at the drain: a find
                 # that meets a free bay never reaches the queue at all.
                 paused = self.is_paused(job.counter, job.item) or not self.queue_auto_run
@@ -2136,8 +2137,9 @@ class Store(QObject):
                 if budget.affordable:
                     self._budget_logged = False
             verdict = autofix.dispatch_decide(
-                source, banned, agent_on_pr, at_capacity,
+                source, banned, agent_on_pr, full,
                 not budget.affordable, outside_allowlist, low_disk,
+                paused=paused, network=False,
             )
             if verdict == autofix.VERDICT_LOW_DISK:
                 self._log_low_disk(disk)

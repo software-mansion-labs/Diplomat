@@ -417,6 +417,8 @@ def dispatch_decide(
     unaffordable: bool = False,
     outside_allowlist: bool = False,
     low_disk: bool = False,
+    paused: bool = False,
+    network: bool = False,
 ) -> str:
     """The one decision both interfaces obey, in fixed precedence: ban, then the
     auto-review allowlist, then in-flight, then (auto only) this device's free
@@ -442,16 +444,27 @@ def dispatch_decide(
     and pushes the machine toward ENOSPC, wherever its bay or its budget stands; a
     freed bay does not free space, so it is the hold the operator has to act on and
     the one the feed should name while several hold; and one ``statvfs`` is the
-    cheapest of the measurements."""
+    cheapest of the measurements.
+
+    Capacity arrives as its two halves: ``at_capacity`` is this device running its
+    cap, ``paused`` is the operator holding the work (a paused item, or the queue's
+    auto-run off). Either one is ``at_capacity``.
+
+    With ``network`` on the job is offered to a pool and some other machine may run
+    it, so nothing about this device as an executor is asked: its disk, its cap and
+    its budget reach the daemon through :func:`network.admit` instead. ``paused``
+    still holds, being a statement about the work and not about the machine."""
     if banned:
         return VERDICT_BANNED
     if outside_allowlist:
         return VERDICT_NOT_ALLOWED
     if agent_on_pr:
         return VERDICT_IN_FLIGHT
+    if network:
+        return VERDICT_AT_CAPACITY if source == SOURCE_AUTO and paused else VERDICT_PROCEED
     if source == SOURCE_AUTO and low_disk:
         return VERDICT_LOW_DISK
-    if source == SOURCE_AUTO and at_capacity:
+    if source == SOURCE_AUTO and (at_capacity or paused):
         return VERDICT_AT_CAPACITY
     if source == SOURCE_AUTO and unaffordable:
         return VERDICT_UNAFFORDABLE

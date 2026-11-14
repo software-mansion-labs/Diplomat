@@ -3989,16 +3989,16 @@ final class Store: ObservableObject {
         // `ps` scan, a panel click is never capped, and an in-flight PR spawns
         // nothing either way — so in both of those the answer would be discarded.
         // Finding room is also what re-arms the "deferring" note.
-        var atCapacity = false, paused = false
+        var atCapacity = false, full = false, paused = false
         if source == .auto, !agentOnPR, !bypassCapacity, !lowDisk {
-            let full = await agentTick().tick.capLoad.count >= autoTaskLimit
+            full = await agentTick().tick.capLoad.count >= autoTaskLimit
             if !full { capacityLogged = false }
             // A switched-off monitor has no room for its own work, whatever the
             // device's, and neither has a switched-off queue — for anything. Both are
             // modelled as capacity because the answer is the same one in every respect
             // that matters here — hold the job, write no attempt record, re-offer it
-            // next poll — which keeps two toggles that only this front-end has out of
-            // the dispatch gate both front-ends mirror. The queue switch has to hold
+            // next poll. The gate still takes them apart from the device's own cap,
+            // which holds nothing offered to the network. The queue switch has to hold
             // HERE and not only at the drain: a find that meets a free bay never
             // reaches the queue at all.
             paused = isPaused(job.counter, item: job.item) || !queueAutoRun
@@ -4016,10 +4016,11 @@ final class Store: ObservableObject {
             if budget.affordable { budgetLogged = false }
         }
         switch AgentDispatchGate.decide(source: source, banned: banned,
-                                        agentOnPR: agentOnPR, atCapacity: atCapacity,
+                                        agentOnPR: agentOnPR, atCapacity: full,
                                         unaffordable: !budget.affordable,
                                         outsideAllowlist: outsideAllowlist,
-                                        lowDisk: lowDisk) {
+                                        lowDisk: lowDisk, paused: paused,
+                                        network: false) {
         case .lowDisk:
             logLowDisk(disk)
             stageQueued(job, attemptNumber: attemptNumber)
