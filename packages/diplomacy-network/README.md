@@ -101,9 +101,9 @@ HTTP over `daemon.sock`, JSON in and out.
 | `POST /offer` | `{ pool, kind, options?, item, title, prompt, base?, now? }` | `{ taskId }` - the same id again for an offer still open |
 | `POST /withdraw` | `{ taskId, reason }` | `{ ok }` - `reason` is free text, kept with the cancelled offer |
 | `POST /invite` | `{ pool, ttlSecs? }` | `{ invite }` |
-| `POST /join` | `{ invite }` | `{ pool }` |
+| `POST /join` | `{ invite }` or `{ pool }` | `{ pool }` - by invite into someone's pool, or back into a pool this machine left |
 | `POST /leave` | `{ pool }` | `{ ok }` |
-| `POST /stop-run` | `{ runId }` | `{ ok }` |
+| `POST /stop-run` | `{ runId }` | `{ ok }` - the run is stopped and its claim released; the task is in the pool again for another machine |
 
 A request the daemon refuses is answered with a 4xx status and `{ error }`, a sentence
 fit to show the operator.
@@ -115,6 +115,13 @@ Diplomat takes nothing. An offer with `now` is claimed by this machine at once, 
 `admit` says - that is a job its own operator started by hand. `base` is the branch or
 revision the job starts from; without it a job on a pull request starts from that pull
 request's head and any other from the default branch.
+
+A pool this machine left stays left, whatever `pools` says, until a `join` or until the
+repository is unlinked and linked again; its row carries `"left": true` meanwhile. The
+linked repositories are kept across a restart of the daemon; `admit` is not.
+
+When `networkEnabled` goes false the daemon cancels every offer of its own that has not
+ended, stops its runs and releases their claims, tells the pool, and exits.
 
 `src/install.js` is what the applets run, each flag printing one JSON object:
 `--check` (`{ daemonRunning, pid }`), `--start-daemon`, `--restart-daemon`,
@@ -129,7 +136,7 @@ The snapshot:
   "docker": { "state": "ready|missing|down|building|failed", "image": "", "detail": "" },
   "model": { "state": "ready|missing", "detail": "" },
   "admit": { "slots": 0, "at": 0, "reason": "" },
-  "pools": [ { "id": "", "path": "", "identity": "", "hash": "",
+  "pools": [ { "id": "", "path": "", "identity": "", "hash": "", "left": false,
       "members": [ { "pk": "", "self": false, "maxAcceptedH": 12, "lastSeen": 0, "reachable": true } ],
       "tasks": [ { "taskId": "", "kind": "", "item": "", "title": "", "identity": "", "hours": 12,
           "state": "available|claimed|done|cancelled", "offeredBy": [""], "offeredHere": false,
