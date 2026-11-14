@@ -485,6 +485,11 @@ check('hello lets in a newcomer with a fresh invite and answers the index', () =
   assert.ok(host.answerHello({ member: hi }, ann.pk, T0 + 5000).body, 'a member it already holds needs no fresh invite');
   const gone = member(ann, { voucher: invite(root, { exp: T0 + 600 }), seq: 1, at: T0 + 20, left: true });
   assert.deepEqual(host.answerHello({ member: gone }, ann.pk, T0 + 20), { error: 'denied', detail: 'left' });
+  // Nobody put it out: a newer record of its own brings it back, its invite long run out.
+  assert.equal(host.accepts(ann.pk, T0 + 5000), false);
+  const back = member(ann, { voucher: invite(root, { exp: T0 + 600 }), seq: 2, at: T0 + 5000 });
+  assert.ok(host.answerHello({ member: back }, ann.pk, T0 + 5000).body);
+  assert.ok(host.member(ann.pk, T0 + 5000));
 });
 
 check('hello carries the records that connect a newcomer to members the host knows', () => {

@@ -34,7 +34,9 @@ export function createWorld({ seed = 1 } = {}) {
   const hosts = new Map();
 
   function boot(h) {
-    h.clock = net.clock(h.name);
+    // A host's clock runs `h.skew` seconds off the world's.
+    const clock = net.clock(h.name);
+    h.clock = { ...clock, now: () => clock.now() + h.skew };
     h.transport = net.transport(h.name, h.pk);
     // A process that was killed writes nothing more, whatever it was in the middle of.
     const life = h.transport.host;
@@ -59,24 +61,34 @@ export function createWorld({ seed = 1 } = {}) {
     const id = identityFromSeed(b64u(net.rnd.bytes(32)));
     disk.write('identity', JSON.stringify({ seed: id.seed }));
     const h = {
-      name, pk: id.pk, id, disk, slots, pools, log: [], requester: fakeRequester(), executor: fakeExecutor(),
+      name, pk: id.pk, id, disk, slots, pools, skew: 0, log: [], requester: fakeRequester(), executor: fakeExecutor(),
       settings: { requiredMinimumH: 12, maximumAcceptedH: 12 },
     };
     hosts.set(name, h);
     return boot(h);
   }
 
-  async function start(h) {
+  // A daemon starts its node first and names the pools once Diplomat has told it which
+  // they are, `gapSecs` later - or, with `named` false, not at all.
+  async function start(h, { gapSecs = 0, named = true } = {}) {
     await h.node.start();
-    h.node.setPools(h.pools);
-    if (h.slots > 0) h.node.admit({ slots: h.slots, reason: 'test' });
+    if (gapSecs > 0) await net.run(gapSecs * 1000);
+    if (named) h.node.setPools(h.pools);
+    say(h);
   }
 
-  // Diplomat states its free slots again and again; a node trusts each statement briefly.
+  // Diplomat's part: `h.slots` is how many tasks the machine runs at a time, and what it
+  // tells the node is how many more it takes, counted from the node's own snapshot. It
+  // says so again and again; a node trusts each statement briefly.
+  function say(h) {
+    if (h.slots <= 0) return;
+    const going = h.node.snapshot().runs.filter((run) => run.endedAt === 0).length;
+    h.node.admit({ slots: Math.max(0, h.slots - going), reason: 'test' });
+  }
   const admitting = net.clock('world');
   const admit = () => {
     for (const h of hosts.values()) {
-      if (h.slots > 0 && !h.transport.host.dead) h.node.admit({ slots: h.slots, reason: 'test' });
+      if (!h.transport.host.dead) say(h);
     }
     admitting.setTimeout(admit, 60000);
   };
@@ -133,10 +145,10 @@ export function createWorld({ seed = 1 } = {}) {
       return all;
     },
     /// Kills a host's process and starts it again on what its disk holds.
-    async restart(h) {
+    async restart(h, options) {
       net.kill(h.name);
       boot(h);
-      await start(h);
+      await start(h, options);
       await net.until(() => h.transport.host.ready, { stepMs: 1, what: 'its transport' });
       return h;
     },

@@ -121,3 +121,28 @@ await check('a host reads one large body per sender at a time and four in all, a
   assert.deepEqual([pushed.ok, pushed.body.refused.length], [true, 1]);
   assert.equal(limit(rest[4], 2 ** 19), MAX_BODY_BYTES);
 });
+
+await check('a large request refused unread may be the second copy of one that was read: a write is not sent again', async () => {
+  const w = createWorld({ seed: 66 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+  const job = exe.executor.jobOf(taskId);
+  const perform = req.requester.perform.bind(req.requester);
+  req.requester.perform = async (...args) => {
+    await new Promise((resolve) => { req.clock.setTimeout(resolve, 5000); });
+    return perform(...args);
+  };
+  // The transport sends the first request twice. The second copy arrives while the
+  // first is being carried out, and a host reads one large body per sender at a time.
+  let acts = 0;
+  w.net.tap(({ headers }) => {
+    if (headers['dn-kind'] !== 'act') return;
+    acts += 1;
+    w.net.faults.duplicate = acts === 1 ? 1 : 0;
+  });
+  const answer = await w.wait(job.act(forgeRequest('POST', '/repos/o/r/pr-1/comments', { body: 'x'.repeat(STRANGER_BODY_BYTES + 5000) })));
+  await w.run(30);
+  assert.equal(answer.status, 504, 'the job is told the outcome is not known');
+  assert.equal(req.requester.calls.filter((c) => c.op === 'perform').length, 1, 'and the comment is posted once');
+});

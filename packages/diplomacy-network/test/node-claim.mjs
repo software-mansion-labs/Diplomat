@@ -153,3 +153,58 @@ await check('a claimant that stands down gives back the locks it was granted', a
   assert.equal(worse.executor.started.length, 0);
   assert.equal(w.task(req, taskId).state, 'available');
 });
+
+await check('a host commits only with a slot still free, and counts nobody absent it never asked', async () => {
+  const w = createWorld({ seed: 36 });
+  const all = await w.pool(['req', 'exe', 'slow'], { exe: { slots: 1 } });
+  const [req, exe] = all;
+  // The word on slots is taken back while the round waits for a member that says nothing.
+  w.net.cut('exe', 'slow');
+  let since = w.net.now();
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => w.net.count({ from: 'exe', to: 'slow', kind: 'sync', since }) >= 1, { stepMs: 5, what: 'a round under way' });
+  exe.slots = 0;
+  exe.node.admit({ slots: 0, reason: 'busy' });
+  await w.run(240);
+  assert.equal(exe.executor.started.length, 0);
+  assert.equal(w.claim(req, taskId), undefined, 'nothing was committed');
+  assert.ok(exe.log.some((line) => line.includes('stood down: no slot left')));
+  assert.ok(w.net.count({ from: 'exe', to: 'req', kind: 'unlock', since }) >= 1, 'the lock it was granted is given back');
+  w.net.heal();
+
+  // Its transport loses its footing in the middle of a round: what was never sent is no silence of a member's.
+  exe.slots = 1;
+  exe.node.admit({ slots: 1 });
+  since = w.net.now();
+  await w.net.until(() => w.net.count({ from: 'exe', kind: 'sync', since }) >= 2, { stepMs: 1, what: 'the next round under way' });
+  exe.transport.host.ready = false;
+  await w.run(300);
+  assert.equal(w.claim(req, taskId), undefined, 'no claim with every member written off unasked');
+  assert.ok(exe.log.some((line) => line.includes('stood down: offline')));
+  exe.transport.host.ready = true;
+  exe.transport.host.watchers.forEach((fn) => fn({ state: 'ready', detail: '' }));
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'the task claimed once the transport is back' });
+  assert.deepEqual([signers(w.claim(req, taskId)), w.claim(req, taskId).absent], [all.filter((h) => h !== exe).map((h) => h.pk).sort(), []]);
+});
+
+await check('the word on slots is how many more: runs begun before it are not counted twice, one begun as it was said is', async () => {
+  const w = createWorld({ seed: 37 });
+  const [req, exe] = await w.pool(['req', 'exe']);
+  // The machine runs two at a time, and Diplomat says how many more it takes.
+  exe.node.admit({ slots: 1 });
+  const first = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => w.runOf(exe, first.taskId), { what: 'the first run' });
+  // A word three seconds later may have been counted before that run was there to see.
+  await w.run(3);
+  exe.node.admit({ slots: 1 });
+  const second = await req.node.offer(offerArgs('pr-2'));
+  await w.run(40);
+  assert.equal(w.task(req, second.taskId).state, 'available', 'one more was allowed, and one was taken');
+  // A later word counted the run itself: one more means one more.
+  exe.node.admit({ slots: 1 });
+  await w.net.until(() => w.runOf(exe, second.taskId), { maxMs: 30000, what: 'the second run' });
+  await w.run(100);
+  const third = await req.node.offer(offerArgs('pr-3'));
+  await w.run(60);
+  assert.equal(w.task(req, third.taskId).state, 'available', 'and no more than that');
+});

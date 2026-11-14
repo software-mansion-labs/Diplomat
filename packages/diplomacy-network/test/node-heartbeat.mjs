@@ -130,3 +130,20 @@ await check('a lease is extended for a run that is going, never for a claim whos
   await w.net.until(() => w.offerRow(req, taskId).attempt === 2, { what: 'the dead job reported' });
   assert.equal(w.claim(req, taskId).state, 'released');
 });
+
+await check('a run that never gets its key gives its claim back before its first lease ends', async () => {
+  const w = createWorld({ seed: 56 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  req.requester.rulesFor = () => { throw new Error('the rules are gone'); };
+  await w.net.until(() => w.claim(req, taskId), { what: 'the claim' });
+  const { claimedAt } = w.claim(req, taskId);
+  await w.run(LEASE_SECS - 120);
+  assert.deepEqual([w.claim(req, taskId).state, w.runOf(exe, taskId).state], ['held', 'preparing']);
+  assert.ok(w.net.count({ from: 'exe', to: 'req', kind: 'key', since: claimedAt }) > 200, 'asked every half minute, whatever the last answer was');
+  assert.ok(w.net.count({ from: 'req', to: 'exe', kind: 'ping', since: claimedAt }) >= 1, 'pinged, and not extended: no job is going');
+  await w.run(130);
+  const claim = w.claim(req, taskId);
+  assert.deepEqual([claim.state, claim.seq, claim.leaseUntil - claimedAt], ['released', 1, LEASE_SECS], 'given back, never extended');
+  assert.deepEqual([exe.executor.started.length, w.offerRow(req, taskId).attempt], [0, 1], 'no job, and no failed attempt');
+});

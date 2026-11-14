@@ -190,6 +190,8 @@ export function createNet({ seed = 1 } = {}) {
 
   return {
     rnd, sent, faults, now, run, until, clock, transport, settled,
+    /// How many timers of a host are waiting to fire.
+    timers: (name) => queue.filter((event) => !event.cancelled && event.owner === hosts.get(name)).length,
     /// Calls `fn({ from, to, headers, body })` for every request a host makes.
     tap: (fn) => taps.push(fn),
     /// Milliseconds of virtual time since the network began.

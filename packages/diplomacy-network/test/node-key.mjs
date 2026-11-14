@@ -8,6 +8,7 @@ import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { unb64u } from '../src/core/canon.js';
 import { actMac } from '../src/core/capability.js';
 import { endClaim } from '../src/core/lease.js';
+import { LEASE_SECS } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const said = ({ ok, code, detail }) => (ok ? 'ok' : `${code}: ${detail}`);
@@ -135,4 +136,170 @@ await check('a key dies with what it was issued for, and a number is spent befor
   await w.restart(req);
   assert.equal(said(await act(cut, 0)), 'denied: seq is not new');
   assert.equal((await act(cut, 1)).body.status, 200);
+});
+
+await check('an executor asks for its key again half a minute after each ask, however long the requester stays out of reach', async () => {
+  const w = createWorld({ seed: 47 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  // The requester drops out of reach as the first ask for the key leaves.
+  let cut = false;
+  w.net.tap(({ from, headers }) => {
+    if (cut || from !== 'exe' || headers['dn-kind'] !== 'key') return;
+    cut = true;
+    w.net.cut('req', 'exe');
+  });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => cut, { what: 'the first ask' });
+  await w.run(20 * 60);
+  assert.equal(w.runOf(exe, taskId).state, 'preparing');
+  w.net.heal();
+  // One ask may still be waiting out its minute; the next follows half a minute later.
+  await w.net.until(() => exe.executor.jobOf(taskId), { maxMs: 100 * 1000, what: 'the job started once the requester is back' });
+});
+
+const FAILED = { ok: false, summary: 'it broke', microUsd: 0, tokens: 0, runner: 'r', model: 'm' };
+
+// A requester and an executor with a job going, and `act(seq, request)`: a forge request
+// made by hand under the executor's key, left for the caller to run the network for.
+async function keyed(seed) {
+  const w = createWorld({ seed });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+  const { capability: { keyId }, secret } = w.stored(exe, 'keys').held[taskId];
+  const act = (seq, request) => w.request(exe, req, 'act', {
+    taskId, keyId, seq, request, mac: actMac(unb64u(secret), { keyId, seq, request }),
+  }, { effort: 4096, drive: false });
+  // The rules take twenty seconds over the first request they are asked about.
+  const authorize = req.requester.authorize.bind(req.requester);
+  const asked = { n: 0 };
+  req.requester.authorize = (...args) => {
+    asked.n += 1;
+    if (asked.n > 1) return authorize(...args);
+    return new Promise((resolve) => { req.clock.setTimeout(() => resolve(authorize(...args)), 20000); });
+  };
+  return { w, req, exe, taskId, act, asked };
+}
+const write = (leaf) => forgeRequest('POST', `/repos/o/r/pr-1/${leaf}`, { n: 1 });
+
+await check('a request is not carried out once its key was taken back, however far the rules had got with it', async () => {
+  const ways = {
+    'the offer withdrawn': ({ req, taskId }) => req.node.withdraw({ taskId, reason: 'no longer wanted' }),
+    'the run reported as failed': ({ w, req, exe, taskId }) => w.request(exe, req, 'done', { taskId, round: w.claim(req, taskId).round, outcome: FAILED }, { effort: 4096 }),
+    'the claim given back': ({ w, req, exe, taskId }) => w.request(exe, req, 'push', { records: [endClaim(exe.id, w.claim(req, taskId), 'released', w.net.now())] }, { effort: 4096 }),
+    'the pool closed': ({ req }) => {
+      req.pools = [];
+      req.node.setPools([]);
+    },
+  };
+  for (const [way, during] of Object.entries(ways)) {
+    const world = await keyed(48);
+    const { w, req, act, asked } = world;
+    const pending = act(0, write('reviews'));
+    await w.net.until(() => asked.n === 1, { stepMs: 5, what: 'the rules asked' });
+    await during(world);
+    assert.equal(said(await w.wait(pending)), 'denied: the key was taken back', way);
+    assert.deepEqual(req.requester.calls.filter((c) => c.op === 'perform'), [], way);
+  }
+});
+
+await check('requests under one key are carried out in the order of their numbers, however long the rules take over one', async () => {
+  const { w, req, act, asked } = await keyed(49);
+  const first = act(0, write('one'));
+  await w.net.until(() => asked.n === 1, { stepMs: 5, what: 'the rules asked about the first' });
+  const second = act(1, write('two'));
+  const answers = await w.wait(Promise.all([first, second]));
+  assert.deepEqual(answers.map((a) => a.body.status), [200, 200]);
+  assert.deepEqual(req.requester.calls.filter((c) => c.op === 'perform').map((c) => c.path.split('/').at(-1)), ['one', 'two']);
+});
+
+await check('a round that said how it ended is counted once and gets no second key; of two hosts that granted, one answers for the claim', async () => {
+  const w = createWorld({ seed: 52 });
+  const [r1, r2, exe] = await w.pool(['r1', 'r2', 'exe'], { exe: { slots: 1 } });
+  const { taskId } = await r1.node.offer(offerArgs('pr-1'));
+  await r2.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+  const [keeper, other] = exe.executor.jobOf(taskId).peer === r1.pk ? [r1, r2] : [r2, r1];
+  const { round, grants } = w.claim(keeper, taskId);
+  const ask = (to, kind, body) => w.request(exe, to, kind, body, { effort: 4096 });
+  assert.deepEqual(grants.map((g) => g.by).sort(), [r1.pk, r2.pk].sort(), 'both granted the claim');
+  assert.equal(said(await ask(other, 'key', { taskId, round })), 'denied: another host answers for this claim');
+  const held = w.stored(exe, 'keys').held[taskId];
+  assert.equal((await ask(keeper, 'key', { taskId, round })).body.secret, held.secret, 'asked again, the same key');
+  // The run reports that it failed, twice over: one failed attempt, and the key is dead.
+  for (let i = 0; i < 2; i += 1) assert.equal((await ask(keeper, 'done', { taskId, round, outcome: FAILED })).ok, true);
+  assert.equal(w.offerRow(keeper, taskId).attempt, 2);
+  assert.equal(w.stored(keeper, 'keys').issued[taskId], undefined);
+  // Its claim still stands, and buys no new key with a fresh count of what it may do.
+  assert.equal(w.claim(keeper, taskId).state, 'held');
+  assert.equal(said(await ask(keeper, 'key', { taskId, round })), 'denied: no active claim of the task names that executor and round');
+  assert.equal(w.stored(keeper, 'keys').issued[taskId], undefined);
+});
+
+await check('a claim made for an offer that was taken back gets nothing from the offer made after it', async () => {
+  const w = createWorld({ seed: 53 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  // The requester grants the claim and drops out of reach before it hands over the key.
+  let cut = false;
+  w.net.tap(({ from, headers }) => {
+    if (cut || from !== 'exe' || headers['dn-kind'] !== 'key') return;
+    cut = true;
+    w.net.cut('req', 'exe');
+  });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => cut, { stepMs: 5, what: 'the first ask for the key' });
+  await w.run(2);
+  // Its operator takes the offer back and makes it again, with another prompt.
+  await req.node.withdraw({ taskId, reason: 'the wrong prompt' });
+  await req.node.offer({ ...offerArgs('pr-1'), prompt: 'the second prompt' });
+  w.net.heal();
+  await w.run(600);
+  assert.equal(w.claim(req, taskId).state, 'held', 'the claim of the first offer stands');
+  assert.equal(exe.executor.started.length, 0, 'and is given no key');
+  // The executor gives it back before its lease ends, and claims the task as it is offered.
+  await w.net.until(() => exe.executor.jobOf(taskId), { maxMs: (LEASE_SECS + 600) * 1000, what: 'a job under a claim of the second offer' });
+  const job = exe.executor.jobOf(taskId);
+  assert.equal(job.spec.prompt, 'the second prompt');
+  exe.executor.end(job.runId);
+  await w.net.until(() => w.offerRow(req, taskId).state === 'done', { what: 'the offer done' });
+  assert.deepEqual([w.offerRow(req, taskId).attempt, exe.executor.started.length], [1, 1], 'no failed attempt, and one job');
+});
+
+await check('while the rules of an offer are asked, the same offer made again is that offer, and a pool closed meanwhile takes none', async () => {
+  const w = createWorld({ seed: 54 });
+  const [req, other] = await w.pool(['req', 'other']);
+  const rulesFor = req.requester.rulesFor.bind(req.requester);
+  req.requester.rulesFor = (args) => new Promise((resolve) => { req.clock.setTimeout(() => resolve(rulesFor(args)), 5000); });
+  const [one, two] = await w.wait(Promise.all([req.node.offer(offerArgs('pr-1')), req.node.offer(offerArgs('pr-1'))]));
+  assert.equal(one.taskId, two.taskId);
+  await w.agreed([req, other]);
+  assert.deepEqual(w.records(other).filter((r) => r.type === 'offer').map((r) => r.seq), [0], 'signed once');
+  const pending = req.node.offer(offerArgs('pr-2'));
+  await w.run(1);
+  req.pools = [];
+  req.node.setPools([]);
+  await assert.rejects(w.wait(pending), /is not linked on this machine/);
+  assert.equal(req.node.snapshot().offers.some((o) => o.item === 'pr-2'), false);
+});
+
+await check('the lapse of a claim made for an offer that was taken back is no failed attempt of the offer made after it', async () => {
+  const w = createWorld({ seed: 55 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  let cut = false;
+  w.net.tap(({ from, headers }) => {
+    if (cut || from !== 'exe' || headers['dn-kind'] !== 'key') return;
+    cut = true;
+    w.net.cut('req', 'exe');
+  });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => cut, { stepMs: 5, what: 'the first ask for the key' });
+  await w.run(2);
+  await req.node.withdraw({ taskId, reason: 'the wrong prompt' });
+  await req.node.offer({ ...offerArgs('pr-1'), prompt: 'the second prompt' });
+  w.net.heal();
+  await w.net.until(() => w.claim(req, taskId)?.state === 'held', { what: 'the old claim known to the requester' });
+  // Its executor dies holding it.
+  w.net.kill('exe');
+  await w.run(LEASE_SECS + 900);
+  assert.deepEqual([w.task(req, taskId).state, w.offerRow(req, taskId).attempt], ['available', 1]);
 });

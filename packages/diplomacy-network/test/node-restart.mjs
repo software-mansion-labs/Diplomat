@@ -121,3 +121,181 @@ await check('a host that lost the record of its runs gives back the claims it ca
   assert.deepEqual([w.stored(exe, 'keys').held, w.stored(req, 'keys').issued], [{}, {}], 'and its key is gone on both sides');
   assert.deepEqual(exe.node.snapshot().runs, []);
 });
+
+await check('a host that comes back takes up the pools it was linked to before anyone names them; one that lost the list ends nothing until they are named', async () => {
+  const w = createWorld({ seed: 76 });
+  const all = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const [req, exe] = all;
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+  const job = exe.executor.jobOf(taskId);
+  const act = async (leaf) => (await w.wait(exe.node.actFor(job.runId)(get('pr-1', leaf)))).status;
+  // Both daemons come back, and nobody names their pools: the list is in the store.
+  for (const h of all) await w.restart(h, { named: false });
+  assert.deepEqual([w.members(req).length, w.members(exe).length], [2, 2]);
+  assert.deepEqual([w.runOf(exe, taskId).state, w.offerRow(req, taskId).state], ['running', 'claimed']);
+  assert.equal(await act('a'), 200);
+  // One comes back without the list: half a minute passes before its pools are named.
+  w.net.kill('exe');
+  exe.disk.remove('links');
+  await w.restart(exe, { gapSecs: 30 });
+  assert.deepEqual(exe.executor.stopped, [], 'the job goes on');
+  assert.deepEqual([w.runOf(exe, taskId).state, w.offerRow(req, taskId).state], ['running', 'claimed']);
+  assert.equal(await act('b'), 200);
+  exe.executor.end(job.runId);
+  await w.net.until(() => w.offerRow(req, taskId).state === 'done', { what: 'the offer done' });
+  // A pool that is gone from the list when the daemon comes back was closed while it was down.
+  const second = await req.node.offer(offerArgs('pr-2'));
+  await w.net.until(() => exe.executor.jobOf(second.taskId), { what: 'a second job' });
+  exe.pools = [];
+  await w.restart(exe);
+  await w.net.settled();
+  assert.deepEqual(exe.executor.stopped.map((s) => s.reason), ['the pool was closed']);
+});
+
+await check('a host that died around the moment it started a job never starts that job twice', async () => {
+  for (const fate of ['alive', 'dead', 'unknown']) {
+    const w = createWorld({ seed: 77 });
+    const all = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+    const [req, exe] = all;
+    // The process dies inside the executor's start: the job exists, the host never learns of it.
+    const start = exe.executor.start.bind(exe.executor);
+    exe.executor.start = (args) => {
+      const handle = start(args);
+      w.net.kill('exe');
+      return handle;
+    };
+    const { taskId } = await req.node.offer(offerArgs('pr-1'));
+    await w.net.until(() => exe.executor.started.length === 1, { what: 'the job started' });
+    exe.executor.start = start;
+    const { runId } = exe.executor.started[0];
+    assert.deepEqual(Object.values(w.stored(exe, 'runs').runs).map((r) => [r.state, r.launched]), [['preparing', true]], 'what the disk knows');
+    if (fate === 'dead') exe.executor.die(runId);
+    const alive = exe.executor.alive;
+    if (fate === 'unknown') exe.executor.alive = () => { throw new Error('docker is not up yet'); };
+    await w.restart(exe);
+    await w.run(60);
+    assert.equal(exe.executor.started.length, 1, `${fate}: started once`);
+    if (fate === 'alive') assert.equal(w.runOf(exe, taskId).state, 'running');
+    if (fate === 'unknown') {
+      assert.equal(w.runOf(exe, taskId).state, 'preparing', 'nothing is decided while the executor cannot say');
+      exe.executor.alive = alive;
+      await w.run(20);
+      assert.equal(w.runOf(exe, taskId).state, 'running');
+    }
+    if (fate === 'dead') {
+      await w.net.until(() => w.offerRow(req, taskId).attempt === 2, { what: 'the lost job reported as a failed attempt' });
+      assert.equal(w.runOf(exe, taskId).state, 'failed');
+    }
+  }
+});
+
+await check('a host that left a pool unheard and came back gives up the claim it finds itself holding', async () => {
+  const w = createWorld({ seed: 78 });
+  const all = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const [req, exe] = all;
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+  w.net.cut('req', 'exe');
+  exe.slots = 0;
+  exe.node.setPools([]);
+  await w.run(30);
+  assert.equal(w.claim(req, taskId).state, 'held', 'the requester never heard the claim was given back');
+  exe.node.setPools(exe.pools);
+  w.net.heal();
+  await w.wait(exe.node.join(req.node.invite({ pool: POOL })));
+  await w.net.until(() => w.claim(req, taskId).state === 'released', { maxMs: 3 * 60 * 1000, what: 'the claim given back again' });
+  assert.equal(exe.executor.started.length, 1);
+});
+
+await check('a stopped host leaves no timer behind, whatever it was in the middle of', async () => {
+  const w = createWorld({ seed: 79 });
+  const all = await w.pool(['req', 'exe', 'silent'], { exe: { slots: 2 } });
+  const [req, exe] = all;
+  // One run waits for a key that never comes; one round waits for a member that says nothing.
+  req.requester.rulesFor = (args) => (args.item === 'pr-1' ? [{ host: 'api.github.com', method: 'GET', path: '/**' }] : null);
+  const first = await req.node.offer(offerArgs('pr-1'));
+  req.requester.rulesFor = () => { throw new Error('the rules are gone'); };
+  await w.net.until(() => w.runOf(exe, first.taskId), { what: 'a run waiting for its key' });
+  req.requester.rulesFor = () => [{ host: 'api.github.com', method: 'GET', path: '/**' }];
+  w.net.cut('exe', 'silent');
+  await w.run(15);
+  exe.node.admit({ slots: 1 });
+  const second = await req.node.offer(offerArgs('pr-2'));
+  req.requester.rulesFor = () => { throw new Error('the rules are gone'); };
+  // A round holds this host's own lock on the task from its first request on.
+  await w.net.until(() => JSON.stringify(w.stored(exe, 'locks')).includes(second.taskId), { stepMs: 5, what: 'a round under way' });
+  exe.slots = 0;
+  const said = exe.log.length;
+  await exe.node.stop();
+  await w.run(3600);
+  assert.deepEqual(exe.log.slice(said).filter((line) => line.includes('stood down')), [], 'its rounds end with it, unsaid');
+  assert.deepEqual(exe.node.snapshot().runs.map((run) => run.taskId), [first.taskId], 'and commit nothing');
+  assert.equal(w.net.timers('exe'), 0);
+  assert.equal(w.net.count({ from: 'exe', since: w.net.now() - 3000 }), 0, 'and it sends nothing');
+});
+
+await check('a host started with its clock an hour behind keeps its place in the pool', async () => {
+  const w = createWorld({ seed: 83 });
+  const all = await w.pool(['a', 'b', 'c']);
+  const [a, b] = all;
+  await w.run(600);
+  const doc = () => w.stored(b, [...b.disk.files.keys()].find((name) => name.startsWith('pools/')));
+  const { records, inviter } = doc();
+  b.skew = -3600;
+  await w.restart(b);
+  await w.run(120);
+  assert.deepEqual([doc().records.length, doc().inviter], [records.length, inviter], 'what it held it still holds');
+  assert.ok(doc().records.find((r) => r.type === 'member' && r.pk === b.pk).voucher, 'and it did not found a pool of its own');
+  b.skew = 0;
+  await w.run(300);
+  const everyone = all.map((h) => h.pk).sort();
+  assert.deepEqual([w.members(a), w.members(b)], [everyone, everyone]);
+});
+
+await check('a store that could not be written at one step is written at the next, and the host goes on', async () => {
+  const w = createWorld({ seed: 84 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+  await w.run(1);
+  // The disk is full for one write.
+  const write = req.disk.write;
+  let failed = 0;
+  req.disk.write = (name, text) => {
+    if (failed > 0) return write(name, text);
+    failed += 1;
+    throw Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
+  };
+  await w.run(15);
+  assert.equal(failed, 1);
+  assert.ok(req.log.some((line) => line.includes('the store could not be written')));
+  // It still looks after its offer: the lease of the run is extended when it comes due.
+  await w.run(LEASE_SECS);
+  assert.ok(w.claim(req, taskId).seq >= 1);
+});
+
+await check('what a member answers after a pool was closed is not taken into it', async () => {
+  const w = createWorld({ seed: 85 });
+  const [a, b] = await w.pool(['a', 'b']);
+  w.net.kill('a');
+  await b.node.offer(offerArgs('pr-1'));
+  await w.run(200);
+  // Back up, it asks b for what it missed, and its pool is closed while the answer is on
+  // its way - unheard, so that b still answers.
+  let pulling = false;
+  w.net.tap(({ from, headers }) => {
+    if (pulling || from !== 'a' || headers['dn-kind'] !== 'pull') return;
+    pulling = true;
+    w.net.clock('world').setTimeout(() => {
+      a.transport.host.ready = false;
+      a.pools = [];
+      a.node.setPools([]);
+    }, 1);
+  });
+  await w.restart(a);
+  await w.net.until(() => pulling, { what: 'a pull by a' });
+  await w.run(120);
+  const doc = w.stored(a, [...a.disk.files.keys()].find((name) => name.startsWith('pools/')));
+  assert.deepEqual([doc.linked, doc.records], [false, undefined]);
+});

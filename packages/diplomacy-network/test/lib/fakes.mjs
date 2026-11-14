@@ -12,9 +12,11 @@ export function forgeRequest(method, path, body = null) {
   };
 }
 
-/// A requester with rules for the kinds in `kinds`. `calls` lists every `authorize` and
-/// `perform` as `{ op, path, ... }`; `refuse(part, reason)` makes it refuse every request
-/// whose path holds `part`; `broken` makes the forge unreachable.
+/// A requester with rules for the kinds in `kinds`: a task may reach what lies under its
+/// own item, and what is performed is the request with the requester's name put on it.
+/// `calls` lists every `authorize` and `perform` as `{ op, path, ... }`; `refuse(part,
+/// reason)` makes it refuse every request whose path holds `part`; `broken` makes the
+/// forge unreachable.
 export function fakeRequester({ kinds = ['review', 'fix'] } = {}) {
   const refusals = [];
   return {
@@ -31,11 +33,14 @@ export function fakeRequester({ kinds = ['review', 'fix'] } = {}) {
     authorize(rules, request, context) {
       context.state.asked = (context.state.asked ?? 0) + 1;
       const refusal = refusals.find((r) => request.path.includes(r.part));
+      const rule = rules.find((r) => r.host === request.host && request.path.startsWith(r.path.replace('**', '')));
       this.calls.push({ op: 'authorize', path: request.path, asked: context.state.asked, rules: rules.length, task: context.task.taskId });
-      return refusal ? { ok: false, reason: refusal.reason } : { ok: true, rule: rules[0], request };
+      if (refusal) return { ok: false, reason: refusal.reason };
+      if (!rule) return { ok: false, reason: 'no rule covers this request' };
+      return { ok: true, request: { ...request, headers: { ...request.headers, authorization: rule.as } } };
     },
     async perform(request, { forge, host }) {
-      this.calls.push({ op: 'perform', path: request.path, forge, host });
+      this.calls.push({ op: 'perform', path: request.path, forge, host, as: request.headers.authorization ?? null });
       if (this.broken) throw new Error('the forge is down');
       return { status: 200, headers: { 'Content-Type': 'application/json', 'x-count': 7 }, body: b64({ did: request.path }) };
     },

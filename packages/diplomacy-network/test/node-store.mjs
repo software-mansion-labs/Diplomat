@@ -67,7 +67,7 @@ await check('a host on a real directory comes back as itself; with a file it can
     await w.wait(exe.node.join(req.node.invite({ pool: POOL })));
     const { taskId } = await req.node.offer({ pool: POOL, kind: 'review', item: 'pr-1', title: 't', prompt: 'p' });
     await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
-    assert.deepEqual(tree(dir), ['identity.json', 'keys.json', 'locks.json', 'offers.json', 'pools', `${poolFile(POOL)}.json`]);
+    assert.deepEqual(tree(dir), ['identity.json', 'keys.json', 'links.json', 'locks.json', 'offers.json', 'pools', `${poolFile(POOL)}.json`]);
     for (const name of tree(dir).filter((n) => n.endsWith('.json'))) assert.equal(mode(path.join(dir, name)), 0o600, name);
     assert.ok(JSON.parse(fs.readFileSync(path.join(dir, 'keys.json'), 'utf8')).issued[taskId].secret);
 

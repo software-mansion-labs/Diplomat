@@ -46,15 +46,20 @@ await check('a task is offered, claimed, acted on under the requester\'s key, an
   const first = await w.wait(job.act(forgeRequest('GET', '/repos/o/r/pr-7/files')));
   const refused = await w.wait(job.act(forgeRequest('GET', '/repos/o/r/pr-7/secrets')));
   const second = await w.wait(job.act(forgeRequest('POST', '/repos/o/r/pr-7/reviews', { event: 'COMMENT' })));
+  const beyond = await w.wait(job.act(forgeRequest('GET', '/repos/o/r/pr-8/files')));
+  assert.deepEqual([beyond.status, body(beyond)], [403, { message: 'no rule covers this request' }], 'the rules of the key are the ones asked');
   assert.deepEqual([first.status, first.headers, body(first)], [200, { 'content-type': 'application/json' }, { did: '/repos/o/r/pr-7/files' }]);
   assert.deepEqual([refused.status, body(refused)], [403, { message: 'this task may not read secrets' }]);
   assert.equal(second.status, 200);
   assert.deepEqual(req.requester.calls.map((c) => [c.op, c.path.split('/').at(-1)]), [
     ['authorize', 'files'], ['perform', 'files'], ['authorize', 'secrets'], ['authorize', 'reviews'], ['perform', 'reviews'],
+    ['authorize', 'files'],
   ], 'every request is authorised before it is performed, and a refused one never is');
-  assert.deepEqual(req.requester.calls.filter((c) => c.op === 'authorize').map((c) => c.asked), [1, 2, 3], 'the key\'s state is carried from one request to the next');
-  assert.deepEqual(req.requester.calls.find((c) => c.op === 'perform'), { op: 'perform', path: '/repos/o/r/pr-7/files', forge: 'github', host: 'github.com' });
-  assert.deepEqual([w.offerRow(req, taskId).requests, w.offerRow(req, taskId).refused], [3, 1]);
+  assert.deepEqual(req.requester.calls.filter((c) => c.op === 'authorize').map((c) => c.asked), [1, 2, 3, 4], 'the key\'s state is carried from one request to the next');
+  assert.deepEqual(req.requester.calls.find((c) => c.op === 'perform'), {
+    op: 'perform', path: '/repos/o/r/pr-7/files', forge: 'github', host: 'github.com', as: 'octocat',
+  }, 'what is performed is the request as the rules made it');
+  assert.deepEqual([w.offerRow(req, taskId).requests, w.offerRow(req, taskId).refused], [4, 2]);
 
   // The job ends well: the offer is done everywhere and the key is dead.
   exe.executor.end(job.runId);
@@ -70,7 +75,7 @@ await check('a task is offered, claimed, acted on under the requester\'s key, an
   assert.equal(req.transport.host.limit(actHeaders(exe, 5 * 2 ** 20)), STRANGER_BODY_BYTES, 'without a key, no pack');
   const late = await w.wait(job.act(forgeRequest('GET', '/repos/o/r/pr-7/files')));
   assert.equal(late.status, 403);
-  assert.equal(req.requester.calls.length, 5, 'a request after the end reaches nothing');
+  assert.equal(req.requester.calls.length, 6, 'a request after the end reaches nothing');
   assert.equal(exe.executor.stopped.length, 0);
 });
 
@@ -135,6 +140,8 @@ await check('a host that closes a pool cancels its offers there, stops its runs 
   a.pools = [];
   a.node.setPools([]);
   await w.net.until(() => w.task(c, mine.taskId) === null, { what: 'the task gone' });
+  const farewell = w.records(c).find((r) => r.type === 'offer' && r.taskId === mine.taskId && r.host === a.pk);
+  assert.equal(farewell.state, 'cancelled', 'the members hold its signed word for it');
   assert.deepEqual([w.offerRow(a, mine.taskId).state, w.offerRow(a, mine.taskId).reason], ['cancelled', 'the pool was closed']);
   assert.equal(w.task(c, theirs.taskId).state, 'available');
   assert.equal(w.members(c).length, 1);
@@ -169,4 +176,120 @@ await check('two hosts offer one task: the run reports to both, and the task is 
   await w.net.until(() => w.offerRow(r2, second.taskId).state === 'cancelled', { what: 'the sibling offer cancelled' });
   await w.agreed([r1, r2, exe]);
   assert.equal(w.task(exe, second.taskId).state, 'cancelled');
+});
+
+await check('a title is cut to what a record carries, and never through the middle of a character', async () => {
+  const w = createWorld({ seed: 16 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const { taskId } = await req.node.offer(offerArgs('pr-1', { title: `${'x'.repeat(299)}\u{1F600} and more` }));
+  assert.equal(w.offerRow(req, taskId).title, `${'x'.repeat(299)}\uFFFD`);
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'the task taken like any other' });
+});
+
+await check('a task that ended and is offered again is a task again, whoever else had offered it', async () => {
+  const w = createWorld({ seed: 17 });
+  const [r1, r2, exe] = await w.pool(['r1', 'r2', 'exe'], { exe: { slots: 1 } });
+  const { taskId } = await r1.node.offer(offerArgs('pr-1'));
+  await r2.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+  exe.executor.end(exe.executor.jobOf(taskId).runId);
+  await w.net.until(() => [r1, r2].every((h) => w.offerRow(h, taskId).state === 'done'), { stepMs: 5, what: 'both offers done' });
+  // Offered again in the second it ended: the end both hosts signed must not end this offer too.
+  assert.equal((await r1.node.offer(offerArgs('pr-1', { prompt: 'once more' }))).taskId, taskId);
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a second job' });
+  const job = exe.executor.jobOf(taskId);
+  assert.equal(job.spec.prompt, 'once more');
+  assert.deepEqual([w.offerRow(r1, taskId).state, w.offerRow(r2, taskId).state], ['claimed', 'done'], 'the offer that was not made again stays ended');
+  exe.executor.end(job.runId);
+  await w.net.until(() => w.offerRow(r1, taskId).state === 'done', { what: 'the second offer done' });
+  assert.deepEqual([w.offerRow(r1, taskId).outcome.ok, exe.executor.started.length], [true, 2]);
+  await w.agreed([r1, r2, exe]);
+  assert.equal(w.task(exe, taskId).state, 'done');
+});
+
+await check('an executor whose clock runs behind the requester\'s still gets its key and finishes the task', async () => {
+  const w = createWorld({ seed: 18 });
+  const all = [w.add('req'), w.add('exe', { slots: 1 })];
+  const [req, exe] = all;
+  exe.skew = -45;
+  for (const h of all) await w.start(h);
+  await w.wait(exe.node.join(req.node.invite({ pool: POOL })));
+  await w.net.until(() => w.members(req).length === 2, { what: 'two members' });
+  const { taskId, job } = await going(w, req, exe, 'pr-1');
+  assert.ok(w.claim(req, taskId).claimedAt < w.offerRow(req, taskId).offeredAt, 'by the clocks the claim is older than the offer');
+  assert.equal((await w.wait(job.act(forgeRequest('GET', '/repos/o/r/pr-1/files')))).status, 200);
+  exe.executor.end(job.runId);
+  await w.net.until(() => w.offerRow(req, taskId).state === 'done', { what: 'the offer done' });
+  await w.run(300);
+  assert.equal(exe.executor.started.length, 1, 'and it is not run again');
+});
+
+await check('a run stopped by the operator is stopped, its claim given back, and the task left to another machine', async () => {
+  const w = createWorld({ seed: 19 });
+  const [req, exe, other] = await w.pool(['req', 'exe', 'other'], { exe: { slots: 1 } });
+  const { taskId, job } = await going(w, req, exe, 'pr-1');
+  await exe.node.stopRun({ runId: job.runId });
+  assert.deepEqual(exe.executor.stopped, [{ runId: job.runId, reason: 'stopped by the operator' }]);
+  assert.equal(w.runOf(exe, taskId).state, 'stopped');
+  await w.net.until(() => w.task(req, taskId).state === 'available', { what: 'the task in the pool again' });
+  // The machine that gave it up has a free slot, and leaves the task alone.
+  await w.run(600);
+  assert.deepEqual([w.task(req, taskId).state, exe.executor.started.length], ['available', 1]);
+  other.slots = 1;
+  await w.net.until(() => other.executor.jobOf(taskId), { maxMs: 3 * 60 * 1000, what: 'a job on another machine' });
+  assert.equal(w.offerRow(req, taskId).attempt, 1, 'a claim given back is no failed attempt');
+  await assert.rejects(exe.node.stopRun({ runId: job.runId }), /No such run is going on this machine\./);
+});
+
+await check('a host that is switched off cancels its offers, stops its runs and gives their claims back, tells the pool, and stops - a member still', async () => {
+  const w = createWorld({ seed: 20 });
+  const [a, b, c] = await w.pool(['a', 'b', 'c'], { a: { slots: 1 } });
+  const theirs = await going(w, b, a, 'pr-1'); // b offers, a runs
+  const mine = await a.node.offer(offerArgs('pr-2')); // a offers, nobody else is free
+  await w.agreed([a, b, c]);
+  // Its job takes three seconds to stop.
+  const { stop } = a.executor;
+  a.executor.stop = (...args) => new Promise((resolve) => { a.clock.setTimeout(() => resolve(stop.apply(a.executor, args)), 3000); });
+  const began = w.net.now();
+  await w.wait(a.node.switchOff());
+  const took = w.net.now() - began;
+  assert.ok(took >= 3 && took <= 4, `it waits for its jobs to stop and the members to answer, and no longer: ${took} s`);
+  a.executor.stop = stop;
+  assert.deepEqual(a.executor.stopped, [{ runId: theirs.job.runId, reason: 'the network was switched off' }]);
+  // The others heard all of it before it stopped, and it is a member still.
+  for (const h of [b, c]) {
+    assert.deepEqual([w.claim(h, theirs.taskId).state, w.task(h, theirs.taskId).state, w.task(h, mine.taskId).state], ['released', 'available', 'cancelled'], h.name);
+    assert.equal(w.members(h).length, 3);
+  }
+  assert.deepEqual([w.offerRow(a, mine.taskId).state, w.offerRow(a, mine.taskId).reason], ['cancelled', 'the network was switched off']);
+  assert.equal(w.runOf(a, theirs.taskId).state, 'stopped');
+  assert.equal(w.offerRow(b, theirs.taskId).attempt, 1, 'a claim given back is no failed attempt');
+  a.slots = 0;
+  await w.run(3600);
+  assert.equal(w.net.timers('a'), 0, 'nothing of it is left going');
+  // Switched on again it is what it was, and takes the task it gave back like any other.
+  a.slots = 1;
+  await w.restart(a, { named: false });
+  await w.net.until(() => a.executor.started.length === 2, { maxMs: 5 * 60 * 1000, what: 'the task taken again' });
+  assert.equal(a.executor.started[1].task.taskId, theirs.taskId);
+
+  // Cut off, and with a job that will not stop, it stops all the same when its wait is
+  // over; the others hear what it ended once it is back.
+  const late = await a.node.offer(offerArgs('pr-3'));
+  await w.agreed([a, b, c]);
+  w.net.split(['a'], ['b', 'c']);
+  a.executor.stop = () => new Promise(() => {});
+  const from = w.net.now();
+  await w.wait(a.node.switchOff({ waitMs: 5000 }));
+  assert.ok(w.net.now() - from >= 5 && w.net.now() - from <= 6, `stopped after ${w.net.now() - from} s`);
+  a.slots = 0;
+  await w.run(3600);
+  assert.equal(w.net.timers('a'), 0);
+  assert.equal(w.task(b, late.taskId).state, 'available', 'nobody heard');
+  a.executor.stop = stop;
+  w.net.heal();
+  await w.restart(a, { named: false });
+  await w.net.until(() => [b, c].every((h) => w.task(h, late.taskId).state === 'cancelled'), { what: 'the cancelled offer known to the others' });
+  await w.wait(a.node.switchOff());
+  await a.node.switchOff();
 });
