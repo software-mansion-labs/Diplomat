@@ -6,26 +6,33 @@
 //
 // "Fast-forward" is proven, not taken from the executor: the pack is indexed into a
 // quarantine repository that borrows the linked checkout's objects read-only, and git is
-// asked whether the ref's old value is an ancestor of the new one. Whether the old value
-// is really what the forge holds is the forge's own check - it rejects a push whose old id
-// is not the ref's current value - so the two together leave no way to rewrite history.
+// asked whether the ref's old value is an ancestor of the new one. The old value must be
+// what the forge says the branch holds now - a creation, a name the forge has no branch
+// of - and the forge itself rejects a push whose old id is not the ref's current value,
+// so there is no way to rewrite history or to take over a branch that exists.
+//
+// The forge is also asked which branch is the default and whether a branch is protected:
+// neither is ever pushed. And the pack is measured before git reads it, because a pack of
+// a few kilobytes can unfold to any size.
 //
 // The pack usually stops at commits the forge already has (the pack's boundary), and a
 // stale checkout may not have them. They are fetched into the quarantine by id, so git
 // sees a whole graph.
 //
 // `denyPaths` keeps a push from writing CI definitions. Every pushed commit is compared
-// with its parents: a path under `denyPaths` may only hold what one of the parents holds
-// there, which lets a merge bring the base branch's workflow files along and stops a
-// commit from writing its own. The commits the push builds on must then be the forge's
-// own: reachable from a branch of that repository, not merely fetchable by id - a forge
-// that shares objects between forks hands out commits no branch of this repository holds.
+// with its parents: a path under `denyPaths` - in any letter case - may only hold what one
+// of the parents holds there, which lets a merge bring the base branch's workflow files
+// along and stops a commit from writing, changing or deleting one. The commits the push
+// builds on must then be the forge's own: reachable from a branch of that repository, not
+// merely fetchable by id - a forge that shares objects between forks hands out commits no
+// branch of this repository holds.
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { GIT_BIN, GIT_TIMEOUT_MS, PUSH_MAX_BYTES } from '../paths.js';
+import zlib from 'node:zlib';
+import { GIT_BIN, GIT_TIMEOUT_MS, PUSH_MAX_BYTES, PUSH_UNPACKED_MAX_BYTES } from '../paths.js';
 
 const MAX_COMMANDS = 64;
 const ZERO = /^0+$/;
@@ -48,31 +55,42 @@ function validRef(ref) {
   return ref.split('/').every((part) => part !== '' && !part.startsWith('.') && !part.endsWith('.lock'));
 }
 
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+
+// One pkt-line of `body` at `at`: four hex digits of length, counting themselves; "0000"
+// is a flush. Returns `{ payload, next }`, `payload` null for a flush.
+function pktAt(body, at) {
+  const head = body.subarray(at, at + 4).toString('latin1');
+  if (!/^[0-9a-f]{4}$/.test(head)) throw new SyntaxError('a malformed pkt-line length');
+  const len = parseInt(head, 16);
+  if (len === 0) return { payload: null, next: at + 4 };
+  if (len <= 4 || at + len > body.length) throw new SyntaxError('a pkt-line of impossible length');
+  return { payload: body.subarray(at + 4, at + len), next: at + len };
+}
+
 /// Reads the head of a git-receive-pack request body: the ref commands, the capabilities
 /// and any push options, up to the pack. Returns `{ commands: [{ old, new, ref }], caps,
-/// options, shallow, format, pack }` (`pack` is the rest of the body, `format` is "sha1" or
+/// options, format, pack }` (`pack` is the rest of the body, `format` is "sha1" or
 /// "sha256") or throws for a body that is not exactly that.
 export function parseReceivePack(body) {
   let at = 0;
-  // One pkt-line: four hex digits of length, counting themselves; "0000" is a flush.
   const pkt = () => {
-    const head = body.subarray(at, at + 4).toString('latin1');
-    if (!/^[0-9a-f]{4}$/.test(head)) throw new SyntaxError('a malformed pkt-line length');
-    const len = parseInt(head, 16);
-    if (len === 0) { at += 4; return null; }
-    if (len <= 4 || at + len > body.length) throw new SyntaxError('a pkt-line of impossible length');
-    const payload = body.subarray(at + 4, at + len);
-    at += len;
+    const { payload, next } = pktAt(body, at);
+    at = next;
     return payload;
   };
+  // Bytes that are not UTF-8 would be read here as one name and by the forge as another.
+  const text = (payload) => {
+    try { return utf8.decode(payload).replace(/\n$/, ''); } catch { throw new SyntaxError('a line that is not UTF-8'); }
+  };
   const commands = [];
-  const shallow = [];
   let caps = [];
   for (;;) {
     const payload = pkt();
     if (payload === null) break;
-    let line = payload.toString('utf8').replace(/\n$/, '');
-    if (commands.length === 0 && shallow.length < MAX_COMMANDS && /^shallow [0-9a-f]{40,64}$/.test(line)) { shallow.push(line.slice(8)); continue; }
+    let line = text(payload);
+    // A shallow line makes the forge's repository shallow: no task has a use for one.
+    if (line.startsWith('shallow ')) throw new SyntaxError('a shallow line');
     const nul = line.indexOf('\0');
     if (nul !== -1) {
       if (commands.length > 0) throw new SyntaxError('capabilities on a later command');
@@ -98,14 +116,53 @@ export function parseReceivePack(body) {
     for (;;) {
       const payload = pkt();
       if (payload === null) break;
-      options.push(payload.toString('utf8').replace(/\n$/, ''));
+      options.push(text(payload));
     }
   }
   const pack = body.subarray(at);
   if (pack.length > 0 && (pack.length < 12 || pack.subarray(0, 4).toString('latin1') !== 'PACK' || ![2, 3].includes(pack.readUInt32BE(4)))) {
     throw new SyntaxError('what follows the commands is not a pack');
   }
-  return { commands, caps, options, shallow, format, pack };
+  return { commands, caps, options, format, pack };
+}
+
+/// What the forge said it did with a push, read from its answer to git-receive-pack:
+/// `{ ok, ng }`, the refs it reports as updated and as declined. Null for an answer that
+/// is not a report this reader can follow to its end. The report comes as pkt-lines, or
+/// inside band 1 of a side-band when the push asked for one.
+export function pushReport(body) {
+  try {
+    let lines = [];
+    for (let at = 0; at < body.length;) {
+      const { payload, next } = pktAt(body, at);
+      at = next;
+      if (payload !== null) lines.push(payload);
+    }
+    if (lines.length > 0 && lines.every((l) => l[0] >= 1 && l[0] <= 3)) {
+      const inner = Buffer.concat(lines.filter((l) => l[0] === 1).map((l) => l.subarray(1)));
+      lines = [];
+      for (let at = 0; at < inner.length;) {
+        const { payload, next } = pktAt(inner, at);
+        at = next;
+        if (payload === null) break;
+        lines.push(payload);
+      }
+    }
+    const report = lines.map((l) => utf8.decode(l).replace(/\n$/, ''));
+    if (!/^unpack /.test(report[0] ?? '')) return null;
+    const ok = [];
+    const ng = [];
+    for (const line of report.slice(1)) {
+      if (line.startsWith('ok ')) ok.push(line.slice(3));
+      else if (line.startsWith('ng ')) ng.push(line.slice(3).split(' ')[0]);
+      else if (!line.startsWith('option ')) return null;
+    }
+    // A ref said both ways, or an "ok" beside a failed unpack, is no report to act on.
+    if (ok.some((ref) => ng.includes(ref)) || (report[0] !== 'unpack ok' && ok.length > 0)) return null;
+    return { ok, ng };
+  } catch {
+    return null;
+  }
 }
 
 /// Whether `text` matches a glob whose "*" stays inside one "/"-separated part and whose
@@ -136,37 +193,37 @@ function repoOf(segments) {
 
 const lower = (s) => String(s ?? '').toLowerCase();
 
-// For a rule scoped to pull requests' head branches: the refs of `repo` this push may
-// move, as the forge reports them now. `refs` null means "any" - a question only the
-// advertisement asks, before a ref is named.
-async function headRefs(rule, repo, ctx, refs) {
+// For a rule scoped to pull requests' head branches: the refs of the pool's repository
+// this push may move, as the forge reports them now. `refs` null means "any" - a question
+// only the advertisement asks, before a ref is named. A head branch that lives in a fork
+// is not one of them: a push goes to the pool's repository and to no other.
+async function headRefs(rule, ctx, refs) {
   const scope = rule.head;
-  const mine = (pull) => pull && pull.open === true && lower(pull.headRepo) === repo
+  const mine = (pull) => pull.open === true && lower(pull.headRepo) === lower(rule.repo)
     && (scope.author === undefined || lower(pull.author) === scope.author);
   if (scope.number !== undefined) {
     if (typeof ctx.pull !== 'function') refuse('nothing here can look a pull request up');
     const pull = await ctx.pull(scope.number);
-    if (!mine(pull)) refuse(`this repository does not hold the head branch of open pull request #${scope.number}`);
+    if (!pull || !mine(pull)) refuse(`this repository does not hold the head branch of open pull request #${scope.number}`);
     return [`refs/heads/${pull.headRef}`];
   }
   if (typeof ctx.pullsByHead !== 'function') refuse('nothing here can look a pull request up');
   const out = [];
   for (const ref of refs || [null]) {
     const branch = ref === null ? undefined : ref.replace(/^refs\/heads\//, '');
-    const pulls = (await ctx.pullsByHead({ repo, ref: branch })) || [];
-    for (const pull of pulls) if (mine(pull) && (branch === undefined || pull.headRef === branch)) out.push(`refs/heads/${pull.headRef}`);
+    for (const pull of await ctx.pullsByHead(branch)) if (mine(pull) && (branch === undefined || pull.headRef === branch)) out.push(`refs/heads/${pull.headRef}`);
   }
   if (out.length === 0) refuse(`no open pull request by ${scope.author} has its head branch here`);
   return out;
 }
 
 /// The check for `GET .../info/refs?service=git-receive-pack`, the ref advertisement a
-/// push starts with: the repository must be one the rule's push could go to.
+/// push starts with: the repository must be the pool's, and for a rule scoped to pull
+/// requests one of them must have its head branch there.
 export function checkAdvertise(rule, segments, ctx = {}) {
   return verdict(async () => {
-    const repo = repoOf(segments);
-    if (rule.head) await headRefs(rule, repo, ctx, null);
-    else if (repo !== lower(rule.repo)) refuse('this is not the pool\'s repository');
+    if (repoOf(segments) !== lower(rule.repo)) refuse('this is not the pool\'s repository');
+    if (rule.head) await headRefs(rule, ctx, null);
     return { ok: true };
   });
 }
@@ -201,7 +258,58 @@ const baseEnv = (home) => ({
   GIT_TERMINAL_PROMPT: '0',
 });
 
-async function prove(rule, repo, push, ctx) {
+// Adds up what a pack unfolds to once git reads it: the size of each object, and for a
+// delta its own bytes and the size of the object it says it builds. git holds an object
+// whole in memory to index it, and a delta of four bytes can ask for sixteen mebibytes
+// more, so the bytes on the wire bound nothing.
+async function unfold(pack, idLength) {
+  const broken = () => refuse('the pushed pack is not one git would read');
+  const end = pack.length - idLength;
+  let at = 12;
+  let total = 0;
+  const count = (bytes) => {
+    total += bytes;
+    if (total > PUSH_UNPACKED_MAX_BYTES) refuse('the pushed pack unfolds to more than a task may send');
+  };
+  // A little-endian base-128 number, seven bits a byte, in `from` at `pos`.
+  const number = (from, pos, limit, first = 0, scale = 1) => {
+    let value = first;
+    for (let byte = 0x80; byte & 0x80; scale *= 128) {
+      if (pos >= limit || scale > 2 ** 46) broken();
+      byte = from[pos++];
+      value += (byte & 0x7f) * scale;
+    }
+    return { value, pos };
+  };
+  for (let i = pack.readUInt32BE(8); i > 0; i--) {
+    if (at >= end) broken();
+    const type = (pack[at] >> 4) & 7;
+    const size = pack[at] & 0x80 ? number(pack, at + 1, end, pack[at] & 15, 16) : { value: pack[at] & 15, pos: at + 1 };
+    at = size.pos;
+    // A delta names its base before its data: by distance back in the pack, or by id.
+    if (type === 6) {
+      while (pack[at++] & 0x80) if (at >= end) broken();
+    } else if (type === 7) {
+      at += idLength;
+    } else if (type < 1 || type > 4) {
+      broken();
+    }
+    count(size.value);
+    let data;
+    try {
+      const inflated = zlib.inflateSync(pack.subarray(at, end), { info: true, maxOutputLength: Math.max(size.value, 1) });
+      data = inflated.buffer;
+      at += inflated.engine.bytesWritten;
+    } catch { broken(); }
+    if (data.length !== size.value) broken();
+    // A delta's data opens with two sizes: its base's, and that of the object it builds.
+    if (type > 4) count(number(data, number(data, 0, data.length).pos, data.length).value);
+    if (i % 4096 === 0) await new Promise((resolve) => setImmediate(resolve));
+  }
+  if (at !== end) broken();
+}
+
+async function prove(deny, push, ctx) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dn-quarantine-'));
   try {
     const gitDir = path.join(dir, 'q.git');
@@ -213,7 +321,7 @@ async function prove(rule, repo, push, ctx) {
     const formatArgs = push.format === 'sha256' ? ['--object-format=sha256'] : [];
     if ((await run(['init', '--bare', '--quiet', ...formatArgs, gitDir], { env })).code !== 0) refuse('the quarantine could not be set up');
     const git = (args, input) => run(args, { env, input });
-    const fetch = async (what) => typeof ctx.fetch === 'function' && (await ctx.fetch({ repo, env, ...what })) === true;
+    const fetch = async (what) => typeof ctx.fetch === 'function' && (await ctx.fetch({ env, ...what })) === true;
     let everything;
     const fetchAll = () => (everything ??= fetch({ all: true }));
 
@@ -232,7 +340,10 @@ async function prove(rule, repo, push, ctx) {
 
     const packed = new Set();
     if (push.pack.length >= 12 && push.pack.readUInt32BE(8) > 0) {
-      const index = () => git(['index-pack', '--stdin', '--fix-thin', `--max-input-size=${PUSH_MAX_BYTES}`], push.pack);
+      await unfold(push.pack, push.format === 'sha256' ? 32 : 20);
+      // The proof reads the pushed trees: one git itself calls broken (an entry named
+      // twice, out of order, ".git") is one two readers may read two ways.
+      const index = () => git(['index-pack', '--stdin', '--fix-thin', '--fsck-objects'], push.pack);
       let indexed = await index();
       // A thin pack leans on objects the forge has; a stale checkout may lack them.
       if (indexed.code !== 0 && (await fetchAll())) indexed = await index();
@@ -270,7 +381,6 @@ async function prove(rule, repo, push, ctx) {
       if (r.code !== 0) refuse(`${cmd.ref}: a fast-forward cannot be proven`);
     }
 
-    const deny = rule.denyPaths || [];
     if (deny.length > 0) {
       if (!(await fetchAll())) refuse('the forge\'s branches could not be fetched, so the pushed files cannot be checked');
       const base = [...boundary, ...news.filter((oid) => !packed.has(oid))];
@@ -278,20 +388,20 @@ async function prove(rule, repo, push, ctx) {
         const stray = await git(['rev-list', '--max-count=1', '--stdin', '--not', '--glob=refs/dn/*'], `${base.join('\n')}\n`);
         if (stray.code !== 0 || stray.stdout.trim() !== '') refuse('the push builds on a commit no branch of this repository holds');
       }
-      // Combined format: for each commit, the files that differ from every parent. Listing
-      // only the directories the patterns start in keeps this cheap on a big tree.
+      // Combined format: for each commit, the files that differ from every parent, a file
+      // the commit deletes among them. Listing only the directories the patterns start in
+      // keeps this cheap on a big tree. Case is not told apart: a forge or a runner on a
+      // file system that folds it reads ".GitHub/workflows" as the directory it knows.
       const prefixes = deny.map((p) => p.split('/').slice(0, p.split('/').findIndex((s) => s.includes('*')) >>> 0).join('/'));
-      const spec = prefixes.includes('') ? [] : ['--', ...new Set(prefixes)];
+      const spec = prefixes.includes('') ? [] : ['--', ...new Set(prefixes.map((p) => `:(icase,literal)${p}`))];
       const diff = await git(['diff-tree', '--stdin', '-r', '-c', '--root', '--raw', '--no-abbrev', '-z', ...spec], `${commits.join('\n')}\n`);
       if (diff.code !== 0) refuse('the pushed commits could not be compared with their parents');
       const tokens = diff.stdout.split('\0');
+      const patterns = deny.map((p) => p.toLowerCase());
       for (let i = 0; i < tokens.length; i++) {
         if (!tokens[i].startsWith(':')) continue;
-        const parents = /^:+/.exec(tokens[i])[0].length;
         const file = tokens[++i];
-        // The mode after the parents' is the commit's own; all zeroes is a deletion.
-        if (/^0+$/.test(tokens[i - 1].split(' ')[parents])) continue;
-        if (deny.some((p) => globMatch(p, file))) refuse(`the push changes ${file}, which this task may not write`);
+        if (patterns.some((p) => globMatch(p, file.toLowerCase()))) refuse(`the push changes ${file}, which this task may not write`);
       }
     }
   } finally {
@@ -304,20 +414,24 @@ async function prove(rule, repo, push, ctx) {
 /// request body. Resolves to `{ ok: true, created }` - the branches the push would create,
 /// for the caller to count against `create` - or `{ ok: false, reason }`. A ref may be
 /// created when `create` is positive and `refs` covers it, and updated when it is the head
-/// branch `head` names or one this key created. `ctx.checkout` is the linked checkout whose
-/// objects the proof may read, `ctx.fetch({ repo, env, wants | all })` fetches from the
-/// forge into the quarantine, `ctx.currentRef(repo, ref)` is the forge's value of a ref and
-/// `ctx.state.branches` lists the branches this key created.
+/// branch `head` names or one of `ctx.state.branches`, the branches the forge accepted
+/// from this task. The default branch and a branch the forge reports as protected are
+/// never moved or created. `ctx.checkout` is the linked checkout whose objects the proof
+/// may read, `ctx.fetch({ env, wants | all })` fetches from the forge into the quarantine,
+/// `ctx.repository()` answers `{ defaultBranch, ciPaths }` and `ctx.branch(ref)` the
+/// forge's `{ sha, protected }` of a branch, null for none. A lookup that throws has not
+/// answered, and its error is the caller's to turn into a refusal.
 export function checkPush(rule, segments, body, ctx = {}) {
   return verdict(async () => {
     if (body.length > PUSH_MAX_BYTES) refuse('the push is larger than a task may send');
-    const repo = repoOf(segments);
-    if (!rule.head && repo !== lower(rule.repo)) refuse('this is not the pool\'s repository');
+    if (repoOf(segments) !== lower(rule.repo)) refuse('this is not the pool\'s repository');
     let push;
     try { push = parseReceivePack(body); } catch (err) { refuse(`not a well-formed push: ${err.message}`); }
     if (push.options.length > 0) refuse('push options are not allowed');
+    // What a push did is known from the forge's report alone, and the forge sends one only when asked.
+    if (!push.caps.includes('report-status') && !push.caps.includes('report-status-v2')) refuse('the push does not ask the forge for its report (report-status)');
 
-    const heads = rule.head ? await headRefs(rule, repo, ctx, push.commands.map((c) => c.ref)) : [];
+    const heads = rule.head ? await headRefs(rule, ctx, push.commands.map((c) => c.ref)) : [];
     const own = ctx.state?.branches || [];
     const covered = (ref) => (rule.refs || []).some((p) => globMatch(p, ref));
     const created = [];
@@ -331,14 +445,19 @@ export function checkPush(rule, segments, body, ctx = {}) {
       }
     }
     if (push.pack.length === 0) refuse('the push carries no pack');
-    // A created branch becomes the key's own, which it may then move. The forge must say
-    // the name is free first, or creating a branch that exists would be a way to claim it.
-    if (typeof ctx.currentRef !== 'function') refuse('nothing here can ask the forge where a branch is');
+    if (typeof ctx.repository !== 'function' || typeof ctx.branch !== 'function') refuse('nothing here can ask the forge about its branches');
+    const { defaultBranch, ciPaths } = await ctx.repository();
     for (const cmd of push.commands) {
-      const now = (await ctx.currentRef(repo, cmd.ref)) ?? '';
-      if (now !== (ZERO.test(cmd.old) ? '' : cmd.old)) refuse(`${cmd.ref}: the forge's branch is not where this push starts from`);
+      // A pull request's head may be the default branch, and a created name may be the one
+      // an empty or renamed repository is waiting for.
+      if (lower(cmd.ref) === lower(`refs/heads/${defaultBranch}`)) refuse(`${cmd.ref}: the default branch is never pushed by a task`);
+      const now = await ctx.branch(cmd.ref);
+      if (now?.protected) refuse(`${cmd.ref}: a protected branch is never pushed by a task`);
+      // A creation is of a name the forge says is free: creating a branch that exists
+      // would be a way to claim it.
+      if ((now?.sha ?? '') !== (ZERO.test(cmd.old) ? '' : cmd.old)) refuse(`${cmd.ref}: the forge's branch is not where this push starts from`);
     }
-    await prove(rule, repo, push, ctx);
+    await prove([...(rule.denyPaths || []), ...ciPaths], push, ctx);
     return { ok: true, created };
   });
 }

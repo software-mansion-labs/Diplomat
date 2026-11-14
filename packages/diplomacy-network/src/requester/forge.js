@@ -7,7 +7,7 @@ import { execFile } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { authorized } from './authorize.js';
+import { authorized, conclude } from './authorize.js';
 import { FORGE_ORIGINS, FORGE_RESPONSE_MAX_BYTES, FORGE_TIMEOUT_MS, GH_BIN, GIT_BIN, GIT_TIMEOUT_MS, GLAB_BIN, TOKEN_TTL_MS } from '../paths.js';
 
 // What an executor may say to the forge about its request. Everything else is dropped:
@@ -19,6 +19,7 @@ const RESPONSE_HEADERS = new Set([
   'x-total', 'x-total-pages', 'x-page', 'x-per-page', 'x-next-page', 'x-prev-page',
 ]);
 const USER_AGENT = 'diplomacy-network';
+const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
 const NODE_QUERY = `query($id: ID!) { node(id: $id) { __typename
   ... on Repository { nameWithOwner }
@@ -69,8 +70,9 @@ function glabConfigToken(host) {
 
 /// The requester's side of the forge. `log` receives one line per request made, never a
 /// credential. Returns `{ perform, context, resolveNode, pull, pullsByHead, comment, assignees,
-/// self, currentRef, projectId, fetchInto }`; every function but `perform` and `context` takes
-/// `{ forge, host }` first - "github" or "gitlab", and the host the credential is for.
+/// self, repository, branch, projectId, fetchInto }`; every function but `perform` and
+/// `context` takes `{ forge, host }` first - "github" or "gitlab", and the host the
+/// credential is for. A lookup throws when the forge's answer does not settle its question.
 export function createForge({ log = () => {} } = {}) {
   const tokens = new Map(); // "forge host" -> { token, at }
 
@@ -137,20 +139,29 @@ export function createForge({ log = () => {} } = {}) {
   /// body base64 and the headers cut to what an executor may see. `host` names the
   /// credential ("github.com", or the GitLab host). Throws for a request `authorize` did
   /// not return, a host that is not the forge's, and a forge that cannot be reached.
+  /// Whatever the outcome, the task's state is told what became of the request.
   async function perform(request, { forge, host }) {
     if (!authorized(request)) throw new Error('forge: perform was given a request authorize did not allow');
-    const res = await send({ forge, host }, request);
+    let res;
+    try {
+      res = await send({ forge, host }, request);
+    } finally {
+      conclude(request, res);
+    }
     const headers = {};
     for (const [name, value] of res.headers) {
       if (RESPONSE_HEADERS.has(name) || name.startsWith('x-ratelimit-')) headers[name] = value;
     }
     let { status, body } = res;
     if (request.pick && status >= 200 && status < 300) {
-      // The rule lets only some members of this answer out.
+      // The rule lets only some members of this answer out, or of each entry of a list.
       let whole = null;
       try { whole = JSON.parse(body.toString('utf8')); } catch {}
-      if (whole && typeof whole === 'object' && !Array.isArray(whole)) {
-        body = Buffer.from(JSON.stringify(Object.fromEntries(request.pick.filter((k) => Object.hasOwn(whole, k)).map((k) => [k, whole[k]]))));
+      const cut = (object) => Object.fromEntries(request.pick.filter((k) => Object.hasOwn(object, k)).map((k) => [k, object[k]]));
+      if (isObject(whole)) {
+        body = Buffer.from(JSON.stringify(cut(whole)));
+      } else if (Array.isArray(whole) && whole.every(isObject)) {
+        body = Buffer.from(JSON.stringify(whole.map(cut)));
       } else {
         status = 502;
         body = Buffer.from('{"message":"the forge\'s answer could not be reduced"}');
@@ -177,6 +188,13 @@ export function createForge({ log = () => {} } = {}) {
   const project = (repo) => `/v4/projects/${encodeURIComponent(repo)}`;
   const str = (v) => (typeof v === 'string' ? v : '');
 
+  // A lookup answers three ways and the three are never mixed: what the forge holds, null
+  // when the forge itself says there is no such thing, and a throw for every other answer.
+  // A rate limit, an outage and a page from a proxy say nothing about what exists, and an
+  // executor can bring the first one about.
+  const unknown = (what, res) => { throw new Error(`forge: the forge did not say ${what} (it answered ${res.status})`); };
+  const missing = (res, wording = /not found$/i) => res.status === 404 && typeof res.json?.message === 'string' && wording.test(res.json.message);
+
   /// What a GitHub node id stands for: `{ type, repo, item: "pr"|"issue", number, open,
   /// itemAuthor, author, pending }` for something in a repository, `{ type, login }` for an
   /// account, or null when the forge shows nothing for the id (and on GitLab, whose ids
@@ -184,8 +202,16 @@ export function createForge({ log = () => {} } = {}) {
   async function resolveNode(target, id) {
     if (target.forge !== 'github' || typeof id !== 'string') return null;
     const res = await api(target, 'POST', '/graphql', { query: NODE_QUERY, variables: { id } });
-    const node = res.json?.data?.node;
-    if (res.status !== 200 || !node || typeof node !== 'object') return null;
+    const said = `what ${id.slice(0, 80)} is`;
+    if (res.status !== 200 || !isObject(res.json?.data)) unknown(said, res);
+    const node = res.json.data.node;
+    if (node === null) {
+      // GitHub answers an id it does not show with a NOT_FOUND error beside the null.
+      const errors = res.json.errors ?? [];
+      if (!Array.isArray(errors) || errors.some((e) => e?.type !== 'NOT_FOUND')) unknown(said, res);
+      return null;
+    }
+    if (!isObject(node)) unknown(said, res);
     const type = str(node.__typename);
     if (type === 'Repository') return { type, repo: str(node.nameWithOwner) };
     if (type === 'User' || type === 'Bot') return { type, login: str(node.login) };
@@ -205,74 +231,100 @@ export function createForge({ log = () => {} } = {}) {
     };
   }
 
+  const githubPull = (p) => ({ number: p.number, open: p.state === 'open', author: str(p.user?.login), headRepo: str(p.head?.repo?.full_name), headRef: str(p.head?.ref), baseRef: str(p.base?.ref), draft: p.draft === true });
+  // A merge request from a fork has its source branch in another project, which no rule
+  // of the pool's project reaches.
+  const gitlabPull = (repo, m) => ({ number: m.iid, open: m.state === 'opened', author: str(m.author?.username), headRepo: m.source_project_id === m.target_project_id ? repo : '', headRef: str(m.source_branch), baseRef: str(m.target_branch), draft: m.draft === true });
+
   /// A pull or merge request of `repo` by number: `{ number, open, author, headRepo,
-  /// headRef, baseRef, draft }`, or null.
+  /// headRef, baseRef, draft }`, or null when the forge has none of that number.
   async function pull(target, repo, number) {
-    if (target.forge === 'github') {
-      const res = await api(target, 'GET', `/repos/${repo}/pulls/${number}`);
-      const p = res.json;
-      if (res.status !== 200 || !p || p.number !== number) return null;
-      return { number, open: p.state === 'open', author: str(p.user?.login), headRepo: str(p.head?.repo?.full_name), headRef: str(p.head?.ref), baseRef: str(p.base?.ref), draft: p.draft === true };
-    }
-    const res = await api(target, 'GET', `${project(repo)}/merge_requests/${number}`);
-    const m = res.json;
-    if (res.status !== 200 || !m || m.iid !== number) return null;
-    // A merge request from a fork has its source branch in another project, which no
-    // rule of the pool's project reaches.
-    return { number, open: m.state === 'opened', author: str(m.author?.username), headRepo: m.source_project_id === m.target_project_id ? repo : '', headRef: str(m.source_branch), baseRef: str(m.target_branch), draft: m.draft === true };
+    const github = target.forge === 'github';
+    const res = await api(target, 'GET', github ? `/repos/${repo}/pulls/${number}` : `${project(repo)}/merge_requests/${number}`);
+    if (missing(res)) return null;
+    if (res.status !== 200 || !isObject(res.json) || (github ? res.json.number : res.json.iid) !== number) unknown(`what #${number} is`, res);
+    return github ? githubPull(res.json) : gitlabPull(repo, res.json);
   }
 
-  /// The open pull or merge requests of `repo` whose head branch is `ref` in `headRepo`
+  /// The open pull or merge requests of `repo` whose head branch is `ref` in `repo` itself
   /// (every open one, up to a page of 100, when `ref` is not given), shaped as `pull`.
-  async function pullsByHead(target, repo, { repo: headRepo, ref }) {
-    if (target.forge === 'github') {
-      const filter = ref === undefined ? '' : `&head=${encodeURIComponent(`${headRepo.split('/')[0]}:${ref}`)}`;
-      const res = await api(target, 'GET', `/repos/${repo}/pulls?state=open&per_page=100${filter}`);
-      if (res.status !== 200 || !Array.isArray(res.json)) return [];
-      return res.json.map((p) => ({ number: p.number, open: p.state === 'open', author: str(p.user?.login), headRepo: str(p.head?.repo?.full_name), headRef: str(p.head?.ref), baseRef: str(p.base?.ref), draft: p.draft === true }));
-    }
-    const filter = ref === undefined ? '' : `&source_branch=${encodeURIComponent(ref)}`;
-    const res = await api(target, 'GET', `${project(repo)}/merge_requests?state=opened&per_page=100${filter}`);
-    if (res.status !== 200 || !Array.isArray(res.json)) return [];
-    return res.json.map((m) => ({ number: m.iid, open: m.state === 'opened', author: str(m.author?.username), headRepo: m.source_project_id === m.target_project_id ? repo : '', headRef: str(m.source_branch), baseRef: str(m.target_branch), draft: m.draft === true }));
+  async function pullsByHead(target, repo, ref) {
+    const github = target.forge === 'github';
+    const filter = ref === undefined ? '' : github ? `&head=${encodeURIComponent(`${repo.split('/')[0]}:${ref}`)}` : `&source_branch=${encodeURIComponent(ref)}`;
+    const res = await api(target, 'GET', github ? `/repos/${repo}/pulls?state=open&per_page=100${filter}` : `${project(repo)}/merge_requests?state=opened&per_page=100${filter}`);
+    if (res.status !== 200 || !Array.isArray(res.json) || !res.json.every(isObject)) unknown('which pull requests are open', res);
+    return res.json.map((p) => (github ? githubPull(p) : gitlabPull(repo, p)));
   }
 
   /// A GitHub review comment of `repo` by its REST id, resolved like a node, or null.
   async function comment(target, repo, id) {
     if (target.forge !== 'github') return null;
     const res = await api(target, 'GET', `/repos/${repo}/pulls/comments/${id}`);
-    if (res.status !== 200 || typeof res.json?.node_id !== 'string') return null;
+    if (missing(res)) return null;
+    if (res.status !== 200 || typeof res.json?.node_id !== 'string') unknown(`what comment ${id} is`, res);
     return resolveNode(target, res.json.node_id);
   }
 
-  /// The logins assigned to a GitHub issue of `repo`, or null when it is not shown.
+  /// Who is assigned to an issue of `repo`: logins on GitHub, account ids on GitLab; null
+  /// when the forge has no issue of that number.
   async function assignees(target, repo, number) {
-    if (target.forge !== 'github') return null;
-    const res = await api(target, 'GET', `/repos/${repo}/issues/${number}`);
-    return res.status === 200 && Array.isArray(res.json?.assignees) ? res.json.assignees.map((a) => str(a?.login)) : null;
+    const github = target.forge === 'github';
+    const res = await api(target, 'GET', github ? `/repos/${repo}/issues/${number}` : `${project(repo)}/issues/${number}`);
+    if (missing(res)) return null;
+    const list = res.status === 200 && Array.isArray(res.json?.assignees) ? res.json.assignees.map((a) => (github ? a?.login : a?.id)) : null;
+    if (!list || !list.every((who) => (github ? typeof who === 'string' && who !== '' : Number.isSafeInteger(who) && who > 0))) unknown(`who is assigned to #${number}`, res);
+    return list;
   }
 
-  /// The account the credential belongs to: `{ id, login }`, or null.
+  /// The account the credential belongs to: `{ id, login }`.
   async function self(target) {
-    if (target.forge === 'github') {
-      const res = await api(target, 'POST', '/graphql', { query: '{ viewer { id login } }' });
-      const v = res.json?.data?.viewer;
-      return res.status === 200 && v ? { id: v.id, login: str(v.login) } : null;
-    }
-    const res = await api(target, 'GET', '/v4/user');
-    return res.status === 200 && res.json ? { id: res.json.id, login: str(res.json.username) } : null;
+    const github = target.forge === 'github';
+    const res = github ? await api(target, 'POST', '/graphql', { query: '{ viewer { id login } }' }) : await api(target, 'GET', '/v4/user');
+    const me = github ? res.json?.data?.viewer : res.json;
+    const login = github ? me?.login : me?.username;
+    if (res.status !== 200 || typeof login !== 'string' || login === '' || !(github ? typeof me.id === 'string' : Number.isSafeInteger(me.id))) unknown('which account this is', res);
+    return { id: me.id, login };
   }
 
-  /// The commit a branch (`refs/heads/...`) of `repo` points at on the forge, or null when
-  /// there is no such branch.
-  async function currentRef(target, repo, ref) {
-    const branch = ref.replace(/^refs\/heads\//, '');
-    if (target.forge === 'github') {
-      const res = await api(target, 'GET', `/repos/${repo}/git/ref/heads/${branch.split('/').map(encodeURIComponent).join('/')}`);
-      return res.status === 200 && typeof res.json?.object?.sha === 'string' ? res.json.object.sha : null;
+  /// What the forge says of `repo` itself: `{ defaultBranch, ciPaths }`. `ciPaths` lists
+  /// where a GitLab project is set to read its CI configuration from, when that is a file
+  /// of its own repository; GitHub reads its workflows from one fixed directory.
+  async function repository(target, repo) {
+    const github = target.forge === 'github';
+    const res = await api(target, 'GET', github ? `/repos/${repo}` : project(repo));
+    const branch = res.status === 200 && isObject(res.json) ? res.json.default_branch : undefined;
+    if (typeof branch !== 'string' || branch === '') unknown('which branch is the default', res);
+    if (github) return { defaultBranch: branch, ciPaths: [] };
+    const configured = res.json.ci_config_path;
+    if (configured !== null && typeof configured !== 'string') unknown('where the project reads its CI configuration from', res);
+    const ciPaths = [];
+    const add = (file) => {
+      const relative = file.replace(/^\/+/, '');
+      if (relative !== '') ciPaths.push(relative);
+    };
+    if (configured) {
+      // GitLab reads a file of the repository with exactly the configured name before it
+      // reads the value as "file@project" or as a URL.
+      add(configured);
+      const at = configured.indexOf('@');
+      if (at !== -1 && configured.slice(at + 1).split(':')[0].toLowerCase() === repo.toLowerCase()) add(configured.slice(0, at));
     }
-    const res = await api(target, 'GET', `${project(repo)}/repository/branches/${encodeURIComponent(branch)}`);
-    return res.status === 200 && typeof res.json?.commit?.id === 'string' ? res.json.commit.id : null;
+    return { defaultBranch: branch, ciPaths };
+  }
+
+  /// A branch (`refs/heads/...`) of `repo` as the forge holds it: `{ sha, protected }`, or
+  /// null when the forge says there is no such branch.
+  async function branch(target, repo, ref) {
+    const said = `where ${ref} is`;
+    if (!ref.startsWith('refs/heads/')) throw new Error(`forge: ${ref} is not a branch`);
+    const name = ref.slice('refs/heads/'.length);
+    const github = target.forge === 'github';
+    const res = await api(target, 'GET', github ? `/repos/${repo}/branches/${name.split('/').map(encodeURIComponent).join('/')}` : `${project(repo)}/repository/branches/${encodeURIComponent(name)}`);
+    // The forge's wording for the branch alone: "Not Found" is the repository's.
+    if (missing(res, github ? /^Branch not found$/ : /^404 Branch Not Found$/)) return null;
+    const sha = res.status === 200 ? (github ? res.json?.commit?.sha : res.json?.commit?.id) : undefined;
+    if (typeof sha !== 'string' || !/^[0-9a-f]{40,64}$/.test(sha) || typeof res.json.protected !== 'boolean' || res.json.name !== name) unknown(said, res);
+    return { sha, protected: res.json.protected };
   }
 
   /// A GitLab project's numeric id, which `rulesFor` needs to allow the numeric spelling
@@ -308,8 +360,8 @@ export function createForge({ log = () => {} } = {}) {
     return r.ok;
   }
 
-  /// What `authorize` needs as its `ctx` for one key: the forge lookups bound to the
-  /// pool's repository, the linked `checkout` the push check may read, and the key's
+  /// What `authorize` needs as its `ctx` for one task: the forge lookups bound to the
+  /// pool's repository, the linked `checkout` the push check may read, and the task's
   /// mutable `state`. `repo` is "owner/name" on GitHub and the project's full path on GitLab.
   function context({ forge, host, repo, checkout, state }) {
     const target = { forge, host };
@@ -318,14 +370,15 @@ export function createForge({ log = () => {} } = {}) {
       state,
       resolveNode: (id) => resolveNode(target, id),
       pull: (number) => pull(target, repo, number),
-      pullsByHead: (head) => pullsByHead(target, repo, head),
+      pullsByHead: (ref) => pullsByHead(target, repo, ref),
       comment: (id) => comment(target, repo, id),
       assignees: (number) => assignees(target, repo, number),
       self: () => self(target),
-      currentRef: (headRepo, ref) => currentRef(target, headRepo, ref),
-      fetch: (what) => fetchInto(target, what),
+      repository: () => repository(target, repo),
+      branch: (ref) => branch(target, repo, ref),
+      fetch: (what) => fetchInto(target, { ...what, repo }),
     };
   }
 
-  return { perform, context, resolveNode, pull, pullsByHead, comment, assignees, self, currentRef, projectId, fetchInto };
+  return { perform, context, resolveNode, pull, pullsByHead, comment, assignees, self, repository, branch, projectId, fetchInto };
 }

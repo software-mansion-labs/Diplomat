@@ -46,7 +46,7 @@ function tidy(result) {
 /// The offers of `host` and the keys it issued for them.
 export function createOffers(host) {
   const offers = host.store.read('offers') ?? {}; // taskId -> the private half
-  const issued = host.keys.issued; // taskId -> { round, secret, seq, state, capability }
+  const issued = host.keys.issued; // taskId -> { round, secret, seq, capability }
   const turns = new Map(); // taskId -> the last request served under its key
 
   const save = () => host.store.write('offers', offers);
@@ -228,7 +228,7 @@ export function createOffers(host) {
           at = standing(P, O, from, round);
           if (!rules || !at) return deny('the task can no longer be acted on');
           issued[taskId] = {
-            round, secret: b64u(host.random(32)), seq: -1, state: {},
+            round, secret: b64u(host.random(32)), seq: -1,
             capability: buildCapability(host.id, {
               keyId: host.random(16), pool: P.id, taskId, executor: from, rules, exp: capabilityExp(at.claim),
             }),
@@ -263,9 +263,11 @@ export function createOffers(host) {
         save();
         // The number is used, on disk, before anything is done under it.
         host.store.flush();
-        const context = await host.requester.context({ pool: P.link, task: specOf(O), state: K.state });
+        // What the task has used of its allowances is the offer's: a key issued for a
+        // later attempt goes on from where the last one stopped.
+        const context = await host.requester.context({ pool: P.link, task: specOf(O), state: (O.used ??= {}) });
         const verdict = await host.requester.authorize(K.capability.rules, body.request, context);
-        host.saveKeys();
+        save();
         // The offer may have ended, or the claim, while the rules were asked.
         if (issued[taskId] !== K) return { error: 'denied', detail: 'the key was taken back' };
         if (verdict?.ok !== true) {
@@ -279,7 +281,7 @@ export function createOffers(host) {
         } catch (err) {
           return { body: forgeAnswer(502, `the forge could not be asked: ${err?.message ?? err}`) };
         } finally {
-          host.saveKeys();
+          save();
           host.touch();
         }
       });

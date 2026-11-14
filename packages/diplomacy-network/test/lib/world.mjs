@@ -33,7 +33,11 @@ export function world({ branches = [] } = {}) {
     580: { number: 580, open: false, author: 'me', headRepo: 'o/r', headRef: 'old' },
     581: { number: 581, open: true, author: 'me', headRepo: 'me/r', headRef: 'forked' },
   };
-  const comments = { 11: nodes.PRRC_mine, 12: nodes.PRRC_theirs, 13: nodes.PRRC_579 };
+  // 14 is this account's and already sent, 15 somebody's and still pending, 16 this account's pending one in another repository.
+  const comments = {
+    11: nodes.PRRC_mine, 12: nodes.PRRC_theirs, 13: nodes.PRRC_579,
+    14: { ...nodes.PRRC_mine, pending: false }, 15: { ...nodes.PRRC_mine, author: 'someone' }, 16: { ...nodes.PRRC_mine, repo: 'o/other' },
+  };
   const asked = [];
   return {
     asked, nodes, pulls,
@@ -41,9 +45,10 @@ export function world({ branches = [] } = {}) {
     state: { branches: [...branches] },
     async resolveNode(id) { asked.push(id); return nodes[id] ?? null; },
     async pull(number) { return pulls[number] ?? null; },
-    async pullsByHead({ repo, ref }) { return Object.values(pulls).filter((p) => p.open && p.headRepo === repo && (ref === undefined || p.headRef === ref)); },
+    async pullsByHead(ref) { return Object.values(pulls).filter((p) => p.open && (ref === undefined || p.headRef === ref)); },
     async comment(id) { return comments[id] ?? null; },
     async assignees() { return this.assigned; },
     async self() { return { id: 7, login: 'me' }; },
+    async repository() { return { defaultBranch: 'main', ciPaths: [] }; },
   };
 }

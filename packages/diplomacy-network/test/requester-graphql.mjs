@@ -203,7 +203,7 @@ await check('a search is confined to the pool\'s repository and to issues and pu
   const table = [
     ['repo:o/r is:open', null],
     ['author:@me repo:o/r state:open type:pr', null],
-    ['"repo:x/y" repo:o/r', null],
+    ['"fix it" repo:o/r', null],
     ['repo:o/r (label:bug OR label:crash)', null],
     ['is:open', /not pinned/],
     ['repo:o/other', /other than the pool/],
@@ -217,10 +217,16 @@ await check('a search is confined to the pool\'s repository and to issues and pu
     ['NOT repo:o/r', /other than the pool/],
     ['-repo:o/r', /other than the pool/],
     ['repo:"o/r" x', /other than the pool/],
-    ['repo:o/r "unclosed', /unclosed quote/],
+    ['repo:o/r "unclosed', /not a whole quoted term/],
     ['repo:o/r )x(', /parentheses/],
     ['repo:o/r (x', /unbalanced/],
     ['repo:o/r\u0000 org:x', /control character/],
+    // A separator the forge may split on and this reader would not, and the other way round.
+    ['repo:o/r x\u0085repo:evil/y', /control character/],
+    ['repo:o/r x repo:evil/y', /space that is not the plain one/],
+    ['repo:o/r x　repo:evil/y', /space that is not the plain one/],
+    ['repo:o/r x repo:evil/y', /space that is not the plain one/],
+    ['repo:o/r\tx', /control character/],
     ['repo:o/rr', /other than the pool/],
     ['Repo:O/R REPO:victim/x', /other than the pool/],
     [5, /not a string/],
@@ -230,6 +236,41 @@ await check('a search is confined to the pool\'s repository and to issues and pu
     if (why === null) assert.equal(got, null, String(query));
     else assert.match(String(got), why, String(query));
   }
+});
+
+await check('a quote in a search opens a phrase where both readers agree it does, and a phrase hides no qualifier', async () => {
+  const fine = ['repo:o/r "fix bug"', '"fix bug" repo:o/r', 'repo:o/r label:"good first issue" -label:"wont fix"', 'repo:o/r ("a b" OR "c d")', 'repo:o/r NOT "a b"', 'repo:o/r -"a b"', 'repo:o/r ""'];
+  for (const q of fine) assert.equal(searchConfined(q, 'o/r'), null, q);
+  const split = [
+    'repo:o/r a" repo:evil/x "b', 'repo:o/r a"b repo:evil/x c"d', 'repo:o/r x"y"', 'repo:o/r "a""b"', 'repo:o/r "a"b', 'repo:o/r label:x"y z"', 'repo:o/r "a b"c repo:evil/x',
+    'repo:o/r"x" org:evil "y"', 'repo:o/r a\\" repo:evil/x \\"b', 'repo:o/r l:a:"b c"',
+  ];
+  for (const q of split) assert.match(String(searchConfined(q, 'o/r')), /quote that is not a whole quoted term|other than the pool/, q);
+  for (const q of ['repo:o/r "see repo:evil/x"', '"repo:x/y" repo:o/r', 'repo:o/r "org:evil"', 'repo:o/r label:"user:victim x"']) assert.match(String(searchConfined(q, 'o/r')), /a quoted term that holds a qualifier/, q);
+  // The pin is one term, once.
+  assert.match(String(searchConfined('repo:o/r repo:o/r fix', 'o/r')), /not pinned/);
+  assert.match(String(searchConfined('repo:o/r "repo:o/r"', 'o/r')), /holds a qualifier/);
+  const viaGraphql = (q) => ask(spec(), 'query($q: String!) { search(query: $q, type: ISSUE, first: 5) { issueCount } }', { q });
+  assert.match((await viaGraphql('repo:o/r a" repo:evil/x "b')).reason, /quote that is not a whole quoted term/);
+  assert.match((await ask(spec(), '{ search(query: "repo:o/r a\\" repo:evil/x \\"b", type: ISSUE, first: 5) { issueCount } }')).reason, /quote that is not a whole quoted term/);
+  assert.equal((await viaGraphql('repo:o/r "fix bug"')).ok, true);
+});
+
+await check('nothing is let out past what a kind needs: no organisation looked up through an account, no branch protection', async () => {
+  await refused(spec(), '{ viewer { organization(login: "secret-org") { id login } } }', undefined, /"organization" takes arguments/);
+  await refused(spec(), IN('pullRequest(number: 578) { author { ... on User { organization(login: "secret-org") { id } } } }'), undefined, /"organization" takes arguments/);
+  await refused(spec(), IN('issue(number: 421) { assignees(first: 5) { nodes { organization(login: "secret-org") { viewerIsAMember: id } } } }'), undefined, /"organization" takes arguments/);
+  await refused(spec(), 'query($o: String!) { viewer { o: organization(login: $o) { name } } }', { o: 'secret-org' }, /"organization" takes arguments/);
+  await refused(spec(), IN('parent { project(number: 3) { name url } }'), undefined, /"project" takes arguments/);
+  await refused(spec(), IN('pullRequest(number: 578) { headRepository { defaultBranchRef(x: 1) { name } } }'), undefined, /"defaultBranchRef" takes arguments/);
+  await refused(spec(), IN('ref(qualifiedName: "refs/heads/main") { branchProtectionRule { pattern requiresApprovingReviews } }'), undefined, /"pattern" may not be read of a branch's protection/);
+  await refused(spec(), IN('refs(refPrefix: "refs/heads/", first: 5) { nodes { name branchProtectionRule { requiresStrictStatusChecks requiredApprovingReviewCount } } }'), undefined, /"requiredApprovingReviewCount" may not be read of a branch's protection/);
+  await refused(spec(), IN('ref(qualifiedName: "refs/heads/main") { branchProtectionRule { pushAllowances(first: 5) { nodes { actor { ... on User { login } } } } } }'), undefined, /"pushAllowances" is not a field/);
+  await refused(spec(), IN('ref(qualifiedName: "refs/heads/main") { branchProtectionRule { creator { login } } }'), undefined, /"creator" is not a field/);
+  // What gh asks of a requested reviewer's team, of a commit's author, of a project item and of a base branch stays.
+  await allowed(spec(), IN('pullRequest(number: 578) { reviewRequests(first: 5) { nodes { requestedReviewer { ... on Team { organization { login } name slug } } } } commits(last: 1) { nodes { commit { author { user { login } avatarUrl(size: 64) } } } } }'));
+  await allowed(spec(), IN('issue(number: 421) { projectItems(first: 5) { nodes { id project { id title } status: fieldValueByName(name: "Status") { ... on ProjectV2ItemFieldSingleSelectValue { optionId name } } } } }'));
+  await allowed(spec(), IN('pullRequest(number: 578) { baseRef { branchProtectionRule { requiresStrictStatusChecks } } }'));
 });
 
 await check('node(id:) is resolved first and must be an object of the pool\'s repository', async () => {
@@ -322,7 +363,7 @@ await check('assignment may add or remove only the task\'s own account', async (
   await refused(spec({ mutations: ['replaceActorsForAssignable'], item: { type: 'pr', number: 578 } }), GH.assignSelf.query, { input: { assignableId: 'PR_578', actorLogins: ['me'] } }, /is a PullRequest|no issue to assign/);
 });
 
-await check('a pull request is opened as a draft, in the pool\'s repository, from a branch the key pushed', async () => {
+await check('a pull request is opened as a draft, in the pool\'s repository, from a branch the task created', async () => {
   const pushed = world({ branches: ['refs/heads/fix-421'] });
   const verdict = await allowed(issues, GH.prCreate.query, GH.prCreate.variables, pushed);
   assert.deepEqual(verdict.effects, [{ pull: 'fix-421' }], 'the caller checks the branch against the key\'s state');

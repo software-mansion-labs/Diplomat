@@ -2,7 +2,7 @@
 // nothing is refused.
 
 import assert from 'node:assert/strict';
-import { authorize, authorized, parseStrictJson } from '../src/requester/authorize.js';
+import { authorize, authorized, conclude, parseStrictJson } from '../src/requester/authorize.js';
 import { world } from './lib/world.mjs';
 
 async function check(name, fn) {
@@ -19,13 +19,13 @@ const RULES = [
   { host: 'api.github.com', method: 'GET', path: '/repos/o/r/pulls/**', fold: [1, 2] },
   { host: 'api.github.com', method: 'GET', path: '/repos/o/r/branches/*', fold: [1, 2] },
   { host: 'api.github.com', method: 'GET', path: '/repos/o/r', fold: [1, 2] },
-  { host: 'api.github.com', method: 'GET', path: '/search/issues', query: { q: { search: 'o/r' } } },
+  { host: 'api.github.com', method: 'GET', path: '/search/issues', query: { q: { search: 'o/r' }, advanced_search: 'free', page: 'free', per_page: 'free' } },
   { host: 'api.github.com', method: 'GET', path: '/user', pick: ['login'] },
   { host: 'api.github.com', method: 'POST', path: '/repos/o/r/pulls/578/reviews', fold: [1, 2], body: { commit_id: 'free', body: 'free', event: { oneOf: ['COMMENT'] } } },
   { host: 'api.github.com', method: 'POST', path: '/repos/o/r/pulls/578/reviews/*/events', fold: [1, 2], body: { event: { oneOf: ['COMMENT'], required: true }, body: 'free' } },
   { host: 'api.github.com', method: 'DELETE', path: '/repos/o/r/pulls/578/reviews/*', fold: [1, 2] },
   { host: 'gitlab.example.com', method: 'GET', path: '/api/v4/projects/group%2Fsub%2Fproj/merge_requests/**', fold: [3] },
-  { host: 'gitlab.example.com', method: 'PUT', path: '/api/v4/projects/group%2Fsub%2Fproj/merge_requests/5/discussions/*', fold: [3], query: { resolved: { equals: 'true', optional: true } }, body: { resolved: { oneOf: [true, 'true'] } } },
+  { host: 'gitlab.example.com', method: 'PUT', path: '/api/v4/projects/group%2Fsub%2Fproj/merge_requests/5/discussions/*', fold: [3], query: { resolved: { equals: 'true', optional: true } }, body: { resolved: { oneOf: [true, 'true'], required: true } } },
   { host: 'gitlab.example.com', method: 'POST', path: '/api/v4/projects/group%2Fsub%2Fproj/issues/421/notes', fold: [3], body: { body: { prose: true } } },
 ];
 
@@ -191,6 +191,32 @@ await check('a search must carry the pool\'s repository once, as its own term', 
   await refused(req('GET', '/search/issues?q=repo%3Ao%2Fr%20OR%20user%3Avictim'), /top-level OR|other than the pool/);
   await refused(req('GET', '/search/code?q=repo:o/r'), /no rule/);
   await refused(req('GET', '/search/repositories?q=user:me'), /no rule/);
+  // A quote that does not wrap a whole term is where two readers of the query part ways.
+  await allowed(req('GET', '/search/issues?q=repo:o/r+%22fix+bug%22+label:%22good+first+issue%22'));
+  await refused(req('GET', '/search/issues?q=repo:o/r+a%22+repo:evil/x+%22b'), /quote that is not a whole quoted term/);
+  await refused(req('GET', '/search/issues?q=repo:o/r+a%5C%22+repo:evil/x+%5C%22b'), /quote that is not a whole quoted term/);
+  await refused(req('GET', '/search/issues?q=repo:o/r+%22see+repo:evil/x%22'), /a quoted term that holds a qualifier/);
+  // A read whose rule names its parameters takes no other.
+  await refused(req('GET', '/search/issues?q=repo:o/r&repository_id=5'), /"repository_id" is not part of this rule/);
+  await allowed(req('GET', '/search/issues?q=repo:o/r&page=2&page=3&per_page%5B%5D=4'));
+  await allowed(req('GET', '/repos/o/r/pulls/1?anything=at-all'));
+});
+
+await check('a rule may refuse what it matches, and may refuse a character anywhere in the path', async () => {
+  const rules = [
+    { host: 'api.github.com', method: 'GET', path: '/repos/o/r/issues/*/timeline', fold: [1, 2], deny: 'this answer holds other repositories' },
+    { host: 'api.github.com', method: 'GET', path: '/repos/o/r/issues/**', fold: [1, 2] },
+    { host: 'api.github.com', method: 'GET', path: '/repos/o/r/compare/**', fold: [1, 2], without: { ':': 'a side that names another repository' } },
+  ];
+  await allowed(req('GET', '/repos/o/r/issues/5'), rules);
+  await allowed(req('GET', '/repos/o/r/issues/5/timeline/x'), rules);
+  await refused(req('GET', '/repos/o/r/issues/5/timeline'), /^this answer holds other repositories$/, rules);
+  await refused(req('GET', '/repos/O/R/issues/5/timeline?per_page=1'), /other repositories/, rules);
+  await refused(req('GET', '/repos/o/r/issues/5/Timeline'), /no rule/, rules.slice(0, 1));
+  await allowed(req('GET', '/repos/o/r/compare/main...feature'), rules);
+  for (const path of ['/repos/o/r/compare/main...them:feature', '/repos/o/r/compare/main...them%3Afeature', '/repos/o/r/compare/a/b:c...d', '/repos/o/r/compare/x/y/z:']) {
+    await refused(req('GET', path), /^a side that names another repository$/, rules);
+  }
 });
 
 await check('a pinned body is strict JSON with every member named by the rule', async () => {
@@ -285,15 +311,31 @@ await check('a rule that asks the forge refuses when nothing can answer or the a
   await refused(post('/repos/o/r/pulls/578/comments/12/replies', { body: 'x' }), /#578 was not opened by me/, any);
 });
 
-await check('what a request uses up is counted against the key, and a refused request uses nothing', async () => {
+await check('what a request uses up is counted against the task, and a refused request uses nothing', async () => {
   const rules = [
     { host: 'api.github.com', method: 'POST', path: '/repos/o/r/pulls', body: { head: { created: true, required: true }, draft: { equals: true, required: true }, title: 'free', base: 'free' } },
-    { host: 'gitlab.example.com', method: 'PUT', path: '/api/v4/projects/9/issues/421', body: { assignee_ids: { self: true, required: true } } },
+    { host: 'gitlab.example.com', method: 'PUT', path: '/api/v4/projects/9/issues/421', body: { assignee_ids: { assignees: 421, required: true } } },
     { host: 'gitlab.example.com', method: 'POST', path: '/api/v4/projects/9/merge_requests', body: { source_branch: { created: true, required: true }, title: { prefix: 'Draft:', required: true }, target_project_id: { equals: 9 } } },
   ];
-  const ctx = world({ branches: ['refs/heads/fix-421'] });
+  const ctx = world({ branches: ['refs/heads/fix-421', 'refs/heads/fix-422'] });
   const open = (body) => post('/repos/o/r/pulls', body);
-  await allowed(open({ head: 'fix-421', base: 'main', title: 't', draft: true }), rules, ctx);
+  const opened = await allowed(open({ head: 'fix-421', base: 'main', title: 't', draft: true }), rules, ctx);
+  assert.deepEqual(ctx.state.pulls, ['fix-421'], 'counted before it is sent');
+  await refused(open({ head: 'fix-421', base: 'other', title: 't', draft: true }), /has opened its pull request from fix-421/, rules, ctx);
+  // The forge's answer settles it: a refusal gives the one pull request back, anything else keeps it.
+  conclude(opened.request, { status: 502, body: Buffer.from('bad gateway') });
+  assert.deepEqual(ctx.state.pulls, ['fix-421'], 'an answer that is no refusal may have opened it');
+  conclude(opened.request, { status: 422, body: Buffer.from('{}') });
+  assert.deepEqual(ctx.state.pulls, ['fix-421'], 'a request is concluded once');
+  ctx.state.pulls = [];
+  const again = await allowed(open({ head: 'fix-421', base: 'main', title: 't', draft: true }), rules, ctx);
+  conclude(again.request, { status: 422, body: Buffer.from('{}') });
+  assert.deepEqual(ctx.state.pulls, []);
+  conclude((await allowed(open({ head: 'fix-421', base: 'main', title: 't', draft: true }), rules, ctx)).request, undefined);
+  assert.deepEqual(ctx.state.pulls, ['fix-421'], 'no answer at all is not a refusal');
+  conclude((await allowed(open({ head: 'fix-422', base: 'main', title: 't', draft: true }), rules, ctx)).request, { status: 201, body: Buffer.from('{}') });
+  assert.deepEqual(ctx.state.pulls, ['fix-421', 'fix-422']);
+  ctx.state.pulls = [];
   await refused(open({ head: 'main', base: 'release', title: 't', draft: true }), /only be opened from a branch this task pushed/, rules, ctx);
   await refused(open({ head: 'o:fix-421', title: 't', draft: true }), /only be opened from a branch/, rules, ctx);
   await refused(open({ head: ['fix-421'], title: 't', draft: true }), /only be opened from a branch/, rules, ctx);
@@ -302,16 +344,28 @@ await check('what a request uses up is counted against the key, and a refused re
   await refused(open({ title: 't', draft: true }), /"head" is required/, rules, ctx);
   await refused(open({ head: 'fix-421', title: 't', draft: true, head_repo: 'victim/r' }), /"head_repo" is not part/, rules, ctx);
   await refused(open({ head: 'fix-421', title: 't', draft: true, issue: 3 }), /"issue" is not part/, rules, ctx);
-  await refused(open({ head: 'fix-421', title: 't', draft: true }), /needs the key's state/, rules, {});
-  assert.deepEqual(ctx.state.branches, ['refs/heads/fix-421']);
+  await refused(open({ head: 'fix-421', title: 't', draft: true }), /needs the task's state/, rules, {});
+  assert.deepEqual(ctx.state, { branches: ['refs/heads/fix-421', 'refs/heads/fix-422'], reserved: [], pulls: [] }, 'a refused request uses nothing');
 
+  // The whole new assignee list of a GitLab issue: what the forge holds, give or take the task's own account.
   const gl = (method, path, body) => ({ host: 'gitlab.example.com', method, path, headers: JSON_TYPE, body: b64(body) });
-  await allowed(gl('PUT', '/api/v4/projects/9/issues/421', { assignee_ids: [7] }), rules, ctx);
-  await allowed(gl('PUT', '/api/v4/projects/9/issues/421', { assignee_ids: [0] }), rules, ctx);
-  await refused(gl('PUT', '/api/v4/projects/9/issues/421', { assignee_ids: [7, 8] }), /only name this task's own account/, rules, ctx);
-  await refused(gl('PUT', '/api/v4/projects/9/issues/421', { assignee_ids: ['7'] }), /only name/, rules, ctx);
+  const assign = (ids) => gl('PUT', '/api/v4/projects/9/issues/421', { assignee_ids: ids });
+  ctx.assigned = [8];
+  await allowed(assign([8, 7]), rules, ctx);
+  await allowed(assign([8]), rules, ctx);
+  for (const ids of [[7], [0], [], [7, 9], [8, 9, 7], [0, 8], [8, 0, 7], ['8', 7], '8', 8, { 0: 8 }, [8.5, 7], [8, 7, -3]]) await refused(assign(ids), /only add or remove this task's own account|is not a list of account ids/, rules, ctx);
+  ctx.assigned = [7];
+  for (const ids of [[0], [], [7]]) await allowed(assign(ids), rules, ctx);
+  ctx.assigned = null;
+  await refused(assign([7]), /#421 is not an issue the forge would show/, rules, ctx);
+  ctx.assigned = [];
   await refused(gl('PUT', '/api/v4/projects/9/issues/421', { assignee_ids: [7], state_event: 'close' }), /"state_event" is not part/, rules, ctx);
-  await refused(gl('PUT', '/api/v4/projects/9/issues/421', { assignee_ids: [7] }), /nothing here can tell/, rules, { state: {} });
+  await refused(assign([7]), /nothing here can tell/, rules, { state: {} });
+  await refused(assign([7]), /nothing here can tell/, rules, { state: {}, async self() { return { id: 7, login: 'me' }; } });
+  // A lookup that fails is the refusal, in its own words.
+  const failing = { ...world(), async assignees() { throw new Error('forge: the forge did not say who is assigned to #421 (it answered 429)'); } };
+  await refused(assign([7]), /^the forge did not say who is assigned to #421 \(it answered 429\)$/, rules, failing);
+  await refused(assign([7]), /^boom$/, rules, { ...world(), async self() { throw new Error('boom'); } });
   await allowed(gl('POST', '/api/v4/projects/9/merge_requests', { source_branch: 'fix-421', title: 'Draft: t', target_project_id: 9 }), rules, ctx);
   await refused(gl('POST', '/api/v4/projects/9/merge_requests', { source_branch: 'fix-421', title: 't' }), /must start with "Draft:"/, rules, ctx);
   await refused(gl('POST', '/api/v4/projects/9/merge_requests', { source_branch: 'fix-421', title: ['Draft: t'] }), /must start with/, rules, ctx);

@@ -11,11 +11,13 @@
 // has a selection set must be one the context's table names, with the context it leads to:
 //
 //   in       the pool's repository and everything inside it; any scalar may be read
-//   actor    a user, bot, team or organisation: a short list of scalars, nothing deeper
+//   actor    a user, bot, team or organisation: a short list of scalars, and the account
+//            or organisation it belongs to, reached without an argument
 //   foreign  something that may live in another repository (a fork, a cross-referenced
 //            issue, a project): a short list of identifying scalars
 //   event    a timeline entry: its own scalars, its actors, and the things it points at as
 //            `foreign`, because a "referenced" event's commit can sit in another repository
+//   protection  a branch's protection rule: the one scalar the gh CLI reads of it
 //   plain    scalars only
 //   schema   type introspection, which the gh CLI runs before most commands
 //
@@ -343,7 +345,7 @@ const FORGES = {
         latestOpinionatedReviews viewerLatestReview reviewThreads replyTo pullRequestReview originalCommit mergeCommit
         potentialMergeCommit statusCheckRollup contexts checkSuite checkSuites checkRuns workflowRun workflow runs status
         steps annotations location start end labels label milestone milestones reactionGroups reactions userContentEdits
-        autoMergeRequest reviewRequests suggestedReviewers issueType subIssuesSummary branchProtectionRule release
+        autoMergeRequest reviewRequests suggestedReviewers issueType subIssuesSummary release
         releases releaseAssets languages deployments deployment latestStatus statuses signature mergeQueueEntry
         checkRunCountsByState statusContextCountsByState issueTemplates pullRequestTemplates codeowners contactLinks
         thread comment commentEdge subject assignable`,
@@ -353,9 +355,16 @@ const FORGES = {
       foreign: `repository headRepository baseRepository parent subIssues blockedBy blocking closingIssuesReferences
         closedByPullRequestsReferences associatedPullRequests projectItems projectCards trackedIssues trackedInIssues`,
       event: 'timelineItems timeline',
+      protection: 'branchProtectionRule',
     }),
+    // `gh pr status` reads whether a pull request's base must be up to date before a
+    // merge; the rest of a branch's protection is a setting no task has a use for.
+    protectionLeaves: set('__typename requiresStrictStatusChecks'),
     actor: table({ actor: 'user organization' }),
     foreign: table({ actor: 'owner', foreign: 'repository project column fieldValueByName defaultBranchRef parent' }),
+    // The one field with a selection set that takes an argument outside `in`: a project
+    // item's own value of a named field.
+    lookups: set('fieldValueByName'),
     event: table({
       actor: 'actor assignee author editor user requestedReviewer creator',
       foreign: `commit source subject target closer canonical duplicate ref review pullRequestCommit beforeCommit afterCommit
@@ -375,6 +384,7 @@ const FORGES = {
     }),
     actor: table({}),
     foreign: table({ foreign: 'namespace group' }),
+    lookups: set(''),
   },
 };
 
@@ -382,26 +392,45 @@ const FORGES = {
 
 const OWNER_QUALIFIER = /^-?(repo|org|user|owner|enterprise):/i;
 
+// One term of a search string, from where the last one ended: a bare word, or a phrase in
+// quotes that stands as a term of its own or as the value of one qualifier
+// (`label:"good first issue"`), with any parentheses around it.
+const SEARCH_TERM = /\s*(?:(\(*)(-?(?:[\w.-]+:)?)"([^"\\]*)"(\)*)|([^\s"]+))(?=\s|$)/y;
+
 /// Whether a forge search string can only return things in `repo` ("owner/name"): it must
 /// carry `repo:owner/name` as a plain term of its own, and nothing that widens it - no
 /// other repository, organisation or user qualifier, no top-level OR, no negation of the
-/// term. Returns null when confined, else the reason.
+/// term. A quote may only wrap a whole term or a qualifier's whole value, and what it
+/// wraps holds no qualifier: where a quote opens mid-word, this reader and the forge's
+/// need not agree on where the phrase ends, and a qualifier could hide in the difference.
+/// Returns null when confined, else the reason.
 export function searchConfined(q, repo) {
   if (typeof q !== 'string') return 'the search query is not a string';
-  if (/[\u0000-\u001f\u007f]/.test(q)) return 'the search query holds a control character';
-  if ((q.match(/"/g) || []).length % 2 !== 0) return 'the search query has an unclosed quote';
+  // Terms are told apart by the plain space alone: any other separator is one the forge
+  // may or may not split on.
+  if (/[\u0000-\u001f\u007f-\u009f]|[^\S ]/.test(q)) return 'the search query holds a control character or a space that is not the plain one';
   const want = `repo:${repo}`.toLowerCase();
   let depth = 0;
   let pinned = 0;
   let previous = '';
-  // A quoted phrase is one term whatever it holds; a qualifier with a quoted value keeps
-  // its prefix, so `repo:"a/b"` is seen as a repo qualifier and never equals the pin.
-  for (const m of q.matchAll(/"[^"]*"?|[^\s"]+(?:"[^"]*"?)?/g)) {
-    let term = m[0];
-    if (term.startsWith('"')) { previous = term; continue; }
-    while (term.startsWith('(')) { depth++; term = term.slice(1); }
+  for (let at = 0; q.slice(at).trim() !== '';) {
+    SEARCH_TERM.lastIndex = at;
+    const m = SEARCH_TERM.exec(q);
+    if (!m) return 'the search query has a quote that is not a whole quoted term';
+    at = SEARCH_TERM.lastIndex;
+    // A qualifier with a quoted value keeps its prefix, so `repo:"a/b"` is seen as a
+    // repo qualifier and never equals the pin.
+    let term = m[5] ?? m[2];
     let closing = 0;
-    while (term.endsWith(')')) { closing++; term = term.slice(0, -1); }
+    if (m[5] === undefined) {
+      if (/[\w-]:/.test(m[3])) return 'the search query has a quoted term that holds a qualifier';
+      depth += m[1].length;
+      closing = m[4].length;
+      previous = '"';
+    } else {
+      while (term.startsWith('(')) { depth++; term = term.slice(1); }
+      while (term.endsWith(')')) { closing++; term = term.slice(0, -1); }
+    }
     if (term.includes('(') || term.includes(')')) return 'the search query has parentheses inside a term';
     if (term !== '') {
       const upper = term.toUpperCase();
@@ -447,14 +476,20 @@ function walker(doc, forge) {
         if (sel.name === '__typename') continue;
         if (context === 'actor' && !tables.actorLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read on a user or organisation`);
         if (context === 'foreign' && !tables.foreignLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read on an object outside the pool's repository`);
+        if (context === 'protection' && !tables.protectionLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read of a branch's protection`);
         continue;
       }
       const wrapper = WRAPPERS[sel.name];
       let next = wrapper === 'same' ? context : wrapper;
       if (context === 'schema') next = SCHEMA_FIELDS.get(sel.name);
       else if (context === 'plain') next = undefined;
-      else if (next === undefined) next = tables[context].get(sel.name);
+      else if (next === undefined) next = tables[context]?.get(sel.name);
       if (next === undefined) refuse(`graphql: "${sel.name}" is not a field this task may select into here`);
+      // An argument on a field of an account or of a foreign object is a lookup from it:
+      // `organization(login:)` on a user reaches any organisation the token can see.
+      if ((context === 'actor' || context === 'foreign') && sel.args.length > 0 && !tables.lookups.has(sel.name)) {
+        refuse(`graphql: "${sel.name}" takes arguments here, which would look another object up`);
+      }
       walk(sel.selections, next, depth + 1, active);
     }
   }
@@ -544,7 +579,8 @@ function checkQuery(doc, op, vars, spec, lookups) {
 //   own       it was written by the identity the task acts as
 //   pending   it is part of a review that has not been submitted
 //   repo      it is the pool's repository
-// `free` is text or layout the task decides. `created` is a branch this key pushed.
+// `free` is text or layout the task decides. `created` is a branch the task created,
+// from which it has opened no pull request.
 // `assignees` is the issue's whole new assignee list, which may differ from the list the
 // forge holds only by the task's own account.
 const THREAD = ['PullRequestReviewThread'];
@@ -662,7 +698,9 @@ async function settle(lookups, spec, ctx) {
   for (const { id, logins, need, what } of lookups) {
     if (logins) {
       if (spec.item?.type !== 'issue' || spec.item.number === undefined || typeof ctx.assignees !== 'function') refuse(`graphql: ${what}: this task has no issue to assign`);
-      const held = ((await ctx.assignees(spec.item.number)) || []).map((l) => l.toLowerCase()).filter((l) => l !== spec.identity);
+      const now = await ctx.assignees(spec.item.number);
+      if (!now) refuse(`graphql: ${what}: #${spec.item.number} is not an issue the forge would show`);
+      const held = now.map((l) => l.toLowerCase()).filter((l) => l !== spec.identity);
       const others = logins.filter((l) => l !== spec.identity);
       if (others.length !== held.length || others.some((l) => !held.includes(l))) refuse(`graphql: ${what} may only add or remove this task's own account`);
       continue;

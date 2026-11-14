@@ -2,10 +2,12 @@
 // quarantine that is always removed and never in the linked checkout.
 
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
+import zlib from 'node:zlib';
+import { execFile, execFileSync } from 'node:child_process';
 import { git, packOf, pushBody } from './lib/fake-forge.mjs';
 
 // The quarantine is made under the temp directory; a private one shows what is left behind.
@@ -13,8 +15,9 @@ const scratch = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dn-rp-')
 process.env.TMPDIR = path.join(scratch, 'tmp');
 fs.mkdirSync(process.env.TMPDIR);
 process.env.DN_PUSH_MAX_BYTES = String(2 * 2 ** 20);
-const { checkAdvertise, checkPush, globMatch, parseReceivePack } = await import('../src/requester/receivepack.js');
-const { authorize } = await import('../src/requester/authorize.js');
+process.env.DN_PUSH_UNPACKED_MAX_BYTES = String(8 * 2 ** 20);
+const { checkAdvertise, checkPush, globMatch, parseReceivePack, pushReport } = await import('../src/requester/receivepack.js');
+const { authorize, conclude } = await import('../src/requester/authorize.js');
 
 async function check(name, fn) {
   await fn();
@@ -67,14 +70,14 @@ const ctxFor = (more = {}) => ({
   checkout,
   state: { branches: [] },
   async pull(number) { return number === 578 ? { number, open: true, author: 'me', headRepo: 'o/r', headRef: 'feature' } : null; },
-  async pullsByHead({ repo, ref }) { return repo === 'o/r' && (ref === undefined || ref === 'feature') ? [{ number: 578, open: true, author: 'me', headRepo: 'o/r', headRef: 'feature' }] : []; },
-  async currentRef(repo, ref) {
-    try { return git(forge, 'rev-parse', '--verify', '--quiet', ref); } catch { return null; }
+  async pullsByHead(ref) { return ref === undefined || ref === 'feature' ? [{ number: 578, open: true, author: 'me', headRepo: 'o/r', headRef: 'feature' }] : []; },
+  async repository() { return { defaultBranch: 'main', ciPaths: [] }; },
+  async branch(ref) {
+    try { return { sha: git(forge, 'rev-parse', '--verify', '--quiet', ref), protected: false }; } catch { return null; }
   },
   // What forge.fetchInto does, from a directory instead of a URL.
-  fetch({ repo, env, wants = [], all = false }) {
+  fetch({ env, wants = [], all = false }) {
     fetches.push(all ? 'all' : wants.length);
-    assert.equal(repo, 'o/r');
     return new Promise((resolve) => {
       execFile('git', ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', forge, ...(all ? ['+refs/heads/*:refs/dn/*'] : wants)], { env }, (err) => resolve(!err));
     });
@@ -101,7 +104,7 @@ async function allowed(promise) {
   return verdict;
 }
 
-await check('the command list is read exactly: capabilities, push options, shallow lines, both object formats', async () => {
+await check('the command list is read exactly: capabilities, push options, both object formats', async () => {
   const one = `${ZERO} ${B} refs/heads/x`;
   const pack = packOf(work, [B], [A]);
   const parsed = parseReceivePack(Buffer.concat([pkt(`${one}\0 report-status-v2 side-band-64k object-format=sha1 agent=git/2.39.5\n`), pkt(`${A} ${B} refs/heads/y\n`), FLUSH, pack]));
@@ -109,9 +112,9 @@ await check('the command list is read exactly: capabilities, push options, shall
   assert.deepEqual(parsed.caps, ['report-status-v2', 'side-band-64k', 'object-format=sha1', 'agent=git/2.39.5']);
   assert.equal(parsed.format, 'sha1');
   assert.deepEqual(parsed.pack, pack);
-  const withOptions = parseReceivePack(Buffer.concat([pkt(`shallow ${A}\n`), pkt(`${one}\0push-options\n`), FLUSH, pkt('merge_request.create\n'), pkt('ci.skip'), FLUSH, pack]));
+  const withOptions = parseReceivePack(Buffer.concat([pkt(`${one}\0push-options\n`), FLUSH, pkt('merge_request.create\n'), pkt('ci.skip'), FLUSH, pack]));
   assert.deepEqual(withOptions.options, ['merge_request.create', 'ci.skip']);
-  assert.deepEqual(withOptions.shallow, [A]);
+  assert.deepEqual(Object.keys(withOptions).sort(), ['caps', 'commands', 'format', 'options', 'pack']);
   const z = '0'.repeat(64);
   const n = 'ab'.repeat(32);
   assert.equal(parseReceivePack(Buffer.concat([pkt(`${z} ${n} refs/heads/x\0object-format=sha256`), FLUSH])).format, 'sha256');
@@ -144,6 +147,23 @@ await check('the command list is read exactly: capabilities, push options, shall
     'refs/heads/a?', 'refs/heads/a*', 'refs/heads/a[', 'refs/heads/a\\b', 'refs/heads/a@{1}', 'refs/heads/a.', 'heads/x', 'refs/heads/a\tb', 'refs/heads/a\u007f']) {
     assert.throws(() => parseReceivePack(Buffer.concat([pkt(`${ZERO} ${B} ${ref}`), FLUSH])), /would not accept|malformed ref command/, ref);
   }
+});
+
+await check('a push carries no shallow line, and a ref name is the bytes the forge will read', async () => {
+  const one = `${ZERO} ${B} refs/heads/x`;
+  assert.throws(() => parseReceivePack(Buffer.concat([pkt(`shallow ${A}\n`), pkt(`${one}\0report-status\n`), FLUSH])), /a shallow line/);
+  assert.throws(() => parseReceivePack(Buffer.concat([pkt(`${one}\0report-status\n`), pkt(`shallow ${A}\n`), FLUSH])), /a shallow line|malformed ref command/);
+  // Two byte strings that are not UTF-8 would both decode to the same replacement character:
+  // one name here, two different refs at the forge.
+  const raw = (bytes) => Buffer.concat([Buffer.from(`${ZERO} ${B} refs/heads/a`), Buffer.from(bytes), Buffer.from('\0report-status\n')]);
+  const line = (payload) => Buffer.concat([Buffer.from((payload.length + 4).toString(16).padStart(4, '0')), payload, FLUSH]);
+  for (const bytes of [[0xff], [0xfe], [0xc3], [0xc3, 0x28], [0xed, 0xa0, 0x80], [0xc0, 0xaf]]) assert.throws(() => parseReceivePack(line(raw(bytes))), /not UTF-8/, bytes.join(' '));
+  assert.equal(parseReceivePack(line(raw([0xc3, 0xa9]))).commands[0].ref, 'refs/heads/aé');
+  // A capability that is not UTF-8 is no better.
+  assert.throws(() => parseReceivePack(line(Buffer.concat([Buffer.from(`${one}\0report-status agent=`), Buffer.from([0xff]), Buffer.from('\n')]))), /not UTF-8/);
+  await refused(push(NEW_RULE, [[ZERO, B, 'refs/heads/x']], ctxFor(), { pack: Buffer.alloc(0) }), /carries no pack/);
+  const shallow = Buffer.concat([pkt(`shallow ${A}\n`), pushBody([[ZERO, B, 'refs/heads/x']], packOf(work, [B], [A]))]);
+  await refused(checkPush(NEW_RULE, SEGMENTS, shallow, ctxFor()), /not a well-formed push: a shallow line/);
 });
 
 await check('a glob\'s "*" stays inside one part and "**" spans any number', async () => {
@@ -207,7 +227,7 @@ await check('a push that would discard commits, delete a ref or move a ref outsi
   await refused(push(HEAD_RULE, [[A, C, 'refs/heads/feature']]), /not where this push starts from/);
 });
 
-await check('a new branch is allowed where the rule creates, and only a branch the key created may then move', async () => {
+await check('a new branch is allowed where the rule creates, and only a branch the task created may then move', async () => {
   at(M);
   const fix = commit('fix 421', { 'src/fix.js': 'f\n' });
   assert.deepEqual((await allowed(push(NEW_RULE, [[ZERO, fix, 'refs/heads/fix-421']]))).created, ['refs/heads/fix-421']);
@@ -217,20 +237,83 @@ await check('a new branch is allowed where the rule creates, and only a branch t
   await refused(push(NEW_RULE, [[fix, more, 'refs/heads/fix-421']]), /may not update that ref/);
   await allowed(push(NEW_RULE, [[fix, more, 'refs/heads/fix-421']], ctxFor({ state: { branches: ['refs/heads/fix-421'] } })));
 
-  // Through authorize, creations are counted against the key.
-  const rules = [{ host: 'github.com', method: 'POST', path: '/o/r.git/git-receive-pack', ...NEW_RULE }];
+  // Through authorize, creations are counted against the task, and the forge's report says which became its own.
+  const rules = [{ host: 'github.com', method: 'POST', path: '/o/r.git/git-receive-pack', ...NEW_RULE, create: 2 }];
   const send = (commands, ctx) => authorize(rules, {
     host: 'github.com', method: 'POST', path: '/o/r.git/git-receive-pack', headers: { 'content-type': 'application/x-git-receive-pack-request' },
     body: pushBody(commands, packOf(work, [more], [M])).toString('base64'),
   }, ctx);
   const ctx = ctxFor();
-  assert.equal((await send([[ZERO, more, 'refs/heads/one']], ctx)).ok, true);
-  assert.deepEqual(ctx.state.branches, ['refs/heads/one']);
-  assert.match((await send([[ZERO, more, 'refs/heads/two']], ctx)).reason, /may create 1 branch\(es\) and no more/);
-  assert.match((await send([[ZERO, more, 'refs/heads/a'], [ZERO, more, 'refs/heads/b']], ctxFor())).reason, /may create 1 branch/);
-  assert.deepEqual(ctx.state.branches, ['refs/heads/one']);
+  const report = (...lines) => Buffer.concat([...lines.map((l) => pkt(`${l}\n`)), FLUSH]);
+  const band = (n, data) => Buffer.concat([Buffer.from((data.length + 5).toString(16).padStart(4, '0')), Buffer.from([n]), data]);
+  const one = await send([[ZERO, more, 'refs/heads/one']], ctx);
+  assert.equal(one.ok, true);
+  assert.deepEqual(ctx.state, { branches: [], reserved: ['refs/heads/one'], pulls: [] }, 'counted, and not yet its own');
+  const pair = await send([[ZERO, more, 'refs/heads/two'], [ZERO, more, 'refs/heads/three']], ctx);
+  assert.match(pair.reason, /may create 2 branch\(es\); it has refs\/heads\/one/);
+  assert.match((await send([[ZERO, more, 'refs/heads/a'], [ZERO, more, 'refs/heads/b'], [ZERO, more, 'refs/heads/c']], ctxFor())).reason, /may create 2 branch\(es\); it has none/);
+  assert.deepEqual(ctx.state.reserved, ['refs/heads/one']);
+  const two = await send([[ZERO, more, 'refs/heads/two']], ctx);
+  assert.deepEqual(ctx.state.reserved, ['refs/heads/one', 'refs/heads/two']);
+  // The forge took one and declined the other.
+  conclude(one.request, { status: 200, body: Buffer.concat([band(2, Buffer.from('ok refs/heads/two\n')), band(1, report('unpack ok', 'ok refs/heads/one')), FLUSH]) });
+  conclude(two.request, { status: 200, body: report('unpack ok', 'ng refs/heads/two pre-receive hook declined') });
+  assert.deepEqual(ctx.state, { branches: ['refs/heads/one'], reserved: [], pulls: [] }, 'what a hook prints beside the report is not the report');
+  // Answers that do not say: the creation stays counted and is not owned.
+  const unsure = [
+    undefined, { status: 500, body: report('unpack ok', 'ok refs/heads/two') }, { status: 302, body: Buffer.alloc(0) }, { status: 200, body: Buffer.from('<html>ok refs/heads/two</html>') },
+    { status: 200, body: report('unpack ok') }, { status: 200, body: report('ok refs/heads/two') }, { status: 200, body: report('unpack ok', 'ok refs/heads/two', 'ng refs/heads/two x') },
+    { status: 200, body: report('unpack index-pack failed', 'ok refs/heads/two') }, { status: 200, body: report('unpack ok', 'ok refs/heads/two', 'what is this') },
+    { status: 200, body: Buffer.concat([band(1, report('unpack ok', 'ok refs/heads/two').subarray(0, 20)), FLUSH]) }, { status: 200, body: report('unpack ok', 'ok refs/heads/twofold') },
+  ];
+  for (const answer of unsure) {
+    conclude((await send([[ZERO, more, 'refs/heads/two']], ctx)).request, answer);
+    assert.deepEqual(ctx.state, { branches: ['refs/heads/one'], reserved: ['refs/heads/two'], pulls: [] }, JSON.stringify(answer?.body?.toString()));
+  }
+  assert.match((await send([[ZERO, more, 'refs/heads/other']], ctx)).reason, /may create 2 branch\(es\); it has refs\/heads\/one, refs\/heads\/two/);
+  // A creation whose answer never came may be why the forge declines it now: it stays counted.
+  conclude((await send([[ZERO, more, 'refs/heads/two']], ctx)).request, { status: 200, body: report('unpack ok', 'ng refs/heads/two already exists') });
+  conclude((await send([[ZERO, more, 'refs/heads/two']], ctx)).request, { status: 403, body: Buffer.alloc(0) });
+  assert.deepEqual(ctx.state.reserved, ['refs/heads/two']);
+  // The forge's "ok", in the newer report too, makes it the task's own.
+  conclude((await send([[ZERO, more, 'refs/heads/two']], ctx)).request, { status: 200, body: band(1, report('unpack ok', 'ok refs/heads/two', 'option refname refs/heads/two', 'option new-oid abc')) });
+  assert.deepEqual(ctx.state, { branches: ['refs/heads/one', 'refs/heads/two'], reserved: [], pulls: [] });
+  // A forge that refuses the whole request gives a fresh creation back.
+  const fresh = ctxFor();
+  conclude((await send([[ZERO, more, 'refs/heads/x']], fresh)).request, { status: 403, body: Buffer.from('denied') });
+  assert.deepEqual(fresh.state, { branches: [], reserved: [], pulls: [] });
+  assert.equal(pushReport(report('unpack ok', 'ok refs/heads/a', 'ng refs/heads/b no')).ng[0], 'refs/heads/b');
+  assert.equal(pushReport(Buffer.from('0005')), null);
+
+  // A push that does not ask for the report could never be confirmed.
+  const quiet = pushBody([[ZERO, more, 'refs/heads/quiet']], packOf(work, [more], [M]), 'side-band-64k agent=git/2');
+  await refused(checkPush(NEW_RULE, SEGMENTS, quiet, ctxFor()), /does not ask the forge for its report/);
+  await allowed(checkPush(NEW_RULE, SEGMENTS, pushBody([[ZERO, more, 'refs/heads/quiet']], packOf(work, [more], [M]), 'report-status-v2'), ctxFor()));
   assert.match((await authorize(rules, { host: 'github.com', method: 'POST', path: '/o/r.git/git-receive-pack', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: '' }, ctx)).reason, /must be sent as/);
   git(forge, 'update-ref', '-d', 'refs/heads/fix-421');
+});
+
+await check('the default branch and a protected branch are never pushed, as a head, as the task\'s own or as a new name', async () => {
+  at(M);
+  const onMain = commit('straight to main', { 'src/base.js': 'y\n' });
+  const mainHead = ctxFor({ async pull(number) { return { number, open: true, author: 'me', headRepo: 'o/r', headRef: 'main' }; } });
+  await refused(push(HEAD_RULE, [[M, onMain, 'refs/heads/main']], mainHead), /refs\/heads\/main: the default branch is never pushed by a task/);
+  await refused(push(NEW_RULE, [[M, onMain, 'refs/heads/main']], ctxFor({ state: { branches: ['refs/heads/main'] } })), /the default branch is never pushed/);
+  const named = (defaultBranch) => ctxFor({ async repository() { return { defaultBranch, ciPaths: [] }; } });
+  await refused(push(NEW_RULE, [[ZERO, onMain, 'refs/heads/trunk']], named('trunk')), /refs\/heads\/trunk: the default branch is never pushed/);
+  await refused(push(NEW_RULE, [[ZERO, onMain, 'refs/heads/Trunk']], named('trunk')), /the default branch is never pushed/);
+  await refused(push(NEW_RULE, [[ZERO, onMain, 'refs/heads/a/b']], named('a/b')), /the default branch is never pushed/);
+  await allowed(push(NEW_RULE, [[ZERO, onMain, 'refs/heads/trunk']], named('main')));
+  await refused(push(NEW_RULE, [[ZERO, onMain, 'refs/heads/ok'], [ZERO, onMain, 'refs/heads/trunk']], named('trunk')), /the default branch is never pushed/);
+
+  at(B);
+  const C = commit('on a protected head', { 'src/a.js': 'p\n' });
+  const guarded = ctxFor({ async branch(ref) { return { sha: git(forge, 'rev-parse', ref), protected: true }; } });
+  await refused(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], guarded), /refs\/heads\/feature: a protected branch is never pushed by a task/);
+  await allowed(push(HEAD_RULE, [[B, C, 'refs/heads/feature']]));
+  // A lookup that throws is the caller's refusal to make; nothing is left behind.
+  await assert.rejects(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], ctxFor({ async branch() { throw new Error('forge: the forge did not say'); } })), /did not say/);
+  await assert.rejects(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], ctxFor({ async repository() { throw new Error('forge: the forge did not say'); } })), /did not say/);
 });
 
 await check('a push may not write a workflow file, in its tip or in any commit on the way', async () => {
@@ -258,11 +341,33 @@ await check('a push may not write a workflow file, in its tip or in any commit o
   const root = commit('unrelated root');
   await refused(push(NEW_RULE, [[ZERO, root, 'refs/heads/unrelated']], ctxFor(), { pack: packOf(work, [root], []) }), /changes \.github\/workflows\/ci\.yml/);
 
-  // What is not a workflow, deleting one, and a merge that brings the base branch's along.
+  // Deleting one is a change to CI like any other: a job that no longer runs.
   at(B);
-  await allowed(push(HEAD_RULE, [[B, commit('other .github file', { '.github/dependabot.yml': 'y\n', 'github/workflows/x.yml': 'x\n' }), 'refs/heads/feature']]));
+  await refused(push(HEAD_RULE, [[B, commit('drop ci', { '.github/workflows/ci.yml': null }), 'refs/heads/feature']]), /changes \.github\/workflows\/ci\.yml/);
   at(B);
-  await allowed(push(HEAD_RULE, [[B, commit('drop ci', { '.github/workflows/ci.yml': null }), 'refs/heads/feature']]));
+  git(work, 'rm', '--quiet', '-r', '.github/workflows');
+  await refused(push(HEAD_RULE, [[B, commit('drop the directory'), 'refs/heads/feature']]), /changes \.github\/workflows\/ci\.yml/);
+  // The forge's own path is one spelling; a runner or a checkout that folds case reads others as the same.
+  for (const file of ['.GitHub/workflows/x.yml', '.github/WORKFLOWS/x.yml', '.GITHUB/Workflows/Deep/x.yml']) {
+    at(B);
+    git(work, 'update-index', '--add', '--cacheinfo', `100644,${git(work, 'hash-object', '-w', path.join(work, 'src/a.js'))},${file}`);
+    git(work, 'commit', '--quiet', '-m', 'another case');
+    await refused(push(HEAD_RULE, [[B, git(work, 'rev-parse', 'HEAD'), 'refs/heads/feature']]), new RegExp(`changes ${file.replaceAll('.', '\\.')}`));
+    git(work, 'reset', '--quiet', '--hard');
+  }
+  // The file a GitLab project is set to read its CI from is added to the rule's own.
+  const configured = (ciPaths) => ctxFor({ async repository() { return { defaultBranch: 'main', ciPaths }; } });
+  at(B);
+  const ciFile = commit('the configured file', { 'ci/Pipeline.yml': 'x\n' });
+  await allowed(push(HEAD_RULE, [[B, ciFile, 'refs/heads/feature']]));
+  await refused(push(HEAD_RULE, [[B, ciFile, 'refs/heads/feature']], configured(['ci/pipeline.yml'])), /changes ci\/Pipeline\.yml/);
+  await refused(push(HEAD_RULE, [[B, ciFile, 'refs/heads/feature']], configured(['CI/PIPELINE.YML'])), /changes ci\/Pipeline\.yml/);
+  await refused(push({ ...HEAD_RULE, denyPaths: undefined }, [[B, ciFile, 'refs/heads/feature']], configured(['ci/pipeline.yml'])), /changes ci\/Pipeline\.yml/);
+  await allowed(push(HEAD_RULE, [[B, ciFile, 'refs/heads/feature']], configured(['ci/pipeline.yml.d', 'pipeline.yml'])));
+
+  // What is not a workflow, and a merge that brings the base branch's along.
+  at(B);
+  await allowed(push(HEAD_RULE, [[B, commit('other .github file', { '.github/dependabot.yml': 'y\n', 'github/workflows/x.yml': 'x\n', '.github/workflowsx/y.yml': 'y\n' }), 'refs/heads/feature']]));
   at(B);
   git(work, 'merge', '--quiet', '--no-edit', M);
   await allowed(push(HEAD_RULE, [[B, git(work, 'rev-parse', 'HEAD'), 'refs/heads/feature']]));
@@ -293,17 +398,25 @@ await check('what cannot be proven is refused: a missing old value, a broken pac
   at(M);
   const onBase = commit('on the new base', { 'src/a.js': 'd\n' });
   // The checkout has never seen the forge's main, and nothing can fetch it.
-  const mainIsOwn = { state: { branches: ['refs/heads/main'] } };
-  await refused(push({ ...NEW_RULE, denyPaths: undefined }, [[M, onBase, 'refs/heads/main']], offline(mainIsOwn)), /old value cannot be found/);
-  await allowed(push({ ...NEW_RULE, denyPaths: undefined }, [[M, onBase, 'refs/heads/main']], ctxFor(mainIsOwn)));
+  git(forge, 'update-ref', 'refs/heads/own', M);
+  const own = { state: { branches: ['refs/heads/own'] } };
+  await refused(push({ ...NEW_RULE, denyPaths: undefined }, [[M, onBase, 'refs/heads/own']], offline(own)), /old value cannot be found/);
+  await allowed(push({ ...NEW_RULE, denyPaths: undefined }, [[M, onBase, 'refs/heads/own']], ctxFor(own)));
+  git(forge, 'update-ref', '-d', 'refs/heads/own');
   await refused(push({ ...HEAD_RULE, denyPaths: undefined }, [[B, C, 'refs/heads/feature']], offline({ checkout: undefined })), /cannot be found/);
   await refused(push({ ...HEAD_RULE, denyPaths: undefined }, [[B, C, 'refs/heads/feature']], offline({ checkout: path.join(scratch, 'nowhere') })), /cannot be found/);
 
   const good = packOf(work, [C], [B]);
-  const broken = Buffer.from(good);
-  broken[broken.length - 30] ^= 0xff;
-  await refused(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], ctxFor(), { pack: broken }), /could not be indexed/);
-  await refused(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], ctxFor(), { pack: good.subarray(0, good.length - 25) }), /could not be indexed/);
+  const flipped = (fromEnd) => {
+    const broken = Buffer.from(good);
+    broken[broken.length - fromEnd] ^= 0xff;
+    return broken;
+  };
+  // A byte of the last object, a pack cut short, bytes between the last object and the checksum, and the checksum itself.
+  await refused(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], ctxFor(), { pack: flipped(30) }), /is not one git would read/);
+  await refused(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], ctxFor(), { pack: good.subarray(0, good.length - 25) }), /is not one git would read/);
+  await refused(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], ctxFor(), { pack: Buffer.concat([good.subarray(0, good.length - 20), Buffer.from('more'), good.subarray(good.length - 20)]) }), /is not one git would read/);
+  await refused(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], ctxFor(), { pack: flipped(1) }), /could not be indexed/);
   await refused(push(HEAD_RULE, [[B, 'ab'.repeat(20), 'refs/heads/feature']], ctxFor(), { pack: good }), /not a commit the push carries or the forge has/);
   const tree = git(work, 'rev-parse', `${C}^{tree}`);
   await refused(push(HEAD_RULE, [[B, tree, 'refs/heads/feature']], ctxFor(), { pack: good }), /not a commit/);
@@ -311,7 +424,90 @@ await check('what cannot be proven is refused: a missing old value, a broken pac
   await refused(checkPush(HEAD_RULE, SEGMENTS, Buffer.from('0000'), ctxFor()), /not a well-formed push/);
   await refused(checkPush(HEAD_RULE, SEGMENTS, Buffer.concat([pushBody([[B, C, 'refs/heads/feature']], good), Buffer.alloc(2 * 2 ** 20)]), ctxFor()), /larger than a task may send/);
   await refused(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], ctxFor({ pull: undefined })), /nothing here can look a pull request up/);
-  await refused(push(NEW_RULE, [[ZERO, C, 'refs/heads/x']], ctxFor({ currentRef: undefined })), /nothing here can ask the forge where a branch is/);
+  await refused(push(NEW_RULE, [[ZERO, C, 'refs/heads/x']], ctxFor({ branch: undefined })), /nothing here can ask the forge about its branches/);
+  await refused(push(NEW_RULE, [[ZERO, C, 'refs/heads/x']], ctxFor({ repository: undefined })), /nothing here can ask the forge about its branches/);
+});
+
+// A pack written by hand: each object is `{ type, data }` (3 is a blob), `{ base, delta }`
+// for a delta against the object at that index, or `{ ref, delta }` for one against an
+// object the forge has.
+function handPack(objects) {
+  const head = (type, size) => {
+    const out = [];
+    let byte = (type << 4) | (size & 15);
+    for (size = Math.floor(size / 16); size > 0; size = Math.floor(size / 128)) { out.push(byte | 0x80); byte = size & 0x7f; }
+    return Buffer.from([...out, byte]);
+  };
+  const back = (n) => {
+    const out = [n & 127];
+    while ((n = Math.floor(n / 128)) > 0) out.unshift(128 | (--n & 127));
+    return Buffer.from(out);
+  };
+  const starts = [];
+  const parts = [Buffer.concat([Buffer.from('PACK'), Buffer.from([0, 0, 0, 2, 0, 0, 0, objects.length])])];
+  let at = 12;
+  for (const o of objects) {
+    starts.push(at);
+    const piece = o.delta === undefined ? Buffer.concat([head(o.type, o.data.length), zlib.deflateSync(o.data)])
+      : Buffer.concat([head(o.ref ? 7 : 6, o.delta.length), o.ref ? Buffer.from(o.ref, 'hex') : back(at - starts[o.base]), zlib.deflateSync(o.delta)]);
+    parts.push(piece);
+    at += piece.length;
+  }
+  const body = Buffer.concat(parts);
+  return Buffer.concat([body, crypto.createHash('sha1').update(body).digest()]);
+}
+const size = (n) => {
+  const out = [];
+  do { out.push((n % 128) | (n >= 128 ? 0x80 : 0)); n = Math.floor(n / 128); } while (n > 0);
+  return Buffer.from(out);
+};
+const MIB = 2 ** 20;
+// A delta that builds `says` bytes (by its own word) out of `times` copies of a base of `mib` MiB: two bytes a copy.
+const copies = (mib, times, says = mib * MIB * times) => Buffer.concat([size(mib * MIB), size(says), ...Array.from({ length: times }, () => Buffer.from([0xc0, mib * 16]))]);
+
+await check('a pack is measured before git reads it: what it unfolds to is bounded, however few bytes it is', async () => {
+  const zeros = { type: 3, data: Buffer.alloc(MIB) };
+  const attempt = (objects) => {
+    const pack = handPack(objects);
+    assert.ok(pack.length < 16 * 1024, 'a few kilobytes on the wire');
+    return push(NEW_RULE, [[ZERO, M, 'refs/heads/roomy']], ctxFor(), { pack });
+  };
+  const over = /unfolds to more than a task may send/;
+  // One mebibyte of zeros, and a delta of a few bytes that copies it: twice is within the 8 MiB this test allows, sixteen times is not.
+  await allowed(attempt([zeros, { base: 0, delta: copies(1, 2) }]));
+  await refused(attempt([zeros, { base: 0, delta: copies(1, 16) }]), over);
+  // A delta on a delta counts for what each builds: 1 + 4 + 4 MiB.
+  await allowed(attempt([zeros, { base: 0, delta: copies(1, 2) }, { base: 1, delta: copies(2, 2) }]));
+  await refused(attempt([zeros, { base: 0, delta: copies(1, 4) }, { base: 1, delta: copies(4, 1) }]), over);
+  // Many small ones add up, and one object of zeros is no different.
+  await refused(attempt([zeros, ...Array.from({ length: 8 }, () => ({ base: 0, delta: copies(1, 1) }))]), over);
+  await refused(attempt([{ type: 3, data: Buffer.alloc(9 * MIB) }]), over);
+  // The size a delta states is the size git builds: one that states less than it copies is not indexed.
+  await refused(attempt([zeros, { base: 0, delta: copies(1, 16, 1) }]), /could not be indexed/);
+  // A delta against an object of the forge's, named by id.
+  const blob = git(work, 'rev-parse', `${A}:src/a.js`);
+  await allowed(attempt([{ ref: blob, delta: Buffer.concat([size(2), size(5), Buffer.from([5]), Buffer.from('hello')]) }]));
+  // What does not read as a pack to its end: an object type git has none of, a size that is not the data's, one object fewer than stated.
+  const unread = /is not one git would read/;
+  await refused(attempt([{ type: 5, data: Buffer.from('x') }]), unread);
+  const lying = handPack([{ type: 3, data: Buffer.from('four') }]);
+  lying[12] = (3 << 4) | 5;
+  await refused(push(NEW_RULE, [[ZERO, M, 'refs/heads/roomy']], ctxFor(), { pack: lying }), unread);
+  const short = handPack([{ type: 3, data: Buffer.from('four') }]);
+  short[11] = 2;
+  await refused(push(NEW_RULE, [[ZERO, M, 'refs/heads/roomy']], ctxFor(), { pack: short }), unread);
+});
+
+await check('a pushed tree that git itself calls broken is refused: a lookup and a checkout would read it two ways', async () => {
+  const mktree = (listing) => execFileSync('git', ['mktree'], { cwd: work, input: listing, encoding: 'utf8' }).trim();
+  const blob = git(work, 'rev-parse', `${M}:src/a.js`);
+  const base = `${git(work, 'ls-tree', M)}\n`;
+  for (const [listing, why] of [[`100644 blob ${blob}\ttwice\n100644 blob ${blob}\ttwice\n`, 'a name twice'], [`100644 blob ${blob}\t.git\n`, 'an entry named .git']]) {
+    const odd = git(work, 'commit-tree', mktree(base + listing), '-p', M, '-m', why);
+    await refused(push(NEW_RULE, [[ZERO, odd, 'refs/heads/odd']], ctxFor(), { pack: packOf(work, [odd], [M]) }), /could not be indexed/);
+  }
+  const fine = git(work, 'commit-tree', mktree(`${base}100644 blob ${blob}\tonce\n`), '-p', M, '-m', 'fine');
+  await allowed(push(NEW_RULE, [[ZERO, fine, 'refs/heads/odd']], ctxFor(), { pack: packOf(work, [fine], [M]) }));
 });
 
 await check('push options are refused, and a push is confined to the repository its rule names', async () => {
@@ -327,8 +523,19 @@ await check('push options are refused, and a push is confined to the repository 
   assert.deepEqual(await checkAdvertise(NEW_RULE, ['o', 'r.git', 'info', 'refs']), { ok: true });
   await refused(checkAdvertise(NEW_RULE, ['o', 'other.git', 'info', 'refs']), /not the pool's repository/);
   await allowed(checkAdvertise(HEAD_RULE, ['o', 'r.git', 'info', 'refs'], ctxFor()));
-  await refused(checkAdvertise(HEAD_RULE, ['me', 'r.git', 'info', 'refs'], ctxFor()), /does not hold the head branch/);
-  await refused(checkAdvertise({ ...HEAD_RULE, head: { author: 'me' } }, ['me', 'r', 'info', 'refs'], ctxFor()), /no open pull request by me/);
+  await allowed(checkAdvertise({ ...HEAD_RULE, head: { author: 'me' } }, ['o', 'r', 'info', 'refs'], ctxFor()));
+  // A pull request's head in a fork is not a place this task pushes to: neither the fork, nor a branch of that name here.
+  const inFork = ctxFor({
+    async pull(number) { return { number, open: true, author: 'me', headRepo: 'me/r', headRef: 'feature' }; },
+    async pullsByHead() { return [{ number: 578, open: true, author: 'me', headRepo: 'me/r', headRef: 'feature' }]; },
+  });
+  for (const rule of [HEAD_RULE, { ...HEAD_RULE, head: { author: 'me' } }]) {
+    await refused(checkAdvertise(rule, ['me', 'r.git', 'info', 'refs'], inFork), /not the pool's repository/);
+    await refused(checkPush(rule, ['me', 'r.git', 'git-receive-pack'], pushBody([[B, C, 'refs/heads/feature']], pack), inFork), /not the pool's repository/);
+    await refused(checkAdvertise(rule, ['o', 'r.git', 'info', 'refs'], inFork), /does not hold the head branch|no open pull request by me/);
+    await refused(checkPush(rule, SEGMENTS, pushBody([[B, C, 'refs/heads/feature']], pack), inFork), /does not hold the head branch|no open pull request by me/);
+  }
+  await refused(checkAdvertise(HEAD_RULE, ['o', 'r.git', 'info', 'refs'], ctxFor({ async pull() { return null; } })), /does not hold the head branch/);
 });
 
 await check('the linked checkout is read and never written', async () => {

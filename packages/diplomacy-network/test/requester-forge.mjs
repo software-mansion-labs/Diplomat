@@ -187,11 +187,27 @@ await check('a write carries its checked body, and a pinned answer is cut to its
   assert.deepEqual(JSON.parse(arrived.body), { commit_id: 'abc123', body: 'héllo' });
   const user = await perform(rules('review', 'pr-578'), gh('GET', '/user'));
   assert.deepEqual(JSON.parse(user.bytes), { login: 'me', id: 7, node_id: 'U_me', type: 'User', name: 'Me', html_url: 'https://github.com/me' });
-  forge.route(GITLAB_HOST, 'GET', /^\/api\/v4\/user$/, (req, res) => res.writeHead(200, { 'content-type': 'application/json' }).end('[{"email":"private@example.com"}]'));
+  // A list is cut entry by entry, and an answer that is neither an object nor a list of them is not passed on.
   const glRules = rulesFor({ forge: 'gitlab', kind: 'investigate', pool: `${GITLAB_HOST}/group/sub/proj`, item: 'job-x', identity: 'me' });
-  const odd = await perform(glRules, glab('GET', '/api/v4/user'), {}, GITLAB);
-  assert.equal(odd.status, 502);
-  assert.ok(!odd.bytes.toString().includes('private@example.com'), 'an answer that cannot be reduced is not passed on');
+  const answering = async (text) => {
+    const remove = forge.route(GITLAB_HOST, 'GET', /^\/api\/v4\/user$/, (req, res) => res.writeHead(200, { 'content-type': 'application/json' }).end(text));
+    const res = await perform(glRules, glab('GET', '/api/v4/user'), {}, GITLAB);
+    remove();
+    assert.ok(!res.bytes.toString().includes('private@example.com'));
+    return res;
+  };
+  const list = await answering('[{"id":7,"email":"private@example.com"},{"username":"me","email":"private@example.com"}]');
+  assert.equal(list.status, 200);
+  assert.deepEqual(JSON.parse(list.bytes), [{ id: 7 }, { username: 'me' }]);
+  for (const odd of ['[{"id":7},"private@example.com"]', '"private@example.com"', '[["private@example.com"]]', 'private@example.com']) assert.equal((await answering(odd)).status, 502, odd);
+  // The repository's own answer: without the clone token, the requester's rights or the repository it forks.
+  const repo = JSON.parse((await perform(rules('investigate', 'job-x'), gh('GET', '/repos/o/r'))).bytes);
+  assert.equal(repo.default_branch, 'main');
+  for (const member of ['temp_clone_token', 'permissions', 'parent', 'security_and_analysis']) assert.equal(repo[member], undefined, member);
+  const glProject = JSON.parse((await perform(glRules, glab('GET', '/api/v4/projects/group%2Fsub%2Fproj'), {}, GITLAB)).bytes);
+  assert.equal(glProject.default_branch, 'main');
+  for (const member of ['runners_token', 'import_url', 'service_desk_address', 'permissions', 'forked_from_project']) assert.equal(glProject[member], undefined, member);
+  assert.deepEqual(JSON.parse((await perform(rules('investigate', 'job-x'), gh('GET', '/repos/o/r/branches/main'))).bytes), { name: 'main', commit: { sha: A }, protected: false });
 });
 
 await check('a refused request never reaches the forge, and perform sends nothing authorize did not return', async () => {
@@ -258,21 +274,23 @@ await check('the forge answers what the deep checks ask: nodes, pull requests, c
   assert.equal(await client.resolveNode(GITLAB, 'gid://gitlab/MergeRequest/1'), null);
   assert.deepEqual(await client.pull(GITHUB, 'o/r', 579), { number: 579, open: true, author: 'me', headRepo: 'o/r', headRef: 'feature', baseRef: 'main', draft: true });
   assert.equal(await client.pull(GITHUB, 'o/r', 999), null);
-  assert.deepEqual((await client.pullsByHead(GITHUB, 'o/r', { repo: 'o/r', ref: 'feature' })).map((p) => p.number), [579]);
-  assert.deepEqual((await client.pullsByHead(GITHUB, 'o/r', { repo: 'o/r' })).map((p) => p.number), [578, 579]);
+  assert.deepEqual((await client.pullsByHead(GITHUB, 'o/r', 'feature')).map((p) => p.number), [579]);
+  assert.deepEqual((await client.pullsByHead(GITHUB, 'o/r')).map((p) => p.number), [578, 579]);
   assert.deepEqual((await client.comment(GITHUB, 'o/r', 13)).number, 579);
   assert.equal(await client.comment(GITHUB, 'o/r', 14), null);
   assert.deepEqual(await client.assignees(GITHUB, 'o/r', 421), ['bob']);
   assert.deepEqual(await client.self(GITHUB), { id: 'U_me', login: 'me' });
-  assert.equal(await client.currentRef(GITHUB, 'o/r', 'refs/heads/feature'), B);
-  assert.equal(await client.currentRef(GITHUB, 'o/r', 'refs/heads/none'), null);
+  assert.deepEqual(await client.repository(GITHUB, 'o/r'), { defaultBranch: 'main', ciPaths: [] });
+  assert.deepEqual(await client.branch(GITHUB, 'o/r', 'refs/heads/feature'), { sha: B, protected: false });
+  assert.equal(await client.branch(GITHUB, 'o/r', 'refs/heads/none'), null);
   // GitLab: a merge request from a fork has no head branch in the pool's project.
   assert.deepEqual(await client.pull(GITLAB, 'group/sub/proj', 5), { number: 5, open: true, author: 'me', headRepo: 'group/sub/proj', headRef: 'feature', baseRef: 'main', draft: false });
   assert.equal((await client.pull(GITLAB, 'group/sub/proj', 6)).headRepo, '');
-  assert.deepEqual((await client.pullsByHead(GITLAB, 'group/sub/proj', { repo: 'group/sub/proj', ref: 'feature' })).map((p) => p.number), [5]);
+  assert.deepEqual((await client.pullsByHead(GITLAB, 'group/sub/proj', 'feature')).map((p) => p.number), [5]);
   assert.equal(await client.projectId(GITLAB, 'group/sub/proj'), 99);
   assert.equal(await client.projectId(GITHUB, 'o/r'), null);
-  assert.equal(await client.currentRef(GITLAB, 'group/sub/proj', 'refs/heads/none'), null);
+  assert.deepEqual(await client.repository(GITLAB, 'group/sub/proj'), { defaultBranch: 'main', ciPaths: [] });
+  assert.equal(await client.branch(GITLAB, 'group/sub/proj', 'refs/heads/none'), null);
 
   // The same lookups behind authorize: a mutation's target is resolved on the forge before it is sent.
   const before = forge.data.mutations.length;
@@ -285,6 +303,93 @@ await check('the forge answers what the deep checks ask: nodes, pull requests, c
   const issue = rules('issues', 'issue-421');
   assert.equal((await perform(issue, ghql({ ...GH.assignSelf, variables: { input: { assignableId: 'I_421', actorLogins: ['bob', 'me'] } } }))).status, 200);
   assert.match((await authorize(issue, ghql(GH.assignSelf), ctxFor())).reason, /only add or remove this task's own account/);
+});
+
+await check('a lookup the forge did not settle throws: only the forge\'s own "no such thing" reads as absent', async () => {
+  const json = (status, body) => (req, res) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
+  const answered = async (host, method, pattern, answer, ask) => {
+    const remove = forge.route(host, method, pattern, answer);
+    try { return await ask(); } finally { remove(); }
+  };
+  const feature = { name: 'feature', commit: { sha: B }, protected: false };
+  const branchOf = /^\/repos\/o\/r\/branches\/feature$/;
+  const ask = () => client.branch(GITHUB, 'o/r', 'refs/heads/feature');
+  // A rate limit, an outage, a proxy's page and the repository's own 404 say nothing about the branch.
+  for (const [status, body] of [[403, { message: 'API rate limit exceeded' }], [429, { message: 'slow down' }], [500, {}], [502, '<html>'], [404, { message: 'Not Found' }], [404, {}], [301, { message: 'Moved Permanently' }],
+    [403, feature], [404, feature], [200, { ...feature, name: 'other' }], [200, { ...feature, protected: undefined }], [200, { ...feature, commit: { sha: 'main' } }], [200, [feature]], [200, 'null']]) {
+    await failing(answered('api.github.com', 'GET', branchOf, json(status, body), ask), new RegExp(`the forge did not say where refs/heads/feature is \\(it answered ${status}\\)`));
+  }
+  assert.equal(await answered('api.github.com', 'GET', branchOf, json(404, { message: 'Branch not found' }), ask), null);
+  assert.deepEqual(await answered('api.github.com', 'GET', branchOf, json(200, { ...feature, protected: true }), ask), { sha: B, protected: true });
+  const glBranch = /^\/api\/v4\/projects\/group%2Fsub%2Fproj\/repository\/branches\/a%2Fb$/;
+  const glAsk = () => client.branch(GITLAB, 'group/sub/proj', 'refs/heads/a/b');
+  for (const [status, body] of [[404, { message: '404 Project Not Found' }], [404, { message: '404 Not Found' }], [429, { message: 'Retry later' }], [403, { name: 'a/b', commit: { id: B }, protected: false }]]) {
+    await failing(answered(GITLAB_HOST, 'GET', glBranch, json(status, body), glAsk), /did not say where refs\/heads\/a\/b is/);
+  }
+  assert.equal(await answered(GITLAB_HOST, 'GET', glBranch, json(404, { message: '404 Branch Not Found' }), glAsk), null);
+  assert.deepEqual(await answered(GITLAB_HOST, 'GET', glBranch, json(200, { name: 'a/b', commit: { id: B }, protected: true, default: false }), glAsk), { sha: B, protected: true });
+  await failing(client.branch(GITHUB, 'o/r', 'refs/tags/v1'), /refs\/tags\/v1 is not a branch/);
+
+  // An answer about another pull request is not an answer about this one.
+  const other = { number: 578, state: 'open', user: { login: 'them' }, head: { ref: 'theirs', repo: { full_name: 'o/r' } }, base: { ref: 'main' } };
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\/577$/, json(200, other), () => client.pull(GITHUB, 'o/r', 577)), /did not say what #577 is/);
+  await failing(answered(GITLAB_HOST, 'GET', /\/merge_requests\/4$/, json(200, { iid: 5, state: 'opened' }), () => client.pull(GITLAB, 'group/sub/proj', 4)), /did not say what #4 is/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\/579$/, json(403, { message: 'API rate limit exceeded' }), () => client.pull(GITHUB, 'o/r', 579)), /did not say what #579 is \(it answered 403\)/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\?/, json(403, { message: 'API rate limit exceeded' }), () => client.pullsByHead(GITHUB, 'o/r', 'feature')), /did not say which pull requests are open/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\?/, json(200, { message: 'x' }), () => client.pullsByHead(GITHUB, 'o/r')), /did not say which pull requests are open/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\/comments\/13$/, json(500, {}), () => client.comment(GITHUB, 'o/r', 13)), /did not say what comment 13 is/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/issues\/421$/, json(403, { message: 'API rate limit exceeded' }), () => client.assignees(GITHUB, 'o/r', 421)), /did not say who is assigned to #421/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/issues\/421$/, json(200, { assignees: [{ login: 'bob' }, null] }), () => client.assignees(GITHUB, 'o/r', 421)), /did not say who is assigned to #421/);
+  assert.equal(await answered('api.github.com', 'GET', /^\/repos\/o\/r\/issues\/999$/, json(404, { message: 'Not Found' }), () => client.assignees(GITHUB, 'o/r', 999)), null);
+  await failing(answered('api.github.com', 'POST', /^\/graphql$/, json(502, {}), () => client.self(GITHUB)), /did not say which account this is/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r$/, json(403, { message: 'API rate limit exceeded' }), () => client.repository(GITHUB, 'o/r')), /did not say which branch is the default \(it answered 403\)/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r$/, json(200, { default_branch: '' }), () => client.repository(GITHUB, 'o/r')), /did not say which branch is the default/);
+
+  // A node: null beside the forge's NOT_FOUND is absent; null beside anything else, or no answer, is unknown.
+  const node = () => client.resolveNode(GITHUB, 'PR_579');
+  assert.equal(await answered('api.github.com', 'POST', /^\/graphql$/, json(200, { data: { node: null }, errors: [{ type: 'NOT_FOUND', message: 'Could not resolve' }] }), node), null);
+  for (const [status, body] of [[200, { data: { node: null }, errors: [{ type: 'RATE_LIMITED' }] }], [200, { data: null, errors: [{ type: 'NOT_FOUND' }] }], [200, { errors: [{ message: 'timeout' }] }], [403, { message: 'secondary rate limit' }], [502, {}]]) {
+    await failing(answered('api.github.com', 'POST', /^\/graphql$/, json(status, body), node), /did not say what PR_579 is/);
+  }
+
+  // Where a GitLab project reads its CI configuration from, as paths of its own repository.
+  const configured = async (value) => {
+    forge.data.repos['group/sub/proj'].ciConfigPath = value;
+    try { return (await client.repository(GITLAB, 'group/sub/proj')).ciPaths; } finally { delete forge.data.repos['group/sub/proj'].ciConfigPath; }
+  };
+  assert.deepEqual(await configured(''), []);
+  assert.deepEqual(await configured('ci/build.yml'), ['ci/build.yml']);
+  assert.deepEqual(await configured('/ci/build.yml'), ['ci/build.yml']);
+  assert.deepEqual(await configured('ci/build.yml@Group/Sub/Proj'), ['ci/build.yml@Group/Sub/Proj', 'ci/build.yml']);
+  assert.deepEqual(await configured('ci/build.yml@group/sub/proj:release'), ['ci/build.yml@group/sub/proj:release', 'ci/build.yml']);
+  assert.deepEqual(await configured('ci/build.yml@group/other'), ['ci/build.yml@group/other']);
+  assert.deepEqual(await configured('https://ci.example/build.yml'), ['https://ci.example/build.yml']);
+  await failing(configured(7), /did not say where the project reads its CI configuration from/);
+  await failing(answered(GITLAB_HOST, 'GET', /^\/api\/v4\/projects\/group%2Fsub%2Fproj$/, json(200, { default_branch: 'main' }), () => client.repository(GITLAB, 'group/sub/proj')), /did not say where the project reads its CI configuration from/);
+});
+
+await check('the quarantine\'s fetch asks for commits by id from the pool\'s repository, and follows no redirect', async () => {
+  const env = { PATH: process.env.PATH, HOME: scratch, GIT_DIR: path.join(scratch, 'fetch-target.git'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  git(scratch, 'init', '--quiet', '--bare', 'fetch-target.git');
+  const before = forge.log.length;
+  const lines = logLines.length;
+  // Nothing but a commit id is asked for, and nothing but a plain repository path is asked of.
+  for (const what of [{ wants: [] }, { wants: ['refs/heads/main'] }, { wants: [A, 'main'] }, { wants: [A, '--upload-pack=x'] }, { wants: [A.slice(0, 39)] },
+    { repo: 'o/r x', wants: [A] }, { repo: 'o/r?x=', wants: [A] }, { repo: 'o/r#', wants: [A] }, { repo: '', all: true }, { repo: 'o/r\n', all: true }]) {
+    assert.equal(await client.fetchInto(GITHUB, { repo: 'o/r', env, ...what }), false, JSON.stringify(what));
+  }
+  assert.equal(await client.fetchInto({ forge: 'github', host: 'github.example.com' }, { repo: 'o/r', env, wants: [A] }), false);
+  assert.deepEqual(seen(before), [], 'the forge heard nothing');
+  assert.equal(logLines.length, lines, 'git was not started');
+  assert.equal(await client.fetchInto(GITHUB, { repo: 'o/r', env, wants: [A] }), true);
+  assert.equal(git(env.GIT_DIR, 'cat-file', '-t', A), 'commit');
+
+  // A forge that answers the fetch with a redirect: git stops there, and the credential it carries reaches nobody else.
+  const remove = forge.route('github.com', 'GET', /^\/o\/r\.git\/info\/refs/, (req, res) => res.writeHead(302, { location: `${strangerOrigin}/o/r.git/info/refs?service=git-upload-pack` }).end());
+  const heard = strangers.length;
+  assert.equal(await client.fetchInto(GITHUB, { repo: 'o/r', env, wants: [B] }), false);
+  remove();
+  assert.equal(strangers.length, heard, 'the redirect\'s target was never contacted');
 });
 
 // A git client's side of the tunnel: every smart-HTTP request becomes `authorize`, then
@@ -401,7 +506,7 @@ await check('a real git push: the one new branch of an issue task, then a draft 
   assert.equal(remote('refs/heads/fix-421'), more);
   const second = await gitPush(`${tunnel.url}/o/r.git`, `${more}:refs/heads/another`);
   assert.equal(second.ok, false);
-  assert.match(tunnel.refusals.at(-1), /may create 1 branch\(es\) and no more/);
+  assert.match(tunnel.refusals.at(-1), /this task may create 1 branch\(es\); it has refs\/heads\/fix-421/);
   assert.equal(remote('refs/heads/another'), null);
   const feature = remote('refs/heads/feature');
   assert.equal((await gitPush(`${tunnel.url}/o/r.git`, `${more}:refs/heads/feature`, '--force')).ok, false);
@@ -410,7 +515,10 @@ await check('a real git push: the one new branch of an issue task, then a draft 
   const before = forge.data.mutations.length;
   assert.equal((await perform(ruleList, ghql(GH.prCreate), ctx)).status, 200);
   assert.equal(forge.data.mutations[before].name, 'createPullRequest');
-  assert.equal((await perform(ruleList, gh('POST', '/repos/o/r/pulls', { title: 't', head: 'fix-421', base: 'main', draft: true }), ctx)).status, 201);
+  assert.deepEqual(state, { branches: ['refs/heads/fix-421'], reserved: [], pulls: ['fix-421'] });
+  // One draft pull request per branch, by either route.
+  assert.match((await authorize(ruleList, gh('POST', '/repos/o/r/pulls', { title: 't', head: 'fix-421', base: 'main', draft: true }), ctx)).reason, /this task has opened its pull request from fix-421/);
+  assert.match((await authorize(ruleList, ghql(GH.prCreate), ctx)).reason, /this task has opened its pull request from fix-421/);
   assert.match((await authorize(ruleList, gh('POST', '/repos/o/r/pulls', { title: 't', head: 'feature', base: 'main', draft: true }), ctx)).reason, /only be opened from a branch this task pushed/);
   assert.equal(git(checkout, 'rev-parse', 'refs/remotes/origin/feature'), B, 'the linked checkout was not fetched into');
   assert.equal(git(checkout, 'status', '--porcelain'), '');

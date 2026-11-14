@@ -2,6 +2,7 @@
 // allowed, and everything an executor could try past them is refused.
 
 import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
 import { canon } from '../src/core/canon.js';
 import { authorize } from '../src/requester/authorize.js';
 import { AUDIT_BRANCHES, rulesFor } from '../src/requester/rules.js';
@@ -47,6 +48,8 @@ const READS = [
   gh('GET', '/repos/o/r/contents/src/a.js?ref=main'),
   gh('GET', '/repos/o/r/commits/abc123/check-runs'),
   gh('GET', '/repos/o/r/compare/main...feature'),
+  gh('GET', '/repos/o/r/branches?per_page=100'),
+  gh('GET', '/repos/o/r/branches/feature'),
   gh('GET', '/repos/O/R'),
   gh('GET', '/user'),
 ];
@@ -59,6 +62,10 @@ const NEVER = [
   { ...gh('GET', '/repos/o/r/pulls/578'), host: 'api.github.com.evil.example' }, { ...gh('GET', '/repos/o/r/pulls/578'), host: 'api.github.com.' },
   { ...gh('GET', '/repos/o/r/pulls/578'), host: 'github.com' }, { ...gh('GET', '/repos/o/r/pulls/578'), host: 'uploads.github.com' },
   { ...gh('GET', '/gists'), host: 'gist.github.com' }, { ...gh('GET', '/o/r/main/.env'), host: 'raw.githubusercontent.com' },
+  // reads of this repository whose answer is somebody else's: the other side of a compare, what refers to an issue, who can be assigned
+  gh('GET', '/repos/o/r/compare/main...victim:main'), gh('GET', '/repos/o/r/compare/main...victim:secret:main'), gh('GET', '/repos/o/r/compare/victim%3Asecret%3Amain...main'),
+  gh('GET', '/repos/o/r/issues/421/timeline'), gh('GET', '/repos/o/r/issues/421/sub_issues'), gh('GET', '/repos/o/r/issues/421/parent'), gh('GET', '/repos/o/r/issues/421/dependencies/blocked_by'),
+  gh('GET', '/repos/o/r/assignees'), gh('GET', '/repos/o/r/assignees/mallory'), gh('GET', '/search/issues?q=repo:o/r+fix&repository_id=1'),
   // path tricks
   gh('GET', '/repos/o/r/../../user/repos'), gh('GET', '/repos/o/r/%2e%2e/%2e%2e/user/repos'), gh('GET', '/repos/o/r//pulls'), gh('GET', '/repos/o/r/pulls/..%2f..%2fhooks'),
   gh('GET', '/repos/o/r/contents/..%2F..%2F..%2Fuser'), gh('GET', '/repos/o/r/pulls/578#/../../../user'),
@@ -110,7 +117,7 @@ const NEVER = [
 await check('every rule list is canonical JSON, so it can be signed into a capability', async () => {
   for (const kind of KINDS) {
     for (const rules of [github(kind), gitlab(kind), github(kind, { verdict: true, markReady: true }), gitlab(kind, { verdict: true, markReady: true })]) {
-      assert.ok(Array.isArray(rules) && rules.length > 0, kind);
+      assert.ok(Array.isArray(rules) && rules.length > 0 && rules.length <= 128, kind); // a capability carries at most 128 rules
       canon(rules);
       for (const rule of rules) assert.ok(['GET', 'POST', 'PUT', 'DELETE'].includes(rule.method) && rule.path.startsWith('/') && typeof rule.host === 'string');
     }
@@ -139,6 +146,15 @@ await check('every kind reads what the real tools read, in the pool\'s repositor
   }
   const verdict = await allowed(github('investigate'), gh('GET', '/user'));
   assert.deepEqual(verdict.request.pick, ['login', 'id', 'node_id', 'type', 'name', 'html_url'], 'the answer is cut to public members');
+  // The repository's own answer goes out without its clone token, the requester's rights on it or the repository it forks.
+  const repo = (await allowed(github('investigate'), gh('GET', '/repos/o/r'))).request.pick;
+  assert.ok(repo.includes('default_branch') && repo.includes('full_name'));
+  for (const member of ['temp_clone_token', 'permissions', 'parent', 'source', 'security_and_analysis', 'organization']) assert.ok(!repo.includes(member), member);
+  for (const path of ['/repos/o/r/branches', '/repos/o/r/branches/main']) {
+    assert.deepEqual((await allowed(github('investigate'), gh('GET', path))).request.pick, ['name', 'commit', 'protected'], 'a branch goes out without its protection settings');
+  }
+  await refused(github('investigate'), gh('GET', '/repos/o/r/issues/421/timeline'), world(), /holds issues and pull requests of other repositories/);
+  await refused(github('investigate'), gh('GET', '/repos/o/r/compare/main...victim:main'), world(), /names another repository/);
 });
 
 await check('no kind, with any option, reaches another repository, a setting, a secret or the account', async () => {
@@ -175,6 +191,10 @@ await check('review: the review lifecycle on its pull request, COMMENT only, and
     gitPush('github.com', '/o/r.git'), gitPush('github.com', '/o/r.git', Buffer.from('x')), gh('POST', '/repos/o/r/pulls', { head: 'fix-421', draft: true, title: 't' }),
   ];
   for (const request of denied) await refused(rules, request);
+  // A review comment is deleted only while it is this account's own, still pending, and in the pool's repository.
+  await refused(rules, gh('DELETE', '/repos/o/r/pulls/comments/14'), world(), /comment 14 is not part of a pending review/);
+  await refused(rules, gh('DELETE', '/repos/o/r/pulls/comments/15'), world(), /comment 15 was not written by this task's account/);
+  await refused(rules, gh('DELETE', '/repos/o/r/pulls/comments/16'), world(), /comment 16 is not in the pool's repository/);
 });
 
 await check('review with verdict: APPROVE and REQUEST_CHANGES are allowed, on its pull request only', async () => {
@@ -213,9 +233,9 @@ await check('conflicts: a push to its pull request\'s head branch and not one wr
   await allowed(rules, ghql(GH.prViewMergeable));
   for (const request of [ghql({ ...GH.resolveThread, variables: { t: 'PRRT_579' } }), gh('POST', '/repos/o/r/pulls/579/comments/13/replies', { body: 'x' }), gh('PUT', '/repos/o/r/pulls/579/update-branch', {}),
     ghql({ ...GH.prReady, variables: { input: { pullRequestId: 'PR_579' } } }), gh('POST', '/repos/o/r/issues/579/comments', { body: 'x' }), gitPush('github.com', '/me/r.git')]) await refused(rules, request);
-  // The head branch of a pull request from a fork lives in the fork, and that is where the push goes.
+  // The head branch of a pull request from a fork lives in the fork, and no task pushes there.
   const forked = github('conflicts', {}, 'pr-581');
-  await allowed(forked, gitPush('github.com', '/me/r.git'));
+  await refused(forked, gitPush('github.com', '/me/r.git'), world(), /no rule of this task allows the request/);
   await refused(forked, gitPush('github.com', '/o/r.git'), world(), /does not hold the head branch of open pull request #581/);
   await refused(github('conflicts', {}, 'pr-580'), gitPush('github.com', '/o/r.git'), world(), /open pull request #580/);
 });
@@ -292,9 +312,11 @@ await check('audit: new branches and draft pull requests; readOnly and investiga
 
 await check('every push rule keeps CI definitions out of reach, and no rule names a ref outside refs/heads', async () => {
   for (const kind of KINDS) {
-    for (const [rules, guarded] of [[github(kind, { markReady: true, verdict: true }), ['.github/workflows/**']], [gitlab(kind, { markReady: true, verdict: true }), ['.gitlab-ci.yml']]]) {
+    for (const [rules, guarded] of [[github(kind, { markReady: true, verdict: true }), ['.github/workflows/**']], [gitlab(kind, { markReady: true, verdict: true }), ['.gitlab-ci.yml', '.gitlab/ci/**']]]) {
       for (const rule of rules.filter((r) => r.git)) {
         assert.equal(rule.git, 'receive-pack');
+        // A push is addressed to the pool's repository by name: no pattern stands where a fork's owner could.
+        assert.ok(!rule.path.includes('*') && ['o/r', 'group/sub/proj'].includes(rule.repo), rule.path);
         if (rule.method === 'POST') assert.deepEqual(rule.denyPaths, guarded, kind);
         else assert.deepEqual(rule.query, { service: { equals: 'git-receive-pack' } });
         assert.ok(rule.head ? rule.refs === undefined && rule.create === undefined : rule.refs.every((r) => r.startsWith('refs/heads/')), kind);
@@ -324,11 +346,11 @@ await check('a job-wide review covers every open pull request of somebody else, 
   await refused(mine, ghql(GH.resolveThread), world(), /#578 was not opened by me/);
   await refused(mine, ghql({ ...GH.resolveThread, variables: { t: 'PRRT_580' } }), world(), /#580 is not open/);
   await allowed(mine, gitPush('github.com', '/o/r.git'));
-  await allowed(mine, gitPush('github.com', '/me/r.git'));
-  await refused(mine, gitPush('github.com', '/o/other.git'), world(), /no open pull request by me/);
+  await refused(mine, gitPush('github.com', '/me/r.git'), world(), /no rule of this task allows the request/);
+  await refused(mine, gitPush('github.com', '/o/other.git'), world(), /no rule of this task allows the request/);
   const theirs = github('conflicts', { author: 'them' }, 'job-c');
   await allowed(theirs, gitPush('github.com', '/o/r.git'));
-  await refused(theirs, gitPush('github.com', '/me/r.git'), world(), /no open pull request by them/);
+  await refused(github('conflicts', { author: 'nobody' }, 'job-c'), gitPush('github.com', '/o/r.git'), world(), /no open pull request by nobody/);
 });
 
 // ------------------------------------------------------------------------- GitLab
@@ -338,7 +360,8 @@ const glWorld = (branches = []) => {
   const w = world({ branches });
   w.pulls = { 5: { number: 5, open: true, author: 'me', headRepo: 'group/sub/proj', headRef: 'feature' }, 6: { number: 6, open: true, author: 'them', headRepo: '', headRef: 'forked' } };
   w.pull = async (n) => w.pulls[n] ?? null;
-  w.pullsByHead = async ({ repo, ref }) => Object.values(w.pulls).filter((p) => p.headRepo === repo && (ref === undefined || p.headRef === ref));
+  w.pullsByHead = async (ref) => Object.values(w.pulls).filter((p) => ref === undefined || p.headRef === ref);
+  w.assigned = [3];
   return w;
 };
 
@@ -351,8 +374,14 @@ await check('GitLab: every kind reads what glab reads, in the pool\'s project on
     glab('GET', '/api/v4/projects/99/merge_requests/5/draft_notes'), glab('GET', '/api/v4/projects/Group%2FSub%2Fproj/merge_requests/5'), glab('GET', `${P}/repository/commits/abc123`),
     glab('GET', `${P}/pipelines/7/jobs`), glab('GET', `${P}/jobs/7/trace`), glab('GET', '/api/v4/user'),
     glab('POST', '/api/graphql', { query: '{currentUser{username}}' }), // glab api graphql -f query=...
+    glab('GET', `${P}/repository/compare?from=main&to=feature&straight=true`), glab('GET', `${P}/repository/branches/feature`),
   ];
   const never = [
+    // reads of this project whose answer is another project's, a person's address, or a write
+    glab('GET', `${P}/repository/compare?from=main&to=x&from_project_id=100`), glab('GET', '/api/v4/projects/99/repository/compare?from=main&to=x&from_project_id=100'),
+    glab('GET', `${P}/merge_requests/5/closes_issues`), glab('GET', `${P}/merge_requests/5/related_issues`), glab('GET', '/api/v4/projects/99/merge_requests/5/blocks'),
+    glab('GET', `${P}/merge_requests/5/blockees`), glab('GET', `${P}/issues/421/links`), glab('GET', `${P}/issues/421/related_merge_requests`), glab('GET', `${P}/issues/421/closed_by`),
+    glab('GET', `${P}/issues/421/user_agent_detail`), glab('GET', `${P}/merge_requests/5/merge_ref`),
     glab('GET', '/api/v4/projects'), glab('GET', '/api/v4/projects?membership=true'), glab('GET', '/api/v4/projects/group%2Fsub%2Fother'), glab('GET', '/api/v4/projects/100/merge_requests/5'),
     glab('GET', '/api/v4/projects/group%2Fsub/merge_requests'), glab('GET', '/api/v4/projects/group%2Fsub%2Fproj%2F..%2Fother/issues'), glab('GET', '/api/v4/projects/99/../100'),
     glab('GET', `${P}/variables`), glab('POST', `${P}/variables`, { key: 'X', value: 'y' }), glab('GET', `${P}/hooks`), glab('GET', `${P}/deploy_keys`), glab('GET', `${P}/members/all`),
@@ -381,6 +410,14 @@ await check('GitLab: every kind reads what glab reads, in the pool\'s project on
     }
   }
   assert.deepEqual((await allowed(gitlab('investigate'), glab('GET', '/api/v4/user'))).request.pick, ['id', 'username', 'name', 'state', 'web_url']);
+  // The project's own answer goes out without the token that registers a runner or an import URL's credential.
+  for (const path of [P, '/api/v4/projects/99']) {
+    const project = (await allowed(gitlab('investigate'), glab('GET', path))).request.pick;
+    assert.ok(project.includes('default_branch') && project.includes('path_with_namespace'));
+    for (const member of ['runners_token', 'import_url', 'service_desk_address', 'permissions', 'forked_from_project', 'shared_with_groups', 'ci_config_path']) assert.ok(!project.includes(member), member);
+  }
+  await refused(gitlab('investigate'), glab('GET', `${P}/repository/compare?from=main&to=x&from_project_id=100`), glWorld(), /"from_project_id"/);
+  await refused(gitlab('investigate'), glab('GET', `${P}/merge_requests/5/merge_ref`), glWorld(), /writes a ref on the forge/);
 });
 
 await check('GitLab: each kind writes what its GitHub twin writes, through the routes glab uses', async () => {
@@ -398,6 +435,22 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
   ]) await refused(review, request, glWorld());
   await allowed(gitlab('review', { verdict: true }), glab('POST', `${P}/merge_requests/5/approve`, {}), glWorld()); // glab mr approve 5
   await refused(gitlab('review', { verdict: true }), glab('POST', `${P}/merge_requests/6/approve`, {}), glWorld());
+  // A job-wide review has no number in its paths: the forge is asked who opened the merge request each one names.
+  const all = gitlab('review', { verdict: true }, 'job-all');
+  for (const base of [P, '/api/v4/projects/99']) {
+    await allowed(all, glab('POST', `${base}/merge_requests/6/draft_notes`, { note: 'x' }), glWorld());
+    await allowed(all, glab('POST', `${base}/merge_requests/6/approve`, {}), glWorld());
+    await refused(all, glab('POST', `${base}/merge_requests/5/draft_notes`, { note: 'x' }), glWorld(), /#5 was opened by me/);
+    await refused(all, glab('POST', `${base}/merge_requests/5/approve`, {}), glWorld(), /#5 was opened by me/);
+    await refused(all, glab('DELETE', `${base}/merge_requests/5/draft_notes/3`), glWorld(), /#5 was opened by me/);
+    await refused(all, glab('POST', `${base}/merge_requests/7/notes`, { body: 'x' }), glWorld(), /not a pull request/);
+  }
+  const allMine = gitlab('review-own', { markReady: true }, 'job-mine');
+  await allowed(allMine, glab('PUT', `${P}/merge_requests/5/discussions/abc`, { resolved: true }), glWorld());
+  await allowed(allMine, glab('PUT', `${P}/merge_requests/5`, { title: 't' }), glWorld());
+  await refused(allMine, glab('PUT', `${P}/merge_requests/6/discussions/abc`, { resolved: true }), glWorld(), /#6 was not opened by me/);
+  await refused(allMine, glab('POST', `${P}/merge_requests/6/discussions/abc/notes`, { body: 'x' }), glWorld(), /#6 was not opened by me/);
+  await refused(allMine, glab('PUT', `${P}/merge_requests/6`, { title: 't' }), glWorld(), /#6 was not opened by me/);
 
   const own = gitlab('review-own');
   for (const request of [
@@ -423,11 +476,18 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
   const pushed = () => glWorld(['refs/heads/fix-421']);
   const create = { title: 'Draft: t', description: 'd', source_branch: 'fix-421', target_branch: 'main', labels: '', target_project_id: 99 }; // glab mr create --draft
   for (const request of [
-    glab('PUT', `${P}/issues/421`, { assignee_ids: [7] }), glab('PUT', `${P}/issues/421`, { assignee_ids: [0] }), // glab issue update 421 --assignee @me, --unassign
+    glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7] }), glab('PUT', `${P}/issues/421`, { assignee_ids: [3] }), // account 3 holds the issue: this task joins and leaves
     glab('POST', `${P}/issues/421/notes`, { body: 'hello' }), glab('POST', `${P}/merge_requests`, create), gitPush('gitlab.example.com', '/group/sub/proj.git'),
   ]) await allowed(issues, request, pushed());
+  // glab issue update 421 --assignee @me, --unassign: the whole list, right only where nobody else holds the issue.
+  const free = () => Object.assign(pushed(), { assigned: [] });
+  for (const assignee_ids of [[7], [0]]) await allowed(issues, glab('PUT', `${P}/issues/421`, { assignee_ids }), free());
+  for (const assignee_ids of [[7], [0], [], [8], [3, 8], [3, 7, 8], [0, 3], '7']) {
+    await refused(issues, glab('PUT', `${P}/issues/421`, { assignee_ids }), pushed(), /own account|not a list of account ids/);
+  }
+  await refused(issues, glab('PUT', `${P}/issues/421`, {}), pushed());
   for (const request of [
-    glab('PUT', `${P}/issues/421`, { assignee_ids: [8] }), glab('PUT', `${P}/issues/422`, { assignee_ids: [7] }), glab('PUT', `${P}/issues/421`, { assignee_ids: [7], labels: 'x' }),
+    glab('PUT', `${P}/issues/422`, { assignee_ids: [3, 7] }), glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7], labels: 'x' }),
     glab('POST', `${P}/issues/422/notes`, { body: 'x' }), glab('POST', `${P}/issues/421/notes`, { body: '/close' }), glab('POST', `${P}/issues/421/notes?body=%2Fclose`, {}),
     glab('POST', `${P}/merge_requests`, { ...create, title: 't' }), glab('POST', `${P}/merge_requests`, { ...create, source_branch: 'main' }), glab('POST', `${P}/merge_requests`, { ...create, target_project_id: 100 }),
     glab('POST', `${P}/merge_requests`, { ...create, description: 'd\n/merge' }), glab('POST', `${P}/merge_requests`, { ...create, merge_when_pipeline_succeeds: true }),
@@ -435,7 +495,7 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
   ]) await refused(issues, request, pushed());
   const noPRs = gitlab('issues', { noPRs: true });
   await allowed(noPRs, glab('POST', `${P}/issues/421/notes`, { body: 'findings' }), pushed());
-  for (const request of [glab('PUT', `${P}/issues/421`, { assignee_ids: [7] }), glab('POST', `${P}/merge_requests`, create), gitPush('gitlab.example.com', '/group/sub/proj.git')]) await refused(noPRs, request, pushed());
+  for (const request of [glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7] }), glab('POST', `${P}/merge_requests`, create), gitPush('gitlab.example.com', '/group/sub/proj.git')]) await refused(noPRs, request, pushed());
 
   await allowed(gitlab('audit'), glab('POST', `${P}/merge_requests`, create), pushed());
   for (const rules of [gitlab('audit', { readOnly: true }), gitlab('investigate')]) {
@@ -448,4 +508,23 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
   await refused(unnumbered, glab('GET', '/api/v4/projects/99/issues/421'), pushed());
   await refused(unnumbered, glab('POST', `${P}/merge_requests`, create), pushed());
   await allowed(unnumbered, glab('POST', `${P}/merge_requests`, { ...create, target_project_id: undefined }), pushed());
+});
+
+await check('a mutation the document check does not know never reaches a rule list', async () => {
+  // The catalogue beside a document check that knows one mutation only.
+  registerHooks({
+    resolve(specifier, context, next) {
+      if (specifier !== './graphql.js' || !context.parentURL?.endsWith('/rules.js?few')) return next(specifier, context);
+      return { url: 'data:text/javascript,export const knownMutations = () => ["addComment"];', shortCircuit: true };
+    },
+  });
+  const few = await import('../src/requester/rules.js?few');
+  const task = { forge: 'github', pool: 'github.com/o/r', identity: 'me' };
+  assert.equal(few.rulesFor({ ...task, kind: 'review', item: 'pr-578' }), null);
+  assert.equal(few.rulesFor({ ...task, kind: 'issues', item: 'issue-421' }), null);
+  assert.deepEqual(few.rulesFor({ ...task, kind: 'issues', item: 'issue-421', options: { noPRs: true } }).find((r) => r.graphql).graphql.mutations, ['addComment']);
+  assert.ok(few.rulesFor({ ...task, kind: 'investigate', item: 'job-q' }));
+  for (const kind of KINDS) {
+    for (const rules of [github(kind, { verdict: true, markReady: true }), gitlab(kind, { verdict: true, markReady: true })]) assert.ok(rules, kind);
+  }
 });

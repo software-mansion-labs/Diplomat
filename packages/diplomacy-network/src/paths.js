@@ -138,6 +138,9 @@ export const TOKEN_TTL_MS = num('DN_TOKEN_TTL_MS', 60 * 1000);
 // The largest push body (ref commands and pack) the push check reads. An `act` request
 // is capped at 48 MiB of JSON, which is 36 MiB once its base64 is undone.
 export const PUSH_MAX_BYTES = num('DN_PUSH_MAX_BYTES', 32 * 2 ** 20);
+// What a pushed pack may unfold to: the sizes of its objects added up, a delta counted as
+// its own bytes and as the object it builds. About what git holds in memory to index it.
+export const PUSH_UNPACKED_MAX_BYTES = num('DN_PUSH_UNPACKED_MAX_BYTES', 512 * 2 ** 20);
 // One git command of the push check, the fetch into the quarantine included.
 export const GIT_TIMEOUT_MS = num('DN_GIT_TIMEOUT_MS', 120 * 1000);
 

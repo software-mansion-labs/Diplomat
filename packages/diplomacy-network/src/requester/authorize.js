@@ -9,7 +9,7 @@
 // matches nothing is refused.
 
 import { checkGraphql, itemMismatch, searchConfined } from './graphql.js';
-import { checkAdvertise, checkPush } from './receivepack.js';
+import { checkAdvertise, checkPush, pushReport } from './receivepack.js';
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const HOST = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$/;
@@ -163,10 +163,10 @@ function normalise(request) {
   // The one place a forge defines an encoded slash: GitLab names a project by its
   // URL-encoded path, as the single segment after /api/v4/projects/.
   const gitlabProject = raw[0] === 'api' && raw[1] === 'v4' && raw[2] === 'projects';
-  raw.forEach((segment, i) => {
+  const decoded = raw.map((segment, i) => {
     if (segment === '') refuse('the path has an empty segment');
     if (segment === '.' || segment === '..') refuse('the path has a dot segment');
-    decode(segment, { slash: gitlabProject && i === 3 });
+    return decode(segment, { slash: gitlabProject && i === 3 });
   });
 
   const query = [];
@@ -191,7 +191,7 @@ function normalise(request) {
 
   if (typeof body !== 'string' || body.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(body)) refuse('the body is not base64');
   return {
-    host: host.toLowerCase(), method: method.toUpperCase(), rawPath, rawQuery, segments: raw, query,
+    host: host.toLowerCase(), method: method.toUpperCase(), rawPath, rawQuery, segments: raw, decoded, query,
     headers: lower, body: Buffer.from(body, 'base64'),
   };
 }
@@ -221,6 +221,8 @@ const sameJson = (a, b, fold) => {
   return a !== undefined && text(a) === text(b);
 };
 
+// Checks the query against the rule's pins and returns the names of the pinned
+// parameters the request gave.
 function checkQuery(rule, req) {
   const pins = rule.query || {};
   const seen = new Set();
@@ -230,10 +232,13 @@ function checkQuery(rule, req) {
     const pin = Object.hasOwn(pins, base) ? pins[base] : undefined;
     if (pin === undefined) {
       // A forge may read a write's parameters from the query as readily as from the
-      // body, so on a write an unnamed parameter would step around every body pin.
-      if (req.method !== 'GET') refuse(`the query parameter "${base}" is not part of this rule`);
+      // body, so on a write an unnamed parameter would step around every body pin. A read
+      // whose rule names its parameters takes those alone: one more can point it at
+      // another repository.
+      if (req.method !== 'GET' || rule.query) refuse(`the query parameter "${base}" is not part of this rule`);
       continue;
     }
+    if (pin === 'free') continue;
     if (name !== base || seen.has(base)) refuse(`the query parameter "${base}" must be given once, plainly`);
     seen.add(base);
     if (pin.equals !== undefined && value !== pin.equals) refuse(`the query parameter "${base}" must be "${pin.equals}"`);
@@ -244,8 +249,9 @@ function checkQuery(rule, req) {
     }
   }
   for (const [name, pin] of Object.entries(pins)) {
-    if (!pin.optional && !seen.has(name)) refuse(`the query parameter "${name}" is required`);
+    if (pin !== 'free' && !pin.optional && !seen.has(name)) refuse(`the query parameter "${name}" is required`);
   }
+  return seen;
 }
 
 function jsonBody(req) {
@@ -253,7 +259,9 @@ function jsonBody(req) {
   try { return parseStrictJson(req.body); } catch (err) { return refuse(`the body is not strict JSON: ${err.message}`); }
 }
 
-async function checkBodyPins(spec, req, ctx, effects) {
+// `given` names the pinned query parameters the request carries: a forge reads a member
+// from either place, so a required one may come as the parameter of the same name.
+async function checkBodyPins(spec, req, ctx, effects, given) {
   const body = req.body.length === 0 ? Object.create(null) : jsonBody(req);
   if (body === null || typeof body !== 'object' || Array.isArray(body)) refuse('the body is not a JSON object');
   for (const [key, value] of Object.entries(body)) {
@@ -265,16 +273,21 @@ async function checkBodyPins(spec, req, ctx, effects) {
     if (pin.prefix !== undefined && !(typeof value === 'string' && value.startsWith(pin.prefix))) refuse(`the body member "${key}" must start with "${pin.prefix}"`);
     if (pin.prose && !(typeof value === 'string' && !COMMAND_LINE.test(value))) refuse(`the body member "${key}" has a line starting with "/", which the forge would run as a command`);
     if (pin.created) effects.push({ pull: value });
-    if (pin.self) {
-      if (typeof ctx.self !== 'function') refuse('nothing here can tell which account this task acts as');
+    if (pin.assignees !== undefined) {
+      if (typeof ctx.self !== 'function' || typeof ctx.assignees !== 'function') refuse('nothing here can tell who is assigned, or which account this task acts as');
+      // The whole new list, as account ids. A lone 0 is how glab spells "nobody"; beside
+      // other ids the forge's reading of it is not written down.
+      const nobody = Array.isArray(value) && value.length === 1 && value[0] === 0;
+      if (!Array.isArray(value) || (!nobody && value.some((id) => !Number.isSafeInteger(id) || id <= 0))) refuse(`the body member "${key}" is not a list of account ids`);
       const me = await ctx.self();
-      const ids = Array.isArray(value) ? value : [value];
-      // 0 is how glab spells "nobody".
-      if (!me || ids.some((id) => id !== me.id && id !== 0)) refuse(`the body member "${key}" may only name this task's own account`);
+      const held = await ctx.assignees(pin.assignees);
+      if (!held) refuse(`#${pin.assignees} is not an issue the forge would show`);
+      const others = (ids) => [...new Set(ids.filter((id) => id !== me.id))].sort((a, b) => a - b).join(' ');
+      if (others(nobody ? [] : value) !== others(held)) refuse(`the body member "${key}" may only add or remove this task's own account`);
     }
   }
   for (const [key, pin] of Object.entries(spec)) {
-    if (pin !== 'free' && pin.required && !Object.hasOwn(body, key)) refuse(`the body member "${key}" is required`);
+    if (pin !== 'free' && pin.required && !Object.hasOwn(body, key) && !given.has(key)) refuse(`the body member "${key}" is required`);
   }
   return req.body.length === 0 ? req.body : Buffer.from(JSON.stringify(body));
 }
@@ -315,38 +328,100 @@ async function checkComment(spec, req, ctx) {
   if (spec.pending && comment.pending !== true) refuse(`comment ${id} is not part of a pending review`);
 }
 
-// Applies what an allowed request uses up to the key's state. Runs after the last await,
-// so two requests racing for the last free branch cannot both take it.
+// What a task has used of its allowances, in `ctx.state`:
+//   branches  the branches the forge accepted from it: its own, which it may move
+//   reserved  branches whose creation was sent and whose answer is not known to be a
+//             refusal: counted against `create`, and not its own
+//   pulls     the branches it opened a pull request from, or sent one for
+const pending = new WeakMap(); // an approved request -> what it holds of the task's state
+
+// Counts what an allowed request would use up, before it is sent. Runs after the last
+// await, so two requests racing for the last free branch cannot both take it.
 function settle(rule, effects, ctx) {
-  if (effects.length === 0) return;
+  if (effects.length === 0) return null;
   const state = ctx.state;
-  if (!state || typeof state !== 'object') refuse('this rule needs the key\'s state, and none was given');
-  state.branches ||= [];
-  const fresh = [];
+  if (!state || typeof state !== 'object') refuse('this rule needs the task\'s state, and none was given');
+  for (const list of ['branches', 'reserved', 'pulls']) state[list] ||= [];
+  const held = { state, branches: [], pulls: [], graphql: Boolean(rule.graphql) };
   for (const effect of effects) {
-    if (effect.branch !== undefined && !state.branches.includes(effect.branch) && !fresh.includes(effect.branch)) fresh.push(effect.branch);
-    if (effect.pull !== undefined && !(typeof effect.pull === 'string' && state.branches.includes(`refs/heads/${effect.pull}`))) {
-      refuse('a pull request may only be opened from a branch this task pushed');
+    if (effect.branch !== undefined && !held.branches.includes(effect.branch)) held.branches.push(effect.branch);
+    if (effect.pull !== undefined) {
+      if (typeof effect.pull !== 'string' || !state.branches.includes(`refs/heads/${effect.pull}`)) refuse('a pull request may only be opened from a branch this task pushed');
+      if (state.pulls.includes(effect.pull) || held.pulls.includes(effect.pull)) refuse(`this task has opened its pull request from ${effect.pull}`);
+      held.pulls.push(effect.pull);
     }
   }
-  if (fresh.length > 0 && state.branches.length + fresh.length > rule.create) refuse(`this task may create ${rule.create} branch(es) and no more`);
-  state.branches.push(...fresh);
+  // A creation sent again is the one already counted.
+  held.fresh = held.branches.filter((ref) => !state.branches.includes(ref) && !state.reserved.includes(ref));
+  const has = [...state.branches, ...state.reserved];
+  if (held.fresh.length > 0 && has.length + held.fresh.length > rule.create) refuse(`this task may create ${rule.create} branch(es); it has ${has.join(', ') || 'none'}`);
+  state.reserved.push(...held.fresh);
+  state.pulls.push(...held.pulls);
+  return held;
+}
+
+const drop = (list, items) => { for (const item of items) if (list.includes(item)) list.splice(list.indexOf(item), 1); };
+
+/// Tells the task's state what became of a request `authorize` allowed: `answer` is the
+/// forge's `{ status, body }` (`body` a Buffer), or undefined when no answer came. A
+/// branch is the task's own once the forge's report says "ok" for it; what the forge
+/// refused is given back to the allowance; anything else stays counted and is not owned.
+export function conclude(request, answer) {
+  const held = pending.get(request);
+  if (!held) return;
+  pending.delete(request);
+  const { state } = held;
+  const refused = answer !== undefined && answer.status >= 400 && answer.status < 500;
+  if (held.branches.length > 0) {
+    const report = answer?.status === 200 ? pushReport(answer.body) : null;
+    const accepted = held.branches.filter((ref) => report?.ok.includes(ref));
+    // Only what this request counted is given back: a creation sent before, whose answer
+    // never came, may be why the forge declines this one.
+    drop(state.reserved, [...accepted, ...held.fresh.filter((ref) => refused || report?.ng.includes(ref))]);
+    for (const ref of accepted) if (!state.branches.includes(ref)) state.branches.push(ref);
+  }
+  if (held.pulls.length > 0) {
+    let failed = refused;
+    if (!failed && held.graphql && answer?.status === 200) {
+      // GraphQL words a refusal as 200 with an error list and nothing where the pull request would be.
+      let said = null;
+      try { said = JSON.parse(answer.body.toString('utf8')); } catch {}
+      failed = Array.isArray(said?.errors) && said.errors.length > 0 && Object.values(said.data ?? {}).every((v) => v === null);
+    }
+    if (failed) drop(state.pulls, held.pulls);
+  }
+}
+
+// A lookup that fails has answered nothing, and nothing is never permission: its failure
+// is the refusal, with the lookup's own words as the reason.
+function asking(ctx) {
+  const out = {};
+  for (const [key, value] of Object.entries(ctx)) {
+    out[key] = typeof value !== 'function' ? value : async (...args) => {
+      try { return await value.apply(ctx, args); } catch (err) { return refuse(String(err?.message ?? err).replace(/^forge: /, '')); }
+    };
+  }
+  return out;
 }
 
 /// Decides one request against a task's rules. `request` is `{ host, method, path,
-/// headers, body }` as the executor sent it (path with its query, body base64). `ctx`
+/// headers, body }` as the executor sent it (path with its query, body base64). `given`
 /// carries what the deep checks ask the forge and the machine: `resolveNode(id)`,
-/// `pull(number)`, `pullsByHead({ repo, ref })`, `comment(id)`, `assignees(number)`,
-/// `self()`, `currentRef`, `fetch`, `checkout` and the key's mutable `state`
-/// (`forge.context()` builds one).
+/// `pull(number)`, `pullsByHead(ref)`, `comment(id)`, `assignees(number)`, `self()`,
+/// `repository()`, `branch(ref)`, `fetch`, `checkout` and the task's mutable `state`
+/// (`forge.context()` builds one). A lookup that throws refuses the request.
 /// Resolves to `{ ok: true, rule, request }` - `request` is the one to perform, in the
-/// single spelling that was checked - or `{ ok: false, reason }`.
-export async function authorize(rules, request, ctx = {}) {
+/// single spelling that was checked - or `{ ok: false, reason }`. What an allowed request
+/// would use up is counted in `state` at once; `conclude` settles it with the forge's answer.
+export async function authorize(rules, request, given = {}) {
   try {
+    const ctx = asking(given);
     const req = normalise(request);
     const rule = (Array.isArray(rules) ? rules : []).find((r) => r.host === req.host && r.method === req.method && pathMatches(r, req.segments));
     if (!rule) refuse('no rule of this task allows the request');
-    checkQuery(rule, req);
+    if (rule.deny !== undefined) refuse(rule.deny);
+    for (const [mark, why] of Object.entries(rule.without || {})) if (req.decoded.some((segment) => segment.includes(mark))) refuse(why);
+    const named = checkQuery(rule, req);
     const encoding = lower(req.headers['content-encoding']);
     if (req.body.length > 0 && encoding !== '' && encoding !== 'identity') refuse('an encoded body cannot be checked');
 
@@ -371,11 +446,11 @@ export async function authorize(rules, request, ctx = {}) {
       effects.push(...verdict.effects);
       body = Buffer.from(JSON.stringify(payload));
     } else if (rule.body) {
-      body = await checkBodyPins(rule.body, req, ctx, effects);
+      body = await checkBodyPins(rule.body, req, ctx, effects, named);
     } else if (body.length > 0) {
       refuse('this rule allows no body');
     }
-    settle(rule, effects, ctx);
+    const held = settle(rule, effects, ctx);
 
     const out = {
       host: req.host,
@@ -386,6 +461,7 @@ export async function authorize(rules, request, ctx = {}) {
     };
     if (rule.pick) out.pick = rule.pick;
     approved.add(out);
+    if (held) pending.set(out, held);
     return { ok: true, rule, request: out };
   } catch (err) {
     if (err instanceof Refusal) return { ok: false, reason: err.message };

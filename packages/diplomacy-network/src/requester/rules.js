@@ -21,13 +21,17 @@
 //   conflicts   -                push fast-forward commits to its PR's head branch.
 //   issues      -                on its issue: assign and unassign the task's own account,
 //                                comment; push ONE new branch and fast-forward it; open
-//                                draft pull requests from that branch.
+//                                one draft pull request from that branch.
 //               assign: false    no assignment.        comment: false    no comment.
 //               noPRs            the comment only: no assignment, no push, no pull request.
 //   audit       -                push up to AUDIT_BRANCHES new branches and fast-forward
-//                                them; open draft pull requests from them.
+//                                them; open one draft pull request from each.
 //               readOnly         nothing.
 //   investigate -                nothing.
+//
+// "One new branch" is counted for the task, across every key issued for it (`authorize`
+// keeps the count in the task's state). No push moves or creates the repository's default
+// branch or a branch the forge reports as protected, whatever the rule covers.
 //
 // An item `job-<id>` is work not tied to one number. What that does to each kind:
 //
@@ -39,7 +43,7 @@
 //   conflicts   every open PR opened by `options.author`, or by the task's account when
 //               the job names nobody: a push must go to the head branch of such a PR.
 //   issues      the issue-pinned writes (assignment, comment) are omitted; the one branch
-//               and its draft pull requests stay. Diplomat makes one job per issue, so a
+//               and its draft pull request stay. Diplomat makes one job per issue, so a
 //               job without a number has no issue of its own to write on.
 //   audit, investigate   unchanged: neither is about one number.
 //
@@ -47,12 +51,22 @@
 // - Reads are an allow-list of sub-trees, not "everything under the repository": Actions
 //   secrets and variables, hooks, deploy keys, collaborators, environments, security
 //   alerts and branch protection are settings a task has no use for and are not listed.
+// - A read stays in the pool's repository. Inside the listed sub-trees, the routes whose
+//   answer is another repository's are refused by rules of their own (`deny`), a compare
+//   takes two refs of this repository, and a route that takes query parameters names
+//   them, since one more could point it elsewhere. What the forge serves under the
+//   repository's own paths by object id - on GitHub, the commits of its forks - no rule
+//   can tell apart.
+// - The answer about the repository itself, and about a branch, goes out cut to what a
+//   job needs (`pick`): the whole answer holds a clone token or a runner registration
+//   token, the requester's permissions and the protection settings.
 // - A push is addressed by the pull request, not by a branch name: the head branch is
-//   whatever the forge says that PR's head is when the push arrives. On GitHub that may
-//   be a branch of a fork, and then the fork is where the push goes; on GitLab only a
-//   merge request whose source branch is in the pool's own project can be pushed to.
+//   whatever the forge says that PR's head is when the push arrives. It goes to the
+//   pool's repository and to no other: a pull request whose head branch is in a fork
+//   cannot be pushed to, on either forge.
 // - A push may not change CI definitions (`denyPaths`) except to what the forge already
-//   holds, which is what merging the base branch does.
+//   holds, which is what merging the base branch does. What a definition runs or includes
+//   from elsewhere in the repository is a file like any other.
 // - A review is written through the review lifecycle the review prompt prescribes; the
 //   one-call shortcuts (GraphQL addPullRequestReview, a top-level PR comment) are not
 //   listed, and a `review` task's replies are made inside review threads only.
@@ -74,14 +88,47 @@ const GITHUB_GIT = 'github.com';
 
 // The sub-trees of a GitHub repository a task may read.
 const GITHUB_READS = [
-  'pulls/**', 'issues/**', 'commits/**', 'compare/**', 'contents/**', 'git/**', 'branches', 'branches/*', 'tags',
+  'pulls/**', 'issues/**', 'commits/**', 'contents/**', 'git/**', 'tags',
   'releases/**', 'labels/**', 'milestones/**', 'check-runs/**', 'check-suites/**', 'statuses/**', 'comments/**',
-  'assignees/**', 'languages', 'topics', 'contributors', 'readme/**', 'license', 'events', 'tarball/**', 'zipball/**',
+  'languages', 'topics', 'contributors', 'readme/**', 'license', 'events', 'tarball/**', 'zipball/**',
   'actions/runs/**', 'actions/jobs/**', 'actions/workflows/**', 'actions/artifacts/**',
 ];
+// Reads inside those sub-trees whose answer is not the repository's own: an issue's
+// timeline, sub-issues, parent and dependencies carry the issues and pull requests of
+// other repositories that refer to it.
+const GITHUB_ELSEWHERE = ['issues/*/timeline', 'issues/*/sub_issues', 'issues/*/parent', 'issues/*/dependencies/**'];
+const GITHUB_ELSEWHERE_WHY = 'this answer holds issues and pull requests of other repositories';
+// What a task is told of the repository itself: not the clone token, the requester's
+// permissions on it, its security settings or the repository it was forked from.
+const GITHUB_REPO_PICK = [
+  'id', 'node_id', 'name', 'full_name', 'owner', 'private', 'visibility', 'fork', 'archived', 'disabled', 'is_template',
+  'html_url', 'url', 'clone_url', 'ssh_url', 'git_url', 'description', 'homepage', 'default_branch', 'language', 'topics',
+  'has_issues', 'has_projects', 'has_wiki', 'has_discussions', 'license', 'created_at', 'updated_at', 'pushed_at', 'size',
+  'open_issues_count',
+];
+// A branch without its protection settings.
+const GITHUB_BRANCH_PICK = ['name', 'commit', 'protected'];
 const GITLAB_READS = [
   'merge_requests/**', 'issues/**', 'repository/**', 'jobs/**', 'pipelines', 'pipelines/*', 'pipelines/*/jobs',
   'labels/**', 'milestones/**', 'releases/**',
+];
+// The same on GitLab, by reason: answers that hold other projects' issues and merge
+// requests, the address a person posted from, and a GET that writes a ref.
+const GITLAB_DENIED = [
+  [['merge_requests/*/closes_issues', 'merge_requests/*/related_issues', 'merge_requests/*/blocks', 'merge_requests/*/blockees',
+    'issues/*/links', 'issues/*/related_merge_requests', 'issues/*/closed_by'], 'this answer holds issues and merge requests of other projects'],
+  [['issues/*/user_agent_detail'], 'this answer holds the address a person posted from'],
+  [['merge_requests/*/merge_ref'], 'this read writes a ref on the forge'],
+];
+// What a task is told of the project itself: not its runners' registration token, its
+// import URL (which may carry a credential), its service desk address, the requester's
+// permissions on it or the project it was forked from.
+const GITLAB_PROJECT_PICK = [
+  'id', 'name', 'name_with_namespace', 'path', 'path_with_namespace', 'description', 'default_branch', 'visibility', 'web_url',
+  'ssh_url_to_repo', 'http_url_to_repo', 'readme_url', 'topics', 'namespace', 'archived', 'empty_repo', 'created_at',
+  'last_activity_at', 'issues_enabled', 'merge_requests_enabled', 'jobs_enabled', 'merge_method', 'squash_option',
+  'remove_source_branch_after_merge', 'only_allow_merge_if_pipeline_succeeds', 'only_allow_merge_if_all_discussions_are_resolved',
+  'license', 'license_url',
 ];
 const GITHUB_ROOTS = ['repository', 'viewer', 'rateLimit', '__type', 'search', 'node'];
 const GITLAB_ROOTS = ['project', 'currentUser'];
@@ -128,13 +175,12 @@ function github({ kind, options, target, item, me }) {
   let graphqlItem;
 
   // Smart HTTP addresses a repository with or without ".git".
-  const push = (more, paths) => {
-    for (const base of paths) {
+  const push = (more) => {
+    for (const base of [`/${owner}/${name}.git`, `/${owner}/${name}`]) {
       rules.push({ host: GITHUB_GIT, method: 'GET', path: `${base}/info/refs`, fold: [0, 1], query: { service: { equals: 'git-receive-pack' } }, git: 'receive-pack', repo: target.repo, ...more });
       rules.push({ host: GITHUB_GIT, method: 'POST', path: `${base}/git-receive-pack`, fold: [0, 1], git: 'receive-pack', repo: target.repo, denyPaths: ['.github/workflows/**'], ...more });
     }
   };
-  const pushToPool = (more) => push(more, [`/${owner}/${name}.git`, `/${owner}/${name}`]);
   const draftPulls = () => {
     mutations.push('createPullRequest');
     rules.push(api('POST', `${repo}/pulls`, { body: {
@@ -163,7 +209,7 @@ function github({ kind, options, target, item, me }) {
       mutations.push('addPullRequestReviewThreadReply', 'resolveReviewThread');
       if (options.markReady === true) mutations.push('markPullRequestReadyForReview');
     }
-    if (kind !== 'review') push({ head: who }, ['/*/*']);
+    if (kind !== 'review') push({ head: who });
   } else if (kind === 'issues') {
     if (item.type === 'pr') return null;
     if (item.type === 'issue') {
@@ -180,22 +226,30 @@ function github({ kind, options, target, item, me }) {
       }
     }
     if (options.noPRs !== true) {
-      pushToPool({ refs: ['refs/heads/**'], create: 1 });
+      push({ refs: ['refs/heads/**'], create: 1 });
       draftPulls();
     }
   } else if (kind === 'audit') {
     if (options.readOnly !== true) {
-      pushToPool({ refs: ['refs/heads/**'], create: AUDIT_BRANCHES });
+      push({ refs: ['refs/heads/**'], create: AUDIT_BRANCHES });
       draftPulls();
     }
   } else if (kind !== 'investigate') {
     return null;
   }
 
-  rules.push(api('GET', repo));
+  rules.push(api('GET', repo, { pick: GITHUB_REPO_PICK }));
+  for (const tree of GITHUB_ELSEWHERE) rules.push(api('GET', `${repo}/${tree}`, { deny: GITHUB_ELSEWHERE_WHY }));
+  // "base...head" names a fork's branch as "owner:branch" or "owner:repo:branch"; a ref
+  // of this repository holds no colon.
+  rules.push(api('GET', `${repo}/compare/**`, { without: { ':': 'a compare whose side holds ":" names another repository' } }));
+  rules.push(api('GET', `${repo}/branches`, { pick: GITHUB_BRANCH_PICK }), api('GET', `${repo}/branches/*`, { pick: GITHUB_BRANCH_PICK }));
   for (const tree of GITHUB_READS) rules.push(api('GET', `${repo}/${tree}`));
   rules.push({ host: GITHUB_API, method: 'GET', path: '/user', pick: ['login', 'id', 'node_id', 'type', 'name', 'html_url'] });
-  rules.push({ host: GITHUB_API, method: 'GET', path: '/search/issues', query: { q: { search: target.repo } } });
+  // A search takes its query and how the answer is paged and ordered.
+  rules.push({ host: GITHUB_API, method: 'GET', path: '/search/issues', query: {
+    q: { search: target.repo }, advanced_search: 'free', page: 'free', per_page: 'free', sort: 'free', order: 'free',
+  } });
   rules.push({ host: GITHUB_API, method: 'POST', path: '/graphql', graphql: {
     forge: 'github', repo: target.repo, roots: GITHUB_ROOTS, mutations, identity: me, ...(graphqlItem ? { item: graphqlItem } : {}),
   } });
@@ -217,7 +271,8 @@ function gitlab({ kind, options, target, item, me }) {
   const push = (more) => {
     for (const base of [`/${target.repo}.git`, `/${target.repo}`]) {
       rules.push({ host: target.host, method: 'GET', path: `${base}/info/refs`, fold: gitFold, query: { service: { equals: 'git-receive-pack' } }, git: 'receive-pack', repo: target.repo, ...more });
-      rules.push({ host: target.host, method: 'POST', path: `${base}/git-receive-pack`, fold: gitFold, git: 'receive-pack', repo: target.repo, denyPaths: ['.gitlab-ci.yml'], ...more });
+      // The push check adds the file the project is set to read its CI configuration from.
+      rules.push({ host: target.host, method: 'POST', path: `${base}/git-receive-pack`, fold: gitFold, git: 'receive-pack', repo: target.repo, denyPaths: ['.gitlab-ci.yml', '.gitlab/ci/**'], ...more });
     }
   };
   // GitLab runs a line starting with "/" in a note or description as a quick action
@@ -254,7 +309,8 @@ function gitlab({ kind, options, target, item, me }) {
       }
     } else if (kind === 'review-own') {
       each('POST', `${mr}/discussions/*/notes`, { ...asked, body: { body: prose } });
-      each('PUT', `${mr}/discussions/*`, { ...asked, query: { resolved: { equals: 'true', optional: true } }, body: { resolved: { oneOf: [true, 'true'] } } });
+      // GitLab reads `resolved` from the query or from the body; one of them must say it.
+      each('PUT', `${mr}/discussions/*`, { ...asked, query: { resolved: { equals: 'true', optional: true } }, body: { resolved: { oneOf: [true, 'true'], required: true } } });
       if (options.markReady === true) each('PUT', mr, { ...asked, body: { title: 'free' } });
     }
     if (kind !== 'review') push({ head: who });
@@ -262,7 +318,7 @@ function gitlab({ kind, options, target, item, me }) {
     if (item.type === 'pr') return null;
     if (item.type === 'issue') {
       const issue = `/issues/${item.number}`;
-      if (options.noPRs !== true && options.assign !== false) each('PUT', issue, { body: { assignee_ids: { self: true, required: true } } });
+      if (options.noPRs !== true && options.assign !== false) each('PUT', issue, { body: { assignee_ids: { assignees: item.number, required: true } } });
       if (options.comment !== false) each('POST', `${issue}/notes`, { body: { body: prose } });
     }
     if (options.noPRs !== true) {
@@ -278,7 +334,10 @@ function gitlab({ kind, options, target, item, me }) {
     return null;
   }
 
-  each('GET', '');
+  each('GET', '', { pick: GITLAB_PROJECT_PICK });
+  for (const [trees, why] of GITLAB_DENIED) for (const tree of trees) each('GET', `/${tree}`, { deny: why });
+  // A compare takes two refs of this project; `from_project_id` would make one another project's.
+  each('GET', '/repository/compare', { query: { from: 'free', to: 'free', straight: 'free', unidiff: 'free' } });
   for (const tree of GITLAB_READS) each('GET', `/${tree}`);
   rules.push({ host: target.host, method: 'GET', path: '/api/v4/user', pick: ['id', 'username', 'name', 'state', 'web_url'] });
   rules.push({ host: target.host, method: 'POST', path: '/api/graphql', graphql: { forge: 'gitlab', repo: target.repo, roots: GITLAB_ROOTS, mutations: [], identity: me } });

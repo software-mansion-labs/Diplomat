@@ -303,3 +303,58 @@ await check('the lapse of a claim made for an offer that was taken back is no fa
   await w.run(LEASE_SECS + 900);
   assert.deepEqual([w.task(req, taskId).state, w.offerRow(req, taskId).attempt], ['available', 1]);
 });
+
+await check('what a task has used belongs to the task: every key issued for it carries on from the last, and a restart forgets none of it', async () => {
+  const w = createWorld({ seed: 61 });
+  const all = await w.pool(['req', 'e1', 'e2'], { e1: { slots: 1 } });
+  const [req, e1, e2] = all;
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => e1.executor.jobOf(taskId), { what: 'the first job' });
+  const first = e1.executor.jobOf(taskId);
+  const get = (leaf) => forgeRequest('GET', `/repos/o/r/pr-1/${leaf}`);
+  const asked = () => req.requester.calls.filter((c) => c.op === 'authorize').map((c) => c.asked);
+  for (const leaf of ['a', 'b']) assert.equal((await w.wait(first.act(get(leaf)))).status, 200);
+  const firstKey = w.stored(req, 'keys').issued[taskId].capability.keyId;
+
+  // The run fails, its key dies, and another machine takes the task under a key of its own.
+  e1.executor.end(first.runId, { ok: false, summary: 'out of time' });
+  await w.net.until(() => w.offerRow(req, taskId).attempt === 2, { what: 'a second attempt' });
+  assert.equal(w.stored(req, 'keys').issued[taskId], undefined);
+  e2.slots = 1;
+  e2.node.admit({ slots: 1 });
+  await w.net.until(() => e2.executor.jobOf(taskId), { what: 'the second job' });
+  const second = e2.executor.jobOf(taskId);
+  assert.equal((await w.wait(second.act(get('c')))).status, 200);
+  const key = w.stored(req, 'keys').issued[taskId];
+  assert.notEqual(key.capability.keyId, firstKey, 'a new key');
+  assert.deepEqual(asked(), [1, 2, 3], 'the second key does not start from nothing');
+  assert.deepEqual(w.stored(req, 'offers')[taskId].used, { asked: 3 }, 'it is kept with the offer');
+  assert.deepEqual(Object.keys(key).sort(), ['capability', 'round', 'secret', 'seq'], 'and not with the key');
+
+  // What the rules counted is on disk before the request leaves: a machine that dies in between forgets nothing.
+  const { perform } = req.requester;
+  let onDisk;
+  req.requester.perform = function sent(...args) {
+    onDisk = w.stored(req, 'offers')[taskId].used;
+    return perform.apply(this, args);
+  };
+  assert.equal((await w.wait(second.act(get('d')))).status, 200);
+  req.requester.perform = perform;
+  assert.deepEqual(onDisk, { asked: 4 });
+
+  await w.restart(req);
+  assert.equal((await w.wait(second.act(get('d')))).status, 200);
+  assert.deepEqual(asked(), [1, 2, 3, 4, 5]);
+
+  // A store that holds an offer without the member, and a key with a state of its own, is read all the same.
+  const offers = w.stored(req, 'offers');
+  delete offers[taskId].used;
+  req.disk.write('offers', JSON.stringify(offers));
+  const keys = w.stored(req, 'keys');
+  keys.issued[taskId].state = { asked: 40 };
+  req.disk.write('keys', JSON.stringify(keys));
+  await w.restart(req);
+  assert.equal((await w.wait(second.act(get('e')))).status, 200);
+  assert.deepEqual(asked(), [1, 2, 3, 4, 5, 1]);
+  assert.deepEqual(w.stored(req, 'offers')[taskId].used, { asked: 1 });
+});

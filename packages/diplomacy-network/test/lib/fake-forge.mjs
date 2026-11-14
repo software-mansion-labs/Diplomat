@@ -96,7 +96,8 @@ function project(doc, vars, selections, data) {
 
 /// Starts the forge. `forge.log` is every request it received (`{ host, method, path,
 /// headers, body }`); `forge.data` is what its APIs answer from and may be edited;
-/// `forge.route(host, method, pattern, fn)` adds an answer of the test's own;
+/// `forge.route(host, method, pattern, fn)` adds an answer of the test's own and returns
+/// the function that takes it away again;
 /// `forge.bare(repo)` creates the bare repository smart HTTP serves at `/<repo>.git`;
 /// `forge.tokens` is the set of GitHub tokens it takes, which a test may add to;
 /// `forge.env` is the environment a test must set before it imports the daemon's sources.
@@ -111,7 +112,9 @@ export async function startFakeForge() {
     viewer,
     // GraphQL node ids -> the object `node(id:)` returns.
     nodes: { U_me: viewer },
-    // "owner/name" -> { id, pulls: { number: {...} }, issues: { number: {...} } }
+    // "owner/name" -> { id, pulls: { number: {...} }, issues: { number: {...} } }, and what
+    // a test sets of a repository's settings: defaultBranch, protected (branch names),
+    // ciConfigPath (GitLab).
     repos: {},
     // REST review comment id -> node id
     comments: {},
@@ -171,6 +174,20 @@ export async function startFakeForge() {
     if (!repo) return { status: 404, json: { message: 'Not Found' } };
     const rest = m[2] || '';
     let x;
+    if (method === 'GET' && rest === '') {
+      const [owner, name] = m[1].split('/');
+      return { status: 200, json: {
+        id: 1, node_id: repo.id, name, full_name: m[1], owner: { login: owner }, private: true, visibility: 'private', fork: false,
+        html_url: `https://github.com/${m[1]}`, clone_url: `https://github.com/${m[1]}.git`, default_branch: repo.defaultBranch || 'main',
+        permissions: { admin: true, push: true, pull: true }, temp_clone_token: 'TEMPCLONETOKEN', allow_auto_merge: true,
+        security_and_analysis: { secret_scanning: { status: 'disabled' } }, parent: { full_name: 'upstream/private-parent' },
+      } };
+    }
+    if (method === 'GET' && (x = /^\/branches\/(.+)$/.exec(rest))) {
+      const branch = decodeURIComponent(x[1]);
+      const sha = revParse(m[1], `refs/heads/${branch}`);
+      return sha ? { status: 200, json: { name: branch, commit: { sha }, protected: (repo.protected || []).includes(branch) } } : { status: 404, json: { message: 'Branch not found' } };
+    }
     if (method === 'GET' && (x = /^\/pulls\/(\d+)$/.exec(rest))) {
       const p = repo.pulls?.[x[1]];
       return p ? { status: 200, json: restPull(m[1], p) } : { status: 404, json: { message: 'Not Found' } };
@@ -187,10 +204,6 @@ export async function startFakeForge() {
     if (method === 'GET' && (x = /^\/pulls\/comments\/(\d+)$/.exec(rest))) {
       return data.comments[x[1]] ? { status: 200, json: { id: Number(x[1]), node_id: data.comments[x[1]] } } : { status: 404, json: { message: 'Not Found' } };
     }
-    if (method === 'GET' && (x = /^\/git\/ref\/(heads\/.+)$/.exec(rest))) {
-      const sha = revParse(m[1], `refs/${decodeURIComponent(x[1])}`);
-      return sha ? { status: 200, json: { ref: `refs/${x[1]}`, object: { sha, type: 'commit' } } } : { status: 404, json: { message: 'Not Found' } };
-    }
     if (method === 'GET') return { status: 200, json: { path: pathname, ok: true }, headers: { link: '<https://api.github.com/next>; rel="next"', etag: '"abc"', 'x-ratelimit-remaining': '4999', 'x-github-request-id': 'REQ1', 'set-cookie': 'session=forge', 'www-authenticate': 'Basic realm="x"' } };
     return { status: method === 'DELETE' ? 204 : 201, json: method === 'DELETE' ? null : { id: 1, node_id: 'PRR_1', state: 'PENDING', html_url: 'https://github.com/o/r/pull/9', number: 9 } };
   }
@@ -206,7 +219,16 @@ export async function startFakeForge() {
     const rest = m[2] || '';
     const mr = (p) => ({ iid: p.number, state: (p.state || 'open') === 'open' ? 'opened' : p.state, draft: p.draft === true, author: { username: p.author }, source_branch: p.head, target_branch: p.base || 'main', source_project_id: p.fork ? 1234 : repo.projectId, target_project_id: repo.projectId });
     let x;
-    if (method === 'GET' && rest === '') return { status: 200, json: { id: repo.projectId, path_with_namespace: repoName, default_branch: 'main', merge_requests_enabled: true, web_url: `https://${GITLAB_HOST}/${repoName}` } };
+    if (method === 'GET' && rest === '') {
+      return { status: 200, json: {
+        id: repo.projectId, path_with_namespace: repoName, default_branch: repo.defaultBranch || 'main', merge_requests_enabled: true, web_url: `https://${GITLAB_HOST}/${repoName}`,
+        ci_config_path: repo.ciConfigPath ?? null, runners_token: 'GR1348941runnerstoken', service_desk_address: 'desk@example.com', import_url: 'https://user:pass@elsewhere.example/x.git',
+        forked_from_project: { path_with_namespace: 'upstream/private-parent' }, permissions: { project_access: { access_level: 40 } },
+      } };
+    }
+    if (method === 'GET' && (x = /^\/issues\/(\d+)$/.exec(rest)) && repo.issues?.[x[1]]) {
+      return { status: 200, json: { iid: Number(x[1]), assignees: (repo.issues[x[1]].assigneeIds || []).map((id) => ({ id, username: `user${id}` })) } };
+    }
     if (method === 'GET' && (x = /^\/merge_requests\/(\d+)$/.exec(rest))) {
       const p = repo.pulls?.[x[1]];
       return p ? { status: 200, json: mr(p) } : { status: 404, json: { message: '404 Not found' } };
@@ -217,7 +239,8 @@ export async function startFakeForge() {
     }
     if (method === 'GET' && (x = /^\/repository\/branches\/(.+)$/.exec(rest))) {
       const sha = revParse(repoName, `refs/heads/${decodeURIComponent(x[1])}`);
-      return sha ? { status: 200, json: { name: decodeURIComponent(x[1]), commit: { id: sha } } } : { status: 404, json: { message: '404 Branch Not Found' } };
+      const branch = decodeURIComponent(x[1]);
+      return sha ? { status: 200, json: { name: branch, commit: { id: sha }, protected: (repo.protected || []).includes(branch), default: branch === (repo.defaultBranch || 'main') } } : { status: 404, json: { message: '404 Branch Not Found' } };
     }
     return { status: method === 'POST' ? 201 : 200, json: { path: pathname, ok: true, id: 1, iid: 5 } };
   }
@@ -302,7 +325,11 @@ export async function startFakeForge() {
       ...fakeTools(root),
       DN_FORGE_ORIGINS: JSON.stringify(Object.fromEntries(HOSTS.map((h) => [h, `${base}/${h}`]))),
     },
-    route(host, method, pattern, fn) { routes.push({ host, method, pattern, fn }); },
+    route(host, method, pattern, fn) {
+      const added = { host, method, pattern, fn };
+      routes.push(added);
+      return () => routes.splice(routes.indexOf(added), 1);
+    },
     /// Adds a pull request (GitLab: merge request) and the nodes a review of it has.
     pull(repoName, p) {
       const repo = data.repos[repoName];
