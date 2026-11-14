@@ -33,6 +33,7 @@ FULL_SNAPSHOT = """
   "model": { "state": "missing", "detail": "no credential" },
   "admit": { "slots": 2, "at": 1794000290, "reason": "" },
   "pools": [ { "id": "github.com/o/r", "path": "/w/r", "identity": "octocat", "hash": "h1",
+      "left": false,
       "members": [ { "pk": "aaaabbbbccccdddd", "self": true, "maxAcceptedH": 24,
                      "lastSeen": 1794000299, "reachable": true },
                    { "pk": "eeeeffff00001111", "self": false, "maxAcceptedH": 12,
@@ -49,7 +50,9 @@ FULL_SNAPSHOT = """
               "pool": "github.com/o/r", "peer": "eeeeffff00001111", "container": "dn-h1-p1",
               "state": "finished", "startedAt": 1794000000, "endedAt": 1794000100, "exit": 0,
               "log": "/l/0" } ],
-  "offers": [ { "taskId": "github.com/o/r#review:pr-337@octocat", "state": "claimed",
+  "offers": [ { "taskId": "github.com/o/r#review:pr-337@octocat", "pool": "github.com/o/r",
+                "kind": "review", "item": "pr-337", "title": "Auto · Review · #337",
+                "state": "claimed", "reason": "second attempt", "offeredAt": 1794000050,
                 "executor": "eeeeffff00001111", "attempt": 1, "requests": 4, "refused": 1 },
               { "taskId": "github.com/o/r#issues:issue-9@octocat", "state": "claimed",
                 "executor": "9999888877776666", "attempt": 2, "requests": 0, "refused": 0 },
@@ -58,7 +61,8 @@ FULL_SNAPSHOT = """
                 "outcome": { "ok": true, "summary": "clean", "usd": 0.42, "tokens": 12345,
                              "runner": "claude", "model": "opus" }, "endedAt": 1794000100 },
               { "taskId": "github.com/o/r#conflicts:pr-5@octocat", "state": "pooled",
-                "executor": "", "attempt": 1, "requests": 0, "refused": 0 } ] }
+                "executor": "", "executorHere": false, "attempt": 1, "requests": 0,
+                "refused": 0 } ] }
 """
 
 PANEL, AUTO = autofix.SOURCE_PANEL, autofix.SOURCE_AUTO
@@ -307,13 +311,18 @@ def test_the_settings_keys():
 
 @pytest.mark.parametrize("stored,want", [
     (None, 12), (11, 12), (12, 12), (48, 48), (13.5, 12), (0, 12), (-5, 12),
-    (1e30, 12), (float("inf"), 12), (float("nan"), 12),
+    (719, 719), (720, 720), (721, 720),
+    (1e30, 720), (float("inf"), 12), (float("nan"), 12),
     # What only a JSON value can be: none of them is a whole number.
     (48.0, 48), (True, 12), ("24", 12), ([24], 12),
 ], ids=repr)
 def test_the_hours_clamp(stored, want):
     assert N.hours(stored) == want
     assert type(N.hours(stored)) is int
+
+
+def test_the_daemons_floor_and_ceiling():
+    assert (N.HOURS_FLOOR, N.HOURS_CEILING) == (12, 720)
 
 
 def test_the_routes_and_their_bodies():
@@ -327,6 +336,7 @@ def test_the_routes_and_their_bodies():
     assert N.invite_body("github.com/o/r", 600) == {"pool": "github.com/o/r",
                                                    "ttlSecs": 600}
     assert N.join_body("tok") == {"invite": "tok"}
+    assert N.join_body(pool="github.com/o/r") == {"pool": "github.com/o/r"}
     assert N.leave_body("github.com/o/r") == {"pool": "github.com/o/r"}
     assert N.stop_run_body("run-1") == {"runId": "run-1"}
 
@@ -342,8 +352,8 @@ def test_the_readmes_snapshot_decodes():
     assert snap.docker == N.Docker("building", "dn:1", "layer 3")
     assert snap.model == N.Service("missing", "no credential")
     assert snap.admit == N.AdmitState(2, 1794000290, "")
-    assert [(p.id, p.path, p.identity, p.hash) for p in snap.pools] == [
-        ("github.com/o/r", "/w/r", "octocat", "h1")]
+    assert [(p.id, p.path, p.identity, p.hash, p.left) for p in snap.pools] == [
+        ("github.com/o/r", "/w/r", "octocat", "h1", False)]
     assert snap.pools[0].members == (
         N.Member("aaaabbbbccccdddd", True, 24, 1794000299, True),
         N.Member("eeeeffff00001111", False, 12, 1794000200, False))
@@ -361,10 +371,33 @@ def test_the_readmes_snapshot_decodes():
     assert len(snap.offers) == 4
     assert snap.offers[0] == N.OfferState(
         task_id=TASK, state="claimed", executor="eeeeffff00001111", attempt=1,
-        requests=4, refused=1, outcome=None, ended_at=None)
+        requests=4, refused=1, outcome=None, ended_at=None, pool="github.com/o/r",
+        kind="review", item="pr-337", title="Auto · Review · #337",
+        reason="second attempt", executor_here=None, offered_at=1794000050)
     assert snap.offers[1].attempt == 2
     assert snap.offers[2].outcome == N.Outcome(True, "clean", 0.42, 12345, "claude", "opus")
     assert snap.offers[2].ended_at == 1794000100
+
+
+def test_a_pool_is_left_only_on_the_daemons_word():
+    left = N.Snapshot.parse(
+        '{"pools": [{"id": "a", "left": true}, {"id": "b"}, {"id": "c", "left": 1}]}')
+    assert [p.left for p in left.pools] == [True, False, False]
+
+
+def test_what_an_offer_row_carries_and_no_word_on_where_it_runs_is_not_a_no():
+    offered = N.Snapshot.parse(FULL_SNAPSHOT).offers
+    assert (offered[0].pool, offered[0].kind, offered[0].item, offered[0].title,
+            offered[0].reason, offered[0].offered_at) == (
+        "github.com/o/r", "review", "pr-337", "Auto · Review · #337", "second attempt",
+        1794000050)
+    assert (offered[0].executor_here, offered[3].executor_here) == (None, False)
+
+
+def test_an_offer_row_that_carries_none_of_it():
+    row = N.Snapshot.parse(FULL_SNAPSHOT).offers[1]
+    assert (row.pool, row.kind, row.item, row.title, row.reason, row.offered_at) == (
+        "", "", "", "", "", None)
 
 
 def test_only_a_preparing_or_running_run_holds_a_bay():
@@ -444,7 +477,8 @@ def test_a_snapshot_naming_no_offers_says_there_are_none():
 
 def test_here_by_a_live_run_by_the_pools_word_by_this_machines_own_key_and_not_here():
     assert N.tasks(N.Snapshot.parse(FULL_SNAPSHOT)).value == {
-        TASK: A.NetworkTask("claimed", "eeeeffff00001111", True),
+        TASK: A.NetworkTask("claimed", "eeeeffff00001111", True,
+                            reason="second attempt"),
         ISSUE_TASK: A.NetworkTask("claimed", "9999888877776666", True),
         AUDIT_TASK: A.NetworkTask("done", "aaaabbbbccccdddd", True, True),
         POOLED_TASK: A.NetworkTask("pooled")}
@@ -459,6 +493,25 @@ def test_a_run_that_ended_here_puts_no_claim_here_and_no_executor_is_not_this_ma
         """)
     assert N.tasks(elsewhere).value == {"t": A.NetworkTask("claimed", "bbbb"),
                                         "u": A.NetworkTask("done")}
+
+
+def test_the_offers_own_word_on_where_it_runs_wins_and_a_word_that_is_no_flag_is_none():
+    """Every road says ``t`` runs here and none says ``u`` does; the offers say
+    otherwise."""
+    told = N.Snapshot.parse("""
+        {"identity": {"pk": "aaaa"},
+         "pools": [{"id": "p", "tasks": [{"taskId": "t", "executorHere": true}]}],
+         "runs": [{"runId": "r", "taskId": "t", "state": "running"}],
+         "offers": [{"taskId": "t", "state": "claimed", "executor": "aaaa", "executorHere": false},
+                    {"taskId": "u", "state": "claimed", "executor": "bbbb", "executorHere": true},
+                    {"taskId": "v", "state": "claimed", "executor": "aaaa", "executorHere": 0},
+                    {"taskId": "w", "state": "failed", "reason": "the container exited 137"}]}
+        """)
+    assert N.tasks(told).value == {
+        "t": A.NetworkTask("claimed", "aaaa"),
+        "u": A.NetworkTask("claimed", "bbbb", True),
+        "v": A.NetworkTask("claimed", "aaaa", True),
+        "w": A.NetworkTask("failed", reason="the container exited 137")}
 
 
 # MARK: - network: what a run resolves to, and the projections

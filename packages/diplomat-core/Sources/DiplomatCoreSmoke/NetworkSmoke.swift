@@ -25,6 +25,7 @@ private let fullSnapshot = """
   "model": { "state": "missing", "detail": "no credential" },
   "admit": { "slots": 2, "at": 1794000290, "reason": "" },
   "pools": [ { "id": "github.com/o/r", "path": "/w/r", "identity": "octocat", "hash": "h1",
+      "left": false,
       "members": [ { "pk": "aaaabbbbccccdddd", "self": true, "maxAcceptedH": 24,
                      "lastSeen": 1794000299, "reachable": true },
                    { "pk": "eeeeffff00001111", "self": false, "maxAcceptedH": 12,
@@ -41,7 +42,9 @@ private let fullSnapshot = """
               "pool": "github.com/o/r", "peer": "eeeeffff00001111", "container": "dn-h1-p1",
               "state": "finished", "startedAt": 1794000000, "endedAt": 1794000100, "exit": 0,
               "log": "/l/0" } ],
-  "offers": [ { "taskId": "github.com/o/r#review:pr-337@octocat", "state": "claimed",
+  "offers": [ { "taskId": "github.com/o/r#review:pr-337@octocat", "pool": "github.com/o/r",
+                "kind": "review", "item": "pr-337", "title": "Auto · Review · #337",
+                "state": "claimed", "reason": "second attempt", "offeredAt": 1794000050,
                 "executor": "eeeeffff00001111", "attempt": 1, "requests": 4, "refused": 1 },
               { "taskId": "github.com/o/r#issues:issue-9@octocat", "state": "claimed",
                 "executor": "9999888877776666", "attempt": 2, "requests": 0, "refused": 0 },
@@ -50,7 +53,8 @@ private let fullSnapshot = """
                 "outcome": { "ok": true, "summary": "clean", "usd": 0.42, "tokens": 12345,
                              "runner": "claude", "model": "opus" }, "endedAt": 1794000100 },
               { "taskId": "github.com/o/r#conflicts:pr-5@octocat", "state": "pooled",
-                "executor": "", "attempt": 1, "requests": 0, "refused": 0 } ] }
+                "executor": "", "executorHere": false, "attempt": 1, "requests": 0,
+                "refused": 0 } ] }
 """
 
 func networkSmoke() throws {
@@ -225,10 +229,13 @@ func networkSmoke() throws {
           && NetworkSettings.requiredMinimumHKey == "networkRequiredMinimumH"
           && NetworkSettings.maximumAcceptedHKey == "networkMaximumAcceptedH")
     let hours: [(Double?, Int)] = [(nil, 12), (11, 12), (12, 12), (48, 48), (13.5, 12),
-                                   (0, 12), (-5, 12), (1e30, 12), (.infinity, 12), (.nan, 12)]
+                                   (0, 12), (-5, 12), (719, 719), (720, 720), (721, 720),
+                                   (1e30, 720), (.infinity, 12), (.nan, 12)]
     for (stored, want) in hours {
         check(NetworkSettings.hours(stored) == want, "hours(\(String(describing: stored))) is \(want)")
     }
+    check(NetworkSettings.hoursFloor == 12 && NetworkSettings.hoursCeiling == 720,
+          "the daemon's floor and ceiling")
     check([NetworkRoute.health, NetworkRoute.state, NetworkRoute.pools, NetworkRoute.admit,
            NetworkRoute.offer, NetworkRoute.withdraw, NetworkRoute.invite, NetworkRoute.join,
            NetworkRoute.leave, NetworkRoute.stopRun]
@@ -242,6 +249,7 @@ func networkSmoke() throws {
           && NSDictionary(dictionary: NetworkRoute.inviteBody(pool: "github.com/o/r", ttlSecs: 600))
               .isEqual(to: ["pool": "github.com/o/r", "ttlSecs": 600]))
     check(NetworkRoute.joinBody(invite: "tok") == ["invite": "tok"]
+          && NetworkRoute.joinBody(pool: "github.com/o/r") == ["pool": "github.com/o/r"]
           && NetworkRoute.leaveBody(pool: "github.com/o/r") == ["pool": "github.com/o/r"]
           && NetworkRoute.stopRunBody(run: "run-1") == ["runId": "run-1"])
 
@@ -259,7 +267,12 @@ func networkSmoke() throws {
           && snap.admit.slots == 2 && snap.admit.at == 1794000290 && snap.admit.reason == "")
     check(snap.pools.count == 1 && snap.pools[0].id == "github.com/o/r"
           && snap.pools[0].path == "/w/r" && snap.pools[0].identity == "octocat"
-          && snap.pools[0].hash == "h1")
+          && snap.pools[0].hash == "h1" && !snap.pools[0].left)
+    let left = NetworkSnapshot.parse(Data("""
+        {"pools": [{"id": "a", "left": true}, {"id": "b"}, {"id": "c", "left": 1}]}
+        """.utf8))
+    check(left?.pools.map(\.left) == [true, false, false],
+          "a pool is left only on the daemon's word")
     let members = snap.pools[0].members
     check(members.map(\.pk) == ["aaaabbbbccccdddd", "eeeeffff00001111"]
           && members.map(\.isSelf) == [true, false]
@@ -286,6 +299,14 @@ func networkSmoke() throws {
           && offered[0].state == "claimed" && offered[0].executor == "eeeeffff00001111"
           && offered[0].attempt == 1 && offered[0].requests == 4 && offered[0].refused == 1
           && offered[0].outcome == nil && offered[0].endedAt == nil && offered[1].attempt == 2)
+    check(offered[0].pool == "github.com/o/r" && offered[0].kind == "review"
+          && offered[0].item == "pr-337" && offered[0].title == "Auto · Review · #337"
+          && offered[0].reason == "second attempt" && offered[0].offeredAt == 1794000050
+          && offered[0].executorHere == nil && offered[3].executorHere == false,
+          "what an offer row carries, and no word on where it runs is not a no")
+    check(offered[1].pool == "" && offered[1].kind == "" && offered[1].item == ""
+          && offered[1].title == "" && offered[1].reason == "" && offered[1].offeredAt == nil,
+          "an offer row that carries none of it")
     let outcome = offered[2].outcome
     check(outcome?.ok == true && outcome?.summary == "clean" && outcome?.usd == 0.42
           && outcome?.tokens == 12345 && outcome?.runner == "claude"
@@ -348,7 +369,8 @@ func networkSmoke() throws {
     check(same(NetworkEvidence.tasks(NetworkSnapshot.parse(Data("{\"offers\": []}".utf8))), [:]),
           "a snapshot naming no offers says there are none")
     check(same(NetworkEvidence.tasks(snap), [
-        networkTask: Seen(state: "claimed", executor: "eeeeffff00001111", executorHere: true),
+        networkTask: Seen(state: "claimed", executor: "eeeeffff00001111", executorHere: true,
+                          reason: "second attempt"),
         "github.com/o/r#issues:issue-9@octocat":
             Seen(state: "claimed", executor: "9999888877776666", executorHere: true),
         "github.com/o/r#audit:job-0b77ab9a731995c3@octocat":
@@ -364,6 +386,22 @@ func networkSmoke() throws {
     check(same(NetworkEvidence.tasks(elsewhere), [
         "t": Seen(state: "claimed", executor: "bbbb"), "u": Seen(state: "done")]),
           "a run that ended here does not put a claim here, and no executor is not this machine")
+    // Every road says t runs here and none says u does; the offers say otherwise.
+    let told = NetworkSnapshot.parse(Data("""
+        {"identity": {"pk": "aaaa"},
+         "pools": [{"id": "p", "tasks": [{"taskId": "t", "executorHere": true}]}],
+         "runs": [{"runId": "r", "taskId": "t", "state": "running"}],
+         "offers": [{"taskId": "t", "state": "claimed", "executor": "aaaa", "executorHere": false},
+                    {"taskId": "u", "state": "claimed", "executor": "bbbb", "executorHere": true},
+                    {"taskId": "v", "state": "claimed", "executor": "aaaa", "executorHere": 0},
+                    {"taskId": "w", "state": "failed", "reason": "the container exited 137"}]}
+        """.utf8))
+    check(same(NetworkEvidence.tasks(told), [
+        "t": Seen(state: "claimed", executor: "aaaa"),
+        "u": Seen(state: "claimed", executor: "bbbb", executorHere: true),
+        "v": Seen(state: "claimed", executor: "aaaa", executorHere: true),
+        "w": Seen(state: "failed", reason: "the container exited 137")]),
+          "the offer's own word on where it runs wins, and a word that is no flag is none")
 
     section("network: what a run resolves to")
     let now: TimeInterval = 1_000_000
@@ -399,6 +437,17 @@ func networkSmoke() throws {
           == "failed: failed on eeeeffff", "a task reported done but not well has failed")
     check(verdict(Seen(state: "failed")) == "failed: refused by the network")
     check(verdict(Seen(state: "cancelled")) == "failed: withdrawn from the network")
+    check(verdict(Seen(state: "failed", reason: "the container exited 137"))
+          == "failed: refused by the network: the container exited 137",
+          "an offer the network gave up on says how its last attempt ended")
+    check(verdict(Seen(state: "cancelled", reason: "merged"))
+          == "failed: withdrawn from the network: merged",
+          "a withdrawn offer says why")
+    check(verdict(Seen(state: "pooled", reason: "x")) == "starting: in the pool"
+          && verdict(Seen(state: "claimed", reason: "x")) == "running: running on the network"
+          && verdict(Seen(state: "done", ok: true, reason: "x")) == "finished: finished on the network"
+          && verdict(Seen(state: "done", reason: "x")) == "failed: failed on the network",
+          "a reason is read of a failed or cancelled offer alone")
     check(verdict(Seen(state: "limbo")) == "unknown: the network reports limbo")
     check(verdict(nil, age: 10) == "starting: offered 10s ago, not in the pool yet")
     check(verdict(nil, age: 20) == "starting: offered 20s ago, not in the pool yet"

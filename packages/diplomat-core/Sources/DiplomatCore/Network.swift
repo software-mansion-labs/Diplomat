@@ -16,13 +16,16 @@ public enum NetworkSettings {
     /// The fewest hours a task may ask for or a member may accept, and the default of
     /// both. The daemon's `HOURS_FLOOR`.
     public static let hoursFloor = 12
+    /// The most hours either may be. The daemon's `HOURS_CEILING`.
+    public static let hoursCeiling = 720
 
-    /// A stored hours value as the daemon reads it: a whole number at or above the
-    /// floor is itself, and anything else is the floor.
+    /// A stored hours value as the daemon reads it: a whole number from the floor to
+    /// the ceiling is itself, one above the ceiling is the ceiling, and anything else
+    /// is the floor.
     public static func hours(_ stored: Double?) -> Int {
-        guard let v = stored, v == v.rounded(), v >= Double(hoursFloor), v < 9.0e18
+        guard let v = stored, v.isFinite, v == v.rounded(), v >= Double(hoursFloor)
         else { return hoursFloor }
-        return Int(v)
+        return Int(min(v, Double(hoursCeiling)))
     }
 }
 
@@ -57,7 +60,10 @@ public enum NetworkRoute {
         return body
     }
 
+    /// By invite into someone's pool.
     public static func joinBody(invite: String) -> [String: String] { ["invite": invite] }
+    /// Back into a pool this machine left.
+    public static func joinBody(pool: String) -> [String: String] { ["pool": pool] }
     public static func leaveBody(pool: String) -> [String: String] { ["pool": pool] }
     public static func stopRunBody(run: String) -> [String: String] { ["runId": run] }
 }
@@ -340,6 +346,8 @@ public struct NetworkSnapshot: Equatable {
         public let path: String
         public let identity: String
         public let hash: String
+        /// Whether this machine left the pool: it takes and offers nothing there.
+        public let left: Bool
         public let members: [Member]
         public let tasks: [Task]
     }
@@ -369,9 +377,20 @@ public struct NetworkSnapshot: Equatable {
 
     public struct Offer: Equatable {
         public let taskId: String
+        public let pool: String
+        public let kind: String
+        public let item: String
+        public let title: String
         /// `pooled`, `claimed`, `done`, `failed` or `cancelled`.
         public let state: String
+        /// How the last attempt of a `failed` offer ended, or why a `cancelled` one
+        /// was withdrawn; "" when the daemon gave none.
+        public let reason: String
         public let executor: String
+        /// The daemon's own word on whether the executor is this machine; `nil` when
+        /// the document gave none.
+        public let executorHere: Bool?
+        public let offeredAt: Double?
         public let attempt: Int
         public let requests: Int
         public let refused: Int
@@ -450,7 +469,8 @@ public struct NetworkSnapshot: Equatable {
                             deadline: number(t["deadline"]))
             }
             return Pool(id: id, path: text(p["path"]), identity: text(p["identity"]),
-                        hash: text(p["hash"]), members: members, tasks: tasks)
+                        hash: text(p["hash"]), left: JSONInput.flag(p["left"]),
+                        members: members, tasks: tasks)
         }
         runs = rows(d["runs"]).compactMap { r in
             guard let runId = r["runId"] as? String, !runId.isEmpty else { return nil }
@@ -468,8 +488,12 @@ public struct NetworkSnapshot: Equatable {
                             usd: number(out["usd"]), tokens: number(out["tokens"]),
                             runner: text(out["runner"]), model: text(out["model"]))
                 }
-                return Offer(taskId: taskId, state: text(o["state"]),
+                return Offer(taskId: taskId, pool: text(o["pool"]), kind: text(o["kind"]),
+                             item: text(o["item"]), title: text(o["title"]),
+                             state: text(o["state"]), reason: text(o["reason"]),
                              executor: text(o["executor"]),
+                             executorHere: (o["executorHere"] as? JSONInput.Flag)?.on,
+                             offeredAt: number(o["offeredAt"]),
                              attempt: integer(o["attempt"]) ?? 0,
                              requests: integer(o["requests"]) ?? 0,
                              refused: integer(o["refused"]) ?? 0,
@@ -485,9 +509,10 @@ public enum NetworkEvidence {
     public static let unanswered = "the daemon did not answer"
     public static let noOffers = "the snapshot lists no offers"
 
-    /// Task id → its offer. A task runs here when one of this machine's live runs is
-    /// for it, when its pool lists this machine as its executor, or when its executor
-    /// is this machine's own key.
+    /// Task id → its offer. Whether a task runs here is the offer's own word where the
+    /// daemon gives it. Where it gives none, a task runs here when one of this
+    /// machine's live runs is for it, when its pool lists this machine as its
+    /// executor, or when its executor is this machine's own key.
     public static func tasks(_ snapshot: NetworkSnapshot?)
         -> Observation<[String: AgentState.NetworkTask]> {
         guard let snapshot else { return .unavailable(unanswered) }
@@ -502,8 +527,8 @@ public enum NetworkEvidence {
             let mine = !offer.executor.isEmpty && offer.executor == snapshot.pk
             out[offer.taskId] = AgentState.NetworkTask(
                 state: offer.state, executor: offer.executor,
-                executorHere: mine || here.contains(offer.taskId),
-                ok: offer.outcome?.ok ?? false)
+                executorHere: offer.executorHere ?? (mine || here.contains(offer.taskId)),
+                ok: offer.outcome?.ok ?? false, reason: offer.reason)
         }
         return .present(out)
     }

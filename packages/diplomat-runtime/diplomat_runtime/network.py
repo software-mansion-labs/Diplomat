@@ -27,15 +27,18 @@ MAXIMUM_ACCEPTED_H_KEY = "networkMaximumAcceptedH"
 #: The fewest hours a task may ask for or a member may accept, and the default of both.
 #: The daemon's ``HOURS_FLOOR``.
 HOURS_FLOOR = 12
+#: The most hours either may be. The daemon's ``HOURS_CEILING``.
+HOURS_CEILING = 720
 
 
 def hours(stored: Any) -> int:
-    """A stored hours value as the daemon reads it: a whole number at or above the
-    floor is itself, and anything else is the floor."""
+    """A stored hours value as the daemon reads it: a whole number from the floor to
+    the ceiling is itself, one above the ceiling is the ceiling, and anything else is
+    the floor."""
     v = _number(stored)
-    if v is None or v != round(v) or v < HOURS_FLOOR or v >= 9.0e18:
+    if v is None or v != round(v) or v < HOURS_FLOOR:
         return HOURS_FLOOR
-    return int(v)
+    return int(min(v, HOURS_CEILING))
 
 
 # MARK: - Routes
@@ -66,8 +69,9 @@ def invite_body(pool: str, ttl_secs: int | None = None) -> dict:
     return {"pool": pool} if ttl_secs is None else {"pool": pool, "ttlSecs": ttl_secs}
 
 
-def join_body(invite: str) -> dict:
-    return {"invite": invite}
+def join_body(invite: str = "", *, pool: str = "") -> dict:
+    """By ``invite`` into someone's pool, or back into a ``pool`` this machine left."""
+    return {"pool": pool} if pool else {"invite": invite}
 
 
 def leave_body(pool: str) -> dict:
@@ -316,6 +320,8 @@ class Pool:
     hash: str = ""
     members: tuple[Member, ...] = ()
     tasks: tuple[PoolTask, ...] = ()
+    #: Whether this machine left the pool: it takes and offers nothing there.
+    left: bool = False
 
 
 @dataclass(frozen=True)
@@ -354,6 +360,17 @@ class OfferState:
     refused: int = 0
     outcome: Outcome | None = None
     ended_at: float | None = None
+    pool: str = ""
+    kind: str = ""
+    item: str = ""
+    title: str = ""
+    #: How the last attempt of a ``failed`` offer ended, or why a ``cancelled`` one was
+    #: withdrawn; "" when the daemon gave none.
+    reason: str = ""
+    #: The daemon's own word on whether the executor is this machine; ``None`` when the
+    #: document gave none.
+    executor_here: bool | None = None
+    offered_at: float | None = None
 
 
 def _object(raw: Any) -> dict:
@@ -438,7 +455,7 @@ class Snapshot:
 def _pool(p: dict) -> Pool:
     return Pool(
         id=p["id"], path=_text(p.get("path")), identity=_text(p.get("identity")),
-        hash=_text(p.get("hash")),
+        hash=_text(p.get("hash")), left=_flag(p.get("left")),
         members=tuple(
             Member(pk=m["pk"], is_self=_flag(m.get("self")),
                    max_accepted_h=_integer(m.get("maxAcceptedH")),
@@ -464,10 +481,14 @@ def _pool(p: dict) -> Pool:
 
 
 def _offer(o: dict) -> OfferState:
-    out = o.get("outcome")
+    out, here = o.get("outcome"), o.get("executorHere")
     return OfferState(
-        task_id=o["taskId"], state=_text(o.get("state")),
-        executor=_text(o.get("executor")), attempt=_integer(o.get("attempt")) or 0,
+        task_id=o["taskId"], pool=_text(o.get("pool")), kind=_text(o.get("kind")),
+        item=_text(o.get("item")), title=_text(o.get("title")),
+        state=_text(o.get("state")), reason=_text(o.get("reason")),
+        executor=_text(o.get("executor")),
+        executor_here=here if isinstance(here, bool) else None,
+        offered_at=_number(o.get("offeredAt")), attempt=_integer(o.get("attempt")) or 0,
         requests=_integer(o.get("requests")) or 0,
         refused=_integer(o.get("refused")) or 0,
         outcome=Outcome(ok=_flag(out.get("ok")), summary=_text(out.get("summary")),
@@ -485,9 +506,10 @@ def tasks(snapshot: Snapshot | None) -> Observation:
     """What a snapshot says of this machine's own offers, as the agent-state resolver
     reads it (:attr:`agentstate.Evidence.network`): task id → its offer.
 
-    A task runs here when one of this machine's live runs is for it, when its pool
-    lists this machine as its executor, or when its executor is this machine's own
-    key."""
+    Whether a task runs here is the offer's own word where the daemon gives it. Where
+    it gives none, a task runs here when one of this machine's live runs is for it,
+    when its pool lists this machine as its executor, or when its executor is this
+    machine's own key."""
     if snapshot is None:
         return Observation.unavailable(UNANSWERED)
     if snapshot.offers is None:
@@ -497,7 +519,7 @@ def tasks(snapshot: Snapshot | None) -> Observation:
     return Observation.present({
         o.task_id: NetworkTask(
             state=o.state, executor=o.executor,
-            executor_here=(bool(o.executor) and o.executor == snapshot.pk)
-            or o.task_id in here,
-            ok=o.outcome.ok if o.outcome else False)
+            executor_here=o.executor_here if o.executor_here is not None
+            else (bool(o.executor) and o.executor == snapshot.pk) or o.task_id in here,
+            ok=o.outcome.ok if o.outcome else False, reason=o.reason)
         for o in snapshot.offers})

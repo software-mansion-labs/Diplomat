@@ -115,7 +115,7 @@ enum AgentStateCommand {
         guard let tasks = o.value else { return ["unavailable": o.reason] }
         return ["present": tasks.mapValues { t -> [String: Any] in
             ["state": t.state, "executor": t.executor, "executorHere": t.executorHere,
-             "ok": t.ok]
+             "ok": t.ok, "reason": t.reason]
         }]
     }
 
@@ -134,6 +134,7 @@ enum AgentStateCommand {
                       "reason": s.admit.reason],
             "pools": s.pools.map { p -> [String: Any] in
                 ["id": p.id, "path": p.path, "identity": p.identity, "hash": p.hash,
+                 "left": p.left,
                  "members": p.members.map { m -> [String: Any] in
                      ["pk": m.pk, "self": m.isSelf, "maxAcceptedH": opt(m.maxAcceptedH),
                       "lastSeen": opt(m.lastSeen), "reachable": m.reachable]
@@ -154,8 +155,10 @@ enum AgentStateCommand {
                  "exit": opt(r.exit), "log": r.log]
             },
             "offers": opt(s.offers?.map { o -> [String: Any] in
-                ["taskId": o.taskId, "state": o.state, "executor": o.executor,
-                 "attempt": o.attempt, "requests": o.requests, "refused": o.refused,
+                ["taskId": o.taskId, "pool": o.pool, "kind": o.kind, "item": o.item,
+                 "title": o.title, "state": o.state, "reason": o.reason,
+                 "executor": o.executor, "executorHere": opt(o.executorHere),
+                 "offeredAt": opt(o.offeredAt), "attempt": o.attempt, "requests": o.requests, "refused": o.refused,
                  "outcome": opt(o.outcome.map { out -> [String: Any] in
                      ["ok": out.ok, "summary": out.summary, "usd": opt(out.usd),
                       "tokens": opt(out.tokens), "runner": out.runner, "model": out.model]
@@ -236,7 +239,8 @@ enum AgentStateCommand {
                         state: t["state"] as? String ?? "",
                         executor: t["executor"] as? String ?? "",
                         executorHere: JSONInput.flag(t["executorHere"]),
-                        ok: JSONInput.flag(t["ok"]))
+                        ok: JSONInput.flag(t["ok"]),
+                        reason: t["reason"] as? String ?? "")
                 }
                 return out
             })

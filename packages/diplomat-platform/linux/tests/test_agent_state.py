@@ -85,9 +85,9 @@ def net(**kw) -> A.RunRecord:
 
 
 def offer(state: str, executor: str = "", here: bool = False,
-          ok: bool = False) -> dict[str, A.NetworkTask]:
+          ok: bool = False, reason: str = "") -> dict[str, A.NetworkTask]:
     """A snapshot's word on :data:`TASK` alone."""
-    return {TASK: A.NetworkTask(state, executor, here, ok)}
+    return {TASK: A.NetworkTask(state, executor, here, ok, reason)}
 
 
 #: The network's evidence when its daemon did not answer.
@@ -648,6 +648,24 @@ CASES = [
     ("a cancelled offer has failed",
      net(), ev(network=offer("cancelled")),
      A.FAILED, "withdrawn from the network"),
+    ("an offer the network gave up on says how its last attempt ended",
+     net(), ev(network=offer("failed", reason="the container exited 137")),
+     A.FAILED, "refused by the network: the container exited 137"),
+    ("a withdrawn offer says why",
+     net(), ev(network=offer("cancelled", reason="merged")),
+     A.FAILED, "withdrawn from the network: merged"),
+    ("a reason is not read of an offer in the pool",
+     net(), ev(network=offer("pooled", reason="x")),
+     A.STARTING, "in the pool"),
+    ("a reason is not read of a claimed offer",
+     net(), ev(network=offer("claimed", reason="x")),
+     A.RUNNING, "running on the network"),
+    ("a reason is not read of a finished offer",
+     net(), ev(network=offer("done", ok=True, reason="x")),
+     A.FINISHED, "finished on the network"),
+    ("a reason is not read of an offer done but not well",
+     net(), ev(network=offer("done", reason="x")),
+     A.FAILED, "failed on the network"),
     ("an offer in a state this build does not know is unknown",
      net(), ev(network=offer("limbo")),
      A.UNKNOWN, "the network reports limbo"),
@@ -1596,9 +1614,25 @@ def test_a_network_run_survives_the_book_and_a_local_one_carries_no_task():
         assert A.RunRecord.from_json({**rec().to_json(), "network": spoilt}) == rec()
 
 
+def test_a_reason_is_read_of_a_failed_or_cancelled_offer_alone():
+    """The whole line, where the scenario table asks only that it contains one."""
+    def line(state: str, **kw) -> str:
+        return A.network_verdict(TASK, A.Observation.present(offer(state, **kw)), 60)[1]
+
+    assert line("failed", reason="x") == "refused by the network: x"
+    assert line("cancelled", reason="x") == "withdrawn from the network: x"
+    assert (line("failed"), line("cancelled")) == (
+        "refused by the network", "withdrawn from the network")
+    assert [line("pooled", reason="x"), line("claimed", reason="x"),
+            line("done", ok=True, reason="x"), line("done", reason="x")] == [
+        "in the pool", "running on the network", "finished on the network",
+        "failed on the network"]
+
+
 def test_the_networks_evidence_survives_json_and_silence_stays_silence():
     seen = {TASK: A.NetworkTask("claimed", PEER, True, False),
-            "other": A.NetworkTask("done", "", False, True)}
+            "other": A.NetworkTask("done", "", False, True),
+            "gone": A.NetworkTask("failed", reason="the container exited 137")}
     assert A.Evidence.from_json(ev(network=seen).to_json()).network.value == seen
     back = A.Evidence.from_json(ev(network=NO_DAEMON).to_json()).network
     assert (back.ok, back.reason) == (False, "the daemon did not answer")

@@ -499,17 +499,22 @@ class NetworkTask:
     executor_here: bool = False
     #: Whether the executor reported the work done and well. Only read of ``done``.
     ok: bool = False
+    #: The daemon's sentence on a ``failed`` or ``cancelled`` offer; "" when it gave
+    #: none.
+    reason: str = ""
 
     def to_json(self) -> dict:
         return {"state": self.state, "executor": self.executor,
-                "executorHere": self.executor_here, "ok": self.ok}
+                "executorHere": self.executor_here, "ok": self.ok,
+                "reason": self.reason}
 
     @staticmethod
     def from_json(obj: dict) -> "NetworkTask":
         return NetworkTask(state=_text(obj.get("state")),
                            executor=_text(obj.get("executor")),
                            executor_here=_flag(obj.get("executorHere")),
-                           ok=_flag(obj.get("ok")))
+                           ok=_flag(obj.get("ok")),
+                           reason=_text(obj.get("reason")))
 
 
 @dataclass(frozen=True)
@@ -912,7 +917,9 @@ def network_verdict(task: str, network: Observation, age: float) -> tuple[str, s
     is an answer and its silence is not one: a snapshot that could not be read leaves
     the run UNKNOWN. A task the snapshot does not name is given :data:`SPAWN_GRACE` to
     appear, the wait a spawn's pid file gets, since the offer and the snapshot are
-    written at different instants; past it the offer never reached the pool.
+    written at different instants; past it the offer never reached the pool. An offer
+    the network gave up on, or one that was withdrawn, is followed by the daemon's
+    reason where it gave one.
     """
     if not network.ok:
         return UNKNOWN, f"the network could not be asked: {network.reason or 'unavailable'}"
@@ -923,6 +930,7 @@ def network_verdict(task: str, network: Observation, age: float) -> tuple[str, s
         return FAILED, "the network holds no such offer"
     place = ("this machine" if seen.executor_here
              else seen.executor[:8] if seen.executor else "the network")
+    why = f": {seen.reason}" if seen.reason else ""
     if seen.state == NET_POOLED:
         return STARTING, "in the pool"
     if seen.state == NET_CLAIMED:
@@ -930,9 +938,9 @@ def network_verdict(task: str, network: Observation, age: float) -> tuple[str, s
     if seen.state == NET_DONE:
         return (FINISHED, f"finished on {place}") if seen.ok else (FAILED, f"failed on {place}")
     if seen.state == NET_FAILED:
-        return FAILED, "refused by the network"
+        return FAILED, f"refused by the network{why}"
     if seen.state == NET_CANCELLED:
-        return FAILED, "withdrawn from the network"
+        return FAILED, f"withdrawn from the network{why}"
     return UNKNOWN, f"the network reports {seen.state}"
 
 

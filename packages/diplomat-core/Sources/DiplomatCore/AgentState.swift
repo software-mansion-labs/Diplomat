@@ -345,13 +345,17 @@ public enum AgentState {
         public var executorHere: Bool
         /// Whether the executor reported the work done and well. Only read of `done`.
         public var ok: Bool
+        /// The daemon's sentence on a `failed` or `cancelled` offer; "" when it gave
+        /// none.
+        public var reason: String
 
         public init(state: String, executor: String = "", executorHere: Bool = false,
-                    ok: Bool = false) {
+                    ok: Bool = false, reason: String = "") {
             self.state = state
             self.executor = executor
             self.executorHere = executorHere
             self.ok = ok
+            self.reason = reason
         }
     }
 
@@ -741,7 +745,8 @@ public enum AgentState {
     /// read leaves the run `.unknown`. A task the snapshot does not name is given
     /// `spawnGrace` to appear, the wait a spawn's pid file gets, since the offer and the
     /// snapshot are written at different instants; past it the offer never reached the
-    /// pool.
+    /// pool. An offer the network gave up on, or one that was withdrawn, is followed by
+    /// the daemon's reason where it gave one.
     public static func networkVerdict(task: String,
                                       network: Observation<[String: NetworkTask]>,
                                       age: TimeInterval) -> (RunState, String) {
@@ -757,13 +762,14 @@ public enum AgentState {
         }
         let place = seen.executorHere ? "this machine"
             : seen.executor.isEmpty ? "the network" : String(seen.executor.prefix(8))
+        let why = seen.reason.isEmpty ? "" : ": \(seen.reason)"
         switch seen.state {
         case NetworkTask.pooled: return (.starting, "in the pool")
         case NetworkTask.claimed: return (.running, "running on \(place)")
         case NetworkTask.done:
             return seen.ok ? (.finished, "finished on \(place)") : (.failed, "failed on \(place)")
-        case NetworkTask.failed: return (.failed, "refused by the network")
-        case NetworkTask.cancelled: return (.failed, "withdrawn from the network")
+        case NetworkTask.failed: return (.failed, "refused by the network\(why)")
+        case NetworkTask.cancelled: return (.failed, "withdrawn from the network\(why)")
         default: return (.unknown, "the network reports \(seen.state)")
         }
     }
