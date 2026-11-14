@@ -76,6 +76,13 @@ Settings come from Diplomat's `config.json` (`DIPLOMAT_CONFIG` relocates it), re
 every second: `networkEnabled`, `networkRequiredMinimumH`, `networkMaximumAcceptedH`.
 The daemon exits when `networkEnabled` is not `true`.
 
+The model credential a job's requests leave with is this machine's own, added by the
+broker on the host and never present in a container. The first of these that exists is
+used: `networkModelToken`, an API key or subscriber token kept for the network alone (on
+macOS the Keychain item with service `Diplomat-networkModelToken` under the user's
+account, elsewhere the file `~/.diplomat/network-model-token`); the Claude Code login;
+`ANTHROPIC_API_KEY` in the daemon's environment.
+
 ## Local socket
 
 HTTP over `daemon.sock`, JSON in and out.
