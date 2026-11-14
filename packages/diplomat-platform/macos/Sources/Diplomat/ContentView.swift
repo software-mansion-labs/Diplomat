@@ -1429,8 +1429,8 @@ struct AuditRow: View {
         default:      return .secondary
         }
     }
-    private var icon: String {
-        switch entry.action {
+    static func icon(for action: String) -> String {
+        switch action {
         case "review", "review-req": return "checklist"
         case "review-reply":         return "arrowshape.turn.up.left.fill"
         case "conflicts":            return "arrow.triangle.merge"
@@ -1461,7 +1461,8 @@ struct AuditRow: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Image(systemName: icon).font(.system(size: 10)).foregroundStyle(sourceColor).frame(width: 16)
+            Image(systemName: Self.icon(for: entry.action)).font(.system(size: 10))
+                .foregroundStyle(sourceColor).frame(width: 16)
             Text(entry.detail).font(.system(size: 10)).lineLimit(2)
             Spacer(minLength: 4)
             Text(entry.source).font(.system(size: 8, weight: .bold)).foregroundStyle(sourceColor)

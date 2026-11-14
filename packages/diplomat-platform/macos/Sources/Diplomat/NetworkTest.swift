@@ -576,7 +576,7 @@ enum NetworkTest {
                 && requests(NetworkRoute.withdraw).count == 3
                 && requests(NetworkRoute.withdraw).last?["taskId"] as? String == "t-away"
                 && requests(NetworkRoute.withdraw).last?["reason"] as? String
-                    == DiplomacyNetwork.withdrawStopped)
+                    == "stopped")
         script.set(snapshot())
 
         // 17. What holds a network job: a pause. Not a full local cap, not a low disk.
@@ -740,7 +740,28 @@ enum NetworkTest {
                 && DiplomacyNetwork.hoursRange == 12...720)
         _ = AppConfig.setInt(NetworkSettings.maximumAcceptedHKey, 720)
 
-        // 22. Off again: what the network still carries is withdrawn and retired as
+        // 22. An offer whose run cannot be booked is withdrawn, and says why. Every
+        //     network verb has its row symbol.
+        let unbookable = scratch.appendingPathComponent("not-a-directory")
+        FileManager.default.createFile(atPath: unbookable.path, contents: nil)
+        setenv("DIPLOMAT_AGENTS_DIR", unbookable.appendingPathComponent("agents").path, 1)
+        let withdrawnBooked = requests(NetworkRoute.withdraw).count
+        let unbooked = await store.dispatchAgent(job(90250), source: .panel)
+        setenv("DIPLOMAT_AGENTS_DIR", scratch.appendingPathComponent("agents").path, 1)
+        check("an offer whose run cannot be booked is withdrawn as not booked",
+              unbooked == .failed("could not register the run, so its offer is withdrawn")
+                && requests(NetworkRoute.withdraw).count == withdrawnBooked + 1
+                && requests(NetworkRoute.withdraw).last?["reason"] as? String == "not booked")
+        check("every network verb has its row symbol",
+              [NetworkAudit.offer, NetworkAudit.claimed, NetworkAudit.done,
+               NetworkAudit.withdraw, NetworkAudit.join, NetworkAudit.invite,
+               NetworkAudit.leave, NetworkAudit.start, NetworkAudit.stop]
+                .allSatisfy { AuditRow.icon(for: $0) == "point.3.connected.trianglepath.dotted" }
+                && [NetworkAudit.failed, NetworkAudit.unavailable]
+                    .allSatisfy { AuditRow.icon(for: $0) == "exclamationmark.triangle.fill" }
+                && AuditRow.icon(for: "network-unheard-of") == "circle.fill")
+
+        // 23. Off again: what the network still carries is withdrawn and retired as
         //     failed before the daemon is stopped, and what it had finished is retired on
         //     its outcome.
         _ = AgentRegistry.forget(Set(AgentRegistry.load().map(\.runID)))
@@ -805,7 +826,7 @@ enum NetworkTest {
                 && AgentSpawner.refusedTerminals == refusedBefore + 1
                 && requests(NetworkRoute.offer).count == offersOff)
 
-        // 23. A network run found in the book while the switch is off is withdrawn and
+        // 24. A network run found in the book while the switch is off is withdrawn and
         //     leaves it at the next settle; with none there the daemon is asked nothing.
         func bookByHand(_ n: Int, task: String) {
             let at = Date().timeIntervalSince1970
@@ -855,7 +876,7 @@ enum NetworkTest {
         check("…after which the daemon is asked nothing, the switch being off",
               asked() == askedBefore && store.networkState == nil)
 
-        // 24. On again, a task the switch retired is announced afresh; and a daemon that
+        // 25. On again, a task the switch retired is announced afresh; and a daemon that
         //     does not answer as the switch goes off holds nothing back.
         store.networkEnabled = true
         await store.networkLifecycle?.value

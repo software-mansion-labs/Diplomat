@@ -249,7 +249,7 @@ extension Store {
                 refreshAudit()
             }
         } else {
-            reply = await withdraw(task.taskId, reason: DiplomacyNetwork.withdrawStopped,
+            reply = await withdraw(task.taskId, reason: NetworkRoute.withdrawStopped,
                                    label: task.title, source: "panel")
         }
         noteNetworkReply(reply, about: pool)

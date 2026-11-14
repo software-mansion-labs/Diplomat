@@ -252,6 +252,15 @@ struct NetworkScreen: View {
     private var pools: some View {
         if let snap = snapshot {
             VStack(alignment: .leading, spacing: 12) {
+                // No pool panel offers "Join…": none yet, or each one left.
+                if snap.pools.allSatisfy(\.left) {
+                    SettingsCard(symbol: NetworkText.symbol, title: "POOLS", tint: .purple) {
+                        if snap.pools.isEmpty { note(NetworkText.noPools) }
+                        NetworkJoinRow(card: "")
+                        if let refusal = store.networkRefusals[""] { note(refusal, tint: .red) }
+                    }
+                    .frame(width: MainRoot.columnWidth, alignment: .topLeading)
+                }
                 ForEach(Array(stride(from: 0, to: snap.pools.count, by: 2)), id: \.self) { i in
                     HStack(alignment: .top, spacing: 12) {
                         panel(snap.pools[i])
@@ -261,15 +270,6 @@ struct NetworkScreen: View {
                             Spacer(minLength: 0)
                         }
                     }
-                }
-                // No pool panel offers "Join…": none yet, or each one left.
-                if snap.pools.allSatisfy(\.left) {
-                    SettingsCard(symbol: NetworkText.symbol, title: "POOLS", tint: .purple) {
-                        if snap.pools.isEmpty { note(NetworkText.noPools) }
-                        NetworkJoinRow(card: "")
-                        if let refusal = store.networkRefusals[""] { note(refusal, tint: .red) }
-                    }
-                    .frame(width: MainRoot.columnWidth, alignment: .topLeading)
                 }
             }
         }
@@ -420,7 +420,9 @@ struct NetworkPoolPanel: View {
         let ending = NetworkText.ending(of: t.taskId, in: store.networkState)
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                Text(t.title.isEmpty ? t.item : t.title).font(.system(size: 10)).lineLimit(1)
+                // Another machine's words: drawn as they are, on one line.
+                Text(verbatim: t.title.isEmpty ? t.item : t.title).font(.system(size: 10))
+                    .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 4)
                 StatusPill(text: t.kind, tint: DiplomatUI.agentTaskTint(t.kind))
                 StatusPill(text: NetworkText.state(t.state), tint: stateTint(t.state))

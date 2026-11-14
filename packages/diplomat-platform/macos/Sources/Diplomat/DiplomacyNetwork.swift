@@ -13,14 +13,6 @@ enum DiplomacyNetwork {
     /// What one press of an hours stepper moves it by.
     static let hoursStep = 12
 
-    /// The reason an offer is withdrawn with when the operator stops a task no run here
-    /// carries.
-    static let withdrawStopped = "stopped"
-    /// The reason an offer is withdrawn with as the switch goes off.
-    static let withdrawSwitchedOff = "switched off"
-    /// The reason an offer is withdrawn with when its run could not be booked.
-    static let withdrawUnbooked = "not booked"
-
     /// The telemetry ledger's `runner` for a task another machine ran. No `AgentRunner`
     /// spells it, so its tokens count against no rate-limit window here
     /// (`Telemetry.Task.anthropic`) and its dollars price no runner's tasks

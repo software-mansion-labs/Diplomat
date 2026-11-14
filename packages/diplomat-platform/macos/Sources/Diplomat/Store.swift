@@ -2194,7 +2194,7 @@ final class Store: ObservableObject {
         guard !left.isEmpty else { return }
         for task in left.compactMap(\.network) where pass.network != nil {
             let body = NetworkRoute.withdrawBody(
-                task: task, reason: DiplomacyNetwork.withdrawSwitchedOff)
+                task: task, reason: NetworkRoute.withdrawSwitchedOff)
             _ = await Task.detached(priority: .userInitiated) {
                 DiplomacyNetwork.post(NetworkRoute.withdraw, body)
             }.value
@@ -4493,7 +4493,7 @@ final class Store: ObservableObject {
         guard AgentRegistry.createRun(record, prompt: job.prompt) != nil else {
             // An offer nothing here tracks is work nobody waits for.
             let body = NetworkRoute.withdrawBody(task: task,
-                                                 reason: DiplomacyNetwork.withdrawUnbooked)
+                                                 reason: NetworkRoute.withdrawNotBooked)
             _ = await Task.detached(priority: .utility) {
                 DiplomacyNetwork.post(NetworkRoute.withdraw, body)
             }.value
