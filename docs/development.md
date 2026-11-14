@@ -204,6 +204,10 @@ DIPLOMAT_RENDER=panel    ./Diplomat.app/Contents/MacOS/Diplomat  # snapshot a sc
                                                      #   wizard[-other|-specific[-mine|-theirs]|-wrong|-banned]
                                                      #   devices[-open|-procs]|conflicts[-other|-specific|-wrong]
                                                      #   devices-screen[-remote[-away]|-off] (the Devices screen)
+                                                     #   network-screen (the Network screen over a synthetic
+                                                     #   daemon snapshot: three pools, one of them left);
+                                                     #   network-screen-starting (a daemon still coming up, no
+                                                     #   pool yet); network-screen-off (the switch off)
                                                      #   audit[-issues|-prs|-all]
                                                      #   telemetry (the screen over a synthetic ledger, written to a
                                                      #   scratch dir); telemetry-panel (the same inside the panel)
@@ -250,6 +254,11 @@ DIPLOMAT_COMMS_TEST=1    ...                     # self-test: what each triage a
                                                      #   the ban, started/finished. Spawns nothing, reaches no Slack
 DIPLOMAT_TASKS_TEST=1    ...                     # self-test: Tasks edits and syncs through the Store against a
                                                      #   stand-in gh, on scratch dirs; exit code = verdict
+DIPLOMAT_NETWORK_TEST=1  ...                     # self-test: the Diplomacy Network through the Store against a
+                                                     #   stand-in daemon on a scratch socket (DN_BASE_DIR): what is
+                                                     #   posted each cycle, a job offered and never spawned, a run
+                                                     #   withdrawn, priced and retired, the switch going off.
+                                                     #   Starts no daemon, opens no terminal; exit code = verdict
 DIPLOMAT_APIWATCH_TEST=1 ...                     # self-test: who a scan may type into (an agent's session,
                                                      #   including one a terminal only shows through tmux;
                                                      #   never a plain shell). Reads no terminal, sends nothing
@@ -447,6 +456,10 @@ packages/
         TasksMonitor.swift         the Tasks sync loop, edits and reloads, all off the main actor
         TasksView.swift            the Tasks screen: tasks, status and reasons, tags, links, history, edits
         TasksTest.swift            self-test of edits and syncs through the Store (DIPLOMAT_TASKS_TEST)
+        DiplomacyNetwork.swift     bridge to the Diplomacy Network daemon: its socket's routes, its installer's daemon verbs, the screen's words
+        NetworkMonitor.swift       the daemon's lifecycle, the per-cycle pools and admit posts, the Network screen's actions
+        NetworkScreen.swift        the Network screen: the daemon's status, the hour settings, one panel per pool
+        NetworkTest.swift          self-test of offers, runs and the switch against a stand-in daemon (DIPLOMAT_NETWORK_TEST)
         TelemetryView.swift        the Telemetry screen: the bell curve, the rate-limit windows, the backlog and finished-work series, the token split
         TelemetryLog.swift         writes/reads ~/.diplomat/pr-monitor/telemetry.jsonl (append-only, rotated)
         UsageScan.swift            Claude Code transcript scanner: repo-vs-other tokens, per-task attribution
