@@ -25,9 +25,10 @@
 // again; if that brings nothing newer, the host's `claude` is run so that it renews and
 // stores its token, and the store is read a last time. Measured: `claude auth status`
 // renews a login that has under five minutes left (and leaves one with thirty alone),
-// so it comes first and costs nothing; a one-word prompt to the smallest model renews
-// on a 401 as well, and is the fallback. At most one renewal every ten minutes, never
-// two at once.
+// so it comes first and costs nothing. The fallback is a one-word prompt to the smallest
+// model, which makes the client use its token; whether that renews one the provider
+// revoked early is not measured. At most one renewal every ten minutes, never two at
+// once.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -77,7 +78,7 @@ function loginIn(raw, where) {
 /// environment carries so its client sends the placeholder the right way. `authorize(headers)`
 /// resolves to the headers with the real credential in place of the placeholder and
 /// rejects when there is none. `refused(headers)` tells it the provider answered those
-/// headers with 401, and resolves to whether a different credential is on hand now.
+/// headers with 401, and resolves to whether a different credential is on hand.
 export function createLLM({ log = () => {}, env = process.env, platform = process.platform, home = os.homedir(),
   user = env.USER || os.userInfo().username, now = Date.now } = {}) {
   let current = null;
@@ -190,7 +191,7 @@ export function createLLM({ log = () => {}, env = process.env, platform = proces
     if (!sent) return false;
     refusedAt.set(sent, now());
     for (const [token, at] of refusedAt) if (now() - at >= REFUSED_FOR_MS) refusedAt.delete(token);
-    log('llm', `the provider refused ${current && current.token === sent ? current.source : 'a credential no longer in use'}`);
+    log('llm', `the provider refused ${current && current.token === sent ? current.source : 'a credential that is not the current one'}`);
     const next = await ensure(true);
     return !!next && next.token !== sent;
   }
