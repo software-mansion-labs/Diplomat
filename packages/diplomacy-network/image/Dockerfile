@@ -30,8 +30,8 @@ RUN apt-get update \
       procps lsof zsh tmux python3 python3-pip python3-venv build-essential android-tools-adb \
  && rm -rf /var/lib/apt/lists/*
 
-# Node from nodejs.org, checked against the release's published hash. The headers are
-# left out: node-gyp fetches its own.
+# Node, gh and glab from their own releases, each checked against the hash pinned above.
+# Node's headers are left out: node-gyp fetches its own.
 RUN set -eu; arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
       arm64) node_arch=arm64; node_sha="$NODE_SHA256_ARM64"; gh_sha="$GH_SHA256_ARM64"; glab_sha="$GLAB_SHA256_ARM64" ;; \
