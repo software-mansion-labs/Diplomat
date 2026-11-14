@@ -31,7 +31,8 @@ differs, so no machine is in charge of a pool and none owns a job.
   an **invite**: **Copy invite** on the pool's card, sent to the other operator by any means,
   pasted into **Join...** there. An invite is good for a day.
 - **Leaving.** **Leave** stops this machine taking the pool's jobs and offering to it. It stays
-  left until **Rejoin**.
+  left until **Rejoin**. After a month away the pool no longer knows the machine, and it needs
+  an invite again.
 - **Reaching each other.** A machine is reachable only as a Tor onion service whose address is
   its own public key, so there are no ports to open and no addresses to exchange. A first
   connection between two machines can take minutes; later ones take about a second.
@@ -131,5 +132,9 @@ pool and frees their PRs and issues for agents in terminals again.
 - **Jobs of one requester on one repository share a container** and can see each other.
 - **A sleeping member counts as absent**, so a job can be taken without it. The machine that
   offered the job hands out one key per job, which is what keeps two executors from acting on it.
+- **A split pool can run a job twice.** When two machines that both offered the same job lose
+  sight of each other, each side can hand it to an executor of its own until they meet again.
+- **Pools are small.** A pool's whole state travels in one message; it is built for the handful
+  of machines and the tens of open jobs a team has, not for thousands.
 - **macOS and Xcode toolchains** are not in a Linux container. A job that must build for Apple
   platforms needs a machine whose operator has arranged that; the network does not provide it.
