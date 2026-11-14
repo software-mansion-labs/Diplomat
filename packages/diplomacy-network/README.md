@@ -27,6 +27,7 @@ src/
     lease.js       hours, leases, pings, extensions, lapse
     capability.js  capabilities, MACs, sequence numbers
   transport/
+    index.js       picks the transport by kind
     tor.js         runs tor, publishes the onion service, dials peers through SOCKS
     loop.js        the same interface on loopback TCP, for tests
     http.js        POST /dn1 framing over either
