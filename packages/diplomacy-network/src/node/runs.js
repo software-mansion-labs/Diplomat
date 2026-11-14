@@ -12,7 +12,7 @@ import {
   ACT_BYTES_PER_SEC, ACT_TIMEOUT_MS, CLOCK_SKEW_SECS, MAX_ACT_BODY_BYTES, RECORD_RETENTION_SECS, RETRY_MS,
 } from '../paths.js';
 import { claimKey } from './gossip.js';
-import { forgeAnswer } from './offers.js';
+import { forgeAnswer, plain } from './offers.js';
 
 const ACT_ATTEMPTS = 3;
 const ANSWER = {
@@ -20,6 +20,12 @@ const ANSWER = {
   headers: (h) => isObject(h) && Object.values(h).every((v) => typeof v === 'string'),
   body: (v) => typeof v === 'string',
 };
+
+// A run's outcome as it is kept and told: an agent's last words, free of anything that
+// moves a cursor.
+const worded = (outcome) => wireOutcome({
+  ...outcome, summary: plain(outcome?.summary), runner: plain(outcome?.runner), model: plain(outcome?.model),
+});
 
 /// The runs of `host` and the keys it holds for them.
 export function createRuns(host) {
@@ -158,7 +164,7 @@ export function createRuns(host) {
     const ok = outcome?.ok === true;
     Object.assign(run, {
       state: ['finished', 'failed', 'stopped'].includes(outcome?.state) ? outcome.state : ok ? 'finished' : 'failed',
-      endedAt: host.now(), exit: Number.isSafeInteger(outcome?.exit) ? outcome.exit : 0, outcome: wireOutcome(outcome), end: 'report',
+      endedAt: host.now(), exit: Number.isSafeInteger(outcome?.exit) ? outcome.exit : 0, outcome: worded(outcome), end: 'report',
     });
     if (!ok) giveUpOn(run);
     save();
@@ -172,7 +178,7 @@ export function createRuns(host) {
   function halt(run, reason, end, failed = end !== 'drop') {
     if (!live(run)) return;
     const started = run.state === 'running' || held[run.taskId]?.runId === run.runId;
-    Object.assign(run, { state: 'stopped', endedAt: host.now(), outcome: wireOutcome({ ok: false, summary: reason }), end });
+    Object.assign(run, { state: 'stopped', endedAt: host.now(), outcome: worded({ ok: false, summary: reason }), end });
     if (failed) giveUpOn(run);
     save();
     host.store.flush();

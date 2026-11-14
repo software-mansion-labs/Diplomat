@@ -51,8 +51,14 @@ await check('hosts join a pool by invite and see one another; a stranger is refu
   await w.start(late);
   const { invite } = a.node.invite({ pool: POOL, ttlSecs: 60 });
   await w.run(90);
-  await assert.rejects(late.node.join({ invite }), /cannot be used: expired/);
-  await assert.rejects(late.node.join({ invite: 'nonsense' }), /not an invite/);
+  // Every refusal of an invite is a sentence the operator can act on.
+  await assert.rejects(late.node.join({ invite }), /^Error: That invite has run out: ask for a new one\.$/);
+  await assert.rejects(late.node.join({ invite: 'nonsense' }), /^Error: That is not an invite: paste the whole token the other machine made\.$/);
+  const forged = createInvite(mallory.id, { pool: POOL, exp: w.net.now() + 600, nonce: Buffer.alloc(16, 7) });
+  const unsigned = inviteToken({ ...forged, by: a.pk });
+  await assert.rejects(late.node.join({ invite: unsigned }), /^Error: That invite is not signed by the machine it names: ask for a new one\.$/);
+  const own = late.node.invite({ pool: POOL }).invite;
+  await assert.rejects(late.node.join({ invite: own }), /^Error: That invite was made on this machine: it lets another machine in, not this one\.$/);
 });
 
 await check('a host that left a pool stays out of it, whatever its list of pools says and however often it restarts, until it joins again', async () => {

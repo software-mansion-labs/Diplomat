@@ -293,3 +293,27 @@ await check('a host that is switched off cancels its offers, stops its runs and 
   await w.wait(a.node.switchOff());
   await a.node.switchOff();
 });
+
+await check('what a run says of itself is told and shown without a control character in it, whoever wrote it', async () => {
+  const w = createWorld({ seed: 17 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const dirty = 'done\u001b[2J\r\nfa\u0007ke \u009b31mline\u007f';
+  const clean = 'done [2J  fa ke  31mline ';
+
+  // The executor's own node cleans what its agent printed before it keeps or tells it.
+  const one = await going(w, req, exe, 'pr-1');
+  exe.executor.end(one.job.runId, { summary: dirty, runner: 'cl\u0000aude', model: 'fa\nble' });
+  await w.net.until(() => w.offerRow(req, one.taskId).state === 'done', { what: 'the offer done' });
+  const kept = w.stored(exe, 'runs').runs[one.job.runId].outcome;
+  assert.deepEqual([kept.summary, kept.runner, kept.model], [clean, 'cl aude', 'fa ble']);
+  const shown = w.offerRow(req, one.taskId).outcome;
+  assert.deepEqual([shown.summary, shown.runner, shown.model], [clean, 'cl aude', 'fa ble']);
+
+  // An executor that cleans nothing: the requester shows none of it either.
+  const two = await going(w, req, exe, 'pr-2');
+  const { round } = w.claim(exe, two.taskId);
+  const outcome = { ok: false, summary: dirty, microUsd: 0, tokens: 0, runner: 'cl\u0000aude', model: 'fa\nble' };
+  assert.equal((await w.request(exe, req, 'done', { taskId: two.taskId, round, outcome })).ok, true);
+  const row = w.offerRow(req, two.taskId);
+  assert.deepEqual([row.outcome.summary, row.outcome.runner, row.outcome.model, row.reason], [clean, 'cl aude', 'fa ble', clean]);
+});

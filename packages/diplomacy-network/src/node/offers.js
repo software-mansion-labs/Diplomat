@@ -16,10 +16,13 @@ import {
 import { claimKey, hoursOf, offerKey } from './gossip.js';
 
 const OPEN = ['pooled', 'claimed'];
-const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
 const MAX_REASON = 200;
 const MAX_SPEC_BYTES = 512 * 2 ** 10;
 const MAX_GRANTED = 16;
+
+/// `value` as text with a space where each control character was: what a run says of
+/// itself reaches logs, terminals and the applets.
+export const plain = (value) => String(value ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
 
 /// A forge answer made here rather than by the forge: `{ status, headers, body }` with a
 /// JSON `{ message }` as its body, the way a forge words a refusal.
@@ -48,7 +51,7 @@ export function createOffers(host) {
 
   const save = () => host.store.write('offers', offers);
   // Cut first: a cut may fall inside a surrogate pair, and a record carries none halved.
-  const text = (value, max) => String(value ?? '').replace(CONTROL, ' ').slice(0, max).toWellFormed();
+  const text = (value, max) => plain(value).slice(0, max).toWellFormed();
 
   // One thing at a time per task: a key is issued once, and requests under it are
   // carried out in the order their numbers were accepted.
@@ -290,7 +293,8 @@ export function createOffers(host) {
       if (!O || !OPEN.includes(O.state) || O.reported.includes(body.round) || !madeFor(O, claim)) return { body: {} };
       const { ok, summary, microUsd, tokens, runner, model } = body.outcome;
       O.reported.push(body.round);
-      O.outcome = { ok, summary, usd: microUsd / 1e6, tokens, runner, model };
+      // The executor's own words: another machine wrote them.
+      O.outcome = { ok, summary: plain(summary), usd: microUsd / 1e6, tokens, runner: plain(runner), model: plain(model) };
       if (ok) end(P, O, 'done');
       else fail(P, O, body.round, summary);
       return { body: {} };

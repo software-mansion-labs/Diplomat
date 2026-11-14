@@ -18,6 +18,11 @@ import { poolFile } from './store.js';
 const BATCH = 256;
 const BATCH_BYTES = STRANGER_BODY_BYTES - 4096;
 const MAX_TOLD = 1024;
+// Why an invite that parses lets nobody in, by `verifyInvite`'s code.
+const UNUSABLE = {
+  'bad-invite': 'That invite is not signed by the machine it names: ask for a new one.',
+  expired: 'That invite has run out: ask for a new one.',
+};
 
 // Member and offer records ahead of the claims that rest on them.
 const inOrder = (keys) => [...keys].sort((a, b) => a.startsWith('claim/') - b.startsWith('claim/'));
@@ -371,10 +376,11 @@ export function createGossip(host) {
       return { pool };
     }
     const parsed = parseInvite(token);
-    if (!parsed) throw new Error('not an invite');
+    if (!parsed) throw new Error('That is not an invite: paste the whole token the other machine made.');
     if (!host.pools.has(parsed.pool) && !host.away.has(parsed.pool)) throw noPool(parsed.pool);
     const verdict = verifyInvite(parsed, { pool: parsed.pool, now: host.now() });
-    if (!verdict.ok || parsed.by === host.self) throw new Error(`the invite cannot be used: ${verdict.code ?? 'it is this host\'s own'}`);
+    if (!verdict.ok) throw new Error(UNUSABLE[verdict.code]);
+    if (parsed.by === host.self) throw new Error('That invite was made on this machine: it lets another machine in, not this one.');
     const P = host.pools.get(parsed.pool) ?? rejoin(parsed.pool);
     P.inviter = parsed.by;
     P.farewell = null;
