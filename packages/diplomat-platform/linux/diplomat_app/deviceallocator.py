@@ -18,7 +18,7 @@ import re
 import shutil
 import socket
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -299,6 +299,8 @@ class RemoteStatus:
 class DaemonReply:
     status: int
     json: object = None
+    #: The body as it was sent, for a reader that parses it itself.
+    raw: bytes = field(default=b"", compare=False, repr=False)
 
     @property
     def ok(self) -> bool:
@@ -354,15 +356,16 @@ NO_REPLY = "no reply"
 
 
 def exchange(endpoint: str, body: dict | None = None, *, timeout_secs: float,
-             sock: Path | None = None) -> DaemonReply | str:
-    """POST to the daemon on ``sock`` (default: the allocator's). Any HTTP status is
-    an answer; otherwise :data:`UNREACHABLE` or :data:`NO_REPLY`. Blocking, so off the
-    GUI thread. Each call is its own connection, so a long one (a sign-in) holds up no
-    other. Raises on a body JSON cannot encode."""
+             sock: Path | None = None, method: str = "POST") -> DaemonReply | str:
+    """One request to the daemon on ``sock`` (default: the allocator's): a POST of
+    ``body``, or a bodiless ``method``. Any HTTP status is an answer; otherwise
+    :data:`UNREACHABLE` or :data:`NO_REPLY`. Blocking, so off the GUI thread. Each call
+    is its own connection, so a long one (a sign-in) holds up no other. Raises on a
+    body JSON cannot encode."""
     path = sock or socket_path()
     if not path.exists():
         return UNREACHABLE
-    payload = json.dumps(body or {})
+    payload = json.dumps(body or {}) if method == "POST" else None
     conn = _UnixHTTPConnection(str(path), timeout_secs)
     try:
         try:
@@ -372,8 +375,8 @@ def exchange(endpoint: str, body: dict | None = None, *, timeout_secs: float,
         except OSError:
             return UNREACHABLE
         try:
-            conn.request("POST", f"/{endpoint}", body=payload,
-                         headers={"content-type": "application/json"})
+            conn.request(method, f"/{endpoint}", body=payload,
+                         headers={"content-type": "application/json"} if payload else {})
             resp = conn.getresponse()
             raw = resp.read()
             status = resp.status
@@ -385,7 +388,7 @@ def exchange(endpoint: str, body: dict | None = None, *, timeout_secs: float,
         parsed = json.loads(raw)
     except ValueError:
         parsed = None
-    return DaemonReply(status, parsed)
+    return DaemonReply(status, parsed, raw)
 
 
 def call(endpoint: str, body: dict | None = None, *,

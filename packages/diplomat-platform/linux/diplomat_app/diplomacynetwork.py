@@ -1,0 +1,221 @@
+"""Bridge to the Diplomacy Network daemon + installer, for the gate every job passes
+while the network is switched on, and for the Network screen.
+
+The applet *drives* the Node installer (``diplomacy-network/src/install.js``) to start
+and stop the daemon, *asks* the daemon's socket (``packages/diplomacy-network``'s
+README, "Local socket"), and writes the three settings the daemon re-reads from the
+shared config. What to send and how to read the answers is :mod:`diplomat_runtime.network`.
+"""
+
+from __future__ import annotations
+
+import os
+import signal
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from diplomat_runtime import appconfig, network
+from . import deviceallocator as da
+from . import procscan
+
+
+def package_dir() -> str:
+    return da.sibling_package("diplomacy-network", "DIPLOMAT_DIPLOMACY_NETWORK_DIR")
+
+
+def install_js() -> str:
+    return os.path.join(package_dir(), "src", "install.js")
+
+
+def package_available() -> bool:
+    return os.path.exists(install_js())
+
+
+def ready() -> bool:
+    """Whether the installer can be run at all: the package and a node to run it."""
+    return package_available() and da.resolve_node() is not None
+
+
+def base_dir() -> Path:
+    """The daemon's directory, relocated by ``DN_BASE_DIR`` as in ``src/paths.js``."""
+    env = os.environ.get("DN_BASE_DIR")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".diplomat" / "network"
+
+
+def socket_path() -> Path:
+    return base_dir() / "daemon.sock"
+
+
+# MARK: settings
+
+def enabled() -> bool:
+    return appconfig.get_bool(network.ENABLED_KEY, False)
+
+
+def set_enabled(on: bool) -> None:
+    appconfig.set_bool(network.ENABLED_KEY, on)
+
+
+def required_minimum_h() -> int:
+    """The hours a task this machine offers asks an executor to hold it for."""
+    return network.hours(appconfig.read().get(network.REQUIRED_MINIMUM_H_KEY))
+
+
+def maximum_accepted_h() -> int:
+    """The most hours a task may ask for and still be taken by this machine."""
+    return network.hours(appconfig.read().get(network.MAXIMUM_ACCEPTED_H_KEY))
+
+
+def set_hours(key: str, value: int) -> None:
+    appconfig.set_int(key, max(network.HOURS_FLOOR, int(value)))
+
+
+# MARK: installer
+
+def start_daemon() -> dict | None:
+    return da.run_installer(install_js(), "--start-daemon")
+
+
+def restart_daemon() -> dict | None:
+    return da.run_installer(install_js(), "--restart-daemon")
+
+
+def stop_daemon() -> dict | None:
+    return da.run_installer(install_js(), "--stop-daemon")
+
+
+def ensure_deps() -> bool:
+    return da.ensure_deps(package_dir())
+
+
+# MARK: the socket
+
+#: Every route answers from memory; an offer also signs and stores a record.
+SEND_TIMEOUT_SECS = 10
+
+_GETS = frozenset({network.ROUTE_HEALTH, network.ROUTE_STATE})
+
+NOT_RUNNING = "The network daemon is not running."
+NO_ANSWER = "The network daemon did not answer."
+
+
+def send(route: str, body: dict | None = None, *,
+         timeout_secs: float = SEND_TIMEOUT_SECS) -> da.DaemonReply | str:
+    """One request to the daemon (a ``network.ROUTE_*``): its reply, or
+    ``da.UNREACHABLE`` / ``da.NO_REPLY``. Blocking, so off the GUI thread."""
+    return da.exchange(route, body, timeout_secs=timeout_secs, sock=socket_path(),
+                       method="GET" if route in _GETS else "POST")
+
+
+def refusal(reply: da.DaemonReply | str) -> str | None:
+    """Why a request did not go through, as a sentence fit to show the operator; None
+    when the daemon took it. A 4xx carries the daemon's own sentence."""
+    if reply == da.UNREACHABLE:
+        return NOT_RUNNING
+    if not isinstance(reply, da.DaemonReply):
+        return NO_ANSWER
+    if reply.ok:
+        return None
+    error = reply.get("error")
+    return error if isinstance(error, str) and error else (
+        f"The network daemon refused the request (HTTP {reply.status}).")
+
+
+def state() -> network.Snapshot | None:
+    """The daemon's snapshot, or None when it gave none."""
+    reply = send(network.ROUTE_STATE)
+    if not isinstance(reply, da.DaemonReply) or not reply.ok:
+        return None
+    return network.Snapshot.parse(reply.raw)
+
+
+# MARK: a job's offer
+
+#: The dispatch verdict for a job the network did not take.
+VERDICT_REFUSED = "network_refused"
+
+#: The runner a completion is recorded under when another machine ran the task: not a
+#: runner of this machine's, so its tokens count against no limit read here.
+RUNNER_ELSEWHERE = "network"
+
+#: Why an offer is withdrawn when its run could not be written to the run book, and
+#: when the operator stops a run no container of this machine is executing.
+WITHDRAW_UNBOOKED = "unbooked"
+WITHDRAW_STOPPED = "stopped"
+
+
+class Refused(str):
+    """:data:`VERDICT_REFUSED`, carrying the sentence that says why, and whether the
+    daemon answered at all: one that did not gives every job the same answer."""
+
+    sentence: str
+    answered: bool
+
+    def __new__(cls, sentence: str, answered: bool = True) -> "Refused":
+        self = super().__new__(cls, VERDICT_REFUSED)
+        self.sentence = sentence
+        self.answered = answered
+        return self
+
+
+def terms(payload: Mapping[str, Any]) -> dict[str, bool]:
+    """What a prompt payload (a config's ``prompt_payload()``) allows its job, as the
+    fields of :class:`autofix.AgentJob` an offer's options are read from. A review's
+    two follow the prompt builder's own gates: no verdict on the operator's own PR, and
+    nothing marked ready on someone else's."""
+    kind = payload.get("kind")
+    if kind == "review":
+        whose = payload.get("specificAuthor")
+        return {"own_pr": whose == "mine",
+                "verdict": payload.get("finalPass") is True and whose != "mine",
+                "mark_ready": payload.get("markReady") is True and whose != "theirs"}
+    if kind in ("issues", "audit"):
+        return {"opens_prs": payload.get("openPRs") is True}
+    return {}
+
+
+# MARK: the node the network replaced
+
+def _is_legacy_node(tokens: list[str]) -> bool:
+    """``python -m szpontnet``: the two as whole, adjacent arguments. A path or a
+    longer module name holding the word is some other program."""
+    return any(flag == "-m" and module == "szpontnet"
+               for flag, module in zip(tokens, tokens[1:]))
+
+
+def end_legacy_nodes() -> set[int]:
+    """Ask every ``python -m szpontnet`` of this user to quit, and return their pids."""
+    pids = procscan.scan_own_pids(
+        lambda pid: _is_legacy_node(procscan.cmdline_tokens(pid)))
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            pass
+    return pids
+
+
+# MARK: display
+
+#: What the switch does, under it wherever it is drawn.
+SWITCH_SUMMARY = ("Every job is offered to a pool shared per repository and runs in a "
+                  "docker container, on this machine or another one in the pool.")
+
+
+def short_key(pk: str) -> str:
+    """A member's key as the screens and the run rows name it."""
+    return pk[:8]
+
+
+def unavailable_summary() -> str | None:
+    """Why the daemon cannot be run from here at all, or None when it can."""
+    if not package_available():
+        return (f"⚠ Package not found at {package_dir()}. Set "
+                "DIPLOMAT_DIPLOMACY_NETWORK_DIR to point at it.")
+    if da.resolve_node() is None:
+        return ("⚠ Node.js not found. Install Node (or set DIPLOMAT_NODE): the network "
+                "daemon needs it to run.")
+    return None

@@ -13,6 +13,7 @@ the caller starts without reaping, which is the intended best-effort degradation
 from __future__ import annotations
 
 import os
+import re
 import signal
 import time
 from collections.abc import Callable
@@ -68,6 +69,24 @@ def start_time(pid: int) -> int:
         return int(raw[raw.rindex(b")") + 1:].split()[19])  # field 22
     except (OSError, ValueError, IndexError):
         return 0
+
+
+# A container's cgroup as docker, containerd and podman name it, under either cgroup
+# driver: ``/docker/<id>``, or a ``docker-<id>.scope`` unit. ``docker.service``, the
+# engine itself, is neither.
+_CONTAINER_CGROUP = re.compile(
+    rb"/docker/[0-9a-f]{12,}|(?:docker|cri-containerd|libpod)-[0-9a-f]{12,}\.scope")
+
+
+def in_container(pid: int) -> bool:
+    """Whether a pid runs inside a container, by the cgroup it is in. The host's
+    process table lists a container's processes beside its own. False when the cgroup
+    can't be read, which is every pid on a host without ``/proc``."""
+    try:
+        raw = Path(f"/proc/{pid}/cgroup").read_bytes()
+    except OSError:
+        return False
+    return _CONTAINER_CGROUP.search(raw) is not None
 
 
 def module_arg(tokens: list[str]) -> str | None:

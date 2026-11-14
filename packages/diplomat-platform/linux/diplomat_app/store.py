@@ -38,6 +38,7 @@ from diplomat_runtime import (
     core,
     diskfloor,
     localrepos,
+    network,
     opencodeapi,
     promptcore,
     review,
@@ -58,6 +59,7 @@ from . import (
     bans,
     conflicts,
     deviceallocator,
+    diplomacynetwork,
     headless,
     issues,
     probes,
@@ -243,6 +245,28 @@ class _InstallerGate:
 
 
 @dataclass(frozen=True)
+class NetworkRun(autofix.RunningAgent):
+    """A run the Diplomacy Network carries, as the panel draws it: with the run its
+    row's controls act on, and the task the daemon knows it by."""
+
+    run_id: str = ""
+    task: str = ""
+
+
+@dataclass(frozen=True)
+class NetworkCall:
+    """An invite, a join or a leave the Network screen asked for: running, or how it
+    ended. ``pool`` is the pool it was about ("" for a join, which names none)."""
+
+    kind: str = ""
+    pool: str = ""
+    running: bool = False
+    error: str = ""
+    #: The invite token, for the screen to put on the clipboard.
+    invite: str = ""
+
+
+@dataclass(frozen=True)
 class RemoteCall:
     """A remote-pool call: idle, running, or its last ``reply`` and when (``at``,
     epoch seconds)."""
@@ -272,6 +296,8 @@ class Store(QObject):
     # a scan started or ended.
     machines_changed = Signal()
     machines_install_changed = Signal()
+    #: The Diplomacy Network's switch, daemon, snapshot or a call of its screen moved.
+    network_changed = Signal()
     # Emitted when the activity feed (audit.jsonl) or ban list snapshot changes.
     activity_changed = Signal()
     # Emitted when the self-update status/progress changes.
@@ -348,6 +374,27 @@ class Store(QObject):
         self.machines_install: dict | None = None
         self._machines_gate = _InstallerGate()
         self.machines_scanning = False
+        # The Diplomacy Network daemon's last snapshot: None when it gave none, which
+        # says nothing about any run (:func:`network.tasks`). Replaced, never mutated.
+        self.network_state: network.Snapshot | None = None
+        # Whether the daemon has been asked at all since the switch last went on.
+        self.network_asked = False
+        self._network_gate = _InstallerGate()
+        self._network_cycle_lock = threading.Lock()
+        # Why the last cycle posted no pool list ("" when it did), and the daemon's
+        # refusal of the last list or admit it was sent.
+        self.network_pools_held = ""
+        self.network_error = ""
+        # When a daemon found dead may next be started, and the wait after that
+        # (:meth:`_revive_network_daemon`).
+        self._network_start_due = 0.0
+        self._network_start_wait = self.NETWORK_START_WAIT
+        # When each forge host's login was last asked for and not learned.
+        self._network_login_asked: dict[str, float] = {}
+        # What each refusal already wrote to the feed, until an offer goes through.
+        self._network_refusals_logged: set[tuple[str, str]] = set()
+        # The Network screen's last invite, join or leave.
+        self.network_call = NetworkCall()
         # The Devices screen's two remote-pool calls. Here, not on the screen: a
         # sign-in runs for up to ten minutes and must outlive the screen being closed.
         self.remote_sign_in = RemoteCall()
@@ -2040,6 +2087,13 @@ class Store(QObject):
         register it. Returns the verdict: ``"spawned"``, an ``autofix.VERDICT_*``
         refusal, or ``"failed"`` (spawn error). Twin of Store.dispatchAgent (macOS).
 
+        With the Diplomacy Network switched on, proceeding is an offer to the job's
+        pool instead of a spawn (:meth:`_offer_tracked`), booked and counted the same
+        and still answered ``"spawned"``; a job the network did not take comes back as
+        a :class:`diplomacynetwork.Refused`. Of the holds below only a paused monitor
+        or queue then applies: the cap, the disk and the budget are the claiming
+        machine's (:func:`network.admit`).
+
         In-flight evidence is the tracked list OR a live ``claude`` visible in
         ``ps`` - the ground-truth floor that also catches agents whose local
         bookkeeping was lost (applet restart). ``_dispatching_prs`` is held for the
@@ -2091,14 +2145,19 @@ class Store(QObject):
             # with a link and no number is a PR of another checkout, which the dedup
             # does not cover.
             agent_on_pr = item is not None and self._in_flight(job.pr_url or "")
+            # With the Diplomacy Network on the job is offered to a pool, and the
+            # machine that claims it answers for its own disk, cap and budget
+            # (:func:`network.admit`): the gate holds it for none of the three, and
+            # the disk and the budget are not read for it here.
+            networked = diplomacynetwork.enabled()
             # The disk first: it outranks every other hold on auto work. Measured on
             # the fullest of the volumes an agent fills: the repo roots (its
             # worktree) and ~/.diplomat (the tool caches).
             disk = None
             low_disk = False
-            if source == autofix.SOURCE_AUTO and not agent_on_pr and not forced:
-                disk = diskfloor.lowest([*(r.path for r in review.repo_roots()),
-                                         str(Path.home() / ".diplomat")])
+            if (source == autofix.SOURCE_AUTO and not agent_on_pr and not forced
+                    and not networked):
+                disk = self._lowest_disk()
                 low_disk = disk is not None and disk.low
                 if not low_disk:
                     self._disk_logged = False
@@ -2132,14 +2191,14 @@ class Store(QObject):
             budget = autofix.Budget(affordable=True)
             if (source == autofix.SOURCE_AUTO and not agent_on_pr
                     and not forced and not at_capacity and not low_disk
-                    and autobudget.enabled()):
+                    and not networked and autobudget.enabled()):
                 budget = autobudget.decide()
                 if budget.affordable:
                     self._budget_logged = False
             verdict = autofix.dispatch_decide(
                 source, banned, agent_on_pr, full,
                 not budget.affordable, outside_allowlist, low_disk,
-                paused=paused, network=False,
+                paused=paused, network=networked,
             )
             if verdict == autofix.VERDICT_LOW_DISK:
                 self._log_low_disk(disk)
@@ -2190,20 +2249,28 @@ class Store(QObject):
             # and a directory nothing ever cleans up. What it costs depends on how
             # it was dispatched, not on having a PR: the cap counts automatic runs
             # and pricing follows the ledger key.
-            try:
-                self._spawn_tracked(job.prompt, job.pr_url, job.pr_number,
-                                    source, job.ledger_key,
-                                    label=row_label, kind=job.kind,
-                                    checkout=job.checkout)
-            except review.SpawnError as exc:
-                activity.log(source, "spawn-failed",
-                             f"{job.label} failed to spawn: {exc}")
-                self.refresh_activity()
-                self._note_comms_spawn_failed(row_label, str(exc))
-                return "failed"
-            token = bool(review.token_export())
-            activity.log(source, job.audit_action,
-                         row_label + (review.TOKEN_AUDIT_NOTE if token else ""))
+            if networked:
+                # The whole of what a dispatch does while the network is on: nothing
+                # below this branch starts an agent on this machine, whatever the
+                # daemon answers.
+                refused = self._offer_tracked(job, source, attempt, forced, row_label)
+                if refused is not None:
+                    return refused
+            else:
+                try:
+                    self._spawn_tracked(job.prompt, job.pr_url, job.pr_number,
+                                        source, job.ledger_key,
+                                        label=row_label, kind=job.kind,
+                                        checkout=job.checkout)
+                except review.SpawnError as exc:
+                    activity.log(source, "spawn-failed",
+                                 f"{job.label} failed to spawn: {exc}")
+                    self.refresh_activity()
+                    self._note_comms_spawn_failed(row_label, str(exc))
+                    return "failed"
+                token = bool(review.token_export())
+                activity.log(source, job.audit_action,
+                             row_label + (review.TOKEN_AUDIT_NOTE if token else ""))
             # The telemetry ledger tracks the MONITORS, so only an auto dispatch is
             # recorded — a wizard click is the operator's own doing and has no queue
             # instant to be late against.
@@ -2225,6 +2292,13 @@ class Store(QObject):
             if item is not None:
                 with self._dispatching_lock:
                     self._dispatching_prs.discard(item)
+
+    @staticmethod
+    def _lowest_disk() -> diskfloor.Reading | None:
+        """The fullest of the volumes an agent fills: the repo roots (its worktree) and
+        ~/.diplomat (the tool caches). None with no floor set."""
+        return diskfloor.lowest([*(r.path for r in review.repo_roots()),
+                                 str(Path.home() / ".diplomat")])
 
     def _item_label(self, url: str, number: int) -> str:
         """``#N`` while one repo root is loaded, else ``repo#N`` (:func:`item_label`)."""
@@ -2258,27 +2332,29 @@ class Store(QObject):
         root = self._root_named(s.item)
         if root is None:
             return False
+        payload = review.ReviewConfig(
+            depth="deep",
+            target=PRTarget.SPECIFIC,
+            me=self.known_me(root),
+            mark_ready=False,
+            leave_reviews=False,
+            reply_to_reviews=True,
+            specific_pr=str(s.number),
+            specific_author=review.SpecificAuthor.MINE,
+            home=root,
+        ).prompt_payload()
         job = autofix.AgentJob(
             kind="review",
             audit_action="review-reply",
             label=f"Review · {self._item_label(s.url, s.number)}",
-            prompt=review.ReviewConfig(
-                depth="deep",
-                target=PRTarget.SPECIFIC,
-                me=self.known_me(root),
-                mark_ready=False,
-                leave_reviews=False,
-                reply_to_reviews=True,
-                specific_pr=str(s.number),
-                specific_author=review.SpecificAuthor.MINE,
-                home=root,
-            ).build_prompt(),
+            prompt=promptcore.build_prompt(payload),
             pr_url=s.url,
             pr_number=s.number,
             ledger_key=autofix.ledger_key(autofix.WORK_REVIEW_REPLY, s.url, s.head_sha),
             counter="my_reviews",
             attempt_stamp=autofix.STAMP_UNRESOLVED_REVIEW,
             checkout=root.path,
+            **diplomacynetwork.terms(payload),
         )
         return self.dispatch_agent(job, autofix.SOURCE_AUTO, attempt) == "spawned"
 
@@ -2296,11 +2372,13 @@ class Store(QObject):
         root = self._root_named(r.item)
         if root is None:
             return False
+        payload = self._review_request_config(
+            r.number, verdict=verdict, home=root).prompt_payload()
         job = autofix.AgentJob(
             kind="review",
             audit_action=REVIEW_REQ_ACTION,
             label=f"Review-req · {self._item_label(r.url, r.number)} (@{r.author}){tag}",
-            prompt=self._review_request_config(r.number, verdict=verdict, home=root).build_prompt(),
+            prompt=promptcore.build_prompt(payload),
             pr_url=r.url,
             pr_number=r.number,
             author_login=r.author,
@@ -2308,6 +2386,7 @@ class Store(QObject):
             counter="review_requests",
             attempt_stamp=r.stamp,
             checkout=root.path,
+            **diplomacynetwork.terms(payload),
         )
         return self.dispatch_agent(job, autofix.SOURCE_AUTO, attempt) == "spawned"
 
@@ -2367,7 +2446,13 @@ class Store(QObject):
 
         ``checkout`` is where the agent works when that is not the repo root
         (:attr:`autofix.AgentJob.checkout`).
+
+        Refused while the Diplomacy Network is on: every job then runs in a container
+        the network starts, and this is the one road to an agent on this machine.
         """
+        if diplomacynetwork.enabled():
+            raise review.SpawnError("the Diplomacy Network is on, so no agent starts "
+                                    "on this machine")
         if checkout == review.repo_path():
             checkout = None
         now = time.time()
@@ -2407,6 +2492,100 @@ class Store(QObject):
             # as FAILED once the spawn grace runs out.
             self._write_book(lambda: agentregistry.forget({record.run_id}))
             raise
+
+    def _offer_target(self, job: autofix.AgentJob) -> tuple[str, int | None]:
+        """The repository a job works in, as a :attr:`LocalRepo.key` ("" when nothing
+        names one), and the PR or issue it is about. Its link names both; a job with no
+        link works in the checkout it would be spawned into."""
+        linked = split_item_key(item_key_from_url(job.pr_url or "") or "")
+        if linked is not None:
+            return linked[0], job.pr_number if job.pr_number is not None else linked[1]
+        where = job.checkout or review.repo_path()
+        return next((r.key for r in self.local_repos if r.path == where), ""), None
+
+    def _offer_tracked(self, job: autofix.AgentJob, source: str, attempt: int,
+                       forced: bool, row_label: str) -> str | None:
+        """Offer a job to its repository's pool and book the run the network carries
+        for it. None once it is offered and booked, else the verdict the dispatch
+        answers with.
+
+        The run is booked as a spawned one is, with the task id the daemon's snapshot
+        is asked about (:attr:`agentstate.RunRecord.network`) where a spawn has a pid
+        and a window.
+
+        A job the network did not take is never started here in its place: an
+        automatic one goes back to the queue for the next cycle, and one the operator
+        started answers with the sentence that says why
+        (:class:`diplomacynetwork.Refused`).
+        """
+        repo_key, number = self._offer_target(job)
+        offer = network.offer_for(
+            job.audit_action, job.own_pr, number, repo_key, job.label, job.prompt,
+            source, forced, verdict=job.verdict, mark_ready=job.mark_ready,
+            no_prs=not job.opens_prs, read_only=not job.opens_prs)
+        if isinstance(offer, str):
+            return self._network_refused(job, source, attempt,
+                                         f"{offer[:1].upper()}{offer[1:]}.", True)
+        reply = diplomacynetwork.send(network.ROUTE_OFFER, offer.body)
+        answered = isinstance(reply, deviceallocator.DaemonReply)
+        sentence = diplomacynetwork.refusal(reply)
+        task = reply.get("taskId") if sentence is None else None
+        if sentence is None and not (isinstance(task, str) and task):
+            sentence = "The network daemon named no task for the offer."
+        if sentence is not None:
+            return self._network_refused(job, source, attempt, sentence, answered)
+        # An offer went through, so whatever kept this job or every job out is over.
+        self._network_refusals_logged = {
+            k for k in self._network_refusals_logged if k[0] not in ("", job.label)}
+        # The daemon answers an offer still open with the task it already has: the
+        # run booked for it is this job's.
+        if any(r.network == task for r in agentregistry.load()):
+            if source == autofix.SOURCE_PANEL:
+                activity.log(source, "in-flight", f"{job.label} - the pool already has this job")
+                self.refresh_activity()
+            return autofix.VERDICT_IN_FLIGHT
+        now = time.time()
+        try:
+            agentregistry.create_run(
+                agentstate.RunRecord(
+                    run_id=agentregistry.new_run_id(now), dispatched_at=now,
+                    pr_number=job.pr_number, pr_url=job.pr_url or "", kind=job.kind,
+                    label=row_label, source=source, ledger_key=job.ledger_key,
+                    network=task),
+                job.prompt)
+        except OSError as exc:
+            # A task no run here stands for would end unseen, so it is taken back.
+            diplomacynetwork.send(network.ROUTE_WITHDRAW, network.withdraw_body(
+                task, diplomacynetwork.WITHDRAW_UNBOOKED))
+            activity.log(source, network.AUDIT_FAILED,
+                         f"{job.label} - offered, then withdrawn: the run could not be "
+                         f"booked ({exc.strerror or exc})")
+            self.refresh_activity()
+            return "failed"
+        activity.log(source, network.AUDIT_OFFER,
+                     f"{row_label} - offered to {offer.pool}"
+                     + (", to run on this machine" if offer.now else ""))
+        return None
+
+    def _network_refused(self, job: autofix.AgentJob, source: str, attempt: int,
+                         sentence: str, answered: bool) -> diplomacynetwork.Refused:
+        """A job the network did not take. Automatic work waits in the queue, and the
+        feed says why once: one line for a daemon that answers nothing, whatever the
+        number of jobs it keeps waiting, and one per job for a refusal of that job."""
+        if source == autofix.SOURCE_AUTO:
+            self._stage_queued(job, attempt)
+            key = (job.label if answered else "", sentence)
+            if key not in self._network_refusals_logged:
+                self._network_refusals_logged.add(key)
+                activity.log(source, network.AUDIT_UNAVAILABLE,
+                             f"{job.label} - {sentence} It waits in the queue."
+                             if answered else
+                             f"{sentence} Automatic work waits in the queue.")
+                self.refresh_activity()
+        else:
+            activity.log(source, network.AUDIT_UNAVAILABLE, f"{job.label} - {sentence}")
+            self.refresh_activity()
+        return diplomacynetwork.Refused(sentence, answered)
 
     def _auto_tasks_running(self) -> int:
         """How many bays of this device's cap are held right now — the number the cap
@@ -2476,9 +2655,11 @@ class Store(QObject):
 
         Runs that are over are left out (:data:`agentstate.ENDED`), so the list starts
         at *awaiting input*.
+
+        A run the Diplomacy Network carries is a :class:`NetworkRun`.
         """
         return [
-            autofix.RunningAgent(
+            (autofix.RunningAgent if r.network is None else NetworkRun)(
                 pr_number=r.pr_number or 0,
                 label=r.label,
                 kind=r.kind,
@@ -2487,6 +2668,8 @@ class Store(QObject):
                 state=s.state,
                 reason=s.reason,
                 item=item_key_from_url(r.pr_url),
+                **({} if r.network is None
+                   else {"run_id": r.run_id, "task": r.network}),
             )
             for r, s in self._agent_tick().rows
             if s.state not in agentstate.ENDED
@@ -2780,6 +2963,7 @@ class Store(QObject):
                 author_login=entry.author or None,
                 # A root's checkout is wherever that root is now, not where it was asked.
                 checkout=checkout or where,
+                **diplomacynetwork.terms(entry.config),
             ),
             attempt=1,
         )
@@ -2981,7 +3165,9 @@ class Store(QObject):
                 continue
             if outside(entry):
                 continue
-            if self._auto_tasks_running() >= self.auto_task_limit:
+            # A task offered to the Diplomacy Network takes no bay of this machine's.
+            if (not diplomacynetwork.enabled()
+                    and self._auto_tasks_running() >= self.auto_task_limit):
                 return
             # Finding room here is what re-arms the saturation notice. The gate's own
             # reset sits behind the capacity measurement this path skips, so without
@@ -2996,6 +3182,9 @@ class Store(QObject):
             # commit at the end of the cycle. Draining on would cost a round of
             # refusals to no end. The same holds for a disk below its floor.
             if verdict in (autofix.VERDICT_UNAFFORDABLE, autofix.VERDICT_LOW_DISK):
+                return
+            # So would a network daemon that answers nothing.
+            if getattr(verdict, "answered", True) is False:
                 return
 
     def _drop_queued_task(self, task_id: str) -> None:
@@ -3171,11 +3360,15 @@ class Store(QObject):
         verdict = self._run_queued_task(entry, forced=True)
         label = entry.job.label
         if verdict == "spawned":
-            activity.log("panel", "queue-run",
-                         f"{label} — started ahead of the task cap")
+            # An offer to the network has said so in its own line, and skips no cap.
+            if not diplomacynetwork.enabled():
+                activity.log("panel", "queue-run",
+                             f"{label} — started ahead of the task cap")
         # The rest are all logged by the step that decided them, but a feed line is
         # not an answer to a click: the row vanished and nothing opened, so say why in
         # the panel, as the wizards do for their own refusals.
+        elif verdict == diplomacynetwork.VERDICT_REFUSED:
+            self.error = f"{label}: {verdict.sentence}"
         elif verdict == "failed":
             self.error = f"{label} failed to spawn — see the activity log."
         elif verdict == autofix.VERDICT_IN_FLIGHT:
@@ -3223,10 +3416,23 @@ class Store(QObject):
         a staleness window in which an agent that just finished still holds its bay —
         the exact class of wrong answer this whole mechanism exists to remove.
         """
+        return self._tick_with(self.network_state)
+
+    def _network_evidence(self, snapshot: network.Snapshot | None) -> agentstate.Observation:
+        """What ``snapshot`` says of this machine's offers. With the switch off nothing
+        asks the daemon, and that is what the evidence says."""
+        if not diplomacynetwork.enabled():
+            return agentstate.Evidence().network
+        return network.tasks(snapshot)
+
+    def _tick_with(self, snapshot: network.Snapshot | None) -> agentstate.Tick:
+        """:meth:`_agent_tick` against one reading of the network daemon, for a caller
+        that goes on to act on what that same reading said."""
         now = time.time()
         records = agentregistry.adopt_pids(agentregistry.load())
-        evidence = probes.gather(records, now, merged=self._merged_prs,
-                                 tokens=self._tokens_left)
+        evidence = dataclasses.replace(
+            probes.gather(records, now, merged=self._merged_prs, tokens=self._tokens_left),
+            network=self._network_evidence(snapshot))
         t = agentstate.tick(records, evidence, now, self.auto_task_limit,
                             appconfig.run_deadline(), tuple(review.repo_roots()))
         with self._tick_lock:
@@ -3240,9 +3446,12 @@ class Store(QObject):
         Called from the poll and the display refresh — the two ticks that are meant to
         move the world on — and from nowhere that merely draws.
         """
-        t = self._agent_tick()
+        # One reading of the network for the verdicts and for what is done about them:
+        # a run that reads finished is priced from the snapshot that said so.
+        snapshot = self.network_state
+        t = self._tick_with(snapshot)
         self._persist_run_changes(t)
-        self._retire_finished(t)
+        self._retire_finished(t, snapshot, self._withdraw_merged(t))
         self._note_silent_probes()
         self._note_comms_runs({r.label: s.reason for r, s in t.rows
                                if s.state == agentstate.FAILED})
@@ -3397,7 +3606,56 @@ class Store(QObject):
             activity.log("auto", "poll-recovered", "Agent run book saving again")
         return True
 
-    def _retire_finished(self, t: agentstate.Tick) -> None:
+    def _withdraw_merged(self, t: agentstate.Tick) -> set[str]:
+        """Take back each offer whose PR merged while the network still carried it
+        (:func:`agentstate.withdrawable`), and return the runs whose withdrawal the
+        daemon did not answer. Those stay booked, so a later tick asks again: a task
+        left in a pool is an agent started on work nobody wants."""
+        unanswered: set[str] = set()
+        for r in t.withdrawable:
+            reply = diplomacynetwork.send(
+                network.ROUTE_WITHDRAW,
+                network.withdraw_body(r.network, network.WITHDRAW_MERGED))
+            if not isinstance(reply, deviceallocator.DaemonReply):
+                unanswered.add(r.run_id)
+                continue
+            refused = diplomacynetwork.refusal(reply)
+            activity.log(r.source, network.AUDIT_WITHDRAW,
+                         f"{r.label or r.run_id} - withdrawn, its PR is merged"
+                         + (f" (the daemon: {refused})" if refused else ""))
+        return unanswered
+
+    def _record_network_outcomes(self, gone: list[agentstate.RunRecord],
+                                 snapshot: network.Snapshot | None, now: float) -> bool:
+        """Record what each retired network run cost, from the outcome its offer ended
+        with, and say whether any was recorded. A run with no outcome spent nothing
+        anyone reported, and its ledger entry stays open.
+
+        The runner is the outcome's own when this machine ran the task. Run elsewhere,
+        it is :data:`diplomacynetwork.RUNNER_ELSEWHERE`: the tokens came out of another
+        account's limits, so they are kept per task and counted against no limit read
+        here (:attr:`telemetry.Task.anthropic`)."""
+        seen = network.tasks(snapshot)
+        if not seen.ok:
+            return False
+        offers = {o.task_id: o for o in snapshot.offers}
+        recorded = False
+        for r in gone:
+            offer = offers.get(r.network) if r.network and r.ledger_key else None
+            if offer is None or offer.outcome is None:
+                continue
+            here = seen.value[offer.task_id].executor_here
+            telemetry.record_done(
+                r.ledger_key, offer.ended_at or now, offer.outcome.tokens,
+                agent_runner=(offer.outcome.runner if here
+                              else diplomacynetwork.RUNNER_ELSEWHERE),
+                usd=offer.outcome.usd, model=offer.outcome.model)
+            recorded = True
+        return recorded
+
+    def _retire_finished(self, t: agentstate.Tick,
+                         snapshot: network.Snapshot | None = None,
+                         unwithdrawn: frozenset[str] | set[str] = frozenset()) -> None:
         """Price what has ended and drop it from the book.
 
         Only on positive evidence that the agent ended, or on the one clock the operator
@@ -3434,8 +3692,13 @@ class Store(QObject):
 
         An automatic run its own runner reported done has its window closed as it
         retires (:meth:`_close_finished_windows`), and retires whether or not it closed.
+
+        A run the Diplomacy Network carried has no window, session or transcript here:
+        it is priced from ``snapshot``, the daemon's reading its verdict came from
+        (:meth:`_record_network_outcomes`). ``unwithdrawn`` are the merged ones whose
+        offer could not be taken back (:meth:`_withdraw_merged`), which stay booked.
         """
-        refused = self._reap_wedged_windows(t)
+        refused = self._reap_wedged_windows(t) | unwithdrawn
         gone = [r for r in t.retirable if r.run_id not in refused]
         if not gone:
             return
@@ -3444,7 +3707,8 @@ class Store(QObject):
         # before pricing, so the export is final, and only with no TUI attached to it;
         # the reaper and the closer have already stopped the ones whose window they shut.
         reaped = {r.run_id for r in t.reapable + t.close_on_retire}
-        sessions = [probes.service_session(r) for r in gone if r.run_id not in reaped]
+        sessions = [probes.service_session(r) for r in gone
+                    if r.run_id not in reaped and r.runs_here]
         attached = set(probes.live_service_sessions()) if any(sessions) else set()
         for session_id in sessions:
             if session_id and session_id not in attached:
@@ -3464,7 +3728,7 @@ class Store(QObject):
             (r, agentregistry.finished_at(r.run_id), _run_prompt(r.run_id),
              agentregistry.bound_session(r.run_id),
              agentregistry.run_runner(r.run_id))
-            for r in gone if r.ledger_key and r.run_id not in failed
+            for r in gone if r.ledger_key and r.run_id not in failed and r.runs_here
         ]
         # Only a run whose agent is done: a merge retires one that may still be filling
         # its review. Decided here, while the sentinel `forget` deletes is still there.
@@ -3489,6 +3753,9 @@ class Store(QObject):
         for r in gone:
             verdict = t.states.get(r.run_id)
             action = "spawn-failed" if r.run_id in failed else "retire"
+            if not r.runs_here and verdict is not None:
+                action = {agentstate.FINISHED: network.AUDIT_DONE,
+                          agentstate.FAILED: network.AUDIT_FAILED}.get(verdict.state, action)
             activity.log(r.source, action,
                          f"{r.label or r.run_id} — "
                          f"{verdict.reason if verdict else 'no verdict'}")
@@ -3507,7 +3774,7 @@ class Store(QObject):
             telemetry.record_completion(r.ledger_key, prompt, r.dispatched_at,
                                         exited_at, now, session_id=session_id,
                                         agent_runner=agent_runner)
-        if retired:
+        if self._record_network_outcomes(gone, snapshot, now) or retired:
             self.telemetry_changed.emit()
 
     def _audit_reviews(self, runs: list[tuple[str, str, str, float]], me: str) -> None:
@@ -4900,13 +5167,16 @@ class Store(QObject):
                 cfg = issues.IssueConfig(target=issues.Target.SPECIFIC, me=self.known_me(root),
                                          specific_issue=str(number), include_features=True,
                                          home=root)
+                payload = cfg.prompt_payload()
                 verdict = self.dispatch_agent(autofix.AgentJob(
                     kind=autofix.QUEUE_ISSUES_ACTION, audit_action=autofix.QUEUE_ISSUES_ACTION,
                     label=(f"Issues · {self._item_label(url, number)}"
                            f" · {issues.depth_by_id(cfg.depth)['title']}"),
-                    prompt=cfg.build_prompt(), pr_url=cfg.single_link,
-                    checkout=root.path,
+                    prompt=promptcore.build_prompt(payload), pr_url=cfg.single_link,
+                    checkout=root.path, **diplomacynetwork.terms(payload),
                 ), autofix.SOURCE_PANEL)
+                # The card shows the network's own sentence for a job it did not take.
+                verdict = getattr(verdict, "sentence", verdict)
             except Exception as exc:  # noqa: BLE001 — a core that cannot build the prompt
                 verdict = str(exc)
             finally:
@@ -5208,6 +5478,365 @@ class Store(QObject):
         self._machine_exclusion_async(
             "machine-include", lambda now: remotemachines.include(m, now),
             f"Put {m.target} back in the pool")
+
+    # MARK: the Diplomacy Network
+    #
+    # What is sent and how the answers read is the core's (:mod:`network`). Here the
+    # daemon is kept up while the switch is on and told, every cycle, which
+    # repositories this machine links to pools and how many tasks it takes.
+
+    #: How long a daemon found dead is left before it is started again; doubled, up to
+    #: the cap, for as long as it stays dead.
+    NETWORK_START_WAIT = 30.0
+    NETWORK_START_WAIT_MAX = 15 * 60.0
+    #: How long a forge login that could not be learned is left before it is asked for
+    #: again: each ask is a call to the forge.
+    NETWORK_LOGIN_RETRY_SECS = 120.0
+
+    @property
+    def network_enabled(self) -> bool:
+        return diplomacynetwork.enabled()
+
+    @property
+    def network_busy(self) -> bool:
+        return self._network_gate.busy
+
+    def set_network_enabled(self, on: bool) -> None:
+        """Flip the switch, then start or stop the daemon off the UI thread. Raises
+        ``OSError`` when the config will not save, with nothing started or stopped."""
+        diplomacynetwork.set_enabled(on)
+        self._network_start_due = 0.0
+        self._network_start_wait = self.NETWORK_START_WAIT
+        self._clear_network()
+        if on:
+            self.start_network_daemon_async()
+        else:
+            self.stop_network_async()
+        self.network_changed.emit()
+        self.tasks_changed.emit()
+
+    def _clear_network(self) -> None:
+        self.network_state = None
+        self.network_asked = False
+        self.network_pools_held = ""
+        self.network_error = ""
+
+    def _log_network_daemon(self, source: str, action: str, did: str,
+                            result: dict | None, *, up: bool = True) -> None:
+        """One feed line for an installer action, with what it really did: ``up`` is
+        whether the daemon should be running after it."""
+        error = (result.get("error") if result is not None
+                 else "the installer could not be run")
+        ok = (result is not None and not error
+              and bool(result.get("daemonRunning")) == up)
+        activity.log(source, action,
+                     f"{did} the Diplomacy Network daemon (ok: {'true' if ok else 'false'})"
+                     + (f": {error}" if error else ""))
+        self.refresh_activity()
+
+    def start_network_async(self, *, source: str = autofix.SOURCE_AUTO) -> None:
+        """Bring the daemon up (its dependencies, then the installer's start) and take
+        a first cycle with it. Nothing while the switch is off."""
+        def work() -> None:
+            if not diplomacynetwork.enabled():
+                return
+            diplomacynetwork.ensure_deps()
+            self._log_network_daemon(source, network.AUDIT_START, "Started",
+                                     diplomacynetwork.start_daemon())
+            if not diplomacynetwork.enabled():
+                # Switched off while it was starting: the stop that asked for was
+                # dropped at the gate this start holds.
+                self._log_network_daemon(source, network.AUDIT_STOP, "Stopped",
+                                         diplomacynetwork.stop_daemon(), up=False)
+                return
+            self._network_cycle()
+        self._gated_action(self._network_gate, self.network_changed, work)
+
+    def start_network_daemon_async(self) -> None:
+        """The operator's own start: the switch, or the Network screen's button."""
+        self.start_network_async(source=autofix.SOURCE_PANEL)
+
+    def restart_network_async(self) -> None:
+        def work() -> None:
+            if not diplomacynetwork.enabled():
+                return
+            self._log_network_daemon(autofix.SOURCE_PANEL, network.AUDIT_START,
+                                     "Restarted", diplomacynetwork.restart_daemon())
+            self._network_cycle()
+        self._gated_action(self._network_gate, self.network_changed, work)
+
+    def stop_network_async(self) -> None:
+        def work() -> None:
+            self._log_network_daemon(autofix.SOURCE_PANEL, network.AUDIT_STOP, "Stopped",
+                                     diplomacynetwork.stop_daemon(), up=False)
+        self._gated_action(self._network_gate, self.network_changed, work)
+
+    def end_legacy_nodes_async(self) -> None:
+        """End the SzpontNet node the Diplomacy Network took the place of, if one of
+        this user's is still up. At every launch, whatever the switch says."""
+        def work() -> None:
+            pids = diplomacynetwork.end_legacy_nodes()
+            if pids:
+                activity.log(autofix.SOURCE_AUTO, network.AUDIT_STOP,
+                             "Ended the SzpontNet node the Diplomacy Network replaces "
+                             f"(pid {', '.join(str(p) for p in sorted(pids))})")
+                self.refresh_activity()
+        self.start_background(work, name="legacy-node")
+
+    def run_network_cycle_async(self) -> None:
+        if diplomacynetwork.enabled():
+            self.start_background(self._network_cycle, name="network-cycle")
+
+    def _network_cycle(self) -> None:
+        """One turn with the daemon, unless one is under way."""
+        if not self._network_cycle_lock.acquire(blocking=False):
+            return
+        try:
+            self._network_cycle_once()
+        finally:
+            self._network_cycle_lock.release()
+
+    def _network_cycle_once(self) -> None:
+        """Tell the daemon which repositories this machine links and how many tasks
+        it takes, and keep its snapshot for the tick.
+
+        The admit goes every cycle because the daemon lets it go stale
+        (``packages/diplomacy-network`` README), and is counted from the snapshot read
+        first; the one kept is read after both posts, so it shows what they changed. A
+        daemon that gives no snapshot is told nothing and is started again."""
+        if not diplomacynetwork.enabled():
+            return
+        snapshot = diplomacynetwork.state()
+        held = error = ""
+        if snapshot is not None:
+            self._network_start_due = 0.0
+            self._network_start_wait = self.NETWORK_START_WAIT
+            pools, held = self._network_pools()
+            replies = []
+            if pools is not None:
+                replies.append(diplomacynetwork.send(
+                    network.ROUTE_POOLS, network.pools_body(pools)))
+            replies.append(diplomacynetwork.send(
+                network.ROUTE_ADMIT, self._network_admit(snapshot).body))
+            error = next((e for e in map(diplomacynetwork.refusal, replies) if e), "")
+            snapshot = diplomacynetwork.state()
+        if not diplomacynetwork.enabled():
+            return  # switched off while this cycle was asking
+        self.network_state = snapshot
+        self.network_asked = True
+        self.network_pools_held, self.network_error = held, error
+        if snapshot is None:
+            self._revive_network_daemon(time.time())
+        else:
+            self._note_network_claims(snapshot)
+        self.network_changed.emit()
+        # The runs the network carries are read off the snapshot just taken.
+        self.refresh_auto_task_count()
+
+    def _revive_network_daemon(self, now: float) -> None:
+        """Start a daemon found dead while the switch is on, no sooner than the wait
+        since the last try."""
+        if now < self._network_start_due or self._network_gate.busy:
+            return
+        self._network_start_due = now + self._network_start_wait
+        self._network_start_wait = min(self._network_start_wait * 2,
+                                       self.NETWORK_START_WAIT_MAX)
+        self.start_network_async()
+
+    def _network_login(self, repo: LocalRepo, now: float) -> str:
+        """The login work is done as on ``repo``'s forge host, or "" while it is not
+        known: gh's own on GitHub (never the username override, which says whose PRs
+        the lists show), glab's on a GitLab host. One that is unknown is asked for,
+        but not on every cycle."""
+        known = self.known_me(repo) if repo.is_gitlab else self.me
+        asked = self._network_login_asked.get(repo.host)
+        if known or (asked is not None and now - asked < self.NETWORK_LOGIN_RETRY_SECS):
+            return known
+        self._network_login_asked[repo.host] = now
+        try:
+            if repo.is_gitlab:
+                return self.me_for(repo)
+            self.fetch_me()
+        except Exception:  # noqa: BLE001 - an unread login leaves the pools as they are
+            return ""
+        return self.me
+
+    def _network_pools(self) -> tuple[list[dict] | None, str]:
+        """The pool list to post, or None and why it is held back.
+
+        The daemon leaves every pool a list omits, so one is posted only when it is
+        whole: every repo root and every checkout under Other repos resolved, and the
+        login known on each of their forge hosts."""
+        if review.roots_guessed() or not review.roots_complete():
+            return None, "a repo root in Settings has no GitHub or GitLab remote"
+        if not all(c.repos for c in self.local_checkouts):
+            return None, "a checkout under Other repos has no GitHub or GitLab remote"
+        repos, now = self.local_repos, time.time()
+        identities: dict[str, str] = {}
+        for repo in repos:
+            if repo.host not in identities:
+                identities[repo.host] = self._network_login(repo, now)
+        unknown = next((host for host, login in identities.items() if not login), None)
+        if unknown is not None:
+            return None, f"the login on {unknown} is not known yet"
+        return network.linked_pools(repos, identities), ""
+
+    def _network_admit(self, snapshot: network.Snapshot) -> network.Admit:
+        """How many more tasks this machine takes: what is left of the automatic cap
+        after the runs it executes for the network and its own local agents, and
+        nothing at all while the disk is low, the budget is spent or automatic work is
+        switched off (:func:`network.admit`)."""
+        disk = self._lowest_disk()
+        local = len(self._tick_with(snapshot).cap_load)
+        return network.admit(
+            self.auto_task_limit, network.running(snapshot) + local,
+            low_disk=disk is not None and disk.low,
+            affordable=not autobudget.enabled() or autobudget.decide().affordable,
+            auto_run=self.queue_auto_run)
+
+    def _note_network_claims(self, snapshot: network.Snapshot) -> None:
+        """Say in the feed, once, where each offered task is being run. What was said
+        is stamped in the run's directory, so a restart does not say it again and a
+        task claimed by another machine after a release is said again."""
+        seen = network.tasks(snapshot)
+        if not seen.ok:
+            return
+        logged = False
+        for r in agentregistry.load():
+            task = seen.value.get(r.network) if r.network else None
+            if task is None or task.state != agentstate.NET_CLAIMED:
+                continue
+            stamp = agentregistry.run_dir(r.run_id) / "claimed"
+            try:
+                if stamp.read_text(encoding="utf-8") == task.executor:
+                    continue
+            except OSError:
+                pass
+            try:
+                stamp.write_text(task.executor, encoding="utf-8")
+            except OSError:
+                continue
+            where = ("this machine" if task.executor_here
+                     else diplomacynetwork.short_key(task.executor) or "another machine")
+            activity.log(r.source, network.AUDIT_CLAIMED,
+                         f"{r.label or r.run_id} - claimed by {where}")
+            logged = True
+        if logged:
+            self.refresh_activity()
+
+    def _network_run(self, run_id: str) -> agentstate.RunRecord | None:
+        return next((r for r in agentregistry.load()
+                     if r.run_id == run_id and r.network is not None), None)
+
+    def forget_network_run_async(self, run_id: str) -> None:
+        """Drop a run the network carries on the operator's word, withdrawing its
+        offer first when the network still holds it
+        (:func:`agentstate.withdraw_on_forget`). The run is dropped whatever the daemon
+        answers, and the feed says when the offer could not be taken back."""
+        def work() -> None:
+            record = self._network_run(run_id)
+            if record is None:
+                return
+            who = record.label or record.run_id
+            task = agentstate.withdraw_on_forget(record, agentstate.Evidence(
+                network=self._network_evidence(self.network_state)))
+            if task is None:
+                activity.log(autofix.SOURCE_PANEL, "retire", f"{who} - forgotten")
+            else:
+                refused = diplomacynetwork.refusal(diplomacynetwork.send(
+                    network.ROUTE_WITHDRAW,
+                    network.withdraw_body(task, network.WITHDRAW_FORGOTTEN)))
+                activity.log(autofix.SOURCE_PANEL, network.AUDIT_WITHDRAW,
+                             f"{who} - forgotten and withdrawn" if refused is None
+                             else f"{who} - forgotten; its offer was not withdrawn: {refused}")
+            self._write_book(lambda: agentregistry.forget({run_id}))
+            self.refresh_activity()
+            self.tasks_changed.emit()
+        self.start_background(work, name="network-forget")
+
+    def stop_network_run_async(self, run_id: str) -> None:
+        """Stop a run the network carries: the container, when this machine is the one
+        running it, and otherwise the offer. The run stays booked and reads how it
+        ended off the daemon's next snapshot."""
+        def work() -> None:
+            record = self._network_run(run_id)
+            if record is None:
+                return
+            who = record.label or record.run_id
+            snapshot = self.network_state
+            here = next((x for x in (snapshot.runs if snapshot else ())
+                         if x.task_id == record.network
+                         and x.state in network.LIVE_RUN_STATES), None)
+            if here is not None:
+                reply = diplomacynetwork.send(network.ROUTE_STOP_RUN,
+                                              network.stop_run_body(here.run_id))
+                did = "stopped on this machine"
+            else:
+                reply = diplomacynetwork.send(
+                    network.ROUTE_WITHDRAW, network.withdraw_body(
+                        record.network, diplomacynetwork.WITHDRAW_STOPPED))
+                did = "withdrawn"
+            refused = diplomacynetwork.refusal(reply)
+            activity.log(autofix.SOURCE_PANEL, network.AUDIT_WITHDRAW,
+                         f"{who} - {did}" if refused is None
+                         else f"{who} - not {did}: {refused}")
+            self.refresh_activity()
+            self._network_cycle()
+        self.start_background(work, name="network-stop")
+
+    def _network_call_async(self, call: NetworkCall, route: str, body: dict,
+                            action: str, done) -> None:
+        """One of the Network screen's three calls, off the UI thread: ``done(reply)``
+        is the feed line for a call the daemon took and the result to show for it.
+        One at a time."""
+        if self.network_call.running:
+            return
+        self.network_call = dataclasses.replace(call, running=True)
+        self.network_changed.emit()
+
+        def work() -> None:
+            reply = diplomacynetwork.send(route, body)
+            refused = diplomacynetwork.refusal(reply)
+            if refused is None:
+                line, result = done(reply)
+                activity.log(autofix.SOURCE_PANEL, action, line)
+                self.refresh_activity()
+            else:
+                result = dataclasses.replace(call, error=refused)
+            self.network_call = result
+            self.network_changed.emit()
+            if refused is None:
+                self._network_cycle()
+        self.start_background(work, name=action)
+
+    def network_invite_async(self, pool: str) -> None:
+        """Ask for an invite to ``pool``; the screen puts it on the clipboard."""
+        call = NetworkCall("invite", pool)
+
+        def done(reply: deviceallocator.DaemonReply) -> tuple[str, NetworkCall]:
+            token = reply.get("invite")
+            if not (isinstance(token, str) and token):
+                return (f"Asked for an invite to {pool} and got none",
+                        dataclasses.replace(call, error="The network daemon gave no invite."))
+            return f"Made an invite to {pool}", dataclasses.replace(call, invite=token)
+        self._network_call_async(call, network.ROUTE_INVITE, network.invite_body(pool),
+                                 network.AUDIT_INVITE, done)
+
+    def network_join_async(self, invite: str) -> None:
+        """Join the pool an invite names; the screen shows which, or why not."""
+        call = NetworkCall("join")
+
+        def done(reply: deviceallocator.DaemonReply) -> tuple[str, NetworkCall]:
+            pool = reply.get("pool")
+            return (f"Joined {pool if isinstance(pool, str) and pool else 'a pool'}",
+                    dataclasses.replace(call, pool=pool if isinstance(pool, str) else ""))
+        self._network_call_async(call, network.ROUTE_JOIN, network.join_body(invite),
+                                 network.AUDIT_JOIN, done)
+
+    def network_leave_async(self, pool: str) -> None:
+        call = NetworkCall("leave", pool)
+        self._network_call_async(call, network.ROUTE_LEAVE, network.leave_body(pool),
+                                 network.AUDIT_LEAVE, lambda _reply: (f"Left {pool}", call))
 
     # MARK: activity feed + bans
 

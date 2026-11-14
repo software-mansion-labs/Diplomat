@@ -83,6 +83,18 @@ def apiwatch_poll_secs() -> float:
     return max(5.0, secs)
 
 
+def network_cycle_secs() -> float:
+    """Cadence of the Diplomacy Network cycle (30s by default). Overridable with
+    DIPLOMAT_NETWORK_SECS, floored at 5s and capped at 60s: the daemon takes no task
+    once the admit it was last sent is two minutes old."""
+    raw = os.environ.get("DIPLOMAT_NETWORK_SECS")
+    try:
+        secs = float(raw) if raw else 30.0
+    except ValueError:
+        secs = 30.0
+    return min(60.0, max(5.0, secs))
+
+
 class DiplomatApp:
     #: Set by :meth:`quit`, which a second Ctrl-C can otherwise re-enter.
     _quitting = False
@@ -176,6 +188,16 @@ class DiplomatApp:
         # uninstall (see Store.ensure_allocator_installed_async).
         self.store.ensure_allocator_installed_async()
         self.store.publish_spawn_terminal()
+
+        # The Diplomacy Network: its daemon is brought up at launch while the switch is
+        # on, and each cycle after that no-ops while it is off.
+        self.store.end_legacy_nodes_async()
+        if self.store.network_enabled:
+            self.store.start_network_async()
+        self.network_timer = QTimer()
+        self.network_timer.setInterval(int(network_cycle_secs() * 1000))
+        self.network_timer.timeout.connect(self.store.run_network_cycle_async)
+        self.network_timer.start()
 
         # Optional prefill (also used for manual UI checks).
         prefill = os.environ.get("DIPLOMAT_PREFILL")

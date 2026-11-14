@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from diplomat_runtime import apiwatch, runner, tmuxwatch
 from diplomat_runtime.agentstate import UNAVAILABLE, Evidence, Observation, ProcInfo, RunRecord
 from diplomat_runtime.prref import LocalRepo
+from . import procscan
 
 #: How long a probe's answer is reused. The resolver re-runs for every question the
 #: applet asks — that is deliberate, so no answer is ever stale — which makes THIS the
@@ -243,7 +244,13 @@ def live_agents(dump: Observation, keys: set[str],
         session_id = opencodeapi.session_arg(args)
         if session_id and by_pid is not None and pid.isdigit():
             by_pid[int(pid)] = session_id
-        for pr in autofix.prompt_items(opencodeapi.scan_text(args), keys):
+        found = list(autofix.prompt_items(opencodeapi.scan_text(args), keys))
+        # The table lists a container's processes too. What runs in one is a job of
+        # the Diplomacy Network, booked as a network run or another machine's task:
+        # never an agent of this device's to find.
+        if found and pid.isdigit() and procscan.in_container(int(pid)):
+            continue
+        for pr in found:
             if pr in into:
                 continue
             into[pr] = "" if tty == "?" else tty.removeprefix("/dev/")

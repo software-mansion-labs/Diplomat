@@ -427,6 +427,18 @@ def isolated_remote_machines(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def isolated_diplomacy_network(tmp_path, monkeypatch):
+    """Point the Diplomacy Network daemon's directory (its socket) at an empty dir, and
+    its package at one that is not there: a test that flips the switch otherwise asks
+    the operator's daemon, and runs the installer that starts it (tor and docker
+    with it). A test that wants an answer serves one on a socket in ``DN_BASE_DIR`` and
+    stubs ``deviceallocator.run_installer``."""
+    monkeypatch.setenv("DN_BASE_DIR", str(tmp_path / "network"))
+    monkeypatch.setenv("DIPLOMAT_DIPLOMACY_NETWORK_DIR", str(tmp_path / "no-network-package"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def isolated_state_dir(tmp_path, monkeypatch):
     """Redirect ``~/.local/state/diplomat`` to a per-test temp dir: quitting the applet
     writes the operator-quit mark there, which would keep the operator's real tray from
