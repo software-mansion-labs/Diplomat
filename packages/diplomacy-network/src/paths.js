@@ -183,3 +183,43 @@ export const JOB_MODEL_REQUESTS = num('DN_JOB_MODEL_REQUESTS', 5000);
 export const JOB_MODEL_BYTES = num('DN_JOB_MODEL_BYTES', 8 * 2 ** 30);
 // A job's runner is given this long to come up after it is started.
 export const JOB_START_MS = num('DN_JOB_START_MS', 60 * 1000);
+
+/// What the daemon keeps of its jobs for the daemon after it: the broker's port and, per
+/// job, its container, its proxy token and the CA generation it trusts (0600).
+export const JOBS_PATH = path.join(BASE_DIR, 'jobs.json');
+/// How many polls in a row Diplomat's config must be unreadable before that reads as the
+/// network switched off: a single read can fall in the middle of a rewrite.
+export const CONFIG_UNREADABLE_POLLS = num('DN_CONFIG_UNREADABLE_POLLS', 5);
+/// The snapshot file is rewritten at most this often.
+export const STATE_WRITE_MS = 1000;
+/// How often the docker engine and the model credential are looked at again.
+export const EXECUTOR_CHECK_MS = num('DN_EXECUTOR_CHECK_MS', 30 * 1000);
+/// How often the jobs in this daemon's containers are held against the node's runs.
+export const RECONCILE_MS = num('DN_RECONCILE_MS', 15 * 1000);
+/// How often idle containers are removed and old CA generations pruned.
+export const SWEEP_MS = num('DN_SWEEP_MS', 10 * 60 * 1000);
+/// The pause before something that failed for want of docker is tried again: a stop that
+/// did not go through, the broker's listener.
+export const EXECUTOR_RETRY_MS = num('DN_EXECUTOR_RETRY_MS', 5000);
+/// How long the installer waits for a daemon it stopped to be gone. A daemon that is
+/// switched off first tells its pools, which SWITCH_OFF_WAIT_MS bounds.
+export const STOP_WAIT_MS = num('DN_STOP_WAIT_MS', SWITCH_OFF_WAIT_MS + 30 * 1000);
+
+// `host:port` on this machine's loopback as `{ host, port }`, or null.
+function loopback(value) {
+  const m = /^(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})$/.exec(String(value ?? ''));
+  return m && Number(m[2]) > 0 && Number(m[2]) < 65536 ? { host: m[1] === 'localhost' ? '127.0.0.1' : m[1].replace(/[[\]]/g, ''), port: Number(m[2]) } : null;
+}
+/// The host's adb server: forwarded to every job while it answers.
+export const ADB_SERVER = loopback(process.env.DN_ADB_SERVER || '127.0.0.1:5037');
+/// More forwards every job is given: DN_FORWARDS is a JSON object of name ->
+/// "127.0.0.1:port". A name that is no forward's name or a target off this machine's
+/// loopback is left out.
+export const FORWARDS = (() => {
+  try {
+    const parsed = JSON.parse(process.env.DN_FORWARDS || '{}');
+    return Object.fromEntries(Object.entries(parsed ?? {})
+      .map(([name, target]) => [name, loopback(target)])
+      .filter(([name, target]) => /^[a-z0-9-]{1,32}$/.test(name) && name !== 'adb' && target));
+  } catch { return {}; }
+})();
