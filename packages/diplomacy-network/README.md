@@ -45,14 +45,16 @@ src/
     ca.js          the broker's certificate authority and leaf certificates
     llm.js         the model credential the broker adds
     mirror.js      the bare mirror a container clones from
-    container.js   image, one container per peer and repository, jobs
+    container.js   image, one container per peer and repository, its network and relay
     job.js         one run: prompt, start, watch, outcome
+    forward.mjs    inside a container: a job's forwards as local addresses
   daemon.js      the process: local socket, config, wiring
   install.js     what the applets run: --check, --start-daemon, --restart-daemon, --stop-daemon
   paths.js       files, tools and tunables
   ipc.js         the local-socket client
 image/
   Dockerfile     the one image every job runs in
+  relay.mjs      what the relay beside each job container runs
   preamble.md    what an agent is told about the container it is in
 test/            one self-contained *.mjs per subject, run by test/run-all.mjs
 ```
@@ -71,7 +73,9 @@ test/            one self-contained *.mjs per subject, run by test/run-all.mjs
 | `tor/` | tor's data directory |
 | `ca/` (0700) | the broker's certificate authority |
 | `mirrors/<pool hash>.git` | bare mirrors |
-| `runs/<run id>/` | one job: `prompt.txt`, `log.jsonl`, `done`, `outcome.json` |
+| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh` (0600), `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory |
+| `runs/<run id>.outcome.json` (0600) | that job's outcome, written by the daemon when the job ends, where no container can write |
+| `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
 Settings come from Diplomat's `config.json` (`DIPLOMAT_CONFIG` relocates it), re-read
 every second: `networkEnabled`, `networkRequiredMinimumH`, `networkMaximumAcceptedH`.
@@ -155,7 +159,7 @@ executor before each lease runs out, and marks the offer done when the executor 
 the outcome.
 
 **Executor side.** With `admit.slots` above zero and a task available that this machine
-would take, the daemon runs the claim round. Having the key, it makes sure of three
+would take, the daemon runs the claim round. Having the key, it makes sure of four
 things and starts the job:
 
 - **The image.** One local image, built from `image/Dockerfile` and tagged by the hash of
@@ -165,13 +169,25 @@ things and starts the job:
 - **The container.** Exactly one per requesting peer and repository, named
   `dn-<pool hash>-<peer hash>`, kept running between that peer's jobs on that
   repository and removed after 6 idle hours. It never serves another repository or
-  another peer. It holds no credential: not the forge's, not the model's.
+  another peer. It holds no credential: not the forge's, not the model's. Its one
+  network is an internal docker network of its own, with the same name: nothing is
+  routed out of it, this machine has no address on it, and its resolver knows no name
+  outside it. A job that ignores its proxy settings reaches nothing: not the internet,
+  not this machine or its LAN, not another peer's container.
+- **The relay.** On each container's network sits `dn-<pool hash>-<peer hash>-relay`:
+  the same image running `image/relay.mjs`, which carries TCP from that network to the
+  broker's port on this machine and to nothing else. It is the container's only way
+  out. It is not a job container and not a second container for the peer: no job runs
+  in it and nothing of a job is in it; it has no capability, no writable file system
+  and no credential, and it is made and removed with the container it serves.
 - **The broker.** Every job gets a proxy address carrying its own token. All of the
   container's traffic leaves through it:
   - the forge's API and git push go to the requester as `act` requests;
   - git fetch and clone of the pool's repository are answered from this machine's bare
     mirror of it;
-  - the model provider's API is forwarded with this machine's own credential added;
+  - the model provider's API is forwarded with this machine's own credential added,
+    until the job has had its share: past `DN_JOB_MODEL_REQUESTS` requests or
+    `DN_JOB_MODEL_BYTES` bytes it is answered 429;
   - everything else is tunnelled untouched, so installing software works as usual.
 
   The broker terminates TLS for the hosts it must read, with a certificate authority that
@@ -182,8 +198,10 @@ its log holds the cost. The daemon reports the outcome to the requester with `do
 
 **Devices.** Simulators, emulators and attached devices stay on the host. A container
 reaches them only through forwards the broker opens for a job: the host's adb server, the
-device allocator, and the host's tool-server. What a machine has is never published; it
-only weighs it when deciding whether to take a task.
+device allocator, and the host's tool-server. A forward is a name that only its own job's
+proxy token opens; `executor/forward.mjs`, started with the job inside the container,
+turns it into the local address a tool expects, and it ends with the job. What a machine
+has is never published; it only weighs it when deciding whether to take a task.
 
 ## Tests
 
