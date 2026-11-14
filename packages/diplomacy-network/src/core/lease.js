@@ -3,7 +3,7 @@
 
 import { sign, verify } from './identity.js';
 import { signRecord } from './records.js';
-import { LEASE_GRACE_SECS, LEASE_SECS, PING_LEAD_SECS } from '../paths.js';
+import { CLOCK_SKEW_SECS, LEASE_GRACE_SECS, LEASE_SECS, PING_LEAD_SECS } from '../paths.js';
 
 /// A task's hours: the largest `minRequiredH` among its open offers, or null when none is open.
 export function taskHours(offers) {
@@ -26,6 +26,13 @@ export function leaseAt(claimedAt, hours, seq) {
 /// Is the claim held and inside its lease and grace at `now`?
 export function isActive(claim, now) {
   return claim.state === 'held' && now < claim.leaseUntil + LEASE_GRACE_SECS;
+}
+
+/// Does `from` speak for round `round` of a task, by the claim record a host holds for
+/// it (or null)? It does as that claim's executor while the claim is active at `now`, and
+/// after it ended the claim itself. A claim that lapsed speaks for nothing.
+export function speaksFor(claim, { from, round, now }) {
+  return Boolean(claim) && claim.executor === from && claim.round === round && (claim.state !== 'held' || isActive(claim, now));
 }
 
 /// When the claim stops holding its task: the moment a held claim lapses unless it is
@@ -97,6 +104,10 @@ export function endClaim(identity, claim, state, now) {
 /// Null when a well-shaped claim's times are the ones its `claimedAt`, `hours` and `seq`
 /// dictate and, for an extension, it embeds the ping that asked for it; otherwise
 /// `bad-lease` or `bad-ping`. Whether the ping's signer offers the task is the pool's to say.
+///
+/// A held version is dated by what it answers - the claim itself by `claimedAt`, an
+/// extension within the clock tolerance of its ping - so its retention, counted from
+/// `at`, cannot be made to run out while its lease still holds.
 export function verifyLease(claim) {
   const { leaseUntil, deadline } = leaseAt(claim.claimedAt, claim.hours, claim.seq);
   if (claim.deadline !== deadline) return 'bad-lease';
@@ -105,8 +116,9 @@ export function verifyLease(claim) {
     return fine ? null : 'bad-lease';
   }
   if (claim.leaseUntil !== leaseUntil) return 'bad-lease';
-  if (claim.seq === 0) return claim.ping ? 'bad-ping' : null;
+  if (claim.seq === 0) return claim.ping ? 'bad-ping' : claim.at === claim.claimedAt ? null : 'bad-lease';
   if (!claim.ping) return 'bad-ping';
   const before = { ...claim, seq: claim.seq - 1, leaseUntil: leaseAt(claim.claimedAt, claim.hours, claim.seq - 1).leaseUntil };
-  return mismatch(claim.ping, before) ? 'bad-ping' : null;
+  if (mismatch(claim.ping, before)) return 'bad-ping';
+  return Math.abs(claim.at - claim.ping.ts) <= CLOCK_SKEW_SECS ? null : 'bad-lease';
 }

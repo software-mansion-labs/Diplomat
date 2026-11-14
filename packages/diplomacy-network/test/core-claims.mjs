@@ -96,6 +96,20 @@ check('a lock for a task that is not available is challenged as unavailable', ()
   assert.equal(c.locks.holder(TASK, T0), null);
 });
 
+check('a lock on a state older than the claim record a member holds is challenged as unavailable', () => {
+  const hosts = trio();
+  const [a, b, c] = hosts;
+  const claim = claimNow(hosts, 2, TASK, T0);
+  // Released by a clock 200 s ahead of the others: free for everybody, dated T0 + 250.
+  const ended = endClaim(c.id, claim, 'released', T0 + 250);
+  hosts.forEach((h) => h.pool.merge(ended, T0 + 50));
+  assert.equal(a.pool.task(TASK, T0 + 50).state, 'available');
+  const at = (asOf) => a.locks.answer({ pool: a.pool, identity: a.id, from: b.id.pk, body: lockBody(a.pool, { asOf }), now: T0 + 60 }).body;
+  assert.deepEqual(at(T0 + 249), { challenge: { reason: 'unavailable' } });
+  assert.equal(a.locks.holder(TASK, T0 + 60), null);
+  assert.equal(at(T0 + 250).grant.gen, 1);
+});
+
 check('a lock from a member that accepts fewer hours than the task needs is challenged', () => {
   const hosts = club(3, T0, (i) => ({ maxAcceptedH: i === 2 ? 24 : 12 }));
   hosts.forEach((h) => h.pool.merge(offer(hosts[0].id, { minRequiredH: 24 }), T0));

@@ -198,14 +198,21 @@ await check('the first failing check names the refusal: to, then ts, then effort
     [resealed(await request(), { body: { asOf: 0 } }, carol), 'bad-request'],
     [resealed(await request(), {}, carol), 'denied'],
   ];
+  // A signature is the dearest check: nothing refused before it has cost the target one.
+  const checked = [];
   for (const [envelope, code] of order) {
     const { ctx } = target();
-    assert.equal(verifyRequest(envelope, ctx()).code, code);
+    const tally = { signatures: 0 };
+    assert.equal(verifyRequest(envelope, ctx({ tally })).code, code);
+    checked.push(tally.signatures);
   }
+  assert.deepEqual(checked, [0, 0, 0, 0, 1]);
   const { ctx } = target();
+  const tally = { signatures: 0 };
   const seen = await request();
-  verifyRequest(seen, ctx());
-  assert.equal(verifyRequest(seen, ctx()).code, 'replay');
+  verifyRequest(seen, ctx({ tally }));
+  assert.equal(verifyRequest(seen, ctx({ tally })).code, 'replay');
+  assert.equal(tally.signatures, 2);
 });
 
 await check('a request that passed its signature counts toward its sender, any other toward the strangers', async () => {

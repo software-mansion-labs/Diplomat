@@ -77,6 +77,7 @@ class Host {
     this.inviter = null;
     this.runs = new Map(); // taskId -> the round in progress
     this.wants = new Map(); // taskId -> attempts left
+    this.offered = new Set(); // the tasks it has offered
     this.crashAt = 0; // crash on receiving this many grants
     this.meter = new EffortMeter(TINY);
     this.replay = new ReplayMemory();
@@ -97,6 +98,26 @@ class Host {
 
   others() {
     return this.pool.members(this.now).map((m) => m.pk).filter((pk) => pk !== this.pk);
+  }
+
+  // Every host it keeps in touch with: the members, and those that stopped signing.
+  known() {
+    return this.pool.known(this.now).map((m) => m.pk).filter((pk) => pk !== this.pk);
+  }
+
+  // Signs its member record and its open offers again, as a daemon does on a timer.
+  resign() {
+    if (!this.up || !this.joined) return;
+    const { now } = this;
+    const again = (record, build) => {
+      const { sig: _, type: __, ...held } = record;
+      return build(this.id, { ...held, voucher: held.voucher?.invite, seq: held.seq + 1, at: now });
+    };
+    this.record = again(this.record, memberRecord);
+    const offers = this.pool.records().filter((r) => r.type === 'offer' && r.host === this.pk && r.state === 'open');
+    const records = [this.record, ...offers.map((o) => again(o, offerRecord))];
+    this.take(records);
+    this.push(records);
   }
 
   executing(taskId) {
@@ -126,6 +147,11 @@ class Host {
     // A round confirms the state it will be granted on: when that moved, it starts over.
     for (const run of [...this.runs.values()]) {
       if (!run.round.over && this.pool.stateHash(run.snapshot.asOf) !== run.snapshot.hash) this.rebase(run);
+    }
+    // An offer of its own that another host's done offer ended is done too.
+    for (const taskId of this.offered) {
+      const mine = this.pool.get(`offer/${taskId}/${this.pk}`);
+      if (mine?.state === 'open' && this.pool.doneAt(taskId, this.now) >= mine.createdAt) this.close(taskId);
     }
   }
 
@@ -215,9 +241,11 @@ class Host {
       return;
     }
     const { now } = this;
+    this.offered.add(taskIdOf(task.item));
+    const before = this.pool.get(`offer/${taskIdOf(task.item)}/${this.pk}`);
     const record = offerRecord(this.id, {
-      pool: POOL, kind: 'review', item: task.item, identity: 'octocat', seq: 0, at: now, title: `Review ${task.item}`,
-      minRequiredH: hours, createdAt: now,
+      pool: POOL, kind: 'review', item: task.item, identity: 'octocat', seq: before ? before.seq + 1 : 0, at: now,
+      title: `Review ${task.item}`, minRequiredH: hours, createdAt: now,
     });
     this.take(record);
     this.push([record]);
@@ -542,7 +570,7 @@ class World {
     for (const host of this.hosts) {
       const loop = () => {
         if (!this.busy || this.era !== era) return;
-        const others = host.up && host.joined ? host.others() : [];
+        const others = host.up && host.joined ? host.known() : [];
         if (others.length > 0) host.syncWith(this.rnd.pick(others));
         this.at(10000 + this.rnd.int(30000), loop);
       };
@@ -596,7 +624,7 @@ class World {
     for (let sweep = 0; !this.agreed(); sweep++) {
       assert.ok(sweep < 10, '(a) hosts that reach each other still differ after ten rounds of sync');
       for (const host of this.live()) {
-        for (const pk of host.others()) {
+        for (const pk of host.known()) {
           if (this.linked(host, this.byPk.get(pk))) host.syncWith(pk);
         }
       }
@@ -766,9 +794,12 @@ async function schedule(seed, tally) {
       await world.settle();
       assert.deepEqual(everywhere(taskId, (t) => [t.state, t.claim]), hosts.map(() => ['available', null]), `an ended claim still holds ${taskId} somewhere`);
       if (fate === 'complete') {
-        for (const pk of offeredBy) world.byPk.get(pk).close(taskId);
+        // One offering host hears of the outcome; every other one follows it.
+        world.byPk.get(r.pick(offeredBy)).close(taskId);
         await world.settle();
         assert.deepEqual(everywhere(taskId, (t) => t.state), hosts.map(() => 'done'));
+        for (const pk of offeredBy) assert.equal(hosts[0].pool.get(`offer/${taskId}/${pk}`).state, 'done', `an offer of ${taskId} stayed open after the task was done`);
+        if (offeredBy.length > 1) tally.siblings += 1;
       }
       tally.ended += 1;
     } else if (fate === 'extend') {
@@ -855,7 +886,7 @@ async function calmWorld(n, item, offerers = [0]) {
 const ITEMS = Array.from({ length: 10 }, (_, i) => `pr-${i}`);
 const tally = {
   schedules: 0, sealed: 0, a: 0, b: 0, c: 0, d: 0, e: 0, absent: 0, blind: 0, won: 0, timeouts: 0, ended: 0, extended: 0, regen: 0,
-  replays: 0, efforts: 0, midRound: 0, splits: 0,
+  replays: 0, efforts: 0, midRound: 0, splits: 0, siblings: 0,
 };
 
 // A worker thread runs its share of the seeds and reports what they exercised, or the
@@ -960,6 +991,80 @@ if (isMainThread) {
     assert.deepEqual(executor.pool.merge(second, world.now).refused, [{ key: claimKey(taskId), code: 'older' }]);
   });
 
+  await check('a host cut off for longer than the retention cannot bring a finished task back', async () => {
+    const { world, hosts, taskId } = await calmWorld(4, 'pr-1');
+    const [requester, executor, third, straggler] = hosts;
+    const offerKey = `offer/${taskId}/${requester.pk}`;
+    executor.want(taskId, 1);
+    await world.settle();
+    const [open, held] = [straggler.pool.get(offerKey), straggler.pool.get(claimKey(taskId))];
+    assert.deepEqual([open.state, held.executor], ['open', executor.pk]);
+    // The straggler loses the network; the task is finished without it.
+    world.split([0, 0, 0, 1]);
+    world.jump(world.now + 600);
+    executor.finish(taskId, 'completed');
+    requester.close(taskId);
+    await world.settle();
+    const ended = requester.pool.get(offerKey).at;
+    assert.equal(straggler.pool.task(taskId, world.now).state, 'claimed', 'what the straggler still believes');
+    // Three days pass, every host signing its records again four times a day.
+    for (let i = 0; i < 12; i++) {
+      world.jump(world.now + DAY / 4);
+      for (const host of hosts) host.resign();
+      await world.settle();
+      for (const host of hosts) host.pool.prune(world.now);
+      for (const host of [requester, executor, third]) assert.notEqual(host.pool.task(taskId, world.now)?.state, 'available');
+    }
+    assert.ok(world.now > ended + DAY + 300);
+    for (const host of hosts) assert.equal(host.pool.get(offerKey), null, 'the end itself is forgotten by now');
+    assert.deepEqual(hosts.map((h) => h.pool.members(world.now).length), [3, 3, 3, 1], 'each side stopped waiting for the other');
+    // Back on the network, it pushes everything it ever held for the task.
+    world.heal();
+    await world.settle();
+    assert.equal(new Set(hosts.map((h) => h.pool.stateHash(world.now))).size, 1);
+    assert.deepEqual(hosts.map((h) => h.pool.members(world.now).length), [4, 4, 4, 4], 'signed again, it is a member again without an invite');
+    for (const host of [requester, executor, third]) {
+      assert.deepEqual(host.handle(straggler.pk, 'push', { records: [open, held] }).body.refused, [{ key: offerKey, code: 'expired' }, { key: claimKey(taskId), code: 'expired' }]);
+      assert.equal(host.pool.task(taskId, world.now), null);
+    }
+    third.want(taskId, 1);
+    straggler.want(taskId, 1);
+    await world.settle();
+    assert.deepEqual(world.rounds.slice(1).map((run) => run.outcome), ['unavailable', 'unavailable'], 'nobody can claim it again');
+  });
+
+  await check('two hosts offer one task: the outcome reaches one of them and the task is done for both', async () => {
+    const { world, hosts, taskId } = await calmWorld(4, 'pr-2', [0, 2]);
+    const [first, executor, second, bystander] = hosts;
+    executor.want(taskId, 1);
+    await world.settle();
+    executor.finish(taskId, 'completed');
+    await world.settle();
+    // The two offering hosts are apart when the first learns the outcome.
+    world.split([0, 0, 1, 0]);
+    first.close(taskId);
+    await world.settle();
+    assert.equal(second.pool.task(taskId, world.now).state, 'available', 'the other still offers it, knowing nothing');
+    for (const host of [first, executor, bystander]) {
+      const task = host.pool.task(taskId, world.now);
+      assert.deepEqual([task.state, task.offeredBy], ['done', []], 'done where the done offer is held, whatever the other offer says');
+    }
+    bystander.want(taskId, 1);
+    await world.settle();
+    assert.equal(world.rounds.at(-1).outcome, 'unavailable');
+    world.heal();
+    await world.settle();
+    for (const host of hosts) {
+      assert.equal(host.pool.task(taskId, world.now).state, 'done');
+      assert.deepEqual([first.pk, second.pk].map((pk) => host.pool.get(`offer/${taskId}/${pk}`).state), ['done', 'done'], 'the second host ended its own offer the same way');
+    }
+    // Offered again later, it is a task again.
+    world.jump(world.now + 3600);
+    second.offer({ item: 'pr-2' }, 12);
+    await world.settle();
+    for (const host of hosts) assert.deepEqual([host.pool.task(taskId, world.now).state, host.pool.task(taskId, world.now).offeredBy], ['available', [second.pk]]);
+  });
+
   const only = process.env.DN_SIM_SEED;
   const count = Number(process.env.DN_SIM_SCHEDULES) || 2000;
   const rerun = (seed) => `FAILED schedule seed ${seed} - run it alone with DN_SIM_SEED=${seed} node test/core-sim.mjs`;
@@ -997,6 +1102,7 @@ if (isMainThread) {
     await shown('(d) a lapsed claim frees its task for every host at the same second', { lapses: tally.d, 'claimed again as the next generation': tally.regen });
     await shown('(e) every round ends by its deadline, and a calm network never needs the deadline', { rounds: tally.e, 'calm races won': tally.won });
     await shown('leases are extended, given up and completed for every host alike', { extended: tally.extended, ended: tally.ended });
+    await shown('a task two hosts offer is done for both once one of them says so', { 'tasks finished through one of two offers': tally.siblings });
     await shown('behind signed envelopes and proof of work no replay reaches a handler', { schedules: tally.sealed, 'replays refused': tally.replays, 'requests redone at a higher effort': tally.efforts });
   }
 }

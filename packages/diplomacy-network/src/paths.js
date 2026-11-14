@@ -54,16 +54,26 @@ export const POW = {
   epochSecs: 3600,
 };
 export const CLOCK_SKEW_SECS = 300;
-// The largest request body, and the larger one an `act` request may carry.
+// The largest request body, and the larger one an `act` request may carry. A sender that
+// is not a member of the request's pool gets the stranger's cap.
 export const MAX_BODY_BYTES = 2 ** 20;
 export const MAX_ACT_BODY_BYTES = 48 * 2 ** 20;
+export const STRANGER_BODY_BYTES = 64 * 2 ** 10;
 export const HOURS_FLOOR = 12;
 export const HOURS_CEILING = 720;
 export const LEASE_SECS = num('DN_LEASE_SECS', 7200);
 export const LEASE_GRACE_SECS = num('DN_LEASE_GRACE_SECS', 600);
 export const PING_LEAD_SECS = num('DN_PING_LEAD_SECS', 600);
 export const GRANT_TTL_SECS = num('DN_GRANT_TTL_SECS', 120);
+// Every offer and claim version, and a member's standing as a member, lasts this long
+// after the version was signed. It must stay far longer than a lease and its grace.
 export const RECORD_RETENTION_SECS = num('DN_RECORD_RETENTION_SECS', 24 * 3600);
+// A member record is kept this long after it was signed: a host that was away for less
+// comes back with a version signed again, and needs no invite for it.
+export const MEMBER_RETENTION_SECS = num('DN_MEMBER_RETENTION_SECS', 30 * 24 * 3600);
+// A host signs its member record and its open offers again this often, four times
+// inside their retention.
+export const RESIGN_INTERVAL_MS = num('DN_RESIGN_INTERVAL_MS', (RECORD_RETENTION_SECS * 1000) / 4);
 export const INVITE_TTL_SECS = 24 * 3600;
 export const OFFER_ATTEMPTS = 3;
 
@@ -75,6 +85,23 @@ export const ROUND_TIMEOUT_MS = num('DN_ROUND_TIMEOUT_MS', 3 * 60 * 1000);
 export const SYNC_INTERVAL_MS = num('DN_SYNC_INTERVAL_MS', 60 * 1000);
 // The longest a host waits, by its rank on a task, before starting to claim it.
 export const RANK_DELAY_MS = num('DN_RANK_DELAY_MS', 5000);
+// One request of a claim round to a member that has not answered lately: a sleeping
+// machine costs a round this long, not a whole REQUEST_TIMEOUT_MS.
+export const PROBE_TIMEOUT_MS = num('DN_PROBE_TIMEOUT_MS', 15 * 1000);
+// A member counts as answering lately for this long after its last answer.
+export const PEER_QUIET_MS = num('DN_PEER_QUIET_MS', 3 * SYNC_INTERVAL_MS);
+// After a request to a peer goes unanswered, gossip leaves that peer alone for this long,
+// doubling per failure up to the cap. Claim rounds ask regardless.
+export const PEER_BACKOFF_MS = num('DN_PEER_BACKOFF_MS', 5000);
+export const PEER_BACKOFF_MAX_MS = num('DN_PEER_BACKOFF_MAX_MS', 10 * 60 * 1000);
+// One `act` request: the forge call and the push check on the requester's side included.
+export const ACT_TIMEOUT_MS = num('DN_ACT_TIMEOUT_MS', 5 * 60 * 1000);
+// How often an unanswered ping, key request or outcome report is sent again.
+export const RETRY_MS = num('DN_RETRY_MS', 30 * 1000);
+// How many claim rounds one host runs at a time.
+export const MAX_ROUNDS = 4;
+// How many bodies above the stranger's cap a host reads at once, over all senders.
+export const MAX_LARGE_BODIES = 4;
 // Diplomat's last word on free slots is trusted this long.
 export const ADMIT_TTL_MS = num('DN_ADMIT_TTL_MS', 120 * 1000);
 // A container no job has used for this long is removed.

@@ -90,8 +90,9 @@ export class ReplayMemory {
 /// `self` is the target's key, `size` the request's length in bytes as received,
 /// `isMember(pool, pk)` whether the target accepts that key in that pool. `meter` and
 /// `replay` are the target's own and are updated: a request that passed its signature
-/// counts toward its sender, any other toward the strangers.
-export function verifyRequest(request, { self, now, size, meter, replay, isMember }) {
+/// counts toward its sender, any other toward the strangers. `tally`, when given, has its
+/// `signatures` raised by one for a request that got as far as its signature check.
+export function verifyRequest(request, { self, now, size, meter, replay, isMember, tally }) {
   const re = requestDigest(request);
   const shapely = re !== null && shaped(request, REQUEST)
     && size <= (request.kind === 'act' ? MAX_ACT_BODY_BYTES : MAX_BODY_BYTES);
@@ -112,6 +113,7 @@ export function verifyRequest(request, { self, now, size, meter, replay, isMembe
   if (pow.effort < owed) return refuse('effort', `this request owes ${owed}`);
   const c = challengeOf(request, { epoch: pow.epoch, nonce: unb64u(pow.nonce), effort: pow.effort });
   if (!check(c, pow.effort, unb64u(pow.counter))) return refuse('bad-request', 'the proof of work does not solve its challenge');
+  if (tally) tally.signatures += 1;
   if (!verify(from, 'dn1/req', request)) return refuse('denied', 'bad signature');
   meter.count(from, member, now);
   const effort = meter.required(from, member, now);

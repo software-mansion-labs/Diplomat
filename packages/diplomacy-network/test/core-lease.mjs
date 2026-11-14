@@ -6,7 +6,8 @@ import assert from 'node:assert/strict';
 import { verifyClaim } from '../src/core/claims.js';
 import { sign, verify } from '../src/core/identity.js';
 import {
-  buildPing, eligible, endClaim, endsAt, extendClaim, isActive, leaseAt, pingDue, pingWindow, taskHours, verifyLease, verifyPing,
+  buildPing, eligible, endClaim, endsAt, extendClaim, isActive, leaseAt, pingDue, pingWindow, speaksFor, taskHours, verifyLease,
+  verifyPing,
 } from '../src/core/lease.js';
 import { signRecord } from '../src/core/records.js';
 import { POOL, T0, claimNow, club, ident, offer, roundId } from './lib/core-fixtures.mjs';
@@ -240,18 +241,75 @@ check('a claim its executor released or completed frees the task at once', () =>
   }
 });
 
-check('a claim is dropped a day after it ended or lapsed, for every host at the same instant', () => {
-  const { hosts, claim, executor } = held();
-  const lapse = T0 + LEASE + GRACE;
+check('every version of a claim is dropped a day after it was signed, for every host at the same instant', () => {
+  const { hosts, claim, requester, executor } = held();
   const key = `claim/${TASK}`;
-  assert.ok(Object.hasOwn(hosts[0].pool.index(lapse + DAY - 1), key));
-  assert.equal(Object.hasOwn(hosts[0].pool.index(lapse + DAY), key), false);
-  assert.equal(hosts[0].pool.nextGen(TASK, lapse + DAY - 1), 1);
-  assert.equal(hosts[0].pool.nextGen(TASK, lapse + DAY), 0);
+  assert.ok(Object.hasOwn(hosts[0].pool.index(T0 + DAY - 1), key));
+  assert.equal(Object.hasOwn(hosts[0].pool.index(T0 + DAY), key), false);
+  assert.equal(hosts[0].pool.nextGen(TASK, T0 + DAY - 1), 1);
+  assert.equal(hosts[0].pool.nextGen(TASK, T0 + DAY), 0);
   const ended = endClaim(executor, claim, 'completed', T0 + 100);
   hosts[1].pool.merge(ended, T0 + 100);
   assert.ok(Object.hasOwn(hosts[1].pool.index(T0 + 100 + DAY - 1), key));
   assert.equal(Object.hasOwn(hosts[1].pool.index(T0 + 100 + DAY), key), false);
   assert.deepEqual(hosts[2].pool.merge(ended, T0 + 100 + 2 * DAY).refused, [{ key, code: 'expired' }]);
-  assert.equal(hosts[2].pool.get(key), null);
+  // The version it ended is older still: once the end is forgotten, so is what it ended.
+  for (const now of [T0 + 100 + DAY + 300, T0 + 100 + DAY + 301, T0 + 3 * DAY]) {
+    assert.deepEqual(hosts[2].pool.merge(claim, now).refused, [{ key, code: 'expired' }]);
+  }
+  // An extension is dated by its ping, so a claim held for days is never dropped while it holds.
+  const { hosts: [a], claim: first } = held(48);
+  let current = first;
+  for (let i = 0; i < 20; i++) {
+    const at = current.leaseUntil - LEAD;
+    for (const id of [hosts[0].id, hosts[1].id, hosts[2].id]) a.pool.merge(resign(id, a.pool.get(`member/${id.pk}`), { seq: i + 1, at }), at);
+    a.pool.merge(offer(requester, { minRequiredH: 48, seq: i + 1, at }), at);
+    current = extendClaim(executor, current, buildPing(requester, current, at), at);
+    assert.deepEqual(a.pool.merge(current, at).refused, []);
+    assert.equal(a.pool.task(TASK, current.leaseUntil - LEAD - 1).state, 'claimed', `through lease ${i + 2}`);
+  }
+  assert.ok(current.leaseUntil > T0 + DAY + 12 * 3600);
+});
+
+check('a held version is dated by what it answers: the claim by its start, an extension by its ping', () => {
+  const { hosts, claim, requester, executor } = held();
+  const due = T0 + LEASE - 100;
+  const ping = buildPing(requester, claim, due);
+  const next = extendClaim(executor, claim, ping, due);
+  assert.equal(verifyLease(resign(executor, claim, { at: claim.claimedAt + 1 })), 'bad-lease', 'a first version dated after its start');
+  for (const [d, verdict] of [[-301, 'bad-lease'], [-300, null], [0, null], [300, null], [301, 'bad-lease']]) {
+    const dated = resign(executor, next, { at: due + d });
+    assert.equal(verifyLease(dated), verdict, `an extension dated ${d} s from its ping`);
+    if (verdict) assert.deepEqual(hosts[2].pool.merge(dated, due + 400).refused, [{ key: `claim/${TASK}`, code: verdict }]);
+  }
+});
+
+check('a claim made on a state stands over nothing dated after that state', () => {
+  const { hosts, claim, executor } = held();
+  const [a, , c] = hosts;
+  // The executor's clock runs ahead: it released at what it calls T0 + 400.
+  const ended = endClaim(executor, claim, 'released', T0 + 400);
+  hosts.forEach((h) => assert.deepEqual(h.pool.merge(ended, T0 + 150).refused, []));
+  assert.equal(a.pool.task(TASK, T0 + 150).state, 'available');
+  assert.equal(c.pool.claimSnapshot(TASK, T0 + 150).available, false, 'not before the release it holds is in the past');
+  assert.equal(claimNow(hosts, 2, TASK, T0 + 399, 1), 'unavailable');
+  const next = claimNow(hosts, 2, TASK, T0 + 400, 1);
+  assert.deepEqual([next.gen, next.claimedAt >= ended.at], [1, true], 'so the claim after it is signed no earlier and is dropped no earlier');
+});
+
+check('only the executor of the claim a host holds speaks for its round, while it is active or after ending it', () => {
+  const { claim, requester, executor } = held();
+  const lapse = T0 + LEASE + GRACE;
+  const by = (from, round, now, record = claim) => speaksFor(record, { from, round, now });
+  assert.equal(by(executor.pk, claim.round, T0 + 5), true);
+  assert.equal(by(executor.pk, claim.round, lapse - 1), true);
+  assert.equal(by(executor.pk, claim.round, lapse), false, 'a lapsed claim speaks for nothing');
+  assert.equal(by(requester.pk, claim.round, T0 + 5), false, 'another member');
+  assert.equal(by(executor.pk, roundId(9), T0 + 5), false, 'another round');
+  assert.equal(by(executor.pk, claim.round, T0 + 5, null), false, 'no claim held');
+  for (const state of ['completed', 'released']) {
+    const ended = endClaim(executor, claim, state, T0 + 50);
+    assert.equal(by(executor.pk, claim.round, lapse + 5000, ended), true, `after it ${state} the claim itself`);
+    assert.equal(by(requester.pk, claim.round, T0 + 60, ended), false);
+  }
 });

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { b64u, canon, hash } from '../src/core/canon.js';
 import { sign } from '../src/core/identity.js';
 import { acceptedSet, checkJoin, createInvite, inviteToken, parseInvite, verifyInvite, verifyVoucher } from '../src/core/membership.js';
-import { MAX_PULL_KEYS, MAX_PUSH_RECORDS, Pool } from '../src/core/pool.js';
+import { MAX_HELLO_CHAIN, MAX_PULL_KEYS, MAX_PUSH_RECORDS, Pool } from '../src/core/pool.js';
 import {
   buildTaskId, checkShape, checkSignature, compareVersions, parseKey, parseTaskId, recordDigest, recordKey, signRecord, validPool,
 } from '../src/core/records.js';
@@ -19,6 +19,7 @@ function check(name, fn) {
 }
 
 const DAY = 24 * 3600;
+const MONTH = 30 * DAY;
 const [root, ann, ben, cat, eve] = [0, 1, 2, 3, 9].map(ident);
 const TASK = `${POOL}#review:pr-578@octocat`;
 const resign = (id, record, over) => {
@@ -236,15 +237,54 @@ check('a member that left is no member, and its record stays only while someone 
   assert.equal(pool.accepts(ann.pk, T0 + 100), false);
   assert.equal(pool.member(ann.pk, T0 + 100), null);
   assert.deepEqual(pool.members(T0 + 100).map((m) => m.pk), [root.pk, ben.pk].sort());
-  pool.prune(T0 + 100 + 30 * DAY);
+  // Two months on, with the root and ben still signing their records.
+  const later = T0 + 100 + 2 * MONTH;
+  pool.merge([member(root, { seq: 1, at: later }), member(ben, { voucher: invite(ann), seq: 1, at: later })], later);
   assert.ok(pool.get(`member/${ann.pk}`), 'ben is connected to the root only through it');
-  assert.ok(pool.accepts(ben.pk, T0 + 100 + 30 * DAY));
-  const benGone = member(ben, { voucher: invite(ann), seq: 1, at: T0 + 200, left: true });
-  pool.merge(benGone, T0 + 200);
-  pool.prune(T0 + 200 + DAY + 299);
+  assert.ok(pool.accepts(ben.pk, later));
+  const benGone = member(ben, { voucher: invite(ann), seq: 2, at: later + 200, left: true });
+  pool.merge([benGone, member(root, { seq: 2, at: later + 200 })], later + 200);
+  pool.prune(later + 200 + MONTH + 299);
   assert.equal(pool.records().length, 3, 'kept through the retention and the clock tolerance');
-  pool.prune(T0 + 200 + DAY + 300);
+  pool.merge(member(root, { seq: 3, at: later + 200 + MONTH }), later + 200 + MONTH + 300);
   assert.deepEqual(pool.records().map(recordKey), [`member/${root.pk}`], 'both dropped once nothing rests on them');
+});
+
+check('a member that stops signing its record is no member after a day, and keeps its place for thirty', () => {
+  const pool = poolOf(root, [member(root), member(ann, { voucher: invite(root) })]);
+  const signed = (seq, at) => member(root, { seq, at });
+  assert.deepEqual(pool.members(T0 + DAY - 1).map((m) => m.pk), [root.pk, ann.pk].sort());
+  pool.merge([signed(1, T0 + DAY), offer(ann, { at: T0 + DAY, createdAt: T0 + DAY })], T0 + DAY);
+  assert.deepEqual(pool.members(T0 + DAY).map((m) => m.pk), [root.pk], 'nobody waits for its consent');
+  assert.equal(pool.member(ann.pk, T0 + DAY), null);
+  assert.equal(pool.task(TASK, T0 + DAY), null, 'and what it offers counts for nothing');
+  assert.ok(pool.accepts(ann.pk, T0 + DAY), 'its key is still one of the pool');
+  assert.ok(Object.hasOwn(pool.index(T0 + MONTH - 1), `member/${ann.pk}`), 'and its record is part of the state');
+  const back = member(ann, { voucher: invite(root), seq: 1, at: T0 + 9 * DAY });
+  pool.merge(signed(2, T0 + 9 * DAY), T0 + 9 * DAY);
+  assert.deepEqual(pool.merge(back, T0 + 9 * DAY).refused, [], 'signed again it is a member again, with no new invite');
+  assert.deepEqual(pool.members(T0 + 9 * DAY).map((m) => m.pk), [root.pk, ann.pk].sort());
+  assert.ok(pool.answerHello({ member: back }, ann.pk, T0 + 9 * DAY).body);
+  // Silent for thirty days it is forgotten, and comes back only by a fresh invite.
+  const [gone, stale] = [T0 + 9 * DAY + MONTH, member(ann, { voucher: invite(root), seq: 2, at: T0 + 9 * DAY + MONTH + 400 })];
+  pool.merge(signed(3, gone + 300), gone + 300);
+  assert.equal(pool.get(`member/${ann.pk}`), null);
+  assert.equal(pool.accepts(ann.pk, gone + 300), false);
+  assert.deepEqual(pool.answerHello({ member: stale }, ann.pk, gone + 400), { error: 'denied', detail: 'expired' });
+  assert.deepEqual(codes(pool.merge(back, gone + 400)), ['expired'], 'and its old record is not taken back');
+});
+
+check('a version that says a member left outlives every version it replaced', () => {
+  const pool = poolOf(root, [member(root), member(ann, { voucher: invite(root) })]);
+  const resigned = member(ann, { voucher: invite(root), seq: 1, at: T0 + 20 * DAY });
+  const left = member(ann, { voucher: invite(root), seq: 2, at: T0 + 20 * DAY + 5, left: true });
+  pool.merge([member(root, { seq: 1, at: T0 + 20 * DAY }), resigned, left], T0 + 20 * DAY + 5);
+  const dropped = T0 + 20 * DAY + 5 + MONTH + 300;
+  for (const now of [T0 + 21 * DAY, dropped - 1, dropped, dropped + DAY]) {
+    pool.merge(member(root, { seq: now, at: now }), now);
+    assert.deepEqual(codes(pool.merge(resigned, now)), [now < dropped ? 'older' : 'expired'], `the version before it left, pushed again at ${now - T0}`);
+    assert.equal(pool.accepts(ann.pk, now), false);
+  }
 });
 
 check('a record dated past the clock tolerance is refused until its time comes', () => {
@@ -269,21 +309,99 @@ check('two hosts with the same records hold the same hash, and a different recor
   assert.deepEqual(a.pool.index(T0)[keys[2]], [[0], b64u(hash(first))]);
 });
 
-check('an offer that is cancelled or done is dropped a day after it was, for every host at the same instant', () => {
+check('every version of an offer is dropped a day after it was signed, for every host at the same instant', () => {
   const [a, b] = club(2);
   const open = offer(a.id);
   const done = offer(a.id, { seq: 1, at: T0 + 50, state: 'done' });
   const other = offer(b.id, { item: 'pr-9', seq: 1, at: T0 + 60, state: 'cancelled' });
-  a.pool.merge([open, done, other], T0 + 60);
-  b.pool.merge([other, done], T0 + 60);
-  for (const asOf of [T0 + 60, T0 + 50 + DAY - 1, T0 + 50 + DAY, T0 + 60 + DAY - 1, T0 + 60 + DAY]) {
+  const waiting = offer(b.id, { item: 'pr-7', at: T0 + 70, createdAt: T0 + 70 });
+  a.pool.merge([open, done, other, waiting], T0 + 70);
+  b.pool.merge([other, waiting, done], T0 + 70);
+  for (const asOf of [T0 + 70, T0 + 50 + DAY - 1, T0 + 50 + DAY, T0 + 60 + DAY - 1, T0 + 60 + DAY, T0 + 70 + DAY - 1, T0 + 70 + DAY]) {
     assert.equal(a.pool.stateHash(asOf), b.pool.stateHash(asOf), `asOf ${asOf}`);
   }
-  assert.equal(Object.keys(a.pool.index(T0 + 50 + DAY - 1)).length, 4);
-  assert.equal(Object.keys(a.pool.index(T0 + 50 + DAY)).length, 3);
-  assert.equal(Object.keys(a.pool.index(T0 + 60 + DAY)).length, 2);
+  // Both member records were signed at T0: they stay in the state, their hosts are
+  // members for a day.
+  assert.equal(Object.keys(a.pool.index(T0 + 50 + DAY - 1)).length, 5);
+  assert.equal(Object.keys(a.pool.index(T0 + 50 + DAY)).length, 4);
+  assert.equal(Object.keys(a.pool.index(T0 + 60 + DAY)).length, 3);
+  assert.equal(Object.keys(a.pool.index(T0 + 70 + DAY)).length, 2, 'an open offer nobody signed again goes the same way');
   assert.deepEqual(codes(a.pool.merge(done, T0 + 50 + 2 * DAY)), ['expired']);
-  assert.equal(a.pool.merge(offer(a.id, { item: 'pr-1' }), T0 + 50 + 2 * DAY).fresh.length, 1, 'an open offer does not age');
+  assert.deepEqual(codes(a.pool.merge(waiting, T0 + 70 + DAY + 300)), ['expired']);
+});
+
+check('an offer signed again inside its retention stays, and keeps the day it was created', () => {
+  const [a, b] = club(2);
+  let now = T0;
+  let seq = 0;
+  a.pool.merge(offer(a.id), now);
+  for (let i = 0; i < 12; i++) {
+    now += DAY / 4;
+    seq += 1;
+    const again = [member(a.id, { seq, at: now }), member(b.id, { voucher: invite(a.id, { n: 1 }), seq, at: now }), offer(a.id, { seq, at: now })];
+    assert.deepEqual(a.pool.merge(again, now).refused, []);
+    const task = a.pool.task(TASK, now);
+    assert.deepEqual([task.state, task.createdAt, task.offeredBy], ['available', T0, [a.id.pk]], `after ${i + 1} quarter days`);
+  }
+  assert.ok(now > T0 + 2 * DAY);
+});
+
+check('a finished task does not come back: the version that ended it outlives every version before it', () => {
+  const hosts = club(3);
+  const [a, b, late] = hosts;
+  // The offer is signed again every six hours for two days, then done; one host saw
+  // nothing after the first day.
+  const versions = Array.from({ length: 9 }, (_, i) => offer(a.id, { seq: i, at: T0 + i * (DAY / 4) }));
+  const done = offer(a.id, { seq: 9, at: T0 + 2 * DAY + 50, state: 'done' });
+  const stamp = (h, seq, at) => h.pool.merge(hosts.map((x, i) => member(x.id, { ...(i ? { voucher: invite(a.id, { n: i }) } : {}), seq, at })), at);
+  for (const [i, version] of versions.entries()) {
+    for (const h of i < 5 ? hosts : [a, b]) {
+      stamp(h, i + 1, version.at);
+      assert.deepEqual(h.pool.merge(version, version.at).refused, []);
+    }
+  }
+  for (const h of [a, b]) assert.deepEqual(h.pool.merge(done, done.at).refused, []);
+  const stale = late.pool.get(recordKey(done));
+  assert.deepEqual([stale.seq, stale.state], [4, 'open']);
+  // Whenever the straggler pushes what it holds, the task stays finished: the done
+  // version wins while it is held, and once it is dropped every open version is too old.
+  const dropped = done.at + DAY + 300;
+  for (const now of [done.at + 1, dropped - 1, dropped, dropped + 1, dropped + 5 * DAY]) {
+    stamp(b, now, now);
+    for (const version of versions) {
+      const [verdict] = codes(b.pool.merge(version, now));
+      assert.equal(verdict, now < dropped ? 'older' : 'expired', `seq ${version.seq} pushed ${now - done.at} s after the end`);
+    }
+    assert.notEqual(b.pool.task(TASK, now)?.state, 'available');
+  }
+  assert.equal(b.pool.task(TASK, dropped), null, 'forgotten, not reopened');
+});
+
+check('one of two hosts offering a task finishes it for both; an offer made after that offers it anew', () => {
+  const hosts = club(3);
+  const [a, b, c] = hosts;
+  const give = (records, now) => hosts.forEach((h) => h.pool.merge(records, now));
+  give([offer(a.id), offer(b.id)], T0);
+  const claim = claimNow(hosts, 2, TASK, T0 + 1);
+  give(offer(a.id, { seq: 1, at: T0 + 500, state: 'done' }), T0 + 500);
+  const ended = c.pool.task(TASK, T0 + 500);
+  assert.deepEqual([ended.state, ended.offeredBy, ended.claim], ['done', [], null], 'the other host\'s open offer no longer offers it');
+  assert.equal(c.pool.claimSnapshot(TASK, T0 + 500).available, false);
+  assert.equal(c.pool.doneAt(TASK, T0 + 500), T0 + 500);
+  assert.equal(c.pool.get(`claim/${TASK}`), claim);
+  give(offer(b.id, { seq: 1, at: T0 + 600 }), T0 + 600);
+  assert.equal(c.pool.task(TASK, T0 + 600).state, 'done', 'signed again it is still the offer made before the end');
+  give(offer(b.id, { seq: 2, at: T0 + 700, createdAt: T0 + 500 }), T0 + 700);
+  assert.equal(c.pool.task(TASK, T0 + 700).state, 'done', 'created the second it ended is not after it');
+  give(offer(b.id, { seq: 3, at: T0 + 800, createdAt: T0 + 501 }), T0 + 800);
+  const anew = c.pool.task(TASK, T0 + 800);
+  assert.deepEqual([anew.offeredBy, anew.createdAt], [[b.id.pk], T0 + 501]);
+  assert.equal(anew.claim, claim, 'a claim still held holds it');
+  // Cancelling is each host's own: the task is cancelled only when no offer is left open.
+  give(offer(a.id, { seq: 2, at: T0 + 900, state: 'cancelled' }), T0 + 900);
+  assert.deepEqual([c.pool.task(TASK, T0 + 900).state, c.pool.doneAt(TASK, T0 + 900)], ['claimed', null]);
+  give(offer(b.id, { seq: 4, at: T0 + 901, createdAt: T0 + 501, state: 'cancelled' }), T0 + 901);
+  assert.equal(c.pool.task(TASK, T0 + 901).state, 'cancelled');
 });
 
 check('reconciling two indexes sends each key the one way it is needed', () => {
@@ -369,6 +487,31 @@ check('hello lets in a newcomer with a fresh invite and answers the index', () =
   assert.deepEqual(host.answerHello({ member: gone }, ann.pk, T0 + 20), { error: 'denied', detail: 'left' });
 });
 
+check('hello carries the records that connect a newcomer to members the host knows', () => {
+  // The root invited ann, ann invited ben, ben invited cat; the host knows the root only.
+  const host = poolOf(root, [member(root)]);
+  const soon = { exp: T0 + 600 };
+  const [annM, benM, catM] = [member(ann, { voucher: invite(root, soon) }), member(ben, { voucher: invite(ann, soon) }), member(cat, { voucher: invite(ben, soon) })];
+  assert.deepEqual(host.answerHello({ member: catM }, cat.pk, T0), { error: 'denied', detail: 'not-member' }, 'alone it reaches nobody the host accepts');
+  assert.deepEqual(host.answerHello({ member: catM, chain: [benM] }, cat.pk, T0), { error: 'denied', detail: 'not-member' }, 'nor with a link missing');
+  assert.equal(host.records().length, 1, 'and nothing of a refused hello is kept');
+  for (const bad of [{ member: catM, chain: 'x' }, { member: catM, chain: Array(MAX_HELLO_CHAIN + 1).fill(benM) }, { member: catM, chain: [offer(ann)] },
+    { member: catM, chain: [{ junk: 1 }] }, { member: catM, chain: [member(ben, { pool: 'github.com/acme/other' })] }]) {
+    assert.deepEqual(host.answerHello(bad, cat.pk, T0), { error: 'bad-request' }, JSON.stringify(bad).slice(0, 60));
+  }
+  const answer = host.answerHello({ member: catM, chain: [benM, annM] }, cat.pk, T0);
+  assert.deepEqual(answer, { body: { index: host.index(T0) } });
+  assert.deepEqual(host.members(T0).map((m) => m.pk), [root.pk, ann.pk, ben.pk, cat.pk].sort());
+  // A link the host has not accepted needs its own invite unexpired, like the newcomer.
+  const other = poolOf(root, [member(root)]);
+  const old = member(ann, { voucher: invite(root, { exp: T0 + 50 }) });
+  const viaOld = member(ben, { voucher: invite(ann, { exp: T0 + 9000 }), at: T0 + 60, joinedAt: T0 + 60 });
+  assert.deepEqual(other.answerHello({ member: viaOld, chain: [old] }, ben.pk, T0 + 60), { error: 'denied', detail: 'not-member' });
+  assert.equal(other.accepts(ann.pk, T0 + 60), false, 'an expired invite lets nobody in through somebody else\'s hello');
+  other.merge(old, T0 + 60);
+  assert.ok(other.answerHello({ member: viaOld }, ben.pk, T0 + 60).body, 'once a member brought that link, the newcomer needs no chain');
+});
+
 check('a task is available while a member offers it open and nobody holds it', () => {
   const hosts = club(3);
   const [a, b, c] = hosts;
@@ -379,7 +522,7 @@ check('a task is available while a member offers it open and nobody holds it', (
   const lowest = [a.id.pk, b.id.pk].sort()[0];
   assert.deepEqual(a.pool.task(TASK, T0), {
     taskId: TASK, kind: 'review', item: 'pr-578', identity: 'octocat', title: lowest === a.id.pk ? 'Review #578' : 'Review it',
-    hours: 24, state: 'available', offeredBy: [a.id.pk, b.id.pk].sort(), claim: null,
+    hours: 24, createdAt: T0, state: 'available', offeredBy: [a.id.pk, b.id.pk].sort(), claim: null,
   });
   give(offer(b.id, { seq: 1, at: T0 + 1, state: 'cancelled', minRequiredH: 24 }), T0 + 1);
   assert.equal(a.pool.task(TASK, T0 + 1).hours, 12, 'the largest among the open offers');

@@ -8,16 +8,17 @@
 
 import { b64u, hash } from './canon.js';
 import { claimPrecedence, compareClaims, precedenceShaped, verifyClaim } from './claims.js';
-import { eligible, endsAt, isActive, taskHours } from './lease.js';
+import { eligible, isActive, taskHours } from './lease.js';
 import { acceptedSet, checkJoin, verifyVoucher, voucherOf } from './membership.js';
 import {
   checkShape, checkSignature, compareVersions, isBytes, isObject, isTime, parseKey, recordDigest, shaped,
   versionPrecedence,
 } from './records.js';
-import { CLOCK_SKEW_SECS, RECORD_RETENTION_SECS } from '../paths.js';
+import { CLOCK_SKEW_SECS, MEMBER_RETENTION_SECS, RECORD_RETENTION_SECS } from '../paths.js';
 
 export const MAX_PULL_KEYS = 4096;
 export const MAX_PUSH_RECORDS = 1024;
+export const MAX_HELLO_CHAIN = 8;
 
 const memberKey = (pk) => `member/${pk}`;
 const offerKey = (taskId, host) => `offer/${taskId}/${host}`;
@@ -40,6 +41,8 @@ function disproof(record) {
 // The entries of `entries` that are live at `asOf` for `self`, and why each other one is
 // not. Members first, since an offer or a claim lives only while its signer does; then
 // offers, since a lease extension lives only while the offer its ping rests on does.
+// Every version is judged by its own `at` alone, so a version that wins over another of
+// its key was signed no earlier and is never dropped before it.
 // The answer is the same for every time from `from` up to `until`: the retention of some
 // record runs out at each of the two, and of none in between.
 function settle(entries, self, asOf) {
@@ -47,18 +50,18 @@ function settle(entries, self, asOf) {
   const dead = new Map();
   const of = (type) => [...entries.values()].filter((e) => e.type === type);
   let [from, until] = [-Infinity, Infinity];
-  const over = (endedAt) => {
-    const drop = endedAt + RECORD_RETENTION_SECS;
-    if (drop <= asOf) from = Math.max(from, drop);
-    else until = Math.min(until, drop);
-    return drop <= asOf;
+  const past = (moment) => {
+    if (moment <= asOf) from = Math.max(from, moment);
+    else until = Math.min(until, moment);
+    return moment <= asOf;
   };
+  const expired = (record) => past(record.at + RECORD_RETENTION_SECS);
 
   const members = new Map(of('member').map((e) => [e.record.pk, e]));
   const kept = new Set();
-  const queue = [...members.values()].filter((e) => !(e.record.left && over(e.record.at))).map((e) => e.record.pk);
-  // A member that left stays for as long as a kept member's voucher is signed by it:
-  // dropped, it would cut everyone it vouched for off from the rest.
+  const queue = [...members.values()].filter((e) => !past(e.record.at + MEMBER_RETENTION_SECS)).map((e) => e.record.pk);
+  // A member record past its retention stays for as long as a kept member's voucher is
+  // signed by it: dropped, it would cut everyone it vouched for off from the rest.
   while (queue.length > 0) {
     const pk = queue.pop();
     if (kept.has(pk)) continue;
@@ -68,27 +71,29 @@ function settle(entries, self, asOf) {
   }
   const accepted = acceptedSet(self, [...kept].map((pk) => members.get(pk).record));
   const roster = new Map(); // pk -> the live member record
+  const present = new Map(); // pk -> the record of a member: live, not left, signed lately
   for (const [pk, e] of members) {
     if (!kept.has(pk)) dead.set(e.key, 'expired');
     else if (!accepted.has(pk)) dead.set(e.key, 'not-member');
     else {
       live.set(e.key, e);
       roster.set(pk, e.record);
+      if (!expired(e.record) && !e.record.left) present.set(pk, e.record);
     }
   }
   for (const e of of('offer')) {
-    if (e.record.state !== 'open' && over(e.record.at)) dead.set(e.key, 'expired');
+    if (expired(e.record)) dead.set(e.key, 'expired');
     else if (!roster.has(e.record.host)) dead.set(e.key, 'not-member');
     else live.set(e.key, e);
   }
   for (const e of of('claim')) {
     const { record } = e;
-    if (over(endsAt(record))) dead.set(e.key, 'expired');
+    if (expired(record)) dead.set(e.key, 'expired');
     else if (!roster.has(record.executor)) dead.set(e.key, 'not-member');
     else if (record.ping && !live.has(offerKey(record.taskId, record.ping.by))) dead.set(e.key, 'no-offer');
     else live.set(e.key, e);
   }
-  return { live, dead, accepted, roster, from, until };
+  return { live, dead, accepted, roster, present, from, until };
 }
 
 /// The records one host holds for one pool. `self` is the host's own public key: the
@@ -204,16 +209,32 @@ export class Pool {
     return accepted.has(pk) && roster.get(pk)?.left !== true;
   }
 
-  /// The member records of the pool's members at `now` - accepted, held, not left - by key.
+  /// The member records of the pool's members at `now` - accepted, held, not left, signed
+  /// within the retention - by key.
   members(now) {
-    const { roster } = this.#at(now);
-    return [...roster.keys()].sort().map((pk) => roster.get(pk)).filter((m) => !m.left);
+    const { present } = this.#at(now);
+    return [...present.keys()].sort().map((pk) => present.get(pk));
   }
 
   /// The member record of `pk` when it is a member at `now`, or null.
   member(pk, now) {
-    const record = this.#at(now).roster.get(pk);
-    return record && !record.left ? record : null;
+    return this.#at(now).present.get(pk) ?? null;
+  }
+
+  /// The member records held at `now` of every key that has not left, by key: the members
+  /// and the hosts that stopped signing theirs, which a host keeps in touch with so that
+  /// one that comes back is heard.
+  known(now) {
+    const { roster } = this.#at(now);
+    return [...roster.keys()].sort().map((pk) => roster.get(pk)).filter((m) => !m.left);
+  }
+
+  /// Is the claim record held for the task, if any, signed no later than `asOf`? A claim
+  /// made on a state then is signed no earlier than the record it stands over, so it is
+  /// never dropped before that record.
+  claimSettled(taskId, asOf) {
+    const held = this.#entries.get(`claim/${taskId}`);
+    return !held || held.record.at <= asOf;
   }
 
   /// The generation a claim of the task made on the state at `asOf` belongs to: one past
@@ -224,13 +245,16 @@ export class Pool {
   }
 
   /// Every task the pool's members offer, by task id, as
-  /// `{ taskId, kind, item, identity, title, hours, state, offeredBy, claim }`. `state` is
-  /// `available` or `claimed` while a member's offer is open, else `done` when one is done,
-  /// else `cancelled`; `offeredBy` lists the hosts whose offer is open; `claim` is the
-  /// claim record while the task is claimed, else null.
+  /// `{ taskId, kind, item, identity, title, hours, createdAt, state, offeredBy, claim }`.
+  /// A done offer ends the task for every offer created no later than it was signed, so
+  /// one of two hosts offering a task finishes it for both. `state` is `available` or
+  /// `claimed` while an offer of a member is open and not ended that way, else `done` when
+  /// one is done, else `cancelled`; `offeredBy` lists the hosts of those open offers and
+  /// `createdAt` is the earliest of them; `claim` is the claim record while the task is
+  /// claimed, else null.
   tasks(now) {
-    const { live, roster } = this.#at(now);
-    const member = (pk) => roster.get(pk)?.left === false;
+    const { live, present } = this.#at(now);
+    const member = (pk) => present.has(pk);
     const offers = new Map();
     for (const key of [...live.keys()].sort()) {
       const { type, record } = live.get(key);
@@ -239,18 +263,33 @@ export class Pool {
       offers.get(record.taskId).push(record);
     }
     return [...offers].map(([taskId, all]) => {
-      const open = all.filter((o) => o.state === 'open');
+      const done = all.filter((o) => o.state === 'done');
+      const open = all.filter((o) => o.state === 'open' && !done.some((d) => d.at >= o.createdAt));
       const held = live.get(`claim/${taskId}`)?.record;
       const claim = held && member(held.executor) && isActive(held, now) ? held : null;
       const { kind, item, identity, title } = open[0] ?? all[0];
       return {
         taskId, kind, item, identity, title,
         hours: taskHours(open) ?? Math.max(...all.map((o) => o.minRequiredH)),
-        state: open.length > 0 ? (claim ? 'claimed' : 'available') : all.some((o) => o.state === 'done') ? 'done' : 'cancelled',
+        createdAt: Math.min(...(open.length > 0 ? open : all).map((o) => o.createdAt)),
+        state: open.length > 0 ? (claim ? 'claimed' : 'available') : done.length > 0 ? 'done' : 'cancelled',
         offeredBy: open.map((o) => o.host),
         claim: open.length > 0 ? claim : null,
       };
     });
+  }
+
+  /// The latest `at` among the done offers members hold for a task at `now`, or null when
+  /// none is done: an offer of that task created no later is ended by it.
+  doneAt(taskId, now) {
+    const { live, present } = this.#at(now);
+    let latest = null;
+    for (const { type, record } of live.values()) {
+      if (type === 'offer' && record.taskId === taskId && record.state === 'done' && present.has(record.host)) {
+        latest = Math.max(latest ?? 0, record.at);
+      }
+    }
+    return latest;
   }
 
   /// One task of `tasks(now)`, or null when no member offers it.
@@ -270,7 +309,7 @@ export class Pool {
       hours: task?.hours ?? 0,
       members: this.members(now).map((m) => m.pk).filter((pk) => pk !== this.self),
       offering: task?.offeredBy ?? [],
-      available: task?.state === 'available',
+      available: task?.state === 'available' && this.claimSettled(taskId, now),
       eligible: Boolean(me && task && eligible(me.maxAcceptedH, task.hours)),
     };
   }
@@ -298,18 +337,20 @@ export class Pool {
   }
 
   /// The answer to `hello` from `from`: `{ body: { index } }` once its member record is
-  /// held and it is accepted, else `{ error }` with `bad-request` or `denied`. A member
-  /// this host has not accepted before must also pass `checkJoin`.
+  /// held and it is accepted, else `{ error }` with `bad-request` or `denied`. `chain`,
+  /// when given, is the member records that connect the sender to members this host may
+  /// know; they are taken in together with the sender's own. A key this host has not
+  /// accepted before, the sender's or one of its chain, must also pass `checkJoin`: a
+  /// chain record that does not is left out.
   answerHello(body, from, now) {
-    if (!shaped(body, { member: isObject }) || body.member.pk !== from) return { error: 'bad-request' };
-    if (!this.accepts(from, now)) {
-      const shape = checkShape(body.member, this.id);
-      if (!shape.ok || body.member.type !== 'member') return { error: 'bad-request' };
-      const join = checkJoin(body.member, now);
-      if (!join.ok) return { error: 'denied', detail: join.code };
-    }
-    const { refused } = this.merge([body.member], now);
-    if (!this.member(from, now)) return { error: 'denied', detail: refused[0]?.code ?? 'left' };
+    const chain = (v) => Array.isArray(v) && v.length <= MAX_HELLO_CHAIN;
+    if (!shaped(body, { member: isObject }, { chain }) || body.member.pk !== from) return { error: 'bad-request' };
+    const records = [body.member, ...(body.chain ?? [])];
+    if (!records.every((r) => checkShape(r, this.id).ok && r.type === 'member')) return { error: 'bad-request' };
+    const lets = (record) => this.accepts(record.pk, now) || checkJoin(record, now).ok;
+    if (!lets(body.member)) return { error: 'denied', detail: checkJoin(body.member, now).code };
+    const { refused } = this.merge(records.filter(lets), now);
+    if (!this.member(from, now)) return { error: 'denied', detail: refused.find((r) => r.key === memberKey(from))?.code ?? 'left' };
     return { body: { index: this.index(now) } };
   }
 

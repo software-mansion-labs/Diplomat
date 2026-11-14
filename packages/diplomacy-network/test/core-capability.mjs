@@ -6,10 +6,11 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { b64u, canon } from '../src/core/canon.js';
 import {
-  SeqTracker, actMac, buildCapability, capabilityExp, checkAct, macOf, validForgeRequest, verifyCapability,
+  SeqTracker, actMac, buildCapability, capabilityExp, checkAct, checkDone, macOf, validForgeRequest, verifyCapability, wireOutcome,
 } from '../src/core/capability.js';
 import { sign } from '../src/core/identity.js';
-import { POOL, T0, ident } from './lib/core-fixtures.mjs';
+import { endClaim } from '../src/core/lease.js';
+import { POOL, T0, claimNow, club, ident, offer } from './lib/core-fixtures.mjs';
 
 function check(name, fn) {
   fn();
@@ -118,6 +119,43 @@ check('an act request is performed only for the capability\'s executor, in time,
   assert.equal(denied(act({ seq: 3 }), shared), 'denied: seq is not new');
   assert.equal(denied(act({ seq: 5, mac: b64u(Buffer.alloc(32)) }), shared), 'denied: bad mac');
   assert.equal(checkAct(act({ seq: 5 }), shared).ok, true, 'a number is used only by a request whose MAC matched');
+});
+
+check('an outcome is reported by the executor of the claim the offering host holds, and by nobody else', () => {
+  const hosts = club(3);
+  hosts.forEach((h) => h.pool.merge(offer(hosts[0].id), T0));
+  const claim = claimNow(hosts, 1, TASK, T0);
+  const [requester, runner, third] = hosts.map((h) => h.id.pk);
+  const outcome = wireOutcome({ ok: true, summary: 'reviewed', usd: 0.4215, tokens: 91234.2, runner: 'claude', model: 'opus' });
+  assert.deepEqual(outcome, { ok: true, summary: 'reviewed', microUsd: 421500, tokens: 91234, runner: 'claude', model: 'opus' });
+  assert.doesNotThrow(() => canon(outcome));
+  assert.deepEqual(wireOutcome({ summary: 'x'.repeat(5000), usd: NaN, tokens: -4, model: null }), {
+    ok: false, summary: 'x'.repeat(4000), microUsd: 0, tokens: 0, runner: '', model: '',
+  });
+  const done = { taskId: TASK, round: claim.round, outcome };
+  const lapse = claim.leaseUntil + 600;
+  const verdict = (body_, over = {}) => {
+    const result = checkDone(body_, { claim, from: runner, now: T0 + 5, ...over });
+    return result.ok ? 'ok' : `${result.code}: ${result.detail}`;
+  };
+  assert.equal(verdict(done), 'ok');
+  assert.equal(verdict(done, { now: lapse - 1 }), 'ok');
+  assert.equal(verdict(done, { now: lapse }), 'denied: not the executor of this task', 'a claim that lapsed');
+  assert.equal(verdict(done, { from: third }), 'denied: not the executor of this task', 'another member, though it knows the round');
+  assert.equal(verdict(done, { from: requester }), 'denied: not the executor of this task');
+  assert.equal(verdict(done, { claim: null }), 'denied: not the executor of this task');
+  assert.equal(verdict({ ...done, round: b64u(Buffer.alloc(8, 3)) }), 'denied: not the executor of this task', 'an earlier round of the same executor');
+  assert.equal(verdict({ ...done, taskId: `${POOL}#review:pr-579@octocat` }), 'denied: not the executor of this task');
+  for (const state of ['completed', 'released']) {
+    const ended = endClaim(hosts[1].id, claim, state, T0 + 50);
+    assert.equal(verdict(done, { claim: ended, now: lapse + 9000 }), 'ok', `after the executor ${state} it`);
+    assert.equal(verdict(done, { claim: ended, from: third }), 'denied: not the executor of this task');
+  }
+  for (const bad of [null, {}, { ...done, keyId: 'x' }, { ...done, round: 'short' }, { ...done, outcome: { ...outcome, usd: 0.5 } },
+    { ...done, outcome: { ...outcome, microUsd: 1.5 } }, { ...done, outcome: { ...outcome, ok: 'yes' } },
+    { ...done, outcome: { ...outcome, summary: 'x'.repeat(4001) } }, { ...done, outcome: (({ model: _, ...rest }) => rest)(outcome) }]) {
+    assert.equal(verdict(bad), 'bad-request: not a done body');
+  }
 });
 
 check('a forge request is a host, a method, a path, lowercase headers and a padded base64 body, and nothing else', () => {

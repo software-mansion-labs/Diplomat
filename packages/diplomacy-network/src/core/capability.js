@@ -6,6 +6,7 @@
 import crypto from 'node:crypto';
 import { b64u, canon, unb64u } from './canon.js';
 import { sign, validPk, verify } from './identity.js';
+import { speaksFor } from './lease.js';
 import { isBytes, isObject, isTime, parseTaskId, shaped, validPool } from './records.js';
 import { LEASE_GRACE_SECS } from '../paths.js';
 
@@ -139,5 +140,41 @@ export function checkAct(body, { capability, secret, seqs, from, now }) {
   const mac = unb64u(actMac(secret, body));
   if (!crypto.timingSafeEqual(mac, unb64u(body.mac))) return deny('bad mac');
   seqs.use(body.keyId, body.seq);
+  return { ok: true };
+}
+
+const MAX_SUMMARY = 4000;
+const MAX_LABEL = 100;
+const count = (v) => Number.isSafeInteger(v) && v >= 0;
+const text = (max) => (v) => typeof v === 'string' && v.length <= max && v.isWellFormed();
+const OUTCOME = {
+  ok: (v) => typeof v === 'boolean', summary: text(MAX_SUMMARY), microUsd: count, tokens: count,
+  runner: text(MAX_LABEL), model: text(MAX_LABEL),
+};
+const DONE = {
+  taskId: (v) => parseTaskId(v) !== null, round: (v) => isBytes(v, 8), outcome: (v) => shaped(v, OUTCOME),
+};
+
+/// The outcome of a run as a `done` request carries it: whole numbers only, the cost in
+/// millionths of a dollar, every text cut to what the request allows.
+export function wireOutcome({ ok, summary, usd, tokens, runner, model } = {}) {
+  const whole = (v) => (Number.isFinite(v) && v > 0 ? Math.min(Math.round(v), Number.MAX_SAFE_INTEGER) : 0);
+  const cut = (v, max) => String(v ?? '').toWellFormed().slice(0, max);
+  return {
+    ok: ok === true, summary: cut(summary, MAX_SUMMARY), microUsd: whole(usd * 1e6), tokens: whole(tokens),
+    runner: cut(runner, MAX_LABEL), model: cut(model, MAX_LABEL),
+  };
+}
+
+/// An offering host's checks on the body of a `done` request from `from`, the verified
+/// sender of its envelope: the body is well-formed, and `from` speaks for the round it
+/// names by `claim`, the claim record this host holds for the task (or null). No key and
+/// no MAC is involved: an offering host that issued no key must be able to check it too.
+/// Answers `{ ok: true }`, or `{ ok: false, code, detail }` with `bad-request` or `denied`.
+export function checkDone(body, { claim, from, now }) {
+  if (!shaped(body, DONE)) return { ok: false, code: 'bad-request', detail: 'not a done body' };
+  if (claim?.taskId !== body.taskId || !speaksFor(claim, { from, round: body.round, now })) {
+    return { ok: false, code: 'denied', detail: 'not the executor of this task' };
+  }
   return { ok: true };
 }

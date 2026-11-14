@@ -151,7 +151,7 @@ export class LockTable {
     if (!claimant) return { error: 'not-member' };
     if (pool.stateHash(body.asOf) !== body.hash) return { body: { stale: true } };
     const task = pool.task(body.taskId, now);
-    if (task?.state !== 'available') return { body: { challenge: { reason: 'unavailable' } } };
+    if (task?.state !== 'available' || !pool.claimSettled(body.taskId, body.asOf)) return { body: { challenge: { reason: 'unavailable' } } };
     if (claimant.maxAcceptedH < task.hours) return { body: { challenge: { reason: 'hours' } } };
     const exp = body.asOf + GRANT_TTL_SECS;
     if (!this.hold(body.taskId, from, body.round, exp, now)) {
