@@ -4,14 +4,20 @@ import DiplomatCore
 /// One of the Node packages beside this app that run a daemon on a unix socket and ship
 /// an installer with the device allocator's interface (`src/install.js --check`,
 /// `--install`, `--uninstall`, `--start-daemon`, `--restart-daemon`, each printing
-/// `AllocatorInstall`'s JSON): the device allocator and the remote-machines MCP.
+/// `AllocatorInstall`'s JSON): the device allocator and the remote-machines MCP. The
+/// Diplomacy Network's installer has the daemon verbs alone.
 struct NodePackage {
-    /// Its folder under `packages/`, and its state directory's under `~/.diplomat`.
+    /// Its folder under `packages/`.
     let name: String
     /// Overrides where the package lives.
     let dirEnv: String
     /// Relocates its state directory, as the package's own `src/paths.js` does.
     let baseEnv: String
+    /// Its state directory under `~/.diplomat`; nil is `name`.
+    var stateDir: String?
+    /// The path under `node_modules` that says its dependencies are fetched; nil for a
+    /// package with none.
+    var depsMarker: String? = "@modelcontextprotocol/sdk"
 
     static let deviceAllocator = NodePackage(name: "device-allocator",
                                              dirEnv: "DIPLOMAT_DEVICE_ALLOCATOR_DIR",
@@ -19,6 +25,10 @@ struct NodePackage {
     static let remoteMachines = NodePackage(name: "remote-machines",
                                             dirEnv: "DIPLOMAT_REMOTE_MACHINES_DIR",
                                             baseEnv: "RM_BASE_DIR")
+    static let diplomacyNetwork = NodePackage(name: "diplomacy-network",
+                                              dirEnv: "DIPLOMAT_DIPLOMACY_NETWORK_DIR",
+                                              baseEnv: "DN_BASE_DIR",
+                                              stateDir: "network", depsMarker: nil)
 
     /// A sibling of this app inside the same checkout, or `dirEnv`, as long as
     /// `daemon-core` sits beside the overriding package (each imports it by relative path).
@@ -40,7 +50,7 @@ struct NodePackage {
         if let env = ProcessInfo.processInfo.environment[baseEnv], !env.isEmpty {
             return URL(fileURLWithPath: (env as NSString).expandingTildeInPath)
         }
-        return Self.home.appendingPathComponent(".diplomat/\(name)")
+        return Self.home.appendingPathComponent(".diplomat/\(stateDir ?? name)")
     }
     var socketPath: String { baseDir.appendingPathComponent("daemon.sock").path }
 
@@ -60,35 +70,58 @@ struct NodePackage {
     /// cannot speak to a unix socket. Blocking for up to `timeoutSecs`, so off the main
     /// actor; each call is its own curl, so a long one holds up no other.
     func send(_ endpoint: String, body: [String: Any] = [:], timeoutSecs: Int) -> Sent {
-        guard FileManager.default.fileExists(atPath: socketPath),
-              let data = try? JSONSerialization.data(withJSONObject: body),
-              let json = String(data: data, encoding: .utf8) else { return .unreachable }
+        guard let data = try? JSONSerialization.data(withJSONObject: body),
+              let json = String(data: data, encoding: .utf8),
+              let (exit, raw) = curl(endpoint, timeoutSecs: timeoutSecs, request: [
+                  "-X", "POST", "-H", "content-type: application/json", "-d", json])
+        else { return .unreachable }
+        // curl's 7 is "failed to connect": a stale socket file, or one nothing listens on.
+        if exit == 7 { return .unreachable }
+        guard exit == 0, let reply = Self.parseReply(raw) else { return .unanswered }
+        return .reply(reply)
+    }
+
+    /// GET `endpoint`: the body of a 2xx answer as the daemon wrote it, or nil when there
+    /// was none. Blocking, like `send`.
+    func get(_ endpoint: String, timeoutSecs: Int) -> Data? {
+        guard let (exit, raw) = curl(endpoint, timeoutSecs: timeoutSecs, request: ["-X", "GET"]),
+              exit == 0, let (code, body) = Self.splitReply(raw), (200..<300).contains(code)
+        else { return nil }
+        return body
+    }
+
+    /// One request to the daemon: curl's exit status and output, or nil when there is no
+    /// socket or no curl.
+    private func curl(_ endpoint: String, timeoutSecs: Int,
+                      request: [String]) -> (exit: Int32, out: Data)? {
+        guard FileManager.default.fileExists(atPath: socketPath) else { return nil }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
         // The status goes on a last line of its own, after the body.
         p.arguments = ["-s", "--max-time", "\(timeoutSecs)", "--unix-socket", socketPath,
-                       "-X", "POST", "http://localhost/\(endpoint)",
-                       "-H", "content-type: application/json", "-d", json,
-                       "-w", "\n%{http_code}"]
+                       "http://localhost/\(endpoint)"] + request + ["-w", "\n%{http_code}"]
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
-        do { try p.run() } catch { return .unreachable }
+        do { try p.run() } catch { return nil }
         let raw = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        // curl's 7 is "failed to connect": a stale socket file, or one nothing listens on.
-        if p.terminationStatus == 7 { return .unreachable }
-        guard p.terminationStatus == 0, let reply = Self.parseReply(raw) else { return .unanswered }
-        return .reply(reply)
+        return (p.terminationStatus, raw)
     }
 
     /// curl's `-w "\n%{http_code}"` output split back into the status and the body.
-    static func parseReply(_ raw: Data) -> DaemonReply? {
+    static func splitReply(_ raw: Data) -> (status: Int, body: Data)? {
         guard let nl = raw.lastIndex(of: UInt8(ascii: "\n")),
               let code = Int(String(decoding: raw[raw.index(after: nl)...], as: UTF8.self)),
               code > 0 else { return nil }
-        return DaemonReply(status: code,
-                           json: try? JSONDecoder().decode(JSONValue.self, from: raw[..<nl]))
+        return (code, Data(raw[..<nl]))
+    }
+
+    static func parseReply(_ raw: Data) -> DaemonReply? {
+        splitReply(raw).map {
+            DaemonReply(status: $0.status,
+                        json: try? JSONDecoder().decode(JSONValue.self, from: $0.body))
+        }
     }
 
     // MARK: installer (blocking — call off the main thread)
@@ -102,7 +135,8 @@ struct NodePackage {
     /// which looks from the outside like a package that installed fine and then
     /// simply never appears.
     var depsInstalled: Bool {
-        FileManager.default.fileExists(atPath: nodeModulesDir + "/@modelcontextprotocol/sdk")
+        guard let depsMarker else { return true }
+        return FileManager.default.fileExists(atPath: nodeModulesDir + "/" + depsMarker)
     }
 
     /// Fetch the package's `node_modules` if they aren't there yet. No-op once

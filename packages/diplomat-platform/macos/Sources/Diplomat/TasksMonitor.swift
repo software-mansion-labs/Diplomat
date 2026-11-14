@@ -353,7 +353,8 @@ extension Store {
         defer { goalFixesStarting.remove(ref.number) }
         let outcome = await dispatchAgent(goalPlusJob(node, number: ref.number), source: .panel)
         switch outcome {
-        case .spawned: break
+        case .spawned, .offered: break
+        case .networkRefused(let why): return "the fix was not offered: \(why)"
         case .banned: return "@\(node.author ?? "") is banned, so no fix was started"
         case .failed(let why): return "the fix agent did not start: \(why)"
         default: return "the fix agent did not start (\(outcome))"
@@ -371,7 +372,7 @@ extension Store {
         return AgentJob(kind: action, auditAction: action, label: ask.label(roots: roots.count),
                         prompt: ask.config.buildPrompt(), prURL: ask.issueLink(in: roots), prNumber: nil,
                         authorLogin: node.author, counter: nil,
-                        directory: ask.config.checkout)
+                        directory: ask.config.checkout, allows: ask.config.allows)
     }
 
     /// One mode edit, then the automatic pass when the goal wants work started, without

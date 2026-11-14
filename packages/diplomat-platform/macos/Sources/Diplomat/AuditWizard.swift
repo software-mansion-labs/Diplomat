@@ -119,8 +119,9 @@ struct AuditWizardView: View {
                                  label: trackingLabel, prompt: cfg.buildPrompt(),
                                  prURL: nil, prNumber: nil,
                                  authorLogin: nil,
-                                 counter: nil, directory: cfg.checkout)
-        status = "Launching \(term.title)…"
+                                 counter: nil, directory: cfg.checkout,
+                                 allows: .init(audit: cfg))
+        status = store.dispatchingText(terminal: term.title)
         Task {
             status = statusText(for: await store.dispatchAgent(job, source: .panel),
                                 terminal: term.title)

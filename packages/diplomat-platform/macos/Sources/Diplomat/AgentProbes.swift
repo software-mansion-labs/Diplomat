@@ -182,6 +182,16 @@ enum AgentProbes {
         return .present(table)
     }
 
+    /// The pids whose command line mentions `word` anywhere. The table joins a process's
+    /// argv with spaces, so this finds candidates and proves nothing about an element.
+    static func pids(mentioning word: String, now: TimeInterval) -> [Int] {
+        guard let text = psDump(now: now).value else { return [] }
+        return text.split(separator: "\n").compactMap { line in
+            guard let cols = columns(String(line)), cols.args.contains(word) else { return nil }
+            return Int(cols.pid)
+        }
+    }
+
     /// Every tty a nudge may be typed into: for each agent process on the box, its own
     /// tty and every tty between it and the window it shows in.
     ///
@@ -588,7 +598,9 @@ enum AgentProbes {
     static func gather(records: [AgentState.RunRecord], now: TimeInterval,
                        keys: Set<String>, directory: String,
                        merged: Observation<Set<String>>,
-                       tokens: Observation<Bool>)
+                       tokens: Observation<Bool>,
+                       network: Observation<[String: AgentState.NetworkTask]>
+                           = .unavailable(DiplomacyNetwork.switchedOff))
         -> (evidence: AgentState.Evidence, attached: Observation<[String]>) {
         let dump = psDump(now: now)
         let table = note("processes", processTable(dump))
@@ -610,7 +622,8 @@ enum AgentProbes {
             sessions: note("agent sessions",
                            agentSessions(records, directory: directory, now: now)),
             activity: note("turn reports", AgentRegistry.activity(records)),
-            tokensLeft: tokens)
+            tokensLeft: tokens,
+            network: network)
         return (evidence, scanned.attached)
     }
 

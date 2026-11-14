@@ -202,6 +202,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if env["DIPLOMAT_TASKS_TEST"] == "1" {
             Task { @MainActor in exit(await TasksTest.run() ? 0 : 1) }
         }
+        // Diplomacy Network self-test: the Store's cycle, gate and run handling against a
+        // stand-in daemon on a scratch socket, with a stand-in installer and process
+        // table. It offers jobs and opens no terminal. Exit code = pass/fail.
+        if env["DIPLOMAT_NETWORK_TEST"] == "1" {
+            Task { @MainActor in exit(await NetworkTest.run() ? 0 : 1) }
+        }
         // API-error-watcher self-test: proves a scan writes into the sessions an agent is
         // running in and no others, and that a wrapped agent's window is still one of
         // them. Every session and process is a literal — no terminal is read and nothing
@@ -409,11 +415,24 @@ enum SingleInstance {
     /// binary's). KERN_PROCARGS2 lays out argc, the executable path, NUL padding, then
     /// the argv and environment strings, each NUL-terminated.
     static func environment(of pid: pid_t) -> [String: String] {
+        var env: [String: String] = [:]
+        for entry in procArgs(of: pid)?.environment ?? [] {
+            guard let eq = entry.firstIndex(of: "=") else { break }
+            env[String(entry[..<eq])] = String(entry[entry.index(after: eq)...])
+        }
+        return env
+    }
+
+    /// A live process's argv, element by element as it was started; nil when the kernel
+    /// withholds it (another user's process, a platform binary's) or the process is gone.
+    static func arguments(of pid: pid_t) -> [String]? { procArgs(of: pid)?.argv }
+
+    private static func procArgs(of pid: pid_t) -> (argv: [String], environment: [String])? {
         var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
         var size = 0
-        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return [:] }
+        guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > MemoryLayout<Int32>.size else { return nil }
         var buf = [UInt8](repeating: 0, count: size)
-        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0 else { return [:] }
+        guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0 else { return nil }
         let argc = Int(buf.withUnsafeBytes { $0.load(as: Int32.self) })
         var at = MemoryLayout<Int32>.size
         func next() -> String? {
@@ -421,14 +440,16 @@ enum SingleInstance {
             defer { at = end + 1 }
             return String(decoding: buf[at..<end], as: UTF8.self)
         }
-        guard next() != nil else { return [:] }
+        guard next() != nil else { return nil }
         while at < size, buf[at] == 0 { at += 1 }
-        for _ in 0..<argc { guard next() != nil else { return [:] } }
-        var env: [String: String] = [:]
-        while let entry = next(), let eq = entry.firstIndex(of: "=") {
-            env[String(entry[..<eq])] = String(entry[entry.index(after: eq)...])
+        var argv: [String] = []
+        for _ in 0..<argc {
+            guard let arg = next() else { return nil }
+            argv.append(arg)
         }
-        return env
+        var environment: [String] = []
+        while let entry = next() { environment.append(entry) }
+        return (argv, environment)
     }
 
     private static func log(_ msg: String) {

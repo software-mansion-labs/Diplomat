@@ -283,6 +283,15 @@ enum AppConfig {
     /// afford it.
     static var autoBudgetGate: Bool { bool(autoBudgetGateKey, fallback: true) }
 
+    /// Whether every job is offered to the Diplomacy Network instead of spawned here. Its
+    /// daemon reads the same key, and exits while it is not `true`.
+    static var networkEnabled: Bool { bool(NetworkSettings.enabledKey, fallback: false) }
+
+    /// One of the network's two hour settings, as its daemon reads it.
+    static func networkHours(_ key: String) -> Int {
+        NetworkSettings.hours(double(key, fallback: Double(NetworkSettings.hoursFloor)))
+    }
+
     /// How sure the gate must be that a task fits before it starts one, as a
     /// percentage, snapped to a level with a quantile behind it.
     static var autoBudgetConfidence: Int {

@@ -145,11 +145,14 @@ enum AgentSpawner {
         case neverStarted(terminal: String, waited: TimeInterval, tokenItem: String = "")
         case noToken(item: String)
         case headless
+        case network
 
         var errorDescription: String? {
             switch self {
             case .headless:
                 return "a headless self-test opens no agent terminal"
+            case .network:
+                return "the Diplomacy Network is on, so no agent starts on this machine"
             case .write(let m): return "Couldn't stage prompt: \(m)"
             case .osascript(let code, let stderr):
                 let s = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1142,8 +1145,9 @@ struct ReviewWizardView: View {
                                  prURL: trackingPRURL,
                                  prNumber: store.isRootCheckout(cfg.checkout) ? cfg.prRef.number : nil,
                                  authorLogin: reviewedAuthorLogin,
-                                 counter: nil, directory: cfg.checkout)
-        status = "Launching \(term.title)…"
+                                 counter: nil, directory: cfg.checkout,
+                                 allows: .init(review: cfg))
+        status = store.dispatchingText(terminal: term.title)
         Task {
             status = statusText(for: await store.dispatchAgent(job, source: .panel),
                                 terminal: term.title)
@@ -1200,5 +1204,7 @@ func statusText(for outcome: Store.DispatchOutcome, terminal: String) -> String 
     case .unaffordable: return "Too little rate limit left for automatic work."
     case .lowDisk: return "Too little free disk for automatic work."
     case .failed(let msg): return "Failed: \(msg)"
+    case .offered: return "Offered to the pool · \(Fmt.clock(Date()))"
+    case .networkRefused(let why): return "Not offered: \(why)"
     }
 }

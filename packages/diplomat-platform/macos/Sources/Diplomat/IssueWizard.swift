@@ -264,8 +264,9 @@ struct IssueWizardView: View {
                                  label: trackingLabel, prompt: cfg.buildPrompt(),
                                  prURL: cfg.singleLink, prNumber: nil,
                                  authorLogin: nil,
-                                 counter: nil, directory: cfg.checkout)
-        status = "Launching \(term.title)…"
+                                 counter: nil, directory: cfg.checkout,
+                                 allows: .init(issues: cfg))
+        status = store.dispatchingText(terminal: term.title)
         Task {
             status = statusText(for: await store.dispatchAgent(job, source: .panel),
                                 terminal: term.title)

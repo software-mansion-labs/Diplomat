@@ -157,7 +157,7 @@ struct ConflictWizardView: View {
                                  prURL: trackingPRURL, prNumber: specificNumber,
                                  authorLogin: nil,
                                  counter: nil, directory: cfg.checkout)
-        status = "Launching \(term.title)…"
+        status = store.dispatchingText(terminal: term.title)
         Task {
             status = statusText(for: await store.dispatchAgent(job, source: .panel),
                                 terminal: term.title)

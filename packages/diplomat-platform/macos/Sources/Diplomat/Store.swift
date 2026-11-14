@@ -58,6 +58,28 @@ final class Store: ObservableObject {
     /// Whether the last exclusion change failed to reach config.json.
     @Published private(set) var machineExclusionFailed = false
 
+    /// The Diplomacy Network daemon's last answer to `GET /state`; nil while it does not
+    /// answer, or the switch is off.
+    @Published var networkState: NetworkSnapshot?
+    /// Whether the daemon answered when it was last asked; nil until it has been.
+    @Published var networkAnswered: Bool?
+    /// `allocatorBusy` for the network daemon's start, restart and stop.
+    @Published var networkBusy = false
+    /// What the daemon refused the Network screen's last action with, by the pool panel
+    /// it was made in ("" for the one shown before any pool).
+    @Published var networkRefusals: [String: String] = [:]
+    /// What `runNetworkCycleOnce` last posted and when, the daemon it posted to, and when
+    /// it may next start one that is not answering.
+    var networkCycle = NetworkCycle()
+    /// The start or stop the switch last asked for; the next one waits for it, so a
+    /// switch flipped twice leaves the daemon as the second flip says.
+    var networkLifecycle: Task<Void, Never>?
+    /// The offers whose claim the activity feed has named.
+    var networkClaimsLogged: Set<String> = []
+    /// Whether the feed has said the network is refusing automatic work, for the current
+    /// spell of it.
+    var networkUnavailableLogged = false
+
     // MARK: persisted settings
 
     /// Persist a settings value — EXCEPT in a one-shot headless mode. A self-test seeds
@@ -426,6 +448,50 @@ final class Store: ObservableObject {
                   !configSaved(AppConfig.setBool(AppConfig.autoBudgetGateKey, autoBudgetGate))
             else { return }
             readBack { autoBudgetGate = AppConfig.autoBudgetGate }
+        }
+    }
+
+    /// Whether every job is offered to its repository's pool on the Diplomacy Network
+    /// instead of spawned here (Settings → DIPLOMACY NETWORK). In the shared file because
+    /// the network's daemon reads it too, and exits while it is off; written before the
+    /// daemon is started or stopped for that reason.
+    @Published var networkEnabled: Bool {
+        didSet {
+            guard networkEnabled != oldValue, !readingConfig else { return }
+            if writesConfig,
+               !configSaved(AppConfig.setBool(NetworkSettings.enabledKey, networkEnabled)) {
+                readBack { networkEnabled = AppConfig.networkEnabled }
+                return
+            }
+            networkSwitched()
+        }
+    }
+
+    /// The hours a job offered from here asks for, and the longest job this machine takes
+    /// from a pool. The daemon reads both from the shared file.
+    @Published var networkRequiredMinimumH: Int {
+        didSet {
+            let clamped = DiplomacyNetwork.clampHours(networkRequiredMinimumH)
+            if clamped != networkRequiredMinimumH { networkRequiredMinimumH = clamped }
+            guard writesConfig, !readingConfig,
+                  !configSaved(AppConfig.setInt(NetworkSettings.requiredMinimumHKey, clamped))
+            else { return }
+            readBack {
+                networkRequiredMinimumH = AppConfig.networkHours(NetworkSettings.requiredMinimumHKey)
+            }
+        }
+    }
+
+    @Published var networkMaximumAcceptedH: Int {
+        didSet {
+            let clamped = DiplomacyNetwork.clampHours(networkMaximumAcceptedH)
+            if clamped != networkMaximumAcceptedH { networkMaximumAcceptedH = clamped }
+            guard writesConfig, !readingConfig,
+                  !configSaved(AppConfig.setInt(NetworkSettings.maximumAcceptedHKey, clamped))
+            else { return }
+            readBack {
+                networkMaximumAcceptedH = AppConfig.networkHours(NetworkSettings.maximumAcceptedHKey)
+            }
         }
     }
 
@@ -1105,6 +1171,9 @@ final class Store: ObservableObject {
         agentModel = AppConfig.agentModel
         autoTaskLimit = AppConfig.autoTaskLimit
         autoBudgetGate = AppConfig.autoBudgetGate
+        networkEnabled = AppConfig.networkEnabled
+        networkRequiredMinimumH = AppConfig.networkHours(NetworkSettings.requiredMinimumHKey)
+        networkMaximumAcceptedH = AppConfig.networkHours(NetworkSettings.maximumAcceptedHKey)
         runDeadlineEnabled = AppConfig.runDeadline != nil
         autoBudgetConfidence = AppConfig.autoBudgetConfidence
         autoBudgetFloorPct = AppConfig.autoBudgetFloorPct
@@ -1200,6 +1269,7 @@ final class Store: ObservableObject {
             // afterwards; publishes the status either way, so it stands in for the
             // plain `refreshAllocatorInstall()` this used to do here.
             Task { await ensureAllocatorInstalled() }
+            Task { await endLegacyMeshNodes() }
         }
     }
 
@@ -1589,6 +1659,13 @@ final class Store: ObservableObject {
             Set(AgentRegistry.load().filter { !$0.untracked }.compactMap(\.item)), roots: roots)
     }
 
+    /// Pin the merged PRs, for headless self-tests only: read for real they cost a `gh`
+    /// call each.
+    func pinMergedPRs(_ items: Set<String>) {
+        guard Headless.active else { return }
+        mergedPRs = .present(items)
+    }
+
     /// Ask whether the account still has room to spend — the precondition on the
     /// resolver's run deadline.
     ///
@@ -1661,6 +1738,9 @@ final class Store: ObservableObject {
                       ledgerKey: String = "", directory: String? = nil,
                       terminal preferred: SpawnTerminal,
                       restoreFocusTo restoreBID: String? = nil) async throws -> SpawnTerminal {
+        // `dispatchAgent` offers every job to the network before it gets here; this holds
+        // for a caller that does not go through it.
+        guard !networkEnabled else { throw AgentSpawner.SpawnError.network }
         let now = Date().timeIntervalSince1970
         guard let record = AgentRegistry.createRun(
             AgentState.RunRecord(runID: AgentRegistry.newRunID(now: now), dispatchedAt: now,
@@ -1733,10 +1813,16 @@ final class Store: ObservableObject {
     ///
     /// Priced on the way out: this is the one way a run leaves the book without being
     /// retired, and retirement is what would otherwise close its ledger entry.
+    ///
+    /// A run the network carries is withdrawn from its pool instead, while the network
+    /// still holds it: forgotten here alone, some machine would start on work nobody is
+    /// waiting for.
     func forgetRun(_ runID: String) {
-        let priced = Store.pricingInputs(AgentRegistry.load().filter { $0.runID == runID })
+        let records = AgentRegistry.load().filter { $0.runID == runID }
+        let priced = Store.pricingInputs(records.filter(\.runsHere))
         guard bookWritten(AgentRegistry.forget([runID])) else { return }
         Task {
+            for r in records where !r.runsHere { await withdrawForgotten(r) }
             await settleLedger(priced)
             await settleAgents()
         }
@@ -1752,6 +1838,10 @@ final class Store: ObservableObject {
         var windows: [String: AgentWindows.Handle]
         /// The 2.x sessions a TUI in the same pass's process table is attached to.
         var attached: Observation<[String]>
+        /// Whether the pass asked the Diplomacy Network daemon for its snapshot, and the
+        /// snapshot when it answered.
+        var networkAsked = false
+        var network: NetworkSnapshot?
     }
 
     /// Resolve every registered run against one pass of evidence. READ-ONLY.
@@ -1774,25 +1864,34 @@ final class Store: ObservableObject {
     ///
     /// The probes shell out, run AppleScript and dial sockets, so the whole pass is done
     /// off the main actor.
+    ///
+    /// The network daemon is asked in the pass itself, while the switch is on, and never
+    /// answered for from an earlier pass: a snapshot older than an offer names no such
+    /// task, which past the grace is the verdict that ends its run.
     func agentTick() async -> AgentPass {
         let limit = autoTaskLimit
         let roots = roots
         let keys = Set(roots.map(\.key))
         let (merged, tokens, deadline) = (mergedPRs, tokensLeft, AppConfig.runDeadline)
         let directory = AgentSpawner.repoPath
+        let network = networkEnabled
         return await Task.detached(priority: .userInitiated) {
             let now = Date().timeIntervalSince1970
             let records = AgentRegistry.adoptPids(AgentRegistry.load())
-            let gathered = AgentProbes.gather(records: records, now: now, keys: keys,
-                                              directory: directory,
-                                              merged: merged, tokens: tokens)
+            let snapshot = network ? DiplomacyNetwork.state() : nil
+            let gathered = AgentProbes.gather(
+                records: records, now: now, keys: keys, directory: directory,
+                merged: merged, tokens: tokens,
+                network: network ? NetworkEvidence.tasks(snapshot)
+                    : .unavailable(DiplomacyNetwork.switchedOff))
             let tick = AgentState.tick(records: records, evidence: gathered.evidence,
                                        roots: roots, now: now, limit: limit, deadline: deadline)
             var windows: [String: AgentWindows.Handle] = [:]
             for r in tick.records where !r.untracked {
                 windows[r.runID] = AgentWindows.handle(r.runID)
             }
-            return AgentPass(tick: tick, windows: windows, attached: gathered.attached)
+            return AgentPass(tick: tick, windows: windows, attached: gathered.attached,
+                             networkAsked: network, network: snapshot)
         }.value
     }
 
@@ -1847,6 +1946,7 @@ final class Store: ObservableObject {
         let load = pass.tick.capLoad.count
         if load < autoTasksMeasured { bringPollForward(capLoad: load) }
         if autoTasksMeasured != load { autoTasksMeasured = load }
+        publishNetwork(pass)
         let failed = pass.tick.rows.filter { $0.1.state == .failed }.map { ($0.0.label, $0.1.reason) }
         noteCommsRuns(neverRan: Dictionary(failed, uniquingKeysWith: { first, _ in first }))
     }
@@ -1929,9 +2029,15 @@ final class Store: ObservableObject {
     /// An OpenCode 2.x run whose window is closed here, or whose TUI is gone, is
     /// interrupted (`OpenCodeProbe.interrupts`): its turn outlives the TUI, and would go on
     /// spending tokens after the ledger has closed its entry.
+    ///
+    /// A run the network carried has no window, session or transcript here: its offer is
+    /// withdrawn first when its PR merged under it, and it is priced from the outcome its
+    /// executor reported (`settleNetworkLedger`). One whose withdrawal no daemon answered
+    /// is kept, and withdrawn again next tick.
     private func retireFinished(_ pass: AgentPass) async {
         let t = pass.tick
-        let refused = reapWedgedWindows(t)
+        let unwithdrawn = await withdrawMerged(t.withdrawable)
+        let refused = reapWedgedWindows(t).union(unwithdrawn)
         let gone = t.retirable.filter { !refused.contains($0.runID) }
         let closed = closeFinishedWindows(t)
         let stops = OpenCodeProbe.interrupts(closing: t.reapable + t.closeOnRetire,
@@ -1943,7 +2049,9 @@ final class Store: ObservableObject {
         // A run whose command never ran has nothing to price — no agent, no transcript,
         // no tokens — and a `done` against its key would count it among the completed
         // ones. Its ledger entry stays open, which is what it is: still owed.
-        let priced = Store.pricingInputs(gone.filter { t.states[$0.runID]?.state != .failed })
+        let priced = Store.pricingInputs(gone.filter {
+            $0.runsHere && t.states[$0.runID]?.state != .failed
+        })
         // Only a run whose agent is done: a merge retires one that may still be filling
         // its review. Decided here, while the sentinel `forget` deletes is still there.
         let audited = gone
@@ -1966,9 +2074,11 @@ final class Store: ObservableObject {
         // being there. This line is the only thing that says which rung decided.
         for r in gone {
             let verdict = t.states[r.runID]
-            AuditLog.log(r.source, verdict?.state == .failed ? "spawn-failed" : "retire",
+            AuditLog.log(r.source, Store.retireVerb(r, verdict?.state),
                          "\(r.label.isEmpty ? r.runID : r.label) — \(verdict?.reason ?? "no verdict")")
         }
+        networkClaimsLogged.subtract(gone.compactMap(\.network))
+        settleNetworkLedger(gone.filter { !$0.runsHere }, snapshot: pass.network)
         for (r, ok) in closed {
             let who = r.label.isEmpty ? r.runID : r.label
             let why = t.states[r.runID]?.reason.components(separatedBy: "; ").last ?? ""
@@ -1978,6 +2088,125 @@ final class Store: ObservableObject {
         if !audited.isEmpty { Store.auditReviews(audited, me: me) }
         OpenCodeProbe.forgetAdopted(Set(gone.map(\.runID)))
         await settleLedger(priced)
+    }
+
+    /// The feed's verb for a run leaving the book. A PR that merged retires its run under
+    /// the same verb wherever the run was.
+    private static func retireVerb(_ r: AgentState.RunRecord,
+                                   _ state: AgentState.RunState?) -> String {
+        if r.runsHere { return state == .failed ? "spawn-failed" : "retire" }
+        switch state {
+        case .failed: return NetworkAudit.failed
+        case .finished: return NetworkAudit.done
+        default: return "retire"
+        }
+    }
+
+    /// The network's half of a published pass: the snapshot the Network screen draws, and
+    /// one feed line the first time an offer is seen claimed.
+    private func publishNetwork(_ pass: AgentPass) {
+        // A pass begun before the switch moved says nothing of the daemon as it is.
+        guard pass.networkAsked, networkEnabled else { return }
+        noteNetworkState(pass.network)
+        for (r, verdict) in pass.tick.rows where verdict.state == .running {
+            guard let task = r.network, networkClaimsLogged.insert(task).inserted else { continue }
+            AuditLog.log(r.source, NetworkAudit.claimed,
+                         "\(r.label.isEmpty ? r.runID : r.label) - \(verdict.reason)")
+        }
+    }
+
+    /// Publish what the daemon just answered, or that it did not.
+    func noteNetworkState(_ snapshot: NetworkSnapshot?) {
+        let answered = snapshot != nil
+        if networkAnswered != answered {
+            let back = networkAnswered == false
+            networkAnswered = answered
+            // Work held while the daemon was silent has somewhere to go again.
+            if back { bringPollForward(capLoad: autoTasksMeasured) }
+        }
+        // Its clock moves on every write, which is no change to redraw the panel for.
+        let same = snapshot.map { $0.saysTheSame(as: networkState) } ?? (networkState == nil)
+        if !same { networkState = snapshot }
+    }
+
+    /// Every linked repository as a pool, with the login each is worked as: the repo
+    /// roots, then the OTHER REPOS checkouts. Nil while a root or a checkout is unread
+    /// or a forge's login is unknown, since a list cut short makes the daemon leave the
+    /// pools it omits.
+    ///
+    /// GitHub's login is `gh`'s own and not the username override: the agents act as it.
+    func networkPools() -> [NetworkPools.Pool]? {
+        guard rootsResolved, localRepoCheckouts.map(\.path) == localRepoPaths else { return nil }
+        let repos = wizardRepos
+        var identities: [String: String] = [:]
+        for repo in repos where identities[repo.host] == nil {
+            identities[repo.host] = repo.isGitLab ? gitlabMe.known(host: repo.host) : me
+        }
+        guard repos.allSatisfy({ !(identities[$0.host] ?? "").isEmpty }) else { return nil }
+        return NetworkPools.linked(roots: repos, identities: identities)
+    }
+
+    /// Ask for each GitLab login `networkPools` lacks: a host no root is on is read by
+    /// nothing else. GitHub's is the poll's to fetch.
+    func readNetworkIdentities() async {
+        guard !Headless.active else { return }
+        for repo in wizardRepos where repo.isGitLab && gitlabMe.known(host: repo.host).isEmpty {
+            _ = try? await gitlabMe.login(host: repo.host)
+        }
+    }
+
+    /// Withdraw the offers of runs whose PR merged while the network still carried them.
+    /// Returns the runs no daemon answered for, which stay in the book for the next tick;
+    /// with the switch off none does, there being no daemon to ask.
+    private func withdrawMerged(_ runs: [AgentState.RunRecord]) async -> Set<String> {
+        guard networkEnabled else { return [] }
+        var unanswered: Set<String> = []
+        for r in runs {
+            guard let task = r.network else { continue }
+            let body = NetworkRoute.withdrawBody(task: task, reason: NetworkRoute.withdrawMerged)
+            let reply = await Task.detached(priority: .utility) {
+                DiplomacyNetwork.post(NetworkRoute.withdraw, body)
+            }.value
+            let who = r.label.isEmpty ? r.runID : r.label
+            switch reply {
+            case .ok:
+                AuditLog.log(r.source, NetworkAudit.withdraw,
+                             "\(who) - its PR merged, so its offer is withdrawn")
+            case .refused(let why):
+                AuditLog.log(r.source, NetworkAudit.withdraw,
+                             "\(who) - its PR merged; the network kept its offer: \(why)")
+            case .down:
+                unanswered.insert(r.runID)
+            }
+        }
+        return unanswered
+    }
+
+    /// Close the ledger entries of runs the network carried, each from the outcome its
+    /// executor reported: what it spent, on which model.
+    ///
+    /// A task another machine ran drew on that machine's account, so it is filed under
+    /// `DiplomacyNetwork.foreignRunner` and counts against no window here; one this
+    /// machine ran keeps the runner its outcome names. An offer with no outcome, or one
+    /// that spent nothing, leaves its entry open like a run whose agent never answered.
+    private func settleNetworkLedger(_ runs: [AgentState.RunRecord],
+                                     snapshot: NetworkSnapshot?) {
+        let tasks = NetworkEvidence.tasks(snapshot).value ?? [:]
+        var recorded = false
+        for r in runs where !r.ledgerKey.isEmpty {
+            guard let task = r.network,
+                  let offer = snapshot?.offers?.first(where: { $0.taskId == task }),
+                  let outcome = offer.outcome,
+                  (outcome.tokens ?? 0) > 0 || (outcome.usd ?? 0) > 0 else { continue }
+            let here = tasks[task]?.executorHere == true
+            TelemetryLog.done(key: r.ledgerKey,
+                              at: offer.endedAt ?? Date().timeIntervalSince1970,
+                              tokens: outcome.tokens,
+                              runner: here ? outcome.runner : DiplomacyNetwork.foreignRunner,
+                              usd: outcome.usd, model: outcome.model)
+            recorded = true
+        }
+        if recorded { refreshTelemetry() }
     }
 
     /// Warn about each retired review run whose review did not go through GitHub's
@@ -2363,8 +2592,11 @@ final class Store: ObservableObject {
         }
     }
 
+    /// With the network on the room is the pool's, which has it whenever its daemon
+    /// answers.
     private func drainHasRoom(capLoad: Int) -> Bool {
-        capLoad < autoTaskLimit && !drainableTasks.isEmpty
+        (networkEnabled ? networkAnswered != false : capLoad < autoTaskLimit)
+            && !drainableTasks.isEmpty
     }
 
     /// Set when the last monitor poll cycle failed (gh/auth/network), so persistent
@@ -3225,7 +3457,10 @@ final class Store: ObservableObject {
             // from dispatching that same task a second time when it reaches it.
             guard queuedTasks.contains(where: { $0.id == entry.id }), !outside(entry)
             else { continue }
-            guard await agentTick().tick.capLoad.count < autoTaskLimit else { return }
+            // A job offered to the network takes no bay of this device's cap.
+            if !networkEnabled {
+                guard await agentTick().tick.capLoad.count < autoTaskLimit else { return }
+            }
             // Finding room here is what re-arms the saturation notice. The gate's own
             // reset sits behind the capacity measurement this path skips, so without
             // this the feed would carry one `at-capacity` line for an unbounded run of
@@ -3234,10 +3469,10 @@ final class Store: ObservableObject {
             switch await runQueuedTask(entry, forced: false) {
             case .failed: return
             // Every remaining entry would be priced against the same windows, or the
-            // same disk, and get the same answer, and the dispatch has already
-            // re-staged this one for the commit at the end of the cycle. Draining on
-            // would cost a round of refusals to no end.
-            case .unaffordable, .lowDisk: return
+            // same disk, or offered to the same daemon, and get the same answer, and the
+            // dispatch has already re-staged this one for the commit at the end of the
+            // cycle. Draining on would cost a round of refusals to no end.
+            case .unaffordable, .lowDisk, .networkRefused: return
             default: break
             }
         }
@@ -3297,6 +3532,15 @@ final class Store: ObservableObject {
             case .review(let cfg): return cfg.buildPrompt()
             case .issues(let cfg): return cfg.buildPrompt()
             case .investigate(let cfg): return cfg.buildPrompt()
+            }
+        }
+
+        /// What `buildPrompt` lets the agent do.
+        var allows: AgentJob.Allows {
+            switch self {
+            case .review(let cfg): return .init(review: cfg)
+            case .issues(let cfg): return .init(issues: cfg)
+            case .investigate: return .init()
             }
         }
     }
@@ -3535,7 +3779,8 @@ final class Store: ObservableObject {
                           prNumber: isPR ? entry.number : nil,
                           authorLogin: entry.author.isEmpty ? nil : entry.author,
                           counter: nil,
-                          directory: root?.path ?? entry.config.checkout),
+                          directory: root?.path ?? entry.config.checkout,
+                          allows: config.allows),
             attemptNumber: 1)
     }
 
@@ -3591,11 +3836,12 @@ final class Store: ObservableObject {
     private func settleRequested(_ entry: QueuedAgentTask, _ outcome: DispatchOutcome) {
         guard entry.job.requested else { return }
         switch outcome {
-        case .spawned, .banned: forgetRequested(entry.id)
+        case .spawned, .offered, .banned: forgetRequested(entry.id)
         // `.notAllowed` is listed only because the switch is exhaustive: an ask can
         // never draw it, since the allowlist answers for the review monitor's own
         // finds and an ask is not one (`AgentJob.counter`).
-        case .inFlight, .atCapacity, .unaffordable, .lowDisk, .failed, .notAllowed: break
+        case .inFlight, .atCapacity, .unaffordable, .lowDisk, .failed, .notAllowed,
+             .networkRefused: break
         }
     }
 
@@ -3780,6 +4026,11 @@ final class Store: ObservableObject {
         case .spawned:
             AuditLog.log("panel", "queue-run",
                          "\(entry.job.label) — started ahead of the task cap")
+        case .offered:
+            AuditLog.log("panel", "queue-run",
+                         "\(entry.job.label) - offered for this machine to run at once")
+        case .networkRefused(let why):
+            error = "\(entry.job.label) was not offered: \(why)."
         // The rest are all logged by the step that decided them, but a feed line is
         // not an answer to a click: the row vanished and nothing opened, so say why
         // in the panel, as the per-row Resolve button does (`resolveConflicts`).
@@ -3870,6 +4121,32 @@ final class Store: ObservableObject {
         /// The checkout the agent works in: its repo root, or the checkout of a repo
         /// listed under Settings → OTHER REPOS. nil is the primary root.
         var directory: String?
+        /// What `prompt` was built to let the agent do, read off the config that built
+        /// it. An offer to the network states it beside the prompt (`NetworkOffer.from`).
+        var allows = Allows()
+
+        /// The four things a job's kind may or may not do, and whose PR a review is of.
+        struct Allows: Equatable {
+            /// A review of the operator's own PR: fixes go on its branch.
+            var ownPR = false
+            /// A review may approve or request changes.
+            var verdict = false
+            /// Work on the operator's own PR may mark it ready for review.
+            var markReady = false
+            /// An issue fix opens no PR.
+            var noPRs = false
+            /// An audit only reads.
+            var readOnly = false
+
+            init() {}
+            init(review cfg: ReviewConfig) {
+                ownPR = cfg.disposition == .mine
+                verdict = cfg.effFinalPass
+                markReady = cfg.effMarkReady
+            }
+            init(issues cfg: IssueConfig) { noPRs = !cfg.openPRs }
+            init(audit cfg: AuditConfig) { readOnly = !cfg.openPRs }
+        }
 
         /// Whether the operator asked for this exact unit of work, as opposed to a
         /// monitor having found it. Read off the verb, which already distinguishes
@@ -3918,12 +4195,23 @@ final class Store: ObservableObject {
         case unaffordable
         case lowDisk
         case failed(String)
-        /// An agent launched: the signal to record the attempt and start the retry
-        /// backoff. `.failed` deliberately does NOT count (a transient spawn error
-        /// retries next poll), and counting a deferral would drop held work into a
-        /// 5m–3h cooldown instead of offering it again the moment an agent finishes
-        /// or the window refills.
-        var didSpawn: Bool { if case .spawned = self { return true }; return false }
+        /// The job went into its repository's pool on the Diplomacy Network, where some
+        /// machine of the pool runs it.
+        case offered
+        /// The network did not take the job: a sentence fit to show the operator.
+        case networkRefused(String)
+        /// An agent launched, here or through the network: the signal to record the
+        /// attempt and start the retry backoff. `.failed` deliberately does NOT count (a
+        /// transient spawn error retries next poll), and counting a deferral or a
+        /// network refusal would drop held work into a 5m–3h cooldown instead of
+        /// offering it again the moment an agent finishes, the window refills or the
+        /// daemon answers.
+        var didSpawn: Bool {
+            switch self {
+            case .spawned, .offered: return true
+            default: return false
+            }
+        }
     }
 
     /// Run one agent job through the shared gate (`AgentDispatchGate` — the pure,
@@ -3977,10 +4265,14 @@ final class Store: ObservableObject {
             && !AuthorAllowlist.allows(job.authorLogin ?? "", in: reviewAllowlist)
         var agentOnPR = false
         if let item = job.item { agentOnPR = await inFlight(item) }
+        // With the network on the job runs in a container on whichever machine claims
+        // it, so this device's disk, cap and budget are not measured for it: they shape
+        // what this machine admits from the pool instead (`runNetworkCycleOnce`).
+        let network = networkEnabled
         // First: a low disk holds the job whatever the cap or the budget would say. Off
         // the main actor, since a volume can be a network mount.
         var disk: DiskFloor.Reading?
-        if source == .auto, !agentOnPR, !forced {
+        if source == .auto, !agentOnPR, !forced, !network {
             disk = await Task.detached(priority: .utility) { Store.agentDisk() }.value
             if disk?.low != true { diskLogged = false }
         }
@@ -3991,8 +4283,10 @@ final class Store: ObservableObject {
         // Finding room is also what re-arms the "deferring" note.
         var atCapacity = false, full = false, paused = false
         if source == .auto, !agentOnPR, !bypassCapacity, !lowDisk {
-            full = await agentTick().tick.capLoad.count >= autoTaskLimit
-            if !full { capacityLogged = false }
+            if !network {
+                full = await agentTick().tick.capLoad.count >= autoTaskLimit
+                if !full { capacityLogged = false }
+            }
             // A switched-off monitor has no room for its own work, whatever the
             // device's, and neither has a switched-off queue — for anything. Both are
             // modelled as capacity because the answer is the same one in every respect
@@ -4010,7 +4304,8 @@ final class Store: ObservableObject {
         // set and this one clear — that is the whole difference between deferring work
         // and forcing it.
         var budget = AgentDispatchGate.Budget(affordable: true)
-        if source == .auto, !agentOnPR, !forced, !lowDisk, !atCapacity, AutoBudget.enabled {
+        if source == .auto, !agentOnPR, !forced, !lowDisk, !atCapacity, !network,
+           AutoBudget.enabled {
             // Off the main actor: the probe behind it dials the usage endpoint.
             budget = await Task.detached(priority: .utility) { AutoBudget.decide() }.value
             if budget.affordable { budgetLogged = false }
@@ -4020,7 +4315,7 @@ final class Store: ObservableObject {
                                         unaffordable: !budget.affordable,
                                         outsideAllowlist: outsideAllowlist,
                                         lowDisk: lowDisk, paused: paused,
-                                        network: false) {
+                                        network: network) {
         case .lowDisk:
             logLowDisk(disk)
             stageQueued(job, attemptNumber: attemptNumber)
@@ -4068,6 +4363,10 @@ final class Store: ObservableObject {
         let rowLabel = AgentDispatchGate.label(source: source, core: job.label,
                                                attemptNumber: attemptNumber,
                                                requested: job.requested)
+        if network {
+            return await offerToNetwork(job, source: source, attemptNumber: attemptNumber,
+                                        forced: forced, rowLabel: rowLabel)
+        }
         do {
             let opened = try await spawnTracked(
                 kind: job.kind, label: rowLabel, prURL: job.prURL, prNumber: job.prNumber,
@@ -4087,6 +4386,118 @@ final class Store: ObservableObject {
             commsSpawnFailed(label: rowLabel, why: msg)
             return .failed(msg)
         }
+    }
+
+    /// Offer one job the gate passed to its repository's pool, and book the run the pool
+    /// carries: a record like a spawned run's, with the offer's task id where a spawn has
+    /// a pid and a window.
+    ///
+    /// A job the network does not take starts no agent here either. Automatic work is
+    /// staged back as held work is and offered again next cycle, with one feed line for
+    /// the spell; a job the operator started is answered with the sentence.
+    private func offerToNetwork(_ job: AgentJob, source: AgentDispatchGate.Source,
+                                attemptNumber: Int, forced: Bool,
+                                rowLabel: String) async -> DispatchOutcome {
+        let refusal: String
+        switch NetworkOffer.from(
+            verb: job.auditAction, ownPR: job.allows.ownPR, number: networkNumber(job),
+            repoKey: networkRepoKey(job), label: job.label, prompt: job.prompt,
+            source: source, forced: forced, verdict: job.allows.verdict,
+            markReady: job.allows.markReady, noPRs: job.allows.noPRs,
+            readOnly: job.allows.readOnly) {
+        case .refused(let why):
+            refusal = why
+        case .offer(let offer):
+            let reply = await Task.detached(priority: .userInitiated) {
+                DiplomacyNetwork.post(NetworkRoute.offer, offer.body)
+            }.value
+            switch reply {
+            case .ok(let answer):
+                if let task = answer?["taskId"]?.string {
+                    return await bookOffer(job, task: task, pool: offer.pool, source: source,
+                                           attemptNumber: attemptNumber, rowLabel: rowLabel)
+                }
+                refusal = "the daemon named no task for the offer"
+            case .refused(let why):
+                refusal = why
+            case .down:
+                refusal = DiplomacyNetwork.notAnswering
+            }
+        }
+        if source == .auto {
+            stageQueued(job, attemptNumber: attemptNumber)
+            if !networkUnavailableLogged {
+                networkUnavailableLogged = true
+                AuditLog.log("auto", NetworkAudit.unavailable,
+                             "Holding auto work - the Diplomacy Network did not take "
+                             + "\(job.label): \(refusal)")
+                refreshAudit()
+            }
+        } else {
+            AuditLog.log(source.rawValue, NetworkAudit.unavailable,
+                         "\(job.label) was not offered: \(refusal)")
+            refreshAudit()
+        }
+        return .networkRefused(refusal)
+    }
+
+    /// Book the run of an offer the pool took, and count it as a dispatch.
+    ///
+    /// The daemon answers an offer still open with the id it already has, so a task this
+    /// book already carries gains no second run.
+    private func bookOffer(_ job: AgentJob, task: String, pool: String,
+                           source: AgentDispatchGate.Source, attemptNumber: Int,
+                           rowLabel: String) async -> DispatchOutcome {
+        networkUnavailableLogged = false
+        guard !AgentRegistry.load().contains(where: { $0.network == task }) else {
+            if source == .panel {
+                AuditLog.log("panel", "in-flight", "\(job.label) - already offered to \(pool)")
+                refreshAudit()
+            }
+            return .inFlight
+        }
+        let now = Date().timeIntervalSince1970
+        let record = AgentState.RunRecord(
+            runID: AgentRegistry.newRunID(now: now), dispatchedAt: now,
+            prNumber: job.prNumber, prURL: job.prURL ?? "", kind: job.kind, label: rowLabel,
+            source: source.rawValue, ledgerKey: source == .auto ? job.ledgerKey : "",
+            network: task)
+        guard AgentRegistry.createRun(record, prompt: job.prompt) != nil else {
+            // An offer nothing here tracks is work nobody waits for.
+            let body = NetworkRoute.withdrawBody(task: task,
+                                                 reason: DiplomacyNetwork.withdrawUnbooked)
+            _ = await Task.detached(priority: .utility) {
+                DiplomacyNetwork.post(NetworkRoute.withdraw, body)
+            }.value
+            let msg = "could not register the run, so its offer is withdrawn"
+            AuditLog.log(source.rawValue, NetworkAudit.failed, "\(job.label) - \(msg)")
+            refreshAudit()
+            return .failed(msg)
+        }
+        AuditLog.log(source.rawValue, NetworkAudit.offer, "\(rowLabel) - offered to \(pool)")
+        bumpAutoCounter(job, source: source, attemptNumber: attemptNumber)
+        recordTelemetryStart(job, source: source, attemptNumber: attemptNumber)
+        await settleAgents()
+        return .offered
+    }
+
+    /// The number the job's pull request or issue has: the one it dedups on, else the one
+    /// in its link (an issue fix, and a PR in an OTHER REPOS checkout, carry only that).
+    private func networkNumber(_ job: AgentJob) -> Int? {
+        job.prNumber ?? job.prURL.flatMap(PRRef.itemKey(url:)).flatMap(PRRef.splitItemKey)?.number
+    }
+
+    /// The repository the job works in, as `PRRef.LocalRepo.key`: the one its link names,
+    /// else its checkout's, else the primary root's.
+    private func networkRepoKey(_ job: AgentJob) -> String {
+        if let root = job.prURL.flatMap(PRRef.itemKey(url:)).flatMap(PRRef.splitItemKey)?.root {
+            return root
+        }
+        if let directory = job.directory,
+           let repo = wizardRepos.first(where: { $0.path == directory }) {
+            return repo.key
+        }
+        return primaryKey
     }
 
     /// Review a PR someone asked me to review (most-comprehensive depth, formal
@@ -4124,7 +4535,7 @@ final class Store: ObservableObject {
                            ledgerKey: AutofixWork.ledgerKey(kind: AutofixWork.kindReviewReq,
                                                             prURL: r.url, headSha: r.headSha),
                            counter: .reviewRequests, attemptStamp: AttemptStamp.reviewRequest(r),
-                           directory: root.path)
+                           directory: root.path, allows: .init(review: cfg))
         return await dispatchAgent(job, source: .auto, attemptNumber: attemptNumber).didSpawn
     }
 
@@ -4201,7 +4612,7 @@ final class Store: ObservableObject {
                            ledgerKey: AutofixWork.ledgerKey(kind: AutofixWork.kindReviewReply,
                                                             prURL: s.url, headSha: s.headSha),
                            counter: .myReviews, attemptStamp: AttemptStamp.unresolvedReview,
-                           directory: root.path)
+                           directory: root.path, allows: .init(review: cfg))
         return await dispatchAgent(job, source: .auto, attemptNumber: attemptNumber).didSpawn
     }
 
@@ -4287,7 +4698,9 @@ final class Store: ObservableObject {
             self.error = "Resolve \(label) failed to spawn — see the activity log."
         case .inFlight:
             self.error = "Resolve \(label): an agent is already on this PR."
-        case .spawned, .banned, .atCapacity, .unaffordable, .lowDisk, .notAllowed:
+        case .networkRefused(let why):
+            self.error = "Resolve \(label) was not offered: \(why)."
+        case .spawned, .offered, .banned, .atCapacity, .unaffordable, .lowDisk, .notAllowed:
             // `.atCapacity`, `.unaffordable` and `.lowDisk` are answers only a monitor
             // gets — none of the automatic-task cap, the spending budget and the disk
             // floor applies to a click — and `.notAllowed` speaks for the review
@@ -4459,6 +4872,7 @@ final class Store: ObservableObject {
             while !Task.isCancelled {
                 await AppLog.timed("processPoll") {
                     await self?.refreshAutoTaskCount()
+                    await self?.runNetworkCycleOnce()
                     await self?.refreshDeviceState()
                     self?.refreshBanList()
                     self?.refreshAudit()

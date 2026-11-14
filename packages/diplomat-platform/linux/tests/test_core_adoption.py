@@ -46,8 +46,6 @@ _DECL = re.compile(
 REACHED_INDIRECTLY = {
     "JSONInput": "Store reads the run book through AgentRegistry.load, TelemetryLog the "
                  "ledger through Telemetry.fold",
-    "NetworkAudit": "the activity feed files every network-* row under its chip "
-                    "through AuditCategory.of(action:)",
 }
 
 
