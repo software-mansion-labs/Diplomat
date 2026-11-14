@@ -332,6 +332,8 @@ def test_the_routes_and_their_bodies():
                                   "withdraw", "invite", "join", "leave", "stop-run"]
     assert N.withdraw_body(TASK, N.WITHDRAW_MERGED) == {"taskId": TASK, "reason": "merged"}
     assert N.WITHDRAW_FORGOTTEN == "forgotten"
+    assert (N.WITHDRAW_STOPPED, N.WITHDRAW_NOT_BOOKED, N.WITHDRAW_SWITCHED_OFF) == (
+        "stopped", "not booked", "switched off")
     assert N.invite_body("github.com/o/r") == {"pool": "github.com/o/r"}
     assert N.invite_body("github.com/o/r", 600) == {"pool": "github.com/o/r",
                                                    "ttlSecs": 600}
@@ -541,7 +543,7 @@ def test_the_network_chip_sits_after_comms():
     assert (net.title, net.color_hex) == ("Network", "#30B0C7")
 
 
-def test_a_network_row_has_a_glyph_of_its_own_or_its_categorys():
+def test_every_network_row_has_a_glyph_of_its_own():
     assert [activity.glyph_for(v) for v in VERBS] == [
-        "↗", "↘", "✓", "△", "↶", "△", "⊕", "⬡", "⊖", "⬡", "⬡"]
+        "↗", "↘", "✓", "△", "↶", "△", "⊕", "✉", "⊖", "▷", "□"]
     assert {activity.color_for(v) for v in VERBS} == {"#30B0C7"}

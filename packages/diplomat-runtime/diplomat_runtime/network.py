@@ -55,9 +55,13 @@ ROUTE_JOIN = "join"
 ROUTE_LEAVE = "leave"
 ROUTE_STOP_RUN = "stop-run"
 
-#: Why an offer is withdrawn: its PR merged, or the operator forgot the run.
+#: Why an offer is withdrawn: its PR merged, the operator forgot the run or stopped a
+#: task no run here carries, its run could not be booked, or the switch went off.
 WITHDRAW_MERGED = "merged"
 WITHDRAW_FORGOTTEN = "forgotten"
+WITHDRAW_STOPPED = "stopped"
+WITHDRAW_NOT_BOOKED = "not booked"
+WITHDRAW_SWITCHED_OFF = "switched off"
 
 
 def withdraw_body(task: str, reason: str) -> dict:

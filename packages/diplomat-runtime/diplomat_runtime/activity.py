@@ -108,7 +108,8 @@ _ACTION_GLYPH: dict[str, str] = {
     "comms-notice": "△", "comms-reply": "↩",
     "network-offer": "↗", "network-claimed": "↘", "network-done": "✓",
     "network-failed": "△", "network-withdraw": "↶", "network-unavailable": "△",
-    "network-join": "⊕", "network-leave": "⊖",
+    "network-join": "⊕", "network-invite": "✉", "network-leave": "⊖",
+    "network-start": "▷", "network-stop": "□",
 }
 
 

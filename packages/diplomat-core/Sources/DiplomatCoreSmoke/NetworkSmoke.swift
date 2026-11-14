@@ -16,6 +16,16 @@ private func same(_ got: Observation<[String: Seen]>, _ want: [String: Seen]?,
     got.value == want && got.reason == reason
 }
 
+/// Whether two request bodies are the same JSON. `NSDictionary.isEqual(to:)` does not
+/// say so of a number under swift-corelibs-foundation.
+private func sameBody(_ got: [String: Any], _ want: [String: Any]) -> Bool {
+    func wire(_ body: [String: Any]) -> Data? {
+        try? JSONSerialization.data(withJSONObject: body, options: [.sortedKeys])
+    }
+    guard let got = wire(got), let want = wire(want) else { return false }
+    return got == want
+}
+
 /// A README-shaped snapshot: one pool, a live run for `networkTask`, four offers.
 private let fullSnapshot = """
 { "updatedAt": 1794000300, "daemon": { "pid": 4321, "startedAt": 1794000000 },
@@ -177,7 +187,7 @@ func networkSmoke() throws {
     check(made(offer("audit", number: nil, label: "", prompt: "abc"))?.title
           == "audit job-ba7816bf8f01cfea", "an unlabelled job is titled by what it is")
     let body = made(offer("review-req", source: .panel, verdict: true))?.body ?? [:]
-    check(NSDictionary(dictionary: body).isEqual(to: [
+    check(sameBody(body, [
         "pool": "github.com/o/r", "kind": "review", "item": "pr-337",
         "title": "Auto · Review · #337", "prompt": "p", "now": true,
         "options": ["verdict": true]]), "the /offer body: \(body)")
@@ -220,9 +230,9 @@ func networkSmoke() throws {
           "the disk is named first")
     check(admit(affordable: false, autoRun: false).reason == "budget",
           "then the budget, then the pause")
-    check(NSDictionary(dictionary: admit().body).isEqual(to: ["slots": 2])
-          && NSDictionary(dictionary: admit(lowDisk: true).body)
-              .isEqual(to: ["slots": 0, "reason": "disk"]), "the /admit body")
+    check(sameBody(admit().body, ["slots": 2])
+          && sameBody(admit(lowDisk: true).body, ["slots": 0, "reason": "disk"]),
+          "the /admit body")
 
     section("network: settings and routes")
     check(NetworkSettings.enabledKey == "networkEnabled"
@@ -244,10 +254,13 @@ func networkSmoke() throws {
     check(NetworkRoute.withdrawBody(task: networkTask, reason: NetworkRoute.withdrawMerged)
           == ["taskId": networkTask, "reason": "merged"]
           && NetworkRoute.withdrawForgotten == "forgotten")
-    check(NSDictionary(dictionary: NetworkRoute.inviteBody(pool: "github.com/o/r"))
-              .isEqual(to: ["pool": "github.com/o/r"])
-          && NSDictionary(dictionary: NetworkRoute.inviteBody(pool: "github.com/o/r", ttlSecs: 600))
-              .isEqual(to: ["pool": "github.com/o/r", "ttlSecs": 600]))
+    check(NetworkRoute.withdrawStopped == "stopped"
+          && NetworkRoute.withdrawNotBooked == "not booked"
+          && NetworkRoute.withdrawSwitchedOff == "switched off",
+          "the reasons an applet withdraws an offer for")
+    check(sameBody(NetworkRoute.inviteBody(pool: "github.com/o/r"), ["pool": "github.com/o/r"])
+          && sameBody(NetworkRoute.inviteBody(pool: "github.com/o/r", ttlSecs: 600),
+                      ["pool": "github.com/o/r", "ttlSecs": 600]), "the /invite body")
     check(NetworkRoute.joinBody(invite: "tok") == ["invite": "tok"]
           && NetworkRoute.joinBody(pool: "github.com/o/r") == ["pool": "github.com/o/r"]
           && NetworkRoute.leaveBody(pool: "github.com/o/r") == ["pool": "github.com/o/r"]
