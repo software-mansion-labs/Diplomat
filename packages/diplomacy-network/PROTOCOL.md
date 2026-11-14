@@ -23,8 +23,21 @@ onion(pk) = base32(pk || sha3-256(".onion checksum" || pk || 0x03)[0..2] || 0x03
 
 Reaching `onion(pk)` therefore authenticates the target; no other address is ever
 exchanged. A request is one HTTP/1.1 `POST /dn1` to virtual port 80 with a JSON body (the
-request envelope) and a JSON response (the response envelope). Bodies are capped at 1 MiB,
-except `act` requests, capped at 48 MiB.
+request envelope) and a JSON response (the response envelope).
+
+A request carries three HTTP headers beside its body: `dn-from`, `dn-pool` and `dn-kind`,
+the envelope's `from`, `pool` and `kind`. Nobody has signed them, and a target uses them
+for one thing only - to decide, before it reads the body, how large a body it will read:
+
+- 64 KiB from a sender that is not a member of the named pool on the target, which is
+  room for any `hello`;
+- 1 MiB from a member;
+- 48 MiB for an `act` from a member that holds a live key of the target (section 9).
+
+A target reads one body above 64 KiB per named sender at a time, and four in all. A
+request over what the target will read is answered with HTTP status 413 and no envelope;
+its sender may send it again. The envelope is checked as section 3 says whatever the
+headers said.
 
 ## 2. Canonical form, hashes, signatures
 
@@ -268,8 +281,14 @@ a member record lets in the records that depend on it whatever their order.
 
 Objective facts - a member announcing itself, a task appearing, a task cancelled because
 its issue or pull request closed, a committed claim - travel by `push` and need nobody's
-consent: a host pushes a record it wrote or learned to every member, and a periodic
-`sync` repairs what a push missed.
+consent. A host pushes every record it signs to every member. Two records are also
+pushed by a host that did not sign them: a newcomer's member record, by the host that
+answered its `hello`, and a lease extension, by the offering host whose ping it answers.
+A record learned by `push` is not pushed on, and a push that goes unanswered is not
+repeated: every 60 s a host sends `sync` to every host whose member record it holds -
+less often, down to once in 10 minutes, to one that does not answer - which carries
+each record to whoever a push missed. A host that leaves a pool signs its
+member record `left`, ends its claims, cancels its offers, and pushes all of it once.
 
 `done` tells a host offering a task how its run ended: `outcome` is
 `{ ok, summary, microUsd, tokens, runner, model }`, the cost in millionths of a dollar,
@@ -280,7 +299,11 @@ by that executor (`completed` or `released`); otherwise it answers `denied`. A l
 claim reports nothing, and neither does any other member, whatever it knows of the key:
 no key and no MAC is involved, so an offering host that issued no key decides the same
 way. On a `done` with `ok` the host signs its offer `done`; without, the attempt failed
-and the task is offered again, or cancelled after the third failed attempt.
+and the task is offered again, or cancelled after the third failed attempt. A claim that
+lapses (section 8) is a failed attempt too; a claim its executor released without a
+`done` is none. An executor with an outcome to report sends `done` to every host
+offering the task, again every 30 s until one of them answers or its claim is no longer
+active, and only then ends its claim.
 
 A request may arrive twice, or be answered and the answer lost. Every kind is safe to
 send again in a fresh envelope: a `lock` of the same executor and round is granted the
@@ -300,6 +323,21 @@ available task:
    member that has answered anything is **present**.
 3. **Sends a lock to every present member**: `{ taskId, round, asOf, hash }`, `round` a
    fresh random 8-byte value.
+
+A member is absent only by this round's own request to it: what earlier requests came
+to decides how long the round waits, never whether it asks. A signed refusal is an
+answer, and its sender is present. The first connection to an onion service can take
+minutes, while a member that is gone must not hold up every round, so the wait for one
+member's answer is:
+
+- 60 s for a member that answered the claimant within the last 3 minutes;
+- 60 s, asked again until the round is 90 s old, for a member the claimant has known for
+  less than 3 minutes and never reached;
+- 15 s for any other.
+
+A host claims only while it has a slot to run the task in. A task its own host offered
+to run at once is the exception: its host claims it whatever its slots, without the rank
+delay below, through the same three steps.
 
 A member answers a lock with:
 
@@ -416,8 +454,13 @@ for the forge.
 1. After its claim is committed, the executor sends `key` to a host offering the task:
    the lowest `pk` among the offering hosts that granted the lock, the executor itself
    counted when it offers the task.
-2. That host checks that the claim in its own state names this executor and round, that
-   it is active, and that it has issued no other live key for the task. It answers with:
+   Any other host answers `denied`, so a claim no offering host granted gets no key.
+   The executor asks every 30 s until it is answered, and releases its claim when the
+   lease would run out first.
+2. That host checks that the claim in its own state names this executor and round and
+   is active. It issues one key per claim: asked again for the same claim it answers
+   with the same capability and secret, and a key it issued for an earlier claim of the
+   task is revoked first. It answers with:
    - `capability`: `{ keyId, pool, taskId, executor, host, rules, exp, sig }`, signed by
      that host - `keyId` is 16 random bytes, `rules` is the exact list of requests this
      task may make (section 10), at most 128 of them, `exp` is `leaseUntil + 600`;
@@ -439,9 +482,18 @@ for the forge.
    than every `seq` used under the key; the MAC matches; and the request matches a rule.
    A request whose MAC matched has used its `seq` whether or not a rule covered it. The
    host sends the request to the forge with its own credentials and answers
-   `{ status, headers, body }`.
-4. Each lease extension moves `exp` with it. A lapse, a `done`, a cancelled offer or a
-   better-ranked claim revokes the key.
+   `{ status, headers, body }`. A request no rule covers is answered the same way, with
+   status 403 and a JSON body `{ "message": "<why>" }`; a forge that cannot be reached,
+   with status 502.
+4. Each lease extension moves `exp` with it: the host signs the capability again under
+   the same `keyId` and secret. An `act` names the key and does not carry it, so the
+   executor has nothing to fetch. A lapse, a `done`, a cancelled offer or a better-ranked
+   claim revokes the key.
+5. Both sides write a `seq` down before they use it: the executor before the request
+   leaves, the host before it asks the rules. An `act` whose answer never came, or came
+   as `replay` because the request arrived twice, may have been performed. The executor
+   sends it again, under a new `seq`, only when the forge request is a `GET` or a `HEAD`;
+   for any other it tells the job that the outcome is unknown.
 
 ## 10. Rules
 

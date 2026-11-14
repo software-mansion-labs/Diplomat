@@ -14,14 +14,14 @@ import {
 const MOST_OWED = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
 const ATTEMPTS = 4;
 
-/// The peers of `host`: `{ ask, patience, seen }`.
+/// The peers of `host`: `{ ask, patience, heard, seen }`.
 export function createPeers(host) {
-  const peers = new Map(); // pk -> { since, seen, failures, until }
+  const peers = new Map(); // pk -> { since, seen, heard, failures, until }
   const owed = new Map(); // "pk pool" -> the effort that peer last asked of this host there
   const lanes = new Map(); // pk -> the last large request sent to it
 
   const peer = (pk) => {
-    if (!peers.has(pk)) peers.set(pk, { since: host.now(), seen: 0, failures: 0, until: 0 });
+    if (!peers.has(pk)) peers.set(pk, { since: host.now(), seen: 0, heard: 0, failures: 0, until: 0 });
     return peers.get(pk);
   };
   const quiet = (p) => host.now() - Math.max(p.seen, p.since) > PEER_QUIET_MS / 1000;
@@ -104,12 +104,17 @@ export function createPeers(host) {
     return 'short';
   }
 
-  /// `{ lastSeen, reachable }` of a peer: when it last answered (0 for never), and
-  /// whether the last request to it was answered.
-  function seen(pk) {
-    const p = peers.get(pk);
-    return { lastSeen: p?.seen ?? 0, reachable: Boolean(p && p.seen > 0 && p.failures === 0) };
+  /// A request this host accepted came from that peer.
+  function heard(pk) {
+    peer(pk).heard = host.now();
   }
 
-  return { ask, patience, seen };
+  /// `{ lastSeen, reachable }` of a peer: when it last answered or asked (0 for never),
+  /// and whether the last request to it was answered.
+  function seen(pk) {
+    const p = peers.get(pk);
+    return { lastSeen: Math.max(p?.seen ?? 0, p?.heard ?? 0), reachable: Boolean(p && p.seen > 0 && p.failures === 0) };
+  }
+
+  return { ask, patience, heard, seen };
 }

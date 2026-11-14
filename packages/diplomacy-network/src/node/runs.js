@@ -297,7 +297,7 @@ export function createRuns(host) {
   /// to `{ status, headers, body }`, whatever happens, one request at a time.
   function actFor(runId) {
     return (forgeRequest) => {
-      const run = runs[runId];
+      const run = Object.hasOwn(runs, runId) ? runs[runId] : null;
       if (!run) return Promise.resolve(forgeAnswer(403, 'no such run'));
       const turn = (turns.get(runId) ?? Promise.resolve()).then(() => request(run, forgeRequest))
         .catch((err) => forgeAnswer(502, `the request could not be made: ${err?.message ?? err}`));
@@ -309,7 +309,7 @@ export function createRuns(host) {
 
   /// Stops one run and gives its claim back.
   function stopRun({ runId }) {
-    const run = runs[runId];
+    const run = Object.hasOwn(runs, runId) ? runs[runId] : null;
     if (!run || !live(run)) throw new Error('No such run is going on this machine.');
     halt(run, 'stopped by the operator', 'release');
   }

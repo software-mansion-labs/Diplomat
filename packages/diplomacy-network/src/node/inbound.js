@@ -53,6 +53,7 @@ export function createInbound(host) {
     const P = host.pools.get(pool);
     if (!P) return reply({ effort, error: { code: 'unknown-pool', detail: 'this host has not linked that pool' } });
     if (kind !== 'hello' && !checked.member) return reply({ effort, error: { code: 'not-member', detail: 'say hello first' } });
+    if (checked.member) host.peers.heard(from);
     const out = await host.handle(P, from, kind, body);
     // What the answer admits to is on disk before the sender can act on it.
     host.store.flush();

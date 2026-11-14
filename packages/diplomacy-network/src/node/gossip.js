@@ -16,9 +16,11 @@ import { poolFile } from './store.js';
 // Records per `pull` and per `push`: what fits a request body with room to spare.
 const BATCH = 256;
 
-/// The keys a pool stores records under.
+/// The key a pool stores a host's member record under.
 export const memberKey = (pk) => `member/${pk}`;
+/// The key of a host's offer of a task.
 export const offerKey = (taskId, pk) => `offer/${taskId}/${pk}`;
+/// The key of the claim of a task.
 export const claimKey = (taskId) => `claim/${taskId}`;
 
 /// The hours a setting stands for: a whole number inside what a record may carry.

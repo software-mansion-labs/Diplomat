@@ -16,6 +16,10 @@ function publicKey(pkBytes) {
   return crypto.createPublicKey({ key: Buffer.concat([SPKI_PREFIX, pkBytes]), format: 'der', type: 'spki' });
 }
 
+// Parsing a key costs as much as signing with it, and a host signs every request and
+// every answer with the one identity it holds.
+const parsed = new WeakMap(); // identity -> its private key object
+
 /// `{ pk, seed }`, both base64url: the public key and the 32-byte private seed.
 export function generateIdentity() {
   const seed = crypto.randomBytes(32);
@@ -38,7 +42,8 @@ export function validPk(pk) {
 /// The base64url signature of `tag || 0x00 || canon(object without "sig")`.
 export function sign(identity, tag, object) {
   const { sig: _, ...rest } = object;
-  return b64u(crypto.sign(null, tagged(tag, canon(rest)), privateKey(unb64u(identity.seed))));
+  if (!parsed.has(identity)) parsed.set(identity, privateKey(unb64u(identity.seed)));
+  return b64u(crypto.sign(null, tagged(tag, canon(rest)), parsed.get(identity)));
 }
 
 /// Does `object.sig` (or `sig`, when given) sign the object under `tag` for `pk`? False

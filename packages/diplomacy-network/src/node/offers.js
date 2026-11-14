@@ -217,7 +217,7 @@ export function createOffers(host) {
     },
 
     act(P, from, body) {
-      if (!isObject(body) || typeof body.taskId !== 'string') return { error: 'bad-request', detail: 'not an act body' };
+      if (!isObject(body) || parseTaskId(body.taskId)?.pool !== P.id) return { error: 'bad-request', detail: 'not an act body' };
       const { taskId } = body;
       return inTurn(taskId, async () => {
         const K = issued[taskId];
