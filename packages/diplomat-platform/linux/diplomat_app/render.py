@@ -8,7 +8,8 @@ a real display by grabbing the widget's own pixels:
 
 what ∈ {panel, lookup, wizard, issues, conflicts, audit, settings[-explain],
 devices, devices-screen[-remote[-away]|-off], machines-screen[-idle|-off],
-telemetry, comms, comms-panel, comms-empty, tasks}.
+network-screen[-starting|-down|-off], telemetry, comms, comms-panel, comms-empty,
+tasks}.
 With DIPLOMAT_RENDER_LIVE=1 it fetches real data first; otherwise it uses a small
 synthetic fixture.
 """
@@ -225,6 +226,80 @@ def _machines_history(now: float, until: float) -> dict:
             at += 60
         out[mid] = rows
     return {"version": 1, "intervalMs": 60_000, "machines": out}
+
+
+def _network_screen_fixture(store: Store, mode: str) -> None:
+    """Plain: the daemon up, taking two more tasks, in two pools - one shared with a
+    reachable and an unreachable machine and holding a task in each state, one of this
+    machine alone. ``-starting``: switched on, the daemon not asked yet. ``-down``:
+    asked, and not answering. ``-off``: switched off.
+
+    The switch is the shared config's, which a render never writes, so it is set on the
+    module that reads it."""
+    from diplomat_runtime import activity, network
+    from . import diplomacynetwork as dn
+
+    off = mode.endswith("-off")
+    dn.enabled = lambda: not off
+    store.network_asked = not (off or mode.endswith("-starting"))
+    store.network_state = None
+    store.audit_entries = [
+        activity.AuditEntry("2026-11-09T11:52:00Z", "auto", "network-claimed",
+                            "Auto · Review-req · #412 (@marta) - claimed by 9f3c1a77"),
+        activity.AuditEntry("2026-11-09T11:51:00Z", "auto", "network-offer",
+                            "Auto · Review-req · #412 (@marta) - offered to "
+                            "github.com/latekvo/diplomat"),
+        activity.AuditEntry("2026-11-09T11:30:00Z", "panel", "network-invite",
+                            "Made an invite to github.com/latekvo/diplomat"),
+        activity.AuditEntry("2026-11-09T09:00:00Z", "panel", "network-start",
+                            "Started the Diplomacy Network daemon (ok: true)"),
+    ] + store.audit_entries
+    if mode != "network-screen":
+        return
+    now = MACHINES_NOW
+    me, peer, away = "4be07d21c9aa", "9f3c1a7755e0", "c41d90ab3e12"
+
+    def task(n, kind, title, state, **extra):
+        return {"taskId": f"t{n}", "kind": kind, "item": f"pr-{n}", "title": title,
+                "identity": "latekvo", "hours": 12, "state": state,
+                "offeredBy": [me], "offeredHere": True, **extra}
+
+    store.network_state = network.Snapshot.from_json({
+        "updatedAt": now - 4, "daemon": {"pid": 4471, "startedAt": now - 3 * 3600},
+        "identity": {"pk": me, "onion": "dipl7x2kq5examplev3hostq4m.onion"},
+        "transport": {"state": "ready", "detail": ""},
+        "docker": {"state": "ready", "image": "diplomat-job:3f9a", "detail": ""},
+        "model": {"state": "ready", "detail": ""},
+        "admit": {"slots": 2, "at": now - 9, "reason": ""},
+        "pools": [
+            {"id": "github.com/latekvo/diplomat", "path": "/src/diplomat",
+             "identity": "latekvo", "hash": "a1",
+             "members": [
+                 {"pk": me, "self": True, "maxAcceptedH": 12, "lastSeen": now - 4,
+                  "reachable": True},
+                 {"pk": peer, "self": False, "maxAcceptedH": 24, "lastSeen": now - 40,
+                  "reachable": True},
+                 {"pk": away, "self": False, "maxAcceptedH": 12,
+                  "lastSeen": now - 5 * 3600, "reachable": False}],
+             "tasks": [
+                 task(412, "review", "Review-req · #412 (@marta)", "claimed",
+                      executor=peer, claimedAt=now - 480, leaseUntil=now + 6720),
+                 task(398, "conflicts", "Conflicts · #398", "claimed",
+                      executor=me, executorHere=True, claimedAt=now - 1500,
+                      leaseUntil=now + 5700),
+                 task(405, "review-own", "Review · #405", "available"),
+                 {**task(377, "issues", "Issues · #377 · deep", "done", executor=peer),
+                  "offeredBy": [peer], "offeredHere": False},
+                 task(390, "review", "Review-req · #390 (@olek)", "cancelled")]},
+            {"id": "github.com/latekvo/prompt-bench", "path": "/src/prompt-bench",
+             "identity": "latekvo", "hash": "b2",
+             "members": [{"pk": me, "self": True, "maxAcceptedH": 12,
+                          "lastSeen": now - 4, "reachable": True}],
+             "tasks": []}],
+        "runs": [{"runId": "r1", "taskId": "t398", "pool": "github.com/latekvo/diplomat",
+                  "peer": me, "container": "dn-r1", "state": "running",
+                  "startedAt": now - 1490}],
+        "offers": []})
 
 
 def _machines_screen_fixture(store: Store, mode: str) -> None:
@@ -1106,6 +1181,12 @@ def run(what: str, out: str) -> int:
         panel.machines_view.clock = lambda: MACHINES_NOW
         store.activity_changed.emit()
         panel._toggle_machines()
+    elif what.startswith("network-screen"):
+        _network_screen_fixture(store, what)
+        panel.network_view.clock = lambda: MACHINES_NOW
+        store.activity_changed.emit()
+        store.network_changed.emit()
+        panel._toggle_network()
     elif what == "devices":
         _device_fixture(store)
         panel._rebuild_devices()

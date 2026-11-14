@@ -25,9 +25,9 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
-from diplomat_runtime import review
+from diplomat_runtime import promptcore, review
 from diplomat_runtime.prref import LocalRepo
-from . import widgets
+from . import diplomacynetwork, widgets
 from .store import Store
 
 
@@ -49,6 +49,10 @@ class SpawnWizard(QWidget):
     #: because that is the only one Qt lets touch the status line.
     _swept = Signal(int, int, str)
 
+    #: The verdict of a job offered to the Diplomacy Network, from the worker that
+    #: asked the daemon.
+    _offered = Signal(object)
+
     #: The nouns a sweep's status line is written out of: one item it covers ("PR" /
     #: "issue"), many of them ("PRs" / "issues"), and what it queues one of per item,
     #: singular and plural ("review"/"reviews", "fix"/"fixes" — the plural is spelt
@@ -61,6 +65,7 @@ class SpawnWizard(QWidget):
     def __init__(self, store: Store, *, kind: str, tint: str) -> None:
         super().__init__()
         self._swept.connect(self._sweep_queued)
+        self._offered.connect(self._offer_answered)
         self.store = store
         # The AgentJob kind and the activity-feed action verb are one and the same
         # string for every wizard ("review" / "issues" / "conflicts" / "audit").
@@ -142,21 +147,36 @@ class SpawnWizard(QWidget):
         # The SAME pipeline the auto-monitor rides - dedup, ban check,
         # registration — only the trigger (this click) and its policies differ
         # (see autofix.dispatch_decide).
-        term = review.resolved(self.store.terminal)
-        verdict = self.store.dispatch_agent(
-            autofix.AgentJob(
-                kind=self._kind,
-                audit_action=self._kind,
-                label=label,
-                prompt=cfg.build_prompt(),
-                pr_url=cfg.single_link,
-                pr_number=self._pr_number(cfg),
-                author_login=self._author_login(),
-                checkout=None if cfg.checkout == review.repo_path() else cfg.checkout,
-            ),
-            autofix.SOURCE_PANEL,
+        payload = cfg.prompt_payload()
+        job = autofix.AgentJob(
+            kind=self._kind,
+            audit_action=self._kind,
+            label=label,
+            prompt=promptcore.build_prompt(payload),
+            pr_url=cfg.single_link,
+            pr_number=self._pr_number(cfg),
+            author_login=self._author_login(),
+            checkout=None if cfg.checkout == review.repo_path() else cfg.checkout,
+            **diplomacynetwork.terms(payload),
         )
+        if diplomacynetwork.enabled():
+            # The offer waits on the daemon's socket, so it is made off this thread.
+            self._dispatch_inflight = True
+            self._restyle_spawn()
+            self.status.setText(widgets.OFFERING_TEXT)
+            store, offered = self.store, self._offered
+            store.start_background(
+                lambda: offered.emit(store.dispatch_agent(job, autofix.SOURCE_PANEL)),
+                name="network-offer")
+            return
+        term = review.resolved(self.store.terminal)
+        verdict = self.store.dispatch_agent(job, autofix.SOURCE_PANEL)
         self.status.setText(widgets.dispatch_status_text(verdict, term.title))
+
+    def _offer_answered(self, verdict: object) -> None:
+        self._dispatch_inflight = False
+        self.status.setText(widgets.dispatch_status_text(verdict, "", network=True))
+        self._sync()
 
     def _pr_number(self, cfg) -> int | None:
         """The PR this run is deduped on: the config's own, or the one a link to another

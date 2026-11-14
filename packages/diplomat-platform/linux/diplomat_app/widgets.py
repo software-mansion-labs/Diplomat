@@ -677,6 +677,76 @@ class RunningTaskRow(QFrame):
         row.addLayout(col, 1)
 
 
+class NetworkTaskRow(ClickableFrame):
+    """A job the Diplomacy Network carries: offered to a pool, and run in a container
+    on whichever machine claimed it. There is no window to look at, so the row opens
+    the Network screen, and its two buttons are the only things done to such a run."""
+
+    #: Each carries the run the row stands for.
+    stop_requested = Signal(str)
+    forget_requested = Signal(str)
+
+    _HELP = (
+        "A job offered to the Diplomacy Network. It runs in a container on the machine "
+        "that claims it and holds no slot of this machine's automatic-task cap. Click "
+        "for the Network screen."
+    )
+    _STOP_HELP = (
+        "Stop this job: its container, when this machine is running it, and otherwise "
+        "its offer."
+    )
+    _FORGET_HELP = (
+        "Drop this job from the list and withdraw its offer, whatever state it is in."
+    )
+
+    def __init__(self, *, run_id: str, label: str, detail: str, glyph: str,
+                 hex_color: str) -> None:
+        super().__init__()
+        self._run_id = run_id
+        self.setToolTip(self._HELP)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            "NetworkTaskRow { background-color: rgba(128,128,128,0.06);"
+            " border-radius: 6px; }"
+        )
+        row = QHBoxLayout(self)
+        row.setContentsMargins(6, 6, 6, 6)
+        row.setSpacing(8)
+        row.addWidget(IconChip(glyph, hex_color, 22, active=True),
+                      0, Qt.AlignmentFlag.AlignVCenter)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        col.addWidget(ElidedLabel(label, 10, "#d8dbde"))
+        self.status = QLabel(f"{glyphs.G_NETWORK} {detail}")
+        self.status.setTextFormat(Qt.TextFormat.PlainText)
+        self.status.setStyleSheet(f"color: {glyphs.AGENT_LIVE}; font-size: 9px;")
+        col.addWidget(self.status)
+        row.addLayout(col, 1)
+        self.stop = self._button("stop", self._STOP_HELP, self._stop)
+        row.addWidget(self.stop, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.forget = self._button("forget", self._FORGET_HELP, self._forget)
+        row.addWidget(self.forget, 0, Qt.AlignmentFlag.AlignVCenter)
+
+    def _button(self, title: str, tip: str, slot) -> QPushButton:
+        btn = QPushButton(title, self)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setToolTip(tip)
+        btn.setStyleSheet(
+            f"QPushButton {{ color: {glyphs.MUTED}; background-color: transparent;"
+            " border: none; border-radius: 8px; padding: 2px 7px;"
+            " font-size: 9px; font-weight: 600; }"
+            "QPushButton:hover { color: #FF3B30; }"
+        )
+        btn.clicked.connect(slot)
+        return btn
+
+    def _stop(self) -> None:
+        self.stop_requested.emit(self._run_id)
+
+    def _forget(self) -> None:
+        self.forget_requested.emit(self._run_id)
+
+
 class StartingTaskRow(QFrame):
     """A queued task whose dispatch is under way — clicked, or reached by the drain —
     waiting on a terminal spawn that takes seconds.
@@ -895,14 +965,26 @@ def hline() -> QFrame:
     return line
 
 
-def dispatch_status_text(verdict: str, terminal_title: str) -> str:
+#: The wizard status line while its job is being offered to the Diplomacy Network.
+OFFERING_TEXT = "Offering it to the pool…"
+#: The wizard status line for a job the Diplomacy Network took.
+OFFERED_TEXT = "Offered to the pool - see the Network screen."
+
+
+def dispatch_status_text(verdict: str, terminal_title: str, *,
+                         network: bool = False) -> str:
     """The wizard status line for one ``Store.dispatch_agent`` verdict - shared by
     all four wizards so refusals read identically everywhere (macOS twin:
-    ``statusText(for:terminal:)``)."""
+    ``statusText(for:terminal:)``). ``network`` is whether the job went to the
+    Diplomacy Network, which opens no terminal."""
     from diplomat_runtime import autofix
 
+    # A job the network did not take says why in its own words.
+    sentence = getattr(verdict, "sentence", None)
+    if sentence:
+        return sentence
     if verdict == "spawned":
-        return f"Launched {terminal_title}"
+        return OFFERED_TEXT if network else f"Launched {terminal_title}"
     if verdict == autofix.VERDICT_IN_FLIGHT:
         return "An agent is already on this PR - see its session above."
     if verdict == autofix.VERDICT_BANNED:
