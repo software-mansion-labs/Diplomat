@@ -461,3 +461,24 @@ jobs:
         run: npm ci
       - name: Discovery, probe, daemon, MCP and installer tests
         run: npm test
+
+  # The Diplomacy Network daemon. Its default run stands in a loopback transport for Tor,
+  # a fake forge for GitHub and GitLab and a fake docker for the engine, so nothing leaves
+  # the runner; git itself runs for real.
+  node-diplomacy-network:
+    name: Node (diplomacy network) · protocol, transport, requester, executor, daemon tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/diplomacy-network
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: packages/diplomacy-network/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Protocol, transport, requester, executor and daemon tests
+        run: npm test
