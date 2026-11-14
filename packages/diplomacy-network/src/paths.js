@@ -113,6 +113,11 @@ export const MAX_ROUNDS = 4;
 export const MAX_LARGE_BODIES = 4;
 // Diplomat's last word on free slots is trusted this long.
 export const ADMIT_TTL_MS = num('DN_ADMIT_TTL_MS', 120 * 1000);
+// Diplomat counts its free slots from a snapshot it read a moment before it states them:
+// a run begun within this long before the statement may be missing from that count.
+export const ADMIT_LAG_SECS = 10;
+// How long a host that is switched off waits for the members to hear what it ended.
+export const SWITCH_OFF_WAIT_MS = num('DN_SWITCH_OFF_WAIT_MS', 15 * 1000);
 // A container no job has used for this long is removed.
 export const CONTAINER_IDLE_MS = num('DN_CONTAINER_IDLE_MS', 6 * 3600 * 1000);
 

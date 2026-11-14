@@ -6,7 +6,7 @@ import { b64u } from '../core/canon.js';
 import { ClaimRound, buildClaim, rankDelay } from '../core/claims.js';
 import { eligible } from '../core/lease.js';
 import {
-  ADMIT_TTL_MS, MAX_ROUNDS, PROBE_TIMEOUT_MS, RANK_DELAY_MS, REQUEST_TIMEOUT_MS, RETRY_MS, ROUND_PATIENCE_MS,
+  ADMIT_LAG_SECS, ADMIT_TTL_MS, MAX_ROUNDS, PROBE_TIMEOUT_MS, RANK_DELAY_MS, REQUEST_TIMEOUT_MS, RETRY_MS, ROUND_PATIENCE_MS,
 } from '../paths.js';
 import { claimKey } from './gossip.js';
 
@@ -22,7 +22,7 @@ export function createClaiming(host) {
   const jitter = (ms) => Math.floor((host.random(4).readUInt32BE(0) / 2 ** 32) * ms);
   const sleep = (ms) => new Promise((resolve) => { host.clock.setTimeout(resolve, ms); });
 
-  /// Diplomat's word on how many tasks this machine runs at a time.
+  /// Diplomat's word on how many more tasks this machine takes.
   function admit({ slots, reason = '' }) {
     admitted = { slots: Math.max(0, Math.floor(Number(slots)) || 0), at: host.now(), reason: String(reason) };
     host.poke();
@@ -34,7 +34,10 @@ export function createClaiming(host) {
     return host.now() - admitted.at <= ADMIT_TTL_MS / 1000 ? admitted.slots : 0;
   }
 
-  const taken = () => host.runs.active() + rounds.size + waiting.size;
+  // What this host took against that word: the runs begun since, every run before them
+  // being in Diplomat's own count, and the tasks it is going for.
+  const took = () => host.runs.since(admitted.at - ADMIT_LAG_SECS);
+  const taken = () => took() + rounds.size + waiting.size;
 
   /// Starts toward the available tasks this host may take, oldest offer first, while a
   /// slot is free. A task this host offered to be done at once needs no slot.
@@ -87,7 +90,7 @@ export function createClaiming(host) {
       return;
     }
     host.saveLocks();
-    const run = { P, taskId, round, snapshot: null, started: now, timer: null };
+    const run = { P, taskId, round, own, snapshot: null, started: now, timer: null };
     rounds.set(taskId, run);
     rebase(run);
     const tick = () => {
@@ -118,6 +121,11 @@ export function createClaiming(host) {
       });
       if (round.over) return;
       const now = host.now();
+      if (answer.lost !== undefined && host.transport.state().state !== 'ready') {
+        // This host's transport is down: the silence is its own, not the member's.
+        carry(run, round.abort('offline'));
+        return;
+      }
       if (answer.lost === undefined) {
         // An answer, even a refusal, is a member that is there: it must agree and grant.
         const heard = action.do === 'sync' ? round.onSync : round.onLock;
@@ -149,16 +157,24 @@ export function createClaiming(host) {
           if (round.wave === wave) rebase(run);
         }, 500 + jitter(1500));
       } else if (action.do === 'unlock') {
-        host.gossip.send(P, action.to, 'unlock', action.body, { fresh: true, timeoutMs: PROBE_TIMEOUT_MS }).catch(() => {});
+        unlock(P, action.to, action.body);
       } else if (action.do === 'commit') {
         commit(run, action);
       } else {
-        end(run);
-        later.set(taskId, host.now() + (RETRY_MS + jitter(RETRY_MS)) / 1000);
-        host.log(`claim of ${taskId} stood down: ${action.reason}`);
-        host.poke();
+        standDown(run, action.reason);
       }
     }
+  }
+
+  function unlock(P, to, body) {
+    host.gossip.send(P, to, 'unlock', body, { fresh: true, timeoutMs: PROBE_TIMEOUT_MS }).catch(() => {});
+  }
+
+  function standDown(run, reason) {
+    end(run);
+    later.set(run.taskId, host.now() + (RETRY_MS + jitter(RETRY_MS)) / 1000);
+    host.log(`claim of ${run.taskId} stood down: ${reason}`);
+    host.poke();
   }
 
   function end(run) {
@@ -170,6 +186,12 @@ export function createClaiming(host) {
 
   function commit(run, { gen, hours, grants, absent }) {
     const { P, taskId, round } = run;
+    // The word on slots may have changed, or gone stale, while the round ran.
+    if (!run.own && took() >= slots()) {
+      for (const grant of grants) unlock(P, grant.by, { taskId, round: round.round });
+      standDown(run, 'no slot left');
+      return;
+    }
     const claim = buildClaim(host.id, { pool: P.id, taskId, round: round.round, gen, hours, grants, absent, now: host.now() });
     end(run);
     if (host.take(P, claim).refused.length > 0) {
@@ -188,17 +210,22 @@ export function createClaiming(host) {
     }
   }
 
-  /// Gives up every round in a pool that is being left. Nothing is signed for it.
+  /// Gives up every round in a pool. Nothing is signed for it.
   function closing(P) {
     for (const run of [...rounds.values()]) {
       if (run.P === P) carry(run, run.round.abort('closed'));
     }
   }
 
+  /// Gives up every round, saying nothing: the host is stopping.
   function stop() {
     for (const timer of waiting.values()) host.clock.clearTimeout(timer);
-    for (const run of rounds.values()) host.clock.clearTimeout(run.timer);
+    for (const run of rounds.values()) {
+      host.clock.clearTimeout(run.timer);
+      run.round.abort('stopped');
+    }
     waiting.clear();
+    rounds.clear();
   }
 
   return { admit, admitted: () => ({ ...admitted }), step, moved, closing, stop };

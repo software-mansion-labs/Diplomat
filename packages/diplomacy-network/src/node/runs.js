@@ -32,6 +32,7 @@ export function createRuns(host) {
   const turns = new Map(); // runId -> the last forge request of that run
 
   const save = () => host.store.write('runs', { runs, shun });
+  const stopping = new Set(); // the stops asked of the executor and not answered yet
   const sleep = (ms) => new Promise((resolve) => { host.clock.setTimeout(resolve, ms); });
   const live = (run) => run.endedAt === 0;
 
@@ -58,6 +59,7 @@ export function createRuns(host) {
     runs[runId] = {
       runId, taskId: claim.taskId, pool: P.id, round: claim.round, peer: '', container: '', state: 'preparing',
       startedAt: host.now(), endedAt: 0, exit: 0, log: '', outcome: null, end: null, told: 0, revoked: false,
+      launched: false, offered: P.pool.task(claim.taskId, host.now())?.createdAt ?? 0,
     };
     save();
     host.touch();
@@ -70,15 +72,22 @@ export function createRuns(host) {
     if (preparing.has(run.runId)) return;
     preparing.add(run.runId);
     try {
-      while (run.state === 'preparing' && live(run)) {
+      while (run.state === 'preparing' && live(run) && host.running()) {
         const P = host.pools.get(run.pool);
         const claim = claimOf(run);
         const task = P?.pool.task(run.taskId, host.now());
         if (!claim || !isActive(claim, host.now()) || !task) return;
         if (held[run.taskId]?.runId === run.runId) {
-          // A job that outlived a restart of this host is not started twice.
-          if (alive(run) === true) Object.assign(run, { state: 'running' });
-          else await launch(run, P, task);
+          if (!run.launched) {
+            await launch(run, P, task);
+            return;
+          }
+          // The host went down around the moment its job was started. A job is never
+          // started twice: one that lives is taken up, one that is gone has failed, and
+          // while the executor cannot say, the question is put again at the next step.
+          const says = alive(run);
+          if (says === true) Object.assign(run, { state: 'running' });
+          if (says === false) conclude(run, { ok: false, summary: 'the run ended without saying how' });
           save();
           return;
         }
@@ -87,7 +96,7 @@ export function createRuns(host) {
           halt(run, 'no machine that agreed to the claim offers the task', 'release');
           return;
         }
-        const answer = await host.gossip.send(P, to, 'key', { taskId: run.taskId, round: run.round });
+        const answer = await host.gossip.send(P, to, 'key', { taskId: run.taskId, round: run.round }, { fresh: true });
         if (run.state !== 'preparing' || !live(run)) return;
         const body = answer.ok ? answer.body : {};
         const expect = { pool: P.id, taskId: run.taskId, executor: host.self, host: to };
@@ -110,7 +119,10 @@ export function createRuns(host) {
 
   async function launch(run, P, task) {
     const { taskId, kind, item, title, identity, hours, offeredBy } = task;
-    // The run and its key are on disk before a job exists for them.
+    // The run, its key, and the fact that its job is being started are on disk before a
+    // job exists.
+    run.launched = true;
+    save();
     host.store.flush();
     let handle;
     try {
@@ -129,12 +141,15 @@ export function createRuns(host) {
     }
     Object.assign(run, { state: 'running', container: String(handle?.container ?? ''), log: String(handle?.log ?? '') });
     save();
+    host.store.flush();
     host.touch();
   }
 
   function stopJob(run, reason) {
-    Promise.resolve().then(() => host.executor.stop(run.runId, reason))
+    const stop = Promise.resolve().then(() => host.executor.stop(run.runId, reason))
       .catch((err) => host.log(`${run.runId} could not be stopped: ${err?.stack ?? err}`));
+    stopping.add(stop);
+    stop.then(() => stopping.delete(stop));
   }
 
   // The job ended by itself: `outcome` is the executor's word on how.
@@ -166,11 +181,10 @@ export function createRuns(host) {
     host.poke();
   }
 
-  // A task this host failed at or gave back is left to the others for as long as that
-  // offer of it stands.
+  // A task this host failed at or gave back is left to the others for as long as the
+  // offer its claim took stands.
   function giveUpOn(run) {
-    const task = host.pools.get(run.pool)?.pool.task(run.taskId, host.now());
-    if (task) shun[run.taskId] = task.createdAt;
+    shun[run.taskId] = run.offered;
   }
 
   // Settles what an ended run owes: its outcome told to a host offering the task, its
@@ -242,7 +256,8 @@ export function createRuns(host) {
     for (const P of host.pools.values()) {
       for (const task of P.pool.tasks(now)) {
         const { claim } = task;
-        if (claim?.executor !== host.self || Object.values(runs).some((run) => run.taskId === task.taskId && run.round === claim.round)) continue;
+        const behind = (run) => run.taskId === task.taskId && run.round === claim.round && run.end !== 'over';
+        if (claim?.executor !== host.self || Object.values(runs).some(behind)) continue;
         host.take(P, endClaim(host.id, claim, 'released', now));
         host.gossip.spread(P, [claimKey(task.taskId)]);
       }
@@ -283,8 +298,10 @@ export function createRuns(host) {
         return forgeAnswer(403, answer.detail);
       }
       if (answer.code === 'bad-request') return forgeAnswer(400, answer.detail);
-      // Refused before it was read, or never sent: it was not carried out, whatever it was.
-      const unsent = ['offline', 'http-413'].includes(answer.lost) || answer.code === 'effort';
+      // Never sent, or refused for want of work before anything was done: it was not
+      // carried out, whatever it was. A body refused unread is no such proof: it may be
+      // the second copy of one the transport sent twice.
+      const unsent = answer.lost === 'offline' || answer.code === 'effort';
       if (attempt === ACT_ATTEMPTS || !live(run)) return forgeAnswer(unsent ? 503 : 504, 'no answer from the requester');
       // An answer that was lost may belong to a request that was carried out: only one
       // that changes nothing is asked again.
@@ -314,13 +331,14 @@ export function createRuns(host) {
     halt(run, 'stopped by the operator', 'release');
   }
 
-  /// Stops every run in a pool that is being left and gives its claims back at once;
-  /// the keys of the records signed.
-  function closing(P) {
+  /// Stops every run in a pool, for `reason`, and gives its claims back at once; the keys
+  /// of the records signed. The tasks are not held against this host: it may take them
+  /// again.
+  function closing(P, reason) {
     const keys = [];
     for (const run of Object.values(runs)) {
       if (run.pool !== P.id || run.end === 'over') continue;
-      halt(run, 'the pool was closed', 'release');
+      halt(run, reason, 'release', false);
       const claim = claimOf(run);
       if (claim?.state === 'held' && isActive(claim, host.now())) {
         host.take(P, endClaim(host.id, claim, 'released', host.now()));
@@ -346,9 +364,10 @@ export function createRuns(host) {
       if (!verdict.ok) return verdict.code === 'old' ? { body: { claim } } : deny(verdict.code);
       if (Math.abs(ping.ts - now) > CLOCK_SKEW_SECS) return deny('stale');
       if (!isActive(claim, now)) return deny('lapsed');
-      // A lease is extended for a run that is still going, never for a claim alone.
+      // A lease is extended for a job that is going, never for a claim alone: a run still
+      // waiting for its key gives its claim back when its first lease is about to end.
       const run = Object.values(runs).find((r) => r.taskId === claim.taskId && r.round === claim.round);
-      if (!run || !live(run) || (run.state === 'running' && alive(run) === false)) return deny('no run');
+      if (!run || !live(run) || !run.launched || (run.state === 'running' && alive(run) === false)) return deny('no run');
       const next = extendClaim(host.id, claim, ping, now);
       if (host.take(P, next).refused.length > 0) return deny('the extension does not hold');
       host.gossip.spread(P, [claimKey(claim.taskId)], from);
@@ -367,8 +386,10 @@ export function createRuns(host) {
 
   return {
     adopt, step, start, stopRun, closing, actFor, handlers,
-    /// How many runs are going.
-    active: () => Object.values(runs).filter(live).length,
+    /// Settles once the executor has answered every stop asked of it.
+    stopped: () => Promise.all([...stopping]),
+    /// How many runs that began at `at` or later are still going.
+    since: (at) => Object.values(runs).filter((run) => live(run) && run.startedAt >= at).length,
     /// Is a run of that task going or still owed its report?
     has: (taskId) => Object.values(runs).some((run) => run.taskId === taskId && run.end !== 'over'),
     /// Did this host give up on that offer of the task?

@@ -10,7 +10,7 @@ import { b64u } from '../core/canon.js';
 import { identityFromSeed } from '../core/identity.js';
 import { solveAsync } from '../core/pow.js';
 import { validPool } from '../core/records.js';
-import { TICK_MS } from '../paths.js';
+import { SWITCH_OFF_WAIT_MS, TICK_MS } from '../paths.js';
 import { createClaiming } from './claiming.js';
 import { claimKey, createGossip } from './gossip.js';
 import { createInbound } from './inbound.js';
@@ -20,9 +20,14 @@ import { createRuns } from './runs.js';
 import { poolFile } from './store.js';
 
 const CHANGE_DELAY_MS = 100;
+const OFF = 'the network was switched off';
+const CLOSED = 'the pool was closed';
 
-/// The host. `solve(challenge, effort)` finds a proof of work and defaults to a search
-/// on a worker thread. See the README for what each dependency is.
+/// The host. `store` is `createStore`'s; `transport` carries requests to and from other
+/// hosts; `clock` is `{ now(), setTimeout, clearTimeout }` with `now` in Unix seconds;
+/// `random(n)` answers n random bytes; `requester` knows the rules and the forge;
+/// `executor` runs jobs; `settings()` answers `{ requiredMinimumH, maximumAcceptedH }`;
+/// `solve(challenge, effort)` finds a proof of work, by default on a worker thread.
 export function createNode({ store, transport, clock, random, log = () => {}, requester, executor, settings, solve = solveAsync }) {
   let id = identityFromSeed(store.read('identity')?.seed ?? '');
   if (!id) {
@@ -34,19 +39,28 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
   const host = {
     id, self: id.pk, store, transport, clock, random, log, requester, executor, settings, solve, keys,
     now: () => clock.now(),
-    pools: new Map(), // pool id -> { id, link, pool, locks, seq, inviter }
+    pools: new Map(), // pool id -> { id, link, pool, locks, seq, inviter, invites, farewell }
+    away: new Map(), // pool id -> the link of a pool that is linked and that this host left
     heldLocks: store.read('locks') ?? {},
     saveKeys: () => store.write('keys', keys),
     saveLocks: () => store.write('locks', {
       toJSON: () => Object.fromEntries([...host.pools.values()].map((P) => [P.id, P.locks.entries()])),
     }),
     save: (P) => store.write(poolFile(P.id), {
-      toJSON: () => ({ id: P.id, link: P.link, linked: true, seq: P.seq, inviter: P.inviter, records: P.pool.records() }),
+      toJSON: () => ({
+        id: P.id, linked: true, seq: P.seq, inviter: P.inviter, invites: P.invites, left: P.farewell, records: P.pool.records(),
+      }),
     }),
   };
   const watchers = [];
   let started = false;
+  // Until the pools were named once, in this life of the host or one before it, a pool
+  // the store knows and this object does not is a pool not linked yet, not a pool that
+  // was closed: nothing is ended over it.
+  const links = store.read('links');
+  let linked = Array.isArray(links?.pools);
   let [poked, touched, ticking] = [null, null, null];
+  host.running = () => started;
 
   /// Tells the watchers, once for everything that changes in a short while.
   host.touch = () => {
@@ -95,12 +109,14 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
   host.runs = createRuns(host);
   host.claiming = createClaiming(host);
   const inbound = createInbound(host);
+  if (linked) links.pools.forEach(host.gossip.link);
 
   const handlers = {
     ...host.gossip.handlers, ...host.offers.handlers, ...host.runs.handlers,
     lock(P, from, body) {
       const answer = P.locks.answer({ pool: P.pool, identity: id, from, body, now: host.now() });
       host.saveLocks();
+      if (answer.body?.grant) host.offers.granted(body.taskId, body.round);
       return answer;
     },
     unlock(P, from, body) {
@@ -115,7 +131,7 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
 
   function step() {
     poked = null;
-    if (!started) return;
+    if (!started || !linked) return;
     for (const part of [host.gossip, host.offers, host.runs, host.claiming]) {
       try {
         part.step();
@@ -123,21 +139,37 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
         log(`a step failed: ${err?.stack ?? err}`);
       }
     }
-    store.flush();
+    try {
+      store.flush();
+    } catch (err) {
+      // What could not be written stays to be written: the next step tries again.
+      log(`the store could not be written: ${err?.message ?? err}`);
+    }
   }
 
   // Leaves a pool: its runs stop, its claims are given back, its offers are cancelled,
-  // and the members are told all of it once.
-  function close(P) {
+  // and the members are told all of it once. A pool that `stay`s linked is away.
+  function close(P, stay) {
     host.claiming.closing(P);
-    host.gossip.unlink(P, [...host.runs.closing(P), ...host.offers.closing(P)]);
+    host.gossip.unlink(P, [...host.runs.closing(P, CLOSED), ...host.offers.closing(P, CLOSED)], stay);
     host.saveLocks();
     host.touch();
   }
 
+  async function stop() {
+    if (!started) return;
+    started = false;
+    for (const timer of [poked, touched, ticking]) clock.clearTimeout(timer);
+    [poked, touched, ticking] = [null, null, null];
+    host.gossip.stop();
+    host.claiming.stop();
+    store.flush();
+    await transport.stop();
+  }
+
   function poolRow(P, now) {
     return {
-      id: P.id, path: P.link.path ?? '', identity: P.link.identity ?? '', hash: P.pool.stateHash(now),
+      id: P.id, path: P.link.path ?? '', identity: P.link.identity ?? '', hash: P.pool.stateHash(now), left: false,
       members: P.pool.members(now).map((m) => ({
         pk: m.pk, self: m.pk === host.self, maxAcceptedH: m.maxAcceptedH,
         ...(m.pk === host.self ? { lastSeen: now, reachable: transport.state().state === 'ready' } : host.peers.seen(m.pk)),
@@ -183,47 +215,72 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
     },
 
     /// Stops serving. Runs are left going: the host takes them up when it starts again.
-    async stop() {
+    stop,
+
+    /// The network is switched off: every offer of this host that has not ended is
+    /// cancelled, every run is stopped and its claim given back, the members are told,
+    /// and the host stops - once they have heard and the jobs are stopped, or after
+    /// `waitMs`. It stays a member of its pools.
+    async switchOff({ waitMs = SWITCH_OFF_WAIT_MS } = {}) {
       if (!started) return;
-      started = false;
-      for (const timer of [poked, touched, ticking]) clock.clearTimeout(timer);
-      [poked, touched, ticking] = [null, null, null];
-      host.gossip.stop();
-      host.claiming.stop();
+      const told = [...host.pools.values()].map((P) => {
+        host.claiming.closing(P);
+        return host.gossip.tell(P, [...host.runs.closing(P, OFF), ...host.offers.closing(P, OFF)]);
+      });
       store.flush();
-      await transport.stop();
+      let timer = null;
+      const waited = new Promise((resolve) => { timer = clock.setTimeout(resolve, waitMs); });
+      await Promise.race([Promise.all([...told, host.runs.stopped()]), waited]);
+      clock.clearTimeout(timer);
+      await stop();
     },
 
-    /// The pools this host is linked to, each `{ id, path, forge, identity }`. A pool no
-    /// longer listed is left: its runs stop, its offers are cancelled, the members are told.
+    /// Every pool this machine is linked to, each `{ id, path, forge, identity }`; the
+    /// list is kept across a restart. A pool no longer listed is closed: its runs stop,
+    /// its offers are cancelled, the members are told, and listed again it is a pool of
+    /// this host's own. A pool this host left stays left for as long as it is listed.
     setPools(list) {
       for (const info of list) {
         if (!validPool(info?.id)) throw new Error(`"${info?.id}" is not a pool id.`);
       }
+      const listed = (id) => list.some((info) => info.id === id);
       for (const P of [...host.pools.values()]) {
-        if (!list.some((info) => info.id === P.id)) close(P);
+        if (!listed(P.id)) close(P, false);
+      }
+      for (const id of [...host.away.keys()]) {
+        if (!listed(id)) host.gossip.forget(id);
       }
       for (const info of list) {
         const P = host.pools.get(info.id);
-        if (!P) host.gossip.link(info);
-        else P.link = info;
+        if (P) P.link = info;
+        else host.gossip.link(info);
       }
+      store.write('links', { pools: list });
+      linked = true;
       store.flush();
       host.poke();
       host.touch();
     },
 
-    /// Leaves a pool and stays linked to it, alone, until it joins again by invite.
+    /// Leaves a pool that stays linked: this host is no member of it, and nothing of the
+    /// pool reaches it, until it joins again.
     leave({ pool }) {
+      if (host.away.has(pool)) return;
       const P = host.pools.get(pool);
-      if (!P) throw new Error(`The pool ${pool} is not linked on this machine.`);
-      close(P);
-      host.gossip.link(P.link);
+      if (!P) throw host.gossip.noPool(pool);
+      close(P, true);
       store.flush();
     },
 
     admit: host.claiming.admit,
-    invite: host.gossip.invite,
+
+    /// `{ invite }`: a token another host joins the pool by, good for `ttlSecs`.
+    invite(args) {
+      const out = host.gossip.invite(args);
+      store.flush();
+      return out;
+    },
+
     actFor: host.runs.actFor,
     ...Object.fromEntries(Object.entries({
       offer: host.offers.offer, withdraw: host.offers.withdraw, join: host.gossip.join, stopRun: host.runs.stopRun,
@@ -241,7 +298,12 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
         identity: { pk: id.pk, onion: transport.address },
         transport: transport.state(),
         admit: host.claiming.admitted(),
-        pools: [...host.pools.values()].map((P) => poolRow(P, now)),
+        pools: [
+          ...[...host.pools.values()].map((P) => poolRow(P, now)),
+          ...[...host.away.values()].map((info) => ({
+            id: info.id, path: info.path ?? '', identity: info.identity ?? '', hash: '', left: true, members: [], tasks: [],
+          })),
+        ],
         runs: host.runs.rows(),
         offers: host.offers.rows(),
       };

@@ -51,8 +51,11 @@ export function createInbound(host) {
     if (!checked.ok) return reply({ effort, error: { code: checked.code, detail: checked.detail } });
     const { pool, kind, from, body } = request;
     const P = host.pools.get(pool);
-    if (!P) return reply({ effort, error: { code: 'unknown-pool', detail: 'this host has not linked that pool' } });
-    if (kind !== 'hello' && !checked.member) return reply({ effort, error: { code: 'not-member', detail: 'say hello first' } });
+    if (!P || (kind !== 'hello' && !checked.member)) {
+      host.gossip.farewell(pool, from);
+      if (!P) return reply({ effort, error: { code: 'unknown-pool', detail: 'this host has not linked that pool' } });
+      return reply({ effort, error: { code: 'not-member', detail: 'say hello first' } });
+    }
     if (checked.member) host.peers.heard(from);
     const out = await host.handle(P, from, kind, body);
     // What the answer admits to is on disk before the sender can act on it.

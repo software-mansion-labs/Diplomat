@@ -6,15 +6,21 @@
 import { LockTable } from '../core/claims.js';
 import { createInvite, inviteToken, parseInvite, verifyInvite, voucherOf } from '../core/membership.js';
 import { MAX_HELLO_CHAIN, MAX_PUSH_RECORDS, Pool } from '../core/pool.js';
-import { isObject, memberRecord, shaped } from '../core/records.js';
+import { isObject, memberRecord, recordKey, shaped } from '../core/records.js';
 import {
   HOURS_CEILING, HOURS_FLOOR, INVITE_TTL_SECS, PEER_BACKOFF_MAX_MS, PRUNE_INTERVAL_MS, RESIGN_INTERVAL_MS,
-  SYNC_INTERVAL_MS,
+  STRANGER_BODY_BYTES, SYNC_INTERVAL_MS,
 } from '../paths.js';
 import { poolFile } from './store.js';
 
-// Records per `pull` and per `push`: what fits a request body with room to spare.
+// Keys per `pull`, and the bytes of records in one `push` or one answer to a `pull`:
+// under the body any sender may send, so gossip never waits its turn at a large one.
 const BATCH = 256;
+const BATCH_BYTES = STRANGER_BODY_BYTES - 4096;
+const MAX_TOLD = 1024;
+
+// Member and offer records ahead of the claims that rest on them.
+const inOrder = (keys) => [...keys].sort((a, b) => a.startsWith('claim/') - b.startsWith('claim/'));
 
 /// The key a pool stores a host's member record under.
 export const memberKey = (pk) => `member/${pk}`;
@@ -39,6 +45,7 @@ export function createGossip(host) {
   const outbox = new Map(); // "pool pk" -> { keys, busy }: what is still to be pushed to that member
   const syncing = new Set(); // "pool pk" of every sync in flight
   const snubbed = new Map(); // "pool pk" -> when a member that refused a hello is greeted again
+  const told = new Map(); // "pool pk" -> when a host is next told that this one left the pool
   let timer = null;
   let pruned = 0;
 
@@ -60,42 +67,104 @@ export function createGossip(host) {
     });
   }
 
-  /// Links a pool: what the store holds of it is taken up again, and the host is a member
-  /// of it at once, alone until it joins or invites someone.
-  function link(info) {
-    const doc = host.store.read(poolFile(info.id)) ?? {};
+  // A pool over what the store holds of it.
+  function load(info, doc) {
     const P = {
       id: info.id, link: info, pool: new Pool({ id: info.id, self: host.self }),
       locks: new LockTable(host.heldLocks[info.id] ?? []),
       seq: Number.isSafeInteger(doc.seq) ? doc.seq : -1, inviter: null,
+      // The invites this host gave since it last became a member, each `{ nonce, exp }`,
+      // and the record that says it left the membership before this one.
+      invites: [], farewell: isObject(doc.left) ? doc.left : null,
     };
     // The locks read at startup are taken up once: a pool linked again starts without them.
     delete host.heldLocks[info.id];
-    const now = host.now();
-    if (doc.linked && Array.isArray(doc.records)) {
-      P.pool.merge(doc.records, now);
+    if ((doc.linked || doc.away) && Array.isArray(doc.records)) {
+      // What the store holds was let in once. A clock that woke up behind those records
+      // must not make them the future, and this host a stranger to its own pool.
+      P.pool.merge(doc.records, doc.records.reduce((latest, r) => (Number.isSafeInteger(r?.at) ? Math.max(latest, r.at) : latest), host.now()));
       P.inviter = typeof doc.inviter === 'string' ? doc.inviter : null;
+      if (Array.isArray(doc.invites)) P.invites = doc.invites;
     }
-    if (!own(P) || own(P).left) {
-      P.inviter = null;
-      P.pool.merge(signMember(P, { voucher: undefined }), now);
-    }
-    host.pools.set(P.id, P);
-    host.save(P);
     return P;
   }
 
+  /// Links a pool: what the store holds of it is taken up again, and the host is a member
+  /// of it at once, alone until it joins or invites someone. A pool this host left stays
+  /// left.
+  function link(info) {
+    const doc = host.store.read(poolFile(info.id)) ?? {};
+    if (doc.away === true) {
+      host.away.set(info.id, info);
+      return;
+    }
+    const P = load(info, doc);
+    if (!own(P)) {
+      P.inviter = null;
+      P.invites = [];
+      P.pool.merge(signMember(P, { voucher: undefined }), host.now());
+    }
+    host.pools.set(P.id, P);
+    host.save(P);
+  }
+
+  /// Pushes the records under `keys` to every member now, whatever the backoff; settles
+  /// once each of them has answered or failed to.
+  function tell(P, keys) {
+    const records = P.pool.records(keys);
+    if (records.length === 0) return Promise.resolve();
+    return Promise.all(others(P).map((pk) => host.peers.ask(P.id, pk, 'push', { records }, { fresh: true }).catch(() => {})));
+  }
+
   /// Leaves a pool: the record saying so and `keys`, the other records this host signed
-  /// on its way out, are pushed to every member once, and the pool is forgotten but for
-  /// the sequence number its next member record must exceed.
-  function unlink(P, keys) {
+  /// on its way out, are pushed to every member once. Of a pool that is no longer linked
+  /// nothing is kept but that record and the sequence number the next member record must
+  /// exceed. A pool that `stay`s linked is away: the member records and the inviter are
+  /// kept too, for the day the host joins it again.
+  function unlink(P, keys, stay) {
     const left = signMember(P, { left: true });
-    const members = others(P);
     P.pool.merge(left, host.now());
-    const records = P.pool.records([...keys, memberKey(host.self)]);
     host.pools.delete(P.id);
-    host.store.write(poolFile(P.id), { id: P.id, linked: false, seq: P.seq });
-    for (const pk of members) host.peers.ask(P.id, pk, 'push', { records }).catch(() => {});
+    const doc = { id: P.id, linked: false, seq: P.seq, left };
+    if (stay) {
+      host.away.set(P.id, P.link);
+      Object.assign(doc, { away: true, inviter: P.inviter, records: P.pool.records().filter((r) => r.type === 'member') });
+    }
+    host.store.write(poolFile(P.id), doc);
+    tell(P, [...keys, memberKey(host.self)]);
+  }
+
+  /// A pool this host left is no longer linked either: linked again it is a pool of its own.
+  function forget(id) {
+    const { seq, left } = host.store.read(poolFile(id));
+    host.away.delete(id);
+    host.store.write(poolFile(id), { id, linked: false, seq, left });
+  }
+
+  // Back into a pool this host left: its member record is signed again over the voucher
+  // it held, and every member it knew is told.
+  function rejoin(id) {
+    const P = load(host.away.get(id), host.store.read(poolFile(id)));
+    P.farewell = null;
+    P.pool.merge(signMember(P), host.now());
+    host.away.delete(id);
+    host.pools.set(id, P);
+    host.moved(P);
+    for (const pk of others(P)) syncWith(P, pk).catch((err) => host.log(`a hello failed: ${err?.stack ?? err}`));
+    return P;
+  }
+
+  /// A host this one does not take for a member asked about a pool: when this host left
+  /// that pool, the asker may not have heard, and is sent the record that says so.
+  function farewell(pool, to) {
+    const key = `${pool} ${to}`;
+    const now = host.now();
+    if ((told.get(key) ?? 0) > now) return;
+    if (told.size >= MAX_TOLD) told.clear();
+    told.set(key, now + PEER_BACKOFF_MAX_MS / 1000);
+    const P = host.pools.get(pool);
+    const left = P ? P.farewell : host.store.read(poolFile(pool))?.left;
+    if (isObject(left)) host.peers.ask(pool, to, 'push', { records: [left] }, { fresh: true }).catch(() => {});
   }
 
   // Every host this one keeps in touch with in a pool: the members, the ones that stopped
@@ -121,13 +190,36 @@ export function createGossip(host) {
     return chain;
   }
 
+  // The records under the first of `keys` that fit one body, and how many keys that
+  // took. A record too large to share a body travels alone.
+  function batch(P, keys) {
+    const records = [];
+    let [bytes, used] = [0, 0];
+    for (const key of keys.slice(0, BATCH)) {
+      const record = P.pool.get(key);
+      const size = record ? Buffer.byteLength(JSON.stringify(record)) : 0;
+      if (records.length > 0 && bytes + size > BATCH_BYTES) break;
+      if (record) records.push(record);
+      bytes += size;
+      used += 1;
+    }
+    return { records, used };
+  }
+
   // Pulls what a member holds and this host lacks, and queues what it lacks for a push.
+  // A pull is answered with as much as fits, from the front: the next asks from there.
   async function exchange(P, pk, plan) {
-    for (let i = 0; i < plan.pull.length && open(P); i += BATCH) {
-      const keys = plan.pull.slice(i, i + BATCH);
-      const pulled = await host.peers.ask(P.id, pk, 'pull', { keys });
-      if (!pulled.ok || !Array.isArray(pulled.body.records)) break;
-      host.take(P, pulled.body.records.slice(0, keys.length));
+    let keys = inOrder(plan.pull);
+    while (keys.length > 0) {
+      const asked = keys.slice(0, BATCH);
+      const pulled = await host.peers.ask(P.id, pk, 'pull', { keys: asked });
+      if (!open(P)) return;
+      const records = pulled.ok && Array.isArray(pulled.body.records) ? pulled.body.records.slice(0, asked.length) : [];
+      host.take(P, records);
+      const last = records.at(-1);
+      const reached = P.pool.get(isObject(last) && typeof last.type === 'string' ? recordKey(last) : '') ? asked.indexOf(recordKey(last)) : -1;
+      if (reached === -1) break;
+      keys = keys.slice(reached + 1);
     }
     post(P, pk, plan.push);
   }
@@ -193,9 +285,9 @@ export function createGossip(host) {
     await null;
     try {
       while (box.keys.size > 0 && open(P)) {
-        const keys = [...box.keys].slice(0, BATCH);
-        for (const k of keys) box.keys.delete(k);
-        const records = P.pool.records(keys);
+        const keys = inOrder(box.keys);
+        const { records, used } = batch(P, keys);
+        for (const k of keys.slice(0, used)) box.keys.delete(k);
         // A push that goes unanswered is not repeated: the next sync carries it.
         if (records.length > 0) await send(P, pk, 'push', { records });
       }
@@ -254,24 +346,38 @@ export function createGossip(host) {
     }
   }
 
+  // What the operator is told about a pool this host cannot act in.
+  const noPool = (pool) => new Error(host.away.has(pool)
+    ? `This machine left the pool ${pool}: join it again first.` : `The pool ${pool} is not linked on this machine.`);
+
   /// An invite to a pool this host is a member of, as a token.
   function invite({ pool, ttlSecs = INVITE_TTL_SECS }) {
     const P = host.pools.get(pool);
-    if (!P) throw new Error(`pool ${pool} is not linked here`);
-    const exp = host.now() + ttlSecs;
-    return { invite: inviteToken(createInvite(host.id, { pool, exp, nonce: host.random(16) })) };
+    if (!P) throw noPool(pool);
+    const now = host.now();
+    const made = createInvite(host.id, { pool, exp: now + ttlSecs, nonce: host.random(16) });
+    P.invites = [...P.invites.filter((given) => given.exp > now), { nonce: made.nonce, exp: made.exp }];
+    host.save(P);
+    return { invite: inviteToken(made) };
   }
 
   /// Joins the pool an invite is for: this host's member record carries the invite from
-  /// here on, and the inviter is greeted until it answers.
-  function join({ invite: token }) {
+  /// here on, and the inviter is greeted until it answers. With `pool` and no invite, the
+  /// host goes back into a pool it left, as the member it was.
+  function join({ invite: token, pool }) {
+    if (token === undefined) {
+      if (host.away.has(pool)) rejoin(pool);
+      else if (!host.pools.has(pool)) throw noPool(pool);
+      return { pool };
+    }
     const parsed = parseInvite(token);
     if (!parsed) throw new Error('not an invite');
-    const P = host.pools.get(parsed.pool);
-    if (!P) throw new Error(`pool ${parsed.pool} is not linked here`);
-    const verdict = verifyInvite(parsed, { pool: P.id, now: host.now() });
+    if (!host.pools.has(parsed.pool) && !host.away.has(parsed.pool)) throw noPool(parsed.pool);
+    const verdict = verifyInvite(parsed, { pool: parsed.pool, now: host.now() });
     if (!verdict.ok || parsed.by === host.self) throw new Error(`the invite cannot be used: ${verdict.code ?? 'it is this host\'s own'}`);
+    const P = host.pools.get(parsed.pool) ?? rejoin(parsed.pool);
     P.inviter = parsed.by;
+    P.farewell = null;
     host.take(P, signMember(P, { voucher: token }));
     syncWith(P, parsed.by).catch((err) => host.log(`a hello failed: ${err?.stack ?? err}`));
     return { pool: P.id };
@@ -279,17 +385,31 @@ export function createGossip(host) {
 
   const handlers = {
     hello(P, from, body) {
-      const before = P.pool.get(memberKey(from));
-      const answer = P.pool.answerHello(body, from, host.now());
-      if (answer.body) {
-        host.moved(P);
-        // The members that have not met the newcomer hear of it from the one that has.
-        if (P.pool.get(memberKey(from)) !== before) spread(P, [memberKey(from)], from);
+      const now = host.now();
+      // An invite is good for the membership it was given in: one this host signed before
+      // it left the pool, or holds no note of, lets nobody in.
+      const spent = (record) => {
+        const invite = isObject(record) ? voucherOf(record) : null;
+        return invite?.by === host.self && now < invite.exp && !P.pool.accepts(record.pk, now)
+          && !P.invites.some((given) => given.nonce === invite.nonce);
+      };
+      if (isObject(body) && [body.member, ...(Array.isArray(body.chain) ? body.chain : [])].some(spent)) {
+        return { error: 'denied', detail: 'that invite is no longer good' };
       }
+      const before = P.pool.get(memberKey(from));
+      const answer = P.pool.answerHello(body, from, now);
+      const changed = P.pool.get(memberKey(from)) !== before;
+      // A hello that is refused may still have brought a record that is kept.
+      if (answer.body || changed) host.moved(P);
+      // The members that have not met the newcomer hear of it from the one that has.
+      if (answer.body && changed) spread(P, [memberKey(from)], from);
       return answer;
     },
     sync: (P, from, body) => P.pool.answerSync(body, host.now()),
-    pull: (P, from, body) => P.pool.answerPull(body),
+    pull(P, from, body) {
+      const answer = P.pool.answerPull(body);
+      return answer.error ? answer : { body: { records: batch(P, body.keys).records } };
+    },
     push(P, from, body) {
       if (!shaped(body, { records: (v) => Array.isArray(v) && v.length <= MAX_PUSH_RECORDS })) return { error: 'bad-request' };
       const { accepted, refused } = host.take(P, body.records);
@@ -297,5 +417,5 @@ export function createGossip(host) {
     },
   };
 
-  return { link, unlink, send, syncWith, syncAll, spread, start, stop, step, invite, join, handlers };
+  return { link, unlink, forget, tell, noPool, farewell, send, syncWith, syncAll, spread, start, stop, step, invite, join, handlers };
 }

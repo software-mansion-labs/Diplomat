@@ -202,11 +202,15 @@ export class Pool {
     return settled.hash;
   }
 
+  /// Is `pk` connected to this host by vouchers at `now`, whatever its member record says?
+  vouched(pk, now) {
+    return this.#at(now).accepted.has(pk);
+  }
+
   /// Does this host take requests from `pk` at `now`: a key connected to it by vouchers
   /// whose member record, when held, does not say it left?
   accepts(pk, now) {
-    const { accepted, roster } = this.#at(now);
-    return accepted.has(pk) && roster.get(pk)?.left !== true;
+    return this.vouched(pk, now) && this.#at(now).roster.get(pk)?.left !== true;
   }
 
   /// The member records of the pool's members at `now` - accepted, held, not left, signed
@@ -339,15 +343,16 @@ export class Pool {
   /// The answer to `hello` from `from`: `{ body: { index } }` once its member record is
   /// held and it is accepted, else `{ error }` with `bad-request` or `denied`. `chain`,
   /// when given, is the member records that connect the sender to members this host may
-  /// know; they are taken in together with the sender's own. A key this host has not
-  /// accepted before, the sender's or one of its chain, must also pass `checkJoin`: a
-  /// chain record that does not is left out.
+  /// know; they are taken in together with the sender's own. A key no voucher connects
+  /// to this host yet, the sender's or one of its chain, must also pass `checkJoin`: a
+  /// chain record that does not is left out. A key that left is connected still: nobody
+  /// put it out, and a newer record of its own brings it back.
   answerHello(body, from, now) {
     const chain = (v) => Array.isArray(v) && v.length <= MAX_HELLO_CHAIN;
     if (!shaped(body, { member: isObject }, { chain }) || body.member.pk !== from) return { error: 'bad-request' };
     const records = [body.member, ...(body.chain ?? [])];
     if (!records.every((r) => checkShape(r, this.id).ok && r.type === 'member')) return { error: 'bad-request' };
-    const lets = (record) => this.accepts(record.pk, now) || checkJoin(record, now).ok;
+    const lets = (record) => this.vouched(record.pk, now) || checkJoin(record, now).ok;
     if (!lets(body.member)) return { error: 'denied', detail: checkJoin(body.member, now).code };
     const { refused } = this.merge(records.filter(lets), now);
     if (!this.member(from, now)) return { error: 'denied', detail: refused.find((r) => r.key === memberKey(from))?.code ?? 'left' };
