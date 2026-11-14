@@ -99,3 +99,36 @@ export const TOKEN_TTL_MS = num('DN_TOKEN_TTL_MS', 60 * 1000);
 export const PUSH_MAX_BYTES = num('DN_PUSH_MAX_BYTES', 32 * 2 ** 20);
 // One git command of the push check, the fetch into the quarantine included.
 export const GIT_TIMEOUT_MS = num('DN_GIT_TIMEOUT_MS', 120 * 1000);
+
+// Executor side.
+export const SECURITY_BIN = process.env.DN_SECURITY || 'security';
+export const CLAUDE_BIN = process.env.DN_CLAUDE || 'claude';
+// The model token the operator set aside for the network (`networkModelToken`): a
+// generic-password item under this service in the macOS login Keychain, a file elsewhere.
+export const MODEL_TOKEN_KEYCHAIN = process.env.DN_MODEL_TOKEN_KEYCHAIN || 'Diplomat-networkModelToken';
+export const MODEL_TOKEN_PATH = process.env.DN_MODEL_TOKEN_PATH
+  ? home(process.env.DN_MODEL_TOKEN_PATH)
+  : path.join(os.homedir(), '.diplomat', 'network-model-token');
+// The image's repository name; its tag is the hash of image/.
+export const IMAGE_REPO = process.env.DN_IMAGE_REPO || 'diplomat-agent';
+export const IMAGE_BUILD_TIMEOUT_MS = num('DN_IMAGE_BUILD_TIMEOUT_MS', 30 * 60 * 1000);
+// What one container may use of this machine.
+export const CONTAINER_PIDS = num('DN_CONTAINER_PIDS', 4096);
+export const CONTAINER_MEMORY = process.env.DN_CONTAINER_MEMORY || '8g';
+export const CONTAINER_CPUS = process.env.DN_CONTAINER_CPUS || '4';
+// Where the broker listens: empty picks the address a container's host.docker.internal
+// leads to (loopback under Docker Desktop, the bridge gateway on Linux).
+export const BROKER_BIND = process.env.DN_BROKER_BIND || '';
+export const BROKER_PORT = num('DN_BROKER_PORT', 0);
+// One forge request's body, which is one `act` request's.
+export const FORGE_BODY_CAP = 48 * 2 ** 20;
+// How long a job's forge request waits for the requester's answer.
+export const FORGE_TIMEOUT_MS = num('DN_FORGE_TIMEOUT_MS', 5 * 60 * 1000);
+export const MIRROR_TIMEOUT_MS = num('DN_MIRROR_TIMEOUT_MS', 10 * 60 * 1000);
+// A job's `done` file is looked for this often, its process far less often.
+export const JOB_POLL_MS = num('DN_JOB_POLL_MS', 500);
+export const JOB_LIVENESS_MS = num('DN_JOB_LIVENESS_MS', 10 * 1000);
+// A stopped job gets this long between SIGTERM and SIGKILL.
+export const JOB_STOP_GRACE_MS = num('DN_JOB_STOP_GRACE_MS', 5000);
+// The name a container reaches this machine's broker by.
+export const CONTAINER_HOST = process.env.DN_CONTAINER_HOST || 'host.docker.internal';
