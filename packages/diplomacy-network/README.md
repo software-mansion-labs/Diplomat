@@ -48,7 +48,7 @@ src/
     container.js   image, one container per peer and repository, jobs
     job.js         one run: prompt, start, watch, outcome
   daemon.js      the process: local socket, config, wiring
-  ctl.js         start, stop and status from the applets, as JSON
+  install.js     what the applets run: --check, --start-daemon, --restart-daemon, --stop-daemon
   paths.js       files, tools and tunables
   ipc.js         the local-socket client
 image/
@@ -92,18 +92,29 @@ HTTP over `daemon.sock`, JSON in and out.
 | --- | --- | --- |
 | `GET /health` | | `{ ok, pid }` |
 | `GET /state` | | the snapshot |
-| `POST /pools` | `{ pools: [{ id, path, forge, identity }] }` | `{ ok }` - the linked repositories; a pool missing from the list is left |
+| `POST /pools` | `{ pools: [{ id, path, forge, identity }] }` | `{ ok }` - every linked repository; a pool missing from the list is left |
 | `POST /admit` | `{ slots, reason? }` | `{ ok }` - how many more tasks this machine takes now |
-| `POST /offer` | `{ pool, kind, options?, item, title, prompt, base?, now? }` | `{ taskId }` |
-| `POST /withdraw` | `{ taskId, reason }` | `{ ok }` |
+| `POST /offer` | `{ pool, kind, options?, item, title, prompt, base?, now? }` | `{ taskId }` - the same id again for an offer still open |
+| `POST /withdraw` | `{ taskId, reason }` | `{ ok }` - `reason` is free text, kept with the cancelled offer |
 | `POST /invite` | `{ pool, ttlSecs? }` | `{ invite }` |
 | `POST /join` | `{ invite }` | `{ pool }` |
 | `POST /leave` | `{ pool }` | `{ ok }` |
 | `POST /stop-run` | `{ runId }` | `{ ok }` |
 
-`admit` goes stale after 120 s: a daemon that has not heard from Diplomat takes nothing.
-An offer with `now` is claimed by this machine at once, whatever `admit` says - that is a
-job its own operator started by hand.
+A request the daemon refuses is answered with a 4xx status and `{ error }`, a sentence
+fit to show the operator.
+
+`pools` is the whole list every time, so Diplomat posts it only when it knows every
+linked repository and whose account each is: a list cut short makes this machine leave
+the pools it omits. `admit` goes stale after 120 s: a daemon that has not heard from
+Diplomat takes nothing. An offer with `now` is claimed by this machine at once, whatever
+`admit` says - that is a job its own operator started by hand. `base` is the branch or
+revision the job starts from; without it a job on a pull request starts from that pull
+request's head and any other from the default branch.
+
+`src/install.js` is what the applets run, each flag printing one JSON object:
+`--check` (`{ daemonRunning, pid }`), `--start-daemon`, `--restart-daemon`,
+`--stop-daemon`.
 
 The snapshot:
 
@@ -122,10 +133,17 @@ The snapshot:
   "runs": [ { "runId": "", "taskId": "", "pool": "", "peer": "", "container": "",
       "state": "preparing|running|finished|failed|stopped", "startedAt": 0, "endedAt": 0,
       "exit": 0, "log": "" } ],
-  "offers": [ { "taskId": "", "state": "pooled|claimed|done|failed|cancelled", "executor": "",
-      "attempt": 1, "requests": 0, "refused": 0, "outcome": { "ok": true, "summary": "",
-      "usd": 0, "tokens": 0, "runner": "", "model": "" }, "endedAt": 0 } ] }
+  "offers": [ { "taskId": "", "pool": "", "kind": "", "item": "", "title": "",
+      "state": "pooled|claimed|done|failed|cancelled", "reason": "", "executor": "",
+      "executorHere": false, "offeredAt": 0, "attempt": 1, "requests": 0, "refused": 0,
+      "outcome": { "ok": true, "summary": "", "usd": 0, "tokens": 0, "runner": "", "model": "" },
+      "endedAt": 0 } ] }
 ```
+
+Every time is Unix seconds. `offers` are the tasks this machine asked for: `pooled` while
+nobody holds it, `claimed` while an executor does, `done` when an executor finished it
+well, `failed` when its attempts ran out (`reason` says how the last one ended), and
+`cancelled` once withdrawn. An ended offer stays in the list for a day.
 
 ## What runs where
 
