@@ -85,19 +85,28 @@ export const ROUND_TIMEOUT_MS = num('DN_ROUND_TIMEOUT_MS', 3 * 60 * 1000);
 export const SYNC_INTERVAL_MS = num('DN_SYNC_INTERVAL_MS', 60 * 1000);
 // The longest a host waits, by its rank on a task, before starting to claim it.
 export const RANK_DELAY_MS = num('DN_RANK_DELAY_MS', 5000);
-// One request of a claim round to a member that has not answered lately: a sleeping
-// machine costs a round this long, not a whole REQUEST_TIMEOUT_MS.
+// A claim round asks every member afresh, whatever the gossip thinks of it. A member that
+// answered within PEER_QUIET_MS is given a whole REQUEST_TIMEOUT_MS. One this host has
+// never reached and has known for less than that is asked again until ROUND_PATIENCE_MS of
+// the round have passed: a first circuit to an onion service can take minutes. Any other
+// gets PROBE_TIMEOUT_MS, so a sleeping machine costs a round seconds.
 export const PROBE_TIMEOUT_MS = num('DN_PROBE_TIMEOUT_MS', 15 * 1000);
-// A member counts as answering lately for this long after its last answer.
 export const PEER_QUIET_MS = num('DN_PEER_QUIET_MS', 3 * SYNC_INTERVAL_MS);
+export const ROUND_PATIENCE_MS = num('DN_ROUND_PATIENCE_MS', ROUND_TIMEOUT_MS / 2);
 // After a request to a peer goes unanswered, gossip leaves that peer alone for this long,
-// doubling per failure up to the cap. Claim rounds ask regardless.
+// doubling per failure up to the cap.
 export const PEER_BACKOFF_MS = num('DN_PEER_BACKOFF_MS', 5000);
 export const PEER_BACKOFF_MAX_MS = num('DN_PEER_BACKOFF_MAX_MS', 10 * 60 * 1000);
-// One `act` request: the forge call and the push check on the requester's side included.
+// One `act` request, the forge call and the push check on the requester's side included;
+// a body is given ACT_BYTES_PER_SEC on top of it.
 export const ACT_TIMEOUT_MS = num('DN_ACT_TIMEOUT_MS', 5 * 60 * 1000);
-// How often an unanswered ping, key request or outcome report is sent again.
+export const ACT_BYTES_PER_SEC = 32 * 2 ** 10;
+// How often an unanswered ping, key request or outcome report is sent again, and how
+// long a task whose round stood down is left alone.
 export const RETRY_MS = num('DN_RETRY_MS', 30 * 1000);
+// How often a host looks at everything it holds for something that came due.
+export const TICK_MS = num('DN_TICK_MS', 10 * 1000);
+export const PRUNE_INTERVAL_MS = num('DN_PRUNE_INTERVAL_MS', 10 * 60 * 1000);
 // How many claim rounds one host runs at a time.
 export const MAX_ROUNDS = 4;
 // How many bodies above the stranger's cap a host reads at once, over all senders.
