@@ -1,0 +1,49 @@
+// A forge that exists only in memory, for the checks that ask it questions: what the
+// lookups of `forge.context()` answer, as plain data a test can read and change.
+
+const on = (number, author, more = {}) => ({ repo: 'o/r', item: 'pr', number, open: true, itemAuthor: author, ...more });
+
+/// The `ctx` of `authorize` over a small fixed forge: `o/r` with pull request 578 (opened
+/// by "them", head `feature`), 579 (opened by "me", head `mine`), 580 (closed) and issue
+/// 421. `me` is the account the credential belongs to. `ctx.asked` lists the node ids looked up.
+export function world({ branches = [] } = {}) {
+  const nodes = {
+    R_1: { type: 'Repository', repo: 'o/r' },
+    R_other: { type: 'Repository', repo: 'o/other' },
+    U_me: { type: 'User', login: 'me' },
+    PR_578: { type: 'PullRequest', ...on(578, 'them'), author: 'them' },
+    PR_579: { type: 'PullRequest', ...on(579, 'me'), author: 'me' },
+    PR_elsewhere: { type: 'PullRequest', ...on(578, 'them'), repo: 'o/other', author: 'them' },
+    PRR_mine: { type: 'PullRequestReview', ...on(578, 'them'), author: 'me', pending: true },
+    PRR_sent: { type: 'PullRequestReview', ...on(578, 'them'), author: 'me', pending: false },
+    PRR_theirs: { type: 'PullRequestReview', ...on(578, 'them'), author: 'someone', pending: true },
+    PRR_579: { type: 'PullRequestReview', ...on(579, 'me'), author: 'me', pending: true },
+    PRRT_578: { type: 'PullRequestReviewThread', ...on(578, 'them'), author: '' },
+    PRRT_579: { type: 'PullRequestReviewThread', ...on(579, 'me'), author: '' },
+    PRRT_580: { type: 'PullRequestReviewThread', ...on(580, 'me', { open: false }), author: '' },
+    PRRC_mine: { type: 'PullRequestReviewComment', ...on(578, 'them'), author: 'me', pending: true },
+    PRRC_theirs: { type: 'PullRequestReviewComment', ...on(578, 'them'), author: 'them', pending: false },
+    PRRC_579: { type: 'PullRequestReviewComment', ...on(579, 'me'), author: 'them', pending: false },
+    I_421: { type: 'Issue', repo: 'o/r', item: 'issue', number: 421, open: true, itemAuthor: 'reporter', author: 'reporter' },
+    I_422: { type: 'Issue', repo: 'o/r', item: 'issue', number: 422, open: true, itemAuthor: 'reporter', author: 'reporter' },
+  };
+  const pulls = {
+    578: { number: 578, open: true, author: 'them', headRepo: 'o/r', headRef: 'feature' },
+    579: { number: 579, open: true, author: 'Me', headRepo: 'o/r', headRef: 'mine' },
+    580: { number: 580, open: false, author: 'me', headRepo: 'o/r', headRef: 'old' },
+    581: { number: 581, open: true, author: 'me', headRepo: 'me/r', headRef: 'forked' },
+  };
+  const comments = { 11: nodes.PRRC_mine, 12: nodes.PRRC_theirs, 13: nodes.PRRC_579 };
+  const asked = [];
+  return {
+    asked, nodes, pulls,
+    assigned: ['bob'],
+    state: { branches: [...branches] },
+    async resolveNode(id) { asked.push(id); return nodes[id] ?? null; },
+    async pull(number) { return pulls[number] ?? null; },
+    async pullsByHead({ repo, ref }) { return Object.values(pulls).filter((p) => p.open && p.headRepo === repo && (ref === undefined || p.headRef === ref)); },
+    async comment(id) { return comments[id] ?? null; },
+    async assignees() { return this.assigned; },
+    async self() { return { id: 7, login: 'me' }; },
+  };
+}
