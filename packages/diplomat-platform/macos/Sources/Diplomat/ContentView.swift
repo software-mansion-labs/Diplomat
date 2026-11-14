@@ -5,26 +5,28 @@ import DiplomatCore
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @State private var query = ""
-    /// Which of the seven screens the body shows: Actions ("main"), Devices, Machines, Comms,
-    /// Tasks, Telemetry or Settings.
+    /// Which of the eight screens the body shows: Actions ("main"), Devices, Machines,
+    /// Network, Comms, Tasks, Telemetry or Settings.
     @State private var screen: PanelScreen
 
-    enum PanelScreen { case main, devices, machines, comms, tasks, telemetry, settings }
+    enum PanelScreen { case main, devices, machines, network, comms, tasks, telemetry, settings }
 
-    /// `showSettings` / `showTelemetry` / `showDevices` / `showMachines` / `showComms` /
-    /// `showTasks` seed the initial screen — used by the headless render to snapshot those
-    /// screens in context.
+    /// `showSettings` / `showTelemetry` / `showDevices` / `showMachines` / `showNetwork` /
+    /// `showComms` / `showTasks` seed the initial screen — used by the headless render to
+    /// snapshot those screens in context.
     /// Defaults to the main view.
     /// `seedPendingUnban` seeds the inline un-ban confirmation for a login (render only).
     /// `seedMutedAudit` pre-mutes Activity filter categories so the filtered feed can be
     /// snapshotted (render only).
     init(showSettings: Bool = false, showTelemetry: Bool = false, showDevices: Bool = false,
-         showMachines: Bool = false, showComms: Bool = false, showTasks: Bool = false,
+         showMachines: Bool = false, showNetwork: Bool = false, showComms: Bool = false,
+         showTasks: Bool = false,
          seedPendingUnban: String? = nil, seedMutedAudit: Set<AuditCategory> = []) {
         _screen = State(initialValue: showSettings ? .settings
                                     : showTelemetry ? .telemetry
                                     : showDevices ? .devices
                                     : showMachines ? .machines
+                                    : showNetwork ? .network
                                     : showComms ? .comms
                                     : showTasks ? .tasks : .main)
         _pendingUnban = State(initialValue: seedPendingUnban)
@@ -74,6 +76,9 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .machines:
                 MachinesScreen(isPresented: presenting(.machines))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            case .network:
+                NetworkScreen(isPresented: presenting(.network))
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .telemetry:
                 TelemetryView(isPresented: presenting(.telemetry))
@@ -139,6 +144,7 @@ struct ContentView: View {
             }.buttonStyle(.borderless).tooltip("Refresh")
             devicesButton
             machinesButton
+            networkButton
             commsButton
             tasksButton
             Button { withAnimation(.easeInOut(duration: 0.15)) { screen = screen == .telemetry ? .main : .telemetry } } label: {
@@ -270,6 +276,19 @@ struct ContentView: View {
         }
         .buttonStyle(.borderless)
         .tooltip("Machines")
+    }
+
+    private var networkButton: some View {
+        let open = screen == .network
+        return Button {
+            withAnimation(.easeInOut(duration: 0.15)) { screen = open ? .main : .network }
+        } label: {
+            Image(systemName: NetworkText.symbol)
+                .fontWeight(open ? .bold : .regular)
+                .foregroundStyle(open ? Color.accentColor : .primary)
+        }
+        .buttonStyle(.borderless)
+        .tooltip("Network")
     }
 
     // MARK: auto-fix monitor status pill
@@ -576,8 +595,13 @@ struct ContentView: View {
     private func agentTaskTint(_ kind: String) -> Color { DiplomatUI.agentTaskTint(kind) }
 
     /// Click a row: focus its window. If focus fails the window is gone and the row is
-    /// dismissed by the store — nothing more to do here.
+    /// dismissed by the store — nothing more to do here. A run the network carries has no
+    /// window on this machine, and opens the Network screen, where its task is.
     private func activate(_ row: Store.AgentRow) {
+        guard row.record.runsHere else {
+            withAnimation(.easeInOut(duration: 0.15)) { screen = .network }
+            return
+        }
         Task { _ = await store.activate(row) }
     }
 
@@ -828,7 +852,7 @@ struct ContentView: View {
 /// How an agent task's kind reads, wherever it is drawn. One mapping per axis, so a
 /// task does not change glyph or colour at the moment it stops being queued and
 /// starts being a session.
-private enum DiplomatUI {
+enum DiplomatUI {
     static func agentTaskIcon(_ kind: String) -> String {
         switch kind {
         case "conflicts": return "arrow.triangle.merge"
@@ -873,7 +897,11 @@ private struct AgentRunRow: View {
             // kept, or — for an agent it did not open — the agent's process, walked out to
             // whatever window is showing it. With neither, offering the click and doing
             // nothing would read as a session whose window had gone missing.
-            if !row.isFocusable {
+            if !row.record.runsHere {
+                Button(action: onTap) { content.contentShape(Rectangle()) }
+                    .buttonStyle(.plain)
+                    .tooltip(NetworkText.rowHelp)
+            } else if !row.isFocusable {
                 content.tooltip(AgentRunRow.noTerminalHelp)
             } else {
                 Button(action: onTap) { content.contentShape(Rectangle()) }
@@ -891,7 +919,8 @@ private struct AgentRunRow: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.borderless)
-                .tooltip("Stop tracking — remove from the list.")
+                .tooltip(row.record.runsHere ? "Stop tracking — remove from the list."
+                         : NetworkText.forgetHelp)
             }
         }
         .padding(6)
@@ -926,8 +955,9 @@ private struct AgentRunRow: View {
         HStack(spacing: 3) {
             AgentTaskStatusLabel(status: row.status)
             // WHY nothing is known: what to go and fix, a revoked automation permission
-            // say, is named only there.
-            if row.state == .unknown, !row.reason.isEmpty {
+            // say, is named only there. A run the network carries always says where it
+            // is, there being no window to look in.
+            if row.state == .unknown || !row.record.runsHere, !row.reason.isEmpty {
                 Text("· \(row.reason)")
                     .font(.system(size: 9))
                     .foregroundStyle(.secondary)
@@ -1417,7 +1447,12 @@ struct AuditRow: View {
         case "allocator-install", "allocator-uninstall": return "shippingbox.fill"
         case "machine-pause", "machine-resume", "machine-exclude", "machine-include",
              "machines-install", "machines-uninstall", MachinesScan.action: return "server.rack"
-        case "merge-failed", "spawn-failed", "poll-failed", "warn":
+        case NetworkAudit.offer, NetworkAudit.claimed, NetworkAudit.done, NetworkAudit.withdraw,
+             NetworkAudit.join, NetworkAudit.invite, NetworkAudit.leave, NetworkAudit.start,
+             NetworkAudit.stop:
+            return NetworkText.symbol
+        case "merge-failed", "spawn-failed", "poll-failed", "warn", NetworkAudit.failed,
+             NetworkAudit.unavailable:
             return "exclamationmark.triangle.fill"
         case "poll-recovered":       return "checkmark.circle.fill"
         default:                     return "circle.fill"

@@ -385,6 +385,14 @@ enum Render {
             // installed, no snapshot.
             let _ = seedMachinesScreen(s, store: store)
             ContentView(showMachines: true).environment(\.renderNow, machinesNow)
+        case let s where s.hasPrefix("network-screen"):
+            // Inside the panel, so the header's button is in the shot. Plain: a daemon
+            // with every service ready, two pools, members seen, unseen and unreachable,
+            // a task in each state, and two runs on this machine, one of them of a job
+            // offered here. "-starting": the transport bootstrapping, the image building,
+            // no pools yet. "-off": the switch off.
+            let _ = seedNetworkScreen(s, store: store)
+            ContentView(showNetwork: true).environment(\.renderNow, machinesNow)
         case let s where s.hasPrefix("devices"):
             // Seed a synthetic device pool (and optionally sessions) so the Devices
             // section can be eyeballed: allocated iOS + booting Android (with held
@@ -1323,6 +1331,116 @@ enum Render {
                                  format: "tablet", state: "available"),
             ]), at: Date())
         }
+        return true
+    }
+
+    /// `DIPLOMAT_RENDER=network-screen[-starting|-off]`: see the mode's case. The snapshot
+    /// goes through the reader the daemon's answer does; no daemon is asked.
+    @MainActor
+    @discardableResult
+    static func seedNetworkScreen(_ mode: String, store: Store) -> Bool {
+        store.hasLoaded = true
+        guard !mode.hasSuffix("off") else {
+            store.networkEnabled = false
+            return true
+        }
+        store.networkEnabled = true
+        store.networkAnswered = true
+        store.networkRequiredMinimumH = 24
+        store.networkMaximumAcceptedH = 48
+        let now = machinesNow.timeIntervalSince1970
+        let here = "a3f91c07d2e845b6c0aa17f3"
+        var doc: [String: Any] = [
+            "updatedAt": now - 2,
+            "daemon": ["pid": 48213, "startedAt": now - 3 * 3600],
+            "identity": ["pk": here, "onion": ""],
+            "transport": ["state": "bootstrapping", "detail": "tor is 45% through its bootstrap"],
+            "docker": ["state": "building", "image": "", "detail": "building the job image"],
+            "model": ["state": "ready", "detail": ""],
+            "admit": ["slots": 4, "at": now - 6, "reason": ""],
+            "pools": [[String: Any]](), "runs": [[String: Any]](), "offers": [[String: Any]](),
+        ]
+        func at(_ secsAgo: Double) -> String {
+            MachinesSnapshot.isoString(Date(timeIntervalSince1970: now - secsAgo))
+        }
+        // Through the daemon's own JSON: the core reads a flag only where the document
+        // held a JSON boolean.
+        func snapshot(_ doc: [String: Any]) -> NetworkSnapshot? {
+            NetworkSnapshot.parse(try? JSONSerialization.data(withJSONObject: doc))
+        }
+        guard !mode.hasSuffix("starting") else {
+            store.auditEntries = [
+                AuditEntry(at: at(40), source: "panel", action: NetworkAudit.start,
+                           detail: "Started the Diplomacy Network daemon (ok: true)"),
+            ] + store.auditEntries
+            store.networkState = snapshot(doc)
+            return true
+        }
+        let (near, far) = ("5be20d9a44c1f7e0932b6d18", "c417aa02e96b3d5581f0a2c7")
+        func member(_ pk: String, hours: Int, seen: Double, reachable: Bool = true) -> [String: Any] {
+            ["pk": pk, "self": pk == here, "maxAcceptedH": hours, "lastSeen": now - seen,
+             "reachable": reachable]
+        }
+        func task(_ id: String, _ kind: String, _ title: String, _ state: String,
+                  offeredHere: Bool, executor: String = "") -> [String: Any] {
+            var t: [String: Any] = [
+                "taskId": id, "kind": kind, "item": title, "title": title, "identity": "latekvo",
+                "hours": 24, "state": state, "offeredBy": [offeredHere ? here : near],
+                "offeredHere": offeredHere, "executor": executor,
+                "executorHere": executor == here, "deadline": now + 20 * 3600,
+            ]
+            if state == "claimed" {
+                t["claimedAt"] = now - 1500
+                t["leaseUntil"] = now + 5700
+            }
+            return t
+        }
+        doc["identity"] = ["pk": here, "onion": "dn4q7wz2kx5h3ty6pbv8ma9cjrf2us1e.onion"]
+        doc["transport"] = ["state": "ready", "detail": ""]
+        doc["docker"] = ["state": "ready", "image": "diplomacy-network:4c1e9a", "detail": ""]
+        doc["admit"] = ["slots": 2, "at": now - 6, "reason": ""]
+        doc["pools"] = [
+            ["id": "github.com/software-mansion/argent", "path": "/Users/dev/argent",
+             "identity": "latekvo", "hash": "9f2c41d7",
+             "members": [member(here, hours: 48, seen: 0), member(near, hours: 24, seen: 35),
+                         member(far, hours: 12, seen: 5400, reachable: false)],
+             "tasks": [
+                task("t-review", "review", "Review · #512", "available", offeredHere: true),
+                task("t-own", "conflicts", "Resolve · #508", "claimed", offeredHere: true,
+                     executor: here),
+                task("t-away", "issues", "Issues · #431", "claimed", offeredHere: true,
+                     executor: near),
+                task("t-theirs", "review", "Review · #77", "claimed", offeredHere: false,
+                     executor: here),
+                task("t-done", "audit", "Audit · argent", "done", offeredHere: false,
+                     executor: near),
+                task("t-gone", "review-own", "Review · #498", "cancelled", offeredHere: true),
+             ]] as [String: Any],
+            ["id": "gitlab.com/acme/platform/api", "path": "/Users/dev/api", "identity": "ilatka",
+             "hash": "17b0e3aa",
+             "members": [member(here, hours: 48, seen: 0)],
+             "tasks": [[String: Any]]()] as [String: Any],
+        ]
+        doc["runs"] = [
+            ["runId": "run-own", "taskId": "t-own", "pool": "github.com/software-mansion/argent",
+             "peer": here, "container": "dn-9f2c41d7-a3f91c07", "state": "running",
+             "startedAt": now - 1500],
+            ["runId": "run-theirs", "taskId": "t-theirs",
+             "pool": "github.com/software-mansion/argent", "peer": near,
+             "container": "dn-9f2c41d7-5be20d9a", "state": "preparing", "startedAt": now - 20],
+        ]
+        store.auditEntries = [
+            AuditEntry(at: at(90), source: "auto", action: NetworkAudit.claimed,
+                       detail: "Resolve · #508 - running on this machine"),
+            AuditEntry(at: at(1500), source: "auto", action: NetworkAudit.offer,
+                       detail: "Resolve · #508 - offered to github.com/software-mansion/argent"),
+            AuditEntry(at: at(2400), source: "auto", action: NetworkAudit.unavailable,
+                       detail: "Holding auto work - the Diplomacy Network did not take "
+                           + "Review · #512: \(DiplomacyNetwork.notAnswering)"),
+            AuditEntry(at: at(3 * 3600), source: "panel", action: NetworkAudit.start,
+                       detail: "Started the Diplomacy Network daemon (ok: true)"),
+        ] + store.auditEntries
+        store.networkState = snapshot(doc)
         return true
     }
 

@@ -42,6 +42,7 @@ struct SettingsView: View {
                     apiWatchSection
                     commsSection
                     allocatorSection
+                    networkSection
                     updateSection
                 }
                 .frame(width: MainRoot.columnWidth, alignment: .topLeading)
@@ -1145,6 +1146,16 @@ struct SettingsView: View {
     private static let allocatorDetail = AllocatorUI.summary + " Installs an MCP server, "
         + "a skill and an always-on rule. Reclaims a device when its agent dies or it sits "
         + "idle past the limits on the Devices screen."
+
+    // MARK: diplomacy network
+
+    private var networkSection: some View {
+        SettingsCard(symbol: NetworkText.symbol, title: "DIPLOMACY NETWORK", tint: .purple,
+                     pill: StatusPill(text: store.networkEnabled ? "on" : "off",
+                                      tint: store.networkEnabled ? .purple : .secondary)) {
+            NetworkSwitchRow()
+        }
+    }
 
     // MARK: applet update
 
