@@ -61,6 +61,13 @@ def _records() -> list[A.RunRecord]:
         A.RunRecord(run_id="untracked:405", dispatched_at=1786000004.0, pr_number=405,
                     source=A.SOURCE_AUTO, pid=4343,
                     tty="pts/9", untracked=True, released=True),
+        # A run the network carries. A side that dropped `network` would read it back
+        # as a local run whose terminal never ran its command.
+        A.RunRecord(run_id="1786000005-dddddddd", dispatched_at=1786000005.0,
+                    pr_number=512, pr_url="https://github.com/o/r/pull/512",
+                    kind="review", label="Auto · Review-req · #512 (@octocat)",
+                    source=A.SOURCE_AUTO, ledger_key="review:github.com/o/r#512@f00d",
+                    network="github.com/o/r#review:pr-512@octocat"),
     ]
 
 
@@ -111,7 +118,7 @@ def test_the_fixture_leaves_no_field_at_its_default():
         for key, value in r.to_json().items():
             if value not in (None, "", 0, 0.0, False):
                 populated.add(key)
-    missing = set(_records()[0].to_json()) - populated
+    missing = {key for r in _records() for key in r.to_json()} - populated
     assert not missing, f"never exercised by the fixture: {sorted(missing)}"
 
 

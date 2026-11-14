@@ -3608,6 +3608,7 @@ try await tasksSmoke()
 try await goalsSmoke()
 print("tasks assertions passed")
 try await gitlabSmoke()
+try networkSmoke()
 
 // ---- Golden prompts (cross-platform parity) ----
 // Every prompt mode both front-ends can assemble is compared byte-for-byte against a

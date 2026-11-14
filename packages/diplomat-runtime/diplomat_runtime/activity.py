@@ -106,6 +106,9 @@ _ACTION_GLYPH: dict[str, str] = {
     "comms-ping": "✉", "comms-review": "☑", "comms-fix": "⊙", "comms-bump": "↑",
     "comms-investigate": "⌕", "comms-error": "△", "comms-recovered": "✓",
     "comms-notice": "△", "comms-reply": "↩",
+    "network-offer": "↗", "network-claimed": "↘", "network-done": "✓",
+    "network-failed": "△", "network-withdraw": "↶", "network-unavailable": "△",
+    "network-join": "⊕", "network-leave": "⊖",
 }
 
 

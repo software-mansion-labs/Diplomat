@@ -53,15 +53,17 @@ def test_category_of_matches_swift_taxonomy() -> None:
         assert activity.category_of(action) == expected, action
 
 
-def test_taxonomy_has_eleven_categories_in_order() -> None:
+def test_taxonomy_has_twelve_categories_in_order() -> None:
     cats = activity.categories()
     ids = [c.id for c in cats]
     assert ids == [
         "review", "reply", "conflicts", "audit", "issues", "apiRestart",
-        "quota", "merge", "bans", "comms", "system",
+        "quota", "merge", "bans", "comms", "network", "system",
     ]
     comms = next(c for c in cats if c.id == "comms")
     assert (comms.title, comms.glyph, comms.color_hex) == ("Comms", "✉", "#007AFF")
+    net = next(c for c in cats if c.id == "network")
+    assert (net.title, net.glyph, net.color_hex) == ("Network", "⬡", "#30B0C7")
     # every category the mapping can produce is a real declared category
     assert activity.category_of("ban") in ids
 

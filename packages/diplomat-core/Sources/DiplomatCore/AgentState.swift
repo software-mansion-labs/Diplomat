@@ -288,6 +288,11 @@ public enum AgentState {
         /// not re-book it as untracked. It holds no bay and blocks no dispatch; it is
         /// kept for the stillness backstop and until its agent leaves.
         public var released: Bool
+        /// The task id of the offer that carries this run on the Diplomacy Network;
+        /// `nil` for a run this device spawned itself. Such a run has no pid, tty or
+        /// window here: whichever machine claimed the task runs it in a container, and
+        /// what became of it is the daemon's to say (`Evidence.network`).
+        public var network: String?
 
         public init(runID: String, dispatchedAt: TimeInterval, prNumber: Int? = nil,
                     prURL: String = "", kind: String = "", label: String = "",
@@ -295,7 +300,8 @@ public enum AgentState {
                     ledgerKey: String = "", pid: Int? = nil, tty: String = "",
                     quietDigest: String = "", quietSince: TimeInterval? = nil,
                     reapRefusedAt: TimeInterval? = nil,
-                    untracked: Bool = false, released: Bool = false) {
+                    untracked: Bool = false, released: Bool = false,
+                    network: String? = nil) {
             self.runID = runID
             self.dispatchedAt = dispatchedAt
             self.prNumber = prNumber
@@ -311,10 +317,42 @@ public enum AgentState {
             self.reapRefusedAt = reapRefusedAt
             self.untracked = untracked
             self.released = released
+            self.network = network
         }
 
         /// This run's `PRRef.itemKey`; nil for a run about no PR.
         public var item: String? { prNumber == nil ? nil : PRRef.itemKey(url: prURL) }
+
+        /// Whether this device spawned the run's agent itself, so that its process,
+        /// screen and window are evidence about it.
+        public var runsHere: Bool { network == nil }
+    }
+
+    /// What the daemon says became of one offered task (`NetworkEvidence.tasks`).
+    public struct NetworkTask: Equatable {
+        public static let pooled = "pooled"
+        public static let claimed = "claimed"
+        public static let done = "done"
+        public static let failed = "failed"
+        public static let cancelled = "cancelled"
+        /// The states in which the network is finished with a task.
+        public static let over: Set<String> = [done, failed, cancelled]
+
+        /// One of the constants above, as the snapshot spells it.
+        public var state: String
+        /// The key of the machine that claimed it; "" while nobody has.
+        public var executor: String
+        public var executorHere: Bool
+        /// Whether the executor reported the work done and well. Only read of `done`.
+        public var ok: Bool
+
+        public init(state: String, executor: String = "", executorHere: Bool = false,
+                    ok: Bool = false) {
+            self.state = state
+            self.executor = executor
+            self.executorHere = executorHere
+            self.ok = ok
+        }
     }
 
     /// Everything the outside world had to say this tick, each part able to say it had
@@ -349,6 +387,11 @@ public enum AgentState {
         /// publishes no limit this applet can read, which is an ordinary machine and not
         /// a broken probe.
         public var tokensLeft: Observation<Bool>
+        /// Task id → what the daemon's snapshot says of that offer. `.unavailable` when
+        /// the daemon did not answer, which is never the same as a snapshot naming no
+        /// offers: the first says nothing about any run, the second says every task it
+        /// does not name is gone.
+        public var network: Observation<[String: NetworkTask]>
 
         /// Defaults are `.unavailable` rather than empty, so a caller that forgets to
         /// wire a probe gets rows reading "unknown" instead of a machine that
@@ -360,7 +403,8 @@ public enum AgentState {
                     liveAgents: Observation<[String: String]> = .unavailable("not probed"),
                     sessions: Observation<[String: SessionState]> = .unavailable("not probed"),
                     activity: Observation<[String: TurnReport]> = .unavailable("not probed"),
-                    tokensLeft: Observation<Bool> = .unavailable("not probed")) {
+                    tokensLeft: Observation<Bool> = .unavailable("not probed"),
+                    network: Observation<[String: NetworkTask]> = .unavailable("not probed")) {
             self.processes = processes
             self.sentinels = sentinels
             self.tails = tails
@@ -369,6 +413,7 @@ public enum AgentState {
             self.sessions = sessions
             self.activity = activity
             self.tokensLeft = tokensLeft
+            self.network = network
         }
     }
 
@@ -625,6 +670,10 @@ public enum AgentState {
     ///
     /// The first rung skips an untracked run: a landed PR does not make its agent leave,
     /// so the next scan would only re-book it.
+    ///
+    /// A run the network carries (`RunRecord.network`) takes the first rung and then
+    /// `networkVerdict` alone: nothing below is evidence about an agent in a container
+    /// on whichever machine claimed it, and no clock here ends one.
     public static func resolveOne(_ record: RunRecord, evidence: Evidence,
                                   now: TimeInterval,
                                   deadline: TimeInterval? = nil) -> Resolution {
@@ -634,6 +683,11 @@ public enum AgentState {
         if !record.untracked, let merged = evidence.mergedPRs.value,
            let item = record.item, merged.contains(item), let pr = record.prNumber {
             return done(.merged, "PR #\(pr) is merged")
+        }
+        if let task = record.network {
+            let (state, detail) = networkVerdict(task: task, network: evidence.network,
+                                                 age: now - record.dispatchedAt)
+            return done(state, detail)
         }
         if let sentinels = evidence.sentinels.value, sentinels.contains(record.runID) {
             return done(.finished, "completion sentinel present")
@@ -676,7 +730,42 @@ public enum AgentState {
     /// nothing about the rung. Two spellings of the same set would drift, and the drift
     /// would be silent — a reading about the wrong accounts still reads true or false.
     public static func deadlineApplies(_ record: RunRecord) -> Bool {
-        !record.untracked && record.source == AgentDispatchGate.Source.auto.rawValue
+        !record.untracked && record.runsHere
+            && record.source == AgentDispatchGate.Source.auto.rawValue
+    }
+
+    /// The state of a run the network carries, and the one line that says where it is.
+    ///
+    /// The daemon's word on the offer is the whole of the evidence, so each state it
+    /// names is an answer and its silence is not one: a snapshot that could not be
+    /// read leaves the run `.unknown`. A task the snapshot does not name is given
+    /// `spawnGrace` to appear, the wait a spawn's pid file gets, since the offer and the
+    /// snapshot are written at different instants; past it the offer never reached the
+    /// pool.
+    public static func networkVerdict(task: String,
+                                      network: Observation<[String: NetworkTask]>,
+                                      age: TimeInterval) -> (RunState, String) {
+        guard let tasks = network.value else {
+            let why = network.reason.isEmpty ? "unavailable" : network.reason
+            return (.unknown, "the network could not be asked: \(why)")
+        }
+        guard let seen = tasks[task] else {
+            if age <= spawnGrace {
+                return (.starting, "offered \(secs(age)) ago, not in the pool yet")
+            }
+            return (.failed, "the network holds no such offer")
+        }
+        let place = seen.executorHere ? "this machine"
+            : seen.executor.isEmpty ? "the network" : String(seen.executor.prefix(8))
+        switch seen.state {
+        case NetworkTask.pooled: return (.starting, "in the pool")
+        case NetworkTask.claimed: return (.running, "running on \(place)")
+        case NetworkTask.done:
+            return seen.ok ? (.finished, "finished on \(place)") : (.failed, "failed on \(place)")
+        case NetworkTask.failed: return (.failed, "refused by the network")
+        case NetworkTask.cancelled: return (.failed, "withdrawn from the network")
+        default: return (.unknown, "the network reports \(seen.state)")
+        }
     }
 
     /// How long this run has been going, once that is long enough to call it over — nil
@@ -997,7 +1086,7 @@ public enum AgentState {
         let scan = liveAgents.value ?? [:]
         let held = Set(records.map(\.tty).filter { !$0.isEmpty })
         return records.map { r in
-            guard r.tty.isEmpty else { return r }
+            guard r.tty.isEmpty, r.runsHere else { return r }
             let found: String
             if let pid = r.pid, let proc = table[pid] {
                 found = proc.tty
@@ -1094,7 +1183,8 @@ public enum AgentState {
     /// edit made it a dispatch), its run ID carries its pid, and without one it is not
     /// released. Not a run a backstop ended, whose window is being closed. And only while
     /// the released record resolves to a live agent, or to one the stillness backstop
-    /// ends at once, so that its window is closed.
+    /// ends at once, so that its window is closed. And never a run the network carried:
+    /// an agent the scan sees on its PR was not that run's.
     public static func releaseEnded(_ records: [RunRecord], states: [String: Resolution],
                                     evidence: Evidence, now: TimeInterval,
                                     deadline: TimeInterval? = nil) -> [(RunRecord, Resolution)] {
@@ -1104,7 +1194,8 @@ public enum AgentState {
         var taken = Set(records.map(\.runID))
         var out: [(RunRecord, Resolution)] = []
         for r in records {
-            guard let v = states[r.runID], ended.contains(v.state), !v.wedged, !v.expired,
+            guard r.runsHere,
+                  let v = states[r.runID], ended.contains(v.state), !v.wedged, !v.expired,
                   let item = r.item, live[item] != nil,
                   r.pid != nil || count[item] == 1 else { continue }
             var runID = "untracked:\(item)"
@@ -1148,10 +1239,12 @@ public enum AgentState {
     ///
     /// Counted by who triggered a run: a panel click is the operator's own act and
     /// spends none of the automatic budget. A released agent spends none: its task ended.
+    /// Nor does a run the network carries: the bay it takes is on whichever machine
+    /// claimed it, and the daemon counts that one (`NetworkAdmit`).
     public static func capLoad(records: [RunRecord],
                                states: [String: Resolution]) -> Set<String> {
         Set(records.filter { r in
-            guard r.source == AgentDispatchGate.Source.auto.rawValue,
+            guard r.source == AgentDispatchGate.Source.auto.rawValue, r.runsHere,
                   !r.released, let s = states[r.runID] else { return false }
             return s.occupying
         }.map(\.runID))
@@ -1239,6 +1332,30 @@ public enum AgentState {
         }
     }
 
+    /// Whether the network is still carrying this run's task, as far as the evidence
+    /// says. An unread snapshot counts as still carrying it: a withdrawal the daemon has
+    /// no use for costs one refused request, and a task left in a pool is an agent
+    /// started on work nobody wants.
+    private static func outstanding(_ record: RunRecord, _ evidence: Evidence) -> Bool {
+        guard let task = record.network else { return false }
+        guard let tasks = evidence.network.value else { return true }
+        return tasks[task].map { !NetworkTask.over.contains($0.state) } ?? false
+    }
+
+    /// The runs whose offer is withdrawn: their PR merged while the network still
+    /// carried the task. Each is also `retirable`, and is withdrawn before it is
+    /// forgotten.
+    public static func withdrawable(records: [RunRecord], states: [String: Resolution],
+                                    evidence: Evidence) -> [RunRecord] {
+        records.filter { states[$0.runID]?.state == .merged && outstanding($0, evidence) }
+    }
+
+    /// The task to withdraw when this run is forgotten on the operator's word, or `nil`
+    /// when the network holds nothing of it.
+    public static func withdrawOnForget(_ record: RunRecord, evidence: Evidence) -> String? {
+        outstanding(record, evidence) ? record.network : nil
+    }
+
     /// Bays of the cap with nothing in them. Clamped, because a lowered cap and
     /// untracked agents can both put more agents on the box than the cap allows.
     public static func freeSlots(limit: Int, occupied: Int) -> Int {
@@ -1264,6 +1381,8 @@ public enum AgentState {
         /// Of those, the automatic ones whose runner reported them done — whose window
         /// is closed as they retire. See `closeOnRetire(records:states:)`.
         public var closeOnRetire: [RunRecord]
+        /// The runs whose offer is withdrawn. See `withdrawable(records:states:evidence:)`.
+        public var withdrawable: [RunRecord]
         public var freeSlots: Int
         /// The instant every verdict below was resolved against.
         public var now: TimeInterval = 0
@@ -1303,6 +1422,8 @@ public enum AgentState {
                     capLoad: load, retirable: retirable(records: recs, states: states),
                     reapable: reapable(records: recs, states: states),
                     closeOnRetire: closeOnRetire(records: recs, states: states),
+                    withdrawable: withdrawable(records: recs, states: states,
+                                               evidence: evidence),
                     freeSlots: freeSlots(limit: limit, occupied: load.count), now: now)
     }
 }

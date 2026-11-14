@@ -1,0 +1,503 @@
+"""Diplomat's side of the Diplomacy Network daemon (``packages/diplomacy-network``):
+what a job is offered as, what this machine admits, and what the daemon's snapshot
+says.
+
+Swift twin: ``DiplomatCore/Network.swift``, decision for decision.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass, field
+from typing import Any
+
+from . import jsoninput
+from .agentstate import (SOURCE_PANEL, NetworkTask, Observation, _flag, _integer,
+                         _number, _text)
+from .prref import GITHUB, LocalRepo
+
+# MARK: - Settings
+
+#: The keys of ``~/.diplomat/config.json`` the daemon reads.
+ENABLED_KEY = "networkEnabled"
+REQUIRED_MINIMUM_H_KEY = "networkRequiredMinimumH"
+MAXIMUM_ACCEPTED_H_KEY = "networkMaximumAcceptedH"
+
+#: The fewest hours a task may ask for or a member may accept, and the default of both.
+#: The daemon's ``HOURS_FLOOR``.
+HOURS_FLOOR = 12
+
+
+def hours(stored: Any) -> int:
+    """A stored hours value as the daemon reads it: a whole number at or above the
+    floor is itself, and anything else is the floor."""
+    v = _number(stored)
+    if v is None or v != round(v) or v < HOURS_FLOOR or v >= 9.0e18:
+        return HOURS_FLOOR
+    return int(v)
+
+
+# MARK: - Routes
+
+#: The daemon's local-socket routes, by the name a daemon client posts to.
+ROUTE_HEALTH = "health"
+ROUTE_STATE = "state"
+ROUTE_POOLS = "pools"
+ROUTE_ADMIT = "admit"
+ROUTE_OFFER = "offer"
+ROUTE_WITHDRAW = "withdraw"
+ROUTE_INVITE = "invite"
+ROUTE_JOIN = "join"
+ROUTE_LEAVE = "leave"
+ROUTE_STOP_RUN = "stop-run"
+
+#: Why an offer is withdrawn: its PR merged, or the operator forgot the run.
+WITHDRAW_MERGED = "merged"
+WITHDRAW_FORGOTTEN = "forgotten"
+
+
+def withdraw_body(task: str, reason: str) -> dict:
+    return {"taskId": task, "reason": reason}
+
+
+def invite_body(pool: str, ttl_secs: int | None = None) -> dict:
+    """``ttl_secs`` absent leaves the invite's life to the daemon."""
+    return {"pool": pool} if ttl_secs is None else {"pool": pool, "ttlSecs": ttl_secs}
+
+
+def join_body(invite: str) -> dict:
+    return {"invite": invite}
+
+
+def leave_body(pool: str) -> dict:
+    return {"pool": pool}
+
+
+def stop_run_body(run: str) -> dict:
+    return {"runId": run}
+
+
+#: The activity verbs of the ``network`` audit category.
+AUDIT_OFFER = "network-offer"
+AUDIT_CLAIMED = "network-claimed"
+AUDIT_DONE = "network-done"
+AUDIT_FAILED = "network-failed"
+AUDIT_WITHDRAW = "network-withdraw"
+AUDIT_UNAVAILABLE = "network-unavailable"
+AUDIT_JOIN = "network-join"
+AUDIT_INVITE = "network-invite"
+AUDIT_LEAVE = "network-leave"
+AUDIT_START = "network-start"
+AUDIT_STOP = "network-stop"
+
+# MARK: - What to offer
+
+KIND_REVIEW = "review"
+KIND_REVIEW_OWN = "review-own"
+KIND_CONFLICTS = "conflicts"
+KIND_ISSUES = "issues"
+KIND_AUDIT = "audit"
+KIND_INVESTIGATE = "investigate"
+
+OPTION_VERDICT = "verdict"
+OPTION_MARK_READY = "markReady"
+OPTION_NO_PRS = "noPRs"
+OPTION_READ_ONLY = "readOnly"
+
+
+@dataclass(frozen=True)
+class Offer:
+    """The body of ``POST /offer``."""
+
+    pool: str
+    kind: str
+    #: The kind's own option alone; empty for a kind that has none.
+    options: dict[str, bool]
+    item: str
+    title: str
+    prompt: str
+    #: Whether this machine claims it at once, whatever it admits.
+    now: bool
+
+    @property
+    def body(self) -> dict:
+        body = {"pool": self.pool, "kind": self.kind, "item": self.item,
+                "title": self.title, "prompt": self.prompt, "now": self.now}
+        if self.options:
+            body["options"] = dict(self.options)
+        return body
+
+
+def offer_for(verb: str, own_pr: bool, number: int | None, repo_key: str, label: str,
+              prompt: str, source: str, forced: bool = False, *, verdict: bool = False,
+              mark_ready: bool = False, no_prs: bool = False,
+              read_only: bool = False) -> Offer | str:
+    """The offer for one job, from the audit verb it is logged under; or, as a string,
+    why the job cannot be offered.
+
+    The four option inputs are what the job's own prompt was built to allow: whether a
+    review may approve or request changes, whether work on the operator's own PR may
+    mark it ready, whether an issue fix opens no PRs, and whether an audit only reads.
+    Each reaches the offer under the one kind it belongs to.
+
+    A job the operator started, or forced past a hold, is theirs to run at once
+    (``now``).
+    """
+    kind = kind_for(verb, own_pr)
+    if kind is None:
+        return f"the network runs no {verb} jobs"
+    pool = pool_for(repo_key)
+    if pool is None:
+        return "no repository to offer it into"
+    options = {KIND_REVIEW: {OPTION_VERDICT: verdict},
+               KIND_REVIEW_OWN: {OPTION_MARK_READY: mark_ready},
+               KIND_ISSUES: {OPTION_NO_PRS: no_prs},
+               KIND_AUDIT: {OPTION_READ_ONLY: read_only}}.get(kind, {})
+    item = item_for(kind, number, prompt)
+    return Offer(pool=pool, kind=kind, options=options, item=item,
+                 title=label or f"{kind} {item}", prompt=prompt,
+                 now=source == SOURCE_PANEL or forced)
+
+
+def kind_for(verb: str, own_pr: bool) -> str | None:
+    """The daemon's kind for an audit verb, or ``None`` for a verb it has none for. A
+    review of the operator's own PR is its own kind, and a reply to reviews is always
+    one."""
+    if verb in ("review-req", "review", "comms-review"):
+        return KIND_REVIEW_OWN if own_pr else KIND_REVIEW
+    return {"review-reply": KIND_REVIEW_OWN, "conflicts": KIND_CONFLICTS,
+            "issues": KIND_ISSUES, "comms-fix": KIND_ISSUES, "audit": KIND_AUDIT,
+            "investigate": KIND_INVESTIGATE,
+            "comms-investigate": KIND_INVESTIGATE}.get(verb)
+
+
+def pool_for(repo_key: str) -> str | None:
+    """The pool a repository key (:attr:`prref.LocalRepo.key`) names: the forge's host
+    and the project path, lowercase. ``None`` for a key that names no repository."""
+    key = repo_key.lower()
+    parts = key.split("/")
+    if len(parts) < 2 or not all(parts):
+        return None
+    return f"{GITHUB}/{key}" if len(parts) == 2 else key
+
+
+def item_for(kind: str, number: int | None, prompt: str) -> str:
+    """What the task is pinned to: the pull request or issue the kind works on, else a
+    name for this prompt alone."""
+    if number is not None:
+        if kind == KIND_ISSUES:
+            return f"issue-{number}"
+        if kind in (KIND_REVIEW, KIND_REVIEW_OWN, KIND_CONFLICTS):
+            return f"pr-{number}"
+    return "job-" + hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+
+
+def linked_pools(roots: Iterable[LocalRepo], identities: Mapping[str, str]) -> list[dict]:
+    """The repositories this machine links to pools, one per root, the first root
+    winning an id. ``identities`` maps a forge host to the login work is done as there;
+    a root on a host with none is left out, a task id being built on that login."""
+    out: dict[str, dict] = {}
+    for root in roots:
+        identity = identities.get(root.host, "").strip().lower()
+        pool = pool_for(root.key)
+        if not identity or pool is None or pool in out:
+            continue
+        out[pool] = {"id": pool, "path": root.path,
+                     "forge": "gitlab" if root.is_gitlab else "github",
+                     "identity": identity}
+    return list(out.values())
+
+
+def pools_body(pools: list[dict]) -> dict:
+    """The body of ``POST /pools``."""
+    return {"pools": pools}
+
+
+# MARK: - Admit
+
+ADMIT_DISK = "disk"
+ADMIT_BUDGET = "budget"
+ADMIT_PAUSED = "paused"
+
+#: The states of a snapshot run that hold a bay.
+LIVE_RUN_STATES = frozenset({"preparing", "running"})
+
+
+@dataclass(frozen=True)
+class Admit:
+    """How many more tasks this machine takes now: the body of ``POST /admit``."""
+
+    slots: int
+    #: Why it is zero when something other than a full cap makes it so; else "".
+    reason: str = ""
+
+    @property
+    def body(self) -> dict:
+        return ({"slots": self.slots, "reason": self.reason} if self.reason
+                else {"slots": self.slots})
+
+
+def admit(limit: int, running: int, low_disk: bool, affordable: bool,
+          auto_run: bool) -> Admit:
+    """The free bays of the cap, or none while the disk is low, the budget is spent or
+    the operator has automatic work off - the first of those that holds is the reason
+    given."""
+    if low_disk:
+        return Admit(0, ADMIT_DISK)
+    if not affordable:
+        return Admit(0, ADMIT_BUDGET)
+    if not auto_run:
+        return Admit(0, ADMIT_PAUSED)
+    return Admit(max(0, limit - running))
+
+
+def running(snapshot: "Snapshot | None") -> int:
+    """The runs this machine is executing for the network."""
+    return sum(r.state in LIVE_RUN_STATES for r in snapshot.runs) if snapshot else 0
+
+
+# MARK: - The snapshot
+
+
+@dataclass(frozen=True)
+class Service:
+    state: str = ""
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class Docker:
+    state: str = ""
+    image: str = ""
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class AdmitState:
+    slots: int = 0
+    at: float | None = None
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class Member:
+    pk: str
+    is_self: bool = False
+    max_accepted_h: int | None = None
+    last_seen: float | None = None
+    reachable: bool = False
+
+
+@dataclass(frozen=True)
+class PoolTask:
+    task_id: str
+    kind: str = ""
+    item: str = ""
+    title: str = ""
+    identity: str = ""
+    hours: int | None = None
+    #: ``available``, ``claimed``, ``done`` or ``cancelled``.
+    state: str = ""
+    offered_by: tuple[str, ...] = ()
+    offered_here: bool = False
+    executor: str = ""
+    executor_here: bool = False
+    claimed_at: float | None = None
+    lease_until: float | None = None
+    deadline: float | None = None
+
+
+@dataclass(frozen=True)
+class Pool:
+    id: str
+    path: str = ""
+    identity: str = ""
+    hash: str = ""
+    members: tuple[Member, ...] = ()
+    tasks: tuple[PoolTask, ...] = ()
+
+
+@dataclass(frozen=True)
+class Run:
+    run_id: str
+    task_id: str = ""
+    pool: str = ""
+    peer: str = ""
+    container: str = ""
+    #: ``preparing``, ``running``, ``finished``, ``failed`` or ``stopped``.
+    state: str = ""
+    started_at: float | None = None
+    ended_at: float | None = None
+    exit: int | None = None
+    log: str = ""
+
+
+@dataclass(frozen=True)
+class Outcome:
+    ok: bool = False
+    summary: str = ""
+    usd: float | None = None
+    tokens: float | None = None
+    runner: str = ""
+    model: str = ""
+
+
+@dataclass(frozen=True)
+class OfferState:
+    task_id: str
+    #: ``pooled``, ``claimed``, ``done``, ``failed`` or ``cancelled``.
+    state: str = ""
+    executor: str = ""
+    attempt: int = 0
+    requests: int = 0
+    refused: int = 0
+    outcome: Outcome | None = None
+    ended_at: float | None = None
+
+
+def _object(raw: Any) -> dict:
+    return raw if isinstance(raw, dict) else {}
+
+
+def _rows(raw: Any) -> list[dict]:
+    return [r for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
+
+
+def _service(raw: Any) -> Service:
+    s = _object(raw)
+    return Service(_text(s.get("state")), _text(s.get("detail")))
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """The daemon's ``GET /state``, read without ever failing: a member that is absent
+    or of the wrong type is its default, a row without its identity is dropped, and
+    anything else in the document is ignored."""
+
+    updated_at: float | None = None
+    pid: int | None = None
+    started_at: float | None = None
+    pk: str = ""
+    onion: str = ""
+    transport: Service = field(default_factory=Service)
+    docker: Docker = field(default_factory=Docker)
+    model: Service = field(default_factory=Service)
+    admit: AdmitState = field(default_factory=AdmitState)
+    pools: tuple[Pool, ...] = ()
+    runs: tuple[Run, ...] = ()
+    #: ``None`` when the document has no ``offers`` list, which says nothing about any
+    #: offer; an empty tuple says there are none.
+    offers: tuple[OfferState, ...] | None = None
+
+    @staticmethod
+    def parse(text: str | bytes | None) -> "Snapshot | None":
+        """The daemon's answer, or ``None`` when there was none or it is not a JSON
+        object."""
+        if text is None:
+            return None
+        try:
+            if isinstance(text, bytes):
+                text = text.decode("utf-8")
+            data = jsoninput.loads(text)
+        except ValueError:
+            return None
+        return Snapshot.from_json(data) if isinstance(data, dict) else None
+
+    @staticmethod
+    def from_json(d: dict) -> "Snapshot":
+        daemon, identity = _object(d.get("daemon")), _object(d.get("identity"))
+        dock, adm = _object(d.get("docker")), _object(d.get("admit"))
+        offers = d.get("offers")
+        return Snapshot(
+            updated_at=_number(d.get("updatedAt")),
+            pid=_integer(daemon.get("pid")),
+            started_at=_number(daemon.get("startedAt")),
+            pk=_text(identity.get("pk")),
+            onion=_text(identity.get("onion")),
+            transport=_service(d.get("transport")),
+            docker=Docker(_text(dock.get("state")), _text(dock.get("image")),
+                          _text(dock.get("detail"))),
+            model=_service(d.get("model")),
+            admit=AdmitState(_integer(adm.get("slots")) or 0, _number(adm.get("at")),
+                             _text(adm.get("reason"))),
+            pools=tuple(_pool(p) for p in _rows(d.get("pools")) if _text(p.get("id"))),
+            runs=tuple(
+                Run(run_id=r["runId"], task_id=_text(r.get("taskId")),
+                    pool=_text(r.get("pool")), peer=_text(r.get("peer")),
+                    container=_text(r.get("container")), state=_text(r.get("state")),
+                    started_at=_number(r.get("startedAt")),
+                    ended_at=_number(r.get("endedAt")), exit=_integer(r.get("exit")),
+                    log=_text(r.get("log")))
+                for r in _rows(d.get("runs")) if _text(r.get("runId"))),
+            offers=(tuple(_offer(o) for o in _rows(offers) if _text(o.get("taskId")))
+                    if isinstance(offers, list) else None),
+        )
+
+
+def _pool(p: dict) -> Pool:
+    return Pool(
+        id=p["id"], path=_text(p.get("path")), identity=_text(p.get("identity")),
+        hash=_text(p.get("hash")),
+        members=tuple(
+            Member(pk=m["pk"], is_self=_flag(m.get("self")),
+                   max_accepted_h=_integer(m.get("maxAcceptedH")),
+                   last_seen=_number(m.get("lastSeen")),
+                   reachable=_flag(m.get("reachable")))
+            for m in _rows(p.get("members")) if _text(m.get("pk"))),
+        tasks=tuple(
+            PoolTask(task_id=t["taskId"], kind=_text(t.get("kind")),
+                     item=_text(t.get("item")), title=_text(t.get("title")),
+                     identity=_text(t.get("identity")), hours=_integer(t.get("hours")),
+                     state=_text(t.get("state")),
+                     offered_by=tuple(
+                         h for h in (t.get("offeredBy")
+                                     if isinstance(t.get("offeredBy"), list) else [])
+                         if isinstance(h, str)),
+                     offered_here=_flag(t.get("offeredHere")),
+                     executor=_text(t.get("executor")),
+                     executor_here=_flag(t.get("executorHere")),
+                     claimed_at=_number(t.get("claimedAt")),
+                     lease_until=_number(t.get("leaseUntil")),
+                     deadline=_number(t.get("deadline")))
+            for t in _rows(p.get("tasks")) if _text(t.get("taskId"))))
+
+
+def _offer(o: dict) -> OfferState:
+    out = o.get("outcome")
+    return OfferState(
+        task_id=o["taskId"], state=_text(o.get("state")),
+        executor=_text(o.get("executor")), attempt=_integer(o.get("attempt")) or 0,
+        requests=_integer(o.get("requests")) or 0,
+        refused=_integer(o.get("refused")) or 0,
+        outcome=Outcome(ok=_flag(out.get("ok")), summary=_text(out.get("summary")),
+                        usd=_number(out.get("usd")), tokens=_number(out.get("tokens")),
+                        runner=_text(out.get("runner")), model=_text(out.get("model")))
+        if isinstance(out, dict) else None,
+        ended_at=_number(o.get("endedAt")))
+
+
+UNANSWERED = "the daemon did not answer"
+NO_OFFERS = "the snapshot lists no offers"
+
+
+def tasks(snapshot: Snapshot | None) -> Observation:
+    """What a snapshot says of this machine's own offers, as the agent-state resolver
+    reads it (:attr:`agentstate.Evidence.network`): task id → its offer.
+
+    A task runs here when one of this machine's live runs is for it, when its pool
+    lists this machine as its executor, or when its executor is this machine's own
+    key."""
+    if snapshot is None:
+        return Observation.unavailable(UNANSWERED)
+    if snapshot.offers is None:
+        return Observation.unavailable(NO_OFFERS)
+    here = {r.task_id for r in snapshot.runs if r.state in LIVE_RUN_STATES}
+    here |= {t.task_id for p in snapshot.pools for t in p.tasks if t.executor_here}
+    return Observation.present({
+        o.task_id: NetworkTask(
+            state=o.state, executor=o.executor,
+            executor_here=(bool(o.executor) and o.executor == snapshot.pk)
+            or o.task_id in here,
+            ok=o.outcome.ok if o.outcome else False)
+        for o in snapshot.offers})

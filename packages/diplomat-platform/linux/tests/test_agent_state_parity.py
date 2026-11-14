@@ -25,12 +25,16 @@ import subprocess
 
 import pytest
 
+from dataclasses import replace
+
 from diplomat_runtime import agentstate as A
+from diplomat_runtime import network as N
 
 # The scenario table itself, so the two languages are pinned against exactly the
 # cases the Python side already asserts rather than a second, drifting copy.
 from test_agent_state import (
-    AT_PROMPT, CASES, PAST_DEADLINE, RELEASED_UNSEEN, T0, WORKING, ev, proc, rec,
+    AT_PROMPT, CASES, NO_DAEMON, PAST_DEADLINE, PEER, RELEASED_UNSEEN, T0, TASK, WORKING,
+    ev, net, offer, proc, rec,
 )
 
 CORE_BIN = os.environ.get("DIPLOMAT_CORE_BIN")
@@ -44,14 +48,19 @@ pytestmark = pytest.mark.skipif(
 LIMIT = 2
 
 
+#: No ``networkSnapshot`` in the payload at all, as against a daemon that gave none.
+_NO_SNAPSHOT = object()
+
+
 def _payload(records, evidence, now=T0, limit=LIMIT,
-             deadline=A.RUN_DEADLINE) -> dict:
+             deadline=A.RUN_DEADLINE, snapshot=_NO_SNAPSHOT) -> dict:
     return {
         "now": now,
         "limit": limit,
         "deadline": deadline,
         "records": [r.to_json() for r in records],
         "evidence": evidence.to_json(),
+        **({} if snapshot is _NO_SNAPSHOT else {"networkSnapshot": snapshot}),
     }
 
 
@@ -64,8 +73,48 @@ def _swift(payload: dict) -> dict:
     return json.loads(proc_.stdout)
 
 
+def _dump(s: N.Snapshot) -> dict:
+    """The snapshot as this side read it, member for member, in the shape the CLI
+    prints its own reading in."""
+    return {
+        "updatedAt": s.updated_at, "pid": s.pid, "startedAt": s.started_at,
+        "pk": s.pk, "onion": s.onion,
+        "transport": {"state": s.transport.state, "detail": s.transport.detail},
+        "model": {"state": s.model.state, "detail": s.model.detail},
+        "docker": {"state": s.docker.state, "image": s.docker.image,
+                   "detail": s.docker.detail},
+        "admit": {"slots": s.admit.slots, "at": s.admit.at, "reason": s.admit.reason},
+        "pools": [{
+            "id": p.id, "path": p.path, "identity": p.identity, "hash": p.hash,
+            "members": [{"pk": m.pk, "self": m.is_self, "maxAcceptedH": m.max_accepted_h,
+                         "lastSeen": m.last_seen, "reachable": m.reachable}
+                        for m in p.members],
+            "tasks": [{"taskId": t.task_id, "kind": t.kind, "item": t.item,
+                       "title": t.title, "identity": t.identity, "hours": t.hours,
+                       "state": t.state, "offeredBy": list(t.offered_by),
+                       "offeredHere": t.offered_here, "executor": t.executor,
+                       "executorHere": t.executor_here, "claimedAt": t.claimed_at,
+                       "leaseUntil": t.lease_until, "deadline": t.deadline}
+                      for t in p.tasks]} for p in s.pools],
+        "runs": [{"runId": r.run_id, "taskId": r.task_id, "pool": r.pool, "peer": r.peer,
+                  "container": r.container, "state": r.state, "startedAt": r.started_at,
+                  "endedAt": r.ended_at, "exit": r.exit, "log": r.log} for r in s.runs],
+        "offers": None if s.offers is None else [{
+            "taskId": o.task_id, "state": o.state, "executor": o.executor,
+            "attempt": o.attempt, "requests": o.requests, "refused": o.refused,
+            "outcome": None if o.outcome is None else {
+                "ok": o.outcome.ok, "summary": o.outcome.summary, "usd": o.outcome.usd,
+                "tokens": o.outcome.tokens, "runner": o.outcome.runner,
+                "model": o.outcome.model},
+            "endedAt": o.ended_at} for o in s.offers],
+    }
+
+
 def _python(records, evidence, now=T0, limit=LIMIT,
-            deadline=A.RUN_DEADLINE) -> dict:
+            deadline=A.RUN_DEADLINE, snapshot=_NO_SNAPSHOT) -> dict:
+    parsed = N.Snapshot.from_json(snapshot) if isinstance(snapshot, dict) else None
+    if snapshot is not _NO_SNAPSHOT:
+        evidence = replace(evidence, network=N.tasks(parsed))
     t = A.tick(records, evidence, now, limit, deadline)
 
     def verdict(s: A.Resolution) -> dict:
@@ -79,6 +128,14 @@ def _python(records, evidence, now=T0, limit=LIMIT,
         "retirable": sorted(r.run_id for r in t.retirable),
         "reapable": sorted(r.run_id for r in t.reapable),
         "closeOnRetire": sorted(r.run_id for r in t.close_on_retire),
+        "withdrawable": sorted(r.run_id for r in t.withdrawable),
+        "withdrawOnForget": sorted(r.run_id for r in t.records
+                                   if A.withdraw_on_forget(r, evidence) is not None),
+        "network": ({"present": {task: seen.to_json()
+                                 for task, seen in evidence.network.value.items()}}
+                    if evidence.network.ok else {"unavailable": evidence.network.reason}),
+        "networkSnapshot": None if parsed is None else _dump(parsed),
+        "networkRunning": N.running(parsed),
         "freeSlots": t.free_slots,
         "constants": {"runDeadline": A.RUN_DEADLINE,
                       "quietTimeout": A.QUIET_TIMEOUT,
@@ -95,7 +152,7 @@ def _python(records, evidence, now=T0, limit=LIMIT,
         # retrying a window it cannot close, and would go on retiring the run. pid, tty,
         # dispatchedAt and source are what a released record inherits from the run it
         # replaces, and the pid is its identity from then on.
-        "records": [{"runId": r.run_id,
+        "records": [{"runId": r.run_id, "network": r.network,
                      "untracked": r.untracked, "released": r.released,
                      "source": r.source,
                      "pid": r.pid, "tty": r.tty, "dispatchedAt": r.dispatched_at,
@@ -117,7 +174,8 @@ def _python_decoding(payload: dict) -> dict:
     return _python([A.RunRecord.from_json(r) for r in payload["records"]],
                    A.Evidence.from_json(payload["evidence"]),
                    now=payload["now"], limit=payload["limit"],
-                   deadline=payload["deadline"])
+                   deadline=payload["deadline"],
+                   snapshot=payload.get("networkSnapshot", _NO_SNAPSHOT))
 
 
 #: Values a hand-written payload puts where a JSON boolean belongs. `1` and `1.0` are
@@ -457,3 +515,250 @@ def test_a_case_the_two_disagree_on_would_actually_fail(mixed_results):
     tampered = json.loads(json.dumps(python))
     tampered["rows"][0]["reason"] += " (tampered)"
     assert swift != tampered
+
+
+# MARK: - The network
+#
+# The scenario table above already runs every network verdict through both resolvers.
+# What is left is what a single hand-built observation cannot reach: the daemon's
+# snapshot as each side DECODES it, the evidence each builds from it, and the
+# projections over a book that holds local and network runs together.
+
+#: A second and third task, beside :data:`TASK`.
+ISSUE_TASK = "github.com/o/r#issues:issue-9@octocat"
+AUDIT_TASK = "github.com/o/r#audit:job-0b77ab9a731995c3@octocat"
+POOLED_TASK = "github.com/o/r#conflicts:pr-5@octocat"
+#: This machine's own key in :func:`_snapshot`.
+SELF = "aaaabbbbccccdddd"
+
+
+def _snapshot() -> dict:
+    """The README's snapshot with every member populated: one pool, a live run for
+    :data:`TASK`, and an offer here by each of the three roads plus one in the pool."""
+    return {
+        "updatedAt": 1794000300, "daemon": {"pid": 4321, "startedAt": 1794000000},
+        "identity": {"pk": SELF, "onion": "abc.onion"},
+        "transport": {"state": "ready", "detail": ""},
+        "docker": {"state": "building", "image": "dn:1", "detail": "layer 3"},
+        "model": {"state": "missing", "detail": "no credential"},
+        "admit": {"slots": 2, "at": 1794000290, "reason": ""},
+        "pools": [{
+            "id": "github.com/o/r", "path": "/w/r", "identity": "octocat", "hash": "h1",
+            "members": [
+                {"pk": SELF, "self": True, "maxAcceptedH": 24, "lastSeen": 1794000299,
+                 "reachable": True},
+                {"pk": PEER, "self": False, "maxAcceptedH": 12, "lastSeen": 1794000200,
+                 "reachable": False}],
+            "tasks": [{
+                "taskId": ISSUE_TASK, "kind": "issues", "item": "issue-9",
+                "title": "Fix #9", "identity": "octocat", "hours": 12, "state": "claimed",
+                "offeredBy": [SELF], "offeredHere": True, "executor": SELF,
+                "executorHere": True, "claimedAt": 1794000100, "leaseUntil": 1794007300,
+                "deadline": 1794043300}]}],
+        "runs": [
+            {"runId": "run-1", "taskId": TASK, "pool": "github.com/o/r", "peer": PEER,
+             "container": "dn-h1-p1", "state": "running", "startedAt": 1794000150,
+             "endedAt": 0, "exit": 0, "log": "/l/1"},
+            {"runId": "run-0", "taskId": AUDIT_TASK, "pool": "github.com/o/r",
+             "peer": PEER, "container": "dn-h1-p1", "state": "finished",
+             "startedAt": 1794000000, "endedAt": 1794000100, "exit": 0, "log": "/l/0"}],
+        "offers": [
+            {"taskId": TASK, "state": "claimed", "executor": PEER, "attempt": 1,
+             "requests": 4, "refused": 1},
+            {"taskId": ISSUE_TASK, "state": "claimed", "executor": "9999888877776666",
+             "attempt": 2, "requests": 0, "refused": 0},
+            {"taskId": AUDIT_TASK, "state": "done", "executor": SELF, "attempt": 1,
+             "requests": 9, "refused": 0,
+             "outcome": {"ok": True, "summary": "clean", "usd": 0.42, "tokens": 12345,
+                         "runner": "claude", "model": "opus"}, "endedAt": 1794000100},
+            {"taskId": POOLED_TASK, "state": "pooled", "executor": "", "attempt": 1,
+             "requests": 0, "refused": 0}],
+    }
+
+
+def _networked():
+    """A book of local and network runs together, under :func:`_snapshot`: a network
+    run per verdict the snapshot can give, one whose PR merged while pooled, one the
+    snapshot never held, and a local run beside them holding the only bay."""
+    records = [
+        rec(run_id="local", pid=1, dispatched_at=T0 - 300, pr_number=301),
+        net(run_id="claimed-here", dispatched_at=T0 - 400),
+        net(run_id="claimed-by-pool", dispatched_at=T0 - 500, pr_number=9,
+            network=ISSUE_TASK),
+        net(run_id="done", dispatched_at=T0 - 600, pr_number=None, network=AUDIT_TASK),
+        net(run_id="pooled", dispatched_at=T0 - 700, pr_number=5, network=POOLED_TASK,
+            source=A.SOURCE_PANEL),
+        net(run_id="merged-while-pooled", dispatched_at=T0 - 800, pr_number=305,
+            network=POOLED_TASK),
+        net(run_id="never-held", dispatched_at=T0 - 900, pr_number=306,
+            network="github.com/o/r#review:pr-306@octocat"),
+        net(run_id="just-offered", dispatched_at=T0 - 3, pr_number=307,
+            network="github.com/o/r#review:pr-307@octocat"),
+    ]
+    evidence = ev(processes={1: proc(elapsed=300)}, tails={"pts/3": WORKING},
+                  merged={305}, live_agents={337: "pts/9", 404: "pts/8"})
+    return records, evidence
+
+
+@pytest.fixture(scope="module")
+def networked_results():
+    records, evidence = _networked()
+    return (_swift(_payload(records, evidence, snapshot=_snapshot())),
+            _python(records, evidence, snapshot=_snapshot()))
+
+
+def test_a_book_of_local_and_network_runs_agrees(networked_results):
+    swift, python = networked_results
+    assert swift == python
+
+
+def test_the_network_fixture_reaches_what_it_claims_to(networked_results):
+    """Anti-vacuity: an agreement over a fixture that decoded to nothing is no
+    agreement."""
+    _swift_out, python = networked_results
+    assert {run: v["reason"] for run, v in python["states"].items()} == {
+        "local": "pid 1 alive; working",
+        "claimed-here": "running on this machine",
+        "claimed-by-pool": "running on this machine",
+        "done": "finished on this machine",
+        "pooled": "in the pool",
+        "merged-while-pooled": "PR #305 is merged",
+        "never-held": "the network holds no such offer",
+        "just-offered": "offered 3s ago, not in the pool yet",
+        "untracked:o/r#404": "found in process table; no screen for tty pts/8",
+    }
+    assert python["capLoad"] == ["local", "untracked:o/r#404"]
+    assert python["withdrawable"] == ["merged-while-pooled"]
+    assert python["withdrawOnForget"] == [
+        "claimed-by-pool", "claimed-here", "merged-while-pooled", "pooled"]
+    assert python["retirable"] == ["done", "merged-while-pooled", "never-held"]
+    assert (python["reapable"], python["closeOnRetire"]) == ([], [])
+    assert python["inFlight"] == {
+        "o/r#301": True, "o/r#337": True, "o/r#9": True, "o/r#5": True,
+        "o/r#305": False, "o/r#306": False, "o/r#307": True, "o/r#404": True}
+    assert python["networkRunning"] == 1
+    assert python["networkSnapshot"] == {
+        **{k: v for k, v in _snapshot().items()
+           if k not in ("daemon", "identity", "offers")},
+        "pid": 4321, "startedAt": 1794000000, "pk": SELF, "onion": "abc.onion",
+        "offers": [{"outcome": None, "endedAt": None, **o}
+                   for o in _snapshot()["offers"]],
+    }
+    assert [r["network"] for r in python["records"]][:3] == [None, TASK, ISSUE_TASK]
+
+
+def _spoil(edit) -> dict:
+    snapshot = _snapshot()
+    edit(snapshot)
+    return snapshot
+
+
+#: The daemon's answer, damaged one way at a time. Both decoders read each the same.
+_SPOILT_SNAPSHOTS = {
+    "no answer": None,
+    "not an object": ["offers"],
+    "empty": {},
+    "no offers list": _spoil(lambda s: s.pop("offers")),
+    "offers of the wrong type": _spoil(lambda s: s.update(offers={"t": 1})),
+    "no offers at all": _spoil(lambda s: s.update(offers=[])),
+    "sections of the wrong type": _spoil(lambda s: s.update(
+        daemon=7, identity=["pk"], transport="ready", docker=None, model=3,
+        admit="2", pools={"id": "p"}, runs="none", updatedAt="soon")),
+    "numbers that are not": _spoil(lambda s: (
+        s["admit"].update(slots=True, at="now"),
+        s["daemon"].update(pid=1e300, startedAt=False),
+        s["offers"][0].update(attempt="1", requests=2.9, refused=1e19, endedAt=True),
+        s["offers"][2]["outcome"].update(usd="0.42", tokens=True),
+        s["runs"][0].update(exit=12.5, startedAt="then"),
+        s["pools"][0]["tasks"][0].update(hours=12.0, claimedAt=None),
+        s["pools"][0]["members"][0].update(maxAcceptedH=True, lastSeen="x"))),
+    "flags that are not": _spoil(lambda s: (
+        s["pools"][0]["members"][0].update(self=1, reachable="yes"),
+        s["pools"][0]["tasks"][0].update(offeredHere=1.0, executorHere=1),
+        s["offers"][2]["outcome"].update(ok=1))),
+    "text that is not": _spoil(lambda s: (
+        s["identity"].update(pk=5, onion=None),
+        s["transport"].update(state=True, detail=["x"]),
+        s["offers"][0].update(state=3, executor=None),
+        s["runs"][0].update(state=None, taskId=9, log=False),
+        s["pools"][0].update(path=1, identity=None, hash=[]),
+        s["pools"][0]["tasks"][0].update(offeredBy=["a", 2, None], kind=4))),
+    "rows without their identity": _spoil(lambda s: (
+        s["offers"].extend([{"state": "done"}, "x", 3, {"taskId": ""}, {"taskId": 5}]),
+        s["runs"].extend([{"taskId": TASK, "state": "running"}, None, {"runId": ""}]),
+        s["pools"].extend([{"path": "/no/id"}, [], {"id": ""}]),
+        s["pools"][0]["members"].extend([{"self": True}, 4]),
+        s["pools"][0]["tasks"].extend([{"kind": "x"}, "t"]))),
+    "an outcome of the wrong type": _spoil(lambda s: s["offers"][2].update(outcome=[True])),
+    "a finished run and no flag": _spoil(lambda s: (
+        s["runs"][0].update(state="finished"),
+        s["pools"][0]["tasks"][0].update(executorHere=False))),
+    "the same task offered twice": _spoil(lambda s: s["offers"].append(
+        {"taskId": TASK, "state": "done", "executor": SELF, "outcome": {"ok": True}})),
+    "members nobody asked for": _spoil(lambda s: (
+        s.update(extra={"k": [1, 2]}), s["offers"][0].update(more=True))),
+}
+
+
+@pytest.mark.parametrize("snapshot", _SPOILT_SNAPSHOTS.values(),
+                         ids=list(_SPOILT_SNAPSHOTS))
+def test_a_damaged_snapshot_is_read_the_same_by_both(snapshot):
+    records, evidence = _networked()
+    payload = _payload(records, evidence, snapshot=snapshot)
+    assert _swift(payload) == _python_decoding(payload)
+
+
+def test_only_a_snapshot_with_an_offers_list_says_anything_about_a_run():
+    """Anti-vacuity for the table above, and the rule it protects: of the damaged
+    snapshots, the ones that lost their offers leave every network run unknown, and
+    only the one that truly lists none fails them."""
+    records, evidence = _networked()
+
+    def states(name: str) -> set[str]:
+        out = _python(records, evidence, snapshot=_SPOILT_SNAPSHOTS[name])
+        return {v["state"] for run, v in out["states"].items()
+                if run not in ("local", "untracked:o/r#404", "merged-while-pooled")}
+
+    for silent in ("no answer", "not an object", "empty", "no offers list",
+                   "offers of the wrong type"):
+        assert states(silent) == {A.UNKNOWN}, silent
+    assert states("no offers at all") == {A.FAILED, A.STARTING}
+    here = _python(records, evidence, snapshot=_SPOILT_SNAPSHOTS["a finished run and no flag"])
+    assert here["states"]["claimed-here"]["reason"] == "running on eeeeffff"
+    assert here["networkRunning"] == 0
+
+
+@pytest.mark.parametrize("value", [7, "", None, True, ["t"], {"taskId": "t"}],
+                         ids=repr)
+def test_a_task_id_that_is_not_text_is_read_the_same_by_both(value):
+    """A record whose ``network`` did not survive its trip is a local run on both
+    sides, judged by its pid."""
+    payload = _payload([rec()], ev(processes={4242: proc()}, tails={"pts/3": WORKING},
+                                   network=NO_DAEMON))
+    payload["records"][0]["network"] = value
+    swift, python = _swift(payload), _python_decoding(payload)
+    assert swift == python
+    assert python["states"]["r1"]["reason"] == "pid 4242 alive; working"
+    assert python["capLoad"] == ["r1"]
+
+
+def test_a_record_carrying_a_removed_meshs_keys_is_read_the_same_by_both():
+    """The keys a removed mesh wrote into the book name no network run."""
+    payload = _payload([rec()], ev(processes={4242: proc()}, tails={"pts/3": WORKING},
+                                   network=NO_DAEMON))
+    payload["records"][0].update(placement="mesh-peer", node="brick",
+                                 workKey="review:github.com/o/r#337@abc",
+                                 claimSeenAt=T0 - 1)
+    swift, python = _swift(payload), _python_decoding(payload)
+    assert swift == python
+    assert python["states"]["r1"]["reason"] == "pid 4242 alive; working"
+    assert python["records"][0]["network"] is None
+
+
+@pytest.mark.parametrize("value", [None, [], "claimed", {TASK: "claimed"},
+                                   {TASK: {"state": 3, "executorHere": 1, "ok": "yes"}}],
+                         ids=repr)
+def test_network_evidence_that_did_not_decode_is_read_the_same_by_both(value):
+    payload = _payload([net()], ev(network=offer("claimed", PEER, here=True)))
+    payload["evidence"]["network"]["value"] = value
+    assert _swift(payload) == _python_decoding(payload)

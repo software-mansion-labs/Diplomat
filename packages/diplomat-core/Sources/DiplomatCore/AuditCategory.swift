@@ -29,6 +29,9 @@ public enum AuditCategory: String, CaseIterable, Sendable {
     case bans
     /// The Slack watcher: pings, triage outcomes, poll health.
     case comms
+    /// The Diplomacy Network: offers and what became of them, pools joined and left,
+    /// the daemon starting and stopping.
+    case network
     /// Everything else: device kills/repairs, allocator install, poll + spawn health.
     case system
 
@@ -45,6 +48,7 @@ public enum AuditCategory: String, CaseIterable, Sendable {
         case .merge:      return "Merges"
         case .bans:       return "Bans"
         case .comms:      return "Comms"
+        case .network:    return "Network"
         case .system:     return "System"
         }
     }
@@ -62,6 +66,7 @@ public enum AuditCategory: String, CaseIterable, Sendable {
         case .merge:      return "checkmark.seal.fill"
         case .bans:       return "hand.raised.fill"
         case .comms:      return "bubble.left.and.bubble.right.fill"
+        case .network:    return "point.3.connected.trianglepath.dotted"
         case .system:     return "gearshape.fill"
         }
     }
@@ -91,6 +96,11 @@ public enum AuditCategory: String, CaseIterable, Sendable {
             return .merge
         case "ban", "unban", "comms-ban":
             return .bans
+        case NetworkAudit.offer, NetworkAudit.claimed, NetworkAudit.done,
+             NetworkAudit.failed, NetworkAudit.withdraw, NetworkAudit.unavailable,
+             NetworkAudit.join, NetworkAudit.invite, NetworkAudit.leave,
+             NetworkAudit.start, NetworkAudit.stop:
+            return .network
         case "comms-ping", "comms-review", "comms-fix", "comms-bump", "comms-investigate",
              "comms-error", "comms-recovered", "comms-notice", "comms-reply":
             return .comms

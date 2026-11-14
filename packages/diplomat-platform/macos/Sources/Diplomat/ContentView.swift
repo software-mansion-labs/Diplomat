@@ -446,6 +446,7 @@ struct ContentView: View {
         case .merge:      return .green
         case .bans:       return .red
         case .comms:      return .blue
+        case .network:    return .teal
         case .system:     return .gray
         }
     }
