@@ -935,6 +935,15 @@ class AgentJob:
     # None is whichever root is primary at spawn time, so a monitor job, which can wait
     # in the queue past a change of primary, names its root's path.
     checkout: str | None = None
+    # What the job's own prompt was built to allow, for the offer that carries it on
+    # the Diplomacy Network (:func:`network.offer_for`): whether the PR is the
+    # operator's own, whether a review may approve or request changes, whether work on
+    # their own PR may mark it ready, and whether an issue fix or an audit opens PRs.
+    # Each is off unless the config behind the prompt granted it.
+    own_pr: bool = False
+    verdict: bool = False
+    mark_ready: bool = False
+    opens_prs: bool = False
 
     @property
     def item(self) -> str | None:
