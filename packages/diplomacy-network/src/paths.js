@@ -123,7 +123,7 @@ export const BROKER_PORT = num('DN_BROKER_PORT', 0);
 // One forge request's body, which is one `act` request's.
 export const FORGE_BODY_CAP = 48 * 2 ** 20;
 // How long a job's forge request waits for the requester's answer.
-export const FORGE_TIMEOUT_MS = num('DN_FORGE_TIMEOUT_MS', 5 * 60 * 1000);
+export const FORGE_ANSWER_TIMEOUT_MS = num('DN_FORGE_ANSWER_TIMEOUT_MS', 5 * 60 * 1000);
 export const MIRROR_TIMEOUT_MS = num('DN_MIRROR_TIMEOUT_MS', 10 * 60 * 1000);
 // A job's `done` file is looked for this often, its process far less often.
 export const JOB_POLL_MS = num('DN_JOB_POLL_MS', 500);

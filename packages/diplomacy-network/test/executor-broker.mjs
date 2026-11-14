@@ -19,7 +19,7 @@ const forgeDir = path.join(scratch, 'forge');
 fs.mkdirSync(forgeDir);
 fs.writeFileSync(path.join(scratch, 'gitconfig'), `[user]\n\tname = T\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n[url "${forgeDir}/"]\n\tinsteadOf = https://github.com/\n`);
 Object.assign(process.env, {
-  DN_BASE_DIR: path.join(scratch, 'base'), DN_BROKER_BIND: '127.0.0.1', DN_CONTAINER_HOST: '127.0.0.1', DN_FORGE_TIMEOUT_MS: '1500',
+  DN_BASE_DIR: path.join(scratch, 'base'), DN_BROKER_BIND: '127.0.0.1', DN_CONTAINER_HOST: '127.0.0.1', DN_FORGE_ANSWER_TIMEOUT_MS: '1500',
   GIT_CONFIG_GLOBAL: path.join(scratch, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
 });
 const { createBroker, brokerBindAddress, deniedAddress, forgeHosts, MODEL_HOSTS } = await import('../src/executor/broker.js');
@@ -331,6 +331,14 @@ try {
       assert.match(r.body, /does not connect/);
     }
     assert.equal(dials.length, before, 'nothing was dialled');
+    // The host's names inside a container are refused by name: out here they resolve to nothing.
+    const asked = lookups.length;
+    for (const target of ['host.docker.internal:5037', 'gateway.docker.internal:80', 'HOST.DOCKER.INTERNAL:443']) {
+      const r = await tunnel(target, basic('dn', job.token));
+      assert.equal(r.status, 403, target);
+      assert.match(r.body, /that name is this machine/);
+    }
+    assert.equal(lookups.length, asked);
     assert.equal((await tunnel('unknown.evil.test:443', basic('dn', job.token))).status, 502, 'a name that does not resolve is not a refusal, just an error');
   });
 
@@ -474,6 +482,8 @@ try {
     const out = [];
     child.stdout.on('data', (c) => out.push(c));
     child.on('close', () => resolve(Buffer.concat(out)));
+    // git may be done before it has read what it was sent.
+    child.stdin.on('error', () => {});
     child.stdin.end(input);
   });
   const gitForge = async (j, r) => {

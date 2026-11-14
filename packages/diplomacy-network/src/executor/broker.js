@@ -21,7 +21,7 @@ import os from 'node:os';
 import tls from 'node:tls';
 import zlib from 'node:zlib';
 import { execFile, spawn } from 'node:child_process';
-import { BROKER_BIND, BROKER_PORT, CONTAINER_HOST, DOCKER_BIN, FORGE_BODY_CAP, FORGE_TIMEOUT_MS, GIT_BIN } from '../paths.js';
+import { BROKER_BIND, BROKER_PORT, CONTAINER_HOST, DOCKER_BIN, FORGE_ANSWER_TIMEOUT_MS, FORGE_BODY_CAP, GIT_BIN } from '../paths.js';
 import { carriesPlaceholder } from './llm.js';
 
 /// The model provider's hosts: the ones a job's requests gain this machine's credential on.
@@ -166,15 +166,21 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   const contexts = new Map(); // "<authority id>/<host>" -> Promise<SecureContext>
   let listening = null; // { host, port }
 
+  const NOT_HERE = 'A job reaches the internet and nothing on its executor\'s machine or network.';
+
   // One resolution per connection, and the connection goes to the address that passed
   // the check: a name that answers differently a moment later gets no second look.
   async function dial(host, port) {
+    // The names a container knows this machine by mean nothing to the resolver out
+    // here, and the job is owed the reason rather than "does not resolve".
+    if (host === CONTAINER_HOST || /(^|\.)docker\.internal$/i.test(host)) {
+      throw new Refusal(403, `the broker does not connect to ${host}: that name is this machine, not a public internet address. ${NOT_HERE}`);
+    }
     let found;
     try { found = await lookup(host); } catch (e) { throw new Refusal(502, `${host} does not resolve (${e.code || e.message})`); }
     const allowed = found.filter((a) => !deniedAddress(a.address));
     if (allowed.length === 0) {
-      throw new Refusal(403, `the broker does not connect to ${host}: ${found.length ? `${found[0].address} is` : 'it has no address and so is'} not a public internet address. `
-        + 'A job reaches the internet and nothing on its executor\'s machine or network.');
+      throw new Refusal(403, `the broker does not connect to ${host}: ${found.length ? `${found[0].address} is` : 'it has no address and so is'} not a public internet address. ${NOT_HERE}`);
     }
     let last;
     for (const a of allowed.slice(0, 3)) {
@@ -389,7 +395,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     let timer;
     const answer = await Promise.race([
       Promise.resolve().then(() => onForge(job.info, request)),
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`the requester did not answer within ${FORGE_TIMEOUT_MS / 1000} s`)), FORGE_TIMEOUT_MS); }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`the requester did not answer within ${FORGE_ANSWER_TIMEOUT_MS / 1000} s`)), FORGE_ANSWER_TIMEOUT_MS); }),
     ]).finally(() => clearTimeout(timer));
     if (!answer || !Number.isInteger(answer.status) || answer.status < 200 || answer.status > 599) {
       throw new Refusal(502, 'the requester sent no usable answer');
