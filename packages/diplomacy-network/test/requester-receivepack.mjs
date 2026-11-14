@@ -57,6 +57,10 @@ git(work, 'push', '--quiet', forge, `${A}:refs/heads/main`);
 const B = commit('feature work', { 'src/a.js': 'b\n' });
 git(work, 'push', '--quiet', forge, `${B}:refs/heads/feature`);
 git(scratch, 'clone', '--quiet', forge, 'checkout');
+// The task account's fork, behind the repository from here on. Pull request 581 is from its `feature`.
+const forkGit = path.join(scratch, 'fork.git');
+git(scratch, 'clone', '--quiet', '--bare', forge, 'fork.git');
+git(forkGit, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
 // The base branch moves on, workflow included, after the checkout was made.
 at(A);
 const M = commit('base moves on', { '.github/workflows/ci.yml': 'on: [push, pull_request]\n', 'src/base.js': 'm\n' });
@@ -65,21 +69,36 @@ git(work, 'push', '--quiet', forge, `${M}:refs/heads/main`);
 const snapshot = (dir) => fs.readdirSync(dir, { recursive: true }).sort().map((f) => `${f} ${fs.statSync(path.join(dir, f)).size}`).join('\n');
 const checkoutBefore = snapshot(checkout);
 
+const POOL = { id: 1, name: 'o/r', owner: 'o', parent: '', defaultBranch: 'main', ciPaths: [] };
+const FORK = { id: 12, name: 'me/r', owner: 'me', parent: 'o/r', defaultBranch: 'main', ciPaths: [] };
+const PULLS = [
+  { number: 578, open: true, author: 'me', headRepo: 'o/r', headRepoId: 1, headRef: 'feature' },
+  { number: 581, open: true, author: 'me', headRepo: 'me/r', headRepoId: 12, headRef: 'feature' },
+];
+
 let fetches = [];
+let asked = [];
 const ctxFor = (more = {}) => ({
   checkout,
   state: { branches: [] },
-  async pull(number) { return number === 578 ? { number, open: true, author: 'me', headRepo: 'o/r', headRef: 'feature' } : null; },
-  async pullsByHead(ref) { return ref === undefined || ref === 'feature' ? [{ number: 578, open: true, author: 'me', headRepo: 'o/r', headRef: 'feature' }] : []; },
-  async repository() { return { defaultBranch: 'main', ciPaths: [] }; },
-  async branch(ref) {
-    try { return { sha: git(forge, 'rev-parse', '--verify', '--quiet', ref), protected: false }; } catch { return null; }
+  async pull(number) { return PULLS.find((p) => p.number === number) ?? null; },
+  async pullsByHead(ref, owner) {
+    asked.push(`pulls ${ref} ${owner}`);
+    return PULLS.filter((p) => ref === undefined || ref === p.headRef);
+  },
+  async repository(of) {
+    asked.push(`repository ${of}`);
+    return { undefined: POOL, 'me/r': FORK }[of] ?? null;
+  },
+  async branch(ref, of) {
+    asked.push(`branch ${ref} ${of}`);
+    try { return { sha: git(of === undefined ? forge : forkGit, 'rev-parse', '--verify', '--quiet', ref), protected: false }; } catch { return null; }
   },
   // What forge.fetchInto does, from a directory instead of a URL.
-  fetch({ env, wants = [], all = false }) {
-    fetches.push(all ? 'all' : wants.length);
+  fetch({ env, repo, wants = [], into }) {
+    fetches.push(`${repo ?? 'pool'} ${into ?? wants.length}`);
     return new Promise((resolve) => {
-      execFile('git', ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', forge, ...(all ? ['+refs/heads/*:refs/dn/*'] : wants)], { env }, (err) => resolve(!err));
+      execFile('git', ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', repo === undefined ? forge : forkGit, ...(into ? [`+refs/heads/*:${into}/*`] : wants)], { env }, (err) => resolve(!err));
     });
   },
   ...more,
@@ -524,7 +543,7 @@ await check('push options are refused, and a push is confined to the repository 
   await refused(checkAdvertise(NEW_RULE, ['o', 'other.git', 'info', 'refs']), /not the pool's repository/);
   await allowed(checkAdvertise(HEAD_RULE, ['o', 'r.git', 'info', 'refs'], ctxFor()));
   await allowed(checkAdvertise({ ...HEAD_RULE, head: { author: 'me' } }, ['o', 'r', 'info', 'refs'], ctxFor()));
-  // A pull request's head in a fork is not a place this task pushes to: neither the fork, nor a branch of that name here.
+  // A rule without `fork` reaches the pool's repository alone: not a fork that holds the pull request's head, nor a branch of that name here.
   const inFork = ctxFor({
     async pull(number) { return { number, open: true, author: 'me', headRepo: 'me/r', headRef: 'feature' }; },
     async pullsByHead() { return [{ number: 578, open: true, author: 'me', headRepo: 'me/r', headRef: 'feature' }]; },
@@ -536,6 +555,154 @@ await check('push options are refused, and a push is confined to the repository 
     await refused(checkPush(rule, SEGMENTS, pushBody([[B, C, 'refs/heads/feature']], pack), inFork), /does not hold the head branch|no open pull request by me/);
   }
   await refused(checkAdvertise(HEAD_RULE, ['o', 'r.git', 'info', 'refs'], ctxFor({ async pull() { return null; } })), /does not hold the head branch/);
+});
+
+const FORK_SEGMENTS = ['me', 'r.git', 'git-receive-pack'];
+const FORK_ADVERT = ['me', 'r.git', 'info', 'refs'];
+const FORK_HEAD = { ...HEAD_RULE, head: { number: 581 }, fork: 'me' };
+const FORK_MINE = { ...HEAD_RULE, head: { author: 'me' }, fork: 'me' };
+const FORK_NEW = { ...NEW_RULE, fork: 'me' };
+// A push to the fork, with the pack a client builds against what the fork advertises.
+const pushFork = (rule, commands, ctx = ctxFor(), segments = FORK_SEGMENTS) => checkPush(rule, segments,
+  pushBody(commands, packOf(work, commands.map((c) => c[1]).filter((oid) => oid !== ZERO), [A, B])), ctx);
+const NOT_THE_FORK = /^me\/r is not this account's own fork of the pool's repository$/;
+
+await check('a rule with `fork` reaches the fork of the pool\'s repository that the account holds itself, as the forge tells it', async () => {
+  at(B);
+  const C = commit('work in the fork', { 'src/a.js': 'f1\n' });
+  const move = [[B, C, 'refs/heads/feature']];
+  fetches = [];
+  asked = [];
+  assert.deepEqual(await pushFork(FORK_HEAD, move), { ok: true, created: [] });
+  assert.deepEqual(asked, ['repository me/r', 'branch refs/heads/feature me/r', 'repository undefined']);
+  assert.deepEqual(fetches, ['me/r refs/dn/0', 'pool refs/dn/1'], 'the fork\'s branches and the pool\'s, each under its own names');
+  // The path is the client's spelling; the forge is asked in one.
+  asked = [];
+  await allowed(pushFork(FORK_HEAD, move, ctxFor(), ['ME', 'R.GIT', 'git-receive-pack']));
+  assert.equal(asked[0], 'repository me/r');
+  await allowed(checkAdvertise(FORK_HEAD, FORK_ADVERT, ctxFor()));
+  await allowed(checkAdvertise(FORK_MINE, ['me', 'r', 'info', 'refs'], ctxFor()));
+  await allowed(checkAdvertise(FORK_NEW, FORK_ADVERT, ctxFor()));
+  await refused(checkAdvertise(FORK_NEW, FORK_ADVERT), /nothing here can ask the forge about its branches/);
+
+  // Whose the repository is and what it is a fork of are the forge's word, in any letter case.
+  const forkIs = (fork) => ctxFor({ async repository(of) { return of === undefined ? POOL : fork; } });
+  for (const fork of [{ ...FORK, owner: 'Me' }, { ...FORK, parent: 'O/R' }]) await allowed(pushFork(FORK_HEAD, move, forkIs(fork)));
+  for (const fork of [null, { ...FORK, owner: 'them' }, { ...FORK, owner: 'me2' }, { ...FORK, owner: '' }, { ...FORK, parent: '' }, { ...FORK, parent: 'o/other' }, { ...FORK, parent: 'them/r' }]) {
+    for (const rule of [FORK_HEAD, FORK_MINE, FORK_NEW]) await refused(checkAdvertise(rule, FORK_ADVERT, forkIs(fork)), NOT_THE_FORK);
+    await refused(pushFork(FORK_HEAD, move, forkIs(fork)), NOT_THE_FORK);
+    await refused(pushFork(FORK_NEW, [[ZERO, C, 'refs/heads/x']], forkIs(fork)), NOT_THE_FORK);
+  }
+  await assert.rejects(pushFork(FORK_HEAD, move, ctxFor({ async repository() { throw new Error('forge: the forge did not say'); } })), /did not say/);
+  // A path the forge would read through an escape names no repository to ask about.
+  for (const name of ['%72.git', '%2e%2e', 'r%2Fx', 'r:x']) {
+    asked = [];
+    await refused(checkAdvertise(FORK_HEAD, ['me', name, 'info', 'refs'], ctxFor({ async repository(of) { asked.push(of); return FORK; } })), /is not this account's own fork of the pool's repository$/);
+    assert.deepEqual(asked, [], name);
+  }
+
+  // The head branch is the pull request's when the forge places its head in this fork, which it names by id.
+  const pullIs = (pull) => ctxFor({ async pull() { return pull; }, async pullsByHead() { return pull ? [pull] : []; } });
+  const [inPool, inFork] = PULLS;
+  for (const pull of [null, inPool, { ...inFork, headRepoId: 1 }, { ...inFork, headRepoId: null }, { ...inFork, headRepoId: '12' }, { ...inFork, open: false }]) {
+    await refused(pushFork(FORK_HEAD, move, pullIs(pull)), /this repository does not hold the head branch of open pull request #581/);
+    await refused(checkAdvertise(FORK_HEAD, FORK_ADVERT, pullIs(pull)), /this repository does not hold the head branch of open pull request #581/);
+    await refused(pushFork(FORK_MINE, move, pullIs(pull)), /no open pull request by me has its head branch here/);
+  }
+  await refused(pushFork(FORK_MINE, move, pullIs({ ...inFork, author: 'them' })), /no open pull request by me has its head branch here/);
+  // A rule over every pull request of an author asks for the ones from that account's branch of the name.
+  asked = [];
+  await allowed(pushFork(FORK_MINE, move));
+  assert.ok(asked.includes('pulls feature me'), asked.join());
+  asked = [];
+  await allowed(push({ ...HEAD_RULE, head: { author: 'me' } }, move));
+  assert.ok(asked.includes('pulls feature undefined'), asked.join());
+
+  // The default branch, the protection and the branch's place asked about are the fork's.
+  const defaults = (pool, fork) => ctxFor({ async repository(of) { return of === undefined ? { ...POOL, defaultBranch: pool } : { ...FORK, defaultBranch: fork }; } });
+  await refused(pushFork(FORK_HEAD, move, defaults('main', 'feature')), /refs\/heads\/feature: the default branch is never pushed by a task/);
+  await allowed(pushFork(FORK_HEAD, move, defaults('feature', 'main')));
+  const branchIs = (answer) => ctxFor({ async branch(ref, of) { return answer(of); } });
+  await refused(pushFork(FORK_HEAD, move, branchIs((of) => ({ sha: B, protected: of === 'me/r' }))), /a protected branch is never pushed by a task/);
+  await allowed(pushFork(FORK_HEAD, move, branchIs((of) => ({ sha: B, protected: of === undefined }))));
+  await refused(pushFork(FORK_HEAD, move, branchIs((of) => (of === undefined ? { sha: B, protected: false } : null))), /not where this push starts from/);
+  await refused(pushFork(FORK_HEAD, [[A, C, 'refs/heads/feature']]), /not where this push starts from/);
+
+  // What a push to the pool's repository is held to holds here.
+  await refused(pushFork(FORK_HEAD, [...move, [ZERO, C, 'refs/heads/second']]), /refs\/heads\/second: this task may not create that ref/);
+  await refused(pushFork(FORK_HEAD, [...move, [A, C, 'refs/heads/main']]), /refs\/heads\/main: this task may not update that ref/);
+  await refused(pushFork(FORK_HEAD, [[B, ZERO, 'refs/heads/feature']]), /may not delete a ref/);
+  at(A);
+  const rewritten = commit('rewritten in the fork', { 'src/a.js': 'r\n' });
+  await refused(pushFork(FORK_HEAD, [[B, rewritten, 'refs/heads/feature']]), /not a fast-forward/);
+  at(B);
+  const evil = commit('a workflow in the fork', { '.github/workflows/steal.yml': 'on: push\n' });
+  await refused(pushFork(FORK_HEAD, [[B, evil, 'refs/heads/feature']]), /changes \.github\/workflows\/steal\.yml/);
+  // The file a project is set to read its CI from: the fork's, and the pool's, where a
+  // fork's merge request can have its pipeline run.
+  at(B);
+  const ciFile = commit('a configured file', { 'ci/pipeline.yml': 'x\n' });
+  const configured = (pool, fork) => ctxFor({ async repository(of) { return of === undefined ? { ...POOL, ciPaths: pool } : { ...FORK, ciPaths: fork }; } });
+  await allowed(pushFork(FORK_HEAD, [[B, ciFile, 'refs/heads/feature']], configured([], [])));
+  await refused(pushFork(FORK_HEAD, [[B, ciFile, 'refs/heads/feature']], configured(['ci/pipeline.yml'], [])), /changes ci\/pipeline\.yml/);
+  await refused(pushFork(FORK_HEAD, [[B, ciFile, 'refs/heads/feature']], configured([], ['ci/pipeline.yml'])), /changes ci\/pipeline\.yml/);
+  await refused(pushFork(FORK_HEAD, move, ctxFor({ async repository(of) { return of === undefined ? null : FORK; } })), /the forge shows no repository where the pool's should be/);
+});
+
+await check('the forge\'s own commits are told from the pushed ones: a fork that is behind takes the base branch, and nothing else rides along', async () => {
+  at(B);
+  const C = commit('more work in the fork', { 'src/a.js': 'f2\n' });
+  git(work, 'merge', '--quiet', '--no-edit', M);
+  const merged = git(work, 'rev-parse', 'HEAD');
+  // The fork never saw M: the pack carries it, workflow change and all, and a branch of the pool's repository holds it.
+  await allowed(pushFork(FORK_HEAD, [[B, merged, 'refs/heads/feature']]));
+  // The same pack sent to the pool's repository, by a client that did not know its main.
+  await allowed(checkPush(HEAD_RULE, SEGMENTS, pushBody([[B, merged, 'refs/heads/feature']], packOf(work, [merged], [A, B])), ctxFor()));
+  // Both repositories must answer for their branches.
+  for (const silent of ['me/r', undefined]) {
+    const ctx = ctxFor();
+    const fetch = ctx.fetch;
+    ctx.fetch = (what) => (what.repo === silent ? Promise.resolve(false) : fetch(what));
+    await refused(pushFork(FORK_HEAD, [[B, merged, 'refs/heads/feature']], ctx), /the forge's branches could not be fetched/);
+  }
+  // A merge settled to what neither side holds is the push's own.
+  at(C);
+  git(work, 'merge', '--quiet', '--no-commit', M);
+  const resolved = commit('evil merge into the fork', { '.github/workflows/ci.yml': 'on: push\njobs: { leak: {} }\n' });
+  await refused(pushFork(FORK_HEAD, [[B, resolved, 'refs/heads/feature']]), /changes \.github\/workflows\/ci\.yml/);
+
+  // A branch of the fork is the forge's own for a push to the fork, under its own name
+  // beside the pool's branch of that name, and is nothing to a push to the pool's repository.
+  at(B);
+  const side = commit('the account\'s own workflow, on a branch of its fork', { '.github/workflows/mine.yml': 'on: push\n' });
+  git(work, 'push', '--quiet', forkGit, `${side}:refs/heads/side`);
+  git(forge, 'update-ref', 'refs/heads/side', A);
+  const onSide = commit('work on top of it', { 'src/a.js': 'f3\n' });
+  const pack = packOf(work, [onSide], [side]);
+  await allowed(checkPush(FORK_HEAD, FORK_SEGMENTS, pushBody([[B, onSide, 'refs/heads/feature']], pack), ctxFor()));
+  await refused(checkPush(HEAD_RULE, SEGMENTS, pushBody([[B, onSide, 'refs/heads/feature']], pack), ctxFor()), /builds on one that cannot be found/);
+  git(forge, 'update-ref', '-d', 'refs/heads/side');
+  git(forkGit, 'update-ref', '-d', 'refs/heads/side');
+});
+
+await check('a branch made in the fork is the task\'s own there under the fork\'s name, and a branch of the pool\'s repository under its own', async () => {
+  at(M);
+  const fix = commit('a fix', { 'src/fix.js': 'f\n' });
+  assert.deepEqual((await allowed(pushFork(FORK_NEW, [[ZERO, fix, 'refs/heads/fix']]))).created, ['me/r:refs/heads/fix']);
+  const spelled = ctxFor({ async repository(of) { return of === undefined ? POOL : { ...FORK, name: 'Me/R' }; } });
+  assert.deepEqual((await allowed(pushFork(FORK_NEW, [[ZERO, fix, 'refs/heads/fix']], spelled))).created, ['me/r:refs/heads/fix']);
+  assert.deepEqual((await allowed(push(NEW_RULE, [[ZERO, fix, 'refs/heads/fix']]))).created, ['refs/heads/fix']);
+  await refused(pushFork({ ...FORK_NEW, create: 0 }, [[ZERO, fix, 'refs/heads/fix']]), /may not create that ref/);
+  for (const repo of [forge, forkGit]) git(work, 'push', '--quiet', repo, `${fix}:refs/heads/fix`);
+  const more = commit('more of the fix', { 'src/fix.js': 'g\n' });
+  const owning = (...branches) => ctxFor({ state: { branches } });
+  await allowed(pushFork(FORK_NEW, [[fix, more, 'refs/heads/fix']], owning('me/r:refs/heads/fix')));
+  await allowed(pushFork(FORK_NEW, [[fix, more, 'refs/heads/fix']], Object.assign(spelled, { state: { branches: ['me/r:refs/heads/fix'] } })));
+  await allowed(push(NEW_RULE, [[fix, more, 'refs/heads/fix']], owning('refs/heads/fix')));
+  await refused(pushFork(FORK_NEW, [[fix, more, 'refs/heads/fix']], owning('refs/heads/fix')), /refs\/heads\/fix: this task may not update that ref/);
+  await refused(pushFork(FORK_NEW, [[fix, more, 'refs/heads/fix']], owning('them/r:refs/heads/fix')), /may not update that ref/);
+  await refused(push(NEW_RULE, [[fix, more, 'refs/heads/fix']], owning('me/r:refs/heads/fix')), /refs\/heads\/fix: this task may not update that ref/);
+  for (const repo of [forge, forkGit]) git(repo, 'update-ref', '-d', 'refs/heads/fix');
 });
 
 await check('the linked checkout is read and never written', async () => {

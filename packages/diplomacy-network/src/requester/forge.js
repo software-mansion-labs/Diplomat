@@ -231,13 +231,15 @@ export function createForge({ log = () => {} } = {}) {
     };
   }
 
-  const githubPull = (p) => ({ number: p.number, open: p.state === 'open', author: str(p.user?.login), headRepo: str(p.head?.repo?.full_name), headRef: str(p.head?.ref), baseRef: str(p.base?.ref), draft: p.draft === true });
-  // A merge request from a fork has its source branch in another project, which no rule
-  // of the pool's project reaches.
-  const gitlabPull = (repo, m) => ({ number: m.iid, open: m.state === 'opened', author: str(m.author?.username), headRepo: m.source_project_id === m.target_project_id ? repo : '', headRef: str(m.source_branch), baseRef: str(m.target_branch), draft: m.draft === true });
+  const id = (v) => (Number.isSafeInteger(v) ? v : null);
+  const githubPull = (p) => ({ number: p.number, open: p.state === 'open', author: str(p.user?.login), headRepo: str(p.head?.repo?.full_name), headRepoId: id(p.head?.repo?.id), headRef: str(p.head?.ref), baseRef: str(p.base?.ref), draft: p.draft === true });
+  // A merge request names the project its source branch is in by id alone: a fork's has no name here.
+  const gitlabPull = (repo, m) => ({ number: m.iid, open: m.state === 'opened', author: str(m.author?.username), headRepo: m.source_project_id === m.target_project_id ? repo : '', headRepoId: id(m.source_project_id), headRef: str(m.source_branch), baseRef: str(m.target_branch), draft: m.draft === true });
 
   /// A pull or merge request of `repo` by number: `{ number, open, author, headRepo,
-  /// headRef, baseRef, draft }`, or null when the forge has none of that number.
+  /// headRepoId, headRef, baseRef, draft }`, or null when the forge has none of that
+  /// number. `headRepoId` is the forge's id of the repository the head branch is in, null
+  /// when that repository is gone.
   async function pull(target, repo, number) {
     const github = target.forge === 'github';
     const res = await api(target, 'GET', github ? `/repos/${repo}/pulls/${number}` : `${project(repo)}/merge_requests/${number}`);
@@ -246,11 +248,13 @@ export function createForge({ log = () => {} } = {}) {
     return github ? githubPull(res.json) : gitlabPull(repo, res.json);
   }
 
-  /// The open pull or merge requests of `repo` whose head branch is `ref` in `repo` itself
-  /// (every open one, up to a page of 100, when `ref` is not given), shaped as `pull`.
-  async function pullsByHead(target, repo, ref) {
+  /// The open pull or merge requests of `repo` whose head branch is named `ref` (every open
+  /// one, up to a page of 100, when `ref` is not given), shaped as `pull`. GitHub lists
+  /// those whose head is in a repository of `owner`, the account `repo` belongs to unless
+  /// another is given; GitLab lists them whichever project the branch is in.
+  async function pullsByHead(target, repo, ref, owner = repo.split('/')[0]) {
     const github = target.forge === 'github';
-    const filter = ref === undefined ? '' : github ? `&head=${encodeURIComponent(`${repo.split('/')[0]}:${ref}`)}` : `&source_branch=${encodeURIComponent(ref)}`;
+    const filter = ref === undefined ? '' : github ? `&head=${encodeURIComponent(`${owner}:${ref}`)}` : `&source_branch=${encodeURIComponent(ref)}`;
     const res = await api(target, 'GET', github ? `/repos/${repo}/pulls?state=open&per_page=100${filter}` : `${project(repo)}/merge_requests?state=opened&per_page=100${filter}`);
     if (res.status !== 200 || !Array.isArray(res.json) || !res.json.every(isObject)) unknown('which pull requests are open', res);
     return res.json.map((p) => (github ? githubPull(p) : gitlabPull(repo, p)));
@@ -286,18 +290,23 @@ export function createForge({ log = () => {} } = {}) {
     return { id: me.id, login };
   }
 
-  /// What the forge says of `repo` itself: `{ defaultBranch, ciPaths }`. `ciPaths` lists
-  /// where a GitLab project is set to read its CI configuration from, when that is a file
-  /// of its own repository; GitHub reads its workflows from one fixed directory.
+  /// What the forge says of the repository `repo` names (on GitLab a project's path or
+  /// its numeric id): `{ id, name, owner, parent, defaultBranch, ciPaths }`, or null when
+  /// the forge shows no such repository. `name` is its full path as the forge spells it,
+  /// `owner` the account or group it belongs to and `parent` the repository it is a fork
+  /// of, "" for none. `ciPaths` lists where a GitLab project is set to read its CI
+  /// configuration from, when that is a file of its own repository; GitHub reads its
+  /// workflows from one fixed directory.
   async function repository(target, repo) {
     const github = target.forge === 'github';
     const res = await api(target, 'GET', github ? `/repos/${repo}` : project(repo));
+    if (missing(res)) return null;
     const branch = res.status === 200 && isObject(res.json) ? res.json.default_branch : undefined;
     if (typeof branch !== 'string' || branch === '') unknown('which branch is the default', res);
-    if (github) return { defaultBranch: branch, ciPaths: [] };
-    const configured = res.json.ci_config_path;
-    if (configured !== null && typeof configured !== 'string') unknown('where the project reads its CI configuration from', res);
+    const name = str(github ? res.json.full_name : res.json.path_with_namespace);
     const ciPaths = [];
+    const configured = github ? null : res.json.ci_config_path;
+    if (configured !== null && typeof configured !== 'string') unknown('where the project reads its CI configuration from', res);
     const add = (file) => {
       const relative = file.replace(/^\/+/, '');
       if (relative !== '') ciPaths.push(relative);
@@ -307,9 +316,16 @@ export function createForge({ log = () => {} } = {}) {
       // reads the value as "file@project" or as a URL.
       add(configured);
       const at = configured.indexOf('@');
-      if (at !== -1 && configured.slice(at + 1).split(':')[0].toLowerCase() === repo.toLowerCase()) add(configured.slice(0, at));
+      if (at !== -1 && configured.slice(at + 1).split(':')[0].toLowerCase() === name.toLowerCase()) add(configured.slice(0, at));
     }
-    return { defaultBranch: branch, ciPaths };
+    const owner = github ? res.json.owner?.login : res.json.namespace?.full_path;
+    // Each forge leaves the parent out of its answer about a repository that is no fork.
+    const origin = github ? res.json.parent : res.json.forked_from_project;
+    const parent = origin === undefined ? '' : github ? origin?.full_name : origin?.path_with_namespace;
+    // The answer is about what was asked for: a project's number on GitLab, a name anywhere.
+    const asked = /^[0-9]+$/.test(repo) ? String(res.json.id) === repo : name.toLowerCase() === repo.toLowerCase();
+    if (!asked || !Number.isSafeInteger(res.json.id) || typeof owner !== 'string' || owner === '' || typeof parent !== 'string' || (origin !== undefined && parent === '')) unknown(`which repository ${repo} is`, res);
+    return { id: res.json.id, name, owner, parent, defaultBranch: branch, ciPaths };
   }
 
   /// A branch (`refs/heads/...`) of `repo` as the forge holds it: `{ sha, protected }`, or
@@ -336,10 +352,10 @@ export function createForge({ log = () => {} } = {}) {
   }
 
   /// Fetches from `repo` on the forge into the repository `env` points git at (the push
-  /// check's quarantine): the commits in `wants` by id, or every branch with `all`.
-  /// Resolves to whether git succeeded.
-  async function fetchInto(target, { repo, env, wants = [], all = false }) {
-    if (!all && (wants.length === 0 || wants.some((oid) => !/^[0-9a-f]{40,64}$/.test(oid)))) return false;
+  /// check's quarantine): the commits in `wants` by id, or with `into` every branch, as
+  /// refs under that name. Resolves to whether git succeeded.
+  async function fetchInto(target, { repo, env, wants = [], into }) {
+    if (!into && (wants.length === 0 || wants.some((oid) => !/^[0-9a-f]{40,64}$/.test(oid)))) return false;
     const gitHost = target.forge === 'github' ? 'github.com' : target.host;
     if (!hostsOf(target.forge, target.host).includes(gitHost) || !/^[A-Za-z0-9._/-]+$/.test(repo)) return false;
     const secret = await token(target.forge, target.host);
@@ -354,15 +370,18 @@ export function createForge({ log = () => {} } = {}) {
       GIT_CONFIG_KEY_1: 'http.followRedirects',
       GIT_CONFIG_VALUE_1: 'false',
     };
-    const what = all ? ['+refs/heads/*:refs/dn/*'] : wants;
+    const what = into ? [`+refs/heads/*:${into}/*`] : wants;
     const r = await run(GIT_BIN, ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', `${origin(gitHost)}/${repo}.git`, ...what], gitEnv);
-    log(`forge fetch ${gitHost}/${repo} ${all ? 'all branches' : `${wants.length} commit(s)`} -> ${r.ok ? 'ok' : 'failed'}`);
+    log(`forge fetch ${gitHost}/${repo} ${into ? 'all branches' : `${wants.length} commit(s)`} -> ${r.ok ? 'ok' : 'failed'}`);
     return r.ok;
   }
 
   /// What `authorize` needs as its `ctx` for one task: the forge lookups bound to the
   /// pool's repository, the linked `checkout` the push check may read, and the task's
-  /// mutable `state`. `repo` is "owner/name" on GitHub and the project's full path on GitLab.
+  /// mutable `state`. `repo` is "owner/name" on GitHub and the project's full path on
+  /// GitLab. The lookups about a repository itself (`repository`, `branch`, `fetch`) take
+  /// another one's name where a check has the forge's word that it is the task account's
+  /// fork of the pool's.
   function context({ forge, host, repo, checkout, state }) {
     const target = { forge, host };
     return {
@@ -370,13 +389,13 @@ export function createForge({ log = () => {} } = {}) {
       state,
       resolveNode: (id) => resolveNode(target, id),
       pull: (number) => pull(target, repo, number),
-      pullsByHead: (ref) => pullsByHead(target, repo, ref),
+      pullsByHead: (ref, owner) => pullsByHead(target, repo, ref, owner),
       comment: (id) => comment(target, repo, id),
       assignees: (number) => assignees(target, repo, number),
       self: () => self(target),
-      repository: () => repository(target, repo),
-      branch: (ref) => branch(target, repo, ref),
-      fetch: (what) => fetchInto(target, { ...what, repo }),
+      repository: (of = repo) => repository(target, of),
+      branch: (ref, of = repo) => branch(target, of, ref),
+      fetch: (what) => fetchInto(target, { ...what, repo: what.repo ?? repo }),
     };
   }
 

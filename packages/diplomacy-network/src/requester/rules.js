@@ -29,9 +29,12 @@
 //               readOnly         nothing.
 //   investigate -                nothing.
 //
-// "One new branch" is counted for the task, across every key issued for it (`authorize`
-// keeps the count in the task's state). No push moves or creates the repository's default
-// branch or a branch the forge reports as protected, whatever the rule covers.
+// A push goes to the pool's repository or to the task account's own fork of it - the
+// fork holds the head branch of a pull request opened from it, and a new branch may be
+// made in either. "One new branch" is counted for the task, across every key issued for
+// it and across both places (`authorize` keeps the count in the task's state). No push
+// moves or creates the default branch of the repository it goes to, or a branch the forge
+// reports as protected there, whatever the rule covers.
 //
 // An item `job-<id>` is work not tied to one number. What that does to each kind:
 //
@@ -61,9 +64,16 @@
 //   job needs (`pick`): the whole answer holds a clone token or a runner registration
 //   token, the requester's permissions and the protection settings.
 // - A push is addressed by the pull request, not by a branch name: the head branch is
-//   whatever the forge says that PR's head is when the push arrives. It goes to the
-//   pool's repository and to no other: a pull request whose head branch is in a fork
-//   cannot be pushed to, on either forge.
+//   whatever the forge says that PR's head is when the push arrives, in the repository
+//   the forge says holds it.
+// - The only other repository a push reaches is the fork of the pool's repository that
+//   the task's account holds itself (`fork`): the path names that account as the owner,
+//   and the forge is asked whose the repository is and what it is a fork of. A fork held
+//   by anybody else, by an organisation or a group, a fork of a fork and the account's
+//   other repositories are out of reach, and nothing of a fork is read through the API.
+// - A draft opened from a branch in the fork is still a pull request of the pool's
+//   repository: GitHub takes the head as "account:branch", GitLab opens the merge
+//   request on the fork's project with the pool's project as its pinned target.
 // - A push may not change CI definitions (`denyPaths`) except to what the forge already
 //   holds, which is what merging the base branch does. What a definition runs or includes
 //   from elsewhere in the repository is a file like any other.
@@ -174,17 +184,20 @@ function github({ kind, options, target, item, me }) {
   const mutations = [];
   let graphqlItem;
 
-  // Smart HTTP addresses a repository with or without ".git".
+  // Smart HTTP addresses a repository with or without ".git". After the pool's own come
+  // the task account's repositories, whatever their names: the push check lets through
+  // the one the forge calls that account's fork of the pool's (`fork`).
   const push = (more) => {
-    for (const base of [`/${owner}/${name}.git`, `/${owner}/${name}`]) {
-      rules.push({ host: GITHUB_GIT, method: 'GET', path: `${base}/info/refs`, fold: [0, 1], query: { service: { equals: 'git-receive-pack' } }, git: 'receive-pack', repo: target.repo, ...more });
-      rules.push({ host: GITHUB_GIT, method: 'POST', path: `${base}/git-receive-pack`, fold: [0, 1], git: 'receive-pack', repo: target.repo, denyPaths: ['.github/workflows/**'], ...more });
+    for (const [base, fold, where] of [[`/${owner}/${name}.git`, [0, 1], {}], [`/${owner}/${name}`, [0, 1], {}], [`/${me}/*`, [0], { fork: me }]]) {
+      rules.push({ host: GITHUB_GIT, method: 'GET', path: `${base}/info/refs`, fold, query: { service: { equals: 'git-receive-pack' } }, git: 'receive-pack', repo: target.repo, ...where, ...more });
+      rules.push({ host: GITHUB_GIT, method: 'POST', path: `${base}/git-receive-pack`, fold, git: 'receive-pack', repo: target.repo, denyPaths: ['.github/workflows/**'], ...where, ...more });
     }
   };
+  // `head` is "branch", or "account:branch" for a branch of that account's fork.
   const draftPulls = () => {
     mutations.push('createPullRequest');
     rules.push(api('POST', `${repo}/pulls`, { body: {
-      head: { created: true, required: true }, draft: { equals: true, required: true },
+      head: { created: 'label', required: true }, draft: { equals: true, required: true },
       title: 'free', body: 'free', base: 'free', maintainer_can_modify: 'free',
     } }));
   };
@@ -268,11 +281,13 @@ function gitlab({ kind, options, target, item, me }) {
     for (const { base, fold } of projects) rules.push({ host: target.host, method, path: `${base}${tail}`, fold, ...more });
   };
   const gitFold = target.parts.map((_, i) => i);
+  // After the pool's own project come the projects in the task account's own namespace:
+  // the push check lets through the one the forge calls a fork of the pool's (`fork`).
   const push = (more) => {
-    for (const base of [`/${target.repo}.git`, `/${target.repo}`]) {
-      rules.push({ host: target.host, method: 'GET', path: `${base}/info/refs`, fold: gitFold, query: { service: { equals: 'git-receive-pack' } }, git: 'receive-pack', repo: target.repo, ...more });
+    for (const [base, fold, where] of [[`/${target.repo}.git`, gitFold, {}], [`/${target.repo}`, gitFold, {}], [`/${me}/*`, [0], { fork: me }]]) {
+      rules.push({ host: target.host, method: 'GET', path: `${base}/info/refs`, fold, query: { service: { equals: 'git-receive-pack' } }, git: 'receive-pack', repo: target.repo, ...where, ...more });
       // The push check adds the file the project is set to read its CI configuration from.
-      rules.push({ host: target.host, method: 'POST', path: `${base}/git-receive-pack`, fold: gitFold, git: 'receive-pack', repo: target.repo, denyPaths: ['.gitlab-ci.yml', '.gitlab/ci/**'], ...more });
+      rules.push({ host: target.host, method: 'POST', path: `${base}/git-receive-pack`, fold, git: 'receive-pack', repo: target.repo, denyPaths: ['.gitlab-ci.yml', '.gitlab/ci/**'], ...where, ...more });
     }
   };
   // GitLab runs a line starting with "/" in a note or description as a quick action
@@ -280,12 +295,21 @@ function gitlab({ kind, options, target, item, me }) {
   const prose = { prose: true };
   // A merge request is a draft by its title, and nothing else in the body may point it
   // at another project or merge it.
-  const draftMerges = () => each('POST', '/merge_requests', { body: {
+  const draft = {
     source_branch: { created: true, required: true }, title: { prefix: 'Draft:', required: true },
     target_branch: 'free', description: prose, labels: 'free', remove_source_branch: 'free', squash: 'free', allow_collaboration: 'free',
+  };
+  const draftMerges = () => {
     // glab names the target project in every merge request it opens; it may only be the pool's own.
-    ...(target.projectId === null ? {} : { target_project_id: { equals: target.projectId } }),
-  } });
+    each('POST', '/merge_requests', { body: { ...draft, ...(target.projectId === null ? {} : { target_project_id: { equals: target.projectId } }) } });
+    // A merge request from a fork is opened on the fork's project and must name the
+    // pool's as its target: `project` has the forge asked whether the project in the
+    // path is the task account's own fork of the pool's.
+    if (target.projectId !== null) {
+      rules.push({ host: target.host, method: 'POST', path: '/api/v4/projects/*/merge_requests', project: { segment: 3, owner: me, repo: target.repo },
+        body: { ...draft, target_project_id: { equals: target.projectId, required: true } } });
+    }
+  };
 
   if (kind === 'review' || kind === 'review-own' || kind === 'conflicts') {
     const scope = pullScope(kind, item, me, options);

@@ -114,7 +114,8 @@ export async function startFakeForge() {
     nodes: { U_me: viewer },
     // "owner/name" -> { id, pulls: { number: {...} }, issues: { number: {...} } }, and what
     // a test sets of a repository's settings: defaultBranch, protected (branch names),
-    // ciConfigPath (GitLab).
+    // ciConfigPath (GitLab), parent (the repository it is a fork of; null for none) and
+    // spelled (its name in the forge's own letter case).
     repos: {},
     // REST review comment id -> node id
     comments: {},
@@ -158,10 +159,17 @@ export async function startFakeForge() {
     return { status: 200, json: { data: project(doc, vars, op.selections, rootData) } };
   }
 
-  const restPull = (repoName, p) => ({
-    number: p.number, state: p.state || 'open', draft: p.draft === true, node_id: p.id, user: { login: p.author },
-    head: { ref: p.head, repo: { full_name: p.headRepo || repoName } }, base: { ref: p.base || 'main', repo: { full_name: repoName } },
-  });
+  // A repository a test did not name a parent for is a fork of one the task must never see.
+  const parentOf = (repo) => (repo.parent === undefined ? 'upstream/private-parent' : repo.parent);
+  const restPull = (repoName, p) => {
+    const head = p.headRepo === null ? null : (p.headRepo || repoName).toLowerCase();
+    return {
+      number: p.number, state: p.state || 'open', draft: p.draft === true, node_id: p.id, user: { login: p.author },
+      // A fork that was deleted leaves a pull request without a head repository.
+      head: { ref: p.head, repo: head === null ? null : { full_name: data.repos[head]?.spelled || head, id: data.repos[head]?.projectId } },
+      base: { ref: p.base || 'main', repo: { full_name: repoName } },
+    };
+  };
   const revParse = (repoName, ref) => {
     try { return git(path.join(gitRoot, `${repoName}.git`), 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`); } catch { return null; }
   };
@@ -175,12 +183,14 @@ export async function startFakeForge() {
     const rest = m[2] || '';
     let x;
     if (method === 'GET' && rest === '') {
-      const [owner, name] = m[1].split('/');
+      const full = repo.spelled || m[1];
+      const [owner, name] = full.split('/');
+      const parent = parentOf(repo);
       return { status: 200, json: {
-        id: 1, node_id: repo.id, name, full_name: m[1], owner: { login: owner }, private: true, visibility: 'private', fork: false,
-        html_url: `https://github.com/${m[1]}`, clone_url: `https://github.com/${m[1]}.git`, default_branch: repo.defaultBranch || 'main',
+        id: repo.projectId, node_id: repo.id, name, full_name: full, owner: { login: owner }, private: true, visibility: 'private', fork: parent !== null,
+        html_url: `https://github.com/${full}`, clone_url: `https://github.com/${full}.git`, default_branch: repo.defaultBranch || 'main',
         permissions: { admin: true, push: true, pull: true }, temp_clone_token: 'TEMPCLONETOKEN', allow_auto_merge: true,
-        security_and_analysis: { secret_scanning: { status: 'disabled' } }, parent: { full_name: 'upstream/private-parent' },
+        security_and_analysis: { secret_scanning: { status: 'disabled' } }, ...(parent === null ? {} : { parent: { full_name: parent } }),
       } };
     }
     if (method === 'GET' && (x = /^\/branches\/(.+)$/.exec(rest))) {
@@ -217,13 +227,16 @@ export async function startFakeForge() {
     if (!found) return { status: 404, json: { message: '404 Project Not Found' } };
     const [repoName, repo] = found;
     const rest = m[2] || '';
-    const mr = (p) => ({ iid: p.number, state: (p.state || 'open') === 'open' ? 'opened' : p.state, draft: p.draft === true, author: { username: p.author }, source_branch: p.head, target_branch: p.base || 'main', source_project_id: p.fork ? 1234 : repo.projectId, target_project_id: repo.projectId });
+    const mr = (p) => ({ iid: p.number, state: (p.state || 'open') === 'open' ? 'opened' : p.state, draft: p.draft === true, author: { username: p.author }, source_branch: p.head, target_branch: p.base || 'main', source_project_id: p.headRepo ? data.repos[p.headRepo].projectId : p.fork ? 1234 : repo.projectId, target_project_id: repo.projectId });
     let x;
     if (method === 'GET' && rest === '') {
+      const full = repo.spelled || repoName;
+      const parent = parentOf(repo);
       return { status: 200, json: {
-        id: repo.projectId, path_with_namespace: repoName, default_branch: repo.defaultBranch || 'main', merge_requests_enabled: true, web_url: `https://${GITLAB_HOST}/${repoName}`,
+        id: repo.projectId, path_with_namespace: full, default_branch: repo.defaultBranch || 'main', merge_requests_enabled: true, web_url: `https://${GITLAB_HOST}/${repoName}`,
+        namespace: { full_path: full.split('/').slice(0, -1).join('/') },
         ci_config_path: repo.ciConfigPath ?? null, runners_token: 'GR1348941runnerstoken', service_desk_address: 'desk@example.com', import_url: 'https://user:pass@elsewhere.example/x.git',
-        forked_from_project: { path_with_namespace: 'upstream/private-parent' }, permissions: { project_access: { access_level: 40 } },
+        ...(parent === null ? {} : { forked_from_project: { path_with_namespace: parent } }), permissions: { project_access: { access_level: 40 } },
       } };
     }
     if (method === 'GET' && (x = /^\/issues\/(\d+)$/.exec(rest)) && repo.issues?.[x[1]]) {
@@ -362,12 +375,12 @@ export async function startFakeForge() {
     node(id, value) { data.nodes[id] = { id, ...value }; return data.nodes[id]; },
     /// Creates the bare repository behind `/<repo>.git`, accepting any push it is sent:
     /// force-pushes and deletions too, so only the requester's check stands in their way.
-    bare(repoName, { id = 'R_1', projectId = 99 } = {}) {
+    bare(repoName, { id = 'R_1', projectId = 99, ...settings } = {}) {
       const dir = path.join(gitRoot, `${repoName}.git`);
       fs.mkdirSync(dir, { recursive: true });
       git(dir, 'init', '--bare', '--quiet', '--initial-branch=main', '.');
       for (const [k, v] of [['http.receivepack', 'true'], ['uploadpack.allowAnySHA1InWant', 'true'], ['receive.denyNonFastForwards', 'false'], ['receive.denyDeletes', 'false']]) git(dir, 'config', k, v);
-      data.repos[repoName] ||= { id, projectId, pulls: {}, issues: {} };
+      data.repos[repoName] ||= { id, projectId, pulls: {}, issues: {}, ...settings };
       data.nodes[id] = { __typename: 'Repository', id, nameWithOwner: repoName };
       return dir;
     },

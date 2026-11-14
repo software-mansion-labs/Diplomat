@@ -93,9 +93,12 @@ const failing = async (promise, pattern) => {
 };
 
 // The forge's world: o/r with main and feature, pull request 579 opened by me from
-// feature, 578 opened by them, issue 421; and the same project on the GitLab host.
+// feature, 578 opened by them, 581 by me from feature in my fork of it, issue 421; and
+// the same project on the GitLab host, with its fork.
 const bare = forge.bare('o/r');
 forge.bare('group/sub/proj', { id: 'R_2', projectId: 99 });
+const forkBare = forge.bare('me/r', { id: 'R_3', projectId: 12, parent: 'o/r', spelled: 'Me/R' });
+forge.bare('me/proj', { id: 'R_4', projectId: 13, parent: 'group/sub/proj' });
 const work = path.join(scratch, 'work');
 git(scratch, 'clone', '--quiet', bare, 'work');
 const commit = (message, files) => {
@@ -111,13 +114,17 @@ const A = commit('root', { 'src/a.js': 'a\n', '.github/workflows/ci.yml': 'on: p
 git(work, 'push', '--quiet', bare, `${A}:refs/heads/main`);
 const B = commit('feature', { 'src/a.js': 'b\n' });
 git(work, 'push', '--quiet', bare, `${B}:refs/heads/feature`);
+git(work, 'push', '--quiet', forkBare, `${B}:refs/heads/feature`);
 git(scratch, 'clone', '--quiet', bare, 'checkout');
 const checkout = path.join(scratch, 'checkout');
 const pr578 = forge.pull('o/r', { number: 578, author: 'them', head: 'theirs' });
 const pr579 = forge.pull('o/r', { number: 579, author: 'me', head: 'feature', draft: true });
 forge.pull('o/r', { number: 580, author: 'me', head: 'old', state: 'closed' });
+forge.pull('o/r', { number: 581, author: 'me', head: 'feature', headRepo: 'me/r' });
+forge.pull('o/r', { number: 582, author: 'them', head: 'gone', headRepo: null, state: 'closed' });
 forge.pull('group/sub/proj', { number: 5, author: 'me', head: 'feature' });
 forge.pull('group/sub/proj', { number: 6, author: 'them', head: 'forked', fork: true });
+forge.pull('group/sub/proj', { number: 8, author: 'me', head: 'feature', headRepo: 'me/proj' });
 forge.issue('o/r', { number: 421, author: 'reporter', assignees: ['bob'] });
 forge.node('PRRT_579', { __typename: 'PullRequestReviewThread', pullRequest: pr579 });
 forge.node('PRR_mine', { __typename: 'PullRequestReview', state: 'PENDING', author: { login: 'me' }, pullRequest: pr578 });
@@ -272,25 +279,57 @@ await check('the forge answers what the deep checks ask: nodes, pull requests, c
   assert.deepEqual(await client.resolveNode(GITHUB, 'U_me'), { type: 'User', login: 'me' });
   assert.equal(await client.resolveNode(GITHUB, 'nothing'), null);
   assert.equal(await client.resolveNode(GITLAB, 'gid://gitlab/MergeRequest/1'), null);
-  assert.deepEqual(await client.pull(GITHUB, 'o/r', 579), { number: 579, open: true, author: 'me', headRepo: 'o/r', headRef: 'feature', baseRef: 'main', draft: true });
+  assert.deepEqual(await client.pull(GITHUB, 'o/r', 579), { number: 579, open: true, author: 'me', headRepo: 'o/r', headRepoId: 99, headRef: 'feature', baseRef: 'main', draft: true });
   assert.equal(await client.pull(GITHUB, 'o/r', 999), null);
+  // A head branch in a fork is told by the fork's id; a fork that is gone has none.
+  const head = (p) => [p.headRepo, p.headRepoId, p.headRef];
+  assert.deepEqual(head(await client.pull(GITHUB, 'o/r', 581)), ['Me/R', 12, 'feature']);
+  assert.deepEqual(head(await client.pull(GITHUB, 'o/r', 582)), ['', null, 'gone']);
   assert.deepEqual((await client.pullsByHead(GITHUB, 'o/r', 'feature')).map((p) => p.number), [579]);
-  assert.deepEqual((await client.pullsByHead(GITHUB, 'o/r')).map((p) => p.number), [578, 579]);
+  assert.deepEqual((await client.pullsByHead(GITHUB, 'o/r', 'feature', 'me')).map(head), [['Me/R', 12, 'feature']]);
+  assert.deepEqual((await client.pullsByHead(GITHUB, 'o/r', 'feature', 'them')), []);
+  assert.deepEqual((await client.pullsByHead(GITHUB, 'o/r')).map((p) => p.number), [578, 579, 581]);
   assert.deepEqual((await client.comment(GITHUB, 'o/r', 13)).number, 579);
   assert.equal(await client.comment(GITHUB, 'o/r', 14), null);
   assert.deepEqual(await client.assignees(GITHUB, 'o/r', 421), ['bob']);
   assert.deepEqual(await client.self(GITHUB), { id: 'U_me', login: 'me' });
-  assert.deepEqual(await client.repository(GITHUB, 'o/r'), { defaultBranch: 'main', ciPaths: [] });
+  // A repository: whose it is and what it is a fork of, under the name the forge spells.
+  assert.deepEqual(await client.repository(GITHUB, 'o/r'), { id: 99, name: 'o/r', owner: 'o', parent: 'upstream/private-parent', defaultBranch: 'main', ciPaths: [] });
+  assert.deepEqual(await client.repository(GITHUB, 'me/r'), { id: 12, name: 'Me/R', owner: 'Me', parent: 'o/r', defaultBranch: 'main', ciPaths: [] });
+  assert.equal(await client.repository(GITHUB, 'me/none'), null);
   assert.deepEqual(await client.branch(GITHUB, 'o/r', 'refs/heads/feature'), { sha: B, protected: false });
   assert.equal(await client.branch(GITHUB, 'o/r', 'refs/heads/none'), null);
-  // GitLab: a merge request from a fork has no head branch in the pool's project.
-  assert.deepEqual(await client.pull(GITLAB, 'group/sub/proj', 5), { number: 5, open: true, author: 'me', headRepo: 'group/sub/proj', headRef: 'feature', baseRef: 'main', draft: false });
-  assert.equal((await client.pull(GITLAB, 'group/sub/proj', 6)).headRepo, '');
-  assert.deepEqual((await client.pullsByHead(GITLAB, 'group/sub/proj', 'feature')).map((p) => p.number), [5]);
+  assert.deepEqual(await client.branch(GITHUB, 'me/r', 'refs/heads/feature'), { sha: B, protected: false });
+  assert.equal(await client.branch(GITHUB, 'me/r', 'refs/heads/main'), null);
+  // GitLab: a merge request names its source project by id alone, so one from a fork has no head repository by name.
+  assert.deepEqual(await client.pull(GITLAB, 'group/sub/proj', 5), { number: 5, open: true, author: 'me', headRepo: 'group/sub/proj', headRepoId: 99, headRef: 'feature', baseRef: 'main', draft: false });
+  assert.deepEqual(head(await client.pull(GITLAB, 'group/sub/proj', 6)), ['', 1234, 'forked']);
+  assert.deepEqual(head(await client.pull(GITLAB, 'group/sub/proj', 8)), ['', 13, 'feature']);
+  assert.deepEqual((await client.pullsByHead(GITLAB, 'group/sub/proj', 'feature', 'me')).map((p) => [p.number, p.headRepoId]), [[5, 99], [8, 13]]);
   assert.equal(await client.projectId(GITLAB, 'group/sub/proj'), 99);
   assert.equal(await client.projectId(GITHUB, 'o/r'), null);
-  assert.deepEqual(await client.repository(GITLAB, 'group/sub/proj'), { defaultBranch: 'main', ciPaths: [] });
+  assert.deepEqual(await client.repository(GITLAB, 'group/sub/proj'), { id: 99, name: 'group/sub/proj', owner: 'group/sub', parent: 'upstream/private-parent', defaultBranch: 'main', ciPaths: [] });
+  // A project is asked for by its path or by its number.
+  const labFork = { id: 13, name: 'me/proj', owner: 'me', parent: 'group/sub/proj', defaultBranch: 'main', ciPaths: [] };
+  assert.deepEqual(await client.repository(GITLAB, 'me/proj'), labFork);
+  assert.deepEqual(await client.repository(GITLAB, '13'), labFork);
+  assert.equal(await client.repository(GITLAB, 'me/none'), null);
+  assert.equal(await client.repository(GITLAB, '4321'), null);
   assert.equal(await client.branch(GITLAB, 'group/sub/proj', 'refs/heads/none'), null);
+  // A repository that is no fork has no parent.
+  for (const [target, repo] of [[GITHUB, 'o/r'], [GITLAB, 'group/sub/proj']]) {
+    forge.data.repos[repo].parent = null;
+    try { assert.equal((await client.repository(target, repo)).parent, ''); } finally { delete forge.data.repos[repo].parent; }
+  }
+
+  // A task's lookups are about the pool's repository unless one names another.
+  const ctx = ctxFor();
+  assert.equal((await ctx.repository()).name, 'o/r');
+  assert.equal((await ctx.repository('me/r')).id, 12);
+  assert.equal(await ctx.branch('refs/heads/main', 'me/r'), null);
+  assert.equal((await ctx.branch('refs/heads/main')).sha, A);
+  assert.deepEqual((await ctx.pullsByHead('feature')).map((p) => p.number), [579]);
+  assert.deepEqual((await ctx.pullsByHead('feature', 'me')).map((p) => p.number), [581]);
 
   // The same lookups behind authorize: a mutation's target is resolved on the forge before it is sent.
   const before = forge.data.mutations.length;
@@ -344,6 +383,29 @@ await check('a lookup the forge did not settle throws: only the forge\'s own "no
   await failing(answered('api.github.com', 'POST', /^\/graphql$/, json(502, {}), () => client.self(GITHUB)), /did not say which account this is/);
   await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r$/, json(403, { message: 'API rate limit exceeded' }), () => client.repository(GITHUB, 'o/r')), /did not say which branch is the default \(it answered 403\)/);
   await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r$/, json(200, { default_branch: '' }), () => client.repository(GITHUB, 'o/r')), /did not say which branch is the default/);
+  // An answer that is not about the repository asked for, or leaves out whose it is or what it is a fork of, has not said.
+  const repoOf = (answer, repo = 'o/r') => answered('api.github.com', 'GET', /^\/repos\/[^/]+\/[^/]+$/, json(200, answer), () => client.repository(GITHUB, repo));
+  const said = { id: 99, full_name: 'O/R', owner: { login: 'O' }, default_branch: 'main' };
+  assert.deepEqual(await repoOf(said), { id: 99, name: 'O/R', owner: 'O', parent: '', defaultBranch: 'main', ciPaths: [] });
+  assert.equal((await repoOf({ ...said, parent: { full_name: 'Up/Stream' } })).parent, 'Up/Stream');
+  for (const answer of [{ ...said, full_name: 'o/other' }, { ...said, full_name: undefined }, { ...said, id: '99' }, { ...said, id: undefined }, { ...said, owner: {} }, { ...said, owner: { login: '' } },
+    { ...said, owner: { login: 7 } }, { ...said, parent: null }, { ...said, parent: {} }, { ...said, parent: { full_name: '' } }, { ...said, parent: { full_name: 7 } }]) {
+    await failing(repoOf(answer), /did not say which repository o\/r is \(it answered 200\)/);
+  }
+  await failing(repoOf(said, 'me/r'), /did not say which repository me\/r is/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/me\/r$/, json(301, { message: 'Moved Permanently' }), () => client.repository(GITHUB, 'me/r')), /did not say which branch is the default \(it answered 301\)/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/me\/r$/, json(404, {}), () => client.repository(GITHUB, 'me/r')), /did not say which branch is the default \(it answered 404\)/);
+  const projectOf = (answer, repo) => answered(GITLAB_HOST, 'GET', /^\/api\/v4\/projects\/[^/]+$/, json(200, answer), () => client.repository(GITLAB, repo));
+  const project = { id: 13, path_with_namespace: 'Me/Proj', namespace: { full_path: 'Me' }, default_branch: 'main', ci_config_path: null, forked_from_project: { path_with_namespace: 'Group/Sub/Proj' } };
+  const read = { id: 13, name: 'Me/Proj', owner: 'Me', parent: 'Group/Sub/Proj', defaultBranch: 'main', ciPaths: [] };
+  assert.deepEqual(await projectOf(project, 'me/proj'), read);
+  assert.deepEqual(await projectOf(project, '13'), read);
+  await failing(projectOf(project, '14'), /did not say which repository 14 is/);
+  await failing(projectOf(project, 'me/other'), /did not say which repository me\/other is/);
+  await failing(projectOf({ ...project, path_with_namespace: '13' }, 'me/proj'), /did not say which repository me\/proj is/);
+  for (const answer of [{ ...project, namespace: undefined }, { ...project, namespace: { full_path: '' } }, { ...project, forked_from_project: null }, { ...project, forked_from_project: {} }, { ...project, id: 13.5 }]) {
+    await failing(projectOf(answer, 'me/proj'), /did not say which repository me\/proj is/);
+  }
 
   // A node: null beside the forge's NOT_FOUND is absent; null beside anything else, or no answer, is unknown.
   const node = () => client.resolveNode(GITHUB, 'PR_579');
@@ -368,14 +430,14 @@ await check('a lookup the forge did not settle throws: only the forge\'s own "no
   await failing(answered(GITLAB_HOST, 'GET', /^\/api\/v4\/projects\/group%2Fsub%2Fproj$/, json(200, { default_branch: 'main' }), () => client.repository(GITLAB, 'group/sub/proj')), /did not say where the project reads its CI configuration from/);
 });
 
-await check('the quarantine\'s fetch asks for commits by id from the pool\'s repository, and follows no redirect', async () => {
+await check('the quarantine\'s fetch asks one repository for commits by id or for its branches, and follows no redirect', async () => {
   const env = { PATH: process.env.PATH, HOME: scratch, GIT_DIR: path.join(scratch, 'fetch-target.git'), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
   git(scratch, 'init', '--quiet', '--bare', 'fetch-target.git');
   const before = forge.log.length;
   const lines = logLines.length;
   // Nothing but a commit id is asked for, and nothing but a plain repository path is asked of.
   for (const what of [{ wants: [] }, { wants: ['refs/heads/main'] }, { wants: [A, 'main'] }, { wants: [A, '--upload-pack=x'] }, { wants: [A.slice(0, 39)] },
-    { repo: 'o/r x', wants: [A] }, { repo: 'o/r?x=', wants: [A] }, { repo: 'o/r#', wants: [A] }, { repo: '', all: true }, { repo: 'o/r\n', all: true }]) {
+    { repo: 'o/r x', wants: [A] }, { repo: 'o/r?x=', wants: [A] }, { repo: 'o/r#', wants: [A] }, { repo: '', into: 'refs/dn/0' }, { repo: 'o/r\n', into: 'refs/dn/0' }]) {
     assert.equal(await client.fetchInto(GITHUB, { repo: 'o/r', env, ...what }), false, JSON.stringify(what));
   }
   assert.equal(await client.fetchInto({ forge: 'github', host: 'github.example.com' }, { repo: 'o/r', env, wants: [A] }), false);
@@ -390,6 +452,14 @@ await check('the quarantine\'s fetch asks for commits by id from the pool\'s rep
   assert.equal(await client.fetchInto(GITHUB, { repo: 'o/r', env, wants: [B] }), false);
   remove();
   assert.equal(strangers.length, heard, 'the redirect\'s target was never contacted');
+
+  // Every branch of a repository, under the name given: the pool's when a task names none, another when it does.
+  const ctx = ctxFor();
+  const asked = forge.log.length;
+  assert.equal(await ctx.fetch({ env, into: 'refs/dn/1' }), true);
+  assert.equal(await ctx.fetch({ env, repo: 'me/r', into: 'refs/dn/0' }), true);
+  assert.equal(git(env.GIT_DIR, 'for-each-ref', '--format=%(refname)'), 'refs/dn/0/feature\nrefs/dn/1/feature\nrefs/dn/1/main');
+  assert.deepEqual([...new Set(seen(asked).map((r) => r.path.split('.git/')[0]))], ['/o/r', '/me/r']);
 });
 
 // A git client's side of the tunnel: every smart-HTTP request becomes `authorize`, then
@@ -523,6 +593,72 @@ await check('a real git push: the one new branch of an issue task, then a draft 
   assert.equal(git(checkout, 'rev-parse', 'refs/remotes/origin/feature'), B, 'the linked checkout was not fetched into');
   assert.equal(git(checkout, 'status', '--porcelain'), '');
   await tunnel.close();
+});
+
+await check('a real git push to the account\'s own fork: its pull request\'s head branch moves there, its one new branch is made there, and nothing else', async () => {
+  const inFork = (ref) => {
+    try { return git(forkBare, 'rev-parse', '--verify', '--quiet', ref); } catch { return null; }
+  };
+  const tunnel = await relay(rules('conflicts', 'pr-581'), ctxFor());
+  const before = forge.log.length;
+  // The fork never saw the base branch move: the merge carries the repository's own commits, its workflow change among them.
+  git(work, 'checkout', '--quiet', '--detach', B);
+  git(work, 'merge', '--quiet', '--no-edit', remote('refs/heads/main'));
+  const merged = git(work, 'rev-parse', 'HEAD');
+  const pushed = await gitPush(`${tunnel.url}/me/r.git`, `${merged}:refs/heads/feature`);
+  assert.equal(pushed.ok, true, pushed.stderr + tunnel.refusals.join('; '));
+  assert.equal(inFork('refs/heads/feature'), merged);
+  assert.deepEqual(pushesReceived(before).map((r) => r.path), ['/me/r.git/git-receive-pack']);
+  assert.deepEqual([...new Set(seen(before).filter((r) => r.path.includes('git-upload-pack')).map((r) => r.path.split('.git/')[0]))], ['/Me/R', '/o/r'], 'the quarantine fetched from the fork, by the name the forge gave it, and from the pool\'s repository');
+
+  const pool = remote('refs/heads/feature');
+  const attempt = async (pattern, repo, ...args) => {
+    const refusals = tunnel.refusals.length;
+    const sent = await gitPush(`${tunnel.url}${repo}`, ...args);
+    assert.equal(sent.ok, false, `git push ${repo} ${args.join(' ')} succeeded`);
+    assert.match(tunnel.refusals.slice(refusals).join('; '), pattern);
+  };
+  const more = commit('more in the fork', { 'src/a.js': 'more\n' });
+  // The repository's branch of that name is not this pull request's head, and no other repository is the fork.
+  await attempt(/does not hold the head branch of open pull request #581/, '/o/r.git', `${more}:refs/heads/feature`);
+  await attempt(/^me\/proj is not this account's own fork of the pool's repository$/, '/me/proj.git', `${more}:refs/heads/feature`);
+  await attempt(/^me\/absent is not this account's own fork of the pool's repository$/, '/me/absent.git', `${more}:refs/heads/feature`);
+  await attempt(/no rule of this task allows the request/, '/them/r.git', `${more}:refs/heads/feature`);
+  await attempt(/may not create that ref/, '/me/r.git', `${more}:refs/heads/second`);
+  await attempt(/may not delete a ref/, '/me/r.git', ':refs/heads/feature');
+  await attempt(/refs\/heads\/second: this task may not create/, '/me/r.git', '--atomic', `${more}:refs/heads/feature`, `${more}:refs/heads/second`);
+  git(work, 'checkout', '--quiet', '--detach', B);
+  await attempt(/not a fast-forward/, '/me/r.git', '--force', `${commit('rewrite the fork', { 'src/a.js': 'rewritten\n' })}:refs/heads/feature`);
+  git(work, 'checkout', '--quiet', '--detach', merged);
+  await attempt(/changes \.github\/workflows\/steal\.yml/, '/me/r.git', `${commit('a workflow in the fork', { '.github/workflows/steal.yml': 'on: push\n' })}:refs/heads/feature`);
+  assert.equal(inFork('refs/heads/feature'), merged);
+  assert.equal(inFork('refs/heads/second'), null);
+  assert.equal(remote('refs/heads/feature'), pool);
+  assert.equal(pushesReceived(before).length, 1, 'no refused push reached the forge');
+  await tunnel.close();
+
+  // An issue task's one new branch, made in the fork, and its draft pull request opened from there.
+  const state = {};
+  const ruleList = rules('issues', 'issue-421');
+  const ctx = ctxFor(state);
+  const issue = await relay(ruleList, ctx);
+  git(work, 'checkout', '--quiet', '--detach', remote('refs/heads/main'));
+  const fix = commit('fix 421 from the fork', { 'src/fix.js': 'fork\n' });
+  const made = await gitPush(`${issue.url}/me/r.git`, `${fix}:refs/heads/fix-9`);
+  assert.equal(made.ok, true, made.stderr + issue.refusals.join('; '));
+  assert.equal(inFork('refs/heads/fix-9'), fix);
+  assert.deepEqual(state.branches, ['me/r:refs/heads/fix-9']);
+  assert.equal((await gitPush(`${issue.url}/me/r.git`, `${commit('part two', { 'src/fix.js': 'fork 2\n' })}:refs/heads/fix-9`)).ok, true, issue.refusals.join('; '));
+  for (const repo of ['/o/r.git', '/me/r.git']) {
+    assert.equal((await gitPush(`${issue.url}${repo}`, `${fix}:refs/heads/another`)).ok, false);
+    assert.match(issue.refusals.at(-1), /this task may create 1 branch\(es\); it has me\/r:refs\/heads\/fix-9/);
+  }
+  const open = (head) => gh('POST', '/repos/o/r/pulls', { title: 't', head, base: 'main', draft: true });
+  for (const head of ['fix-9', 'them:fix-9', 'me:other', 'me:r:fix-9', 'me:fix-9:x']) assert.match((await authorize(ruleList, open(head), ctx)).reason, /only be opened from a branch this task pushed/, head);
+  assert.equal((await perform(ruleList, open('Me:fix-9'), ctx)).status, 201);
+  assert.deepEqual(state, { branches: ['me/r:refs/heads/fix-9'], reserved: [], pulls: ['me/r:fix-9'] });
+  assert.match((await authorize(ruleList, open('me:fix-9'), ctx)).reason, /this task has opened its pull request from me\/r:fix-9/);
+  await issue.close();
 });
 
 if (process.env.DN_TEST_GITHUB === '1') {

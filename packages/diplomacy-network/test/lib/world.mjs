@@ -4,9 +4,15 @@
 const on = (number, author, more = {}) => ({ repo: 'o/r', item: 'pr', number, open: true, itemAuthor: author, ...more });
 
 /// The `ctx` of `authorize` over a small fixed forge: `o/r` with pull request 578 (opened
-/// by "them", head `feature`), 579 (opened by "me", head `mine`), 580 (closed) and issue
-/// 421. `me` is the account the credential belongs to. `ctx.asked` lists the node ids looked up.
+/// by "them", head `feature`), 579 (opened by "me", head `mine`), 580 (closed), 581 (opened
+/// by "me" from `forked` in `me/r`, that account's fork of `o/r`) and issue 421. `me` is
+/// the account the credential belongs to. `ctx.asked` lists the node ids looked up.
 export function world({ branches = [] } = {}) {
+  const repos = {
+    'o/r': { id: 1, name: 'o/r', owner: 'o', parent: '', defaultBranch: 'main', ciPaths: [] },
+    'me/r': { id: 12, name: 'me/r', owner: 'me', parent: 'o/r', defaultBranch: 'main', ciPaths: [] },
+    'me/mine': { id: 13, name: 'me/mine', owner: 'me', parent: '', defaultBranch: 'main', ciPaths: [] },
+  };
   const nodes = {
     R_1: { type: 'Repository', repo: 'o/r' },
     R_other: { type: 'Repository', repo: 'o/other' },
@@ -28,10 +34,10 @@ export function world({ branches = [] } = {}) {
     I_422: { type: 'Issue', repo: 'o/r', item: 'issue', number: 422, open: true, itemAuthor: 'reporter', author: 'reporter' },
   };
   const pulls = {
-    578: { number: 578, open: true, author: 'them', headRepo: 'o/r', headRef: 'feature' },
-    579: { number: 579, open: true, author: 'Me', headRepo: 'o/r', headRef: 'mine' },
-    580: { number: 580, open: false, author: 'me', headRepo: 'o/r', headRef: 'old' },
-    581: { number: 581, open: true, author: 'me', headRepo: 'me/r', headRef: 'forked' },
+    578: { number: 578, open: true, author: 'them', headRepo: 'o/r', headRepoId: 1, headRef: 'feature' },
+    579: { number: 579, open: true, author: 'Me', headRepo: 'o/r', headRepoId: 1, headRef: 'mine' },
+    580: { number: 580, open: false, author: 'me', headRepo: 'o/r', headRepoId: 1, headRef: 'old' },
+    581: { number: 581, open: true, author: 'me', headRepo: 'me/r', headRepoId: 12, headRef: 'forked' },
   };
   // 14 is this account's and already sent, 15 somebody's and still pending, 16 this account's pending one in another repository.
   const comments = {
@@ -40,7 +46,7 @@ export function world({ branches = [] } = {}) {
   };
   const asked = [];
   return {
-    asked, nodes, pulls,
+    asked, nodes, pulls, repos,
     assigned: ['bob'],
     state: { branches: [...branches] },
     async resolveNode(id) { asked.push(id); return nodes[id] ?? null; },
@@ -49,6 +55,6 @@ export function world({ branches = [] } = {}) {
     async comment(id) { return comments[id] ?? null; },
     async assignees() { return this.assigned; },
     async self() { return { id: 7, login: 'me' }; },
-    async repository() { return { defaultBranch: 'main', ciPaths: [] }; },
+    async repository(of = 'o/r') { return repos[of] ?? null; },
   };
 }

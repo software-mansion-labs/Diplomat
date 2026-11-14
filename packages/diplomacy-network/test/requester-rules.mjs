@@ -233,10 +233,15 @@ await check('conflicts: a push to its pull request\'s head branch and not one wr
   await allowed(rules, ghql(GH.prViewMergeable));
   for (const request of [ghql({ ...GH.resolveThread, variables: { t: 'PRRT_579' } }), gh('POST', '/repos/o/r/pulls/579/comments/13/replies', { body: 'x' }), gh('PUT', '/repos/o/r/pulls/579/update-branch', {}),
     ghql({ ...GH.prReady, variables: { input: { pullRequestId: 'PR_579' } } }), gh('POST', '/repos/o/r/issues/579/comments', { body: 'x' }), gitPush('github.com', '/me/r.git')]) await refused(rules, request);
-  // The head branch of a pull request from a fork lives in the fork, and no task pushes there.
+  // The head branch of a pull request from the task account's own fork lives in that fork, and is pushed there alone.
   const forked = github('conflicts', {}, 'pr-581');
-  await refused(forked, gitPush('github.com', '/me/r.git'), world(), /no rule of this task allows the request/);
+  await allowed(forked, gitPush('github.com', '/me/r.git'));
+  await allowed(forked, gitPush('github.com', '/ME/r'));
   await refused(forked, gitPush('github.com', '/o/r.git'), world(), /does not hold the head branch of open pull request #581/);
+  await refused(rules, gitPush('github.com', '/me/r.git'), world(), /does not hold the head branch of open pull request #579/);
+  await refused(forked, gitPush('github.com', '/me/mine.git'), world(), /^me\/mine is not this account's own fork of the pool's repository$/);
+  await refused(forked, gitPush('github.com', '/me/absent.git'), world(), /^me\/absent is not this account's own fork of the pool's repository$/);
+  for (const path of ['/them/r.git', '/me/r/x.git', '/me.git']) await refused(forked, gitPush('github.com', path), world(), /no rule of this task allows the request/);
   await refused(github('conflicts', {}, 'pr-580'), gitPush('github.com', '/o/r.git'), world(), /open pull request #580/);
 });
 
@@ -250,7 +255,7 @@ await check('issues: assign itself, comment on its issue, and a draft pull reque
     ghql(GH.issueComment), gh('POST', '/repos/o/r/issues/421/comments', { body: 'on it' }), // gh issue comment 421
     ghql(GH.repositoryInfo), ghql(GH.prForBranch), ghql(GH.prCreate), // gh pr create --draft
     gh('POST', '/repos/o/r/pulls', { title: 't', body: 'Fixes #421', head: 'fix-421', base: 'main', draft: true }),
-    gitPush('github.com', '/o/r.git'), gitPush('github.com', '/o/r'),
+    gitPush('github.com', '/o/r.git'), gitPush('github.com', '/o/r'), gitPush('github.com', '/me/r.git'),
   ];
   for (const request of allowedOnes) await allowed(rules, request, pushed());
   const denied = [
@@ -264,7 +269,7 @@ await check('issues: assign itself, comment on its issue, and a draft pull reque
     ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, draft: false } } }), ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, headRefName: 'main' } } }),
     ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, repositoryId: 'R_other' } } }),
     ghql({ ...GH.prReady, variables: { input: { pullRequestId: 'PR_579' } } }), ghql({ ...GH.resolveThread, variables: { t: 'PRRT_579' } }),
-    gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc' }), gitPush('github.com', '/me/r.git'),
+    gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc' }), gitPush('github.com', '/me/mine.git'), gitPush('github.com', '/them/r.git'),
   ];
   for (const request of denied) await refused(rules, request, pushed());
   // Before anything is pushed there is no branch to open a pull request from.
@@ -315,8 +320,11 @@ await check('every push rule keeps CI definitions out of reach, and no rule name
     for (const [rules, guarded] of [[github(kind, { markReady: true, verdict: true }), ['.github/workflows/**']], [gitlab(kind, { markReady: true, verdict: true }), ['.gitlab-ci.yml', '.gitlab/ci/**']]]) {
       for (const rule of rules.filter((r) => r.git)) {
         assert.equal(rule.git, 'receive-pack');
-        // A push is addressed to the pool's repository by name: no pattern stands where a fork's owner could.
-        assert.ok(!rule.path.includes('*') && ['o/r', 'group/sub/proj'].includes(rule.repo), rule.path);
+        // A push is addressed by name: to the pool's repository in full, or to a repository of the
+        // task's own account, which the check holds to that account's fork of the pool's.
+        assert.ok(['o/r', 'group/sub/proj'].includes(rule.repo), rule.path);
+        if (rule.fork === undefined) assert.ok(!rule.path.includes('*'), rule.path);
+        else assert.ok(rule.fork === 'me' && ['/me/*/info/refs', '/me/*/git-receive-pack'].includes(rule.path), rule.path);
         if (rule.method === 'POST') assert.deepEqual(rule.denyPaths, guarded, kind);
         else assert.deepEqual(rule.query, { service: { equals: 'git-receive-pack' } });
         assert.ok(rule.head ? rule.refs === undefined && rule.create === undefined : rule.refs.every((r) => r.startsWith('refs/heads/')), kind);
@@ -346,10 +354,12 @@ await check('a job-wide review covers every open pull request of somebody else, 
   await refused(mine, ghql(GH.resolveThread), world(), /#578 was not opened by me/);
   await refused(mine, ghql({ ...GH.resolveThread, variables: { t: 'PRRT_580' } }), world(), /#580 is not open/);
   await allowed(mine, gitPush('github.com', '/o/r.git'));
-  await refused(mine, gitPush('github.com', '/me/r.git'), world(), /no rule of this task allows the request/);
+  await allowed(mine, gitPush('github.com', '/me/r.git'));
+  await refused(mine, gitPush('github.com', '/me/mine.git'), world(), /not this account's own fork/);
   await refused(mine, gitPush('github.com', '/o/other.git'), world(), /no rule of this task allows the request/);
   const theirs = github('conflicts', { author: 'them' }, 'job-c');
   await allowed(theirs, gitPush('github.com', '/o/r.git'));
+  await refused(theirs, gitPush('github.com', '/me/r.git'), world(), /no open pull request by them has its head branch here/);
   await refused(github('conflicts', { author: 'nobody' }, 'job-c'), gitPush('github.com', '/o/r.git'), world(), /no open pull request by nobody/);
 });
 
@@ -358,7 +368,12 @@ await check('a job-wide review covers every open pull request of somebody else, 
 const P = '/api/v4/projects/group%2Fsub%2Fproj';
 const glWorld = (branches = []) => {
   const w = world({ branches });
-  w.pulls = { 5: { number: 5, open: true, author: 'me', headRepo: 'group/sub/proj', headRef: 'feature' }, 6: { number: 6, open: true, author: 'them', headRepo: '', headRef: 'forked' } };
+  w.pulls = {
+    5: { number: 5, open: true, author: 'me', headRepo: 'group/sub/proj', headRepoId: 99, headRef: 'feature' },
+    6: { number: 6, open: true, author: 'them', headRepo: '', headRepoId: 16, headRef: 'forked' },
+    8: { number: 8, open: true, author: 'me', headRepo: '', headRepoId: 13, headRef: 'mine' },
+  };
+  w.repos['me/proj'] = { id: 13, name: 'me/proj', owner: 'me', parent: 'group/sub/proj', defaultBranch: 'main', ciPaths: [] };
   w.pull = async (n) => w.pulls[n] ?? null;
   w.pullsByHead = async (ref) => Object.values(w.pulls).filter((p) => ref === undefined || p.headRef === ref);
   w.assigned = [3];
@@ -469,8 +484,13 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
     await refused(ready, glab('PUT', `${P}/merge_requests/5`, body), glWorld());
   }
   await refused(ready, glab('PUT', `${P}/merge_requests/5?state_event=close`, { title: 't' }), glWorld());
-  // A merge request from a fork has its branch in a project no rule reaches.
-  await refused(gitlab('conflicts', {}, 'pr-6'), gitPush('gitlab.example.com', '/group/sub/proj.git'), glWorld(), /does not hold the head branch of open pull request #6/);
+  // A merge request's branch is pushed in the project that holds it: the pool's, or the task account's own fork of it.
+  const lab = (path) => gitPush('gitlab.example.com', path);
+  for (const path of ['/group/sub/proj.git', '/me/proj.git']) await refused(gitlab('conflicts', {}, 'pr-6'), lab(path), glWorld(), /does not hold the head branch of open pull request #6/);
+  await allowed(gitlab('conflicts', {}, 'pr-8'), lab('/me/proj.git'), glWorld());
+  await allowed(gitlab('conflicts', {}, 'pr-8'), lab('/Me/proj'), glWorld());
+  await refused(gitlab('conflicts', {}, 'pr-8'), lab('/group/sub/proj.git'), glWorld(), /does not hold the head branch of open pull request #8/);
+  for (const path of ['/them/proj.git', '/me/sub/proj.git', '/group/proj.git']) await refused(gitlab('conflicts', {}, 'pr-8'), lab(path), glWorld(), /no rule of this task allows the request/);
 
   const issues = gitlab('issues');
   const pushed = () => glWorld(['refs/heads/fix-421']);

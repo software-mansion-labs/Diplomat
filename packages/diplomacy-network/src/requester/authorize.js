@@ -9,7 +9,7 @@
 // matches nothing is refused.
 
 import { checkGraphql, itemMismatch, searchConfined } from './graphql.js';
-import { checkAdvertise, checkPush, pushReport } from './receivepack.js';
+import { branchLabel, checkAdvertise, checkFork, checkPush, pushReport } from './receivepack.js';
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const HOST = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$/;
@@ -261,7 +261,8 @@ function jsonBody(req) {
 
 // `given` names the pinned query parameters the request carries: a forge reads a member
 // from either place, so a required one may come as the parameter of the same name.
-async function checkBodyPins(spec, req, ctx, effects, given) {
+// `fork` is the fork the request's path names, when its rule has one checked.
+async function checkBodyPins(spec, req, ctx, effects, given, fork) {
   const body = req.body.length === 0 ? Object.create(null) : jsonBody(req);
   if (body === null || typeof body !== 'object' || Array.isArray(body)) refuse('the body is not a JSON object');
   for (const [key, value] of Object.entries(body)) {
@@ -272,7 +273,7 @@ async function checkBodyPins(spec, req, ctx, effects, given) {
     if (pin.oneOf && !pin.oneOf.some((allowed) => sameJson(value, allowed, pin.fold))) refuse(`the body member "${key}" has a value this task may not use`);
     if (pin.prefix !== undefined && !(typeof value === 'string' && value.startsWith(pin.prefix))) refuse(`the body member "${key}" must start with "${pin.prefix}"`);
     if (pin.prose && !(typeof value === 'string' && !COMMAND_LINE.test(value))) refuse(`the body member "${key}" has a line starting with "/", which the forge would run as a command`);
-    if (pin.created) effects.push({ pull: value });
+    if (pin.created) effects.push(pin.created === 'label' ? { head: value } : { pull: value, fork });
     if (pin.assignees !== undefined) {
       if (typeof ctx.self !== 'function' || typeof ctx.assignees !== 'function') refuse('nothing here can tell who is assigned, or which account this task acts as');
       // The whole new list, as account ids. A lone 0 is how glab spells "nobody"; beside
@@ -328,12 +329,33 @@ async function checkComment(spec, req, ctx) {
   if (spec.pending && comment.pending !== true) refuse(`comment ${id} is not part of a pending review`);
 }
 
+// A project named in the path that must be the task account's own fork of the pool's;
+// returns its name.
+async function checkProject(spec, req, ctx) {
+  const verdict = await checkFork(req.decoded[spec.segment], spec.owner, spec.repo, ctx);
+  if (!verdict.ok) refuse(verdict.reason);
+  return verdict.fork.name;
+}
+
 // What a task has used of its allowances, in `ctx.state`:
 //   branches  the branches the forge accepted from it: its own, which it may move
 //   reserved  branches whose creation was sent and whose answer is not known to be a
 //             refusal: counted against `create`, and not its own
 //   pulls     the branches it opened a pull request from, or sent one for
+// A branch is named by its ref, one in a fork as "<repository>:<ref>" (`branchLabel`);
+// `pulls` names it the same way without "refs/heads/".
 const pending = new WeakMap(); // an approved request -> what it holds of the task's state
+
+// The name in `branches` of the branch a pull request would be opened from. GitHub's
+// `head` is "branch", or "account:branch" for a branch of that account's fork of the
+// repository; elsewhere the branch comes plain, beside the fork it is in.
+function headLabel(effect, branches) {
+  if (effect.head === undefined) return typeof effect.pull === 'string' ? branchLabel(`refs/heads/${effect.pull}`, effect.fork) : undefined;
+  const parts = typeof effect.head === 'string' ? effect.head.split(':') : [];
+  if (parts.length === 1) return `refs/heads/${parts[0]}`;
+  if (parts.length !== 2) return undefined;
+  return branches.find((label) => label.endsWith(`:refs/heads/${parts[1]}`) && label.split('/')[0] === parts[0].toLowerCase());
+}
 
 // Counts what an allowed request would use up, before it is sent. Runs after the last
 // await, so two requests racing for the last free branch cannot both take it.
@@ -345,10 +367,12 @@ function settle(rule, effects, ctx) {
   const held = { state, branches: [], pulls: [], graphql: Boolean(rule.graphql) };
   for (const effect of effects) {
     if (effect.branch !== undefined && !held.branches.includes(effect.branch)) held.branches.push(effect.branch);
-    if (effect.pull !== undefined) {
-      if (typeof effect.pull !== 'string' || !state.branches.includes(`refs/heads/${effect.pull}`)) refuse('a pull request may only be opened from a branch this task pushed');
-      if (state.pulls.includes(effect.pull) || held.pulls.includes(effect.pull)) refuse(`this task has opened its pull request from ${effect.pull}`);
-      held.pulls.push(effect.pull);
+    if (effect.pull !== undefined || effect.head !== undefined) {
+      const label = headLabel(effect, state.branches);
+      if (!state.branches.includes(label)) refuse('a pull request may only be opened from a branch this task pushed');
+      const from = label.replace('refs/heads/', '');
+      if (state.pulls.includes(from) || held.pulls.includes(from)) refuse(`this task has opened its pull request from ${from}`);
+      held.pulls.push(from);
     }
   }
   // A creation sent again is the one already counted.
@@ -374,11 +398,13 @@ export function conclude(request, answer) {
   const refused = answer !== undefined && answer.status >= 400 && answer.status < 500;
   if (held.branches.length > 0) {
     const report = answer?.status === 200 ? pushReport(answer.body) : null;
-    const accepted = held.branches.filter((ref) => report?.ok.includes(ref));
+    // The forge reports a ref by its name alone, in whichever repository the push went to.
+    const ref = (label) => label.slice(label.indexOf(':') + 1);
+    const accepted = held.branches.filter((label) => report?.ok.includes(ref(label)));
     // Only what this request counted is given back: a creation sent before, whose answer
     // never came, may be why the forge declines this one.
-    drop(state.reserved, [...accepted, ...held.fresh.filter((ref) => refused || report?.ng.includes(ref))]);
-    for (const ref of accepted) if (!state.branches.includes(ref)) state.branches.push(ref);
+    drop(state.reserved, [...accepted, ...held.fresh.filter((label) => refused || report?.ng.includes(ref(label)))]);
+    for (const label of accepted) if (!state.branches.includes(label)) state.branches.push(label);
   }
   if (held.pulls.length > 0) {
     let failed = refused;
@@ -407,9 +433,9 @@ function asking(ctx) {
 /// Decides one request against a task's rules. `request` is `{ host, method, path,
 /// headers, body }` as the executor sent it (path with its query, body base64). `given`
 /// carries what the deep checks ask the forge and the machine: `resolveNode(id)`,
-/// `pull(number)`, `pullsByHead(ref)`, `comment(id)`, `assignees(number)`, `self()`,
-/// `repository()`, `branch(ref)`, `fetch`, `checkout` and the task's mutable `state`
-/// (`forge.context()` builds one). A lookup that throws refuses the request.
+/// `pull(number)`, `pullsByHead(ref, owner)`, `comment(id)`, `assignees(number)`, `self()`,
+/// `repository(repo)`, `branch(ref, repo)`, `fetch`, `checkout` and the task's mutable
+/// `state` (`forge.context()` builds one). A lookup that throws refuses the request.
 /// Resolves to `{ ok: true, rule, request }` - `request` is the one to perform, in the
 /// single spelling that was checked - or `{ ok: false, reason }`. What an allowed request
 /// would use up is counted in `state` at once; `conclude` settles it with the forge's answer.
@@ -429,6 +455,7 @@ export async function authorize(rules, request, given = {}) {
     let body = req.body;
     if (rule.pull) await checkPull(rule.pull, req, ctx);
     if (rule.comment) await checkComment(rule.comment, req, ctx);
+    const fork = rule.project ? await checkProject(rule.project, req, ctx) : undefined;
     if (rule.git && req.method === 'GET') {
       if (body.length > 0) refuse('a read carries no body');
       const verdict = await checkAdvertise(rule, req.segments, ctx);
@@ -446,7 +473,7 @@ export async function authorize(rules, request, given = {}) {
       effects.push(...verdict.effects);
       body = Buffer.from(JSON.stringify(payload));
     } else if (rule.body) {
-      body = await checkBodyPins(rule.body, req, ctx, effects, named);
+      body = await checkBodyPins(rule.body, req, ctx, effects, named, fork);
     } else if (body.length > 0) {
       refuse('this rule allows no body');
     }

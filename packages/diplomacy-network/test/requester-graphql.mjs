@@ -366,7 +366,7 @@ await check('assignment may add or remove only the task\'s own account', async (
 await check('a pull request is opened as a draft, in the pool\'s repository, from a branch the task created', async () => {
   const pushed = world({ branches: ['refs/heads/fix-421'] });
   const verdict = await allowed(issues, GH.prCreate.query, GH.prCreate.variables, pushed);
-  assert.deepEqual(verdict.effects, [{ pull: 'fix-421' }], 'the caller checks the branch against the key\'s state');
+  assert.deepEqual(verdict.effects, [{ head: 'fix-421' }], 'the caller checks the branch against the key\'s state');
   const input = GH.prCreate.variables.input;
   await refused(issues, GH.prCreate.query, { input: { ...input, draft: false } }, /"draft" to be true/);
   const { draft: _draft, ...ready } = input;

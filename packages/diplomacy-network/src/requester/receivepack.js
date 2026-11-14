@@ -19,13 +19,20 @@
 // stale checkout may not have them. They are fetched into the quarantine by id, so git
 // sees a whole graph.
 //
-// `denyPaths` keeps a push from writing CI definitions. Every pushed commit is compared
-// with its parents: a path under `denyPaths` - in any letter case - may only hold what one
-// of the parents holds there, which lets a merge bring the base branch's workflow files
-// along and stops a commit from writing, changing or deleting one. The commits the push
-// builds on must then be the forge's own: reachable from a branch of that repository, not
-// merely fetchable by id - a forge that shares objects between forks hands out commits no
-// branch of this repository holds.
+// A push goes to the pool's repository, or under a rule with `fork` to the fork of it
+// that the task's account holds itself: the forge is asked whose the repository at the
+// path is and what it is a fork of. There the same checks hold, against the fork's own
+// default branch and protection, and the head branch of a pull request is one whose head
+// the forge places in that fork.
+//
+// `denyPaths` keeps a push from writing CI definitions. Every pushed commit that no
+// branch of the forge holds is compared with its parents: a path under `denyPaths` - in
+// any letter case - may only hold what one of the parents holds there, which lets a merge
+// bring the base branch's workflow files along and stops a commit from writing, changing
+// or deleting one. The commits the push builds on must then be the forge's own: reachable
+// from a branch of the repository pushed to (for a fork, of the pool's repository too),
+// not merely fetchable by id - a forge that shares objects between forks hands out
+// commits no branch of this repository holds.
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
@@ -193,37 +200,62 @@ function repoOf(segments) {
 
 const lower = (s) => String(s ?? '').toLowerCase();
 
-// For a rule scoped to pull requests' head branches: the refs of the pool's repository
-// this push may move, as the forge reports them now. `refs` null means "any" - a question
-// only the advertisement asks, before a ref is named. A head branch that lives in a fork
-// is not one of them: a push goes to the pool's repository and to no other.
-async function headRefs(rule, ctx, refs) {
+// What the forge says of the repository at `asked`, which must be the fork of `repo` that
+// the account `owner` holds itself. Whose a repository is and what it is a fork of are
+// the forge's word, never the path's. Every other case gets one refusal, a name that
+// stands for nothing included, so it does not tell which repositories the account has.
+async function ownFork(asked, owner, repo, ctx) {
+  if (typeof ctx.repository !== 'function') refuse('nothing here can ask the forge about its branches');
+  // A name spelled with an escape is not asked about: the forge would read another one.
+  const there = /^[a-z0-9._/-]+$/i.test(asked) ? await ctx.repository(asked) : null;
+  if (!there || lower(there.owner) !== lower(owner) || lower(there.parent) !== lower(repo)) refuse(`${asked} is not this account's own fork of the pool's repository`);
+  return there;
+}
+
+/// Whether `asked` (a repository's path, or on GitLab a project's number) is the fork of
+/// `repo` that the account `owner` holds itself: `{ ok: true, fork }` with what
+/// `ctx.repository` says of it, or `{ ok: false, reason }`.
+export function checkFork(asked, owner, repo, ctx = {}) {
+  return verdict(async () => ({ ok: true, fork: await ownFork(asked, owner, repo, ctx) }));
+}
+
+// Where a push goes and which pull requests' head branches it may move there, as the
+// forge reports them now. The place is the pool's repository, or under a rule with `fork`
+// the task account's own fork of it (returned as `fork`). `heads` is for a rule scoped to
+// pull requests (`head`): the head branches that live in that place. `refs` null means
+// "any" - a question only the advertisement asks, before a ref is named.
+async function destination(rule, segments, ctx, refs) {
+  const asked = repoOf(segments);
+  if (rule.fork === undefined && asked !== lower(rule.repo)) refuse('this is not the pool\'s repository');
+  const fork = rule.fork === undefined ? undefined : await ownFork(asked, rule.fork, rule.repo, ctx);
+  if (!rule.head) return { fork, heads: [] };
   const scope = rule.head;
-  const mine = (pull) => pull.open === true && lower(pull.headRepo) === lower(rule.repo)
+  // A fork is told by the forge's id of it: a merge request names its source project no other way.
+  const mine = (pull) => pull.open === true && (fork ? pull.headRepoId === fork.id : lower(pull.headRepo) === lower(rule.repo))
     && (scope.author === undefined || lower(pull.author) === scope.author);
   if (scope.number !== undefined) {
     if (typeof ctx.pull !== 'function') refuse('nothing here can look a pull request up');
     const pull = await ctx.pull(scope.number);
     if (!pull || !mine(pull)) refuse(`this repository does not hold the head branch of open pull request #${scope.number}`);
-    return [`refs/heads/${pull.headRef}`];
+    return { fork, heads: [`refs/heads/${pull.headRef}`] };
   }
   if (typeof ctx.pullsByHead !== 'function') refuse('nothing here can look a pull request up');
-  const out = [];
+  const heads = [];
   for (const ref of refs || [null]) {
     const branch = ref === null ? undefined : ref.replace(/^refs\/heads\//, '');
-    for (const pull of await ctx.pullsByHead(branch)) if (mine(pull) && (branch === undefined || pull.headRef === branch)) out.push(`refs/heads/${pull.headRef}`);
+    for (const pull of await ctx.pullsByHead(branch, rule.fork)) if (mine(pull) && (branch === undefined || pull.headRef === branch)) heads.push(`refs/heads/${pull.headRef}`);
   }
-  if (out.length === 0) refuse(`no open pull request by ${scope.author} has its head branch here`);
-  return out;
+  if (heads.length === 0) refuse(`no open pull request by ${scope.author} has its head branch here`);
+  return { fork, heads };
 }
 
 /// The check for `GET .../info/refs?service=git-receive-pack`, the ref advertisement a
-/// push starts with: the repository must be the pool's, and for a rule scoped to pull
-/// requests one of them must have its head branch there.
+/// push starts with: the repository must be the pool's - or, under a rule with `fork`,
+/// the task account's own fork of it - and for a rule scoped to pull requests one of
+/// them must have its head branch there.
 export function checkAdvertise(rule, segments, ctx = {}) {
   return verdict(async () => {
-    if (repoOf(segments) !== lower(rule.repo)) refuse('this is not the pool\'s repository');
-    if (rule.head) await headRefs(rule, ctx, null);
+    await destination(rule, segments, ctx, null);
     return { ok: true };
   });
 }
@@ -309,7 +341,7 @@ async function unfold(pack, idLength) {
   if (at !== end) broken();
 }
 
-async function prove(deny, push, ctx) {
+async function prove(deny, push, ctx, fork) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'dn-quarantine-'));
   try {
     const gitDir = path.join(dir, 'q.git');
@@ -322,8 +354,15 @@ async function prove(deny, push, ctx) {
     if ((await run(['init', '--bare', '--quiet', ...formatArgs, gitDir], { env })).code !== 0) refuse('the quarantine could not be set up');
     const git = (args, input) => run(args, { env, input });
     const fetch = async (what) => typeof ctx.fetch === 'function' && (await ctx.fetch({ env, ...what })) === true;
+    // The quarantine is filled from the repository pushed to and, for a push to a fork
+    // (`fork` is its name), from the pool's as well: the base branch a fork's pull
+    // request merges lives there. A repository left unnamed is the pool's.
+    const sources = fork === undefined ? [undefined] : [fork, undefined];
     let everything;
-    const fetchAll = () => (everything ??= fetch({ all: true }));
+    const fetchAll = () => (everything ??= (async () => {
+      for (const [i, repo] of sources.entries()) if (!(await fetch({ repo, into: `refs/dn/${i}` }))) return false;
+      return true;
+    })());
 
     // Which of `oids` the quarantine cannot read as commits, after asking the forge for them.
     const missing = async (oids) => {
@@ -334,7 +373,8 @@ async function prove(deny, push, ctx) {
         return oids.filter((oid) => !have.has(oid));
       };
       let gone = await absent();
-      if (gone.length > 0 && ((await fetch({ wants: gone })) || (await fetchAll()))) gone = await absent();
+      for (const repo of sources) if (gone.length > 0 && (await fetch({ repo, wants: gone }))) gone = await absent();
+      if (gone.length > 0 && (await fetchAll())) gone = await absent();
       return gone;
     };
 
@@ -388,13 +428,17 @@ async function prove(deny, push, ctx) {
         const stray = await git(['rev-list', '--max-count=1', '--stdin', '--not', '--glob=refs/dn/*'], `${base.join('\n')}\n`);
         if (stray.code !== 0 || stray.stdout.trim() !== '') refuse('the push builds on a commit no branch of this repository holds');
       }
+      // A commit some branch of the forge holds is not this push's to answer for: a pack
+      // sent to a fork that fell behind carries the base branch's own commits along.
+      const fresh = await git(['rev-list', '--stdin', '--not', '--glob=refs/dn/*'], `${commits.join('\n')}\n`);
+      if (fresh.code !== 0) refuse('the pushed commits could not be told from the forge\'s own');
       // Combined format: for each commit, the files that differ from every parent, a file
       // the commit deletes among them. Listing only the directories the patterns start in
       // keeps this cheap on a big tree. Case is not told apart: a forge or a runner on a
       // file system that folds it reads ".GitHub/workflows" as the directory it knows.
       const prefixes = deny.map((p) => p.split('/').slice(0, p.split('/').findIndex((s) => s.includes('*')) >>> 0).join('/'));
       const spec = prefixes.includes('') ? [] : ['--', ...new Set(prefixes.map((p) => `:(icase,literal)${p}`))];
-      const diff = await git(['diff-tree', '--stdin', '-r', '-c', '--root', '--raw', '--no-abbrev', '-z', ...spec], `${commits.join('\n')}\n`);
+      const diff = await git(['diff-tree', '--stdin', '-r', '-c', '--root', '--raw', '--no-abbrev', '-z', ...spec], fresh.stdout);
       if (diff.code !== 0) refuse('the pushed commits could not be compared with their parents');
       const tokens = diff.stdout.split('\0');
       const patterns = deny.map((p) => p.toLowerCase());
@@ -409,29 +453,35 @@ async function prove(deny, push, ctx) {
   }
 }
 
+/// The name a branch goes by in a task's state: its ref for one in the pool's repository,
+/// "<repository>:<ref>" for one in a fork, so the two are never taken for each other.
+export const branchLabel = (ref, fork) => (fork === undefined ? ref : `${lower(fork)}:${ref}`);
+
 /// The check for `POST .../git-receive-pack`. `rule` is the matched rule (`refs`, `create`,
-/// `head`, `denyPaths`, `repo`), `segments` the request path's parts and `body` the
-/// request body. Resolves to `{ ok: true, created }` - the branches the push would create,
-/// for the caller to count against `create` - or `{ ok: false, reason }`. A ref may be
-/// created when `create` is positive and `refs` covers it, and updated when it is the head
-/// branch `head` names or one of `ctx.state.branches`, the branches the forge accepted
-/// from this task. The default branch and a branch the forge reports as protected are
-/// never moved or created. `ctx.checkout` is the linked checkout whose objects the proof
-/// may read, `ctx.fetch({ env, wants | all })` fetches from the forge into the quarantine,
-/// `ctx.repository()` answers `{ defaultBranch, ciPaths }` and `ctx.branch(ref)` the
-/// forge's `{ sha, protected }` of a branch, null for none. A lookup that throws has not
-/// answered, and its error is the caller's to turn into a refusal.
+/// `head`, `fork`, `denyPaths`, `repo`), `segments` the request path's parts and `body`
+/// the request body. Resolves to `{ ok: true, created }` - the branches the push would
+/// create, by their `branchLabel`, for the caller to count against `create` - or
+/// `{ ok: false, reason }`. The push goes to the pool's repository, or under a rule with
+/// `fork` (an account) to that account's own fork of it. A ref may be created when
+/// `create` is positive and `refs` covers it, and updated when it is the head branch
+/// `head` names or one of `ctx.state.branches`, the branches the forge accepted from
+/// this task. The default branch and a branch the forge reports as protected are never
+/// moved or created. `ctx.checkout` is the linked checkout whose objects the proof may
+/// read, `ctx.fetch({ env, repo, wants | into })` fetches from the forge into the
+/// quarantine, `ctx.repository(repo)` answers `{ id, name, owner, parent, defaultBranch,
+/// ciPaths }` (null for none) and `ctx.branch(ref, repo)` the forge's `{ sha, protected }`
+/// of a branch, null for none; `repo` left out is the pool's repository. A lookup that
+/// throws has not answered, and its error is the caller's to turn into a refusal.
 export function checkPush(rule, segments, body, ctx = {}) {
   return verdict(async () => {
     if (body.length > PUSH_MAX_BYTES) refuse('the push is larger than a task may send');
-    if (repoOf(segments) !== lower(rule.repo)) refuse('this is not the pool\'s repository');
     let push;
     try { push = parseReceivePack(body); } catch (err) { refuse(`not a well-formed push: ${err.message}`); }
     if (push.options.length > 0) refuse('push options are not allowed');
     // What a push did is known from the forge's report alone, and the forge sends one only when asked.
     if (!push.caps.includes('report-status') && !push.caps.includes('report-status-v2')) refuse('the push does not ask the forge for its report (report-status)');
 
-    const heads = rule.head ? await headRefs(rule, ctx, push.commands.map((c) => c.ref)) : [];
+    const { fork, heads } = await destination(rule, segments, ctx, push.commands.map((c) => c.ref));
     const own = ctx.state?.branches || [];
     const covered = (ref) => (rule.refs || []).some((p) => globMatch(p, ref));
     const created = [];
@@ -439,25 +489,29 @@ export function checkPush(rule, segments, body, ctx = {}) {
       if (ZERO.test(cmd.new)) refuse(`${cmd.ref}: a task may not delete a ref`);
       if (ZERO.test(cmd.old)) {
         if (!(rule.create > 0) || !covered(cmd.ref)) refuse(`${cmd.ref}: this task may not create that ref`);
-        created.push(cmd.ref);
-      } else if (!heads.includes(cmd.ref) && !own.includes(cmd.ref)) {
+        created.push(branchLabel(cmd.ref, fork?.name));
+      } else if (!heads.includes(cmd.ref) && !own.includes(branchLabel(cmd.ref, fork?.name))) {
         refuse(`${cmd.ref}: this task may not update that ref`);
       }
     }
     if (push.pack.length === 0) refuse('the push carries no pack');
     if (typeof ctx.repository !== 'function' || typeof ctx.branch !== 'function') refuse('nothing here can ask the forge about its branches');
-    const { defaultBranch, ciPaths } = await ctx.repository();
+    const pool = async () => (await ctx.repository()) ?? refuse('the forge shows no repository where the pool\'s should be');
+    const there = fork ?? await pool();
     for (const cmd of push.commands) {
       // A pull request's head may be the default branch, and a created name may be the one
       // an empty or renamed repository is waiting for.
-      if (lower(cmd.ref) === lower(`refs/heads/${defaultBranch}`)) refuse(`${cmd.ref}: the default branch is never pushed by a task`);
-      const now = await ctx.branch(cmd.ref);
+      if (lower(cmd.ref) === lower(`refs/heads/${there.defaultBranch}`)) refuse(`${cmd.ref}: the default branch is never pushed by a task`);
+      const now = await ctx.branch(cmd.ref, fork?.name);
       if (now?.protected) refuse(`${cmd.ref}: a protected branch is never pushed by a task`);
       // A creation is of a name the forge says is free: creating a branch that exists
       // would be a way to claim it.
       if ((now?.sha ?? '') !== (ZERO.test(cmd.old) ? '' : cmd.old)) refuse(`${cmd.ref}: the forge's branch is not where this push starts from`);
     }
-    await prove([...(rule.denyPaths || []), ...ciPaths], push, ctx);
+    // A merge request from a fork can have its pipeline run in the pool's project, which
+    // reads the file that project is set to read.
+    const ciPaths = fork ? [...fork.ciPaths, ...(await pool()).ciPaths] : there.ciPaths;
+    await prove([...(rule.denyPaths || []), ...ciPaths], push, ctx, fork?.name);
     return { ok: true, created };
   });
 }

@@ -580,7 +580,8 @@ function checkQuery(doc, op, vars, spec, lookups) {
 //   pending   it is part of a review that has not been submitted
 //   repo      it is the pool's repository
 // `free` is text or layout the task decides. `created` is a branch the task created,
-// from which it has opened no pull request.
+// from which it has opened no pull request: "branch", or "account:branch" for one in
+// that account's fork.
 // `assignees` is the issue's whole new assignee list, which may differ from the list the
 // forge holds only by the task's own account.
 const THREAD = ['PullRequestReviewThread'];
@@ -666,7 +667,7 @@ function checkMutation(doc, op, vars, spec, lookups, effects) {
       lookups.push({ logins: val.map((l) => l.toLowerCase()), what: `${field.name}.${key}` });
     } else if (rule.created) {
       if (typeof val !== 'string') refuse(`graphql: "${key}" is not a branch name`);
-      effects.push({ pull: val });
+      effects.push({ head: val });
     } else if (val !== rule.equals) {
       refuse(`graphql: ${field.name} needs "${key}" to be ${JSON.stringify(rule.equals)}`);
     }
