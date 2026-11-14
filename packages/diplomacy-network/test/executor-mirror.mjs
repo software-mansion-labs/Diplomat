@@ -99,7 +99,7 @@ try {
     const r = await mirrors.ensureMirror({ pool: a.pool, checkout: a.checkout });
     assert.equal(r.path, mirrorPath);
     assert.equal(r.refreshed, false);
-    assert.match(r.error, /^git remote: /);
+    assert.match(r.error, /^git remote: fatal: /);
     assert.deepEqual(refs(mirrorPath), before);
     fs.renameSync(`${a.bare}.away`, a.bare);
     assert.equal((await mirrors.ensureMirror({ pool: a.pool, checkout: a.checkout })).refreshed, true);
@@ -147,9 +147,9 @@ try {
     fs.mkdirSync(path.dirname(fork));
     git(scratch, 'clone', '--quiet', '--bare', up.bare, fork);
     git(up.checkout, 'remote', 'set-url', 'origin', 'git@github.com:someone/gamma.git');
-    git(up.checkout, 'remote', 'add', 'upstream', 'https://github.com/DN-Test/Gamma.git');
+    git(up.checkout, 'remote', 'add', 'upstream', 'https://github.com/dn-test/gamma');
     const made = await mirrors.ensureMirror({ pool: up.pool, checkout: up.checkout });
-    assert.equal(git(made.path, 'config', '--get', 'remote.origin.url'), 'https://github.com/DN-Test/Gamma.git');
+    assert.equal(git(made.path, 'config', '--get', 'remote.origin.url'), 'https://github.com/dn-test/gamma');
   });
 
   await check('a checkout with no remote for the pool makes no mirror, and neither does a remote that cannot be read', async () => {
@@ -158,7 +158,7 @@ try {
     await assert.rejects(mirrors.ensureMirror({ pool: other, checkout: c.checkout }), /has no upstream or origin remote for github\.com\/dn-test\/elsewhere/);
     assert.equal(mirrors.path(other), null);
     fs.renameSync(c.bare, `${c.bare}.away`);
-    await assert.rejects(mirrors.ensureMirror({ pool: c.pool, checkout: c.checkout }), /^Error: git clone: /);
+    await assert.rejects(mirrors.ensureMirror({ pool: c.pool, checkout: c.checkout }), /^Error: git clone: fatal: /);
     assert.equal(mirrors.path(c.pool), null);
     assert.deepEqual(fs.readdirSync(MIRRORS_DIR).filter((n) => n.includes('.tmp.')), [], 'nothing half-made is left');
     fs.renameSync(`${c.bare}.away`, c.bare);

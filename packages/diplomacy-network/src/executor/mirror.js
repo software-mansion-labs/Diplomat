@@ -26,7 +26,9 @@ function git(args, { cwd, timeout = MIRROR_TIMEOUT_MS } = {}) {
     const env = { ...process.env, GIT_TERMINAL_PROMPT: '0', GIT_SSH_COMMAND: process.env.GIT_SSH_COMMAND || 'ssh -o BatchMode=yes' };
     execFile(GIT_BIN, args, { cwd, env, timeout, encoding: 'utf8', maxBuffer: 16 * 2 ** 20 }, (err, stdout, stderr) => {
       if (!err) return resolve(stdout);
-      const why = err.killed ? `no answer within ${timeout / 1000} s` : (stderr.trim().split('\n').pop() || err.message);
+      // git's own last word is often the tail of a paragraph of advice; its reason is the fatal line.
+      const said = stderr.trim().split('\n');
+      const why = err.killed ? `no answer within ${timeout / 1000} s` : (said.filter((l) => l.startsWith('fatal:')).pop() || said.pop() || err.message);
       reject(new Error(`git ${args[0] === '-C' ? args[2] : args[0]}: ${why}`));
     });
   });
