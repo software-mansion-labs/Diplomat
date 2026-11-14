@@ -36,6 +36,7 @@ export function createNet({ seed = 1 } = {}) {
   const cuts = new Set(); // "a|b" for every pair that cannot reach each other
   const faults = { minMs: 5, maxMs: 40, drop: 0, duplicate: 0 };
   const sent = [];
+  const taps = [];
   let ms = 0;
   let count = 0;
 
@@ -131,21 +132,26 @@ export function createNet({ seed = 1 } = {}) {
         const fail = (code, after) => at(after, () => settle(reject, failure(code)), host);
         const target = byPk.get(to);
         sent.push({ at: now(), from: name, to: target?.name ?? null, kind: headers['dn-kind'] ?? null, bytes: body.length });
+        for (const tap of taps) tap({ from: name, to: target?.name ?? null, headers, body });
         if (host.stopped) return fail('stopped', 0);
-        if (!host.ready) return fail('unreachable', 0);
+        if (!host.ready || !host.up) return fail('unreachable', 0);
         fail('timeout', timeoutMs);
         // A host that is down refuses quickly; one behind a cut, or a lost request, is silence.
         if (target && !cuts.has(pair(name, target.name)) && !(target.up && !target.dead && target.ready)) return fail('unreachable', Math.min(3000, timeoutMs));
         if (!linked(host, target) || rnd.chance(faults.drop)) return undefined;
+        // A duplicate is what the real transport does when a kept connection turns out
+        // dead: the same bytes go out again, and only the second copy's answer comes back.
         const copies = rnd.chance(faults.duplicate) ? 2 : 1;
+        let sentAt = 0;
         for (let copy = 0; copy < copies; copy += 1) {
-          at(delay(), async () => {
+          sentAt += delay();
+          at(sentAt, async () => {
             if (!linked(host, target)) return;
             const all = { ...headers, 'content-length': String(body.length) };
             let out;
             if (body.length > target.limit(all)) out = 'http-413';
             else out = await target.handler(Buffer.from(body), { headers: all }).catch(() => 'http-500');
-            if (copy > 0 || rnd.chance(faults.drop)) return;
+            if (copy < copies - 1 || rnd.chance(faults.drop)) return;
             at(delay(), () => {
               if (!linked(host, target)) return;
               if (typeof out === 'string') settle(reject, failure(out));
@@ -184,6 +190,8 @@ export function createNet({ seed = 1 } = {}) {
 
   return {
     rnd, sent, faults, now, run, until, clock, transport, settled,
+    /// Calls `fn({ from, to, headers, body })` for every request a host makes.
+    tap: (fn) => taps.push(fn),
     /// Milliseconds of virtual time since the network began.
     ms: () => ms,
     /// Cuts two hosts apart, or joins them again.

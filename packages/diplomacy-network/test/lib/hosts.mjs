@@ -5,8 +5,10 @@
 import './fast-env.mjs';
 import assert from 'node:assert/strict';
 import { b64u } from '../../src/core/canon.js';
+import { buildRequest, verifyResponse } from '../../src/core/envelope.js';
 import { identityFromSeed } from '../../src/core/identity.js';
 import { solve } from '../../src/core/pow.js';
+import { memberRecord } from '../../src/core/records.js';
 import { createNode } from '../../src/node/node.js';
 import { createStore, memoryDisk } from '../../src/node/store.js';
 import { fakeExecutor, fakeRequester } from './fakes.mjs';
@@ -34,8 +36,15 @@ export function createWorld({ seed = 1 } = {}) {
   function boot(h) {
     h.clock = net.clock(h.name);
     h.transport = net.transport(h.name, h.pk);
+    // A process that was killed writes nothing more, whatever it was in the middle of.
+    const life = h.transport.host;
+    const disk = {
+      ...h.disk,
+      write: (name, text) => life.dead || h.disk.write(name, text),
+      remove: (name) => life.dead || h.disk.remove(name),
+    };
     h.node = createNode({
-      store: createStore({ disk: h.disk, log: (line) => h.log.push(line) }),
+      store: createStore({ disk, log: (line) => h.log.push(line) }),
       transport: h.transport, clock: h.clock, random: (n) => net.rnd.bytes(n), log: (line) => h.log.push(line),
       requester: h.requester, executor: h.executor, settings: () => h.settings,
       solve: (challenge, effort) => solve(challenge, effort).counter,
@@ -44,10 +53,10 @@ export function createWorld({ seed = 1 } = {}) {
     return h;
   }
 
-  /// A host, not yet started. `slots` is what it keeps telling its node it may run.
-  function add(name, { slots = 0, pools = [LINK] } = {}) {
+  /// A host, not yet started. `slots` is what it keeps telling its node it may run;
+  /// `disk` is where it keeps its store, in memory unless given.
+  function add(name, { slots = 0, pools = [LINK], disk = memoryDisk() } = {}) {
     const id = identityFromSeed(b64u(net.rnd.bytes(32)));
-    const disk = memoryDisk();
     disk.write('identity', JSON.stringify({ seed: id.seed }));
     const h = {
       name, pk: id.pk, id, disk, slots, pools, log: [], requester: fakeRequester(), executor: fakeExecutor(),
@@ -73,10 +82,46 @@ export function createWorld({ seed = 1 } = {}) {
   };
   admit();
 
+  const solver = (challenge, effort) => solve(challenge, effort).counter;
+
   const world = {
     net, hosts, POOL,
     add,
     start,
+    /// Somebody with a key and a transport and no node behind them.
+    stranger(name) {
+      const id = identityFromSeed(b64u(net.rnd.bytes(32)));
+      const transport = net.transport(name, id.pk);
+      transport.host.ready = true;
+      return { name, pk: id.pk, id, transport };
+    },
+    /// A member with a key and a transport and no node behind it: it joined by
+    /// `inviter`'s invite, answers nothing, and does only what a test makes it do.
+    async intruder(name, inviter) {
+      const s = world.stranger(name);
+      const now = net.now();
+      const member = memberRecord(s.id, {
+        pool: POOL, seq: 0, at: now, joinedAt: now, maxAcceptedH: 12, voucher: inviter.node.invite({ pool: POOL }).invite,
+      });
+      const answer = await world.request(s, inviter, 'hello', { member }, { effort: 128 });
+      assert.equal(answer.ok, true, 'the intruder was let in');
+      return s;
+    },
+    /// One request made by hand, as `from`, with every part open to tampering: answers
+    /// what `to` said - `{ ok, body }` or `{ ok, code, detail }`, with `effort`, the raw
+    /// `response` and the `request` sent - or `{ invalid: true }` for an answer that is
+    /// not a signed response to that request. `mangle` rewrites the envelope after it
+    /// was signed; `bytes` replaces the body sent altogether. With `drive` false the
+    /// network is left to the caller to run, so several requests can be on their way at once.
+    async request(from, to, kind, body, { effort = 8, pool = POOL, ts = net.now(), mangle, bytes, nonce = net.rnd.bytes(16), headers, drive = true } = {}) {
+      const request = await buildRequest(from.id, { pool, kind, to: to.pk, ts, body, nonce, effort }, solver);
+      const sent = bytes ?? Buffer.from(JSON.stringify(mangle ? mangle(structuredClone(request)) : request));
+      const going = from.transport.request(to.pk, sent, { headers: headers ?? { 'dn-from': from.pk, 'dn-pool': pool, 'dn-kind': kind } });
+      const raw = await (drive ? world.wait(going) : going);
+      const response = JSON.parse(raw.toString('utf8'));
+      const answer = verifyResponse(response, { request, from: to.pk });
+      return { ...(answer ?? { invalid: true }), response, request, sent };
+    },
     /// `names` as started hosts of one pool: the first founds it, the rest join by its invite.
     async pool(names, options = {}) {
       const all = names.map((name) => add(name, options[name] ?? options));
@@ -92,6 +137,7 @@ export function createWorld({ seed = 1 } = {}) {
       net.kill(h.name);
       boot(h);
       await start(h);
+      await net.until(() => h.transport.host.ready, { stepMs: 1, what: 'its transport' });
       return h;
     },
     run: (secs) => net.run(secs * 1000),
@@ -111,6 +157,10 @@ export function createWorld({ seed = 1 } = {}) {
     offerRow: (h, taskId) => h.node.snapshot().offers.find((o) => o.taskId === taskId) ?? null,
     runOf: (h, taskId) => h.node.snapshot().runs.filter((r) => r.taskId === taskId).at(-1) ?? null,
     name: (pk) => [...hosts.values()].find((h) => h.pk === pk)?.name ?? pk,
+    /// The records a host's store holds for the pool.
+    records: (h) => JSON.parse(h.disk.read([...h.disk.files.keys()].find((name) => name.startsWith('pools/')))).records,
+    /// The claim record a host's store holds for a task, or undefined.
+    claim: (h, taskId) => world.records(h).find((r) => r.type === 'claim' && r.taskId === taskId),
     /// What a host's store holds under `name`, parsed.
     stored: (h, name) => JSON.parse(h.disk.read(name) ?? 'null'),
   };
