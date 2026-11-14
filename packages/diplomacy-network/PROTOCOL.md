@@ -286,19 +286,59 @@ for the forge.
 A rule allows one shape of forge request:
 
 ```json
-{ "host": "api.github.com", "method": "POST", "path": "/repos/o/r/pulls/578/reviews" }
+{ "host": "api.github.com", "method": "POST", "path": "/repos/o/r/pulls/578/reviews", "fold": [1, 2] }
 ```
 
+A request is first brought to one spelling and refused when it has more than one reading:
+the method is one of GET, POST, PUT, PATCH, DELETE; the host is a plain lowercase name; the
+path is absolute, with no empty or dot segment, no fragment, no `;`, and no encoded slash,
+dot, backslash, percent sign or control character (GitLab's URL-encoded project path, the
+segment after `/api/v4/projects/`, is the one place an encoded slash may stand); a header
+is given once; the body is base64. Then the first rule whose host, method and path match
+decides, alone. A request no rule matches is refused.
+
 - `path` is matched segment by segment: a literal, `*` for exactly one segment, or a
-  trailing `**` for any remainder. The query string is not part of the path; a rule may
-  pin query parameters with `"query": { "q": { "contains": "repo:o/r" } }`.
-- `{ "graphql": { "roots": [...], "mutations": [...] } }` on a `POST /graphql` rule
-  confines the document: a query may select only the listed root fields, with
-  `repository` pinned to the pool's owner and name; a mutation must be one of the listed
-  names, and the object it addresses must resolve to the task's own item.
-- `{ "git": "receive-pack", "refs": ["refs/heads/fix-*"] }` on the two smart-HTTP push
-  endpoints confines a push: every ref it updates must match, none may be deleted, and
-  every update must be a fast-forward of the ref's current value.
+  trailing `**` for any remainder. `fold` lists the segments, counted from 0, that are
+  compared without regard to case: the ones naming the repository, which both forges
+  resolve that way. Every other literal must equal the segment as sent. The query string
+  is not part of the path.
+- `"query": { "service": { "equals": "git-receive-pack" } }` pins query parameters:
+  `equals`, `oneOf`, or `search` - a forge search string that must carry
+  `repo:<owner>/<name>` as a term of its own, with no other repository, organisation or
+  user qualifier, no negation and no top-level OR. A pinned parameter is required unless
+  `optional` and is given once. On a write, a parameter the rule does not pin is refused,
+  because a forge reads a write's parameters from the query as readily as from the body.
+  `sudo`, `private_token`, `access_token`, `job_token` and `_method` are refused always.
+- `"body": { "event": { "oneOf": ["COMMENT"] }, "body": "free" }` pins a JSON body member
+  by member. The body is parsed strictly (`application/json`, UTF-8, no duplicate key) and
+  a member the rule does not name is refused. A member is `"free"`, or pinned with
+  `equals`, `oneOf`, `prefix`, `prose` (text with no line starting with `/`, which GitLab
+  would run as a quick action), `created` (a branch this key pushed) or `self` (the
+  requester's own account id), and may be `required`. What is sent to the forge is the
+  parsed body, written out again. A rule without `body` takes no body.
+- `pull` and `comment` have the forge asked, before anything is sent, which pull request
+  the number or comment id in the path belongs to, who opened or wrote it and whether it
+  is open or pending. `pick` lists the members of the forge's JSON answer an executor
+  gets back.
+- `{ "graphql": { "forge": "github", "repo": "o/r", "roots": [...], "mutations": [...],
+  "item": { "type": "pr", "number": 578 }, "identity": "me" } }` on the GraphQL endpoint
+  confines the document, which must be exactly one query or mutation. A query may select
+  only the listed root fields: `repository` (GitLab: `project`) pinned to the pool's own,
+  the viewer's public scalars, a `search` confined as above, and `node(id:)` once the id
+  has been resolved to an object of the pool's repository. Below a root, a field with a
+  selection set must be one the reader knows the reach of, so a selection cannot walk from
+  the repository to its owner's other repositories. A mutation must be a single field
+  from the list, its input may hold only the members the reader's table names, and every
+  object it addresses is resolved on the forge and must belong to the task's own item.
+- `{ "git": "receive-pack", "repo": "o/r", "refs": ["refs/heads/**"], "create": 1,
+  "denyPaths": [".github/workflows/**"] }` on the two smart-HTTP push endpoints confines a
+  push. No ref may be deleted. A ref may be created when `refs` covers it, up to `create`
+  refs per key; it may be updated when it is a ref this key created, or the head branch
+  of the pull request `"head": { "number": 578 }` names (`{ "author": "me" }`: of any open
+  pull request by that author). Every update must be a fast-forward of the ref's current
+  value, proven by indexing the pack in a quarantine. No pushed commit may write a path
+  under `denyPaths` that none of its parents holds, and the push must build on commits a
+  branch of that repository holds. Push options are refused.
 
 The rules a task receives come from the daemon's catalogue (`src/requester/rules.js`),
 keyed by forge and kind and pinned to the task's own item. A kind without an entry can be
