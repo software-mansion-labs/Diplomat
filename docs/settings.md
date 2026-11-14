@@ -233,6 +233,12 @@ swaps the panel to a settings screen:
   which the daemon re-reads every minute. The [Devices screen](devices.md) holds the same
   controls, the device list, and the remote device pool
   ([allocator README](../packages/device-allocator/README.md#a-remote-device-pool)).
+- **Offer every job to the Diplomacy Network** (**default off**) - with it on, no agent is
+  started in a terminal: every job is offered to the shared pool of its repository and runs in
+  a docker container, on this machine or another in the pool. See
+  [Diplomacy Network](network.md), whose screen holds the pools, the invites and the two hours
+  limits. `networkEnabled`, `networkRequiredMinimumH` and `networkMaximumAcceptedH` in
+  `~/.diplomat/config.json`.
 - **Comms (Slack)** - the [Slack watcher](comms.md) (**default off**): the switch,
   keywords, a sender allowlist, one switch per thing it may do (queue reviews and
   fixes, bump queued work, investigate bug reports), the batch size and interval,

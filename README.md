@@ -61,6 +61,13 @@ drive the gate that holds automatic work before the limit runs out. [More](docs/
 
 <img alt="Telemetry" src="docs/img/telemetry.png" />
 
+### Diplomacy Network - a pool per repository, shared with the machines you invite
+
+Switched on, Diplomat machines that work on the same repository share one pool of jobs over Tor.
+Whichever has room takes a job and runs it in a locked-down docker container that holds no
+credential; everything it does on the forge is done by the machine that asked, in its operator's
+name, and only what that job needs. [More](docs/network.md)
+
 ### Devices - one simulator per agent
 
 A bundled MCP server gives every agent a simulator or emulator of its own, so parallel agents never
@@ -157,7 +164,8 @@ CI if the prompts drift apart.
 | [`diplomat-platform`](packages/diplomat-platform) | the macOS SwiftUI app and the Linux PySide6 applet |
 | [`device-allocator`](packages/device-allocator/README.md) | the one-device-per-agent MCP server and its daemon |
 | [`remote-machines`](packages/remote-machines/README.md) | the MCP server that lists the machines an agent can offload work to over SSH, and their live load |
-| [`daemon-core`](packages/daemon-core/README.md) | what those two share: the socket daemon, its client, and their install into Claude Code |
+| [`diplomacy-network`](packages/diplomacy-network/README.md) | the Diplomacy Network daemon: pools over Tor, jobs in containers, forge actions in the requester's name |
+| [`daemon-core`](packages/daemon-core/README.md) | what those three share: the socket daemon and its client, and for the two MCP servers their install into Claude Code |
 | [`szpont`](packages/szpont/README.md) / [`szpont-npm`](packages/szpont-npm/README.md) | the `szpont` launcher on PyPI and npm |
 </details>
 
@@ -165,4 +173,5 @@ CI if the prompts drift apart.
 
 [The panel](docs/panel.md) · [Actions](docs/actions.md) · [Automatic work](docs/automation.md) ·
 [Settings](docs/settings.md) · [Telemetry](docs/telemetry.md) · [Comms](docs/comms.md) ·
-[Tasks](docs/tasks.md) · [Devices](docs/devices.md) · [Development](docs/development.md)
+[Tasks](docs/tasks.md) · [Devices](docs/devices.md) · [Diplomacy Network](docs/network.md) ·
+[Development](docs/development.md)
