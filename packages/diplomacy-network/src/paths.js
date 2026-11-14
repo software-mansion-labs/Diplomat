@@ -55,6 +55,7 @@ export const POW = {
 };
 export const CLOCK_SKEW_SECS = 300;
 export const HOURS_FLOOR = 12;
+export const HOURS_CEILING = 720;
 export const LEASE_SECS = num('DN_LEASE_SECS', 7200);
 export const LEASE_GRACE_SECS = num('DN_LEASE_GRACE_SECS', 600);
 export const PING_LEAD_SECS = num('DN_PING_LEAD_SECS', 600);

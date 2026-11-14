@@ -32,8 +32,17 @@ except `act` requests, capped at 48 MiB.
 strings as UTF-8, and numbers restricted to integers in the safe range. Floats, `null`
 inside records, and duplicate keys are invalid. `H(x)` is SHA-256. Every signature is
 Ed25519 over `tag || 0x00 || canon(object without its "sig" member)`, where `tag` is an
-ASCII domain tag (`dn1/req`, `dn1/res`, `dn1/rec`, `dn1/grant`, `dn1/ping`, `dn1/invite`).
-Times are integer Unix seconds.
+ASCII domain tag (`dn1/req`, `dn1/res`, `dn1/rec`, `dn1/grant`, `dn1/ping`, `dn1/invite`,
+`dn1/cap`). Times are integer Unix seconds.
+
+Where a hash is written as a concatenation, a key is its 32 raw bytes, a nonce its raw
+bytes, a string its UTF-8 bytes and a hash its 32 raw bytes. Inside JSON every byte
+string, hashes included, is base64url without padding. Where keys are ordered ("the
+lowest `pk`"), they are compared as their base64url strings, by code unit.
+
+Everything a host receives is checked against the exact shape this document gives it: an
+object with a missing member, an unknown member or a member of the wrong type is refused,
+never repaired.
 
 ## 3. Request envelope and the proof of work
 
@@ -102,24 +111,34 @@ counts toward the stranger counter.
 A pool's state is a set of signed records, each stored under a key. A host keeps the
 whole set for every pool it is in.
 
-| Record | Key | Signed by | Newer version wins by |
-| --- | --- | --- | --- |
-| `member` | `member/<pk>` | that member | higher `seq` |
-| `offer` | `offer/<taskId>/<host pk>` | the offering host | higher `seq` |
-| `claim` | `claim/<taskId>` | the executor | see section 7 |
+| Record | Key | Signed by | Precedence | Newer version wins by |
+| --- | --- | --- | --- | --- |
+| `member` | `member/<pk>` | that member | `[seq]` | higher `seq` |
+| `offer` | `offer/<taskId>/<host pk>` | the offering host | `[seq]` | higher `seq` |
+| `claim` | `claim/<taskId>` | the executor | `[gen, executor, round, seq]` | see section 7 |
 
 Two versions with the same precedence are ordered by `H(canon(record))`, lower wins.
 
 ```json
-{ "type": "member", "pool": "...", "pk": "...", "seq": 3, "joinedAt": 1794000000,
+{ "type": "member", "pool": "...", "pk": "...", "seq": 3, "at": 1794000900, "joinedAt": 1794000000,
   "maxAcceptedH": 12, "voucher": { "invite": "<invite token>" }, "left": false, "sig": "..." }
 
-{ "type": "offer", "pool": "...", "taskId": "...", "host": "<pk>", "seq": 1,
+{ "type": "offer", "pool": "...", "taskId": "...", "host": "<pk>", "seq": 1, "at": 1794000000,
   "kind": "review", "item": "pr-578", "identity": "octocat", "title": "...",
   "minRequiredH": 12, "createdAt": 1794000000, "state": "open", "attempt": 1, "sig": "..." }
 ```
 
-`offer.state` is `open`, `cancelled` or `done`. An offer never carries the prompt.
+Every record carries `at`, the time that version was signed. A record dated more than
+300 s past the receiver's clock is refused until its time comes. `offer.state` is `open`,
+`cancelled` or `done`. An offer never carries the prompt. A member that started its pool
+has no `voucher`.
+
+Limits: a pool id is at most 200 characters, `host/owner/repo` or deeper, of `a-z`,
+`0-9`, `.`, `_` and `-`; `kind` is `[a-z][a-z0-9-]{0,31}`; `item` is
+`[a-z0-9][a-z0-9._-]{0,63}`; `identity` is `[a-z0-9][a-z0-9._-]{0,99}`; `title` is at
+most 300 characters with no control character; hours are 12 to 720; `attempt` is 1 to
+255; a claim lists at most 256 grants and 256 absent members; a time or a `seq` is at
+most 2^40.
 
 ### Task ids
 
@@ -129,33 +148,54 @@ taskId = <pool id> "#" <kind> ":" <item> "@" <identity>
 
 `identity` is the forge login the work is done as, lowercase. Two hosts acting as the
 same login on the same item offer the same task; two different logins asking for the
-same item are two tasks. A task is **available** while it has at least one open offer and
-no active claim.
+same item are two tasks. A task is **available** while it has at least one open offer
+from a member and no active claim.
 
-### State hash
+### Membership
+
+A host enters a pool with an invite: `{ "pool", "by": "<pk>", "exp", "nonce", "sig" }`,
+signed by a member and handed over out of band as a token, the base64url of its canonical
+form. `nonce` is 16 random bytes. Its `member` record carries the token as `voucher`; the
+voucher holds when the invite is for that pool, signed by another key than the member's,
+and `joinedAt` is no later than `exp`.
+
+A host **accepts** the keys connected to itself through vouchers: itself, the signer of
+its own invite, anyone vouched for by a member it accepts, and the voucher signer of any
+member it accepts. A host that starts a pool has no voucher and is its own root. Nothing
+else joins a pool. The pool's **members** are the accepted keys whose `member` record is
+held and does not say `left`: they are who a claim needs the consent of.
+
+A host lets in a key it has not accepted before only by `hello`, and only while the
+invite is unexpired. Any member that accepts the invite's signer can be greeted, not only
+the signer. A member a host learns of from another member needs no unexpired invite: that
+member let it in.
+
+### Live records and the state hash
 
 ```
 stateHash(asOf) = H(canon([[key, H(canon(record))], ...] sorted by key))
 ```
 
-over the records live at `asOf`. A record stops being live, and is dropped, 24 hours
-after it became final: an offer that is `cancelled` or `done`, a claim that is released,
-completed or lapsed, a member that `left`. `asOf` is chosen by whoever asks and is
-refused when more than 300 s from the answerer's clock, so both sides hash the same set.
+over the records live at `asOf`. Whether a record is live depends only on the records
+held and on `asOf`, so two hosts holding the same records hash the same set:
 
-### Membership
+- An offer that is `cancelled` or `done` is live for 24 hours after its `at`.
+- A claim is live for 24 hours after it ended: after its `at` when it is `released` or
+  `completed`, after `leaseUntil + 600` when it is `held`.
+- A member that `left` is live for 24 hours after its `at`, and beyond that for as long
+  as the voucher of a live member is signed by it: dropped, it would cut that member off.
+- A member is live only while its key is accepted. An offer or a claim is live only
+  while the member record of its signer is. A claim that embeds a ping is live only
+  while an offer of that task by the ping's signer is.
 
-A host enters a pool with an invite: `{ "pool", "by": "<pk>", "exp", "nonce", "sig" }`,
-signed by a member and handed over out of band. Its `member` record carries the invite as
-`voucher`. A host accepts the members connected to itself through vouchers: itself, the
-signer of its own invite, anyone vouched for by a member it accepts, and the voucher
-signer of any member it accepts. A host that starts a pool has no voucher and is its own
-root. Nothing else joins a pool.
+A record that is not live is dropped, and refused when it arrives. `asOf` is chosen by
+whoever asks and is refused when more than 300 s from the answerer's clock, so a host
+keeps every record for 300 s past the moment it stops being live.
 
 ## 6. Requests between members
 
-Every kind but `hello` is refused with `not-member` unless `from` is an accepted member of
-`pool` on the target.
+Every kind but `hello` is refused with `not-member` unless `from` is a key the target
+accepts in `pool` whose member record, when held, does not say `left`.
 
 | Kind | Body | Answer |
 | --- | --- | --- |
@@ -170,11 +210,18 @@ Every kind but `hello` is refused with `not-member` unless `from` is an accepted
 | `act` | `{ taskId, keyId, seq, request, mac }` | `{ status, headers, body }` |
 | `done` | `{ taskId, keyId, outcome, summary, mac }` | `{ }` |
 
-`index` maps every live key to `[precedence, H(canon(record))]`. Objective facts - a
-member announcing itself, a task appearing, a task cancelled because its issue or pull
-request closed, a committed claim - travel by `push` and need nobody's consent: a host
-pushes a record it wrote or learned to every member, and a periodic `sync` repairs what
-a push missed.
+`index` maps every live key to `[precedence, H(canon(record))]`. `pull` takes at most 4096
+keys and `push` at most 1024 records. `accepted` lists the keys the target now holds as
+pushed; a refused record has an empty `key` when it is too malformed to have one, and its
+`code` is `bad-record`, `wrong-pool`, `future`, `older` (the target holds a version that
+wins), `bad-signature`, `bad-voucher`, `bad-claim`, `bad-grant`, `bad-lease`, `bad-ping`,
+`expired`, `not-member` or `no-offer`. Records pushed together are taken in together, so
+a member record lets in the records that depend on it whatever their order.
+
+Objective facts - a member announcing itself, a task appearing, a task cancelled because
+its issue or pull request closed, a committed claim - travel by `push` and need nobody's
+consent: a host pushes a record it wrote or learned to every member, and a periodic
+`sync` repairs what a push missed.
 
 ## 7. Claiming a task
 
@@ -184,29 +231,44 @@ available task:
 1. **Confirms its own state.** It refreshes its own offers (an item that closed is
    cancelled first) and computes `stateHash(asOf)`.
 2. **Confirms it with every member.** It sends `sync` to every other member and repairs
-   differences until all that answer report its hash. A member that does not answer
-   within the round's timeout is **absent** for this round.
+   differences until all that answer report its hash. A member that has answered nothing
+   in this round when a request to it goes unanswered is **absent** for this round; a
+   member that has answered anything is **present**.
 3. **Sends a lock to every present member**: `{ taskId, round, asOf, hash }`, `round` a
    fresh random 8-byte value.
 
 A member answers a lock with:
 
 - `{ stale: true }` when its hash at `asOf` differs - the claimant goes back to step 2;
-- `{ challenge: { reason, holder? } }` when the task is not available in its state
+- `{ challenge: { reason, holder? } }` when the task is not available by its own clock
   (`unavailable`), the claimant's `maxAcceptedH` is below the task's hours
   (`hours`), or it has already granted or is itself claiming the task for another
   executor (`locked`, with that executor as `holder`);
-- `{ grant }` otherwise: `{ pool, taskId, executor, round, hash, by, exp, sig }`, signed,
-  valid 120 s. A granted lock binds the member until `exp`, an `unlock`, or the commit.
+- `{ grant }` otherwise: `{ pool, taskId, executor, round, gen, hash, by, exp, sig }`,
+  signed, with `exp = asOf + 120`. `gen` is the claim's generation: one more than the
+  `gen` of the claim record live for that task at `asOf`, zero when there is none. A
+  granted lock binds the member through `exp` by its own clock, or until an `unlock` or
+  the commit of that round. A host's own round binds it the same way, from its start
+  until it commits, stands down or times out.
 
-The claim holds only when every present member granted it. The claimant then signs the
+The claim holds only when every present member granted it on one `asOf` and `hash`, no
+later than `exp`, and at least one host offering the task is among them or is the
+claimant itself. A round times out 180 s after it started and commits nothing from then
+on: the claimant unlocks every member it locked and stands down, as it does whenever a
+present member has not granted by then. The claimant of a round that holds signs the
 claim record and pushes it:
 
 ```json
-{ "type": "claim", "pool": "...", "taskId": "...", "executor": "<pk>", "round": "...",
-  "seq": 0, "state": "held", "claimedAt": 1794000000, "leaseUntil": 1794007200,
+{ "type": "claim", "pool": "...", "taskId": "...", "executor": "<pk>", "round": "...", "gen": 0,
+  "seq": 0, "state": "held", "at": 1794000000, "claimedAt": 1794000000, "leaseUntil": 1794007200,
   "deadline": 1794043200, "hours": 12, "grants": [ ... ], "absent": ["<pk>", ...], "sig": "..." }
 ```
+
+`grants` is ordered by `by` and `absent` is ordered; neither names a key twice, the
+executor, or a key of the other. Every host checks of a claim what does not depend on
+its own state: each grant is signed by its `by` and names the claim's pool, task,
+executor, round and `gen`; all grants carry one `hash` and one `exp`; and
+`exp - 120 <= claimedAt <= exp`. Who was absent is the claimant's word.
 
 ### Conflicts
 
@@ -218,13 +280,17 @@ Every conflict is settled by a value all hosts compute alike.
   with the `holder`. The one that ranks worse sends `unlock` to every member it locked and
   stands down; the one that ranks better re-sends its lock to the members that challenged
   it, until they grant or the round times out.
-- **Two committed claims for one task** (two sides of a partition each saw the other
-  absent). The claim with the better rank is the claim; the other executor stops its run
-  the moment it learns of it.
-- **A claim against a newer claim of the same executor.** Higher `seq` wins.
-- **An active claim against a later one.** A claim that is `held` and unexpired cannot be
-  replaced by another executor's claim with a later `claimedAt` unless that one ranks
-  better and their lease windows overlap, which is the partition case above.
+- **Two claim records for one task.** Exactly one stands, by the first of these that
+  tells them apart: the higher `gen`; the better rank of the executor; the lower `round`
+  (compared as base64url strings); the higher `seq`; the lower `H(canon(record))`. This
+  order is total and transitive, so every host that has seen the same claims holds the
+  same one, in whatever order it saw them.
+- **Two sides of a partition each saw the other absent.** Both claimed on the same state,
+  so both claims have the same `gen` and the better rank is the claim. The other executor
+  stops its run the moment it learns of it.
+- **A claim made after another ended.** The members that granted it saw the earlier claim
+  released, completed or lapsed, so it is the next `gen` and stands over the earlier one,
+  whatever that one's rank and whatever versions of it surface later.
 
 To keep hosts from racing for the same task, a host waits before step 1 for a delay
 proportional to its rank on that task, up to 5 s.
@@ -237,17 +303,23 @@ proportional to its rank on that task, up to 5 s.
   The default and the floor are 12.
 - A task's `hours` is the largest `minRequiredH` among its open offers. A host may claim
   a task only when its `maxAcceptedH` is at least that.
-- A claim is leased for 2 hours at a time: `leaseUntil = claimedAt + 7200`,
-  `deadline = claimedAt + hours * 3600`.
-- From 10 minutes before `leaseUntil`, a host offering the task sends the executor a
-  `ping`: `{ pool, taskId, executor, round, n, by, ts, sig }`. The executor must answer
-  with its claim at `seq + 1`, `leaseUntil` moved 2 hours on (never past `deadline`), and
-  the ping embedded as `ping`. The offering host pushes it to the pool.
+- A claim is leased for 2 hours at a time. `deadline = claimedAt + hours * 3600`, and a
+  held claim at `seq` has `leaseUntil = min(claimedAt + (seq + 1) * 7200, deadline)`.
+- From 10 minutes before `leaseUntil` until the claim lapses, a host offering the task
+  sends the executor a `ping`: `{ pool, taskId, executor, round, n, by, ts, sig }` with
+  `n` the `seq` it asks for, one more than the claim's. The executor must answer with its
+  claim at `seq = n`, `leaseUntil` moved 2 hours on (never past `deadline`), and the ping
+  embedded as `ping`. The offering host pushes it to the pool.
+- Every host checks of a held claim with `seq` above zero that it embeds a ping signed by
+  its `by`, for that pool, task, executor and round, with `n = seq` and `ts` in the window
+  of the lease before it: from 600 s before that `leaseUntil` to 600 s after. A held claim
+  at `seq` zero embeds none. A claim whose `leaseUntil` has reached `deadline` has nothing
+  left to extend.
 - A claim is **active** while `state` is `held` and `now < leaseUntil + 600`. Past that
   it has lapsed: every host treats the task as available again, the executor stops the
-  run, and the requester's key is dead. At `deadline` there is nothing left to extend.
-- An executor that finishes or gives up pushes its claim with `state` `completed` or
-  `released`.
+  run, and the requester's key is dead.
+- An executor that finishes or gives up pushes its claim at `seq + 1` with `state`
+  `completed` or `released`, without a ping. A member that left holds no claim.
 
 ## 9. Acting as the requester
 
