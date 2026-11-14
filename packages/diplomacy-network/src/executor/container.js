@@ -1,8 +1,15 @@
 // The image every job runs in and the containers made from it: exactly one per
 // requesting peer and repository, named dn-<pool hash>-<peer hash>, running many of that
 // peer's jobs on that repository and nobody else's, and nothing at all between jobs.
-// Every container, volume and docker query carries dn.base=<BASE_DIR>, so two daemons on
-// one machine (a test beside the real one) never see each other's.
+//
+// A job container is attached to one network, an internal one of its own with the same
+// name: no route leads out of it, to the internet, to this machine, or to another
+// peer's container. The only other thing on that network is the container's relay,
+// <name>-relay: the same image running image/relay.mjs, which carries TCP from that
+// network to the broker's port and to nothing else. No job runs in a relay.
+//
+// Every container, volume, network and docker query carries dn.base=<BASE_DIR>, so two
+// daemons on one machine (a test beside the real one) never see each other's.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -11,7 +18,7 @@ import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
   BASE_DIR, CONTAINER_CPUS, CONTAINER_HOST, CONTAINER_IDLE_MS, CONTAINER_MEMORY, CONTAINER_PIDS, DOCKER_BIN,
-  IMAGE_BUILD_TIMEOUT_MS, IMAGE_REPO, RUNS_DIR,
+  IMAGE_BUILD_TIMEOUT_MS, IMAGE_REPO, RELAY_HOST, RUNS_DIR,
 } from '../paths.js';
 
 /// The directory the image is built from.
@@ -21,6 +28,21 @@ export const IMAGE_DIR = fileURLToPath(new URL('../../image/', import.meta.url))
 // nothing that reaches outside it. Measured: without any one of these `apt-get install`
 // fails.
 const CAPABILITIES = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'SETGID', 'SETUID'];
+
+// A relay runs one small program that needs no privilege, no writable file and no user.
+const RELAY_LIMITS = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges', '--read-only', '--user', '65534:65534',
+  '--pids-limit', '64', '--memory', '256m'];
+
+// A job network has no route out, no IPv6, and no address of this machine on it:
+// measured on Linux, a container on a plain internal network reaches everything the
+// host serves through that network's gateway address, the docker API included. Its
+// subnet is a /29 chosen here, because an engine has under thirty of its own to give
+// and the machine's other projects need them.
+const NETWORK_OPTIONS = ['--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated'];
+function subnetFor(name, attempt) {
+  const h = crypto.createHash('sha256').update(`${name}/${attempt}`).digest();
+  return `10.213.${h[0]}.${h[1] & 0xf8}/29`;
+}
 
 const hex8 = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 8);
 
@@ -71,6 +93,7 @@ export function docker(args, { timeout = 60000, onLine = null } = {}) {
 }
 
 const lastLine = (s) => s.trim().split('\n').pop() || '';
+const relayOf = (name) => `${name}-relay`;
 
 // One container's run records, the only part of RUNS_DIR it is shown: a single shared
 // mount would let one peer's jobs read another's prompts and logs. No run id can spell
@@ -84,9 +107,10 @@ const runsDirOf = (name) => path.join(RUNS_DIR, '.containers', name);
 /// container when it has to; `release({ name, runId })` ends the job's hold and, when it
 /// was the last one, restarts the container so nothing a job left running outlives it
 /// (it resolves once that is done).
-/// `sweep()` removes every container that has run nothing for CONTAINER_IDLE_MS.
+/// `sweep()` removes every container that has run nothing for CONTAINER_IDLE_MS, with its
+/// relay, network and volume. `broker()` is the broker's `address()`: where relays lead.
 /// `imageDir` is the directory the image is built from.
-export function createContainers({ log = () => {}, now = Date.now, imageDir = IMAGE_DIR } = {}) {
+export function createContainers({ log = () => {}, now = Date.now, imageDir = IMAGE_DIR, broker = () => null } = {}) {
   let state = { state: 'down', image: '', detail: 'not checked yet' };
   let building = null;
   const known = new Map(); // name -> { name, image, jobs: Set, lastUsed }
@@ -135,15 +159,72 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     if (r.code !== 0) return null;
     try {
       const c = JSON.parse(r.stdout);
-      return { running: c.State.Running === true, image: c.Config.Image, labels: c.Config.Labels || {} };
+      return { running: c.State.Running === true, image: c.Config.Image, labels: c.Config.Labels || {}, network: c.HostConfig.NetworkMode };
+    } catch { return null; }
+  }
+
+  async function network(name) {
+    const r = await docker(['network', 'inspect', '--format', '{{json .}}', name]);
+    if (r.code !== 0) return null;
+    try {
+      const n = JSON.parse(r.stdout);
+      return { labels: n.Labels || {}, subnet: n.IPAM.Config[0].Subnet, gateway: n.IPAM.Config[0].Gateway || '' };
     } catch { return null; }
   }
 
   async function remove(name, { volume }) {
     await docker(['rm', '-f', name]);
+    await docker(['rm', '-f', relayOf(name)]);
+    await docker(['network', 'rm', name]);
     if (volume) await docker(['volume', 'rm', '-f', name.replace(/^dn-/, 'dn-work-')]);
     known.delete(name);
     strays.delete(name);
+  }
+
+  // The container's network and the relay on it, made if missing and made again if the
+  // relay is not running, is of another image, or leads to where an earlier daemon's
+  // broker listened.
+  async function ensureWayOut(name, tag) {
+    const at = broker();
+    if (!at) throw new Error('the broker is not listening, and a container has no other way out');
+    const target = `${CONTAINER_HOST}:${at.port}`;
+    let net = await network(name);
+    if (!net) {
+      let made;
+      for (let attempt = 0; attempt < 8; attempt++) {
+        made = await docker(['network', 'create', ...NETWORK_OPTIONS, '--subnet', subnetFor(name, attempt), '--label', `dn.base=${BASE_DIR}`, name]);
+        // That /29 is another network's; the next one serves as well.
+        if (made.code === 0 || !/overlaps/i.test(made.stderr)) break;
+      }
+      if (made.code !== 0) throw new Error(`docker network create: ${lastLine(made.stderr)}`);
+      net = await network(name);
+    }
+    const relay = await inspect(relayOf(name));
+    for (const [what, labels] of [['network', net && net.labels], ['relay', relay && relay.labels]]) {
+      if (labels && labels['dn.base'] !== BASE_DIR) throw new Error(`a ${what} named for ${name} belongs to another daemon on this machine (${labels['dn.base'] || 'unlabelled'})`);
+    }
+    if (!net) throw new Error(`docker network inspect ${name}: no such network right after it was made`);
+    if (net.gateway) {
+      throw new Error(`the network ${name} carries an address of this machine (${net.gateway}), so a job on it would reach whatever this machine serves: this docker engine does not make an isolated network`);
+    }
+    if (relay && relay.running && relay.image === tag && relay.labels['dn.broker'] === target) return;
+    if (relay) await docker(['rm', '-f', relayOf(name)]);
+    const steps = [
+      ['create', '--name', relayOf(name), '--label', `dn.relay=${name}`, '--label', `dn.broker=${target}`, '--label', `dn.base=${BASE_DIR}`,
+        ...RELAY_LIMITS,
+        '--network', name, '--network-alias', RELAY_HOST,
+        // The name the broker is reached by; an address needs no entry.
+        ...(/^[\d.]+$/.test(CONTAINER_HOST) ? [] : ['--add-host', `${CONTAINER_HOST}:host-gateway`]),
+        tag, 'node', '/opt/dn/relay.mjs', net.subnet, String(at.port), CONTAINER_HOST, String(at.port)],
+      // The relay's second network is its way to this machine; the job container is never on it.
+      ['network', 'connect', 'bridge', relayOf(name)],
+      ['start', relayOf(name)],
+    ];
+    for (const step of steps) {
+      const r = await docker(step);
+      if (r.code !== 0) throw new Error(`docker ${step[0]} for the relay of ${name}: ${lastLine(r.stderr)}`);
+    }
+    log('docker', `relay of ${name} leads to ${target}`);
   }
 
   async function create(name, tag, pool, peer) {
@@ -157,8 +238,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
       '--cap-drop=ALL', ...CAPABILITIES.map((c) => `--cap-add=${c}`),
       '--security-opt', 'no-new-privileges',
       '--pids-limit', String(CONTAINER_PIDS), '--memory', CONTAINER_MEMORY, '--cpus', CONTAINER_CPUS,
-      // The name the broker is reached by; an address needs no entry.
-      ...(/^[\d.]+$/.test(CONTAINER_HOST) ? [] : ['--add-host', `${CONTAINER_HOST}:host-gateway`]),
+      '--network', name,
       // The work tree lives in a volume (a bind mount is an order of magnitude slower
       // under Docker Desktop); only this container's own run records are bound.
       '-v', `${volume}:/work`, '-v', `${runsDir}:/dn/runs`,
@@ -179,12 +259,13 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
       const busy = !!entry && entry.jobs.size > 0;
       // A container from another image is replaced, but never from under a job: that
       // job's successors join it in the old image until it is idle.
-      if (found && !busy && (found.image !== tag || !found.running)) {
+      if (found && !busy && (found.image !== tag || !found.running || found.network !== name)) {
         await remove(name, { volume: false });
         found = null;
         entry = null;
       }
       if (busy && !(found && found.running)) throw new Error(`container ${name} is gone with ${entry.jobs.size} job(s) in it`);
+      await ensureWayOut(name, found ? found.image : tag);
       if (!found) {
         await create(name, tag, pool, peer);
         entry = { name, image: tag, jobs: new Set(), lastUsed: now() };
@@ -216,7 +297,13 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
   async function sweep() {
     const listed = await docker(['ps', '-a', '--filter', `label=dn.base=${BASE_DIR}`, '--format', '{{.Names}}']);
     if (listed.code !== 0) return;
-    const names = listed.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    const names = listed.stdout.split('\n').map((l) => l.trim()).filter((n) => n && !n.endsWith('-relay'));
+    // A network whose container is gone carries nothing, and neither does the relay on
+    // it. Asked again in the container's turn: one may be on its way to that network.
+    const networks = await docker(['network', 'ls', '--filter', `label=dn.base=${BASE_DIR}`, '--format', '{{.Name}}']);
+    await Promise.all(networks.stdout.split('\n').map((l) => l.trim()).filter((n) => n && !names.includes(n)).map((name) => serial(name, async () => {
+      if (!(await inspect(name))) await remove(name, { volume: false });
+    })));
     // One an earlier daemon left is idle from the moment it is first seen.
     for (const name of names) if (!known.has(name) && !strays.has(name)) strays.set(name, now());
     await Promise.all(names.map((name) => serial(name, async () => {

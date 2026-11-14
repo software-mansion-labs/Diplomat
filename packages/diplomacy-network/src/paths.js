@@ -132,3 +132,13 @@ export const JOB_LIVENESS_MS = num('DN_JOB_LIVENESS_MS', 10 * 1000);
 export const JOB_STOP_GRACE_MS = num('DN_JOB_STOP_GRACE_MS', 5000);
 // The name a container reaches this machine's broker by.
 export const CONTAINER_HOST = process.env.DN_CONTAINER_HOST || 'host.docker.internal';
+// The name a job container reaches its relay by, and through it the broker. The relay
+// reaches this machine by CONTAINER_HOST.
+export const RELAY_HOST = process.env.DN_RELAY_HOST || 'dn-broker';
+// The most one job gets of the model on this machine's credential: requests, and bytes
+// sent and received together. A fuse against a job that runs away, set far above what a
+// task spends.
+export const JOB_MODEL_REQUESTS = num('DN_JOB_MODEL_REQUESTS', 5000);
+export const JOB_MODEL_BYTES = num('DN_JOB_MODEL_BYTES', 8 * 2 ** 30);
+// A job's runner is given this long to come up after it is started.
+export const JOB_START_MS = num('DN_JOB_START_MS', 60 * 1000);

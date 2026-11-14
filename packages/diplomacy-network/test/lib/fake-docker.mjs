@@ -4,13 +4,17 @@
 // A "container" is a directory: its volume is <root>/work, its bind mounts are links,
 // and what is exec'd in it runs on this host with DN_ROOT=<root>, with the container's
 // paths in the arguments translated and with shims for the tools only a container has
-// (setsid, flock, update-ca-certificates, and dash as sh where the host has one). FAKE_DOCKER_PATH is put in front of PATH for
-// what is exec'd, which is where a test keeps its own `claude`.
+// (setsid, flock, update-ca-certificates, and dash as sh where the host has one).
+// FAKE_DOCKER_PATH is put in front of PATH for what is exec'd, which is where a test
+// keeps its own `claude`. A network is a record that a container must name to be made
+// and that cannot be removed from under one; nothing is isolated, and the command a
+// container was made with (a relay's) is recorded and not run.
 //
 // Staged failures, as files in FAKE_DOCKER_DIR:
 //   down             the engine does not answer
 //   fail-<command>   that subcommand fails once per line in the file, printing the line
-//   build-ms         a build takes this long
+//   hold-<command>   that subcommand does not go on while this file exists
+//   old-engine       a network gets a gateway address whatever it was asked for
 // calls.jsonl records every invocation's arguments.
 
 import fs from 'node:fs';
@@ -20,14 +24,19 @@ import { spawn, spawnSync } from 'node:child_process';
 const DIR = process.env.FAKE_DOCKER_DIR;
 if (!DIR) { console.error('fake-docker: FAKE_DOCKER_DIR is not set'); process.exit(2); }
 const argv = process.argv.slice(2);
-for (const d of ['containers', 'volumes', 'images', 'roots']) fs.mkdirSync(path.join(DIR, d), { recursive: true });
+for (const d of ['containers', 'volumes', 'images', 'roots', 'networks']) fs.mkdirSync(path.join(DIR, d), { recursive: true });
 fs.appendFileSync(path.join(DIR, 'calls.jsonl'), `${JSON.stringify(argv)}\n`);
 
 const die = (msg, code = 1) => { process.stderr.write(`${msg}\n`); process.exit(code); };
 const file = (...p) => path.join(DIR, ...p);
 const readJson = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
 const container = (name) => readJson(file('containers', `${name}.json`));
-const save = (c) => fs.writeFileSync(file('containers', `${c.name}.json`), JSON.stringify(c));
+// Whole or not at all: one job's liveness probe reads this record while another job's
+// start rewrites it, and a record caught half-written reads as "No such container".
+const save = (c) => {
+  fs.writeFileSync(file(`saving-${process.pid}`), JSON.stringify(c));
+  fs.renameSync(file(`saving-${process.pid}`), file('containers', `${c.name}.json`));
+};
 
 // Options this fake understands, by how many values each takes; everything else that
 // starts with a dash is a flag.
@@ -47,12 +56,15 @@ function parse(args, valued) {
 
 function staged(command) {
   if (fs.existsSync(file('down'))) die('Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?');
+  while (fs.existsSync(file(`hold-${command}`))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
   const f = file(`fail-${command}`);
   if (!fs.existsSync(f)) return;
   const lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean);
   if (lines.length <= 1) fs.unlinkSync(f); else fs.writeFileSync(f, `${lines.slice(1).join('\n')}\n`);
   die(lines[0] || `${command} failed`);
 }
+
+const labelsOf = (opts) => Object.fromEntries((opts['--label'] || []).map((l) => l.split(/=(.*)/s).slice(0, 2)));
 
 function killAll(c) {
   for (const pid of c.pids || []) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
@@ -67,9 +79,45 @@ switch (command) {
     console.log('0.0.0-fake');
     break;
 
-  case 'network':
-    console.log('172.17.0.1 ');
+  case 'network': {
+    const { opts, rest } = parse(args.slice(1), ['--label', '--format', '--filter', '-o', '--subnet']);
+    const [name] = rest;
+    const known = () => readJson(file('networks', `${name}.json`));
+    if (args[0] === 'ls') {
+      const want = (opts['--filter'] || []).map((f) => f.replace(/^label=/, '').split(/=(.*)/s));
+      for (const f of fs.readdirSync(file('networks'))) {
+        const n = readJson(file('networks', f));
+        if (n && want.every(([k, v]) => n.labels[k] === v)) console.log(n.name);
+      }
+    } else if (args[0] === 'inspect' && name === 'bridge') console.log('172.17.0.1 ');
+    else if (args[0] === 'inspect') {
+      const n = known();
+      if (!n) die(`Error response from daemon: network ${name} not found`);
+      console.log(JSON.stringify({ Name: n.name, Internal: n.internal, Labels: n.labels, IPAM: { Config: [{ Subnet: n.subnet, Gateway: n.gateway }] } }));
+    } else if (args[0] === 'create') {
+      if (known()) die(`Error response from daemon: network with name ${name} already exists`);
+      const nth = fs.readdirSync(file('networks')).length + 1;
+      // An engine that does not know the isolated gateway mode takes the option and
+      // gives the network a gateway all the same.
+      const isolated = (opts['-o'] || []).includes('com.docker.network.bridge.gateway_mode_ipv4=isolated') && !fs.existsSync(file('old-engine'));
+      const subnet = opts['--subnet'] ? opts['--subnet'][0] : `172.30.${nth}.0/24`;
+      fs.writeFileSync(file('networks', `${name}.json`), JSON.stringify({ name, args, internal: !!opts['--internal'], subnet, gateway: isolated ? undefined : subnet.replace(/\d+\/\d+$/, '1'), labels: labelsOf(opts) }));
+      console.log(`fake-net-${name}`);
+    } else if (args[0] === 'rm') {
+      if (!known()) die(`Error response from daemon: network ${name} not found`);
+      for (const f of fs.readdirSync(file('containers'))) {
+        const c = readJson(file('containers', f));
+        if (c && c.networks.includes(name)) die(`Error response from daemon: error while removing network: network ${name} has active endpoints (name:"${c.name}")`);
+      }
+      fs.unlinkSync(file('networks', `${name}.json`));
+    } else if (args[0] === 'connect') {
+      const c = container(rest[1]);
+      if (!c) die(`Error response from daemon: No such container: ${rest[1]}`);
+      c.networks.push(name);
+      save(c);
+    } else die(`fake-docker: no such command: network ${args[0]}`, 2);
     break;
+  }
 
   case 'image': {
     const { rest } = parse(args.slice(1), ['--format']);
@@ -82,13 +130,10 @@ switch (command) {
 
   case 'build': {
     const { opts, rest } = parse(args, ['-t', '--progress']);
-    const ms = Number(readJson(file('build-ms'))) || 0;
     console.error('#1 [internal] load build definition from Dockerfile');
     if (!fs.existsSync(path.join(rest[0], 'Dockerfile'))) die('ERROR: failed to read dockerfile');
-    setTimeout(() => {
-      console.error('#2 exporting to image');
-      fs.writeFileSync(file('images', encodeURIComponent(opts['-t'][0])), '');
-    }, ms);
+    console.error('#2 exporting to image');
+    fs.writeFileSync(file('images', encodeURIComponent(opts['-t'][0])), '');
     break;
   }
 
@@ -111,9 +156,12 @@ switch (command) {
     break;
   }
 
+  case 'create':
   case 'run': {
-    const { opts, rest } = parse(args, ['--name', '--label', '--security-opt', '--pids-limit', '--memory', '--cpus', '--add-host', '-v']);
+    const { opts, rest } = parse(args, ['--name', '--label', '--security-opt', '--pids-limit', '--memory', '--cpus', '--add-host', '-v', '--network', '--network-alias', '--user']);
     const name = opts['--name'][0];
+    const networks = opts['--network'] || ['bridge'];
+    for (const n of networks) if (n !== 'bridge' && !fs.existsSync(file('networks', `${n}.json`))) die(`docker: Error response from daemon: network ${n} not found`, 125);
     if (container(name)) die(`docker: Error response from daemon: Conflict. The container name "/${name}" is already in use.`, 125);
     if (!fs.existsSync(file('images', encodeURIComponent(rest[0])))) die(`Unable to find image '${rest[0]}' locally`, 125);
     const root = file('roots', name);
@@ -128,8 +176,16 @@ switch (command) {
       fs.symlinkSync(host, path.join(root, dst));
       mounts.push({ src, dst, host });
     }
-    save({ name, image: rest[0], args, running: true, root, mounts, pids: [], labels: Object.fromEntries((opts['--label'] || []).map((l) => l.split(/=(.*)/s).slice(0, 2))) });
+    save({ name, image: rest[0], args, running: command === 'run', root, mounts, pids: [], networks, labels: labelsOf(opts) });
     console.log(`fake-${name}`);
+    break;
+  }
+
+  case 'start': {
+    const c = container(args[0]);
+    if (!c) die(`Error response from daemon: No such container: ${args[0]}`);
+    c.running = true;
+    save(c);
     break;
   }
 
@@ -137,7 +193,7 @@ switch (command) {
     const { rest } = parse(args.slice(1), ['--format']);
     const c = container(rest[0]);
     if (!c) die(`Error response from daemon: No such container: ${rest[0]}`);
-    console.log(JSON.stringify({ State: { Running: c.running }, Config: { Image: c.image, Labels: c.labels } }));
+    console.log(JSON.stringify({ State: { Running: c.running }, Config: { Image: c.image, Labels: c.labels }, HostConfig: { NetworkMode: c.networks[0] } }));
     break;
   }
 

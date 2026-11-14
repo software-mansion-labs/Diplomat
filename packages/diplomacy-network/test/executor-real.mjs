@@ -1,6 +1,7 @@
 // The executor against the real docker engine and the real internet: the image built,
-// real containers, the tools inside them leaving through the real broker, and one real
-// agent run on this machine's model credential with no credential inside the container.
+// real containers that reach nothing but their relay, the tools inside them leaving
+// through the real broker, and one real agent run on this machine's model credential
+// with no credential inside the container.
 //
 // Run: DN_TEST_DOCKER=real node test/executor-real.mjs
 //   DN_TEST_SKIP_CLAUDE=1   leaves the agent run out (a machine with no model credential)
@@ -10,6 +11,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
@@ -84,7 +86,7 @@ const onForge = async (job, r) => {
 };
 
 const clock = { skew: 0 };
-const containers = createContainers({ now: () => Date.now() + clock.skew });
+const containers = createContainers({ now: () => Date.now() + clock.skew, broker: () => broker.address() });
 const mirrors = createMirrors();
 const llm = createLLM();
 const broker = createBroker({ ca: createCA(), llm, mirrors, onForge });
@@ -107,23 +109,82 @@ exit $code
 const STEPS = `out="/dn/runs/$DN_RUN_ID"
 step() { n="$1"; shift; sh -c "$*" > "$out/out-$n.txt" 2>&1; echo "$n $?" >> "$out/out-steps.txt"; }
 `;
-async function launch(runId, peer, { script = null, env = {}, prompt = 'Do nothing.' } = {}) {
+// What a container reaches when it ignores the proxy: one line per target, "<name>: no
+// (<why>)" or "<name>: REACHED <what answered>". Besides the targets it is given
+// (name=host:port, tried as HTTP), it tries the internet by name and by address over TCP
+// and UDP, the resolver, every other address of its own network on the given ports, the
+// cloud metadata address, the docker socket and IPv6.
+const REACH = `
+import ipaddress, os, socket, sys
+
+def http(host, port):
+    try:
+        with socket.create_connection((host, int(port)), 3) as c:
+            c.settimeout(3)
+            c.sendall(('GET /version HTTP/1.0\\r\\nHost: %s\\r\\nx-via: direct\\r\\n\\r\\n' % host).encode())
+            return 'REACHED ' + repr(c.recv(200)[:60])
+    except Exception as e:
+        return 'no (%s)' % e
+
+def say(name, result):
+    print('%s: %s' % (name, result), flush=True)
+
+ports = sys.argv[1].split(',')
+for target in sys.argv[2:]:
+    name, at = target.split('=')
+    say(name, http(*at.rsplit(':', 1)))
+say('the internet by name', http('example.com', 80))
+say('the internet by address', http('1.1.1.1', 80))
+say('a resolver over TCP', http('1.1.1.1', 53))
+try:
+    u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    u.settimeout(3)
+    u.sendto(b'\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x07example\\x03com\\x00\\x00\\x01\\x00\\x01', ('1.1.1.1', 53))
+    say('a resolver over UDP', 'REACHED %d bytes' % len(u.recv(512)))
+except Exception as e:
+    say('a resolver over UDP', 'no (%s)' % e)
+try:
+    say('a name outside, asked of the resolver in the container', 'REACHED %s' % socket.getaddrinfo('example.com', 80)[0][4][0])
+except Exception as e:
+    say('a name outside, asked of the resolver in the container', 'no (%s)' % e)
+me = socket.gethostbyname(socket.gethostname())
+for a in ipaddress.ip_network(me + '/29', strict=False):
+    if str(a) != me:
+        for port in ports:
+            say('its own network, %s:%s' % (a, port), http(str(a), port))
+say('the cloud metadata address', http('169.254.169.254', 80))
+say('the docker socket', 'REACHED' if os.path.exists('/var/run/docker.sock') else 'no (no such file)')
+v6 = [l.split()[-1] for l in open('/proc/net/if_inet6') if l.split()[-1] != 'lo'] if os.path.exists('/proc/net/if_inet6') else []
+say('IPv6', 'REACHED an address on %s' % v6 if v6 else 'no (only loopback has an address)')
+`;
+const FWD = `const [h, p] = process.env.DN_FORWARD_ECHO.split(':');
+const s = require('net').connect(p, h);
+s.on('data', (d) => { process.stdout.write(d); s.end(); });
+s.on('error', (e) => console.log(e.message));
+s.write('ping');
+`;
+async function launch(runId, peer, { script = null, env = {}, prompt = 'Do nothing.', forwardTo = {} } = {}) {
   const job = { runId, pool };
   const container = await containers.acquire({ pool, peer, runId });
   if (script !== null) {
-    fs.mkdirSync(path.join(container.runsDir, 'bin'), { recursive: true });
-    fs.writeFileSync(path.join(container.runsDir, 'bin', 'claude'), STAND_IN, { mode: 0o755 });
-    fs.writeFileSync(path.join(container.runsDir, 'bin', `${runId}.sh`), STEPS + script);
+    const bin = path.join(container.runsDir, 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.writeFileSync(path.join(bin, 'claude'), STAND_IN, { mode: 0o755 });
+    fs.writeFileSync(path.join(bin, 'reach.py'), REACH);
+    fs.writeFileSync(path.join(bin, 'fwd.js'), FWD);
+    fs.writeFileSync(path.join(bin, `${runId}.sh`), STEPS + script);
     env = { ...env, PATH: '/dn/runs/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' };
   }
   const proxy = await broker.addJob({ ...job, peer });
+  const forwards = Object.entries(forwardTo).map(([name, port]) => broker.addForward(runId, { name, target: { port } }));
   const release = mirrors.retain(pool);
-  const started = await startJob({ run: job, container, spec: { prompt, item: 'pr:1', base: '', name: 'Requester Name', email: 'requester@example.com' }, proxy, env });
+  const started = await startJob({ run: job, container, spec: { prompt, item: 'pr:1', base: '', name: 'Requester Name', email: 'requester@example.com' }, proxy, env, forwards });
   const outcome = watch(job).finally(() => { release(); broker.removeJob(runId); return containers.release({ name: container.name, runId }); });
   const out = (name) => fs.readFileSync(path.join(started.dir, `out-${name}.txt`), 'utf8').trim();
   const steps = () => Object.fromEntries(fs.readFileSync(path.join(started.dir, 'out-steps.txt'), 'utf8').trim().split('\n').map((l) => [l.split(' ')[0], Number(l.split(' ')[1])]));
   return { run: job, container, proxy, dir: started.dir, outcome, out, steps };
 }
+const unreached = (out) => out.split('\n').filter((l) => !/: no \(/.test(l));
 const groupAlive = async (job) => (await docker(['exec', job.container.name, 'sh', '-c', `kill -s 0 -- -${fs.readFileSync(path.join(job.dir, 'pid'), 'utf8').trim()}`])).code === 0;
 
 let tag = '';
@@ -144,7 +205,11 @@ try {
   });
 
   const at = await broker.start();
-  const hostPort = await new Promise((resolve) => hostService.listen(0, at.host === '127.0.0.1' ? '127.0.0.1' : '0.0.0.0', () => resolve(hostService.address().port)));
+  // On every interface, so that no address of this machine is a way to it.
+  const hostPort = await new Promise((resolve) => hostService.listen(0, '0.0.0.0', () => resolve(hostService.address().port)));
+  const bridgeGateway = await sh('network', 'inspect', 'bridge', '--format', '{{range .IPAM.Config}}{{.Gateway}}{{end}}');
+  const lan = Object.entries(os.networkInterfaces()).flatMap(([name, list]) => list.filter((i) => i.family === 'IPv4' && !i.internal && !/^(docker|br-|veth|bridge)/.test(name)).map((i) => i.address))[0];
+  assert.ok(net.isIPv4(bridgeGateway) && net.isIPv4(lan), `${bridgeGateway} ${lan}`);
   await mirrors.ensureMirror({ pool, checkout });
   // Only the mirror has this commit: a clone that ends on it was answered by the mirror.
   fs.writeFileSync(path.join(checkout, 'only-in-mirror'), 'x\n');
@@ -162,10 +227,11 @@ step tunnel "curl -sS -o /dev/null -w '%{http_code}' https://example.com"
 step nodefetch "node -e \\"fetch('https://example.com').then((r) => console.log(r.status))\\""
 step hostport "curl -sS -H 'x-via: proxy' -o /dev/null -w '%{http_code}' http://host.docker.internal:${hostPort}/"
 step hostconnect "curl -sS -o /dev/null https://host.docker.internal:${hostPort}/"
-step bridge "curl -sS -o /dev/null -w '%{http_code}' http://172.17.0.1:${hostPort}/"
-step notoken "curl -sS -o /dev/null -w '%{http_code}' -x http://host.docker.internal:${at.port} http://example.com/"
-step direct_host "curl -sS --noproxy '*' -m 6 -H 'x-via: direct' -o /dev/null -w '%{http_code}' http://host.docker.internal:${hostPort}/"
-step direct_internet "curl -sS --noproxy '*' -m 8 -o /dev/null -w '%{http_code}' https://example.com"
+step bridge "curl -sS -o /dev/null -w '%{http_code}' http://${bridgeGateway}:${hostPort}/"
+step lan "curl -sS -o /dev/null -w '%{http_code}' http://${lan}:${hostPort}/"
+step notoken "curl -sS -o /dev/null -w '%{http_code}' -x http://dn-broker:${at.port} http://example.com/"
+step reach "python3 /dn/runs/bin/reach.py ${hostPort},2375 host.docker.internal=host.docker.internal:${hostPort} docker-desktop-host=192.168.65.254:${hostPort} bridge-gateway=${bridgeGateway}:${hostPort} bridge-gateway-docker-api=${bridgeGateway}:2375 lan=${lan}:${hostPort} lan-docker-api=${lan}:2375"
+step resolv "cat /etc/resolv.conf; getent hosts dn-broker"
 step head "git rev-parse HEAD && git config user.name && git config user.email"
 step gh "gh api repos/dn-test/alpha"
 step ghother "gh api user"
@@ -196,10 +262,31 @@ exit 0
     assert.notEqual(tools.steps().hostconnect, 0);
     assert.match(tools.out('hostconnect'), /403/);
     assert.equal(tools.out('bridge'), '403');
+    assert.equal(tools.out('lan'), '403');
     assert.ok(!hostSeen.includes('proxy'), 'nothing came through the broker');
     assert.equal(tools.out('notoken'), '407', 'and the broker itself answers nothing without a token');
-    // Not asserted, recorded: what the container reaches when it ignores the proxy.
-    console.log(`INFO without the proxy, from inside the container: this machine's port -> ${tools.out('direct_host').split('\n').pop()}, the internet -> ${tools.out('direct_internet').split('\n').pop()}`);
+  });
+
+  await check('ignoring the proxy leads nowhere: not to the internet by name or address, TCP or UDP, not to this machine by any of its addresses, its network or its docker API, and the container\'s resolver knows no name outside', async () => {
+    const reach = tools.out('reach');
+    console.log(`INFO without the proxy, from inside a job container:\n${reach.split('\n').map((l) => `INFO   ${l}`).join('\n')}`);
+    assert.equal(tools.steps().reach, 0, reach);
+    assert.deepEqual(unreached(reach), []);
+    for (const tried of ['host.docker.internal', 'docker-desktop-host', 'bridge-gateway', 'bridge-gateway-docker-api', 'lan', 'lan-docker-api', 'the internet by name', 'the internet by address',
+      'a resolver over TCP', 'a resolver over UDP', 'a name outside', 'its own network', 'the cloud metadata address', 'the docker socket', 'IPv6']) assert.ok(reach.includes(`${tried}`), tried);
+    assert.ok(!hostSeen.includes('direct'), 'the service on this machine never heard from it');
+    // The one name its resolver knows is its relay's, on its own network.
+    assert.match(tools.out('resolv'), /^10\.213\.\d+\.\d+\s+dn-broker$/m);
+    // The relay answers on that network only: from the default bridge its port is shut.
+    const name = tools.container.name;
+    const [inside, outside] = (await sh('inspect', `${name}-relay`, '--format', `{{(index .NetworkSettings.Networks "${name}").IPAddress}} {{.NetworkSettings.Networks.bridge.IPAddress}}`)).split(' ');
+    assert.ok(net.isIPv4(inside) && net.isIPv4(outside));
+    const knock = await docker(['run', '--rm', '--label', `dn.base=${BASE}`, tag, 'curl', '-sS', '-m', '4', '-o', '/dev/null', '-w', '%{http_code}', `http://${outside}:${at.port}/`]);
+    assert.notEqual(knock.code, 0);
+    assert.match(knock.stderr, /refused|Couldn't connect|Failed to connect/i);
+    // And the job container is on no network but its own.
+    assert.equal(await sh('inspect', name, '--format', '{{range $k, $v := .NetworkSettings.Networks}}{{$k}} {{end}}'), name);
+    assert.match(await sh('network', 'inspect', name, '--format', '{{.Internal}} {{json .IPAM.Config}}'), /^true \[\{"Subnet":"10\.213\.\d+\.\d+\/29"\}\]$/, 'internal, and no gateway address');
   });
 
   await check('gh prints what the requester answered, and what the requester refuses is a 403 with its reason', () => {
@@ -257,8 +344,41 @@ exit 0
     assert.notEqual(other.container.name, tools.container.name);
     assert.deepEqual(other.out('runs').split('\n').sort(), ['bin', 'other-peer']);
     assert.equal(other.out('work'), 'other-peer');
-    const listed = (await sh('ps', '-a', ...mine, '--format', '{{.Names}} {{.Label "dn.peer"}} {{.Label "dn.pool"}}')).split('\n').sort();
+    const listed = (await sh('ps', '-a', ...mine, '--filter', 'label=dn.pool', '--format', '{{.Names}} {{.Label "dn.peer"}} {{.Label "dn.pool"}}')).split('\n').sort();
     assert.deepEqual(listed, [`${tools.container.name} ${PEER_A} ${pool.id}`, `${other.container.name} ${PEER_B} ${pool.id}`].sort());
+    const relays = (await sh('ps', '-a', ...mine, '--filter', 'label=dn.relay', '--format', '{{.Names}} {{.Label "dn.relay"}}')).split('\n').sort();
+    assert.deepEqual(relays, [`${tools.container.name}-relay ${tools.container.name}`, `${other.container.name}-relay ${other.container.name}`].sort(), 'each with a relay of its own and nothing else');
+  });
+
+  await check('one peer\'s container cannot reach another\'s, and a forward opened for one job is of no use to a job in another container', async () => {
+    const echo = net.createServer((c) => c.on('data', (d) => c.write(`echo:${d}`)).on('error', () => {}));
+    const echoPort = await new Promise((resolve) => echo.listen(0, '127.0.0.1', () => resolve(echo.address().port)));
+    const owner = await launch('owner', PEER_A, { forwardTo: { echo: echoPort }, script: `
+node -e "require('http').createServer((q, s) => s.end('peer a')).listen(8099, '0.0.0.0')" &
+step forward "node /dn/runs/bin/fwd.js"
+step where "echo \\$DN_FORWARD_ECHO; hostname -i"
+step wait "while [ ! -f /dn/runs/$DN_RUN_ID/go ]; do sleep 0.2; done"
+exit 0
+` });
+    await until('the owner waits', () => fs.existsSync(path.join(owner.dir, 'out-wait.txt')));
+    assert.equal(owner.out('forward'), 'echo:ping', 'the job it was opened for uses it');
+    const [helper, ownerIp] = owner.out('where').split('\n');
+    assert.match(helper, /^127\.0\.0\.1:\d+$/);
+    const relayIp = await sh('inspect', `${owner.container.name}-relay`, '--format', `{{(index .NetworkSettings.Networks "${owner.container.name}").IPAddress}}`);
+    const intruder = await launch('intruder', PEER_B, { script: `
+step theirs "curl -sS -m 6 -o /dev/null -w '%{http_connect}' -p -x $HTTP_PROXY http://echo.forward.dn:1/"
+step reach "python3 /dn/runs/bin/reach.py 8099 the-other-peers-container=${ownerIp}:8099 its-forward-listener=${ownerIp}:${helper.split(':')[1]} its-relay=${relayIp}:${at.port}"
+exit 0
+` });
+    assert.equal((await intruder.outcome).ok, true);
+    assert.match(intruder.out('theirs'), /404/, 'the name means nothing under another job\'s token');
+    const reach = intruder.out('reach');
+    console.log(`INFO from another peer's container:\n${reach.split('\n').slice(0, 3).map((l) => `INFO   ${l}`).join('\n')}`);
+    assert.deepEqual(unreached(reach), []);
+    assert.ok(reach.includes('the-other-peers-container') && reach.includes('its-forward-listener') && reach.includes('its-relay'));
+    fs.writeFileSync(path.join(owner.dir, 'go'), '');
+    assert.equal((await owner.outcome).ok, true);
+    echo.close();
   });
 
   await check('two jobs run at once in one container, and stopping one leaves the other to finish', async () => {
@@ -323,6 +443,7 @@ exit 0
     await containers.sweep();
     assert.equal(await sh('ps', '-a', '-q', ...mine), '');
     assert.equal(await sh('volume', 'ls', '-q', ...mine), '');
+    assert.equal(await sh('network', 'ls', '-q', ...mine), '');
     assert.deepEqual(containers.list(), []);
   });
 
@@ -332,6 +453,7 @@ exit 0
   hostService.close();
   for (const id of (await docker(['ps', '-a', '-q', ...mine])).stdout.split('\n').filter(Boolean)) await docker(['rm', '-f', id]);
   for (const v of (await docker(['volume', 'ls', '-q', ...mine])).stdout.split('\n').filter(Boolean)) await docker(['volume', 'rm', '-f', v]);
+  for (const n of (await docker(['network', 'ls', '-q', ...mine])).stdout.split('\n').filter(Boolean)) await docker(['network', 'rm', n]);
   if (tag && !process.env.DN_TEST_KEEP_IMAGE) await docker(['image', 'rm', tag]);
   fs.rmSync(scratch, { recursive: true, force: true });
 }

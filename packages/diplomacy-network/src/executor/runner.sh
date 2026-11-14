@@ -63,6 +63,19 @@ export GH_TOKEN=dn-placeholder GITLAB_TOKEN=dn-placeholder
 export GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1
 export IS_SANDBOX=1 DISABLE_AUTOUPDATER=1
 
+# Each forward the job was given gets a listener on this container's loopback, and the
+# variable its tool reads says where.
+if [ -n "${DN_FORWARDS:-}" ]; then
+  node "$RUN/forward.mjs" "$RUN/forwards.sh" $DN_FORWARDS &
+  n=0
+  while [ ! -f "$RUN/forwards.sh" ]; do
+    n=$((n + 1))
+    [ "$n" -gt 300 ] && fail "the forwards did not open"
+    sleep 0.1
+  done
+  . "$RUN/forwards.sh"
+fi
+
 # The clone borrows from a bare copy the container keeps of the repository, so a second
 # job downloads only what is new. That copy is never collected: clones point into it.
 (

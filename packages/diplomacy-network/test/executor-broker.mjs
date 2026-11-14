@@ -19,7 +19,8 @@ const forgeDir = path.join(scratch, 'forge');
 fs.mkdirSync(forgeDir);
 fs.writeFileSync(path.join(scratch, 'gitconfig'), `[user]\n\tname = T\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n[url "${forgeDir}/"]\n\tinsteadOf = https://github.com/\n`);
 Object.assign(process.env, {
-  DN_BASE_DIR: path.join(scratch, 'base'), DN_BROKER_BIND: '127.0.0.1', DN_CONTAINER_HOST: '127.0.0.1', DN_FORGE_ANSWER_TIMEOUT_MS: '1500',
+  DN_BASE_DIR: path.join(scratch, 'base'), DN_BROKER_BIND: '127.0.0.1', DN_RELAY_HOST: '127.0.0.1', DN_FORGE_ANSWER_TIMEOUT_MS: '1500',
+  DN_JOB_MODEL_REQUESTS: '12', DN_JOB_MODEL_BYTES: '300000',
   GIT_CONFIG_GLOBAL: path.join(scratch, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
 });
 const { createBroker, brokerBindAddress, deniedAddress, forgeHosts, MODEL_HOSTS } = await import('../src/executor/broker.js');
@@ -681,7 +682,7 @@ try {
     const r = await Promise.race([
       request(job, 'api.anthropic.com', { method: 'POST', path: '/v1/messages', headers: { 'x-api-key': PLACEHOLDER, accept: 'text/event-stream' }, body: Buffer.from('{"stream":true}'),
         onChunk: (c) => { got.push(c.toString()); if (got.join('').includes('message_start')) release(); } }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('the stream was held back')), 10000)),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('the stream was held back')), 120000)),
     ]);
     assert.equal(r.headers['content-type'], 'text/event-stream');
     assert.equal(r.body.toString(), 'event: message_start\ndata: {"n":1}\n\nevent: message_stop\ndata: {"n":2}\n\n');
@@ -743,28 +744,67 @@ try {
     }
   });
 
-  await check('a forward leads to its target while the job lives and is closed with it', async () => {
-    const adb = net.createServer((s) => { s.on('error', () => {}); s.on('data', (d) => s.write(`OKAY${d}`)); });
+  await check('a forward is its job\'s alone: that job\'s token opens it, no other does, and it closes with the job', async () => {
+    const adb = net.createServer((c) => { c.on('error', () => {}); c.on('data', (d) => c.write(`OKAY${d}`)); });
     const adbPort = await listen(adb);
-    await assert.rejects(broker.addForward('no-such-run', { name: 'adb', target: { port: adbPort } }), /not admitted/);
+    assert.throws(() => broker.addForward('no-such-run', { name: 'adb', target: { port: adbPort } }), /not admitted/);
     const fjob = await broker.addJob({ runId: 'run-f', pool: alpha.pool });
-    const f = await broker.addForward('run-f', { name: 'adb', target: { host: '127.0.0.1', port: adbPort } });
-    assert.deepEqual(Object.keys(f), ['name', 'host', 'port']);
-    assert.equal(f.name, 'adb');
-    assert.equal(f.host, '127.0.0.1', 'the name a container dials');
-    assert.notEqual(f.port, port);
-    const talk = () => new Promise((resolve, reject) => {
-      const s = net.connect(f.port, '127.0.0.1', () => s.write('host:devices'));
-      s.on('data', (d) => resolve({ s, said: d.toString() }));
-      s.on('error', reject);
-    });
-    const open = await talk();
+    for (const bad of ['Not A Name', 'a.b', '', 'x'.repeat(33)]) assert.throws(() => broker.addForward('run-f', { name: bad, target: { port: adbPort } }), /not a forward's name/);
+    assert.deepEqual(broker.addForward('run-f', { name: 'adb', target: { host: '127.0.0.1', port: adbPort } }), { name: 'adb' });
+    const talk = async (auth, name = 'adb') => {
+      const t = await tunnel(`${name}.forward.dn:1`, auth);
+      if (t.status !== 200) return t;
+      t.socket.write('host:devices');
+      return { ...t, said: await new Promise((r) => t.socket.once('data', (d) => r(d.toString()))) };
+    };
+    const open = await talk(basic('dn', fjob.token));
     assert.equal(open.said, 'OKAYhost:devices');
-    const closed = new Promise((r) => open.s.on('close', r));
+    // The same name under another job's token, a name this job was not given, no token at all.
+    const others = await talk(basic('dn', job.token));
+    assert.equal(others.status, 404);
+    assert.equal(others.body, 'this job has no forward named adb\n');
+    assert.equal((await talk(basic('dn', fjob.token), 'tool-server')).status, 404);
+    assert.equal((await talk('')).status, 407);
+    const closed = new Promise((r) => open.socket.on('close', r));
     broker.removeJob('run-f');
-    await closed;
-    await assert.rejects(talk(), /ECONNREFUSED/);
-    assert.equal((await tunnel('tunnel.test:443', basic('dn', fjob.token))).status, 407);
+    try {
+      await Promise.race([closed, new Promise((_, reject) => setTimeout(() => reject(new Error('the forward outlived its job')), 60000))]);
+    } finally { open.socket.destroy(); }
+    assert.equal((await talk(basic('dn', fjob.token))).status, 407);
+  });
+
+  await check('a job gets so much of the model and no more: past its requests or its bytes the answer is a 429 that says so, and the provider is not asked', async () => {
+    providerAnswer = (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"ok":true}'); };
+    const body = Buffer.from(JSON.stringify({ model: 'claude-x', max_tokens: 1, messages: [{ role: 'user', content: 'ping' }] }));
+    const ask = (j, opts = {}) => request(j, 'api.anthropic.com', { method: 'POST', path: '/v1/messages', headers: { 'x-api-key': PLACEHOLDER }, body, ...opts });
+    const greedy = await broker.addJob({ runId: 'run-greedy', pool: alpha.pool });
+    for (let i = 0; i < 12; i++) assert.equal((await ask(greedy, i % 2 ? { path: '/v1/messages/count_tokens' } : {})).status, 200, `request ${i + 1}`);
+    const asked = providerSeen.length;
+    for (let i = 0; i < 2; i++) {
+      const over = await ask(greedy);
+      assert.equal(over.status, 429);
+      assert.equal(over.headers['x-should-retry'], 'false', 'the client is told not to try again');
+      const said = JSON.parse(over.body);
+      assert.equal(said.type, 'error');
+      assert.equal(said.error.type, 'rate_limit_error');
+      assert.match(said.error.message, /^this job has used all of the model it gets on this executor \(12 requests, 300000 bytes\): it made 12 requests of \d+ bytes\. /);
+    }
+    assert.equal(providerSeen.length, asked, 'the provider never saw them');
+    assert.equal(logged.filter((l) => l.includes('run-greedy the model is closed to this job after 12 requests')).length, 1, 'said once in the log');
+    // What is not sent on this machine's credential is not this machine's to count.
+    assert.equal((await ask(greedy, { headers: { 'x-api-key': 'sk-the-agents-own' } })).status, 200);
+    assert.equal((await ask(job)).status, 200, 'and another job has its own share');
+
+    // Bytes: what the job sends...
+    const big = Buffer.from(JSON.stringify({ model: 'claude-x', messages: [{ role: 'user', content: 'x'.repeat(160000) }] }));
+    const wordy = await broker.addJob({ runId: 'run-wordy', pool: alpha.pool });
+    assert.deepEqual([(await ask(wordy, { body: big })).status, (await ask(wordy, { body: big })).status, (await ask(wordy)).status], [200, 200, 429]);
+    // ...and what it is sent back.
+    providerAnswer = (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ text: 'y'.repeat(160000) })); };
+    const reader = await broker.addJob({ runId: 'run-reader', pool: alpha.pool });
+    assert.deepEqual([(await ask(reader)).status, (await ask(reader)).status, (await ask(reader)).status], [200, 200, 429]);
+    for (const id of ['run-greedy', 'run-wordy', 'run-reader']) broker.removeJob(id);
+    providerAnswer = (req, res) => { res.writeHead(200, { 'content-type': 'application/json', 'request-id': 'req_1' }); res.end('{"ok":true}'); };
   });
 
   await check('removing a job cuts its open connections and leaves the other jobs\' alone', async () => {

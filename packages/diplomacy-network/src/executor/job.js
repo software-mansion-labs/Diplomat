@@ -6,19 +6,23 @@
 //   prompt.txt  the container preamble, then the requester's prompt
 //   env.sh      the job's environment, its proxy token included (0600)
 //   ca.crt      the broker's certificate authority
-//   run.sh      runner.sh; stop.sh
+//   run.sh      runner.sh; stop.sh; forward.mjs
+//   forwards.sh where forward.mjs listens for the job's forwards, when it has any
 //   pid         the runner's process group
 //   setup.log   everything before the agent started
 //   log.jsonl   the agent's event stream; stderr.log
 //   done        the agent's exit code, written last
 // The container can write all of it. So the host fills it in before the container can
 // see it, writes nothing into it afterwards, and reads back only what is a plain file
-// in the place the host itself put the directory.
+// in the place the host itself put the directory. The outcome it makes of that is kept
+// beside the run directories, in RUNS_DIR/<run id>.outcome.json, where no container
+// can write.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { JOB_LIVENESS_MS, JOB_POLL_MS, JOB_STOP_GRACE_MS, RUNS_DIR } from '../paths.js';
+import { atomicWrite, readJson } from '../../../daemon-core/src/fsio.js';
+import { JOB_LIVENESS_MS, JOB_POLL_MS, JOB_START_MS, JOB_STOP_GRACE_MS, RUNS_DIR } from '../paths.js';
 import { docker, IMAGE_DIR } from './container.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -29,16 +33,12 @@ const quote = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
 
 const live = new Map(); // run id -> job
 
-/// The environment that tells a job where its forwards are: `adb` becomes the variable
-/// adb itself reads, anything else `DN_FORWARD_<NAME>=host:port`. The device allocator
-/// and the tool-server are to be offered to a job through here.
-export function forwardEnv(forwards) {
-  const env = {};
-  for (const f of forwards) {
-    if (f.name === 'adb') env.ADB_SERVER_SOCKET = `tcp:${f.host}:${f.port}`;
-    else env[`DN_FORWARD_${f.name.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`] = `${f.host}:${f.port}`;
-  }
-  return env;
+const outcomePath = (runId) => path.join(RUNS_DIR, `${runId}.outcome.json`);
+
+/// The outcome of a run that ended, as `watch` resolved it, or null: what a daemon that
+/// was not there when the run ended still has to report.
+export function readOutcome(runId) {
+  return /^[A-Za-z0-9_-]{1,64}$/.test(runId) ? readJson(outcomePath(runId)) : null;
 }
 
 /// The job's prompt: image/preamble.md filled in for this pool and task, a rule, and the
@@ -114,8 +114,8 @@ function parseOutcome(job, exit) {
 /// `{ runId, pool: { id, forge, host, owner, repo } }`, `spec` the requester's
 /// `{ prompt, item, base, name, email }`, `proxy` the broker's `{ proxyUrl, caCertPath }`,
 /// `env` whatever else the job's environment carries (the model placeholder), and
-/// `forwards` the broker forwards opened for it. Resolves to `{ dir, log }` once the
-/// runner is alive.
+/// `forwards` the broker forwards opened for it (`{ name }` each). Resolves to
+/// `{ dir, log }` once the runner is alive.
 export async function startJob({ run, container, spec, proxy, env = {}, forwards = [] }) {
   const { runId, pool } = run;
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(runId)) throw new Error(`not a run id: ${runId}`);
@@ -131,6 +131,7 @@ export async function startJob({ run, container, spec, proxy, env = {}, forwards
   fs.copyFileSync(proxy.caCertPath, path.join(staging, 'ca.crt'));
   fs.copyFileSync(path.join(HERE, 'runner.sh'), path.join(staging, 'run.sh'));
   fs.copyFileSync(path.join(HERE, 'stop.sh'), path.join(staging, 'stop.sh'));
+  fs.copyFileSync(path.join(HERE, 'forward.mjs'), path.join(staging, 'forward.mjs'));
   const vars = {
     DN_RUN_ID: runId,
     DN_PROXY: proxy.proxyUrl,
@@ -141,7 +142,7 @@ export async function startJob({ run, container, spec, proxy, env = {}, forwards
     // Each forge client is pointed at the pool's own host.
     ...(pool.forge === 'gitlab' ? { GITLAB_HOST: pool.host } : pool.host !== 'github.com' ? { GH_HOST: pool.host } : {}),
     ...env,
-    ...forwardEnv(forwards),
+    ...(forwards.length > 0 ? { DN_FORWARDS: forwards.map((f) => f.name).join(' ') } : {}),
   };
   // In a file and not on docker's command line, where any user of this machine could
   // read the token off the process list.
@@ -153,6 +154,7 @@ export async function startJob({ run, container, spec, proxy, env = {}, forwards
   }
   const link = path.join(RUNS_DIR, runId);
   fs.rmSync(link, { recursive: true, force: true });
+  fs.rmSync(outcomePath(runId), { force: true });
   fs.symlinkSync(path.relative(RUNS_DIR, dir), link);
 
   // Where the host put the directory, whatever stands at that name later.
@@ -162,7 +164,7 @@ export async function startJob({ run, container, spec, proxy, env = {}, forwards
   if (started.code !== 0) throw new Error(`the job could not be started in ${container.name}: ${started.stderr.trim().split('\n').pop()}`);
   for (let waited = 0; !job.pid; waited += 100) {
     job.pid = Number((readOwn(job, 'pid', 32) || '').trim()) || 0;
-    if (!job.pid && waited >= 15000) throw new Error(`the job did not come up in ${container.name}`);
+    if (!job.pid && waited >= JOB_START_MS) throw new Error(`the job did not come up in ${container.name} within ${JOB_START_MS / 1000} s`);
     if (!job.pid) await sleep(100);
   }
   live.set(runId, job);
@@ -204,6 +206,8 @@ async function follow(job) {
   if (state === 'stopped') Object.assign(outcome, { ok: false, summary: 'stopped' });
   if (state === 'vanished') Object.assign(outcome, { ok: false, summary: 'the job\'s process disappeared without finishing: its container was removed or the docker engine restarted' });
   outcome.state = state === 'ended' ? (outcome.ok ? 'finished' : 'failed') : state === 'stopped' ? 'stopped' : 'failed';
+  // The copy on disk is for a later daemon; this one has the outcome either way.
+  try { atomicWrite(outcomePath(job.runId), outcome, 0o600); } catch {}
   live.delete(job.runId);
   return outcome;
 }
@@ -211,6 +215,7 @@ async function follow(job) {
 /// Resolves when the run ends, to `{ ok, summary, usd, tokens, model, runner, exit,
 /// state }`: `state` is `finished`, `failed` or `stopped`; `exit` is null when the agent
 /// never reported one. A run whose process is gone without a `done` file is a failure.
+/// The same object is kept on disk for `readOutcome`.
 export function watch(run) {
   const job = live.get(run.runId);
   if (!job) return Promise.reject(new Error(`run ${run.runId} is not running`));

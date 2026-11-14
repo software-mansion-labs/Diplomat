@@ -1,14 +1,15 @@
 // Containers and jobs against the stand-in docker: one container per peer and
-// repository, many jobs in it, each stopped on its own; the image built once per tag;
-// the real runner script cloning through the real broker from a real mirror, with a
-// stand-in for the agent.
+// repository, on a network of its own with a relay as its one way out, many jobs in it,
+// each stopped on its own; the image built once per tag; the real runner script cloning
+// through the real broker from a real mirror, with a stand-in for the agent.
 // Run: node test/executor-container.mjs
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
+import net from 'node:net';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-ctr-'));
@@ -41,6 +42,7 @@ case "$mode" in
   link) rm -f "$run/log.jsonl"; ln -s "$FAKE_AGENT_DIR/planted/log.jsonl" "$run/log.jsonl"; exit 0 ;;
   swap) sleep 1; mv "$run" "$run.real"; ln -s "$FAKE_AGENT_DIR/planted" "$run"; exit 0 ;;
   commit) echo fix > fix.txt; git add fix.txt; git commit --quiet -m "fix by the agent"; git log -1 --format='%an <%ae>' > "$out.author" ;;
+  forward) node -e 'const [h, p] = process.env.DN_FORWARD_ECHO.split(":"); const s = require("net").connect(p, h); s.on("data", (d) => { process.stdout.write(d); s.end(); }); s.on("error", (e) => console.log(e.message)); s.write("ping");' > "$out.forward" 2>&1 ;;
 esac
 echo '{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}'
 echo '{"type":"result","subtype":"success","is_error":false,"result":"did '"$DN_RUN_ID"'","total_cost_usd":0.25,"usage":{"input_tokens":1,"output_tokens":1},"modelUsage":{"claude-small":{"inputTokens":1,"outputTokens":2,"cacheReadInputTokens":3,"cacheCreationInputTokens":4,"costUSD":0.05},"claude-big":{"inputTokens":10,"outputTokens":20,"cacheReadInputTokens":300,"cacheCreationInputTokens":4000,"costUSD":0.2}}}'
@@ -49,12 +51,14 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"did '"$DN_
 const BASE = path.join(scratch, 'base');
 Object.assign(process.env, {
   DN_BASE_DIR: BASE, DN_DOCKER: FAKE, FAKE_DOCKER_DIR: fakeDir, FAKE_DOCKER_PATH: binDir, FAKE_AGENT_DIR: agentDir,
-  DN_BROKER_BIND: '127.0.0.1', DN_CONTAINER_HOST: '127.0.0.1', DN_IMAGE_REPO: 'dn-test-agent',
+  // The stand-in docker has no networks: a job in it runs on this host, where the name
+  // of its relay has to be the loopback address the broker itself listens on.
+  DN_BROKER_BIND: '127.0.0.1', DN_RELAY_HOST: '127.0.0.1', DN_IMAGE_REPO: 'dn-test-agent',
   DN_JOB_POLL_MS: '40', DN_JOB_LIVENESS_MS: '250', DN_JOB_STOP_GRACE_MS: '1000', DN_CONTAINER_IDLE_MS: '3600000',
   GIT_CONFIG_GLOBAL: path.join(scratch, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
 });
 const { createContainers, containerName, imageTag, IMAGE_DIR } = await import('../src/executor/container.js');
-const { startJob, watch, stopJob, renderPrompt, forwardEnv } = await import('../src/executor/job.js');
+const { startJob, watch, stopJob, renderPrompt, readOutcome } = await import('../src/executor/job.js');
 const { createBroker } = await import('../src/executor/broker.js');
 const { createCA } = await import('../src/executor/ca.js');
 const { createMirrors } = await import('../src/executor/mirror.js');
@@ -66,7 +70,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const git = (cwd, ...args) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const calls = (command) => fs.readFileSync(path.join(fakeDir, 'calls.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)).filter((a) => !command || a[0] === command);
 const agent = (runId, what) => fs.readFileSync(path.join(agentDir, `${runId}.${what}`), 'utf8');
-const until = async (what, fn, ms = 10000) => { for (const end = Date.now() + ms; Date.now() < end;) { if (await fn()) return; await sleep(25); } assert.fail(`never: ${what}`); };
+// Long enough for a machine with every core taken many times over.
+const until = async (what, fn, ms = 120000) => { for (const end = Date.now() + ms; Date.now() < end;) { if (await fn()) return; await sleep(25); } assert.fail(`never: ${what}`); };
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 function makeRepo(owner, name) {
@@ -91,7 +96,7 @@ function makeRepo(owner, name) {
 const clock = { now: Date.now() };
 const logged = [];
 const log = (...a) => logged.push(a.join(' '));
-const containers = createContainers({ log, now: () => clock.now, imageDir });
+const containers = createContainers({ log, now: () => clock.now, imageDir, broker: () => broker.address() });
 const mirrors = createMirrors({ log });
 const forgeSeen = [];
 const broker = createBroker({
@@ -104,12 +109,13 @@ const PEER_B = 'pkBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
 const SPEC = { prompt: 'Review the pull request.', item: 'pr:7', base: '', name: 'Requester Name', email: 'requester@example.com' };
 
 // What the daemon does around one job: container, mirror, broker, start.
-async function launch(runId, peer, repo, spec = {}) {
+async function launch(runId, peer, repo, spec = {}, forwardTo = {}, alsoTold = []) {
   const run = { runId, pool: repo.pool };
   const container = await containers.acquire({ pool: repo.pool, peer, runId });
   await mirrors.ensureMirror({ pool: repo.pool, checkout: repo.checkout });
   const proxy = await broker.addJob({ ...run, peer });
-  const started = await startJob({ run, container, spec: { ...SPEC, ...spec }, proxy, env: { CLAUDE_CODE_OAUTH_TOKEN: 'dn-placeholder' } });
+  const forwards = [...Object.entries(forwardTo).map(([name, port]) => broker.addForward(runId, { name, target: { port } })), ...alsoTold];
+  const started = await startJob({ run, container, spec: { ...SPEC, ...spec }, proxy, env: { CLAUDE_CODE_OAUTH_TOKEN: 'dn-placeholder' }, forwards });
   const outcome = watch(run).finally(() => { broker.removeJob(runId); return containers.release({ name: container.name, runId }); });
   return { run, container, proxy, started, outcome };
 }
@@ -165,10 +171,11 @@ try {
     assert.equal(containers.dockerState().state, 'failed');
     assert.match(containers.dockerState().detail, /apt-get update/);
 
-    fs.writeFileSync(path.join(fakeDir, 'build-ms'), '400');
+    fs.writeFileSync(path.join(fakeDir, 'hold-build'), '');
     const building = Promise.all([containers.ensureImage(), containers.ensureImage()]);
     await until('the build shows', () => containers.dockerState().state === 'building');
     assert.equal(containers.dockerState().image, imageTag(imageDir));
+    fs.rmSync(path.join(fakeDir, 'hold-build'));
     const [tag, same] = await building;
     assert.equal(tag, imageTag(imageDir));
     assert.equal(same, tag);
@@ -176,7 +183,11 @@ try {
     assert.equal(await containers.ensureImage(), tag);
     assert.equal(calls('build').length, 2, 'the failed one and the one that worked: never again for the same tag');
     assert.deepEqual(calls('build').at(-1), ['build', '--progress', 'plain', '-t', tag, imageDir]);
-    fs.rmSync(path.join(fakeDir, 'build-ms'));
+  });
+
+  await check('without a broker listening no container is made: it would have no way out', async () => {
+    await assert.rejects(containers.acquire({ pool: { id: 'github.com/o/r' }, peer: PEER_A, runId: 'early' }), /the broker is not listening, and a container has no other way out/);
+    assert.deepEqual([...calls('run'), ...calls('create'), ...calls('network').filter((c) => c[1] !== 'inspect')], []);
   });
 
   await broker.start();
@@ -196,6 +207,15 @@ try {
     assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.staging')), [], 'nothing is left where it was put together');
     assert.equal(fs.readFileSync(path.join(dir, 'done'), 'utf8'), '0\n');
     assert.equal(fs.statSync(path.join(dir, 'env.sh')).mode & 0o777, 0o600);
+    // The outcome is kept for a later daemon, beside the run directories and not in one.
+    assert.deepEqual(readOutcome('run-1'), outcome);
+    assert.equal(fs.statSync(path.join(RUNS_DIR, 'run-1.outcome.json')).mode & 0o777, 0o600);
+    assert.deepEqual(fs.readdirSync(dir).filter((f) => f.includes('outcome')), []);
+    assert.equal(readOutcome('run-none'), null);
+    // An id is never a path into what a container writes.
+    fs.writeFileSync(path.join(dir, 'planted.outcome.json'), '{"ok":true,"summary":"forged"}');
+    assert.equal(readOutcome('run-1/planted'), null);
+    fs.rmSync(path.join(dir, 'planted.outcome.json'));
 
     assert.deepEqual(agent('run-1', 'args').trim().split('\n'), ['-p', '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose']);
     const [head, name, email, origin] = agent('run-1', 'git').split('\n');
@@ -231,14 +251,37 @@ try {
     for (const said of ['https://github.com/dn-test/alpha.git', '`pr:7`', 'apt-get update && apt-get install -y', 'GNU', '403', '`gh`', 'git fetch origin pull/<n>/head',
       'Requester Name <requester@example.com>', 'No simulator, emulator or device is offered']) assert.ok(prompt.includes(said), said);
     const lab = renderPrompt({ pool: { id: 'gitlab.example.org/g/r', forge: 'gitlab', host: 'gitlab.example.org', owner: 'g', repo: 'r' }, spec: { ...SPEC, item: '' },
-      forwards: [{ name: 'adb', host: 'host.docker.internal', port: 5 }] });
+      forwards: [{ name: 'adb' }] });
     for (const said of ['https://gitlab.example.org/g/r.git', '`glab`', 'merge-requests/<n>/head', 'the repository as a whole', 'forwarded from the host and already in your environment: adb']) assert.ok(lab.includes(said), said);
   });
 
-  await check('a forward reaches a job as the variable its tool reads', () => {
-    assert.deepEqual(forwardEnv([{ name: 'adb', host: 'host.docker.internal', port: 40001 }, { name: 'tool-server', host: 'host.docker.internal', port: 40002 }]),
-      { ADB_SERVER_SOCKET: 'tcp:host.docker.internal:40001', DN_FORWARD_TOOL_SERVER: 'host.docker.internal:40002' });
-    assert.deepEqual(forwardEnv([]), {});
+  await check('a forward reaches a job as the variable its tool reads, and leads through the broker to its target', async () => {
+    const echo = net.createServer((c) => c.on('data', (d) => c.write(`echo:${d}`)).on('error', () => {}));
+    await new Promise((r) => echo.listen(0, '127.0.0.1', r));
+    // Another job keeps the container up, so nothing here ends because the container did.
+    const holder = await launch('run-h', PEER_A, alpha, { prompt: 'MODE=sleep' });
+    const job = await launch('run-f', PEER_A, alpha, { prompt: 'MODE=forward' }, { echo: echo.address().port, adb: echo.address().port });
+    assert.equal((await job.outcome).ok, true);
+    assert.equal(agent('run-f', 'forward'), 'echo:ping');
+    const env = agent('run-f', 'env');
+    const at = /^DN_FORWARD_ECHO=(127\.0\.0\.1:\d+)$/m.exec(env);
+    assert.ok(at, 'a listener inside the container, not an address of the host');
+    assert.notEqual(at[1], `127.0.0.1:${echo.address().port}`);
+    assert.match(env, /^ADB_SERVER_SOCKET=tcp:127\.0\.0\.1:\d+$/m);
+    assert.match(agent('run-f', 'prompt'), /forwarded from the host and already in your environment: echo, adb\./);
+    assert.doesNotMatch(agent('run-1', 'env'), /DN_FORWARD|ADB_SERVER_SOCKET/, 'a job given none has none');
+    await until('the listener is gone with its job', () => new Promise((resolve) => {
+      const c = net.connect(Number(at[1].split(':')[1]), '127.0.0.1');
+      c.on('connect', () => { c.destroy(); resolve(false); });
+      c.on('error', () => resolve(true));
+    }));
+    // A forward the broker does not have for this job is a connection that closes, not the broker's refusal fed to the tool.
+    const ghost = await launch('run-g', PEER_A, alpha, { prompt: 'MODE=forward' }, {}, [{ name: 'echo' }]);
+    assert.equal((await ghost.outcome).ok, true);
+    assert.equal(agent('run-g', 'forward'), '');
+    await stopJob(holder.run);
+    await holder.outcome;
+    echo.close();
   });
 
   await check('the container is created locked down: six capabilities, no new privileges, limits, its own volume and run records, nothing of the host\'s', () => {
@@ -249,11 +292,65 @@ try {
       '--label', 'dn.pool=github.com/dn-test/alpha', '--label', `dn.peer=${PEER_A}`, '--label', `dn.base=${BASE}`,
       '--cap-drop=ALL', '--cap-add=CHOWN', '--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '--cap-add=FSETID', '--cap-add=SETGID', '--cap-add=SETUID',
       '--security-opt', 'no-new-privileges', '--pids-limit', '4096', '--memory', '8g', '--cpus', '4',
+      '--network', name,
       '-v', `${name.replace('dn-', 'dn-work-')}:/work`, '-v', `${path.join(RUNS_DIR, '.containers', name)}:/dn/runs`,
       imageTag(imageDir), 'sleep', 'infinity']);
     const all = calls().flat().join(' ');
-    assert.doesNotMatch(all, /docker\.sock|--privileged|\.ssh|--network[ =]host|--pid[ =]host/);
+    assert.doesNotMatch(all, /docker\.sock|--privileged|\.ssh|--network[ =]host|--pid[ =]host|-p \d|--publish/);
     assert.deepEqual(calls('volume').filter((c) => c[1] === 'create'), [['volume', 'create', '--label', `dn.base=${BASE}`, name.replace('dn-', 'dn-work-')]]);
+  });
+
+  await check('its one network is its own: internal, with no address of this machine on it, and the only other thing there is a relay that leads to the broker\'s port', () => {
+    const name = containerName(alpha.pool.id, PEER_A);
+    const port = String(broker.address().port);
+    const made = calls().filter((c) => ['network', 'create', 'start', 'run'].includes(c[0]) && c[1] !== 'inspect' && c.some((a) => a === name || a === `${name}-relay`)).slice(0, 5);
+    const subnet = made[0][7];
+    assert.match(subnet, /^10\.213\.\d+\.\d+\/29$/);
+    assert.deepEqual(made.slice(0, 4), [
+      ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', '--subnet', subnet, '--label', `dn.base=${BASE}`, name],
+      ['create', '--name', `${name}-relay`, '--label', `dn.relay=${name}`, '--label', `dn.broker=host.docker.internal:${port}`, '--label', `dn.base=${BASE}`,
+        '--cap-drop=ALL', '--security-opt', 'no-new-privileges', '--read-only', '--user', '65534:65534', '--pids-limit', '64', '--memory', '256m',
+        '--network', name, '--network-alias', '127.0.0.1', '--add-host', 'host.docker.internal:host-gateway',
+        imageTag(imageDir), 'node', '/opt/dn/relay.mjs', subnet, port, 'host.docker.internal', port],
+      ['network', 'connect', 'bridge', `${name}-relay`],
+      ['start', `${name}-relay`],
+    ]);
+    assert.equal(made[4][0], 'run', 'and only then the container');
+    // No container but a relay is ever put on a second network, and that one is the default bridge.
+    for (const c of calls('network').filter((x) => x[1] === 'connect')) assert.match(c.slice(2).join(' '), /^bridge dn-[0-9a-f]{8}-[0-9a-f]{8}-relay$/);
+    for (const c of calls('run')) assert.equal(c.filter((a) => a === '--network').length, 1);
+  });
+
+  await check('a relay carries what it is sent to the one address it was started with, whatever a client asks of it', async () => {
+    const seen = [];
+    const target = net.createServer((c) => c.on('data', (d) => { seen.push(String(d)); c.write('from the broker'); }).on('error', () => {}));
+    await new Promise((r) => target.listen(0, '127.0.0.1', r));
+    const free = net.createServer();
+    await new Promise((r) => free.listen(0, '127.0.0.1', r));
+    const port = free.address().port;
+    await new Promise((r) => free.close(r));
+    const relayFile = path.join(IMAGE_DIR, 'relay.mjs');
+    const relay = spawn(process.execPath, [relayFile, '127.0.0.0/8', String(port), '127.0.0.1', String(target.address().port)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    try {
+      const said = await new Promise((resolve) => relay.stdout.once('data', (d) => resolve(String(d).trim())));
+      assert.equal(said, `relay: 127.0.0.1:${port} -> 127.0.0.1:${target.address().port}`, 'it listens on its address in the job network and on no other');
+      const asked = 'CONNECT elsewhere.example:443 HTTP/1.1\r\nHost: elsewhere.example:443\r\n\r\n';
+      const answer = await new Promise((resolve, reject) => {
+        const c = net.connect(port, '127.0.0.1', () => c.write(asked));
+        c.on('data', (d) => { resolve(String(d)); c.destroy(); });
+        c.on('error', reject);
+        c.on('close', () => reject(new Error('the relay closed the connection without an answer')));
+        c.setTimeout(60000, () => c.destroy(new Error('the relay gave no answer')));
+      });
+      assert.equal(answer, 'from the broker');
+      assert.deepEqual(seen, [asked], 'word for word, to the broker');
+    } finally { relay.kill('SIGKILL'); target.close(); }
+    // In a container with no address on the network it was told to serve, it serves nothing.
+    const none = spawn(process.execPath, [relayFile, '203.0.113.0/24', String(port), '127.0.0.1', '1'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    none.stderr.on('data', (d) => { err += d; });
+    assert.equal(await new Promise((r) => none.on('close', r)), 1);
+    assert.match(err, /no address in 203\.0\.113\.0\/24/);
   });
 
   await check('the same peer on the same repository gets the same container again; its second clone borrows from the first', async () => {
@@ -276,14 +373,20 @@ try {
     assert.equal(calls('run').length, 3);
     assert.deepEqual(containers.list().map((c) => c.name).sort(), [...names].sort());
     // Each sees its own run records and no one else's.
-    for (const [name, mine] of [[first.container.name, ['run-1', 'run-2']], [otherPeer.container.name, ['run-3']], [otherPool.container.name, ['run-4']]]) {
+    for (const [name, mine] of [[first.container.name, ['run-1', 'run-2', 'run-f', 'run-g', 'run-h']], [otherPeer.container.name, ['run-3']], [otherPool.container.name, ['run-4']]]) {
       assert.deepEqual(fs.readdirSync(path.join(fakeDir, 'roots', name, 'dn', 'runs')).sort(), mine);
     }
+    // And each is on a network of its own, which is what keeps one peer's container from another's.
+    const networks = calls('run').map((c) => c[c.indexOf('--network') + 1]);
+    assert.deepEqual(networks.sort(), [...names].sort());
+    assert.deepEqual(calls('create').map((c) => [c[c.indexOf('--name') + 1], c[c.indexOf('--network') + 1]]).sort(), [...names].sort().map((n) => [`${n}-relay`, n]));
     assert.equal(agent('run-4', 'git').split('\n')[3], 'https://github.com/dn-test/beta.git');
   });
 
   await check('two jobs run at once in one container, and stopping one leaves the other to finish', async () => {
+    fs.writeFileSync(path.join(RUNS_DIR, 'run-5.outcome.json'), '{"ok":true,"summary":"an earlier run of that name"}');
     const stays = await launch('run-5', PEER_A, alpha, { prompt: 'MODE=sleep' });
+    assert.equal(readOutcome('run-5'), null, 'a run that is running has no outcome yet');
     const goes = await launch('run-6', PEER_A, alpha, { prompt: 'MODE=sleep' });
     assert.equal(stays.container.name, goes.container.name);
     await until('both agents run', () => fs.existsSync(path.join(agentDir, 'run-5.started')) && fs.existsSync(path.join(agentDir, 'run-6.started')));
@@ -295,8 +398,10 @@ try {
     const stopped = await stopJob(goes.run);
     assert.deepEqual(stopped, { ok: false, summary: 'stopped', usd: 0, tokens: 0, model: '', runner: 'claude', exit: null, state: 'stopped' });
     assert.equal(await goes.outcome, stopped);
-    assert.equal(pidAlive(goesPid), false, 'its runner is dead');
-    assert.throws(() => process.kill(-goesPid, 0), 'and so is everything it started');
+    assert.deepEqual(readOutcome('run-6'), stopped);
+    // A killed process is gone when the kernel gets to it, which is soon and not at once.
+    await until('its runner is dead', () => !pidAlive(goesPid));
+    await until('and so is everything it started', () => { try { process.kill(-goesPid, 0); return false; } catch { return true; } });
     assert.equal(pidAlive(staysPid), true, 'the other job was not touched');
     process.kill(-staysPid, 0);
     assert.equal(fs.existsSync(path.join(fakeDir, 'roots', stays.container.name, 'work', 'jobs', 'run-6')), false);
@@ -309,7 +414,7 @@ try {
 
     // The survivor ends on its own terms: here, by being stopped later.
     assert.equal((await stopJob(stays.run)).state, 'stopped');
-    assert.equal(pidAlive(staysPid), false);
+    await until('the survivor is dead too', () => !pidAlive(staysPid));
     await stays.outcome;
     assert.deepEqual(calls('restart').slice(restarts), [['restart', '-t', '0', stays.container.name]], 'with its last job gone the container is restarted: nothing a job started outlives it');
   });
@@ -334,6 +439,7 @@ try {
     assert.equal(outcome.state, 'failed');
     assert.equal(outcome.exit, null);
     assert.match(outcome.summary, /disappeared without finishing/);
+    assert.deepEqual(readOutcome('run-10'), outcome);
   });
 
   await check('a container removed under a running job fails that job, and the next one gets a new container', async () => {
@@ -414,8 +520,12 @@ try {
     await containers.sweep();
     const gone = calls('rm').map((c) => c.at(-1));
     assert.ok(!gone.includes(name), 'not the one with a job in it');
-    assert.ok(gone.includes(containerName(beta.pool.id, PEER_A)), 'the idle ones went');
-    assert.ok(calls('volume').some((c) => c[1] === 'rm' && c.at(-1) === containerName(beta.pool.id, PEER_A).replace('dn-', 'dn-work-')));
+    const idle = containerName(beta.pool.id, PEER_A);
+    assert.ok(gone.includes(idle), 'the idle ones went');
+    assert.ok(gone.includes(`${idle}-relay`), 'each with its relay');
+    assert.ok(calls('network').some((c) => c[1] === 'rm' && c[2] === idle), 'its network');
+    assert.ok(calls('volume').some((c) => c[1] === 'rm' && c.at(-1) === idle.replace('dn-', 'dn-work-')), 'and its volume');
+    assert.equal(fs.existsSync(path.join(fakeDir, 'networks', `${idle}.json`)), false);
     assert.equal(fs.existsSync(path.join(fakeDir, 'volumes', name.replace('dn-', 'dn-work-'))), true);
     await stopJob(busy.run);
     await busy.outcome;
@@ -426,8 +536,10 @@ try {
     assert.equal(calls('rm').length, before, 'idle time is counted from the end of the last job');
     clock.now += 2000;
     await containers.sweep();
-    assert.deepEqual(calls('rm').at(-1), ['rm', '-f', name]);
+    assert.deepEqual(calls('rm').slice(-2), [['rm', '-f', name], ['rm', '-f', `${name}-relay`]]);
+    assert.deepEqual(calls('network').at(-1), ['network', 'rm', name]);
     assert.equal(fs.existsSync(path.join(fakeDir, 'volumes', name.replace('dn-', 'dn-work-'))), false);
+    assert.deepEqual(fs.readdirSync(path.join(fakeDir, 'networks')), []);
     assert.deepEqual(containers.list(), []);
   });
 
@@ -455,23 +567,45 @@ try {
     assert.equal((await after.outcome).ok, true);
     assert.equal(calls('run').length, runs + 1);
     assert.equal(calls('run').at(-1).at(-3), newTag);
+    assert.equal(calls('create').at(-1).at(-7), newTag, 'and its relay is of the new image too');
     assert.equal(calls('volume').filter((c) => c[1] === 'rm').length, volumeRemovals, 'the work volume and its cache stay');
     assert.match(agent('run-19', 'git').split('\n')[4], /cache\.git/);
+
+    // A relay that outlived its container is of the image that container had: it is made again as well.
+    fs.appendFileSync(path.join(imageDir, 'Dockerfile'), 'RUN true\n');
+    execFileSync(FAKE, ['rm', '-f', after.container.name]);
+    const creates = calls('create').length;
+    assert.equal((await (await launch('run-20', PEER_A, alpha)).outcome).ok, true);
+    assert.equal(calls('create').length, creates + 1);
+    assert.deepEqual(calls('create').at(-1).slice(2, 3).concat(calls('create').at(-1).at(-7)), [`${after.container.name}-relay`, imageTag(imageDir)]);
   });
 
   await check('a container an earlier daemon left is restarted before it is used, and one of another daemon is never touched', async () => {
     const tag = await containers.ensureImage();
     // Left behind by this base's previous daemon, for a pair this one has not seen.
     const mine = containerName(beta.pool.id, PEER_B);
-    execFileSync(FAKE, ['run', '-d', '--name', mine, '--label', `dn.base=${BASE}`, '-v', `${mine.replace('dn-', 'dn-work-')}:/work`, '-v', `${path.join(RUNS_DIR, '.containers', mine)}:/dn/runs`, tag, 'sleep', 'infinity']);
+    const isolated = ['--internal', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', '--label', `dn.base=${BASE}`];
+    execFileSync(FAKE, ['network', 'create', ...isolated, mine]);
+    execFileSync(FAKE, ['run', '-d', '--name', mine, '--label', `dn.base=${BASE}`, '--network', mine, '-v', `${mine.replace('dn-', 'dn-work-')}:/work`, '-v', `${path.join(RUNS_DIR, '.containers', mine)}:/dn/runs`, tag, 'sleep', 'infinity']);
     const restarts = calls('restart').length;
     const runs = calls('run').length;
     const held = await containers.acquire({ pool: beta.pool, peer: PEER_B, runId: 'adopter' });
     assert.equal(held.name, mine);
     assert.deepEqual(calls('restart').slice(restarts), [['restart', '-t', '0', mine]]);
     assert.equal(calls('run').length, runs, 'it is used, not made again');
+    assert.equal(calls('create').at(-1)[2], `${mine}-relay`, 'and given the relay it lacked');
     await containers.release({ name: mine, runId: 'adopter' });
     assert.equal((await (await launch('run-20', PEER_B, beta)).outcome).ok, true);
+
+    // One that is not on a network of its own is no container of this kind: it is made again.
+    const loosePool = { ...beta.pool, id: 'github.com/dn-test/loose' };
+    const loose = containerName(loosePool.id, PEER_A);
+    execFileSync(FAKE, ['run', '-d', '--name', loose, '--label', `dn.base=${BASE}`, tag, 'sleep', 'infinity']);
+    const before = calls('run').length;
+    await containers.acquire({ pool: loosePool, peer: PEER_A, runId: 'l' });
+    assert.equal(calls('run').length, before + 1);
+    assert.equal(calls('run').at(-1)[calls('run').at(-1).indexOf('--network') + 1], loose);
+    await containers.release({ name: loose, runId: 'l' });
 
     // The same name under another daemon's base.
     const pool = { ...beta.pool, id: 'github.com/dn-test/foreign' };
@@ -484,6 +618,93 @@ try {
     assert.ok(!calls('rm').slice(rms).some((c) => c.at(-1) === theirs));
     assert.ok(calls('ps').every((c) => c.includes(`label=dn.base=${BASE}`)), 'every listing is of this daemon\'s own');
     execFileSync(FAKE, ['rm', '-f', theirs]);
+    // And the same for a network of that name.
+    const takenPool = { ...beta.pool, id: 'github.com/dn-test/taken' };
+    const taken = containerName(takenPool.id, PEER_A);
+    execFileSync(FAKE, ['network', 'create', '--label', 'dn.base=/somewhere/else', taken]);
+    await assert.rejects(containers.acquire({ pool: takenPool, peer: PEER_A, runId: 'r' }), /a network named for dn-\S+ belongs to another daemon on this machine \(\/somewhere\/else\)/);
+    assert.ok(fs.existsSync(path.join(fakeDir, 'networks', `${taken}.json`)), 'which is left as it was');
+    execFileSync(FAKE, ['network', 'rm', taken]);
+  });
+
+  await check('a relay that leads to where an earlier daemon\'s broker listened is made again, and the container it serves is kept', async () => {
+    const name = containerName(beta.pool.id, PEER_B);
+    assert.equal((await (await launch('run-21', PEER_B, beta)).outcome).ok, true);
+    const later = createContainers({ log, now: () => clock.now, imageDir, broker: () => ({ host: '127.0.0.1', port: 61234 }) });
+    const [runs, creates] = [calls('run').length, calls('create').length];
+    await later.acquire({ pool: beta.pool, peer: PEER_B, runId: 'moved' });
+    assert.equal(calls('run').length, runs, 'the container stays');
+    assert.equal(calls('create').length, creates + 1);
+    const relay = calls('create').at(-1);
+    assert.equal(relay[2], `${name}-relay`);
+    assert.ok(relay.includes('dn.broker=host.docker.internal:61234'));
+    assert.deepEqual(relay.slice(-3), ['61234', 'host.docker.internal', '61234']);
+    await later.release({ name, runId: 'moved' });
+    // With the broker where the relay leads, the relay is left alone.
+    await later.acquire({ pool: beta.pool, peer: PEER_B, runId: 'same' });
+    assert.equal(calls('create').length, creates + 1);
+    await later.release({ name, runId: 'same' });
+    // One that has stopped is made again, under a container that stays.
+    const record = path.join(fakeDir, 'containers', `${name}-relay.json`);
+    fs.writeFileSync(record, JSON.stringify({ ...JSON.parse(fs.readFileSync(record, 'utf8')), running: false }));
+    await later.acquire({ pool: beta.pool, peer: PEER_B, runId: 'down' });
+    assert.deepEqual([calls('create').length, calls('run').length], [creates + 2, runs]);
+    assert.deepEqual(calls('start').at(-1), ['start', `${name}-relay`]);
+    await later.release({ name, runId: 'down' });
+  });
+
+  await check('a relay whose container is gone is removed with its network at the next sweep', async () => {
+    const name = containerName(beta.pool.id, PEER_B);
+    execFileSync(FAKE, ['rm', '-f', name]);
+    await containers.sweep();
+    assert.deepEqual(calls('rm').at(-1), ['rm', '-f', `${name}-relay`]);
+    assert.equal(fs.existsSync(path.join(fakeDir, 'containers', `${name}-relay.json`)), false);
+    assert.equal(fs.existsSync(path.join(fakeDir, 'networks', `${name}.json`)), false);
+  });
+
+  await check('a sweep that meets a container on its way leaves that container\'s network and relay alone', async () => {
+    const pool = { ...beta.pool, id: 'github.com/dn-test/arriving' };
+    const name = containerName(pool.id, PEER_A);
+    fs.writeFileSync(path.join(fakeDir, 'hold-run'), '');
+    const arriving = containers.acquire({ pool, peer: PEER_A, runId: 'a' });
+    await until('its relay is up and the container is not yet', () => calls('start').some((c) => c[1] === `${name}-relay`));
+    const listings = calls('network').filter((c) => c[1] === 'ls').length;
+    const sweeping = containers.sweep();
+    await until('the sweep has seen the network', () => calls('network').filter((c) => c[1] === 'ls').length > listings);
+    fs.rmSync(path.join(fakeDir, 'hold-run'));
+    await Promise.all([arriving, sweeping]);
+    for (const kept of [['containers', `${name}.json`], ['containers', `${name}-relay.json`], ['networks', `${name}.json`]]) assert.equal(fs.existsSync(path.join(fakeDir, ...kept)), true, kept[1]);
+    await containers.release({ name, runId: 'a' });
+  });
+
+  await check('an engine that puts an address of this machine on a job\'s network is refused, and nothing is started on that network', async () => {
+    fs.writeFileSync(path.join(fakeDir, 'old-engine'), '');
+    const pool = { ...beta.pool, id: 'github.com/dn-test/old' };
+    const [runs, creates] = [calls('run').length, calls('create').length];
+    await assert.rejects(containers.acquire({ pool, peer: PEER_A, runId: 'o' }), /carries an address of this machine \(10\.213\.\d+\.1\), so a job on it would reach whatever this machine serves: this docker engine does not make an isolated network/);
+    assert.deepEqual([calls('run').length, calls('create').length], [runs, creates]);
+    fs.rmSync(path.join(fakeDir, 'old-engine'));
+    // The network it made for nothing goes at the next sweep, and no other does.
+    const left = () => fs.readdirSync(path.join(fakeDir, 'networks')).sort();
+    const before = left();
+    assert.ok(before.includes(`${containerName(pool.id, PEER_A)}.json`));
+    await containers.sweep();
+    assert.deepEqual(left(), before.filter((f) => f !== `${containerName(pool.id, PEER_A)}.json`));
+  });
+
+  await check('a subnet another network has is passed over for the next one, and any other refusal is said as docker said it', async () => {
+    const made = () => calls('network').filter((c) => c[1] === 'create');
+    const before = made().length;
+    fs.writeFileSync(path.join(fakeDir, 'fail-network-create'), 'Error response from daemon: invalid pool request: Pool overlaps with other one on this address space\n');
+    const pool = { ...beta.pool, id: 'github.com/dn-test/crowded' };
+    const held = await containers.acquire({ pool, peer: PEER_A, runId: 'c' });
+    const tried = made().slice(before).map((c) => c[7]);
+    assert.equal(tried.length, 2);
+    assert.notEqual(tried[0], tried[1]);
+    await containers.release({ name: held.name, runId: 'c' });
+    fs.writeFileSync(path.join(fakeDir, 'fail-network-create'), 'Error response from daemon: operation not permitted\n');
+    await assert.rejects(containers.acquire({ pool: { ...beta.pool, id: 'github.com/dn-test/denied' }, peer: PEER_A, runId: 'd' }), /^Error: docker network create: Error response from daemon: operation not permitted$/);
+    assert.equal(made().length, before + 3, 'tried once');
   });
 
   await check('a stray container this daemon never used is removed once it has been seen idle for the full time', async () => {
@@ -494,7 +715,7 @@ try {
     assert.ok(!calls('rm').some((c) => c.at(-1) === stray), 'first seen is not yet idle');
     clock.now += 3601 * 1000;
     await containers.sweep();
-    assert.deepEqual(calls('rm').at(-1), ['rm', '-f', stray]);
+    assert.ok(calls('rm').some((c) => c.at(-1) === stray));
   });
 
   console.log(`\nall ${checks} checks passed`);

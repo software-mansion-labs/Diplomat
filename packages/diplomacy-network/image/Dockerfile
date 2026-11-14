@@ -54,5 +54,8 @@ RUN set -eu; arch="$(dpkg --print-architecture)"; \
     npm cache clean --force; rm -rf /root/.npm /tmp/*; \
     node --version; npm --version; corepack --version; gh --version; glab --version; claude --version
 
+# What the relay beside each job container runs (src/executor/container.js).
+COPY relay.mjs /opt/dn/relay.mjs
+
 WORKDIR /work
 CMD ["sleep", "infinity"]

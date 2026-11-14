@@ -1,14 +1,17 @@
-// The proxy every container talks through. One listener per daemon; a job's proxy URL
-// carries that job's own token, so every request names the job it belongs to and a
-// request without a live token is answered 407 and nothing else.
+// The proxy every container talks through. One listener per daemon, which a job
+// container reaches through its relay and no other way; a job's proxy URL carries that
+// job's own token, so every request names the job it belongs to and a request without a
+// live token is answered 407 and nothing else.
 //
 // What a job's request becomes:
+//   CONNECT <name>.forward.dn -> the forward of that name opened for this job, if any
 //   CONNECT to a forge host of its pool, or to the model provider, on 443
 //                         -> TLS is terminated here with a certificate from ca.js, and
 //                            the requests inside are read:
 //       fetch/clone of the pool's repository -> git upload-pack on the local mirror
 //       anything else for the forge          -> onForge(job, request), the requester's answer
-//       the model provider                   -> forwarded with this machine's credential
+//       the model provider                   -> forwarded with this machine's credential,
+//                                               until the job has had its share of it
 //   CONNECT anywhere else -> a blind tunnel, unless the name resolves to this machine,
 //                            its LAN or the docker bridge
 //   GET http://...        -> forwarded, same destination rule
@@ -21,7 +24,10 @@ import os from 'node:os';
 import tls from 'node:tls';
 import zlib from 'node:zlib';
 import { execFile, spawn } from 'node:child_process';
-import { BROKER_BIND, BROKER_PORT, CONTAINER_HOST, DOCKER_BIN, FORGE_ANSWER_TIMEOUT_MS, FORGE_BODY_CAP, GIT_BIN } from '../paths.js';
+import {
+  BROKER_BIND, BROKER_PORT, CONTAINER_HOST, DOCKER_BIN, FORGE_ANSWER_TIMEOUT_MS, FORGE_BODY_CAP, GIT_BIN,
+  JOB_MODEL_BYTES, JOB_MODEL_REQUESTS, RELAY_HOST,
+} from '../paths.js';
 import { carriesPlaceholder } from './llm.js';
 
 /// The model provider's hosts: the ones a job's requests gain this machine's credential on.
@@ -63,9 +69,9 @@ export function deniedAddress(address, interfaces = os.networkInterfaces()) {
   return Object.values(interfaces).some((list) => (list || []).some((i) => i.address === bare));
 }
 
-/// The address the broker listens on: where a container's `host.docker.internal` leads.
-/// Docker Desktop carries it to the host's loopback; on Linux `host-gateway` is the
-/// bridge's gateway address, so that one address is bound and never every interface.
+/// The address the broker listens on: where a relay's `host-gateway` leads. Docker
+/// Desktop carries it to the host's loopback; on Linux it is the default bridge's
+/// gateway address, so that one address is bound and never every interface.
 export async function brokerBindAddress({ platform = process.platform, override = BROKER_BIND, bridgeGateway = dockerBridgeGateway } = {}) {
   if (override) return override;
   if (platform !== 'linux') return '127.0.0.1';
@@ -240,7 +246,12 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     const port = Number(m[2]);
     if (trace) trace(`${job.info.runId} CONNECT ${host}:${port}`);
     if (port === 443 && job.intercept.has(host)) return intercept(job, host, socket, head);
-    dial(host, port).then((upstream) => {
+    const forward = /^([a-z0-9-]+)\.forward\.dn$/.exec(host);
+    const target = forward && job.forwards.get(forward[1]);
+    if (forward && !target) return refuse(socket, new Refusal(404, `this job has no forward named ${forward[1]}`));
+    // A forward leads to this machine on purpose, so it is not held to the rule for
+    // everything else; which job may use it is settled by the token it came with.
+    (target ? systemConnect({ host: target.host || '127.0.0.1', port: target.port }) : dial(host, port)).then((upstream) => {
       if (socket.destroyed) return upstream.destroy();
       hold(job, upstream);
       upstream.on('error', () => socket.destroy());
@@ -420,6 +431,18 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     const body = await collect(req, FORGE_BODY_CAP);
     const base = { ...plainHeaders(req.headers, ['content-length']), host, 'content-length': String(body.length) };
     const inject = carriesPlaceholder(req.headers) && MODEL_PATHS.test(req.url.split('?')[0]);
+    if (inject) {
+      const { spent } = job;
+      if (spent.requests >= JOB_MODEL_REQUESTS || spent.bytes >= JOB_MODEL_BYTES) {
+        if (!spent.said) log('broker', job.info.runId, `the model is closed to this job after ${spent.requests} requests and ${spent.bytes} bytes`);
+        spent.said = true;
+        // The provider's shape for "slow down", marked as not worth another try.
+        res.setHeader('x-should-retry', 'false');
+        return sendJson(res, 429, { type: 'error', error: { type: 'rate_limit_error', message: `this job has used all of the model it gets on this executor (${JOB_MODEL_REQUESTS} requests, ${JOB_MODEL_BYTES} bytes): it made ${spent.requests} requests of ${spent.bytes} bytes. No further request will be answered; finish with what you have.` } });
+      }
+      spent.requests += 1;
+      spent.bytes += body.length;
+    }
     let upRes;
     for (let attempt = 0; ; attempt++) {
       let headers = base;
@@ -439,6 +462,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     }
     res.writeHead(upRes.statusCode, rawHeaders(upRes));
     res.flushHeaders();
+    if (inject) upRes.on('data', (c) => { job.spent.bytes += c.length; });
     upRes.pipe(res);
     upRes.on('error', () => res.destroy());
   }
@@ -453,10 +477,10 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     const hosts = [...forgeHosts(info.pool), ...MODEL_HOSTS];
     const authority = await ca.authority(hosts);
     const token = crypto.randomBytes(32).toString('hex');
-    const job = { info, token, authority, intercept: new Set(hosts), sockets: new Set(), forwards: new Set() };
+    const job = { info, token, authority, intercept: new Set(hosts), sockets: new Set(), forwards: new Map(), spent: { requests: 0, bytes: 0, said: false } };
     jobs.set(info.runId, job);
     tokens.set(token, job);
-    return { proxyUrl: `http://dn:${token}@${CONTAINER_HOST}:${listening.port}`, token, caCertPath: authority.certPath };
+    return { proxyUrl: `http://dn:${token}@${RELAY_HOST}:${listening.port}`, token, caCertPath: authority.certPath };
   }
 
   /// Ends a job's access: its token dies, its connections and its forwards close.
@@ -465,37 +489,18 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     if (!job) return;
     jobs.delete(runId);
     tokens.delete(job.token);
-    for (const f of job.forwards) f.close();
     for (const s of job.sockets) s.destroy();
   }
 
-  /// Opens a TCP listener that leads to `target` (`{ host, port }` on this machine, the
-  /// adb server for one) for as long as the job lives. Resolves to `{ name, host, port }`
-  /// as the container dials it. The listener cannot tell one container from another:
-  /// whatever reaches the broker's address reaches the target while the job runs.
+  /// Gives a job a way to `target` (`{ host, port }` on this machine, the adb server for
+  /// one) for as long as the job lives: a CONNECT to `<name>.forward.dn` under that
+  /// job's token leads there, and under any other token leads nowhere. Returns `{ name }`.
   function addForward(runId, { name, target }) {
     const job = jobs.get(runId);
-    if (!job) return Promise.reject(new Error(`job ${runId} is not admitted`));
-    return new Promise((resolve, reject) => {
-      const conns = new Set();
-      const server = net.createServer((conn) => {
-        const up = net.connect({ host: target.host || '127.0.0.1', port: target.port });
-        for (const s of [conn, up]) {
-          conns.add(s);
-          s.on('error', () => {});
-          s.on('close', () => { conns.delete(s); conn.destroy(); up.destroy(); });
-        }
-        conn.pipe(up);
-        up.pipe(conn);
-      });
-      const forward = { close() { server.close(); for (const s of conns) s.destroy(); job.forwards.delete(forward); } };
-      server.once('error', reject);
-      server.listen(0, listening.host, () => {
-        if (!jobs.has(runId)) { forward.close(); return reject(new Error(`job ${runId} ended`)); }
-        job.forwards.add(forward);
-        resolve({ name, host: CONTAINER_HOST, port: server.address().port });
-      });
-    });
+    if (!job) throw new Error(`job ${runId} is not admitted`);
+    if (!/^[a-z0-9-]{1,32}$/.test(name)) throw new Error(`not a forward's name: ${name}`);
+    job.forwards.set(name, target);
+    return { name };
   }
 
   /// Starts listening; resolves to `{ host, port }`.
