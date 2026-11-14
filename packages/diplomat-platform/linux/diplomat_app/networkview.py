@@ -10,7 +10,7 @@ import time
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QGuiApplication, QPalette
 from PySide6.QtWidgets import (
     QFrame,
     QGridLayout,
@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from diplomat_runtime import activity, network
+from diplomat_runtime import activity, agentstate, network
 from diplomat_runtime.models import Fmt
 from . import diplomacynetwork as dn
 from . import glyphs
@@ -32,6 +32,7 @@ from .machinesview import _chip, _clear, _clock, _note, _plain
 from .store import Store
 from .widgets import (
     ActivityRow,
+    ElidedLabel,
     GlyphLabel,
     Pill,
     SettingRow,
@@ -44,8 +45,7 @@ from .widgets import (
 _TEAL = "#30B0C7"
 _GREEN, _ORANGE, _RED, _GREY = rm.GREEN, rm.AMBER, rm.RED, rm.GREY
 
-#: The most hours either setting takes, and what one press of a stepper moves it by.
-HOURS_CEILING = getattr(network, "HOURS_CEILING", 720)
+#: What one press of an hours stepper moves it by.
 HOURS_STEP = 12
 
 OFF_NOTE = "Off: every job runs in a terminal on this machine."
@@ -95,14 +95,9 @@ def service_tint(state: str) -> str:
     return _ORANGE if state else _GREY
 
 
-def has_left(pool: network.Pool) -> bool:
-    """Whether this machine left the pool, which stays listed until it is rejoined."""
-    return bool(getattr(pool, "left", False))
-
-
 def counts(snapshot: network.Snapshot) -> str:
-    """The pools this machine is in, and the tasks they hold."""
-    joined = [p for p in snapshot.pools if not has_left(p)]
+    """The pools this machine is in and the tasks they hold; one it left is not counted."""
+    joined = [p for p in snapshot.pools if not p.left]
     pools, tasks = len(joined), sum(len(p.tasks) for p in joined)
     return (f"{pools} pool{'' if pools == 1 else 's'} · "
             f"{tasks} task{'' if tasks == 1 else 's'}")
@@ -111,6 +106,17 @@ def counts(snapshot: network.Snapshot) -> str:
 def task_state(state: str) -> str:
     """A pool task's state as the screen words it."""
     return {"available": "in the pool", "claimed": "running"}.get(state, state)
+
+
+def ending(task: str, snapshot: network.Snapshot | None) -> str | None:
+    """How the offer this machine made of ``task`` ended, in the words its run's row
+    has, where the daemon gave a reason; None for any other task."""
+    offers = network.tasks(snapshot)
+    offer = offers.value.get(task) if offers.ok else None
+    if (offer is None or not offer.reason
+            or offer.state not in (agentstate.NET_FAILED, agentstate.NET_CANCELLED)):
+        return None
+    return agentstate.network_verdict(task, offers, 0)[1]
 
 
 def place(task: network.PoolTask) -> str:
@@ -199,13 +205,14 @@ class PoolPanel(QWidget):
         self.join_row: JoinRow | None = None
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        card, col, pill = settings_card(glyphs.G_NETWORK, pool.id, _TEAL)
+        card, col, pill = settings_card(glyphs.G_NETWORK, pool.id, _TEAL,
+                                        foreign_title=True)
         outer.addWidget(card)
         subtitle = " · ".join(x for x in (
             pool.path, f"as @{pool.identity}" if pool.identity else "") if x)
         if subtitle:
             col.addWidget(_plain(subtitle, muted(9, mono=True)))
-        if has_left(pool):
+        if pool.left:
             pill.set_state("left", _GREY)
             col.addWidget(_note(LEFT_NOTE))
             back = QHBoxLayout()
@@ -301,7 +308,11 @@ class PoolPanel(QWidget):
         col.setSpacing(2)
         head = QHBoxLayout()
         head.setSpacing(6)
-        head.addWidget(_plain(t.title or t.item, "font-size: 10px;"), 1)
+        # Another machine's words: drawn as they are, on one line.
+        head.addWidget(ElidedLabel(
+            t.title or t.item, 10,
+            self.palette().color(QPalette.ColorRole.WindowText).name(),
+            Qt.TextElideMode.ElideMiddle), 1)
         if t.kind:
             head.addWidget(_chip(t.kind, _GREY))
         head.addWidget(_chip(task_state(t.state), {"claimed": _GREEN,
@@ -317,6 +328,9 @@ class PoolPanel(QWidget):
             foot.addWidget(stop)
             self.stops[t.task_id] = stop
         col.addLayout(foot)
+        why = ending(t.task_id, self._store.network_state)
+        if why:
+            col.addWidget(_note(why, _ORANGE))
         return box
 
     def _invite(self) -> None:
@@ -508,7 +522,7 @@ class NetworkView(QWidget):
 
     def _hours_box(self, slot) -> QSpinBox:
         box = QSpinBox(self)
-        box.setRange(network.HOURS_FLOOR, HOURS_CEILING)
+        box.setRange(network.HOURS_FLOOR, network.HOURS_CEILING)
         box.setSingleStep(HOURS_STEP)
         box.setSuffix(" h")
         box.setKeyboardTracking(False)
@@ -670,7 +684,7 @@ class NetworkView(QWidget):
         refusals = store.network_refusals
         cards: list[QWidget] = []
         # In no pool, an invite has no pool's panel to be pasted into.
-        if all(has_left(p) for p in state.pools):
+        if all(p.left for p in state.pools):
             card, col, _ = settings_card(glyphs.G_NETWORK, "POOLS", _TEAL)
             if not state.pools:
                 col.addWidget(_note(NO_POOLS))

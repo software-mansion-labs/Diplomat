@@ -161,12 +161,15 @@ class ElidedLabel(QLabel):
 
     Custom-painted so the grid never miscomputes a wrapped height (which made
     rows overlap); font size + colour are explicit because QPainter.drawText
-    ignores the stylesheet pen.
+    ignores the stylesheet pen. The text is painted as it is, never read as HTML,
+    and however long it is the label asks for no width.
     """
 
-    def __init__(self, text: str, font_px: int, color: str) -> None:
+    def __init__(self, text: str, font_px: int, color: str,
+                 mode: Qt.TextElideMode = Qt.TextElideMode.ElideRight) -> None:
         super().__init__()
         self._full = text
+        self._mode = mode
         self._color = QColor(color)
         f = self.font()
         f.setPixelSize(font_px)
@@ -180,18 +183,19 @@ class ElidedLabel(QLabel):
         self._full = text
         self.update()
 
+    def elided(self) -> str:
+        """The text as it is painted at the width the label has."""
+        return self.fontMetrics().elidedText(self._full, self._mode, self.width())
+
     def paintEvent(self, event) -> None:  # noqa: N802
         from PySide6.QtGui import QPainter
 
         painter = QPainter(self)
         painter.setPen(self._color)
-        elided = self.fontMetrics().elidedText(
-            self._full, Qt.TextElideMode.ElideRight, self.width()
-        )
         painter.drawText(
             self.rect(),
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-            elided,
+            self.elided(),
         )
         painter.end()
 
@@ -1402,9 +1406,13 @@ class SliderSetting(QWidget):
         return self._slider.maximum()
 
 
-def settings_card(glyph: str, title: str, tint: str) -> tuple[QWidget, QVBoxLayout, Pill]:
+def settings_card(glyph: str, title: str, tint: str, *,
+                  foreign_title: bool = False) -> tuple[QWidget, QVBoxLayout, Pill]:
     """One block of Settings: a tinted glyph, a caps title, a state pill, and the
     rows under them on a soft card.
+
+    ``foreign_title`` is for a title this program did not write (a pool's id, which
+    an invite can name): it is cut in the middle to the room the card has.
 
     Returns the host, the layout to add rows to, and the pill — which starts empty
     and hidden, so a card with nothing to report simply has none.
@@ -1424,14 +1432,22 @@ def settings_card(glyph: str, title: str, tint: str) -> tuple[QWidget, QVBoxLayo
     badge = GlyphLabel(glyph, 17, tint, 9)
     badge.setStyleSheet(f"background-color: {tint_bg(tint, 0.16)}; border-radius: 5px;")
     head.addWidget(badge)
-    label = QLabel(title)
-    # Plain: a pool's card is titled by its id, which an invite can name.
-    label.setTextFormat(Qt.TextFormat.PlainText)
-    label.setStyleSheet(
-        "color: palette(mid); font-size: 10px; font-weight: 800; letter-spacing: 1px;"
-    )
-    head.addWidget(label)
-    head.addStretch(1)
+    if foreign_title:
+        label = ElidedLabel(title, 10, host.palette().mid().color().name(),
+                            Qt.TextElideMode.ElideMiddle)
+        font = label.font()
+        font.setWeight(QFont.Weight.ExtraBold)
+        font.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1)
+        label.setFont(font)
+        head.addWidget(label, 1)
+    else:
+        label = QLabel(title)
+        label.setTextFormat(Qt.TextFormat.PlainText)
+        label.setStyleSheet(
+            "color: palette(mid); font-size: 10px; font-weight: 800; letter-spacing: 1px;"
+        )
+        head.addWidget(label)
+        head.addStretch(1)
     pill = Pill("")
     head.addWidget(pill)
     outer.addLayout(head)

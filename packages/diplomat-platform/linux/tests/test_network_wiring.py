@@ -546,6 +546,19 @@ def test_a_task_that_failed_is_logged_as_failed_and_still_priced(store, on, daem
     assert [e["tokens"] for e in ledger() if e["ev"] == "done"] == [90]
 
 
+@pytest.mark.parametrize("state, reason, said", [
+    ("failed", "the container exited 137", "refused by the network: the container exited 137"),
+    ("cancelled", "merged", "withdrawn from the network: merged")])
+def test_an_offer_the_network_ended_retires_its_run_with_the_daemons_reason(
+        store, on, daemon, state, reason, said):
+    daemon(state=snapshot(offers=[offer(state=state, reason=reason)]))
+    book_network_run()
+    store._settle_agents()
+    assert agentregistry.load() == []
+    (failed,) = lines("network-failed")
+    assert failed.startswith("Auto · Review · #9") and failed.endswith(f" {said}")
+
+
 @pytest.mark.parametrize("ok, audited", [(True, [("https://github.com/o/r/pull/9", "alice")]),
                                          (False, [])])
 def test_a_review_the_network_finished_is_audited_like_one_run_here(
@@ -976,7 +989,8 @@ def test_stop_ends_the_run_here_and_otherwise_withdraws(store, on, daemon):
     assert d.sent("stop-run") == [{"runId": "r-7"}]
     assert d.sent("withdraw") == [{"taskId": "t2", "reason": "stopped"},
                                   {"taskId": "t3", "reason": "stopped"}]
-    assert lines("network-stop") == ["Review · #9 - its run on this machine was stopped"]
+    assert lines("network-stop") == [
+        "Review · #9 - its run on this machine was stopped and the job is back in the pool"]
     assert lines("network-withdraw") == ["Review · #9 - withdrawn (stopped)"] * 2
     settled = "/state"  # each stop ends in a settle, which reads the daemon itself
     assert [path for _, path, _ in d.got] == [
@@ -1032,12 +1046,14 @@ def test_switching_off_takes_every_offer_back_and_frees_its_item(store, on, daem
     assert store.wait_for_background() == []
 
     assert sorted((b["taskId"], b["reason"]) for b in d.sent("withdraw")) == [
-        ("t1", "switched off"), ("t3", "switched off"), ("t4", "switched off")]
+        ("t1", "switched off"), ("t3", "merged"), ("t4", "switched off")]
     assert at_stop == [("--stop-daemon", 3)], "asked before the daemon is stopped"
     assert [r.run_id for r in agentregistry.load()] == ["local-1"]
     assert sorted(lines("network-failed")) == [
         f"Auto · Review · #{n} - withdrawn: the Diplomacy Network was switched off"
-        for n in (11, 12, 9)]
+        for n in (12, 9)]
+    assert lines("network-withdraw") == [
+        "Auto · Review · #11 - its PR merged, so its offer is withdrawn"]
     assert len(lines("network-done")) == 1, "the one that had ended is settled as it would be"
     assert [e["tokens"] for e in ledger() if e["ev"] == "done"] == [70]
 
@@ -1054,6 +1070,16 @@ def test_switching_off_drops_the_runs_of_a_daemon_that_does_not_answer(store, on
     assert lines("network-failed") == [
         "Auto · Review · #9 - withdrawn: the Diplomacy Network was switched off"]
     assert installer == [("install.js", "--stop-daemon")]
+
+
+def test_switching_off_sends_no_withdrawal_to_a_daemon_that_gave_no_snapshot(store, daemon):
+    d = daemon()
+    d.state = None
+    book_network_run("t1", 9)
+    store._settle_agents()
+    assert agentregistry.load() == [] and d.sent("withdraw") == []
+    assert lines("network-failed") == [
+        "Auto · Review · #9 - withdrawn: the Diplomacy Network was switched off"]
 
 
 def test_a_run_still_booked_with_the_switch_off_is_dropped_by_the_next_settle(store, daemon):
@@ -1103,7 +1129,7 @@ def test_rejoining_a_pool_names_it_and_is_a_join_in_the_feed(store, on, daemon):
     store.network_rejoin_async(POOL)
     assert store.wait_for_background() == []
     assert d.sent("join") == [{"pool": POOL}]
-    assert lines("network-join") == [f"Joined {POOL}"] and store.network_refusals == {}
+    assert lines("network-join") == [f"Rejoined {POOL}"] and store.network_refusals == {}
     d.routes["/join"] = (409, {"error": "That repository is not linked."})
     store.network_rejoin_async(POOL)
     assert store.wait_for_background() == []

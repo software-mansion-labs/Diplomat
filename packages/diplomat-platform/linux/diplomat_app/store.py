@@ -2566,7 +2566,7 @@ class Store(QObject):
         except OSError:
             # An offer nothing here tracks is work nobody waits for.
             diplomacynetwork.send(network.ROUTE_WITHDRAW, network.withdraw_body(
-                task, diplomacynetwork.WITHDRAW_UNBOOKED))
+                task, network.WITHDRAW_NOT_BOOKED))
             activity.log(source, network.AUDIT_FAILED,
                          f"{job.label} - could not register the run, so its offer is "
                          "withdrawn")
@@ -5781,18 +5781,19 @@ class Store(QObject):
     def _drop_switched_off_runs(self) -> None:
         """With the switch off: take back every offer the network still carries and
         drop its run as failed, so the PR or issue it was about is free for an agent
-        of this machine. A run that had ended is settled as it would have been, and
-        one is dropped whatever the daemon answers. A step of a settle, under its
-        lock."""
+        of this machine. A run that had ended, or whose PR merged, is settled as it
+        would have been. A daemon that gave its snapshot is told to withdraw each
+        first; a silent one is not waited on, and a run is dropped whatever the
+        daemon answers. A step of a settle, under its lock."""
         if not any(r.network is not None for r in agentregistry.load()):
             return
         snapshot = diplomacynetwork.state()
         t = self._tick_with(network.tasks(snapshot))
-        self._retire_finished(t, snapshot, {r.run_id for r in t.withdrawable})
+        self._retire_finished(t, snapshot, self._withdraw_merged(t))
         left = [r for r in agentregistry.load() if r.network is not None]
-        for r in left:
+        for r in left if snapshot is not None else ():
             diplomacynetwork.send(network.ROUTE_WITHDRAW, network.withdraw_body(
-                r.network, diplomacynetwork.WITHDRAW_SWITCHED_OFF))
+                r.network, network.WITHDRAW_SWITCHED_OFF))
         if left and self._write_book(
                 lambda: agentregistry.forget({r.run_id for r in left})):
             for r in left:
@@ -5839,14 +5840,15 @@ class Store(QObject):
                         if r.task_id == task.task_id
                         and r.state in network.LIVE_RUN_STATES), None)
             if run is None:
-                reply = self._withdraw(task.task_id, diplomacynetwork.WITHDRAW_STOPPED,
+                reply = self._withdraw(task.task_id, network.WITHDRAW_STOPPED,
                                        title, autofix.SOURCE_PANEL)
             else:
                 reply = diplomacynetwork.send(network.ROUTE_STOP_RUN,
                                               network.stop_run_body(run.run_id))
                 if diplomacynetwork.refusal(reply) is None:
                     activity.log(autofix.SOURCE_PANEL, network.AUDIT_STOP,
-                                 f"{title} - its run on this machine was stopped")
+                                 f"{title} - its run on this machine was stopped "
+                                 "and the job is back in the pool")
                     self.refresh_activity()
             self._note_network_reply(reply, pool)
             self.refresh_auto_task_count()
@@ -5895,9 +5897,9 @@ class Store(QObject):
 
     def network_rejoin_async(self, pool: str) -> None:
         """Go back into a pool this machine left."""
-        self._network_join({"pool": pool}, pool)
+        self._network_join(network.join_body(pool=pool), pool, rejoined=pool)
 
-    def _network_join(self, body: dict, card: str) -> None:
+    def _network_join(self, body: dict, card: str, *, rejoined: str = "") -> None:
         def work() -> None:
             reply = diplomacynetwork.send(network.ROUTE_JOIN, body)
             if self._note_network_reply(reply, card) is not None:
@@ -5905,6 +5907,7 @@ class Store(QObject):
                 return
             pool = reply.get("pool")
             activity.log(autofix.SOURCE_PANEL, network.AUDIT_JOIN,
+                         f"Rejoined {rejoined}" if rejoined else
                          f"Joined {pool if isinstance(pool, str) and pool else 'a pool'}")
             self.refresh_activity()
             self.network_joined.emit(card, True)

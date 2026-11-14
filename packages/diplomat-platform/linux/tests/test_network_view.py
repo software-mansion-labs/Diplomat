@@ -10,7 +10,6 @@ import dataclasses
 import gc
 import re
 import weakref
-from types import SimpleNamespace
 
 import pytest
 
@@ -89,11 +88,21 @@ def texts(widget) -> list[str]:
     """Every line the widget shows, top to bottom."""
     from PySide6.QtWidgets import QApplication, QLabel
 
+    from diplomat_app.widgets import ElidedLabel
+
+    def text(lb) -> str:
+        return lb._full if isinstance(lb, ElidedLabel) else lb.text()
+
     QApplication.processEvents()  # a row added by a rebuild is shown on the next turn
-    shown = [lb for lb in widget.findChildren(QLabel) if lb.isVisible() and lb.text()]
-    shown.sort(key=lambda lb: (lb.mapTo(widget, lb.rect().topLeft()).y(),
-                               lb.mapTo(widget, lb.rect().topLeft()).x()))
-    return [lb.text() for lb in shown]
+    at = {lb: lb.mapTo(widget, lb.rect().topLeft())
+          for lb in widget.findChildren(QLabel) if lb.isVisible() and text(lb)}
+    # Labels of unlike heights centred on one row start a pixel or two apart.
+    row, rows = None, {}
+    for lb in sorted(at, key=lambda lb: at[lb].y()):
+        if row is None or at[lb].y() - row > 3:
+            row = at[lb].y()
+        rows[lb] = row
+    return [text(lb) for lb in sorted(at, key=lambda lb: (rows[lb], at[lb].x()))]
 
 
 def _clock_of(ahead: float) -> str:
@@ -298,6 +307,8 @@ def test_what_the_daemon_reports_is_drawn_as_plain_text(screen):
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QLabel
 
+    from diplomat_app.widgets import ElidedLabel
+
     view = screen(RICH)
     tag = "<b>x</b>"
     pool = view.store.network_state.pools[0]
@@ -308,8 +319,10 @@ def test_what_the_daemon_reports_is_drawn_as_plain_text(screen):
     _with(view, pools=(hostile,), onion=f"o{tag}",
           transport=network.Service("failed", f"d{tag}"))
     labels = [lb for lb in view.findChildren(QLabel) if tag in lb.text()]
-    assert len(labels) >= 8
+    assert len(labels) == 7
     assert all(lb.textFormat() == Qt.TextFormat.PlainText for lb in labels)
+    painted = sorted(lb._full for lb in view.findChildren(ElidedLabel) if tag in lb._full)
+    assert painted == [f"p{tag}", f"t{tag}"], "a painter draws these two, and reads no HTML"
 
 
 def test_the_recent_card_lists_the_feeds_last_six_network_lines(screen):
@@ -397,10 +410,55 @@ def test_stop_is_offered_for_this_machines_open_tasks_and_says_what_it_does(
     assert {t: b.toolTip() for t, b in view.panels[0].stops.items()} == {"t7": nv.STOP_RUN_HELP}
 
 
-def _left(pool):
+def _offer(task: str, state: str, reason: str = "") -> network.OfferState:
+    return network.OfferState(task_id=task, state=state, reason=reason)
+
+
+def test_an_offer_that_failed_or_was_withdrawn_says_why_under_its_task(screen):
+    from diplomat_app import networkview as nv
+
+    view = screen(RICH)
+    spent, gone = "the container exited 137 on its third attempt", "merged"
+    _with(view, offers=(_offer("t390", "failed", spent), _offer("t405", "cancelled", gone),
+                        _offer("t412", "claimed", "second attempt"),
+                        _offer("t398", "cancelled")))
+    shown = texts(view.panels[0])
+    after = {line: shown[shown.index(line) + 1:][:4] for line in (
+        "Review-req · #390 (@olek)", "Review · #405")}
+    assert f"refused by the network: {spent}" in after["Review-req · #390 (@olek)"]
+    assert f"withdrawn from the network: {gone}" in after["Review · #405"]
+    assert sum("the network" in line for line in shown) == 2, (
+        "nothing under an offer still open, one with no reason or another machine's task")
+    state = view.store.network_state
+    assert nv.ending("t390", state) == f"refused by the network: {spent}"
+    assert nv.ending("t412", state) is None and nv.ending("t398", state) is None
+    assert nv.ending("t377", state) is None and nv.ending("t390", None) is None
+
+
+def test_a_title_or_pool_id_from_elsewhere_is_drawn_as_it_is_and_takes_no_width(screen):
+    from diplomat_app.widgets import ElidedLabel
+
+    view = screen(RICH)
+    room = view.minimumSizeHint().width()
+    pool = view.store.network_state.pools[0]
+    title = "<b>bold</b> <a href='https://example.com'>link</a> " + "x" * 4000
+    name = "github.com/" + "y" * 4000 + "/<i>repo</i>"
+    hostile = dataclasses.replace(pool.tasks[0], title=title)
+    _with(view, pools=(dataclasses.replace(pool, id=name, tasks=(hostile,)),))
+    shown = texts(view.panels[0])
+    assert shown[0] == name and title in shown
+    drawn = {lb._full: lb for lb in view.panels[0].findChildren(ElidedLabel)}
+    assert drawn[title].text() == "" and drawn[name].text() == "", "painted, never parsed"
+    for label, full in ((drawn[title], title), (drawn[name], name)):
+        ends = label.elided().split("…")
+        assert len(ends) == 2 and all(ends), "cut in the middle"
+        assert full.startswith(ends[0]) and full.endswith(ends[1]) and len(ends[0]) < 200
+    assert view.minimumSizeHint().width() == room, "however long, it asks for no width"
+
+
+def _left(pool: network.Pool) -> network.Pool:
     """``pool`` as the snapshot lists it once this machine has left it."""
-    fields = {f.name: getattr(pool, f.name) for f in dataclasses.fields(pool)}
-    return SimpleNamespace(**{**fields, "left": True})
+    return dataclasses.replace(pool, left=True)
 
 
 def test_a_pool_this_machine_left_says_so_and_offers_only_the_way_back(screen, monkeypatch):
@@ -506,6 +564,8 @@ def test_the_hours_open_on_twelve_and_write_the_two_config_keys(screen):
     assert (dn.required_minimum_h(), dn.maximum_accepted_h()) == (36, 24)
     dn.set_hours(network.MAXIMUM_ACCEPTED_H_KEY, 5)
     assert appconfig.read()[network.MAXIMUM_ACCEPTED_H_KEY] == 12
+    dn.set_hours(network.MAXIMUM_ACCEPTED_H_KEY, 9999)
+    assert appconfig.read()[network.MAXIMUM_ACCEPTED_H_KEY] == 720, "and 720 the ceiling"
     # A value set from elsewhere shows on the next rebuild, and is not written back.
     appconfig.set_int(network.MAXIMUM_ACCEPTED_H_KEY, 48)
     view.rebuild()

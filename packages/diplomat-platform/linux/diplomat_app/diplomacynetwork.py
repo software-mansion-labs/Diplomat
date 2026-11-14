@@ -70,7 +70,7 @@ def maximum_accepted_h() -> int:
 
 
 def set_hours(key: str, value: int) -> None:
-    appconfig.set_int(key, max(network.HOURS_FLOOR, int(value)))
+    appconfig.set_int(key, network.hours(value))
 
 
 # MARK: installer
@@ -142,13 +142,6 @@ VERDICT_REFUSED = "network_refused"
 #: The runner a completion is recorded under when another machine ran the task: not a
 #: runner of this machine's, so its tokens count against no limit read here.
 RUNNER_ELSEWHERE = "network"
-
-#: Why an offer is withdrawn when its run could not be written to the run book, when
-#: the operator stops a task no container of this machine is executing, and when the
-#: switch goes off under it.
-WITHDRAW_UNBOOKED = "not booked"
-WITHDRAW_STOPPED = "stopped"
-WITHDRAW_SWITCHED_OFF = "switched off"
 
 
 class Refused(str):
