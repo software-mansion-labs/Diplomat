@@ -160,6 +160,11 @@ export const IMAGE_BUILD_TIMEOUT_MS = num('DN_IMAGE_BUILD_TIMEOUT_MS', 30 * 60 *
 export const CONTAINER_PIDS = num('DN_CONTAINER_PIDS', 4096);
 export const CONTAINER_MEMORY = process.env.DN_CONTAINER_MEMORY || '8g';
 export const CONTAINER_CPUS = process.env.DN_CONTAINER_CPUS || '4';
+// The most one container may hold of this machine's disk: its writable layer, its /work
+// volume and its run records together.
+export const CONTAINER_DISK_BYTES = num('DN_CONTAINER_DISK_BYTES', 20 * 2 ** 30);
+// How long one measurement of a container's disk use may take.
+export const CONTAINER_USAGE_TIMEOUT_MS = num('DN_CONTAINER_USAGE_TIMEOUT_MS', 5 * 60 * 1000);
 // Where the broker listens: empty picks the address a container's host.docker.internal
 // leads to (loopback under Docker Desktop, the bridge gateway on Linux).
 export const BROKER_BIND = process.env.DN_BROKER_BIND || '';

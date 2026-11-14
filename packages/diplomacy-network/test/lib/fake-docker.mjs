@@ -9,7 +9,9 @@
 // FAKE_DOCKER_PATH is put in front of PATH for what is exec'd, which is where a test
 // keeps its own `claude`. A network is a record that a container must name to be made
 // and that cannot be removed from under one; nothing is isolated, and the command a
-// container was made with (a relay's) is recorded and not run.
+// container was made with (a relay's) is recorded and not run. A `run --rm` is the
+// probe container.js measures and clears with: its `du` and its `find -delete` are done
+// here, on the directories its mounts name, and answered the way GNU's are.
 //
 // Staged failures, as files in FAKE_DOCKER_DIR:
 //   down             the engine does not answer
@@ -18,6 +20,9 @@
 //   fail-<command>-<argument>, hold-<command>-<argument>
 //                    the same, of the calls with that argument among theirs
 //   old-engine       a network gets a gateway address whatever it was asked for
+//   no-isolated-gateway  a network asked for with the isolated gateway mode is refused
+//   engine-version   the version the engine says it is, in place of a current one
+//   no-storage-opt   a container asked for with a size for its writable layer is refused
 // calls.jsonl records every invocation's arguments.
 
 import fs from 'node:fs';
@@ -68,6 +73,22 @@ function staged(command, args) {
   die(lines[0] || `${command} failed`);
 }
 
+// What `du -sxB1` and `du -sx --inodes` say of a directory: the bytes its entries hold on
+// disk and how many entries there are, itself included, with no link followed.
+function measure(dir) {
+  let bytes = 0;
+  let inodes = 0;
+  const walk = (p) => {
+    let st;
+    try { st = fs.lstatSync(p); } catch { return; }
+    bytes += st.blocks * 512;
+    inodes += 1;
+    if (st.isDirectory()) for (const n of fs.readdirSync(p)) walk(path.join(p, n));
+  };
+  walk(dir);
+  return { bytes, inodes };
+}
+
 const labelsOf = (opts) => Object.fromEntries((opts['--label'] || []).map((l) => l.split(/=(.*)/s).slice(0, 2)));
 
 // The process groups the setsid shim started in a container, one to a line.
@@ -85,7 +106,7 @@ staged(command === 'container' || command === 'image' || command === 'volume' ||
 
 switch (command) {
   case 'version':
-    console.log('0.0.0-fake');
+    console.log(fs.existsSync(file('engine-version')) ? fs.readFileSync(file('engine-version'), 'utf8').trim() : '27.5.1');
     break;
 
   case 'network': {
@@ -105,6 +126,9 @@ switch (command) {
       console.log(JSON.stringify({ Name: n.name, Internal: n.internal, Labels: n.labels, IPAM: { Config: [{ Subnet: n.subnet, Gateway: n.gateway }] } }));
     } else if (args[0] === 'create') {
       if (known()) die(`Error response from daemon: network with name ${name} already exists`);
+      if (fs.existsSync(file('no-isolated-gateway')) && (opts['-o'] || []).some((o) => o.endsWith('=isolated'))) {
+        die('Error response from daemon: invalid gateway mode "isolated" for com.docker.network.bridge.gateway_mode_ipv4');
+      }
       const nth = fs.readdirSync(file('networks')).length + 1;
       // An engine that does not know the isolated gateway mode takes the option and
       // gives the network a gateway all the same.
@@ -149,9 +173,16 @@ switch (command) {
   case 'volume': {
     const { opts, rest } = parse(args.slice(1), ['--label', '--filter', '--format']);
     if (args[0] === 'create') {
-      fs.mkdirSync(file('volumes', rest[0]), { recursive: true });
-      fs.writeFileSync(file('volumes', `${rest[0]}.labels`), JSON.stringify(opts['--label'] || []));
+      // A volume that is there is answered with as it is: its labels stay its maker's.
+      if (!fs.existsSync(file('volumes', `${rest[0]}.labels`))) {
+        fs.mkdirSync(file('volumes', rest[0]), { recursive: true });
+        fs.writeFileSync(file('volumes', `${rest[0]}.labels`), JSON.stringify(opts['--label'] || []));
+      }
       console.log(rest[0]);
+    } else if (args[0] === 'inspect') {
+      const labels = readJson(file('volumes', `${rest[0]}.labels`));
+      if (!labels) die(`Error response from daemon: get ${rest[0]}: no such volume`);
+      console.log(JSON.stringify(labels.length === 0 ? null : Object.fromEntries(labels.map((l) => l.split(/=(.*)/s).slice(0, 2)))));
     } else if (args[0] === 'rm') {
       fs.rmSync(file('volumes', rest[0]), { recursive: true, force: true });
       fs.rmSync(file('volumes', `${rest[0]}.labels`), { force: true });
@@ -167,12 +198,27 @@ switch (command) {
 
   case 'create':
   case 'run': {
-    const { opts, rest } = parse(args, ['--name', '--label', '--security-opt', '--pids-limit', '--memory', '--cpus', '--add-host', '-v', '--network', '--network-alias', '--user']);
+    const { opts, rest } = parse(args, ['--name', '--label', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--storage-opt', '--add-host', '-v', '--network', '--network-alias', '--user']);
     const name = opts['--name'][0];
     const networks = opts['--network'] || ['bridge'];
-    for (const n of networks) if (n !== 'bridge' && !fs.existsSync(file('networks', `${n}.json`))) die(`docker: Error response from daemon: network ${n} not found`, 125);
+    for (const n of networks) if (n !== 'bridge' && n !== 'none' && !fs.existsSync(file('networks', `${n}.json`))) die(`docker: Error response from daemon: network ${n} not found`, 125);
     if (container(name)) die(`docker: Error response from daemon: Conflict. The container name "/${name}" is already in use.`, 125);
     if (!fs.existsSync(file('images', encodeURIComponent(rest[0])))) die(`Unable to find image '${rest[0]}' locally`, 125);
+    if (opts['--storage-opt'] && fs.existsSync(file('no-storage-opt'))) {
+      die('docker: Error response from daemon: --storage-opt is supported only for overlay over xfs with \'pquota\' mount option\n\nRun \'docker run --help\' for more information', 125);
+    }
+    if (opts['--rm']) {
+      const at = Object.fromEntries((opts['-v'] || []).map((v) => { const [src, dst] = v.split(':'); return [dst, src.startsWith('/') ? src : file('volumes', src)]; }));
+      const script = rest.slice(1).join(' ');
+      if (/\bdu -sxB1 /.test(script)) {
+        const sizes = Object.keys(at).filter((dst) => script.includes(` ${dst}`)).map((dst) => [dst, measure(at[dst])]);
+        for (const [dst, m] of sizes) console.log(`${m.bytes}\t${dst}`);
+        for (const [dst, m] of sizes) console.log(`${m.inodes}\t${dst}`);
+      } else if (rest[1] === 'find' && rest.includes('-delete')) {
+        for (const n of fs.readdirSync(at[rest[2]])) fs.rmSync(path.join(at[rest[2]], n), { recursive: true, force: true });
+      }
+      break;
+    }
     const root = file('roots', name);
     fs.rmSync(root, { recursive: true, force: true });
     fs.mkdirSync(path.join(root, 'dn'), { recursive: true });
@@ -199,10 +245,12 @@ switch (command) {
   }
 
   case 'container': {
-    const { rest } = parse(args.slice(1), ['--format']);
+    const { opts, rest } = parse(args.slice(1), ['--format']);
     const c = container(rest[0]);
     if (!c) die(`Error response from daemon: No such container: ${rest[0]}`);
-    console.log(JSON.stringify({ State: { Running: c.running }, Config: { Image: c.image, Labels: c.labels }, HostConfig: { NetworkMode: c.networks[0] } }));
+    // The mounts are links in the root and count for nothing, as a volume does not count in a writable layer.
+    console.log(JSON.stringify({ State: { Running: c.running }, Config: { Image: c.image, Labels: c.labels }, HostConfig: { NetworkMode: c.networks[0] },
+      ...(opts['--size'] ? { SizeRw: measure(c.root).bytes } : {}) }));
     break;
   }
 

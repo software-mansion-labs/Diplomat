@@ -7,10 +7,10 @@
 // Run: node test/daemon-e2e.mjs
 
 import assert from 'node:assert/strict';
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { containerName } from '../src/executor/container.js';
 import { GITLAB_POOL, POOL, REPO, check, createBench, fakeAdb, passed, until } from './lib/daemons.mjs';
 import { GITLAB_HOST } from './lib/fake-forge.mjs';
 
@@ -20,8 +20,7 @@ const adb = await fakeAdb();
 const allocator = net.createServer((socket) => socket.end('allocator\n'));
 await new Promise((resolve) => allocator.listen(0, '127.0.0.1', resolve));
 
-const hex8 = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 8);
-const containerOf = (peer, pool = POOL) => `dn-${hex8(pool)}-${hex8(peer)}`;
+const containerOf = (peer, pool = POOL) => containerName(pool, peer);
 const offerOf = async (m, taskId) => (await m.state()).offers.find((o) => o.taskId === taskId);
 const runOf = async (m, taskId) => (await m.state()).runs.filter((r) => r.taskId === taskId).at(-1) ?? null;
 const ended = (m, taskId) => until(`${taskId} to end`, async () => {
