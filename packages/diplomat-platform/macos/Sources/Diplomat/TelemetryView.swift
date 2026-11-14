@@ -305,7 +305,6 @@ struct TelemetryView: View {
     private func pendingCard(_ s: Telemetry.Summary) -> some View {
         let found: String = "\(s.queuedCount) unit\(s.queuedCount == 1 ? "" : "s") of work "
             + "found in this range, \(s.startedCount) started"
-            + (s.remoteCount > 0 ? ", \(s.remoteCount) on mesh peers" : "")
             + ". Fixes stack on top of reviews, which take a free slot first, so the "
             + "top edge is everything the pool owes. Work picked up between two points "
             + "on the chart never shows as a backlog — that is the chart working, not "
@@ -332,9 +331,7 @@ struct TelemetryView: View {
         let width: String = "finished in this range, one bar per "
             + Telemetry.bucketLabel(s.bucketHours)
         let counts: String = "Counted where a run ENDED, so one that spanned two bars "
-            + "is a single delivery in the bar it finished in. Work the mesh placed on "
-            + "a peer counts here — it was delivered — though its cost is that peer's "
-            + "and stays out of the per-task figures."
+            + "is a single delivery in the bar it finished in."
         return VStack(alignment: .leading, spacing: 6) {
             cardHead("finishedWork", "\(s.finishedCount)")
             note(width)
@@ -771,7 +768,7 @@ private struct QuotaChart: View {
             // one where it finished, joined by a thin dashed green→red tie. Each dot
             // sits at its instant's weekly-quota level (startedPct/donePct), so it
             // rides the line; a nil pct — no week reading to place it against — drops
-            // to a lane near the floor. A nil `done` (still running, or on a peer) is a
+            // to a lane near the floor. A nil `done` (still running) is a
             // lone start dot. Hard-coded green/red, like the half-way rule above: a
             // marker's colour is its meaning, not a metric's tint.
             let started = Color(red: 0.20, green: 0.78, blue: 0.35)
