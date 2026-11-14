@@ -7,16 +7,17 @@ import DiplomatCore
 enum DiplomacyNetwork {
     static let package = NodePackage.diplomacyNetwork
 
-    /// The daemon's `HOURS_CEILING`.
-    static let hoursCeiling = 720
-    static var hoursRange: ClosedRange<Int> { NetworkSettings.hoursFloor...hoursCeiling }
+    static var hoursRange: ClosedRange<Int> {
+        NetworkSettings.hoursFloor...NetworkSettings.hoursCeiling
+    }
     /// What one press of an hours stepper moves it by.
     static let hoursStep = 12
-    static func clampHours(_ h: Int) -> Int { min(max(h, hoursRange.lowerBound), hoursRange.upperBound) }
 
     /// The reason an offer is withdrawn with when the operator stops a task no run here
     /// carries.
     static let withdrawStopped = "stopped"
+    /// The reason an offer is withdrawn with as the switch goes off.
+    static let withdrawSwitchedOff = "switched off"
     /// The reason an offer is withdrawn with when its run could not be booked.
     static let withdrawUnbooked = "not booked"
 
@@ -145,8 +146,13 @@ enum NetworkText {
     static let noEvents = "No network actions in the activity feed."
     static let invitePlaceholder = "Paste an invite"
     static let inviteCopied = "Invite copied. Send it to the machine that should join."
-    static let stopRunHelp = "Stop this job's run on this machine."
+    static let stopRunHelp = "Stop this job's run on this machine. It goes back to the pool."
     static let withdrawHelp = "Withdraw this job from the pool."
+    /// The feed's words for a run stopped here, after the task's title.
+    static let runStopped = "its run on this machine was stopped and the job is back in the pool"
+    /// The feed's words for a run retired because the switch went off.
+    static let switchedOffRun = "withdrawn: the Diplomacy Network was switched off"
+    static let leftNote = "left - this machine takes and offers nothing here"
 
     static var packageProblem: String? {
         let pkg = DiplomacyNetwork.package
@@ -167,9 +173,11 @@ enum NetworkText {
     /// A member's or executor's key as it is shown.
     static func short(_ pk: String) -> String { String(pk.prefix(8)) }
 
+    /// The pools this machine is in and what they hold; one it left is not counted.
     static func counts(_ s: NetworkSnapshot) -> String {
-        let tasks = s.pools.reduce(0) { $0 + $1.tasks.count }
-        return "\(s.pools.count) \(s.pools.count == 1 ? "pool" : "pools") · "
+        let pools = s.pools.filter { !$0.left }
+        let tasks = pools.reduce(0) { $0 + $1.tasks.count }
+        return "\(pools.count) \(pools.count == 1 ? "pool" : "pools") · "
             + "\(tasks) \(tasks == 1 ? "task" : "tasks")"
     }
 
@@ -192,6 +200,16 @@ enum NetworkText {
         case "claimed": return "running"
         default: return state
         }
+    }
+
+    /// How the offer this machine made of `task` ended, in the words its run's row has,
+    /// where the daemon gave a reason; nil for any other task.
+    static func ending(of task: String, in snapshot: NetworkSnapshot?) -> String? {
+        let offers = NetworkEvidence.tasks(snapshot)
+        guard let offer = offers.value?[task], !offer.reason.isEmpty,
+              offer.state == AgentState.NetworkTask.failed
+                || offer.state == AgentState.NetworkTask.cancelled else { return nil }
+        return AgentState.networkVerdict(task: task, network: offers, age: 0).1
     }
 
     /// Where a pool's task is and until when: "on this machine · lease to 14:05".

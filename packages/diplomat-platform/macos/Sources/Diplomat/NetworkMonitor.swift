@@ -33,7 +33,8 @@ struct NetworkCycle {
 extension Store {
     // MARK: lifecycle
 
-    /// The switch moved: start the daemon, or stop it.
+    /// The switch moved: start the daemon, or retire the runs the network carried and
+    /// stop it.
     func networkSwitched() {
         networkCycle = NetworkCycle()
         networkUnavailableLogged = false
@@ -52,6 +53,8 @@ extension Store {
                 await runNetworkCycleOnce()
             } else {
                 await whileNetworkBusy {
+                    // While the daemon is still there to hear a withdrawal.
+                    await self.settleAgents()
                     let result = await Task.detached(priority: .userInitiated) {
                         DiplomacyNetwork.stopDaemon()
                     }.value
@@ -242,7 +245,7 @@ extension Store {
             }.value
             if case .ok = reply {
                 AuditLog.log("panel", NetworkAudit.stop,
-                             "\(task.title) - its run on this machine was stopped")
+                             "\(task.title) - \(NetworkText.runStopped)")
                 refreshAudit()
             }
         } else {
@@ -286,6 +289,19 @@ extension Store {
         refreshAudit()
         await runNetworkCycleOnce()
         return true
+    }
+
+    /// Go back into a pool this machine left.
+    func rejoinNetworkPool(_ pool: String) async {
+        let body = NetworkRoute.joinBody(pool: pool)
+        let reply = await Task.detached(priority: .userInitiated) {
+            DiplomacyNetwork.post(NetworkRoute.join, body)
+        }.value
+        noteNetworkReply(reply, about: pool)
+        guard case .ok = reply else { return }
+        AuditLog.log("panel", NetworkAudit.join, "Rejoined \(pool)")
+        refreshAudit()
+        await runNetworkCycleOnce()
     }
 
     func leaveNetworkPool(_ pool: String) async {

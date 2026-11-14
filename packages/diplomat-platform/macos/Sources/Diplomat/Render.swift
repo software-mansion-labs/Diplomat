@@ -1415,11 +1415,31 @@ enum Render {
                 task("t-done", "audit", "Audit · argent", "done", offeredHere: false,
                      executor: near),
                 task("t-gone", "review-own", "Review · #498", "cancelled", offeredHere: true),
+                task("t-spent", "issues", "Issues · #440", "cancelled", offeredHere: true),
              ]] as [String: Any],
             ["id": "gitlab.com/acme/platform/api", "path": "/Users/dev/api", "identity": "ilatka",
              "hash": "17b0e3aa",
              "members": [member(here, hours: 48, seen: 0)],
              "tasks": [[String: Any]]()] as [String: Any],
+            ["id": "github.com/latekvo/dotfiles", "path": "/Users/dev/dotfiles",
+             "identity": "latekvo", "hash": "c02d5b1e", "left": true,
+             "members": [[String: Any]](), "tasks": [[String: Any]]()] as [String: Any],
+        ]
+        func offer(_ id: String, _ kind: String, _ title: String, _ state: String,
+                   reason: String = "", executor: String = "") -> [String: Any] {
+            ["taskId": id, "pool": "github.com/software-mansion/argent", "kind": kind,
+             "item": title, "title": title, "state": state, "reason": reason,
+             "executor": executor, "executorHere": executor == here,
+             "offeredAt": now - 2400, "attempt": state == "failed" ? 3 : 1,
+             "requests": 0, "refused": 0]
+        }
+        doc["offers"] = [
+            offer("t-review", "review", "Review · #512", "pooled"),
+            offer("t-own", "conflicts", "Resolve · #508", "claimed", executor: here),
+            offer("t-away", "issues", "Issues · #431", "claimed", executor: near),
+            offer("t-gone", "review-own", "Review · #498", "cancelled", reason: "merged"),
+            offer("t-spent", "issues", "Issues · #440", "failed",
+                  reason: "the container exited 137 on its third attempt"),
         ]
         doc["runs"] = [
             ["runId": "run-own", "taskId": "t-own", "pool": "github.com/software-mansion/argent",

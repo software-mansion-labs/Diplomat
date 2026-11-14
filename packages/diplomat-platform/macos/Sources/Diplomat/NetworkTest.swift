@@ -4,8 +4,9 @@ import DiplomatCore
 /// `DIPLOMAT_NETWORK_TEST=1`: the app's half of the Diplomacy Network (the core's is
 /// pinned in `DiplomatCoreSmoke`): what the Store posts to the daemon each cycle, that a
 /// job dispatched with the switch on is offered and never spawned, how an offered run
-/// is drawn, withdrawn, priced and retired, and that the launch sweep ends the retired
-/// mesh node and nothing else.
+/// is drawn, withdrawn, priced and retired, what the switch going off does to the runs
+/// the network still carries, and that the launch sweep ends the retired mesh node and
+/// nothing else.
 ///
 /// The daemon is a `FakeDaemon` on a scratch socket (`DN_BASE_DIR`), the installer and
 /// the process table are stand-ins, and the feed, the run book and the shared config
@@ -18,10 +19,17 @@ enum NetworkTest {
         private var snapshot: [String: Any] = [:]
         private var refusals: [String: (Int, String)] = [:]
         private var offers = 0
+        private var asked: [String: Int] = [:]
 
         func set(_ doc: [String: Any]) {
             lock.lock(); defer { lock.unlock() }
             snapshot = doc
+        }
+
+        /// How many requests `route` has had.
+        func count(_ route: String) -> Int {
+            lock.lock(); defer { lock.unlock() }
+            return asked[route] ?? 0
         }
 
         /// Answer `route` with this status and error until cleared with nil.
@@ -32,6 +40,7 @@ enum NetworkTest {
 
         func respond(_ route: String, _ body: [String: Any]) -> (Int, String) {
             lock.lock(); defer { lock.unlock() }
+            asked[route, default: 0] += 1
             if let (status, error) = refusals[route] {
                 return (status, NetworkTest.json(["error": error]))
             }
@@ -182,7 +191,8 @@ enum NetworkTest {
         let away = "cccc3333dddd4444"
         var daemonPid = 700
         func snapshot(offers: [[String: Any]] = [], runs: [[String: Any]] = [],
-                      tasks: [[String: Any]] = []) -> [String: Any] {
+                      tasks: [[String: Any]] = [],
+                      more: [[String: Any]] = []) -> [String: Any] {
             ["updatedAt": Date().timeIntervalSince1970,
              "daemon": ["pid": daemonPid, "startedAt": 1000 + daemonPid],
              "identity": ["pk": here, "onion": "x.onion"],
@@ -191,7 +201,7 @@ enum NetworkTest {
              "model": ["state": "ready", "detail": ""],
              "admit": ["slots": 0, "at": 0, "reason": ""],
              "pools": [["id": "github.com/o/r", "path": root.path, "identity": "latekvo",
-                        "hash": "h", "members": [[String: Any]](), "tasks": tasks]],
+                        "hash": "h", "members": [[String: Any]](), "tasks": tasks]] + more,
              "runs": runs, "offers": offers]
         }
         let script = Script()
@@ -215,8 +225,11 @@ enum NetworkTest {
         defer { daemon?.stop() }
 
         let installer = Calls<String>()
+        // The withdrawals the daemon had heard each time it was told to stop.
+        let withdrawnAtStop = Calls<Int>()
         DiplomacyNetwork.installerForSelfTest = { verb in
             installer.add(verb)
+            if verb == "--stop-daemon" { withdrawnAtStop.add(script.count(NetworkRoute.withdraw)) }
             var result = AllocatorInstall()
             result.daemonRunning = verb != "--stop-daemon" && FileManager.default.fileExists(atPath: socket)
             return result
@@ -358,9 +371,9 @@ enum NetworkTest {
 
         // 8. The row follows the daemon's word on the offer.
         func offerRow(_ task: String, _ state: String, executor: String = "",
-                      outcome: [String: Any]? = nil) -> [String: Any] {
+                      reason: String = "", outcome: [String: Any]? = nil) -> [String: Any] {
             var o: [String: Any] = ["taskId": task, "state": state, "executor": executor,
-                                    "attempt": 1, "requests": 0, "refused": 0]
+                                    "reason": reason, "attempt": 1, "requests": 0, "refused": 0]
             if let outcome {
                 o["outcome"] = outcome
                 o["endedAt"] = 1_800_000_000.0
@@ -494,11 +507,15 @@ enum NetworkTest {
         check("a task this machine ran keeps the runner its outcome names",
               ledger("done", key: ledgerKey(90220)).first?["runner"] as? String == "claude")
         check("a third job is offered", await store.dispatchAgent(job(90221), source: .auto) == .offered)
-        script.set(snapshot(offers: [offerRow("task-3", "failed", executor: away)]))
+        script.set(snapshot(offers: [offerRow("task-3", "failed", executor: away,
+                                              reason: "the container exited 137")]))
         await store.settleAgents()
         check("an offer the network gave up on is logged as network-failed",
               booked("task-3") == nil && feedDetails(NetworkAudit.failed).count == 1
                 && ledger("done", key: ledgerKey(90221)).isEmpty)
+        check("…with the daemon's reason after the verdict",
+              feedDetails(NetworkAudit.failed).first?
+                .hasSuffix("refused by the network: the container exited 137") == true)
 
         // 15. A merged PR: withdrawn once, then forgotten.
         check("a fourth job is offered", await store.dispatchAgent(job(90230), source: .auto) == .offered)
@@ -546,7 +563,11 @@ enum NetworkTest {
                 && requests(NetworkRoute.stopRun).first?["runId"] as? String == "run-9"
                 && requests(NetworkRoute.withdraw).count == 2
                 && feedDetails(NetworkAudit.stop).last
-                    == "Review · #1 - its run on this machine was stopped")
+                    == "Review · #1 - its run on this machine was stopped and the job is "
+                        + "back in the pool")
+        check("the stop button says where the job goes",
+              NetworkText.stopRunHelp
+                == "Stop this job's run on this machine. It goes back to the pool.")
         if let theirs = poolTask("t-away", here: false) {
             await store.stopNetworkTask(theirs, pool: "github.com/o/r")
         }
@@ -669,18 +690,85 @@ enum NetworkTest {
         check("leaving a pool names it and is logged",
               requests(NetworkRoute.leave).last?["pool"] as? String == "github.com/o/r"
                 && feedDetails(NetworkAudit.leave).count == 1)
+        script.refuse(NetworkRoute.join, (409, "github.com/o/r is not linked on this machine"))
+        await store.rejoinNetworkPool("github.com/o/r")
+        check("a refused rejoin shows the daemon's sentence on the pool's panel",
+              store.networkRefusals["github.com/o/r"]
+                == "github.com/o/r is not linked on this machine"
+                && feedDetails(NetworkAudit.join).count == 1)
+        script.refuse(NetworkRoute.join, nil)
+        await store.rejoinNetworkPool("github.com/o/r")
+        check("rejoining a pool this machine left names the pool, not an invite",
+              (requests(NetworkRoute.join).last as? [String: String])
+                == ["pool": "github.com/o/r"]
+                && store.networkRefusals["github.com/o/r"] == nil
+                && feedDetails(NetworkAudit.join).last == "Rejoined github.com/o/r")
+        let leftDoc = snapshot(
+            offers: [offerRow("t-spent", "failed", reason: "the container exited 137"),
+                     offerRow("t-gone", "cancelled", reason: "merged"),
+                     offerRow("t-quiet", "cancelled"),
+                     offerRow("t-open", "claimed", reason: "second attempt")],
+            tasks: [["taskId": "t-open", "state": "claimed"]],
+            more: [["id": "github.com/o/gone", "left": true,
+                    "tasks": [["taskId": "t-old", "state": "available"]]]])
+        let leftSnap = NetworkSnapshot.parse(Data(json(leftDoc).utf8))
+        check("the screen is told which pool this machine left",
+              leftSnap?.pools.map(\.left) == [false, true])
+        check("…and counts neither it nor its tasks",
+              leftSnap.map(NetworkText.counts) == "1 pool · 1 task")
+        check("a task whose offer failed or was withdrawn says why, as its run's row would",
+              NetworkText.ending(of: "t-spent", in: leftSnap)
+                == "refused by the network: the container exited 137"
+                && NetworkText.ending(of: "t-gone", in: leftSnap)
+                    == "withdrawn from the network: merged")
+        check("…and one with no reason, still open or not this machine's says nothing",
+              NetworkText.ending(of: "t-quiet", in: leftSnap) == nil
+                && NetworkText.ending(of: "t-open", in: leftSnap) == nil
+                && NetworkText.ending(of: "t-old", in: leftSnap) == nil
+                && NetworkText.ending(of: "t-spent", in: nil) == nil)
 
         // 21. The hours are kept inside the daemon's range.
         store.networkRequiredMinimumH = 5
         store.networkMaximumAcceptedH = 9999
         check("the hours settings are clamped and saved",
               store.networkRequiredMinimumH == NetworkSettings.hoursFloor
-                && store.networkMaximumAcceptedH == DiplomacyNetwork.hoursCeiling
-                && AppConfig.read()[NetworkSettings.maximumAcceptedHKey] as? Int
-                    == DiplomacyNetwork.hoursCeiling)
+                && store.networkMaximumAcceptedH == 720
+                && AppConfig.read()[NetworkSettings.maximumAcceptedHKey] as? Int == 720)
+        _ = AppConfig.setInt(NetworkSettings.maximumAcceptedHKey, 9999)
+        check("a stored value above the ceiling reads as the ceiling",
+              AppConfig.networkHours(NetworkSettings.maximumAcceptedHKey) == 720
+                && DiplomacyNetwork.hoursRange == 12...720)
+        _ = AppConfig.setInt(NetworkSettings.maximumAcceptedHKey, 720)
 
-        // 22. Off again: the daemon is stopped, and a dispatch takes the local path, which
-        //     in a self-test ends at the refused terminal.
+        // 22. Off again: what the network still carries is withdrawn and retired as
+        //     failed before the daemon is stopped, and what it had finished is retired on
+        //     its outcome.
+        _ = AgentRegistry.forget(Set(AgentRegistry.load().map(\.runID)))
+        func taskOf(_ n: Int) -> String {
+            AgentRegistry.load().first { $0.prNumber == n }?.network ?? "no run for #\(n)"
+        }
+        for n in [90260, 90261, 90262] {
+            check("#\(n) is offered", await store.dispatchAgent(job(n), source: .auto) == .offered)
+        }
+        let (pooledTask, claimedTask, doneTask) = (taskOf(90260), taskOf(90261), taskOf(90262))
+        script.set(snapshot(offers: [
+            offerRow(pooledTask, "pooled"), offerRow(claimedTask, "claimed", executor: away),
+            offerRow(doneTask, "claimed", executor: away),
+        ]))
+        await store.settleAgents()
+        check("three runs are booked and listed",
+              AgentRegistry.load().count == 3 && row(pooledTask) != nil
+                && row(claimedTask) != nil && row(doneTask) != nil)
+        // The third finishes unseen: the settle the switch takes is the one that finds it.
+        script.set(snapshot(offers: [
+            offerRow(pooledTask, "pooled"), offerRow(claimedTask, "claimed", executor: away),
+            offerRow(doneTask, "done", executor: away, outcome: [
+                "ok": true, "summary": "", "usd": 0.25, "tokens": 5000, "runner": "claude",
+                "model": "m"]),
+        ]))
+        let (withdrawsBefore, failedBefore, doneBefore) = (
+            requests(NetworkRoute.withdraw).count, feedDetails(NetworkAudit.failed).count,
+            feedDetails(NetworkAudit.done).count)
         store.networkEnabled = false
         await store.networkLifecycle?.value
         check("switching off saves the key and runs --stop-daemon",
@@ -689,12 +777,105 @@ enum NetworkTest {
                 && installer.all.last == "--stop-daemon"
                 && feedDetails(NetworkAudit.stop).last
                     == "Stopped the Diplomacy Network daemon (ok: true)")
+        let offWithdrawals = Array(requests(NetworkRoute.withdraw).dropFirst(withdrawsBefore))
+        check("…having withdrawn every offer the network still carried, as switched off",
+              Set(offWithdrawals.compactMap { $0["taskId"] as? String })
+                == [pooledTask, claimedTask]
+                && offWithdrawals.count == 2
+                && offWithdrawals.allSatisfy { $0["reason"] as? String == "switched off" })
+        check("…before the daemon was told to stop",
+              withdrawnAtStop.all == [script.count(NetworkRoute.withdraw)])
+        check("their runs leave the book and the list as failed, and say why",
+              booked(pooledTask) == nil && booked(claimedTask) == nil
+                && row(pooledTask) == nil && row(claimedTask) == nil
+                && Array(feedDetails(NetworkAudit.failed).dropFirst(failedBefore)).sorted() == [
+                    "Auto · Review-req · #90260 - withdrawn: the Diplomacy Network was switched off",
+                    "Auto · Review-req · #90261 - withdrawn: the Diplomacy Network was switched off",
+                ])
+        check("a run the network had finished is retired on its outcome instead",
+              booked(doneTask) == nil && row(doneTask) == nil
+                && feedDetails(NetworkAudit.done).count == doneBefore + 1
+                && feedDetails(NetworkAudit.done).last?
+                    .hasSuffix("#90262 — finished on \(NetworkText.short(away))") == true
+                && ledger("done", key: ledgerKey(90262)).count == 1)
         let offersOff = requests(NetworkRoute.offer).count
-        let local = await store.dispatchAgent(job(90400), source: .panel)
-        check("with the switch off a dispatch takes the local path and offers nothing",
+        let local = await store.dispatchAgent(job(90260), source: .panel)
+        check("a withdrawn run's PR is free for a local run at once, which offers nothing",
               local == .failed(AgentSpawner.SpawnError.headless.localizedDescription)
                 && AgentSpawner.refusedTerminals == refusedBefore + 1
                 && requests(NetworkRoute.offer).count == offersOff)
+
+        // 23. A network run found in the book while the switch is off is withdrawn and
+        //     leaves it at the next settle; with none there the daemon is asked nothing.
+        func bookByHand(_ n: Int, task: String) {
+            let at = Date().timeIntervalSince1970
+            AgentRegistry.createRun(
+                AgentState.RunRecord(runID: AgentRegistry.newRunID(now: at), dispatchedAt: at,
+                                     prNumber: n, prURL: url(n), kind: "review",
+                                     label: "Auto · Review-req · #\(n)",
+                                     source: AgentDispatchGate.Source.auto.rawValue,
+                                     network: task),
+                prompt: "")
+        }
+        func asked() -> Int { (earlier + (daemon?.requests ?? [])).count }
+        bookByHand(90270, task: "task-stray")
+        script.set(snapshot(offers: [offerRow("task-stray", "pooled")]))
+        await store.settleAgents()
+        check("a network run in the book with the switch off is withdrawn and retired as failed",
+              booked("task-stray") == nil
+                && requests(NetworkRoute.withdraw).last?["taskId"] as? String == "task-stray"
+                && requests(NetworkRoute.withdraw).last?["reason"] as? String == "switched off"
+                && feedDetails(NetworkAudit.failed).last
+                    == "Auto · Review-req · #90270 - withdrawn: the Diplomacy Network was switched off")
+        bookByHand(90272, task: "task-landed")
+        script.set(snapshot(offers: [offerRow("task-landed", "claimed", executor: away)]))
+        store.pinMergedPRs(["o/r#90272"])
+        let failedOff = feedDetails(NetworkAudit.failed).count
+        await store.settleAgents()
+        store.pinMergedPRs([])
+        check("…and one whose PR merged is withdrawn as merged and retired as merged",
+              booked("task-landed") == nil
+                && requests(NetworkRoute.withdraw).last?["taskId"] as? String == "task-landed"
+                && requests(NetworkRoute.withdraw).last?["reason"] as? String
+                    == NetworkRoute.withdrawMerged
+                && feedDetails(NetworkAudit.failed).count == failedOff)
+        bookByHand(90273, task: "task-unheard")
+        script.refuse(NetworkRoute.state, (500, "no snapshot"))
+        let withdrawnOff = script.count(NetworkRoute.withdraw)
+        await store.settleAgents()
+        script.refuse(NetworkRoute.state, nil)
+        check("…and one a daemon gave no snapshot for is retired with no withdrawal sent",
+              booked("task-unheard") == nil
+                && script.count(NetworkRoute.withdraw) == withdrawnOff
+                && feedDetails(NetworkAudit.failed).last
+                    == "Auto · Review-req · #90273 - withdrawn: the Diplomacy Network was switched off")
+        let askedBefore = asked()
+        await store.settleAgents()
+        await store.runNetworkCycleOnce()
+        check("…after which the daemon is asked nothing, the switch being off",
+              asked() == askedBefore && store.networkState == nil)
+
+        // 24. On again, a task the switch retired is announced afresh; and a daemon that
+        //     does not answer as the switch goes off holds nothing back.
+        store.networkEnabled = true
+        await store.networkLifecycle?.value
+        bookByHand(90274, task: claimedTask)
+        script.set(snapshot(offers: [offerRow(claimedTask, "claimed", executor: away)]))
+        let claimedLines = feedDetails(NetworkAudit.claimed).count
+        await store.settleAgents()
+        check("a task whose run the switch retired is announced again when next seen claimed",
+              feedDetails(NetworkAudit.claimed).count == claimedLines + 1)
+        _ = AgentRegistry.forget(Set(AgentRegistry.load().map(\.runID)))
+        bookByHand(90271, task: "task-deaf")
+        stopDaemon()
+        store.networkEnabled = false
+        await store.networkLifecycle?.value
+        check("with the daemon silent the run is retired all the same, and the daemon stopped",
+              booked("task-deaf") == nil
+                && feedDetails(NetworkAudit.failed).last
+                    == "Auto · Review-req · #90271 - withdrawn: the Diplomacy Network was switched off"
+                && installer.all.last == "--stop-daemon"
+                && installer.all.filter { $0 == "--stop-daemon" }.count == 2)
 
         print(pass ? "NETWORK TEST OK" : "NETWORK TEST FAILED")
         return pass

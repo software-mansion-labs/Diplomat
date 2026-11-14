@@ -251,25 +251,25 @@ struct NetworkScreen: View {
     @ViewBuilder
     private var pools: some View {
         if let snap = snapshot {
-            if snap.pools.isEmpty {
-                SettingsCard(symbol: NetworkText.symbol, title: "POOLS", tint: .purple) {
-                    note(NetworkText.noPools)
-                    NetworkJoinRow(card: "")
-                    if let refusal = store.networkRefusals[""] { note(refusal, tint: .red) }
-                }
-                .frame(width: MainRoot.columnWidth, alignment: .topLeading)
-            } else {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(Array(stride(from: 0, to: snap.pools.count, by: 2)), id: \.self) { i in
-                        HStack(alignment: .top, spacing: 12) {
-                            panel(snap.pools[i])
-                            if i + 1 < snap.pools.count {
-                                panel(snap.pools[i + 1])
-                            } else {
-                                Spacer(minLength: 0)
-                            }
+            VStack(alignment: .leading, spacing: 12) {
+                ForEach(Array(stride(from: 0, to: snap.pools.count, by: 2)), id: \.self) { i in
+                    HStack(alignment: .top, spacing: 12) {
+                        panel(snap.pools[i])
+                        if i + 1 < snap.pools.count {
+                            panel(snap.pools[i + 1])
+                        } else {
+                            Spacer(minLength: 0)
                         }
                     }
+                }
+                // No pool panel offers "Join…": none yet, or each one left.
+                if snap.pools.allSatisfy(\.left) {
+                    SettingsCard(symbol: NetworkText.symbol, title: "POOLS", tint: .purple) {
+                        if snap.pools.isEmpty { note(NetworkText.noPools) }
+                        NetworkJoinRow(card: "")
+                        if let refusal = store.networkRefusals[""] { note(refusal, tint: .red) }
+                    }
+                    .frame(width: MainRoot.columnWidth, alignment: .topLeading)
                 }
             }
         }
@@ -332,7 +332,8 @@ struct NetworkJoinRow: View {
     }
 }
 
-/// One pool: who is in it, what it holds, and the invite, join and leave actions.
+/// One pool: who is in it, what it holds, and the invite, join and leave actions. A
+/// pool this machine left shows that, and the way back in.
 struct NetworkPoolPanel: View {
     @EnvironmentObject var store: Store
     let pool: NetworkSnapshot.Pool
@@ -343,21 +344,28 @@ struct NetworkPoolPanel: View {
     @State private var copied = false
 
     var body: some View {
-        SettingsCard(symbol: NetworkText.symbol, title: pool.id, tint: .purple,
-                     pill: StatusPill(text: membersPill, tint: .purple)) {
+        SettingsCard(symbol: NetworkText.symbol, title: pool.id,
+                     tint: pool.left ? .secondary : .purple,
+                     pill: pool.left ? StatusPill(text: "left", tint: .secondary)
+                        : StatusPill(text: membersPill, tint: .purple)) {
             if !subtitle.isEmpty {
                 Text(subtitle).font(.system(size: 9, design: .monospaced))
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
             }
-            section("Members") {
-                if pool.members.isEmpty { note(NetworkText.noMembers) }
-                ForEach(pool.members, id: \.pk) { member($0) }
+            if pool.left {
+                note(NetworkText.leftNote)
+                leftActions
+            } else {
+                section("Members") {
+                    if pool.members.isEmpty { note(NetworkText.noMembers) }
+                    ForEach(pool.members, id: \.pk) { member($0) }
+                }
+                section("Tasks") {
+                    if pool.tasks.isEmpty { note(NetworkText.noTasks) }
+                    ForEach(pool.tasks, id: \.taskId) { task($0) }
+                }
+                actions
             }
-            section("Tasks") {
-                if pool.tasks.isEmpty { note(NetworkText.noTasks) }
-                ForEach(pool.tasks, id: \.taskId) { task($0) }
-            }
-            actions
             if let refusal = store.networkRefusals[pool.id] { note(refusal, tint: .red) }
         }
     }
@@ -409,6 +417,7 @@ struct NetworkPoolPanel: View {
     private func task(_ t: NetworkSnapshot.Task) -> some View {
         let place = NetworkText.place(t)
         let open = t.state == "available" || t.state == "claimed"
+        let ending = NetworkText.ending(of: t.taskId, in: store.networkState)
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text(t.title.isEmpty ? t.item : t.title).font(.system(size: 10)).lineLimit(1)
@@ -428,8 +437,22 @@ struct NetworkPoolPanel: View {
                     .tooltip(t.executorHere ? NetworkText.stopRunHelp : NetworkText.withdrawHelp)
                 }
             }
+            if let ending {
+                Text(ending).font(.system(size: 9)).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .cardChrome(padding: 5)
+    }
+
+    private var leftActions: some View {
+        HStack(spacing: 8) {
+            Button { Task { await store.rejoinNetworkPool(pool.id) } } label: {
+                Text("Rejoin").bold()
+            }
+            .buttonStyle(.borderedProminent).controlSize(.small)
+            Spacer(minLength: 0)
+        }
     }
 
     @ViewBuilder

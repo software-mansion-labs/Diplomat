@@ -471,7 +471,7 @@ final class Store: ObservableObject {
     /// from a pool. The daemon reads both from the shared file.
     @Published var networkRequiredMinimumH: Int {
         didSet {
-            let clamped = DiplomacyNetwork.clampHours(networkRequiredMinimumH)
+            let clamped = NetworkSettings.hours(Double(networkRequiredMinimumH))
             if clamped != networkRequiredMinimumH { networkRequiredMinimumH = clamped }
             guard writesConfig, !readingConfig,
                   !configSaved(AppConfig.setInt(NetworkSettings.requiredMinimumHKey, clamped))
@@ -484,7 +484,7 @@ final class Store: ObservableObject {
 
     @Published var networkMaximumAcceptedH: Int {
         didSet {
-            let clamped = DiplomacyNetwork.clampHours(networkMaximumAcceptedH)
+            let clamped = NetworkSettings.hours(Double(networkMaximumAcceptedH))
             if clamped != networkMaximumAcceptedH { networkMaximumAcceptedH = clamped }
             guard writesConfig, !readingConfig,
                   !configSaved(AppConfig.setInt(NetworkSettings.maximumAcceptedHKey, clamped))
@@ -1867,17 +1867,20 @@ final class Store: ObservableObject {
     ///
     /// The network daemon is asked in the pass itself, while the switch is on, and never
     /// answered for from an earlier pass: a snapshot older than an offer names no such
-    /// task, which past the grace is the verdict that ends its run.
+    /// task, which past the grace is the verdict that ends its run. With the switch off
+    /// it is asked only while the book still holds a run the network carried, which
+    /// that pass withdraws and retires (`retireNetworkRuns`).
     func agentTick() async -> AgentPass {
         let limit = autoTaskLimit
         let roots = roots
         let keys = Set(roots.map(\.key))
         let (merged, tokens, deadline) = (mergedPRs, tokensLeft, AppConfig.runDeadline)
         let directory = AgentSpawner.repoPath
-        let network = networkEnabled
+        let enabled = networkEnabled
         return await Task.detached(priority: .userInitiated) {
             let now = Date().timeIntervalSince1970
             let records = AgentRegistry.adoptPids(AgentRegistry.load())
+            let network = enabled || records.contains { !$0.runsHere }
             let snapshot = network ? DiplomacyNetwork.state() : nil
             let gathered = AgentProbes.gather(
                 records: records, now: now, keys: keys, directory: directory,
@@ -1922,6 +1925,7 @@ final class Store: ObservableObject {
             bookWritten(Store.persistRunChanges(pass.tick.records))
             publish(pass)
             await retireFinished(pass)
+            if !networkEnabled { await retireNetworkRuns(pass) }
             noteSilentProbes()
             settleInFlight = nil
             return pass
@@ -2156,10 +2160,8 @@ final class Store: ObservableObject {
     }
 
     /// Withdraw the offers of runs whose PR merged while the network still carried them.
-    /// Returns the runs no daemon answered for, which stay in the book for the next tick;
-    /// with the switch off none does, there being no daemon to ask.
+    /// Returns the runs no daemon answered for, which stay in the book for the next tick.
     private func withdrawMerged(_ runs: [AgentState.RunRecord]) async -> Set<String> {
-        guard networkEnabled else { return [] }
         var unanswered: Set<String> = []
         for r in runs {
             guard let task = r.network else { continue }
@@ -2180,6 +2182,32 @@ final class Store: ObservableObject {
             }
         }
         return unanswered
+    }
+
+    /// With the switch off nothing carries a network run: each one the book still holds
+    /// once `retireFinished` has retired what the network was finished with leaves it
+    /// as failed, so its PR or issue is free for a local run at once. A daemon that
+    /// answered this pass is told to withdraw each first; a silent one is not waited on.
+    private func retireNetworkRuns(_ pass: AgentPass) async {
+        guard pass.tick.records.contains(where: { !$0.runsHere }) else { return }
+        let left = AgentRegistry.load().filter { !$0.runsHere }
+        guard !left.isEmpty else { return }
+        for task in left.compactMap(\.network) where pass.network != nil {
+            let body = NetworkRoute.withdrawBody(
+                task: task, reason: DiplomacyNetwork.withdrawSwitchedOff)
+            _ = await Task.detached(priority: .userInitiated) {
+                DiplomacyNetwork.post(NetworkRoute.withdraw, body)
+            }.value
+        }
+        guard bookWritten(AgentRegistry.forget(Set(left.map(\.runID)))) else { return }
+        for r in left {
+            AuditLog.log(r.source, NetworkAudit.failed,
+                         "\(r.label.isEmpty ? r.runID : r.label) - \(NetworkText.switchedOffRun)")
+        }
+        networkClaimsLogged.subtract(left.compactMap(\.network))
+        // This pass's rows were published with them in.
+        let gone = Set(left.map(\.runID))
+        agentRows.removeAll { gone.contains($0.record.runID) }
     }
 
     /// Close the ledger entries of runs the network carried, each from the outcome its
