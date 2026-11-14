@@ -1,0 +1,94 @@
+// A host's identity: one Ed25519 key pair that is also its onion service key, so the
+// onion address is a function of the public key (PROTOCOL.md section 1).
+
+import crypto from 'node:crypto';
+import { b64u, canon, tagged, unb64u } from './canon.js';
+
+// The fixed DER prefixes Node wraps a raw Ed25519 key in.
+const PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
+const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
+
+function privateKey(seed) {
+  return crypto.createPrivateKey({ key: Buffer.concat([PKCS8_PREFIX, seed]), format: 'der', type: 'pkcs8' });
+}
+
+function publicKey(pkBytes) {
+  return crypto.createPublicKey({ key: Buffer.concat([SPKI_PREFIX, pkBytes]), format: 'der', type: 'spki' });
+}
+
+/// `{ pk, seed }`, both base64url: the public key and the 32-byte private seed.
+export function generateIdentity() {
+  const seed = crypto.randomBytes(32);
+  return identityFromSeed(seed);
+}
+
+/// The identity a stored seed stands for, or null when the seed is not 32 bytes.
+export function identityFromSeed(seed) {
+  const bytes = Buffer.isBuffer(seed) ? seed : unb64u(seed);
+  if (!bytes || bytes.length !== 32) return null;
+  const pk = crypto.createPublicKey(privateKey(bytes)).export({ format: 'der', type: 'spki' }).subarray(-32);
+  return { pk: b64u(pk), seed: b64u(bytes) };
+}
+
+/// Is this a well-formed public key (32 bytes, base64url)?
+export function validPk(pk) {
+  return unb64u(pk)?.length === 32;
+}
+
+/// The base64url signature of `tag || 0x00 || canon(object without "sig")`.
+export function sign(identity, tag, object) {
+  const { sig: _, ...rest } = object;
+  return b64u(crypto.sign(null, tagged(tag, canon(rest)), privateKey(unb64u(identity.seed))));
+}
+
+/// Does `object.sig` (or `sig`, when given) sign the object under `tag` for `pk`? False
+/// for any malformed input rather than a throw.
+export function verify(pk, tag, object, sig = object?.sig) {
+  try {
+    const pkBytes = unb64u(pk);
+    const sigBytes = unb64u(sig);
+    if (pkBytes?.length !== 32 || sigBytes?.length !== 64) return false;
+    const { sig: _, ...rest } = object;
+    return crypto.verify(null, tagged(tag, canon(rest)), publicKey(pkBytes), sigBytes);
+  } catch {
+    return false;
+  }
+}
+
+const B32 = 'abcdefghijklmnopqrstuvwxyz234567';
+
+function base32(buf) {
+  let bits = 0;
+  let acc = 0;
+  let out = '';
+  for (const byte of buf) {
+    acc = (acc << 8) | byte;
+    bits += 8;
+    while (bits >= 5) {
+      out += B32[(acc >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits) out += B32[(acc << (5 - bits)) & 31];
+  return out;
+}
+
+/// The v3 onion address ("<56 chars>.onion") of a public key.
+export function onionAddress(pk) {
+  const key = unb64u(pk);
+  if (key?.length !== 32) throw new TypeError('not a public key');
+  const version = Buffer.from([3]);
+  const checksum = crypto.createHash('sha3-256')
+    .update(Buffer.concat([Buffer.from('.onion checksum'), key, version])).digest().subarray(0, 2);
+  return `${base32(Buffer.concat([key, checksum, version]))}.onion`;
+}
+
+/// The key as tor's ADD_ONION takes it: "ED25519-V3:" plus the base64 of the 64-byte
+/// expanded secret key (the clamped SHA-512 of the seed).
+export function torSecretKey(identity) {
+  const h = crypto.createHash('sha512').update(unb64u(identity.seed)).digest();
+  h[0] &= 248;
+  h[31] &= 127;
+  h[31] |= 64;
+  return `ED25519-V3:${h.toString('base64')}`;
+}
