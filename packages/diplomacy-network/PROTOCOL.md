@@ -342,13 +342,14 @@ commit, opening a pull request - is done by the requester, on the executor's req
 credential of the requester crosses the network, and the executor needs none of its own
 for the forge.
 
-1. After its claim is committed, the executor sends `key` to a host offering the task
-   (the lowest `pk` among the offering hosts that granted the lock).
+1. After its claim is committed, the executor sends `key` to a host offering the task:
+   the lowest `pk` among the offering hosts that granted the lock, the executor itself
+   counted when it offers the task.
 2. That host checks that the claim in its own state names this executor and round, that
    it is active, and that it has issued no other live key for the task. It answers with:
-   - `capability`: `{ keyId, pool, taskId, executor, host, rules, exp, sig }` - `rules`
-     is the exact list of requests this task may make (section 10), `exp` is
-     `leaseUntil + 600`;
+   - `capability`: `{ keyId, pool, taskId, executor, host, rules, exp, sig }`, signed by
+     that host - `keyId` is 16 random bytes, `rules` is the exact list of requests this
+     task may make (section 10), at most 128 of them, `exp` is `leaseUntil + 600`;
    - `secret`: 32 random bytes;
    - `spec`: what the executor needs to run the task - the prompt, the item, the base
      revision, and the name and email commits are authored with.
@@ -357,13 +358,16 @@ for the forge.
 
    ```json
    { "host": "api.github.com", "method": "POST", "path": "/repos/o/r/pulls/578/reviews",
-     "headers": { "content-type": "application/json", "accept": "..." }, "body": "<b64>" }
+     "headers": { "content-type": "application/json", "accept": "..." }, "body": "<b64u>" }
    ```
 
-   The host performs it only when: the envelope is signed by the capability's executor;
-   the key is unexpired and unrevoked; the claim is still active for that executor; `seq`
-   is new; the MAC matches; and the request matches a rule. It sends the request to the
-   forge with its own credentials and answers `{ status, headers, body }`.
+   `path` carries the query string, if any. Header names are lowercase. The host
+   performs it only when: the envelope is signed by the capability's executor; the key is
+   unexpired and unrevoked; the claim is still active for that executor; `seq` is greater
+   than every `seq` used under the key; the MAC matches; and the request matches a rule.
+   A request whose MAC matched has used its `seq` whether or not a rule covered it. The
+   host sends the request to the forge with its own credentials and answers
+   `{ status, headers, body }`.
 4. Each lease extension moves `exp` with it. A lapse, a `done`, a cancelled offer or a
    better-ranked claim revokes the key.
 
@@ -425,6 +429,9 @@ decides, alone. A request no rule matches is refused.
   value, proven by indexing the pack in a quarantine. No pushed commit may write a path
   under `denyPaths` that none of its parents holds, and the push must build on commits a
   branch of that repository holds. Push options are refused.
+
+A rule carrying `graphql` or `git` never allows a request by its host, method and path
+alone: its own check must pass too.
 
 The rules a task receives come from the daemon's catalogue (`src/requester/rules.js`),
 keyed by forge and kind and pinned to the task's own item. A kind without an entry can be
