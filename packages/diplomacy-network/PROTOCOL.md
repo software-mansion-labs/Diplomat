@@ -574,14 +574,20 @@ decides, alone. A request no rule matches is refused.
   a member the rule does not name is refused. A member is `"free"`, or pinned with
   `equals`, `oneOf`, `prefix`, `prose` (text with no line starting with `/`, which GitLab
   would run as a quick action), `created` (a branch this task created, from which it has
-  opened no pull request yet) or `"assignees": <issue>` (the whole new list of that
+  opened no pull request yet; `"created": "label"` reads the member as GitHub's head
+  label, which is `branch` for a branch of the pool's repository and `account:branch`
+  for one in that account's fork of it) or `"assignees": <issue>` (the whole new list of that
   issue's assignees, as account ids: the list the forge holds now, with the task's own
   account added or taken away and no other change), and may be `required` - which the
   pinned query parameter of the same name satisfies as well. What is sent to the forge is
   the parsed body, written out again. A rule without `body` takes no body.
 - `pull` and `comment` have the forge asked, before anything is sent, which pull request
   the number or comment id in the path belongs to, who opened or wrote it and whether it
-  is open or pending. `pick` lists the members of the forge's JSON answer an executor
+  is open or pending. `"project": { "segment": 3, "owner": "me", "repo": "group/proj" }`
+  has the forge asked what the project named in that path segment is: the request is
+  allowed only when it is the fork of `repo` that the account `owner` holds itself (see
+  `fork` below), and a `created` branch of that rule is one this task created in that
+  fork. `pick` lists the members of the forge's JSON answer an executor
   gets back - of each entry, when the answer is a list. An answer that is neither an
   object nor a list of objects is not passed on.
 - `{ "graphql": { "forge": "github", "repo": "o/r", "roots": [...], "mutations": [...],
@@ -598,20 +604,32 @@ decides, alone. A request no rule matches is refused.
   from the list, its input may hold only the members the reader's table names, and every
   object it addresses is resolved on the forge and must belong to the task's own item.
 - `{ "git": "receive-pack", "repo": "o/r", "refs": ["refs/heads/**"], "create": 1,
-  "denyPaths": [".github/workflows/**"] }` on the two smart-HTTP push endpoints of `repo`,
-  and of no other repository, confines a push. No ref may be deleted. A ref may be
-  created when `refs` covers it, up to `create` refs per task; it may be updated when it
-  is a ref this task created, or the head branch, in `repo` itself, of the pull request
-  `"head": { "number": 578 }` names (`{ "author": "me" }`: of any open pull request by
-  that author). The repository's default branch, and a branch the forge reports as
-  protected, is never created or moved. The forge is asked where each ref is: a creation
+  "denyPaths": [".github/workflows/**"] }` on the two smart-HTTP push endpoints of a
+  repository confines a push. Without `fork` the repository is `repo`, the pool's own,
+  and no other. With `"fork": "me"` the rule's path names a repository of that account
+  (`/me/*/info/refs`, `/me/*/git-receive-pack`), and the push is allowed only when the
+  forge says the repository at the path belongs to that account and is a fork of `repo`
+  itself, both compared without regard to case. A repository the forge does not show,
+  one of another owner and one that is not a fork of `repo` are refused in the same
+  words. No ref may be deleted. A ref may be created when `refs` covers it, up to
+  `create` refs per task, counted over `repo` and the fork together; it may be updated
+  when it is a ref this task created in the repository the push goes to, or the head
+  branch of the pull request `"head": { "number": 578 }` names (`{ "author": "me" }`: of
+  any open pull request by that author) - an open pull request of `repo` whose head
+  branch the forge places in the repository the push goes to. The default branch of
+  that repository, and a branch the forge reports as protected there, is never created
+  or moved. The forge is asked where each ref is: a creation
   must be of a name the forge has no branch of, an update must start from the branch's
   current value and be a fast-forward of it, proven by indexing the pack in a quarantine.
   No pushed commit may add, change or delete a path under `denyPaths` - compared without
-  regard to case - except to what one of its parents holds there, and the push must build
-  on commits a branch of that repository holds. On GitLab the file the project is set to
+  regard to case - except to what one of its parents holds there; a commit in the pack
+  that a branch of the forge holds already is the forge's own and is not compared. The
+  push must build on commits a branch of the repository pushed to holds - for a fork, a
+  branch of the fork or of `repo`, which are the two repositories the quarantine
+  fetches from. On GitLab the file the project is set to
   read its CI configuration from, when it is a file of the project's own repository, is
-  under `denyPaths` too. The push must ask for the forge's report (`report-status`);
+  under `denyPaths` too; for a push to a fork, the fork's file and `repo`'s both are.
+  The push must ask for the forge's report (`report-status`);
   push options, a `shallow` line, a ref name that is not UTF-8, a pack holding an object
   git's own check calls broken, and a pack whose objects add up to more than 512 MiB once
   unpacked - a delta counted as the object it builds - are refused.
@@ -620,12 +638,15 @@ A rule carrying `graphql` or `git` never allows a request by its host, method an
 alone: its own check must pass too.
 
 Where a check asks the forge - who opened a pull request, where a branch is, which branch
-is the default, who is assigned - only an answer that settles the question is used. A
+is the default, who is assigned, whose a repository is and what it is a fork of - only
+an answer that settles the question is used. A
 forge that says there is no such thing has answered; a rate limit, an error or anything
 else has not, and the request is refused.
 
 What a rule lets a task use up is counted for the task, not for the key: the branches it
-may create, and one pull request from each. The host keeps the count with its offer, on
+may create, and one pull request from each. A branch in a fork is counted with the
+others and kept under the fork's name, so it is never taken for the branch of that name
+in the pool's repository. The host keeps the count with its offer, on
 disk, so a key issued for a later claim of the same offer goes on from where the last one
 stopped, and a restart forgets nothing. A creation is counted before the push is sent. The
 branch is "a ref this task created" once the forge's report says `ok` for it; a creation

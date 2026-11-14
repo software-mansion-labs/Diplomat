@@ -84,17 +84,26 @@ and ends with the job.
 | Job | May write |
 |---|---|
 | Review of someone else's PR | a review with line comments and thread replies on that PR; approve or request changes only where the review policy lets it |
-| Answering reviews on your PR | thread replies, resolving threads, fast-forward pushes to that PR's branch when the branch is in the repository itself; marking it ready only where the setting allows |
-| Conflicts | fast-forward pushes to that PR's branch when the branch is in the repository itself |
-| Issue | add or remove itself as an assignee, comment on that issue, push one new branch and fast-forward it, open one draft PR from it |
-| Audit | push up to 24 new branches and fast-forward them, open one draft PR from each; nothing when read-only |
+| Answering reviews on your PR | thread replies, resolving threads, fast-forward pushes to that PR's branch when the branch is in the repository itself or in your own fork of it; marking it ready only where the setting allows |
+| Conflicts | fast-forward pushes to that PR's branch when the branch is in the repository itself or in your own fork of it |
+| Issue | add or remove itself as an assignee, comment on that issue, push one new branch - in the repository itself or in your own fork of it - and fast-forward it, open one draft PR from it |
+| Audit | push up to 24 new branches, in the repository itself or in your own fork of it, and fast-forward them, open one draft PR from each; nothing when read-only |
 | Investigate | nothing |
 
-**One new branch** is one for the job, not for each attempt: what a job has created is kept with
-the offer, so a second machine taking the job after the first failed, and the daemon after a
-restart, go on from the same count. A branch is the job's own - to push to again, to open its PR
-from - once the forge has said it accepted the push that created it. A push the forge declined
-uses nothing up; one whose answer never came stays counted.
+**One new branch** is one for the job, not for each attempt and not for each place: what a job
+has created, in the repository or in your fork, is kept with the offer, so a second machine
+taking the job after the first failed, and the daemon after a restart, go on from the same
+count. A branch is the job's own - to push to again, to open its PR from - once the forge has
+said it accepted the push that created it. A push the forge declined uses nothing up; one whose
+answer never came stays counted.
+
+**Your own fork** is the repository under the account the repository was linked with that the
+forge itself calls a fork of this repository. The machine asks the forge whose it is and what it
+is a fork of before every push there. A fork held by somebody else, by an organisation or a
+group, a fork of a fork and any other repository of yours are out of reach. A PR's branch is
+pushed in the fork only when the forge places that PR's branch there, and a push to the fork is
+held to everything a push to the repository is, against the fork's own default and protected
+branches.
 
 Every job may read the repository it belongs to. Of what lies outside it and the repository
 points at - the fork a PR comes from, an issue elsewhere that mentions one here - it is told
@@ -107,16 +116,18 @@ whoever knows their id; the rules do not narrow what the forge itself calls part
 repository.)
 
 No job may merge, close, force-push, delete a branch, push to the default branch or to a branch
-the forge reports as protected, push to a fork or any other repository, or touch settings,
-secrets or releases. No push may add, change or delete a CI definition, in any letter case:
-`.github/workflows/**` on GitHub; `.gitlab-ci.yml`, `.gitlab/ci/**` and the file the project is
-set to read its CI configuration from on GitLab. What CI runs from the rest of the repository - a
+the forge reports as protected, push to any repository but this one and your own fork of it, or
+touch settings, secrets or releases. No push may add, change or delete a CI definition, in any
+letter case: `.github/workflows/**` on GitHub; `.gitlab-ci.yml`, `.gitlab/ci/**` and the file the
+project is set to read its CI configuration from on GitLab - for a push to your fork, the file
+either project is set to read. What CI runs from the rest of the repository - a
 script, a Makefile, a file a definition includes from elsewhere - is a job's to change like any
 other file. Whether a name that does not exist yet would be protected once created is left to the
 forge, which enforces its own rules on the push.
 
 Before it allows a push or a write, the machine asks the forge what the rule depends on: where
-the branch is, which branch is the default, who opened the PR, who is assigned. Only an answer
+the branch is, which branch is the default, who opened the PR, who is assigned, whose a fork is.
+Only an answer
 that settles the question counts; when the forge is rate-limited, failing or silent, the request
 is refused. A refused request comes back to the agent with the reason.
 

@@ -230,9 +230,14 @@ the outcome.
 
 A request is checked before it is sent (`requester/authorize.js`). Where the check
 depends on the forge - where a branch is, which branch is the default, whether it is
-protected, who opened a pull request, who is assigned - the forge is asked, and an answer
+protected, who opened a pull request, who is assigned, whose a repository is and what it
+is a fork of - the forge is asked, and an answer
 that does not settle the question refuses the request: a rate limit or an error is not
-"no such branch". A push is read whole (`requester/receivepack.js`): its pack is measured
+"no such branch". A push goes to the pool's repository or to the fork of it held by the
+account the pool is linked with (its `identity`), where the head branch of a pull
+request opened from that fork lives, and to no other repository: not somebody else's
+fork, not an organisation's or a group's, not a fork of a fork. A push is read whole
+(`requester/receivepack.js`): its pack is measured
 before git sees it and refused when its objects add up to more than
 `DN_PUSH_UNPACKED_MAX_BYTES` (512 MiB) once unpacked, then indexed in a quarantine with
 git's own object check, where the fast-forward and the pushed files are proven.
