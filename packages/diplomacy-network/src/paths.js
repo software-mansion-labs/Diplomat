@@ -75,3 +75,23 @@ export const RANK_DELAY_MS = num('DN_RANK_DELAY_MS', 5000);
 export const ADMIT_TTL_MS = num('DN_ADMIT_TTL_MS', 120 * 1000);
 // A container no job has used for this long is removed.
 export const CONTAINER_IDLE_MS = num('DN_CONTAINER_IDLE_MS', 6 * 3600 * 1000);
+
+// Acting as the requester (PROTOCOL.md section 9). Where each forge host is reached:
+// {"api.github.com":"http://127.0.0.1:1234"} sends that host's requests to a stand-in,
+// which is how the tests never touch a real forge. A host not listed is https://<host>.
+export const FORGE_ORIGINS = (() => {
+  try {
+    const parsed = JSON.parse(process.env.DN_FORGE_ORIGINS || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch { return {}; }
+})();
+// One request to the forge, and the largest answer passed back to an executor.
+export const FORGE_TIMEOUT_MS = num('DN_FORGE_TIMEOUT_MS', 60 * 1000);
+export const FORGE_RESPONSE_MAX_BYTES = num('DN_FORGE_RESPONSE_MAX_BYTES', 32 * 2 ** 20);
+// A forge token read from gh or glab is reused this long before it is read again.
+export const TOKEN_TTL_MS = num('DN_TOKEN_TTL_MS', 60 * 1000);
+// The largest push body (ref commands and pack) the push check reads. An `act` request
+// is capped at 48 MiB of JSON, which is 36 MiB once its base64 is undone.
+export const PUSH_MAX_BYTES = num('DN_PUSH_MAX_BYTES', 32 * 2 ** 20);
+// One git command of the push check, the fetch into the quarantine included.
+export const GIT_TIMEOUT_MS = num('DN_GIT_TIMEOUT_MS', 120 * 1000);
