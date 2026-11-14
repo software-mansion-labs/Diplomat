@@ -82,7 +82,7 @@ test/            one self-contained *.mjs per subject, run by test/run-all.mjs
 | `pools/<pool hash>.json` (0600) | that pool's records |
 | `locks.json` (0600) | the claim locks this host granted |
 | `keys.json` (0600) | live capabilities this host issued or holds |
-| `offers.json` (0600) | the tasks this host asked for: prompt, counters, outcome |
+| `offers.json` (0600) | the tasks this host asked for: prompt, counters, outcome, and what each has used of its rules' allowances |
 | `runs.json` (0600) | the tasks this host runs or ran, and the tasks it gave up on |
 | `jobs.json` (0600) | the jobs going in this daemon's containers, for the daemon after it: the broker's port, each job's container, proxy token and CA generation |
 | `tor/` | tor's data directory |
@@ -227,6 +227,21 @@ come from `requester/rules.js`, and from then on performs each allowed `act` req
 with this machine's own `gh` or `glab` credentials (`requester/forge.js`). It pings the
 executor before each lease runs out, and marks the offer done when the executor reports
 the outcome.
+
+A request is checked before it is sent (`requester/authorize.js`). Where the check
+depends on the forge - where a branch is, which branch is the default, whether it is
+protected, who opened a pull request, who is assigned - the forge is asked, and an answer
+that does not settle the question refuses the request: a rate limit or an error is not
+"no such branch". A push is read whole (`requester/receivepack.js`): its pack is measured
+before git sees it and refused when its objects add up to more than
+`DN_PUSH_UNPACKED_MAX_BYTES` (512 MiB) once unpacked, then indexed in a quarantine with
+git's own object check, where the fast-forward and the pushed files are proven.
+
+What a task has used of its allowances - the branches it created, the pull request it
+opened from each - is the task's, not the key's: it is kept with the offer in
+`offers.json`, written before the request that uses it is sent, so every key issued for
+the task goes on from the same count and a restart forgets none of it. A branch is the
+task's own once the forge's answer to the push says so.
 
 **Executor side.** With `admit.slots` above zero and a task available that this machine
 would take, the daemon runs the claim round. Having the key, it makes sure of four
