@@ -346,10 +346,23 @@ exit 0
     assert.notEqual(other.container.name, tools.container.name);
     assert.deepEqual(other.out('runs').split('\n').sort(), ['bin', 'other-peer']);
     assert.equal(other.out('work'), 'other-peer');
-    const listed = (await sh('ps', '-a', ...mine, '--filter', 'label=dn.pool', '--format', '{{.Names}} {{.Label "dn.peer"}} {{.Label "dn.pool"}}')).split('\n').sort();
-    assert.deepEqual(listed, [`${tools.container.name} ${PEER_A} ${pool.id}`, `${other.container.name} ${PEER_B} ${pool.id}`].sort());
-    const relays = (await sh('ps', '-a', ...mine, '--filter', 'label=dn.relay', '--format', '{{.Names}} {{.Label "dn.relay"}}')).split('\n').sort();
-    assert.deepEqual(relays, [`${tools.container.name}-relay ${tools.container.name}`, `${other.container.name}-relay ${other.container.name}`].sort(), 'each with a relay of its own and nothing else');
+    for (const c of [tools.container, other.container]) assert.match(c.name, /^dn-[0-9a-z]{25}-[0-9a-z]{25}$/);
+    // Every container of this run by its labels: a job container and its relay for each pair, and nothing else.
+    const listed = (await sh('ps', '-a', ...mine, '--format', '{{.Names}} {{.Label "dn.peer"}} {{.Label "dn.pool"}} {{.Label "dn.relay"}}')).split('\n').map((l) => l.trim()).sort();
+    assert.deepEqual(listed, [[tools.container.name, PEER_A], [other.container.name, PEER_B]].flatMap(([name, peer]) => [`${name} ${peer} ${pool.id}`, `${name}-relay ${peer} ${pool.id} ${name}`]).sort());
+    // Its network and its volume say whose they are as well.
+    const whose = '{{index .Labels "dn.peer"}} {{index .Labels "dn.pool"}} {{index .Labels "dn.base"}}';
+    for (const [name, peer] of [[tools.container.name, PEER_A], [other.container.name, PEER_B]]) {
+      assert.equal(await sh('network', 'inspect', name, '--format', whose), `${peer} ${pool.id} ${BASE}`);
+      assert.equal(await sh('volume', 'inspect', name.replace('dn-', 'dn-work-'), '--format', whose), `${peer} ${pool.id} ${BASE}`);
+    }
+    // Nothing is shared between a job container and its relay, or between two peers' containers: no volume, no namespace.
+    const held = '{{range .Mounts}}{{.Type}}:{{if .Name}}{{.Name}}{{else}}{{.Source}}{{end}}:{{.Destination}} {{end}}| {{json .HostConfig.VolumesFrom}} {{json .HostConfig.PidMode}} {{json .HostConfig.IpcMode}} {{json .HostConfig.UTSMode}} {{json .HostConfig.UsernsMode}} {{.HostConfig.Privileged}}';
+    for (const c of [tools.container, other.container]) {
+      const volume = c.name.replace('dn-', 'dn-work-');
+      assert.match(await sh('inspect', c.name, '--format', held), new RegExp(`^(volume:${volume}:/work bind:\\S+/\\.containers/${c.name}:/dn/runs|bind:\\S+/\\.containers/${c.name}:/dn/runs volume:${volume}:/work) \\| null "" "(private|shareable)" "" "" false$`));
+      assert.match(await sh('inspect', `${c.name}-relay`, '--format', held), /^\| null "" "(private|shareable)" "" "" false$/, 'a relay holds no volume and no directory');
+    }
   });
 
   await check('one peer\'s container cannot reach another\'s, and a forward opened for one job is of no use to a job in another container', async () => {
@@ -466,6 +479,28 @@ exit 0
       assert.doesNotMatch(fs.readFileSync(path.join(job.dir, 'log.jsonl'), 'utf8'), /sk-ant-/);
     });
   }
+
+  await check('what a container holds of the disk is measured: its layer, its volume and its run records, a directory it gave to another user and every empty file included', async () => {
+    const name = tools.container.name;
+    const MiB = 2 ** 20;
+    const before = await containers.usage(name);
+    await sh('exec', name, 'sh', '-c', [
+      'dd if=/dev/urandom of=/root/layer.bin bs=1M count=10 2>/dev/null',
+      'mkdir -m 700 /work/private && dd if=/dev/urandom of=/work/private/volume.bin bs=1M count=15 2>/dev/null',
+      'mkdir /work/private/many && cd /work/private/many && i=0 && while [ $i -lt 5000 ]; do : > f$i; i=$((i+1)); done',
+      'chown -R 1234:1234 /work/private',
+      'dd if=/dev/urandom of=/dn/runs/records.bin bs=1M count=2 2>/dev/null',
+    ].join(' && '));
+    const started = Date.now();
+    const after = await containers.usage(name);
+    console.log(`INFO disk use of ${name}: ${before} bytes, then ${after} (${after - before} more) measured in ${Date.now() - started} ms`);
+    // The directory, the file and the five thousand in the volume, and the one file among the records.
+    const least = 27 * MiB + 5004 * 4096;
+    assert.ok(after - before >= least && after - before < least + 2 * MiB, `${after - before} for ${least}`);
+    assert.equal(await sh('ps', '-a', '-q', ...mine, '--filter', 'label=dn.probe'), '', 'what measured it is gone');
+    assert.equal(await containers.usage('dn-no-such-container'), null);
+    assert.deepEqual(await containers.overQuota(), [], 'under the 20 GiB a container may hold, none is named');
+  });
 
   await check('an idle container is removed with its volume, and nothing of this run is left in docker', async () => {
     clock.skew = 7 * 3600 * 1000;
