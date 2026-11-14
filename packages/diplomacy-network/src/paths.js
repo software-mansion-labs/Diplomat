@@ -54,6 +54,9 @@ export const POW = {
   epochSecs: 3600,
 };
 export const CLOCK_SKEW_SECS = 300;
+// The largest request body, and the larger one an `act` request may carry.
+export const MAX_BODY_BYTES = 2 ** 20;
+export const MAX_ACT_BODY_BYTES = 48 * 2 ** 20;
 export const HOURS_FLOOR = 12;
 export const HOURS_CEILING = 720;
 export const LEASE_SECS = num('DN_LEASE_SECS', 7200);

@@ -56,16 +56,17 @@ never repaired.
 Every request carries its own proof of work. None is ever accepted without one.
 
 - **Public seed.** `seed(to, epoch) = H("dn1/seed" || 0x00 || to || u64be(epoch))` with
-  `epoch = floor(ts / 3600)`. A target accepts its current epoch and the ones directly
-  before and after it.
+  `epoch = floor(ts / 3600)`. `ts` is within 300 s of the target's clock, so the epoch of
+  an accepted request is the target's own or one directly beside it.
 - **Work seed.** `nonce` is 16 fresh random bytes per request. A target remembers every
-  `(from, nonce)` it accepted for as long as the epoch stays acceptable and refuses a
-  repeat.
+  `(from, nonce)` it accepted for as long as the epoch stays acceptable - its own and the
+  ones directly before and after it - and refuses a repeat.
 - **Challenge.** `c = H("dn1/pow" || 0x00 || seed || to || from || nonce || u32be(effort) || H(canon(core)))`
   where `core` is the envelope's `v, pool, kind, from, to, ts, body`.
 - **Solution.** `counter` is 8 bytes such that, with `R` the first 4 bytes of
   `blake2b-512(c || counter)` read big-endian, `R * effort <= 0xFFFFFFFF`. A solution
-  costs `effort` hashes on average and one hash to check.
+  costs `effort` hashes on average and one hash to check. `effort` is an integer from 1
+  to 2^32 - 1.
 - **Signature.** `sig` covers the whole envelope including `pow`, so the work is bound to
   the sender key, the target key, the difficulty, the public seed and the work seed.
 
@@ -89,11 +90,21 @@ stranger: all strangers share one counter, and their `BASE` is 16 times higher.
 
 ### Verification order
 
-A target checks, cheapest first, and stops at the first failure: envelope shape and size;
-`to` is its own key; `ts` within 300 s of its clock; `pow.epoch` acceptable; `effort`
-at least `required(from)`; the solution; the signature; `(from, nonce)` unseen. Only a
-request that passed the signature counts toward its sender's `n`; a failure before that
-counts toward the stranger counter.
+A target checks, cheapest first, and stops at the first failure:
+
+| Check | Refusal |
+| --- | --- |
+| envelope shape and size | `bad-request` |
+| `to` is its own key | `bad-request` |
+| `ts` within 300 s of its clock | `stale` |
+| `pow.epoch` is the epoch of `ts` | `stale` |
+| `effort` at least `required(from)` | `effort` |
+| the solution | `bad-request` |
+| the signature | `denied` |
+| `(from, nonce)` unseen | `replay` |
+
+Only a request that passed the signature counts toward its sender's `n`; a failure before
+that counts toward the stranger counter.
 
 ## 4. Response envelope
 
@@ -102,9 +113,12 @@ counts toward the stranger counter.
 ```
 
 `effort` is what the target would require of this sender's next request. A refusal has
-`"ok": false` and `"error": { "code": "...", "detail": "..." }` in place of `body`. Codes:
-`effort` (too little work; `effort` says how much), `stale` (clock or epoch), `replay`,
-`unknown-pool`, `not-member`, `bad-request`, `denied`, `busy`.
+`"ok": false` and `"error": { "code": "...", "detail": "..." }` in place of `body`;
+`detail` is at most 200 characters. Codes: `effort` (too little work; `effort` says how
+much), `stale` (clock or epoch), `replay`, `unknown-pool`, `not-member`, `bad-request`,
+`denied`, `busy`. A request that has no canonical form is answered with `re` over its
+bytes as received. A sender takes a response only when it is signed by the target and
+`re` names the request it sent.
 
 ## 5. Pool state
 
