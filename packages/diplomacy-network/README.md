@@ -46,6 +46,7 @@ src/
     container.js   image, one container per peer and repository, jobs
     job.js         one run: prompt, start, watch, outcome
   daemon.js      the process: local socket, config, wiring
+  ctl.js         start, stop and status from the applets, as JSON
   paths.js       files, tools and tunables
   ipc.js         the local-socket client
 image/
@@ -84,7 +85,7 @@ HTTP over `daemon.sock`, JSON in and out.
 | `GET /state` | | the snapshot |
 | `POST /pools` | `{ pools: [{ id, path, forge, identity }] }` | `{ ok }` - the linked repositories; a pool missing from the list is left |
 | `POST /admit` | `{ slots, reason? }` | `{ ok }` - how many more tasks this machine takes now |
-| `POST /offer` | `{ pool, kind, item, title, prompt, base?, now? }` | `{ taskId }` |
+| `POST /offer` | `{ pool, kind, options?, item, title, prompt, base?, now? }` | `{ taskId }` |
 | `POST /withdraw` | `{ taskId, reason }` | `{ ok }` |
 | `POST /invite` | `{ pool, ttlSecs? }` | `{ invite }` |
 | `POST /join` | `{ invite }` | `{ pool }` |
