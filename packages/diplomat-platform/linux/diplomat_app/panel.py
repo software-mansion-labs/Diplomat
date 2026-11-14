@@ -823,7 +823,6 @@ class Panel(QWidget):
                                      detail=_network_detail(agent),
                                      glyph=glyph, hex_color=tint)
                 row.clicked.connect(self._open_network)
-                row.stop_requested.connect(self.store.stop_network_run_async)
                 row.forget_requested.connect(self.store.forget_network_run_async)
                 ranked.append((rank, row))
                 continue

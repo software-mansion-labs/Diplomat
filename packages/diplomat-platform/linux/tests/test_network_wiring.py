@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler
 from types import SimpleNamespace
 
 import pytest
+from PySide6.QtCore import Qt
 
 from diplomat_runtime import (
     activity,
@@ -106,7 +107,7 @@ class FakeDaemon:
 
 
 def snapshot(offers=(), runs=(), pools=(), admit=None) -> dict:
-    return {"updatedAt": time.time(), "daemon": {"pid": 7, "startedAt": time.time() - 60},
+    return {"updatedAt": time.time(), "daemon": {"pid": 7, "startedAt": 1_793_990_000.0},
             "identity": {"pk": ME, "onion": "x.onion"},
             "transport": {"state": "ready"}, "docker": {"state": "ready"},
             "model": {"state": "ready"}, "admit": admit or {"slots": 0},
@@ -189,41 +190,42 @@ def test_the_pools_are_posted_once_every_login_is_known(store, on, daemon, monke
     monkeypatch.setattr("diplomat_app.store.API.fetch_viewer_login", login)
     store._local_checkouts = [localrepos.Checkout("/src/tool", (LAB,))]
 
-    store._network_cycle()
-    store._network_cycle()
+    store._network_cycle_once(1000.0)
+    store._network_cycle_once(1030.0)
     assert d.sent("pools") == [], "a list missing a repository would make the daemon leave its pool"
-    assert store.network_pools_held == "the login on gitlab.example.com is not known yet"
     assert asked == ["gitlab.example.com"], "an unknown login is not asked for on every cycle"
-    assert len(d.sent("admit")) == 2, "the admit goes whatever holds the pools back"
+    assert len(d.sent("admit")) == 1, "the admit goes whatever holds the pools back"
 
     store._gitlab_me[LAB.host] = ("Bob", localrepos.glab_host_entry(LAB.host))
-    store._network_cycle()
+    store._network_cycle_once(1040.0)
+    store._network_cycle_once(1050.0)
     assert d.sent("pools") == [{"pools": [
         {"id": POOL, "path": "/src/r", "forge": "github", "identity": "alice"},
         {"id": "gitlab.example.com/group/sub/tool", "path": "/src/tool", "forge": "gitlab",
-         "identity": "bob"}]}]
-    assert store.network_pools_held == ""
+         "identity": "bob"}]}], "and is said again only when it changed"
 
 
-@pytest.mark.parametrize("break_it, why", [
-    (lambda mp, st: mp.setattr(review, "roots_complete", lambda: False),
-     "a repo root in Settings has no GitHub or GitLab remote"),
-    (lambda mp, st: mp.setattr(review, "roots_guessed", lambda: True),
-     "a repo root in Settings has no GitHub or GitLab remote"),
-    (lambda mp, st: setattr(st, "_local_checkouts", [localrepos.Checkout("/src/x", ())]),
-     "a checkout under Other repos has no GitHub or GitLab remote"),
-    (lambda mp, st: (setattr(st, "me", ""),
-                     mp.setattr("diplomat_app.store.API.fetch_viewer_login", lambda: "")),
-     "the login on github.com is not known yet"),
-])
+@pytest.mark.parametrize("break_it", [
+    lambda mp, st: mp.setattr(review, "roots_complete", lambda: False),
+    lambda mp, st: mp.setattr(review, "roots_guessed", lambda: True),
+    lambda mp, st: setattr(st, "_local_checkouts", [localrepos.Checkout("/src/x", ())]),
+    lambda mp, st: setattr(st, "me", ""),
+], ids=["a root unread", "a root guessed", "a checkout unread", "no login"])
 def test_an_unresolved_repository_holds_the_pools_back(store, on, daemon, monkeypatch,
-                                                       break_it, why):
+                                                       break_it):
     d = daemon()
     break_it(monkeypatch, store)
     store._network_cycle()
-    assert d.sent("pools") == []
-    assert store.network_pools_held == why
+    assert d.sent("pools") == [] and len(d.sent("admit")) == 1
     assert store.network_state is not None
+
+
+def test_no_linked_repository_is_an_empty_list_once_the_roots_are_resolved(
+        store, on, daemon, monkeypatch):
+    d = daemon()
+    monkeypatch.setattr(type(store), "local_repos", property(lambda self: []))
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": []}]
 
 
 def test_the_github_login_is_ghs_own_not_the_username_override(store, on, daemon):
@@ -235,11 +237,14 @@ def test_the_github_login_is_ghs_own_not_the_username_override(store, on, daemon
 
 # MARK: - the cycle: admit
 
-def test_the_admit_is_counted_again_and_posted_every_cycle(store, on, daemon, monkeypatch):
+def test_the_admit_is_said_when_it_changes_and_once_a_minute(store, on, daemon, monkeypatch):
     d = daemon()
     store.auto_task_limit = 3
-    store._network_cycle()
-    assert d.sent("admit") == [{"slots": 3}]
+    store._network_cycle_once(1000.0)
+    store._network_cycle_once(1059.0)
+    assert d.sent("admit") == [{"slots": 3}], "unchanged, and said under a minute ago"
+    store._network_cycle_once(1060.0)
+    assert d.sent("admit") == [{"slots": 3}] * 2, "the daemon lets it go stale"
 
     # One container this machine runs for the network, and one agent in a terminal.
     d.state = snapshot(runs=[{"runId": "r1", "taskId": "tx", "state": "running"},
@@ -250,39 +255,42 @@ def test_the_admit_is_counted_again_and_posted_every_cycle(store, on, daemon, mo
         source=autofix.SOURCE_AUTO, pid=4242, tty="pts/4"), "P")
     fake_probes(monkeypatch, processes={local.pid: agentstate.ProcInfo(
         tty="pts/4", elapsed=5.0, is_agent=True)})
-    store._network_cycle()
+    store._network_cycle_once(1061.0)
     assert d.sent("admit")[-1] == {"slots": 1}
 
     store.queue_auto_run = False
-    store._network_cycle()
+    store._network_cycle_once(1062.0)
     assert d.sent("admit")[-1] == {"slots": 0, "reason": "paused"}
 
     monkeypatch.setattr("diplomat_app.store.autobudget.enabled", lambda: True)
     monkeypatch.setattr("diplomat_app.store.autobudget.decide",
                         lambda: autofix.Budget(affordable=False))
-    store._network_cycle()
+    store._network_cycle_once(1063.0)
     assert d.sent("admit")[-1] == {"slots": 0, "reason": "budget"}
 
     monkeypatch.setattr("diplomat_app.store.diskfloor.lowest",
                         lambda paths: SimpleNamespace(low=True))
-    store._network_cycle()
+    store._network_cycle_once(1064.0)
     assert d.sent("admit")[-1] == {"slots": 0, "reason": "disk"}
-    assert len(d.sent("admit")) == 5, "once a cycle, since the daemon lets it go stale"
+    assert len(d.sent("admit")) == 6 and len(d.sent("pools")) == 1
 
 
-def test_the_snapshot_kept_is_the_one_read_after_the_posts(store, on, daemon):
+def test_a_daemon_that_started_since_is_told_both_again(store, on, daemon):
     d = daemon()
-    d.routes["/admit"] = lambda body: (d.__setattr__("state", snapshot(admit=body)), (200, {}))[1]
-    store.auto_task_limit = 2
-    store._network_cycle()
-    assert store.network_state.admit.slots == 2
-    assert [m for m, path, _ in d.got if path == "/state"] == ["GET", "GET"]
+    store._network_cycle_once(1000.0)
+    store._network_cycle_once(1010.0)
+    assert (len(d.sent("pools")), len(d.sent("admit"))) == (1, 1)
+    d.state = {**snapshot(), "daemon": {"pid": 8, "startedAt": 1_794_000_000.0}}
+    store._network_cycle_once(1020.0)
+    assert (len(d.sent("pools")), len(d.sent("admit"))) == (2, 2)
 
 
-def test_a_refused_post_is_kept_for_the_screen(store, on, daemon):
-    daemon({"/admit": (400, {"error": "slots must be a whole number."})})
-    store._network_cycle()
-    assert store.network_error == "slots must be a whole number."
+def test_a_post_the_daemon_refused_is_made_again(store, on, daemon):
+    d = daemon({"/admit": (400, {"error": "slots must be a whole number."}),
+                "/pools": (400, {"error": "No such checkout."})})
+    store._network_cycle_once(1000.0)
+    store._network_cycle_once(1001.0)
+    assert (len(d.sent("pools")), len(d.sent("admit"))) == (2, 2)
 
 
 def test_nothing_asks_the_daemon_with_the_switch_off(store, daemon, monkeypatch):
@@ -297,7 +305,26 @@ def test_nothing_asks_the_daemon_with_the_switch_off(store, daemon, monkeypatch)
     assert d.got == []
     assert len(calls) == 1
     assert [r.network for r in agentregistry.load()] == [None]
-    assert store.network_state is None and not store.network_asked
+    assert store.network_state is None and store.network_answered is None
+
+
+def test_every_settle_asks_the_daemon_and_keeps_what_it_said(store, on, daemon):
+    d = daemon()
+    told = []
+    store.network_changed.connect(lambda: told.append(1))
+    store._settle_agents()
+    d.state = {**d.state, "updatedAt": d.state["updatedAt"] + 5}
+    store._settle_agents()
+    assert [path for _, path, _ in d.got] == ["/state", "/state"]
+    assert store.network_answered is True and store.network_state.pid == 7
+    assert len(told) == 1, "its clock moving on is no change to redraw for"
+    d.state = {**d.state, "admit": {"slots": 4}}
+    store._settle_agents()
+    assert len(told) == 2 and store.network_state.admit.slots == 4
+    d.close()
+    store._settle_agents()
+    assert store.network_answered is False and store.network_state is None
+    assert len(told) == 3
 
 
 # MARK: - the daemon's lifecycle
@@ -318,7 +345,7 @@ def installer(monkeypatch):
 
 def test_the_switch_starts_and_stops_the_daemon_off_the_gui_thread(store, daemon, installer,
                                                                    monkeypatch):
-    daemon()
+    d = daemon()
     monkeypatch.setattr(review, "roots_guessed", lambda: False)
     monkeypatch.setattr(review, "roots_complete", lambda: True)
     threads = []
@@ -330,14 +357,16 @@ def test_the_switch_starts_and_stops_the_daemon_off_the_gui_thread(store, daemon
     assert store.wait_for_background() == []
     assert appconfig.read()[network.ENABLED_KEY] is True
     assert installer == [("install.js", "--start-daemon")] and threads == [False]
-    assert store.network_state is not None, "the start takes a first cycle"
+    assert store.network_answered is True, "the start takes a first cycle"
     assert lines("network-start") == ["Started the Diplomacy Network daemon (ok: true)"]
 
+    asked = len(d.got)
     store.set_network_enabled(False)
     assert store.wait_for_background() == []
     assert appconfig.read()[network.ENABLED_KEY] is False
     assert installer[-1] == ("install.js", "--stop-daemon")
-    assert store.network_state is None and not store.network_asked
+    assert len(d.got) == asked, "no run of the network's is booked: nothing to take back"
+    assert store.network_state is None and store.network_answered is None
     assert lines("network-stop") == ["Stopped the Diplomacy Network daemon (ok: true)"]
 
 
@@ -350,59 +379,86 @@ def test_neither_a_start_nor_a_restart_runs_with_the_switch_off(store, daemon, i
     assert installer == [] and d.got == []
 
 
-def test_a_switch_turned_off_while_the_daemon_starts_stops_it(store, on, daemon, monkeypatch):
-    """The switch's own stop is dropped while the start holds the gate."""
-    d = daemon()
-    ran = []
+def test_a_switch_flipped_twice_leaves_the_daemon_as_the_second_flip_says(store, monkeypatch):
+    ran, release = [], threading.Event()
 
     def run(script, arg):
         ran.append(arg)
-        if arg == "--start-daemon":
-            store.set_network_enabled(False)
+        if len(ran) == 1:
+            release.wait(10)
         return {"daemonRunning": arg != "--stop-daemon"}
 
     monkeypatch.setattr(da, "run_installer", run)
-    store.start_network_daemon_async()
+    store.set_network_enabled(True)
+    deadline = time.monotonic() + 10
+    while not ran and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert store.network_busy
+    store.set_network_enabled(False)
+    store.restart_network_async()
+    release.set()
     assert store.wait_for_background() == []
-    assert ran == ["--start-daemon", "--stop-daemon"]
-    assert d.got == [] and store.network_state is None
-    assert lines("network-stop") == ["Stopped the Diplomacy Network daemon (ok: true)"]
+    assert ran == ["--start-daemon", "--stop-daemon"], "the stop waited, the button gave way"
+    assert not store.network_busy
 
 
-def test_a_start_the_installer_could_not_make_says_so(store, on):
-    store.start_network_daemon_async()
-    assert store.wait_for_background() == []
+def test_a_start_asked_for_while_one_is_under_way_gives_way(store, on, installer):
+    with store._network_lifecycle:
+        store.start_network_daemon_async()
+        store.restart_network_async()
+        assert store.wait_for_background() == [], "neither waits for its turn"
+    assert installer == []
+
+
+def test_a_start_that_keeps_failing_is_said_once_for_the_silence(store, on):
+    store._network_cycle_once(1000.0)
+    store._network_cycle_once(1015.0)
     assert lines("network-start") == [
         "Started the Diplomacy Network daemon (ok: false): the installer could not be run"]
+    store.restart_network_async()
+    assert store.wait_for_background() == []
+    assert lines("network-start")[0] == (
+        "Restarted the Diplomacy Network daemon (ok: false): the installer could not be run"
+    ), "the operator's own is answered every time"
 
 
 def test_a_daemon_found_dead_is_started_again_with_a_growing_wait(store, on, installer):
-    store._network_cycle()
-    assert store.wait_for_background() == []
+    store._network_cycle_once(1000.0)
     assert installer == [("install.js", "--start-daemon")]
-    assert store.network_asked and store.network_state is None
+    assert store.network_answered is False and store.network_state is None
 
-    store._network_cycle()
-    assert store.wait_for_background() == []
+    store._network_cycle_once(1014.0)
     assert len(installer) == 1, "not on every cycle"
-
-    due = store._network_start_due
-    store._revive_network_daemon(due - 1)
-    store._revive_network_daemon(due)
-    assert store.wait_for_background() == []
+    store._network_cycle_once(1015.0)
     assert len(installer) == 2
-    assert store._network_start_due == due + 2 * store.NETWORK_START_WAIT
+    store._network_cycle_once(1044.0)
+    store._network_cycle_once(1045.0)
+    assert len(installer) == 3
+
+    waits, now = [], 1045.0
+    for _ in range(6):
+        now = store._network_memo.start_after
+        store._network_cycle_once(now)
+        waits.append(store._network_memo.start_delay)
+    assert waits == [120.0, 240.0, 480.0, 600.0, 600.0, 600.0]
     assert all(e.source == "auto" for e in activity.read() if e.action == "network-start")
 
 
-def test_an_answer_resets_the_wait(store, on, installer, daemon):
-    store._network_cycle()
-    assert store.wait_for_background() == []
-    assert store._network_start_wait == 2 * store.NETWORK_START_WAIT
-    daemon()
-    store._network_cycle()
-    assert (store._network_start_due, store._network_start_wait) == (
-        0.0, store.NETWORK_START_WAIT)
+def test_an_answer_resets_the_wait_and_brings_the_poll_forward(store, on, installer, daemon,
+                                                               monkeypatch):
+    forwarded = []
+    monkeypatch.setattr(store, "_bring_poll_forward", forwarded.append)
+    d = daemon()
+    store._network_cycle_once(990.0)
+    # The same daemon goes quiet and comes back: nothing of it reads as another one.
+    up, d.state = d.state, None
+    store._network_cycle_once(1000.0)
+    store._network_cycle_once(1015.0)
+    assert store._network_memo.start_delay == 30.0 and forwarded == []
+    d.state = up
+    store._network_cycle_once(1016.0)
+    assert (store._network_memo.start_after, store._network_memo.start_delay) == (0.0, 0.0)
+    assert len(forwarded) == 1, "work held while it was silent has somewhere to go"
 
 
 # MARK: - the gate
@@ -444,7 +500,7 @@ def test_the_run_reads_where_it_is_as_the_snapshot_moves_and_is_priced_once(
     store._network_cycle()
     store._network_cycle()
     assert rows(store) == [(agentstate.RUNNING, "running on 9f3c1a77")]
-    assert lines("network-claimed") == ["Auto · Review · #9 - claimed by 9f3c1a77"]
+    assert lines("network-claimed") == ["Auto · Review · #9 - running on 9f3c1a77"]
 
     d.state = snapshot(offers=[offer(
         state="done", executor=PEER, endedAt=1_794_000_000.0,
@@ -490,6 +546,31 @@ def test_a_task_that_failed_is_logged_as_failed_and_still_priced(store, on, daem
     assert [e["tokens"] for e in ledger() if e["ev"] == "done"] == [90]
 
 
+@pytest.mark.parametrize("ok, audited", [(True, [("https://github.com/o/r/pull/9", "alice")]),
+                                         (False, [])])
+def test_a_review_the_network_finished_is_audited_like_one_run_here(
+        store, on, daemon, monkeypatch, ok, audited):
+    asked = []
+    monkeypatch.setattr("diplomat_runtime.reviewaudit.audit", lambda url, me, since: (
+        asked.append((url, me)), ["left a review nobody can see"])[1])
+    daemon(state=snapshot(offers=[offer(state="done", executor=PEER, outcome={"ok": ok})]))
+    book_network_run()
+    store._settle_agents()
+    assert store.wait_for_background() == []
+    assert asked == audited
+    assert lines("warn") == (
+        ["Auto · Review · #9 left a review nobody can see"] if ok else [])
+
+
+def test_an_outcome_that_spent_nothing_leaves_the_ledger_entry_open(store, on, daemon):
+    daemon(state=snapshot(offers=[offer(
+        state="done", executor=ME, outcome={"ok": True, "tokens": 0, "usd": 0})]))
+    book_network_run(ledger_key="review:o/r#9")
+    store._network_cycle()
+    assert agentregistry.load() == [] and len(lines("network-done")) == 1
+    assert [e for e in ledger() if e["ev"] == "done"] == []
+
+
 def test_a_daemon_that_does_not_answer_is_not_an_empty_snapshot(store, on):
     """Read as empty, a run past its grace has no offer and is retired as failed."""
     book_network_run(age=agentstate.SPAWN_GRACE + 60)
@@ -511,7 +592,7 @@ def test_an_offer_the_pool_already_holds_books_no_second_run(store, on, daemon, 
     assert store.dispatch_agent(sweep, autofix.SOURCE_PANEL) == "spawned"
     assert store.dispatch_agent(sweep, autofix.SOURCE_PANEL) == autofix.VERDICT_IN_FLIGHT
     assert sorted(r.network for r in agentregistry.load()) == ["t1", "t2"]
-    assert lines("in-flight") == ["Audit - the pool already has this job"]
+    assert lines("in-flight") == ["Audit - already offered to github.com/o/r"]
     assert calls == []
 
 
@@ -524,10 +605,9 @@ def test_an_offer_no_run_could_be_booked_for_is_taken_back(store, on, daemon, mo
 
     monkeypatch.setattr(agentregistry, "create_run", full)
     assert store.dispatch_agent(job(ledger_key="review:o/r#9"), autofix.SOURCE_AUTO) == "failed"
-    assert d.sent("withdraw") == [{"taskId": "t1", "reason": dn.WITHDRAW_UNBOOKED}]
+    assert d.sent("withdraw") == [{"taskId": "t1", "reason": "not booked"}]
     assert lines("network-failed") == [
-        "Review · #9 - offered, then withdrawn: the run could not be booked "
-        "(No space left on device)"]
+        "Review · #9 - could not register the run, so its offer is withdrawn"]
     assert lines("network-offer") == [] and ledger() == [] and calls == []
 
 
@@ -538,8 +618,7 @@ def test_a_panel_job_is_this_machines_to_run_at_once(store, on, daemon, monkeypa
     store.dispatch_agent(job(2), autofix.SOURCE_AUTO, bypass_capacity=True, forced=True)
     store.dispatch_agent(job(3), autofix.SOURCE_AUTO, bypass_capacity=True)
     assert [b["now"] for b in d.sent("offer")] == [True, True, False]
-    assert lines("network-offer")[-1] == (
-        "Review · #1 - offered to github.com/o/r, to run on this machine")
+    assert lines("network-offer")[-1] == "Review · #1 - offered to github.com/o/r"
     assert [e for e in ledger() if e["ev"] == "started"] == [], "no ledger key, no entry"
 
 
@@ -552,15 +631,18 @@ def test_with_the_daemon_down_auto_work_waits_and_a_panel_job_says_why(
     verdicts = [store.dispatch_agent(job(n), autofix.SOURCE_AUTO) for n in (1, 2)]
 
     assert verdicts == [dn.VERDICT_REFUSED] * 2
-    assert all(not v.answered and v.sentence == dn.NOT_RUNNING for v in verdicts)
+    assert all(v.sentence == "the Diplomacy Network daemon is not answering"
+               for v in verdicts)
     store.commit_queue()
     assert [e.id for e in store.queued_tasks] == ["review-req:o/r#1", "review-req:o/r#2"]
     assert lines("network-unavailable") == [
-        "The network daemon is not running. Automatic work waits in the queue."]
+        "Holding auto work - the Diplomacy Network did not take Review · #1: "
+        "the Diplomacy Network daemon is not answering"]
 
     clicked = store.dispatch_agent(job(3), autofix.SOURCE_PANEL)
-    assert clicked == dn.VERDICT_REFUSED and clicked.sentence == dn.NOT_RUNNING
-    assert lines("network-unavailable")[0] == "Review · #3 - The network daemon is not running."
+    assert clicked == dn.VERDICT_REFUSED and clicked.sentence == dn.NOT_ANSWERING
+    assert lines("network-unavailable")[0] == (
+        "Review · #3 was not offered: the Diplomacy Network daemon is not answering")
     assert "review-req:o/r#3" not in [e.id for e in store._staged_queue]
 
     assert calls == [] and agentregistry.load() == [] and ledger() == []
@@ -586,22 +668,40 @@ def test_the_queue_retries_next_cycle_and_stops_at_a_daemon_that_is_down(
     assert store._staged_queue == [] and calls == []
 
 
-def test_a_refusal_of_one_job_is_said_once_per_job(store, on, daemon, monkeypatch):
-    daemon({"/offer": (409, {"error": "This machine is not in that pool."})})
+def test_the_queue_has_room_whenever_the_daemon_answers(store, on):
+    store.queued_tasks = [autofix.QueuedTask("review-req:o/r#6", job(6), 1)]
+    full = store.auto_task_limit
+    assert store._drain_has_room(full), "a full cap of this machine's is no bar to the pool"
+    store.network_answered = False
+    assert not store._drain_has_room(0)
+    store.network_answered = True
+    assert store._drain_has_room(full)
+    appconfig.set_bool(network.ENABLED_KEY, False)
+    assert not store._drain_has_room(full) and store._drain_has_room(0)
+
+
+def test_a_refusal_is_said_once_for_the_spell_of_it(store, on, daemon, monkeypatch):
+    refused = (409, {"error": "This machine is not in that pool."})
+    d = daemon({"/offer": refused})
     calls = _spawn_recorder(monkeypatch)
-    for _ in range(2):
-        for n in (1, 2):
-            verdict = store.dispatch_agent(job(n), autofix.SOURCE_AUTO)
-            assert verdict == dn.VERDICT_REFUSED and verdict.answered
+    for n in (1, 2):
+        verdict = store.dispatch_agent(job(n), autofix.SOURCE_AUTO)
+        assert verdict.sentence == "This machine is not in that pool."
     assert lines("network-unavailable") == [
-        "Review · #2 - This machine is not in that pool. It waits in the queue.",
-        "Review · #1 - This machine is not in that pool. It waits in the queue."]
+        "Holding auto work - the Diplomacy Network did not take Review · #1: "
+        "This machine is not in that pool."]
+
+    d.routes["/offer"] = (200, {"taskId": "t3"})
+    assert store.dispatch_agent(job(3), autofix.SOURCE_AUTO) == "spawned"
+    d.routes["/offer"] = refused
+    store.dispatch_agent(job(4), autofix.SOURCE_AUTO)
+    assert len(lines("network-unavailable")) == 2, "an offer that went through ends the spell"
     assert calls == []
 
 
 @pytest.mark.parametrize("answer, sentence", [
-    ((200, {}), "The network daemon named no task for the offer."),
-    ((500, {}), "The network daemon refused the request (HTTP 500)."),
+    ((200, {}), "the daemon named no task for the offer"),
+    ((500, {}), "the daemon answered HTTP 500"),
 ])
 def test_an_offer_with_no_task_books_nothing(store, on, daemon, monkeypatch, answer, sentence):
     daemon({"/offer": answer})
@@ -618,10 +718,10 @@ def test_a_job_with_no_repository_or_kind_is_refused_without_asking(store, on, d
     nowhere = autofix.AgentJob(kind="audit", audit_action="audit", label="Audit",
                                prompt="A", checkout="/src/not-listed")
     verdict = store.dispatch_agent(nowhere, autofix.SOURCE_PANEL)
-    assert verdict.sentence == "No repository to offer it into."
+    assert verdict.sentence == "no repository to offer it into"
     unknown = autofix.AgentJob(kind="x", audit_action="telemetry", label="X", prompt="A")
     assert store.dispatch_agent(unknown, autofix.SOURCE_PANEL).sentence == (
-        "The network runs no telemetry jobs.")
+        "the network runs no telemetry jobs")
     assert d.sent("offer") == [] and calls == []
 
 
@@ -630,8 +730,20 @@ def test_execute_now_with_the_daemon_down_shows_the_sentence(store, on, monkeypa
     entry = autofix.QueuedTask("review-req:o/r#5", job(5), 1)
     store.queued_tasks = [entry]
     store._execute_queued_task(entry)
-    assert store.error == "Review · #5: The network daemon is not running."
+    assert store.error == (
+        "Review · #5 was not offered: the Diplomacy Network daemon is not answering.")
     assert calls == [] and lines("queue-run") == []
+
+
+def test_execute_now_offers_the_job_for_this_machine_to_run(store, on, daemon, monkeypatch):
+    d = daemon(takes_offers())
+    calls = _spawn_recorder(monkeypatch)
+    entry = autofix.QueuedTask("review-req:o/r#5", job(5), 1)
+    store.queued_tasks = [entry]
+    store._execute_queued_task(entry)
+    assert [b["now"] for b in d.sent("offer")] == [True]
+    assert lines("queue-run") == ["Review · #5 - offered for this machine to run at once"]
+    assert calls == []
 
 
 def test_no_road_to_a_spawn_is_open_with_the_switch_on(store, on, monkeypatch):
@@ -789,9 +901,22 @@ def test_a_merged_pr_is_withdrawn_once_and_a_finished_run_never(store, on, daemo
     store._network_cycle()
     store._settle_agents()
     store._network_cycle()
-    assert d.sent("withdraw") == [{"taskId": "t1", "reason": network.WITHDRAW_MERGED}]
+    assert d.sent("withdraw") == [{"taskId": "t1", "reason": "merged"}]
     assert agentregistry.load() == []
-    assert lines("network-withdraw") == ["Auto · Review · #9 - withdrawn, its PR is merged"]
+    assert lines("network-withdraw") == [
+        "Auto · Review · #9 - its PR merged, so its offer is withdrawn"]
+
+
+def test_a_merged_pr_whose_offer_the_network_keeps_says_why(store, on, daemon):
+    daemon({"/withdraw": (409, {"error": "That task is not this machine's."})},
+           state=snapshot(offers=[offer("t1", "claimed", executor=PEER)]))
+    book_network_run("t1", 9)
+    merged(store, 9)
+    store._settle_agents()
+    assert lines("network-withdraw") == [
+        "Auto · Review · #9 - its PR merged; the network kept its offer: "
+        "That task is not this machine's."]
+    assert agentregistry.load() == [], "answered, so the run is not asked about again"
 
 
 def test_a_withdrawal_nobody_answered_is_asked_again(store, on, daemon):
@@ -804,7 +929,7 @@ def test_a_withdrawal_nobody_answered_is_asked_again(store, on, daemon):
     assert len(agentregistry.load()) == 1, "kept, so the next tick asks again"
     d = daemon(state=snapshot(offers=[offer(state="pooled")]))
     store._settle_agents()
-    assert d.sent("withdraw") == [{"taskId": "t1", "reason": network.WITHDRAW_MERGED}]
+    assert d.sent("withdraw") == [{"taskId": "t1", "reason": "merged"}]
     assert agentregistry.load() == []
 
 
@@ -812,15 +937,15 @@ def test_forgetting_a_run_withdraws_an_offer_the_network_still_holds(store, on, 
     d = daemon(state=snapshot(offers=[offer("t1", "pooled"),
                                       offer("t2", "done", outcome={"ok": True})]))
     live, over = book_network_run("t1", 9), book_network_run("t2", 10)
-    store._network_cycle()
     # The second is over and would be retired by the next settle; forgotten first, it
-    # has nothing to withdraw.
+    # has nothing to withdraw. Neither was ever seen by a cycle: the forget asks itself.
     for run in (live, over):
         store.forget_network_run_async(run.run_id)
         assert store.wait_for_background() == []
-    assert d.sent("withdraw") == [{"taskId": "t1", "reason": network.WITHDRAW_FORGOTTEN}]
+    assert d.sent("withdraw") == [{"taskId": "t1", "reason": "forgotten"}]
     assert agentregistry.load() == []
-    assert lines("network-withdraw") == ["Auto · Review · #9 - forgotten and withdrawn"]
+    assert lines("network-withdraw") == ["Auto · Review · #9 - withdrawn (forgotten)"]
+    assert lines("retire") == ["Auto · Review · #10 - forgotten"]
 
 
 def test_a_run_is_forgotten_whatever_the_daemon_answers(store, on):
@@ -829,51 +954,137 @@ def test_a_run_is_forgotten_whatever_the_daemon_answers(store, on):
     assert store.wait_for_background() == []
     assert agentregistry.load() == []
     assert lines("network-withdraw") == [
-        "Auto · Review · #9 - forgotten; its offer was not withdrawn: "
-        "The network daemon is not running."]
+        "Auto · Review · #9 - not withdrawn: the Diplomacy Network daemon is not answering"]
 
 
-def test_stop_ends_the_container_here_and_otherwise_withdraws(store, on, daemon):
-    d = daemon(state=snapshot(
-        offers=[offer("t1", "claimed", executor=ME), offer("t2", "claimed", executor=PEER)],
-        runs=[{"runId": "r-7", "taskId": "t1", "state": "running"},
-              {"runId": "r-6", "taskId": "t1", "state": "failed"}]))
-    here, there = book_network_run("t1", 9), book_network_run("t2", 10)
-    store._network_cycle()
-    for run in (here, there):
-        store.stop_network_run_async(run.run_id)
+def pool_task(task, **fields) -> network.PoolTask:
+    return network.PoolTask(task_id=task, kind="review", item="pr-9", title="Review · #9",
+                            state="claimed", **fields)
+
+
+def test_stop_ends_the_run_here_and_otherwise_withdraws(store, on, daemon):
+    d = daemon(state=snapshot(runs=[{"runId": "r-7", "taskId": "t1", "state": "running"},
+                                    {"runId": "r-6", "taskId": "t1", "state": "failed"},
+                                    {"runId": "r-5", "taskId": "t3", "state": "finished"}]))
+    # The first runs here. The second runs elsewhere, and the third's run here has
+    # ended since the screen drew it: neither has a run to stop.
+    for task in (pool_task("t1", executor=ME, executor_here=True),
+                 pool_task("t2", executor=PEER, offered_here=True),
+                 pool_task("t3", executor=ME, executor_here=True)):
+        store.stop_network_task_async(task, POOL)
         assert store.wait_for_background() == []
     assert d.sent("stop-run") == [{"runId": "r-7"}]
-    assert d.sent("withdraw") == [{"taskId": "t2", "reason": dn.WITHDRAW_STOPPED}]
-    assert lines("network-withdraw") == ["Auto · Review · #10 - withdrawn",
-                                         "Auto · Review · #9 - stopped on this machine"]
-    assert len(agentregistry.load()) == 2, "each reads how it ended off the next snapshot"
+    assert d.sent("withdraw") == [{"taskId": "t2", "reason": "stopped"},
+                                  {"taskId": "t3", "reason": "stopped"}]
+    assert lines("network-stop") == ["Review · #9 - its run on this machine was stopped"]
+    assert lines("network-withdraw") == ["Review · #9 - withdrawn (stopped)"] * 2
+    settled = "/state"  # each stop ends in a settle, which reads the daemon itself
+    assert [path for _, path, _ in d.got] == [
+        "/state", "/stop-run", settled, "/withdraw", settled,
+        "/state", "/withdraw", settled], "asked afresh for a task this machine runs"
+    assert store.network_refusals == {}
 
 
-def test_stop_and_forget_leave_a_local_run_alone(store, on, daemon):
+def test_a_stop_the_daemon_refuses_is_shown_in_its_pool(store, on, daemon):
+    daemon({"/withdraw": (409, {"error": "That task is not this machine's."})})
+    store.stop_network_task_async(pool_task("t2", offered_here=True), POOL)
+    assert store.wait_for_background() == []
+    assert store.network_refusals == {POOL: "That task is not this machine's."}
+    assert lines("network-withdraw") == [
+        "Review · #9 - not withdrawn: That task is not this machine's."]
+
+
+def test_forget_leaves_a_local_run_alone(store, on, daemon):
     d = daemon()
     local = agentregistry.create_run(agentstate.RunRecord(
         run_id="local-1", dispatched_at=time.time(), pr_number=4), "P")
-    store.stop_network_run_async(local.run_id)
     store.forget_network_run_async(local.run_id)
     assert store.wait_for_background() == []
     assert [m for m, _, _ in d.got] == [] and len(agentregistry.load()) == 1
+
+
+# MARK: - the switch going off
+
+def test_switching_off_takes_every_offer_back_and_frees_its_item(store, on, daemon,
+                                                                 monkeypatch):
+    d = daemon(state=snapshot(offers=[
+        offer("t1", "claimed", executor=PEER),
+        offer("t2", "done", executor=PEER, endedAt=1_794_000_000.0,
+              outcome={"ok": True, "tokens": 70, "runner": "claude"}),
+        offer("t3", "pooled")]))
+    calls = _spawn_recorder(monkeypatch)
+    at_stop = []
+    monkeypatch.setattr(da, "run_installer", lambda script, arg: (
+        at_stop.append((arg, len(d.sent("withdraw")))), {"daemonRunning": False})[1])
+    store.auto_task_limit = 8
+    book_network_run("t1", 9)
+    book_network_run("t2", 10, ledger_key="review:o/r#10")
+    book_network_run("t3", 11)
+    book_network_run("t4", 12)  # the daemon holds no offer of it
+    local = agentregistry.create_run(agentstate.RunRecord(
+        run_id="local-1", dispatched_at=time.time(), pr_number=4,
+        pr_url="https://github.com/o/r/pull/4", pid=4242, tty="pts/4"), "P")
+    fake_probes(monkeypatch, processes={local.pid: agentstate.ProcInfo(
+        tty="pts/4", elapsed=5.0, is_agent=True)})
+    merged(store, 11)
+
+    store.set_network_enabled(False)
+    assert store.wait_for_background() == []
+
+    assert sorted((b["taskId"], b["reason"]) for b in d.sent("withdraw")) == [
+        ("t1", "switched off"), ("t3", "switched off"), ("t4", "switched off")]
+    assert at_stop == [("--stop-daemon", 3)], "asked before the daemon is stopped"
+    assert [r.run_id for r in agentregistry.load()] == ["local-1"]
+    assert sorted(lines("network-failed")) == [
+        f"Auto · Review · #{n} - withdrawn: the Diplomacy Network was switched off"
+        for n in (11, 12, 9)]
+    assert len(lines("network-done")) == 1, "the one that had ended is settled as it would be"
+    assert [e["tokens"] for e in ledger() if e["ev"] == "done"] == [70]
+
+    # Its PR is free for an agent of this machine at once.
+    assert store.dispatch_agent(job(9), autofix.SOURCE_AUTO) == "spawned"
+    assert len(calls) == 1 and d.sent("offer") == []
+
+
+def test_switching_off_drops_the_runs_of_a_daemon_that_does_not_answer(store, on, installer):
+    book_network_run("t1", 9)
+    store.set_network_enabled(False)
+    assert store.wait_for_background() == []
+    assert agentregistry.load() == []
+    assert lines("network-failed") == [
+        "Auto · Review · #9 - withdrawn: the Diplomacy Network was switched off"]
+    assert installer == [("install.js", "--stop-daemon")]
+
+
+def test_a_run_still_booked_with_the_switch_off_is_dropped_by_the_next_settle(store, daemon):
+    d = daemon()
+    book_network_run("t1", 9)
+    store._settle_agents()
+    assert agentregistry.load() == []
+    assert d.sent("withdraw") == [{"taskId": "t1", "reason": "switched off"}]
+    assert lines("network-failed") == [
+        "Auto · Review · #9 - withdrawn: the Diplomacy Network was switched off"]
+    del d.got[:]
+    store._settle_agents()
+    assert d.got == [], "with none booked, nothing is asked"
 
 
 # MARK: - the three calls of the Network screen
 
 def test_invite_join_and_leave_post_and_are_logged(store, on, daemon):
     d = daemon({"/invite": (200, {"invite": "dn1-secret"}), "/join": (200, {"pool": POOL})})
+    invited, joined = [], []
+    store.network_invited.connect(lambda pool, invite: invited.append((pool, invite)),
+                                  Qt.ConnectionType.DirectConnection)
+    store.network_joined.connect(lambda card, ok: joined.append((card, ok)),
+                                 Qt.ConnectionType.DirectConnection)
     store.network_invite_async(POOL)
     assert store.wait_for_background() == []
-    assert store.network_call == dataclasses.replace(
-        store.network_call, kind="invite", pool=POOL, running=False, error="",
-        invite="dn1-secret")
-    store.network_join_async("dn1-other")
+    store.network_join_async("dn1-other", "")
     assert store.wait_for_background() == []
-    assert (store.network_call.kind, store.network_call.pool) == ("join", POOL)
     store.network_leave_async(POOL)
     assert store.wait_for_background() == []
+    assert invited == [(POOL, "dn1-secret")] and joined == [("", True)]
     assert (d.sent("invite"), d.sent("join"), d.sent("leave")) == (
         [{"pool": POOL}], [{"invite": "dn1-other"}], [{"pool": POOL}])
     assert [(e.action, e.detail) for e in activity.read()
@@ -881,14 +1092,47 @@ def test_invite_join_and_leave_post_and_are_logged(store, on, daemon):
         ("network-leave", f"Left {POOL}"), ("network-join", f"Joined {POOL}"),
         ("network-invite", f"Made an invite to {POOL}")]
     assert "dn1-secret" not in json.dumps([e.detail for e in activity.read()])
+    assert store.network_refusals == {}
 
 
-def test_a_call_the_daemon_refuses_shows_its_sentence_and_logs_nothing(store, on, daemon):
-    daemon({"/join": (400, {"error": "That invite has expired."})})
-    store.network_join_async("dn1-old")
+def test_rejoining_a_pool_names_it_and_is_a_join_in_the_feed(store, on, daemon):
+    d = daemon({"/join": (200, {"pool": POOL})})
+    joined = []
+    store.network_joined.connect(lambda card, ok: joined.append((card, ok)),
+                                 Qt.ConnectionType.DirectConnection)
+    store.network_rejoin_async(POOL)
     assert store.wait_for_background() == []
-    assert store.network_call.error == "That invite has expired."
-    assert lines("network-join") == []
+    assert d.sent("join") == [{"pool": POOL}]
+    assert lines("network-join") == [f"Joined {POOL}"] and store.network_refusals == {}
+    d.routes["/join"] = (409, {"error": "That repository is not linked."})
+    store.network_rejoin_async(POOL)
+    assert store.wait_for_background() == []
+    assert store.network_refusals == {POOL: "That repository is not linked."}
+    assert joined == [(POOL, True), (POOL, False)] and len(lines("network-join")) == 1
+
+
+def test_a_call_the_daemon_refuses_is_kept_for_its_panel_and_logs_nothing(store, on, daemon):
+    d = daemon({"/join": (400, {"error": "That invite has expired."}),
+                "/invite": (200, {}), "/leave": (409, {"error": "Not in that pool."})})
+    joined = []
+    store.network_joined.connect(lambda card, ok: joined.append((card, ok)),
+                                 Qt.ConnectionType.DirectConnection)
+    store.network_join_async("dn1-old", "")
+    store.network_invite_async(POOL)
+    assert store.wait_for_background() == []
+    assert store.network_refusals == {"": "That invite has expired.",
+                                      POOL: "the daemon gave no invite"}
+    store.network_leave_async(POOL)
+    assert store.wait_for_background() == []
+    assert store.network_refusals[POOL] == "Not in that pool."
+    assert joined == [("", False)]
+    assert lines("network-join") + lines("network-invite") + lines("network-leave") == []
+
+    # The next one that goes through clears what its panel was showing.
+    d.routes["/leave"] = (200, {})
+    store.network_leave_async(POOL)
+    assert store.wait_for_background() == []
+    assert store.network_refusals == {"": "That invite has expired."}
 
 
 # MARK: - the node the network took the place of
@@ -922,8 +1166,7 @@ def test_the_launch_sweep_ends_the_legacy_node_alone_and_says_so_once(store, mon
     store.end_legacy_nodes_async()
     assert store.wait_for_background() == []
     assert killed == [(11, signal.SIGTERM)]
-    assert lines("network-stop") == [
-        "Ended the SzpontNet node the Diplomacy Network replaces (pid 11)"]
+    assert lines("network-stop") == ["Ended the retired mesh node (pid 11)"]
 
     del table[11]
     store.end_legacy_nodes_async()
@@ -1047,7 +1290,8 @@ def test_the_agent_dump_asks_the_daemon_only_while_the_switch_is_on(
     agentdump.run()
     out = capsys.readouterr().out
     assert d.got == [] and "  network " not in out
-    assert "because: the network could not be asked: not probed" in out
+    assert ("because: the network could not be asked: "
+            "the Diplomacy Network is switched off") in out
 
     appconfig.set_bool(network.ENABLED_KEY, True)
     agentdump.run()

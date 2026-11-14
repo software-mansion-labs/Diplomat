@@ -94,12 +94,16 @@ def ensure_deps() -> bool:
 # MARK: the socket
 
 #: Every route answers from memory; an offer also signs and stores a record.
-SEND_TIMEOUT_SECS = 10
+SEND_TIMEOUT_SECS = 15
+#: The snapshot is asked for on every agent tick, so a daemon that is slow to give it
+#: is read as one that did not.
+STATE_TIMEOUT_SECS = 3
 
 _GETS = frozenset({network.ROUTE_HEALTH, network.ROUTE_STATE})
 
-NOT_RUNNING = "The network daemon is not running."
-NO_ANSWER = "The network daemon did not answer."
+#: Why nothing can be said of a network run, as the sentences that take it start.
+NOT_ANSWERING = "the Diplomacy Network daemon is not answering"
+SWITCHED_OFF = "the Diplomacy Network is switched off"
 
 
 def send(route: str, body: dict | None = None, *,
@@ -111,22 +115,20 @@ def send(route: str, body: dict | None = None, *,
 
 
 def refusal(reply: da.DaemonReply | str) -> str | None:
-    """Why a request did not go through, as a sentence fit to show the operator; None
-    when the daemon took it. A 4xx carries the daemon's own sentence."""
-    if reply == da.UNREACHABLE:
-        return NOT_RUNNING
+    """Why a request did not go through, in words fit to show the operator; None when
+    the daemon took it. A 4xx carries the daemon's own sentence."""
     if not isinstance(reply, da.DaemonReply):
-        return NO_ANSWER
+        return NOT_ANSWERING
     if reply.ok:
         return None
     error = reply.get("error")
-    return error if isinstance(error, str) and error else (
-        f"The network daemon refused the request (HTTP {reply.status}).")
+    return (error if isinstance(error, str) and error
+            else f"the daemon answered HTTP {reply.status}")
 
 
 def state() -> network.Snapshot | None:
     """The daemon's snapshot, or None when it gave none."""
-    reply = send(network.ROUTE_STATE)
+    reply = send(network.ROUTE_STATE, timeout_secs=STATE_TIMEOUT_SECS)
     if not isinstance(reply, da.DaemonReply) or not reply.ok:
         return None
     return network.Snapshot.parse(reply.raw)
@@ -141,23 +143,22 @@ VERDICT_REFUSED = "network_refused"
 #: runner of this machine's, so its tokens count against no limit read here.
 RUNNER_ELSEWHERE = "network"
 
-#: Why an offer is withdrawn when its run could not be written to the run book, and
-#: when the operator stops a run no container of this machine is executing.
-WITHDRAW_UNBOOKED = "unbooked"
+#: Why an offer is withdrawn when its run could not be written to the run book, when
+#: the operator stops a task no container of this machine is executing, and when the
+#: switch goes off under it.
+WITHDRAW_UNBOOKED = "not booked"
 WITHDRAW_STOPPED = "stopped"
+WITHDRAW_SWITCHED_OFF = "switched off"
 
 
 class Refused(str):
-    """:data:`VERDICT_REFUSED`, carrying the sentence that says why, and whether the
-    daemon answered at all: one that did not gives every job the same answer."""
+    """:data:`VERDICT_REFUSED`, carrying the words that say why."""
 
     sentence: str
-    answered: bool
 
-    def __new__(cls, sentence: str, answered: bool = True) -> "Refused":
+    def __new__(cls, sentence: str) -> "Refused":
         self = super().__new__(cls, VERDICT_REFUSED)
         self.sentence = sentence
-        self.answered = answered
         return self
 
 
@@ -200,9 +201,10 @@ def end_legacy_nodes() -> set[int]:
 
 # MARK: display
 
-#: What the switch does, under it wherever it is drawn.
-SWITCH_SUMMARY = ("Every job is offered to a pool shared per repository and runs in a "
-                  "docker container, on this machine or another one in the pool.")
+#: The switch, and what it does, wherever it is drawn.
+SWITCH_TITLE = "Offer every job to the Diplomacy Network"
+EXPLANATION = ("Every job is offered to a shared pool per repository and runs in a "
+               "docker container, possibly on another machine in the pool.")
 
 
 def short_key(pk: str) -> str:
@@ -216,6 +218,5 @@ def unavailable_summary() -> str | None:
         return (f"⚠ Package not found at {package_dir()}. Set "
                 "DIPLOMAT_DIPLOMACY_NETWORK_DIR to point at it.")
     if da.resolve_node() is None:
-        return ("⚠ Node.js not found. Install Node (or set DIPLOMAT_NODE): the network "
-                "daemon needs it to run.")
+        return "⚠ Node.js not found. Install Node (or set DIPLOMAT_NODE): the daemon needs it."
     return None

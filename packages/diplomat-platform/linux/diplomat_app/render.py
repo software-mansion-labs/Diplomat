@@ -235,17 +235,21 @@ def _network_screen_fixture(store: Store, mode: str) -> None:
     asked, and not answering. ``-off``: switched off.
 
     The switch is the shared config's, which a render never writes, so it is set on the
-    module that reads it."""
+    module that reads it. So is the daemon's answer: the panel's own tick asks for it,
+    and what is drawn is what is seeded here."""
     from diplomat_runtime import activity, network
     from . import diplomacynetwork as dn
 
     off = mode.endswith("-off")
     dn.enabled = lambda: not off
-    store.network_asked = not (off or mode.endswith("-starting"))
+    store.network_answered = (None if off or mode.endswith("-starting")
+                              else mode == "network-screen")
     store.network_state = None
+    dn.state = lambda: store.network_state
+    store._note_network_state = lambda snapshot: None
     store.audit_entries = [
         activity.AuditEntry("2026-11-09T11:52:00Z", "auto", "network-claimed",
-                            "Auto · Review-req · #412 (@marta) - claimed by 9f3c1a77"),
+                            "Auto · Review-req · #412 (@marta) - running on 9f3c1a77"),
         activity.AuditEntry("2026-11-09T11:51:00Z", "auto", "network-offer",
                             "Auto · Review-req · #412 (@marta) - offered to "
                             "github.com/latekvo/diplomat"),

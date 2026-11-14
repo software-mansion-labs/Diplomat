@@ -1404,8 +1404,8 @@ class SettingsView(QWidget):
         self._sw_network = SwitchToggle(_TEAL)
         self._sw_network.toggled.connect(self._on_network_toggled)
         self._network_row = self._track(SettingRow(
-            "Diplomacy Network", self._sw_network,
-            detail=f"{diplomacynetwork.SWITCH_SUMMARY} While it is on, no agent starts "
+            diplomacynetwork.SWITCH_TITLE, self._sw_network,
+            detail=f"{diplomacynetwork.EXPLANATION} While it is on, no agent starts "
                    "in a terminal on this machine. The pools and the hours a job may "
                    "take are on the Network screen.",
         ))

@@ -30,9 +30,9 @@ def run() -> int:
               if deadline is not None else None)
     evidence = probes.gather(records, now, tokens=tokens)
     networked = diplomacynetwork.enabled()
-    if networked:
-        evidence = dataclasses.replace(
-            evidence, network=network.tasks(diplomacynetwork.state()))
+    evidence = dataclasses.replace(evidence, network=(
+        network.tasks(diplomacynetwork.state()) if networked
+        else agentstate.Observation.unavailable(diplomacynetwork.SWITCHED_OFF)))
     t = agentstate.tick(records, evidence, now, limit, deadline, tuple(review.repo_roots()))
 
     print(f"registry: {agentregistry.runs_path()}")

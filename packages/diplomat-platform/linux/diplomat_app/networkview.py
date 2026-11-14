@@ -1,6 +1,6 @@
-"""The Network screen, twin of the macOS one: the Diplomacy Network's switch and
-daemon, how many tasks this machine takes, and one section per pool it is in with the
-pool's members, its tasks and the things done to it.
+"""The Network screen, twin of the macOS one (``NetworkScreen.swift``): the Diplomacy
+Network daemon's status, the hours this machine asks for and takes, and one panel per
+pool it is in.
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import os
 import time
 from collections.abc import Callable
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
     QFrame,
@@ -28,9 +28,8 @@ from diplomat_runtime.models import Fmt
 from . import diplomacynetwork as dn
 from . import glyphs
 from . import remotemachines as rm
-from .devicesview import Installer, restart_button, start_button
 from .machinesview import _chip, _clear, _clock, _note, _plain
-from .store import NetworkCall, Store
+from .store import Store
 from .widgets import (
     ActivityRow,
     GlyphLabel,
@@ -45,70 +44,87 @@ from .widgets import (
 _TEAL = "#30B0C7"
 _GREEN, _ORANGE, _RED, _GREY = rm.GREEN, rm.AMBER, rm.RED, rm.GREY
 
-#: The most hours a task may ask for (``packages/diplomacy-network`` PROTOCOL).
-HOURS_MAX = 720
+#: The most hours either setting takes, and what one press of a stepper moves it by.
+HOURS_CEILING = getattr(network, "HOURS_CEILING", 720)
+HOURS_STEP = 12
 
-OFF_NOTE = "The network is off: every job starts on this machine."
-STARTING_NOTE = "Starting the network daemon…"
-DOWN_NOTE = ("The network daemon is not answering, so no job can be offered. Automatic "
-             "work waits in the queue until it does.")
-NO_POOLS_NOTE = ("This machine is in no pool yet. One is made for each repository in "
-                 "Settings once the daemon knows whose account works on it.")
-NO_TASKS_NOTE = "No tasks in this pool."
-LEAVE_QUESTION = ("Leave this pool? This machine stops sharing this repository's jobs "
-                  "with the other members.")
-INVITE_COPIED = "Invite copied to the clipboard."
-JOIN_PLACEHOLDER = "Paste an invite"
-RESTART_HELP = "Stop the running daemon and start this checkout's."
+OFF_NOTE = "Off: every job runs in a terminal on this machine."
+ASKING = "Asking the daemon…"
+SILENT = "Not answering. Diplomat starts it again on its own, waiting longer after each try."
+RESTART_HELP = ("Stop the running daemon and start this checkout's. Jobs running in "
+                "containers here are stopped with it.")
+REQUIRED_TITLE = "Hours a job of yours may take"
+REQUIRED_SUMMARY = ("Counted from when a machine takes it. Only machines that take jobs "
+                    "this long run yours.")
+ACCEPTED_TITLE = "Longest job this machine takes"
+ACCEPTED_SUMMARY = "A job that may take longer is left to the other machines of its pool."
+NO_POOLS = ("No pools yet. Each repository in Settings gets one once Diplomat knows "
+            "which account works on it.")
+NO_MEMBERS = "No members listed yet."
+NO_TASKS = "No tasks in this pool."
+NO_EVENTS = "No network actions in the activity feed."
+INVITE_PLACEHOLDER = "Paste an invite"
+INVITE_COPIED = "Invite copied. Send it to the machine that should join."
+STOP_RUN_HELP = "Stop this job's run on this machine. It goes back to the pool."
+WITHDRAW_HELP = "Withdraw this job from the pool."
+LEFT_NOTE = "left - this machine takes and offers nothing here"
 
-#: What the daemon's reason for taking nothing reads as.
-_ADMIT_REASONS = {network.ADMIT_DISK: "disk", network.ADMIT_BUDGET: "budget",
-                  network.ADMIT_PAUSED: "paused"}
+_SECTION = "font-size: 11px; font-weight: 600;"
 
-#: A pool task's state, as its row says it. ``{where}`` is the machine running it.
-_TASK_STATES = {"available": "in the pool", "claimed": "running on {where}",
-                "done": "done on {where}", "cancelled": "withdrawn"}
+
+def leave_question(pool: str) -> str:
+    return f"Leave {pool}? This machine stops taking its jobs and offering jobs to it."
 
 
 def network_events(entries: list) -> list:
-    return [e for e in entries if e.action.startswith("network-")][:8]
+    return [e for e in entries if e.action.startswith("network-")][:6]
 
 
-def admit_line(snapshot: network.Snapshot) -> str:
+def admit_line(admit: network.AdmitState) -> str:
     """How many more tasks this machine takes, as the daemon was last told."""
-    admit = snapshot.admit
     if admit.slots > 0:
         return f"taking {admit.slots} more"
-    reason = _ADMIT_REASONS.get(admit.reason, admit.reason)
-    return f"taking nothing: {reason or 'no free slot'}"
+    return f"taking nothing: {admit.reason or 'full'}"
 
 
-def service_line(state: str, detail: str) -> tuple[str, str]:
-    """One of the daemon's three services: its state, with why when it is not ready."""
+def service_tint(state: str) -> str:
     if state == "ready":
-        return "ready", _GREEN
-    return (f"{state or 'unknown'}: {detail}" if detail else state or "unknown"), _ORANGE
+        return _GREEN
+    if state in ("failed", "missing", "down"):
+        return _RED
+    return _ORANGE if state else _GREY
+
+
+def has_left(pool: network.Pool) -> bool:
+    """Whether this machine left the pool, which stays listed until it is rejoined."""
+    return bool(getattr(pool, "left", False))
 
 
 def counts(snapshot: network.Snapshot) -> str:
-    pools = len(snapshot.pools)
-    tasks = sum(len(p.tasks) for p in snapshot.pools)
+    """The pools this machine is in, and the tasks they hold."""
+    joined = [p for p in snapshot.pools if not has_left(p)]
+    pools, tasks = len(joined), sum(len(p.tasks) for p in joined)
     return (f"{pools} pool{'' if pools == 1 else 's'} · "
             f"{tasks} task{'' if tasks == 1 else 's'}")
 
 
-def where(executor: str, here: bool) -> str:
-    return "this machine" if here else dn.short_key(executor) or "another machine"
+def task_state(state: str) -> str:
+    """A pool task's state as the screen words it."""
+    return {"available": "in the pool", "claimed": "running"}.get(state, state)
 
 
-def network_installer(store: Store) -> Installer:
-    """The daemon's start and restart, for the buttons Machines draws its own with.
-    This daemon has no install of its own: bringing it up and down is the switch."""
-    return Installer(
-        ready=dn.ready, busy=lambda: store.network_busy,
-        install=store.start_network_daemon_async, uninstall=store.stop_network_async,
-        start=store.start_network_daemon_async, restart=store.restart_network_async,
-        recheck=store.run_network_cycle_async, restart_help=RESTART_HELP)
+def place(task: network.PoolTask) -> str:
+    """Where a pool's task is and until when: "on this machine · lease to 14:05"."""
+    parts = []
+    if task.offered_here:
+        parts.append("offered here")
+    if task.executor_here:
+        parts.append("on this machine")
+    elif task.executor:
+        parts.append(f"on {dn.short_key(task.executor)}")
+    if task.state == "claimed" and task.lease_until:
+        parts.append(f"lease to {_clock(task.lease_until)}")
+    return " · ".join(parts)
 
 
 def _button(title: str, tint: str, tip: str = "") -> QPushButton:
@@ -118,144 +134,214 @@ def _button(title: str, tint: str, tip: str = "") -> QPushButton:
         f"QPushButton {{ color: {tint}; background-color: {tint_bg(tint, 0.14)};"
         " border: none; border-radius: 5px; padding: 2px 9px; font-size: 9px;"
         " font-weight: 700; }"
-        f"QPushButton:hover {{ background-color: {tint_bg(tint, 0.26)}; }}")
+        f"QPushButton:hover {{ background-color: {tint_bg(tint, 0.26)}; }}"
+        f"QPushButton:disabled {{ color: {_GREY}; }}")
     return btn
+
+
+# MARK: - joining a pool
+
+class JoinRow(QWidget):
+    """Paste an invite and join the pool it is to. ``card`` is the pool panel it sits
+    in ("" for the one shown before any pool), which is where a refusal is shown; ``ui``
+    is that panel's state, which outlives the row."""
+
+    def __init__(self, store: Store, card: str, ui: dict, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._store, self.card, self._ui = store, card, ui
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.field = QLineEdit(self)
+        self.field.setPlaceholderText(INVITE_PLACEHOLDER)
+        self.field.setAccessibleName("Invite")
+        self.field.setText(ui.get("invite", ""))
+        self.field.textChanged.connect(self._typed)
+        self.field.returnPressed.connect(self._join)
+        row.addWidget(self.field, 1)
+        self.button = _button("Join", _TEAL)
+        self.button.clicked.connect(self._join)
+        row.addWidget(self.button)
+        self._sync()
+
+    def _token(self) -> str:
+        return self.field.text().strip()
+
+    def _typed(self, text: str) -> None:
+        self._ui["invite"] = text
+        self._sync()
+
+    def _sync(self) -> None:
+        self.button.setEnabled(bool(self._token()) and not self._ui.get("sending"))
+
+    def _join(self) -> None:
+        if not self._token() or self._ui.get("sending"):
+            return
+        self._ui["sending"] = True
+        self._sync()
+        self._store.network_join_async(self._token(), self.card)
 
 
 # MARK: - one pool
 
-class PoolPanel(QFrame):
-    """One pool: who is in it, what it holds, and its invite and leave. ``ages`` takes
+class PoolPanel(QWidget):
+    """One pool: who is in it, what it holds, and the invite, join and leave actions.
+    A pool this machine left says so and offers only the way back in. ``ui`` is what
+    the operator has open in it, kept by the screen across a redraw; ``ages`` takes
     the lines that say how long ago something was, for the screen to keep current."""
 
-    def __init__(self, pool: network.Pool, *, store: Store, call: NetworkCall,
+    def __init__(self, pool: network.Pool, *, store: Store, ui: dict, refusal: str,
                  ages: list) -> None:
         super().__init__()
-        self._store = store
-        self._pool = pool.id
+        self._store, self._pool, self._ui = store, pool.id, ui
         self.actions: dict[str, QPushButton] = {}
-        self.setObjectName("poolPanel")
-        self.setStyleSheet("#poolPanel { background-color: rgba(128,128,128,0.08);"
-                           " border-radius: 8px; }")
-        col = QVBoxLayout(self)
-        col.setContentsMargins(9, 8, 9, 8)
-        col.setSpacing(6)
-
-        head = QHBoxLayout()
-        head.setSpacing(6)
-        head.addWidget(_plain(pool.id, "font-size: 11px; font-weight: 700;"))
-        if pool.identity:
-            head.addWidget(_plain(f"as {pool.identity}", muted(9)))
-        head.addStretch(1)
+        self.stops: dict[str, QPushButton] = {}
+        self.join_row: JoinRow | None = None
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        card, col, pill = settings_card(glyphs.G_NETWORK, pool.id, _TEAL)
+        outer.addWidget(card)
+        subtitle = " · ".join(x for x in (
+            pool.path, f"as @{pool.identity}" if pool.identity else "") if x)
+        if subtitle:
+            col.addWidget(_plain(subtitle, muted(9, mono=True)))
+        if has_left(pool):
+            pill.set_state("left", _GREY)
+            col.addWidget(_note(LEFT_NOTE))
+            back = QHBoxLayout()
+            self._add(back, "Rejoin", _TEAL, self._rejoin)
+            back.addStretch(1)
+            col.addLayout(back)
+            if refusal:
+                col.addWidget(_note(refusal, _RED))
+            return
         n = len(pool.members)
-        head.addWidget(_chip(f"{n} member{'' if n == 1 else 's'}", _TEAL))
-        col.addLayout(head)
-
-        col.addWidget(_plain("MEMBERS", muted(9, bold=True) + " letter-spacing: 0.5px;"))
+        pill.set_state(f"{n} member{'' if n == 1 else 's'}", _TEAL)
+        col.addWidget(_plain("Members", _SECTION))
+        if not pool.members:
+            col.addWidget(_note(NO_MEMBERS))
         for member in pool.members:
             col.addLayout(self._member(member, ages))
-        col.addWidget(_plain(f"TASKS · {len(pool.tasks)}",
-                             muted(9, bold=True) + " letter-spacing: 0.5px;"))
+        col.addWidget(_plain("Tasks", _SECTION))
         if not pool.tasks:
-            col.addWidget(_note(NO_TASKS_NOTE))
+            col.addWidget(_note(NO_TASKS))
         for task in pool.tasks:
-            col.addLayout(self._task(task))
+            col.addWidget(self._task(task))
 
-        mine = call if call.pool == pool.id else NetworkCall()
-        actions = QHBoxLayout()
-        actions.setSpacing(4)
-        self.status = _note("")
-        actions.addWidget(self.status, 1)
-        self._add(actions, "Copy invite", _TEAL, self._invite,
-                  "Make an invite to this pool and put it on the clipboard. Whoever "
-                  "pastes it into their own Diplomat joins the pool.")
-        self._add(actions, "Leave", _RED, self._ask_leave,
-                  "Take this machine out of the pool.")
-        col.addLayout(actions)
+        self._buttons = QWidget(self)
+        buttons = QHBoxLayout(self._buttons)
+        buttons.setContentsMargins(0, 0, 0, 0)
+        buttons.setSpacing(6)
+        self._add(buttons, "Copy invite", _TEAL, self._invite)
+        self._add(buttons, "Join…", _TEAL, self._toggle_join)
+        self._add(buttons, "Leave", _TEAL, self._ask_leave)
+        buttons.addStretch(1)
+        col.addWidget(self._buttons)
+        self.join_row = JoinRow(store, pool.id, ui, self)
+        col.addWidget(self.join_row)
+        self._copied = _note(INVITE_COPIED, _GREEN)
+        col.addWidget(self._copied)
 
         self._confirm = QWidget(self)
-        confirm = QHBoxLayout(self._confirm)
+        confirm = QVBoxLayout(self._confirm)
         confirm.setContentsMargins(0, 0, 0, 0)
-        confirm.setSpacing(4)
-        confirm.addWidget(_note(LEAVE_QUESTION, _ORANGE), 1)
-        self._add(confirm, "Leave pool", _RED, self._leave)
-        self._add(confirm, "Stay", _GREY, self._cancel_leave)
-        self._confirm.hide()
+        confirm.setSpacing(5)
+        confirm.addWidget(_note(leave_question(pool.id)))
+        answers = QHBoxLayout()
+        answers.setSpacing(6)
+        self._add(answers, "Leave pool", _RED, self._leave, title="Leave")
+        self._add(answers, "Cancel", _GREY, self._cancel_leave)
+        answers.addStretch(1)
+        confirm.addLayout(answers)
         col.addWidget(self._confirm)
+        if refusal:
+            col.addWidget(_note(refusal, _RED))
+        self._sync()
 
-        busy = call.running
-        for btn in self.actions.values():
-            btn.setEnabled(not busy)
-        if mine.running:
-            self._say("Leaving…" if mine.kind == "leave" else "Making an invite…")
-        elif mine.error:
-            self._say(mine.error, _RED)
-        elif mine.invite:
-            self._say(INVITE_COPIED, _GREEN)
+    def _sync(self) -> None:
+        leaving = bool(self._ui.get("leaving"))
+        self._buttons.setVisible(not leaving)
+        self.join_row.setVisible(not leaving and bool(self._ui.get("joining")))
+        self._copied.setVisible(not leaving and bool(self._ui.get("copied")))
+        self._confirm.setVisible(leaving)
 
-    def _say(self, text: str, tint: str | None = None) -> None:
-        self.status.setText(text)
-        self.status.setStyleSheet(muted(10) if tint is None
-                                  else f"color: {tint}; font-size: 10px;")
-
-    def _add(self, layout: QHBoxLayout, title: str, tint: str, slot, tip: str = "") -> None:
-        btn = _button(title, tint, tip)
+    def _add(self, layout: QHBoxLayout, key: str, tint: str, slot, *,
+             title: str | None = None) -> None:
+        btn = _button(title or key, tint)
         btn.clicked.connect(slot)
         layout.addWidget(btn)
-        self.actions[title] = btn
+        self.actions[key] = btn
 
     def _member(self, m: network.Member, ages: list) -> QHBoxLayout:
         row = QHBoxLayout()
         row.setSpacing(6)
-        up = m.reachable or m.is_self
-        row.addWidget(_plain("●", f"color: {_GREEN if up else _GREY}; font-size: 8px;"))
         row.addWidget(_plain(dn.short_key(m.pk), "font-size: 10px; font-family: monospace;"))
         if m.is_self:
             row.addWidget(_chip("this machine", _TEAL))
-        elif not m.reachable:
+        if not m.reachable:
             row.addWidget(_chip("unreachable", _ORANGE))
-        if m.max_accepted_h is not None:
-            row.addWidget(_plain(f"takes jobs up to {m.max_accepted_h} h", muted(9)))
         row.addStretch(1)
-        seen = _plain("", muted(9))
-        last = m.last_seen
-        if last is None:
-            seen.setText("" if m.is_self else "not seen yet")
-        else:
-            ages.append((seen.setText, lambda now: f"seen {rm.ago(now - last)}"))
-        row.addWidget(seen)
+        if m.max_accepted_h is not None:
+            row.addWidget(_plain(f"takes up to {m.max_accepted_h} h", muted(9)))
+        if not m.is_self:
+            seen = _plain("never seen", muted(9))
+            last = m.last_seen
+            if last:
+                ages.append((seen.setText, lambda now: f"seen {rm.ago(max(0, now - last))}"))
+            row.addWidget(seen)
         return row
 
-    def _task(self, t: network.PoolTask) -> QHBoxLayout:
-        row = QHBoxLayout()
-        row.setSpacing(6)
-        row.addWidget(_plain(t.title or f"{t.kind} {t.item}".strip() or t.task_id,
-                             "font-size: 10px;"), 1)
+    def _task(self, t: network.PoolTask) -> QFrame:
+        box = QFrame(self)
+        box.setObjectName("poolTask")
+        box.setStyleSheet("#poolTask { background-color: rgba(128,128,128,0.08);"
+                          " border-radius: 6px; }")
+        col = QVBoxLayout(box)
+        col.setContentsMargins(5, 5, 5, 5)
+        col.setSpacing(2)
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        head.addWidget(_plain(t.title or t.item, "font-size: 10px;"), 1)
         if t.kind:
-            row.addWidget(_chip(t.kind, _GREY))
-        if t.offered_here:
-            row.addWidget(_chip("yours", _TEAL))
-        state = (_TASK_STATES[t.state].format(where=where(t.executor, t.executor_here))
-                 if t.state in _TASK_STATES else t.state)
-        if t.state == "claimed" and t.lease_until is not None:
-            state += f" · lease until {_clock(t.lease_until)}"
-        tint = _GREEN if t.state == "claimed" else None
-        row.addWidget(_plain(state, muted(9) if tint is None
-                             else f"color: {tint}; font-size: 9px;"))
-        return row
+            head.addWidget(_chip(t.kind, _GREY))
+        head.addWidget(_chip(task_state(t.state), {"claimed": _GREEN,
+                                                   "available": _ORANGE}.get(t.state, _GREY)))
+        col.addLayout(head)
+        foot = QHBoxLayout()
+        foot.setSpacing(6)
+        foot.addWidget(_plain(place(t) or "nobody has taken it", muted(9)), 1)
+        if t.state in ("available", "claimed") and (t.offered_here or t.executor_here):
+            stop = _button("Stop", _RED, STOP_RUN_HELP if t.executor_here else WITHDRAW_HELP)
+            store, pool = self._store, self._pool
+            stop.clicked.connect(lambda: store.stop_network_task_async(t, pool))
+            foot.addWidget(stop)
+            self.stops[t.task_id] = stop
+        col.addLayout(foot)
+        return box
 
     def _invite(self) -> None:
+        self._ui["copied"] = False
+        self._sync()
         self._store.network_invite_async(self._pool)
 
+    def _toggle_join(self) -> None:
+        self._ui["joining"] = not self._ui.get("joining")
+        self._sync()
+
     def _ask_leave(self) -> None:
-        self._confirm.show()
+        self._ui["leaving"] = True
+        self._sync()
 
     def _cancel_leave(self) -> None:
-        self._confirm.hide()
+        self._ui["leaving"] = False
+        self._sync()
 
     def _leave(self) -> None:
-        self._confirm.hide()
+        self._cancel_leave()
         self._store.network_leave_async(self._pool)
+
+    def _rejoin(self) -> None:
+        self._store.network_rejoin_async(self._pool)
 
 
 # MARK: - the screen
@@ -274,56 +360,75 @@ class NetworkView(QWidget):
         self.clock: Callable[[], float] = time.time
         self._ages: list[tuple[Callable[[str], None], Callable[[float], str]]] = []
         self._pool_ages: list[tuple[Callable[[str], None], Callable[[float], str]]] = []
-        #: The call whose invite is already on the clipboard, and the join whose
-        #: invite has been cleared from the field.
-        self._copied: NetworkCall | None = None
-        self._joined: NetworkCall | None = None
+        #: What the operator has open in each pool's panel, by pool id ("" for the
+        #: panel shown before any pool).
+        self._ui: dict[str, dict] = {}
         self.panels: list[PoolPanel] = []
+        self.first_join: JoinRow | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(12)
         root.addLayout(self._build_header())
-
         self._save_error = _note("", _RED)
         self._save_error.hide()
         root.addWidget(self._save_error)
 
-        body = QHBoxLayout()
-        body.setSpacing(12)
+        self._off_card, off, off_pill = settings_card(
+            glyphs.G_NETWORK, "DIPLOMACY NETWORK", _TEAL)
+        off_pill.set_state("off", _GREY)
+        self.off_switch = self._switch_row(off)
+        off.addWidget(_note(OFF_NOTE))
+        root.addWidget(self._off_card)
+
+        self._on_host = QWidget(self)
+        on = QVBoxLayout(self._on_host)
+        on.setContentsMargins(0, 0, 0, 0)
+        on.setSpacing(12)
+        cards = QHBoxLayout()
+        cards.setSpacing(12)
         left = QVBoxLayout()
-        card, self._pools_col, self._pools_pill = settings_card(
-            glyphs.G_NETWORK, "POOLS", _TEAL)
-        self._pools_col.setSpacing(8)
-        left.addWidget(card)
+        left.addWidget(self._build_status_card())
         left.addStretch(1)
         right = QVBoxLayout()
-        right.setSpacing(10)
-        right.addWidget(self._build_status_card())
+        right.setSpacing(12)
+        right.addWidget(self._build_settings_card())
         events_card, self._events_col, _ = settings_card(glyphs.G_RECENT, "RECENT", _GREY)
         right.addWidget(events_card)
         right.addStretch(1)
-        body.addLayout(left, 3)
-        body.addLayout(right, 2)
-        root.addLayout(body)
+        cards.addLayout(left, 1)
+        cards.addLayout(right, 1)
+        on.addLayout(cards)
+        self._pools = QGridLayout()
+        self._pools.setSpacing(12)
+        self._pools.setColumnStretch(0, 1)
+        self._pools.setColumnStretch(1, 1)
+        on.addLayout(self._pools)
+        root.addWidget(self._on_host)
         root.addStretch(1)
 
-        self._age_timer = QTimer(self)
-        self._age_timer.setInterval(2_000)
-        self._age_timer.timeout.connect(self._refresh_ages)
+        self._timer = QTimer(self)
+        self._timer.setInterval(2_000)
+        self._timer.timeout.connect(self._poll)
 
         store.network_changed.connect(self.rebuild)
+        store.network_invited.connect(self._on_invited)
+        store.network_joined.connect(self._on_joined)
         store.activity_changed.connect(self._rebuild_events)
         self.rebuild()
 
     def opened(self) -> None:
         if self.live:
             self.store.run_network_cycle_async()
-            self._age_timer.start()
+            self._timer.start()
         self.rebuild()
 
     def closed(self) -> None:
-        self._age_timer.stop()
+        self._timer.stop()
+
+    def _poll(self) -> None:
+        self.store.run_network_cycle_async()
+        self._refresh_ages()
 
     def _save(self, write) -> bool:
         try:
@@ -343,16 +448,22 @@ class NetworkView(QWidget):
             set_text(text(now))
 
     def rebuild(self) -> None:
-        self._copy_invite()
         self._refresh_status()
         self._rebuild_pools()
         self._rebuild_events()
 
-    def _copy_invite(self) -> None:
-        call = self.store.network_call
-        if call.invite and call is not self._copied:
-            self._copied = call
-            QGuiApplication.clipboard().setText(call.invite)
+    def _on_invited(self, pool: str, invite: str) -> None:
+        QGuiApplication.clipboard().setText(invite)
+        self._ui.setdefault(pool, {})["copied"] = True
+        self._rebuild_pools()
+
+    def _on_joined(self, card: str, ok: bool) -> None:
+        ui = self._ui.setdefault(card, {})
+        ui["sending"] = False
+        if ok:
+            ui["invite"] = ""
+            ui["joining"] = False
+        self._rebuild_pools()
 
     # MARK: header
 
@@ -375,147 +486,42 @@ class NetworkView(QWidget):
         row.addWidget(done)
         return row
 
-    def _daemon_light(self) -> tuple[str, str]:
-        """The daemon's standing, as the header and the status card both say it."""
-        store = self.store
-        if not store.network_enabled:
-            return _GREY, "off"
-        if store.network_state is not None:
-            return _GREEN, "daemon running"
-        if store.network_busy or not store.network_asked:
-            return _GREY, "starting"
-        return _RED, "daemon not answering"
+    def _daemon_light(self) -> tuple[str, str, str]:
+        """The daemon's standing: its tint, the header's words and the pill's."""
+        if not self.store.network_enabled:
+            return _GREY, "off", "off"
+        answered = self.store.network_answered
+        if answered is None:
+            return _GREY, "checking", "checking"
+        if answered:
+            return _GREEN, "daemon running", "running"
+        return _ORANGE, "daemon not answering", "not answering"
 
-    # MARK: pools
+    # MARK: the switch and the hours
 
-    def _rebuild_pools(self) -> None:
-        _clear(self._pools_col)
-        self._pool_ages = []
-        self.panels = []
-        store, state = self.store, self.store.network_state
-        on = store.network_enabled
-        self._pools_pill.set_state(
-            f"{len(state.pools)} joined" if on and state else "",
-            _GREEN if on and state and state.pools else _GREY)
-        if not on:
-            self._pools_col.addWidget(_note(OFF_NOTE))
-            return
-        if state is None:
-            starting = store.network_busy or not store.network_asked
-            self._pools_col.addWidget(
-                _note(STARTING_NOTE) if starting else _note(DOWN_NOTE, _ORANGE))
-            return
-        if store.network_pools_held:
-            self._pools_col.addWidget(_note(
-                f"The daemon was not told which repositories to share: "
-                f"{store.network_pools_held}.", _ORANGE))
-        if not state.pools:
-            self._pools_col.addWidget(_note(NO_POOLS_NOTE))
-        for pool in state.pools:
-            panel = PoolPanel(pool, store=store, call=store.network_call,
-                              ages=self._pool_ages)
-            self.panels.append(panel)
-            self._pools_col.addWidget(panel)
-        self._refresh_ages()
-
-    def _rebuild_events(self) -> None:
-        _clear(self._events_col)
-        events = network_events(self.store.audit_entries)
-        if not events:
-            self._events_col.addWidget(_note("No network events in the activity feed."))
-        for e in events:
-            self._events_col.addWidget(ActivityRow(
-                glyph=activity.glyph_for(e.action),
-                glyph_color=activity.color_for(e.action),
-                detail=e.detail, source=e.source,
-                source_color=activity.source_color(e.source),
-                clock=Fmt.clock(e.date)))
-
-    # MARK: status
+    def _switch_row(self, body: QVBoxLayout) -> SwitchToggle:
+        switch = SwitchToggle(_TEAL)
+        switch.setChecked(self.store.network_enabled)
+        switch.toggled.connect(self._on_switch)
+        body.addWidget(SettingRow(dn.SWITCH_TITLE, switch, summary=dn.EXPLANATION))
+        return switch
 
     def _hours_box(self, slot) -> QSpinBox:
         box = QSpinBox(self)
-        box.setRange(network.HOURS_FLOOR, HOURS_MAX)
+        box.setRange(network.HOURS_FLOOR, HOURS_CEILING)
+        box.setSingleStep(HOURS_STEP)
         box.setSuffix(" h")
         box.setKeyboardTracking(False)
         box.valueChanged.connect(slot)
         return box
 
-    def _build_status_card(self) -> QWidget:
-        card, body, self._state_pill = settings_card(
-            glyphs.G_NETWORK, "DIPLOMACY NETWORK", _TEAL)
-        self.switch = SwitchToggle(_TEAL)
-        self.switch.setChecked(self.store.network_enabled)
-        self.switch.toggled.connect(self._on_switch)
-        body.addWidget(SettingRow("Diplomacy Network", self.switch,
-                                  summary=dn.SWITCH_SUMMARY))
-        self._unavailable = _note("", _ORANGE)
-        body.addWidget(self._unavailable)
-
-        self._on_host = QWidget(card)
-        on = QVBoxLayout(self._on_host)
-        on.setContentsMargins(0, 0, 0, 0)
-        on.setSpacing(9)
-        self._daemon_pill = Pill("")
-        self._daemon_row = SettingRow("Daemon", self._daemon_pill)
-        on.addWidget(self._daemon_row)
-        installer = network_installer(self.store)
-        self._ready, self._busy = installer.ready, installer.busy
-        self.start = start_button(self.store, installer)
-        self.restart = restart_button(self.store, installer)
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.start)
-        buttons.addWidget(self.restart)
-        buttons.addStretch(1)
-        on.addLayout(buttons)
-
-        facts = QGridLayout()
-        facts.setHorizontalSpacing(10)
-        facts.setVerticalSpacing(3)
-        self._facts: dict[str, QLabel] = {}
-        for line, key in enumerate(("Transport", "Docker", "Model", "This machine",
-                                    "Address", "Tasks")):
-            facts.addWidget(_plain(key, muted(10)), line, 0)
-            value = _plain("", "font-size: 10px;")
-            value.setWordWrap(True)
-            facts.addWidget(value, line, 1)
-            self._facts[key] = value
-        facts.setColumnStretch(1, 1)
-        self._facts_host = QWidget(self._on_host)
-        self._facts_host.setLayout(facts)
-        facts.setContentsMargins(0, 0, 0, 0)
-        on.addWidget(self._facts_host)
-        self._error = _note("", _ORANGE)
-        on.addWidget(self._error)
-
+    def _build_settings_card(self) -> QWidget:
+        card, body, _ = settings_card(glyphs.G_LIMITS, "SETTINGS", _GREY)
+        self.switch = self._switch_row(body)
         self.required_h = self._hours_box(self._on_required_h)
-        on.addWidget(SettingRow(
-            "Hours a job of yours may take", self.required_h,
-            summary="Asked of whichever machine takes a job this one offers."))
+        body.addWidget(SettingRow(REQUIRED_TITLE, self.required_h, summary=REQUIRED_SUMMARY))
         self.accepted_h = self._hours_box(self._on_accepted_h)
-        on.addWidget(SettingRow(
-            "Longest job this machine takes", self.accepted_h,
-            summary="A job that asks for more hours is left to the other machines."))
-
-        self._join_row = QWidget(self._on_host)
-        join = QVBoxLayout(self._join_row)
-        join.setContentsMargins(0, 0, 0, 0)
-        join.setSpacing(4)
-        line = QHBoxLayout()
-        self.join_field = QLineEdit(self._join_row)
-        self.join_field.setPlaceholderText(JOIN_PLACEHOLDER)
-        self.join_field.setAccessibleName("Invite")
-        self.join_field.returnPressed.connect(self._join)
-        line.addWidget(self.join_field, 1)
-        self.join = QPushButton("Join…")
-        self.join.setToolTip("Join the pool an invite from another machine names.")
-        self.join.clicked.connect(self._join)
-        line.addWidget(self.join)
-        join.addLayout(line)
-        self._join_status = _note("")
-        join.addWidget(self._join_status)
-        on.addWidget(self._join_row)
-        body.addWidget(self._on_host)
+        body.addWidget(SettingRow(ACCEPTED_TITLE, self.accepted_h, summary=ACCEPTED_SUMMARY))
         return card
 
     def _sync_hours(self) -> None:
@@ -526,74 +532,6 @@ class NetworkView(QWidget):
                 box.blockSignals(True)
                 box.setValue(value)
                 box.blockSignals(False)
-
-    def _refresh_status(self) -> None:
-        store, state = self.store, self.store.network_state
-        on = store.network_enabled
-        self.switch.setChecked(on)
-        color, label = self._daemon_light()
-        self._dot.setStyleSheet(f"color: {color}; font-size: 9px;")
-        self._light.setText(label)
-        self._state_pill.set_state("on" if on else "off", _GREEN if on else _GREY)
-        self._counts.setText(counts(state) if on and state else "")
-        unavailable = dn.unavailable_summary() if on else None
-        self._unavailable.setText(unavailable or "")
-        self._unavailable.setVisible(bool(unavailable))
-        self._on_host.setVisible(on)
-        if not on:
-            return
-        self._sync_hours()
-        self._daemon_pill.set_state(label, color)
-        self._ages = []
-        usable = self._ready() and not self._busy()
-        self.start.setVisible(state is None)
-        self.start.setEnabled(usable)
-        self.restart.setEnabled(usable)
-        self._facts_host.setVisible(state is not None)
-        self._join_row.setVisible(state is not None)
-        if state is None:
-            starting = store.network_busy or not store.network_asked
-            self._daemon_row.set_summary(STARTING_NOTE if starting
-                                         else "The network daemon is not answering.")
-        else:
-            pid = f"pid {state.pid}" if state.pid is not None else "running"
-            started = state.started_at
-            self._ages.append((self._daemon_row.set_summary, lambda now: (
-                f"{pid} · started {rm.ago(now - started)}" if started is not None else pid)))
-            for key, (text, tint) in (
-                    ("Transport", service_line(state.transport.state, state.transport.detail)),
-                    ("Docker", service_line(state.docker.state, state.docker.detail)),
-                    ("Model", service_line(state.model.state, state.model.detail))):
-                self._facts[key].setText(text)
-                self._facts[key].setStyleSheet(f"color: {tint}; font-size: 10px;")
-            self._facts["This machine"].setText(dn.short_key(state.pk) or "-")
-            self._facts["Address"].setText(state.onion or "-")
-            self._facts["Tasks"].setText(admit_line(state))
-        self._error.setText(store.network_error)
-        self._error.setVisible(bool(store.network_error))
-
-        call = store.network_call
-        joining = call.kind == "join"
-        self.join.setEnabled(not call.running)
-        self.join_field.setEnabled(not call.running)
-        if joining and call.running:
-            self._say_join("Joining…")
-        elif joining and call.error:
-            self._say_join(call.error, _RED)
-        elif joining:
-            if call is not self._joined:
-                self._joined = call
-                self.join_field.clear()
-            self._say_join(f"Joined {call.pool}." if call.pool else "Joined.", _GREEN)
-        else:
-            self._say_join("")
-        self._refresh_ages()
-
-    def _say_join(self, text: str, tint: str | None = None) -> None:
-        self._join_status.setText(text)
-        self._join_status.setVisible(bool(text))
-        self._join_status.setStyleSheet(muted(10) if tint is None
-                                        else f"color: {tint}; font-size: 10px;")
 
     def _on_switch(self, on: bool) -> None:
         # The switch following the setting is no change to make: its signal stays
@@ -609,7 +547,159 @@ class NetworkView(QWidget):
     def _on_accepted_h(self, value: int) -> None:
         self._save(lambda: dn.set_hours(network.MAXIMUM_ACCEPTED_H_KEY, value))
 
-    def _join(self) -> None:
-        invite = self.join_field.text().strip()
-        if invite:
-            self.store.network_join_async(invite)
+    # MARK: status
+
+    def _build_status_card(self) -> QWidget:
+        card, body, _ = settings_card(glyphs.G_NETWORK, "DIPLOMACY NETWORK", _TEAL)
+        self._daemon_pill = Pill("")
+        self._daemon_row = SettingRow("Daemon", self._daemon_pill)
+        body.addWidget(self._daemon_row)
+        self._problem = _note("", _ORANGE)
+        body.addWidget(self._problem)
+
+        self._buttons = QWidget(card)
+        buttons = QHBoxLayout(self._buttons)
+        buttons.setContentsMargins(0, 0, 0, 0)
+        self.start = QPushButton("Start daemon")
+        self.start.clicked.connect(self.store.start_network_daemon_async)
+        buttons.addWidget(self.start)
+        self.restart = QPushButton("Restart daemon")
+        self.restart.setToolTip(RESTART_HELP)
+        self.restart.clicked.connect(self.store.restart_network_async)
+        buttons.addWidget(self.restart)
+        buttons.addStretch(1)
+        body.addWidget(self._buttons)
+
+        self._answered = QWidget(card)
+        answered = QVBoxLayout(self._answered)
+        answered.setContentsMargins(0, 0, 0, 0)
+        answered.setSpacing(4)
+        chips = QHBoxLayout()
+        chips.setSpacing(6)
+        self._services: dict[str, QLabel] = {}
+        for name in ("transport", "docker", "model"):
+            self._services[name] = _chip("", _GREY)
+            chips.addWidget(self._services[name])
+        chips.addStretch(1)
+        answered.addLayout(chips)
+        self._service_notes = QVBoxLayout()
+        self._service_notes.setSpacing(2)
+        answered.addLayout(self._service_notes)
+        facts = QGridLayout()
+        facts.setHorizontalSpacing(10)
+        facts.setVerticalSpacing(3)
+        self._facts: dict[str, QLabel] = {}
+        for line, key in enumerate(("This machine", "Onion address", "Work from pools")):
+            facts.addWidget(_plain(key, muted(10)), line, 0)
+            self._facts[key] = _plain("", "font-size: 10px; font-weight: 600;")
+            facts.addWidget(self._facts[key], line, 1)
+        facts.setColumnStretch(1, 1)
+        answered.addLayout(facts)
+        body.addWidget(self._answered)
+        return card
+
+    def _refresh_status(self) -> None:
+        store, state = self.store, self.store.network_state
+        on, answered = store.network_enabled, store.network_answered
+        self.switch.setChecked(on)
+        self.off_switch.setChecked(on)
+        color, light, pill = self._daemon_light()
+        self._dot.setStyleSheet(f"color: {color}; font-size: 9px;")
+        self._light.setText(light)
+        self._counts.setText(counts(state) if on and state else "")
+        self._off_card.setVisible(not on)
+        self._on_host.setVisible(on)
+        if not on:
+            return
+        self._sync_hours()
+        self._daemon_pill.set_state(pill, color)
+        self._ages = []
+        problem = dn.unavailable_summary() if answered is False else None
+        self._problem.setText(problem or "")
+        self._problem.setVisible(bool(problem))
+        usable = dn.ready() and not store.network_busy
+        self._buttons.setVisible(answered is not None)
+        self.start.setVisible(answered is False)
+        self.start.setEnabled(usable)
+        self.restart.setEnabled(usable)
+        self._answered.setVisible(state is not None)
+        if answered is None:
+            self._daemon_row.set_summary(ASKING)
+        elif state is None:
+            self._daemon_row.set_summary(SILENT)
+        else:
+            self._refresh_answered(state)
+        self._refresh_ages()
+
+    def _refresh_answered(self, state: network.Snapshot) -> None:
+        pid = f"pid {state.pid} · " if state.pid is not None else ""
+        started, socket = state.started_at, str(dn.socket_path())
+        self._ages.append((self._daemon_row.set_summary, lambda now: pid + (
+            f"started {rm.ago(max(0, now - started))} · " if started is not None else "")
+            + socket))
+        _clear(self._service_notes)
+        for name, service in (("transport", state.transport), ("docker", state.docker),
+                              ("model", state.model)):
+            tint = service_tint(service.state)
+            chip = self._services[name]
+            chip.setText(f"{name} {service.state or 'unknown'}")
+            chip.setStyleSheet(
+                f"color: {tint}; background-color: {tint_bg(tint, 0.14)};"
+                " border-radius: 7px; padding: 1px 6px; font-size: 9px; font-weight: 700;")
+            if service.state != "ready" and service.detail:
+                self._service_notes.addWidget(_note(f"{name}: {service.detail}", tint))
+        self._facts["This machine"].setText(dn.short_key(state.pk) or "no key yet")
+        self._facts["Onion address"].setText(state.onion or "not published yet")
+        self._facts["Work from pools"].setText(admit_line(state.admit))
+
+    # MARK: pools
+
+    def _join_rows(self) -> list[JoinRow]:
+        return [j for j in (*(p.join_row for p in self.panels), self.first_join)
+                if j is not None]
+
+    def _rebuild_pools(self) -> None:
+        focused = next((j.card for j in self._join_rows() if j.field.hasFocus()), None)
+        _clear(self._pools)
+        self._pool_ages = []
+        self.panels = []
+        self.first_join = None
+        store, state = self.store, self.store.network_state
+        if not store.network_enabled or state is None:
+            return
+        refusals = store.network_refusals
+        cards: list[QWidget] = []
+        # In no pool, an invite has no pool's panel to be pasted into.
+        if all(has_left(p) for p in state.pools):
+            card, col, _ = settings_card(glyphs.G_NETWORK, "POOLS", _TEAL)
+            if not state.pools:
+                col.addWidget(_note(NO_POOLS))
+            self.first_join = JoinRow(store, "", self._ui.setdefault("", {}), card)
+            col.addWidget(self.first_join)
+            if refusals.get(""):
+                col.addWidget(_note(refusals[""], _RED))
+            cards.append(card)
+        for pool in state.pools:
+            panel = PoolPanel(pool, store=store, ui=self._ui.setdefault(pool.id, {}),
+                              refusal=refusals.get(pool.id, ""), ages=self._pool_ages)
+            self.panels.append(panel)
+            cards.append(panel)
+        for i, card in enumerate(cards):
+            self._pools.addWidget(card, i // 2, i % 2, Qt.AlignmentFlag.AlignTop)
+        for join in self._join_rows():
+            if join.card == focused:
+                join.field.setFocus()
+        self._refresh_ages()
+
+    def _rebuild_events(self) -> None:
+        _clear(self._events_col)
+        events = network_events(self.store.audit_entries)
+        if not events:
+            self._events_col.addWidget(_note(NO_EVENTS))
+        for e in events:
+            self._events_col.addWidget(ActivityRow(
+                glyph=activity.glyph_for(e.action),
+                glyph_color=activity.color_for(e.action),
+                detail=e.detail, source=e.source,
+                source_color=activity.source_color(e.source),
+                clock=Fmt.clock(e.date)))

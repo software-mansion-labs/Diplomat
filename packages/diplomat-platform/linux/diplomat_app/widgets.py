@@ -680,24 +680,13 @@ class RunningTaskRow(QFrame):
 class NetworkTaskRow(ClickableFrame):
     """A job the Diplomacy Network carries: offered to a pool, and run in a container
     on whichever machine claimed it. There is no window to look at, so the row opens
-    the Network screen, and its two buttons are the only things done to such a run."""
+    the Network screen, where its task is."""
 
-    #: Each carries the run the row stands for.
-    stop_requested = Signal(str)
+    #: Carries the run the row stands for.
     forget_requested = Signal(str)
 
-    _HELP = (
-        "A job offered to the Diplomacy Network. It runs in a container on the machine "
-        "that claims it and holds no slot of this machine's automatic-task cap. Click "
-        "for the Network screen."
-    )
-    _STOP_HELP = (
-        "Stop this job: its container, when this machine is running it, and otherwise "
-        "its offer."
-    )
-    _FORGET_HELP = (
-        "Drop this job from the list and withdraw its offer, whatever state it is in."
-    )
+    _HELP = "Open the Network screen."
+    _FORGET_HELP = "Withdraw this job from the pool and remove it from the list."
 
     def __init__(self, *, run_id: str, label: str, detail: str, glyph: str,
                  hex_color: str) -> None:
@@ -722,26 +711,17 @@ class NetworkTaskRow(ClickableFrame):
         self.status.setStyleSheet(f"color: {glyphs.AGENT_LIVE}; font-size: 9px;")
         col.addWidget(self.status)
         row.addLayout(col, 1)
-        self.stop = self._button("stop", self._STOP_HELP, self._stop)
-        row.addWidget(self.stop, 0, Qt.AlignmentFlag.AlignVCenter)
-        self.forget = self._button("forget", self._FORGET_HELP, self._forget)
-        row.addWidget(self.forget, 0, Qt.AlignmentFlag.AlignVCenter)
-
-    def _button(self, title: str, tip: str, slot) -> QPushButton:
-        btn = QPushButton(title, self)
-        btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        btn.setToolTip(tip)
-        btn.setStyleSheet(
+        self.forget = QPushButton("forget", self)
+        self.forget.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.forget.setToolTip(self._FORGET_HELP)
+        self.forget.setStyleSheet(
             f"QPushButton {{ color: {glyphs.MUTED}; background-color: transparent;"
             " border: none; border-radius: 8px; padding: 2px 7px;"
             " font-size: 9px; font-weight: 600; }"
             "QPushButton:hover { color: #FF3B30; }"
         )
-        btn.clicked.connect(slot)
-        return btn
-
-    def _stop(self) -> None:
-        self.stop_requested.emit(self._run_id)
+        self.forget.clicked.connect(self._forget)
+        row.addWidget(self.forget, 0, Qt.AlignmentFlag.AlignVCenter)
 
     def _forget(self) -> None:
         self.forget_requested.emit(self._run_id)
@@ -966,9 +946,7 @@ def hline() -> QFrame:
 
 
 #: The wizard status line while its job is being offered to the Diplomacy Network.
-OFFERING_TEXT = "Offering it to the pool…"
-#: The wizard status line for a job the Diplomacy Network took.
-OFFERED_TEXT = "Offered to the pool - see the Network screen."
+OFFERING_TEXT = "Offering to the pool…"
 
 
 def dispatch_status_text(verdict: str, terminal_title: str, *,
@@ -977,14 +955,17 @@ def dispatch_status_text(verdict: str, terminal_title: str, *,
     all four wizards so refusals read identically everywhere (macOS twin:
     ``statusText(for:terminal:)``). ``network`` is whether the job went to the
     Diplomacy Network, which opens no terminal."""
-    from diplomat_runtime import autofix
+    from datetime import datetime
 
-    # A job the network did not take says why in its own words.
+    from diplomat_runtime import autofix
+    from diplomat_runtime.models import Fmt
+
     sentence = getattr(verdict, "sentence", None)
     if sentence:
-        return sentence
+        return f"Not offered: {sentence}"
     if verdict == "spawned":
-        return OFFERED_TEXT if network else f"Launched {terminal_title}"
+        return (f"Offered to the pool · {Fmt.clock(datetime.now().astimezone())}" if network
+                else f"Launched {terminal_title}")
     if verdict == autofix.VERDICT_IN_FLIGHT:
         return "An agent is already on this PR - see its session above."
     if verdict == autofix.VERDICT_BANNED:
@@ -1444,6 +1425,8 @@ def settings_card(glyph: str, title: str, tint: str) -> tuple[QWidget, QVBoxLayo
     badge.setStyleSheet(f"background-color: {tint_bg(tint, 0.16)}; border-radius: 5px;")
     head.addWidget(badge)
     label = QLabel(title)
+    # Plain: a pool's card is titled by its id, which an invite can name.
+    label.setTextFormat(Qt.TextFormat.PlainText)
     label.setStyleSheet(
         "color: palette(mid); font-size: 10px; font-weight: 800; letter-spacing: 1px;"
     )
