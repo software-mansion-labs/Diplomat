@@ -470,17 +470,20 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   // ---- jobs and forwards
 
   /// Admits a job: `{ runId, pool: { id, forge, host, owner, repo }, ... }`, handed to
-  /// onForge as it is. Resolves to `{ proxyUrl, token, caCertPath }`.
-  async function addJob(info) {
+  /// onForge as it is. Resolves to `{ proxyUrl, token, caCertPath, generation }`. A job
+  /// that is already running, taken up by a later daemon, is admitted under the `token`
+  /// it was started with and the CA `generation` it trusts.
+  async function addJob(info, { token = crypto.randomBytes(32).toString('hex'), generation = null } = {}) {
     if (!listening) throw new Error('the broker is not listening');
     if (jobs.has(info.runId)) throw new Error(`job ${info.runId} is already admitted`);
     const hosts = [...forgeHosts(info.pool), ...MODEL_HOSTS];
-    const authority = await ca.authority(hosts);
-    const token = crypto.randomBytes(32).toString('hex');
+    if (!/^[0-9a-f]{64}$/.test(token) || tokens.has(token)) throw new Error(`job ${info.runId} cannot be admitted under that token`);
+    const authority = generation === null ? await ca.authority(hosts) : ca.kept(generation);
+    if (!authority) throw new Error(`job ${info.runId} cannot be admitted: the certificate authority it was started under is gone`);
     const job = { info, token, authority, intercept: new Set(hosts), sockets: new Set(), forwards: new Map(), spent: { requests: 0, bytes: 0, said: false } };
     jobs.set(info.runId, job);
     tokens.set(token, job);
-    return { proxyUrl: `http://dn:${token}@${RELAY_HOST}:${listening.port}`, token, caCertPath: authority.certPath };
+    return { proxyUrl: `http://dn:${token}@${RELAY_HOST}:${listening.port}`, token, caCertPath: authority.certPath, generation: authority.id };
   }
 
   /// Ends a job's access: its token dies, its connections and its forwards close.
@@ -503,12 +506,16 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     return { name };
   }
 
-  /// Starts listening; resolves to `{ host, port }`.
-  async function start() {
+  /// Starts listening, on `port` when given: the port the jobs of an earlier daemon were
+  /// told. Resolves to `{ host, port }`.
+  async function start({ port = BROKER_PORT } = {}) {
     const host = await brokerBindAddress();
     await new Promise((resolve, reject) => {
-      outer.once('error', reject);
-      outer.listen(BROKER_PORT, host, resolve);
+      const failed = (err) => { outer.off('listening', up); reject(err); };
+      const up = () => { outer.off('error', failed); resolve(); };
+      outer.once('error', failed);
+      outer.once('listening', up);
+      outer.listen(port, host);
     });
     listening = { host, port: outer.address().port };
     log('broker', `listening on ${host}:${listening.port}`);

@@ -832,6 +832,33 @@ try {
     await broker.stop();
   });
 
+  await check('a later daemon\'s broker listens where the earlier one did, and knows a job that is still running by the token it was started with', async () => {
+    const make = () => createBroker({ ca: createCA(), llm, mirrors, onForge, lookup, connect, upstreamCa: fs.readFileSync(providerCa.certPath) });
+    const later = make();
+    const other = make();
+    try {
+      assert.equal((await later.start({ port })).port, port);
+      // Another forge host joined since: the newest CA is not the one this job trusts.
+      const newest = await later.addJob({ runId: 'newcomer', pool: alpha.pool });
+      assert.notEqual(newest.generation, job.generation);
+      const again = await later.addJob(info, { token: job.token, generation: job.generation });
+      assert.deepEqual(again, job, 'the same token, port and certificate authority');
+      assert.equal((await request(again, 'api.github.com', { path: '/user' })).status, 200, 'its forge still answers under the CA it was started with');
+      await assert.rejects(later.addJob({ runId: 'orphan', pool: alpha.pool }, { generation: 'ffffffffffff' }), /job orphan cannot be admitted: the certificate authority it was started under is gone/);
+      await assert.rejects(later.addJob({ runId: 'orphan', pool: alpha.pool }, { generation: '../ca' }), /is gone/);
+      // One token is one job, and a token is 32 random bytes.
+      await assert.rejects(later.addJob({ runId: 'thief', pool: alpha.pool }, { token: job.token }), /job thief cannot be admitted under that token/);
+      await assert.rejects(later.addJob({ runId: 'short', pool: alpha.pool }, { token: 'abc' }), /job short cannot be admitted under that token/);
+      // A port somebody else took is said, and the broker can still start on another.
+      await assert.rejects(other.start({ port }), /EADDRINUSE/);
+      assert.equal(other.address(), null);
+      assert.notEqual((await other.start()).port, port);
+    } finally {
+      await later.stop();
+      await other.stop();
+    }
+  });
+
   console.log(`\nall ${checks} checks passed`);
 } finally {
   await broker.stop().catch(() => {});

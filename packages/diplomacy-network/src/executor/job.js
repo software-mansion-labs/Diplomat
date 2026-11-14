@@ -171,6 +171,24 @@ export async function startJob({ run, container, spec, proxy, env = {}, forwards
   return { dir, log: path.join(dir, 'log.jsonl') };
 }
 
+/// Takes up a run that a daemon before this one started in `container` (`{ name,
+/// runsDir }`): `watch` and `stopJob` know it from here on. False when its directory
+/// names no process group to follow.
+export function attachJob({ runId, container }) {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(runId)) return false;
+  if (live.has(runId)) return true;
+  let realDir;
+  try { realDir = path.join(fs.realpathSync(container.runsDir), runId); } catch { return false; }
+  const job = {
+    runId, container: container.name, dir: path.join(container.runsDir, runId), realDir, inside: `/dn/runs/${runId}`,
+    pid: 0, stopping: false, stopped: false, watching: null,
+  };
+  job.pid = Number((readOwn(job, 'pid', 32) || '').trim()) || 0;
+  if (!job.pid) return false;
+  live.set(runId, job);
+  return true;
+}
+
 // Whether the job's process group still exists: true, false, or null when docker
 // itself could not say. Spelt `-s 0 --`: the image's sh takes no `--` after `-0`.
 async function alive(job) {
@@ -224,13 +242,21 @@ export function watch(run) {
 }
 
 /// Kills that run's processes, and only that run's, and marks it stopped; resolves to
-/// its outcome.
+/// its outcome once they are gone, however long the engine takes to say so.
 export async function stopJob(run) {
   const job = live.get(run.runId);
   if (!job) return null;
   job.stopping = true;
-  await docker(['exec', job.container, 'sh', `${job.inside}/stop.sh`, job.runId, String(Math.ceil(JOB_STOP_GRACE_MS / 1000))],
-    { timeout: JOB_STOP_GRACE_MS + 30000 });
+  // Stopped is what the container says of the process group, not what was asked of it:
+  // an engine that did not answer has stopped nothing, and is asked until it has.
+  for (;;) {
+    await docker(['exec', job.container, 'sh', `${job.inside}/stop.sh`, job.runId, String(Math.ceil(JOB_STOP_GRACE_MS / 1000))],
+      { timeout: JOB_STOP_GRACE_MS + 30000 });
+    if ((await alive(job)) === false) break;
+    await sleep(JOB_POLL_MS);
+  }
   job.stopped = true;
-  return watch(run);
+  // The run may have ended by itself while the engine was asked.
+  job.watching ??= follow(job);
+  return job.watching;
 }

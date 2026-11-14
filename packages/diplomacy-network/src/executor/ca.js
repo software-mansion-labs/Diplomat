@@ -77,7 +77,8 @@ function leafConfig(host) {
 /// The certificate authority kept under `dir`. `state()` is `{ state: 'idle' | 'ready' |
 /// 'missing' | 'failed', detail }`; `authority(hosts)` resolves to the CA that may sign
 /// for all of `hosts`, minting one when the newest cannot: `{ id, certPath, hosts,
-/// constrained, leaf(host) -> { key, cert } }`.
+/// constrained, leaf(host) -> { key, cert } }`. `kept(id)` is the generation of that id
+/// while it is on disk, or null: the one a job still running was started under.
 export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN } = {}) {
   let state = { state: 'idle', detail: '' };
   const authorities = new Map(); // id -> authority
@@ -231,7 +232,7 @@ export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN }
     }
   }
 
-  return { state: () => state, authority, prune };
+  return { state: () => state, authority, kept: (id) => (/^[0-9a-f]{12}$/.test(id) ? open(id) : null), prune };
 }
 
 function covers(hosts, host) {

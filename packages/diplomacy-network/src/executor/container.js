@@ -107,6 +107,9 @@ const runsDirOf = (name) => path.join(RUNS_DIR, '.containers', name);
 /// container when it has to; `release({ name, runId })` ends the job's hold and, when it
 /// was the last one, restarts the container so nothing a job left running outlives it
 /// (it resolves once that is done).
+/// `adopt({ pool, peer, runId })` counts a job an earlier daemon started as running in
+/// that pair's container and resolves to the container, or to null when it is not there
+/// to be used; nothing in it is restarted.
 /// `sweep()` removes every container that has run nothing for CONTAINER_IDLE_MS, with its
 /// relay, network and volume. `broker()` is the broker's `address()`: where relays lead.
 /// `imageDir` is the directory the image is built from.
@@ -282,6 +285,23 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     });
   }
 
+  // A job an earlier daemon started and this one took up again: its container is used as
+  // it stands, the job in it still running.
+  function adopt({ pool, peer, runId }) {
+    const name = containerName(pool.id, peer);
+    return serial(name, async () => {
+      const found = await inspect(name);
+      if (!found || !found.running || found.labels['dn.base'] !== BASE_DIR || found.network !== name) return null;
+      await ensureWayOut(name, found.image);
+      const entry = known.get(name) ?? { name, image: found.image, jobs: new Set(), lastUsed: now() };
+      strays.delete(name);
+      known.set(name, entry);
+      entry.jobs.add(runId);
+      entry.lastUsed = now();
+      return { name, image: entry.image, runsDir: runsDirOf(name) };
+    });
+  }
+
   function release({ name, runId }) {
     const entry = known.get(name);
     if (!entry) return Promise.resolve();
@@ -319,6 +339,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     dockerState: () => state,
     ensureImage,
     acquire,
+    adopt,
     release,
     sweep,
     list: () => [...known.values()].map((e) => ({ name: e.name, image: e.image, jobs: [...e.jobs], lastUsed: e.lastUsed })),
