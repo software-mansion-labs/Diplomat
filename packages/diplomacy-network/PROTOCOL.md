@@ -358,10 +358,11 @@ for the forge.
 
    ```json
    { "host": "api.github.com", "method": "POST", "path": "/repos/o/r/pulls/578/reviews",
-     "headers": { "content-type": "application/json", "accept": "..." }, "body": "<b64u>" }
+     "headers": { "content-type": "application/json", "accept": "..." }, "body": "<base64>" }
    ```
 
-   `path` carries the query string, if any. Header names are lowercase. The host
+   `path` carries the query string, if any. Header names are lowercase. `body` is
+   padded base64 (RFC 4648 section 4), here and in the answer. The host
    performs it only when: the envelope is signed by the capability's executor; the key is
    unexpired and unrevoked; the claim is still active for that executor; `seq` is greater
    than every `seq` used under the key; the MAC matches; and the request matches a rule.

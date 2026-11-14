@@ -25,7 +25,7 @@ src/
     pool.js        one pool's record set: merge, index, state hash, task view
     claims.js      locks, grants, ranks, the claim round's decisions
     lease.js       hours, leases, pings, extensions, lapse
-    capability.js  capabilities, MACs, rule matching (paths, queries)
+    capability.js  capabilities, MACs, sequence numbers
   transport/
     tor.js         runs tor, publishes the onion service, dials peers through SOCKS
     loop.js        the same interface on loopback TCP, for tests
@@ -35,6 +35,7 @@ src/
     store.js       what survives a restart: identity, records, locks, keys
   requester/
     rules.js       the rule catalogue per forge and kind
+    authorize.js   decides one forge request against a task's rules
     graphql.js     the GraphQL document check
     receivepack.js the push check: ref commands, fast-forward proof
     forge.js       performs an allowed request with this machine's credentials

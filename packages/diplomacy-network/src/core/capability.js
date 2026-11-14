@@ -1,10 +1,7 @@
-// Acting as the requester (PROTOCOL.md sections 9 and 10): the capability a requester
-// hands the executor of its task, the MAC and sequence number on every request made
-// under it, and the rules that say which forge requests it covers.
-//
-// A forge reads a request more leniently than a rule is written: it resolves "..",
-// decodes escapes, takes the last or the first of two equal members. So a request that
-// could be read two ways matches no rule at all.
+// Acting as the requester (PROTOCOL.md section 9): the capability a requester hands the
+// executor of its task, and the MAC and sequence number on every request made under it.
+// Whether a rule covers a request is decided where the rules are written and read:
+// src/requester/.
 
 import crypto from 'node:crypto';
 import { b64u, canon, unb64u } from './canon.js';
@@ -13,7 +10,6 @@ import { isBytes, isObject, isTime, parseTaskId, shaped, validPool } from './rec
 import { LEASE_GRACE_SECS } from '../paths.js';
 
 const MAX_RULES = 128;
-const MAX_PINS = 32;
 const MAX_PATH = 8192;
 const MAX_HEADERS = 64;
 const HOST = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
@@ -22,38 +18,18 @@ const HEADER_NAME = /^[a-z0-9-]{1,64}$/;
 const PRINTABLE = /^[\x20-\x7e]*$/;
 // A path and its query: visible ASCII, and no fragment, which never reaches a forge.
 const URL_CHARS = /^[\x21\x22\x24-\x7e]+$/;
-const SEGMENT = /^(?:[A-Za-z0-9._~!$&'()*+,;=:@-]|%[0-9A-Fa-f]{2})+$/;
-// What no path segment may decode to: a separator, or a character a forge may strip.
-const UNSAFE = /[/\\\u0000-\u001f\u007f]/;
+const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
-const scalar = (v) => typeof v === 'string' || typeof v === 'boolean' || Number.isSafeInteger(v);
-const canonical = (v) => {
+// A rule as a capability carries it: something with a canonical form that names the
+// host, method and path it is about. The rest of its shape belongs to its reader.
+function ruleShaped(rule) {
+  if (!isObject(rule) || ![rule.host, rule.method, rule.path].every((v) => typeof v === 'string')) return false;
   try {
-    canon(v);
+    canon(rule);
     return true;
   } catch {
     return false;
   }
-};
-const pin = (p) => shaped(p, {}, {
-  equals: scalar, in: (v) => Array.isArray(v) && v.length <= MAX_PINS && v.every(scalar),
-  contains: (v) => typeof v === 'string', required: (v) => typeof v === 'boolean',
-});
-const pins = (v) => isObject(v) && Object.keys(v).length <= MAX_PINS && Object.values(v).every(pin);
-const pattern = (v) => {
-  if (typeof v !== 'string' || v.length > MAX_PATH || !v.startsWith('/')) return false;
-  if (v === '/') return true;
-  const parts = v.slice(1).split('/');
-  return parts.every((p, i) => p !== '' && p !== '.' && p !== '..' && (p !== '**' || i === parts.length - 1));
-};
-
-/// Is this a well-formed rule? The inner shape of its `graphql`, `git` and `refs`
-/// members belongs to the checks that read them.
-export function validRule(rule) {
-  const text = (re) => (v) => typeof v === 'string' && re.test(v);
-  return shaped(rule, { host: text(HOST), method: text(METHOD), path: pattern }, {
-    query: pins, json: pins, graphql: canonical, git: canonical, refs: canonical,
-  });
 }
 
 const FORGE_REQUEST = {
@@ -62,142 +38,18 @@ const FORGE_REQUEST = {
   path: (v) => typeof v === 'string' && v.length <= MAX_PATH && v.startsWith('/') && URL_CHARS.test(v),
   headers: (h) => isObject(h) && Object.keys(h).length <= MAX_HEADERS
     && Object.entries(h).every(([k, v]) => HEADER_NAME.test(k) && typeof v === 'string' && v.length <= MAX_PATH && PRINTABLE.test(v)),
-  body: (v) => unb64u(v) !== null,
+  body: (v) => typeof v === 'string' && BASE64.test(v),
 };
 
 /// Is this a well-formed forge request: `{ host, method, path, headers, body }`, the body
-/// in base64url?
+/// in padded base64?
 export function validForgeRequest(request) {
   return shaped(request, FORGE_REQUEST);
 }
 
-// The decoded segments and the raw query of a request path, or null when a forge could
-// read the path as another one: an empty, "." or ".." segment, an escaped separator, a
-// fragment, a character outside the URL alphabet.
-function splitPath(path) {
-  const mark = path.indexOf('?');
-  const [raw, query] = mark === -1 ? [path, ''] : [path.slice(0, mark), path.slice(mark + 1)];
-  if (raw === '/') return { segments: [], query };
-  const segments = [];
-  for (const part of raw.slice(1).split('/')) {
-    if (!SEGMENT.test(part)) return null;
-    let segment;
-    try {
-      segment = decodeURIComponent(part);
-    } catch {
-      return null;
-    }
-    if (segment === '.' || segment === '..' || UNSAFE.test(segment)) return null;
-    segments.push(segment);
-  }
-  return { segments, query };
-}
-
-function pathMatches(rulePath, segments) {
-  const parts = rulePath === '/' ? [] : rulePath.slice(1).split('/');
-  for (const [i, part] of parts.entries()) {
-    if (part === '**') return true;
-    if (i >= segments.length) return false;
-    if (part !== '*' && part !== segments[i]) return false;
-  }
-  return parts.length === segments.length;
-}
-
-function satisfies(p, value) {
-  if (Object.hasOwn(p, 'equals') && value !== p.equals) return false;
-  if (Object.hasOwn(p, 'in') && !p.in.includes(value)) return false;
-  if (Object.hasOwn(p, 'contains') && !(typeof value === 'string' && value.includes(p.contains))) return false;
-  return true;
-}
-
-// A pinned member that is present must satisfy its pin; an absent one passes unless the
-// pin requires it. `values` maps each name to every value it was given.
-function pinsHold(wanted, values) {
-  return Object.entries(wanted).every(([name, p]) => {
-    const given = values.get(name) ?? [];
-    if (given.length === 0) return p.required !== true;
-    return given.length === 1 && satisfies(p, given[0]);
-  });
-}
-
-function queryValues(query) {
-  const values = new Map();
-  for (const pair of query.split('&')) {
-    if (pair === '') continue;
-    const eq = pair.indexOf('=');
-    const [name, value] = (eq === -1 ? [pair, ''] : [pair.slice(0, eq), pair.slice(eq + 1)])
-      .map((s) => decodeURIComponent(s.replaceAll('+', ' ')));
-    values.set(name, [...(values.get(name) ?? []), value]);
-  }
-  return values;
-}
-
-// The names of the members of a JSON object, as often as each is written. `text` has
-// already parsed as an object, so only strings and brackets need telling apart.
-function memberNames(text) {
-  const names = [];
-  let depth = 0;
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    if (ch === '{' || ch === '[') depth += 1;
-    else if (ch === '}' || ch === ']') depth -= 1;
-    else if (ch === '"') {
-      let end = i + 1;
-      while (text[end] !== '"') end += text[end] === '\\' ? 2 : 1;
-      let next = end + 1;
-      while (' \t\n\r'.includes(text[next])) next += 1;
-      if (depth === 1 && text[next] === ':') names.push(JSON.parse(text.slice(i, end + 1)));
-      i = end;
-    }
-  }
-  return names;
-}
-
-// The members of a JSON request body, each name mapped to its values, or null when the
-// body is not sent as JSON or is not one JSON object.
-function jsonValues(request) {
-  if (!/^application\/json\s*(;.*)?$/i.test(request.headers['content-type'] ?? '')) return null;
-  try {
-    const text = new TextDecoder('utf-8', { fatal: true }).decode(unb64u(request.body));
-    const parsed = JSON.parse(text);
-    if (!isObject(parsed)) return null;
-    const values = new Map();
-    for (const name of memberNames(text)) values.set(name, [...(values.get(name) ?? []), parsed[name]]);
-    return values;
-  } catch {
-    return null;
-  }
-}
-
-function ruleCovers(rule, request, path) {
-  if (rule.host !== request.host || rule.method !== request.method || !pathMatches(rule.path, path.segments)) return false;
-  try {
-    if (rule.query && !pinsHold(rule.query, queryValues(path.query))) return false;
-  } catch {
-    return false;
-  }
-  if (!rule.json) return true;
-  const values = jsonValues(request);
-  return values !== null && pinsHold(rule.json, values);
-}
-
-/// What `rules` say about a forge request: `{ verdict: 'allow', rule }` when a rule
-/// covers it outright; `{ verdict: 'deep', rules }` when only rules carrying a `graphql`
-/// or `git` member cover its host, method, path and pins, so their own check must decide;
-/// `{ verdict: 'deny' }` otherwise, which is also the answer to a malformed request or
-/// rule and to a path a forge could read as another one.
-export function matchRules(rules, request) {
-  const path = validForgeRequest(request) ? splitPath(request.path) : null;
-  if (!path || !Array.isArray(rules)) return { verdict: 'deny' };
-  const covering = rules.filter((rule) => validRule(rule) && ruleCovers(rule, request, path));
-  const plain = covering.find((rule) => !Object.hasOwn(rule, 'graphql') && !Object.hasOwn(rule, 'git'));
-  if (plain) return { verdict: 'allow', rule: plain };
-  return covering.length > 0 ? { verdict: 'deep', rules: covering } : { verdict: 'deny' };
-}
-
 const CAPABILITY = {
   keyId: (v) => isBytes(v, 16), pool: validPool, taskId: (v) => parseTaskId(v) !== null, executor: validPk,
-  host: validPk, rules: (v) => Array.isArray(v) && v.length <= MAX_RULES && v.every(validRule), exp: isTime,
+  host: validPk, rules: (v) => Array.isArray(v) && v.length <= MAX_RULES && v.every(ruleShaped), exp: isTime,
   sig: (v) => isBytes(v, 64),
 };
 
@@ -273,11 +125,11 @@ const ACT = {
 
 /// The issuing host's checks on the body of an `act` request from `from`, in order: the
 /// sender is the capability's executor and names its key and task; the key is unexpired
-/// at `now`; `seq` is new; the MAC matches; a rule covers the request. Answers
-/// `{ ok: true, verdict, rule?, rules? }` as `matchRules` does, or
+/// at `now`; `seq` is new; the MAC matches. Answers `{ ok: true }`, or
 /// `{ ok: false, code, detail }` with `bad-request` or `denied`. `seqs` is the host's
-/// SeqTracker: a request whose MAC matched has used its number, covered or not. Whether
-/// the key is revoked and the claim still active is the caller's to check first.
+/// SeqTracker: a request whose MAC matched has used its number, whatever the rules then
+/// say of it. Whether the key is revoked, the claim still active and the request covered
+/// by a rule is the caller's to check.
 export function checkAct(body, { capability, secret, seqs, from, now }) {
   if (!shaped(body, ACT)) return { ok: false, code: 'bad-request', detail: 'not an act body' };
   const deny = (detail) => ({ ok: false, code: 'denied', detail });
@@ -287,6 +139,5 @@ export function checkAct(body, { capability, secret, seqs, from, now }) {
   const mac = unb64u(actMac(secret, body));
   if (!crypto.timingSafeEqual(mac, unb64u(body.mac))) return deny('bad mac');
   seqs.use(body.keyId, body.seq);
-  const match = matchRules(capability.rules, body.request);
-  return match.verdict === 'deny' ? deny('no rule covers the request') : { ok: true, ...match };
+  return { ok: true };
 }
