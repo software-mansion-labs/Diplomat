@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { DAEMON, POOL, check, createBench, passed, until } from './lib/daemons.mjs';
+import { DAEMON, POOL, check, createBench, heldGit, passed, until } from './lib/daemons.mjs';
 
 const bench = await createBench();
 
@@ -264,14 +264,6 @@ try {
     assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null });
   });
 
-  // A git that waits, at the commands a mirror is made or refreshed with, while a file is there.
-  function heldGit(m) {
-    const hold = path.join(m.home, 'hold-git');
-    const file = path.join(m.home, 'bin', 'git-held');
-    fs.writeFileSync(file, `#!/bin/sh\ncase " $* " in *" clone "*|*" update "*) : > "${hold}.waiting"; while [ -e "${hold}" ]; do sleep 0.05; done;; esac\nexec git "$@"\n`, { mode: 0o755 });
-    m.env.DN_GIT = file;
-    return { hold, waiting: () => fs.existsSync(`${hold}.waiting`) };
-  }
   const jobStarts = (m) => m.docker('exec').filter((call) => call.some((arg) => /run\.sh$/.test(arg)));
 
   await check('a job being started when the network is switched off is not started: the switch-off waits for the start to find that out, no container is made for it, and nothing is left', async () => {
@@ -289,6 +281,7 @@ try {
     fs.rmSync(git.hold);
     assert.deepEqual(await a.exit, { code: 0, signal: null });
     assert.deepEqual([a.docker('run'), a.agent(early.runId), world(a)], [[], null, [0, 0, 0]]);
+    assert.ok(!a.log().includes('] taking no job of '), 'a machine that is going holds nothing against the pool');
 
     // Its start waits for the engine to make its container.
     const b = await bench.machine('mid2', { env: { DN_SWITCH_OFF_WAIT_MS: '60000' } }).start();

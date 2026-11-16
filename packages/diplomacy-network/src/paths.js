@@ -257,6 +257,11 @@ export const SWEEP_MS = num('DN_SWEEP_MS', 10 * 60 * 1000);
 /// The pause before something that failed for want of docker is tried again: a stop that
 /// did not go through, the broker's listener.
 export const EXECUTOR_RETRY_MS = num('DN_EXECUTOR_RETRY_MS', 5000);
+/// How long a pool is left alone after a job of it could not be started on this machine:
+/// this long after the first failure, twice as long after each one in a row, and no
+/// longer than the second.
+export const POOL_RETRY_MS = num('DN_POOL_RETRY_MS', 60 * 1000);
+export const POOL_RETRY_MAX_MS = num('DN_POOL_RETRY_MAX_MS', 10 * 60 * 1000);
 /// jobs.json follows what the jobs have spent of the model this often.
 export const JOBS_WRITE_MS = num('DN_JOBS_WRITE_MS', 5000);
 /// A run's directory and its outcome are kept this long after the run ended.

@@ -219,7 +219,7 @@ The snapshot:
   "model": { "state": "ready|missing", "detail": "" },
   "devices": { "state": "off|ready|none", "detail": "" },
   "admit": { "slots": 0, "at": 0, "reason": "" },
-  "pools": [ { "id": "", "path": "", "identity": "", "hash": "", "left": false,
+  "pools": [ { "id": "", "path": "", "identity": "", "hash": "", "left": false, "notTaking": "",
       "members": [ { "pk": "", "self": false, "maxAcceptedH": 12, "lastSeen": 0, "reachable": true,
           "skew": false } ],
       "tasks": [ { "taskId": "", "kind": "", "item": "", "title": "", "identity": "", "hours": 12,
@@ -233,7 +233,7 @@ The snapshot:
       "executorHere": false, "backedBy": [""], "offeredAt": 0, "attempt": 1, "requests": 0,
       "refused": 0,
       "outcome": { "ok": true, "summary": "", "usd": 0, "tokens": 0, "runner": "", "model": "" },
-      "endedAt": 0 } ] }
+      "endedAt": 0, "notTaking": "" } ] }
 ```
 
 Every time is Unix seconds. `offers` are the tasks this machine asked for: `pooled` while
@@ -256,6 +256,17 @@ other offer.
 carries the reason. `devices` is `off` until the operator sets `networkDevices`, then
 `ready` while an adb server answers on this machine and `none` while none does.
 `transport` is `failed`, with the reason, between a start that failed and the next one.
+
+A pool's `notTaking` is why this machine takes none of that pool's jobs, in a sentence,
+and empty while it takes them: the transport is not up, docker is not ready, there is no
+credential for the model, or the last job of the pool could not be started here
+("Executor side" below). An offer's `notTaking` is why this machine does not take that
+job of its own while it is `pooled`: its pool's `notTaking`, or
+`this machine takes jobs of at most 12 h and this one needs 24` when
+`networkRequiredMinimumH` is above `networkMaximumAcceptedH`. It is empty for a job
+this machine is free to take, and for one that is not `pooled`. `admit` is Diplomat's
+word and is said nowhere else: with no slot free a job waits unless its operator
+started it with `now`.
 
 A `tasks` row is one task, however many machines offer it: `claimed` while a claim holds
 any open offer of it, `available` while offers are open and none is held, `done` when
@@ -344,9 +355,12 @@ nothing answers: at once, then no sooner than 15 s after that try, then after tw
 long each time, up to 10 minutes. A promise nobody waited for is logged the same way
 (`unhandled: ...`) and never ends it.
 
-What only a test sets is honoured by any daemon that is given it, so each is said in
-`daemon.log` at the start, by name and value, and none belongs in a daemon on the
-network: `DN_TRANSPORT=loop` (loopback TCP in place of Tor; the snapshot's
+A tool named by hand is said so in `daemon.log` beside where it is
+(`docker is /x/docker, which DN_DOCKER names`): whatever stands in a tool's place has
+what the daemon gives that tool, and a docker that is none runs a job on this machine
+itself. What only a test sets is honoured by any daemon that is given it, so each is
+said in `daemon.log` at the start, by name and value, and none belongs in a daemon on
+the network: `DN_TRANSPORT=loop` (loopback TCP in place of Tor; the snapshot's
 `transport.detail` then begins `loop (test transport)`), `DN_FORGE_ORIGINS` (where each
 forge host is reached), `DN_POW_*` (how much work a request costs) and `DN_TEST_FAULTS`
 (a file of faults for the daemon to throw).
@@ -520,8 +534,21 @@ daemon makes sure of four things and starts the job:
   a connection nothing moves on is closed after `DN_JOB_IDLE_MS` (30 min). Everything
   else is streamed.
 
-The job itself is the agent runner in headless mode. Its exit is the completion signal;
-its log holds the cost. The daemon reports the outcome to the requester with `done`.
+The job itself is Claude Code in headless mode, whatever runner Diplomat is set to use
+for the agents it starts in terminals: a machine with no credential for it takes no job.
+Its exit is the completion signal; its log holds the cost. The daemon reports the outcome
+to the requester with `done`.
+
+A job that cannot be started - the mirror cannot be made, the container cannot, the
+runner does not come up - never ran, and why not is this machine's own affair: its claim
+is given back, which costs the requester none of the task's three attempts, and this
+machine does not go for that task again. It then takes no job of that pool for a minute
+(`DN_POOL_RETRY_MS`), twice as long after each such failure in a row and ten minutes at
+most (`DN_POOL_RETRY_MAX_MS`); the pool's `notTaking` says why meanwhile. When the wait
+is over the mirror is tried, the one part of a start that needs no job: while it cannot
+be made the wait begins again, and once it can the pool's jobs are taken as before.
+Whatever else stood in the way shows at the next job, which is given back like the last.
+A job that was started sets the wait back to a minute.
 
 A machine takes work only while its docker engine answers, the image is there and a
 model credential is; both are looked at again every 30 s, and the snapshot says which is
