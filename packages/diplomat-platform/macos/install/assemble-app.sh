@@ -22,6 +22,8 @@ cp "$BIN" "$STAGE/Contents/MacOS/$APP_NAME"
 # resolves them via Bundle.main.resourceURL/assets inside the packaged .app.
 cp -R "$ASSETS" "$STAGE/Contents/Resources/assets"
 
+# LSUIElement: an instance takes a Dock tile only once it has ended the older one
+# (AppDelegate), so a relaunch lands on the kept-in-Dock tile, not beside it.
 cat > "$STAGE/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,6 +37,7 @@ cat > "$STAGE/Contents/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key><string>1.0</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSUIElement</key><true/>
 </dict>
 </plist>
 PLIST

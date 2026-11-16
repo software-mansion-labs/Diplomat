@@ -302,7 +302,7 @@ and drives the real app there through the VM's own VNC server: an attended launc
 opens the window and takes focus, ⌘, opens Settings, ⌘W leaves the app running, a
 second launch or ⌘0 brings the window back, ⌘Q asks first, an
 unattended start (the login agent, the watchdog) opens no window and leaves the
-frontmost app in front.
+frontmost app in front, and the 06:00 relaunch keeps the app on its kept-in-Dock tile.
 Its exit code is the verdict, and it keeps a screenshot per step:
 
 ```bash
