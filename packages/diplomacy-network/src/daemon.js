@@ -38,7 +38,7 @@ import { createTransport } from './transport/index.js';
 import {
   ADB_SERVER, BASE_DIR, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, CONTAINER_DISK_BYTES, DISCOVERY_PATH, EXECUTOR_CHECK_MS,
   EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GIT_BIN, HOURS_FLOOR, JOBS_PATH, JOBS_WRITE_MS, LOG_PATH,
-  MIRROR_KEEP_MS, RECONCILE_MS, RUN_KEEP_MS, SOCKET_PATH, STATE_PATH, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS,
+  MIRROR_KEEP_MS, RECONCILE_MS, RUN_KEEP_MS, SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS,
   TEST_FAULTS_PATH, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS,
 } from './paths.js';
 
@@ -579,7 +579,8 @@ const SHAPES = {
   pool: { id: POOL, path: text(4096), forge: [(v) => v === 'github' || v === 'gitlab', '"github" or "gitlab"'], identity: text(255, 0) },
   admit: { slots: whole(0, 1000), reason: optional(text(200, 0)) },
   offer: {
-    pool: POOL, kind: text(64), item: text(200), title: text(1000, 0), prompt: text(2 ** 20, 0), options: optional(plainObject),
+    // How long a prompt may be is the node's to say: it measures the task as it is sent.
+    pool: POOL, kind: text(64), item: text(200), title: text(1000, 0), prompt: [(v) => typeof v === 'string', 'text'], options: optional(plainObject),
     base: optional(text(300)), now: optional(flag),
   },
   withdraw: { taskId: text(600), reason: optional(text(1000, 0)) },
@@ -664,7 +665,7 @@ const server = jsonServer(async (route, body) => {
     if (!(err instanceof Refusal)) log(`${route} failed: ${err?.stack ?? err}`);
     throw err;
   }
-}, { notJson: 'The request body is not JSON.' });
+}, { notJson: 'The request body is not JSON.', maxBody: SOCKET_BODY_CHARS, tooLarge: `The request body is longer than ${SOCKET_BODY_CHARS} characters.` });
 
 // ---- the process
 

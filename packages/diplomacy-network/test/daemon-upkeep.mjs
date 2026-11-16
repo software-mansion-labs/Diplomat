@@ -28,6 +28,8 @@ const exists = (...parts) => fs.existsSync(path.join(...parts));
 const names = (dir) => { try { return fs.readdirSync(dir).sort(); } catch { return []; } };
 const done = (m, taskId) => until(`${taskId} done`, async () => (await offerOf(m, taskId)).state === 'done');
 // A task this machine runs itself, at once.
+// The interval the first check's daemon writes its snapshot at.
+const STATE_WRITE_MS = 2000;
 const own = async (m, item, prompt) => (await m.ok('/offer', { pool: POOL, kind: item.startsWith('pr') ? 'review' : 'issues', item, title: item, prompt, now: true })).taskId;
 const waiting = (m, taskId, file) => until(`${m.name}'s agent to wait for ${file}`, async () => {
   const run = await runOf(m, taskId);
@@ -84,8 +86,8 @@ try {
   });
 
   let up;
-  await check('the sweep and the prune fire on their timer: an idle container goes, an old certificate authority goes once no job runs, and state.json is written a second apart at most under a burst of changes', async () => {
-    up = await bench.machine('up', { env: { DN_SWEEP_MS: '200', DN_CONTAINER_IDLE_MS: '1500' } }).start();
+  await check('the sweep and the prune fire on their timer: an idle container goes, an old certificate authority goes once no job runs, and state.json is written no more often than its interval under a burst of changes', async () => {
+    up = await bench.machine('up', { env: { DN_SWEEP_MS: '200', DN_CONTAINER_IDLE_MS: '1500', DN_STATE_WRITE_MS: String(STATE_WRITE_MS) } }).start();
     await up.linked();
     const taskId = await own(up, 'pr-1', 'wait held\nsay swept');
     const run = await waiting(up, taskId, 'held');
@@ -107,20 +109,21 @@ try {
     assert.deepEqual(names(ca), [current], 'the one a next job of these hosts is given stays');
     assert.match(up.log(), new RegExp(`removing ${run.container}: idle`));
 
-    // Every change moves the snapshot; the file follows a second behind at most, and
-    // is not written more often than that.
+    // Every change moves the snapshot; the file follows one interval behind at most, and
+    // is not written more often than that. Four writes begin three intervals apart; the
+    // first may have begun before the burst did, by less than an interval.
     const file = path.join(up.base, 'state.json');
-    const written = [];
+    const written = new Set([fs.statSync(file).mtimeMs]);
+    const from = Date.now();
     let slots = 0;
-    await until('three writes under a burst', async () => {
+    await until('four writes under a burst', async () => {
       slots = (slots % 900) + 1;
       await up.ok('/admit', { slots });
-      const at = fs.statSync(file).mtimeMs;
-      if (written.at(-1) !== at) written.push(at);
-      return written.length >= 4;
+      written.add(fs.statSync(file).mtimeMs);
+      return written.size > 4;
     });
-    const gaps = written.slice(2).map((at, i) => Math.round(at - written[i + 1]));
-    assert.ok(gaps.every((gap) => gap >= 700), `state.json was written ${JSON.stringify(gaps)} ms apart`);
+    const took = Date.now() - from;
+    assert.ok(took >= 2 * STATE_WRITE_MS, `state.json was written four times in ${took} ms, at an interval of ${STATE_WRITE_MS} ms`);
     await until('the file to catch up', () => JSON.parse(fs.readFileSync(file, 'utf8')).admit.slots === slots);
   });
 

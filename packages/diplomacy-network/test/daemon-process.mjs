@@ -201,6 +201,38 @@ try {
     assert.deepEqual((await a.call('GET', '/health')).body, { ok: true, pid: a.pid });
     assert.doesNotMatch(a.log(), /failed:/, 'a refusal is no fault, and is not logged as one');
 
+    // How long a task may be is one limit, the node's, on the task as it is sent: half a
+    // mebibyte of prompt and options. It is met to the character, and past it the
+    // answer is the same sentence however long the prompt.
+    const sized = async (chars) => {
+      const answer = await a.call('POST', '/offer', offerBody('pr-9', { prompt: 'p'.repeat(chars) }));
+      if (answer.status === 200) await a.ok('/withdraw', { taskId: answer.body.taskId });
+      return answer;
+    };
+    const tooLong = { error: 'The task cannot be sent to another machine: its prompt and options are too long.' };
+    let [fits, over] = [2 ** 19 - 1024, 2 ** 19];
+    assert.equal((await sized(fits)).status, 200);
+    while (over - fits > 1) {
+      const mid = Math.floor((fits + over) / 2);
+      if ((await sized(mid)).status === 200) fits = mid;
+      else over = mid;
+    }
+    for (const chars of [over, 2 ** 19, 10 ** 6 + 1, 2 ** 20, 2 ** 20 + 1, 3 * 2 ** 20]) {
+      const answer = await sized(chars);
+      assert.deepEqual([chars, answer.status, answer.body], [chars, 409, tooLong]);
+    }
+    // The socket reads a body of 4 MiB of characters, which holds any task the node
+    // takes however its JSON is written; a longer one is read to its end and answered.
+    const body = (chars) => {
+      const head = JSON.stringify(offerBody('pr-9', { prompt: '' })).slice(0, -2);
+      return `${head}${'p'.repeat(chars - head.length - 2)}"}`;
+    };
+    assert.deepEqual(await a.call('POST', '/offer', undefined, { raw: body(4 * 2 ** 20) }), { status: 409, body: tooLong });
+    assert.deepEqual(await a.call('POST', '/offer', undefined, { raw: body(4 * 2 ** 20 + 1) }), { status: 413, body: { error: 'The request body is longer than 4194304 characters.' } });
+    assert.deepEqual(await a.call('POST', '/offer', undefined, { raw: body(6 * 2 ** 20) }), { status: 413, body: { error: 'The request body is longer than 4194304 characters.' } });
+    assert.deepEqual((await a.call('GET', '/health')).body, { ok: true, pid: a.pid });
+    assert.doesNotMatch(a.log(), /failed:/);
+
     // A fault of the daemon's own is a 500 with the reason, a line in the log, and no crash.
     fs.chmodSync(path.join(a.base, 'pools'), 0o500);
     const fault = await a.call('POST', '/invite', { pool: POOL });

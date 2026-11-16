@@ -159,6 +159,7 @@ Every other answer is `{ error }` with a status that says whose fault it was:
 | 400 | the body is not what the route reads: not JSON (`The request body is not JSON.`), not an object, a member missing or of the wrong type or size. Members a route does not read are ignored |
 | 409 | the body is well formed and the network refuses it; `error` is a sentence fit to show the operator |
 | 404 | no such route |
+| 413 | the body is longer than 4 MiB of characters (`The request body is longer than 4194304 characters.`); it was read to its end and none of it kept |
 | 503 | the daemon is on its way out (`The Diplomacy Network daemon is stopping.`): nothing was done, and the daemon after it takes the same request. `GET /health` answers to the last |
 | 500 | a fault of the daemon's own; the same line is in `daemon.log`, and the daemon goes on |
 
@@ -166,7 +167,10 @@ Every other answer is `{ error }` with a status that says whose fault it was:
 wait for any other member to hear of it: the pool is told in the background, and the
 snapshot shows the offer `pooled` meanwhile. The commits a job makes are authored as
 `user.name` and `user.email` of the offering machine's checkout say; an offer from a
-checkout that has neither is refused.
+checkout that has neither is refused. How long a task may be is one limit: its prompt
+and options, as the task is sent to another machine, come to half a mebibyte at most,
+and a longer one is a 409 (`... its prompt and options are too long.`). The socket reads
+eight times that, so no task under the limit is cut short by how its JSON was written.
 
 `withdraw` is safe to repeat. A task this machine has no open offer of - one it never
 offered, one that already ended, one already withdrawn - is answered `{ ok: true,
@@ -244,7 +248,7 @@ for every host a claim of it needs - the hosts offering it, or every other membe
 this machine offers it: nobody can take it until the clocks agree. Otherwise it is empty.
 
 The same snapshot is written to `state.json` (0600), replaced whole and at most once a
-second, and once more as the daemon ends.
+second (`DN_STATE_WRITE_MS`), and once more as the daemon ends.
 
 ## What runs where
 

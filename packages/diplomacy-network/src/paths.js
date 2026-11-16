@@ -202,7 +202,10 @@ export const JOBS_PATH = path.join(BASE_DIR, 'jobs.json');
 /// network switched off: a single read can fall in the middle of a rewrite.
 export const CONFIG_UNREADABLE_POLLS = num('DN_CONFIG_UNREADABLE_POLLS', 5);
 /// The snapshot file is rewritten at most this often.
-export const STATE_WRITE_MS = 1000;
+export const STATE_WRITE_MS = num('DN_STATE_WRITE_MS', 1000);
+/// The longest body the local socket reads, in characters. An offer's prompt and options
+/// are held to half a mebibyte by the node, and JSON may write a character as six.
+export const SOCKET_BODY_CHARS = 4 * 2 ** 20;
 /// How often the docker engine and the model credential are looked at again.
 export const EXECUTOR_CHECK_MS = num('DN_EXECUTOR_CHECK_MS', 30 * 1000);
 /// How often the jobs in this daemon's containers are held against the node's runs.
