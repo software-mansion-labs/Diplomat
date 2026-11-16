@@ -82,7 +82,7 @@ closed at every start.
 
 | File | Holds |
 | --- | --- |
-| `daemon.sock`, `daemon.json`, `daemon.log` | as in the other daemons |
+| `daemon.sock`, `daemon.json`, `daemon.log` | as in the other daemons. A log that has reached 16 MiB is copied to `daemon.log.1`, over the copy before it, and starts again |
 | `state.json` | the snapshot the applets read |
 | `identity.json` (0600) | the host key |
 | `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it |
