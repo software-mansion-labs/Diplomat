@@ -751,11 +751,11 @@ function bye(code) {
 }
 
 // Removes everything this daemon made in docker. Null once it is gone, else why it may
-// not be: the engine did not answer in SWITCH_OFF_WAIT_MS, or a job was still being
-// started, whose container the engine may make after it listed what there was.
+// not be: the engine said so, did not answer in SWITCH_OFF_WAIT_MS, or a job was still
+// being started, whose container the engine may make after it listed what there was.
 async function clearDocker() {
   const late = delay(SWITCH_OFF_WAIT_MS, `the docker engine did not answer within ${SWITCH_OFF_WAIT_MS / 1000} s`);
-  const left = await Promise.race([containers.removeAll().then(() => null), late]);
+  const left = await Promise.race([containers.removeAll().then(() => null, (err) => String(err?.message ?? err)), late]);
   return left ?? (starting > 0 ? 'a job was still being started' : null);
 }
 

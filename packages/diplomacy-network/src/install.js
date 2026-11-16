@@ -17,7 +17,7 @@ import { daemonControl } from '../../daemon-core/src/daemon-control.js';
 import { pidAlive, readJson } from '../../daemon-core/src/fsio.js';
 import { createContainers } from './executor/container.js';
 import * as client from './ipc.js';
-import { CONFIG_PATH, DISCOVERY_PATH, INSTALLER_ANSWER_MS, OFF_REMOVES, STOP_WAIT_MS, TOOL_PATH } from './paths.js';
+import { CONFIG_PATH, DISCOVERY_PATH, EXECUTOR_RETRY_MS, INSTALLER_ANSWER_MS, OFF_REMOVES, STOP_WAIT_MS, TOOL_PATH } from './paths.js';
 
 // docker is looked for where the daemon looks for it.
 process.env.PATH = TOOL_PATH;
@@ -51,17 +51,26 @@ async function stop() {
 
 // A daemon that is switched off removes what it made in docker as it ends, and then
 // what OFF_REMOVES names. One that was not there to be stopped, was killed past its end
-// or found the engine not answering left that standing, so it is done here again. Like
-// the daemon, this takes only a config it can read for the network being off.
+// or found the engine down left that standing, so it is done here again, and asked again
+// until the answer is due: an engine that is starting takes a while to answer. Like the
+// daemon, this takes only a config it can read for the network being off.
 async function stopForGood() {
   const error = await stop();
   const config = readJson(CONFIG_PATH);
   if (error || config === null || typeof config !== 'object' || config.networkEnabled === true) return error;
+  const containers = createContainers();
   const late = delay(Math.max(0, answerBy - Date.now()), 'the docker engine did not answer in time');
-  const left = await Promise.race([createContainers().removeAll().then(() => null), late]);
-  if (left !== null) return `the daemon is gone, but what it made in docker is still there: ${left}`;
-  for (const dir of OFF_REMOVES) fs.rmSync(dir, { recursive: true, force: true });
-  return null;
+  // What the engine last said outlives an asking that the answer's time cut short.
+  let said = null;
+  for (;;) {
+    const left = await Promise.race([containers.removeAll().then(() => null, (err) => { said = String(err?.message ?? err); return said; }), late]);
+    if (left === null) {
+      for (const dir of OFF_REMOVES) fs.rmSync(dir, { recursive: true, force: true });
+      return null;
+    }
+    if (Date.now() + EXECUTOR_RETRY_MS >= answerBy) return `the daemon is gone, but what it made in docker is still there: ${said ?? left}`;
+    await delay(EXECUTOR_RETRY_MS);
+  }
 }
 
 const actions = {

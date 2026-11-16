@@ -255,6 +255,43 @@ try {
     assert.deepEqual([world(m), kept(m)], [[0, 0, 0], ['identity.json', 'pools', 'links.json', 'offers.json']]);
   });
 
+  await check('a switch-off that finds the docker engine down says what the engine said and ends with a failure; the installer asks again while its answer may wait, and removes everything once the engine is back', async () => {
+    const m = await bench.machine('down', { env: { DN_SWITCH_OFF_WAIT_MS: '1500', DN_INSTALLER_ANSWER_MS: '6000' } }).start();
+    await m.linked();
+    await waiting(m, await own(m, 'pr-1', 'wait never\nsay never'), 'never');
+    const down = path.join(m.dockerDir, 'down');
+    fs.writeFileSync(down, '');
+    m.setConfig({ networkEnabled: false });
+    assert.deepEqual(await m.exit, { code: 1, signal: null });
+    assert.match(m.log(), /\] switched off with what this daemon made in docker still there: (?!the docker engine did not answer)[^\n]+\n[^\n]*\] ended\n$/);
+    assert.deepEqual([world(m), kept(m).slice(0, 3)], [[2, 1, 1], ['runs', 'mirrors', 'ca']]);
+
+    // The engine refuses, then takes a listing and answers nothing: the answer is due
+    // with that one unanswered, and says what the engine said last.
+    const listings = () => m.docker('ps').length;
+    const hold = path.join(m.dockerDir, 'hold-ps');
+    let from = listings();
+    const failing = m.install('--stop-daemon');
+    await until('the installer to have asked the engine twice', () => listings() >= from + 2);
+    fs.writeFileSync(hold, '');
+    fs.rmSync(down);
+    const failed = await failing;
+    assert.deepEqual([failed.ok, failed.daemonRunning], [false, false]);
+    assert.match(failed.error, /^the daemon is gone, but what it made in docker is still there: (?!the docker engine did not answer).+/);
+    assert.deepEqual(world(m), [2, 1, 1]);
+
+    // An engine that comes back while the installer waits.
+    fs.writeFileSync(down, '');
+    fs.rmSync(hold);
+    m.env.DN_INSTALLER_ANSWER_MS = '120000';
+    from = listings();
+    const asked = m.install('--stop-daemon');
+    await until('the installer to have asked the engine again', () => listings() >= from + 2);
+    fs.rmSync(down);
+    assert.deepEqual(await asked, { ok: true, daemonRunning: false, pid: null });
+    assert.deepEqual([world(m), kept(m)], [[0, 0, 0], ['identity.json', 'pools', 'links.json', 'offers.json']]);
+  });
+
   await check('a machine with no docker at all has nothing in docker to leave: its switch-off and the installer both end well', async () => {
     const m = await bench.machine('bare', { docker: 'none' }).start();
     await m.linked();
