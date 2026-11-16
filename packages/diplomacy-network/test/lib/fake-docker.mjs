@@ -244,18 +244,25 @@ switch (command) {
     if (!c.running) die(`Error response from daemon: container ${name} is not running`);
     const shims = path.join(c.root, 'shims');
     if (!fs.existsSync(shims)) {
-      fs.mkdirSync(shims, { recursive: true });
-      const shim = (n, body) => fs.writeFileSync(path.join(shims, n), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+      // Made aside and moved in whole: two execs at once both find every shim.
+      const made = `${shims}.${process.pid}`;
+      fs.mkdirSync(made, { recursive: true });
+      const shim = (n, body) => fs.writeFileSync(path.join(made, n), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
       // In place, as setsid(1) does for what is no group leader: the pid stays.
       shim('setsid', 'echo $$ >> "$FAKE_DOCKER_PIDS"\nexec perl -MPOSIX -e \'POSIX::setsid(); exec { $ARGV[0] } @ARGV\' "$@"');
       // The image's sh is dash, which is stricter than the bash a host may call sh.
       if (fs.existsSync('/bin/dash')) shim('sh', 'exec /bin/dash "$@"');
-      if (spawnSync('sh', ['-c', 'command -v flock']).status !== 0) shim('flock', 'exit 0');
+      // A lock on the caller's open file, as flock(1) takes it: two jobs starting at once
+      // install the broker's certificate one after the other, as in the image.
+      if (spawnSync('sh', ['-c', 'command -v flock']).status !== 0) {
+        shim('flock', `exec perl -e 'use Fcntl qw(:flock); open(my $f, ">&=", $ARGV[0]) or exit 1; flock($f, LOCK_EX) or exit 1' "$@"`);
+      }
       shim('update-ca-certificates', [
         'for b in /etc/ssl/cert.pem /etc/ssl/certs/ca-certificates.crt; do [ -f "$b" ] && break; done',
         'mkdir -p "$DN_ROOT/etc/ssl/certs"',
         'cat "$b" "$DN_ROOT"/usr/local/share/ca-certificates/*.crt > "$DN_ROOT/etc/ssl/certs/ca-certificates.crt"',
       ].join('\n'));
+      try { fs.renameSync(made, shims); } catch { fs.rmSync(made, { recursive: true, force: true }); }
     }
     const inside = (a) => {
       const m = c.mounts.find((x) => a === x.dst || a.startsWith(`${x.dst}/`));
