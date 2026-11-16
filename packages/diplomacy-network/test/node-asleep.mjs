@@ -7,9 +7,10 @@
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { b64u } from '../src/core/canon.js';
+import { rankDelay } from '../src/core/claims.js';
 import { backers } from '../src/core/records.js';
 import { ELSEWHERE, OUTLIVED } from '../src/node/offers.js';
-import { CATCH_UP_MS, CLOCK_SKEW_SECS, RECORD_RETENTION_SECS, REQUEST_TIMEOUT_MS } from '../src/paths.js';
+import { CATCH_UP_MS, CLOCK_SKEW_SECS, RANK_DELAY_MS, RECORD_RETENTION_SECS, REQUEST_TIMEOUT_MS } from '../src/paths.js';
 
 const HOUR = 3600;
 const offerArgs = (item, more = {}) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: `look at ${item}`, ...more });
@@ -304,7 +305,7 @@ await check('a machine that wakes gives none of its offers away before the pool 
   }
 });
 
-await check('a machine that sleeps again before the pool has answered it is not up to date by the answer to what it asked before', async () => {
+await check('a member that is asleep keeps no returning machine waiting: one answer, and the machine gives its offer again; and a machine that sleeps again while it takes in what it missed is not up to date by what it had asked before', async () => {
   const w = createWorld({ seed: 119 });
   const all = await w.pool(['l', 'd', 'x']);
   const [l, d] = all;
@@ -313,21 +314,57 @@ await check('a machine that sleeps again before the pool has answered it is not 
   const { taskId } = await l.node.offer(offerArgs('pr-1'));
   await w.agreed(all);
   for (const name of ['l', 'x']) w.net.sleep(name);
-  await w.run(2 * HOUR);
-  // It wakes and asks: one member has answered and the other is yet to have its time.
+  await w.run(HOUR);
   w.net.sleep('l', false);
-  await w.run(5);
-  assert.equal((await lock(w, evil, l, taskId, roundId(1))).grant.offer, undefined, 'not up to date while a member may still answer');
+  await w.run(2);
+  assert.equal((await lock(w, evil, l, taskId, roundId(1))).grant.offer.gen, 1, 'two seconds after it woke, with one member of three asleep');
   await unlock(w, evil, l, taskId, roundId(1));
+
+  // It sleeps, and the pool gets a record it lacks. Awake, it is told so in 40 ms and
+  // asks for the record - and sleeps again before the record is there.
   w.net.sleep('l');
-  await w.run(2 * HOUR);
+  await d.node.offer(offerArgs('pr-2'));
+  await w.run(HOUR);
   Object.assign(w.net.faults, { minMs: 20, maxMs: 20 });
+  const since = w.net.now();
+  w.net.sleep('l', false);
+  await w.net.until(() => w.net.count({ from: 'l', to: 'd', kind: 'pull', since }) >= 1, { stepMs: 1, what: 'the record asked for' });
+  w.net.sleep('l');
+  await w.run(HOUR);
+  assert.equal(w.view(l).tasks.length, 1, 'it does not hold the record');
   w.net.sleep('l', false);
   const woken = await lock(w, evil, l, taskId, roundId(2));
   assert.deepEqual([Boolean(woken.grant), woken.grant.offer], [true, undefined], 'the lock is granted, the offer is not given');
   await unlock(w, evil, l, taskId, roundId(2));
-  await w.run(REQUEST_TIMEOUT_MS / 1000 + 15);
-  assert.equal((await lock(w, evil, l, taskId, roundId(3))).grant.offer.gen, 1, 'every member has had its time: it gives its offer');
+  await w.run(2);
+  assert.deepEqual([w.view(l).tasks.length, (await lock(w, evil, l, taskId, roundId(3))).grant.offer.gen], [2, 2], 'told what it missed, it gives its offer');
+  assert.deepEqual(failures(all), []);
+});
+
+await check('a member that tells a returning machine the very state the machine holds has said what it missed - nothing - and the machine is up to date; one that tells it another state has not', async () => {
+  const w = createWorld({ seed: 124 });
+  const all = await w.pool(['l', 'd']);
+  const [l, d] = all;
+  const evil = await w.intruder('evil', d);
+  await w.net.until(() => all.every((h) => w.members(h).includes(evil.pk)), { what: 'the member known' });
+  const { taskId } = await l.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  for (const name of ['l', 'd']) w.net.sleep(name);
+  await w.run(2 * HOUR);
+  // Nobody answers what the machine asks: the one member awake has no node.
+  w.net.sleep('l', false);
+  await w.run(5);
+  const given = async (n) => {
+    const { grant } = await lock(w, evil, l, taskId, roundId(n));
+    await unlock(w, evil, l, taskId, roundId(n));
+    return grant.offer?.gen ?? null;
+  };
+  const sync = async (hash) => (await w.request(evil, l, 'sync', { asOf: w.net.now(), hash })).body;
+  assert.equal(await given(1), null, 'nobody has said anything');
+  assert.ok((await sync(b64u(Buffer.alloc(32, 7)))).index, 'told of another state, it answers with what it holds');
+  assert.equal(await given(2), null, 'and is no wiser');
+  assert.deepEqual(await sync(w.view(l).hash), { hash: w.view(l).hash });
+  assert.equal(await given(3), 1, 'told of the state it holds, it gives its offer');
   assert.deepEqual(failures(all), []);
 });
 
@@ -389,8 +426,10 @@ await check('the record of a run and a lock that reach a host in one instant: th
   assert.deepEqual(failures(all), []);
 });
 
-await check('a machine that wakes waits for every member it asks to have had its time to answer, and with nobody to answer goes on by what it holds after a while', async () => {
-  for (const [seed, awake, atLeast, atMost, asked] of [[115, ['e'], REQUEST_TIMEOUT_MS, CATCH_UP_MS - 30000, 6], [116, [], CATCH_UP_MS, CATCH_UP_MS + 60000, 10]]) {
+await check('a machine that wakes with every member awake goes for its own task as soon as its turn comes, with one asleep runs it without waiting for the sleeper\'s time to answer, and with nobody to answer goes on by what it holds after a while', async () => {
+  // Awake, the others answer in a moment, and what is left is the wait of its rank.
+  const turn = (taskId, l) => rankDelay(taskId, l.pk, RANK_DELAY_MS) + 2000;
+  for (const [seed, awake, atLeast, most, asked] of [[125, ['d', 'e'], 0, turn, 4], [115, ['e'], 0, () => REQUEST_TIMEOUT_MS / 2, 6], [116, [], CATCH_UP_MS, () => CATCH_UP_MS + 60000, 10]]) {
     const w = createWorld({ seed });
     const all = await w.pool(['l', 'd', 'e']);
     const [l] = all;
@@ -403,9 +442,9 @@ await check('a machine that wakes waits for every member it asks to have had its
     const [woke, since] = [w.net.ms(), w.net.now()];
     w.net.sleep('l', false);
     slots(l);
-    await w.net.until(() => l.executor.jobOf(taskId), { stepMs: 1000, what: 'its own task run' });
+    await w.net.until(() => l.executor.jobOf(taskId), { stepMs: 100, what: 'its own task run' });
     const waited = w.net.ms() - woke;
-    assert.ok(waited >= atLeast && waited <= atMost, `with ${awake.length} of two members awake it ran its task after ${waited} ms`);
+    assert.ok(waited >= atLeast && waited <= most(taskId, l), `with ${awake.length} of two members awake it ran its task after ${waited} ms`);
     // One question at a time: a member that says nothing is asked again when its time is up, and by the rounds for the task.
     assert.ok(w.net.count({ from: 'l', to: 'd', kind: 'sync', since }) <= asked, `it asked the member that says nothing ${w.net.count({ from: 'l', to: 'd', kind: 'sync', since })} times`);
     assert.deepEqual([w.offerRow(l, taskId).executorHere, failures(all)], [true, []]);

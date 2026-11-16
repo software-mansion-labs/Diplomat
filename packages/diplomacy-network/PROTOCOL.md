@@ -672,8 +672,8 @@ run ("What remains").
 What a host holds of a pool is as old as the last moment it was there. A host is away,
 and its pools are **out of date**, from the moment it starts, from the moment it finds
 its clock more than 60 s past where it last looked - the machine slept - and from the
-moment its transport comes up. Until it has asked the pool, it holds back what it would
-do of its own accord for its offers by that state:
+moment its transport comes up. Until a member has told it what it missed, it holds back
+what it would do of its own accord for its offers by that state:
 
 - it backs no claim. A `lock` is granted as any member's is, without `offer`: its
   consent to the claim, and nothing of its own given;
@@ -681,10 +681,14 @@ do of its own accord for its offers by that state:
 
 What it is asked - a `key`, an `act`, a `done` - it answers as ever. It asks by sending
 `sync` to every host whose member record it holds, at once and whatever it made of that
-host before. The pool is asked once one of them has answered and each of the others has
-answered or failed to - a request waits 60 s - or at once when there is nobody to ask.
+host before. A pool is up to date as soon as one member has told the host what that
+member holds: the first to answer, once the host has pulled what that answer shows it
+lacks, or a member whose own `sync` to the host names the very state the host holds,
+which is the same word from the other side. A member that is asleep, or slow to be
+reached, keeps nobody waiting. With nobody to ask, the pool is up to date at once.
 When nobody answers, the host asks again, and after 180 s of that with its transport up
-it goes on with what it holds.
+it goes on with what it holds. A host that goes out of date again meanwhile starts
+over: what a member said before says nothing of what came after.
 
 Then it looks at its offers. One whose job was run meanwhile is `done` (above). One
 whose last version this host signed 24 hours ago or longer is `cancelled`: its record
@@ -725,8 +729,11 @@ Every conflict is settled by a value all hosts compute alike.
 To keep hosts from racing for the same task, a host waits before step 1 for a delay
 proportional to its rank on that task, up to 5 s. A host may wait longer, up to a minute
 more: how well a task suits a machine is weighed by the host that would take it, on what
-that machine has, and neither that nor the wait is told to anyone. A task its own host
-offered to run at once waits for neither of the two.
+that machine has. Nothing of that is announced or sent: no record and no request says
+what a machine has or how long it waited. It is not hidden from a member that watches:
+the rank delay follows from the task id and the host's key, so a member that offers
+such work and sees who takes it, and when, can infer whether that host waited ("What
+remains"). A task its own host offered to run at once waits for neither of the two.
 
 ### What remains
 
@@ -759,6 +766,11 @@ Nothing in a record hides any of this.
       before the run could take that offer in.
     - *nobody answered the host when it came back.* After 180 s it goes on with what it
       holds, and gives its offer to whoever asks.
+    - *the first member to tell the host what it missed had missed the run too.* The
+      host goes by the first word it gets. From a member that was away as well it learns
+      nothing of the run, and gives its offer to the next claimant that holds no record
+      of it either. The record, when another member brings it, ends an offer no claim
+      holds; one that a claim holds by then ends by that claim's run.
     - *the host was there and out of reach for more than a day.* It kept signing its
       offer, and the record of the run was dropped before the host could hear of it.
 - **A member that offers a task another host offers too** is a requester of its own
@@ -800,6 +812,13 @@ Nothing in a record hides any of this.
   forge request made, an offer that a claim holds is untouched, and the host keeps
   whom it took for the executor and for its backers. The forge shows the work undone,
   and Diplomat offers it again.
+- **What a machine has shows in what it takes.** A host weighs a task against what its
+  machine has and waits longer for one that suits it less ("Conflicts"). It announces
+  nothing and sends nothing of that. A member that offers such work and watches who
+  takes it, and when, can infer it all the same: the rank delay is anybody's to
+  compute, so one observation tells a host that waited from one that did not - a
+  machine with no device to give from one that has one. Any private preference shows
+  in who takes what.
 - **A member can take an offer and sit on it.** A claim made by the rules holds the
   offers it was given for one lease and its grace, 2 h 10 min, and for as long after as
   its executor answers the pings, up to each offer's hours; a job's own executor answers

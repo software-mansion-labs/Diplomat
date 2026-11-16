@@ -61,7 +61,7 @@ export function createNode({
   const host = {
     id, self: id.pk, store, transport, clock, random, log, requester, executor, settings, solve, keys,
     now: () => clock.now(),
-    pools: new Map(), // pool id -> { id, link, pool, locks, seq, inviter, invites, farewell, stale, catching }
+    pools: new Map(), // pool id -> { id, link, pool, locks, seq, inviter, invites, farewell, stale, epoch, catching }
     away: new Map(), // pool id -> the link of a pool that is linked and that this host left
     // pool id -> the locks of a pool this host is not in now: one read from the store and
     // not linked yet, or one it left.

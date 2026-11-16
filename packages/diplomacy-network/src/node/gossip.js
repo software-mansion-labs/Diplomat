@@ -86,9 +86,11 @@ export function createGossip(host) {
       // and what is kept of the membership it left before this one.
       invites: [], farewell: gone(doc),
       // Since when what this host holds of the pool may be out of date - it started, it
-      // slept, its transport came up - or null once the members were asked: until then
-      // it gives none of its offers away and looks after none.
-      stale: host.now(), catching: null,
+      // slept, its transport came up - or null once a member has said what it holds:
+      // until then this host gives none of its offers away and looks after none. `epoch`
+      // counts the times it went out of date, and `catching` is the epoch the members
+      // are being asked about.
+      stale: host.now(), epoch: 0, catching: null,
     };
     // The locks read at startup are taken up once: a pool linked again starts without them.
     delete host.heldLocks[info.id];
@@ -321,25 +323,38 @@ export function createGossip(host) {
   /// What this host holds of its pools is as old as the moment it last looked: every
   /// pool is out of date from now.
   function woke() {
-    for (const P of host.pools.values()) P.stale = host.now();
+    for (const P of host.pools.values()) {
+      P.stale = host.now();
+      P.epoch += 1;
+    }
+  }
+
+  // A pool that went out of date in `epoch` is up to date - unless it went out of date
+  // again since: what a member said before that says nothing of what came after.
+  function caughtUp(P, epoch) {
+    if (P.stale === null || P.epoch !== epoch) return;
+    host.log(`${P.id} is up to date ${host.now() - P.stale} s after this host came back to it`);
+    P.stale = null;
   }
 
   // Asks every member of a pool that is out of date what this host missed, whatever the
   // backoff and whatever sync with them is under way: that one may have asked before
   // there was anything to miss. The pool is up to date once one of them has answered and
-  // the others have had their time, or there is nobody to ask, or nobody has answered
-  // for CATCH_UP_MS with the transport up. A pool that went out of date again meanwhile
-  // is asked about anew.
-  async function catchUp(P) {
-    const since = P.stale;
+  // this host holds what that one held - a member that is asleep keeps nobody waiting -
+  // or there is nobody to ask, or nobody has answered for CATCH_UP_MS with the transport
+  // up.
+  function catchUp(P) {
+    const { epoch } = P;
+    P.catching = epoch;
     const pks = others(P);
-    const heard = await Promise.all(pks.map((pk) => meet(P, pk, { fresh: true })));
-    if (P.stale !== since) return;
-    const waited = host.transport.state().state === 'ready' && host.now() - since >= CATCH_UP_MS / 1000;
-    if (pks.length === 0 || heard.some(Boolean) || waited) {
-      P.stale = null;
-      host.poke();
-    }
+    const waited = host.transport.state().state === 'ready' && host.now() - P.stale >= CATCH_UP_MS / 1000;
+    if (pks.length === 0 || waited) return caughtUp(P, epoch);
+    const asked = pks.map((pk) => meet(P, pk, { fresh: true }).then((heard) => heard && caughtUp(P, epoch))
+      .catch((err) => host.log(`a pool could not be caught up: ${err?.stack ?? err}`)));
+    // Where nobody answered, the next step asks again.
+    return Promise.all(asked).then(() => {
+      if (P.catching === epoch) P.catching = null;
+    });
   }
 
   function post(P, pk, keys) {
@@ -404,10 +419,9 @@ export function createGossip(host) {
   function step() {
     const now = host.now();
     for (const P of host.pools.values()) {
-      if (P.stale !== null) {
-        P.catching ??= catchUp(P).catch((err) => host.log(`a pool could not be caught up: ${err?.stack ?? err}`))
-          .finally(() => { P.catching = null; });
-      }
+      // One asking at a time, and a new one at once for a pool that went out of date
+      // again: the answers to the asking before are not waited for.
+      if (P.stale !== null && P.catching !== P.epoch) catchUp(P);
       const mine = own(P);
       if (now - mine.at >= RESIGN_INTERVAL_MS / 1000 || mine.maxAcceptedH !== hoursOf(host.settings().maximumAcceptedH)) {
         host.take(P, signMember(P));
@@ -487,7 +501,13 @@ export function createGossip(host) {
       if (answer.body && changed) spread(P, [memberKey(from)], from);
       return answer;
     },
-    sync: (P, from, body) => P.pool.answerSync(body, host.now()),
+    sync(P, from, body) {
+      const answer = P.pool.answerSync(body, host.now());
+      // A member that holds exactly what this host holds has told it what it missed:
+      // nothing. That is as good as its answer to what this host asks.
+      if (answer.body && !answer.body.index) caughtUp(P, P.epoch);
+      return answer;
+    },
     pull(P, from, body) {
       const answer = P.pool.answerPull(body);
       return answer.error ? answer : { body: { records: batch(P, body.keys).records } };
