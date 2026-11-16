@@ -8,7 +8,7 @@
 // decides, alone - its pins and deep checks are not retried against a later rule. What
 // matches nothing is refused.
 
-import { checkGraphql, itemMismatch, searchConfined } from './graphql.js';
+import { checkGraphql, itemMismatch, sameButSelf, searchConfined } from './graphql.js';
 import { branchLabel, checkAdvertise, checkFork, checkPush, pushReport } from './receivepack.js';
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
@@ -127,7 +127,10 @@ export function parseStrictJson(buffer) {
 // ------------------------------------------------------------------ normalisation
 
 // Percent-decodes one path segment or query component, refusing an escape that is
-// malformed or that hides a byte with a meaning of its own in a path.
+// malformed or that hides a byte with a meaning of its own in a path. A path may not
+// escape what needs no escape either: a forge's router reads "%63ompare" as "compare", so
+// with such escapes refused a route's name has the one spelling the rules are written in.
+const NEEDS_NO_ESCAPE = /[A-Za-z0-9_~-]/;
 function decode(raw, { plus, slash }) {
   const bytes = [];
   for (let i = 0; i < raw.length; i++) {
@@ -140,7 +143,8 @@ function decode(raw, { plus, slash }) {
     if (byte < 0x20 || byte === 0x7f) refuse('an encoded control character');
     if (!plus) {
       if (byte === 0x2f && !slash) refuse('an encoded slash in the path');
-      if (byte === 0x2e || byte === 0x5c || byte === 0x25) refuse('an encoded dot, backslash or percent sign in the path');
+      if (byte === 0x2e || byte === 0x5c || byte === 0x25 || byte === 0x3b) refuse('an encoded dot, backslash, percent sign or semicolon in the path');
+      if (NEEDS_NO_ESCAPE.test(String.fromCharCode(byte))) refuse('an escape of a letter, a digit, "-", "_" or "~" in the path');
     }
     bytes.push(byte);
     i += 2;
@@ -200,9 +204,11 @@ function normalise(request) {
 
 // A rule's path against a request's: literal segments, "*" for exactly one, a trailing
 // "**" for any remainder. `fold` lists the segments compared without regard to case - the
-// ones that name the repository, which both forges resolve that way. Any other literal
-// must equal the segment as sent, so a segment spelled with an escape matches none.
-function pathMatches(rule, segments) {
+// ones that name the repository, which both forges resolve that way; any other literal
+// must equal the segment as sent. `loose` is the widest reading a forge's router could
+// give the path: no literal's case counts, and a segment may carry an extension
+// ("compare.json"), which GitLab's router takes off as the answer's format.
+function pathMatches(rule, segments, loose) {
   const pattern = rule.path.slice(1).split('/');
   const fold = rule.fold || [];
   for (let i = 0; i < pattern.length; i++) {
@@ -211,7 +217,8 @@ function pathMatches(rule, segments) {
     const got = segments[i];
     if (got === undefined) return false;
     if (want === '*') continue;
-    if (fold.includes(i) ? got.toLowerCase() !== want.toLowerCase() : got !== want) return false;
+    const [g, w] = loose || fold.includes(i) ? [got.toLowerCase(), want.toLowerCase()] : [got, want];
+    if (g !== w && !(loose && g.startsWith(`${w}.`))) return false;
   }
   return segments.length === pattern.length;
 }
@@ -283,8 +290,7 @@ async function checkBodyPins(spec, req, ctx, effects, given, fork) {
       const me = await ctx.self();
       const held = await ctx.assignees(pin.assignees);
       if (!held) refuse(`#${pin.assignees} is not an issue the forge would show`);
-      const others = (ids) => [...new Set(ids.filter((id) => id !== me.id))].sort((a, b) => a - b).join(' ');
-      if (others(nobody ? [] : value) !== others(held)) refuse(`the body member "${key}" may only add or remove this task's own account`);
+      if (!sameButSelf(held, nobody ? [] : value, me.id)) refuse(`the body member "${key}" may only add or remove this task's own account`);
     }
   }
   for (const [key, pin] of Object.entries(spec)) {
@@ -339,12 +345,15 @@ async function checkProject(spec, req, ctx) {
 
 // What a task has used of its allowances, in `ctx.state`:
 //   branches  the branches the forge accepted from it: its own, which it may move
-//   reserved  branches whose creation was sent and whose answer is not known to be a
-//             refusal: counted against `create`, and not its own
-//   pulls     the branches it opened a pull request from, or sent one for
+//   reserved  branches whose creation was sent and whose answer is not known: counted
+//             against `create`, and not its own
+//   sent      the commit each of `reserved` was sent at
+//   pulls     the branches the forge opened its pull request from
+//   asked     the branches a pull request was sent for, its answer not known
 // A branch is named by its ref, one in a fork as "<repository>:<ref>" (`branchLabel`);
-// `pulls` names it the same way without "refs/heads/".
+// `pulls` and `asked` name it the same way without "refs/heads/".
 const pending = new WeakMap(); // an approved request -> what it holds of the task's state
+const flying = new WeakMap(); // a task's state -> what the requests not yet concluded hold of it
 
 // The name in `branches` of the branch a pull request would be opened from. GitHub's
 // `head` is "branch", or "account:branch" for a branch of that account's fork of the
@@ -357,21 +366,63 @@ function headLabel(effect, branches) {
   return branches.find((label) => label.endsWith(`:refs/heads/${parts[1]}`) && label.split('/')[0] === parts[0].toLowerCase());
 }
 
+const drop = (list, items) => { for (const item of items) if (list.includes(item)) list.splice(list.indexOf(item), 1); };
+
+// The task's state with every member there, or null where the caller gave none.
+function stateOf(ctx) {
+  const { state } = ctx;
+  if (!state || typeof state !== 'object') return null;
+  for (const list of ['branches', 'reserved', 'pulls', 'asked']) state[list] ||= [];
+  state.sent ||= {};
+  return state;
+}
+
+// A creation whose answer never came may have happened, and the forge knows. It is asked
+// once the request is over, before the task's next push or pull request is judged. A
+// branch the forge does not have is given back to the allowance, one it has at the commit
+// that was sent is the task's own, one it has at another commit stays counted. A pull
+// request the forge shows from the branch, open or not, is the task's one (`pulls` set),
+// and none shown gives it back.
+async function recall(ctx, pulls) {
+  const state = stateOf(ctx);
+  if (!state) return;
+  const over = (list) => (name) => ![...(flying.get(state) ?? [])].some((held) => held[list].includes(name));
+  for (const label of state.reserved.filter(over('branches'))) {
+    if (typeof ctx.branch !== 'function') refuse('nothing here can ask the forge about its branches');
+    const cut = label.indexOf(':');
+    const now = await ctx.branch(label.slice(cut + 1), cut < 0 ? undefined : label.slice(0, cut));
+    if (!state.reserved.includes(label) || !over('branches')(label) || (now !== null && now.sha !== state.sent[label])) continue;
+    drop(state.reserved, [label]);
+    delete state.sent[label];
+    if (now !== null) state.branches.push(label);
+  }
+  for (const from of (pulls ? state.asked : []).filter(over('pulls'))) {
+    if (typeof ctx.pullsByHead !== 'function') refuse('nothing here can look a pull request up');
+    const cut = from.indexOf(':');
+    const shown = await ctx.pullsByHead(from.slice(cut + 1), cut < 0 ? undefined : from.split('/')[0], true);
+    if (!state.asked.includes(from) || !over('pulls')(from)) continue;
+    drop(state.asked, [from]);
+    if (shown.length > 0) state.pulls.push(from);
+  }
+}
+
 // Counts what an allowed request would use up, before it is sent. Runs after the last
 // await, so two requests racing for the last free branch cannot both take it.
 function settle(rule, effects, ctx) {
   if (effects.length === 0) return null;
-  const state = ctx.state;
-  if (!state || typeof state !== 'object') refuse('this rule needs the task\'s state, and none was given');
-  for (const list of ['branches', 'reserved', 'pulls']) state[list] ||= [];
+  const state = stateOf(ctx) ?? refuse('this rule needs the task\'s state, and none was given');
   const held = { state, branches: [], pulls: [], graphql: Boolean(rule.graphql) };
+  const tips = {};
   for (const effect of effects) {
-    if (effect.branch !== undefined && !held.branches.includes(effect.branch)) held.branches.push(effect.branch);
-    if (effect.pull !== undefined || effect.head !== undefined) {
+    if (effect.branch !== undefined) {
+      if (!held.branches.includes(effect.branch)) held.branches.push(effect.branch);
+      tips[effect.branch] = effect.sha;
+    } else {
       const label = headLabel(effect, state.branches);
       if (!state.branches.includes(label)) refuse('a pull request may only be opened from a branch this task pushed');
       const from = label.replace('refs/heads/', '');
       if (state.pulls.includes(from) || held.pulls.includes(from)) refuse(`this task has opened its pull request from ${from}`);
+      if (state.asked.includes(from)) refuse(`this task's pull request from ${from} is on its way to the forge`);
       held.pulls.push(from);
     }
   }
@@ -380,21 +431,26 @@ function settle(rule, effects, ctx) {
   const has = [...state.branches, ...state.reserved];
   if (held.fresh.length > 0 && has.length + held.fresh.length > rule.create) refuse(`this task may create ${rule.create} branch(es); it has ${has.join(', ') || 'none'}`);
   state.reserved.push(...held.fresh);
-  state.pulls.push(...held.pulls);
+  for (const label of held.fresh) state.sent[label] = tips[label];
+  state.asked.push(...held.pulls);
+  if (!flying.has(state)) flying.set(state, new Set());
+  flying.get(state).add(held);
   return held;
 }
 
-const drop = (list, items) => { for (const item of items) if (list.includes(item)) list.splice(list.indexOf(item), 1); };
-
 /// Tells the task's state what became of a request `authorize` allowed: `answer` is the
-/// forge's `{ status, body }` (`body` a Buffer), or undefined when no answer came. A
-/// branch is the task's own once the forge's report says "ok" for it; what the forge
-/// refused is given back to the allowance; anything else stays counted and is not owned.
+/// forge's `{ status, body }` (`body` a Buffer), or undefined when no answer came or the
+/// request was never sent. A branch is the task's own once the forge's report says "ok"
+/// for it, a pull request its one once the forge answers that it opened it; what the forge
+/// refused is given back to the allowance. Anything else stays counted, and not owned,
+/// until the forge is asked what became of it. Every allowed request is concluded: one
+/// that is not counts as still on its way.
 export function conclude(request, answer) {
   const held = pending.get(request);
   if (!held) return;
   pending.delete(request);
   const { state } = held;
+  flying.get(state).delete(held);
   const refused = answer !== undefined && answer.status >= 400 && answer.status < 500;
   if (held.branches.length > 0) {
     const report = answer?.status === 200 ? pushReport(answer.body) : null;
@@ -403,18 +459,23 @@ export function conclude(request, answer) {
     const accepted = held.branches.filter((label) => report?.ok.includes(ref(label)));
     // Only what this request counted is given back: a creation sent before, whose answer
     // never came, may be why the forge declines this one.
-    drop(state.reserved, [...accepted, ...held.fresh.filter((label) => refused || report?.ng.includes(ref(label)))]);
+    const settled = [...accepted, ...held.fresh.filter((label) => refused || report?.ng.includes(ref(label)))];
+    drop(state.reserved, settled);
+    for (const label of settled) delete state.sent[label];
     for (const label of accepted) if (!state.branches.includes(label)) state.branches.push(label);
   }
   if (held.pulls.length > 0) {
-    let failed = refused;
-    if (!failed && held.graphql && answer?.status === 200) {
+    let opened = refused ? false : answer !== undefined && answer.status >= 200 && answer.status < 300 ? true : undefined;
+    if (opened && held.graphql) {
       // GraphQL words a refusal as 200 with an error list and nothing where the pull request would be.
       let said = null;
       try { said = JSON.parse(answer.body.toString('utf8')); } catch {}
-      failed = Array.isArray(said?.errors) && said.errors.length > 0 && Object.values(said.data ?? {}).every((v) => v === null);
+      const results = Object.values(said?.data ?? {});
+      const errors = Array.isArray(said?.errors) && said.errors.length > 0;
+      opened = errors ? (results.every((v) => v === null) ? false : undefined) : results.length > 0 && results.every((v) => v !== null) ? true : undefined;
     }
-    if (failed) drop(state.pulls, held.pulls);
+    if (opened !== undefined) drop(state.asked, held.pulls);
+    if (opened) state.pulls.push(...held.pulls);
   }
 }
 
@@ -433,7 +494,7 @@ function asking(ctx) {
 /// Decides one request against a task's rules. `request` is `{ host, method, path,
 /// headers, body }` as the executor sent it (path with its query, body base64). `given`
 /// carries what the deep checks ask the forge and the machine: `resolveNode(id)`,
-/// `pull(number)`, `pullsByHead(ref, owner)`, `comment(id)`, `assignees(number)`, `self()`,
+/// `pull(number)`, `pullsByHead(ref, owner, ever)`, `comment(id)`, `assignees(number)`, `self()`,
 /// `repository(repo)`, `branch(ref, repo)`, `fetch`, `checkout` and the task's mutable
 /// `state` (`forge.context()` builds one). A lookup that throws refuses the request.
 /// Resolves to `{ ok: true, rule, request }` - `request` is the one to perform, in the
@@ -443,8 +504,13 @@ export async function authorize(rules, request, given = {}) {
   try {
     const ctx = asking(given);
     const req = normalise(request);
-    const rule = (Array.isArray(rules) ? rules : []).find((r) => r.host === req.host && r.method === req.method && pathMatches(r, req.segments));
+    const first = (loose) => (Array.isArray(rules) ? rules : []).find((r) => r.host === req.host && r.method === req.method && pathMatches(r, req.segments, loose));
+    const rule = first(false);
     if (!rule) refuse('no rule of this task allows the request');
+    // A rule that refuses a route or pins its parameters stands before the wider rule
+    // around it. A spelling the forge could still resolve to that route must not slip
+    // past it into the wider one.
+    if (first(true) !== rule) refuse('the path could be read as a route another rule of this task decides: only a letter\'s case or an extension sets it apart');
     if (rule.deny !== undefined) refuse(rule.deny);
     for (const [mark, why] of Object.entries(rule.without || {})) if (req.decoded.some((segment) => segment.includes(mark))) refuse(why);
     const named = checkQuery(rule, req);
@@ -462,9 +528,10 @@ export async function authorize(rules, request, given = {}) {
       if (!verdict.ok) refuse(verdict.reason);
     } else if (rule.git) {
       if (req.headers['content-type'] !== RECEIVE_PACK_TYPE) refuse(`a push must be sent as ${RECEIVE_PACK_TYPE}`);
+      await recall(ctx, false);
       const verdict = await checkPush(rule, req.segments, body, ctx);
       if (!verdict.ok) refuse(verdict.reason);
-      for (const branch of verdict.created) effects.push({ branch });
+      effects.push(...verdict.created);
     } else if (rule.graphql) {
       if (req.method !== 'POST') refuse('a GraphQL request is a POST');
       const payload = jsonBody(req);
@@ -477,6 +544,7 @@ export async function authorize(rules, request, given = {}) {
     } else if (body.length > 0) {
       refuse('this rule allows no body');
     }
+    if (effects.some((effect) => effect.branch === undefined)) await recall(ctx, true);
     const held = settle(rule, effects, ctx);
 
     const out = {

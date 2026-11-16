@@ -139,6 +139,58 @@ await check('a path with more than one reading is refused before any rule is tri
   for (const bad of [null, 'GET /x', [], 5]) assert.equal((await authorize(RULES, bad)).ok, false);
 });
 
+await check('a route\'s name has one spelling: what needs no escape may not be escaped, once or twice over', async () => {
+  for (const path of ['/repos/o/r/%70ulls/1', '/repos/o/r/pull%73/1', '/repos/o/r/pulls/%31', '/%72epos/o/r/pulls', '/repos/%6f/r/pulls', '/repos/%6F/r/pulls', '/repos/o/r/pulls/a%2Db',
+    '/repos/o/r/pulls/a%5Fb', '/repos/o/r/pulls/a%5fb', '/repos/o/r/pulls/%7Ea', '/repos/o/r/pulls/%4A', '/repos/o/r/pulls/%5a', '/repos/o/r/pulls/%30']) {
+    await refused(req('GET', path), /an escape of a letter, a digit, "-", "_" or "~"/);
+  }
+  const twice = [
+    ['/repos/o/r/%2570ulls/1', /percent sign/], // an escaped escape
+    ['/repos/o/r/%C1%B0ulls/1', /not UTF-8/], ['/repos/o/r/%E0%81%B0ulls/1', /not UTF-8/], // "p" in more bytes than it has
+    ['/repos/o/r/%u0070ulls/1', /malformed percent-escape/],
+    ['/repos/o/r/pulls%3Bx=1/1', /semicolon/], ['/repos/o/r/pulls%3b/1', /semicolon/],
+  ];
+  for (const [path, pattern] of twice) await refused(req('GET', path), pattern);
+  // What does need an escape keeps it, in either case of its digits, and is sent as it came;
+  // "+" in a path is a plus sign.
+  for (const path of ['/repos/o/r/pulls/a%20b', '/repos/o/r/pulls/a%3Ab', '/repos/o/r/pulls/a%3ab', '/repos/o/r/pulls/%C3%A9', '/repos/o/r/pulls/a+b', '/repos/o/r/pulls/a@b,c=d', '/repos/o/r/pulls/v1.0.json']) {
+    assert.equal((await allowed(req('GET', path))).request.path, path);
+  }
+  const gl = (path) => req('GET', path, { host: 'gitlab.example.com' });
+  await refused(gl('/api/v4/projects/group%2Fsub%2F%70roj/merge_requests/5'), /an escape of a letter/);
+  await refused(gl('/api/v4/projects/group%2Fsub%2Fproj/merge%5Frequests/5'), /an escape of a letter/);
+  await refused(gl('/api/v4/projects/group%252Fsub%252Fproj/merge_requests/5'), /percent sign/);
+});
+
+await check('a path a looser router would take to an earlier rule\'s route is refused, not handed to the wider rule after it', async () => {
+  const rules = [
+    { host: 'api.github.com', method: 'GET', path: '/repos/o/r/issues/*/timeline', fold: [1, 2], deny: 'elsewhere' },
+    { host: 'api.github.com', method: 'GET', path: '/repos/o/r/compare', fold: [1, 2], query: { from: 'free' } },
+    { host: 'api.github.com', method: 'GET', path: '/repos/o/r/**', fold: [1, 2] },
+  ];
+  const second = /could be read as a route another rule of this task decides/;
+  await refused(req('GET', '/repos/o/r/issues/5/timeline'), /elsewhere/, rules);
+  await refused(req('GET', '/repos/O/R/issues/5/timeline'), /elsewhere/, rules);
+  for (const last of ['Timeline', 'TIMELINE', 'timelinE', 'timeline.json', 'timeline.JSON', 'timeline.txt', 'timeline.x', 'timeline.json.json', 'Timeline.Json', 'timeline.', 'timeline..', 'timeline.a+b']) {
+    await refused(req('GET', `/repos/o/r/issues/5/${last}`), second, rules);
+  }
+  // An extension or a capital anywhere on the way, not only at the end.
+  for (const path of ['/repos/o/r/Issues/5/timeline', '/repos/o/r/issues.json/5/timeline', '/repos/o/r/ISSUES.x/5/Timeline.y']) await refused(req('GET', path), second, rules);
+  // A rule that pins its parameters is stepped around the same way.
+  await refused(req('GET', '/repos/o/r/compare?from=a&to=b'), /"to" is not part of this rule/, rules);
+  for (const path of ['/repos/o/r/compare.json?from=a&to=b', '/repos/o/r/Compare?to=b', '/repos/o/r/compare.json', '/repos/o/r/COMPARE.JSON?from=a']) await refused(req('GET', path), second, rules);
+  // Where no rule matches as sent, that is the answer, whatever a looser reading finds.
+  await refused(req('GET', '/Repos/o/r/issues/5/timeline'), /no rule of this task/, rules);
+  await refused(req('GET', '/repos/o/r.json/issues/5/timeline'), /no rule of this task/, rules);
+  // What only resembles the route is another path, decided by the wider rule and sent as it came.
+  for (const path of ['/repos/o/r/issues/5/timelines', '/repos/o/r/issues/5/timeline-x', '/repos/o/r/issues/5/timeline_json', '/repos/o/r/issues/5/time+line', '/repos/o/r/issues/5/timeline+',
+    '/repos/o/r/issues/5/x.timeline', '/repos/o/r/issues/5/timeline/x', '/repos/o/r/issues/timeline', '/repos/o/r/contents/issues/5/timeline.json', '/repos/o/r/comparex?to=b', '/repos/o/r/compare/a...b']) {
+    const verdict = await allowed(req('GET', path), rules);
+    assert.equal(verdict.rule, rules[2]);
+    assert.equal(verdict.request.path, path);
+  }
+});
+
 await check('a method is one of five, uppercased, and no header changes it', async () => {
   await allowed(req('get', '/repos/o/r'));
   for (const method of ['HEAD', 'OPTIONS', 'TRACE', 'CONNECT', 'PROPFIND', 'GET ', 'GET\u0000', '', 5, null]) await refused(req(method, '/repos/o/r'), /method/);
@@ -319,22 +371,62 @@ await check('what a request uses up is counted against the task, and a refused r
   ];
   const ctx = world({ branches: ['refs/heads/fix-421', 'refs/heads/fix-422'] });
   const open = (body) => post('/repos/o/r/pulls', body);
-  const opened = await allowed(open({ head: 'fix-421', base: 'main', title: 't', draft: true }), rules, ctx);
-  assert.deepEqual(ctx.state.pulls, ['fix-421'], 'counted before it is sent');
-  await refused(open({ head: 'fix-421', base: 'other', title: 't', draft: true }), /has opened its pull request from fix-421/, rules, ctx);
-  // The forge's answer settles it: a refusal gives the one pull request back, anything else keeps it.
-  conclude(opened.request, { status: 502, body: Buffer.from('bad gateway') });
-  assert.deepEqual(ctx.state.pulls, ['fix-421'], 'an answer that is no refusal may have opened it');
+  const draft = (head, base = 'main') => open({ head, base, title: 't', draft: true });
+  const used = () => [ctx.state.pulls, ctx.state.asked];
+  const opened = await allowed(draft('fix-421'), rules, ctx);
+  assert.deepEqual(used(), [[], ['fix-421']], 'counted before it is sent');
+  await refused(draft('fix-421', 'other'), /pull request from fix-421 is on its way to the forge/, rules, ctx);
+  assert.deepEqual(ctx.listed, [], 'what is on its way is not asked about');
+  // The forge's answer settles it: a refusal gives the one pull request back, "created" makes it the task's one.
   conclude(opened.request, { status: 422, body: Buffer.from('{}') });
-  assert.deepEqual(ctx.state.pulls, ['fix-421'], 'a request is concluded once');
-  ctx.state.pulls = [];
-  const again = await allowed(open({ head: 'fix-421', base: 'main', title: 't', draft: true }), rules, ctx);
-  conclude(again.request, { status: 422, body: Buffer.from('{}') });
-  assert.deepEqual(ctx.state.pulls, []);
-  conclude((await allowed(open({ head: 'fix-421', base: 'main', title: 't', draft: true }), rules, ctx)).request, undefined);
-  assert.deepEqual(ctx.state.pulls, ['fix-421'], 'no answer at all is not a refusal');
-  conclude((await allowed(open({ head: 'fix-422', base: 'main', title: 't', draft: true }), rules, ctx)).request, { status: 201, body: Buffer.from('{}') });
-  assert.deepEqual(ctx.state.pulls, ['fix-421', 'fix-422']);
+  assert.deepEqual(used(), [[], []]);
+  conclude((await allowed(draft('fix-422'), rules, ctx)).request, { status: 201, body: Buffer.from('{}') });
+  assert.deepEqual(used(), [['fix-422'], []]);
+  await refused(draft('fix-422', 'other'), /has opened its pull request from fix-422/, rules, ctx);
+  assert.deepEqual(ctx.listed, [], 'what the forge answered is not asked about');
+
+  // An answer that does not say, or none: it may have been opened, so it stays counted until the forge is asked.
+  for (const answer of [{ status: 502, body: Buffer.from('bad gateway') }, { status: 302, body: Buffer.alloc(0) }, undefined]) {
+    const unsure = await allowed(draft('fix-421'), rules, ctx);
+    conclude(unsure.request, answer);
+    assert.deepEqual(used(), [['fix-422'], ['fix-421']], `after ${answer?.status}`);
+    conclude(unsure.request, { status: 422, body: Buffer.from('{}') });
+    assert.deepEqual(used(), [['fix-422'], ['fix-421']], 'a request is concluded once');
+    // The forge shows no pull request from that branch: the next try is allowed, and is the one counted.
+    ctx.listed.length = 0;
+    conclude((await allowed(draft('fix-421'), rules, ctx)).request, { status: 422, body: Buffer.from('{}') });
+    assert.deepEqual(ctx.listed, [['fix-421', undefined, true]]);
+    assert.deepEqual(used(), [['fix-422'], []]);
+  }
+  // The forge shows one, open or closed: it is the task's one.
+  for (const shown of [true, false]) {
+    conclude((await allowed(draft('fix-421'), rules, ctx)).request, undefined);
+    ctx.pulls[590] = { number: 590, open: shown, author: 'me', headRepo: 'o/r', headRepoId: 1, headRef: 'fix-421' };
+    await refused(draft('fix-421'), /has opened its pull request from fix-421/, rules, ctx);
+    assert.deepEqual(used(), [['fix-422', 'fix-421'], []]);
+    delete ctx.pulls[590];
+    ctx.state.pulls = ['fix-422'];
+  }
+  // A forge that does not say has said nothing.
+  conclude((await allowed(draft('fix-421'), rules, ctx)).request, undefined);
+  await refused(draft('fix-421'), /^the forge did not say which pull requests there are/, rules, { ...ctx, async pullsByHead() { throw new Error('forge: the forge did not say which pull requests there are (it answered 503)'); } });
+  await refused(draft('fix-421'), /nothing here can look a pull request up/, rules, { ...ctx, pullsByHead: undefined });
+  assert.deepEqual(used(), [['fix-422'], ['fix-421']]);
+  // A reading of an unanswered creation does not undo the one sent after it.
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const late = ask(draft('fix-421'), rules, { ...ctx, async pullsByHead() { await gate; return []; } });
+  const second = await allowed(draft('fix-421'), rules, ctx);
+  release();
+  assert.match((await late).reason, /pull request from fix-421 is on its way to the forge/);
+  assert.deepEqual(used(), [['fix-422'], ['fix-421']]);
+  conclude(second.request, { status: 201, body: Buffer.from('{}') });
+  // A pull request from a branch of the fork is looked for under the fork's account.
+  const forked = world({ branches: ['me/r:refs/heads/fix-9'] });
+  Object.assign(forked.state, { asked: ['me/r:fix-9'] });
+  await allowed(draft('me:fix-9'), [{ ...rules[0], body: { ...rules[0].body, head: { created: 'label', required: true } } }], forked);
+  assert.deepEqual(forked.listed, [['fix-9', 'me', true]]);
+  assert.deepEqual([forked.state.pulls, forked.state.asked], [[], ['me/r:fix-9']]);
   ctx.state.pulls = [];
   await refused(open({ head: 'main', base: 'release', title: 't', draft: true }), /only be opened from a branch this task pushed/, rules, ctx);
   await refused(open({ head: 'o:fix-421', title: 't', draft: true }), /only be opened from a branch/, rules, ctx);
@@ -345,7 +437,7 @@ await check('what a request uses up is counted against the task, and a refused r
   await refused(open({ head: 'fix-421', title: 't', draft: true, head_repo: 'victim/r' }), /"head_repo" is not part/, rules, ctx);
   await refused(open({ head: 'fix-421', title: 't', draft: true, issue: 3 }), /"issue" is not part/, rules, ctx);
   await refused(open({ head: 'fix-421', title: 't', draft: true }), /needs the task's state/, rules, {});
-  assert.deepEqual(ctx.state, { branches: ['refs/heads/fix-421', 'refs/heads/fix-422'], reserved: [], pulls: [] }, 'a refused request uses nothing');
+  assert.deepEqual(ctx.state, { branches: ['refs/heads/fix-421', 'refs/heads/fix-422'], reserved: [], sent: {}, pulls: [], asked: [] }, 'a refused request uses nothing');
 
   // The whole new assignee list of a GitLab issue: what the forge holds, give or take the task's own account.
   const gl = (method, path, body) => ({ host: 'gitlab.example.com', method, path, headers: JSON_TYPE, body: b64(body) });
