@@ -133,7 +133,7 @@ class WizardView(SpawnWizard):
         # Action toggles
         self.mark_ready = QCheckBox("Mark clean PRs ready for review")
         self.mark_ready.setChecked(True)
-        self.leave_reviews = QCheckBox("Leave reviews (CLAUDE.md format)")
+        self.leave_reviews = QCheckBox("Leave per-line reviews")
         self.leave_reviews.setChecked(True)
         self.reply = QCheckBox("Reply to others' review threads")
         self.reply.setChecked(True)

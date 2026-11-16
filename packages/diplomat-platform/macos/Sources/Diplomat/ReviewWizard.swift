@@ -1038,7 +1038,7 @@ struct ReviewWizardView: View {
             }
             if config.canLeaveReviews {
                 Toggle(isOn: $leaveReviews) {
-                    Text("Leave reviews (CLAUDE.md format)").font(.caption)
+                    Text("Leave per-line reviews").font(.caption)
                 }
                 .tooltip("Post per-line reviews on these PRs.")
                 .transition(rowTransition)

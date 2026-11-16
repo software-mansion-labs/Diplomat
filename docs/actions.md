@@ -37,7 +37,7 @@ prompt:
   swarm + hard reproductions → full E2E, swarming until one clean pass.
 - **Mark clean PRs ready for review** - *(never on someone else's)* flip
   perfectly-clean drafts to ready.
-- **Leave reviews (CLAUDE.md format)** - *(never on my own)* post formal per-line reviews;
+- **Leave per-line reviews** - *(never on my own)* post formal per-line reviews;
   off, the findings stay in the agent's summary (the verdict pass below still posts them).
 - **Reply to others' review threads** - *(never on someone else's)* answer and resolve open threads.
 - **Soft-approve clean PRs (thank-you review)** - *(on by default; never on my own,
