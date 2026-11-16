@@ -845,11 +845,15 @@ A rule allows one shape of forge request:
 
 A request is first brought to one spelling and refused when it has more than one reading:
 the method is one of GET, POST, PUT, PATCH, DELETE; the host is a plain lowercase name; the
-path is absolute, with no empty or dot segment, no fragment, no `;`, and no encoded slash,
-dot, backslash, percent sign or control character (GitLab's URL-encoded project path, the
-segment after `/api/v4/projects/`, is the one place an encoded slash may stand); a header
-is given once; the body is base64. Then the first rule whose host, method and path match
-decides, alone. A request no rule matches is refused.
+path is absolute, with no empty or dot segment, no fragment, no `;`, no encoded slash,
+dot, backslash, percent sign, semicolon or control character (GitLab's URL-encoded project
+path, the segment after `/api/v4/projects/`, is the one place an encoded slash may stand),
+and no escape of a character that needs none - a letter, a digit, `-`, `_` or `~` - so a
+route's name is spelled one way; a header is given once; the body is base64. Then the
+first rule whose host, method and path match decides, alone. A request no rule matches is
+refused. So is one that a different rule would be the first to match under the widest
+reading a forge's router could give its path - no literal's case counting, a segment free
+to carry an extension (`compare.json`): the forge may take it for that rule's route.
 
 - `path` is matched segment by segment: a literal, `*` for exactly one segment, or a
   trailing `**` for any remainder. `fold` lists the segments, counted from 0, that are
@@ -899,7 +903,17 @@ decides, alone. A request no rule matches is refused.
   selection set must be one the reader knows the reach of, so a selection cannot walk from
   the repository to its owner's other repositories; on an account, or on an object that
   may live in another repository, such a field takes no argument, which would look
-  another object up from there. Of a branch's protection one scalar is read, whether its
+  another object up from there. A field takes only the arguments the reader lists, which
+  page, order and filter what the object it is selected on holds; one that names an object
+  by its node id (GitHub's `pullRequestId`) is resolved on the forge as `node(id:)` is, and
+  any other is refused, since it could name another repository. A scalar is read freely on
+  what is inside the repository, with two exceptions. Of the repository itself - the root
+  field, and a `node` that turns out to be it - a query reads the scalars that hold what
+  the REST rule's `pick` passes on, and on GitHub `viewerPermission`, which `gh` reads
+  before it opens a pull request. And no scalar is read that tells of the account asking
+  and not of the repository: on GitHub a name with `viewer` in it other than
+  `viewerDidAuthor`, on GitLab `can...`, `subscribed`, `createNoteEmail` and
+  `troubleshootJobWithAi`. Of a branch's protection one scalar is read, whether its
   checks must be up to date. A mutation must be a single field
   from the list, its input may hold only the members the reader's table names, and every
   object it addresses is resolved on the forge and must belong to the task's own item.
@@ -922,7 +936,8 @@ decides, alone. A request no rule matches is refused.
   must be of a name the forge has no branch of, an update must start from the branch's
   current value and be a fast-forward of it, proven by indexing the pack in a quarantine.
   No pushed commit may add, change or delete a path under `denyPaths` - compared without
-  regard to case - except to what one of its parents holds there; a commit in the pack
+  regard to case - except to what one of its parents holds there, so a merge may take
+  the path, or its absence, from any commit it merges; a commit in the pack
   that a branch of the forge holds already is the forge's own and is not compared. The
   push must build on commits a branch of the repository pushed to holds - for a fork, a
   branch of the fork or of `repo`, which are the two repositories the quarantine
@@ -951,7 +966,17 @@ disk, so a key issued for a later claim of the same offer goes on from where the
 stopped, and a restart forgets nothing. A creation is counted before the push is sent. The
 branch is "a ref this task created" once the forge's report says `ok` for it; a creation
 the forge declined is given back; one whose outcome is not known stays counted and is not
-the task's to move or to open a pull request from.
+the task's to move or to open a pull request from, until the forge has said what became
+of it. Before the task's next push is checked the host asks the forge for each such
+branch: none, and the creation is given back; the branch at the commit that was sent, and
+it is a ref this task created; the branch at another commit, and it stays counted. A pull
+request is counted the same way - before the request is sent, as opened once the forge
+answers 2xx (for the GraphQL mutation: without errors and with its payload), given back
+on 4xx (or on errors and no payload). After any other outcome the host asks the forge,
+before the task's next pull request is checked, for the pull requests from that head in
+any state: none gives it back, any makes it the one this task opened. A creation whose
+request is still out is not asked about, and a question the forge does not settle refuses
+the request that waits on it.
 
 The rules a task receives come from the daemon's catalogue (`src/requester/rules.js`),
 keyed by forge and kind and pinned to the task's own item. A kind without an entry can be

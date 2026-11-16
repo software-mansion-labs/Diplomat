@@ -329,7 +329,19 @@ What a task has used of its allowances - the branches it created, the pull reque
 opened from each - is the task's, not the key's: it is kept with the offer in
 `offers.json`, written before the request that uses it is sent, so every key issued for
 the task goes on from the same count and a restart forgets none of it. A branch is the
-task's own once the forge's answer to the push says so.
+task's own once the forge's answer to the push says so, a pull request its one once the
+forge's answer says it was opened. A creation whose answer never came stays counted until
+the forge is asked what became of it, before the task's next push or pull request is
+checked (PROTOCOL.md, section 10).
+
+A request reaches a rule in one spelling: a path that escapes a character needing no
+escape is refused, and so is one that a forge's router could read as the route of a rule
+standing earlier - by a letter's case or an added extension. What the forge says about
+the repository itself is cut to the same list on both surfaces, by `pick` on the REST
+answer and by a list of readable fields in a GraphQL document (`requester/graphql.js`;
+it adds GitHub's `viewerPermission`, which `gh` reads before it opens a pull request).
+A document is refused whole when it asks for more, takes an argument that could name
+another repository, or reads what tells of the linked account and not of the repository.
 
 **Executor side.** With `admit.slots` above zero and a task with a free offer that this
 machine would take, the daemon runs the claim round. The node asks its executor adapter:
