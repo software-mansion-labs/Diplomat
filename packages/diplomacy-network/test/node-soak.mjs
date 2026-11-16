@@ -3,9 +3,9 @@
 // hosts that leave the pool and come back, hosts switched off, machines that sleep
 // while another offers what they offer, a member that answers nobody, pushes records no
 // host may take, offers what the others offer and says a run of its own did their job,
-// hosts off the network, cuts, lost and repeated requests, and hours passing. After every step
-// what must always hold is checked; at the end the network is mended and everything
-// offered must have ended, on every host alike.
+// hosts off the network, cuts, lost and repeated requests, and hours passing. After
+// every step what must always hold is checked; at the end the network is mended and
+// everything offered must have ended, on every host alike.
 //
 //   DN_SOAK_SEEDS  how many seeds to run (default 4)     DN_SOAK_STEPS  steps per seed (default 120)
 //   DN_SOAK_SEED   the first seed (default 1); a failure prints the seed to run again
@@ -18,7 +18,7 @@ import { specDigest } from '../src/core/capability.js';
 import { buildClaim } from '../src/core/claims.js';
 import { UNSERVED } from '../src/core/envelope.js';
 import { sign } from '../src/core/identity.js';
-import { endClaim } from '../src/core/lease.js';
+import { endClaim, isActive } from '../src/core/lease.js';
 import { LIMITS, backers, backing, memberRecord, offerRecord } from '../src/core/records.js';
 import { ELSEWHERE } from '../src/node/offers.js';
 
@@ -400,7 +400,11 @@ async function soak(seed) {
       }
     }
     trail.push(`${w.net.now()} mended`);
-    const settled = () => openOffers().length === 0 && everyJob().length === 0 && new Set(all.map((h) => w.view(h).hash)).size === 1;
+    // A job that ended is not over while its machine holds the claim: it may still be
+    // telling how the run went.
+    const claiming = () => all.some((h) => w.records(h).some((r) => r.type === 'claim' && r.executor === h.pk && isActive(r, w.net.now())));
+    const settled = () => openOffers().length === 0 && everyJob().length === 0 && !claiming()
+      && new Set(all.map((h) => w.view(h).hash)).size === 1;
     for (let minute = 0; !settled(); minute += 1) {
       assert.ok(minute < 16 * 60, `still unsettled 16 hours after the network was mended: ${JSON.stringify(openOffers().map(({ h, o }) => [h.name, o.item, o.state, o.attempt]))}`);
       for (const { h, job } of everyJob()) h.executor.end(job.runId);
