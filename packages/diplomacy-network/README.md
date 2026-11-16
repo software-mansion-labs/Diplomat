@@ -358,7 +358,11 @@ checked (PROTOCOL.md, section 10).
 
 A request reaches a rule in one spelling: a path that escapes a character needing no
 escape is refused, and so is one that a forge's router could read as the route of a rule
-standing earlier - by a letter's case or an added extension. What the forge says about
+standing earlier - by a letter's case or an added extension. A name GitLab takes as one
+segment keeps its encoded slashes and dots: the project's path in any request, and in a
+GET a file's path, a branch's or a tag's name (`repository/branches/feature%2Flogin`).
+Such a path is refused when a proxy that decodes the slash would turn it into a route an
+earlier rule decides, a refused one, or one no rule knows. What the forge says about
 the repository itself is cut to the same list on both surfaces, by `pick` on the REST
 answer and by a list of readable fields in a GraphQL document (`requester/graphql.js`;
 it adds GitHub's `viewerPermission`, which `gh` reads before it opens a pull request).

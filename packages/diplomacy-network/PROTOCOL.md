@@ -975,14 +975,26 @@ A rule allows one shape of forge request:
 A request is first brought to one spelling and refused when it has more than one reading:
 the method is one of GET, POST, PUT, PATCH, DELETE; the host is a plain lowercase name; the
 path is absolute, with no empty or dot segment, no fragment, no `;`, no encoded slash,
-dot, backslash, percent sign, semicolon or control character (GitLab's URL-encoded project
-path, the segment after `/api/v4/projects/`, is the one place an encoded slash may stand),
-and no escape of a character that needs none - a letter, a digit, `-`, `_` or `~` - so a
-route's name is spelled one way; a header is given once; the body is base64. Then the
-first rule whose host, method and path match decides, alone. A request no rule matches is
-refused. So is one that a different rule would be the first to match under the widest
-reading a forge's router could give its path - no literal's case counting, a segment free
-to carry an extension (`compare.json`): the forge may take it for that rule's route.
+dot, backslash, percent sign, semicolon or control character, and no escape of a character
+that needs none - a letter, a digit, `-`, `_` or `~` - so a route's name is spelled one
+way; a header is given once; the body is base64. Then the first rule whose host, method
+and path match decides, alone. A request no rule matches is refused. So is one that a
+different rule would be the first to match under the widest reading a forge's router could
+give its path - no literal's case counting, a segment free to carry an extension
+(`compare.json`): the forge may take it for that rule's route.
+
+An encoded slash and an encoded dot stand where GitLab defines them, in a name it takes as
+one segment: the project's path, the segment after `/api/v4/projects/`, in any request;
+and in a GET, any segment after that one - a file's path
+(`repository/files/src%2Fmain.js`), a branch's or a tag's name
+(`repository/branches/feature%2Flogin`). `glab` encodes such a name's dots as well
+(`README%2Emd`). The name's parts between its slashes are held to the path's own rule: none
+is empty, `.` or `..`. An encoded dot is read as the dot it is, the one before an extension
+included. An encoded slash is part of its segment, which only a rule's `*` or `**` can
+match - GitLab's router matches a route before it decodes a name, so the slash separates
+nothing there - and the request is refused all the same when the path with each such slash
+read as a separator would be decided by an earlier rule, by a rule that refuses, or by no
+rule: that is the request a proxy that decodes before it forwards would hand the forge.
 
 - `path` is matched segment by segment: a literal, `*` for exactly one segment, or a
   trailing `**` for any remainder. `fold` lists the segments, counted from 0, that are
@@ -1109,4 +1121,5 @@ the request that waits on it.
 
 The rules a task receives come from the daemon's catalogue (`src/requester/rules.js`),
 keyed by forge and kind and pinned to the task's own item. A kind without an entry can be
-offered by nobody.
+offered by nobody; nor can a `pr-<n>` or `issue-<n>` whose number is past 2147483647, the
+largest a forge's API takes.

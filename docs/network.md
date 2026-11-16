@@ -144,22 +144,29 @@ description, visibility, default branch, language, topics, licence, dates, size,
 features are switched on, which ways of merging it accepts - and nothing off the list: not its
 tokens, not its other settings, not its branch protection rules. Of a branch it is told whether
 the branch is protected and, on GitHub, whether a PR into it must be up to date before a merge.
-The list holds whichever way the agent asks, through the forge's REST API or through GraphQL,
-with one addition: on GitHub, GraphQL also tells the account's level of access to the
-repository, which `gh` reads before it opens a PR.
+The list holds whichever way the agent asks, through the forge's REST API or through GraphQL.
 
-A GraphQL request is refused whole when it asks for anything off that list, or for what the
-forge would say about the account that offered the job rather than about the repository: what
-that account may do to an issue, a PR or a comment, whether it is subscribed to one or has read
-it, its e-mail addresses. Which comments the account wrote is told, because `gh` asks. GitLab's
-REST answers are passed on with a few such facts in them: whether the account is subscribed to
-an MR, an issue or a label, and whether it may merge or approve an MR and has approved it.
+Of your account's standing in the repository a job can read exactly this: on GitHub, through
+GraphQL, the level of access the account has (`viewerPermission`: read, triage, write, maintain
+or admin), which `gh` reads before it opens a PR; on GitLab, in REST answers, whether the
+account is subscribed to an MR, an issue or a label (`subscribed`), whether it may merge an MR
+(`user.can_merge`), and whether it may approve one and has approved it (`user_can_approve`,
+`user_has_approved`). The account's tokens, the detail of its access permission by permission
+and the repository's protection settings are not readable.
+
+A GraphQL request is refused whole when it asks for anything off that list, or for anything
+else the forge would say about the account that offered the job rather than about the
+repository: what that account may do to an issue, a PR or a comment, whether it is subscribed
+to one or has read it, its e-mail addresses. Which comments the account wrote is told, because
+`gh` asks.
 (GitHub serves the commits of a repository's forks through the repository to whoever knows
 their id; the rules do not narrow what the forge itself calls part of the repository.)
 
 A request reaches a rule by its plain address only. One that spells the address another way the
 forge might also understand - an escaped letter, an added extension, a doubled or trailing
 slash, different capitals - is refused, so a rule cannot be walked around by respelling.
+GitLab's own spelling of a name that holds a slash - `feature%2Flogin` for the branch
+`feature/login`, `src%2Fmain.js` for a file - is taken where GitLab defines it, when a job reads.
 
 No job may merge, close, force-push, delete a branch, push to the default branch or to a branch
 the forge reports as protected, push to any repository but this one and your own fork of it, or
