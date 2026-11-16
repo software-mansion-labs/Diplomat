@@ -43,8 +43,8 @@ export const CUT = 'the container was restarted to stop another job';
 const ADB_SAID = ' `adb devices` lists what is attached to the host, and a device is named by its serial (`adb -s <serial>` or `ANDROID_SERIAL`). `adb connect`, `forward`, `reverse`, `pair` and `kill-server` are refused by the host: do not retry them.';
 const SUMMARY_CAP = 4000;
 const TAIL_BYTES = 4 * 2 ** 20;
-// The dearest a token is sold at, in USD: 80 a million, the output of the top model in
-// its fast mode as priced in November 2026. On the wire a token is a byte or more.
+// The dearest a token is sold at: USD 80 a million, the output of the top model in its
+// fast mode as priced in November 2026.
 const USD_PER_BYTE = 80 / 1e6;
 const { O_RDONLY, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -151,11 +151,10 @@ const repoUrl = (pool) => `https://${pool.host}/${pool.owner}/${pool.repo}.git`;
 
 // The last `tail` bytes of a file the container wrote in the run's own directory, or
 // null. The directory is opened where the host put it, and only as a directory; the file
-// is then named through that descriptor (by /proc on Linux, by the directory's own
-// number on a Mac), so a link put in the directory's place between the two leads
-// nowhere. The file is opened without waiting, since a pipe in its place has no writer to
-// wait for, and read at a place and by its length: a pipe, a device or a directory has
-// neither to give.
+// is named through that descriptor (by /proc on Linux, by the directory's own number on
+// a Mac), so a link put in the directory's place between the two leads nowhere. The open
+// does not wait for the writer a pipe in the file's place never has, and the read is at
+// a place and by a length, which a pipe, a device or a directory has not to give.
 async function readOwn(job, name, tail = TAIL_BYTES) {
   let dir = null;
   let file = null;
