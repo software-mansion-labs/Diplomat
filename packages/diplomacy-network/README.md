@@ -94,7 +94,7 @@ closed at every start.
 | `runs.json` (0600) | the tasks this host runs or ran, and the tasks it gave up on |
 | `jobs.json` (0600) | the jobs going in this daemon's containers, for the daemon after it: the broker's port, and each job's container, proxy token, CA generation, process group, forwards and what it has spent of the model, the last no more than 5 s behind |
 | `tor/` | tor's data directory |
-| `ca/` (0700) | the broker's certificate authority |
+| `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it |
 | `mirrors/<pool hash>.git` | bare mirrors. One is removed a day after its pool was last linked and not left |
 | `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended |
 | `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed with its directory |
@@ -313,38 +313,84 @@ machine. Having the key, the daemon makes sure of four things and starts the job
   for; nothing project-specific. `image/preamble.md` tells the agent it is root in a
   disposable container and may install whatever else it needs.
 - **The container.** Exactly one per requesting peer and repository, named
-  `dn-<pool hash>-<peer hash>`, kept running between that peer's jobs on that
+  `dn-<pool part>-<peer part>`, kept running between that peer's jobs on that
   repository and removed after 6 idle hours. It never serves another repository or
-  another peer. It holds no credential: not the forge's, not the model's. Its one
-  network is an internal docker network of its own, with the same name: nothing is
-  routed out of it, this machine has no address on it, and its resolver knows no name
-  outside it. A job that ignores its proxy settings reaches nothing: not the internet,
-  not this machine or its LAN, not another peer's container.
-- **The relay.** On each container's network sits `dn-<pool hash>-<peer hash>-relay`:
+  another peer. Each part of the name is 128 bits of a SHA-256, and the name alone
+  makes nothing a pair's own: the container, its relay, its network and its volume
+  each carry `dn.pool`, `dn.peer` and `dn.base` in full, and one found under a pair's
+  name with other labels is refused and left as it is. It holds no credential: not the
+  forge's, not the model's. Its one network is an internal docker network of its own,
+  with the same name: nothing is routed out of it, this machine has no address on it,
+  and its resolver knows no name outside it. A job that ignores its proxy settings
+  reaches nothing: not the internet, not this machine or its LAN, not another peer's
+  container.
+
+  Of this machine it gets `DN_CONTAINER_MEMORY` (8g, and no swap past it),
+  `DN_CONTAINER_CPUS` (4), `DN_CONTAINER_PIDS` (4096) processes and
+  `DN_CONTAINER_DISK_BYTES` (20 GiB) of disk. The engine holds the writable layer to
+  that size where its storage can (`--storage-opt size=`). Where it cannot - Docker
+  Desktop's default storage refuses the option - `usage(name)` measures the layer, the
+  `/work` volume and the run records, and `overQuota()` names the containers past it.
+- **The relay.** On each container's network sits `dn-<pool part>-<peer part>-relay`:
   the same image running `image/relay.mjs`, which carries TCP from that network to the
-  broker's port on this machine and to nothing else. It is the container's only way
-  out. It is not a job container and not a second container for the peer: no job runs
-  in it and nothing of a job is in it; it has no capability, no writable file system
-  and no credential, and it is made and removed with the container it serves.
+  broker's port on this machine and to nothing else, 1024 connections at a time. It is
+  the container's only way out. It is not a job container and not a second container
+  for the peer: no job runs in it and nothing of a job is in it; it has no capability,
+  no writable file system and no credential, shares no namespace and no volume with the
+  job container, and it is made and removed with the container it serves.
 - **The broker.** Every job gets a proxy address carrying its own token. All of the
   container's traffic leaves through it:
-  - the forge's API and git push go to the requester as `act` requests;
+  - the forge's API and git push go to the requester as `act` requests. The forge is
+    every host it takes a login or serves repositories on: for github.com that is
+    `github.com`, `api.github.com`, `uploads.github.com` and `gist.github.com`, for a
+    GitLab its one host. They are read on port 443 and refused on every other port and
+    over plain http, as are the hosts the forge serves git over ssh on
+    (`ssh.github.com`, `altssh.gitlab.com`). A name in capitals or with a trailing dot
+    is the same name;
   - git fetch and clone of the pool's repository are answered from this machine's bare
     mirror of it;
   - the model provider's API is forwarded with this machine's own credential added,
     until the job has had its share: past `DN_JOB_MODEL_REQUESTS` requests or
-    `DN_JOB_MODEL_BYTES` bytes it is answered 429;
-  - everything else is tunnelled untouched, so installing software works as usual.
+    `DN_JOB_MODEL_BYTES` bytes it is answered 429. Of the provider's answer the job
+    gets the body and the headers a client needs (`content-type`, `content-encoding`,
+    `content-length`, `cache-control`, `request-id`, `retry-after`, `x-should-retry`);
+    the ones that tell of the account behind the credential stay here;
+  - everything else is tunnelled untouched, to the public internet only, so installing
+    software works as usual. An address inside a network any interface of this machine
+    is on, IPv4 or IPv6, is refused, and so is every range that is not publicly routed;
+    the interfaces are read at each connection. The hosts github.com hands downloads
+    out from (`codeload.github.com`, `raw.githubusercontent.com`,
+    `objects.githubusercontent.com`) and bare addresses are among the tunnels: they
+    serve what is public, or what a link in the requester's own answer opens for a
+    short while.
 
   The broker terminates TLS for the hosts it must read, with a certificate authority that
-  exists only on this machine and is trusted only inside its containers.
+  exists only on this machine and is trusted only inside its containers. There is one
+  authority per set of hosts, so the certificate a job is handed names its own pool's
+  forge and the model provider and no other pool's. Each request on a terminated
+  connection is judged on its own: its `Host` must be the host the connection was opened
+  to, and the job's token must still stand. The broker frames every body it passes on
+  itself, refuses a request framed two ways, and keeps one job's upstream connections
+  apart from every other job's.
+
+  One job holds so much of the broker and no more, each with its tunable:
+  `DN_JOB_CONNECTIONS` (256) connections; `DN_JOB_BUFFER_BYTES` (48 MiB) of request
+  bodies read whole at a time, which is what goes to the requester, to the mirror or
+  through a credential swap; `DN_JOB_FORGE_REQUESTS` (4) forge requests in flight, each
+  holding an answer of at most `DN_FORGE_RESPONSE_MAX_BYTES`. A request past these waits
+  its turn and is answered 503 when none comes. A request's head has
+  `DN_JOB_HEADER_MS` (30 s) to arrive, a body read whole `DN_JOB_BODY_MS` (5 min), and
+  a connection nothing moves on is closed after `DN_JOB_IDLE_MS` (30 min). Everything
+  else is streamed.
 
 The job itself is the agent runner in headless mode. Its exit is the completion signal;
 its log holds the cost. The daemon reports the outcome to the requester with `done`.
 
 A machine takes work only while its docker engine answers, the image is there and a
 model credential is; both are looked at again every 30 s, and the snapshot says which is
-missing.
+missing. The engine must be Docker 27.1 or later, the first that makes a network with no
+address of this machine on it: under an older one the snapshot says so, and no job is
+started on a network of another kind.
 
 **Across a restart.** A job outlives the daemon that started it. The daemon after it
 reads `jobs.json`, listens where the broker listened, and takes each job up where it
