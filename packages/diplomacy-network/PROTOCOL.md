@@ -153,9 +153,19 @@ sender sends it again in a fresh envelope with a `ts` of that moment - once, 1.5
 later, whatever its kind: an `act` goes out again under the `seq` it had (section 9).
 The counters behind `required` are the process's too, and start from nothing.
 
-A sender whose clock runs ahead of the target's, inside the 300 s, moves that mark ahead
-with it: after a start the requests of every other sender are `busy` until their own
-clocks have passed it.
+Only a request the host served moves that mark: one of a member, in a pool the host
+has linked, or the `hello` of a host that carries a member's invite. What is answered
+`not-member` moves nothing. And the mark is never ahead of the host's own clock at the
+start: where a sender whose clock runs ahead, inside the 300 s, left a later date on
+disk, the host serves nothing dated at or before the second it started in, and
+everything after. So a sender is `busy` after a target's start only for as long as its
+own clock is behind that mark.
+
+That leaves one request a host can serve twice: one dated after the second the host
+started in and served before it - its sender's clock was ahead by more than the host
+took to come back - when the same bytes arrive once more after the start. Every kind
+but `act` answers the same when asked again, and an `act` is carried out once for its
+`seq`, which is on disk (section 9).
 
 ### What a sender pays
 

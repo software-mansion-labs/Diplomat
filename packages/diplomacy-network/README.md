@@ -85,7 +85,7 @@ closed at every start.
 | `daemon.sock`, `daemon.json`, `daemon.log` | as in the other daemons |
 | `state.json` | the snapshot the applets read |
 | `identity.json` (0600) | the host key |
-| `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it |
+| `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it, or at or before the second of the start where that time is ahead of this machine's clock |
 | `links.json` (0600) | the linked repositories, as Diplomat last posted them |
 | `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left |
 | `locks.json` (0600) | the claim locks this host granted |
