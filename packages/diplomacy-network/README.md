@@ -78,8 +78,9 @@ test/            one self-contained *.mjs per subject, run by test/run-all.mjs
 | `daemon.sock`, `daemon.json`, `daemon.log` | as in the other daemons |
 | `state.json` | the snapshot the applets read |
 | `identity.json` (0600) | the host key |
+| `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it |
 | `links.json` (0600) | the linked repositories, as Diplomat last posted them |
-| `pools/<pool hash>.json` (0600) | that pool's records |
+| `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left |
 | `locks.json` (0600) | the claim locks this host granted |
 | `keys.json` (0600) | live capabilities this host issued or holds |
 | `offers.json` (0600) | the tasks this host asked for: prompt, counters, outcome, and what each has used of its rules' allowances |
@@ -91,6 +92,13 @@ test/            one self-contained *.mjs per subject, run by test/run-all.mjs
 | `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh` (0600), `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory |
 | `runs/<run id>.outcome.json` (0600) | that job's outcome, written by the daemon when the job ends, where no container can write |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
+
+The node's documents are written in one order - identity, `heard`, links, pools, locks,
+keys, offers, runs - each whole, through a temporary file: a run is on disk only after
+the key it was started with. They are read back as plain JSON; only what travels between
+hosts has to be canonical. A pool's document holds at most 256 members with at most 256
+KiB of records each (PROTOCOL.md section 5), and is rewritten when a record of it
+changes.
 
 Settings come from Diplomat's `config.json` (`DIPLOMAT_CONFIG` relocates it), re-read
 every second: `networkEnabled`, `networkRequiredMinimumH`, `networkMaximumAcceptedH`.
@@ -182,9 +190,10 @@ The snapshot:
   "model": { "state": "ready|missing", "detail": "" },
   "admit": { "slots": 0, "at": 0, "reason": "" },
   "pools": [ { "id": "", "path": "", "identity": "", "hash": "", "left": false,
-      "members": [ { "pk": "", "self": false, "maxAcceptedH": 12, "lastSeen": 0, "reachable": true } ],
+      "members": [ { "pk": "", "self": false, "maxAcceptedH": 12, "lastSeen": 0, "reachable": true,
+          "skew": false } ],
       "tasks": [ { "taskId": "", "kind": "", "item": "", "title": "", "identity": "", "hours": 12,
-          "state": "available|claimed|done|cancelled", "offeredBy": [""], "offeredHere": false,
+          "state": "available|claimed|done|cancelled", "blocked": "", "offeredBy": [""], "offeredHere": false,
           "executor": "", "executorHere": false, "claimedAt": 0, "leaseUntil": 0, "deadline": 0 } ] } ],
   "runs": [ { "runId": "", "taskId": "", "pool": "", "peer": "", "container": "",
       "state": "preparing|running|finished|failed|stopped", "startedAt": 0, "endedAt": 0,
@@ -200,8 +209,17 @@ Every time is Unix seconds. `offers` are the tasks this machine asked for: `pool
 nobody holds it, `claimed` while an executor does, `done` when an executor finished it
 well, `failed` when its attempts ran out (`reason` says how the last one ended), and
 `cancelled` once withdrawn. `outcome` is null until an attempt has reported one. An ended
-offer stays in the list for a day. `docker` and `model` say why this machine takes no
-work when it takes none: their `detail` carries the reason.
+offer stays in the list for a day, and keeps the `executor` and `executorHere` of the
+machine that last held it - the one that reported it done, or the last to hold it before
+it failed or was cancelled; `executor` is empty only when nobody ever held it. `docker`
+and `model` say why this machine takes no work when it takes none: their `detail`
+carries the reason.
+
+A member's `skew` is true when its last answer said its clock and this machine's are
+more than 300 s apart: neither takes the other's requests, and a claim round goes on
+without that member. A task's `blocked` is `clock` while it is available and that is so
+for every host a claim of it needs - the hosts offering it, or every other member when
+this machine offers it: nobody can take it until the clocks agree. Otherwise it is empty.
 
 The same snapshot is written to `state.json` (0600), replaced whole and at most once a
 second, and once more as the daemon ends.
@@ -249,8 +267,11 @@ the task goes on from the same count and a restart forgets none of it. A branch 
 task's own once the forge's answer to the push says so.
 
 **Executor side.** With `admit.slots` above zero and a task available that this machine
-would take, the daemon runs the claim round. Having the key, it makes sure of four
-things and starts the job:
+would take, the daemon runs the claim round. The node asks its executor adapter:
+`wouldTake(task)` says whether, and `weigh(task)`, when the adapter has one, how many
+more milliseconds this machine waits before it goes for that task - at most a minute,
+none for a task its own operator started with `now`. What that rests on stays on this
+machine. Having the key, the daemon makes sure of four things and starts the job:
 
 - **The image.** One local image, built from `image/Dockerfile` and tagged by the hash of
   that directory. Debian, git, node, python, curl and the handful of tools agents reach
@@ -317,9 +338,12 @@ deciding whether to take a task.
 ## Tests
 
 `npm test` runs every `test/*.mjs`, with no network: the loopback transport, a stand-in
-tor, a fake forge and a fake docker. The `daemon-*.mjs` files start real daemon
-processes on scratch state directories (`test/lib/daemons.mjs`), with `test/lib/agent.mjs`
-standing in for the agent.
+tor, a fake forge and a fake docker. The `node-*.mjs` files run whole hosts on a network
+in memory with a clock of its own (`test/lib/mem-net.mjs`, `test/lib/hosts.mjs`):
+`node-standing.mjs` is what a member that means harm cannot do with a claim, and
+`node-limits.mjs` what a host does for whom and how much of it. The `daemon-*.mjs` files
+start real daemon processes on scratch state directories (`test/lib/daemons.mjs`), with
+`test/lib/agent.mjs` standing in for the agent.
 
 Three files reach for the real things, and print `SKIP` and pass without them:
 

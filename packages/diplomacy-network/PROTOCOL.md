@@ -25,20 +25,39 @@ Reaching `onion(pk)` therefore authenticates the target; no other address is eve
 exchanged. A request is one HTTP/1.1 `POST /dn1` to virtual port 80 with a JSON body (the
 request envelope) and a JSON response (the response envelope).
 
-A request carries three HTTP headers beside its body: `dn-from`, `dn-pool` and `dn-kind`,
-the envelope's `from`, `pool` and `kind`. Nobody has signed them, and a target uses them
-for one thing only - to decide, before it reads the body, how large a body it will read:
+A target decides how large a body it reads before it has read it, when nothing of the
+request is checked yet. So it reads 64 KiB from anyone, which is room for any `hello`,
+and more only in a place the sender reserved: a member first sends a `reserve` request
+(section 6) - small, signed and paid for like every request - naming the kind and the
+size of the request to follow, and is answered with a ticket of 16 random bytes. The
+large request carries the ticket in the HTTP header `dn-ticket`, and is read when the
+ticket is live and the declared length is no more than was reserved. No other header
+means anything to a target: words nobody signed buy nothing, and without a live ticket
+every sender gets the 64 KiB, whoever it says it is.
 
-- 64 KiB from a sender that is not a member of the named pool on the target, which is
-  room for any `hello`;
-- 1 MiB from a member;
-- 48 MiB for an `act` from a member that holds a live key of the target (section 9).
+- A member may reserve up to 1 MiB, and a member that holds a live key of the target
+  (section 9) up to 48 MiB for an `act`.
+- A ticket is good for one request, and is void when that request's headers have not
+  arrived 60 s after it was given. A member that reserves again gives up the ticket it
+  held.
+- A member has one place at a time and a target four in all, counting the tickets not
+  yet used and the bodies being read and served. A place is free again once its request
+  was answered, refused or abandoned, however long that took. A `reserve` that finds no
+  place free is answered `busy`.
 
-A target reads one body above 64 KiB per named sender at a time, and four in all. A
-request over what the target will read is answered with HTTP status 413 and no envelope;
-its sender may send it again, unless it is an `act`: a transport may send the same bytes
-twice, and the copy refused unread may follow one that was read (section 9). The
-envelope is checked as section 3 says whatever the headers said.
+A request over what the target will read is answered with HTTP status 413 and no envelope;
+its sender may send it again, with a ticket of its own each time, unless it is an `act`:
+a transport may send the same bytes twice, and the copy refused unread may follow one
+that was read (section 9).
+
+What a connection can cost a target before any proof of work is checked is bounded: its
+headers are at most 8 KiB and have 20 s to arrive; a body without a ticket is at most
+64 KiB and has 20 s more, plus 1 s per 32 KiB; a target holds 256 connections, and at
+that number closes the idle ones and drops a new one unanswered. That is 72 KiB and 42 s
+a connection, 18 MiB in all. A body with a ticket has the same 20 s plus 1 s per 32 KiB -
+26 minutes for 48 MiB - and holds its place that long. Senders cannot be told apart
+behind Tor, so there is no limit per sender: whoever keeps 256 connections busy with
+bytes that are never a request keeps others out for as long as it keeps that up.
 
 ## 2. Canonical form, hashes, signatures
 
@@ -56,7 +75,10 @@ lowest `pk`"), they are compared as their base64url strings, by code unit.
 
 Everything a host receives is checked against the exact shape this document gives it: an
 object with a missing member, an unknown member or a member of the wrong type is refused,
-never repaired.
+never repaired. A request and a response travel as their canonical bytes and as nothing
+else: bytes that are JSON written any other way - whitespace, keys in another order, a
+key given twice, a number or a string spelled as `canon` does not spell it - are no
+envelope. Such a request is refused (`bad-request`), and such a response is no answer.
 
 ## 3. Request envelope and the proof of work
 
@@ -120,6 +142,33 @@ A target checks, cheapest first, and stops at the first failure:
 Only a request that passed the signature counts toward its sender's `n`; a failure before
 that counts toward the stranger counter.
 
+### After a start
+
+The memory of the `(from, nonce)` pairs a host accepted is its running process's. So a
+host keeps on disk the latest `ts` among the requests it served, and after a start serves
+no request dated at or before the latest it served before it went down: such a request,
+having passed every check above, is answered `busy`. Nothing was done for it, and its
+sender sends it again in a fresh envelope - once, 1.5 s later, for every kind but `act`
+(section 9). The counters behind `required` are the process's too, and start from
+nothing.
+
+A sender whose clock runs ahead of the target's, inside the 300 s, moves that mark ahead
+with it: after a start the requests of every other sender are `busy` until their own
+clocks have passed it.
+
+### What a sender pays
+
+A sender pays what the target's last answer asked for. It never pays more than the most
+the table above lets a target ask - 16384 << 12 = 262144 << 8 = 67 108 864 - and a target
+that asks for more is not sent that request again. A request refused for `effort` is sent
+again at the price asked, at most three times.
+
+For one peer a host does at most 16384 << 14 = 268 435 456 hashes of work in any hour:
+four requests at the highest price, or 16384 at a member's base. Once that is spent it
+sends that peer nothing until the hour has moved on. So the most one member can make
+another host work is that much an hour - about four minutes of one core at a million
+hashes a second - however it prices itself.
+
 ## 4. Response envelope
 
 ```json
@@ -129,10 +178,11 @@ that counts toward the stranger counter.
 `effort` is what the target would require of this sender's next request. A refusal has
 `"ok": false` and `"error": { "code": "...", "detail": "..." }` in place of `body`;
 `detail` is at most 200 characters. Codes: `effort` (too little work; `effort` says how
-much), `stale` (clock or epoch), `replay`, `unknown-pool`, `not-member`, `bad-request`,
-`denied`, `busy`. A request that has no canonical form is answered with `re` over its
-bytes as received. A sender takes a response only when it is signed by the target and
-`re` names the request it sent.
+much), `stale` (clock or epoch), `replay`, `not-member`, `bad-request`, `denied`, and
+`busy` (the target could not serve the request this once: it has only just started, it
+has no place free, or it failed). A request that is not the canonical form of anything
+is answered with `re` over its bytes as received. A sender takes a response only when it
+is signed by the target and `re` names the request it sent.
 
 ## 5. Pool state
 
@@ -167,8 +217,35 @@ Limits: a pool id is at most 200 characters, `host/owner/repo` or deeper, of `a-
 `0-9`, `.`, `_` and `-`; `kind` is `[a-z][a-z0-9-]{0,31}`; `item` is
 `[a-z0-9][a-z0-9._-]{0,63}`; `identity` is `[a-z0-9][a-z0-9._-]{0,99}`; `title` is at
 most 300 characters with no control character; hours are 12 to 720; `attempt` is 1 to
-255; a claim lists at most 256 grants and 256 absent members; a time or a `seq` is at
-most 2^40.
+255; a claim lists at most 256 grants and 256 absent members; a time, a `seq` or a `gen`
+is at most 2^40.
+
+### How much a pool holds
+
+- **256 members.** When a host accepts more member records than that, the live ones are
+  the 256 most senior: the fewest vouchers away from a member that has none, then the
+  earliest `joinedAt`, then the lowest `pk`. A member is further from the root than the
+  one that vouched for it, so none is seated without that one. The others are not live
+  (`full`). A host counts itself first in its own state: a host the others have no seat
+  for is a member only where it looks itself, and its hash is nobody else's. A host makes
+  no invite while it holds 256 member records of a pool.
+- **Per member: 64 offers, 64 claims, 256 KiB.** A member has at most 64 offers and 64
+  claims live, and its live records - its member record, the offers and the claims it
+  signed - take at most 256 KiB together in canonical form. Offers, then claims, are
+  counted in key order against what their signer has left, and one that does not fit is
+  not live (`quota`): which records those are depends only on the records held, so every
+  host drops the same ones. A record that ended counts for as long as it is live, so a
+  member makes at most 64 offers and 64 claims in a pool in any 24 hours. A host signs
+  no offer and no claim of its own that would not fit with 32 KiB to spare, the later
+  versions of a record being longer than the first.
+
+So a member's records never take more than 256 KiB of a pool, and a pool's never more
+than 64 MiB, which takes every seat filled to its quota. A host keeps a pool as one
+document and writes it whole when a record changes; a pool of ten members with 64 offers
+each is half a megabyte. A claim carries the grant of every member that gave one, about
+0.5 KiB plus 0.4 KiB per grant, and an executor's claims of the last day share its 256
+KiB: in a pool of ten members an executor makes about fifty claims a day, in a pool of
+fifty about ten, in a full one two.
 
 ### Task ids
 
@@ -248,11 +325,14 @@ held and on `asOf`, so two hosts holding the same records hash the same set:
 - Every version of a member record is live for 30 days after its `at`, and beyond that
   for as long as the voucher of a live member is signed by it: dropped, it would cut that
   member off.
-- A member is live only while its key is accepted. An offer or a claim is live only
-  while the member record of its signer is. A claim that embeds a ping is live only
-  while an offer of that task by the ping's signer is.
+- A member is live only while its key is accepted and it has a seat (above). An offer or
+  a claim is live only while the member record of its signer is, and while it fits its
+  signer's quota (above).
+- A claim is live only while a host that stands behind it has a live offer record of its
+  task: its executor, or a member whose grant it carries (section 7). A claim that
+  embeds a ping is live only while the ping's signer has one.
 
-A record that is not live is dropped, and refused (`expired`) when it arrives. `asOf` is
+A record that is not live is dropped, and refused when it arrives. `asOf` is
 chosen by whoever asks and is refused when more than 300 s from the answerer's clock, so
 a host keeps every record for 300 s past the moment it stops being live.
 
@@ -265,10 +345,21 @@ across the claims of one task: a claim is made only on a state in which the clai
 before it lies in the past (section 7), so it too is signed no earlier than what it
 stands over. The retention must stay far longer than a lease and its grace.
 
+A host that left a pool keeps none of its records, and a member that did not hear it
+leave still holds them: joined again, the host may be handed an open offer it cancelled
+or finished on its way out, or a held claim it gave back. It ends them again: an open
+offer of its own that it no longer makes it signs `cancelled` or `done`, as that offer
+ended, and a held claim of its own with no run behind it it signs `released`.
+
 ## 6. Requests between members
 
 Every kind but `hello` is refused with `not-member` unless `from` is a key the target
-accepts in `pool` whose member record, when held, does not say `left`.
+accepts in `pool` whose member record, when held, does not say `left`. A sender a host
+does not take for a member gets that one refusal, with an empty `detail`, whatever the
+pool - one the host is a member of, one it left, one it never heard of - and whatever it
+asked: the answer says nothing about the pools a host is linked to. A `hello` that is
+refused is answered the same way, unless it carries an invite to the pool signed by a
+key the host accepts: its sender was asked in, and is told why it is not let in.
 
 | Kind | Body | Answer |
 | --- | --- | --- |
@@ -276,12 +367,13 @@ accepts in `pool` whose member record, when held, does not say `left`.
 | `sync` | `{ asOf, hash }` | `{ hash }`, plus `{ index }` when the hashes differ |
 | `pull` | `{ keys }` | `{ records }` |
 | `push` | `{ records }` | `{ accepted, refused: [{ key, code }] }` |
-| `lock` | `{ taskId, round, asOf, hash }` | `{ grant }` or `{ challenge }` or `{ stale: true }` |
+| `lock` | `{ taskId, round, asOf, hash, hours }` | `{ grant }` or `{ challenge }` or `{ stale: true }` |
 | `unlock` | `{ taskId, round }` | `{ }` |
 | `ping` | `{ ping }` | `{ claim }` |
 | `key` | `{ taskId, round }` | `{ capability, secret, spec }` |
 | `act` | `{ taskId, keyId, seq, request, mac }` | `{ status, headers, body }` |
 | `done` | `{ taskId, round, outcome }` | `{ }` |
+| `reserve` | `{ kind, bytes }` | `{ ticket }` |
 
 `index` maps every live key to `[precedence, H(canon(record))]`. `pull` takes at most 4096
 keys and `push` at most 1024 records. A `pull` is answered with the records under the
@@ -293,8 +385,10 @@ ahead of the claims that rest on them. `accepted` lists the keys the target now 
 pushed; a refused record has an empty `key` when it is too malformed to have one, and its
 `code` is `bad-record`, `wrong-pool`, `future`, `older` (the target holds a version that
 wins), `bad-signature`, `bad-voucher`, `bad-claim`, `bad-grant`, `bad-lease`, `bad-ping`,
-`expired`, `not-member` or `no-offer`. Records pushed together are taken in together, so
-a member record lets in the records that depend on it whatever their order.
+or the reason it would not be live (section 5): `expired`, `not-member`, `full`, `quota`
+or `no-offer`. Records pushed together are taken in together, so a member record lets in
+the records that depend on it, and an offer the claim that rests on it, whatever their
+order.
 
 Objective facts - a member announcing itself, a task appearing, a task cancelled because
 its issue or pull request closed, a committed claim - travel by `push` and need nobody's
@@ -305,12 +399,16 @@ A record learned by `push` is not pushed on, and a push that goes unanswered is 
 repeated: every 60 s a host sends `sync` to every host whose member record it holds -
 less often, down to once in 10 minutes, to one that does not answer - which carries
 each record to whoever a push missed. A host that leaves a pool signs its member record
-`left`, ends its claims, cancels its offers, and pushes all of it once. It
-keeps the `left` record for as long as it is not a member again: a host it does not take
-for a member that asks it about the pool has not heard, and is pushed that record, at
-most once in 10 minutes. A host that stops taking part without leaving - its network is
-switched off - cancels its open offers and gives its claims back the same way, pushes
-that once, and stays a member for as long as its record is fresh.
+`left`, ends its claims, cancels its offers, and pushes all of it once. The locks it
+granted bind it through their `exp` all the same, should it join again before. It
+keeps the `left` record, and the keys of the members it left, for as long as it is not a
+member again: one of those keys that asks it about the pool has not heard, and is pushed
+that record, at most once in 10 minutes. Nobody else is sent anything. A host dials,
+pushes to and solves a proof of work for only the keys a pool's own records name as its
+members; a key it knows from a request alone it answers and nothing more. A host that
+stops taking part without leaving - its network is switched off - cancels its open
+offers and gives its claims back the same way, pushes that once, and stays a member for
+as long as its record is fresh.
 
 `done` tells a host offering a task how its run ended: `outcome` is
 `{ ok, summary, microUsd, tokens, runner, model }`, the cost in millionths of a dollar,
@@ -318,8 +416,9 @@ that once, and stays a member for as long as its record is fresh.
 takes it only when the envelope's sender is the executor of the claim record the host
 holds for that task, `round` is that claim's round, and the claim is active or was ended
 by that executor (`completed` or `released`); otherwise it answers `denied`. A `done`
-for a round that already reported, or for a claim made before the offer was (section 9),
-changes nothing. A lapsed claim reports nothing, and neither does any other member,
+for a round that already reported, or for a claim that was not made for the offer the
+host has open (section 9), changes nothing. A lapsed claim reports nothing, and neither
+does any other member,
 whatever it knows of the key: no key and no MAC is involved, so an offering host that
 issued no key decides the same way. On a `done` with `ok` the host signs its offer
 `done`; without, the attempt failed and the task is offered again, or cancelled after
@@ -331,7 +430,8 @@ answers or its claim is no longer active, and only then ends its claim.
 A request may arrive twice, or be answered and the answer lost. Every kind is safe to
 send again in a fresh envelope: a `lock` of the same executor and round is granted the
 same way, `key` answers with the same capability and secret, `unlock`, `push` and `done`
-change nothing the second time, and `act` is guarded by its `seq` (section 9).
+change nothing the second time, `reserve` gives a new ticket for the same place, and
+`act` is guarded by its `seq` (section 9).
 
 ## 7. Claiming a task
 
@@ -345,14 +445,17 @@ available task:
    differences until all that answer report its hash. A member that has answered nothing
    in this round when a request to it goes unanswered is **absent** for this round; a
    member that has answered anything is **present**.
-3. **Sends a lock to every present member**: `{ taskId, round, asOf, hash }`, `round` a
-   fresh random 8-byte value.
+3. **Sends a lock to every present member**: `{ taskId, round, asOf, hash, hours }`,
+   `round` a fresh random 8-byte value and `hours` the task's hours (section 8) in the
+   state the round confirmed.
 
 A member is absent only by this round's own request to it: what earlier requests came
 to decides how long the round waits, never whether it asks. A signed refusal is an
-answer, and its sender is present. The first connection to an onion service can take
-minutes, while a member that is gone must not hold up every round, so the wait for one
-member's answer is:
+answer, and its sender is present - but for `stale`: a member whose clock is more than
+300 s from the claimant's can take no request of the claimant and give it no grant it
+could use, and counts as one that did not answer. The first connection to an onion
+service can take minutes, while a member that is gone must not hold up every round, so
+the wait for one member's answer is:
 
 - 60 s for a member that answered the claimant within the last 3 minutes;
 - 60 s, asked again until the round is 90 s old, for a member the claimant has known for
@@ -370,11 +473,13 @@ A member answers a lock with:
 
 - `{ stale: true }` when its hash at `asOf` differs - the claimant goes back to step 2;
 - `{ challenge: { reason, holder? } }` when the task is not available by its own clock,
-  or the claim record it holds for the task is dated after `asOf`
-  (`unavailable`), the claimant's `maxAcceptedH` is below the task's hours
-  (`hours`), or it has already granted or is itself claiming the task for another
-  executor (`locked`, with that executor as `holder`);
-- `{ grant }` otherwise: `{ pool, taskId, executor, round, gen, hash, by, exp, sig }`,
+  the claim record it holds for the task is dated after `asOf`, or that record is at
+  the last generation a record can carry (`unavailable`); when the claimant's
+  `maxAcceptedH` is below the task's hours, or the lock asks for other hours than the
+  task has in the member's own state (`hours`); or when it has already granted or is
+  itself claiming the task for another executor (`locked`, with that executor as
+  `holder`);
+- `{ grant }` otherwise: `{ pool, taskId, executor, round, gen, hours, hash, by, exp, sig }`,
   signed, with `exp = asOf + 120`. `gen` is the claim's generation: one more than the
   `gen` of the claim record live for that task at `asOf`, zero when there is none. A
   granted lock binds the member through `exp` by its own clock, or until an `unlock` or
@@ -397,8 +502,9 @@ claim record and pushes it:
 `grants` is ordered by `by` and `absent` is ordered; neither names a key twice, the
 executor, or a key of the other. Every host checks of a claim what does not depend on
 its own state: each grant is signed by its `by` and names the claim's pool, task,
-executor, round and `gen`; all grants carry one `hash` and one `exp`; and
-`exp - 120 <= claimedAt <= exp`. Who was absent is the claimant's word.
+executor, round, `gen` and `hours`; all grants carry one `hash` and one `exp`; and
+`exp - 120 <= claimedAt <= exp`. Who was absent is the claimant's word, and excuses
+nothing: a claim stands by the grants it carries (below).
 
 ### Conflicts
 
@@ -423,23 +529,68 @@ Every conflict is settled by a value all hosts compute alike.
   whatever that one's rank and whatever versions of it surface later.
 
 To keep hosts from racing for the same task, a host waits before step 1 for a delay
-proportional to its rank on that task, up to 5 s.
+proportional to its rank on that task, up to 5 s. A host may wait longer, up to a minute
+more: how well a task suits a machine is weighed by the host that would take it, on what
+that machine has, and neither that nor the wait is told to anyone. A task its own host
+offered to run at once waits for nothing.
 
-### What a claim does not prove
+### What gives a claim standing
 
-Two limits are accepted, and nothing in a record hides them.
+A claim record is live - it holds its task, stands over another claim, is extended, is
+reported on - only while a host that offers the task stands behind it: its executor,
+when that host offers the task itself, or a member whose grant the claim carries, for as
+long as that host holds a live offer record of the task. This is part of what makes a
+record live (section 5), so every host applies it when a record arrives, the host that
+offers the task and a bystander alike, and a claim without it is refused (`no-offer`)
+and enters no pool. With the checks above it comes to this:
 
-- **Who was absent is the claimant's own statement.** A claimant that lists a member as
-  absent without having asked it commits a claim every host takes. What keeps this from
-  turning into two executors acting for one requester is the key (section 9): a
-  requester issues one key per task, only for a round it granted itself, so a claim made
-  behind its back gets nothing to act with.
+- **A grant is consent to one thing**: this executor, this task, this round, this `gen`,
+  these hours, on this state. A member grants only the hours the task has in its own
+  state, and a claim for other hours than its grants name is refused (`bad-grant`). So
+  the hours of a claim are its offer's, and its `deadline`, every lease and every key
+  (sections 8 and 9) end `hours` after `claimedAt`.
+- **A claim nobody granted is no claim**, and neither is one granted only by members
+  that do not offer the task. `absent` may name any member but cannot stand in for the
+  host that offers the task: an offerer that cannot be reached cannot act for the task
+  either, so nothing is lost by waiting for it.
+- **Nothing but a claim with standing replaces a claim.** A later generation, a release
+  and a completion are claim records, signed by their executor and judged as any other:
+  only its executor ends a claim, and a member that does not offer the task can put no
+  record over one, whatever `gen` it writes.
+- **An offering host acts only on a claim it agreed to.** It asks for the extension of a
+  claim, issues its key, takes its `done` and counts its lapse as a failed attempt only
+  when the claim is its own or one it granted, in a round it noted while the offer it
+  has open was open (section 9).
+- **The generations end.** `gen` is at most 2^40. A claim record at that generation has
+  no successor: no member grants a lock over it and no host begins a round, until the
+  record is no longer live.
+
+What remains, and nothing in a record hides it:
+
+- **A member that offers a task is a requester of it.** Any member may sign an offer of
+  any task, and one that offers a task another host offers too stands behind a claim of
+  it as that host does - its own included, with no grant from anyone. Such a member can
+  put a claim over one that stands, by writing a later `gen`: the executor stops, and the
+  task is held until that claim's lease lapses, or for as long as the member extends it
+  by its own pings, up to the hours. It can use up the generations the same way. It gets
+  no key from the other requester and reports nothing to it, so it cannot act as that
+  requester or end its offer; it can keep the task from being done. Hosts that offer the
+  same task act as one forge login, and trust each other this far.
+- **Two hosts that offer one task, separated.** Each can grant a claim on the same state
+  while it cannot reach the other. Both claims have the same `gen`, the better rank is
+  the claim once the two sides meet, and the other executor stops then with whatever it
+  had done.
+- **A grant is good for 120 s.** A claim made inside that time on a state that has since
+  moved on is taken in when it surfaces, and stands or not by `gen` and rank.
 - **A lease that lapses on one side of a partition.** When the two hosts offering one
   task are separated, the executor may keep extending its claim through the offering
   host on its own side while, on the other side, the claim lapses unseen and the task is
   claimed again as the next generation. After the partition heals the later generation
   stands for every host, and the earlier executor stops the moment it learns of it, with
   whatever it had done until then.
+- **A claim lives no longer than the offer records behind it.** When the last of them is
+  dropped a day after it was signed, the claim goes with it, also the record of a claim
+  that ended.
 
 ## 8. Hours, leases and the heartbeat
 
@@ -448,7 +599,8 @@ Two limits are accepted, and nothing in a record hides them.
 - A member publishes `maxAcceptedH` in its `member` record: the longest task it takes.
   The default and the floor are 12.
 - A task's `hours` is the largest `minRequiredH` among its open offers. A host may claim
-  a task only when its `maxAcceptedH` is at least that.
+  a task only when its `maxAcceptedH` is at least that, no member grants it a lock
+  otherwise, and the `hours` of a claim are the ones its grants name (section 7).
 - A claim is leased for 2 hours at a time. `deadline = claimedAt + hours * 3600`, and a
   held claim at `seq` has `leaseUntil = min(claimedAt + (seq + 1) * 7200, deadline)`.
 - From 10 minutes before `leaseUntil` until the claim lapses, a host offering the task
@@ -484,7 +636,7 @@ for the forge.
 1. After its claim is committed, the executor sends `key` to a host offering the task:
    the lowest `pk` among the offering hosts that granted the lock, the executor itself
    counted when it offers the task.
-   Any other host answers `denied`, so a claim no offering host granted gets no key.
+   Any other host answers `denied`.
    The executor asks again 30 s after each ask that brought no key, and releases its
    claim when its first lease would run out first.
 2. That host checks that the claim in its own state names this executor and round, is
@@ -493,8 +645,8 @@ for the forge.
    one gets nothing from it - no key, no `done`, and its lapse is no failed attempt. The
    host tells by the round: it notes every round it grants a lock for while an offer is
    open, and a claim it granted is of that offer when its round is among them. A claim
-   it did not grant it can only date by the executor's clock, and takes for the offer's
-   unless `claimedAt` is more than 300 s before the offer was made. It issues one key
+   it did not grant is not of its offer; its own claim of a task it runs itself is, when
+   `claimedAt` is no earlier than the offer. It issues one key
    per claim: asked again for the same claim it answers with the same capability and
    secret, and a key it issued for an earlier claim of the task is revoked first. It
    answers with:
@@ -529,11 +681,12 @@ for the forge.
 5. Both sides write a `seq` down before they use it: the executor before the request
    leaves, the host before it asks the rules. Requests under one key are served one at a
    time, in the order their numbers were accepted, and a request whose key was revoked
-   while the rules were asked is answered `denied` and not performed. An `act` whose
-   answer never came, came as `replay` because the request arrived twice, or came as
-   HTTP 413, may have been performed. The executor sends it again, under a new `seq`,
-   only when the forge request is a `GET` or a `HEAD`; for any other it tells the job
-   that the outcome is unknown.
+   while the rules were asked is answered `denied` and not performed. An `act` refused
+   for want of work (`effort`) was not looked at, and goes out again as it is, under the
+   same `seq`. One whose answer never came, came as `replay` because the request arrived
+   twice, came as `busy`, or came as HTTP 413, may have been performed. The executor
+   sends it again, under a new `seq`, only when the forge request is a `GET` or a
+   `HEAD`; for any other it tells the job that the outcome is unknown.
 
 ## 10. Rules
 
