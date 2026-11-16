@@ -487,6 +487,12 @@ def devices_reply(reply: DaemonReply | None) -> RemoteReply:
     ))
 
 
+# How long an installer is waited for before it is killed, which leaves no answer. The
+# Diplomacy Network's answers within INSTALLER_ANSWER_MS (its src/paths.js), which has to
+# stay under this.
+INSTALLER_TIMEOUT_SECS = 90
+
+
 def run_installer(script: str, arg: str) -> dict | None:
     """``node <script> <arg>``'s JSON reply, or None when node, the script or a
     parseable reply is missing."""
@@ -496,7 +502,7 @@ def run_installer(script: str, arg: str) -> dict | None:
     try:
         out = subprocess.run(
             [node, script, arg],
-            capture_output=True, text=True, timeout=90,
+            capture_output=True, text=True, timeout=INSTALLER_TIMEOUT_SECS,
         )
         return json.loads(out.stdout)
     except Exception:  # noqa: BLE001
