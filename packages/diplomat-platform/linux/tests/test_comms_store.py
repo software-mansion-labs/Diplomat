@@ -22,6 +22,7 @@ import pytest
 from test_autofix import _spawn_recorder, store  # noqa: F401 — fixture
 from test_comms_core import _first_tick, _Slack, _stub_claude, slack  # noqa: F401 — fixture
 from test_comms_core import _message as _slack_message
+from test_network_wiring import daemon, offer, on, snapshot, takes_offers  # noqa: F401 - fixtures
 
 from diplomat_app import bans, issues
 from diplomat_app.store import Store, app_settings
@@ -1367,6 +1368,30 @@ def test_a_run_whose_terminal_never_ran_it_is_not_done(comms_store, monkeypatch)
     assert not item.get("finishedAt")
     assert commsview.job_status(item, set()) == "not queued"
     assert commsview.job_status(item, {qkey("review", 12)}) == "queued"
+
+
+def test_a_ping_whose_offer_the_switch_took_back_reads_never_started(
+        comms_store, on, daemon, monkeypatch):
+    d = daemon(takes_offers(), state=snapshot(offers=[offer()]))
+    _spawn_recorder(monkeypatch)
+    monkeypatch.setattr("diplomat_app.deviceallocator.run_installer",
+                        lambda script, arg: {"daemonRunning": False})
+    message, decision = _ask(1, "review", 12)
+    _tick(comms_store, monkeypatch, (message, decision))
+    entry = next(t for t in comms_store.queued_tasks if t.id == qkey("review", 12))
+    assert comms_store._run_queued_task(entry, forced=True) == "spawned"
+    assert _kinds_by_id()[message["id"]] == ["action", "started"]
+
+    comms_store.set_network_enabled(False)
+    assert comms_store.wait_for_background() == []
+
+    assert d.sent("withdraw") == [{"taskId": "t1", "reason": "switched off"}]
+    assert _kinds_by_id()[message["id"]] == ["action", "started", "action"]
+    [item] = comms_store.comms_items
+    assert item["outcome"] == (
+        f"{comms.NEVER_STARTED} (withdrawn: the Diplomacy Network was switched off)")
+    assert not item.get("finishedAt")
+    assert [w.offered for w in comms_store.requested_work] == ["t1"], "kept for the next poll"
 
 
 @pytest.mark.parametrize("key, waiting", [(qkey("review-req", 12), True), (qkey("review", 12), False)])

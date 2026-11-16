@@ -1205,6 +1205,7 @@ func statusText(for outcome: Store.DispatchOutcome, terminal: String) -> String 
     case .lowDisk: return "Too little free disk for automatic work."
     case .failed(let msg): return "Failed: \(msg)"
     case .offered: return "Offered to the pool · \(Fmt.clock(Date()))"
+    case .offering: return NetworkText.offering
     case .networkRefused(let why): return "Not offered: \(why)"
     }
 }

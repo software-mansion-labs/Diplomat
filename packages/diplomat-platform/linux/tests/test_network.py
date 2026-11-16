@@ -31,6 +31,7 @@ FULL_SNAPSHOT = """
   "transport": { "state": "ready", "detail": "" },
   "docker": { "state": "building", "image": "dn:1", "detail": "layer 3" },
   "model": { "state": "missing", "detail": "no credential" },
+  "devices": { "state": "none", "detail": "no adb server" },
   "admit": { "slots": 2, "at": 1794000290, "reason": "" },
   "pools": [ { "id": "github.com/o/r", "path": "/w/r", "identity": "octocat", "hash": "h1",
       "left": false,
@@ -265,6 +266,45 @@ def test_a_blank_identity_is_none():
     assert N.linked_pools(ROOTS, {"github.com": "  "}) == []
 
 
+def test_a_two_part_key_is_githubs_and_a_longer_one_names_its_own_host():
+    assert N.pool_for("O/R") == "github.com/o/r"
+    assert N.pool_for("gitlab.com/Owner/Repo") == "gitlab.com/owner/repo"
+    assert N.pool_for("gitlab.com/g/sub/p") == "gitlab.com/g/sub/p"
+    assert N.pool_for("r") is None and N.pool_for("o//r") is None
+
+
+# MARK: - network: the pools listing
+
+LOGINS = {"github.com": "octocat", "gitlab.example.com": "me"}
+OTHER = LocalRepo("a", "b", "/w/b")
+WHOLE = ["github.com/o/r", "gitlab.example.com/g/sub/p", "github.com/x/y"]
+
+
+def _listing(roots_read=True, others=(OTHER,), unread=(), identities=LOGINS):
+    pools, held = N.pools_listing(ROOTS, roots_read, others, unread, identities)
+    return [p["id"] for p in pools] if pools is not None else held
+
+
+def test_the_listing_is_the_roots_then_what_the_other_checkouts_name():
+    assert _listing() == WHOLE + ["github.com/a/b"]
+    assert _listing(others=(ROOTS[3], OTHER)) == WHOLE + ["github.com/a/b"], (
+        "a checkout of a root's repository adds no pool")
+    assert _listing(others=()) == WHOLE, "a checkout naming no forge is left out"
+    assert N.pools_listing(ROOTS, True, (), (), LOGINS)[1] == ""
+
+
+def test_what_could_not_be_read_or_has_no_login_holds_the_listing_back():
+    assert _listing(roots_read=False) == "Pools are held back: a repo root cannot be read"
+    assert _listing(unread=("~/gone", "/mnt/x")) == (
+        "Pools are held back: ~/gone cannot be read")
+    assert _listing(identities={"github.com": "octocat"}) == (
+        "Pools are held back: the account for g/sub/p is not known yet")
+    assert _listing(identities={"github.com": " ", "gitlab.example.com": "me"}) == (
+        "Pools are held back: the account for o/r is not known yet")
+    assert _listing(roots_read=False, unread=("/mnt/x",), identities={}) == N.HELD_ROOT
+    assert _listing(unread=("/mnt/x",), identities={}) == N.held_unread("/mnt/x")
+
+
 def test_the_pools_body():
     assert N.pools_body(GITHUB_ONLY) == {"pools": GITHUB_ONLY}
 
@@ -305,18 +345,29 @@ def test_the_admit_body():
 
 
 def test_the_settings_keys():
-    assert (N.ENABLED_KEY, N.REQUIRED_MINIMUM_H_KEY, N.MAXIMUM_ACCEPTED_H_KEY) == (
-        "networkEnabled", "networkRequiredMinimumH", "networkMaximumAcceptedH")
+    assert (N.ENABLED_KEY, N.REQUIRED_MINIMUM_H_KEY, N.MAXIMUM_ACCEPTED_H_KEY,
+            N.DEVICES_KEY) == ("networkEnabled", "networkRequiredMinimumH",
+                               "networkMaximumAcceptedH", "networkDevices")
+
+
+#: Stored values and the hours the daemon's `hoursOf` makes of each: the same document
+#: `NetworkSmoke.swift` reads. The daemon's own test sets 48, 100000, 1 and "many".
+HOURS = json.loads("""
+[[null, 12], [11, 12], [12, 12], [48, 48], [48.0, 48], [13.5, 14], [15.5, 16], [12.49, 12],
+ [12.5, 13], [14.5, 15],
+ [0, 12], [-5, 12], [719, 719], [719.5, 720], [720, 720], [721, 720], [1e30, 720],
+ [100000, 720], [1, 12], ["many", 12], ["24", 24], [" 48 ", 48], ["", 12], ["15.5", 16],
+ ["0x30", 48], ["1e2", 100], [".5e2", 50], ["4_8", 12], ["48h", 12], ["Infinity", 12],
+ ["\u0664\u0668", 12], [true, 12], [false, 12], [[24], 24], [["36"], 36], [[], 12],
+ [[24, 48], 12], [[null], 12], [{}, 12]]
+""")
 
 
 @pytest.mark.parametrize("stored,want", [
-    (None, 12), (11, 12), (12, 12), (48, 48), (13.5, 12), (0, 12), (-5, 12),
-    (719, 719), (720, 720), (721, 720),
-    (1e30, 720), (float("inf"), 12), (float("nan"), 12),
-    # What only a JSON value can be: none of them is a whole number.
-    (48.0, 48), (True, 12), ("24", 12), ([24], 12),
+    *map(tuple, HOURS), (float("inf"), 12), (float("-inf"), 12), (float("nan"), 12),
+    (10 ** 400, 12),
 ], ids=repr)
-def test_the_hours_clamp(stored, want):
+def test_the_hours_are_what_the_daemon_reads(stored, want):
     assert N.hours(stored) == want
     assert type(N.hours(stored)) is int
 
@@ -353,6 +404,8 @@ def test_the_readmes_snapshot_decodes():
     assert snap.transport == N.Service("ready", "")
     assert snap.docker == N.Docker("building", "dn:1", "layer 3")
     assert snap.model == N.Service("missing", "no credential")
+    assert snap.devices == N.Service("none", "no adb server")
+    assert N.Snapshot.parse("{}").devices == N.Service()
     assert snap.admit == N.AdmitState(2, 1794000290, "")
     assert [(p.id, p.path, p.identity, p.hash, p.left) for p in snap.pools] == [
         ("github.com/o/r", "/w/r", "octocat", "h1", False)]
@@ -514,6 +567,26 @@ def test_the_offers_own_word_on_where_it_runs_wins_and_a_word_that_is_no_flag_is
         "u": A.NetworkTask("claimed", "bbbb", True),
         "v": A.NetworkTask("claimed", "aaaa", True),
         "w": A.NetworkTask("failed", reason="the container exited 137")}
+
+
+def test_an_open_offer_is_found_by_its_pool_kind_and_item():
+    snap = N.Snapshot.parse(FULL_SNAPSHOT)
+    assert N.open_task("github.com/o/r", "review", "pr-337", snap) == TASK
+    assert N.open_task("github.com/o/x", "review", "pr-337", snap) is None
+    assert N.open_task("github.com/o/r", "review-own", "pr-337", snap) is None
+    assert N.open_task("github.com/o/r", "review", "pr-338", snap) is None
+
+
+def test_an_offer_that_ended_is_not_the_one_held():
+    ended = N.Snapshot.parse("""
+        {"offers": [{"taskId": "a", "pool": "p", "kind": "k", "item": "i", "state": "done"},
+                    {"taskId": "b", "pool": "p", "kind": "k", "item": "i", "state": "failed"},
+                    {"taskId": "c", "pool": "p", "kind": "k", "item": "i", "state": "cancelled"},
+                    {"taskId": "d", "pool": "p", "kind": "k", "item": "i", "state": "pooled"}]}
+        """)
+    assert N.open_task("p", "k", "i", ended) == "d"
+    assert N.open_task("p", "k", "i", None) is None
+    assert N.open_task("p", "k", "i", N.Snapshot.parse("{}")) is None
 
 
 # MARK: - network: what a run resolves to, and the projections

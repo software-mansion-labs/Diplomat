@@ -74,7 +74,7 @@ enum NetworkTest {
     static func run() async -> Bool {
         var pass = true
         func check(_ name: String, _ ok: Bool) {
-            print("\(ok ? "PASS" : "FAIL") — \(name)")
+            print("\(ok ? "PASS" : "FAIL") - \(name)")
             if !ok { pass = false }
         }
 
@@ -274,6 +274,53 @@ enum NetworkTest {
         await store.runNetworkCycleOnce()
         check("an unchanged list is not posted again", requests(NetworkRoute.pools).count == 1)
 
+        //    An OTHER REPOS checkout that cannot be read holds the list back and says
+        //    so; one that names no forge is left out; a repair is posted next cycle.
+        func git(_ arguments: String...) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            proc.arguments = arguments
+            proc.standardOutput = Pipe()
+            proc.standardError = Pipe()
+            try? proc.run()
+            proc.waitUntilExit()
+        }
+        func postedPools() -> [String] {
+            ((requests(NetworkRoute.pools).last?["pools"] as? [[String: String]]) ?? [])
+                .map { $0["id"] ?? "" }
+        }
+        let bare = scratch.appendingPathComponent("bare").path
+        let gone = scratch.appendingPathComponent("unmounted/tool").path
+        git("init", "-q", bare)
+        store.localRepoPaths = [gone, bare]
+        await store.runNetworkCycleOnce()
+        await store.runNetworkCycleOnce()
+        check("a checkout that cannot be read holds the pools back and says which",
+              requests(NetworkRoute.pools).count == 1
+                && store.networkPoolsHeld == "Pools are held back: \(gone) cannot be read")
+        git("init", "-q", gone)
+        git("-C", gone, "remote", "add", "origin", "https://github.com/acme/tool.git")
+        await store.runNetworkCycleOnce()
+        check("readable again, it is posted on the next cycle; one naming no forge is left out",
+              requests(NetworkRoute.pools).count == 2 && store.networkPoolsHeld.isEmpty
+                && postedPools() == ["github.com/o/r", "gitlab.example.com/acme/api",
+                                     "github.com/acme/tool"])
+        let bareConfig = bare + "/.git/config"
+        let sound = (try? String(contentsOfFile: bareConfig, encoding: .utf8)) ?? ""
+        try? "[remote \"origin\"\n".write(toFile: bareConfig, atomically: true, encoding: .utf8)
+        await store.runNetworkCycleOnce()
+        check("a checkout git fails on holds the pools back as well",
+              requests(NetworkRoute.pools).count == 2
+                && store.networkPoolsHeld == "Pools are held back: \(bare) cannot be read")
+        try? sound.write(toFile: bareConfig, atomically: true, encoding: .utf8)
+        await store.runNetworkCycleOnce()
+        check("…until git reads it again", store.networkPoolsHeld.isEmpty)
+        store.localRepoPaths = []
+        await store.runNetworkCycleOnce()
+        check("a checkout taken off the list leaves its pool",
+              requests(NetworkRoute.pools).count == 3
+                && postedPools() == ["github.com/o/r", "gitlab.example.com/acme/api"])
+
         // 5. `admit` is the cap less what runs here, said again when it changes and
         //    once a minute, and withheld for the reasons the local gate holds a job.
         func lastAdmit() -> [String: Any] { requests(NetworkRoute.admit).last ?? [:] }
@@ -333,6 +380,10 @@ enum NetworkTest {
                            attemptStamp: Store.AttemptStamp.unresolvedReview,
                            directory: root.path, allows: allows)
         }
+        func isOffered(_ outcome: Store.DispatchOutcome) -> Bool {
+            if case .offered = outcome { return true }
+            return false
+        }
         func row(_ task: String) -> Store.AgentRow? {
             store.agentRows.first { $0.record.network == task }
         }
@@ -344,7 +395,7 @@ enum NetworkTest {
         // 7. One offer, no spawn, and a run booked under the offer's task id.
         let offered = await store.dispatchAgent(job(90210), source: .auto)
         let body = requests(NetworkRoute.offer).last ?? [:]
-        check("an automatic job with the switch on is offered", offered == .offered)
+        check("an automatic job with the switch on is offered", isOffered(offered))
         check("…with exactly one offer call", requests(NetworkRoute.offer).count == 1)
         check("…and no terminal asked for", AgentSpawner.refusedTerminals == refusedBefore)
         check("the offer names the pool, the kind, the item and the prompt",
@@ -369,16 +420,18 @@ enum NetworkTest {
               await store.dispatchAgent(job(90210), source: .auto) == .inFlight
                 && requests(NetworkRoute.offer).count == 1)
 
-        // 8. The row follows the daemon's word on the offer.
+        // 8. The row follows the daemon's word on the offer. A row has every member the
+        //    daemon's `rows()` lists (`packages/diplomacy-network/src/node/offers.js`),
+        //    `executorHere` being whether the executor is this machine.
         func offerRow(_ task: String, _ state: String, executor: String = "",
-                      reason: String = "", outcome: [String: Any]? = nil) -> [String: Any] {
-            var o: [String: Any] = ["taskId": task, "state": state, "executor": executor,
-                                    "reason": reason, "attempt": 1, "requests": 0, "refused": 0]
-            if let outcome {
-                o["outcome"] = outcome
-                o["endedAt"] = 1_800_000_000.0
-            }
-            return o
+                      reason: String = "", outcome: [String: Any]? = nil,
+                      kind: String = NetworkOffer.kindReview, item: String = "") -> [String: Any] {
+            let ended = ["done", "failed", "cancelled"].contains(state)
+            return ["taskId": task, "pool": "github.com/o/r", "kind": kind, "item": item,
+                    "title": "", "state": state, "executor": executor,
+                    "executorHere": executor == here, "attempt": 1, "requests": 0, "refused": 0,
+                    "outcome": outcome ?? NSNull(), "reason": reason,
+                    "offeredAt": 1_799_990_000, "endedAt": ended ? 1_800_000_000 : 0]
         }
         script.set(snapshot(offers: [offerRow("task-1", "pooled")]))
         await store.settleAgents()
@@ -499,14 +552,14 @@ enum NetworkTest {
 
         // 14. Finished here: the outcome's own runner. Failed: logged as failed, and an
         //     outcome that spent nothing closes no entry.
-        check("a second job is offered", await store.dispatchAgent(job(90220), source: .auto) == .offered)
+        check("a second job is offered", isOffered(await store.dispatchAgent(job(90220), source: .auto)))
         script.set(snapshot(offers: [offerRow("task-2", "done", executor: here, outcome: [
             "ok": true, "summary": "", "usd": 0.5, "tokens": 9000, "runner": "claude", "model": "m",
         ])]))
         await store.settleAgents()
         check("a task this machine ran keeps the runner its outcome names",
               ledger("done", key: ledgerKey(90220)).first?["runner"] as? String == "claude")
-        check("a third job is offered", await store.dispatchAgent(job(90221), source: .auto) == .offered)
+        check("a third job is offered", isOffered(await store.dispatchAgent(job(90221), source: .auto)))
         script.set(snapshot(offers: [offerRow("task-3", "failed", executor: away,
                                               reason: "the container exited 137")]))
         await store.settleAgents()
@@ -518,7 +571,7 @@ enum NetworkTest {
                 .hasSuffix("refused by the network: the container exited 137") == true)
 
         // 15. A merged PR: withdrawn once, then forgotten.
-        check("a fourth job is offered", await store.dispatchAgent(job(90230), source: .auto) == .offered)
+        check("a fourth job is offered", isOffered(await store.dispatchAgent(job(90230), source: .auto)))
         script.set(snapshot(offers: [offerRow("task-4", "claimed", executor: away)]))
         await store.settleAgents()
         store.pinMergedPRs(["o/r#90230"])
@@ -533,7 +586,7 @@ enum NetworkTest {
 
         // 16. Forgetting a run the pool still holds withdraws it; stopping a task goes
         //     to its run when this machine has it, else to the offer.
-        check("a fifth job is offered", await store.dispatchAgent(job(90240), source: .auto) == .offered)
+        check("a fifth job is offered", isOffered(await store.dispatchAgent(job(90240), source: .auto)))
         script.set(snapshot(offers: [offerRow("task-5", "pooled")]))
         await store.settleAgents()
         if let run = booked("task-5") { store.forgetRun(run.runID) }
@@ -588,7 +641,7 @@ enum NetworkTest {
                 && requests(NetworkRoute.offer).count == offersHeld)
         store.queueAutoRun = true
         check("a low disk does not hold one",
-              await store.dispatchAgent(job(90251), source: .auto) == .offered)
+              isOffered(await store.dispatchAgent(job(90251), source: .auto)))
         setenv(DiskFloor.envOverride, "0", 1)
         store.autoTaskLimit = 1
         let now = Date().timeIntervalSince1970
@@ -601,7 +654,7 @@ enum NetworkTest {
         await store.settleAgents()
         check("the local cap is full", store.autoTasksMeasured >= store.autoTaskLimit)
         check("…and does not hold a network job either",
-              await store.dispatchAgent(job(90252), source: .auto) == .offered)
+              isOffered(await store.dispatchAgent(job(90252), source: .auto)))
         store.autoTaskLimit = 3
 
         // 18. The four options are the prompt's own, in both polarities.
@@ -611,7 +664,7 @@ enum NetworkTest {
                                    prompt: prompt, prURL: url(n), prNumber: nil,
                                    authorLogin: nil, counter: nil, directory: root.path,
                                    allows: allows)
-            guard await store.dispatchAgent(j, source: .panel) == .offered,
+            guard isOffered(await store.dispatchAgent(j, source: .panel)),
                   let sent = requests(NetworkRoute.offer).last,
                   sent["prompt"] as? String == prompt, sent["now"] as? Bool == true else { return nil }
             return sent["options"] as? [String: Bool] ?? [:]
@@ -738,7 +791,20 @@ enum NetworkTest {
         check("a stored value above the ceiling reads as the ceiling",
               AppConfig.networkHours(NetworkSettings.maximumAcceptedHKey) == 720
                 && DiplomacyNetwork.hoursRange == 12...720)
+        func storeRaw(_ key: String, _ value: Any) {
+            var doc = AppConfig.read()
+            doc[key] = value
+            try? JSONSerialization.data(withJSONObject: doc).write(to: AppConfig.url)
+        }
+        storeRaw(NetworkSettings.maximumAcceptedHKey, 15.5)
+        let rounded = AppConfig.networkHours(NetworkSettings.maximumAcceptedHKey)
+        storeRaw(NetworkSettings.maximumAcceptedHKey, " 48 ")
+        check("a stored value reads as the daemon reads it: rounded, a string as its number",
+              rounded == 16 && AppConfig.networkHours(NetworkSettings.maximumAcceptedHKey) == 48)
         _ = AppConfig.setInt(NetworkSettings.maximumAcceptedHKey, 720)
+        check("jobs see no device until the setting says so",
+              !store.networkDevices && !AppConfig.networkDevices
+                && AppConfig.read()[NetworkSettings.devicesKey] == nil)
 
         // 22. An offer whose run cannot be booked is withdrawn, and says why. Every
         //     network verb has its row symbol.
@@ -769,7 +835,7 @@ enum NetworkTest {
             AgentRegistry.load().first { $0.prNumber == n }?.network ?? "no run for #\(n)"
         }
         for n in [90260, 90261, 90262] {
-            check("#\(n) is offered", await store.dispatchAgent(job(n), source: .auto) == .offered)
+            check("#\(n) is offered", isOffered(await store.dispatchAgent(job(n), source: .auto)))
         }
         let (pooledTask, claimedTask, doneTask) = (taskOf(90260), taskOf(90261), taskOf(90262))
         script.set(snapshot(offers: [
@@ -799,6 +865,8 @@ enum NetworkTest {
                 && feedDetails(NetworkAudit.stop).last
                     == "Stopped the Diplomacy Network daemon (ok: true)")
         let offWithdrawals = Array(requests(NetworkRoute.withdraw).dropFirst(withdrawsBefore))
+        check("with the switch off, the evidence of the network's runs says so",
+              DiplomacyNetwork.switchedOff == "the Diplomacy Network is switched off")
         check("…having withdrawn every offer the network still carried, as switched off",
               Set(offWithdrawals.compactMap { $0["taskId"] as? String })
                 == [pooledTask, claimedTask]
@@ -897,6 +965,329 @@ enum NetworkTest {
                     == "Auto · Review-req · #90271 - withdrawn: the Diplomacy Network was switched off"
                 && installer.all.last == "--stop-daemon"
                 && installer.all.filter { $0 == "--stop-daemon" }.count == 2)
+
+        // 26. An ask is answered by work that ran, not by its offer. Offered, it stands
+        //     marked and is not offered twice; its run finishing forgets it, and so does
+        //     the operator taking the offer back; one whose offer ended unrun - failed,
+        //     or withdrawn as the switch goes off - is as it was, for the next drain.
+        startDaemon()
+        script.set(snapshot())
+        store.networkEnabled = true
+        await store.networkLifecycle?.value
+        _ = AgentRegistry.forget(Set(AgentRegistry.load().map(\.runID)))
+        store.requestedWork = []
+        // Ends the cycle the refusals above staged work in.
+        store.commitQueue()
+        store.queuedTasks = []
+        let sweptPRs = [90280, 90281, 90282, 90283, 90284]
+        store.prs = sweptPRs.map { n in
+            OpenPR(number: n, title: "PR \(n)", url: url(n), isDraft: true, author: "LatekVO",
+                   createdAt: Date(), readyForReviewAt: nil, files: [], reviewDecision: nil,
+                   reviewThreads: [])
+        }
+        let offersSwept = requests(NetworkRoute.offer).count
+        let swept = store.requestReviewSweep(ReviewConfig(
+            depth: "deep", target: .mine, me: "LatekVO", includeDrafts: true,
+            includeReady: false))
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        let carried = sweptPRs.map(taskOf)
+        func asks() -> [String] { store.requestedWork.map { "\($0.number) \($0.offered)" } }
+        check("an offered ask stands, marked with the task that carries it",
+              swept.queued == 5 && requests(NetworkRoute.offer).count == offersSwept + 5
+                && asks() == zip(sweptPRs, carried).map { "\($0) \($1)" })
+        script.set(snapshot(offers: carried.map { offerRow($0, "pooled") }))
+        await store.settleAgents()
+        store.offerRequestedWork()
+        store.commitQueue()
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        check("…and is neither queued nor offered again while the pool holds it",
+              store.queuedTasks.isEmpty && AgentRegistry.load().count == 5
+                && requests(NetworkRoute.offer).count == offersSwept + 5)
+        check("the mark is stored with the ask",
+              Store.decodeRequestedWork(try? JSONEncoder().encode(store.requestedWork),
+                                        configured: "o/r").map(\.offered) == carried)
+        script.set(snapshot(offers: [
+            offerRow(carried[0], "pooled"), offerRow(carried[1], "pooled"),
+            offerRow(carried[2], "done", executor: away, outcome: ["ok": true]),
+            offerRow(carried[3], "failed", reason: "no machine could run it"),
+            offerRow(carried[4], "pooled"),
+        ]))
+        await store.settleAgents()
+        check("a run that finished forgets its ask; an offer that failed keeps it",
+              store.requestedWork.map(\.number) == [90280, 90281, 90283, 90284]
+                && booked(carried[2]) == nil && booked(carried[3]) == nil)
+        script.refuse(NetworkRoute.withdraw, (409, "The task is not yours."))
+        if let theirs = poolTask(carried[4], here: false) {
+            await store.stopNetworkTask(theirs, pool: "github.com/o/r")
+        }
+        script.refuse(NetworkRoute.withdraw, nil)
+        check("a withdrawal the daemon refused leaves the ask standing",
+              store.requestedWork.map(\.number) == [90280, 90281, 90283, 90284])
+        if let theirs = poolTask(carried[4], here: false) {
+            await store.stopNetworkTask(theirs, pool: "github.com/o/r")
+        }
+        check("an offer the operator takes back takes its ask with it",
+              requests(NetworkRoute.withdraw).last?["taskId"] as? String == carried[4]
+                && store.requestedWork.map(\.number) == [90280, 90281, 90283])
+        script.set(snapshot(offers: [
+            offerRow(carried[0], "pooled"), offerRow(carried[1], "pooled"),
+            offerRow(carried[4], "cancelled", reason: "stopped"),
+        ]))
+        await store.settleAgents()
+        store.offerRequestedWork()
+        store.commitQueue()
+        check("the ask whose offer failed is queued again, unmarked",
+              store.queuedTasks.map(\.job.prNumber) == [90283]
+                && asks() == ["90280 \(carried[0])", "90281 \(carried[1])", "90283 "])
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        let again = taskOf(90283)
+        check("…and the drain offers it afresh",
+              requests(NetworkRoute.offer).count == offersSwept + 6
+                && asks().last == "90283 \(again)")
+        if let run = booked(again) { store.forgetRun(run.runID) }
+        for _ in 0..<50 where store.requestedWork.count > 2 {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        check("a run the operator forgets takes its ask with it",
+              store.requestedWork.map(\.number) == [90280, 90281])
+        for _ in 0..<50 where booked(again) != nil {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        await store.settleAgents()
+
+        store.networkEnabled = false
+        await store.networkLifecycle?.value
+        store.offerRequestedWork()
+        store.commitQueue()
+        check("switched off with two offers still in the pool, each ask is as it was",
+              AgentRegistry.load().isEmpty && asks() == ["90280 ", "90281 "]
+                && store.queuedTasks.map(\.job.prNumber) == [90280, 90281])
+        let (terminalsOff, offersAsked) = (AgentSpawner.refusedTerminals,
+                                           requests(NetworkRoute.offer).count)
+        // A terminal that will not open ends a drain, so the second is run by hand.
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        await store.executeQueuedTask(store.queuedTasks.last?.id ?? "")
+        check("…and the queue starts each on this machine, offering nothing",
+              AgentSpawner.refusedTerminals == terminalsOff + 2
+                && requests(NetworkRoute.offer).count == offersAsked
+                && store.requestedWork.map(\.number) == [90280, 90281])
+
+        // 27. The settings are the shared file's: written there by another process, they
+        //     are followed on the next cycle, the switch as one moved here is.
+        store.queuedTasks = []
+        store.requestedWork = []
+        script.set(snapshot())
+        func stops() -> Int { installer.all.filter { $0 == "--stop-daemon" }.count }
+        store.writesConfig = false
+        store.networkEnabled = true
+        await store.networkLifecycle?.value
+        await store.runNetworkCycleOnce()
+        check("a store that writes no config keeps the switch it was given", store.networkEnabled)
+        store.networkEnabled = false
+        await store.networkLifecycle?.value
+        store.writesConfig = true
+        let (startsOutside, stopsOutside) = (starts(), stops())
+        storeRaw(NetworkSettings.enabledKey, true)
+        storeRaw(NetworkSettings.requiredMinimumHKey, 35.5)
+        storeRaw(NetworkSettings.devicesKey, true)
+        await store.runNetworkCycleOnce()
+        await store.networkLifecycle?.value
+        check("a switch another process turned on in config.json is followed on the next cycle",
+              store.networkEnabled && starts() == startsOutside + 1
+                && store.networkAnswered == true)
+        check("…and so are the hours and the devices setting",
+              store.networkRequiredMinimumH == 36 && store.networkDevices)
+        check("…none of them written back",
+              AppConfig.read()[NetworkSettings.requiredMinimumHKey] as? Double == 35.5)
+
+        // 28. Devices: the setting is the daemon's `networkDevices`, and the snapshot's
+        //     word on them is drawn as it changes.
+        store.networkDevices = false
+        let devicesOff = AppConfig.read()[NetworkSettings.devicesKey] as? Bool
+        store.networkDevices = true
+        check("the devices switch is saved to config.json as networkDevices",
+              devicesOff == false && AppConfig.read()["networkDevices"] as? Bool == true)
+        func devices(_ state: String, _ detail: String = "") -> [String: Any] {
+            var doc = snapshot()
+            doc["devices"] = ["state": state, "detail": detail]
+            return doc
+        }
+        script.set(devices("ready"))
+        await store.runNetworkCycleOnce()
+        let ready = store.networkState?.devices
+        script.set(devices("none", "no adb server answers"))
+        await store.runNetworkCycleOnce()
+        check("the snapshot's word on devices is published, and again when it alone changes",
+              ready?.state == "ready" && ready?.detail == ""
+                && store.networkState?.devices.state == "none"
+                && store.networkState?.devices.detail == "no adb server answers")
+        check("the devices setting says what it gives",
+              NetworkText.devicesTitle == "Let jobs use this machine's devices"
+                && NetworkText.devicesSummary == "Off: jobs see no device. On: a job running "
+                    + "here can use the Android devices and emulators attached to this machine "
+                    + "through adb - including a phone on USB - and an emulator can reach "
+                    + "services on this machine. Switch it on only for pools whose machines "
+                    + "you trust with that.")
+
+        // 29. What the screen's buttons say they do.
+        check("a restart is said to leave the jobs running",
+              NetworkText.restartHelp == "Stop the running daemon and start this checkout's. "
+                + "Jobs running in containers here keep running, and the daemon that starts "
+                + "takes them up.")
+        if let mine = poolTask("t-here", here: true), let theirs = poolTask("t-away", here: false) {
+            check("a task this machine runs is stopped, one it only offered is withdrawn",
+                  NetworkText.stopButton(mine) == ("Stop", NetworkText.stopRunHelp)
+                    && NetworkText.stopButton(theirs) == ("Withdraw", NetworkText.withdrawHelp))
+        } else {
+            check("the pool's tasks are read", false)
+        }
+        script.set(snapshot())
+
+        // 30. A job in a directory that is no linked repository's is offered nowhere; one
+        //     that names no directory works in the primary root.
+        func audit(in directory: String?) -> Store.AgentJob {
+            Store.AgentJob(kind: "audit", auditAction: "audit", label: "Audit", prompt: "audit it",
+                           prURL: nil, prNumber: nil, authorLogin: nil, counter: nil,
+                           directory: directory)
+        }
+        let offersNowhere = requests(NetworkRoute.offer).count
+        check("a job whose directory is no linked repository's is refused",
+              await store.dispatchAgent(audit(in: scratch.appendingPathComponent("stray").path),
+                                        source: .panel)
+                == .networkRefused("no repository to offer it into")
+                && requests(NetworkRoute.offer).count == offersNowhere)
+        check("…and one that names no directory goes to the primary root's pool",
+              isOffered(await store.dispatchAgent(audit(in: nil), source: .panel))
+                && requests(NetworkRoute.offer).last?["pool"] as? String == "github.com/o/r")
+
+        // 31. A request body is not an argument of curl: one longer than an argument list
+        //     may be arrives whole.
+        let long = String(repeating: "x", count: 1_200_000)
+        let longReply = await Task.detached {
+            DiplomacyNetwork.post(NetworkRoute.offer, ["pool": "p", "prompt": long])
+        }.value
+        var tookLong = false
+        if case .ok = longReply { tookLong = true }
+        check("a body longer than an argument list may be reaches the daemon whole",
+              tookLong && (requests(NetworkRoute.offer).last?["prompt"] as? String)?.count
+                == long.count)
+
+        // 32. A job is this machine's when the ended offer says its executor is, and no
+        //     one's here when the attempts ran out with nobody holding it.
+        check("an offer row has the members the daemon lists",
+              Set(offerRow("t", "pooled").keys) == [
+                "taskId", "pool", "kind", "item", "title", "state", "executor", "executorHere",
+                "attempt", "requests", "refused", "outcome", "reason", "offeredAt", "endedAt"])
+        func runnerBooked(_ n: Int, _ state: String, executor: String) async -> String? {
+            guard case .offered(let task) = await store.dispatchAgent(job(n), source: .auto)
+            else { return nil }
+            script.set(snapshot(offers: [offerRow(task, state, executor: executor, outcome: [
+                "ok": state == "done", "summary": "", "usd": 0.25, "tokens": 800,
+                "runner": "claude", "model": "m",
+            ])]))
+            await store.settleAgents()
+            return ledger("done", key: ledgerKey(n)).first?["runner"] as? String
+        }
+        check("a finished offer that names this machine is booked to its runner",
+              await runnerBooked(90296, "done", executor: here) == "claude")
+        check("…one that names another machine, to none of this machine's",
+              await runnerBooked(90297, "done", executor: away) == DiplomacyNetwork.foreignRunner)
+        check("an outcome nobody held when the attempts ran out is not this machine's",
+              await runnerBooked(90298, "failed", executor: "") == DiplomacyNetwork.foreignRunner)
+
+        // 33. A merged run's withdrawal is final only on a definite answer: a 5xx is
+        //     asked again, a refusal is not.
+        var merging = ""
+        if case .offered(let task) = await store.dispatchAgent(job(90299), source: .auto) {
+            merging = task
+        }
+        script.set(snapshot(offers: [offerRow(merging, "claimed", executor: away)]))
+        await store.settleAgents()
+        script.refuse(NetworkRoute.withdraw, (503, "The Diplomacy Network daemon is stopping."))
+        store.pinMergedPRs(["o/r#90299"])
+        let withdrawalsMerged = requests(NetworkRoute.withdraw).count
+        func kept() -> Int {
+            feedDetails(NetworkAudit.withdraw).filter { $0.contains("the network kept its offer") }
+                .count
+        }
+        let keptBefore = kept()
+        await store.settleAgents()
+        check("a withdrawal answered 503 does not retire the merged run",
+              requests(NetworkRoute.withdraw).count == withdrawalsMerged + 1
+                && booked(merging) != nil && kept() == keptBefore)
+        await store.settleAgents()
+        check("…and is made again on the next tick",
+              requests(NetworkRoute.withdraw).count == withdrawalsMerged + 2
+                && booked(merging) != nil)
+        script.refuse(NetworkRoute.withdraw, (409, "that task is another machine's"))
+        await store.settleAgents()
+        check("a refusal is final, and is said",
+              booked(merging) == nil && kept() == keptBefore + 1
+                && feedDetails(NetworkAudit.withdraw).last?
+                    .hasSuffix("the network kept its offer: that task is another machine's") == true)
+        script.refuse(NetworkRoute.withdraw, nil)
+        store.pinMergedPRs([])
+
+        // 34. An offer of the operator's the daemon gave no definite answer to is kept:
+        //     booked when the snapshot lists it, offered again when it does not, dropped
+        //     with the sentence when refused, withdrawn when the switch goes off.
+        func item(_ n: Int) -> String {
+            NetworkOffer.item(kind: NetworkOffer.kindReview, number: n, prompt: "review \(n)")
+        }
+        func offering() -> [Int] { store.networkOffering.compactMap(\.job.prNumber) }
+        script.set(snapshot())
+        script.refuse(NetworkRoute.offer, (500, "boom"))
+        let unsure = await store.dispatchAgent(job(90301), source: .panel)
+        check("an offer of the operator's with no definite answer is kept, and reads offering",
+              unsure == .offering && offering() == [90301]
+                && statusText(for: unsure, terminal: "Terminal") == "Offering to the pool…"
+                && !AgentRegistry.load().contains { $0.prNumber == 90301 })
+        check("…while automatic work is refused as before, the queue offering it again",
+              await store.dispatchAgent(job(90302), source: .auto) == .networkRefused("boom")
+                && offering() == [90301])
+        store.commitQueue()
+        store.queuedTasks = []
+        let offersUnsure = requests(NetworkRoute.offer).count
+        await store.runNetworkCycleOnce()
+        check("the next cycle makes the offer again, and keeps it while there is no answer",
+              requests(NetworkRoute.offer).count == offersUnsure + 1 && offering() == [90301])
+        script.set(snapshot(offers: [
+            offerRow("task-ended", "cancelled", item: item(90301)),
+            offerRow("task-held", "pooled", item: item(90301)),
+        ]))
+        await store.runNetworkCycleOnce()
+        check("found open in the snapshot by pool, kind and item, it is booked, not offered",
+              requests(NetworkRoute.offer).count == offersUnsure + 1 && offering().isEmpty
+                && booked("task-held")?.prNumber == 90301
+                && booked("task-held")?.source == "panel")
+        _ = await store.dispatchAgent(job(90303), source: .panel)
+        script.refuse(NetworkRoute.offer, nil)
+        await store.runNetworkCycleOnce()
+        check("one the snapshot does not list is offered again, and booked when taken",
+              offering().isEmpty && AgentRegistry.load().contains { $0.prNumber == 90303 })
+        script.refuse(NetworkRoute.offer, (500, "boom"))
+        _ = await store.dispatchAgent(job(90304), source: .panel)
+        script.refuse(NetworkRoute.offer, (409, "o/r has no pool on this machine"))
+        await store.runNetworkCycleOnce()
+        check("one the daemon refuses is dropped with the sentence",
+              offering().isEmpty && !AgentRegistry.load().contains { $0.prNumber == 90304 }
+                && feedDetails(NetworkAudit.unavailable).last
+                    == "Review-req · #90304 was not offered: o/r has no pool on this machine")
+        script.refuse(NetworkRoute.offer, (500, "boom"))
+        _ = await store.dispatchAgent(job(90305), source: .panel)
+        script.refuse(NetworkRoute.offer, nil)
+        script.set(snapshot(offers: [offerRow("task-off", "pooled", item: item(90305))]))
+        // Switched off by another process: followed, and the offer it held withdrawn.
+        storeRaw(NetworkSettings.enabledKey, false)
+        await store.runNetworkCycleOnce()
+        await store.networkLifecycle?.value
+        check("a switch another process turned off is followed, and the daemon stopped",
+              !store.networkEnabled && stops() == stopsOutside + 1)
+        check("…and an unanswered offer the daemon turned out to hold is withdrawn",
+              offering().isEmpty && requests(NetworkRoute.withdraw).contains {
+                  $0["taskId"] as? String == "task-off"
+                      && $0["reason"] as? String == NetworkRoute.withdrawSwitchedOff
+              })
 
         print(pass ? "NETWORK TEST OK" : "NETWORK TEST FAILED")
         return pass

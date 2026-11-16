@@ -38,10 +38,13 @@ extension Store {
     func networkSwitched() {
         networkCycle = NetworkCycle()
         networkUnavailableLogged = false
+        let offering = networkOffering
+        networkOffering = []
         if !networkEnabled {
             networkState = nil
             networkAnswered = nil
             networkRefusals = [:]
+            networkPoolsHeld = ""
         }
         guard DiplomacyNetwork.drivesDaemon else { return }
         let on = networkEnabled
@@ -55,6 +58,7 @@ extension Store {
                 await whileNetworkBusy {
                     // While the daemon is still there to hear a withdrawal.
                     await self.settleAgents()
+                    await self.withdrawOffering(offering)
                     let result = await Task.detached(priority: .userInitiated) {
                         DiplomacyNetwork.stopDaemon()
                     }.value
@@ -121,6 +125,7 @@ extension Store {
     /// it takes. `pools` is said when it changed and `admit` also once a minute; a
     /// daemon that started since is told both again.
     func runNetworkCycleOnce(now: TimeInterval = Date().timeIntervalSince1970) async {
+        rereadNetworkSettings()
         guard networkEnabled, !networkCycle.running else { return }
         networkCycle.running = true
         defer { networkCycle.running = false }
@@ -140,6 +145,7 @@ extension Store {
         networkCycle.startFailureLogged = false
         await postNetworkPools(now: now)
         await postNetworkAdmit(snapshot, now: now)
+        await settleOffering(snapshot)
     }
 
     /// Start a daemon that is not answering, no sooner than its backoff allows.
@@ -156,14 +162,21 @@ extension Store {
         }
     }
 
+    /// Say this machine's pools when they changed. The OTHER REPOS checkouts are read
+    /// again first: one that could not be read may be back, and one may have gained a
+    /// remote.
     private func postNetworkPools(now: TimeInterval) async {
-        guard let pools = networkPools() else {
+        await rereadLocalRepos()
+        let listing = networkPools()
+        guard case .pools(let pools) = listing else {
+            if case .held(let why) = listing, networkPoolsHeld != why { networkPoolsHeld = why }
             if now - networkCycle.identitiesAskedAt >= NetworkCycle.admitEvery {
                 networkCycle.identitiesAskedAt = now
                 await readNetworkIdentities()
             }
             return
         }
+        if !networkPoolsHeld.isEmpty { networkPoolsHeld = "" }
         guard pools != networkCycle.pools else { return }
         let body = NetworkPools.body(pools)
         let reply = await Task.detached(priority: .utility) {
@@ -206,6 +219,18 @@ extension Store {
         await withdraw(task, reason: NetworkRoute.withdrawForgotten,
                        label: record.label.isEmpty ? record.runID : record.label,
                        source: "panel")
+    }
+
+    /// The switch went off over jobs whose offer was never definitely answered: withdraw
+    /// each one the daemon turns out to hold.
+    private func withdrawOffering(_ offering: [OfferingJob]) async {
+        guard !offering.isEmpty else { return }
+        let snapshot = await Task.detached(priority: .utility) { DiplomacyNetwork.state() }.value
+        for held in offering {
+            guard let task = held.task(in: snapshot) else { continue }
+            await withdraw(task, reason: NetworkRoute.withdrawSwitchedOff, label: held.rowLabel,
+                           source: held.source.rawValue)
+        }
     }
 
     @discardableResult
@@ -251,6 +276,7 @@ extension Store {
         } else {
             reply = await withdraw(task.taskId, reason: NetworkRoute.withdrawStopped,
                                    label: task.title, source: "panel")
+            if case .ok = reply { forgetOffered(task.taskId) }
         }
         noteNetworkReply(reply, about: pool)
         await settleAgents()

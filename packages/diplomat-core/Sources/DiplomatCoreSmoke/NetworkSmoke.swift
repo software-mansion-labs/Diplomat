@@ -33,6 +33,7 @@ private let fullSnapshot = """
   "transport": { "state": "ready", "detail": "" },
   "docker": { "state": "building", "image": "dn:1", "detail": "layer 3" },
   "model": { "state": "missing", "detail": "no credential" },
+  "devices": { "state": "none", "detail": "no adb server" },
   "admit": { "slots": 2, "at": 1794000290, "reason": "" },
   "pools": [ { "id": "github.com/o/r", "path": "/w/r", "identity": "octocat", "hash": "h1",
       "left": false,
@@ -209,6 +210,46 @@ func networkSmoke() throws {
           && both[1].forge == "gitlab" && both[1].identity == "me")
     check(NetworkPools.linked(roots: roots, identities: ["github.com": "  "]).isEmpty,
           "a blank identity is none")
+    check(NetworkOffer.pool(repoKey: "O/R") == "github.com/o/r"
+          && NetworkOffer.pool(repoKey: "gitlab.com/Owner/Repo") == "gitlab.com/owner/repo"
+          && NetworkOffer.pool(repoKey: "gitlab.com/g/sub/p") == "gitlab.com/g/sub/p"
+          && NetworkOffer.pool(repoKey: "r") == nil && NetworkOffer.pool(repoKey: "o//r") == nil,
+          "a two-part key is GitHub's, a longer one names its own host")
+
+    section("network: the pools listing")
+    let logins = ["github.com": "octocat", "gitlab.example.com": "me"]
+    let other = PRRef.LocalRepo(owner: "a", repo: "b", path: "/w/b")
+    func listing(rootsRead: Bool = true, others: [PRRef.LocalRepo] = [other],
+                 unread: [String] = [], identities: [String: String] = logins)
+        -> NetworkPools.Listing {
+        NetworkPools.listing(roots: roots, rootsRead: rootsRead, others: others,
+                             unread: unread, identities: identities)
+    }
+    func ids(_ l: NetworkPools.Listing) -> [String]? {
+        if case .pools(let pools) = l { return pools.map(\.id) }
+        return nil
+    }
+    let whole = ["github.com/o/r", "gitlab.example.com/g/sub/p", "github.com/x/y"]
+    check(ids(listing()) == whole + ["github.com/a/b"],
+          "the roots, then what the other checkouts name: \(listing())")
+    check(ids(listing(others: [roots[3], other])) == whole + ["github.com/a/b"],
+          "a checkout of a root's repository adds no pool")
+    check(ids(listing(others: [])) == whole, "a checkout naming no forge is left out")
+    check(listing(rootsRead: false) == .held("Pools are held back: a repo root cannot be read"),
+          "an unread root holds the list back")
+    check(listing(unread: ["~/gone", "/mnt/x"])
+          == .held("Pools are held back: ~/gone cannot be read"),
+          "an unread checkout holds the list back, the first one named")
+    check(listing(identities: ["github.com": "octocat"])
+          == .held("Pools are held back: the account for g/sub/p is not known yet")
+          && listing(identities: ["github.com": " ", "gitlab.example.com": "me"])
+          == .held("Pools are held back: the account for o/r is not known yet"),
+          "an unknown login holds the list back, its repository named")
+    check(listing(rootsRead: false, unread: ["/mnt/x"], identities: [:])
+          == .held(NetworkPools.heldRoot)
+          && listing(unread: ["/mnt/x"], identities: [:])
+          == .held(NetworkPools.held(unread: "/mnt/x")),
+          "the roots are named before a checkout, a checkout before a login")
     check(NetworkPools.body(githubOnly) == ["pools": [
         ["id": "github.com/o/r", "path": "/w/r", "forge": "github", "identity": "octocat"],
         ["id": "github.com/x/y", "path": "/w/y", "forge": "github", "identity": "octocat"]]],
@@ -237,12 +278,33 @@ func networkSmoke() throws {
     section("network: settings and routes")
     check(NetworkSettings.enabledKey == "networkEnabled"
           && NetworkSettings.requiredMinimumHKey == "networkRequiredMinimumH"
-          && NetworkSettings.maximumAcceptedHKey == "networkMaximumAcceptedH")
-    let hours: [(Double?, Int)] = [(nil, 12), (11, 12), (12, 12), (48, 48), (13.5, 12),
-                                   (0, 12), (-5, 12), (719, 719), (720, 720), (721, 720),
-                                   (1e30, 720), (.infinity, 12), (.nan, 12)]
-    for (stored, want) in hours {
-        check(NetworkSettings.hours(stored) == want, "hours(\(String(describing: stored))) is \(want)")
+          && NetworkSettings.maximumAcceptedHKey == "networkMaximumAcceptedH"
+          && NetworkSettings.devicesKey == "networkDevices")
+    // Stored values and the hours the daemon's `hoursOf` makes of each: the same
+    // document `test_network.py` reads. The daemon's own test sets 48, 100000, 1 and
+    // "many".
+    let stored = """
+    {"rows": [[null, 12], [11, 12], [12, 12], [48, 48], [48.0, 48], [13.5, 14], [15.5, 16],
+     [12.5, 13], [14.5, 15],
+     [12.49, 12], [0, 12], [-5, 12], [719, 719], [719.5, 720], [720, 720], [721, 720],
+     [1e30, 720], [100000, 720], [1, 12], ["many", 12], ["24", 24], [" 48 ", 48], ["", 12],
+     ["15.5", 16], ["0x30", 48], ["1e2", 100], [".5e2", 50], ["4_8", 12], ["48h", 12],
+     ["Infinity", 12], ["\\u0664\\u0668", 12], [true, 12], [false, 12], [[24], 24],
+     [["36"], 36], [[], 12], [[24, 48], 12], [[null], 12], [{}, 12]]}
+    """
+    let rows = (JSONInput.parse(Data(stored.utf8))?["rows"] as? [[Any]]) ?? []
+    check(rows.count == 39, "the hours document reads")
+    for row in rows {
+        let want = (row.last as? NSNumber)?.intValue
+        check(row.count == 2 && NetworkSettings.hours(json: row[0]) == want,
+              "hours(\(row.first ?? "")) is \(String(describing: want))")
+    }
+    check(NetworkSettings.hours(json: nil) == 12, "an absent setting is the floor")
+    let numbers: [(Double?, Int)] = [(nil, 12), (48, 48), (13.5, 14), (721, 720),
+                                     (.infinity, 12), (-.infinity, 12), (.nan, 12)]
+    for (number, want) in numbers {
+        check(NetworkSettings.hours(number) == want,
+              "hours(\(String(describing: number))) is \(want)")
     }
     check(NetworkSettings.hoursFloor == 12 && NetworkSettings.hoursCeiling == 720,
           "the daemon's floor and ceiling")
@@ -277,6 +339,7 @@ func networkSmoke() throws {
           && snap.docker.state == "building" && snap.docker.image == "dn:1"
           && snap.docker.detail == "layer 3"
           && snap.model.state == "missing" && snap.model.detail == "no credential"
+          && snap.devices.state == "none" && snap.devices.detail == "no adb server"
           && snap.admit.slots == 2 && snap.admit.at == 1794000290 && snap.admit.reason == "")
     check(snap.pools.count == 1 && snap.pools[0].id == "github.com/o/r"
           && snap.pools[0].path == "/w/r" && snap.pools[0].identity == "octocat"
@@ -335,7 +398,8 @@ func networkSmoke() throws {
 
     let empty = NetworkSnapshot.parse(Data("{}".utf8))
     check(empty != nil && empty?.updatedAt == nil && empty?.pid == nil && empty?.pk == ""
-          && empty?.transport.state == "" && empty?.admit.slots == 0 && empty?.admit.at == nil
+          && empty?.transport.state == "" && empty?.devices.state == ""
+          && empty?.admit.slots == 0 && empty?.admit.at == nil
           && empty?.pools == [] && empty?.runs == [] && empty?.offers == nil,
           "an empty document is a snapshot of defaults, and lists no offers")
     let spoilt = NetworkSnapshot.parse(Data("""
@@ -415,6 +479,25 @@ func networkSmoke() throws {
         "v": Seen(state: "claimed", executor: "aaaa", executorHere: true),
         "w": Seen(state: "failed", reason: "the container exited 137")]),
           "the offer's own word on where it runs wins, and a word that is no flag is none")
+    func openTask(_ pool: String, _ kind: String, _ item: String,
+                  in snapshot: NetworkSnapshot?) -> String? {
+        NetworkEvidence.openTask(pool: pool, kind: kind, item: item, in: snapshot)
+    }
+    check(openTask("github.com/o/r", "review", "pr-337", in: snap) == networkTask,
+          "an open offer is found by its pool, kind and item")
+    check(openTask("github.com/o/x", "review", "pr-337", in: snap) == nil
+          && openTask("github.com/o/r", "review-own", "pr-337", in: snap) == nil
+          && openTask("github.com/o/r", "review", "pr-338", in: snap) == nil,
+          "…and by no two of them")
+    let ended = NetworkSnapshot.parse(Data("""
+        {"offers": [{"taskId": "a", "pool": "p", "kind": "k", "item": "i", "state": "done"},
+                    {"taskId": "b", "pool": "p", "kind": "k", "item": "i", "state": "failed"},
+                    {"taskId": "c", "pool": "p", "kind": "k", "item": "i", "state": "cancelled"},
+                    {"taskId": "d", "pool": "p", "kind": "k", "item": "i", "state": "pooled"}]}
+        """.utf8))
+    check(openTask("p", "k", "i", in: ended) == "d", "an offer that ended is not the one held")
+    check(openTask("p", "k", "i", in: nil) == nil && openTask("p", "k", "i", in: empty) == nil,
+          "no snapshot and no offers list hold none")
 
     section("network: what a run resolves to")
     let now: TimeInterval = 1_000_000

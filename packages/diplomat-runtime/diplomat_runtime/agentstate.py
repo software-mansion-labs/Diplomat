@@ -1244,10 +1244,9 @@ def synthesize_untracked(records: list[RunRecord], live_agents: Observation,
     the book could not be read, and one whose run had no pid and ended beside another
     record on its PR. Not another run this applet ended, whose agent goes to a released
     record (:func:`release_ended`), nor a window a backstop failed to close, whose run
-    is kept. They are found the old way - the prompt's ``PR #<n> in <owner>/<repo>`` in
-    the process table - which is why they are a *fallback* and not the identity
-    mechanism: that scan cannot tell two runs on one PR apart, so at most one record per
-    PR is made.
+    is kept. They are found by the prompt's ``PR #<n> in <owner>/<repo>`` in the process
+    table, which is why they are a *fallback* and not the identity mechanism: that scan
+    cannot tell two runs on one PR apart, so at most one record per PR is made.
 
     One is made once and then kept in the book like any other run, because the
     stillness backstop measures a screen against the last one seen and a record

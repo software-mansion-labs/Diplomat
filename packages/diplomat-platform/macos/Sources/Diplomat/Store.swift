@@ -68,6 +68,11 @@ final class Store: ObservableObject {
     /// What the daemon refused the Network screen's last action with, by the pool panel
     /// it was made in ("" for the one shown before any pool).
     @Published var networkRefusals: [String: String] = [:]
+    /// Why the daemon is not told this machine's pools (`NetworkPools.listing`), or "".
+    @Published var networkPoolsHeld = ""
+    /// The operator's jobs whose offer the daemon was sent and gave no definite answer
+    /// to (`settleOffering`).
+    @Published var networkOffering: [OfferingJob] = []
     /// What `runNetworkCycleOnce` last posted and when, the daemon it posted to, and when
     /// it may next start one that is not answering.
     var networkCycle = NetworkCycle()
@@ -309,12 +314,16 @@ final class Store: ObservableObject {
 
     /// Re-read every listed checkout's remotes, off the main actor.
     func refreshLocalRepos() {
+        Task { await rereadLocalRepos() }
+    }
+
+    func rereadLocalRepos() async {
         let paths = localRepoPaths
-        Task {
-            let resolved = await Task.detached(priority: .userInitiated) {
-                LocalRepos.resolve(paths)
-            }.value
-            if localRepoPaths == paths { localRepoCheckouts = resolved }
+        let resolved = await Task.detached(priority: .userInitiated) {
+            LocalRepos.resolve(paths)
+        }.value
+        if localRepoPaths == paths, localRepoCheckouts != resolved {
+            localRepoCheckouts = resolved
         }
     }
     /// Which agent CLI a spawn runs (Settings → AGENT RUNNER). In `AppConfig` rather
@@ -493,6 +502,36 @@ final class Store: ObservableObject {
                 networkMaximumAcceptedH = AppConfig.networkHours(NetworkSettings.maximumAcceptedHKey)
             }
         }
+    }
+
+    /// Whether a job running here may use this machine's Android devices. The daemon
+    /// reads it from the shared file for each job it starts.
+    @Published var networkDevices: Bool {
+        didSet {
+            guard writesConfig, !readingConfig,
+                  !configSaved(AppConfig.setBool(NetworkSettings.devicesKey, networkDevices))
+            else { return }
+            readBack { networkDevices = AppConfig.networkDevices }
+        }
+    }
+
+    /// Take the network's settings as the shared file has them: the daemon acts on the
+    /// file, and another process may have written it. A switch that moved is followed
+    /// as one moved here is.
+    func rereadNetworkSettings() {
+        guard writesConfig else { return }
+        let on = AppConfig.networkEnabled
+        let switched = on != networkEnabled
+        readBack {
+            if switched { networkEnabled = on }
+            let required = AppConfig.networkHours(NetworkSettings.requiredMinimumHKey)
+            if required != networkRequiredMinimumH { networkRequiredMinimumH = required }
+            let accepted = AppConfig.networkHours(NetworkSettings.maximumAcceptedHKey)
+            if accepted != networkMaximumAcceptedH { networkMaximumAcceptedH = accepted }
+            let devices = AppConfig.networkDevices
+            if devices != networkDevices { networkDevices = devices }
+        }
+        if switched { networkSwitched() }
     }
 
     /// The run deadline's switch (Settings → STALLED AGENTS). Beside the budget knobs
@@ -1174,6 +1213,7 @@ final class Store: ObservableObject {
         networkEnabled = AppConfig.networkEnabled
         networkRequiredMinimumH = AppConfig.networkHours(NetworkSettings.requiredMinimumHKey)
         networkMaximumAcceptedH = AppConfig.networkHours(NetworkSettings.maximumAcceptedHKey)
+        networkDevices = AppConfig.networkDevices
         runDeadlineEnabled = AppConfig.runDeadline != nil
         autoBudgetConfidence = AppConfig.autoBudgetConfidence
         autoBudgetFloorPct = AppConfig.autoBudgetFloorPct
@@ -1822,7 +1862,10 @@ final class Store: ObservableObject {
         let priced = Store.pricingInputs(records.filter(\.runsHere))
         guard bookWritten(AgentRegistry.forget([runID])) else { return }
         Task {
-            for r in records where !r.runsHere { await withdrawForgotten(r) }
+            for r in records where !r.runsHere {
+                forgetOffered(r.network ?? "")
+                await withdrawForgotten(r)
+            }
             await settleLedger(priced)
             await settleAgents()
         }
@@ -2068,6 +2111,9 @@ final class Store: ObservableObject {
         // disk) is retired again next tick: nothing below may happen to one that stays,
         // or it is logged and priced twice.
         guard bookWritten(AgentRegistry.forget(Set(gone.map(\.runID)))) else { return }
+        for r in gone where t.states[r.runID]?.state == .finished {
+            forgetOffered(r.network ?? "")
+        }
         let concluded = ReviewReconcile.concluded(gone, verdicts: t.states)
         if !concluded.isEmpty {
             saveReviewReqAttempts(ReviewReconcile.conclude(loadReviewReqAttempts(),
@@ -2133,21 +2179,22 @@ final class Store: ObservableObject {
         if !same { networkState = snapshot }
     }
 
-    /// Every linked repository as a pool, with the login each is worked as: the repo
-    /// roots, then the OTHER REPOS checkouts. Nil while a root or a checkout is unread
-    /// or a forge's login is unknown, since a list cut short makes the daemon leave the
-    /// pools it omits.
+    /// Every linked repository as a pool, with the login each is worked as, or why the
+    /// list is held back (`NetworkPools.listing`). A listed path with no checkout read
+    /// for it yet counts as unread.
     ///
     /// GitHub's login is `gh`'s own and not the username override: the agents act as it.
-    func networkPools() -> [NetworkPools.Pool]? {
-        guard rootsResolved, localRepoCheckouts.map(\.path) == localRepoPaths else { return nil }
-        let repos = wizardRepos
+    func networkPools() -> NetworkPools.Listing {
+        let unread = localRepoPaths.filter { path in
+            !localRepoCheckouts.contains { $0.path == path && $0.read }
+        }
+        let others = localRepos
         var identities: [String: String] = [:]
-        for repo in repos where identities[repo.host] == nil {
+        for repo in roots + others where identities[repo.host] == nil {
             identities[repo.host] = repo.isGitLab ? gitlabMe.known(host: repo.host) : me
         }
-        guard repos.allSatisfy({ !(identities[$0.host] ?? "").isEmpty }) else { return nil }
-        return NetworkPools.linked(roots: repos, identities: identities)
+        return NetworkPools.listing(roots: roots, rootsRead: rootsResolved, others: others,
+                                    unread: unread, identities: identities)
     }
 
     /// Ask for each GitLab login `networkPools` lacks: a host no root is on is read by
@@ -2166,18 +2213,20 @@ final class Store: ObservableObject {
         for r in runs {
             guard let task = r.network else { continue }
             let body = NetworkRoute.withdrawBody(task: task, reason: NetworkRoute.withdrawMerged)
-            let reply = await Task.detached(priority: .utility) {
-                DiplomacyNetwork.post(NetworkRoute.withdraw, body)
+            let (reply, reach) = await Task.detached(priority: .utility) {
+                DiplomacyNetwork.ask(NetworkRoute.withdraw, body)
             }.value
             let who = r.label.isEmpty ? r.runID : r.label
-            switch reply {
-            case .ok:
+            // Only a definite answer ends it. Asking again is safe: the daemon answers a
+            // withdrawal of a task it no longer holds as done.
+            switch (reach, reply) {
+            case (.answered, .ok):
                 AuditLog.log(r.source, NetworkAudit.withdraw,
                              "\(who) - its PR merged, so its offer is withdrawn")
-            case .refused(let why):
+            case (.answered, .refused(let why)):
                 AuditLog.log(r.source, NetworkAudit.withdraw,
                              "\(who) - its PR merged; the network kept its offer: \(why)")
-            case .down:
+            default:
                 unanswered.insert(r.runID)
             }
         }
@@ -2208,6 +2257,9 @@ final class Store: ObservableObject {
         // This pass's rows were published with them in.
         let gone = Set(left.map(\.runID))
         agentRows.removeAll { gone.contains($0.record.runID) }
+        // A ping whose run this was reads that it never ran, not that it finished.
+        noteCommsRuns(neverRan: Dictionary(left.map { ($0.label, NetworkText.switchedOffRun) },
+                                           uniquingKeysWith: { first, _ in first }))
     }
 
     /// Close the ledger entries of runs the network carried, each from the outcome its
@@ -3596,6 +3648,9 @@ final class Store: ObservableObject {
         /// is about, whose root the ask runs in; "" for an investigation stored before asks
         /// named one, which runs in the primary root.
         var repo: String
+        /// The Diplomacy Network task this ask is offered as, "" while no offer carries
+        /// it. An offer is not a start: the ask stands until the work has run.
+        var offered = ""
 
         /// This ask's identity everywhere it has one: the queued task's id, the row
         /// the panel draws it as, and what `forgetRequested` drops it by.
@@ -3625,7 +3680,9 @@ final class Store: ObservableObject {
             (roots.first { $0.key == repo } ?? PRRef.repo(ofKey: repo)).webURL(.issues, number: number)
         }
 
-        private enum CodingKeys: String, CodingKey { case number, url, author, action, config, repo }
+        private enum CodingKeys: String, CodingKey {
+            case number, url, author, action, config, repo, offered
+        }
 
         /// `repo` nil reads it off `url`.
         init(number: Int, url: String, author: String, config: RequestedConfig,
@@ -3646,6 +3703,7 @@ final class Store: ObservableObject {
             author = try c.decodeIfPresent(String.self, forKey: .author) ?? ""
             // Absent from a row a single-repo build wrote: `decodeRequestedWork` fills it.
             repo = try c.decodeIfPresent(String.self, forKey: .repo) ?? ""
+            offered = try c.decodeIfPresent(String.self, forKey: .offered) ?? ""
             // No verb means a row written while this list held reviews alone, whose
             // `config` is the bare `ReviewConfig` it was stored as.
             let action = try c.decodeIfPresent(String.self, forKey: .action)
@@ -3665,6 +3723,7 @@ final class Store: ObservableObject {
             try c.encode(author, forKey: .author)
             try c.encode(config.action, forKey: .action)
             try c.encode(repo, forKey: .repo)
+            if !offered.isEmpty { try c.encode(offered, forKey: .offered) }
             switch config {
             case .review(let cfg): try c.encode(cfg, forKey: .config)
             case .issues(let cfg): try c.encode(cfg, forKey: .config)
@@ -3836,10 +3895,22 @@ final class Store: ObservableObject {
     /// which this says in the feed. While a root path fails to resolve (`rootsResolved`)
     /// its repo may be that one, so the ask is kept and skipped instead.
     ///
+    /// An ask the Diplomacy Network carries (`RequestedWork.offered`) is left out for as
+    /// long as the book holds the run of its offer. Once that run has left the book
+    /// without finishing - withdrawn, refused, the switch turned off - the ask is as it
+    /// was before the offer, and is offered again here.
+    ///
     /// Not private: the queue self-test commits a cycle directly, which is the only way
     /// to exercise the offer without a live GitHub fetch.
     func offerRequestedWork() {
+        var carried: Set<String>?
         for entry in requestedWork {
+            if !entry.offered.isEmpty {
+                let tasks = carried ?? Set(AgentRegistry.load().compactMap(\.network))
+                carried = tasks
+                if tasks.contains(entry.offered) { continue }
+                markOffered(entry.key, task: "")
+            }
             // An investigation, or an ask stored without its home, would still run in
             // the primary root: its repo leaving the roots drops it all the same.
             if let task = requestedTask(entry), !askRootGone(entry) {
@@ -3861,21 +3932,40 @@ final class Store: ObservableObject {
     /// to do. Every other outcome leaves the ask alone — an in-flight PR, a window with
     /// no budget left and a terminal that failed to open are all reasons to try again
     /// next poll, which is exactly what staying in the list means.
+    ///
+    /// An offer to the Diplomacy Network is not a start. The ask stays, marked with the
+    /// task that carries it, until that run finishes (`retireFinished`) or the operator
+    /// takes the offer back (`forgetOffered`); a run that leaves the book any other way
+    /// leaves the ask to be offered again (`offerRequestedWork`).
     private func settleRequested(_ entry: QueuedAgentTask, _ outcome: DispatchOutcome) {
         guard entry.job.requested else { return }
         switch outcome {
-        case .spawned, .offered, .banned: forgetRequested(entry.id)
+        case .offered(let task): markOffered(entry.id, task: task)
+        case .spawned, .banned: forgetRequested(entry.id)
         // `.notAllowed` is listed only because the switch is exhaustive: an ask can
         // never draw it, since the allowlist answers for the review monitor's own
         // finds and an ask is not one (`AgentJob.counter`).
         case .inFlight, .atCapacity, .unaffordable, .lowDisk, .failed, .notAllowed,
-             .networkRefused: break
+             .offering, .networkRefused: break
         }
     }
 
     /// Drop one ask, by the queue key that is its identity.
     private func forgetRequested(_ key: String) {
         requestedWork.removeAll { $0.key == key }
+    }
+
+    /// Note the network task that carries the ask `key`, or with "" that none does.
+    private func markOffered(_ key: String, task: String) {
+        guard let at = requestedWork.firstIndex(where: { $0.key == key }) else { return }
+        requestedWork[at].offered = task
+    }
+
+    /// Drop the ask the network carried as `task`: its run finished, or the operator
+    /// took the offer back.
+    func forgetOffered(_ task: String) {
+        guard !task.isEmpty else { return }
+        requestedWork.removeAll { $0.offered == task }
     }
 
     /// The queued row's "cancel": drop an ask the operator has changed their mind
@@ -4072,8 +4162,10 @@ final class Store: ObservableObject {
         case .notAllowed:
             error = "\(entry.job.label): the PR's author is not on the auto-review list "
                   + "(add them, or review it from the wizard)."
-        case .atCapacity, .unaffordable, .lowDisk:
-            break   // unreachable: the run bypasses the holds the operator overrode
+        case .atCapacity, .unaffordable, .lowDisk, .offering:
+            // Unreachable: the run bypasses the holds the operator overrode, and an
+            // unanswered offer of queued work is offered again from the queue.
+            break
         }
         refreshAudit()
     }
@@ -4224,8 +4316,11 @@ final class Store: ObservableObject {
         case lowDisk
         case failed(String)
         /// The job went into its repository's pool on the Diplomacy Network, where some
-        /// machine of the pool runs it.
-        case offered
+        /// machine of the pool runs it, as this task.
+        case offered(task: String)
+        /// The offer was sent and the daemon gave no definite answer: the job is kept
+        /// (`networkOffering`) until a later cycle books or drops it.
+        case offering
         /// The network did not take the job: a sentence fit to show the operator.
         case networkRefused(String)
         /// An agent launched, here or through the network: the signal to record the
@@ -4423,6 +4518,10 @@ final class Store: ObservableObject {
     /// A job the network does not take starts no agent here either. Automatic work is
     /// staged back as held work is and offered again next cycle, with one feed line for
     /// the spell; a job the operator started is answered with the sentence.
+    ///
+    /// An offer the daemon was sent and gave no definite answer to may be in the pool.
+    /// Automatic work is offered again from the queue, which the daemon answers with the
+    /// task it holds; a job the operator started is kept in `networkOffering`.
     private func offerToNetwork(_ job: AgentJob, source: AgentDispatchGate.Source,
                                 attemptNumber: Int, forced: Bool,
                                 rowLabel: String) async -> DispatchOutcome {
@@ -4436,9 +4535,16 @@ final class Store: ObservableObject {
         case .refused(let why):
             refusal = why
         case .offer(let offer):
-            let reply = await Task.detached(priority: .userInitiated) {
-                DiplomacyNetwork.post(NetworkRoute.offer, offer.body)
+            let (reply, reach) = await Task.detached(priority: .userInitiated) {
+                DiplomacyNetwork.ask(NetworkRoute.offer, offer.body)
             }.value
+            if reach == .unsure, source != .auto {
+                let held = OfferingJob(job: job, source: source, attemptNumber: attemptNumber,
+                                       rowLabel: rowLabel, offer: offer)
+                networkOffering.removeAll { $0.id == held.id }
+                networkOffering.append(held)
+                return .offering
+            }
             switch reply {
             case .ok(let answer):
                 if let task = answer?["taskId"]?.string {
@@ -4467,6 +4573,61 @@ final class Store: ObservableObject {
             refreshAudit()
         }
         return .networkRefused(refusal)
+    }
+
+    /// A job of the operator's whose offer was sent and not definitely answered.
+    struct OfferingJob: Identifiable, Equatable {
+        let job: AgentJob
+        let source: AgentDispatchGate.Source
+        let attemptNumber: Int
+        let rowLabel: String
+        let offer: NetworkOffer.Offer
+        /// What the daemon names its task by.
+        var id: String { "\(offer.pool) \(offer.kind) \(offer.item)" }
+
+        /// The task the daemon holds for it, when the snapshot lists one.
+        func task(in snapshot: NetworkSnapshot?) -> String? {
+            NetworkEvidence.openTask(pool: offer.pool, kind: offer.kind, item: offer.item,
+                                     in: snapshot)
+        }
+    }
+
+    /// Settle each job in `networkOffering` against a daemon that answers: book the task
+    /// the snapshot holds for it, else make the offer again, which the daemon answers
+    /// with the task it already has when the first one reached it. A refusal drops the
+    /// job with the sentence; no definite answer keeps it for the next cycle.
+    func settleOffering(_ snapshot: NetworkSnapshot) async {
+        for held in networkOffering {
+            var task = held.task(in: snapshot)
+            var refusal = ""
+            if task == nil {
+                let body = held.offer.body
+                let (reply, reach) = await Task.detached(priority: .utility) {
+                    DiplomacyNetwork.ask(NetworkRoute.offer, body)
+                }.value
+                guard reach == .answered else { continue }
+                switch reply {
+                case .ok(let answer):
+                    task = answer?["taskId"]?.string
+                    refusal = "the daemon named no task for the offer"
+                case .refused(let why): refusal = why
+                case .down: continue
+                }
+            }
+            // The switch may have moved across the wait, which empties the list.
+            guard let at = networkOffering.firstIndex(of: held) else { continue }
+            networkOffering.remove(at: at)
+            guard let task else {
+                AuditLog.log(held.source.rawValue, NetworkAudit.unavailable,
+                             "\(held.job.label) was not offered: \(refusal)")
+                refreshAudit()
+                continue
+            }
+            // A second press of the same job books the task ahead of this.
+            guard !AgentRegistry.load().contains(where: { $0.network == task }) else { continue }
+            _ = await bookOffer(held.job, task: task, pool: held.offer.pool, source: held.source,
+                                attemptNumber: held.attemptNumber, rowLabel: held.rowLabel)
+        }
     }
 
     /// Book the run of an offer the pool took, and count it as a dispatch.
@@ -4506,7 +4667,7 @@ final class Store: ObservableObject {
         bumpAutoCounter(job, source: source, attemptNumber: attemptNumber)
         recordTelemetryStart(job, source: source, attemptNumber: attemptNumber)
         await settleAgents()
-        return .offered
+        return .offered(task: task)
     }
 
     /// The number the job's pull request or issue has: the one it dedups on, else the one
@@ -4516,16 +4677,14 @@ final class Store: ObservableObject {
     }
 
     /// The repository the job works in, as `PRRef.LocalRepo.key`: the one its link names,
-    /// else its checkout's, else the primary root's.
+    /// else its checkout's, and the primary root's for a job that names no checkout. ""
+    /// for a checkout that is no linked repository's.
     private func networkRepoKey(_ job: AgentJob) -> String {
         if let root = job.prURL.flatMap(PRRef.itemKey(url:)).flatMap(PRRef.splitItemKey)?.root {
             return root
         }
-        if let directory = job.directory,
-           let repo = wizardRepos.first(where: { $0.path == directory }) {
-            return repo.key
-        }
-        return primaryKey
+        guard let directory = job.directory else { return primaryKey }
+        return wizardRepos.first { $0.path == directory }?.key ?? ""
     }
 
     /// Review a PR someone asked me to review (most-comprehensive depth, formal
@@ -4728,7 +4887,8 @@ final class Store: ObservableObject {
             self.error = "Resolve \(label): an agent is already on this PR."
         case .networkRefused(let why):
             self.error = "Resolve \(label) was not offered: \(why)."
-        case .spawned, .offered, .banned, .atCapacity, .unaffordable, .lowDisk, .notAllowed:
+        case .spawned, .offered, .offering, .banned, .atCapacity, .unaffordable, .lowDisk,
+             .notAllowed:
             // `.atCapacity`, `.unaffordable` and `.lowDisk` are answers only a monitor
             // gets — none of the automatic-task cap, the spending budget and the disk
             // floor applies to a click — and `.notAllowed` speaks for the review

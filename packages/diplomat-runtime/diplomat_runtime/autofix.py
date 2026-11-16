@@ -992,6 +992,9 @@ class RequestedWork:
     config: dict
     #: The item's root, as its ``LocalRepo.key``; "" in a row single-repo builds stored.
     repo: str = ""
+    #: The Diplomacy Network task this ask is offered as, "" while no offer carries it.
+    #: An offer is not a start: the ask stands until the work has run.
+    offered: str = ""
 
     @property
     def item(self) -> str | None:
@@ -1036,8 +1039,9 @@ class RequestedWork:
         return f"{noun} · {named} · {self.config.get('depth', '')}"
 
     def to_json(self) -> dict:
-        return {"number": self.number, "url": self.url, "author": self.author,
-                "config": self.config, "repo": self.repo}
+        row = {"number": self.number, "url": self.url, "author": self.author,
+               "config": self.config, "repo": self.repo}
+        return {**row, "offered": self.offered} if self.offered else row
 
     @staticmethod
     def from_json(obj: dict) -> "RequestedWork | None":
@@ -1056,7 +1060,8 @@ class RequestedWork:
             return None
         return RequestedWork(number=number, url=str(obj.get("url", "")),
                              author=str(obj.get("author", "")), config=config,
-                             repo=str(obj.get("repo", "")))
+                             repo=str(obj.get("repo", "")),
+                             offered=str(obj.get("offered", "")))
 
 
 @dataclass(frozen=True)

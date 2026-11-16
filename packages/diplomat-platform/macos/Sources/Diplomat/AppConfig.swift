@@ -289,8 +289,12 @@ enum AppConfig {
 
     /// One of the network's two hour settings, as its daemon reads it.
     static func networkHours(_ key: String) -> Int {
-        NetworkSettings.hours(double(key, fallback: Double(NetworkSettings.hoursFloor)))
+        NetworkSettings.hours(json: read()[key])
     }
+
+    /// Whether a job running on this machine may reach its adb server. The daemon reads
+    /// the same key for each job it starts.
+    static var networkDevices: Bool { bool(NetworkSettings.devicesKey, fallback: false) }
 
     /// How sure the gate must be that a task fits before it starts one, as a
     /// percentage, snapped to a level with a quantile behind it.

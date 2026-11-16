@@ -354,6 +354,8 @@ extension Store {
         let outcome = await dispatchAgent(goalPlusJob(node, number: ref.number), source: .panel)
         switch outcome {
         case .spawned, .offered: break
+        // On its way: recorded as dispatched by the pass that finds its run.
+        case .offering: return nil
         case .networkRefused(let why): return "the fix was not offered: \(why)"
         case .banned: return "@\(node.author ?? "") is banned, so no fix was started"
         case .failed(let why): return "the fix agent did not start: \(why)"

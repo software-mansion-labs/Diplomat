@@ -234,14 +234,15 @@ def _network_screen_fixture(store: Store, mode: str) -> None:
     machine alone. ``-starting``: switched on, the daemon not asked yet. ``-down``:
     asked, and not answering. ``-off``: switched off.
 
-    The switch is the shared config's, which a render never writes, so it is set on the
-    module that reads it. So is the daemon's answer: the panel's own tick asks for it,
-    and what is drawn is what is seeded here."""
+    The switch and the devices setting are the shared config's, which a render never
+    writes, so they are set on the module that reads them. So is the daemon's answer:
+    the panel's own tick asks for it, and what is drawn is what is seeded here."""
     from diplomat_runtime import activity, network
     from . import diplomacynetwork as dn
 
     off = mode.endswith("-off")
     dn.enabled = lambda: not off
+    dn.devices = lambda: mode == "network-screen"
     store.network_answered = (None if off or mode.endswith("-starting")
                               else mode == "network-screen")
     store.network_state = None
@@ -274,6 +275,7 @@ def _network_screen_fixture(store: Store, mode: str) -> None:
         "transport": {"state": "ready", "detail": ""},
         "docker": {"state": "ready", "image": "diplomat-job:3f9a", "detail": ""},
         "model": {"state": "ready", "detail": ""},
+        "devices": {"state": "ready", "detail": ""},
         "admit": {"slots": 2, "at": now - 9, "reason": ""},
         "pools": [
             {"id": "github.com/latekvo/diplomat", "path": "/src/diplomat",

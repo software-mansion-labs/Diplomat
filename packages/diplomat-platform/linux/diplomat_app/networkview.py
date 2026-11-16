@@ -52,12 +52,17 @@ OFF_NOTE = "Off: every job runs in a terminal on this machine."
 ASKING = "Asking the daemon…"
 SILENT = "Not answering. Diplomat starts it again on its own, waiting longer after each try."
 RESTART_HELP = ("Stop the running daemon and start this checkout's. Jobs running in "
-                "containers here are stopped with it.")
+                "containers here keep running, and the daemon that starts takes them up.")
 REQUIRED_TITLE = "Hours a job of yours may take"
 REQUIRED_SUMMARY = ("Counted from when a machine takes it. Only machines that take jobs "
                     "this long run yours.")
 ACCEPTED_TITLE = "Longest job this machine takes"
 ACCEPTED_SUMMARY = "A job that may take longer is left to the other machines of its pool."
+DEVICES_TITLE = "Let jobs use this machine's devices"
+DEVICES_SUMMARY = ("Off: jobs see no device. On: a job running here can use the Android "
+                   "devices and emulators attached to this machine through adb - including "
+                   "a phone on USB - and an emulator can reach services on this machine. "
+                   "Switch it on only for pools whose machines you trust with that.")
 NO_POOLS = ("No pools yet. Each repository in Settings gets one once Diplomat knows "
             "which account works on it.")
 NO_MEMBERS = "No members listed yet."
@@ -67,6 +72,8 @@ INVITE_PLACEHOLDER = "Paste an invite"
 INVITE_COPIED = "Invite copied. Send it to the machine that should join."
 STOP_RUN_HELP = "Stop this job's run on this machine. It goes back to the pool."
 WITHDRAW_HELP = "Withdraw this job from the pool."
+#: The snapshot's services, each a chip of the status card.
+SERVICES = ("transport", "docker", "model", "devices")
 LEFT_NOTE = "left - this machine takes and offers nothing here"
 
 _SECTION = "font-size: 11px; font-weight: 600;"
@@ -92,7 +99,13 @@ def service_tint(state: str) -> str:
         return _GREEN
     if state in ("failed", "missing", "down"):
         return _RED
-    return _ORANGE if state else _GREY
+    return _GREY if state in ("", "off") else _ORANGE
+
+
+def stop_button(task: network.PoolTask) -> tuple[str, str]:
+    """The button that ends a pool's task from here, and its tooltip: the run, when
+    this machine is running it, else the offer this machine made of it."""
+    return ("Stop", STOP_RUN_HELP) if task.executor_here else ("Withdraw", WITHDRAW_HELP)
 
 
 def counts(snapshot: network.Snapshot) -> str:
@@ -322,7 +335,8 @@ class PoolPanel(QWidget):
         foot.setSpacing(6)
         foot.addWidget(_plain(place(t) or "nobody has taken it", muted(9)), 1)
         if t.state in ("available", "claimed") and (t.offered_here or t.executor_here):
-            stop = _button("Stop", _RED, STOP_RUN_HELP if t.executor_here else WITHDRAW_HELP)
+            title, tip = stop_button(t)
+            stop = _button(title, _RED, tip)
             store, pool = self._store, self._pool
             stop.clicked.connect(lambda: store.stop_network_task_async(t, pool))
             foot.addWidget(stop)
@@ -536,16 +550,21 @@ class NetworkView(QWidget):
         body.addWidget(SettingRow(REQUIRED_TITLE, self.required_h, summary=REQUIRED_SUMMARY))
         self.accepted_h = self._hours_box(self._on_accepted_h)
         body.addWidget(SettingRow(ACCEPTED_TITLE, self.accepted_h, summary=ACCEPTED_SUMMARY))
+        self.devices = SwitchToggle(_TEAL)
+        self.devices.toggled.connect(self._on_devices)
+        body.addWidget(SettingRow(DEVICES_TITLE, self.devices, summary=DEVICES_SUMMARY))
         return card
 
-    def _sync_hours(self) -> None:
-        """The two hours as the shared config has them, without writing them back."""
+    def _sync_settings(self) -> None:
+        """The hours and the devices switch as the shared config has them, without
+        writing them back."""
         for box, value in ((self.required_h, dn.required_minimum_h()),
                            (self.accepted_h, dn.maximum_accepted_h())):
             if box.value() != value and not box.hasFocus():
                 box.blockSignals(True)
                 box.setValue(value)
                 box.blockSignals(False)
+        self.devices.setChecked(dn.devices())
 
     def _on_switch(self, on: bool) -> None:
         # The switch following the setting is no change to make: its signal stays
@@ -560,6 +579,11 @@ class NetworkView(QWidget):
 
     def _on_accepted_h(self, value: int) -> None:
         self._save(lambda: dn.set_hours(network.MAXIMUM_ACCEPTED_H_KEY, value))
+
+    def _on_devices(self, on: bool) -> None:
+        # Following the setting is no change to make, as for the switch above.
+        if on != dn.devices() and not self._save(lambda: dn.set_devices(on)):
+            self.devices.setChecked(dn.devices())
 
     # MARK: status
 
@@ -591,7 +615,7 @@ class NetworkView(QWidget):
         chips = QHBoxLayout()
         chips.setSpacing(6)
         self._services: dict[str, QLabel] = {}
-        for name in ("transport", "docker", "model"):
+        for name in SERVICES:
             self._services[name] = _chip("", _GREY)
             chips.addWidget(self._services[name])
         chips.addStretch(1)
@@ -625,7 +649,7 @@ class NetworkView(QWidget):
         self._on_host.setVisible(on)
         if not on:
             return
-        self._sync_hours()
+        self._sync_settings()
         self._daemon_pill.set_state(pill, color)
         self._ages = []
         problem = dn.unavailable_summary() if answered is False else None
@@ -652,8 +676,8 @@ class NetworkView(QWidget):
             f"started {rm.ago(max(0, now - started))} · " if started is not None else "")
             + socket))
         _clear(self._service_notes)
-        for name, service in (("transport", state.transport), ("docker", state.docker),
-                              ("model", state.model)):
+        for name in SERVICES:
+            service: network.Service = getattr(state, name)
             tint = service_tint(service.state)
             chip = self._services[name]
             chip.setText(f"{name} {service.state or 'unknown'}")
@@ -683,15 +707,19 @@ class NetworkView(QWidget):
             return
         refusals = store.network_refusals
         cards: list[QWidget] = []
-        # In no pool, an invite has no pool's panel to be pasted into.
-        if all(p.left for p in state.pools):
+        held, nowhere = store.network_pools_held, all(p.left for p in state.pools)
+        if held or nowhere:
             card, col, _ = settings_card(glyphs.G_NETWORK, "POOLS", _TEAL)
-            if not state.pools:
+            if held:
+                col.addWidget(_note(held, _ORANGE))
+            elif not state.pools:
                 col.addWidget(_note(NO_POOLS))
-            self.first_join = JoinRow(store, "", self._ui.setdefault("", {}), card)
-            col.addWidget(self.first_join)
-            if refusals.get(""):
-                col.addWidget(_note(refusals[""], _RED))
+            # In no pool, an invite has no pool's panel to be pasted into.
+            if nowhere:
+                self.first_join = JoinRow(store, "", self._ui.setdefault("", {}), card)
+                col.addWidget(self.first_join)
+                if refusals.get(""):
+                    col.addWidget(_note(refusals[""], _RED))
             cards.append(card)
         for pool in state.pools:
             panel = PoolPanel(pool, store=store, ui=self._ui.setdefault(pool.id, {}),

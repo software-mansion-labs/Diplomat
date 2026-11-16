@@ -12,6 +12,8 @@ public enum NetworkSettings {
     public static let enabledKey = "networkEnabled"
     public static let requiredMinimumHKey = "networkRequiredMinimumH"
     public static let maximumAcceptedHKey = "networkMaximumAcceptedH"
+    /// Whether a job running on this machine may reach its adb server. Off unless `true`.
+    public static let devicesKey = "networkDevices"
 
     /// The fewest hours a task may ask for or a member may accept, and the default of
     /// both. The daemon's `HOURS_FLOOR`.
@@ -19,13 +21,69 @@ public enum NetworkSettings {
     /// The most hours either may be. The daemon's `HOURS_CEILING`.
     public static let hoursCeiling = 720
 
-    /// A stored hours value as the daemon reads it: a whole number from the floor to
-    /// the ceiling is itself, one above the ceiling is the ceiling, and anything else
-    /// is the floor.
+    /// A number of hours as the daemon keeps it (its `hoursOf`): rounded to the nearest
+    /// whole number, a half going up, and held to the floor and the ceiling. The floor
+    /// when it is no finite number.
     public static func hours(_ stored: Double?) -> Int {
-        guard let v = stored, v.isFinite, v == v.rounded(), v >= Double(hoursFloor)
-        else { return hoursFloor }
-        return Int(min(v, Double(hoursCeiling)))
+        guard let v = stored, v.isFinite else { return hoursFloor }
+        return Int(min(max((v + 0.5).rounded(.down), Double(hoursFloor)), Double(hoursCeiling)))
+    }
+
+    /// A stored hours value, as `JSONSerialization` or `JSONInput` reads one, as the
+    /// daemon reads it: `hours` of its JavaScript number.
+    public static func hours(json stored: Any?) -> Int { hours(jsNumber(stored)) }
+
+    /// JavaScript's `Number()` of a JSON value: a number is itself, `true` is 1, `false`
+    /// and `null` are 0, a string is the number it spells (a blank one is 0) and an
+    /// array is its members joined by commas, read as that string. Anything else, and a
+    /// value that is absent, is NaN.
+    static func jsNumber(_ value: Any?) -> Double {
+        switch value {
+        case let flag as JSONInput.Flag: return flag.on ? 1 : 0
+        case let number as NSNumber: return number.doubleValue
+        case is NSNull: return 0
+        case let text as String: return jsNumber(text: text)
+        case let array as [Any]: return jsNumber(text: jsString(array))
+        default: return .nan
+        }
+    }
+
+    /// A member of an array as JavaScript joins it into the array's string.
+    private static func jsString(_ value: Any) -> String {
+        switch value {
+        case let flag as JSONInput.Flag: return flag.on ? "true" : "false"
+        case let number as NSNumber: return "\(number.doubleValue)"
+        case is NSNull: return ""
+        case let text as String: return text
+        case let array as [Any]: return array.map(jsString).joined(separator: ",")
+        default: return "[object Object]"
+        }
+    }
+
+    /// What JavaScript strips from the ends of a string it reads as a number.
+    private static let jsSpace = CharacterSet(charactersIn:
+        "\t\n\u{0B}\u{0C}\r \u{A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}"
+        + "\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}"
+        + "\u{FEFF}")
+
+    private static func jsNumber(text: String) -> Double {
+        let text = text.trimmingCharacters(in: jsSpace)
+        if text.isEmpty { return 0 }
+        let decimal = #"^[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$"#
+        if text.range(of: decimal, options: .regularExpression) != nil {
+            return Double(text) ?? .nan
+        }
+        let radix: [Character: Double] = ["x": 16, "o": 8, "b": 2]
+        let digits = text.dropFirst(2)
+        guard text.first == "0", !digits.isEmpty,
+              let base = text.dropFirst().first.flatMap({ radix[Character($0.lowercased())] })
+        else { return .nan }
+        var value = 0.0
+        for digit in digits {
+            guard let d = digit.hexDigitValue, digit.isASCII, Double(d) < base else { return .nan }
+            value = value * base + Double(d)
+        }
+        return value
     }
 }
 
@@ -248,6 +306,39 @@ public enum NetworkPools {
         return out
     }
 
+    /// What `POST /pools` is to say, or why nothing is said yet.
+    public enum Listing: Equatable {
+        case pools([Pool])
+        case held(String)
+    }
+
+    public static let heldRoot = "Pools are held back: a repo root cannot be read"
+    public static func held(unread path: String) -> String {
+        "Pools are held back: \(path) cannot be read"
+    }
+    public static func held(account repo: String) -> String {
+        "Pools are held back: the account for \(repo) is not known yet"
+    }
+
+    /// Every linked repository as a pool: the roots, then what the OTHER REPOS
+    /// checkouts name that no root does (`others`). A checkout that was read and names
+    /// no forge is no pool and is in neither list. A root or a checkout that could not
+    /// be read (`unread`, by path), or a repository whose forge login is unknown, holds
+    /// the whole list back: a list cut short makes the daemon leave the pools it omits.
+    public static func listing(roots: [PRRef.LocalRepo], rootsRead: Bool,
+                               others: [PRRef.LocalRepo], unread: [String],
+                               identities: [String: String]) -> Listing {
+        guard rootsRead else { return .held(heldRoot) }
+        if let path = unread.first { return .held(held(unread: path)) }
+        let named = Set(roots.map(\.key))
+        let repos = roots + others.filter { !named.contains($0.key) }
+        let nameless = repos.first {
+            (identities[$0.host] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+        if let nameless { return .held(held(account: nameless.slug)) }
+        return .pools(linked(roots: repos, identities: identities))
+    }
+
     public static func body(_ pools: [Pool]) -> [String: [[String: String]]] {
         ["pools": pools.map(\.json)]
     }
@@ -410,6 +501,9 @@ public struct NetworkSnapshot: Equatable {
     public let transport: Service
     public let docker: Docker
     public let model: Service
+    /// Whether jobs running here reach this machine's adb server: `off`, `ready` or
+    /// `none`.
+    public let devices: Service
     public let admit: Admit
     public let pools: [Pool]
     public let runs: [Run]
@@ -444,6 +538,7 @@ public struct NetworkSnapshot: Equatable {
         onion = text(identity["onion"])
         transport = service(d["transport"])
         model = service(d["model"])
+        devices = service(d["devices"])
         let dock = object(d["docker"])
         docker = Docker(state: text(dock["state"]), image: text(dock["image"]),
                         detail: text(dock["detail"]))
@@ -535,6 +630,17 @@ public enum NetworkEvidence {
                 ok: offer.outcome?.ok ?? false, reason: offer.reason)
         }
         return .present(out)
+    }
+
+    /// The task the daemon holds for an offer of `item` as `kind` to `pool`: its open
+    /// offer of the three, which is what it names a task by. Nil when the snapshot
+    /// lists none.
+    public static func openTask(pool: String, kind: String, item: String,
+                                in snapshot: NetworkSnapshot?) -> String? {
+        let open = [AgentState.NetworkTask.pooled, AgentState.NetworkTask.claimed]
+        return snapshot?.offers?.first {
+            $0.pool == pool && $0.kind == kind && $0.item == item && open.contains($0.state)
+        }?.taskId
     }
 }
 

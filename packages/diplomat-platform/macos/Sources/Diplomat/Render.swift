@@ -387,7 +387,8 @@ enum Render {
             ContentView(showMachines: true).environment(\.renderNow, machinesNow)
         case let s where s.hasPrefix("network-screen"):
             // Inside the panel, so the header's button is in the shot. Plain: a daemon
-            // with every service ready, two pools, members seen, unseen and unreachable,
+            // with every service ready, three pools (one of them left), members seen,
+            // unseen and unreachable,
             // a task in each state, and two runs on this machine, one of them of a job
             // offered here. "-starting": the transport bootstrapping, the image building,
             // no pools yet. "-off": the switch off.
@@ -1357,6 +1358,7 @@ enum Render {
             "transport": ["state": "bootstrapping", "detail": "tor is 45% through its bootstrap"],
             "docker": ["state": "building", "image": "", "detail": "building the job image"],
             "model": ["state": "ready", "detail": ""],
+            "devices": ["state": "off", "detail": ""],
             "admit": ["slots": 4, "at": now - 6, "reason": ""],
             "pools": [[String: Any]](), "runs": [[String: Any]](), "offers": [[String: Any]](),
         ]
@@ -1398,6 +1400,8 @@ enum Render {
         doc["identity"] = ["pk": here, "onion": "dn4q7wz2kx5h3ty6pbv8ma9cjrf2us1e.onion"]
         doc["transport"] = ["state": "ready", "detail": ""]
         doc["docker"] = ["state": "ready", "image": "diplomacy-network:4c1e9a", "detail": ""]
+        doc["devices"] = ["state": "ready", "detail": ""]
+        store.networkDevices = true
         doc["admit"] = ["slots": 2, "at": now - 6, "reason": ""]
         doc["pools"] = [
             ["id": "github.com/software-mansion/argent", "path": "/Users/dev/argent",

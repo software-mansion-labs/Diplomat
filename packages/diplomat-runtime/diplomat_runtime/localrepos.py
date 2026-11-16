@@ -205,15 +205,35 @@ def remote_config(path: str) -> str | None:
     though ``git -C`` would answer for a repository the folder sits inside."""
     if not os.path.exists(os.path.join(os.path.expanduser(path), ".git")):
         return None
+    out = _git_remotes(path)
+    return out.stdout if out is not None and out.returncode == 0 else None
+
+
+def _git_remotes(path: str) -> subprocess.CompletedProcess | None:
     try:
-        out = subprocess.run(
+        return subprocess.run(
             ["git", "-C", path, "config", "--local", "--get-regexp",
              r"^remote\..*\.url$"],
             capture_output=True, text=True, timeout=GIT_TIMEOUT,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    return out.stdout if out.returncode == 0 else None
+
+
+def checkout_remotes(path: str) -> str | None:
+    """:func:`remote_config` of ``path`` (``~`` expanded), telling what was read from
+    what was not: "" for a folder that is no checkout and for a checkout with no remote
+    (``git config --get-regexp`` exits 1 on no match), ``None`` for a path that is
+    missing or that ``git`` failed on."""
+    where = os.path.expanduser(path)
+    if not os.path.exists(where):
+        return None
+    if not os.path.exists(os.path.join(where, ".git")):
+        return ""
+    out = _git_remotes(where)
+    if out is None or out.returncode not in (0, 1):
+        return None
+    return out.stdout if out.returncode == 0 else ""
 
 
 def entries(path: str, remotes: str, only: tuple[str, ...] = (),
@@ -252,10 +272,12 @@ def _identity(repo: LocalRepo) -> str:
 @dataclass(frozen=True)
 class Checkout:
     """One path listed in Settings, and the repos it answers for: none when it is no
-    checkout or has no GitHub or GitLab remote."""
+    checkout or has no GitHub or GitLab remote. ``read`` is False for a path that could
+    not be read (:func:`checkout_remotes`), which may answer for repos all the same."""
 
     path: str
     repos: tuple[LocalRepo, ...]
+    read: bool = True
 
     @property
     def slug(self) -> str | None:
@@ -266,7 +288,9 @@ class Checkout:
 def inspect(path: str, hosts: Mapping[str, str] = GITLAB_HOSTS) -> Checkout:
     """``path`` (``~`` expanded) with its GitHub and GitLab remotes (:func:`entries`)."""
     where = os.path.expanduser(path)
-    return Checkout(path, tuple(entries(where, remote_config(where) or "", hosts=hosts)))
+    remotes = checkout_remotes(where)
+    return Checkout(path, tuple(entries(where, remotes or "", hosts=hosts)),
+                    read=remotes is not None)
 
 
 def resolve(paths: list[str]) -> list[Checkout]:

@@ -69,11 +69,14 @@ struct NodePackage {
     /// POST `body` to the daemon. Any HTTP status is a reply. `curl`, as `URLSession`
     /// cannot speak to a unix socket. Blocking for up to `timeoutSecs`, so off the main
     /// actor; each call is its own curl, so a long one holds up no other.
+    ///
+    /// The body goes to curl on its stdin: an argument is listed by `ps` to every user
+    /// of the machine, and a prompt can be longer than an argument list may be.
     func send(_ endpoint: String, body: [String: Any] = [:], timeoutSecs: Int) -> Sent {
         guard let data = try? JSONSerialization.data(withJSONObject: body),
-              let json = String(data: data, encoding: .utf8),
               let (exit, raw) = curl(endpoint, timeoutSecs: timeoutSecs, request: [
-                  "-X", "POST", "-H", "content-type: application/json", "-d", json])
+                  "-X", "POST", "-H", "content-type: application/json",
+                  "--data-binary", "@-"], body: data)
         else { return .unreachable }
         // curl's 7 is "failed to connect": a stale socket file, or one nothing listens on.
         if exit == 7 { return .unreachable }
@@ -91,9 +94,9 @@ struct NodePackage {
     }
 
     /// One request to the daemon: curl's exit status and output, or nil when there is no
-    /// socket or no curl.
-    private func curl(_ endpoint: String, timeoutSecs: Int,
-                      request: [String]) -> (exit: Int32, out: Data)? {
+    /// socket or no curl. `body` is what curl reads on its stdin.
+    private func curl(_ endpoint: String, timeoutSecs: Int, request: [String],
+                      body: Data? = nil) -> (exit: Int32, out: Data)? {
         guard FileManager.default.fileExists(atPath: socketPath) else { return nil }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
@@ -103,7 +106,21 @@ struct NodePackage {
         let out = Pipe()
         p.standardOutput = out
         p.standardError = FileHandle.nullDevice
+        let input = Pipe()
+        p.standardInput = body == nil ? FileHandle.nullDevice : input
         do { try p.run() } catch { return nil }
+        if let body {
+            let writer = input.fileHandleForWriting
+            // A curl that exited without reading is an error to this write, not a
+            // SIGPIPE to the app.
+            _ = fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1)
+            // Off this thread: a body larger than the pipe holds would otherwise wait
+            // here on a curl that is not reading.
+            DispatchQueue.global(qos: .userInitiated).async {
+                try? writer.write(contentsOf: body)
+                try? writer.close()
+            }
+        }
         let raw = out.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         return (p.terminationStatus, raw)

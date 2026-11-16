@@ -31,13 +31,34 @@ enum DiplomacyNetwork {
         case down
     }
 
-    /// POST to one of `NetworkRoute`'s routes. Blocking, so off the main actor.
-    static func post(_ route: String, _ body: [String: Any], timeoutSecs: Int = 15) -> Reply {
+    /// How far a request got.
+    enum Reach: Equatable {
+        /// The daemon gave a definite answer: it took the request, or refused it (a 4xx).
+        case answered
+        /// Sent, with no definite answer: no reply, or a fault of the daemon's own (a
+        /// 5xx). The daemon may have acted on it.
+        case unsure
+        /// It never reached a daemon.
+        case unreached
+    }
+
+    /// POST to one of `NetworkRoute`'s routes: what the daemon said, and how far the
+    /// request got. Blocking, so off the main actor.
+    static func ask(_ route: String, _ body: [String: Any],
+                    timeoutSecs: Int = 15) -> (reply: Reply, reach: Reach) {
         switch package.send(route, body: body, timeoutSecs: timeoutSecs) {
-        case .unreachable, .unanswered: return .down
-        case .reply(let r) where (200..<300).contains(r.status): return .ok(r.json)
-        case .reply(let r): return .refused(r.json?["error"]?.string ?? "the daemon answered HTTP \(r.status)")
+        case .unreachable: return (.down, .unreached)
+        case .unanswered: return (.down, .unsure)
+        case .reply(let r) where (200..<300).contains(r.status): return (.ok(r.json), .answered)
+        case .reply(let r):
+            return (.refused(r.json?["error"]?.string ?? "the daemon answered HTTP \(r.status)"),
+                    r.status >= 500 ? .unsure : .answered)
         }
+    }
+
+    /// `ask`, for a caller that does not repeat a request.
+    static func post(_ route: String, _ body: [String: Any], timeoutSecs: Int = 15) -> Reply {
+        ask(route, body, timeoutSecs: timeoutSecs).reply
     }
 
     /// `GET /state`, or nil when no daemon answered with a snapshot. Blocking.
@@ -103,7 +124,8 @@ extension NetworkSnapshot {
         guard let other else { return false }
         return pid == other.pid && startedAt == other.startedAt && pk == other.pk
             && onion == other.onion && transport == other.transport && docker == other.docker
-            && model == other.model && admit == other.admit && pools == other.pools
+            && model == other.model && devices == other.devices && admit == other.admit
+            && pools == other.pools
             && runs == other.runs && offers == other.offers
     }
 }
@@ -114,6 +136,8 @@ enum NetworkText {
     static let explanation = "Every job is offered to a shared pool per repository and runs "
         + "in a docker container, possibly on another machine in the pool."
     static let offering = "Offering to the pool…"
+    static let offeringHelp = "The daemon has not answered this job's offer. Diplomat asks "
+        + "it again until it does."
     static let rowHelp = "Open the Network screen."
     static let forgetHelp = "Withdraw this job from the pool and remove it from the list."
     static let symbol = "point.3.connected.trianglepath.dotted"
@@ -124,13 +148,18 @@ enum NetworkText {
     static let silent = "Not answering. Diplomat starts it again on its own, waiting longer "
         + "after each try."
     static let restartHelp = "Stop the running daemon and start this checkout's. Jobs running "
-        + "in containers here are stopped with it."
+        + "in containers here keep running, and the daemon that starts takes them up."
     static let requiredTitle = "Hours a job of yours may take"
     static let requiredSummary = "Counted from when a machine takes it. Only machines that "
         + "take jobs this long run yours."
     static let acceptedTitle = "Longest job this machine takes"
     static let acceptedSummary = "A job that may take longer is left to the other machines "
         + "of its pool."
+    static let devicesTitle = "Let jobs use this machine's devices"
+    static let devicesSummary = "Off: jobs see no device. On: a job running here can use the "
+        + "Android devices and emulators attached to this machine through adb - including a "
+        + "phone on USB - and an emulator can reach services on this machine. Switch it on "
+        + "only for pools whose machines you trust with that."
     static let noPools = "No pools yet. Each repository in Settings gets one once Diplomat "
         + "knows which account works on it."
     static let noMembers = "No members listed yet."
@@ -140,6 +169,12 @@ enum NetworkText {
     static let inviteCopied = "Invite copied. Send it to the machine that should join."
     static let stopRunHelp = "Stop this job's run on this machine. It goes back to the pool."
     static let withdrawHelp = "Withdraw this job from the pool."
+
+    /// The button that ends a pool's task from here, and its tooltip: the run, when this
+    /// machine is running it, else the offer this machine made of it.
+    static func stopButton(_ task: NetworkSnapshot.Task) -> (title: String, help: String) {
+        task.executorHere ? ("Stop", stopRunHelp) : ("Withdraw", withdrawHelp)
+    }
     /// The feed's words for a run stopped here, after the task's title.
     static let runStopped = "its run on this machine was stopped and the job is back in the pool"
     /// The feed's words for a run retired because the switch went off.

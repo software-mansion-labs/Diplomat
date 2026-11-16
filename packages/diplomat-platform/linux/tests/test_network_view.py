@@ -23,6 +23,7 @@ from test_network_wiring import (  # noqa: F401 - fixtures
     POOL,
     book_network_run,
     daemon,
+    job,
     offer,
     snapshot,
 )
@@ -50,6 +51,7 @@ def seeded(monkeypatch):
     from diplomat_app.store import Store
 
     monkeypatch.setattr(dn, "enabled", dn.enabled)
+    monkeypatch.setattr(dn, "devices", dn.devices)
     monkeypatch.setattr(dn, "state", dn.state)
     monkeypatch.setattr(dn, "ready", lambda: True)
 
@@ -148,7 +150,8 @@ def test_in_pools_it_draws_each_pool_with_its_members_tasks_and_actions(screen):
     assert view._daemon_pill.text() == "running"
     assert view._daemon_row.summary() == f"pid 4471 · started 3 h ago · {dn.socket_path()}"
     assert [chip.text() for chip in view._services.values()] == [
-        "transport ready", "docker ready", "model ready"]
+        "transport ready", "docker ready", "model ready", "devices ready"]
+    assert view.devices.isChecked()
     assert {k: v.text() for k, v in view._facts.items()} == {
         "This machine": "4be07d21", "Onion address": "dipl7x2kq5examplev3hostq4m.onion",
         "Work from pools": "taking 2 more"}
@@ -157,7 +160,8 @@ def test_in_pools_it_draws_each_pool_with_its_members_tasks_and_actions(screen):
     shown = texts(view)
     for line in ("Network", "DIPLOMACY NETWORK", "Daemon", "SETTINGS", "RECENT",
                  dn.SWITCH_TITLE, dn.EXPLANATION, nv.REQUIRED_TITLE, nv.REQUIRED_SUMMARY,
-                 nv.ACCEPTED_TITLE, nv.ACCEPTED_SUMMARY):
+                 nv.ACCEPTED_TITLE, nv.ACCEPTED_SUMMARY, nv.DEVICES_TITLE,
+                 nv.DEVICES_SUMMARY):
         assert line in shown, line
 
 
@@ -207,7 +211,9 @@ def test_a_daemon_that_does_not_answer_is_said_and_can_be_started(screen, monkey
     view.start.click()
     view.restart.click()
     assert asked == ["start", "restart"]
-    assert view.restart.toolTip() == nv.RESTART_HELP
+    assert view.restart.toolTip() == nv.RESTART_HELP == (
+        "Stop the running daemon and start this checkout's. Jobs running in containers "
+        "here keep running, and the daemon that starts takes them up.")
 
 
 def test_switched_off_it_explains_and_offers_the_switch(screen):
@@ -270,10 +276,16 @@ def test_a_service_that_is_not_ready_says_why_and_a_missing_fact_says_so(screen)
           docker=network.Docker("missing", "", "docker is not installed"),
           model=network.Service("missing", ""), pk="", onion="")
     assert [chip.text() for chip in view._services.values()] == [
-        "transport bootstrapping", "docker missing", "model missing"]
+        "transport bootstrapping", "docker missing", "model missing", "devices ready"]
     shown = texts(view)
     assert "transport: tor is at 40%" in shown and "docker: docker is not installed" in shown
     assert not any(line.startswith("model:") for line in shown)
+    _with(view, devices=network.Service("none", "no adb server answers on this machine"))
+    assert view._services["devices"].text() == "devices none"
+    assert "devices: no adb server answers on this machine" in texts(view)
+    _with(view, devices=network.Service("off", ""))
+    assert view._services["devices"].text() == "devices off"
+    assert not any(line.startswith("devices:") for line in texts(view))
     assert view._facts["This machine"].text() == "no key yet"
     assert view._facts["Onion address"].text() == "not published yet"
     _with(view, transport=network.Service("ready", "circuit built"))
@@ -398,7 +410,8 @@ def test_stop_is_offered_for_this_machines_open_tasks_and_says_what_it_does(
         "t412": nv.WITHDRAW_HELP, "t398": nv.STOP_RUN_HELP, "t405": nv.WITHDRAW_HELP}
     assert nv.STOP_RUN_HELP == "Stop this job's run on this machine. It goes back to the pool."
     assert nv.WITHDRAW_HELP == "Withdraw this job from the pool."
-    assert all(b.text() == "Stop" for b in stops.values())
+    assert {task: b.text() for task, b in stops.items()} == {
+        "t412": "Withdraw", "t398": "Stop", "t405": "Withdraw"}
     stops["t398"].click()
     stops["t405"].click()
     assert asked == [("t398", DIPLOMAT), ("t405", DIPLOMAT)]
@@ -407,7 +420,8 @@ def test_stop_is_offered_for_this_machines_open_tasks_and_says_what_it_does(
     pool = view.store.network_state.pools[0]
     theirs = dataclasses.replace(pool.tasks[1], task_id="t7", offered_here=False)
     _with(view, pools=(dataclasses.replace(pool, tasks=(theirs,)),))
-    assert {t: b.toolTip() for t, b in view.panels[0].stops.items()} == {"t7": nv.STOP_RUN_HELP}
+    assert {t: (b.text(), b.toolTip()) for t, b in view.panels[0].stops.items()} == {
+        "t7": ("Stop", nv.STOP_RUN_HELP)}
 
 
 def _offer(task: str, state: str, reason: str = "") -> network.OfferState:
@@ -487,6 +501,28 @@ def test_a_pool_this_machine_left_says_so_and_offers_only_the_way_back(screen, m
     shown = texts(view)
     assert view.first_join is not None and "POOLS" in shown and nv.NO_POOLS not in shown
     assert view._counts.text() == "0 pools · 0 tasks"
+
+
+def test_pools_held_back_say_why_above_whatever_the_daemon_still_lists(screen):
+    from diplomat_app import networkview as nv
+
+    view = screen(RICH)
+    assert "POOLS" not in texts(view)
+    held = "Pools are held back: /mnt/work/tool cannot be read"
+    view.store.network_pools_held = held
+    view.store.network_changed.emit()
+    shown = texts(view)
+    assert shown.index("POOLS") < shown.index(DIPLOMAT) and held in shown
+    assert view.first_join is None and len(view.panels) == 2, "each panel has its own join"
+
+    _with(view, pools=())
+    shown = texts(view)
+    assert held in shown and nv.NO_POOLS not in shown, "the reason, not the first-run note"
+    assert view.first_join is not None
+
+    view.store.network_pools_held = ""
+    view.store.network_changed.emit()
+    assert held not in texts(view) and nv.NO_POOLS in texts(view)
 
 
 def test_an_invite_lands_on_the_clipboard_and_a_refusal_shows_in_its_panel(
@@ -571,6 +607,48 @@ def test_the_hours_open_on_twelve_and_write_the_two_config_keys(screen):
     view.rebuild()
     assert view.accepted_h.value() == 48
     assert appconfig.read()[network.MAXIMUM_ACCEPTED_H_KEY] == 48
+
+
+def test_the_tint_of_a_service_chip_follows_its_state():
+    from diplomat_app import networkview as nv
+
+    assert [nv.service_tint(s) for s in ("ready", "failed", "missing", "down")] == [
+        nv._GREEN, nv._RED, nv._RED, nv._RED]
+    assert [nv.service_tint(s) for s in ("", "off")] == [nv._GREY, nv._GREY], (
+        "a setting left off is no trouble")
+    assert [nv.service_tint(s) for s in ("none", "bootstrapping")] == [nv._ORANGE, nv._ORANGE]
+
+
+def test_the_devices_switch_is_off_until_set_and_writes_its_config_key(
+        screen, monkeypatch, tmp_path):
+    from diplomat_app import networkview as nv
+
+    assert nv.DEVICES_TITLE == "Let jobs use this machine's devices"
+    assert nv.DEVICES_SUMMARY == (
+        "Off: jobs see no device. On: a job running here can use the Android devices and "
+        "emulators attached to this machine through adb - including a phone on USB - and "
+        "an emulator can reach services on this machine. Switch it on only for pools "
+        "whose machines you trust with that.")
+    saved = dn.devices
+    view = screen(STARTING)
+    monkeypatch.setattr(dn, "devices", saved)  # the render's fixture answers for it
+    assert not dn.devices() and not view.devices.isChecked()
+    assert appconfig.read() == {}, "showing the setting writes nothing"
+    view.devices.setChecked(True)
+    assert appconfig.read() == {network.DEVICES_KEY: True} and dn.devices()
+    # A value set from elsewhere shows on the next rebuild, and is not written back.
+    appconfig.set_bool(network.DEVICES_KEY, False)
+    view.rebuild()
+    assert not view.devices.isChecked()
+    assert appconfig.read()[network.DEVICES_KEY] is False
+
+    def refuse(key, value):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(appconfig, "set_bool", refuse)
+    view.devices.setChecked(True)
+    assert view._save_error.isVisible() and "No space left on device" in view._save_error.text()
+    assert not view.devices.isChecked(), "the switch shows what is in force"
 
 
 def test_the_screens_switch_flips_the_setting_through_the_store(screen, monkeypatch):
@@ -731,6 +809,33 @@ def test_a_network_run_is_a_row_that_opens_the_screen_and_can_only_be_forgotten(
 
 # MARK: - Settings and the wizard
 
+def test_an_offer_the_daemon_has_not_settled_is_a_row_that_says_so(app, panel):
+    from types import SimpleNamespace
+
+    from PySide6.QtWidgets import QLabel
+
+    from diplomat_app.store import NetworkOffering
+    from diplomat_app.widgets import SectionHeader, StartingTaskRow
+
+    appconfig.set_bool(network.ENABLED_KEY, True)
+    panel.store.network_offering = [NetworkOffering(
+        job(), "panel", "Review · #9",
+        SimpleNamespace(pool=POOL, kind="review", item="pr-9"))]
+    panel._rebuild_agent_tasks()
+    layout = panel.tasks_col
+    drawn = [layout.itemAt(i).widget() for i in range(layout.count())]
+    (row,) = [w for w in drawn if isinstance(w, StartingTaskRow)]
+    assert row.status.text() == "Offering to the pool…"
+    assert row.toolTip() == (
+        "The daemon has not answered this job's offer. Diplomat asks it again until it does.")
+    assert "Review · #9" in [getattr(lb, "_full", "") for lb in row.findChildren(QLabel)]
+    (header,) = [w for w in drawn if isinstance(w, SectionHeader)]
+    assert "1" in [lb.text() for lb in header.findChildren(QLabel)], "counted among the tasks"
+    # A job that is starting on this machine reads as it did.
+    assert StartingTaskRow(label="L", glyph="g", hex_color="#fff").status.text().endswith(
+        "starting")
+
+
 def test_the_settings_switch_flips_the_setting_and_follows_it(app, monkeypatch):
     from diplomat_app.settingsview import SettingsView
     from diplomat_app.store import Store
@@ -821,6 +926,7 @@ def test_each_mode_renders_through_the_real_entry_and_touches_no_real_state(
     ran = []
     monkeypatch.setattr(da, "run_installer", lambda script, arg: ran.append(arg))
     monkeypatch.setattr(dn, "enabled", dn.enabled)
+    monkeypatch.setattr(dn, "devices", dn.devices)
     monkeypatch.setattr(dn, "state", dn.state)
     monkeypatch.setenv("DIPLOMAT_RENDER", mode)
     monkeypatch.setattr(render, "_agents_scratch_dir", None)

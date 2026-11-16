@@ -278,7 +278,7 @@ enum OpenCodeProbe {
     private static let adoptedLock = NSLock()
     private static var adopted: [String: String] = [:]
 
-    /// Give runs this applet did not spawn — released, or never booked — the 2.x session
+    /// Give runs this applet did not spawn - released, or never booked - the 2.x session
     /// the process-table scan found, so they are asked of the service, priced and
     /// interrupted like a spawned run (`serviceSession(of:)`). A spawned run binds its
     /// session at spawn.

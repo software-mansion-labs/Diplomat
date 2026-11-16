@@ -7,6 +7,8 @@ enum LocalRepos {
     struct Checkout: Equatable {
         /// As entered; `~` is expanded only for the lookup and the spawn.
         let path: String
+        /// False for a path that could not be read: missing, or `git` failing on it.
+        var read = true
         /// Its GitHub and GitLab remotes (`LocalRepo.entries`), Settings naming it by the
         /// first. Empty for a path that is no checkout or has neither: listed, but no link
         /// resolves to it.
@@ -18,17 +20,37 @@ enum LocalRepos {
         let hosts = GLab.configuredHosts()
         return paths.map { raw in
             let path = (raw as NSString).expandingTildeInPath
+            guard FileManager.default.fileExists(atPath: path) else {
+                return Checkout(path: raw, read: false, repos: [])
+            }
             guard RepoPaths.isCheckout(path) else { return Checkout(path: raw, repos: []) }
+            guard let remotes = readRemotes(of: path) else {
+                return Checkout(path: raw, read: false, repos: [])
+            }
             return Checkout(path: raw, repos: PRRef.LocalRepo.entries(
-                path: path, remotes: remotes(of: path), gitlabHosts: hosts))
+                path: path, remotes: remotes, gitlabHosts: hosts))
         }
     }
 
     static func remotes(of path: String) -> String {
-        git(["-C", path, "config", "--local", "--get-regexp", #"^remote\..*\.url$"#]) ?? ""
+        guard let ran = git(remoteQuery(path)), ran.status == 0 else { return "" }
+        return ran.out
     }
 
-    private static func git(_ arguments: [String]) -> String? {
+    /// `remotes(of:)` telling a checkout with no remote ("": `git config --get-regexp`
+    /// exits 1 on no match) from one `git` failed on (nil).
+    static func readRemotes(of path: String) -> String? {
+        guard let ran = git(remoteQuery(path)), ran.status == 0 || ran.status == 1 else {
+            return nil
+        }
+        return ran.status == 0 ? ran.out : ""
+    }
+
+    private static func remoteQuery(_ path: String) -> [String] {
+        ["-C", path, "config", "--local", "--get-regexp", #"^remote\..*\.url$"#]
+    }
+
+    private static func git(_ arguments: [String]) -> (status: Int32, out: String)? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         proc.arguments = arguments
@@ -38,8 +60,7 @@ enum LocalRepos {
         do { try proc.run() } catch { return nil }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
-        guard proc.terminationStatus == 0 else { return nil }
-        return String(data: data, encoding: .utf8)
+        return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 }
 

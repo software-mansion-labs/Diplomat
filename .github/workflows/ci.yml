@@ -126,8 +126,9 @@ jobs:
               swift run Diplomat
             test -s "$RUNNER_TEMP/$mode.png"
           done
-      # The Network screen: a daemon with every service ready, two pools and a task in
-      # each state; one still starting, with no pool yet; and the switch off.
+      # The Network screen: a daemon with every service ready, three pools (one of them
+      # left) and a task in each state; one still starting, with no pool yet; and the
+      # switch off.
       - name: Headless network-screen render
         working-directory: packages/diplomat-platform/macos
         run: |

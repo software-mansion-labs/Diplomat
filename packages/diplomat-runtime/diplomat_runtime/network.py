@@ -8,13 +8,15 @@ Swift twin: ``DiplomatCore/Network.swift``, decision for decision.
 from __future__ import annotations
 
 import hashlib
+import math
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 from . import jsoninput
-from .agentstate import (SOURCE_PANEL, NetworkTask, Observation, _flag, _integer,
-                         _number, _text)
+from .agentstate import (NET_CLAIMED, NET_POOLED, SOURCE_PANEL, NetworkTask, Observation,
+                         _flag, _integer, _number, _text)
 from .prref import GITHUB, LocalRepo
 
 # MARK: - Settings
@@ -23,6 +25,8 @@ from .prref import GITHUB, LocalRepo
 ENABLED_KEY = "networkEnabled"
 REQUIRED_MINIMUM_H_KEY = "networkRequiredMinimumH"
 MAXIMUM_ACCEPTED_H_KEY = "networkMaximumAcceptedH"
+#: Whether a job running on this machine may reach its adb server. Off unless ``true``.
+DEVICES_KEY = "networkDevices"
 
 #: The fewest hours a task may ask for or a member may accept, and the default of both.
 #: The daemon's ``HOURS_FLOOR``.
@@ -31,14 +35,60 @@ HOURS_FLOOR = 12
 HOURS_CEILING = 720
 
 
+_JS_DECIMAL = re.compile(r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?")
+_JS_RADIX = re.compile(r"0[xX][0-9a-fA-F]+|0[oO][0-7]+|0[bB][01]+")
+#: What JavaScript strips from the ends of a string it reads as a number.
+_JS_SPACE = ("\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+             "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff")
+
+
+def _js_string(value: Any) -> str:
+    """A member of an array as JavaScript joins it into the array's string."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ",".join(_js_string(v) for v in value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return repr(value) if isinstance(value, (int, float)) else "[object Object]"
+
+
+def js_number(value: Any) -> float:
+    """JavaScript's ``Number()`` of a JSON value: a number is itself, ``true`` is 1,
+    ``false`` and ``null`` are 0, a string is the number it spells (a blank one is 0)
+    and an array is its members joined by commas, read as that string. Anything else
+    is NaN."""
+    if isinstance(value, list):
+        value = _js_string(value)
+    if value is None:
+        return 0.0
+    if isinstance(value, (bool, int, float)):
+        try:
+            return float(value)
+        except OverflowError:
+            return math.inf
+    if isinstance(value, str):
+        text = value.strip(_JS_SPACE)
+        if not text:
+            return 0.0
+        if _JS_DECIMAL.fullmatch(text):
+            return float(text)
+        if _JS_RADIX.fullmatch(text):
+            return float(int(text, 0))
+    return math.nan
+
+
 def hours(stored: Any) -> int:
-    """A stored hours value as the daemon reads it: a whole number from the floor to
-    the ceiling is itself, one above the ceiling is the ceiling, and anything else is
-    the floor."""
-    v = _number(stored)
-    if v is None or v != round(v) or v < HOURS_FLOOR:
+    """A stored hours value as the daemon reads it (its ``hoursOf``): the value's
+    JavaScript number (:func:`js_number`) rounded to the nearest whole number, a half
+    going up, and held to the floor and the ceiling. The floor when that is no finite
+    number."""
+    v = js_number(stored)
+    if not math.isfinite(v):
         return HOURS_FLOOR
-    return int(min(v, HOURS_CEILING))
+    return int(min(max(math.floor(v + 0.5), HOURS_FLOOR), HOURS_CEILING))
 
 
 # MARK: - Routes
@@ -215,6 +265,40 @@ def linked_pools(roots: Iterable[LocalRepo], identities: Mapping[str, str]) -> l
                      "forge": "gitlab" if root.is_gitlab else "github",
                      "identity": identity}
     return list(out.values())
+
+
+HELD_ROOT = "Pools are held back: a repo root cannot be read"
+
+
+def held_unread(path: str) -> str:
+    return f"Pools are held back: {path} cannot be read"
+
+
+def held_account(repo: str) -> str:
+    return f"Pools are held back: the account for {repo} is not known yet"
+
+
+def pools_listing(roots: Iterable[LocalRepo], roots_read: bool, others: Iterable[LocalRepo],
+                  unread: Iterable[str], identities: Mapping[str, str]
+                  ) -> tuple[list[dict] | None, str]:
+    """What ``POST /pools`` is to say, or ``None`` and why nothing is said yet.
+
+    Every linked repository is a pool: the roots, then what the Other repos checkouts
+    name that no root does (``others``). A checkout that was read and names no forge is
+    no pool and is in neither list. A root or a checkout that could not be read
+    (``unread``, by path), or a repository whose forge login is unknown, holds the whole
+    list back: a list cut short makes the daemon leave the pools it omits."""
+    if not roots_read:
+        return None, HELD_ROOT
+    for path in unread:
+        return None, held_unread(path)
+    roots = list(roots)
+    named = {r.key for r in roots}
+    repos = roots + [r for r in others if r.key not in named]
+    for repo in repos:
+        if not identities.get(repo.host, "").strip():
+            return None, held_account(repo.slug)
+    return linked_pools(repos, identities), ""
 
 
 def pools_body(pools: list[dict]) -> dict:
@@ -404,6 +488,9 @@ class Snapshot:
     transport: Service = field(default_factory=Service)
     docker: Docker = field(default_factory=Docker)
     model: Service = field(default_factory=Service)
+    #: Whether jobs running here reach this machine's adb server: ``off``, ``ready``
+    #: or ``none``.
+    devices: Service = field(default_factory=Service)
     admit: AdmitState = field(default_factory=AdmitState)
     pools: tuple[Pool, ...] = ()
     runs: tuple[Run, ...] = ()
@@ -440,6 +527,7 @@ class Snapshot:
             docker=Docker(_text(dock.get("state")), _text(dock.get("image")),
                           _text(dock.get("detail"))),
             model=_service(d.get("model")),
+            devices=_service(d.get("devices")),
             admit=AdmitState(_integer(adm.get("slots")) or 0, _number(adm.get("at")),
                              _text(adm.get("reason"))),
             pools=tuple(_pool(p) for p in _rows(d.get("pools")) if _text(p.get("id"))),
@@ -527,3 +615,14 @@ def tasks(snapshot: Snapshot | None) -> Observation:
             else (bool(o.executor) and o.executor == snapshot.pk) or o.task_id in here,
             ok=o.outcome.ok if o.outcome else False, reason=o.reason)
         for o in snapshot.offers})
+
+
+def open_task(pool: str, kind: str, item: str, snapshot: Snapshot | None) -> str | None:
+    """The task the daemon holds for an offer of ``item`` as ``kind`` to ``pool``: its
+    open offer of the three, which is what it names a task by. None when the snapshot
+    lists none."""
+    if snapshot is None or snapshot.offers is None:
+        return None
+    return next((o.task_id for o in snapshot.offers
+                 if (o.pool, o.kind, o.item) == (pool, kind, item)
+                 and o.state in (NET_POOLED, NET_CLAIMED)), None)

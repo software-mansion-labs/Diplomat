@@ -483,6 +483,8 @@ struct ContentView: View {
         /// key, so the row keeps its identity across the change and animates into
         /// its new place instead of one row vanishing as another appears.
         case starting(Store.QueuedAgentTask)
+        /// A job of the operator's whose offer to the network is not answered yet.
+        case offering(Store.OfferingJob)
         /// An empty slot of the device's cap. Carries its position only, which is all
         /// that distinguishes one from another.
         case freeSlot(Int)
@@ -494,6 +496,7 @@ struct ContentView: View {
             case .session(let r): return "s-\(r.id)"
             case .queued(let q):  return "q-\(q.id)"
             case .starting(let q): return "q-\(q.id)"
+            case .offering(let o): return "o-\(o.id)"
             case .freeSlot(let i): return "free-\(i)"
             }
         }
@@ -502,7 +505,7 @@ struct ContentView: View {
             switch self {
             case .session(let r): return r.status
             case .queued:   return .queued
-            case .starting: return .starting
+            case .starting, .offering: return .starting
             case .freeSlot: return .free
             }
         }
@@ -520,6 +523,7 @@ struct ContentView: View {
     private var agentTaskItems: [AgentTaskItem] {
         let items = store.agentRows.map(AgentTaskItem.session)
             + store.startingTasks.map(AgentTaskItem.starting)
+            + store.networkOffering.map(AgentTaskItem.offering)
             + store.queuedTasks.map(AgentTaskItem.queued)
             + (0..<store.freeAutoSlots).map(AgentTaskItem.freeSlot)
         return items.enumerated()
@@ -533,7 +537,7 @@ struct ContentView: View {
     private var agentTaskList: some View {
         let items = agentTaskItems
         let queued = store.queuedTasks.count
-        let starting = store.startingTasks.count
+        let starting = store.startingTasks.count + store.networkOffering.count
         let free = store.freeAutoSlots
         // Built outside the ViewBuilder: a builder call is where the type-checker is
         // slowest, and CI's runner is slower than this machine.
@@ -587,6 +591,8 @@ struct ContentView: View {
             )
         case .starting(let task):
             StartingTaskRow(task: task, tint: agentTaskTint(task.job.kind))
+        case .offering(let held):
+            OfferingTaskRow(held: held, tint: agentTaskTint(held.job.kind))
         case .freeSlot:
             FreeSlotRow()
         }
@@ -1192,6 +1198,28 @@ private struct StartingTaskRow: View {
         .padding(6)
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.06)))
         .tooltip(StartingTaskRow.help)
+    }
+}
+
+/// A job of the operator's whose offer the Diplomacy Network has not answered: the
+/// starting row, saying where it is.
+private struct OfferingTaskRow: View {
+    let held: Store.OfferingJob
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 8) {
+            IconBadge(symbol: DiplomatUI.agentTaskIcon(held.job.kind), tint: tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(held.rowLabel).font(.caption).lineLimit(1)
+                Text(NetworkText.offering).font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+            ProgressView().controlSize(.small)
+        }
+        .padding(6)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.06)))
+        .tooltip(NetworkText.offeringHelp)
     }
 }
 

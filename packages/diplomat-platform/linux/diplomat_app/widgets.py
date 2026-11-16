@@ -747,9 +747,15 @@ class StartingTaskRow(QFrame):
         "already, like any automatic agent."
     )
 
-    def __init__(self, *, label: str, glyph: str, hex_color: str) -> None:
+    #: The same row for a job of the operator's whose offer to the Diplomacy Network
+    #: is not answered yet.
+    OFFERING_HELP = ("The daemon has not answered this job's offer. Diplomat asks it "
+                     "again until it does.")
+
+    def __init__(self, *, label: str, glyph: str, hex_color: str,
+                 offering: bool = False) -> None:
         super().__init__()
-        self.setToolTip(self._HELP)
+        self.setToolTip(self.OFFERING_HELP if offering else self._HELP)
         self.setStyleSheet(
             "StartingTaskRow { background-color: rgba(128,128,128,0.06);"
             " border-radius: 6px; }"
@@ -764,9 +770,9 @@ class StartingTaskRow(QFrame):
         col = QVBoxLayout()
         col.setSpacing(1)
         col.addWidget(ElidedLabel(label, 10, "#d8dbde"))
-        status = QLabel(f"{glyphs.G_STARTING} starting")
-        status.setStyleSheet(f"color: {glyphs.AGENT_LIVE}; font-size: 9px;")
-        col.addWidget(status)
+        self.status = QLabel(OFFERING_TEXT if offering else f"{glyphs.G_STARTING} starting")
+        self.status.setStyleSheet(f"color: {glyphs.AGENT_LIVE}; font-size: 9px;")
+        col.addWidget(self.status)
         row.addLayout(col, 1)
 
 
@@ -964,9 +970,13 @@ def dispatch_status_text(verdict: str, terminal_title: str, *,
     from diplomat_runtime import autofix
     from diplomat_runtime.models import Fmt
 
+    from . import diplomacynetwork
+
     sentence = getattr(verdict, "sentence", None)
     if sentence:
         return f"Not offered: {sentence}"
+    if verdict == diplomacynetwork.VERDICT_OFFERING:
+        return OFFERING_TEXT
     if verdict == "spawned":
         return (f"Offered to the pool · {Fmt.clock(datetime.now().astimezone())}" if network
                 else f"Launched {terminal_title}")

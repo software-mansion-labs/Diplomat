@@ -792,6 +792,7 @@ class Panel(QWidget):
         _clear_layout(self.tasks_col)
         queued = self.store.queued_tasks
         starting = self.store.starting_tasks
+        offering = self.store.network_offering
         free = self.store.free_auto_slots
         running = self.store.running_tasks
         parts = [f"{len(queued)} queued" if queued else "",
@@ -802,7 +803,8 @@ class Panel(QWidget):
         # would drop the count for as long as its spawn takes. Empty bays are not:
         # a device with nothing to do reads "0", not "2".
         header = SectionHeader(glyph=glyphs.G_TASKS, title="Agent tasks",
-                               count=len(running) + len(starting) + len(queued),
+                               count=(len(running) + len(starting) + len(offering)
+                                      + len(queued)),
                                caption=caption or None,
                                expanded=self._tasks_expanded)
         header.clicked.connect(self._toggle_tasks)
@@ -842,6 +844,10 @@ class Panel(QWidget):
                 glyph=glyph,
                 hex_color=tint,
             )))
+        for held in offering:
+            glyph, tint = _task_look(held.job.kind)
+            ranked.append((starting_rank, StartingTaskRow(
+                label=held.row_label, glyph=glyph, hex_color=tint, offering=True)))
         for _rank, row in sorted(ranked, key=lambda pair: pair[0]):
             self.tasks_col.addWidget(row)
         for _ in range(free):

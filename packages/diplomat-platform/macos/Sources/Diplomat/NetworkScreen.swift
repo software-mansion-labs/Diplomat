@@ -158,7 +158,7 @@ struct NetworkScreen: View {
         switch state {
         case "ready": return .green
         case "failed", "missing", "down": return .red
-        case "": return .secondary
+        case "", "off": return .secondary
         default: return .orange
         }
     }
@@ -169,6 +169,7 @@ struct NetworkScreen: View {
             ("transport", snap.transport.state, snap.transport.detail),
             ("docker", snap.docker.state, snap.docker.detail),
             ("model", snap.model.state, snap.model.detail),
+            ("devices", snap.devices.state, snap.devices.detail),
         ]
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
@@ -209,6 +210,12 @@ struct NetworkScreen: View {
                      $store.networkRequiredMinimumH)
             hoursRow(NetworkText.acceptedTitle, NetworkText.acceptedSummary,
                      $store.networkMaximumAcceptedH)
+            SettingRow(title: NetworkText.devicesTitle, summary: NetworkText.devicesSummary) {
+                Toggle(NetworkText.devicesTitle, isOn: $store.networkDevices)
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+            }
         }
     }
 
@@ -252,12 +259,19 @@ struct NetworkScreen: View {
     private var pools: some View {
         if let snap = snapshot {
             VStack(alignment: .leading, spacing: 12) {
-                // No pool panel offers "Join…": none yet, or each one left.
-                if snap.pools.allSatisfy(\.left) {
+                let (held, nowhere) = (store.networkPoolsHeld, snap.pools.allSatisfy(\.left))
+                if !held.isEmpty || nowhere {
                     SettingsCard(symbol: NetworkText.symbol, title: "POOLS", tint: .purple) {
-                        if snap.pools.isEmpty { note(NetworkText.noPools) }
-                        NetworkJoinRow(card: "")
-                        if let refusal = store.networkRefusals[""] { note(refusal, tint: .red) }
+                        if !held.isEmpty {
+                            note(held, tint: .orange)
+                        } else if snap.pools.isEmpty {
+                            note(NetworkText.noPools)
+                        }
+                        // No pool panel offers "Join…": none yet, or each one left.
+                        if nowhere {
+                            NetworkJoinRow(card: "")
+                            if let refusal = store.networkRefusals[""] { note(refusal, tint: .red) }
+                        }
                     }
                     .frame(width: MainRoot.columnWidth, alignment: .topLeading)
                 }
@@ -418,6 +432,7 @@ struct NetworkPoolPanel: View {
         let place = NetworkText.place(t)
         let open = t.state == "available" || t.state == "claimed"
         let ending = NetworkText.ending(of: t.taskId, in: store.networkState)
+        let stop = NetworkText.stopButton(t)
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 // Another machine's words: drawn as they are, on one line.
@@ -433,10 +448,10 @@ struct NetworkPoolPanel: View {
                 Spacer(minLength: 4)
                 if open, t.offeredHere || t.executorHere {
                     Button { Task { await store.stopNetworkTask(t, pool: pool.id) } } label: {
-                        Text("Stop")
+                        Text(stop.title)
                     }
                     .buttonStyle(.bordered).controlSize(.mini)
-                    .tooltip(t.executorHere ? NetworkText.stopRunHelp : NetworkText.withdrawHelp)
+                    .tooltip(stop.help)
                 }
             }
             if let ending {

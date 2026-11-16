@@ -373,6 +373,13 @@ def repo_roots() -> list[LocalRepo]:
     return list(_resolved_roots()[0])
 
 
+def roots_reading() -> tuple[list[LocalRepo], bool]:
+    """:func:`repo_roots` and :func:`roots_complete` of one reading; asked for apart,
+    the two may straddle a re-read."""
+    roots, complete, _, _ = _resolved_roots()
+    return list(roots), complete
+
+
 def roots_complete() -> bool:
     """Whether every root path had a GitHub or GitLab remote when :func:`repo_roots`
     last read them (:func:`localrepos.all_resolve`). Until they all do, a repo missing from the

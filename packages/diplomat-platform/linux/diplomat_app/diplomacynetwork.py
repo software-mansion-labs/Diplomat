@@ -3,8 +3,8 @@ while the network is switched on, and for the Network screen.
 
 The applet *drives* the Node installer (``diplomacy-network/src/install.js``) to start
 and stop the daemon, *asks* the daemon's socket (``packages/diplomacy-network``'s
-README, "Local socket"), and writes the three settings the daemon re-reads from the
-shared config. What to send and how to read the answers is :mod:`diplomat_runtime.network`.
+README, "Local socket"), and writes the settings the daemon re-reads from the shared
+config. What to send and how to read the answers is :mod:`diplomat_runtime.network`.
 """
 
 from __future__ import annotations
@@ -73,6 +73,15 @@ def set_hours(key: str, value: int) -> None:
     appconfig.set_int(key, network.hours(value))
 
 
+def devices() -> bool:
+    """Whether a job running on this machine may reach its adb server."""
+    return appconfig.get_bool(network.DEVICES_KEY, False)
+
+
+def set_devices(on: bool) -> None:
+    appconfig.set_bool(network.DEVICES_KEY, on)
+
+
 # MARK: installer
 
 def start_daemon() -> dict | None:
@@ -85,10 +94,6 @@ def restart_daemon() -> dict | None:
 
 def stop_daemon() -> dict | None:
     return da.run_installer(install_js(), "--stop-daemon")
-
-
-def ensure_deps() -> bool:
-    return da.ensure_deps(package_dir())
 
 
 # MARK: the socket
@@ -126,6 +131,13 @@ def refusal(reply: da.DaemonReply | str) -> str | None:
             else f"the daemon answered HTTP {reply.status}")
 
 
+def definite(reply: da.DaemonReply | str) -> bool:
+    """Whether the daemon settled a request: it took it, or refused it (a 4xx). No
+    reply, and a fault of the daemon's own (a 5xx), settle nothing: the daemon may or
+    may not have acted."""
+    return isinstance(reply, da.DaemonReply) and reply.status < 500
+
+
 def state() -> network.Snapshot | None:
     """The daemon's snapshot, or None when it gave none."""
     reply = send(network.ROUTE_STATE, timeout_secs=STATE_TIMEOUT_SECS)
@@ -142,6 +154,23 @@ VERDICT_REFUSED = "network_refused"
 #: The runner a completion is recorded under when another machine ran the task: not a
 #: runner of this machine's, so its tokens count against no limit read here.
 RUNNER_ELSEWHERE = "network"
+
+
+class Offered(str):
+    """The dispatch verdict of a started job (``"spawned"``) for one the network took,
+    carrying the task it is offered as."""
+
+    task: str
+
+    def __new__(cls, task: str) -> "Offered":
+        self = super().__new__(cls, "spawned")
+        self.task = task
+        return self
+
+
+#: The dispatch verdict for a job of the operator's whose offer the daemon was sent and
+#: gave no definite answer to: kept, and settled on a later cycle.
+VERDICT_OFFERING = "network_offering"
 
 
 class Refused(str):
@@ -171,7 +200,7 @@ def terms(payload: Mapping[str, Any]) -> dict[str, bool]:
     return {}
 
 
-# MARK: the node the network replaced
+# MARK: the retired mesh node
 
 def _is_legacy_node(tokens: list[str]) -> bool:
     """``python -m szpontnet``: the two as whole, adjacent arguments. A path or a
