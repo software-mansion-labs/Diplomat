@@ -36,6 +36,8 @@ const { createBroker } = await import('../src/executor/broker.js');
 const { createCA } = await import('../src/executor/ca.js');
 const { createLLM } = await import('../src/executor/llm.js');
 const { createMirrors } = await import('../src/executor/mirror.js');
+const { createAdbFilter } = await import('../src/executor/adb.js');
+const { fakeAdb } = await import('./lib/daemons.mjs');
 const { RUNS_DIR } = await import('../src/paths.js');
 
 let checks = 0;
@@ -379,6 +381,33 @@ exit 0
     fs.writeFileSync(path.join(owner.dir, 'go'), '');
     assert.equal((await owner.outcome).ok, true);
     echo.close();
+  });
+
+  await check('the adb client in the image lists devices through the filter, and its connect, forward and reverse never reach the server behind it', async () => {
+    const client = Number(/version \d+\.\d+\.(\d+)/.exec(await sh('run', '--rm', '--network', 'none', '--label', `dn.base=${BASE}`, tag, 'adb', 'version'))[1]);
+    // A stand-in server of the client's own version behind the filter: the client has
+    // no reason to replace it, and no device of this machine is touched.
+    const server = await fakeAdb({ version: client });
+    const filter = createAdbFilter({ target: { host: '127.0.0.1', port: server.port } });
+    const job = await launch('adb', PEER_A, { forwardTo: { adb: (await filter.start()).port }, script: `
+step where "echo \\$ADB_SERVER_SOCKET"
+step devices "adb devices"
+step connect "adb connect 127.0.0.1:1"
+step forward "adb forward tcp:0 tcp:1"
+step reverse "adb -s emulator-5554 reverse tcp:1 tcp:2"
+exit 0
+` });
+    assert.equal((await job.outcome).ok, true);
+    assert.match(job.out('where'), /^tcp:127\.0\.0\.1:\d+$/);
+    assert.match(job.out('devices'), /emulator-5554\tdevice/);
+    assert.match(job.out('connect'), /not offered to a task on this machine: host:connect:127\.0\.0\.1:1/);
+    assert.match(job.out('forward'), /not offered to a task on this machine/);
+    assert.deepEqual([job.steps().devices, job.steps().forward !== 0, job.steps().reverse !== 0], [0, true, true]);
+    assert.deepEqual(server.asked.filter((service) => /connect|forward|reverse|kill/.test(service)), [], `the server heard ${JSON.stringify(server.asked)}`);
+    assert.ok(server.asked.includes('host:devices'));
+    console.log(`INFO adb 1.0.${client} in the image: devices listed, connect, forward and reverse refused by the filter`);
+    await filter.stop();
+    await server.close();
   });
 
   await check('two jobs run at once in one container, and stopping one leaves the other to finish', async () => {

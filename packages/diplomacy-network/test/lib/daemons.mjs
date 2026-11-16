@@ -13,7 +13,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { killDaemonsUnder, onInterrupt } from '../../../daemon-core/src/test-interrupt.js';
-import { git, startFakeForge } from './fake-forge.mjs';
+import { GITLAB_HOST, git, startFakeForge } from './fake-forge.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// The daemon under test.
@@ -28,6 +28,8 @@ const AGENT = path.join(HERE, 'agent.mjs');
 export const REPO = 'acme/widgets';
 /// Its pool.
 export const POOL = `github.com/${REPO}`;
+/// The pool of the same repository as the stand-in forge's GitLab serves it.
+export const GITLAB_POOL = `${GITLAB_HOST}/${REPO}`;
 
 /// A pause between two looks at something; never a wait for it.
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -58,17 +60,35 @@ export async function check(name, fn) {
 /// How many checks passed.
 export const passed = () => checks;
 
-/// A stand-in for the host's adb server: answers `host:version` and `host:devices` in
-/// adb's framing, and keeps what it was asked. `{ port, asked, close() }`.
-export async function fakeAdb() {
+/// A stand-in for the host's adb server, in adb's framing: it answers `host:version`
+/// (as protocol `version`), `host:devices` and `host:features`, switches to its one
+/// device for `host:transport:` and `host:tport:serial:` and answers the request that
+/// follows with `ran <request>`, and fails anything else. `asked` is every request it
+/// was sent. `{ port, asked, close() }`.
+export async function fakeAdb({ version = 41 } = {}) {
   const asked = [];
+  const frame = (text) => `${text.length.toString(16).padStart(4, '0')}${text}`;
   const server = net.createServer((socket) => {
+    let pending = '';
+    let onDevice = false;
     socket.on('error', () => {});
-    socket.once('data', (chunk) => {
-      const service = chunk.toString('latin1').slice(4);
-      asked.push(service);
-      const payload = service === 'host:version' ? '0029' : service === 'host:devices' ? 'emulator-5554\tdevice\n' : null;
-      socket.end(payload === null ? 'FAIL0007unknown' : `OKAY${payload.length.toString(16).padStart(4, '0')}${payload}`);
+    socket.on('data', (chunk) => {
+      pending += chunk.toString('latin1');
+      while (pending.length >= 4 && pending.length >= 4 + parseInt(pending.slice(0, 4), 16)) {
+        const service = pending.slice(4, 4 + parseInt(pending.slice(0, 4), 16));
+        pending = pending.slice(4 + service.length);
+        asked.push(service);
+        if (onDevice) return socket.end(`OKAYran ${service}`);
+        if (/^host:transport:/.test(service)) { onDevice = true; socket.write('OKAY'); continue; }
+        if (/^host:tport:serial:/.test(service)) { onDevice = true; socket.write('OKAY\x01\0\0\0\0\0\0\0'); continue; }
+        const payload = {
+          'host:version': version.toString(16).padStart(4, '0'), 'host:devices': 'emulator-5554\tdevice\n',
+          'host:devices-l': 'emulator-5554          device product:sdk transport_id:1\n', 'host:features': 'shell_v2,cmd',
+          'host:host-features': 'shell_v2,cmd', 'host-serial:emulator-5554:get-state': 'device',
+        }[service];
+        return socket.end(payload === undefined ? `FAIL${frame('unknown host service')}` : `OKAY${frame(payload)}`);
+      }
+      return undefined;
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -118,6 +138,8 @@ export async function createBench() {
     for (const d of [home, bin, agentDir, dockerDir]) fs.mkdirSync(d, { recursive: true });
     const token = `ghs_${name}${'0'.repeat(24)}`.slice(0, 28);
     forge.tokens.add(token);
+    const gitlabToken = `glpat-${name}${'0'.repeat(20)}`.slice(0, 24);
+    forge.gitlabTokens.add(gitlabToken);
     const script = (file, body) => {
       fs.writeFileSync(path.join(bin, file), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
       return path.join(bin, file);
@@ -127,7 +149,8 @@ export async function createBench() {
     // token, not the requester's.
     fs.writeFileSync(gitconfig, [
       '[user]', `\tname = ${name} Operator`, `\temail = ${name}@example.com`, '[init]', '\tdefaultBranch = main',
-      `[url "http://x-access-token:${token}@127.0.0.1:${forge.port}/h/github.com/"]`, '\tinsteadOf = https://github.com/', '',
+      `[url "http://x-access-token:${token}@127.0.0.1:${forge.port}/h/github.com/"]`, '\tinsteadOf = https://github.com/',
+      `[url "http://oauth2:${gitlabToken}@127.0.0.1:${forge.port}/h/${GITLAB_HOST}/"]`, `\tinsteadOf = https://${GITLAB_HOST}/`, '',
     ].join('\n'));
     const env = {
       PATH: process.env.PATH, TMPDIR: os.tmpdir(), HOME: model === 'real' ? os.homedir() : home, LANG: 'C',
@@ -135,7 +158,7 @@ export async function createBench() {
       GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0',
       DN_FORGE_ORIGINS: forge.env.DN_FORGE_ORIGINS,
       DN_GH: script('gh', `[ "$1 $2 $3 $4" = "auth token --hostname github.com" ] && echo "${token}" && exit 0\nexit 1`),
-      DN_GLAB: script('glab', 'exit 1'),
+      DN_GLAB: script('glab', `[ "$1 $2 $3 $4 $5" = "config get token --host ${GITLAB_HOST}" ] && echo "${gitlabToken}" && exit 0\nexit 1`),
       // No Keychain and no login of the operator's: the model credential is a key that
       // is no key.
       ...(model === 'real' ? { DN_MODEL_TOKEN_PATH: path.join(home, 'model-token') } : {
@@ -174,9 +197,18 @@ export async function createBench() {
     let child = null;
     let admitting = null;
     const m = {
-      name, home, base, env, token, checkout, agentDir, dockerDir, configPath,
+      name, home, base, env, token, gitlabToken, checkout, agentDir, dockerDir, configPath,
       socket: path.join(base, 'daemon.sock'),
       link: { id: POOL, path: checkout, forge: 'github', identity: name },
+      /// The link of the GitLab pool, with a checkout of its own made the first time.
+      gitlabLink() {
+        const at = path.join(home, 'wg');
+        if (!fs.existsSync(at)) {
+          git(home, 'clone', '--quiet', path.join(forge.gitRoot, `${REPO}.git`), at);
+          git(at, 'remote', 'set-url', 'origin', `https://${GITLAB_HOST}/${REPO}.git`);
+        }
+        return { id: GITLAB_POOL, path: at, forge: 'gitlab', identity: name };
+      },
       get pid() { return child?.pid ?? null; },
       get exited() { return child === null || child.exitCode !== null || child.signalCode !== null; },
       exit: null,
@@ -279,7 +311,7 @@ export async function createBench() {
       killJobs() {
         for (const c of m.containers()) {
           try {
-            const { pids = [] } = JSON.parse(fs.readFileSync(path.join(dockerDir, 'containers', `${c}.json`), 'utf8'));
+            const pids = fs.readFileSync(path.join(dockerDir, 'pids', c), 'utf8').split('\n').filter(Boolean).map(Number);
             for (const pid of pids) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
           } catch {}
         }
@@ -293,9 +325,8 @@ export async function createBench() {
     root, forge, loopDir, machine,
     /// The forge's requests so far that carried `token`, as `[method, host, path]`.
     sentWith(token) {
-      const bearer = `Bearer ${token}`;
-      const basic = `Basic ${Buffer.from(`x-access-token:${token}`).toString('base64')}`;
-      return forge.log.filter((r) => [bearer, basic].includes(r.headers.authorization)).map((r) => [r.method, r.host, r.path]);
+      const ways = [`Bearer ${token}`, ...['x-access-token', 'oauth2'].map((user) => `Basic ${Buffer.from(`${user}:${token}`).toString('base64')}`)];
+      return forge.log.filter((r) => ways.includes(r.headers.authorization)).map((r) => [r.method, r.host, r.path]);
     },
     /// What a branch of the repository on the forge points at: `{ sha, author }`, or null.
     branch(name) {

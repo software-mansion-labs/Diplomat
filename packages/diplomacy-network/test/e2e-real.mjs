@@ -231,8 +231,9 @@ const adbAnswers = () => new Promise((resolve) => {
 });
 
 // The host's own adb server, listed by a job through the forward the daemon opens for
-// it. The job is the stand-in agent, which asks for the version and the devices and
-// nothing else; no device is touched.
+// it once the operator offers this machine's devices. The job is the stand-in agent,
+// which asks for the version and the devices, and for a connection out of this machine
+// that the daemon's filter refuses before the server hears of it; no device is touched.
 async function realAdb() {
   let found = true;
   try { execFileSync('adb', ['version'], { stdio: 'ignore' }); } catch { found = false; }
@@ -241,8 +242,11 @@ async function realAdb() {
   if (started) execFileSync('adb', ['start-server'], { stdio: 'ignore' });
   const bench = await createBench();
   try {
-    const m = await bench.machine('adb', { env: { DN_ADB_SERVER: '127.0.0.1:5037' } }).start();
+    const m = bench.machine('adb', { env: { DN_ADB_SERVER: '127.0.0.1:5037' } });
+    m.setConfig({ networkDevices: true });
+    await m.start();
     await m.linked();
+    await until('the adb server seen', async () => (await m.state()).devices.state === 'ready');
     const { taskId } = await m.ok('/offer', { pool: POOL, kind: 'review', item: 'pr-1', title: 'List devices', prompt: 'adb\nsay listed', now: true });
     await until('the job done', async () => (await offerOf(m, taskId)).state === 'done');
     const agent = m.agent((await runOf(m, taskId)).runId);
@@ -251,6 +255,7 @@ async function realAdb() {
     assert.notEqual(agent.env.ADB_SERVER_SOCKET, 'tcp:127.0.0.1:5037', 'through a listener of its own, not the host\'s port');
     assert.match(step.version, /^OKAY0004[0-9a-f]{4}$/);
     assert.match(step.devices, /^OKAY[0-9a-f]{4}/);
+    assert.equal(step.connect, 'FAIL003fnot offered to a task on this machine: host:connect:127.0.0.1:1');
     // What `adb devices` on the host lists, serial for serial.
     const listed = (text) => text.split('\n').map((l) => l.split('\t')[0].trim()).filter(Boolean).sort();
     const host = listed(execFileSync('adb', ['devices'], { encoding: 'utf8' }).replace(/^List of devices attached\s*/, ''));

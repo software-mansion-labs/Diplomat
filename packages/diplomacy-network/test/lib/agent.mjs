@@ -2,10 +2,17 @@
 // runner.sh starts `claude`, and does what the requester's prompt spells out, one step
 // per line after the preamble:
 //
-//   api <METHOD> <path> [json]   a forge API request, as gh makes it: through the proxy
+//   api <METHOD> <path> [json]   a forge API request, as gh or glab makes it: through the
+//                                proxy, to the pool's forge
+//   model                        one request to the model provider, as the agent's own
+//                                client makes it: through the proxy, with a placeholder key
 //   push <branch>                a commit on top of the clone, pushed to that branch
-//   adb                          asks the forwarded adb server for its version and devices
+//   adb                          asks the forwarded adb server for its version and devices,
+//                                and to connect to an address for it
 //   wait <name>                  until the file <name> exists in FAKE_AGENT_DIR
+//   plant <file> <text>          writes <text> over <file> in the job's run directory
+//   deaf                         ignores SIGTERM from here on
+//   child                        leaves a process of its own session behind, its pid kept
 //   say <text>                   the result's text
 //   fail                         ends as an agent that reports an error
 //
@@ -18,7 +25,7 @@ import https from 'node:https';
 import net from 'node:net';
 import path from 'node:path';
 import tls from 'node:tls';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 
 const dir = process.env.FAKE_AGENT_DIR;
 const runId = process.env.DN_RUN_ID;
@@ -36,23 +43,27 @@ const git = (...args) => {
   }
 };
 
-function api(method, route, body) {
+// A GitLab pool's job is told its forge's host; a GitHub one asks api.github.com.
+const forgeHost = process.env.GITLAB_HOST || 'api.github.com';
+const credential = process.env.GITLAB_HOST ? { 'private-token': process.env.GITLAB_TOKEN } : { authorization: `token ${process.env.GH_TOKEN}`, accept: 'application/vnd.github+json' };
+
+function api(method, route, body, host = forgeHost, headers = credential) {
   const proxy = new URL(process.env.HTTPS_PROXY);
   const auth = Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString('base64');
   return new Promise((resolve) => {
     const failed = (err) => resolve({ status: 0, body: String(err?.message ?? err) });
     const connect = http.request({
-      host: proxy.hostname, port: proxy.port, method: 'CONNECT', path: 'api.github.com:443',
-      headers: { host: 'api.github.com:443', 'proxy-authorization': `Basic ${auth}` },
+      host: proxy.hostname, port: proxy.port, method: 'CONNECT', path: `${host}:443`,
+      headers: { host: `${host}:443`, 'proxy-authorization': `Basic ${auth}` },
     });
     connect.on('error', failed);
     connect.on('connect', (res, socket) => {
       if (res.statusCode !== 200) return failed(new Error(`the proxy answered ${res.statusCode}`));
       const req = https.request({
-        host: 'api.github.com', path: route, method,
-        createConnection: () => tls.connect({ socket, servername: 'api.github.com', ca: fs.readFileSync(process.env.SSL_CERT_FILE) }),
+        host, path: route, method,
+        createConnection: () => tls.connect({ socket, servername: host, ca: fs.readFileSync(process.env.SSL_CERT_FILE) }),
         headers: {
-          authorization: `token ${process.env.GH_TOKEN}`, accept: 'application/vnd.github+json', 'user-agent': 'stand-in-agent',
+          ...headers, 'user-agent': 'stand-in-agent',
           ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}),
         },
       }, (answer) => {
@@ -100,6 +111,8 @@ for (const line of prompt.slice(prompt.lastIndexOf('\n---\n') + 5).split('\n')) 
   if (verb === 'api') {
     const [method, route, ...json] = rest;
     Object.assign(step, await api(method, route, json.length > 0 ? json.join(' ') : undefined));
+  } else if (verb === 'model') {
+    Object.assign(step, await api('POST', '/v1/messages', '{"model":"stand-in","max_tokens":1,"messages":[]}', 'api.anthropic.com', { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }));
   } else if (verb === 'push') {
     fs.writeFileSync(`${rest[0].replace(/\W/g, '-')}.txt`, `${runId}\n`);
     git('add', '-A');
@@ -109,6 +122,16 @@ for (const line of prompt.slice(prompt.lastIndexOf('\n---\n') + 5).split('\n')) 
   } else if (verb === 'adb') {
     step.version = await adb('host:version');
     step.devices = await adb('host:devices');
+    step.connect = await adb('host:connect:127.0.0.1:1');
+  } else if (verb === 'plant') {
+    // DN_ROOT is where the stand-in docker keeps a container's own paths.
+    fs.writeFileSync(path.join(process.env.DN_ROOT ?? '/', 'dn', 'runs', runId, rest[0]), `${rest.slice(1).join(' ')}\n`);
+  } else if (verb === 'deaf') {
+    process.on('SIGTERM', () => {});
+  } else if (verb === 'child') {
+    const child = spawn('sleep', ['600'], { detached: true, stdio: 'ignore' });
+    child.unref();
+    step.pid = child.pid;
   } else if (verb === 'wait') {
     record.waiting = rest[0];
     save();

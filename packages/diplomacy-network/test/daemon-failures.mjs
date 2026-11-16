@@ -156,6 +156,11 @@ try {
     await until('the job stopped', () => !alive(cutPid));
     assert.match(b.log(), new RegExp(`giving ${cut.runId} back: the broker could not listen where this job reaches it`));
     await until('B\'s run stopped', async () => (await runOf(b, third.taskId)).state === 'stopped');
+    // The run's record and the log say what stopped it: nothing the operator did.
+    const record = JSON.parse(fs.readFileSync(path.join(b.base, 'runs.json'), 'utf8')).runs[cut.runId];
+    assert.equal(record.outcome.summary, 'the broker could not listen where this job reaches it');
+    assert.match(b.log(), new RegExp(`stopping ${cut.runId}: the broker could not listen where this job reaches it`));
+    assert.doesNotMatch(b.log(), /stopped by the operator/);
     await until('the task back in the pool', async () => (await offerOf(a, third.taskId)).state === 'pooled');
     assert.equal((await offerOf(a, third.taskId)).attempt, 1, 'given back, not failed');
     await new Promise((resolve) => squatter.close(resolve));

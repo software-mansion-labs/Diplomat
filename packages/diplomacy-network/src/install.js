@@ -3,15 +3,18 @@
 //   node src/install.js --check          -> { installed, daemonRunning, pid }
 //   node src/install.js --start-daemon   -> { ok, daemonRunning, pid, error? }
 //   node src/install.js --restart-daemon -> the same, after replacing a running daemon
-//   node src/install.js --stop-daemon    -> the same, once the daemon is gone
+//   node src/install.js --stop-daemon    -> the same, once the daemon is gone; with the
+//                                           network switched off in Diplomat's config,
+//                                           the daemon's containers are gone too
 // Nothing is installed anywhere: `installed` is true wherever this file runs, and is in
 // the answer because the applets read every installer's `--check` alike.
 
 import { setTimeout as delay } from 'node:timers/promises';
 import { daemonControl } from '../../daemon-core/src/daemon-control.js';
-import { pidAlive } from '../../daemon-core/src/fsio.js';
+import { pidAlive, readJson } from '../../daemon-core/src/fsio.js';
+import { clearDocker } from './executor/clear.js';
 import * as client from './ipc.js';
-import { DISCOVERY_PATH, STOP_WAIT_MS } from './paths.js';
+import { CONFIG_PATH, DISCOVERY_PATH, STOP_WAIT_MS } from './paths.js';
 
 const { startDaemon, stopDaemon } = daemonControl({ client, discoveryPath: DISCOVERY_PATH, restartExitMs: STOP_WAIT_MS });
 
@@ -40,9 +43,19 @@ async function stop() {
   return pid && pidAlive(pid) ? `the daemon (pid ${pid}) did not exit within ${STOP_WAIT_MS / 1000} s` : null;
 }
 
+// A daemon that is switched off removes what it made in docker as it ends. One that was
+// not there to be stopped, or was killed past its end, left that standing. Like the
+// daemon, this takes only a config it can read for the network being off.
+async function stopForGood() {
+  const error = await stop();
+  const config = readJson(CONFIG_PATH);
+  if (!error && config !== null && typeof config === 'object' && config.networkEnabled !== true) await clearDocker();
+  return error;
+}
+
 const actions = {
   '--start-daemon': start,
-  '--stop-daemon': stop,
+  '--stop-daemon': stopForGood,
   '--restart-daemon': async () => (await stop()) ?? start(),
 };
 

@@ -39,6 +39,8 @@ function git(args, { cwd, timeout = MIRROR_TIMEOUT_MS } = {}) {
 /// error }`: a refresh that fails leaves the mirror as it was and says why; a mirror
 /// that cannot be created rejects. `path(pool)` is the mirror if there is one.
 /// `retain(pool)` marks a job as reading the mirror and returns the function that ends it.
+/// `sweep(pools, keepMs)` is told the pools whose mirrors are wanted now, and removes
+/// every other mirror that has not been wanted for `keepMs` and that no job reads.
 export function createMirrors({ log = () => {}, dir = MIRRORS_DIR } = {}) {
   const queues = new Map(); // mirror path -> the last operation on it
   const readers = new Map(); // mirror path -> jobs reading it
@@ -112,5 +114,29 @@ export function createMirrors({ log = () => {}, dir = MIRRORS_DIR } = {}) {
     };
   }
 
-  return { ensureMirror, retain, path: (pool) => (exists(pathOf(pool)) ? pathOf(pool) : null) };
+  function sweep(pools, keepMs) {
+    const now = Date.now();
+    // A mirror's own date says when its pool was last wanted, across daemons.
+    for (const pool of pools) {
+      try { fs.utimesSync(pathOf(pool), now / 1000, now / 1000); } catch {}
+    }
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch {}
+    for (const name of names) {
+      const target = path.join(dir, name);
+      let last = now;
+      try { last = fs.statSync(target).mtimeMs; } catch {}
+      // What an interrupted clone left is as stale as a mirror nobody wants.
+      if (!/^[0-9a-f]{16}\.git(\.tmp\.\d+)?$/.test(name) || now - last < keepMs) continue;
+      // In the mirror's own turn: never from under a refresh, nor a job that came since.
+      const turn = (queues.get(target) || Promise.resolve()).then(() => {
+        if (readers.get(target)) return;
+        fs.rmSync(target, { recursive: true, force: true });
+        log('mirror', `removed ${target}: its pool was not linked for ${Math.round(keepMs / 3600000)} h`);
+      });
+      queues.set(target, turn.catch(() => {}));
+    }
+  }
+
+  return { ensureMirror, retain, sweep, path: (pool) => (exists(pathOf(pool)) ? pathOf(pool) : null) };
 }

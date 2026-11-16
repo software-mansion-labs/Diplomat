@@ -6,13 +6,14 @@
 //   POST /pools, /admit, /offer, /withdraw, /invite, /join, /leave, /stop-run
 //
 // It reads Diplomat's config.json every CONFIG_POLL_MS: the two hour settings reach the
-// node at once, and `networkEnabled` anything but true switches the node off - offers
-// cancelled, runs stopped, pools told - and ends the process. SIGTERM and SIGINT end it
-// with its runs left going: the next daemon takes them up from jobs.json.
+// node at once, `networkDevices` decides what the jobs started from then on are given
+// of this machine's devices, and `networkEnabled` anything but true switches the node
+// off - offers cancelled, runs stopped, pools told, its containers removed - and ends
+// the process. SIGTERM and SIGINT end it with its runs left going: the next daemon
+// takes them up from jobs.json.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import net from 'node:net';
 import { execFile } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { atomicWrite, pidAlive, procIdentity, readJson, sweepDeadTmp } from '../../daemon-core/src/fsio.js';
@@ -20,10 +21,12 @@ import { createLog } from '../../daemon-core/src/log.js';
 import { NO_ROUTE, jsonServer, listenSingleton, socketHealthy } from '../../daemon-core/src/serve.js';
 import { b64u } from './core/canon.js';
 import { identityFromSeed } from './core/identity.js';
+import { adbAnswers, createAdbFilter } from './executor/adb.js';
 import { createBroker } from './executor/broker.js';
 import { createCA } from './executor/ca.js';
+import { clearDocker } from './executor/clear.js';
 import { createContainers } from './executor/container.js';
-import { attachJob, readOutcome, startJob, stopJob, watch } from './executor/job.js';
+import { attachJob, forgetRuns, readOutcome, startJob, stopJob, unended, watch } from './executor/job.js';
 import { createLLM } from './executor/llm.js';
 import { createMirrors } from './executor/mirror.js';
 import { createNode } from './node/node.js';
@@ -34,9 +37,19 @@ import { rulesFor } from './requester/rules.js';
 import { createTransport } from './transport/index.js';
 import {
   ADB_SERVER, BASE_DIR, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, DISCOVERY_PATH, EXECUTOR_CHECK_MS,
-  EXECUTOR_RETRY_MS, FORWARDS, GIT_BIN, HOURS_FLOOR, JOBS_PATH, LOG_PATH, RECONCILE_MS, SOCKET_PATH, STATE_PATH,
-  STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS,
+  EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GIT_BIN, HOURS_FLOOR, JOBS_PATH, JOBS_WRITE_MS, LOG_PATH,
+  MIRROR_KEEP_MS, RECONCILE_MS, RUN_KEEP_MS, SOCKET_PATH, STATE_PATH, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS,
+  TEST_FAULTS_PATH, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS,
 } from './paths.js';
+
+// Prompts of private repositories, tokens and keys lie under the state directory, and
+// some of it is written by git, tor and openssl: whatever this process or a tool it
+// runs creates is the operator's alone, and so is a directory an earlier daemon made
+// before that held.
+process.umask(0o077);
+fs.mkdirSync(BASE_DIR, { recursive: true });
+fs.chmodSync(BASE_DIR, 0o700);
+try { fs.chmodSync(LOG_PATH, 0o600); } catch {}
 
 const log = createLog(LOG_PATH);
 const startedAt = Math.floor(Date.now() / 1000);
@@ -49,6 +62,8 @@ const every = (ms, fn) => timers.push(setInterval(fn, ms));
 // ---- Diplomat's settings
 
 let hours = { requiredMinimumH: HOURS_FLOOR, maximumAcceptedH: HOURS_FLOOR };
+// `networkDevices`: whether a job is given anything of this machine's devices.
+let devicesOn = false;
 let unreadable = 0;
 
 // Diplomat's config as an object, or null while it cannot be read as one.
@@ -70,7 +85,62 @@ function pollConfig() {
   unreadable = 0;
   // The node holds each to the range the protocol allows.
   hours = { requiredMinimumH: config.networkRequiredMinimumH, maximumAcceptedH: config.networkMaximumAcceptedH };
+  if ((config.networkDevices === true) !== devicesOn) {
+    devicesOn = !devicesOn;
+    log(devicesOn ? 'the jobs started from now on are given this machine\'s devices' : 'the jobs started from now on are given no device of this machine');
+    lookForAdb();
+  }
   if (config.networkEnabled !== true) end({ off: true, why: 'the network was switched off in Diplomat\'s settings' });
+}
+
+// ---- the transport
+
+// A transport starts once, and one whose start failed is over: tor is not installed yet,
+// or its data directory is held. The node is given this instead, the transport of the
+// moment behind one face: a start that failed is followed by a new transport, the waits
+// between them doubling up to TRANSPORT_RETRY_MAX_MS, and the state the node shows is
+// `failed` with the reason during a wait and what the new transport says from its start.
+function lastingTransport(make) {
+  const watchers = [];
+  const halted = new AbortController();
+  let inner = make();
+  let state = inner.state();
+  let onRequest = null;
+  let limitFor = null;
+  const say = (now) => {
+    state = now;
+    for (const fn of watchers) fn({ ...now });
+  };
+  return {
+    address: inner.address,
+    state: () => ({ ...state }),
+    onState(fn) { watchers.push(fn); },
+    onRequest(fn) { onRequest = fn; },
+    limitFor(fn) { limitFor = fn; },
+    async start() {
+      for (let wait = TRANSPORT_RETRY_MS; ; wait = Math.min(wait * 2, TRANSPORT_RETRY_MAX_MS)) {
+        const mine = inner;
+        mine.onRequest(onRequest);
+        mine.limitFor(limitFor);
+        mine.onState(say);
+        try {
+          await mine.start();
+          return;
+        } catch (err) {
+          if (halted.signal.aborted) return;
+          log(`the transport did not start (${err?.message ?? err}): the next try is in ${wait / 1000} s`);
+        }
+        await delay(wait, null, { signal: halted.signal }).catch(() => {});
+        if (halted.signal.aborted) return;
+        inner = make();
+      }
+    },
+    request: (...args) => inner.request(...args),
+    async stop() {
+      halted.abort();
+      await inner.stop();
+    },
+  };
 }
 
 // ---- the requester side
@@ -127,17 +197,27 @@ const mirrors = createMirrors({ log });
 const broker = createBroker({ log, ca, llm, mirrors, onForge: (job, request) => node.actFor(job.runId)(request) });
 const containers = createContainers({ log, broker: () => broker.address() });
 
-const jobs = new Map(); // run id -> { container, pool, peer, token, generation, release, stopping }
+const jobs = new Map(); // run id -> { container, pool, peer, token, generation, pid, forwards, release, stopping, ended }
 // Until the jobs an earlier daemon left were looked at, a run this daemon holds no job
-// for may still be running, and its container must not be touched for another.
+// for may still be running: nothing can be said of it, and no job is started, since a
+// container this daemon has counted no job in is restarted before its first.
 let takenUp = false;
 const lookedAt = Promise.withResolvers();
 let report = () => {};
 
+// jobs.json as it stands on disk. It is written when a job comes or goes, and every
+// JOBS_WRITE_MS while what a job has spent of the model moves: the daemon after this one
+// counts on from there, a few seconds short at most.
+let savedJobs = '';
 const saveJobs = () => {
-  const kept = Object.fromEntries([...jobs].map(([runId, { container, pool, peer, token, generation }]) => [runId, { container, pool, peer, token, generation }]));
+  const kept = Object.fromEntries([...jobs].map(([runId, { container, pool, peer, token, generation, pid, forwards }]) => [
+    runId, { container, pool, peer, token, generation, pid, forwards, spent: broker.spent?.(runId) ?? null },
+  ]));
+  const next = { port: broker.address()?.port ?? 0, jobs: kept };
+  if (JSON.stringify(next) === savedJobs) return;
   try {
-    atomicWrite(JOBS_PATH, { port: broker.address()?.port ?? 0, jobs: kept }, 0o600);
+    atomicWrite(JOBS_PATH, next, 0o600);
+    savedJobs = JSON.stringify(next);
   } catch (err) {
     log(`jobs.json could not be written: ${err?.message ?? err}`);
   }
@@ -149,30 +229,31 @@ function poolOf(link) {
   return { id: link.id, forge: link.forge, host: parts[0], owner: parts.slice(1, -1).join('/'), repo: parts.at(-1) };
 }
 
-// Does the host's adb server answer? Asked in adb's own words: some other listener on
-// that port is nothing to hand a job.
-function adbAnswers() {
-  return new Promise((resolve) => {
-    if (!ADB_SERVER) return resolve(false);
-    const socket = net.connect(ADB_SERVER);
-    let said = '';
-    const done = (answer) => { socket.destroy(); resolve(answer); };
-    socket.setTimeout(2000, () => done(false));
-    socket.on('error', () => done(false));
-    socket.on('connect', () => socket.write('000chost:version'));
-    socket.on('data', (chunk) => {
-      said += chunk.toString('latin1');
-      if (said.length >= 4) done(said.startsWith('OKAY'));
-    });
-    socket.on('close', () => resolve(false));
-  });
+// The adb server as jobs reach it: through the filter, never at its own address.
+const adb = createAdbFilter({ target: ADB_SERVER, log });
+let adbUp = false;
+
+async function lookForAdb() {
+  adbUp = devicesOn && await adbAnswers(ADB_SERVER);
+  return adbUp;
 }
 
-// The forwards one job is given: the adb server while it answers, and whatever
-// DN_FORWARDS names.
-async function openForwards(runId) {
-  const forwards = Object.entries(FORWARDS).map(([name, target]) => broker.addForward(runId, { name, target }));
-  if (await adbAnswers()) forwards.push(broker.addForward(runId, { name: 'adb', target: ADB_SERVER }));
+// The snapshot's `devices`: `off` until the operator opts in, then `ready` while an adb
+// server answers and `none` while none does.
+function devicesState() {
+  if (!devicesOn) return { state: 'off', detail: '' };
+  if (adbUp) return { state: 'ready', detail: '' };
+  return { state: 'none', detail: ADB_SERVER ? `no adb server answers at ${ADB_SERVER.host}:${ADB_SERVER.port}` : 'DN_ADB_SERVER names no address on this machine' };
+}
+
+// The forwards one job is given while the operator offers this machine's devices: the
+// adb server, filtered, while it answers, and whatever DN_FORWARDS names. `only` holds a
+// job taken up after a restart to the forwards it was started with.
+async function openForwards(runId, only = null) {
+  if (!devicesOn) return [];
+  const wanted = (name) => only === null || only.includes(name);
+  const forwards = Object.entries(FORWARDS).filter(([name]) => wanted(name)).map(([name, target]) => broker.addForward(runId, { name, target }));
+  if (wanted('adb') && await lookForAdb()) forwards.push(broker.addForward(runId, { name: 'adb', target: await adb.start() }));
   return forwards;
 }
 
@@ -188,6 +269,7 @@ async function settle(runId, outcome) {
   const job = jobs.get(runId);
   if (!job) return;
   log(`${runId} ended: ${outcome.state ?? 'failed'}${outcome.ok ? '' : ` (${outcome.summary})`}`);
+  job.ended = true;
   report(runId, outcome);
   broker.removeJob(runId);
   job.release();
@@ -215,9 +297,15 @@ async function startRun({ runId, pool: link, peer, spec }) {
     container = await containers.acquire({ pool, peer, runId });
     const proxy = await broker.addJob({ runId, pool, peer });
     const forwards = await openForwards(runId);
-    jobs.set(runId, { container: container.name, pool, peer, token: proxy.token, generation: proxy.generation, release, stopping: null });
+    jobs.set(runId, {
+      container: container.name, pool, peer, token: proxy.token, generation: proxy.generation, pid: 0, forwards: forwards.map((f) => f.name),
+      release, stopping: null, ended: false,
+    });
     saveJobs();
     const started = await startJob({ run: { runId, pool }, container, spec, proxy, env: llm.env(), forwards });
+    // Kept here for the daemon after this one: the job can rewrite its own copy.
+    jobs.get(runId).pid = started.pid;
+    saveJobs();
     log(`${runId} started in ${container.name} for ${peer}${forwards.length > 0 ? `, with ${forwards.map((f) => f.name).join(', ')} forwarded` : ''}`);
     follow(runId);
     return { container: container.name, log: started.log };
@@ -232,12 +320,15 @@ async function startRun({ runId, pool: link, peer, spec }) {
 }
 
 // Stops a job and does not give up: the node asks once, and a job that outlived its run
-// would go on spending the requester's key and this machine's model.
+// would go on spending the requester's key and this machine's model. Its way out is
+// closed before anything is asked of its container, so one that is slow to die, or
+// will not, does neither from that moment.
 function stopRun(runId, reason) {
   const job = jobs.get(runId);
   if (!job) return Promise.resolve();
   job.stopping ??= (async () => {
     log(`stopping ${runId}: ${reason}`);
+    broker.removeJob(runId);
     while (jobs.has(runId)) {
       try {
         // Null for a job that was never started or has ended: `settle` clears it away.
@@ -254,19 +345,19 @@ function stopRun(runId, reason) {
 const executor = {
   // Only what can run right now is claimed: a claim this machine cannot serve keeps the
   // task from every machine that could.
-  wouldTake: () => !ending && takenUp && containers.dockerState().state === 'ready' && llm.state().state === 'ready',
+  wouldTake: () => !ending && containers.dockerState().state === 'ready' && llm.state().state === 'ready',
   start: startRun,
   stop: stopRun,
   alive: (runId) => (jobs.has(runId) ? true : takenUp ? false : null),
   onEnd(fn) { report = fn; },
 };
 
-// A job this daemon can no longer serve is given back: the node stops it and releases
-// its claim, which costs its requester no attempt. One the node holds no run for is
-// stopped here.
+// A job this daemon can no longer serve is given back: the node stops it for that
+// reason and releases its claim, which costs its requester no attempt. One the node
+// holds no run for is stopped here.
 function giveBack(runId, why) {
   log(`giving ${runId} back: ${why}`);
-  node.stopRun({ runId }).catch(() => stopRun(runId, why));
+  node.stopRun({ runId, reason: why }).catch(() => stopRun(runId, why));
 }
 
 // Takes up the jobs the daemon before this one left running: each is admitted to the
@@ -283,22 +374,22 @@ async function takeUp(kept) {
       }
       const container = await containers.adopt({ pool: was.pool, peer: was.peer, runId });
       if (!container) continue;
-      if (!attachJob({ runId, container })) {
+      if (!attachJob({ runId, container, pid: was.pid || null })) {
         await containers.release({ name: container.name, runId });
         continue;
       }
-      jobs.set(runId, { ...was, container: container.name, release: mirrors.retain(was.pool), stopping: null });
+      jobs.set(runId, { ...was, container: container.name, release: mirrors.retain(was.pool), stopping: null, ended: false });
       follow(runId);
       if (moved) {
         // The job's proxy address leads to a port this daemon could not have again.
         giveBack(runId, 'the broker could not listen where this job reaches it');
         continue;
       }
-      await broker.addJob({ runId, pool: was.pool, peer: was.peer }, { token: was.token, generation: was.generation });
-      await openForwards(runId);
+      await broker.addJob({ runId, pool: was.pool, peer: was.peer }, { token: was.token, generation: was.generation, spent: was.spent ?? undefined });
+      await openForwards(runId, was.forwards ?? []);
       log(`${runId} taken up in ${container.name}`);
     } catch (err) {
-      log(`${runId} could not be taken up: ${err?.message ?? err}`);
+      log(`${runId} could not be taken up: ${err?.stack ?? err}`);
       if (jobs.has(runId)) giveBack(runId, 'it could not be taken up after a restart');
     }
   }
@@ -308,17 +399,53 @@ async function takeUp(kept) {
 }
 
 // A job the node holds no live run for is stopped: its run was stopped while a stop
-// could not go through, or the node's own record of it was lost.
+// could not go through, or the node's own record of it was lost. So is a job this
+// daemon holds no record of at all, which jobs.json lost leaves behind: it runs on in
+// its container with a proxy token nobody takes.
 function reconcile() {
-  if (!takenUp || jobs.size === 0) return;
+  if (!takenUp) return;
   const going = new Set(node.snapshot().runs.filter((run) => run.endedAt === 0).map((run) => run.runId));
-  for (const runId of jobs.keys()) {
-    if (!going.has(runId)) stopRun(runId, 'no run of this host stands behind it');
+  for (const [runId, job] of jobs) {
+    // One that ended is only being taken down.
+    if (!going.has(runId) && !job.ended) stopRun(runId, 'no run of this host stands behind it');
+  }
+  for (const { runId, container } of unended()) {
+    if (jobs.has(runId) || !attachJob({ runId, container })) continue;
+    log(`stopping ${runId} in ${container.name}: this daemon holds no record of the job`);
+    stopJob({ runId }).catch((err) => log(`${runId} could not be stopped: ${err?.message ?? err}`));
   }
 }
 
 async function checkExecutor() {
-  await Promise.all([containers.ensureImage().catch(() => {}), llm.load().catch(() => {})]);
+  await Promise.all([containers.ensureImage().catch(() => {}), llm.load().catch(() => {}), lookForAdb()]);
+}
+
+// What is not kept for ever, looked at every SWEEP_MS, each on its own: a container no
+// job has used for CONTAINER_IDLE_MS, every certificate authority but the newest (a job
+// answers from the one it was started under), the directory and the outcome of a run
+// RUN_KEEP_MS after it ended, and the mirror of a pool that has not been linked, or has
+// been left, for MIRROR_KEEP_MS.
+const upkeep = [
+  ['idle containers', () => containers.sweep()],
+  ['old certificate authorities', () => { if (jobs.size === 0) ca.prune(); }],
+  ['ended runs', () => {
+    const gone = forgetRuns({ olderThanMs: RUN_KEEP_MS });
+    if (gone.length > 0) log(`forgot ${gone.length} run(s) that ended over ${Math.round(RUN_KEEP_MS / 3600000)} h ago`);
+  }],
+  ['mirrors', () => {
+    const standing = new Set(node.snapshot().pools.filter((pool) => !pool.left).map((pool) => pool.id));
+    return mirrors.sweep([...links.values()].filter((link) => standing.has(link.id)).map(poolOf), MIRROR_KEEP_MS);
+  }],
+];
+
+async function sweep() {
+  for (const [what, look] of upkeep) {
+    try {
+      await look();
+    } catch (err) {
+      log(`upkeep of ${what} failed: ${err?.stack ?? err}`);
+    }
+  }
 }
 
 // The broker, the image and the model credential, then the jobs left from before. On
@@ -346,11 +473,8 @@ async function startExecutor() {
   await takeUp(kept);
   every(EXECUTOR_CHECK_MS, checkExecutor);
   every(RECONCILE_MS, reconcile);
-  every(SWEEP_MS, () => {
-    containers.sweep().catch((err) => log(`the sweep failed: ${err?.message ?? err}`));
-    // A job answers from the CA generation it was started under.
-    if (jobs.size === 0) ca.prune();
-  });
+  every(JOBS_WRITE_MS, saveJobs);
+  every(SWEEP_MS, sweep);
 }
 
 // ---- the snapshot
@@ -359,7 +483,7 @@ function snapshot() {
   const { updatedAt, identity, transport, admit, pools, runs, offers } = node.snapshot();
   return {
     updatedAt, daemon: { pid: process.pid, startedAt }, identity, transport,
-    docker: containers.dockerState(), model: llm.state(), admit, pools, runs, offers,
+    docker: containers.dockerState(), model: llm.state(), devices: devicesState(), admit, pools, runs, offers,
   };
 }
 
@@ -383,9 +507,9 @@ function touch() {
   writing ??= setTimeout(writeState, Math.max(0, written + STATE_WRITE_MS - Date.now()));
 }
 
-// The engine and the credential change without the node's knowing.
+// The engine, the credential and the devices change without the node's knowing.
 function watchExecutor() {
-  const now = JSON.stringify([containers.dockerState(), llm.state()]);
+  const now = JSON.stringify([containers.dockerState(), llm.state(), devicesState()]);
   if (now !== shown) touch();
   shown = now;
 }
@@ -506,7 +630,7 @@ const server = jsonServer(async (route, body) => {
     if (!(err instanceof Refusal)) log(`${route} failed: ${err?.stack ?? err}`);
     throw err;
   }
-});
+}, { notJson: 'The request body is not JSON.' });
 
 // ---- the process
 
@@ -521,8 +645,9 @@ function bye(code) {
 }
 
 // Ends the daemon. Switched `off`, the node first cancels what this machine offered,
-// stops what it runs and tells its pools; otherwise the runs are left going for the
-// next daemon. Either way the transport stops, and with it tor.
+// stops what it runs and tells its pools, and everything this daemon made in docker is
+// removed; otherwise the runs are left going for the next daemon. Either way the
+// transport stops, and with it tor.
 async function end({ off, why }) {
   if (ending) return;
   ending = true;
@@ -536,6 +661,9 @@ async function end({ off, why }) {
       // The jobs the node stopped, taken down before the broker goes.
       const gone = (async () => { while (jobs.size > 0) await delay(100); })();
       await Promise.race([gone, delay(SWITCH_OFF_WAIT_MS)]);
+      // A job that outlived its stop goes with its container here.
+      const cleared = await Promise.race([clearDocker(), delay(SWITCH_OFF_WAIT_MS)]);
+      if (cleared > 0) log(`removed ${cleared} container(s), network(s) and volume(s) of this daemon`);
     } else {
       await node?.stop();
     }
@@ -543,9 +671,29 @@ async function end({ off, why }) {
     log(`the node did not stop cleanly: ${err?.stack ?? err}`);
   }
   await broker.stop().catch((err) => log(`the broker did not stop: ${err?.message ?? err}`));
+  await adb.stop();
   writeState();
   log('ended');
   bye(0);
+}
+
+// An exception nobody caught, thrown by some event's handler: logged with its stack,
+// and the daemon goes on serving - the jobs it watches are worth more than the one
+// event. The same fault FAULT_REPEATS times within FAULT_WINDOW_MS is one it does not
+// get past: it exits with a status that has Diplomat start it again, its jobs left
+// going for the daemon after it.
+const faults = new Map(); // a fault's message and first frame -> when it was thrown, of late
+function onFault(err) {
+  const stack = String(err?.stack ?? err);
+  log(`uncaught: ${stack}`);
+  const now = Date.now();
+  for (const [fault, times] of faults) if (now - times.at(-1) >= FAULT_WINDOW_MS) faults.delete(fault);
+  const fault = stack.split('\n').slice(0, 2).join('\n');
+  const times = [...(faults.get(fault) ?? []).filter((at) => now - at < FAULT_WINDOW_MS), now];
+  faults.set(fault, times);
+  if (times.length < FAULT_REPEATS) return;
+  log(`the same fault ${FAULT_REPEATS} times within ${FAULT_WINDOW_MS / 1000} s: exiting, to be started again`);
+  bye(1);
 }
 
 let signalled = false;
@@ -580,7 +728,7 @@ function onListening() {
   }
   links = new Map((store.read('links')?.pools ?? []).map((pool) => [pool.id, pool]));
   node = createNode({
-    store, transport: createTransport({ identity, log }), log, requester, executor,
+    store, transport: lastingTransport(() => createTransport({ identity, log })), log, requester, executor,
     clock: { now: () => Math.floor(Date.now() / 1000), setTimeout, clearTimeout },
     random: (n) => crypto.randomBytes(n),
     settings: () => hours,
@@ -593,11 +741,20 @@ function onListening() {
   pollConfig();
   every(CONFIG_POLL_MS, pollConfig);
   every(STATE_WRITE_MS, watchExecutor);
+  // A test's way to a fault in an event's handler: each line of this file is thrown once.
+  if (TEST_FAULTS_PATH) {
+    every(CONFIG_POLL_MS, () => {
+      let lines = [];
+      try { lines = fs.readFileSync(TEST_FAULTS_PATH, 'utf8').split('\n').filter(Boolean); } catch {}
+      if (lines.length === 0) return;
+      fs.writeFileSync(TEST_FAULTS_PATH, lines.slice(1).map((line) => `${line}\n`).join(''));
+      throw new Error(lines[0]);
+    });
+  }
   touch();
 }
 
 async function start() {
-  fs.mkdirSync(BASE_DIR, { recursive: true, mode: 0o700 });
   if (await socketHealthy(SOCKET_PATH)) {
     const owner = readJson(DISCOVERY_PATH)?.pid;
     log(`another daemon${owner ? ` (pid ${owner})` : ''} is already live; exiting`);
@@ -609,6 +766,7 @@ async function start() {
   process.on('SIGTERM', () => onSignal('SIGTERM'));
   // A promise nobody waited for must not take the daemon and its runs' watch down.
   process.on('unhandledRejection', (err) => log(`unhandled: ${err?.stack ?? err}`));
+  process.on('uncaughtException', onFault);
 }
 
 start();

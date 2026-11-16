@@ -174,6 +174,8 @@ export const JOB_POLL_MS = num('DN_JOB_POLL_MS', 500);
 export const JOB_LIVENESS_MS = num('DN_JOB_LIVENESS_MS', 10 * 1000);
 // A stopped job gets this long between SIGTERM and SIGKILL.
 export const JOB_STOP_GRACE_MS = num('DN_JOB_STOP_GRACE_MS', 5000);
+/// A job still there this long after it was first told to stop ends with its container.
+export const JOB_STOP_BOUND_MS = num('DN_JOB_STOP_BOUND_MS', 60 * 1000);
 // The name a container reaches this machine's broker by.
 export const CONTAINER_HOST = process.env.DN_CONTAINER_HOST || 'host.docker.internal';
 // The name a job container reaches its relay by, and through it the broker. The relay
@@ -184,8 +186,6 @@ export const RELAY_HOST = process.env.DN_RELAY_HOST || 'dn-broker';
 // task spends.
 export const JOB_MODEL_REQUESTS = num('DN_JOB_MODEL_REQUESTS', 5000);
 export const JOB_MODEL_BYTES = num('DN_JOB_MODEL_BYTES', 8 * 2 ** 30);
-// A job's runner is given this long to come up after it is started.
-export const JOB_START_MS = num('DN_JOB_START_MS', 60 * 1000);
 
 /// What the daemon keeps of its jobs for the daemon after it: the broker's port and, per
 /// job, its container, its proxy token and the CA generation it trusts (0600).
@@ -199,11 +199,30 @@ export const STATE_WRITE_MS = 1000;
 export const EXECUTOR_CHECK_MS = num('DN_EXECUTOR_CHECK_MS', 30 * 1000);
 /// How often the jobs in this daemon's containers are held against the node's runs.
 export const RECONCILE_MS = num('DN_RECONCILE_MS', 15 * 1000);
-/// How often idle containers are removed and old CA generations pruned.
+/// How often what is not kept for ever is looked at: idle containers, old CA
+/// generations, the directories of ended runs, the mirrors of pools no longer linked.
 export const SWEEP_MS = num('DN_SWEEP_MS', 10 * 60 * 1000);
 /// The pause before something that failed for want of docker is tried again: a stop that
 /// did not go through, the broker's listener.
 export const EXECUTOR_RETRY_MS = num('DN_EXECUTOR_RETRY_MS', 5000);
+/// jobs.json follows what the jobs have spent of the model this often.
+export const JOBS_WRITE_MS = num('DN_JOBS_WRITE_MS', 5000);
+/// A run's directory and its outcome are kept this long after the run ended.
+export const RUN_KEEP_MS = num('DN_RUN_KEEP_MS', 24 * 3600 * 1000);
+/// A pool's mirror is kept this long after the pool was last linked and not left.
+export const MIRROR_KEEP_MS = num('DN_MIRROR_KEEP_MS', 24 * 3600 * 1000);
+/// An uncaught exception that comes back this many times within FAULT_WINDOW_MS ends
+/// the daemon.
+export const FAULT_REPEATS = 5;
+/// The time within which a fault that comes back counts as the same trouble.
+export const FAULT_WINDOW_MS = 60 * 1000;
+/// Only for tests: a file whose lines the daemon throws, one per config poll, from a
+/// timer's handler.
+export const TEST_FAULTS_PATH = process.env.DN_TEST_FAULTS || '';
+/// The wait before a transport whose start failed is made again and started.
+export const TRANSPORT_RETRY_MS = num('DN_TRANSPORT_RETRY_MS', 5000);
+/// That wait doubles after every start that fails, up to this.
+export const TRANSPORT_RETRY_MAX_MS = num('DN_TRANSPORT_RETRY_MAX_MS', 5 * 60 * 1000);
 /// How long the installer waits for a daemon it stopped to be gone. A daemon that is
 /// switched off first tells its pools, which SWITCH_OFF_WAIT_MS bounds.
 export const STOP_WAIT_MS = num('DN_STOP_WAIT_MS', SWITCH_OFF_WAIT_MS + 30 * 1000);
@@ -213,11 +232,12 @@ function loopback(value) {
   const m = /^(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})$/.exec(String(value ?? ''));
   return m && Number(m[2]) > 0 && Number(m[2]) < 65536 ? { host: m[1] === 'localhost' ? '127.0.0.1' : m[1].replace(/[[\]]/g, ''), port: Number(m[2]) } : null;
 }
-/// The host's adb server: forwarded to every job while it answers.
+/// The host's adb server: while `networkDevices` is on and it answers, every job is
+/// given a filtered way to it.
 export const ADB_SERVER = loopback(process.env.DN_ADB_SERVER || '127.0.0.1:5037');
-/// More forwards every job is given: DN_FORWARDS is a JSON object of name ->
-/// "127.0.0.1:port". A name that is no forward's name or a target off this machine's
-/// loopback is left out.
+/// More forwards every job is given while `networkDevices` is on: DN_FORWARDS is a JSON
+/// object of name -> "127.0.0.1:port". A name that is no forward's name or a target off
+/// this machine's loopback is left out.
 export const FORWARDS = (() => {
   try {
     const parsed = JSON.parse(process.env.DN_FORWARDS || '{}');

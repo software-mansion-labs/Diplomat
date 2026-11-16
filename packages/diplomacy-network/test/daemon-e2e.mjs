@@ -8,8 +8,11 @@
 
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import net from 'node:net';
-import { POOL, REPO, check, createBench, fakeAdb, passed, until } from './lib/daemons.mjs';
+import path from 'node:path';
+import { GITLAB_POOL, POOL, REPO, check, createBench, fakeAdb, passed, until } from './lib/daemons.mjs';
+import { GITLAB_HOST } from './lib/fake-forge.mjs';
 
 const bench = await createBench();
 const adb = await fakeAdb();
@@ -18,7 +21,7 @@ const allocator = net.createServer((socket) => socket.end('allocator\n'));
 await new Promise((resolve) => allocator.listen(0, '127.0.0.1', resolve));
 
 const hex8 = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 8);
-const containerOf = (peer) => `dn-${hex8(POOL)}-${hex8(peer)}`;
+const containerOf = (peer, pool = POOL) => `dn-${hex8(pool)}-${hex8(peer)}`;
 const offerOf = async (m, taskId) => (await m.state()).offers.find((o) => o.taskId === taskId);
 const runOf = async (m, taskId) => (await m.state()).runs.filter((r) => r.taskId === taskId).at(-1) ?? null;
 const ended = (m, taskId) => until(`${taskId} to end`, async () => {
@@ -28,12 +31,17 @@ const ended = (m, taskId) => until(`${taskId} to end`, async () => {
 // How a step of the stand-in agent went: an API status, or whether a push was taken.
 const went = (steps) => steps.map((s) => [s.verb, s.verb === 'push' ? (s.code === 0 ? 'pushed' : 'refused') : s.status ?? null]);
 // Whose credential a request to the forge carried.
-const sender = (machines) => (r) => machines.find((m) => [`Bearer ${m.token}`, `Basic ${Buffer.from(`x-access-token:${m.token}`).toString('base64')}`].includes(r.headers.authorization))?.name ?? null;
+const sender = (machines) => (r) => machines.find((m) => [
+  `Bearer ${m.token}`, `Basic ${Buffer.from(`x-access-token:${m.token}`).toString('base64')}`,
+  `Bearer ${m.gitlabToken}`, `Basic ${Buffer.from(`oauth2:${m.gitlabToken}`).toString('base64')}`,
+].includes(r.headers.authorization))?.name ?? null;
 
 try {
   const a = bench.machine('a');
   const b = bench.machine('b', { env: { DN_ADB_SERVER: `127.0.0.1:${adb.port}`, DN_FORWARDS: JSON.stringify({ alloc: `127.0.0.1:${allocator.address().port}`, lan: '192.168.1.1:80' }) } });
   const c = bench.machine('c');
+  // B's operator offers its devices to the jobs it runs.
+  b.setConfig({ networkDevices: true });
   const by = sender([a, b, c]);
   await Promise.all([a.start(), b.start(), c.start()]);
   await Promise.all([a.linked(), b.linked(), c.linked()]);
@@ -113,9 +121,13 @@ try {
     assert.match(agent.prompt, /^[\s\S]+\n---\n\nwait go\n/, 'the container preamble, then the requester\'s words');
 
     // The adb server and what DN_FORWARDS names, each as the variable its tool reads; a
-    // target off this machine's loopback is no forward.
+    // target off this machine's loopback is no forward. The server is asked after its
+    // devices, and what would have it act on this machine never reaches it.
     const step = agent.steps.find((s) => s.verb === 'adb');
     assert.deepEqual([step.version, step.devices], ['OKAY00040029', 'OKAY0015emulator-5554\tdevice\n']);
+    assert.equal(step.connect, 'FAIL003fnot offered to a task on this machine: host:connect:127.0.0.1:1');
+    assert.deepEqual(adb.asked.filter((service) => !['host:version', 'host:devices'].includes(service)), []);
+    assert.deepEqual([(await b.state()).devices, (await a.state()).devices], [{ state: 'ready', detail: '' }, { state: 'off', detail: '' }]);
     assert.match(agent.env.ADB_SERVER_SOCKET, /^tcp:127\.0\.0\.1:\d+$/);
     assert.notEqual(agent.env.ADB_SERVER_SOCKET, `tcp:127.0.0.1:${adb.port}`, 'a listener of the job\'s own, not the host\'s port');
     assert.match(agent.env.DN_FORWARD_ALLOC, /^127\.0\.0\.1:\d+$/);
@@ -166,7 +178,10 @@ try {
   });
 
   await check('another requester gets a container of its own, and two jobs at once each act through their own requester', async () => {
-    await b.admit(2);
+    // Said once: a word repeated after the first claim counts that claim's run twice
+    // for ten seconds, and the second task would wait them out.
+    b.quiet();
+    await b.ok('/admit', { slots: 2 });
     const before = bench.forge.log.length;
     const prompt = (who) => ['wait both', `api POST /repos/acme/widgets/pulls/1/reviews {"event":"COMMENT","body":"from ${who}"}`, 'adb', `say done for ${who}`].join('\n');
     const mine = await a.ok('/offer', { pool: POOL, kind: 'review', item: 'pr-1', title: 'Again', prompt: prompt('a') });
@@ -188,8 +203,58 @@ try {
     await b.admit(1);
   });
 
+  await check('a GitLab pool: the project\'s number is asked of the forge once for every task, a review\'s note is posted as the requester, and what the rules leave out is refused', async () => {
+    await Promise.all([a, b].map((m) => m.ok('/pools', { pools: [m.link, m.gitlabLink()] })));
+    const { invite: toGitlab } = await a.ok('/invite', { pool: GITLAB_POOL });
+    assert.deepEqual(await b.ok('/join', { invite: toGitlab }), { pool: GITLAB_POOL });
+    const poolOn = async (m) => (await m.state()).pools.find((p) => p.id === GITLAB_POOL);
+    await until('two members of the GitLab pool', async () => (await poolOn(a)).members.length === 2 && (await poolOn(b)).members.length === 2);
+
+    const before = bench.forge.log.length;
+    const project = '/api/v4/projects/acme%2Fwidgets';
+    const first = await a.ok('/offer', {
+      pool: GITLAB_POOL, kind: 'review', item: 'pr-1', title: 'Review the merge request',
+      prompt: [
+        `api GET ${project}/merge_requests/1`, `api POST ${project}/merge_requests/1/notes {"body":"from a"}`,
+        `api POST ${project}/merge_requests/1/approve {}`, 'api DELETE /api/v4/projects/99', 'push sneaky', 'say reviewed the merge request',
+      ].join('\n'),
+    });
+    assert.equal(first.taskId, `${GITLAB_POOL}#review:pr-1@a`);
+    assert.equal((await ended(a, first.taskId)).outcome.summary, 'reviewed the merge request');
+    const run = await runOf(b, first.taskId);
+    const steps = b.agent(run.runId).steps;
+    assert.deepEqual(went(steps), [['api', 200], ['api', 201], ['api', 403], ['api', 403], ['push', 'refused'], ['say', null]], JSON.stringify(steps));
+    assert.equal(steps[0].body.author.username, 'someone', 'the forge\'s own answer came back');
+    assert.deepEqual([steps[2].body, steps[3].body], [{ message: 'no rule of this task allows the request' }, { message: 'no rule of this task allows the request' }]);
+    assert.deepEqual([b.agent(run.runId).env.GITLAB_HOST, b.agent(run.runId).env.GITLAB_TOKEN], [GITLAB_HOST, 'dn-placeholder']);
+    assert.deepEqual([run.peer, run.container, run.pool], [pk.a, containerOf(pk.a, GITLAB_POOL), GITLAB_POOL], 'a container of that pool\'s own');
+
+    // The same task again, spelling the project by its number, which only a requester
+    // that learned the number allows.
+    const second = await a.ok('/offer', {
+      pool: GITLAB_POOL, kind: 'review', item: 'pr-1', title: 'Review it again',
+      prompt: 'api POST /api/v4/projects/99/merge_requests/1/notes {"body":"again from a"}\nsay reviewed it again',
+    });
+    assert.equal((await ended(a, second.taskId)).outcome.summary, 'reviewed it again');
+    const again = await until('the second run', async () => (await (await b.state()).runs.filter((r) => r.taskId === second.taskId)).at(-1));
+    assert.notEqual(again.runId, run.runId);
+    assert.deepEqual(went(b.agent(again.runId).steps), [['api', 201], ['say', null]]);
+
+    const seen = bench.forge.log.slice(before).filter((r) => r.host === GITLAB_HOST && r.headers.authorization);
+    const api = seen.filter((r) => r.path.startsWith('/api/'));
+    assert.deepEqual(api.filter((r) => r.path === project).map((r) => [by(r), r.method]), [['a', 'GET']], 'asked once, by the requester, for both tasks');
+    assert.deepEqual(api.filter((r) => r.method !== 'GET').map((r) => [by(r), r.method, r.path, JSON.parse(r.body).body]), [
+      ['a', 'POST', `${project}/merge_requests/1/notes`, 'from a'], ['a', 'POST', '/api/v4/projects/99/merge_requests/1/notes', 'again from a'],
+    ], 'the two notes, each sent with the requester\'s credential, and nothing the rules refused');
+    assert.deepEqual([...new Set(seen.filter((r) => !r.path.startsWith('/api/')).map((r) => `${by(r)} ${r.path.replace('/acme/widgets.git/', '')}`))].sort(),
+      ['b git-upload-pack', 'b info/refs?service=git-upload-pack'], 'the clone is the executor\'s mirror, fetched as the executor');
+    assert.equal(bench.branch('sneaky'), null);
+  });
+
   await check('a task offered with `now` is run by the machine that offered it, in a container, whatever it admits', async () => {
-    const d = await bench.machine('d').start();
+    const d = bench.machine('d');
+    d.setConfig({ networkDevices: true });
+    await d.start();
     await d.linked();
     await d.ok('/admit', { slots: 0 });
     const waits = await d.ok('/offer', { pool: POOL, kind: 'review', item: 'pr-1', title: 'Later', prompt: 'say never' });
@@ -202,8 +267,76 @@ try {
     assert.deepEqual(d.docker('run').map((call) => call[call.indexOf('--name') + 1]), [containerOf(self)], 'its own task still runs in a container');
     assert.equal(d.agent(run.runId).steps[0].status, 200);
     assert.equal(d.agent(run.runId).env.ADB_SERVER_SOCKET, undefined, 'no adb server answers on this machine, so none is forwarded');
+    assert.deepEqual((await d.state()).devices, { state: 'none', detail: 'no adb server answers at 127.0.0.1:1' });
     assert.deepEqual([(await offerOf(d, waits.taskId)).state, await runOf(d, waits.taskId)], ['pooled', null], 'what it did not ask to run now waits for a slot');
     await d.kill();
+  });
+
+  await check('a machine gives its jobs nothing of its devices until its operator says so, and what the operator says holds for the jobs started after it', async () => {
+    const own = await fakeAdb();
+    const e = await bench.machine('e', { env: { DN_ADB_SERVER: `127.0.0.1:${own.port}`, DN_FORWARDS: JSON.stringify({ alloc: `127.0.0.1:${allocator.address().port}` }) } }).start();
+    await e.linked();
+    // The same two tasks are offered again and again here, and a task keeps its id: the
+    // run of an offer is the one that was not there before it.
+    const job = async (item, prompt) => {
+      const before = new Set((await e.state()).runs.map((run) => run.runId));
+      const { taskId } = await e.ok('/offer', { pool: POOL, kind: item === 'pr-1' ? 'review' : 'issues', item, title: item, prompt, now: true });
+      const mine = (run) => run.taskId === taskId && !before.has(run.runId) && run.container !== '';
+      return { taskId, run: await until(`the job of ${item}`, async () => (await e.state()).runs.find(mine) ?? null) };
+    };
+    const given = (run) => { const { env } = e.agent(run.runId); return [env.ADB_SERVER_SOCKET !== undefined, env.DN_FORWARD_ALLOC !== undefined]; };
+
+    // An adb server answers and DN_FORWARDS names a forward, and neither is offered.
+    assert.deepEqual((await e.state()).devices, { state: 'off', detail: '' });
+    const off = await job('pr-1', 'adb\nsay nothing here');
+    await ended(e, off.taskId);
+    assert.deepEqual(given(off.run), [false, false]);
+    assert.equal(e.agent(off.run.runId).steps[0].version, 'no ADB_SERVER_SOCKET');
+    assert.match(e.agent(off.run.runId).prompt, /No simulator, emulator or device is offered to this task/);
+    assert.deepEqual(own.asked, [], 'the adb server was not so much as asked whether it is there');
+
+    e.setConfig({ networkDevices: true });
+    await until('the devices offered', async () => (await e.state()).devices.state === 'ready');
+    const on = await job('issue-2', 'wait held\nadb\nsay listed');
+    await until('the job to wait', () => e.agent(on.run.runId)?.waiting === 'held');
+    assert.deepEqual([...given(on.run), e.agent(on.run.runId).env.DN_FORWARDS], [true, true, 'alloc adb']);
+
+    // Taken back while that job runs: it keeps what it was started with, the next has none.
+    e.setConfig({ networkDevices: false });
+    await until('the devices withdrawn', async () => (await e.state()).devices.state === 'off');
+    const after = await job('pr-1', 'adb\nsay nothing again');
+    await ended(e, after.taskId);
+    assert.deepEqual(given(after.run), [false, false]);
+    e.release('held');
+    await ended(e, on.taskId);
+    assert.equal(e.agent(on.run.runId).steps.find((s) => s.verb === 'adb').devices, 'OKAY0015emulator-5554\tdevice\n');
+
+    // A job left going by the daemon before has what it was started with and no more,
+    // whatever the setting says by then: the status of the broker's answer to a job's
+    // token asking for its adb forward.
+    const forward = (run) => new Promise((resolve) => {
+      const { port, jobs } = JSON.parse(fs.readFileSync(path.join(e.base, 'jobs.json'), 'utf8'));
+      const socket = net.connect(port, '127.0.0.1');
+      let said = '';
+      const answer = (status) => { socket.destroy(); resolve(status); };
+      socket.on('connect', () => socket.write(`CONNECT adb.forward.dn:1 HTTP/1.1\r\nHost: adb.forward.dn:1\r\nProxy-Authorization: Basic ${Buffer.from(`dn:${jobs[run.runId].token}`).toString('base64')}\r\n\r\n`));
+      socket.on('data', (chunk) => { said += chunk.toString('latin1'); if (said.includes('\r\n')) answer(Number(said.split(' ')[1])); });
+      socket.on('error', () => answer(0));
+      socket.on('close', () => answer(0));
+    });
+    const without = await job('pr-1', 'wait without\nsay without');
+    await until('the job without devices to wait', () => e.agent(without.run.runId)?.waiting === 'without');
+    e.setConfig({ networkDevices: true });
+    await until('the devices offered again', async () => (await e.state()).devices.state === 'ready');
+    const withAdb = await job('issue-2', 'wait with\nsay with');
+    await until('the job with devices to wait', () => e.agent(withAdb.run.runId)?.waiting === 'with');
+    assert.deepEqual([await forward(without.run), await forward(withAdb.run)], [404, 200]);
+    assert.deepEqual(await e.stop(), { code: 0, signal: null });
+    await e.start();
+    await until('both taken up', () => [without, withAdb].every(({ run }) => e.log().includes(`${run.runId} taken up in ${run.container}`)));
+    assert.deepEqual([await forward(without.run), await forward(withAdb.run)], [404, 200], 'the same after a restart');
+    await e.kill();
+    await own.close();
   });
 
   console.log(`\nall ${passed()} checks passed (${REPO})`);

@@ -13,6 +13,10 @@ import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-ctr-'));
+// What every run id here begins with. The stand-in container shares the host's /proc,
+// where stop.sh finds a job's processes by the run id in their environment: two of this
+// file at once under one id would stop each other's jobs.
+const R = `run-${process.pid}`;
 const FAKE = fileURLToPath(new URL('./lib/fake-docker.mjs', import.meta.url));
 const fakeDir = path.join(scratch, 'docker');
 const agentDir = path.join(scratch, 'agent');
@@ -36,6 +40,7 @@ run="$DN_ROOT/dn/runs/$DN_RUN_ID"
 echo '{"type":"system","subtype":"init","model":"claude-big"}'
 case "$mode" in
   sleep) echo started > "$out.started"; exec sleep 60 ;;
+  defy) trap '' TERM; printf '#!/bin/sh\\nexit 0\\n' > "$run/stop.sh"; sed -n 's/^GROUP=//p' "$out.prompt" > "$run/pid"; echo started > "$out.started"; exec sleep 60 ;;
   vanish) echo started > "$out.started"; kill -9 "$PPID" "$$" ;;
   crash) echo "boom: the agent fell over" >&2; exit 3 ;;
   refused) echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"the model refused","total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":1}}'; exit 1 ;;
@@ -118,6 +123,8 @@ async function launch(runId, peer, repo, spec = {}, forwardTo = {}, alsoTold = [
   const proxy = await broker.addJob({ ...run, peer });
   const forwards = [...Object.entries(forwardTo).map(([name, port]) => broker.addForward(runId, { name, target: { port } })), ...alsoTold];
   const started = await startJob({ run, container, spec: { ...SPEC, ...spec }, proxy, env: { CLAUDE_CODE_OAUTH_TOKEN: 'dn-placeholder' }, forwards });
+  // The group a job is asked after and stopped by is there the moment the start names it.
+  assert.doesNotThrow(() => process.kill(-started.pid, 0), `no process group ${started.pid} yet`);
   const outcome = watch(run).finally(() => { broker.removeJob(runId); return containers.release({ name: container.name, runId }); });
   return { run, container, proxy, started, outcome };
 }
@@ -198,37 +205,37 @@ try {
 
   let first;
   await check('a job runs the agent in a clone of the repository, as the requester, behind the broker, holding no credential', async () => {
-    first = await launch('run-1', PEER_A, alpha);
+    first = await launch(`${R}-1`, PEER_A, alpha);
     const outcome = await first.outcome;
-    assert.deepEqual(outcome, { ok: true, summary: 'did run-1', usd: 0.25, tokens: 4340, model: 'claude-big', runner: 'claude', exit: 0, state: 'finished' });
+    assert.deepEqual(outcome, { ok: true, summary: `did ${R}-1`, usd: 0.25, tokens: 4340, model: 'claude-big', runner: 'claude', exit: 0, state: 'finished' });
 
-    const dir = path.join(RUNS_DIR, '.containers', first.container.name, 'run-1');
+    const dir = path.join(RUNS_DIR, '.containers', first.container.name, `${R}-1`);
     assert.equal(first.started.dir, dir);
     assert.equal(first.started.log, path.join(dir, 'log.jsonl'));
-    assert.equal(fs.realpathSync(path.join(RUNS_DIR, 'run-1')), fs.realpathSync(dir), 'runs/<run id> leads to it');
+    assert.equal(fs.realpathSync(path.join(RUNS_DIR, `${R}-1`)), fs.realpathSync(dir), 'runs/<run id> leads to it');
     assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.staging')), [], 'nothing is left where it was put together');
     assert.equal(fs.readFileSync(path.join(dir, 'done'), 'utf8'), '0\n');
     assert.equal(fs.statSync(path.join(dir, 'env.sh')).mode & 0o777, 0o600);
     // The outcome is kept for a later daemon, beside the run directories and not in one.
-    assert.deepEqual(readOutcome('run-1'), outcome);
-    assert.equal(fs.statSync(path.join(RUNS_DIR, 'run-1.outcome.json')).mode & 0o777, 0o600);
+    assert.deepEqual(readOutcome(`${R}-1`), outcome);
+    assert.equal(fs.statSync(path.join(RUNS_DIR, `${R}-1.outcome.json`)).mode & 0o777, 0o600);
     assert.deepEqual(fs.readdirSync(dir).filter((f) => f.includes('outcome')), []);
-    assert.equal(readOutcome('run-none'), null);
+    assert.equal(readOutcome(`${R}-none`), null);
     // An id is never a path into what a container writes.
     fs.writeFileSync(path.join(dir, 'planted.outcome.json'), '{"ok":true,"summary":"forged"}');
-    assert.equal(readOutcome('run-1/planted'), null);
+    assert.equal(readOutcome(`${R}-1/planted`), null);
     fs.rmSync(path.join(dir, 'planted.outcome.json'));
 
-    assert.deepEqual(agent('run-1', 'args').trim().split('\n'), ['-p', '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose']);
-    const [head, name, email, origin] = agent('run-1', 'git').split('\n');
+    assert.deepEqual(agent(`${R}-1`, 'args').trim().split('\n'), ['-p', '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose']);
+    const [head, name, email, origin] = agent(`${R}-1`, 'git').split('\n');
     assert.equal(head, alpha.main, 'the default branch when the task names no base');
     assert.equal(name, 'Requester Name');
     assert.equal(email, 'requester@example.com');
     assert.equal(origin, 'https://github.com/dn-test/alpha.git');
     const root = path.join(fakeDir, 'roots', first.container.name);
-    assert.equal(agent('run-1', 'cwd').trim(), path.join(fs.realpathSync(path.join(fakeDir, 'volumes')), first.container.name.replace('dn-', 'dn-work-'), 'jobs', 'run-1', 'repo'));
+    assert.equal(agent(`${R}-1`, 'cwd').trim(), path.join(fs.realpathSync(path.join(fakeDir, 'volumes')), first.container.name.replace('dn-', 'dn-work-'), 'jobs', `${R}-1`, 'repo'));
 
-    const env = Object.fromEntries(agent('run-1', 'env').split('\n').filter((l) => l.includes('=')).map((l) => l.split(/=(.*)/s).slice(0, 2)));
+    const env = Object.fromEntries(agent(`${R}-1`, 'env').split('\n').filter((l) => l.includes('=')).map((l) => l.split(/=(.*)/s).slice(0, 2)));
     for (const k of ['HTTPS_PROXY', 'HTTP_PROXY', 'https_proxy', 'http_proxy']) assert.equal(env[k], first.proxy.proxyUrl, k);
     assert.equal(env.NO_PROXY, 'localhost,127.0.0.1');
     assert.equal(env.NODE_USE_ENV_PROXY, '1');
@@ -239,15 +246,15 @@ try {
     assert.equal(env.CLAUDE_CODE_OAUTH_TOKEN, 'dn-placeholder');
     assert.equal(env.IS_SANDBOX, '1');
     assert.equal(env.GIT_TERMINAL_PROMPT, '0');
-    assert.equal(env.DN_RUN_ID, 'run-1');
-    assert.equal(fs.existsSync(path.join(root, 'work', 'jobs', 'run-1')), false, 'the work tree is gone when the job is');
+    assert.equal(env.DN_RUN_ID, `${R}-1`);
+    assert.equal(fs.existsSync(path.join(root, 'work', 'jobs', `${R}-1`)), false, 'the work tree is gone when the job is');
     assert.ok(fs.existsSync(path.join(root, 'work', 'cache.git', 'HEAD')), 'the container keeps its copy of the repository');
     assert.equal(forgeSeen.length, 0, 'the clone never went to the requester');
   });
 
   await check('the prompt is the container preamble, a rule, and the requester\'s words', () => {
-    const prompt = agent('run-1', 'prompt');
-    assert.equal(prompt, fs.readFileSync(path.join(RUNS_DIR, 'run-1', 'prompt.txt'), 'utf8'));
+    const prompt = agent(`${R}-1`, 'prompt');
+    assert.equal(prompt, fs.readFileSync(path.join(RUNS_DIR, `${R}-1`, 'prompt.txt'), 'utf8'));
     assert.ok(prompt.endsWith('\n\n---\n\nReview the pull request.\n'));
     assert.doesNotMatch(prompt, /\{\{/, 'every blank is filled');
     for (const said of ['https://github.com/dn-test/alpha.git', '`pr:7`', 'apt-get update && apt-get install -y', 'GNU', '403', '`gh`', 'git fetch origin pull/<n>/head',
@@ -255,32 +262,38 @@ try {
     const lab = renderPrompt({ pool: { id: 'gitlab.example.org/g/r', forge: 'gitlab', host: 'gitlab.example.org', owner: 'g', repo: 'r' }, spec: { ...SPEC, item: '' },
       forwards: [{ name: 'adb' }] });
     for (const said of ['https://gitlab.example.org/g/r.git', '`glab`', 'merge-requests/<n>/head', 'the repository as a whole', 'forwarded from the host and already in your environment: adb']) assert.ok(lab.includes(said), said);
+    // What adb is good for through the host's filter is said to a job that has it, and
+    // to no other.
+    const ADB = '`adb devices` lists what is attached to the host, and a device is named by its serial (`adb -s <serial>` or `ANDROID_SERIAL`). `adb connect`, `forward`, `reverse`, `pair` and `kill-server` are refused by the host: do not retry them.';
+    assert.ok(lab.includes(`already in your environment: adb. ${ADB}\n`));
+    const other = renderPrompt({ pool: { id: 'github.com/g/r', forge: 'github', host: 'github.com', owner: 'g', repo: 'r' }, spec: SPEC, forwards: [{ name: 'alloc' }] });
+    assert.ok(other.includes('already in your environment: alloc.\n') && !other.includes('adb devices'));
   });
 
   await check('a forward reaches a job as the variable its tool reads, and leads through the broker to its target', async () => {
     const echo = net.createServer((c) => c.on('data', (d) => c.write(`echo:${d}`)).on('error', () => {}));
     await new Promise((r) => echo.listen(0, '127.0.0.1', r));
     // Another job keeps the container up, so nothing here ends because the container did.
-    const holder = await launch('run-h', PEER_A, alpha, { prompt: 'MODE=sleep' });
-    const job = await launch('run-f', PEER_A, alpha, { prompt: 'MODE=forward' }, { echo: echo.address().port, adb: echo.address().port });
+    const holder = await launch(`${R}-h`, PEER_A, alpha, { prompt: 'MODE=sleep' });
+    const job = await launch(`${R}-f`, PEER_A, alpha, { prompt: 'MODE=forward' }, { echo: echo.address().port, adb: echo.address().port });
     assert.equal((await job.outcome).ok, true);
-    assert.equal(agent('run-f', 'forward'), 'echo:ping');
-    const env = agent('run-f', 'env');
+    assert.equal(agent(`${R}-f`, 'forward'), 'echo:ping');
+    const env = agent(`${R}-f`, 'env');
     const at = /^DN_FORWARD_ECHO=(127\.0\.0\.1:\d+)$/m.exec(env);
     assert.ok(at, 'a listener inside the container, not an address of the host');
     assert.notEqual(at[1], `127.0.0.1:${echo.address().port}`);
     assert.match(env, /^ADB_SERVER_SOCKET=tcp:127\.0\.0\.1:\d+$/m);
-    assert.match(agent('run-f', 'prompt'), /forwarded from the host and already in your environment: echo, adb\./);
-    assert.doesNotMatch(agent('run-1', 'env'), /DN_FORWARD|ADB_SERVER_SOCKET/, 'a job given none has none');
+    assert.match(agent(`${R}-f`, 'prompt'), /forwarded from the host and already in your environment: echo, adb\./);
+    assert.doesNotMatch(agent(`${R}-1`, 'env'), /DN_FORWARD|ADB_SERVER_SOCKET/, 'a job given none has none');
     await until('the listener is gone with its job', () => new Promise((resolve) => {
       const c = net.connect(Number(at[1].split(':')[1]), '127.0.0.1');
       c.on('connect', () => { c.destroy(); resolve(false); });
       c.on('error', () => resolve(true));
     }));
     // A forward the broker does not have for this job is a connection that closes, not the broker's refusal fed to the tool.
-    const ghost = await launch('run-g', PEER_A, alpha, { prompt: 'MODE=forward' }, {}, [{ name: 'echo' }]);
+    const ghost = await launch(`${R}-g`, PEER_A, alpha, { prompt: 'MODE=forward' }, {}, [{ name: 'echo' }]);
     assert.equal((await ghost.outcome).ok, true);
-    assert.equal(agent('run-g', 'forward'), '');
+    assert.equal(agent(`${R}-g`, 'forward'), '');
     await stopJob(holder.run);
     await holder.outcome;
     echo.close();
@@ -356,18 +369,18 @@ try {
   });
 
   await check('the same peer on the same repository gets the same container again; its second clone borrows from the first', async () => {
-    const second = await launch('run-2', PEER_A, alpha, { base: 'pull/7/head' });
+    const second = await launch(`${R}-2`, PEER_A, alpha, { base: 'pull/7/head' });
     assert.equal(second.container.name, first.container.name);
     assert.equal((await second.outcome).ok, true);
     assert.equal(calls('run').length, 1, 'one container, not two');
-    const [head, , , , alternates] = agent('run-2', 'git').split('\n');
+    const [head, , , , alternates] = agent(`${R}-2`, 'git').split('\n');
     assert.equal(head, alpha.pr, 'the pull request head, fetched from the mirror');
     assert.match(alternates, /\/cache\.git\/objects$/);
   });
 
   await check('another peer on the same repository, and the same peer on another repository, each get a container of their own', async () => {
-    const otherPeer = await launch('run-3', PEER_B, alpha);
-    const otherPool = await launch('run-4', PEER_A, beta);
+    const otherPeer = await launch(`${R}-3`, PEER_B, alpha);
+    const otherPool = await launch(`${R}-4`, PEER_A, beta);
     assert.equal((await otherPeer.outcome).ok, true);
     assert.equal((await otherPool.outcome).ok, true);
     const names = new Set([first.container.name, otherPeer.container.name, otherPool.container.name]);
@@ -375,43 +388,43 @@ try {
     assert.equal(calls('run').length, 3);
     assert.deepEqual(containers.list().map((c) => c.name).sort(), [...names].sort());
     // Each sees its own run records and no one else's.
-    for (const [name, mine] of [[first.container.name, ['run-1', 'run-2', 'run-f', 'run-g', 'run-h']], [otherPeer.container.name, ['run-3']], [otherPool.container.name, ['run-4']]]) {
+    for (const [name, mine] of [[first.container.name, [`${R}-1`, `${R}-2`, `${R}-f`, `${R}-g`, `${R}-h`]], [otherPeer.container.name, [`${R}-3`]], [otherPool.container.name, [`${R}-4`]]]) {
       assert.deepEqual(fs.readdirSync(path.join(fakeDir, 'roots', name, 'dn', 'runs')).sort(), mine);
     }
     // And each is on a network of its own, which is what keeps one peer's container from another's.
     const networks = calls('run').map((c) => c[c.indexOf('--network') + 1]);
     assert.deepEqual(networks.sort(), [...names].sort());
     assert.deepEqual(calls('create').map((c) => [c[c.indexOf('--name') + 1], c[c.indexOf('--network') + 1]]).sort(), [...names].sort().map((n) => [`${n}-relay`, n]));
-    assert.equal(agent('run-4', 'git').split('\n')[3], 'https://github.com/dn-test/beta.git');
+    assert.equal(agent(`${R}-4`, 'git').split('\n')[3], 'https://github.com/dn-test/beta.git');
   });
 
   await check('two jobs run at once in one container, and stopping one leaves the other to finish', async () => {
-    fs.writeFileSync(path.join(RUNS_DIR, 'run-5.outcome.json'), '{"ok":true,"summary":"an earlier run of that name"}');
-    const stays = await launch('run-5', PEER_A, alpha, { prompt: 'MODE=sleep' });
-    assert.equal(readOutcome('run-5'), null, 'a run that is running has no outcome yet');
-    const goes = await launch('run-6', PEER_A, alpha, { prompt: 'MODE=sleep' });
+    fs.writeFileSync(path.join(RUNS_DIR, `${R}-5.outcome.json`), '{"ok":true,"summary":"an earlier run of that name"}');
+    const stays = await launch(`${R}-5`, PEER_A, alpha, { prompt: 'MODE=sleep' });
+    assert.equal(readOutcome(`${R}-5`), null, 'a run that is running has no outcome yet');
+    const goes = await launch(`${R}-6`, PEER_A, alpha, { prompt: 'MODE=sleep' });
     assert.equal(stays.container.name, goes.container.name);
-    await until('both agents run', () => fs.existsSync(path.join(agentDir, 'run-5.started')) && fs.existsSync(path.join(agentDir, 'run-6.started')));
-    assert.deepEqual(containers.list().find((c) => c.name === stays.container.name).jobs.sort(), ['run-5', 'run-6']);
+    await until('both agents run', () => fs.existsSync(path.join(agentDir, `${R}-5.started`)) && fs.existsSync(path.join(agentDir, `${R}-6.started`)));
+    assert.deepEqual(containers.list().find((c) => c.name === stays.container.name).jobs.sort(), [`${R}-5`, `${R}-6`]);
     const pid = (r) => Number(fs.readFileSync(path.join(RUNS_DIR, r, 'pid'), 'utf8'));
-    const [staysPid, goesPid] = [pid('run-5'), pid('run-6')];
+    const [staysPid, goesPid] = [pid(`${R}-5`), pid(`${R}-6`)];
     assert.ok(pidAlive(staysPid) && pidAlive(goesPid));
 
     const stopped = await stopJob(goes.run);
     assert.deepEqual(stopped, { ok: false, summary: 'stopped', usd: 0, tokens: 0, model: '', runner: 'claude', exit: null, state: 'stopped' });
     assert.equal(await goes.outcome, stopped);
-    assert.deepEqual(readOutcome('run-6'), stopped);
+    assert.deepEqual(readOutcome(`${R}-6`), stopped);
     // A killed process is gone when the kernel gets to it, which is soon and not at once.
     await until('its runner is dead', () => !pidAlive(goesPid));
     await until('and so is everything it started', () => { try { process.kill(-goesPid, 0); return false; } catch { return true; } });
     assert.equal(pidAlive(staysPid), true, 'the other job was not touched');
     process.kill(-staysPid, 0);
-    assert.equal(fs.existsSync(path.join(fakeDir, 'roots', stays.container.name, 'work', 'jobs', 'run-6')), false);
-    assert.equal(fs.existsSync(path.join(fakeDir, 'roots', stays.container.name, 'work', 'jobs', 'run-5', 'repo', 'README')), true);
+    assert.equal(fs.existsSync(path.join(fakeDir, 'roots', stays.container.name, 'work', 'jobs', `${R}-6`)), false);
+    assert.equal(fs.existsSync(path.join(fakeDir, 'roots', stays.container.name, 'work', 'jobs', `${R}-5`, 'repo', 'README')), true);
     assert.equal(calls('rm').length, 0, 'the container was never removed');
     assert.equal(await stopJob(goes.run), null, 'stopping what has ended is nothing');
     const restarts = calls('restart').length;
-    await containers.release({ name: goes.container.name, runId: 'run-6' });
+    await containers.release({ name: goes.container.name, runId: `${R}-6` });
     assert.equal(calls('restart').length, restarts, 'nor restarted under the job still in it');
 
     // The survivor ends on its own terms: here, by being stopped later.
@@ -422,31 +435,31 @@ try {
   });
 
   await check('an agent that reports an error, one that dies without a word, and a task that cannot start are failures that say why', async () => {
-    const refused = await (await launch('run-7', PEER_A, alpha, { prompt: 'MODE=refused' })).outcome;
+    const refused = await (await launch(`${R}-7`, PEER_A, alpha, { prompt: 'MODE=refused' })).outcome;
     assert.deepEqual(refused, { ok: false, summary: 'the model refused', usd: 0.01, tokens: 6, model: '', runner: 'claude', exit: 1, state: 'failed' });
-    const crashed = await (await launch('run-8', PEER_A, alpha, { prompt: 'MODE=crash' })).outcome;
+    const crashed = await (await launch(`${R}-8`, PEER_A, alpha, { prompt: 'MODE=crash' })).outcome;
     assert.deepEqual(crashed, { ok: false, summary: 'the agent left no result: boom: the agent fell over', usd: 0, tokens: 0, model: '', runner: 'claude', exit: 3, state: 'failed' });
-    const noBase = await (await launch('run-9', PEER_A, alpha, { base: 'no-such-branch' })).outcome;
+    const noBase = await (await launch(`${R}-9`, PEER_A, alpha, { base: 'no-such-branch' })).outcome;
     assert.equal(noBase.ok, false);
     assert.equal(noBase.exit, 70);
     assert.match(noBase.summary, /^the agent left no result: .*dn: the base revision no-such-branch is not in the repository$/s);
-    assert.equal(fs.existsSync(path.join(agentDir, 'run-9.prompt')), false, 'the agent was never started');
+    assert.equal(fs.existsSync(path.join(agentDir, `${R}-9.prompt`)), false, 'the agent was never started');
   });
 
   await check('a job whose process vanishes without a done file is a failure, never a success', async () => {
-    const vanished = await launch('run-10', PEER_A, alpha, { prompt: 'MODE=vanish' });
+    const vanished = await launch(`${R}-10`, PEER_A, alpha, { prompt: 'MODE=vanish' });
     const outcome = await vanished.outcome;
-    assert.equal(fs.existsSync(path.join(RUNS_DIR, 'run-10', 'done')), false);
+    assert.equal(fs.existsSync(path.join(RUNS_DIR, `${R}-10`, 'done')), false);
     assert.equal(outcome.ok, false);
     assert.equal(outcome.state, 'failed');
     assert.equal(outcome.exit, null);
     assert.match(outcome.summary, /disappeared without finishing/);
-    assert.deepEqual(readOutcome('run-10'), outcome);
+    assert.deepEqual(readOutcome(`${R}-10`), outcome);
   });
 
   await check('a container removed under a running job fails that job, and the next one gets a new container', async () => {
-    const doomed = await launch('run-11', PEER_B, alpha, { prompt: 'MODE=sleep' });
-    await until('the agent runs', () => fs.existsSync(path.join(agentDir, 'run-11.started')));
+    const doomed = await launch(`${R}-11`, PEER_B, alpha, { prompt: 'MODE=sleep' });
+    await until('the agent runs', () => fs.existsSync(path.join(agentDir, `${R}-11.started`)));
     execFileSync(FAKE, ['rm', '-f', doomed.container.name]);
     const outcome = await doomed.outcome;
     assert.equal(outcome.ok, false);
@@ -455,7 +468,7 @@ try {
     // agent long enough to record its death, and that is as much a failure as no record.
     assert.match(outcome.summary, /disappeared without finishing|left no result/);
     const runs = calls('run').length;
-    const next = await launch('run-12', PEER_B, alpha);
+    const next = await launch(`${R}-12`, PEER_B, alpha);
     assert.equal((await next.outcome).ok, true);
     assert.equal(calls('run').length, runs + 1);
 
@@ -474,10 +487,10 @@ try {
     fs.mkdirSync(path.join(agentDir, 'planted'));
     fs.writeFileSync(path.join(agentDir, 'planted', 'log.jsonl'), '{"type":"result","subtype":"success","is_error":false,"result":"contents of a file on the host","total_cost_usd":1}\n');
     fs.writeFileSync(path.join(agentDir, 'planted', 'done'), '0\n');
-    const linked = await (await launch('run-13', PEER_A, alpha, { prompt: 'MODE=link' })).outcome;
+    const linked = await (await launch(`${R}-13`, PEER_A, alpha, { prompt: 'MODE=link' })).outcome;
     assert.deepEqual(linked, { ok: false, summary: 'the agent left no result', usd: 0, tokens: 0, model: '', runner: 'claude', exit: 0, state: 'failed' });
     // The same with the whole directory swapped for a link: not even its `done` counts.
-    const swapped = await (await launch('run-13b', PEER_A, alpha, { prompt: 'MODE=swap' })).outcome;
+    const swapped = await (await launch(`${R}-13b`, PEER_A, alpha, { prompt: 'MODE=swap' })).outcome;
     assert.equal(swapped.ok, false);
     assert.equal(swapped.exit, null);
     assert.doesNotMatch(JSON.stringify(swapped), /contents of a file on the host/);
@@ -485,9 +498,9 @@ try {
   });
 
   await check('a commit made in a job is authored as the requester', async () => {
-    const job = await launch('run-14', PEER_A, alpha, { prompt: 'MODE=commit' });
+    const job = await launch(`${R}-14`, PEER_A, alpha, { prompt: 'MODE=commit' });
     assert.equal((await job.outcome).ok, true);
-    assert.equal(agent('run-14', 'author').trim(), 'Requester Name <requester@example.com>');
+    assert.equal(agent(`${R}-14`, 'author').trim(), 'Requester Name <requester@example.com>');
   });
 
   await check('a run id that is not one, and a run started twice, are refused before anything is written', async () => {
@@ -507,7 +520,7 @@ try {
       await assert.rejects(startJob({ run: { runId: 'taken', pool: alpha.pool }, container, spec: SPEC, proxy }), /the run directory could not be put in place/);
     } finally { fs.rmSync = realRm; }
     assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.staging')), []);
-    const live = await launch('run-15', PEER_A, alpha, { prompt: 'MODE=sleep' });
+    const live = await launch(`${R}-15`, PEER_A, alpha, { prompt: 'MODE=sleep' });
     await assert.rejects(startJob({ run: live.run, container, spec: SPEC, proxy }), /already started/);
     await stopJob(live.run);
     containers.release({ name: container.name, runId: 'x' });
@@ -516,8 +529,8 @@ try {
 
   await check('a container with a job in it survives any idle time; an idle one is removed with its volume after CONTAINER_IDLE_MS', async () => {
     const name = first.container.name;
-    const busy = await launch('run-16', PEER_A, alpha, { prompt: 'MODE=sleep' });
-    await until('the agent runs', () => fs.existsSync(path.join(agentDir, 'run-16.started')));
+    const busy = await launch(`${R}-16`, PEER_A, alpha, { prompt: 'MODE=sleep' });
+    await until('the agent runs', () => fs.existsSync(path.join(agentDir, `${R}-16.started`)));
     clock.now += 10 * 3600 * 1000;
     await containers.sweep();
     const gone = calls('rm').map((c) => c.at(-1));
@@ -546,38 +559,38 @@ try {
   });
 
   await check('a new image replaces a container only when no job is running in it, and keeps its volume', async () => {
-    const before = await launch('run-17', PEER_A, alpha, { prompt: 'MODE=sleep' });
-    await until('the agent runs', () => fs.existsSync(path.join(agentDir, 'run-17.started')));
+    const before = await launch(`${R}-17`, PEER_A, alpha, { prompt: 'MODE=sleep' });
+    await until('the agent runs', () => fs.existsSync(path.join(agentDir, `${R}-17.started`)));
     const oldTag = before.container.image;
     fs.appendFileSync(path.join(imageDir, 'Dockerfile'), 'RUN true\n');
     const newTag = imageTag(imageDir);
     assert.notEqual(newTag, oldTag);
 
     const runs = calls('run').length;
-    const joined = await launch('run-18', PEER_A, alpha);
+    const joined = await launch(`${R}-18`, PEER_A, alpha);
     assert.equal(joined.container.image, oldTag, 'with a job running, the newcomer joins it in the old image');
     assert.equal((await joined.outcome).ok, true);
     assert.equal(calls('run').length, runs);
-    assert.equal(fs.existsSync(path.join(agentDir, 'run-17.started')), true);
-    assert.ok(pidAlive(Number(fs.readFileSync(path.join(RUNS_DIR, 'run-17', 'pid'), 'utf8'))), 'and the running job was not disturbed');
+    assert.equal(fs.existsSync(path.join(agentDir, `${R}-17.started`)), true);
+    assert.ok(pidAlive(Number(fs.readFileSync(path.join(RUNS_DIR, `${R}-17`, 'pid'), 'utf8'))), 'and the running job was not disturbed');
 
     await stopJob(before.run);
     await before.outcome;
     const volumeRemovals = calls('volume').filter((c) => c[1] === 'rm').length;
-    const after = await launch('run-19', PEER_A, alpha);
+    const after = await launch(`${R}-19`, PEER_A, alpha);
     assert.equal(after.container.image, newTag);
     assert.equal((await after.outcome).ok, true);
     assert.equal(calls('run').length, runs + 1);
     assert.equal(calls('run').at(-1).at(-3), newTag);
     assert.equal(calls('create').at(-1).at(-7), newTag, 'and its relay is of the new image too');
     assert.equal(calls('volume').filter((c) => c[1] === 'rm').length, volumeRemovals, 'the work volume and its cache stay');
-    assert.match(agent('run-19', 'git').split('\n')[4], /cache\.git/);
+    assert.match(agent(`${R}-19`, 'git').split('\n')[4], /cache\.git/);
 
     // A relay that outlived its container is of the image that container had: it is made again as well.
     fs.appendFileSync(path.join(imageDir, 'Dockerfile'), 'RUN true\n');
     execFileSync(FAKE, ['rm', '-f', after.container.name]);
     const creates = calls('create').length;
-    assert.equal((await (await launch('run-20', PEER_A, alpha)).outcome).ok, true);
+    assert.equal((await (await launch(`${R}-20`, PEER_A, alpha)).outcome).ok, true);
     assert.equal(calls('create').length, creates + 1);
     assert.deepEqual(calls('create').at(-1).slice(2, 3).concat(calls('create').at(-1).at(-7)), [`${after.container.name}-relay`, imageTag(imageDir)]);
   });
@@ -597,7 +610,7 @@ try {
     assert.equal(calls('run').length, runs, 'it is used, not made again');
     assert.equal(calls('create').at(-1)[2], `${mine}-relay`, 'and given the relay it lacked');
     await containers.release({ name: mine, runId: 'adopter' });
-    assert.equal((await (await launch('run-20', PEER_B, beta)).outcome).ok, true);
+    assert.equal((await (await launch(`${R}-20`, PEER_B, beta)).outcome).ok, true);
 
     // One that is not on a network of its own is no container of this kind: it is made again.
     const loosePool = { ...beta.pool, id: 'github.com/dn-test/loose' };
@@ -631,7 +644,7 @@ try {
 
   await check('a relay that leads to where an earlier daemon\'s broker listened is made again, and the container it serves is kept', async () => {
     const name = containerName(beta.pool.id, PEER_B);
-    assert.equal((await (await launch('run-21', PEER_B, beta)).outcome).ok, true);
+    assert.equal((await (await launch(`${R}-21`, PEER_B, beta)).outcome).ok, true);
     const later = createContainers({ log, now: () => clock.now, imageDir, broker: () => ({ host: '127.0.0.1', port: 61234 }) });
     const [runs, creates] = [calls('run').length, calls('create').length];
     await later.acquire({ pool: beta.pool, peer: PEER_B, runId: 'moved' });
@@ -721,21 +734,38 @@ try {
   });
 
   await check('a stop the engine did not hear has stopped nothing: it is asked again until the job is gone', async () => {
-    const job = await launch('run-40', PEER_A, alpha, { prompt: 'MODE=sleep' });
-    await until('the agent runs', () => fs.existsSync(path.join(agentDir, 'run-40.started')));
-    const pid = Number(fs.readFileSync(path.join(RUNS_DIR, 'run-40', 'pid'), 'utf8'));
-    const asked = () => calls('exec').filter((c) => c.at(-2) === 'run-40' && c[3].endsWith('/stop.sh')).length;
+    const job = await launch(`${R}-40`, PEER_A, alpha, { prompt: 'MODE=sleep' });
+    await until('the agent runs', () => fs.existsSync(path.join(agentDir, `${R}-40.started`)));
+    const pid = Number(fs.readFileSync(path.join(RUNS_DIR, `${R}-40`, 'pid'), 'utf8'));
+    const asked = () => calls('exec').filter((c) => c[6] === 'stop' && c[7] === `${R}-40`).length;
     fs.writeFileSync(path.join(fakeDir, 'down'), '');
     let settled = false;
     const stopping = stopJob(job.run).then((outcome) => { settled = true; return outcome; });
     await until('the engine was asked a second time', () => asked() >= 2);
     assert.equal(settled, false, 'the run is not called stopped');
     assert.equal(pidAlive(pid), true, 'and it is not');
-    assert.equal(readOutcome('run-40'), null);
+    assert.equal(readOutcome(`${R}-40`), null);
     fs.rmSync(path.join(fakeDir, 'down'));
     assert.equal((await stopping).state, 'stopped');
     await until('its runner is dead', () => !pidAlive(pid));
     await job.outcome;
+  });
+
+  await check('a job stopped while it was being asked after ends as stopped: the answer that it is gone came of the stop', async () => {
+    const job = await launch(`${R}-44`, PEER_A, alpha, { prompt: 'MODE=sleep' });
+    await until('the agent runs', () => fs.existsSync(path.join(agentDir, `${R}-44.started`)));
+    const asked = () => calls('exec').filter((c) => c[6] === 'up' && c[7] === `${R}-44`).length;
+    // The engine holds its answers: whether the job is up is being asked when the stop
+    // begins, and is answered once the job was killed.
+    fs.writeFileSync(path.join(fakeDir, 'hold-exec'), '');
+    const before = asked();
+    await until('the job is asked after', () => asked() > before);
+    const stopping = stopJob(job.run);
+    process.kill(-job.started.pid, 'SIGKILL');
+    await until('its runner is dead', () => !pidAlive(job.started.pid));
+    fs.rmSync(path.join(fakeDir, 'hold-exec'));
+    assert.equal((await stopping).state, 'stopped');
+    assert.equal((await job.outcome).summary, 'stopped');
   });
 
   await check('a job an earlier daemon started is taken up where it stands: nothing is restarted, it is watched to its end, and it can be stopped', async () => {
@@ -747,40 +777,69 @@ try {
       await startJob({ run, container, spec: { ...SPEC, prompt }, proxy, env: { CLAUDE_CODE_OAUTH_TOKEN: 'dn-placeholder' } });
       return container;
     };
-    const container = await startOnly('run-41', 'MODE=sleep');
-    await startOnly('run-42', 'Review.');
-    await until('the long one runs', () => fs.existsSync(path.join(agentDir, 'run-41.started')));
-    await until('the short one ended with nobody watching', () => fs.existsSync(path.join(RUNS_DIR, 'run-42', 'done')));
-    const pid = Number(fs.readFileSync(path.join(RUNS_DIR, 'run-41', 'pid'), 'utf8'));
+    const container = await startOnly(`${R}-41`, 'MODE=sleep');
+    await startOnly(`${R}-42`, 'Review.');
+    await until('the long one runs', () => fs.existsSync(path.join(agentDir, `${R}-41.started`)));
+    await until('the short one ended with nobody watching', () => fs.existsSync(path.join(RUNS_DIR, `${R}-42`, 'done')));
+    const pid = Number(fs.readFileSync(path.join(RUNS_DIR, `${R}-41`, 'pid'), 'utf8'));
 
     const fresh = createContainers({ log, now: () => clock.now, imageDir, broker: () => broker.address() });
     const [restarts, creates] = [calls('restart').length, calls('create').length];
-    const taken = await fresh.adopt({ pool: alpha.pool, peer: PEER_A, runId: 'run-41' });
+    const taken = await fresh.adopt({ pool: alpha.pool, peer: PEER_A, runId: `${R}-41` });
     assert.deepEqual(taken, container);
-    assert.deepEqual(await fresh.adopt({ pool: alpha.pool, peer: PEER_A, runId: 'run-42' }), container);
-    assert.deepEqual(fresh.list().map((c) => [c.name, c.jobs.sort()]), [[container.name, ['run-41', 'run-42']]]);
+    assert.deepEqual(await fresh.adopt({ pool: alpha.pool, peer: PEER_A, runId: `${R}-42` }), container);
+    assert.deepEqual(fresh.list().map((c) => [c.name, c.jobs.sort()]), [[container.name, [`${R}-41`, `${R}-42`]]]);
     // Its next job joins the one still running in it.
-    await fresh.acquire({ pool: alpha.pool, peer: PEER_A, runId: 'run-43' });
+    await fresh.acquire({ pool: alpha.pool, peer: PEER_A, runId: `${R}-43` });
     assert.deepEqual([calls('restart').length, calls('create').length], [restarts, creates], 'the container and its relay are used as they stand');
     assert.equal(pidAlive(pid), true);
     assert.equal(await fresh.adopt({ pool: { ...alpha.pool, id: 'github.com/dn-test/never-made' }, peer: PEER_A, runId: 'x' }), null, 'a container that is not there is nobody\'s');
 
-    assert.equal(later.attachJob({ runId: 'run-41', container: taken }), true);
-    assert.equal(later.attachJob({ runId: 'run-42', container: taken }), true);
-    assert.equal(later.attachJob({ runId: 'run-43', container: taken }), false, 'a run that never came up');
-    assert.equal(later.attachJob({ runId: '../run-41', container: taken }), false);
-    await assert.rejects(later.watch({ runId: 'run-43' }), /is not running/);
-    const ended = await later.watch({ runId: 'run-42' });
-    assert.deepEqual([ended.ok, ended.state, ended.summary, ended.usd], [true, 'finished', 'did run-42', 0.25]);
-    assert.deepEqual(readOutcome('run-42'), ended);
-    assert.equal((await later.stopJob({ runId: 'run-41' })).state, 'stopped');
+    assert.equal(later.attachJob({ runId: `${R}-41`, container: taken }), true);
+    assert.equal(later.attachJob({ runId: `${R}-42`, container: taken }), true);
+    assert.equal(later.attachJob({ runId: `${R}-43`, container: taken }), false, 'a run that never came up');
+    assert.equal(later.attachJob({ runId: `../${R}-41`, container: taken }), false);
+    await assert.rejects(later.watch({ runId: `${R}-43` }), /is not running/);
+    const ended = await later.watch({ runId: `${R}-42` });
+    assert.deepEqual([ended.ok, ended.state, ended.summary, ended.usd], [true, 'finished', `did ${R}-42`, 0.25]);
+    assert.deepEqual(readOutcome(`${R}-42`), ended);
+    assert.equal((await later.stopJob({ runId: `${R}-41` })).state, 'stopped');
     await until('its runner is dead', () => !pidAlive(pid));
-    for (const runId of ['run-41', 'run-42']) broker.removeJob(runId);
-    await fresh.release({ name: container.name, runId: 'run-41' });
-    await fresh.release({ name: container.name, runId: 'run-42' });
-    await fresh.release({ name: container.name, runId: 'run-43' });
+    for (const runId of [`${R}-41`, `${R}-42`]) broker.removeJob(runId);
+    await fresh.release({ name: container.name, runId: `${R}-41` });
+    await fresh.release({ name: container.name, runId: `${R}-42` });
+    await fresh.release({ name: container.name, runId: `${R}-43` });
     // The first daemon's own count of the container, which nothing ended.
-    for (const runId of ['run-41', 'run-42']) await containers.release({ name: container.name, runId });
+    for (const runId of [`${R}-41`, `${R}-42`]) await containers.release({ name: container.name, runId });
+  });
+
+  await check('a job that left a stop script and another job\'s process group in its run directory, and ignores TERM, is stopped by what the host itself holds, and nothing else is', async () => {
+    const other = await launch(`${R}-50`, PEER_A, alpha, { prompt: 'MODE=sleep' });
+    const pid = (r) => Number(fs.readFileSync(path.join(RUNS_DIR, r, 'pid'), 'utf8'));
+    const otherPid = other.started.pid;
+    const run = { runId: `${R}-51`, pool: alpha.pool };
+    const container = await containers.acquire({ pool: alpha.pool, peer: PEER_A, runId: `${R}-51` });
+    const started = await startJob({ run, container, spec: { ...SPEC, prompt: `MODE=defy\nGROUP=${otherPid}` }, proxy: await broker.addJob({ ...run, peer: PEER_A }), env: { CLAUDE_CODE_OAUTH_TOKEN: 'dn-placeholder' } });
+    await until('both agents run', () => [`${R}-50`, `${R}-51`].every((r) => fs.existsSync(path.join(agentDir, `${r}.started`))));
+    assert.deepEqual([pid(`${R}-50`), pid(`${R}-51`), fs.readFileSync(path.join(RUNS_DIR, `${R}-51`, 'stop.sh'), 'utf8')], [otherPid, otherPid, '#!/bin/sh\nexit 0\n'], 'what the job wrote');
+    // The group the host has is the one its own start named, whatever the job wrote since.
+    assert.ok(started.pid > 1 && started.pid !== otherPid && pidAlive(started.pid));
+
+    // No job's process group is the one that names every process of the container, or
+    // the asking shell's own.
+    for (const none of [1, 0, -7, 1.5, '1', 'x']) assert.equal(later.attachJob({ runId: `${R}-51`, container, pid: none }), false, `a group of ${none}`);
+    // The daemon after this one knows the job by what this one kept of it.
+    assert.equal(later.attachJob({ runId: `${R}-51`, container, pid: started.pid }), true);
+    const stopped = await later.stopJob(run);
+    assert.equal(stopped.state, 'stopped');
+    await until('its runner is dead', () => !pidAlive(started.pid));
+    assert.equal(pidAlive(otherPid), true, 'the job whose group it named was not touched');
+    assert.deepEqual(calls('exec').filter((c) => c.some((a) => a.includes(`/dn/runs/${R}-51`))).map((c) => c.at(-1)), [`/dn/runs/${R}-51/run.sh`],
+      'nothing was run from its run directory but the runner, once');
+    broker.removeJob(`${R}-51`);
+    await containers.release({ name: container.name, runId: `${R}-51` });
+    await stopJob(other.run);
+    await other.outcome;
   });
 
   console.log(`\nall ${checks} checks passed`);

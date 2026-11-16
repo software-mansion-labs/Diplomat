@@ -181,10 +181,10 @@ try {
       assert.match(answer.body.error, SENTENCE, route);
     }
     for (const route of ['/pools', '/admit', '/offer', '/withdraw', '/invite', '/join', '/leave', '/stop-run']) {
-      for (const raw of ['{"pool":', '"text"', '7', 'null', '[1]']) {
+      for (const raw of ['{"pool":', 'pool=1', '"text"', '7', 'null', '[1]']) {
         const answer = await a.call('POST', route, undefined, { raw });
-        assert.equal(answer.status, 400, `${route} ${raw}`);
-        assert.equal(typeof answer.body.error, 'string');
+        const sentence = raw.endsWith(':') || raw.includes('=') ? 'The request body is not JSON.' : 'The request body must be a JSON object.';
+        assert.deepEqual([answer.status, answer.body], [400, { error: sentence }], `${route} ${raw}`);
       }
     }
     assert.equal((await a.call('POST', '/nothing', {})).status, 404);
@@ -276,7 +276,7 @@ try {
     };
     shaped({ ...state, offers: [] }, {
       updatedAt: 'int', daemon: { pid: 'int', startedAt: 'int' }, identity: { pk: 'string', onion: 'string' },
-      transport: said, docker: { state: 'string', image: 'string', detail: 'string' }, model: said,
+      transport: said, docker: { state: 'string', image: 'string', detail: 'string' }, model: said, devices: said,
       admit: { slots: 'int', at: 'int', reason: 'string' },
       pools: [{
         id: 'string', path: 'string', identity: 'string', hash: 'string', left: 'boolean',
@@ -321,7 +321,9 @@ try {
     assert.deepEqual(Object.keys(onDisk), Object.keys(state));
     assert.deepEqual([onDisk.daemon, onDisk.identity, onDisk.runs, onDisk.docker], [state.daemon, state.identity, state.runs, state.docker]);
     assert.equal(fs.statSync(file).mode & 0o777, 0o600);
-    assert.deepEqual(fs.readdirSync(a.base).filter((f) => f.includes('.tmp')), [], 'and is replaced whole, never written in place');
+    // Replaced whole, never written in place: what a write is made in is gone once it is
+    // moved over the file, and a look that falls between the two finds it for a moment.
+    await until('no file a write was made in to be left', () => !fs.readdirSync(a.base).some((f) => f.includes('.tmp')));
     await a.kill();
   });
 

@@ -4,7 +4,8 @@
 // A "container" is a directory: its volume is <root>/work, its bind mounts are links,
 // and what is exec'd in it runs on this host with DN_ROOT=<root>, with the container's
 // paths in the arguments translated and with shims for the tools only a container has
-// (setsid, flock, update-ca-certificates, and dash as sh where the host has one).
+// (setsid, flock, update-ca-certificates, and dash as sh where the host has one). What
+// is put in a session of its own there is what `restart` and `rm` kill.
 // FAKE_DOCKER_PATH is put in front of PATH for what is exec'd, which is where a test
 // keeps its own `claude`. A network is a record that a container must name to be made
 // and that cannot be removed from under one; nothing is isolated, and the command a
@@ -13,18 +14,19 @@
 // Staged failures, as files in FAKE_DOCKER_DIR:
 //   down             the engine does not answer
 //   fail-<command>   that subcommand fails once per line in the file, printing the line
+//   fail-<command>-<argument>   the same, of the calls with that argument among theirs
 //   hold-<command>   that subcommand does not go on while this file exists
 //   old-engine       a network gets a gateway address whatever it was asked for
 // calls.jsonl records every invocation's arguments.
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 
 const DIR = process.env.FAKE_DOCKER_DIR;
 if (!DIR) { console.error('fake-docker: FAKE_DOCKER_DIR is not set'); process.exit(2); }
 const argv = process.argv.slice(2);
-for (const d of ['containers', 'volumes', 'images', 'roots', 'networks']) fs.mkdirSync(path.join(DIR, d), { recursive: true });
+for (const d of ['containers', 'volumes', 'images', 'roots', 'networks', 'pids']) fs.mkdirSync(path.join(DIR, d), { recursive: true });
 fs.appendFileSync(path.join(DIR, 'calls.jsonl'), `${JSON.stringify(argv)}\n`);
 
 const die = (msg, code = 1) => { process.stderr.write(`${msg}\n`); process.exit(code); };
@@ -54,11 +56,11 @@ function parse(args, valued) {
   return { opts, rest };
 }
 
-function staged(command) {
+function staged(command, args) {
   if (fs.existsSync(file('down'))) die('Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?');
   while (fs.existsSync(file(`hold-${command}`))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-  const f = file(`fail-${command}`);
-  if (!fs.existsSync(f)) return;
+  const f = [command, ...args.filter((arg) => /^[\w-]+$/.test(arg)).map((arg) => `${command}-${arg}`)].map((name) => file(`fail-${name}`)).find((name) => fs.existsSync(name));
+  if (!f) return;
   const lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean);
   if (lines.length <= 1) fs.unlinkSync(f); else fs.writeFileSync(f, `${lines.slice(1).join('\n')}\n`);
   die(lines[0] || `${command} failed`);
@@ -66,13 +68,18 @@ function staged(command) {
 
 const labelsOf = (opts) => Object.fromEntries((opts['--label'] || []).map((l) => l.split(/=(.*)/s).slice(0, 2)));
 
+// The process groups the setsid shim started in a container, one to a line.
+const pidsOf = (name) => path.join(DIR, 'pids', name);
+
 function killAll(c) {
-  for (const pid of c.pids || []) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
-  c.pids = [];
+  let pids = [];
+  try { pids = fs.readFileSync(pidsOf(c.name), 'utf8').split('\n').filter(Boolean).map(Number); } catch {}
+  for (const pid of pids) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
+  fs.rmSync(pidsOf(c.name), { force: true });
 }
 
 const [command, ...args] = argv;
-staged(command === 'container' || command === 'image' || command === 'volume' || command === 'network' ? `${command}-${args[0]}` : command);
+staged(command === 'container' || command === 'image' || command === 'volume' || command === 'network' ? `${command}-${args[0]}` : command, args);
 
 switch (command) {
   case 'version':
@@ -176,7 +183,7 @@ switch (command) {
       fs.symlinkSync(host, path.join(root, dst));
       mounts.push({ src, dst, host });
     }
-    save({ name, image: rest[0], args, running: command === 'run', root, mounts, pids: [], networks, labels: labelsOf(opts) });
+    save({ name, image: rest[0], args, running: command === 'run', root, mounts, networks, labels: labelsOf(opts) });
     console.log(`fake-${name}`);
     break;
   }
@@ -237,8 +244,8 @@ switch (command) {
     if (!fs.existsSync(shims)) {
       fs.mkdirSync(shims, { recursive: true });
       const shim = (n, body) => fs.writeFileSync(path.join(shims, n), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-      // A detached spawn already is a session of its own.
-      shim('setsid', 'exec "$@"');
+      // In place, as setsid(1) does for what is no group leader: the pid stays.
+      shim('setsid', 'echo $$ >> "$FAKE_DOCKER_PIDS"\nexec perl -MPOSIX -e \'POSIX::setsid(); exec { $ARGV[0] } @ARGV\' "$@"');
       // The image's sh is dash, which is stricter than the bash a host may call sh.
       if (fs.existsSync('/bin/dash')) shim('sh', 'exec /bin/dash "$@"');
       if (spawnSync('sh', ['-c', 'command -v flock']).status !== 0) shim('flock', 'exit 0');
@@ -256,22 +263,12 @@ switch (command) {
       ...process.env,
       ...Object.fromEntries((opts['-e'] || []).map((kv) => kv.split(/=(.*)/s).slice(0, 2))),
       DN_ROOT: c.root,
+      FAKE_DOCKER_PIDS: pidsOf(name),
       PATH: [process.env.FAKE_DOCKER_PATH, shims, process.env.PATH].filter(Boolean).join(':'),
     };
     const translated = cmd.map(inside);
-    if (opts['-d']) {
-      const child = spawn(translated[0], translated.slice(1), { env, cwd: c.root, detached: true, stdio: 'ignore' });
-      child.on('error', (e) => die(`exec failed: ${e.message}`, 126));
-      child.on('spawn', () => {
-        c.pids.push(child.pid);
-        save(c);
-        child.unref();
-        process.exit(0);
-      });
-    } else {
-      const r = spawnSync(translated[0], translated.slice(1), { env, cwd: c.root, stdio: 'inherit' });
-      process.exit(r.status ?? 137);
-    }
+    const r = spawnSync(translated[0], translated.slice(1), { env, cwd: c.root, stdio: 'inherit' });
+    process.exit(r.status ?? 137);
     break;
   }
 

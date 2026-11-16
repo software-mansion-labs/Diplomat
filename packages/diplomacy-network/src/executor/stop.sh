@@ -1,37 +1,52 @@
 #!/bin/sh
-# Ends one job's processes and removes its work tree, leaving every other job in the
-# container alone. usage: stop.sh <run id> <grace seconds>
+# One job's processes, asked after or ended, with every other job in the container left
+# alone. The host never runs this from a file: a job can write wherever its container
+# can, so job.js puts this text on the command line of the container's sh.
+#   sh -c <this text> sh up <run id> <group>      prints `up` while the runner's process
+#                                                 group exists, `gone` otherwise
+#   sh -c <this text> sh left <run id> <group>    the same, of anything of the job at all
+#   sh -c <this text> sh stop <run id> <group> <grace seconds>
+#                                                 TERM, the grace, KILL, and the job's
+#                                                 work tree removed
 #
 # The job's process group covers what the agent started the ordinary way. Whatever left
 # that group (a daemon the agent launched) still carries DN_RUN_ID in its environment,
 # which is how it is found.
 
-RUN="$(cd "$(dirname "$0")" && pwd)"
-id="$1"
-grace="$2"
-pid="$(cat "$RUN/pid" 2>/dev/null)"
+verb="$1"
+id="$2"
+pid="$3"
+grace="${4:-0}"
 
 strays() {
   for e in /proc/[0-9]*/environ; do
     p="${e#/proc/}"
     p="${p%/environ}"
     [ "$p" = "$$" ] && continue
-    tr '\0' '\n' < "$e" 2>/dev/null | grep -qx "DN_RUN_ID=$id" && echo "$p"
+    tr '\0' '\n' 2>/dev/null < "$e" | grep -qx "DN_RUN_ID=$id" && echo "$p"
   done
 }
 # `-s SIG --`: dash takes no `--` after `-SIG`.
-group() { [ -n "$pid" ] && kill -s "$1" -- "-$pid" 2>/dev/null; }
+group() { kill -s "$1" -- "-$pid" 2>/dev/null; }
 signal() {
   group "$1"
   for p in $(strays); do kill -s "$1" "$p" 2>/dev/null; done
 }
+anything() { group 0 || [ -n "$(strays)" ]; }
+say() { if "$@"; then echo up; else echo gone; fi; }
 
-signal TERM
-n=0
-while [ "$n" -lt "$grace" ] && { group 0 || [ -n "$(strays)" ]; }; do
-  sleep 1
-  n=$((n + 1))
-done
-signal KILL
-rm -rf "${DN_ROOT:-}/work/jobs/$id"
+case "$verb" in
+  up) say group 0 ;;
+  left) say anything ;;
+  stop)
+    signal TERM
+    n=0
+    while [ "$n" -lt "$grace" ] && anything; do
+      sleep 1
+      n=$((n + 1))
+    done
+    signal KILL
+    rm -rf "${DN_ROOT:-}/work/jobs/$id"
+    ;;
+esac
 exit 0

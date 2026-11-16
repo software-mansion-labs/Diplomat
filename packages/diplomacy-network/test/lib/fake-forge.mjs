@@ -99,7 +99,8 @@ function project(doc, vars, selections, data) {
 /// `forge.route(host, method, pattern, fn)` adds an answer of the test's own and returns
 /// the function that takes it away again;
 /// `forge.bare(repo)` creates the bare repository smart HTTP serves at `/<repo>.git`;
-/// `forge.tokens` is the set of GitHub tokens it takes, which a test may add to;
+/// `forge.tokens` and `forge.gitlabTokens` are the sets of GitHub and GitLab tokens it
+/// takes, which a test may add to;
 /// `forge.env` is the environment a test must set before it imports the daemon's sources.
 export async function startFakeForge() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-forge-'));
@@ -292,13 +293,14 @@ export async function startFakeForge() {
     child.stdin.end(body);
   }
 
-  // The GitHub tokens this forge takes: its own, and whichever a test adds for a machine
-  // that is to be told apart by the credential it sends.
+  // The tokens this forge takes, GitHub's and GitLab's: its own, and whichever a test adds
+  // for a machine that is to be told apart by the credential it sends.
   const tokens = new Set([GITHUB_TOKEN]);
+  const gitlabTokens = new Set([GITLAB_TOKEN]);
   const expected = (host, url) => {
     if (host === 'api.github.com') return [...tokens].map((t) => `Bearer ${t}`);
     if (host === 'github.com') return [...tokens].map((t) => `Basic ${Buffer.from(`x-access-token:${t}`).toString('base64')}`);
-    return [url.startsWith('/api/') ? `Bearer ${GITLAB_TOKEN}` : `Basic ${Buffer.from(`oauth2:${GITLAB_TOKEN}`).toString('base64')}`];
+    return [...gitlabTokens].map((t) => (url.startsWith('/api/') ? `Bearer ${t}` : `Basic ${Buffer.from(`oauth2:${t}`).toString('base64')}`));
   };
 
   const server = http.createServer((req, res) => {
@@ -333,7 +335,7 @@ export async function startFakeForge() {
   const base = `http://127.0.0.1:${port}/h`;
 
   return {
-    port, log, data, root, gitRoot, tokens,
+    port, log, data, root, gitRoot, tokens, gitlabTokens,
     env: {
       ...fakeTools(root),
       DN_FORGE_ORIGINS: JSON.stringify(Object.fromEntries(HOSTS.map((h) => [h, `${base}/${h}`]))),
