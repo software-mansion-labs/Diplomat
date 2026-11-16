@@ -2,6 +2,7 @@
 //
 //   identity.json           { seed }
 //   heard.json              { ts }: the latest date of a request this host served
+//   peers.json              { silent }: the peers this host asks in vain, and has for long, and since when
 //   pools/<pool hash>.json  one pool: its link, this host's own sequence numbers, its records
 //   locks.json              the lock table of every pool
 //   keys.json               the keys this host issued and the keys it holds, secrets included
@@ -69,7 +70,7 @@ export function memoryDisk() {
 // A document rests on the ones before it here - a run on the key it holds, a key and a
 // lock on a pool's records - and is written after them, so a host that dies between two
 // writes of one flush finds nothing that rests on what never reached the disk.
-const ORDER = ['identity', 'heard', 'links', 'pools', 'locks', 'keys', 'offers', 'runs'];
+const ORDER = ['identity', 'heard', 'peers', 'links', 'pools', 'locks', 'keys', 'offers', 'runs'];
 const rank = (name) => ORDER.indexOf(name.split('/')[0]);
 
 /// The store over `dir` (or over `disk`): `{ read(name), write(name, value), remove(name), flush() }`.

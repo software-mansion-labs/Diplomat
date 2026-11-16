@@ -89,7 +89,8 @@ export const RANK_DELAY_MS = num('DN_RANK_DELAY_MS', 5000);
 // answered within PEER_QUIET_MS is given a whole REQUEST_TIMEOUT_MS. One this host has
 // never reached and has known for less than that is asked again until ROUND_PATIENCE_MS of
 // the round have passed: a first circuit to an onion service can take minutes. Any other
-// gets PROBE_TIMEOUT_MS, so a sleeping machine costs a round seconds.
+// gets PROBE_TIMEOUT_MS, so a sleeping machine costs a round seconds - also the round of
+// a host that starts again, which keeps on disk which members were that long silent.
 export const PROBE_TIMEOUT_MS = num('DN_PROBE_TIMEOUT_MS', 15 * 1000);
 export const PEER_QUIET_MS = num('DN_PEER_QUIET_MS', 3 * SYNC_INTERVAL_MS);
 export const ROUND_PATIENCE_MS = num('DN_ROUND_PATIENCE_MS', ROUND_TIMEOUT_MS / 2);

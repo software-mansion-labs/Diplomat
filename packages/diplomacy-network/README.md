@@ -86,6 +86,7 @@ closed at every start.
 | `state.json` | the snapshot the applets read |
 | `identity.json` (0600) | the host key |
 | `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it, or at or before the second of the start where that time is ahead of this machine's clock |
+| `peers.json` (0600) | the machines this host has asked in vain for more than 3 minutes, and since when: after a start a claim round waits 15 s for each of them, not the 90 s and more it gives a machine it has yet to reach |
 | `links.json` (0600) | the linked repositories, as Diplomat last posted them |
 | `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left |
 | `locks.json` (0600) | the claim locks this host granted |
@@ -100,7 +101,7 @@ closed at every start.
 | `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed with its directory |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
-The node's documents are written in one order - identity, `heard`, links, pools, locks,
+The node's documents are written in one order - identity, `heard`, `peers`, links, pools, locks,
 keys, offers, runs - each whole, through a temporary file: a run is on disk only after
 the key it was started with. They are read back as plain JSON; only what travels between
 hosts has to be canonical. A pool's document holds at most 256 members with at most 256
@@ -373,7 +374,7 @@ or `claim of <task> stood down: <why> - ...` with the same numbers - then
 `job of <task> started 0 s after its claim`. The wait is the one of the machine's rank
 and of what it weighed; a member counts as absent once the round stopped waiting for it;
 and a round that stood down leaves its task alone for 30 to 60 s. A machine that came
-back also says when it could go on:
+back to a pool with other machines in it also says, once, when it could go on:
 `<pool> is up to date 0 s after this host came back to it`.
 
 **Executor side.** With `admit.slots` above zero and a task with a free offer that this

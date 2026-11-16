@@ -519,7 +519,14 @@ the wait for one member's answer is:
 - 60 s for a member that answered the claimant within the last 3 minutes;
 - 60 s, asked again until the round is 90 s old, for a member the claimant has known for
   less than 3 minutes and never reached;
-- 15 s for any other.
+- 15 s for any other: one that has not answered the claimant for 3 minutes.
+
+A claimant that starts again has reached nobody yet. It keeps on disk which members had
+not answered it for 3 minutes when a request to them last failed, and since when, until
+one answers: such a member gets the 15 s from the first round on, not the wait of one
+never reached. A silence that began more than 24 h ago is not gone by. Nothing else
+changes for that member: it is asked in every round, counted absent when it does not
+answer, and has its say when it does.
 
 A host claims only while it has a slot to run the task in, and looks again before it
 commits: a claimant whose slot went while its round ran unlocks every member that
