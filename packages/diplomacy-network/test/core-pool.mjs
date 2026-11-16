@@ -495,6 +495,7 @@ check('an index too long for one answer travels a page at a time: each page says
     assert.equal(answer.body.hash, a.pool.stateHash(T0));
     assert.ok(canon(answer.body.index).length <= INDEX_PAGE_BYTES);
     pages.push(answer.body);
+    assert.ok(pages.length < 10);
   }
   assert.ok(pages.length > 2);
   assert.deepEqual(pages.map((page) => page.more), [...Array(pages.length - 1).fill(true), undefined]);

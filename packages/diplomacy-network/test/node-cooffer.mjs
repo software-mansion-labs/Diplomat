@@ -136,7 +136,7 @@ await check('a host that offers a task of another host and gives its own offer t
 });
 
 await check('a run that outlasts the hours of one of the offers it holds goes on for the other: the offer it lost is run again by another machine, and each ends by its own run', async () => {
-  let seen = 0;
+  let [seen, short] = [0, 0];
   for (const seed of [61, 62, 63, 64, 65, 66]) {
     const w = createWorld({ seed });
     const all = await poolOf(w, { a: { requires: 24 }, b: {}, e: { accepts: 24 }, f: {} });
@@ -150,8 +150,16 @@ await check('a run that outlasts the hours of one of the offers it holds goes on
     const job = e.executor.jobOf(taskId);
     const claim = w.claim(a, taskId);
     assert.deepEqual([backers(claim).sort(), claim.hours], [[a.pk, b.pk].sort(), 24]);
-    // The job has the hours of the offer its key is from: only the longer one is watched here.
-    if (job.peer !== a.pk) continue;
+    // The job has the hours of the offer its key is from.
+    if (job.peer === b.pk) {
+      assert.equal(job.task.hours, 12);
+      await w.run(12 * 3600 + 60);
+      assert.deepEqual(e.executor.stopped, [{ runId: job.runId, reason: 'not finished by its deadline' }]);
+      await w.net.until(() => [a, b].every((h) => w.offerRow(h, taskId).attempt === 2), { what: 'the attempt failed for both' });
+      assert.deepEqual([a, b].map((h) => [w.offerRow(h, taskId).state, w.offerRow(h, taskId).reason]), Array(2).fill(['pooled', 'not finished by its deadline']));
+      short += 1;
+      continue;
+    }
     seen += 1;
     assert.equal(job.task.hours, 24);
     await w.run(12 * 3600 + LEASE_GRACE_SECS + 60);
@@ -171,7 +179,7 @@ await check('a run that outlasts the hours of one of the offers it holds goes on
     await w.net.until(() => w.offerRow(b, taskId).state === 'done', { what: 'the shorter offer done' });
     assert.deepEqual([w.offerRow(a, taskId).outcome.summary, w.offerRow(b, taskId).outcome.summary, started(all)], ['the long one', 'the short one', 2]);
     assert.deepEqual(failures(all), []);
-    if (seen === 2) break;
+    if (seen > 0 && short > 0) break;
   }
-  assert.ok(seen > 0, 'a run with its key from the host of the longer offer');
+  assert.ok(seen > 0 && short > 0, `a run with its key from either host: ${seen} and ${short}`);
 });
