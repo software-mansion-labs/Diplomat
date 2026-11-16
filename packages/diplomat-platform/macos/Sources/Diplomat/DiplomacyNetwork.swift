@@ -20,6 +20,8 @@ enum DiplomacyNetwork {
     static let foreignRunner = "network"
 
     static let notAnswering = "the Diplomacy Network daemon is not answering"
+    /// What a Stop says of a run the daemon no longer lists as going.
+    static let runEnded = "That job's run on this machine has already ended."
     static let switchedOff = "the Diplomacy Network is switched off"
 
     /// What the daemon said to one request.
@@ -153,6 +155,14 @@ enum NetworkText {
     static let requiredSummary = "Counted from when a machine takes it. Only machines that "
         + "take jobs this long run yours."
     static let acceptedTitle = "Longest job this machine takes"
+    /// What the two hours say together when a job of this machine's own may take longer
+    /// than the longest job it takes, or nil.
+    static func hoursNote(required: Int, accepted: Int) -> String? {
+        required > accepted
+            ? "This machine takes none of its own jobs: one may take \(hours(required)), and "
+                + "the longest job it takes is \(hours(accepted))."
+            : nil
+    }
     static let acceptedSummary = "A job that may take longer is left to the other machines "
         + "of its pool."
     static let devicesTitle = "Let jobs use this machine's devices"

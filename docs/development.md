@@ -209,7 +209,9 @@ DIPLOMAT_RENDER=panel    ./Diplomat.app/Contents/MacOS/Diplomat  # snapshot a sc
                                                      #   network-screen-starting (a daemon still coming up, no
                                                      #   pool yet); network-screen-failed (no tor and no docker
                                                      #   to use); network-screen-down (the daemon not
-                                                     #   answering); network-screen-off (the switch off);
+                                                     #   answering); network-screen-unsaved (a change the
+                                                     #   config refused, hours that leave this machine none of
+                                                     #   its own jobs); network-screen-off (the switch off);
                                                      #   network-panel (the main panel saying what of the
                                                      #   network does not work)
                                                      #   audit[-issues|-prs|-all]

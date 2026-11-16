@@ -322,32 +322,41 @@ extension Store {
     }
 
     /// Stop one task of a pool: its run, when this machine is the one running it, else
-    /// the offer this machine made of it.
+    /// the offer this machine made of it. A run that is not there to stop is said to be
+    /// so in the pool's card, and nothing is withdrawn in its place: the button said
+    /// the job goes back to the pool.
     func stopNetworkTask(_ task: NetworkSnapshot.Task, pool: String) async {
+        if task.executorHere {
+            await stopRun(of: task, pool: pool)
+        } else {
+            let reply = await withdraw(task.taskId, reason: NetworkRoute.withdrawStopped,
+                                       label: task.title, source: "panel")
+            if case .ok = reply { forgetOffered(task.taskId) }
+            noteNetworkReply(reply, about: pool)
+        }
+        await settleAgents()
+    }
+
+    private func stopRun(of task: NetworkSnapshot.Task, pool: String) async {
         // Asked afresh: the published snapshot may be a tick old, and a run that ended
         // since is not there to stop.
-        let runs = !task.executorHere ? [] : await Task.detached(priority: .userInitiated) {
-            DiplomacyNetwork.state()?.runs ?? []
+        let fresh = await Task.detached(priority: .userInitiated) { DiplomacyNetwork.state() }.value
+        guard let run = fresh?.runs.first(where: {
+            $0.taskId == task.taskId && NetworkAdmit.live.contains($0.state)
+        }) else {
+            networkRefusals[pool] = fresh == nil ? DiplomacyNetwork.notAnswering
+                                                 : DiplomacyNetwork.runEnded
+            return
+        }
+        let body = NetworkRoute.stopRunBody(run: run.runId)
+        let reply = await Task.detached(priority: .userInitiated) {
+            DiplomacyNetwork.post(NetworkRoute.stopRun, body)
         }.value
-        let run = runs.first { $0.taskId == task.taskId && NetworkAdmit.live.contains($0.state) }
-        let reply: DiplomacyNetwork.Reply
-        if let run {
-            let body = NetworkRoute.stopRunBody(run: run.runId)
-            reply = await Task.detached(priority: .userInitiated) {
-                DiplomacyNetwork.post(NetworkRoute.stopRun, body)
-            }.value
-            if case .ok = reply {
-                AuditLog.log("panel", NetworkAudit.stop,
-                             "\(task.title) - \(NetworkText.runStopped)")
-                refreshAudit()
-            }
-        } else {
-            reply = await withdraw(task.taskId, reason: NetworkRoute.withdrawStopped,
-                                   label: task.title, source: "panel")
-            if case .ok = reply { forgetOffered(task.taskId) }
+        if case .ok = reply {
+            AuditLog.log("panel", NetworkAudit.stop, "\(task.title) - \(NetworkText.runStopped)")
+            refreshAudit()
         }
         noteNetworkReply(reply, about: pool)
-        await settleAgents()
     }
 
     // MARK: pools

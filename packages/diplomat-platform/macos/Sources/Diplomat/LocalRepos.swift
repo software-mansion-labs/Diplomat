@@ -46,16 +46,28 @@ enum LocalRepos {
         ["-C", path, "config", "--local", "--get-regexp", #"^remote\..*\.url$"#]
     }
 
+    /// The `git` that is run and how long one call may take (the Linux twin's budget),
+    /// behind a seam a self-test fills: a path that hangs - a dead network mount - must
+    /// not hold the cycle that reads the checkouts.
+    static var gitCall: (path: String, timeout: TimeInterval) = ("/usr/bin/git", 5)
+
+    /// nil for a call that could not start or outlived the budget, which is ended. The
+    /// wait is for the exit, before the read: what is asked for prints a few lines.
     private static func git(_ arguments: [String]) -> (status: Int32, out: String)? {
         let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.executableURL = URL(fileURLWithPath: gitCall.path)
         proc.arguments = arguments
         let pipe = Pipe()
         proc.standardOutput = pipe
-        proc.standardError = Pipe()
-        do { try proc.run() } catch { return nil }
+        proc.standardError = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in exited.signal() }
+        do { try proc.run() } catch { proc.terminationHandler = nil; return nil }
+        guard exited.wait(timeout: .now() + gitCall.timeout) == .success else {
+            kill(proc.processIdentifier, SIGKILL)
+            return nil
+        }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
         return (proc.terminationStatus, String(data: data, encoding: .utf8) ?? "")
     }
 }

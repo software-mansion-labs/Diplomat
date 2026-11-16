@@ -432,6 +432,9 @@ class Store(QObject):
         # Whether the feed has said the network is refusing automatic work, for the
         # current spell of it.
         self._network_unavailable_logged = False
+        # Whether the feed has said the shared config cannot be read, for the current
+        # spell of it.
+        self._config_unreadable_logged = False
         # Why the network refused each queued job that it refused for a reason of the
         # job's own, by the job's label: what its row says, and what the feed has said.
         self.network_job_refusals: dict[str, str] = {}
@@ -3623,11 +3626,14 @@ class Store(QObject):
             return agentstate.Observation.unavailable(diplomacynetwork.SWITCHED_OFF)
         return network.tasks(snapshot)
 
-    def _tick_with(self, seen: agentstate.Observation) -> agentstate.Tick:
+    def _tick_with(self, seen: agentstate.Observation,
+                   records: list[agentstate.RunRecord] | None = None) -> agentstate.Tick:
         """:meth:`_agent_tick` against one reading of the network daemon, for a caller
-        that goes on to act on what that same reading said."""
+        that goes on to act on what that same reading said. ``records`` is the book as
+        that caller read it before it asked the daemon."""
         now = time.time()
-        records = agentregistry.adopt_pids(agentregistry.load())
+        if records is None:
+            records = agentregistry.adopt_pids(agentregistry.load())
         evidence = dataclasses.replace(
             probes.gather(records, now, merged=self._merged_prs, tokens=self._tokens_left),
             network=seen)
@@ -3652,19 +3658,32 @@ class Store(QObject):
             # One the switch's own turn did not reach: booked as it went off, or left
             # by a Diplomat that quit first.
             self._drop_switched_off_runs()
+        # The book is read first, so the snapshot is newer than every run judged by
+        # it: a run booked in between would be ended by a row from before its offer.
+        records = agentregistry.adopt_pids(agentregistry.load())
         snapshot = diplomacynetwork.state() if networked else None
-        t = self._tick_with(self._network_evidence(snapshot))
+        t = self._tick_with(self._network_evidence(snapshot), records)
         # A settle begun before the switch moved says nothing of the daemon as it is.
         if networked and diplomacynetwork.enabled():
             self._note_network_state(snapshot)
             self._note_network_claims(t)
         self._persist_run_changes(t)
         self._retire_finished(t, snapshot, self._withdraw_merged(t) if networked else set())
+        self._note_unreadable_config()
         self._note_silent_probes()
         self._note_comms_runs({r.label: s.reason for r, s in t.rows
                                if s.state == agentstate.FAILED and not s.spent},
                               {r.label: s.reason for r, s in t.rows if s.spent})
         return t
+
+    def _note_unreadable_config(self) -> None:
+        """Say once per spell that the shared config cannot be read: every setting
+        reads as its default meanwhile, and the switch as it was last read."""
+        unreadable = appconfig.read_known() is None
+        if unreadable and not self._config_unreadable_logged:
+            activity.log("auto", "warn", appconfig.unreadable_note())
+            self.refresh_activity()
+        self._config_unreadable_logged = unreadable
 
     def _note_silent_probes(self) -> None:
         """Say out loud when a probe has stopped answering.
@@ -6075,20 +6094,28 @@ class Store(QObject):
 
     def stop_network_task_async(self, task: network.PoolTask, pool: str) -> None:
         """Stop one task of a pool: its run, when this machine is the one running it,
-        else the offer this machine made of it."""
+        else the offer this machine made of it. A run that is not there to stop is
+        said to be so in the pool's card, and nothing is withdrawn in its place: the
+        button said the job goes back to the pool."""
         def work() -> None:
             title = task.title or task.item
-            # Asked afresh: the snapshot kept may be a tick old, and a run that ended
-            # since is not there to stop.
-            fresh = diplomacynetwork.state() if task.executor_here else None
-            run = next((r for r in (fresh.runs if fresh else ())
-                        if r.task_id == task.task_id
-                        and r.state in network.LIVE_RUN_STATES), None)
-            if run is None:
+            if not task.executor_here:
                 reply = self._withdraw(task.task_id, network.WITHDRAW_STOPPED,
                                        title, autofix.SOURCE_PANEL)
                 if diplomacynetwork.refusal(reply) is None:
                     self._forget_offered(task.task_id)
+                self._note_network_reply(reply, pool)
+                self.refresh_auto_task_count()
+                return
+            # Asked afresh: the snapshot kept may be a tick old, and a run that ended
+            # since is not there to stop.
+            fresh = diplomacynetwork.state()
+            run = next((r for r in (fresh.runs if fresh else ())
+                        if r.task_id == task.task_id
+                        and r.state in network.LIVE_RUN_STATES), None)
+            if run is None:
+                self._set_network_refusal(pool, diplomacynetwork.NOT_ANSWERING
+                                          if fresh is None else diplomacynetwork.RUN_ENDED)
             else:
                 reply = diplomacynetwork.send(network.ROUTE_STOP_RUN,
                                               network.stop_run_body(run.run_id))
@@ -6097,7 +6124,7 @@ class Store(QObject):
                                  f"{title} - its run on this machine was stopped "
                                  "and the job is back in the pool")
                     self.refresh_activity()
-            self._note_network_reply(reply, pool)
+                self._note_network_reply(reply, pool)
             self.refresh_auto_task_count()
         self.start_background(work, name="network-stop")
 

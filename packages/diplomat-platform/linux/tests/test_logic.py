@@ -10,6 +10,8 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 _LINUX = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, _LINUX)
 # The shared runtime, spelled out rather than left to ``diplomat_app/__init__``: under
@@ -609,6 +611,11 @@ def test_repo_path_resolution(tmp_path):
         # every spawn.
         (tmp_path / "config.json").write_text("{ not json", encoding="utf-8")
         assert review.repo_path() == review.default_repo_path()
+        # No pick is saved over it: the write would drop every key the file holds.
+        with pytest.raises(OSError):
+            store.repo_root_paths = [picked]
+        assert (tmp_path / "config.json").read_text(encoding="utf-8") == "{ not json"
+        (tmp_path / "config.json").unlink()
 
         # The env override outranks the stored pick.
         store.repo_root_paths = [picked]

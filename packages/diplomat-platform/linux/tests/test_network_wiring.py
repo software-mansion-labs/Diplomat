@@ -1562,6 +1562,55 @@ def test_a_run_is_forgotten_whatever_the_daemon_answers(store, on):
         "Auto · Review · #9 - not withdrawn: the Diplomacy Network daemon is not answering"]
 
 
+def unreadable_notes() -> list[str]:
+    return [line for line in lines("warn") if line == appconfig.unreadable_note()]
+
+
+def test_a_config_that_cannot_be_read_leaves_the_switch_as_it_was(store, on, daemon,
+                                                                 monkeypatch, tmp_path):
+    """One bad read is not "off": the daemon needs five, and on "off" the offers are
+    withdrawn, the runs retired and agents started in terminals on the same items."""
+    d = daemon(state=snapshot(offers=[daemon_row("t1")]))
+    run = book_network_run()
+    assert dn.enabled()
+    whole = appconfig.path().read_text(encoding="utf-8")
+    appconfig.path().write_text(whole.rstrip()[:-1], encoding="utf-8")
+    assert dn.enabled() and store.network_enabled, "one brace short"
+    store._settle_agents()
+    store._settle_agents()
+    assert d.sent("withdraw") == []
+    assert [r.run_id for r in agentregistry.load()] == [run.run_id]
+    assert len(unreadable_notes()) == 1, "said once for the spell"
+    # Every setting reads as its default meanwhile, the repo roots among them: the job
+    # has no pool, and is still not started in a terminal.
+    assert store.dispatch_agent(job(77), autofix.SOURCE_AUTO) == dn.VERDICT_REFUSED
+    with pytest.raises(OSError):
+        store.set_network_enabled(False)
+    assert dn.enabled(), "a switch that would not save stays where it was"
+
+    appconfig.path().write_text(whole, encoding="utf-8")
+    store._settle_agents()
+    appconfig.path().write_text("", encoding="utf-8")
+    store._settle_agents()
+    assert dn.enabled() and len(unreadable_notes()) == 2, "an empty file, a second spell"
+
+    # What can be read is believed: a value that is no boolean, and no file, are off.
+    appconfig.path().write_text('{"networkEnabled": "true"}', encoding="utf-8")
+    assert not dn.enabled()
+    appconfig.set_bool(network.ENABLED_KEY, True)
+    assert dn.enabled()
+    appconfig.path().unlink()
+    assert not dn.enabled()
+
+    # Read on from one file says nothing of another that cannot be read.
+    appconfig.set_bool(network.ENABLED_KEY, True)
+    assert dn.enabled()
+    other = tmp_path / "other.json"
+    other.write_text("{", encoding="utf-8")
+    monkeypatch.setenv("DIPLOMAT_CONFIG", str(other))
+    assert not dn.enabled()
+
+
 def pool_task(task, **fields) -> network.PoolTask:
     return network.PoolTask(task_id=task, kind="review", item="pr-9", title="Review · #9",
                             state="claimed", **fields)
@@ -1571,24 +1620,52 @@ def test_stop_ends_the_run_here_and_otherwise_withdraws(store, on, daemon):
     d = daemon(state=snapshot(runs=[{"runId": "r-7", "taskId": "t1", "state": "running"},
                                     {"runId": "r-6", "taskId": "t1", "state": "failed"},
                                     {"runId": "r-5", "taskId": "t3", "state": "finished"}]))
-    # The first runs here. The second runs elsewhere, and the third's run here has
-    # ended since the screen drew it: neither has a run to stop.
+    # The first runs here. The second runs elsewhere: its offer is taken back. The
+    # third's run here has ended since the screen drew it: there is nothing to stop,
+    # and the offer its button never spoke of stays.
     for task in (pool_task("t1", executor=ME, executor_here=True),
                  pool_task("t2", executor=PEER, offered_here=True),
                  pool_task("t3", executor=ME, executor_here=True)):
         store.stop_network_task_async(task, POOL)
         assert store.wait_for_background() == []
     assert d.sent("stop-run") == [{"runId": "r-7"}]
-    assert d.sent("withdraw") == [{"taskId": "t2", "reason": "stopped"},
-                                  {"taskId": "t3", "reason": "stopped"}]
+    assert d.sent("withdraw") == [{"taskId": "t2", "reason": "stopped"}]
     assert lines("network-stop") == [
         "Review · #9 - its run on this machine was stopped and the job is back in the pool"]
-    assert lines("network-withdraw") == ["Review · #9 - withdrawn (stopped)"] * 2
+    assert lines("network-withdraw") == ["Review · #9 - withdrawn (stopped)"]
     settled = "/state"  # each stop ends in a settle, which reads the daemon itself
     assert [path for _, path, _ in d.got] == [
         "/state", "/stop-run", settled, "/withdraw", settled,
-        "/state", "/withdraw", settled], "asked afresh for a task this machine runs"
-    assert store.network_refusals == {}
+        "/state", settled], "asked afresh for a task this machine runs"
+    assert store.network_refusals == {POOL: "That job's run on this machine has already ended."}
+    assert dn.RUN_ENDED == store.network_refusals[POOL]
+
+
+def test_stop_of_a_run_the_daemon_does_not_show_withdraws_nothing(store, on):
+    """The read timed out, or the daemon is down: Stop said the job goes back to the
+    pool, and a withdrawal would cancel this machine's own offer instead."""
+    store.stop_network_task_async(
+        pool_task("t1", executor=ME, executor_here=True, offered_here=True), POOL)
+    assert store.wait_for_background() == []
+    assert store.network_refusals == {POOL: dn.NOT_ANSWERING}
+    assert lines("network-withdraw") == []
+
+
+def test_a_run_booked_while_the_daemon_is_asked_is_not_judged_by_that_answer(
+        store, on, monkeypatch):
+    """The book is read before the daemon is asked: a snapshot older than an offer says
+    nothing of its run, and a row that ended before it must not end it."""
+    stale = network.Snapshot.from_json(
+        snapshot(offers=[daemon_row("t1", "failed", reason="the container exited 137")]))
+
+    def state():
+        book_network_run("t1")
+        return stale
+
+    monkeypatch.setattr(dn, "state", state)
+    store._settle_agents()
+    assert [r.network for r in agentregistry.load()] == ["t1"]
+    assert lines("network-failed") == []
 
 
 def test_a_stop_the_daemon_refuses_is_shown_in_its_pool(store, on, daemon):

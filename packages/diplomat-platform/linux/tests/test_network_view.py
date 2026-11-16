@@ -33,6 +33,7 @@ pytest.importorskip("PySide6")
 RICH, STARTING, DOWN, OFF = (
     "network-screen", "network-screen-starting", "network-screen-down", "network-screen-off")
 FAILED = "network-screen-failed"
+UNSAVED = "network-screen-unsaved"
 DIPLOMAT, BENCH = "github.com/latekvo/diplomat", "github.com/latekvo/prompt-bench"
 
 
@@ -45,15 +46,14 @@ def app():
 
 @pytest.fixture
 def seeded(monkeypatch):
-    """A store as a render seeds it for one of the four modes. The fixture sets the
-    switch and the daemon's answer on the module that reads them, which is put back
+    """A store as a render seeds it for one of its modes. The fixture sets the switch,
+    the hours and the daemon's answer on the module that reads them, which is put back
     afterwards."""
     from diplomat_app import render
     from diplomat_app.store import Store
 
-    monkeypatch.setattr(dn, "enabled", dn.enabled)
-    monkeypatch.setattr(dn, "devices", dn.devices)
-    monkeypatch.setattr(dn, "state", dn.state)
+    for name in ("enabled", "devices", "state", "required_minimum_h", "maximum_accepted_h"):
+        monkeypatch.setattr(dn, name, getattr(dn, name))
     monkeypatch.setattr(dn, "ready", lambda: True)
 
     def seed(mode: str) -> Store:
@@ -75,6 +75,30 @@ def seeded(monkeypatch):
 def test_each_render_seeds_what_the_panel_says_of_the_network(seeded, mode, line):
     store = seeded(mode)
     assert network.trouble(store.network_answered, store.network_state) == line
+
+
+def test_the_unsaved_render_seeds_hours_that_say_so(screen):
+    from diplomat_app import networkview as nv
+
+    view = screen(UNSAVED)
+    assert view.hours_note.text() == nv.hours_note(72, 48) != ""
+    assert not view.hours_note.isHidden()
+
+
+def test_hours_that_leave_this_machine_none_of_its_own_jobs_say_so(screen):
+    from diplomat_app import networkview as nv
+
+    view = screen(RICH)
+    view.accepted_h.setValue(48)
+    view.required_h.setValue(48)
+    assert view.hours_note.isHidden() and nv.hours_note(48, 48) == ""
+    view.required_h.setValue(72)
+    assert not view.hours_note.isHidden()
+    assert view.hours_note.text() == nv.hours_note(72, view.accepted_h.value()) == (
+        "This machine takes none of its own jobs: one may take 72 h, and the longest "
+        f"job it takes is {view.accepted_h.value()} h.")
+    view.accepted_h.setValue(72)
+    assert view.hours_note.isHidden()
 
 
 @pytest.fixture

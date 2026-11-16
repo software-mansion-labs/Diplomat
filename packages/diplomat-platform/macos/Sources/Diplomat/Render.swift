@@ -399,6 +399,8 @@ enum Render {
             // offered here. "-starting": the transport bootstrapping, the image building,
             // no pools yet. "-failed": the daemon up with no tor and no docker to use.
             // "-down": the daemon asked, and not answering. "-off": the switch off.
+            // "-unsaved": the plain screen over a change config.json refused, the hours
+            // set so that this machine takes none of its own jobs.
             let _ = seedNetworkScreen(s, store: store)
             ContentView(showNetwork: true).environment(\.renderNow, machinesNow)
         case let s where s.hasPrefix("devices"):
@@ -1342,7 +1344,8 @@ enum Render {
         return true
     }
 
-    /// `DIPLOMAT_RENDER=network-screen[-starting|-failed|-down|-off]`: see the mode's case. The snapshot
+    /// `DIPLOMAT_RENDER=network-screen[-starting|-failed|-down|-unsaved|-off]`: see the mode's
+    /// case. The snapshot
     /// goes through the reader the daemon's answer does; no daemon is asked.
     @MainActor
     @discardableResult
@@ -1356,6 +1359,10 @@ enum Render {
         store.networkAnswered = !mode.hasSuffix("down")
         store.networkRequiredMinimumH = 24
         store.networkMaximumAcceptedH = 48
+        if mode.hasSuffix("unsaved") {
+            store.networkRequiredMinimumH = 72
+            _ = seedUnsaved(store)
+        }
         let now = machinesNow.timeIntervalSince1970
         let here = "a3f91c07d2e845b6c0aa17f3"
         var doc: [String: Any] = [

@@ -85,6 +85,9 @@ final class Store: ObservableObject {
     /// Whether the feed has said the network is refusing automatic work, for the current
     /// spell of it.
     var networkUnavailableLogged = false
+    /// Whether the feed has said the shared config cannot be read, for the current spell
+    /// of it.
+    var configUnreadableLogged = false
     /// Why the network refused each queued job that it refused for a reason of the job's
     /// own, by the job's label: what its row says, and what the feed has said.
     @Published var networkJobRefusals: [String: String] = [:]
@@ -484,7 +487,9 @@ final class Store: ObservableObject {
             guard networkEnabled != oldValue, !readingConfig else { return }
             if writesConfig,
                !configSaved(AppConfig.setBool(NetworkSettings.enabledKey, networkEnabled)) {
-                readBack { networkEnabled = AppConfig.networkEnabled }
+                // A file that cannot be read says nothing of the switch.
+                let known = AppConfig.unreadable ? oldValue : AppConfig.networkEnabled
+                readBack { networkEnabled = known }
                 return
             }
             networkSwitched()
@@ -532,9 +537,18 @@ final class Store: ObservableObject {
 
     /// Take the network's settings as the shared file has them: the daemon acts on the
     /// file, and another process may have written it. A switch that moved is followed
-    /// as one moved here is.
+    /// as one moved here is. A file that is there and cannot be read says nothing - one
+    /// read can fall in the middle of a rewrite - so every setting stays as it was last
+    /// read, and the feed says so once for the spell.
     func rereadNetworkSettings() {
         guard writesConfig else { return }
+        let unreadable = AppConfig.unreadable
+        if unreadable, !configUnreadableLogged {
+            AuditLog.log("auto", "warn", AppConfig.unreadableNote)
+            refreshAudit()
+        }
+        configUnreadableLogged = unreadable
+        guard !unreadable else { return }
         let on = AppConfig.networkEnabled
         let switched = on != networkEnabled
         readBack {

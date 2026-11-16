@@ -741,6 +741,25 @@ enum NetworkTest {
                 && requests(NetworkRoute.withdraw).last?["taskId"] as? String == "t-away"
                 && requests(NetworkRoute.withdraw).last?["reason"] as? String
                     == "stopped")
+        let sentBefore = (requests(NetworkRoute.stopRun).count, requests(NetworkRoute.withdraw).count)
+        if let ended = poolTask("t-ended", here: true) {
+            await store.stopNetworkTask(ended, pool: "github.com/o/r")
+        }
+        check("a run that ended since the screen drew it is not there to stop, and nothing "
+                + "is withdrawn in its place",
+              requests(NetworkRoute.stopRun).count == sentBefore.0
+                && requests(NetworkRoute.withdraw).count == sentBefore.1
+                && store.networkRefusals["github.com/o/r"] == DiplomacyNetwork.runEnded
+                && DiplomacyNetwork.runEnded == "That job's run on this machine has already ended.")
+        if let unseen = poolTask("t-here", here: true) {
+            script.refuse(NetworkRoute.state, (500, "boom"))
+            await store.stopNetworkTask(unseen, pool: "github.com/o/r")
+            script.refuse(NetworkRoute.state, nil)
+        }
+        check("…nor when the daemon does not say what runs here",
+              requests(NetworkRoute.stopRun).count == sentBefore.0
+                && requests(NetworkRoute.withdraw).count == sentBefore.1
+                && store.networkRefusals["github.com/o/r"] == DiplomacyNetwork.notAnswering)
         script.set(snapshot())
 
         // 17. What holds a network job: a pause. Not a full local cap, not a low disk.
@@ -1629,6 +1648,82 @@ enum NetworkTest {
         store.networkEnabled = false
         await store.networkLifecycle?.value
         check("…and switched off again, nothing is", store.networkTrouble == nil)
+
+        // 39. The hours say when they leave this machine none of its own jobs.
+        check("hours that leave this machine none of its own jobs say so",
+              NetworkText.hoursNote(required: 48, accepted: 48) == nil
+                && NetworkText.hoursNote(required: 72, accepted: 48)
+                    == "This machine takes none of its own jobs: one may take 72 h, and the "
+                        + "longest job it takes is 48 h.")
+
+        // 40. A git call that hangs is ended at its budget, and reads as a checkout git
+        //     failed on.
+        let realGit = LocalRepos.gitCall
+        let hung = scratch.appendingPathComponent("hung-git")
+        try? Data("#!/bin/sh\nexec sleep 30\n".utf8).write(to: hung)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: hung.path)
+        LocalRepos.gitCall = (hung.path, 0.5)
+        let gitAsked = Date()
+        let remotes = LocalRepos.readRemotes(of: bare)
+        let gitTook = Date().timeIntervalSince(gitAsked)
+        LocalRepos.gitCall = realGit
+        check("a git call that hangs is ended at its budget",
+              remotes == nil && gitTook >= 0.4 && gitTook < 5)
+        check("…and the real one still reads the checkout",
+              LocalRepos.readRemotes(of: bare)?.contains("github.com/acme/") == true)
+
+        // 38. A config that is there and cannot be read says nothing: the switch stays
+        //     as it was last read, nothing is withdrawn, retired or started on it, and
+        //     no setting is written over the file.
+        script.set(snapshot(offers: [offerRow("task-cfg", "pooled")]))
+        store.networkEnabled = true
+        await store.networkLifecycle?.value
+        bookByHand(90380, task: "task-cfg")
+        await store.runNetworkCycleOnce()
+        let configWhole = (try? Data(contentsOf: AppConfig.url)) ?? Data()
+        let configWithdrawn = requests(NetworkRoute.withdraw).count
+        func unreadableNotes() -> Int {
+            feedDetails("warn").filter { $0 == AppConfig.unreadableNote }.count
+        }
+        try? configWhole.dropLast(3).write(to: AppConfig.url)
+        await store.runNetworkCycleOnce()
+        await store.settleAgents()
+        check("one brace short, the config says nothing: the switch stays on",
+              AppConfig.unreadable && store.networkEnabled)
+        check("…nothing is withdrawn and the run stays booked",
+              requests(NetworkRoute.withdraw).count == configWithdrawn
+                && booked("task-cfg") != nil)
+        await store.runNetworkCycleOnce()
+        check("…and the feed says so once for the spell", unreadableNotes() == 1)
+        let limit = store.autoTaskLimit
+        store.networkDevices.toggle()
+        check("no setting is saved over a file that cannot be read",
+              !AppConfig.setInt(AppConfig.autoTaskLimitKey, limit + 1)
+                && !AppConfig.setBool(NetworkSettings.enabledKey, false)
+                && !AppConfig.set(AppConfig.agentTokenKeychainItemKey, "x")
+                && !AppConfig.setDouble(AppConfig.autoBudgetFloorPctKey, 1)
+                && !AppConfig.setRepoRoots(["/nowhere"])
+                && !AppConfig.update { _ in [:] }
+                && (try? Data(contentsOf: AppConfig.url)) == configWhole.dropLast(3)
+                && store.configSaveFailed)
+        store.networkEnabled = false
+        check("…and a switch that would not save stays where it was", store.networkEnabled)
+        try? Data().write(to: AppConfig.url)
+        await store.runNetworkCycleOnce()
+        check("an empty file is one that cannot be read", AppConfig.unreadable && store.networkEnabled)
+        try? configWhole.write(to: AppConfig.url)
+        await store.runNetworkCycleOnce()
+        try? Data("[]".utf8).write(to: AppConfig.url)
+        await store.runNetworkCycleOnce()
+        check("a second spell is said again", store.networkEnabled && unreadableNotes() == 2)
+        try? Data("{\"networkEnabled\": \"true\"}".utf8).write(to: AppConfig.url)
+        await store.runNetworkCycleOnce()
+        await store.networkLifecycle?.value
+        check("what can be read is believed: a value that is no boolean is off",
+              !AppConfig.unreadable && !store.networkEnabled)
+        try? FileManager.default.removeItem(at: AppConfig.url)
+        check("…and no file is no setting, which a write may follow",
+              !AppConfig.unreadable && AppConfig.setInt(AppConfig.autoTaskLimitKey, limit))
 
         print(pass ? "NETWORK TEST OK" : "NETWORK TEST FAILED")
         return pass

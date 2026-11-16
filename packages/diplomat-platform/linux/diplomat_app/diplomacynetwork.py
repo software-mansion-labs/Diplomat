@@ -51,8 +51,21 @@ def socket_path() -> Path:
 
 # MARK: settings
 
+#: The config the switch was last read from, and what it said.
+_switch_read: tuple[Path, bool] | None = None
+
+
 def enabled() -> bool:
-    return appconfig.get_bool(network.ENABLED_KEY, False)
+    """The switch, as the shared config has it. A config that is there and cannot be
+    read says nothing of it - one read can fall in the middle of a rewrite - so the
+    switch is as it was last read, and off when it never was."""
+    global _switch_read
+    where, config = appconfig.path(), appconfig.read_known()
+    if config is None:
+        return _switch_read is not None and _switch_read == (where, True)
+    on = config.get(network.ENABLED_KEY) is True
+    _switch_read = (where, on)
+    return on
 
 
 def set_enabled(on: bool) -> None:
@@ -108,6 +121,8 @@ _GETS = frozenset({network.ROUTE_HEALTH, network.ROUTE_STATE})
 
 #: Why nothing can be said of a network run, as the sentences that take it start.
 NOT_ANSWERING = "the Diplomacy Network daemon is not answering"
+#: What a Stop says of a run the daemon no longer lists as going.
+RUN_ENDED = "That job's run on this machine has already ended."
 SWITCHED_OFF = "the Diplomacy Network is switched off"
 
 

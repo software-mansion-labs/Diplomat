@@ -889,33 +889,16 @@ def _busy(service, session_id: str = SID) -> None:
     service.routes[("GET", "/api/session/active")] = (200, {"data": {session_id: {}}})
 
 
-def test_an_unbound_2x_run_is_bound_by_its_opening_prompt_and_asked(service,
-                                                                    monkeypatch):
-    _opening(service, OTHER, "Review PR #8 in o/r")
+def test_a_tracked_run_is_never_bound_by_an_opening_prompt(service, monkeypatch):
+    """A 2.x run's session is bound as it is spawned. One with neither a session nor a
+    port has no server to ask, and a TUI that merely opened on the same prompt is
+    another agent's: untracked ones are adopted by their PR (:func:`probes.adopt`)."""
     _opening(service, SID, PROMPT)
     _busy(service)
-    monkeypatch.setattr(probes, "_ps_dump", lambda now: _ps(
-        f"opencode --session {OTHER}", f"opencode --session {SID}"))
+    monkeypatch.setattr(probes, "_ps_dump", lambda now: _ps(f"opencode --session {SID}"))
     obs = probes.agent_sessions([_unbound_run()], "/repo", T0)
-    assert obs.value == {"m1": SessionState(busy=True)}
-    assert agentregistry.service_session("m1") == SID
-
-
-def test_a_session_another_run_holds_is_not_bound_again(service, monkeypatch):
-    _opening(service, SID, PROMPT)
-    _busy(service)
-    monkeypatch.setattr(probes, "_ps_dump", lambda now: _ps(f"opencode --session {SID}"))
-    probes.agent_sessions([_v2_run("r1"), _unbound_run()], "/repo", T0)
+    assert obs.value == {}
     assert agentregistry.bound_session("m1") == ""
-
-
-def test_a_run_bound_by_its_prompt_is_interrupted_when_retired(service, monkeypatch):
-    _opening(service, SID, PROMPT)
-    _busy(service)
-    monkeypatch.setattr(probes, "_ps_dump", lambda now: _ps(f"opencode --session {SID}"))
-    record = _unbound_run()
-    probes.agent_sessions([record], "/repo", T0)
-    assert ("interrupt", SID) in _retire(monkeypatch, [record])
 
 
 def test_one_probe_pass_asks_for_the_active_map_once(service):
