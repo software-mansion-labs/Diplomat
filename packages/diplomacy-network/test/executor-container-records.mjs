@@ -221,7 +221,7 @@ try {
   await check('a container\'s records directory is this user\'s, made before the engine is asked for the container: one the engine has to make for a mount is root\'s on Linux', async () => {
     const name = containerName(pool(14).id, PEER);
     stage('fail-run', 'docker: Error response from daemon: no space left on device\n');
-    await assert.rejects(containers.acquire({ pool: pool(14), peer: PEER, runId: 'run-14' }), /^Error: docker run: docker: Error response from daemon: no space left on device$/);
+    await assert.rejects(containers.acquire({ pool: pool(14), peer: PEER, runId: 'run-14' }), /^OwnFault: docker run: docker: Error response from daemon: no space left on device$/);
     assert.equal(fs.statSync(records(name)).uid, process.getuid());
     await containers.sweep();
     nothingLeft();

@@ -96,8 +96,8 @@ closed at every start.
 | `jobs.json` (0600) | the jobs going in this daemon's containers, for the daemon after it: the broker's port, and each job's container, proxy token, CA generation, process group, forwards and what it has spent of the model, the last no more than 5 s behind |
 | `tor/` | tor's data directory |
 | `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it. A leaf is good for 90 days, is replaced from two weeks before its end, under a running job too, and is removed once past it |
-| `mirrors/<pool hash>.git` | bare mirrors. One is removed a day after its pool was last linked and not left |
-| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended - the directory first, and the link only once the directory is gone, so one that will not go is met again at the next look - and `runs/.containers/<container>/` once it is empty and the container is gone |
+| `mirrors/<pool part>.git` | bare mirrors, each named by the 128 bits its pool has in a container's name. One is removed a day after its pool was last linked and not left, never from under a job that reads it; one named by sixteen hex digits is an earlier version's, is not read, and goes a day after it was last touched |
+| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended - the directory first, and the link only once the directory is gone, so one that will not go is met again at the next look - and `runs/.containers/<container>/`, with whatever else a job left in it, once the container is gone and no run in it is kept |
 | `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed once its directory is gone |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
@@ -111,7 +111,8 @@ changes.
 A job's directory is kept for the day after its end because the snapshot's `log` names a
 file in it, which is what the operator opens to see what the job did; nothing else reads
 it once the outcome is reported. `DN_RUN_KEEP_MS` and `DN_MIRROR_KEEP_MS` set the two
-days; both are looked at every 10 minutes, with the idle containers, the old
+days; both are looked at every 10 minutes, with what is left under a container's name
+that no job is in, the images no job is started in, the old
 certificate authorities and the certificates past their end. A container reads its run directory through a bind mount as
 its own root, which the engine maps to the operator (Docker Desktop, rootless docker) or
 to the host's root (rootful docker on Linux): either reads 0700 and 0600. Under
@@ -348,10 +349,41 @@ four things and starts the job:
   that directory. Debian, git, node, python, curl and the handful of tools agents reach
   for; nothing project-specific. `image/preamble.md` tells the agent it is root in a
   disposable container and may install whatever else it needs.
+
+  The tag names the recipe, not the bytes. Held to a hash are the Debian base image (by
+  digest) and the releases of node, gh and glab (by SHA-256, for each architecture).
+  Held to a version only are corepack and Claude Code, with whatever they depend on as
+  npm resolves it on the day. Held to nothing are the Debian packages: they are what
+  bookworm serves on the day of the build. So two machines with one tag can hold
+  different packages, and an image is as old as its build.
+
+  An image the daemon builds carries this state directory in its `dn.base` label. One
+  that carries it, is named `DN_IMAGE_REPO:<tag>` and is not the image jobs are started
+  in is removed when the daemon looks every 10 minutes, unless a container is still of
+  it: the engine refuses that one, and it is asked for again. An image without the
+  label - another daemon's, one built by hand - is never removed, nor is one of another
+  name that was built on top of the daemon's and carries its label.
 - **The container.** Exactly one per requesting peer and repository, named
-  `dn-<pool part>-<peer part>`, kept running between that peer's jobs on that
-  repository and removed after 6 idle hours. It never serves another repository or
-  another peer. Each part of the name is 128 bits of a SHA-256, and the name alone
+  `dn-<pool part>-<peer part>`. It lasts as long as a job is in it: when its last job
+  leaves it is removed with its relay, its network and its `/work` volume, and that
+  peer's next job on that repository gets a new one from the image, so nothing a job
+  wrote, installed or left running is there for a job that starts after every earlier
+  one has ended. Jobs of one peer on one repository that run at the same time run in
+  that one container, each as root, and nothing in it keeps them apart: each can read
+  the other's run directory, its proxy token included, and replace any program the
+  other runs. What a job starts from is the host's and the image's all the same: its
+  runner, prompt and environment are written by the host into a run directory of its
+  own; its clone is whole and its own, fetched through the broker from this machine's
+  mirror - the container keeps no copy of the repository for a later job to borrow
+  from; and its git reads a settings file of its own and neither the container's
+  system-wide settings nor its template directory (`GIT_CONFIG_GLOBAL`,
+  `GIT_CONFIG_NOSYSTEM`, `GIT_TEMPLATE_DIR`). A job that comes while the
+  removal runs waits for it and never joins the container that is going. What the
+  engine would not remove stops that pair's next job at its start, and is asked for
+  again when the daemon looks every 10 minutes. A container this daemon has no job in
+  and did not make - an earlier daemon's, whose job may yet be taken up - is removed
+  once it has been seen for 6 hours (`DN_CONTAINER_IDLE_MS`). The container never
+  serves another repository or another peer. Each part of the name is 128 bits of a SHA-256, and the name alone
   makes nothing a pair's own: the container, its relay, its network and its volume
   each carry `dn.pool`, `dn.peer` and `dn.base` in full, and one found under a pair's
   name with other labels is refused and left as it is. It holds no credential: not the
@@ -367,11 +399,19 @@ four things and starts the job:
   that size where its storage can (`--storage-opt size=`). Where it cannot - Docker
   Desktop's default storage refuses the option - `usage(name)` measures the layer, the
   `/work` volume and the run records, and `overQuota()` names the containers past it.
-  The daemon asks every 10 minutes (`DN_SWEEP_MS`). A container past its allowance is
-  discarded: its jobs are stopped and end as failed attempts with the reason `the
-  container outgrew its disk allowance` - whichever of them filled it would fill the
-  next one too, and three attempts are all a task gets - and the container goes with
-  its relay, its network, its volume and its run records.
+  In the volume and the records a file counts for the blocks it holds plus 4096 bytes,
+  no link is followed and no file is opened; in the writable layer a file counts for
+  its full length, holes included. The run records outlive the container by the day
+  they are kept, so they are measured under its name for as long as any are there,
+  container or not. The daemon asks every
+  10 minutes (`DN_SWEEP_MS`). A name past its allowance is discarded: its jobs are
+  stopped and end as failed attempts with the reason `the container outgrew its disk
+  allowance` - whichever of them filled it would fill the next one too, and three
+  attempts are all a task gets - and the container goes with its relay, its network,
+  its volume and its run records. A name the engine could not measure on three looks
+  running is discarded the same way: one miss is a busy engine, and a container that
+  can be made unmeasurable is not thereby made unbounded. A discard reports a name
+  gone only when all of it is; what is left is measured and tried again.
 - **The relay.** On each container's network sits `dn-<pool part>-<peer part>-relay`:
   the same image running `image/relay.mjs`, which carries TCP from that network to the
   broker's port on this machine and to nothing else, 1024 connections at a time. It is
@@ -491,8 +531,8 @@ running is watched again, in its container as it is, under the proxy token and t
 certificate authority it was started with, with the forwards it was started with and
 its share of the model counted on from what `jobs.json` says it had spent. Until that
 is done no job is started - a run that was still waiting for its key, or an offer made
-with `now` in the daemon's first moment, waits for it - so a container holding a job is
-never restarted under it. A job that cannot be taken up - its container is gone, or the
+with `now` in the daemon's first moment, waits for it - so a container holding a job
+from before is never made anew under it. A job that cannot be taken up - its container is gone, or the
 broker's port could not be had again - is stopped for that reason, and the node gives
 the task back. So that the port can be had again, the broker listens below the range
 Linux deals outgoing connections from, where that range leaves room below it: a port
@@ -524,9 +564,24 @@ when the container itself says nothing of it is left. One that is still there 60
 run any more - ends with its container, which is restarted in its turn among whatever
 else is being done to that container; the other jobs in it, all
 the same requester's on the same repository, end as failed attempts with the reason
-`the container was restarted to stop another job`. A process that left the group and
+`the container was restarted to stop another job`, and no later job joins a container
+that was restarted: the next one has it made anew. A process that left the group and
 cleared its environment is known to nobody: it has no token either, and goes when the
-container's last job ends, which restarts the container.
+container's last job ends, which removes the container.
+
+What a container says is believed no further than it costs the job that could have
+forged it. Root in a container can replace `/bin/sh` and every tool named above, and
+then answers the host's questions itself, for its own processes and for those of the
+jobs beside it: that a job is up, that it is gone, that nothing of it is left after a
+stop. The exit code in `done`, the logs and the result line are the job's own word as
+well, and so is everything under `/work`. Three things do not pass through the
+container. The job's token is taken out of the broker before the first question, so a
+job the host counts as ended reaches no forge, no model and no forward, whatever of it
+still runs. A restart is the engine's and ends every process of the container. And the
+removal of the container with its `/work` volume when its last job leaves is the
+engine's too: after it nothing a job started, replaced or wrote is left. Until then a
+job that lied its way past a stop runs on inside the container's limits, with no token
+of its own, beside jobs of the same requester on the same repository.
 
 **Devices.** Simulators, emulators and attached devices stay on the host, and a job is
 given nothing of them unless this machine's operator opts in: `networkDevices` in

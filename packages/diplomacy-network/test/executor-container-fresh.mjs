@@ -115,7 +115,7 @@ try {
     assert.deepEqual(containers.list(), [{ name, image: containers.dockerState().image, jobs: [] }]);
     const from = calls().length;
     await assert.rejects(containers.acquire({ pool: p, peer: PEER, runId: 'two' }),
-      (e) => e.message === `what earlier jobs left under ${name} could not be removed (the volume ${volumeOf(name)}), and no job is started beside it`);
+      (e) => e.name === 'Error' && e.message === `what earlier jobs left under ${name} could not be removed (the volume ${volumeOf(name)}), and no job is started beside it`);
     assert.deepEqual(acted(from), ['volume rm'], 'nothing was made on it');
     assert.equal(there('volumes', volumeOf(name), 'left-by-a-job'), true);
     // The engine takes it now: the sweep does not wait for it to have been idle.
@@ -148,7 +148,7 @@ try {
     clock.now += 10 * 3600 * 1000;
     await containers.sweep();
     assert.deepEqual(acted(from), []);
-    await assert.rejects(containers.acquire({ pool: p, peer: PEER, runId: 'two' }), /is gone with 1 job\(s\) in it/);
+    await assert.rejects(containers.acquire({ pool: p, peer: PEER, runId: 'two' }), /^Error: container \S+ is gone with 1 job\(s\) in it$/);
     await containers.release({ name, runId: 'one' });
     assert.deepEqual(acted(from), ['rm -f', 'network rm', 'volume rm']);
     assert.deepEqual(['containers', 'networks', 'volumes'].map((kind) => fs.readdirSync(path.join(fakeDir, kind))), [[], [], []]);

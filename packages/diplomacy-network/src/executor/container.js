@@ -36,6 +36,7 @@ import {
   BASE_DIR, CONTAINER_CPUS, CONTAINER_DISK_BYTES, CONTAINER_HOST, CONTAINER_IDLE_MS, CONTAINER_MEMORY, CONTAINER_PIDS,
   CONTAINER_USAGE_TIMEOUT_MS, DOCKER_BIN, IMAGE_BUILD_TIMEOUT_MS, IMAGE_REPO, RELAY_HOST, RUNS_DIR,
 } from '../paths.js';
+import { OwnFault, own } from './own-fault.js';
 
 /// The directory the image is built from.
 export const IMAGE_DIR = fileURLToPath(new URL('../../image/', import.meta.url));
@@ -140,7 +141,8 @@ const volumeOf = (name) => name.replace(/^dn-/, 'dn-work-');
 const lines = (stdout) => stdout.split('\n').map((l) => l.trim()).filter(Boolean);
 // A job container's name, by its shape: no relay, no probe, nothing docker reads as an option.
 const isJobName = (name) => /^dn-[0-9a-z-]+$/.test(name) && !/-(relay|probe)$/.test(name);
-const labelsFor = (pool, peer) => ['--label', `dn.pool=${pool.id}`, '--label', `dn.peer=${peer}`, '--label', `dn.base=${BASE_DIR}`];
+const OWN_LABEL = ['--label', `dn.base=${BASE_DIR}`];
+const labelsFor = (pool, peer) => ['--label', `dn.pool=${pool.id}`, '--label', `dn.peer=${peer}`, ...OWN_LABEL];
 const mine = (labels) => !!labels && labels['dn.base'] === BASE_DIR;
 
 // One container's run records, the only part of RUNS_DIR it is shown: a single shared
@@ -153,9 +155,12 @@ const runsDirOf = (name) => path.join(RUNS_DIR, '.containers', name);
 /// `acquire({ pool, peer, runId })` resolves to that pair's container `{ name, image,
 /// runsDir }` with the job counted as running in it: the one its jobs are running in,
 /// or, when none is, a new one made from the image after everything found under its
-/// name was removed. `release({ name, runId })` ends the job's hold and, when it was the
-/// last one, removes the container with its relay, its network and its volume (it
-/// resolves once that is done): nothing a job left running or wrote is there for the
+/// name was removed. It rejects with an OwnFault when the engine, the image, another
+/// daemon's object under the name or the making of the new container is why; what
+/// earlier jobs left and a container that went from under its jobs reject plainly, being
+/// possibly those jobs' doing. `release({ name, runId })` ends the job's hold and, when
+/// it was the last one, removes the container with its relay, its network and its volume
+/// (it resolves once that is done): nothing a job left running or wrote is there for the
 /// next one.
 /// `adopt({ pool, peer, runId })` counts a job an earlier daemon started as running in
 /// that pair's container and resolves to the container, or to null when it is not there
@@ -163,7 +168,8 @@ const runsDirOf = (name) => path.join(RUNS_DIR, '.containers', name);
 /// `sweep()` removes what is under a name no job is counted in: at once what a removal
 /// left, a network or a volume without a container, and the run records of a container
 /// that is gone once no run among them is kept; a container no job of this daemon was
-/// ever in once it has been seen for CONTAINER_IDLE_MS.
+/// ever in once it has been seen for CONTAINER_IDLE_MS. And every image this daemon
+/// built but the one jobs are started in, once no container is of it.
 /// `broker()` is the broker's `address()`: where relays lead.
 /// `restart`, `usage`, `overQuota`, `erase`, `discard` and `removeAll` are described where
 /// they are defined. `imageDir` is the directory the image is built from.
@@ -215,7 +221,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     }
     state = { state: 'building', image: tag, detail: 'starting' };
     log('docker', `building ${tag}`);
-    const built = await docker(['build', '--progress', 'plain', '-t', tag, imageDir], {
+    const built = await docker(['build', '--progress', 'plain', ...OWN_LABEL, '-t', tag, imageDir], {
       timeout: IMAGE_BUILD_TIMEOUT_MS,
       onLine: (line) => { state = { state: 'building', image: tag, detail: line.slice(0, 200) }; },
     });
@@ -265,7 +271,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     }
     if (!why) return;
     log('docker', why);
-    throw new Error(why);
+    throw new OwnFault(why);
   }
 
   // What the engine holds under a container's name, in the order it can be removed in -
@@ -388,7 +394,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
   function acquire({ pool, peer, runId }) {
     const name = containerName(pool.id, peer);
     return serial(name, async () => {
-      const tag = await ensureImage();
+      const tag = await own(ensureImage());
       let entry = known.get(name);
       // A job joins the jobs running in its pair's container, in the image they were
       // started in. One whose jobs were ended by a restart holds only what they left.
@@ -409,8 +415,8 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
         }
         const left = await remove(name, there);
         if (left.length > 0) throw new Error(`what earlier jobs left under ${name} could not be removed (${left.join(', ')}), and no job is started beside it`);
-        await ensureWayOut(name, tag, pool, peer);
-        await create(name, tag, pool, peer);
+        await own(ensureWayOut(name, tag, pool, peer));
+        await own(create(name, tag, pool, peer));
         entry = { name, image: tag, jobs: new Set(), cut: false };
       }
       strays.delete(name);
@@ -516,6 +522,14 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     await Promise.all(jobContainers(records).filter((name) => !names.includes(name) && !kept.has(name)).map((name) => serial(name, async () => {
       if (!known.has(name) && !(await wipe(name, '', true))) log('docker', `the run records of ${name} could not be removed: they are counted against its disk allowance until they are`);
     })));
+    // An image this daemon built, once jobs are started in another: by its label and its
+    // name both, since an image built on top of one carries the label too. The engine
+    // refuses one a container is of, and it is asked for again at the next sweep.
+    if (state.state !== 'ready') return;
+    const images = await docker(['image', 'ls', ...OWN, '--format', '{{.Repository}}:{{.Tag}}']);
+    for (const image of lines(images.stdout).filter((i) => i.startsWith(`${IMAGE_REPO}:`) && i !== state.image)) {
+      if ((await docker(['image', 'rm', image])).code === 0) log('docker', `removed the image ${image}: jobs are started in ${state.image}`);
+    }
   }
 
   // One run of the probe container beside `name`, on `image`: resolves to docker's

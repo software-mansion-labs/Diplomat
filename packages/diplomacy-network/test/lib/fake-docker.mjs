@@ -155,20 +155,34 @@ switch (command) {
   }
 
   case 'image': {
-    const { rest } = parse(args.slice(1), ['--format']);
+    const { opts, rest } = parse(args.slice(1), ['--format', '--filter']);
+    const there = () => fs.existsSync(file('images', encodeURIComponent(rest[0])));
     if (args[0] === 'inspect') {
-      if (!fs.existsSync(file('images', encodeURIComponent(rest[0])))) die(`Error response from daemon: No such image: ${rest[0]}`);
+      if (!there()) die(`Error response from daemon: No such image: ${rest[0]}`);
       console.log('sha256:fake');
-    }
+    } else if (args[0] === 'ls') {
+      const want = (opts['--filter'] || []).map((f) => f.replace(/^label=/, ''));
+      for (const f of fs.readdirSync(file('images'))) {
+        if (want.every((w) => (readJson(file('images', f)) || []).includes(w))) console.log(decodeURIComponent(f));
+      }
+    } else if (args[0] === 'rm') {
+      if (!there()) die(`Error response from daemon: No such image: ${rest[0]}`);
+      // A container of an image holds it, running or not.
+      for (const f of fs.readdirSync(file('containers'))) {
+        const c = readJson(file('containers', f));
+        if (c && c.image === rest[0]) die(`Error response from daemon: conflict: unable to remove repository reference "${rest[0]}" (must force) - container ${c.name} is using its referenced image`);
+      }
+      fs.unlinkSync(file('images', encodeURIComponent(rest[0])));
+    } else die(`fake-docker: no such command: image ${args[0]}`, 2);
     break;
   }
 
   case 'build': {
-    const { opts, rest } = parse(args, ['-t', '--progress']);
+    const { opts, rest } = parse(args, ['-t', '--progress', '--label']);
     console.error('#1 [internal] load build definition from Dockerfile');
     if (!fs.existsSync(path.join(rest[0], 'Dockerfile'))) die('ERROR: failed to read dockerfile');
     console.error('#2 exporting to image');
-    fs.writeFileSync(file('images', encodeURIComponent(opts['-t'][0])), '');
+    fs.writeFileSync(file('images', encodeURIComponent(opts['-t'][0])), JSON.stringify(opts['--label'] || []));
     break;
   }
 
