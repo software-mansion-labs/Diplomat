@@ -384,8 +384,7 @@ async function takeUp(kept) {
       const container = await containers.adopt({ pool: was.pool, peer: was.peer, runId });
       if (!container) continue;
       if (!was.pid) {
-        // The daemon before this one went while it started the job, before the job's
-        // process group was heard: what there is of the job is ended, not watched.
+        // Its process group was never heard: nothing to watch it by, so it is ended.
         log(`${runId} was being started when the daemon before this one went: stopping what there is of it in ${container.name}`);
         if (attachJob({ runId, container })) await stopJob({ runId }, containers);
         await containers.release({ name: container.name, runId });
@@ -489,12 +488,13 @@ async function startExecutor() {
   const kept = readJson(JOBS_PATH) ?? {};
   const leftJobs = Object.keys(kept.jobs ?? {}).length > 0;
   while (!broker.address() && !ending) {
+    const told = leftJobs && kept.port > 0;
     try {
-      await broker.start(leftJobs && kept.port > 0 ? { port: kept.port } : {});
+      await broker.start(told ? { port: kept.port } : {});
     } catch (err) {
       log(`the broker is not listening: ${err?.message ?? err}`);
-      // Somebody else has the port the jobs were told: any port serves the next ones.
-      if (err?.code === 'EADDRINUSE') kept.port = 0;
+      // Somebody else has the port the jobs were told: another serves the next ones.
+      if (err?.code === 'EADDRINUSE' && told) kept.port = 0;
       else await delay(EXECUTOR_RETRY_MS);
     }
   }

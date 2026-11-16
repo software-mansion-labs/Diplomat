@@ -441,7 +441,10 @@ is done no job is started - a run that was still waiting for its key, or an offe
 with `now` in the daemon's first moment, waits for it - so a container holding a job is
 never restarted under it. A job that cannot be taken up - its container is gone, or the
 broker's port could not be had again - is stopped for that reason, and the node gives
-the task back. Every 15 s the jobs in this daemon's containers are held against the
+the task back. So that the port can be had again, the broker listens below the range
+Linux deals outgoing connections from: a port of that range may be given to some
+connection while the daemon is away, and cannot be listened on while that connection
+lasts, nor for a minute after. Every 15 s the jobs in this daemon's containers are held against the
 node's runs, and a job no run stands behind is stopped: one whose run was stopped
 while the engine did not answer, and one `jobs.json` no longer names, which is found by
 its run directory.

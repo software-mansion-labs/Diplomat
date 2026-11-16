@@ -23,7 +23,7 @@ Object.assign(process.env, {
   DN_JOB_MODEL_REQUESTS: '12', DN_JOB_MODEL_BYTES: '300000',
   GIT_CONFIG_GLOBAL: path.join(scratch, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
 });
-const { createBroker, brokerBindAddress, deniedAddress, forgeHosts, forgeSshHosts, normalHost, MODEL_HOSTS } = await import('../src/executor/broker.js');
+const { createBroker, brokerBindAddress, quietPort, deniedAddress, forgeHosts, forgeSshHosts, normalHost, MODEL_HOSTS } = await import('../src/executor/broker.js');
 const { createCA } = await import('../src/executor/ca.js');
 const { createLLM, PLACEHOLDER } = await import('../src/executor/llm.js');
 const { createMirrors } = await import('../src/executor/mirror.js');
@@ -278,6 +278,15 @@ try {
     for (const none of [null, '', 'fe80::1']) {
       await assert.rejects(brokerBindAddress({ platform: 'linux', override: '', bridgeGateway: async () => none }), /no gateway address/);
     }
+  });
+
+  await check('the port is one below the range the system deals outgoing connections from, where it states one with room below it; the system\'s pick anywhere else', () => {
+    const picked = [];
+    const pick = (from, to) => { picked.push([from, to]); return from + 7; };
+    assert.deepEqual([quietPort({ range: '32768\t60999\n', pick }), quietPort({ range: '11000 65535', pick })], [10007, 10007]);
+    assert.deepEqual(picked, [[10000, 32768], [10000, 11000]], 'from 10000 up to the first port of the range, which is not one of them');
+    for (const range of ['10999 65535', '1024\t65535\n', '', 'not a range', null]) assert.equal(quietPort({ range, pick }), 0, String(range));
+    assert.equal(picked.length, 2);
   });
 
   await check('a job cannot be admitted before the broker listens', async () => {

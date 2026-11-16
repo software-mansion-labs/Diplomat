@@ -175,6 +175,8 @@ export const CONTAINER_USAGE_TIMEOUT_MS = num('DN_CONTAINER_USAGE_TIMEOUT_MS', 5
 // leads to (loopback under Docker Desktop, the bridge gateway on Linux).
 export const BROKER_BIND = process.env.DN_BROKER_BIND || '';
 export const BROKER_PORT = num('DN_BROKER_PORT', 0);
+// Where Linux states the range of ports it deals outgoing connections from.
+export const LOCAL_PORTS_PATH = process.env.DN_LOCAL_PORTS_PATH || '/proc/sys/net/ipv4/ip_local_port_range';
 // One forge request's body, which is one `act` request's.
 export const FORGE_BODY_CAP = 48 * 2 ** 20;
 // How long a job's forge request waits for the requester's answer.
