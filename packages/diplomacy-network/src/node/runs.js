@@ -133,6 +133,7 @@ export function createRuns(host) {
           run.spec = spec;
           host.saveKeys();
           save();
+          host.log(`key of ${run.taskId} received ${host.now() - run.startedAt} s after its claim, at ask ${tries + 1}`);
         } else if (host.now() + RETRY_MS / 1000 >= claim.leaseUntil) {
           halt(run, 'the requester gave no key before the lease ran out', 'release');
           return;
@@ -172,6 +173,7 @@ export function createRuns(host) {
       return;
     }
     Object.assign(run, { state: 'running', container: String(handle?.container ?? ''), log: String(handle?.log ?? '') });
+    host.log(`job of ${taskId} started ${host.now() - run.startedAt} s after its claim`);
     save();
     host.store.flush();
     host.touch();

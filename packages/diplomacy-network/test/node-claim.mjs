@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { outranks } from '../src/core/claims.js';
+import { PROBE_TIMEOUT_MS, RANK_DELAY_MS, REQUEST_TIMEOUT_MS } from '../src/paths.js';
 
 const offerArgs = (item, more = {}) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p', ...more });
 const signers = (claim) => claim.grants.map((g) => g.by);
@@ -212,4 +213,42 @@ await check('the word on slots is how many more: runs begun before it are not co
   const third = await req.node.offer(offerArgs('pr-3'));
   await w.run(60);
   assert.equal(w.task(req, third.taskId).state, 'available', 'and no more than that');
+});
+
+await check('a host says in one line of its log where the time of each round went, and when a run had its key and its job began: seconds and counts, and nothing any member said', async () => {
+  const w = createWorld({ seed: 39 });
+  const all = await w.pool(['req', 'exe', 'zzz']);
+  const [req, exe] = all;
+  // One member sleeps, for long enough that the others give it a short time to answer.
+  w.net.sleep('zzz');
+  await w.run(600);
+  const first = await req.node.offer(offerArgs('pr-1'));
+  const second = await req.node.offer(offerArgs('pr-2'));
+  await w.agreed([req, exe]);
+  const about = (taskId) => exe.log.filter((line) => line.includes(` of ${taskId} `));
+  const numbers = (line, shape) => {
+    assert.match(line, shape);
+    return shape.exec(line).slice(1).map(Number);
+  };
+
+  exe.slots = 1;
+  exe.node.admit({ slots: 1 });
+  await w.net.until(() => exe.executor.jobOf(first.taskId), { what: 'a job' });
+  const lines = about(first.taskId);
+  assert.equal(lines.length, 3, lines.join(' | '));
+  const [begun, waited, over] = numbers(lines[0], /^claim of \S+ made - begun (\d+) s after the offer, after a wait of (\d+) ms, over in (\d+) s: 2 members asked, 1 answered, 1 absent, 1 gave an offer$/);
+  const sleeper = PROBE_TIMEOUT_MS / 1000;
+  assert.ok(waited <= RANK_DELAY_MS && begun >= Math.floor(waited / 1000) && over >= sleeper && over <= sleeper + 2, lines[0]);
+  const [keyed] = numbers(lines[1], /^key of \S+ received (\d+) s after its claim, at ask 1$/);
+  const [started] = numbers(lines[2], /^job of \S+ started (\d+) s after its claim$/);
+  assert.ok(keyed <= 1 && started >= keyed && started <= 1, lines.slice(1).join(' | '));
+
+  // The host that offers the second task is gone when the round for it comes: nobody
+  // answers, and nobody gives an offer.
+  w.net.sleep('req');
+  exe.slots = 2;
+  exe.node.admit({ slots: 1 });
+  await w.net.until(() => about(second.taskId).length > 0, { what: 'a round for the second task' });
+  const [, , gone] = numbers(about(second.taskId)[0], /^claim of \S+ stood down: no-requester - begun (\d+) s after the offer, after a wait of (\d+) ms, over in (\d+) s: 2 members asked, 0 answered, 2 absent$/);
+  assert.ok(gone >= REQUEST_TIMEOUT_MS / 1000 && gone <= REQUEST_TIMEOUT_MS / 1000 + 2, about(second.taskId)[0]);
 });

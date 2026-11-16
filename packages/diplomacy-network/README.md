@@ -321,8 +321,8 @@ another.
 A machine that was asleep, off or without a network while its job was run for another
 machine's offer finds the run on record when it is back, and marks its own offer done
 without a second run. It asks the pool what it missed before it does anything for its
-offers - a moment when the others answer, a minute when one of them is asleep, three
-when none answers - and an offer it could not sign for a day it cancels: Diplomat
+offers - a moment when any of the others answers, three minutes when none does - and an
+offer it could not sign for a day it cancels: Diplomat
 offers the work again when the forge still shows it undone. Of two machines, when one
 runs its own offer while the other sleeps, the sleeper marks its offer done when it
 wakes: the job is run once. Two machines that cannot reach each other each have it
@@ -353,12 +353,23 @@ opened from each - is the task's, not the key's: it is kept with the offer in
 the task goes on from the same count and a restart forgets none of it. A branch is the
 task's own once the forge's answer to the push says so.
 
+**Where the time goes.** What happened between an offer and its job is in `daemon.log`,
+in seconds and counts and nothing any machine said: one line a claim round -
+`claim of <task> made - begun 3 s after the offer, after a wait of 3516 ms, over in 15 s: 2 members asked, 1 answered, 1 absent, 1 gave an offer`,
+or `claim of <task> stood down: <why> - ...` with the same numbers - then
+`key of <task> received 0 s after its claim, at ask 1` and
+`job of <task> started 0 s after its claim`. The wait is the one of the machine's rank
+and of what it weighed; a member counts as absent once the round stopped waiting for it;
+and a round that stood down leaves its task alone for 30 to 60 s. A machine that came
+back also says when it could go on:
+`<pool> is up to date 0 s after this host came back to it`.
+
 **Executor side.** With `admit.slots` above zero and a task with a free offer that this
 machine would take, the daemon runs the claim round. The node asks its executor adapter:
 `wouldTake(task)` says whether, and `weigh(task)`, when the adapter has one, how many
 more milliseconds this machine waits before it goes for that task - at most a minute,
-none for a task its own operator started with `now`. What that rests on stays on this
-machine. The claim made, the daemon asks for the key: itself, when this machine offers
+none for a task its own operator started with `now`. What that rests on is sent to
+nobody. The claim made, the daemon asks for the key: itself, when this machine offers
 the task too, else one of the machines whose offer the claim holds, and the next of them
 whenever one gives none. The job is the one that machine hands out, and when it ends its
 outcome is told to every machine whose offer the claim was given. Having the key, the
@@ -537,7 +548,9 @@ with no device to give a job (`networkDevices` off, or on with no device its adb
 lists as ready) waits 30 s (`DN_DEVICE_WAIT_MS`) longer before it goes for the task, so
 a machine with a device gets there first. A checkout is looked at once and again an
 hour later. Nothing is refused on this ground: a task no machine with a device took
-runs on one without.
+runs on one without. The wait is announced to nobody and can be seen all the same: a
+member that offers such a task and watches which machine takes it, and when, can infer
+whether that machine has a device to give.
 
 Anything else on the host - the device allocator, a tool-server - is forwarded only
 when the daemon's environment names it and `networkDevices` is on: `DN_FORWARDS` is a
