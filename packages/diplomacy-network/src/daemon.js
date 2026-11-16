@@ -16,7 +16,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { execFile } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { atomicWrite, pidAlive, procIdentity, readJson, sweepDeadTmp } from '../../daemon-core/src/fsio.js';
+import { atomicWrite, procIdentity, readJson, sweepDeadTmp } from '../../daemon-core/src/fsio.js';
 import { createLog } from '../../daemon-core/src/log.js';
 import { NO_ROUTE, jsonServer, listenSingleton, socketHealthy, startFailed } from '../../daemon-core/src/serve.js';
 import { b64u } from './core/canon.js';
@@ -340,11 +340,12 @@ async function startRun({ runId, pool: link, peer, spec }) {
   // A daemon on its way out makes no container and starts no job: one that is switched
   // off has listed what it removes by then, or is about to.
   const unlessEnding = () => { if (ending) throw new Error('this machine is stopping'); };
+  // Not counted as being started while it waits: a daemon that ends first never gets to it.
+  await lookedAt.promise;
   starting += 1;
   let release = () => {};
   let container = null;
   try {
-    await lookedAt.promise;
     const pool = poolOf(link);
     const mirror = await mirrors.ensureMirror({ pool, checkout: link.path });
     if (mirror.error) log(`the mirror of ${pool.id} was not refreshed: ${mirror.error}`);
@@ -734,11 +735,11 @@ const server = jsonServer(async (route, body) => {
 
 // ---- the process
 
-// Whether the socket and daemon.json are this daemon's still: not once a daemon that
-// took them over owns them.
+// Whether the socket and daemon.json are this daemon's still: not once daemon.json
+// names a daemon that took them over.
 function owned() {
   const owner = readJson(DISCOVERY_PATH)?.pid;
-  return !owner || owner === process.pid || !pidAlive(owner);
+  return !owner || owner === process.pid;
 }
 
 function bye(code) {

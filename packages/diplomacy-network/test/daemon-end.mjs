@@ -92,6 +92,11 @@ try {
       first.child.kill('SIGKILL');
       await Promise.all([first.exit, second.exit]);
     }
+    // With no daemon.json to name another, the socket is its own to remove.
+    const alone = await bench.machine('own2').start();
+    fs.rmSync(path.join(alone.base, 'daemon.json'));
+    assert.deepEqual(await alone.stop(), { code: 0, signal: null });
+    assert.equal(fs.existsSync(alone.socket), false);
   });
 
   await check('a job that finishes while its daemon is on its way out is forgotten only once the node\'s word on its end is on disk: the daemon after it has one run, done, and no second attempt', async () => {
@@ -248,6 +253,15 @@ try {
     fs.rmSync(hold);
     assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null });
     assert.deepEqual([world(m), kept(m)], [[0, 0, 0], ['identity.json', 'pools', 'links.json', 'offers.json']]);
+  });
+
+  await check('a machine with no docker at all has nothing in docker to leave: its switch-off and the installer both end well', async () => {
+    const m = await bench.machine('bare', { docker: 'none' }).start();
+    await m.linked();
+    await until('its word on docker', async () => (await m.state()).docker.state === 'missing');
+    m.setConfig({ networkEnabled: false });
+    assert.deepEqual(await m.exit, { code: 0, signal: null });
+    assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null });
   });
 
   // A git that waits, at the commands a mirror is made or refreshed with, while a file is there.

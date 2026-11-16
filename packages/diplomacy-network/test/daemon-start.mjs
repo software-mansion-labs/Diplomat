@@ -12,8 +12,23 @@ import { POOL, check, createBench, passed, until } from './lib/daemons.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const bench = await createBench();
-// The PATH launchd gives an app, and with it everything the app starts.
-const SYSTEM_PATH = '/usr/bin:/bin:/usr/sbin:/sbin';
+// The tools a daemon is given stand-ins of here.
+const STOOD_IN = ['tor', 'docker', 'gh', 'glab', 'claude', 'security'];
+// The PATH launchd gives an app, and with it everything the app starts: the system's
+// directories, as one of links to all that is in them but those tools. A Linux machine
+// has a docker and a gh there, and a Mac its `security`, and no test runs the real one.
+const SYSTEM_PATH = path.join(bench.root, 'system');
+fs.mkdirSync(SYSTEM_PATH);
+for (const dir of ['/sbin', '/usr/sbin', '/bin', '/usr/bin']) {
+  let names = [];
+  try { names = fs.readdirSync(dir); } catch {}
+  for (const name of names.filter((n) => !STOOD_IN.includes(n))) {
+    fs.rmSync(path.join(SYSTEM_PATH, name), { force: true });
+    fs.symlinkSync(path.join(dir, name), path.join(SYSTEM_PATH, name));
+  }
+}
+// The daemon looks beside node last, and where one of those tools is there it finds it.
+const BESIDE_NODE = STOOD_IN.find((name) => fs.existsSync(path.join(path.dirname(process.execPath), name)));
 const offerOf = async (m, taskId) => (await m.state()).offers.find((o) => o.taskId === taskId);
 
 // A machine whose daemon is told where no tool is: it is given the system's PATH, and
@@ -24,6 +39,10 @@ function bare(name, dir, options = {}) {
   for (const named of ['DN_TOR', 'DN_DOCKER', 'DN_GH', 'DN_GLAB', 'DN_SECURITY', 'DN_CLAUDE']) delete m.env[named];
   return m;
 }
+// A check on such a machine, left out where its daemon would run a real tool.
+const bareCheck = (name, fn) => (BESIDE_NODE
+  ? console.log(`SKIP ${name}: this machine has a ${BESIDE_NODE} beside node, where the daemon would find the real one`)
+  : check(name, fn));
 
 try {
   await check('a tool is the first file of its name on the path that can be run; one named by a path is looked for there alone', async () => {
@@ -42,7 +61,7 @@ try {
     assert.deepEqual([locate(inSecond, first), locate(path.join(first, 'unrunnable'), on), locate(path.join(first, 'absent'), on)], [inSecond, null, null]);
   });
 
-  await check('started with the PATH an app is given, the daemon finds tor, docker, gh and the rest where a user\'s installs are, and what they run finds its own helpers there', async () => {
+  await bareCheck('started with the PATH an app is given, the daemon finds tor, docker, gh and the rest where a user\'s installs are, and what they run finds its own helpers there', async () => {
     // Named from the home, and ahead of a directory whose gh is another one.
     const other = path.join(bench.root, 'more-installs');
     const m = bare('found', `~/installs:${other}`);
@@ -50,9 +69,8 @@ try {
     for (const dir of [tools, other]) fs.mkdirSync(dir);
     fs.writeFileSync(path.join(other, 'gh'), '#!/bin/sh\nexit 1\n', { mode: 0o755 });
     const install = (file, body) => fs.writeFileSync(path.join(tools, file), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-    // tor and docker as node scripts, which run under `env node`: node is in none of
-    // the system's directories either.
-    assert.equal(SYSTEM_PATH.split(':').includes(path.dirname(process.execPath)), false, 'this test needs a node outside the system\'s directories');
+    // tor and docker as node scripts, which run under `env node`: where node is in none
+    // of the system's directories, they run only on a PATH that has node's own.
     fs.symlinkSync(path.join(HERE, 'lib', 'fake-tor.mjs'), path.join(tools, 'tor'));
     fs.symlinkSync(path.join(HERE, 'lib', 'fake-docker.mjs'), path.join(tools, 'docker'));
     // gh hands its work to a helper of its own, as the real one runs git.
@@ -80,7 +98,7 @@ try {
     assert.deepEqual(await m.stop(), { code: 0, signal: null });
   });
 
-  await check('a tool that is nowhere is named: tor and docker in the snapshot, each of them in the log, and found without a restart once it is installed', async () => {
+  await bareCheck('a tool that is nowhere is named: tor and docker in the snapshot, each of them in the log, and found without a restart once it is installed', async () => {
     const tools = path.join(bench.root, 'no-installs');
     fs.mkdirSync(tools);
     const m = bare('nowhere', tools, { env: { DN_TRANSPORT_RETRY_MS: '100', DN_TRANSPORT_RETRY_MAX_MS: '400' } });
@@ -91,7 +109,7 @@ try {
     });
     assert.equal(state.transport.detail, 'cannot run tor: it is not installed where this machine\'s tools are looked for (DN_TOR names it by hand)');
     assert.equal(state.docker.detail, 'docker not found: every job runs in a container');
-    const looked = `${SYSTEM_PATH}:${tools}:${path.dirname(process.execPath)}`;
+    const looked = [...new Set([...SYSTEM_PATH.split(':'), tools, path.dirname(process.execPath)])].join(':');
     for (const tool of ['tor', 'docker', 'gh', 'glab', 'claude']) assert.ok(m.log().includes(`] ${tool} is in none of ${looked}\n`), `${tool}: ${m.log()}`);
 
     fs.symlinkSync(path.join(HERE, 'lib', 'fake-tor.mjs'), path.join(tools, 'tor'));
@@ -102,7 +120,7 @@ try {
     await m.kill();
   });
 
-  await check('the installer removes a switched-off machine\'s containers with a docker that is only where a user\'s installs are', async () => {
+  await bareCheck('the installer removes a switched-off machine\'s containers with a docker that is only where a user\'s installs are', async () => {
     const tools = path.join(bench.root, 'installs');
     fs.mkdirSync(tools);
     fs.symlinkSync(path.join(HERE, 'lib', 'fake-docker.mjs'), path.join(tools, 'docker'));
