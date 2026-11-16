@@ -1,8 +1,9 @@
 // A job that will not be stopped: one that left a stop script and a process group of
 // its choosing in its run directory, ignores TERM and left a child behind, one in a
-// container where nothing can be run any more, and one of which only a process outside
-// its group is left. Either way the job's proxy token is dead before anything is asked
-// of its container, and the job is gone in the end.
+// container where nothing can be run any more, one beside a job that was being asked
+// after, and one of which only a process outside its group is left. Either way the job's
+// proxy token is dead before anything is asked of its container, and the job is gone in
+// the end.
 // Real daemon processes on scratch directories over the loop transport, with the
 // stand-in docker, forge and agent.
 // Run: node test/daemon-stop.mjs
@@ -116,6 +117,34 @@ try {
     await until('both jobs gone', () => pids.every((pid) => !alive(pid)));
 
     await until('the stopped run stopped', async () => (await runOf(b, one.taskId)).state === 'stopped');
+    await until('the other run failed', async () => (await runOf(b, two.taskId)).state === 'failed');
+    await until('the other task back in the pool', async () => (await offerOf(a, two.taskId)).attempt === 2);
+    assert.equal((await offerOf(a, two.taskId)).reason, 'the container was restarted to stop another job');
+    await Promise.all([a.kill(), b.kill()]);
+  });
+
+  await check('a job that was being asked after when its container was restarted to stop another ends as a failed attempt that says so, not as one that disappeared', async () => {
+    const [a, b] = await pair(['ca', 'cb'], { DN_JOB_STOP_BOUND_MS: '1500', DN_JOB_LIVENESS_MS: '100' });
+    await b.ok('/admit', { slots: 2 });
+    const one = await a.ok('/offer', review('pr-1', 'wait one\nsay one'));
+    const two = await a.ok('/offer', review('pr-2', 'wait two\nsay two'));
+    const [first, second] = [await waiting(b, one.taskId, 'one'), await waiting(b, two.taskId, 'two')];
+    assert.equal(first.container, second.container);
+    const restarts = b.docker('restart').length;
+
+    // The first job's stop is never heard. Whether the second is up is being asked when
+    // the container is restarted, and is answered after.
+    for (const verb of ['stop', 'left']) fs.writeFileSync(path.join(b.dockerDir, `fail-exec-${verb}`), 'OCI runtime exec failed: exec failed: resource temporarily unavailable\n'.repeat(20000));
+    fs.writeFileSync(path.join(b.dockerDir, 'hold-exec-up'), '');
+    const asked = () => b.docker('exec').filter((c) => c.includes('up') && c.includes(second.runId)).length;
+    const before = asked();
+    await until('the second job asked after', () => asked() > before);
+    await a.ok('/withdraw', { taskId: one.taskId, reason: 'no longer wanted' });
+    await until('the container restarted', () => b.docker('restart').length > restarts);
+    await until('both jobs gone', () => [first, second].every((run) => !alive(b.agent(run.runId).pid)));
+    fs.rmSync(path.join(b.dockerDir, 'hold-exec-up'));
+    for (const verb of ['stop', 'left']) fs.rmSync(path.join(b.dockerDir, `fail-exec-${verb}`), { force: true });
+
     await until('the other run failed', async () => (await runOf(b, two.taskId)).state === 'failed');
     await until('the other task back in the pool', async () => (await offerOf(a, two.taskId)).attempt === 2);
     assert.equal((await offerOf(a, two.taskId)).reason, 'the container was restarted to stop another job');

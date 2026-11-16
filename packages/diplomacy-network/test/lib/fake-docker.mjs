@@ -14,8 +14,9 @@
 // Staged failures, as files in FAKE_DOCKER_DIR:
 //   down             the engine does not answer
 //   fail-<command>   that subcommand fails once per line in the file, printing the line
-//   fail-<command>-<argument>   the same, of the calls with that argument among theirs
 //   hold-<command>   that subcommand does not go on while this file exists
+//   fail-<command>-<argument>, hold-<command>-<argument>
+//                    the same, of the calls with that argument among theirs
 //   old-engine       a network gets a gateway address whatever it was asked for
 // calls.jsonl records every invocation's arguments.
 
@@ -58,8 +59,9 @@ function parse(args, valued) {
 
 function staged(command, args) {
   if (fs.existsSync(file('down'))) die('Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?');
-  while (fs.existsSync(file(`hold-${command}`))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-  const f = [command, ...args.filter((arg) => /^[\w-]+$/.test(arg)).map((arg) => `${command}-${arg}`)].map((name) => file(`fail-${name}`)).find((name) => fs.existsSync(name));
+  const names = [command, ...args.filter((arg) => /^[\w-]+$/.test(arg)).map((arg) => `${command}-${arg}`)];
+  while (names.some((name) => fs.existsSync(file(`hold-${name}`)))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  const f = names.map((name) => file(`fail-${name}`)).find((name) => fs.existsSync(name));
   if (!f) return;
   const lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean);
   if (lines.length <= 1) fs.unlinkSync(f); else fs.writeFileSync(f, `${lines.slice(1).join('\n')}\n`);
