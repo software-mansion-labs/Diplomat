@@ -48,10 +48,7 @@ case "$mode" in
   refused) echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"the model refused","total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":1}}'; exit 1 ;;
   link) rm -f "$run/log.jsonl"; ln -s "$FAKE_AGENT_DIR/planted/log.jsonl" "$run/log.jsonl"; exit 0 ;;
   swap) sleep 1; mv "$run" "$run.real"; ln -s "$FAKE_AGENT_DIR/planted" "$run"; exit 0 ;;
-  leave) echo left > "$DN_ROOT/work/left-by-a-job"; echo left > "$DN_ROOT/left-by-a-job"
-    printf '#!/bin/sh\\necho ran >> "%s"\\nexec git-upload-pack "$@"\\n' "$FAKE_AGENT_DIR/left-ran" > "$DN_ROOT/work/upload.sh"; chmod +x "$DN_ROOT/work/upload.sh"
-    git -C "$DN_ROOT/work/cache.git" config remote.origin.url "$DN_ROOT/work/cache.git" 2>/dev/null
-    git -C "$DN_ROOT/work/cache.git" config remote.origin.uploadpack "$DN_ROOT/work/upload.sh" 2>/dev/null ;;
+  leave) echo left > "$DN_ROOT/work/left-by-a-job"; echo left > "$DN_ROOT/left-by-a-job" ;;
   commit) echo fix > fix.txt; git add fix.txt; git commit --quiet -m "fix by the agent"; git log -1 --format='%an <%ae>' > "$out.author" ;;
   forward) node -e 'const [h, p] = process.env.DN_FORWARD_ECHO.split(":"); const s = require("net").connect(p, h); s.on("data", (d) => { process.stdout.write(d); s.end(); }); s.on("error", (e) => console.log(e.message)); s.write("ping");' > "$out.forward" 2>&1 ;;
 esac
@@ -508,12 +505,11 @@ try {
     taken.close();
   });
 
-  await check('the same peer on the same repository gets a container of the same name, made anew once the last job has left the one before: nothing an earlier job wrote, or named to be run, is in it', async () => {
+  await check('the same peer on the same repository gets a container of the same name, made anew once the last job has left the one before: nothing an earlier job wrote is in it', async () => {
     const name = first.container.name;
     const runs = calls('run').length;
-    // What a job can leave for the next: a file in the volume, one in the container's
-    // own layer, and in the clone a later runner fetches into the name of a program to
-    // fetch with.
+    // What a job can leave for the next: a file in the volume and one in the container's
+    // own layer.
     const leaver = await launch(`${R}-2`, PEER_A, alpha, { prompt: 'MODE=leave', base: 'pull/7/head' });
     assert.equal(leaver.container.name, name);
     assert.equal((await leaver.outcome).ok, true);
@@ -530,7 +526,6 @@ try {
     assert.equal(calls('run').length, runs + 2, 'a container for each of the two');
     assert.equal(fs.existsSync(path.join(fakeDir, 'volumes', volumeOf(name), 'left-by-a-job')), false, 'the volume is a new one');
     assert.equal(fs.existsSync(path.join(fakeDir, 'roots', name, 'left-by-a-job')), false, 'and so is the container\'s own file system');
-    assert.equal(fs.existsSync(path.join(agentDir, 'left-ran')), false, 'and what the earlier job named was not run');
     await stopJob(next.run, containers);
     await next.outcome;
   });

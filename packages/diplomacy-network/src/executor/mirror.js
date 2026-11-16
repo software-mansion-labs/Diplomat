@@ -154,9 +154,10 @@ export function createMirrors({ log = () => {}, dir = MIRRORS_DIR } = {}) {
       // mirror named by sixteen hex digits, which an earlier version made: nothing reads it.
       if (!/^([0-9a-z]{25}|[0-9a-f]{16})\.git(\.tmp\.\d+)?$/.test(name) || now - last < keepMs) continue;
       // In the mirror's own turn: never from under a refresh, nor a job that came since.
-      const turn = (queues.get(target) || Promise.resolve()).then(() => {
+      const turn = (queues.get(target) || Promise.resolve()).then(async () => {
         if (readers.get(target)) return;
-        fs.rmSync(target, { recursive: true, force: true });
+        // Off the daemon's thread: a repository takes as long to delete as it has files.
+        await fs.promises.rm(target, { recursive: true, force: true });
         log('mirror', `removed ${target}: no linked pool's mirror for ${Math.round(keepMs / 3600000)} h`);
       });
       queues.set(target, turn.catch(() => {}));
