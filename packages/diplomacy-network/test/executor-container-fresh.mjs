@@ -49,8 +49,10 @@ try {
   await check('a job that comes while its pair\'s container is being removed waits for that and has one made after it: it does not join the one that is going', async () => {
     const p = pool(1);
     const name = containerName(p.id, PEER);
-    await containers.acquire({ pool: p, peer: PEER, runId: 'one' });
+    const { image } = await containers.acquire({ pool: p, peer: PEER, runId: 'one' });
     fs.writeFileSync(path.join(fakeDir, 'volumes', volumeOf(name), 'left-by-a-job'), 'x');
+    // A measurement cut off has left its probe beside the container, the volume mounted in it.
+    execFileSync(FAKE, ['run', '-d', '--name', `${name}-probe`, '--label', `dn.probe=${name}`, '--label', `dn.base=${BASE}`, image, 'sleep', 'infinity']);
     // The engine holds its answer to whatever ends the container.
     for (const held of ['hold-rm', 'hold-restart']) stage(held);
     const from = calls().length;
@@ -62,8 +64,8 @@ try {
     for (const held of ['hold-rm', 'hold-restart']) unstage(held);
     await leaving;
     assert.deepEqual((await coming).name, name);
-    assert.deepEqual(acted(from), [...WHOLE, ...MADE]);
-    assert.equal(there('volumes', volumeOf(name), 'left-by-a-job'), false);
+    assert.deepEqual(acted(from), ['rm -f', ...WHOLE, ...MADE], 'the container, its relay and the probe, then the network and the volume');
+    assert.deepEqual([there('volumes', volumeOf(name), 'left-by-a-job'), there('containers', `${name}-probe.json`)], [false, false]);
     assert.deepEqual(containers.list().map((c) => c.jobs), [['two']]);
     await containers.release({ name, runId: 'two' });
   });

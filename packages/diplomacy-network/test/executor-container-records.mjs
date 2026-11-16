@@ -205,11 +205,25 @@ try {
   await check('the records under a container this daemon has put no job in are not this user\'s to walk: a sweep leaves them, kept run or none', async () => {
     const name = containerName(pool(13).id, PEER);
     execFileSync(FAKE, ['run', '-d', '--name', name, '--label', `dn.pool=${pool(13).id}`, '--label', `dn.peer=${PEER}`, '--label', `dn.base=${BASE}`, containers.dockerState().image, 'sleep', 'infinity']);
-    fs.mkdirSync(path.join(records(name), 'left-by-a-job'), { recursive: true });
+    // With no volume and no records it holds its writable layer, which the engine says
+    // without a probe, and it is named past its allowance like any other.
+    fs.writeFileSync(path.join(fakeDir, 'roots', name, 'layer.bin'), Buffer.alloc(5 * MiB, 1));
     const probes = calls('run').length;
+    between(await containers.usage(name), 5 * MiB);
+    assert.deepEqual((await containers.overQuota()).map((o) => [o.name, o.jobs]), [[name, []]]);
+    fs.mkdirSync(path.join(records(name), 'left-by-a-job'), { recursive: true });
     assert.equal(await denied(records(name), () => containers.sweep()), 0);
     assert.deepEqual([fs.readdirSync(records(name)), calls('run').length], [['left-by-a-job'], probes]);
     await containers.discard(name);
+    nothingLeft();
+  });
+
+  await check('a container\'s records directory is this user\'s, made before the engine is asked for the container: one the engine has to make for a mount is root\'s on Linux', async () => {
+    const name = containerName(pool(14).id, PEER);
+    stage('fail-run', 'docker: Error response from daemon: no space left on device\n');
+    await assert.rejects(containers.acquire({ pool: pool(14), peer: PEER, runId: 'run-14' }), /^Error: docker run: docker: Error response from daemon: no space left on device$/);
+    assert.equal(fs.statSync(records(name)).uid, process.getuid());
+    await containers.sweep();
     nothingLeft();
   });
 
@@ -240,12 +254,14 @@ try {
     await containers.acquire({ pool: p, peer: PEER, runId: 'run-8b' });
     unsized(2);
     assert.deepEqual([await pass(), await pass()], [missed, missed]);
-    await containers.release({ name, runId: 'run-8b' });
 
-    // Records alone, in a daemon that has no image to size them from, are no number either.
-    run(name, 'run-8c');
+    // A daemon that has no image of its own sizes a container from the container's, and
+    // records alone from nothing: no number.
     const said = [];
     const imageless = createContainers({ log: (...a) => said.push(a.join(' ')), imageDir });
+    assert.deepEqual([await imageless.usage(name), said], [await containers.usage(name), []]);
+    await containers.release({ name, runId: 'run-8b' });
+    run(name, 'run-8c');
     assert.deepEqual([await imageless.usage(name), said], [null, [`docker the disk use of ${name} could not be measured: docker: invalid reference format`]]);
     await containers.discard(name);
     nothingLeft();
@@ -307,6 +323,12 @@ try {
     await assert.rejects(containers.discard(name), (e) => e.message === `${name} could not be removed: the container ${name}`);
     assert.deepEqual(kept(), [true, ['.containers', 'run-12']]);
     execFileSync(FAKE, ['rm', '-f', name]);
+
+    // A volume the engine keeps, the container gone.
+    execFileSync(FAKE, ['volume', 'create', '--label', `dn.pool=${pool(12).id}`, '--label', `dn.peer=${PEER}`, '--label', `dn.base=${BASE}`, volumeOf(name)]);
+    stage('fail-volume-rm', 'Error response from daemon: remove: volume is in use\n');
+    await assert.rejects(containers.discard(name), (e) => e.message === `${name} could not be removed: the volume ${volumeOf(name)}`);
+    assert.deepEqual(kept(), [true, ['.containers', 'run-12']]);
 
     stage('down');
     await assert.rejects(containers.discard(name), (e) => e.message === `${name} could not be removed: the engine does not say that it is gone`);

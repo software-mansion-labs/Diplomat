@@ -57,10 +57,9 @@ const RELAY_LIMITS = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges', '
 const PROBE_LIMITS = ['--network', 'none', '--read-only', '--cap-drop=ALL', '--security-opt', 'no-new-privileges',
   '--pids-limit', '64', '--memory', '256m', '--memory-swap', '256m', '--cpus', '1'];
 const INODE_BYTES = 4096;
-// A name whose disk use the engine could not say this many passes of `overQuota` running
-// is counted as past its allowance: a job that makes its container unmeasurable is not
-// thereby unbounded. One miss is an engine busy for a moment; three in a row is what a
-// job is given before it is called gone, too.
+// A name the engine could not size this many passes of `overQuota` running counts as
+// past its allowance: making a container unmeasurable does not make it unbounded. One
+// miss is a busy engine; three is what a job is given before it is called gone.
 export const UNMEASURED_PASSES = 3;
 const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
@@ -469,14 +468,15 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
   const OWN = ['--filter', `label=dn.base=${BASE_DIR}`];
   const jobContainers = (names) => names.filter(isJobName);
 
-  // The runs RUNS_DIR holds a link to, as the links `startJob` makes them, by the
-  // container whose records each leads into: name -> the links.
+  // The links RUNS_DIR holds to runs, which `startJob` makes and no job can reach, by the
+  // container whose records each leads into: name -> the links. What is no link is
+  // under no name.
   async function linked() {
     const links = new Map();
     for (const runId of await fs.promises.readdir(RUNS_DIR).catch(() => [])) {
       const link = path.join(RUNS_DIR, runId);
-      const [dir, name, run, ...more] = (await fs.promises.readlink(link).catch(() => '')).split(path.sep);
-      if (dir === '.containers' && run === runId && more.length === 0) links.set(name, [...(links.get(name) ?? []), link]);
+      const [, name] = (await fs.promises.readlink(link).catch(() => '')).split(path.sep);
+      links.set(name, [...(links.get(name) ?? []), link]);
     }
     return links;
   }
@@ -591,14 +591,12 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     return over;
   }
 
-  // Removes the run records kept under `name`, or with `runId` that run's among them,
-  // and everything in them; resolves to whether they are gone. As this user only where
-  // the caller knows no container of the name is there (`alone`): a job in one could
-  // move what is being walked and lead the walk out of the records. Through the probe
-  // otherwise, and where this user may not (what root made in a bind mount on Linux is
-  // not this user's to delete): its `find` follows no link, and in it one would lead
-  // nowhere but into the probe's own read-only root. The probe is given the records'
-  // directory, which no job can replace, never a path inside it.
+  // Removes the run records under `name`, or the run `runId`'s among them; resolves to
+  // whether they are gone. As this user only when no container of the name is there
+  // (`alone`): a job in one could move what is being walked and lead the walk elsewhere.
+  // Otherwise, and where this user may not (root's files in a bind mount on Linux),
+  // through the probe, where a link leads nowhere but into the probe's read-only root.
+  // The probe mounts the records' directory, which no job can replace, never a path in it.
   async function wipe(name, runId, alone) {
     const target = path.join(runsDirOf(name), runId);
     const own = () => fs.promises.rm(target, { recursive: true, force: true });
