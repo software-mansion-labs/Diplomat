@@ -20,7 +20,7 @@ fs.mkdirSync(process.env.TMPDIR);
 const forge = await startFakeForge();
 Object.assign(process.env, forge.env);
 const { createForge } = await import('../src/requester/forge.js');
-const { authorize } = await import('../src/requester/authorize.js');
+const { authorize, conclude } = await import('../src/requester/authorize.js');
 const { rulesFor } = await import('../src/requester/rules.js');
 
 const client = createForge();
@@ -202,7 +202,7 @@ await check('a branch is the task\'s own once the forge accepted its creation, a
   fs.renameSync(path.join(hub.bare, 'hooks', 'update.off'), path.join(hub.bare, 'hooks', 'update'));
 });
 
-await check('a creation is counted while its answer is out, and one whose answer never comes stays counted and is not owned', async () => {
+await check('a creation is counted while its answer is out, and one whose answer never comes is settled by what the forge shows', async () => {
   const rules = hubRules('issues', 'issue-421');
   hub.at(hub.root);
   const fix = hub.commit('racing', { 'src/race.js': 'r\n' });
@@ -215,17 +215,45 @@ await check('a creation is counted while its answer is out, and one whose answer
   assert.deepEqual(state.branches, []);
 
   // The forge's answer is lost on the way: the branch may exist, so it stays counted; it was not confirmed, so it is not owned.
-  const lost = {};
-  const off = forge.route('github.com', 'POST', /git-receive-pack$/, (req, res) => res.destroy());
-  const verdict = await authorize(rules, hubPush([[ZERO, fix, 'refs/heads/lost']]), hubCtx(lost));
-  await assert.rejects(client.perform(verdict.request, GITHUB), /unreachable/);
+  const unanswered = async (ref) => {
+    const state = {};
+    const off = forge.route('github.com', 'POST', /git-receive-pack$/, (req, res) => res.destroy());
+    const verdict = await authorize(rules, hubPush([[ZERO, fix, ref]]), hubCtx(state));
+    await assert.rejects(client.perform(verdict.request, GITHUB), /unreachable/);
+    off();
+    assert.deepEqual([state.branches, state.reserved, state.sent], [[], [ref], { [ref]: fix }]);
+    return state;
+  };
+  const used = (state) => [state.branches, state.reserved, state.sent];
+  const draft = (head) => gh('POST', '/repos/o/r/pulls', { title: 't', head, base: 'main', draft: true });
+  const more = hub.commit('racing on', { 'src/race.js': 's\n' });
+  // The forge is asked before the task's next push or pull request is judged. It has no
+  // such branch: nothing to open a pull request from, and the allowance is free again.
+  const lost = await unanswered('refs/heads/lost');
+  await refused(rules, draft('lost'), hubCtx(lost), /only be opened from a branch this task pushed/);
+  assert.deepEqual(used(lost), [[], [], {}]);
+  assert.match((await sent(rules, hubPush([[ZERO, fix, 'refs/heads/lost']]), hubCtx(await unanswered('refs/heads/lost')))).bytes.toString('latin1'), /ok refs\/heads\/lost/);
+  // The push had reached the forge after all: the branch is where it was sent, and the task's own.
+  for (const next of [hubPush([[fix, more, 'refs/heads/landed']]), draft('landed')]) {
+    const landed = await unanswered('refs/heads/landed');
+    hub.set('landed', fix);
+    assert.ok((await sent(rules, next, hubCtx(landed))).status < 300);
+    assert.deepEqual(used(landed), [['refs/heads/landed'], [], {}]);
+    await refused(rules, hubPush([[ZERO, fix, 'refs/heads/other']]), hubCtx(landed), /may create 1 branch\(es\); it has refs\/heads\/landed/);
+    git(hub.bare, 'update-ref', '-d', 'refs/heads/landed');
+  }
+  // Somebody's branch of that name, at another commit, is not the task's; it stays counted.
+  const taken = await unanswered('refs/heads/taken');
+  hub.set('taken', hub.root);
+  await refused(rules, hubPush([[hub.root, fix, 'refs/heads/taken']]), hubCtx(taken), /may not update that ref/);
+  await refused(rules, draft('taken'), hubCtx(taken), /only be opened from a branch this task pushed/);
+  await refused(rules, hubPush([[ZERO, fix, 'refs/heads/other']]), hubCtx(taken), /may create 1 branch\(es\); it has refs\/heads\/taken/);
+  // A forge that does not say where the branch is has not said it is gone.
+  const off = failing('api.github.com', /^\/repos\/o\/r\/branches\/taken$/, 503);
+  await refused(rules, hubPush([[ZERO, fix, 'refs/heads/other']]), hubCtx(taken), /the forge did not say where refs\/heads\/taken is/);
+  await refused(rules, draft('taken'), hubCtx(taken), /the forge did not say where refs\/heads\/taken is/);
   off();
-  assert.deepEqual([lost.branches, lost.reserved], [[], ['refs/heads/lost']]);
-  await refused(rules, hubPush([[ZERO, fix, 'refs/heads/other']]), hubCtx(lost), /may create 1 branch/);
-  await refused(rules, gh('POST', '/repos/o/r/pulls', { title: 't', head: 'lost', base: 'main', draft: true }), hubCtx(lost), /only be opened from a branch this task pushed/);
-  // Sent again, the same creation is the same one, and the forge's "ok" makes it the task's.
-  assert.match((await sent(rules, hubPush([[ZERO, fix, 'refs/heads/lost']]), hubCtx(lost))).bytes.toString('latin1'), /ok refs\/heads\/lost/);
-  assert.deepEqual([lost.branches, lost.reserved], [['refs/heads/lost'], []]);
+  assert.deepEqual(used(taken), [[], ['refs/heads/taken'], { 'refs/heads/taken': fix }]);
 
   // A push that does not ask the forge for its report could never be confirmed.
   await refused(rules, hubPush([[ZERO, fix, 'refs/heads/quiet']], 'side-band-64k agent=git/test'), hubCtx({}), /report-status/);
@@ -257,7 +285,7 @@ await check('one draft pull request per branch the task created, counted when th
   });
   await sent(rules, ghql(GH.prCreate), hubCtx(viaGraphql));
   off();
-  assert.deepEqual(viaGraphql.pulls, []);
+  assert.deepEqual([viaGraphql.pulls, viaGraphql.asked], [[], []], 'given back by the answer itself');
   await sent(rules, ghql(GH.prCreate), hubCtx(viaGraphql));
   assert.deepEqual(viaGraphql.pulls, ['fix-421']);
   await refused(rules, open('main'), hubCtx(viaGraphql), /has opened its pull request from fix-421/);
@@ -267,6 +295,58 @@ await check('one draft pull request per branch the task created, counted when th
   const onLab = { branches: ['refs/heads/fix-421'] };
   assert.equal((await sent(labRules('issues', 'issue-421'), glab('POST', `${PROJECT}/merge_requests`, merge), labCtx(onLab), GITLAB)).status, 201);
   await refused(labRules('issues', 'issue-421'), glab('POST', `${PROJECT}/merge_requests`, { ...merge, target_branch: 'release' }), labCtx(onLab), /has opened its pull request from fix-421/);
+
+  // An answer that never came, or that does not say: the forge is asked at the next try
+  // whether it shows a pull request from the branch.
+  const used = (state) => [state.pulls, state.asked];
+  const from = (branch) => gh('POST', '/repos/o/r/pulls', { title: 't', head: branch, base: 'main', draft: true });
+  const cut = (host, pattern) => forge.route(host, 'POST', pattern, (req, res) => res.destroy());
+  const unsure = { branches: ['refs/heads/fix-900', 'refs/heads/fix-901'] };
+  off = cut('api.github.com', /^\/repos\/o\/r\/pulls$/);
+  await assert.rejects(client.perform((await authorize(rules, from('fix-900'), hubCtx(unsure))).request, GITHUB), /unreachable/);
+  off();
+  assert.deepEqual(used(unsure), [[], ['fix-900']]);
+  // It shows none: the pull request is still the task's to open.
+  off = forge.route('api.github.com', 'POST', /^\/repos\/o\/r\/pulls$/, (req, res) => res.writeHead(502).end('bad gateway'));
+  assert.equal((await sent(rules, from('fix-900'), hubCtx(unsure))).status, 502);
+  off();
+  assert.deepEqual(used(unsure), [[], ['fix-900']]);
+  // It shows one, closed since: that is the task's one. One from another branch says nothing of this branch.
+  forge.pull('o/r', { number: 701, author: 'me', head: 'fix-901', state: 'closed' });
+  const silent = failing('api.github.com', /^\/repos\/o\/r\/pulls\?/, 503);
+  await refused(rules, from('fix-900'), hubCtx(unsure), /the forge did not say which pull requests there are/);
+  silent();
+  assert.deepEqual(used(unsure), [[], ['fix-900']]);
+  conclude((await authorize(rules, from('fix-901'), hubCtx(unsure))).request, undefined);
+  assert.equal((await sent(rules, from('fix-900'), hubCtx(unsure))).status, 201);
+  await refused(rules, from('fix-901'), hubCtx(unsure), /has opened its pull request from fix-901/);
+  assert.deepEqual(used(unsure), [['fix-901', 'fix-900'], []]);
+
+  // A GraphQL answer that says neither "opened" nor "refused" is no answer.
+  const vague = { branches: ['refs/heads/fix-421'] };
+  for (const said of ['{"data":{"createPullRequest":null}}', '{"data":{}}', 'not json', '{"data":{"a":{"pullRequest":{"number":1}},"b":null},"errors":[{"message":"x"}]}']) {
+    off = forge.route('api.github.com', 'POST', /^\/graphql$/, (req, res, body) => {
+      res.writeHead(200, { 'content-type': 'application/json' }).end(body.toString().includes('createPullRequest') ? said : '{"data":{"node":{"__typename":"Repository","nameWithOwner":"o/r"}}}');
+    });
+    await sent(rules, ghql(GH.prCreate), hubCtx(vague));
+    off();
+    assert.deepEqual(used(vague), [[], ['fix-421']], said);
+  }
+  await sent(rules, ghql(GH.prCreate), hubCtx(vague));
+  assert.deepEqual(used(vague), [['fix-421'], []]);
+
+  // GitLab: a merge request the forge shows from the branch, merged since, is the task's one.
+  const labUnsure = { branches: ['refs/heads/fix-900', 'refs/heads/fix-901'] };
+  const labFrom = (branch) => glab('POST', `${PROJECT}/merge_requests`, { ...merge, source_branch: branch });
+  for (const branch of ['fix-900', 'fix-901']) {
+    off = cut(GITLAB_HOST, /merge_requests$/);
+    await assert.rejects(client.perform((await authorize(labRules('issues', 'issue-421'), labFrom(branch), labCtx(labUnsure))).request, GITLAB), /unreachable/);
+    off();
+  }
+  forge.pull('group/sub/proj', { number: 702, author: 'me', head: 'fix-901', state: 'merged' });
+  assert.equal((await sent(labRules('issues', 'issue-421'), labFrom('fix-900'), labCtx(labUnsure), GITLAB)).status, 201);
+  await refused(labRules('issues', 'issue-421'), labFrom('fix-901'), labCtx(labUnsure), /has opened its pull request from fix-901/);
+  assert.deepEqual(used(labUnsure), [['fix-901', 'fix-900'], []]);
 });
 
 await check('no task moves or creates the default branch or a protected one, whatever its pull request says', async () => {
@@ -534,8 +614,19 @@ await check('the one new branch of a task may be made in the task account\'s own
   await refused(rules, viaGraphql('me:fork-fix'), hubCtx(state), /has opened its pull request from me\/r:fork-fix/);
   const fresh = { branches: ['me/r:refs/heads/fork-fix'] };
   for (const head of ['fork-fix', 'them:fork-fix', 'a:me:fork-fix']) await refused(rules, viaGraphql(head), hubCtx(fresh), mine);
-  assert.equal((await authorize(rules, viaGraphql('me:fork-fix'), hubCtx(fresh))).ok, true);
-  assert.deepEqual(fresh.pulls, ['me/r:fork-fix']);
+  const asked = await authorize(rules, viaGraphql('me:fork-fix'), hubCtx(fresh));
+  assert.equal(asked.ok, true);
+  assert.deepEqual(fresh.asked, ['me/r:fork-fix']);
+  // No answer came: a pull request the forge shows from the fork's branch is the task's
+  // one, and one from the pool's own branch of that name is not.
+  conclude(asked.request, undefined);
+  forge.pull('o/r', { number: 704, author: 'them', head: 'fork-fix', state: 'closed' });
+  assert.equal((await sent(rules, open('me:fork-fix'), hubCtx(fresh))).status, 201);
+  fresh.pulls = [];
+  fresh.asked = ['me/r:fork-fix'];
+  forge.pull('o/r', { number: 703, author: 'me', head: 'fork-fix', headRepo: 'me/r', state: 'closed' });
+  await refused(rules, open('me:fork-fix'), hubCtx(fresh), /has opened its pull request from me\/r:fork-fix/);
+  assert.deepEqual([fresh.pulls, fresh.asked], [['me/r:fork-fix'], []]);
 
   // The fork is the forge's word, and only the account's own fork of this repository is one.
   hub.at(hub.root);
@@ -562,9 +653,9 @@ await check('the one new branch of a task may be made in the task account\'s own
   hub.at(hub.root);
   await refused(rules, toFork([[ZERO, hub.commit('a workflow', { '.github/workflows/steal.yml': 'on: push\n' }), 'refs/heads/workflow']]), hubCtx({}), /changes \.github\/workflows\/steal\.yml/);
   // An audit's branches are counted together, wherever each is.
-  const audit = { branches: Array.from({ length: 12 }, (_, i) => `refs/heads/a${i}`), reserved: Array.from({ length: 12 }, (_, i) => `me/r:refs/heads/b${i}`) };
+  const audit = { branches: Array.from({ length: 24 }, (_, i) => (i < 12 ? `refs/heads/a${i}` : `me/r:refs/heads/b${i}`)) };
   await refused(hubRules('audit', 'job-a'), toFork([[ZERO, other, 'refs/heads/one-more']]), hubCtx(audit), /may create 24 branch\(es\)/);
-  audit.reserved.pop();
+  audit.branches.pop();
   assert.equal((await authorize(hubRules('audit', 'job-a'), toFork([[ZERO, other, 'refs/heads/one-more']]), hubCtx(audit))).ok, true);
 
   // GitLab: the branch in the fork's project, the merge request opened on that project with the pool's as its target.

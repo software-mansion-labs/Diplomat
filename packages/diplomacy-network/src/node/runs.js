@@ -133,6 +133,7 @@ export function createRuns(host) {
           run.spec = spec;
           host.saveKeys();
           save();
+          host.log(`key of ${run.taskId} received ${host.now() - run.startedAt} s after its claim, at ask ${tries + 1}`);
         } else if (host.now() + RETRY_MS / 1000 >= claim.leaseUntil) {
           halt(run, 'the requester gave no key before the lease ran out', 'release');
           return;
@@ -172,6 +173,7 @@ export function createRuns(host) {
       return;
     }
     Object.assign(run, { state: 'running', container: String(handle?.container ?? ''), log: String(handle?.log ?? '') });
+    host.log(`job of ${taskId} started ${host.now() - run.startedAt} s after its claim`);
     save();
     host.store.flush();
     host.touch();
@@ -235,7 +237,8 @@ export function createRuns(host) {
           if (run.told + RETRY_MS / 1000 > host.now()) return;
           run.told = host.now();
           const body = { taskId: run.taskId, round: run.round, spec: run.spec, outcome: run.outcome };
-          const answers = await Promise.all(owed.map((pk) => host.gossip.send(P, pk, 'done', body)));
+          // How an offer ends hangs on the report: it is sent whatever gossip makes of its host.
+          const answers = await Promise.all(owed.map((pk) => host.gossip.send(P, pk, 'done', body, { fresh: true })));
           run.heard.push(...owed.filter((_, i) => answers[i].ok));
           save();
           // An offer its host ended for this report is ended here before the claim is:
@@ -250,7 +253,7 @@ export function createRuns(host) {
       }
       if (mine() && run.end !== 'drop') {
         const state = run.end === 'report' && run.outcome.ok ? 'completed' : 'released';
-        host.take(P, endClaim(host.id, claim, state, host.now()));
+        host.take(P, endClaim(host.id, claim, state, host.now(), run.spec));
         host.gossip.spread(P, [claimKey(run.taskId, host.self)]);
       }
       if (held[run.taskId]?.runId === run.runId) {

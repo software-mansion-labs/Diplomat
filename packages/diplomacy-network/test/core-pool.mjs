@@ -395,7 +395,7 @@ check('an offer is ended by its own host alone: done or cancelled by one of two 
     assert.deepEqual(left.offers, [{ host: b.id.pk, hours: 12, createdAt: T0, claim }]);
     assert.equal(c.pool.get(recordKey(claim)), claim);
     // The claim ends: the offer still open is free for the next one.
-    give(endClaim(c.id, claim, 'completed', T0 + 600), T0 + 600);
+    give(endClaim(c.id, claim, 'completed', T0 + 600, b64u(Buffer.alloc(32, 7))), T0 + 600);
     const free = c.pool.task(TASK, T0 + 600);
     assert.deepEqual([free.state, free.free, free.claim], ['available', [b.id.pk], null]);
     assert.equal(c.pool.claimSnapshot(TASK, T0 + 600).available, true);

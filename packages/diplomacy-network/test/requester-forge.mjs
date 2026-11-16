@@ -96,7 +96,7 @@ const failing = async (promise, pattern) => {
 // feature, 578 opened by them, 581 by me from feature in my fork of it, issue 421; and
 // the same project on the GitLab host, with its fork.
 const bare = forge.bare('o/r');
-forge.bare('group/sub/proj', { id: 'R_2', projectId: 99 });
+const labBare = forge.bare('group/sub/proj', { id: 'R_2', projectId: 99 });
 const forkBare = forge.bare('me/r', { id: 'R_3', projectId: 12, parent: 'o/r', spelled: 'Me/R' });
 forge.bare('me/proj', { id: 'R_4', projectId: 13, parent: 'group/sub/proj' });
 const work = path.join(scratch, 'work');
@@ -214,7 +214,19 @@ await check('a write carries its checked body, and a pinned answer is cut to its
   const glProject = JSON.parse((await perform(glRules, glab('GET', '/api/v4/projects/group%2Fsub%2Fproj'), {}, GITLAB)).bytes);
   assert.equal(glProject.default_branch, 'main');
   for (const member of ['runners_token', 'import_url', 'service_desk_address', 'permissions', 'forked_from_project']) assert.equal(glProject[member], undefined, member);
+  // A branch, on both forges: without its protection settings and without what the requester may do to it.
   assert.deepEqual(JSON.parse((await perform(rules('investigate', 'job-x'), gh('GET', '/repos/o/r/branches/main'))).bytes), { name: 'main', commit: { sha: A }, protected: false });
+  git(work, 'push', '--quiet', labBare, `${A}:refs/heads/shown`);
+  const shown = { name: 'shown', commit: { id: A }, merged: false, protected: false, default: false, web_url: `https://${GITLAB_HOST}/group/sub/proj/-/tree/shown` };
+  const project = '/api/v4/projects/group%2Fsub%2Fproj';
+  assert.deepEqual(JSON.parse((await perform(glRules, glab('GET', `${project}/repository/branches/shown`), {}, GITLAB)).bytes), shown);
+  assert.deepEqual(JSON.parse((await perform(glRules, glab('GET', `${project}/repository/branches?per_page=100`), {}, GITLAB)).bytes), [shown]);
+  // What the forge itself answers holds them.
+  const whole = async (host, token, url) => (await fetch(`http://127.0.0.1:${forge.port}/h/${host}${url}`, { headers: { authorization: `Bearer ${token}` } })).json();
+  assert.deepEqual(Object.keys(await whole('api.github.com', GITHUB_TOKEN, '/repos/o/r/branches/main')), ['name', 'commit', 'protected', 'protection_url', 'protection']);
+  const lab = await whole(GITLAB_HOST, GITLAB_TOKEN, `${project}/repository/branches/shown`);
+  assert.deepEqual([lab.developers_can_push, lab.developers_can_merge, lab.can_push], [true, true, true]);
+  git(labBare, 'update-ref', '-d', 'refs/heads/shown');
 });
 
 await check('a refused request never reaches the forge, and perform sends nothing authorize did not return', async () => {
@@ -374,8 +386,8 @@ await check('a lookup the forge did not settle throws: only the forge\'s own "no
   await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\/577$/, json(200, other), () => client.pull(GITHUB, 'o/r', 577)), /did not say what #577 is/);
   await failing(answered(GITLAB_HOST, 'GET', /\/merge_requests\/4$/, json(200, { iid: 5, state: 'opened' }), () => client.pull(GITLAB, 'group/sub/proj', 4)), /did not say what #4 is/);
   await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\/579$/, json(403, { message: 'API rate limit exceeded' }), () => client.pull(GITHUB, 'o/r', 579)), /did not say what #579 is \(it answered 403\)/);
-  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\?/, json(403, { message: 'API rate limit exceeded' }), () => client.pullsByHead(GITHUB, 'o/r', 'feature')), /did not say which pull requests are open/);
-  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\?/, json(200, { message: 'x' }), () => client.pullsByHead(GITHUB, 'o/r')), /did not say which pull requests are open/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\?/, json(403, { message: 'API rate limit exceeded' }), () => client.pullsByHead(GITHUB, 'o/r', 'feature')), /did not say which pull requests there are/);
+  await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\?/, json(200, { message: 'x' }), () => client.pullsByHead(GITHUB, 'o/r')), /did not say which pull requests there are/);
   await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/pulls\/comments\/13$/, json(500, {}), () => client.comment(GITHUB, 'o/r', 13)), /did not say what comment 13 is/);
   await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/issues\/421$/, json(403, { message: 'API rate limit exceeded' }), () => client.assignees(GITHUB, 'o/r', 421)), /did not say who is assigned to #421/);
   await failing(answered('api.github.com', 'GET', /^\/repos\/o\/r\/issues\/421$/, json(200, { assignees: [{ login: 'bob' }, null] }), () => client.assignees(GITHUB, 'o/r', 421)), /did not say who is assigned to #421/);
@@ -585,7 +597,7 @@ await check('a real git push: the one new branch of an issue task, then a draft 
   const before = forge.data.mutations.length;
   assert.equal((await perform(ruleList, ghql(GH.prCreate), ctx)).status, 200);
   assert.equal(forge.data.mutations[before].name, 'createPullRequest');
-  assert.deepEqual(state, { branches: ['refs/heads/fix-421'], reserved: [], pulls: ['fix-421'] });
+  assert.deepEqual(state, { branches: ['refs/heads/fix-421'], reserved: [], sent: {}, pulls: ['fix-421'], asked: [] });
   // One draft pull request per branch, by either route.
   assert.match((await authorize(ruleList, gh('POST', '/repos/o/r/pulls', { title: 't', head: 'fix-421', base: 'main', draft: true }), ctx)).reason, /this task has opened its pull request from fix-421/);
   assert.match((await authorize(ruleList, ghql(GH.prCreate), ctx)).reason, /this task has opened its pull request from fix-421/);
@@ -656,7 +668,7 @@ await check('a real git push to the account\'s own fork: its pull request\'s hea
   const open = (head) => gh('POST', '/repos/o/r/pulls', { title: 't', head, base: 'main', draft: true });
   for (const head of ['fix-9', 'them:fix-9', 'me:other', 'me:r:fix-9', 'me:fix-9:x']) assert.match((await authorize(ruleList, open(head), ctx)).reason, /only be opened from a branch this task pushed/, head);
   assert.equal((await perform(ruleList, open('Me:fix-9'), ctx)).status, 201);
-  assert.deepEqual(state, { branches: ['me/r:refs/heads/fix-9'], reserved: [], pulls: ['me/r:fix-9'] });
+  assert.deepEqual(state, { branches: ['me/r:refs/heads/fix-9'], reserved: [], sent: {}, pulls: ['me/r:fix-9'], asked: [] });
   assert.match((await authorize(ruleList, open('me:fix-9'), ctx)).reason, /this task has opened its pull request from me\/r:fix-9/);
   await issue.close();
 });

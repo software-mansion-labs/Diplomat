@@ -417,7 +417,7 @@ class Host {
 
   // The executor gives its claim up, or reports its task finished.
   finish(taskId, state) {
-    const ended = endClaim(this.id, this.pool.get(claimKey(taskId, this.pk)), state, this.now);
+    const ended = endClaim(this.id, this.pool.get(claimKey(taskId, this.pk)), state, this.now, b64u(Buffer.alloc(32, 7)));
     assert.deepEqual(this.take(ended).refused, []);
     this.push([ended]);
   }

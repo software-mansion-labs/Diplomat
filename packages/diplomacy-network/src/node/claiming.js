@@ -8,6 +8,7 @@
 import { b64u } from '../core/canon.js';
 import { ClaimRound, buildClaim, rankDelay } from '../core/claims.js';
 import { eligible } from '../core/lease.js';
+import { backers } from '../core/records.js';
 import {
   ADMIT_LAG_SECS, ADMIT_TTL_MS, JOIN_WAIT_MS, MAX_ROUNDS, PROBE_TIMEOUT_MS, RANK_DELAY_MS, REQUEST_TIMEOUT_MS, RETRY_MS, ROUND_PATIENCE_MS,
 } from '../paths.js';
@@ -19,7 +20,7 @@ const FAILED_RETRY_MS = 10 * RETRY_MS;
 
 /// The claiming of `host`.
 export function createClaiming(host) {
-  const rounds = new Map(); // taskId -> { P, taskId, round, snapshot, started, own, timer }
+  const rounds = new Map(); // taskId -> { P, taskId, round, snapshot, started, offered, waited, own, timer }
   const waiting = new Map(); // taskId -> the timer of the wait before a round
   const later = new Map(); // taskId -> the time before which a task is left alone
   let admitted = { slots: 0, at: 0, reason: '' };
@@ -79,13 +80,14 @@ export function createClaiming(host) {
       // A run that holds another offer of the task takes this one in too: it is given
       // the time to.
       const delay = (task.state === 'claimed' ? JOIN_WAIT_MS : 0) + (own ? 0 : rankDelay(taskId, host.self, RANK_DELAY_MS) + verdict);
-      waiting.set(taskId, host.clock.setTimeout(() => begin(P, taskId, own), delay));
+      waiting.set(taskId, host.clock.setTimeout(() => begin(P, taskId, own, delay), delay));
     }
   }
 
   // What this host's executor makes of a task: null when it does not take it, else how
   // many more milliseconds this host waits before it goes for it. The executor weighs the
-  // task against what this machine has, and neither that nor the wait is told to anyone.
+  // task against what this machine has, and neither that nor the wait is sent to anyone;
+  // a member that watches when this host claims can still tell that it waited.
   function weighed(P, task) {
     try {
       const { taskId, kind, item, title, identity, hours, offeredBy } = task;
@@ -99,7 +101,7 @@ export function createClaiming(host) {
     }
   }
 
-  function begin(P, taskId, own) {
+  function begin(P, taskId, own, waited) {
     waiting.delete(taskId);
     const now = host.now();
     if (host.pools.get(P.id) !== P || (!own && taken() >= slots())) return;
@@ -112,7 +114,8 @@ export function createClaiming(host) {
       return;
     }
     host.saveLocks();
-    const run = { P, taskId, round, own, snapshot: null, started: now, timer: null };
+    const offered = P.pool.task(taskId, now)?.createdAt ?? now;
+    const run = { P, taskId, round, own, snapshot: null, started: now, offered, waited, timer: null };
     rounds.set(taskId, run);
     drive(run, () => rebased(run));
     const tick = () => {
@@ -217,10 +220,18 @@ export function createClaiming(host) {
     host.gossip.send(P, to, 'unlock', body, { fresh: true, timeoutMs: PROBE_TIMEOUT_MS }).catch(() => {});
   }
 
+  // Where the time of a round went, for the log: seconds and counts, and nothing of what
+  // any member said.
+  function spent(run) {
+    const { round, snapshot, started, offered, waited } = run;
+    return `begun ${started - offered} s after the offer, after a wait of ${waited} ms, over in ${host.now() - started} s: `
+      + `${snapshot?.members.length ?? 0} members asked, ${round.present.length} answered, ${round.absent.length} absent`;
+  }
+
   function standDown(run, reason) {
     end(run);
     later.set(run.taskId, host.now() + (RETRY_MS + jitter(RETRY_MS)) / 1000);
-    host.log(`claim of ${run.taskId} stood down: ${reason}`);
+    host.log(`claim of ${run.taskId} stood down: ${reason} - ${spent(run)}`);
     host.poke();
   }
 
@@ -242,6 +253,7 @@ export function createClaiming(host) {
     if (!run.own && took() >= slots()) return drop('no slot left');
     // This host's own offer of the task, when it has one, is the claim's by its own word.
     const mine = own ? host.offers.nextGen(taskId) : null;
+    if (mine === null && !grants.some((grant) => grant.offer)) return drop('no host gives it its offer');
     const claim = buildClaim(host.id, {
       pool: P.id, taskId, round: round.round, gen, grants, absent, now: host.now(),
       ...(mine === null ? {} : { offer: { ...own, gen: mine } }),
@@ -249,6 +261,7 @@ export function createClaiming(host) {
     if (!P.pool.room(claim)) return drop('this host has as many claims in the pool as a member may');
     end(run);
     if (host.take(P, claim).refused.length > 0) return drop('the claim does not hold in the state of this host');
+    host.log(`claim of ${taskId} made - ${spent(run)}, ${backers(claim).length} gave an offer`);
     // The run is on record together with the claim it rests on, before anyone hears of either.
     host.runs.adopt(P, claim);
     host.gossip.spread(P, [claimKey(taskId, host.self)]);

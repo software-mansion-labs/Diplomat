@@ -16,6 +16,11 @@ process.env.TMPDIR = path.join(scratch, 'tmp');
 fs.mkdirSync(process.env.TMPDIR);
 process.env.DN_PUSH_MAX_BYTES = String(2 * 2 ** 20);
 process.env.DN_PUSH_UNPACKED_MAX_BYTES = String(8 * 2 ** 20);
+// The git the check runs, behind a switch: while the file `gitFails` exists, a command
+// whose arguments start with its text exits the way a git that broke or was killed does.
+const gitFails = path.join(scratch, 'git-fails');
+process.env.DN_GIT = path.join(scratch, 'git-or-not');
+fs.writeFileSync(process.env.DN_GIT, `#!/bin/sh\nif [ -e '${gitFails}' ]; then case "$*" in "$(cat '${gitFails}')"*) exit 128;; esac; fi\nexec git "$@"\n`, { mode: 0o755 });
 const { checkAdvertise, checkPush, globMatch, parseReceivePack, pushReport } = await import('../src/requester/receivepack.js');
 const { authorize, conclude } = await import('../src/requester/authorize.js');
 
@@ -112,6 +117,8 @@ const push = (rule, commands, ctx = ctxFor(), { pack, caps, thin } = {}) => {
   const body = pushBody(commands, pack ?? packOf(work, commands.map((c) => c[1]).filter((oid) => oid !== ZERO), [A, B, M], { thin }), caps);
   return checkPush(rule, SEGMENTS, body, ctx);
 };
+// A task's state as `authorize` keeps it, with `more` in it.
+const stateOf = (more) => ({ branches: [], reserved: [], sent: {}, pulls: [], asked: [], ...more });
 async function refused(promise, pattern) {
   const verdict = await promise;
   assert.equal(verdict.ok, false, 'the push was allowed');
@@ -249,8 +256,8 @@ await check('a push that would discard commits, delete a ref or move a ref outsi
 await check('a new branch is allowed where the rule creates, and only a branch the task created may then move', async () => {
   at(M);
   const fix = commit('fix 421', { 'src/fix.js': 'f\n' });
-  assert.deepEqual((await allowed(push(NEW_RULE, [[ZERO, fix, 'refs/heads/fix-421']]))).created, ['refs/heads/fix-421']);
-  assert.deepEqual((await allowed(push(NEW_RULE, [[ZERO, M, 'refs/heads/from-main']], ctxFor(), { pack: packOf(work, [], []) }))).created, ['refs/heads/from-main'], 'a branch at a commit the forge has');
+  assert.deepEqual((await allowed(push(NEW_RULE, [[ZERO, fix, 'refs/heads/fix-421']]))).created, [{ branch: 'refs/heads/fix-421', sha: fix }]);
+  assert.deepEqual((await allowed(push(NEW_RULE, [[ZERO, M, 'refs/heads/from-main']], ctxFor(), { pack: packOf(work, [], []) }))).created, [{ branch: 'refs/heads/from-main', sha: M }], 'a branch at a commit the forge has');
   git(work, 'push', '--quiet', forge, `${fix}:refs/heads/fix-421`);
   const more = commit('fix 421 more', { 'src/fix.js': 'g\n' });
   await refused(push(NEW_RULE, [[fix, more, 'refs/heads/fix-421']]), /may not update that ref/);
@@ -267,7 +274,7 @@ await check('a new branch is allowed where the rule creates, and only a branch t
   const band = (n, data) => Buffer.concat([Buffer.from((data.length + 5).toString(16).padStart(4, '0')), Buffer.from([n]), data]);
   const one = await send([[ZERO, more, 'refs/heads/one']], ctx);
   assert.equal(one.ok, true);
-  assert.deepEqual(ctx.state, { branches: [], reserved: ['refs/heads/one'], pulls: [] }, 'counted, and not yet its own');
+  assert.deepEqual(ctx.state, stateOf({ reserved: ['refs/heads/one'], sent: { 'refs/heads/one': more } }), 'counted, and not yet its own');
   const pair = await send([[ZERO, more, 'refs/heads/two'], [ZERO, more, 'refs/heads/three']], ctx);
   assert.match(pair.reason, /may create 2 branch\(es\); it has refs\/heads\/one/);
   assert.match((await send([[ZERO, more, 'refs/heads/a'], [ZERO, more, 'refs/heads/b'], [ZERO, more, 'refs/heads/c']], ctxFor())).reason, /may create 2 branch\(es\); it has none/);
@@ -277,7 +284,7 @@ await check('a new branch is allowed where the rule creates, and only a branch t
   // The forge took one and declined the other.
   conclude(one.request, { status: 200, body: Buffer.concat([band(2, Buffer.from('ok refs/heads/two\n')), band(1, report('unpack ok', 'ok refs/heads/one')), FLUSH]) });
   conclude(two.request, { status: 200, body: report('unpack ok', 'ng refs/heads/two pre-receive hook declined') });
-  assert.deepEqual(ctx.state, { branches: ['refs/heads/one'], reserved: [], pulls: [] }, 'what a hook prints beside the report is not the report');
+  assert.deepEqual(ctx.state, stateOf({ branches: ['refs/heads/one'] }), 'what a hook prints beside the report is not the report');
   // Answers that do not say: the creation stays counted and is not owned.
   const unsure = [
     undefined, { status: 500, body: report('unpack ok', 'ok refs/heads/two') }, { status: 302, body: Buffer.alloc(0) }, { status: 200, body: Buffer.from('<html>ok refs/heads/two</html>') },
@@ -287,20 +294,22 @@ await check('a new branch is allowed where the rule creates, and only a branch t
   ];
   for (const answer of unsure) {
     conclude((await send([[ZERO, more, 'refs/heads/two']], ctx)).request, answer);
-    assert.deepEqual(ctx.state, { branches: ['refs/heads/one'], reserved: ['refs/heads/two'], pulls: [] }, JSON.stringify(answer?.body?.toString()));
+    assert.deepEqual(ctx.state, stateOf({ branches: ['refs/heads/one'], reserved: ['refs/heads/two'], sent: { 'refs/heads/two': more } }), JSON.stringify(answer?.body?.toString()));
   }
-  assert.match((await send([[ZERO, more, 'refs/heads/other']], ctx)).reason, /may create 2 branch\(es\); it has refs\/heads\/one, refs\/heads\/two/);
-  // A creation whose answer never came may be why the forge declines it now: it stays counted.
+  // The same creation sent while the first is on its way is the one already counted, and
+  // the forge declining it gives nothing back: the first may be why.
+  const first = await send([[ZERO, more, 'refs/heads/two']], ctx);
   conclude((await send([[ZERO, more, 'refs/heads/two']], ctx)).request, { status: 200, body: report('unpack ok', 'ng refs/heads/two already exists') });
   conclude((await send([[ZERO, more, 'refs/heads/two']], ctx)).request, { status: 403, body: Buffer.alloc(0) });
   assert.deepEqual(ctx.state.reserved, ['refs/heads/two']);
+  assert.match((await send([[ZERO, more, 'refs/heads/other']], ctx)).reason, /may create 2 branch\(es\); it has refs\/heads\/one, refs\/heads\/two/);
   // The forge's "ok", in the newer report too, makes it the task's own.
-  conclude((await send([[ZERO, more, 'refs/heads/two']], ctx)).request, { status: 200, body: band(1, report('unpack ok', 'ok refs/heads/two', 'option refname refs/heads/two', 'option new-oid abc')) });
-  assert.deepEqual(ctx.state, { branches: ['refs/heads/one', 'refs/heads/two'], reserved: [], pulls: [] });
+  conclude(first.request, { status: 200, body: band(1, report('unpack ok', 'ok refs/heads/two', 'option refname refs/heads/two', 'option new-oid abc')) });
+  assert.deepEqual(ctx.state, stateOf({ branches: ['refs/heads/one', 'refs/heads/two'] }));
   // A forge that refuses the whole request gives a fresh creation back.
   const fresh = ctxFor();
   conclude((await send([[ZERO, more, 'refs/heads/x']], fresh)).request, { status: 403, body: Buffer.from('denied') });
-  assert.deepEqual(fresh.state, { branches: [], reserved: [], pulls: [] });
+  assert.deepEqual(fresh.state, stateOf());
   assert.equal(pushReport(report('unpack ok', 'ok refs/heads/a', 'ng refs/heads/b no')).ng[0], 'refs/heads/b');
   assert.equal(pushReport(Buffer.from('0005')), null);
 
@@ -392,6 +401,96 @@ await check('a push may not write a workflow file, in its tip or in any commit o
   await allowed(push(HEAD_RULE, [[B, git(work, 'rev-parse', 'HEAD'), 'refs/heads/feature']]));
   // A rule without denyPaths takes the workflow.
   await allowed(push({ ...HEAD_RULE, denyPaths: undefined }, [[B, evil, 'refs/heads/feature']]));
+});
+
+// A merge of `parents` in the executor's clone, with `files` written over what git made of it.
+const mergeOf = (parents, files = {}) => {
+  at(parents[0]);
+  git(work, 'merge', '--quiet', '--no-commit', '--no-ff', ...parents.slice(1));
+  return commit(`merge of ${parents.length}`, files);
+};
+
+await check('a merge may hold a CI definition as a parent the forge already has holds it; a parent pushed along answers for itself', async () => {
+  const WORKFLOW = '.github/workflows/ci.yml';
+  // Beside main, which changed its workflow in M, the forge has a branch with one of its own.
+  at(A);
+  const other = commit('a branch with its own workflow', { '.github/workflows/other.yml': 'on: push\n' });
+  git(work, 'push', '--quiet', forge, `${other}:refs/heads/other`);
+  at(B);
+  const C = commit('clean work', { 'src/a.js': 'merge me\n' });
+  const feature = (tip) => push(HEAD_RULE, [[B, tip, 'refs/heads/feature']]);
+  const show = (rev, file) => git(work, 'show', `${rev}:${file}`);
+
+  // Each definition exactly as one parent has it: the base branch's, the other branch's, or the task's own old one.
+  const two = mergeOf([C, M]);
+  assert.equal(show(two, WORKFLOW), show(M, WORKFLOW));
+  await allowed(feature(two));
+  const three = mergeOf([C, M, other]);
+  assert.equal(git(work, 'rev-list', '--parents', '-1', three).split(' ').length, 4, 'an octopus merge');
+  assert.equal(show(three, '.github/workflows/other.yml'), 'on: push');
+  await allowed(feature(three));
+  const ours = mergeOf([C, M], { [WORKFLOW]: 'on: push\n' });
+  assert.equal(show(ours, WORKFLOW), show(C, WORKFLOW));
+  await allowed(feature(ours));
+
+  // As no parent has it: edited, or deleted, in a merge of two and in an octopus.
+  await refused(feature(mergeOf([C, M], { [WORKFLOW]: 'on: push\njobs: { leak: {} }\n' })), /changes \.github\/workflows\/ci\.yml/);
+  await refused(feature(mergeOf([C, M], { [WORKFLOW]: null })), /changes \.github\/workflows\/ci\.yml/);
+  await refused(feature(mergeOf([C, M, other], { '.github/workflows/other.yml': 'on: [push, workflow_dispatch]\n' })), /changes \.github\/workflows\/other\.yml/);
+  await refused(feature(mergeOf([C, M, other], { [WORKFLOW]: 'on: push\njobs: { leak: {} }\n' })), /changes \.github\/workflows\/ci\.yml/);
+  await refused(feature(mergeOf([C, M, other], { '.github/workflows/new.yml': 'on: push\n' })), /changes \.github\/workflows\/new\.yml/);
+
+  // A definition cannot be made a parent's by pushing that parent along: the commit that
+  // wrote it is checked as its own, whichever side of the merge it is on.
+  at(B);
+  const writer = commit('writes a workflow', { '.github/workflows/steal.yml': 'on: push\n' });
+  const laundered = mergeOf([C, writer]);
+  assert.equal(git(work, 'diff-tree', '-c', '--name-only', '--no-commit-id', '-r', laundered), '', 'the merge itself differs from no parent');
+  await refused(feature(laundered), /changes \.github\/workflows\/steal\.yml/);
+  await refused(feature(mergeOf([writer, C])), /changes \.github\/workflows\/steal\.yml/);
+  await refused(feature(mergeOf([C, M, writer])), /changes \.github\/workflows\/steal\.yml/);
+  await refused(push(NEW_RULE, [[ZERO, laundered, 'refs/heads/x']]), /changes \.github\/workflows\/steal\.yml/);
+  // In a pack that leaves the writer out, the merge builds on a commit the forge has on no branch.
+  await refused(push(HEAD_RULE, [[B, laundered, 'refs/heads/feature']], ctxFor(), { pack: packOf(work, [laundered], [A, B, M, writer]) }), /builds on one that cannot be found/);
+  git(work, 'push', '--quiet', forge, `${writer}:refs/pull/9/head`);
+  await refused(push(HEAD_RULE, [[B, laundered, 'refs/heads/feature']], ctxFor(), { pack: packOf(work, [laundered], [A, B, M, writer]) }), /no branch of this repository holds/);
+  git(forge, 'update-ref', '-d', 'refs/pull/9/head');
+  git(forge, 'update-ref', '-d', 'refs/heads/other');
+});
+
+await check('a git command that fails proves nothing: the push is refused, whichever step it was', async () => {
+  at(B);
+  const C = commit('work', { 'src/a.js': 'proven\n' });
+  const pushed = () => push(HEAD_RULE, [[B, C, 'refs/heads/feature']]);
+  await allowed(pushed());
+  for (const [command, why] of [
+    ['init', /the quarantine could not be set up/],
+    ['index-pack', /the pushed pack could not be indexed/],
+    ['show-index', /the pushed pack could not be listed/],
+    ['cat-file', /not a commit the push carries or the forge has/],
+    ['rev-list --no-walk', /the pushed commits could not be read/],
+    ['merge-base', /refs\/heads\/feature: a fast-forward cannot be proven/],
+    ['rev-list --max-count', /no branch of this repository holds/],
+    ['rev-list --stdin', /could not be told from the forge's own/],
+    ['diff-tree', /could not be compared with their parents/],
+  ]) {
+    fs.writeFileSync(gitFails, command);
+    try { await refused(pushed(), why); } finally { fs.rmSync(gitFails); }
+  }
+  await allowed(pushed());
+});
+
+await check('a head branch is the one the forge names for the ref pushed: a pull request answered for another branch opens no other ref', async () => {
+  // A forge whose filter by head branch lets every open pull request through.
+  const unfiltered = ctxFor({ async pullsByHead() { return PULLS; } });
+  const mine = { ...HEAD_RULE, head: { author: 'me' } };
+  git(forge, 'update-ref', 'refs/heads/elsewhere', B);
+  at(B);
+  const C = commit('work', { 'src/a.js': 'heads\n' });
+  await refused(push(mine, [[B, C, 'refs/heads/elsewhere']], unfiltered), /refs\/heads\/elsewhere: this task may not update that ref/);
+  await refused(push(mine, [[B, C, 'refs/heads/feature'], [B, C, 'refs/heads/elsewhere']], unfiltered), /refs\/heads\/elsewhere: this task may not update that ref/);
+  await allowed(push(mine, [[B, C, 'refs/heads/feature']], unfiltered));
+  git(forge, 'update-ref', '-d', 'refs/heads/elsewhere');
 });
 
 await check('a commit the forge hands out by id but holds on no branch is not a base to build on', async () => {
@@ -670,6 +769,22 @@ await check('the forge\'s own commits are told from the pushed ones: a fork that
   git(work, 'merge', '--quiet', '--no-commit', M);
   const resolved = commit('evil merge into the fork', { '.github/workflows/ci.yml': 'on: push\njobs: { leak: {} }\n' });
   await refused(pushFork(FORK_HEAD, [[B, resolved, 'refs/heads/feature']]), /changes \.github\/workflows\/ci\.yml/);
+  // A workflow written by a commit pushed along is that commit's, whatever merge takes it over unchanged.
+  at(B);
+  const writer = commit('writes a workflow, for the fork', { '.github/workflows/steal.yml': 'on: push\n' });
+  const laundered = mergeOf([C, writer]);
+  await refused(pushFork(FORK_HEAD, [[B, laundered, 'refs/heads/feature']]), /changes \.github\/workflows\/steal\.yml/);
+  // The same commit as somebody else's fork holds it: the forge hands it out by id through
+  // this fork and through the pool's repository, and no branch of either holds it.
+  const lean = pushBody([[B, laundered, 'refs/heads/feature']], packOf(work, [laundered], [A, B, M, writer]));
+  await refused(checkPush(FORK_HEAD, FORK_SEGMENTS, lean, ctxFor()), /builds on one that cannot be found/);
+  for (const holder of [forge, forkGit]) {
+    git(work, 'push', '--quiet', holder, `${writer}:refs/pull/9/head`);
+    fetches = [];
+    await refused(checkPush(FORK_HEAD, FORK_SEGMENTS, lean, ctxFor()), /no branch of this repository holds/);
+    assert.ok(fetches.includes(`${holder === forkGit ? 'me/r' : 'pool'} 1`), `the commit was fetched by id: ${fetches.join()}`);
+    git(holder, 'update-ref', '-d', 'refs/pull/9/head');
+  }
 
   // A branch of the fork is the forge's own for a push to the fork, under its own name
   // beside the pool's branch of that name, and is nothing to a push to the pool's repository.
@@ -688,10 +803,10 @@ await check('the forge\'s own commits are told from the pushed ones: a fork that
 await check('a branch made in the fork is the task\'s own there under the fork\'s name, and a branch of the pool\'s repository under its own', async () => {
   at(M);
   const fix = commit('a fix', { 'src/fix.js': 'f\n' });
-  assert.deepEqual((await allowed(pushFork(FORK_NEW, [[ZERO, fix, 'refs/heads/fix']]))).created, ['me/r:refs/heads/fix']);
+  assert.deepEqual((await allowed(pushFork(FORK_NEW, [[ZERO, fix, 'refs/heads/fix']]))).created, [{ branch: 'me/r:refs/heads/fix', sha: fix }]);
   const spelled = ctxFor({ async repository(of) { return of === undefined ? POOL : { ...FORK, name: 'Me/R' }; } });
-  assert.deepEqual((await allowed(pushFork(FORK_NEW, [[ZERO, fix, 'refs/heads/fix']], spelled))).created, ['me/r:refs/heads/fix']);
-  assert.deepEqual((await allowed(push(NEW_RULE, [[ZERO, fix, 'refs/heads/fix']]))).created, ['refs/heads/fix']);
+  assert.deepEqual((await allowed(pushFork(FORK_NEW, [[ZERO, fix, 'refs/heads/fix']], spelled))).created, [{ branch: 'me/r:refs/heads/fix', sha: fix }]);
+  assert.deepEqual((await allowed(push(NEW_RULE, [[ZERO, fix, 'refs/heads/fix']]))).created, [{ branch: 'refs/heads/fix', sha: fix }]);
   await refused(pushFork({ ...FORK_NEW, create: 0 }, [[ZERO, fix, 'refs/heads/fix']]), /may not create that ref/);
   for (const repo of [forge, forkGit]) git(work, 'push', '--quiet', repo, `${fix}:refs/heads/fix`);
   const more = commit('more of the fix', { 'src/fix.js': 'g\n' });
@@ -703,6 +818,97 @@ await check('a branch made in the fork is the task\'s own there under the fork\'
   await refused(pushFork(FORK_NEW, [[fix, more, 'refs/heads/fix']], owning('them/r:refs/heads/fix')), /may not update that ref/);
   await refused(push(NEW_RULE, [[fix, more, 'refs/heads/fix']], owning('me/r:refs/heads/fix')), /refs\/heads\/fix: this task may not update that ref/);
   for (const repo of [forge, forkGit]) git(repo, 'update-ref', '-d', 'refs/heads/fix');
+});
+
+await check('a creation whose answer never came is settled by what the forge shows, before the task\'s next push is judged', async () => {
+  at(M);
+  const tip = commit('lost and found', { 'src/lost.js': 'l\n' });
+  const next = commit('and on', { 'src/lost.js': 'm\n' });
+  const to = (repo, rule) => (commands, ctx) => authorize([{ host: 'github.com', method: 'POST', path: `/${repo}.git/git-receive-pack`, ...rule }], {
+    host: 'github.com', method: 'POST', path: `/${repo}.git/git-receive-pack`, headers: { 'content-type': 'application/x-git-receive-pack-request' },
+    body: pushBody(commands, packOf(work, commands.map((c) => c[1]), [M])).toString('base64'),
+  }, ctx);
+  const send = to('o/r', NEW_RULE);
+  // A creation that was sent, and no answer came.
+  const lost = async (ctx, ref, how = send) => conclude((await how([[ZERO, tip, ref]], ctx)).request, undefined);
+  const held = (ref) => stateOf({ reserved: [ref], sent: { [ref]: tip } });
+
+  // The forge has no such branch: the allowance is free again.
+  let ctx = ctxFor();
+  await lost(ctx, 'refs/heads/lost');
+  assert.deepEqual(ctx.state, held('refs/heads/lost'));
+  asked = [];
+  const other = await send([[ZERO, tip, 'refs/heads/other']], ctx);
+  assert.equal(other.ok, true, other.reason);
+  assert.ok(asked.includes('branch refs/heads/lost undefined'), asked.join());
+  assert.deepEqual(ctx.state, held('refs/heads/other'));
+
+  // The forge has it at the commit that was sent: it is the task's own, to move and to count.
+  ctx = ctxFor();
+  await lost(ctx, 'refs/heads/lost');
+  git(work, 'push', '--quiet', forge, `${tip}:refs/heads/lost`);
+  await allowed(send([[tip, next, 'refs/heads/lost']], ctx));
+  assert.deepEqual(ctx.state, stateOf({ branches: ['refs/heads/lost'] }));
+  await refused(send([[ZERO, tip, 'refs/heads/other']], ctx), /may create 1 branch\(es\); it has refs\/heads\/lost/);
+  // Two requests that find it out at once make it the task's own once.
+  ctx = ctxFor({ state: held('refs/heads/lost') });
+  const both =await Promise.all([send([[tip, next, 'refs/heads/lost']], ctx), send([[tip, next, 'refs/heads/lost']], ctx)]);
+  assert.deepEqual(both.map((verdict) => verdict.ok), [true, true]);
+  assert.deepEqual(ctx.state, stateOf({ branches: ['refs/heads/lost'] }));
+
+  // The forge has it at another commit: somebody's branch, which stays counted and is not the task's.
+  git(work, 'push', '--quiet', forge, `${M}:refs/heads/taken`);
+  ctx = ctxFor({ state: held('refs/heads/taken') });
+  await refused(send([[M, tip, 'refs/heads/taken']], ctx), /may not update that ref/);
+  await refused(send([[ZERO, tip, 'refs/heads/other']], ctx), /may create 1 branch\(es\); it has refs\/heads\/taken/);
+  assert.deepEqual(ctx.state, held('refs/heads/taken'));
+
+  // A creation still on its way is not asked about, and stays counted. After a restart nothing is on its way.
+  ctx = ctxFor();
+  const flying = await send([[ZERO, tip, 'refs/heads/flying']], ctx);
+  asked = [];
+  await refused(send([[ZERO, tip, 'refs/heads/other']], ctx), /may create 1 branch\(es\); it has refs\/heads\/flying/);
+  assert.ok(!asked.includes('branch refs/heads/flying undefined'), asked.join());
+  await allowed(send([[ZERO, tip, 'refs/heads/other']], ctxFor({ state: JSON.parse(JSON.stringify(ctx.state)) })));
+  conclude(flying.request, undefined);
+  // The forge's word that came while the creation was being sent again is about the one before.
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const slow = { ...ctx, async branch(ref, of) { const now = await ctx.branch(ref, of); if (ref === 'refs/heads/flying') await gate; return now; } };
+  const late = send([[ZERO, tip, 'refs/heads/other']], slow);
+  await allowed(send([[ZERO, tip, 'refs/heads/flying']], ctx));
+  release();
+  await refused(late, /may create 1 branch\(es\); it has refs\/heads\/flying/);
+  assert.deepEqual(ctx.state, held('refs/heads/flying'));
+
+  // A forge that does not say has said nothing: the request is refused and the state is as it was.
+  ctx = ctxFor();
+  await lost(ctx, 'refs/heads/unsaid');
+  const silent = { ...ctx, async branch(ref, of) { if (ref === 'refs/heads/unsaid') throw new Error('forge: the forge did not say where refs/heads/unsaid is (it answered 503)'); return ctx.branch(ref, of); } };
+  await refused(send([[ZERO, tip, 'refs/heads/other']], silent), /^the forge did not say where refs\/heads\/unsaid is/);
+  await refused(send([[ZERO, tip, 'refs/heads/other']], { ...ctx, branch: undefined }), /nothing here can ask the forge about its branches/);
+  assert.deepEqual(ctx.state, held('refs/heads/unsaid'));
+
+  // A branch of the fork is looked for in the fork, where the pool's repository has none of that name.
+  git(forge, 'update-ref', '-d', 'refs/heads/lost');
+  const sendFork = to('me/r', FORK_NEW);
+  ctx = ctxFor();
+  await lost(ctx, 'refs/heads/lost', sendFork);
+  assert.deepEqual(ctx.state, held('me/r:refs/heads/lost'));
+  git(work, 'push', '--quiet', forkGit, `${tip}:refs/heads/lost`);
+  asked = [];
+  await allowed(sendFork([[tip, next, 'refs/heads/lost']], ctx));
+  assert.ok(asked.includes('branch refs/heads/lost me/r'), asked.join());
+  assert.deepEqual(ctx.state, stateOf({ branches: ['me/r:refs/heads/lost'] }));
+
+  // A push does not wait for what became of a pull request.
+  ctx = ctxFor({ state: stateOf({ asked: ['fix-1'] }) });
+  asked = [];
+  await allowed(send([[ZERO, tip, 'refs/heads/other']], ctx));
+  assert.deepEqual(asked.filter((line) => line.startsWith('pulls')), []);
+  assert.deepEqual(ctx.state.asked, ['fix-1']);
+
+  for (const [repo, ref] of [[forge, 'taken'], [forkGit, 'lost']]) git(repo, 'update-ref', '-d', `refs/heads/${ref}`);
 });
 
 await check('the linked checkout is read and never written', async () => {

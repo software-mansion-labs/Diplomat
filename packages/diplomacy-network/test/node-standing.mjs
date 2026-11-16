@@ -237,7 +237,7 @@ await check('the hours of a claim are those of the offers that back it: a host b
   await w.agreed(all);
   const at = w.net.now();
   const made = buildClaim(evil.id, { pool: POOL, taskId: quick.taskId, round: ROUND, gen: 0, grants: await granted(quick.taskId, at), absent: [], now: at });
-  assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [endClaim(evil.id, made, 'completed', at)] })), [[claimKey(quick.taskId, evil)], []]);
+  assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [endClaim(evil.id, made, 'completed', at, specDigest({ prompt: 'another job' }))] })), [[claimKey(quick.taskId, evil)], []]);
   await w.run(5);
   assert.deepEqual([w.offerRow(req, quick.taskId).executor, w.offerRow(req, quick.taskId).state, w.offerRow(req, quick.taskId).attempt], ['', 'pooled', 1], 'a claim ended without a word of the job counts for nothing');
   const done = (spec) => w.request(evil, req, 'done', { taskId: quick.taskId, round: ROUND, spec, outcome: OUTCOME });
@@ -320,7 +320,7 @@ await check('a member whose clock is far off is absent from a round, a task whos
   req.skew = 400;
   free(exe);
   await w.net.until(() => exe.log.some((line) => line.includes(`claim of ${second.taskId} stood down: no-requester`)), { what: 'a round without the offerer' });
-  await w.net.until(() => member(req, exe).skew && member(req, off).skew, { what: 'the offerer seeing its clock is off' });
+  await w.net.until(() => member(req, exe).skew && member(req, off).skew && member(off, req).skew, { what: 'every host seeing the offerer\'s clock is off' });
   for (const h of all) assert.deepEqual([w.task(h, second.taskId).state, w.task(h, second.taskId).blocked], ['available', 'clock'], h.name);
   req.skew = 0;
   await w.net.until(() => exe.executor.jobOf(second.taskId), { what: 'the task claimed once the clocks agree' });
