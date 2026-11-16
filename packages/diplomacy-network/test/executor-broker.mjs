@@ -1317,7 +1317,12 @@ try {
         const asked = start(j).catch((e) => e);
         await until(() => dials.length === dialled + 1 && made === before + 1, `the connection for ${what} to be made`);
         broker.removeJob('run-late');
-        if (closedFirst) await asked;
+        // The client learns of the cut in the turn of the loop the broker does, or a
+        // later one: a turn on, the broker has seen its side close.
+        if (closedFirst) {
+          await asked;
+          await new Promise((r) => setImmediate(r));
+        }
         release();
         gates.delete(target);
         await asked;
