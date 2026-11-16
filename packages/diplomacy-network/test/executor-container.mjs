@@ -309,10 +309,17 @@ try {
     assert.ok(prompt.endsWith('\n\n---\n\nReview the pull request.\n'));
     assert.doesNotMatch(prompt, /\{\{/, 'every blank is filled');
     for (const said of ['https://github.com/dn-test/alpha.git', '`pr:7`', 'apt-get update && apt-get install -y', 'GNU', '403', '`gh`', 'git fetch origin pull/<n>/head',
-      'Requester Name <requester@example.com>', 'No simulator, emulator or device is offered']) assert.ok(prompt.includes(said), said);
+      'Requester Name <requester@example.com>', 'No simulator, emulator or device is offered',
+      // What is true of the forge here, and no more: https on 443 only, links to other hosts followed.
+      '`github.com` is reached over https on port 443 and no other way: there is no ssh to it', 'that host is reached like any other site',
+      // A head branch in the requester's own fork: fetched from origin, pushed by URL.
+      '`refs/pull/<N>/head`, on GitLab `refs/merge-requests/<N>/head`', 'the fork itself cannot be fetched from here',
+      '`git push https://github.com/<account>/<fork>.git HEAD:refs/heads/<head branch>`', '`gh pr create --draft --head <account>:<branch>`',
+      'a merge request on the fork\'s project with this repository\'s project as the target']) assert.ok(prompt.includes(said), said);
     const lab = renderPrompt({ pool: { id: 'gitlab.example.org/g/r', forge: 'gitlab', host: 'gitlab.example.org', owner: 'g', repo: 'r' }, spec: { ...SPEC, item: '' },
       forwards: [{ name: 'adb' }] });
-    for (const said of ['https://gitlab.example.org/g/r.git', '`glab`', 'merge-requests/<n>/head', 'the repository as a whole', 'forwarded from the host and already in your environment: adb']) assert.ok(lab.includes(said), said);
+    for (const said of ['https://gitlab.example.org/g/r.git', '`glab`', 'merge-requests/<n>/head', 'the repository as a whole', 'forwarded from the host and already in your environment: adb',
+      '`git push https://gitlab.example.org/<account>/<fork>.git HEAD:refs/heads/<head branch>`']) assert.ok(lab.includes(said), said);
     // What adb is good for through the host's filter is said to a job that has it, and
     // to no other.
     const ADB = '`adb devices` lists what is attached to the host, and a device is named by its serial (`adb -s <serial>` or `ANDROID_SERIAL`). `adb connect`, `forward`, `reverse`, `pair` and `kill-server` are refused by the host: do not retry them.';
@@ -433,6 +440,53 @@ try {
     none.stderr.on('data', (d) => { err += d; });
     assert.equal(await new Promise((r) => none.on('close', r)), 1);
     assert.match(err, /no address in 203\.0\.113\.0\/24/);
+  });
+
+  await check('a relay carries 1024 connections at a time and drops the next, and one that cannot listen says so and exits 1', async () => {
+    const reached = new Set();
+    const target = net.createServer((c) => { reached.add(c); c.on('close', () => reached.delete(c)).on('error', () => {}).resume(); });
+    await new Promise((r) => target.listen(0, '127.0.0.1', r));
+    const free = net.createServer();
+    await new Promise((r) => free.listen(0, '127.0.0.1', r));
+    const port = free.address().port;
+    await new Promise((r) => free.close(r));
+    const relayFile = path.join(IMAGE_DIR, 'relay.mjs');
+    const relay = spawn(process.execPath, [relayFile, '127.0.0.0/8', String(port), '127.0.0.1', String(target.address().port)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const clients = [];
+    const dial = () => new Promise((resolve, reject) => {
+      const c = net.connect(port, '127.0.0.1', () => resolve(c));
+      c.once('error', reject);
+      c.on('error', () => {});
+      clients.push(c);
+    });
+    try {
+      await new Promise((resolve) => relay.stdout.once('data', resolve));
+      for (let i = 0; i < 1024; i++) await dial();
+      await until('every one of them to reach the broker', () => reached.size === 1024);
+      const extra = await dial();
+      let closed = false;
+      extra.on('close', () => { closed = true; });
+      await until('the connection past the bound to be dropped', () => closed);
+      assert.equal(reached.size, 1024, 'and it never reached the broker');
+      clients[0].destroy();
+      await until('a closed connection to be given back', () => reached.size === 1023);
+      await dial();
+      await until('the place it left to be had again', () => reached.size === 1024);
+      assert.equal(relay.exitCode, null, 'the relay is still there');
+    } finally {
+      for (const c of clients) c.destroy();
+      relay.kill('SIGKILL');
+      target.close();
+    }
+    // A port that is taken: said, and an exit a restart policy sees.
+    const taken = net.createServer();
+    await new Promise((r) => taken.listen(0, '127.0.0.1', r));
+    const second = spawn(process.execPath, [relayFile, '127.0.0.0/8', String(taken.address().port), '127.0.0.1', '1'], { stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    second.stderr.on('data', (d) => { err += d; });
+    assert.equal(await new Promise((r) => second.on('close', r)), 1);
+    assert.match(err, /^relay: listen EADDRINUSE/);
+    taken.close();
   });
 
   await check('the same peer on the same repository gets the same container again; its second clone borrows from the first', async () => {
