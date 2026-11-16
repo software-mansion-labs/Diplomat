@@ -242,9 +242,9 @@ before it failed or was cancelled; `executor` is empty only when nobody ever hel
 An offer may also be `done` with no report: its job was run for another machine's offer
 while this machine was away. Its `outcome` then has the `summary`
 `run for another machine's offer of the same job` and no cost, `executor` is the machine
-that ran the job, and `backedBy` lists the machines, other than that one, whose offers
-the run was given: who vouches that it took place. `backedBy` is empty for every other
-offer.
+that ran the job, and `backedBy` lists the machines whose offers the run was given -
+the one that ran it among them when it ran its own offer. `backedBy` is empty for every
+other offer.
 
 `docker` and `model` say why this machine takes no work when it takes none: their `detail`
 carries the reason. `devices` is `off` until the operator sets `networkDevices`, then
@@ -323,14 +323,15 @@ machine's offer finds the run on record when it is back, and marks its own offer
 without a second run. It asks the pool what it missed before it does anything for its
 offers - a moment when the others answer, a minute when one of them is asleep, three
 when none answers - and an offer it could not sign for a day it cancels: Diplomat
-offers the work again when the forge still shows it undone. Two cases still run a job
-twice. A machine that ran the task it offered itself, with no other machine's offer in
-its claim, is the only witness of that run, and its word alone ends no other machine's
-offer: of two machines, when one runs its own offer while the other sleeps, the sleeper
-has the job run again when it wakes. And two machines that cannot reach each other each
-have it run. The exact rules, and what a member that offers somebody else's task can
-and cannot do with it, are in PROTOCOL.md, section 7: "A job that was run for another
-offer", "A host that was away" and "What remains".
+offers the work again when the forge still shows it undone. Of two machines, when one
+runs its own offer while the other sleeps, the sleeper marks its offer done when it
+wakes: the job is run once. Two machines that cannot reach each other each have it
+run. And the record of a run is its machine's word: a machine in the pool that holds
+the same job can say it ran it and have the others mark their offers done unrun, which
+is no more than a machine that takes a job and reports it done can do. The exact rules,
+and what a member that offers somebody else's task can and cannot do with it, are in
+PROTOCOL.md, section 7: "A job that was run for another offer", "A host that was away"
+and "What remains".
 
 A request is checked before it is sent (`requester/authorize.js`). Where the check
 depends on the forge - where a branch is, which branch is the default, whether it is

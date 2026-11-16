@@ -623,7 +623,8 @@ is to that host.
 A host is not always there when its job is run: it was asleep, switched off or out of
 reach during the round, so no claim was given its offer, or during the report, so it
 never heard how the run it backed ended. Its offer is open and no claim's, and the job
-is done. The record the run left speaks for it. A host signs an open offer of its own
+is done - for another host's offer, or for the offer of the very machine that ran it.
+The record the run left speaks for it. A host signs an open offer of its own
 `done` when no claim holds that offer and the pool holds a live claim record of the task
 of which all of this is true:
 
@@ -633,9 +634,12 @@ of which all of this is true:
   offer was made, the 300 s two clocks may differ by aside. A run that began before that
   says nothing of an offer made knowing of it;
 - this host backs it with that very offer or not at all: a run it gave an earlier offer
-  of its own to was over, for this host, when it offered the task again;
-- a host other than the claim's executor backs it: the word of the machine that ran a
-  job is not enough.
+  of its own to was over, for this host, when it offered the task again.
+
+Whose offers the run was given does not matter: a machine that ran the task it offers
+itself, backed by nobody else, leaves such a record too. Of two machines of one
+operator, when one runs its own offer while the other sleeps, the sleeper's offer is
+`done` when it wakes and the job is run once.
 
 A record that reaches a host - pushed, pulled, or brought by the executor's later
 `sync` - is weighed at once, also when a `lock` for the offer is being answered: the
@@ -643,8 +647,8 @@ offer is done before it can be given away. An offer that a claim holds is not to
 it ends by that claim's run, so no record stops a run that is going.
 
 The host books nothing for an offer that ends this way: what the run cost is with the
-offer the run reported to. It keeps who ran the job and which hosts other than the
-executor backed that run.
+offer the run reported to. It keeps who ran the job and every host that backed that
+run, the executor among them when it ran its own offer.
 
 The spec is everything an executor is handed to run a task, and so everything the digest
 covers: the task id, kind, item and title, the forge login, the prompt and its options,
@@ -740,11 +744,6 @@ Nothing in a record hides any of this.
   - *A host that was away when its job was run* ends its offer by the record of that
     run ("A job that was run for another offer"). The job is run a second time all the
     same where that rule does not reach:
-    - *the machine that ran the job was its only backer.* A machine that runs the task
-      it offers itself, with no other host's offer in its claim, leaves a record that is
-      its own word alone, and that ends nobody else's offer. Two machines of which one
-      runs its own offer while the other sleeps are this case: the sleeper's offer is
-      open when it wakes, and is run.
     - *the run was claimed more than 300 s before the offer was made*, and the offer was
       never given to it: the host made its offer while the run was going and was gone
       before the run could take that offer in.
@@ -755,8 +754,8 @@ Nothing in a record hides any of this.
 - **A member that offers a task another host offers too** is a requester of its own
   offer and of nothing else. It cannot stop a run, take an offer from the claim that
   holds it, or fail or cancel another host's offer; how another host's offer can be
-  made to end `done` is under "An outcome is the executor's word" and "Two members
-  together" below. What is left to it:
+  made to end `done` is under "An outcome is the executor's word" and "One member that
+  holds a job" below. What is left to it:
   - *Being asked for the key.* An executor whose claim holds several offers asks their
     hosts for the key in an order that starts at a place it draws at random (section
     9). When it starts with this member, the run does the job this member hands out,
@@ -779,20 +778,18 @@ Nothing in a record hides any of this.
   without doing the work has finished it, and so has a member through whose key the
   work was done (above). What a host sees for itself is how many forge requests it
   served for the task.
-- **Two members together can make a host take its job for run.** A `completed` claim
-  that names a job is its executor's word, and a backing is the word of the host that
-  gave it. Two members that act together - or one that holds two keys in the pool, which
-  inviting a key of its own gets it - offer the task with one key, claim it with the
-  other on the first one's backing, and sign that claim `completed` under the digest of
-  another host's job. That digest takes the job itself to compute - the prompt, its
-  options and the commit author, to the byte, none of which a record carries - so they
-  must already have that job: they offer the same work themselves, or were handed it
-  with a key before. A host whose offer of that job is open and free then signs it
-  `done`, unrun. That is all it comes to: one run of a job they can already see is
-  suppressed. No key is issued and no forge request made, an offer that a claim holds
-  is untouched, a single key gets nowhere, and the host keeps who it took for the
-  executor and who for the backer. The forge is the evidence: whoever offered the work
-  offers it again when the forge still shows it undone.
+- **One member that holds a job can make a host that offers it end its offer unrun.**
+  A `completed` claim that names a job is its executor's word. A member offers the
+  task, claims its own offer, and signs that claim `completed` under the digest of
+  another host's job; a host whose offer of that job is open and free then signs it
+  `done`, unrun. The digest takes the job itself to compute - the prompt, its options
+  and the commit author, to the byte, none of which a record carries - so the member
+  must already hold that exact job: it offers the same work itself, or was handed it
+  with a key before. This is no more than any executor can do by taking a job and
+  reporting it done (above), and it gets the member less: no key is issued and no
+  forge request made, an offer that a claim holds is untouched, and the host keeps
+  whom it took for the executor and for its backers. The forge shows the work undone,
+  and Diplomat offers it again.
 - **A member can take an offer and sit on it.** A claim made by the rules holds the
   offers it was given for one lease and its grace, 2 h 10 min, and for as long after as
   its executor answers the pings, up to each offer's hours; a job's own executor answers

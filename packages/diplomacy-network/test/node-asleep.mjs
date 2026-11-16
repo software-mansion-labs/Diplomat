@@ -188,11 +188,11 @@ await check('a host that offers a task again as soon as its run ended has it run
   assert.deepEqual([w.offerRow(d, taskId).outcome.summary, w.offerRow(d, taskId).backedBy, failures(all)], ['look at pr-1', [], []]);
 });
 
-await check('the word of the machine that ran a job is not enough: a run that only its own machine\'s offer was given ends no other offer, and the job is run again for the machine that slept; a run that a third machine gave its offer to ends it', async () => {
-  for (const [seed, names, runs] of [[108, ['l', 'd'], 2], [118, ['l', 'd', 'x'], 1]]) {
+await check('two machines of one operator: the laptop sleeps, the desktop runs the job for its own offer, and the laptop wakes to an offer that is done - the job is run once, and the offer names the desktop as the machine that ran it and as the host whose offer that run was given; with a third machine that offers the task too, the offer names both', async () => {
+  for (const [seed, names] of [[108, ['l', 'd']], [118, ['l', 'd', 'x']]]) {
     const w = createWorld({ seed });
     const all = await w.pool(names);
-    const [l, d, x] = all;
+    const [l, d] = all;
     const { taskId } = await l.node.offer(offerArgs('pr-1'));
     await w.agreed(all);
     w.net.sleep('l');
@@ -202,22 +202,16 @@ await check('the word of the machine that ran a job is not enough: a run that on
     await w.net.until(() => d.executor.jobOf(taskId), { what: 'the desktop running the task it offers' });
     finish(d, taskId);
     await w.net.until(() => all.slice(1).every((h) => w.offerRow(h, taskId).state === 'done') && w.claim(d, taskId).state === 'completed', { what: 'the run over' });
-    const claim = w.claim(d, taskId);
-    assert.deepEqual([claim.executor, backers(claim).sort()], [d.pk, all.slice(1).map((h) => h.pk).sort()], `${names}`);
+    const backed = all.slice(1).map((h) => h.pk).sort();
+    assert.deepEqual([w.claim(d, taskId).executor, backers(w.claim(d, taskId)).sort()], [d.pk, backed], `${names}`);
     await w.run(HOUR);
     w.net.sleep('l', false);
-    if (runs === 1) {
-      await w.net.until(() => w.offerRow(l, taskId).state === 'done', { what: 'the laptop\'s offer done' });
-      assert.deepEqual([w.offerRow(l, taskId).executor, w.offerRow(l, taskId).backedBy, w.offerRow(l, taskId).outcome], [d.pk, [x.pk], NOTHING_BOOKED]);
-      await w.run(HOUR);
-    } else {
-      await w.net.until(() => started(all) === 2, { what: 'the job run again' });
-      assert.equal(w.offerRow(l, taskId).attempt, 1);
-      finish(d, taskId);
-      await w.net.until(() => w.offerRow(l, taskId).state === 'done', { what: 'the laptop\'s offer done by a run of its own' });
-      assert.deepEqual([w.offerRow(l, taskId).outcome.summary, w.offerRow(l, taskId).backedBy], ['look at pr-1', []]);
-    }
-    assert.deepEqual([started(all), failures(all)], [runs, []], `${names}`);
+    await w.net.until(() => w.offerRow(l, taskId).state === 'done', { what: 'the laptop\'s offer done' });
+    const row = w.offerRow(l, taskId);
+    assert.deepEqual([row.executor, [...row.backedBy].sort(), row.attempt, row.outcome], [d.pk, backed, 1, NOTHING_BOOKED], `${names}`);
+    await w.run(HOUR);
+    assert.deepEqual([started(all), failures(all)], [1, []], `${names}`);
+    for (const h of all) assert.equal(w.task(h, taskId).state, 'done', h.name);
   }
 });
 

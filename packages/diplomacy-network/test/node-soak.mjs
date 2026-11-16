@@ -49,6 +49,7 @@ async function soak(seed) {
   const rival = new Map(); // taskId -> { createdAt, seq, state, hours } of the offer the member with no node made of it
   const handed = new Map(); // taskId -> the digest of a job a host was handed for it
   const elsewhere = new Set(); // "host|task|offeredAt" of every offer that ended by a run for another host's offer
+  const boasted = new Set(); // taskId of every job the member with no node said a run of its own did
   const performed = new Map(); // "path body" of a write -> how often a requester carried it out
   const sendings = []; // { keyId, met } of every `act` sent: what its sender was told of it
   const secrets = new Map(); // "requester|task|round" -> secret
@@ -112,18 +113,21 @@ async function soak(seed) {
           given.set(id, to);
         }
       }
-      // What the member with no node does is nothing to an offer of another host: it is
-      // given none, and none ends but by a run its host gave it to.
+      // The member with no node is given no offer of another host. All it can do to one
+      // is say that a run for its own offer did the very job: that offer then ends
+      // unrun, and says whose word that was.
       for (const o of h.node.snapshot().offers) {
-        assert.notEqual(o.executor, evil.pk, `${h.name} gave ${o.item} to a machine that never asked for it`);
         assert.ok(o.state !== 'done' || o.outcome?.ok === true, `${o.item} is done without an outcome`);
-        // An offer that ended by a run for another host's offer names a host other than
-        // the run's own machine that gave that run its offer, and that host did.
-        if (o.state !== 'done' || o.outcome.summary !== ELSEWHERE) continue;
-        elsewhere.add(`${h.name}|${o.taskId}|${o.offeredAt}`);
-        assert.ok(o.backedBy.length > 0 && !o.backedBy.includes(o.executor) && !o.backedBy.includes(evil.pk), `${h.name} took ${w.name(o.executor)}'s own word that ${o.item} was done`);
-        const gave = (pk) => [...given].some(([id, to]) => id.startsWith(`${pk}|${o.taskId}|`) && to.startsWith(`${o.executor}|`));
-        assert.ok(o.backedBy.some(gave), `${h.name} ended ${o.item} by a run of ${w.name(o.executor)} that nobody gave an offer to`);
+        const done = o.state === 'done' && o.outcome.summary === ELSEWHERE;
+        if (done) elsewhere.add(`${h.name}|${o.taskId}|${o.offeredAt}`);
+        if (o.executor === evil.pk) {
+          assert.ok(done && boasted.has(o.taskId), `${h.name} gave ${o.item} to a machine that never asked for it`);
+          assert.deepEqual(o.backedBy, [evil.pk], `${h.name} names other hosts behind a run only its machine speaks of`);
+        } else if (done) {
+          // The run of a host that is there was given an offer by every host it names.
+          const gave = (pk) => [...given].some(([id, to]) => id.startsWith(`${pk}|${o.taskId}|`) && to.startsWith(`${o.executor}|`));
+          assert.ok(o.backedBy.length > 0 && o.backedBy.every(gave), `${h.name} ended ${o.item} by a run of ${w.name(o.executor)} that ${o.backedBy.filter((pk) => !gave(pk)).map(w.name)} gave no offer to`);
+        }
       }
       const keys = w.stored(h, 'keys') ?? {};
       for (const [taskId, K] of Object.entries(keys.issued ?? {})) {
@@ -323,11 +327,11 @@ async function soak(seed) {
         pool: POOL, taskId, round: 'AAAAAAAAAAA', gen: pick([0, 1, LIMITS.time]), grants: [], absent: [], now, offer: { at: mine.createdAt, gen, hours: mine.hours },
       });
       const member = memberRecord(evil.id, { pool: POOL, seq: evilSeq += 1, at: now, joinedAt: evilJoined, maxAcceptedH: 12, voucher });
-      // One time in two it says its run did the very job the others offer: its word
-      // alone ends no offer of another host.
+      // One time in two it says its run did the very job the others offer.
       const job = specDigest({ taskId, kind: 'review', item, title: `Review ${item}`, identity: taskId.slice(taskId.lastIndexOf('@') + 1), prompt: 'p', options: {} });
       assert.equal(handed.get(taskId) ?? job, job, 'the job it names is the one the others hand out');
       const ran = dice.chance(0.5);
+      if (ran) boasted.add(taskId);
       for (const h of all) {
         const say = (kind, body) => w.request(evil, h, kind, body, { effort: 128 }).catch(() => ({ ok: false }));
         await say('hello', { member });

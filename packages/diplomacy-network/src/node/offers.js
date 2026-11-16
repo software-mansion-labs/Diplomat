@@ -15,8 +15,8 @@ import { claimKey, hoursOf, offerKey } from './gossip.js';
 const OPEN = ['pooled', 'claimed'];
 const MAX_REASON = 200;
 const MAX_SPEC_BYTES = 512 * 2 ** 10;
-/// What the outcome of an offer says when its job was done by a run this host heard
-/// nothing from: one that another host gave its offer of the same job to.
+/// What the outcome of an offer says when its job was done by a run this host's offer
+/// was not given to: one for another offer of the same job.
 export const ELSEWHERE = 'run for another machine\'s offer of the same job';
 /// Why an offer its host could not sign again in time is cancelled.
 export const OUTLIVED = 'this machine was away for longer than an offer lasts';
@@ -192,21 +192,19 @@ export function createOffers(host) {
   // completed claim names a job. The run was claimed no earlier than this offer was made,
   // the clocks' tolerance aside - one that began before says nothing of an offer made
   // knowing of it, and a run this host gave an earlier offer of its own to is such a
-  // one. And its executor's word is not enough: a host other than the executor gave it
-  // an offer.
+  // one.
   function elsewhere(P, O) {
     return P.pool.claims(O.taskId, host.now()).find((claim) => claim.spec === jobOf(O)
-      && claim.claimedAt + CLOCK_SKEW_SECS >= O.createdAt && [undefined, O.createdAt].includes(backing(claim, host.self)?.at)
-      && backers(claim).some((pk) => pk !== claim.executor)) ?? null;
+      && claim.claimedAt + CLOCK_SKEW_SECS >= O.createdAt && [undefined, O.createdAt].includes(backing(claim, host.self)?.at)) ?? null;
   }
 
   // An offer no claim holds whose job was done elsewhere is done: nothing is booked for
-  // it, and it says who ran the job and whose offer that run was given. True when so.
+  // it, and it says who ran the job and whose offers that run was given. True when so.
   function finished(P, O) {
     const ran = elsewhere(P, O);
     if (!ran) return false;
     O.ran = ran.executor;
-    O.backedBy = backers(ran).filter((pk) => pk !== ran.executor);
+    O.backedBy = backers(ran);
     O.outcome = { ok: true, summary: ELSEWHERE, usd: 0, tokens: 0, runner: '', model: '' };
     end(P, O, 'done');
     return true;
