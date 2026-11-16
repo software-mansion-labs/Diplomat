@@ -54,31 +54,45 @@ lock on the job, and commits only when all that answered agreed. A member that d
 is recorded as absent. Two machines reaching for one job are told apart by a rank computed from
 the job and the machine's key, the same on every machine.
 
-What a machine has - simulators, attached devices, toolchains - is never announced. It only
-weighs it when deciding whether to take a job.
+What a machine has - simulators, attached devices, toolchains - is never announced. A machine
+weighs it by itself, in one case: a job on an Android project is left for half a minute by a
+machine that has no device to give, so that one with a device takes it first. If none does,
+the job runs on a machine without.
 
 ## Where a job runs
 
 In a container built from one local image: Debian with git, node, python, curl, `gh`, `glab`,
 `adb` and the agent itself. The agent is root in it and is told it may install whatever else it
-needs.
+needs. The machine needs Docker 27.1 or newer: a job's network is made in a mode that release
+brought, and an older engine takes no job.
 
 - **One container per requesting machine and repository.** It runs every job that machine asks
   for on that repository, and never another machine's or another repository's.
 - **No credential is inside it.** Not the forge's, not the model's.
 - **It reaches nothing but the broker.** The container sits alone on an internal network; its
   only way out is a relay to a proxy on the host. Through it: the forge's API and `git push` go
-  to the machine that offered the job; `git clone` and `fetch` of the repository are answered from
-  the host's own mirror; the model's API is forwarded with the host's credential added; anything
-  else is tunnelled, so installing software works. Addresses of the host, its network and other
+  to the machine that offered the job, on every host the forge takes a login or serves
+  repositories on, over https on port 443 and no other way; `git clone` and `fetch` of the
+  repository are answered from the host's own mirror; the model's API is forwarded with the
+  host's credential added, and its answer comes back without the headers that describe the
+  host's account; anything else is tunnelled to the public internet, so installing software
+  works. Addresses of the host, of every network the host is on, IPv4 or IPv6, and of other
   containers are refused.
+- **It gets a bounded share of the host.** 8 GiB of memory, 4 CPUs, 4096 processes and 20 GiB of
+  disk per container; per job, 256 connections through the broker and 48 MiB of request bodies
+  held at a time. A container found holding more disk than that is removed, and the jobs in it
+  end as failed attempts.
 - **Devices stay on the host, and jobs see none of them** until **Let jobs use this machine's
   devices** is switched on (the Network screen's settings; off by default). With it on, a job
   running here can use the Android devices and emulators attached to this machine through adb -
   a phone on USB included - by a forward opened for that job, and an emulator can reach services
-  on this machine. Such a job can do with those devices whatever adb can, so switch it on only
-  for pools whose machines you trust with that. It applies to jobs started afterwards.
-- **A fuse.** One job gets 5000 model requests or 8 GiB of model traffic, then is refused.
+  on this machine. Such a job can do with those devices whatever a shell on them can, so switch
+  it on only for pools whose machines you trust with that; what adb does on this machine itself -
+  connecting to an address, pairing, forwarding or reversing a port, stopping its server - is
+  refused. It applies to jobs started afterwards.
+- **A fuse.** One job gets 5000 model requests or 8 GiB of model traffic on this machine's
+  credential, then is refused. The count is the job's own, and a restart of the daemon does not
+  start it again.
 
 ## Acting in your name
 
@@ -189,7 +203,13 @@ not run is started in a terminal like any other work.
   machines you would give that to.
 - **Your model quota runs your pool's jobs.** A job this machine takes spends this machine's
   model credential, up to the fuse.
-- **Jobs of one requester on one repository share a container** and can see each other.
+- **Jobs of one requester on one repository share a container** and can see each other: each
+  can read the other's files, and can read and use the other's key for that requester while both
+  run. A process a job leaves behind lives until the container's last job ends.
+- **What is public on the forge is the internet.** The hosts a forge hands downloads out from,
+  and any site by its bare address, are reached like any other site: a job can fetch another
+  public repository's files there without the requester seeing it. Nothing private opens that
+  way, since no container holds a credential.
 - **A sleeping member counts as absent**, so a job can be taken without it. The machine that
   offered the job hands out one key per job, which is what keeps two executors from acting on it.
 - **A split pool can run a job twice.** When two machines that both offered the same job lose
