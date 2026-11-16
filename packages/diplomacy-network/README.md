@@ -85,7 +85,7 @@ closed at every start.
 | `daemon.sock`, `daemon.json`, `daemon.log` | as in the other daemons. A log that has reached 16 MiB is copied to `daemon.log.1`, over the copy before it, and starts again |
 | `state.json` | the snapshot as the daemon last had it, for a person looking into a daemon that no longer answers: the applets ask the socket |
 | `identity.json` (0600) | the host key |
-| `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it |
+| `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it, or at or before the second of the start where that time is ahead of this machine's clock |
 | `links.json` (0600) | the linked repositories, as Diplomat last posted them |
 | `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left |
 | `locks.json` (0600) | the claim locks this host granted |
@@ -219,7 +219,7 @@ The snapshot:
   "model": { "state": "ready|missing", "detail": "" },
   "devices": { "state": "off|ready|none", "detail": "" },
   "admit": { "slots": 0, "at": 0, "reason": "" },
-  "pools": [ { "id": "", "path": "", "identity": "", "hash": "", "left": false,
+  "pools": [ { "id": "", "path": "", "identity": "", "hash": "", "left": false, "notTaking": "",
       "members": [ { "pk": "", "self": false, "maxAcceptedH": 12, "lastSeen": 0, "reachable": true,
           "skew": false } ],
       "tasks": [ { "taskId": "", "kind": "", "item": "", "title": "", "identity": "", "hours": 12,
@@ -230,22 +230,43 @@ The snapshot:
       "exit": 0, "log": "" } ],
   "offers": [ { "taskId": "", "pool": "", "kind": "", "item": "", "title": "",
       "state": "pooled|claimed|done|failed|cancelled", "reason": "", "executor": "",
-      "executorHere": false, "offeredAt": 0, "attempt": 1, "requests": 0, "refused": 0,
+      "executorHere": false, "backedBy": [""], "offeredAt": 0, "attempt": 1, "requests": 0,
+      "refused": 0,
       "outcome": { "ok": true, "summary": "", "usd": 0, "tokens": 0, "runner": "", "model": "" },
-      "endedAt": 0 } ] }
+      "endedAt": 0, "notTaking": "" } ] }
 ```
 
 Every time is Unix seconds. `offers` are the tasks this machine asked for: `pooled` while
 nobody holds it, `claimed` while an executor does, `done` when an executor finished it
 well, `failed` when its attempts ran out (`reason` says how the last one ended), and
-`cancelled` once withdrawn. `outcome` is null until an attempt has reported one. An ended
-offer stays in the list for a day, and keeps the `executor` and `executorHere` of the
-machine that last held it - the one that reported it done, or the last to hold it before
-it failed or was cancelled; `executor` is empty only when nobody ever held it. `docker`
-and `model` say why this machine takes no work when it takes none: their `detail`
+`cancelled` once withdrawn, or once this machine was away for longer than an offer
+lasts (`reason` says which). `outcome` is null until an attempt has reported one. An
+ended offer stays in the list for a day, and keeps the `executor` and `executorHere` of
+the machine that last held it - the one that reported it done, or the last to hold it
+before it failed or was cancelled; `executor` is empty only when nobody ever held it.
+
+An offer may also be `done` with no report: its job was run for another machine's offer
+while this machine was away. Its `outcome` then has the `summary`
+`run for another machine's offer of the same job` and no cost, `executor` is the machine
+that ran the job, and `backedBy` lists the machines whose offers the run was given -
+the one that ran it among them when it ran its own offer. `backedBy` is empty for every
+other offer.
+
+`docker` and `model` say why this machine takes no work when it takes none: their `detail`
 carries the reason. `devices` is `off` until the operator sets `networkDevices`, then
 `ready` while an adb server answers on this machine and `none` while none does.
 `transport` is `failed`, with the reason, between a start that failed and the next one.
+
+A pool's `notTaking` is why this machine takes none of that pool's jobs, in a sentence,
+and empty while it takes them: the transport is not up, docker is not ready, there is no
+credential for the model, or the last job of the pool could not be started here
+("Executor side" below). An offer's `notTaking` is why this machine does not take that
+job of its own while it is `pooled`: its pool's `notTaking`, or
+`this machine takes jobs of at most 12 h and this one needs 24` when
+`networkRequiredMinimumH` is above `networkMaximumAcceptedH`. It is empty for a job
+this machine is free to take, and for one that is not `pooled`. `admit` is Diplomat's
+word and is said nowhere else: with no slot free a job waits unless its operator
+started it with `now`.
 
 A `tasks` row is one task, however many machines offer it: `claimed` while a claim holds
 any open offer of it, `available` while offers are open and none is held, `done` when
@@ -334,9 +355,12 @@ nothing answers: at once, then no sooner than 15 s after that try, then after tw
 long each time, up to 10 minutes. A promise nobody waited for is logged the same way
 (`unhandled: ...`) and never ends it.
 
-What only a test sets is honoured by any daemon that is given it, so each is said in
-`daemon.log` at the start, by name and value, and none belongs in a daemon on the
-network: `DN_TRANSPORT=loop` (loopback TCP in place of Tor; the snapshot's
+A tool named by hand is said so in `daemon.log` beside where it is
+(`docker is /x/docker, which DN_DOCKER names`): whatever stands in a tool's place has
+what the daemon gives that tool, and a docker that is none runs a job on this machine
+itself. What only a test sets is honoured by any daemon that is given it, so each is
+said in `daemon.log` at the start, by name and value, and none belongs in a daemon on
+the network: `DN_TRANSPORT=loop` (loopback TCP in place of Tor; the snapshot's
 `transport.detail` then begins `loop (test transport)`), `DN_FORGE_ORIGINS` (where each
 forge host is reached), `DN_POW_*` (how much work a request costs) and `DN_TEST_FAULTS`
 (a file of faults for the daemon to throw).
@@ -358,11 +382,23 @@ of the offering machines, and each marks its own offer done on that run's report
 takes the same job on each of them, to the byte - title, prompt, options, base revision,
 and the `user.name` and `user.email` its commits are authored with. A machine whose job
 differs has done nothing by that run: its offer is free again when the run ends and is
-run next, by itself. So is the offer of a machine that could not be told how the run
-ended - one that was off or asleep from then until the run's lease ran out. Withdrawing,
-failing or finishing an offer on one machine changes nothing on another. What a member
-that offers somebody else's task can and cannot do with it is in PROTOCOL.md, section 7,
-"What remains".
+run next, by itself. Withdrawing or failing an offer on one machine changes nothing on
+another.
+
+A machine that was asleep, off or without a network while its job was run for another
+machine's offer finds the run on record when it is back, and marks its own offer done
+without a second run. It asks the pool what it missed before it does anything for its
+offers - a moment when any of the others answers, three minutes when none does - and an
+offer it could not sign for a day it cancels: Diplomat
+offers the work again when the forge still shows it undone. Of two machines, when one
+runs its own offer while the other sleeps, the sleeper marks its offer done when it
+wakes: the job is run once. Two machines that cannot reach each other each have it
+run. And the record of a run is its machine's word: a machine in the pool that holds
+the same job can say it ran it and have the others mark their offers done unrun, which
+is no more than a machine that takes a job and reports it done can do. The exact rules,
+and what a member that offers somebody else's task can and cannot do with it, are in
+PROTOCOL.md, section 7: "A job that was run for another offer", "A host that was away"
+and "What remains".
 
 A request is checked before it is sent (`requester/authorize.js`). Where the check
 depends on the forge - where a branch is, which branch is the default, whether it is
@@ -382,14 +418,37 @@ What a task has used of its allowances - the branches it created, the pull reque
 opened from each - is the task's, not the key's: it is kept with the offer in
 `offers.json`, written before the request that uses it is sent, so every key issued for
 the task goes on from the same count and a restart forgets none of it. A branch is the
-task's own once the forge's answer to the push says so.
+task's own once the forge's answer to the push says so, a pull request its one once the
+forge's answer says it was opened. A creation whose answer never came stays counted until
+the forge is asked what became of it, before the task's next push or pull request is
+checked (PROTOCOL.md, section 10).
+
+A request reaches a rule in one spelling: a path that escapes a character needing no
+escape is refused, and so is one that a forge's router could read as the route of a rule
+standing earlier - by a letter's case or an added extension. What the forge says about
+the repository itself is cut to the same list on both surfaces, by `pick` on the REST
+answer and by a list of readable fields in a GraphQL document (`requester/graphql.js`;
+it adds GitHub's `viewerPermission`, which `gh` reads before it opens a pull request).
+A document is refused whole when it asks for more, takes an argument that could name
+another repository, or reads what tells of the linked account and not of the repository.
+
+**Where the time goes.** What happened between an offer and its job is in `daemon.log`,
+in seconds and counts and nothing any machine said: one line a claim round -
+`claim of <task> made - begun 3 s after the offer, after a wait of 3516 ms, over in 15 s: 2 members asked, 1 answered, 1 absent, 1 gave an offer`,
+or `claim of <task> stood down: <why> - ...` with the same numbers - then
+`key of <task> received 0 s after its claim, at ask 1` and
+`job of <task> started 0 s after its claim`. The wait is the one of the machine's rank
+and of what it weighed; a member counts as absent once the round stopped waiting for it;
+and a round that stood down leaves its task alone for 30 to 60 s. A machine that came
+back also says when it could go on:
+`<pool> is up to date 0 s after this host came back to it`.
 
 **Executor side.** With `admit.slots` above zero and a task with a free offer that this
 machine would take, the daemon runs the claim round. The node asks its executor adapter:
 `wouldTake(task)` says whether, and `weigh(task)`, when the adapter has one, how many
 more milliseconds this machine waits before it goes for that task - at most a minute,
-none for a task its own operator started with `now`. What that rests on stays on this
-machine. The claim made, the daemon asks for the key: itself, when this machine offers
+none for a task its own operator started with `now`. What that rests on is sent to
+nobody. The claim made, the daemon asks for the key: itself, when this machine offers
 the task too, else one of the machines whose offer the claim holds, and the next of them
 whenever one gives none. The job is the one that machine hands out, and when it ends its
 outcome is told to every machine whose offer the claim was given. Having the key, the
@@ -475,8 +534,21 @@ daemon makes sure of four things and starts the job:
   a connection nothing moves on is closed after `DN_JOB_IDLE_MS` (30 min). Everything
   else is streamed.
 
-The job itself is the agent runner in headless mode. Its exit is the completion signal;
-its log holds the cost. The daemon reports the outcome to the requester with `done`.
+The job itself is Claude Code in headless mode, whatever runner Diplomat is set to use
+for the agents it starts in terminals: a machine with no credential for it takes no job.
+Its exit is the completion signal; its log holds the cost. The daemon reports the outcome
+to the requester with `done`.
+
+A job that cannot be started - the mirror cannot be made, the container cannot, the
+runner does not come up - never ran, and why not is this machine's own affair: its claim
+is given back, which costs the requester none of the task's three attempts, and this
+machine does not go for that task again. It then takes no job of that pool for a minute
+(`DN_POOL_RETRY_MS`), twice as long after each such failure in a row and ten minutes at
+most (`DN_POOL_RETRY_MAX_MS`); the pool's `notTaking` says why meanwhile. When the wait
+is over the mirror is tried, the one part of a start that needs no job: while it cannot
+be made the wait begins again, and once it can the pool's jobs are taken as before.
+Whatever else stood in the way shows at the next job, which is given back like the last.
+A job that was started sets the wait back to a minute.
 
 A machine takes work only while its docker engine answers, the image is there and a
 model credential is; both are looked at again every 30 s, and the snapshot says which is
@@ -568,7 +640,9 @@ with no device to give a job (`networkDevices` off, or on with no device its adb
 lists as ready) waits 30 s (`DN_DEVICE_WAIT_MS`) longer before it goes for the task, so
 a machine with a device gets there first. A checkout is looked at once and again an
 hour later. Nothing is refused on this ground: a task no machine with a device took
-runs on one without.
+runs on one without. The wait is announced to nobody and can be seen all the same: a
+member that offers such a task and watches which machine takes it, and when, can infer
+whether that machine has a device to give.
 
 Anything else on the host - the device allocator, a tool-server - is forwarded only
 when the daemon's environment names it and `networkDevices` is on: `DN_FORWARDS` is a
@@ -588,12 +662,13 @@ it makes of it is that wait before going for a task.
 tor, a fake forge and a fake docker. The `node-*.mjs` files run whole hosts on a network
 in memory with a clock of its own (`test/lib/mem-net.mjs`, `test/lib/hosts.mjs`):
 `node-standing.mjs` is what a member that means harm cannot do with a claim,
-`node-cooffer.mjs` one task offered by several machines, `node-limits.mjs` what a host
-does for whom and how much of it, `node-full.mjs` a pool at its caps, and
-`node-soak.mjs` seeded runs of everything at once (`DN_SOAK_SEEDS`, `DN_SOAK_STEPS` and
-`DN_SOAK_SEED` say how many, how long and from which seed). The `daemon-*.mjs` files
-start real daemon processes on scratch state directories (`test/lib/daemons.mjs`), with
-`test/lib/agent.mjs` standing in for the agent.
+`node-cooffer.mjs` one task offered by several machines, `node-asleep.mjs` a machine
+that was away while its job was run, `node-limits.mjs` what a host does for whom and
+how much of it, `node-full.mjs` a pool at its caps, and `node-soak.mjs` seeded runs of
+everything at once (`DN_SOAK_SEEDS`, `DN_SOAK_STEPS` and `DN_SOAK_SEED` say how many,
+how long and from which seed). The `daemon-*.mjs` files start real daemon processes on
+scratch state directories (`test/lib/daemons.mjs`), with `test/lib/agent.mjs` standing
+in for the agent.
 
 Three files reach for the real things, and print `SKIP` and pass without them:
 

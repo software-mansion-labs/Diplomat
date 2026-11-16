@@ -44,6 +44,17 @@ export async function until(what, fn, ms = 180000) {
   return assert.fail(`never: ${what}`);
 }
 
+/// Gives the machine `m`, before it is started, a git that waits at the commands a
+/// mirror is made or refreshed with while the file `hold` is there; `waiting()` says
+/// whether one has got there since `watch()`.
+export function heldGit(m) {
+  const hold = path.join(m.home, 'hold-git');
+  const file = path.join(m.home, 'bin', 'git-held');
+  fs.writeFileSync(file, `#!/bin/sh\ncase " $* " in *" clone "*|*" update "*) : > "${hold}.waiting"; while [ -e "${hold}" ]; do sleep 0.05; done;; esac\nexec git "$@"\n`, { mode: 0o755 });
+  m.env.DN_GIT = file;
+  return { hold, waiting: () => fs.existsSync(`${hold}.waiting`), watch: () => fs.rmSync(`${hold}.waiting`, { force: true }) };
+}
+
 let checks = 0;
 // Every machine of every bench: what each daemon logged last is printed with a failure,
 // since the bench removes the logs as it closes.

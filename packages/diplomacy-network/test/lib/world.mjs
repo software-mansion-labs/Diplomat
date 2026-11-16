@@ -6,7 +6,8 @@ const on = (number, author, more = {}) => ({ repo: 'o/r', item: 'pr', number, op
 /// The `ctx` of `authorize` over a small fixed forge: `o/r` with pull request 578 (opened
 /// by "them", head `feature`), 579 (opened by "me", head `mine`), 580 (closed), 581 (opened
 /// by "me" from `forked` in `me/r`, that account's fork of `o/r`) and issue 421. `me` is
-/// the account the credential belongs to. `ctx.asked` lists the node ids looked up.
+/// the account the credential belongs to. `ctx.asked` lists the node ids looked up and
+/// `ctx.listed` what `pullsByHead` was asked, as [ref, owner, ever].
 export function world({ branches = [] } = {}) {
   const repos = {
     'o/r': { id: 1, name: 'o/r', owner: 'o', parent: '', defaultBranch: 'main', ciPaths: [] },
@@ -45,13 +46,17 @@ export function world({ branches = [] } = {}) {
     14: { ...nodes.PRRC_mine, pending: false }, 15: { ...nodes.PRRC_mine, author: 'someone' }, 16: { ...nodes.PRRC_mine, repo: 'o/other' },
   };
   const asked = [];
+  const listed = [];
   return {
-    asked, nodes, pulls, repos,
+    asked, listed, nodes, pulls, repos,
     assigned: ['bob'],
     state: { branches: [...branches] },
     async resolveNode(id) { asked.push(id); return nodes[id] ?? null; },
     async pull(number) { return pulls[number] ?? null; },
-    async pullsByHead(ref) { return Object.values(pulls).filter((p) => p.open && (ref === undefined || p.headRef === ref)); },
+    async pullsByHead(ref, owner, ever) {
+      listed.push([ref, owner, ever]);
+      return Object.values(pulls).filter((p) => (ever || p.open) && (ref === undefined || p.headRef === ref));
+    },
     async comment(id) { return comments[id] ?? null; },
     async assignees() { return this.assigned; },
     async self() { return { id: 7, login: 'me' }; },

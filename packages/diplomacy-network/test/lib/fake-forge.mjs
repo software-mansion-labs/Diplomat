@@ -198,7 +198,12 @@ export async function startFakeForge() {
     if (method === 'GET' && (x = /^\/branches\/(.+)$/.exec(rest))) {
       const branch = decodeURIComponent(x[1]);
       const sha = revParse(m[1], `refs/heads/${branch}`);
-      return sha ? { status: 200, json: { name: branch, commit: { sha }, protected: (repo.protected || []).includes(branch) } } : { status: 404, json: { message: 'Branch not found' } };
+      if (!sha) return { status: 404, json: { message: 'Branch not found' } };
+      const guarded = (repo.protected || []).includes(branch);
+      return { status: 200, json: {
+        name: branch, commit: { sha }, protected: guarded, protection_url: `https://api.github.com/repos/${m[1]}/branches/${branch}/protection`,
+        protection: { enabled: guarded, required_status_checks: { enforcement_level: guarded ? 'everyone' : 'off', contexts: [] } },
+      } };
     }
     if (method === 'GET' && (x = /^\/pulls\/(\d+)$/.exec(rest))) {
       const p = repo.pulls?.[x[1]];
@@ -206,7 +211,8 @@ export async function startFakeForge() {
     }
     if (method === 'GET' && rest === '/pulls') {
       const head = searchParams.get('head');
-      const list = Object.values(repo.pulls || {}).filter((p) => (p.state || 'open') === 'open')
+      const state = searchParams.get('state') || 'open';
+      const list = Object.values(repo.pulls || {}).filter((p) => state === 'all' || (p.state || 'open') === state)
         .filter((p) => !head || `${(p.headRepo || m[1]).split('/')[0]}:${p.head}` === head);
       return { status: 200, json: list.map((p) => restPull(m[1], p)) };
     }
@@ -250,12 +256,25 @@ export async function startFakeForge() {
     }
     if (method === 'GET' && rest === '/merge_requests') {
       const branch = searchParams.get('source_branch');
-      return { status: 200, json: Object.values(repo.pulls || {}).filter((p) => (p.state || 'open') === 'open' && (!branch || p.head === branch)).map(mr), headers: { 'x-total': '1', 'x-next-page': '' } };
+      const state = searchParams.get('state') || 'all';
+      return { status: 200, json: Object.values(repo.pulls || {}).map(mr).filter((m) => (state === 'all' || m.state === state) && (!branch || m.source_branch === branch)), headers: { 'x-total': '1', 'x-next-page': '' } };
+    }
+    // A branch as GitLab answers it: who may push and merge, the caller included, beside the branch itself.
+    const branchOf = (branch, sha) => {
+      const guarded = (repo.protected || []).includes(branch);
+      return {
+        name: branch, commit: { id: sha }, merged: false, protected: guarded, default: branch === (repo.defaultBranch || 'main'),
+        developers_can_push: !guarded, developers_can_merge: !guarded, can_push: true, web_url: `https://${GITLAB_HOST}/${repoName}/-/tree/${branch}`,
+      };
+    };
+    if (method === 'GET' && rest === '/repository/branches') {
+      const heads = git(path.join(gitRoot, `${repoName.toLowerCase()}.git`), 'for-each-ref', '--format=%(refname:lstrip=2) %(objectname)', 'refs/heads');
+      return { status: 200, json: heads.split('\n').filter(Boolean).map((line) => branchOf(...line.split(' '))) };
     }
     if (method === 'GET' && (x = /^\/repository\/branches\/(.+)$/.exec(rest))) {
-      const sha = revParse(repoName, `refs/heads/${decodeURIComponent(x[1])}`);
       const branch = decodeURIComponent(x[1]);
-      return sha ? { status: 200, json: { name: branch, commit: { id: sha }, protected: (repo.protected || []).includes(branch), default: branch === (repo.defaultBranch || 'main') } } : { status: 404, json: { message: '404 Branch Not Found' } };
+      const sha = revParse(repoName, `refs/heads/${branch}`);
+      return sha ? { status: 200, json: branchOf(branch, sha) } : { status: 404, json: { message: '404 Branch Not Found' } };
     }
     return { status: method === 'POST' ? 201 : 200, json: { path: pathname, ok: true, id: 1, iid: 5 } };
   }

@@ -327,14 +327,15 @@ try {
     const outcome = { ok: 'boolean', summary: 'string', usd: 'number|int', tokens: 'int', runner: 'string', model: 'string' };
     const offer = {
       taskId: 'string', pool: 'string', kind: 'string', item: 'string', title: 'string', state: 'string', reason: 'string',
-      executor: 'string', executorHere: 'boolean', offeredAt: 'int', attempt: 'int', requests: 'int', refused: 'int', endedAt: 'int',
+      executor: 'string', executorHere: 'boolean', backedBy: ['string'], offeredAt: 'int', attempt: 'int', requests: 'int',
+      refused: 'int', endedAt: 'int', notTaking: 'string',
     };
     shaped({ ...state, offers: [] }, {
       updatedAt: 'int', daemon: { pid: 'int', startedAt: 'int' }, identity: { pk: 'string', onion: 'string' },
       transport: said, docker: { state: 'string', image: 'string', detail: 'string' }, model: said, devices: said,
       admit: { slots: 'int', at: 'int', reason: 'string' },
       pools: [{
-        id: 'string', path: 'string', identity: 'string', hash: 'string', left: 'boolean',
+        id: 'string', path: 'string', identity: 'string', hash: 'string', left: 'boolean', notTaking: 'string',
         members: [{ pk: 'string', self: 'boolean', maxAcceptedH: 'int', lastSeen: 'int', reachable: 'boolean', skew: 'boolean' }],
         tasks: [{
           taskId: 'string', kind: 'string', item: 'string', title: 'string', identity: 'string', hours: 'int', state: 'string',

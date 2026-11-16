@@ -38,9 +38,9 @@ import { createTransport } from './transport/index.js';
 import {
   ADB_SERVER, BASE_DIR, CLAUDE_BIN, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, CONTAINER_DISK_BYTES, DISCOVERY_PATH,
   DOCKER_BIN, EXECUTOR_CHECK_MS, EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GH_BIN, GIT_BIN, GLAB_BIN, HOURS_FLOOR,
-  JOBS_PATH, JOBS_WRITE_MS, LOG_PATH, MIRROR_KEEP_MS, OPENSSL_BIN, RECONCILE_MS, RUN_KEEP_MS, SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH,
-  OFF_REMOVES, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS, TEST_FAULTS_PATH, TEST_KNOBS, TOOL_PATH, TOR_BIN, TRANSPORT_RETRY_MAX_MS,
-  TRANSPORT_RETRY_MS, locate,
+  JOBS_PATH, JOBS_WRITE_MS, LOG_PATH, MIRROR_KEEP_MS, OPENSSL_BIN, POOL_RETRY_MAX_MS, POOL_RETRY_MS, RECONCILE_MS, RUN_KEEP_MS,
+  SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH, OFF_REMOVES, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS, TEST_FAULTS_PATH, TEST_KNOBS,
+  TOOL_PATH, TOR_BIN, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS, locate,
 } from './paths.js';
 
 // Prompts of private repositories, tokens and keys lie under the state directory, and
@@ -95,7 +95,10 @@ function lookForTools() {
     const at = locate(bin);
     if (located.get(tool) === at) continue;
     located.set(tool, at);
-    log(at ? `${tool} is ${at}` : `${tool} is ${bin.includes('/') ? `not at ${bin}` : `in none of ${TOOL_PATH}`}`);
+    // One named by hand is said to be: a stand-in in a tool's place takes from the daemon
+    // whatever that tool gives it.
+    const named = bin === tool ? '' : `, which DN_${tool.toUpperCase()} names`;
+    log(at ? `${tool} is ${at}${named}` : `${tool} is ${bin.includes('/') ? `not at ${bin}` : `in none of ${TOOL_PATH}`}`);
   }
 }
 
@@ -333,6 +336,44 @@ async function settle(runId, ended) {
 // How many jobs are being started: each may make a container yet.
 let starting = 0;
 
+// The pools a job could not be started in: pool id -> { why, until, row, path }. While
+// `why` says something this machine takes no job of the pool; `row` counts the failures
+// since a job of the pool was last started, and `path` is the checkout they were met with.
+const stuck = new Map();
+
+// Leaves a pool alone for a while: POOL_RETRY_MS after the first failure, twice as long
+// after each one in a row, POOL_RETRY_MAX_MS at most.
+function leaveAlone({ id, path: checkout }, why) {
+  const row = (stuck.get(id)?.row ?? 0) + 1;
+  const wait = Math.min(POOL_RETRY_MAX_MS, POOL_RETRY_MS * 2 ** (row - 1));
+  stuck.set(id, { why, until: Date.now() + wait, row, path: checkout });
+  log(`taking no job of ${id} for ${Math.round(wait / 1000)} s: ${why}`);
+}
+
+// A pool whose wait is over is taken from again once its mirror can be made, the one
+// part of a start that needs no job; whatever else stood in the way shows at the next
+// job, which is given back like the last. Nothing is held against a pool that is linked
+// no longer, or to another checkout.
+async function retryPools() {
+  for (const [id, held] of stuck) {
+    const link = links.get(id);
+    if (link?.path !== held.path) {
+      stuck.delete(id);
+      continue;
+    }
+    if (held.until > Date.now()) continue;
+    // Not looked at again by the next pass while this one is at it.
+    held.until = Infinity;
+    try {
+      await mirrors.ensureMirror({ pool: poolOf(link), checkout: link.path });
+      held.why = '';
+      log(`taking jobs of ${id} again`);
+    } catch (err) {
+      leaveAlone(link, String(err?.message ?? err));
+    }
+  }
+}
+
 async function startRun({ runId, pool: link, peer, spec }) {
   if (typeof spec?.prompt !== 'string' || typeof spec.name !== 'string' || typeof spec.email !== 'string') {
     throw new Error('the task names no prompt or no author for its commits');
@@ -343,10 +384,10 @@ async function startRun({ runId, pool: link, peer, spec }) {
   // Not counted as being started while it waits: a daemon that ends first never gets to it.
   await lookedAt.promise;
   starting += 1;
+  const pool = poolOf(link);
   let release = () => {};
   let container = null;
   try {
-    const pool = poolOf(link);
     const mirror = await mirrors.ensureMirror({ pool, checkout: link.path });
     if (mirror.error) log(`the mirror of ${pool.id} was not refreshed: ${mirror.error}`);
     unlessEnding();
@@ -365,6 +406,7 @@ async function startRun({ runId, pool: link, peer, spec }) {
     jobs.get(runId).pid = started.pid;
     saveJobs();
     log(`${runId} started in ${container.name} for ${peer}${forwards.length > 0 ? `, with ${forwards.map((f) => f.name).join(', ')} forwarded` : ''}`);
+    stuck.delete(pool.id);
     follow(runId);
     return { container: container.name, log: started.log };
   } catch (err) {
@@ -373,6 +415,12 @@ async function startRun({ runId, pool: link, peer, spec }) {
     if (container) await containers.release({ name: container.name, runId }).catch(() => {});
     jobs.delete(runId);
     saveJobs();
+    // No job ran, and why not is this machine's own affair: the node has stopped the run
+    // and given it back by the time it hears of the failure, which it would count as an
+    // attempt.
+    const why = String(err?.message ?? err);
+    if (!ending) leaveAlone(link, why);
+    giveBack(runId, `this machine could not start it: ${why}`);
     throw err;
   } finally {
     starting -= 1;
@@ -402,10 +450,20 @@ function stopRun(runId, reason) {
   return job.stopping;
 }
 
+// Why this machine can run no job of the pool `id` right now, '' when it can.
+function unable(id) {
+  const docker = containers.dockerState();
+  if (docker.state !== 'ready') return `docker is ${docker.state}: ${docker.detail}`;
+  const model = llm.state();
+  if (model.state !== 'ready') return `no credential for the model: ${model.detail}`;
+  const why = stuck.get(id)?.why ?? '';
+  return why === '' ? '' : `this machine could not start a job of this pool: ${why}`;
+}
+
 const executor = {
   // Only what can run right now is claimed: a claim this machine cannot serve keeps the
   // task from every machine that could.
-  wouldTake: () => !ending && containers.dockerState().state === 'ready' && llm.state().state === 'ready',
+  wouldTake: (task) => !ending && unable(task.pool) === '',
   // A task on an Android project is left a while to a machine with a device to give.
   weigh: createWeighing({ checkoutOf: (pool) => links.get(pool)?.path ?? null, hasDevice: () => (attached?.length ?? 0) > 0 }),
   start: startRun,
@@ -568,6 +626,7 @@ async function startExecutor() {
   if (ending) return;
   await takeUp(kept);
   every(EXECUTOR_CHECK_MS, checkExecutor);
+  every(EXECUTOR_CHECK_MS, retryPools);
   every(RECONCILE_MS, reconcile);
   every(JOBS_WRITE_MS, saveJobs);
   every(SWEEP_MS, sweep);
@@ -575,11 +634,24 @@ async function startExecutor() {
 
 // ---- the snapshot
 
+// The node's snapshot with the executor's side of it: the engine, the credential, the
+// devices, and `notTaking` - of a pool, why this machine takes none of its jobs; of a job
+// of this machine's own that waits in the pool, why this machine does not take it.
 function snapshot() {
   const { updatedAt, identity, transport, admit, pools, runs, offers } = node.snapshot();
+  const down = transport.state === 'ready' ? '' : `the transport is ${transport.state}: ${transport.detail}`;
+  const rows = pools.map((pool) => ({ ...pool, notTaking: pool.left ? '' : down || unable(pool.id) }));
+  const own = (offer) => {
+    if (offer.state !== 'pooled') return '';
+    const pool = rows.find((row) => row.id === offer.pool);
+    const most = pool?.members.find((member) => member.self)?.maxAcceptedH;
+    const needs = pool?.tasks.find((task) => task.taskId === offer.taskId)?.hours;
+    return pool?.notTaking || (needs > most ? `this machine takes jobs of at most ${most} h and this one needs ${needs}` : '');
+  };
   return {
     updatedAt, daemon: { pid: process.pid, startedAt }, identity, transport,
-    docker: containers.dockerState(), model: llm.state(), devices: devicesState(), admit, pools, runs, offers,
+    docker: containers.dockerState(), model: llm.state(), devices: devicesState(), admit, pools: rows, runs,
+    offers: offers.map((offer) => ({ ...offer, notTaking: own(offer) })),
   };
 }
 
@@ -607,9 +679,10 @@ function touch() {
   writing ??= setTimeout(writeState, Math.max(0, written + STATE_WRITE_MS - Date.now()));
 }
 
-// The engine, the credential and the devices change without the node's knowing.
+// The engine, the credential, the devices and what is held against a pool change
+// without the node's knowing.
 function watchExecutor() {
-  const now = JSON.stringify([containers.dockerState(), llm.state(), devicesState()]);
+  const now = JSON.stringify([containers.dockerState(), llm.state(), devicesState(), [...stuck].map(([id, held]) => [id, held.why])]);
   if (now !== shown) touch();
   shown = now;
 }

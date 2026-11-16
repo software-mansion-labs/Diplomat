@@ -195,13 +195,15 @@ try {
     await m.kill();
   });
 
-  await check('a daemon says at its start which of a test\'s settings it was given, and shows a loop transport as one; given none, it says nothing', async () => {
+  await check('a daemon says at its start which of a test\'s settings it was given, which tools were named to it by hand, and shows a loop transport as one; given none, it says nothing', async () => {
     const m = bench.machine('knobs');
     m.env.DN_TEST_FAULTS = path.join(m.home, 'faults');
     await m.start();
     const said = (text) => text.split('\n').filter((line) => line.includes('which only a test does')).map((line) => line.replace(/^\[[^\]]+\] /, ''));
     const knob = (name) => `${name}=${m.env[name]} is set, which only a test does: this daemon is not one to run on the network`;
     assert.deepEqual(said(m.log()), ['DN_FORGE_ORIGINS', 'DN_POW_MEMBER_BASE', 'DN_POW_STRANGER_BASE', 'DN_TEST_FAULTS', 'DN_TRANSPORT'].map(knob));
+    const tools = m.log().split('\n').filter((line) => /\] (docker|gh|glab|git) is /.test(line)).map((line) => line.replace(/^\[[^\]]+\] /, '').replace(/^git is \S+$/, 'git is found'));
+    assert.deepEqual(tools, ['docker', 'git', 'gh', 'glab'].map((tool) => (tool === 'git' ? 'git is found' : `${tool} is ${m.env[`DN_${tool.toUpperCase()}`]}, which DN_${tool.toUpperCase()} names`)));
     const { transport } = await until('its transport', async () => { const now = await m.state(); return now.transport.state === 'ready' ? now : null; });
     assert.match(transport.detail, /^loop \(test transport\): 127\.0\.0\.1:\d+$/);
     await m.kill();

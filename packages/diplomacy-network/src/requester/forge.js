@@ -249,14 +249,16 @@ export function createForge({ log = () => {} } = {}) {
   }
 
   /// The open pull or merge requests of `repo` whose head branch is named `ref` (every open
-  /// one, up to a page of 100, when `ref` is not given), shaped as `pull`. GitHub lists
-  /// those whose head is in a repository of `owner`, the account `repo` belongs to unless
-  /// another is given; GitLab lists them whichever project the branch is in.
-  async function pullsByHead(target, repo, ref, owner = repo.split('/')[0]) {
+  /// one, up to a page of 100, when `ref` is not given), shaped as `pull`; with `ever`, the
+  /// closed and merged ones as well. GitHub lists those whose head is in a repository of
+  /// `owner`, the account `repo` belongs to unless another is given; GitLab lists them
+  /// whichever project the branch is in.
+  async function pullsByHead(target, repo, ref, owner = repo.split('/')[0], ever = false) {
     const github = target.forge === 'github';
     const filter = ref === undefined ? '' : github ? `&head=${encodeURIComponent(`${owner}:${ref}`)}` : `&source_branch=${encodeURIComponent(ref)}`;
-    const res = await api(target, 'GET', github ? `/repos/${repo}/pulls?state=open&per_page=100${filter}` : `${project(repo)}/merge_requests?state=opened&per_page=100${filter}`);
-    if (res.status !== 200 || !Array.isArray(res.json) || !res.json.every(isObject)) unknown('which pull requests are open', res);
+    const state = ever ? 'all' : github ? 'open' : 'opened';
+    const res = await api(target, 'GET', github ? `/repos/${repo}/pulls?state=${state}&per_page=100${filter}` : `${project(repo)}/merge_requests?state=${state}&per_page=100${filter}`);
+    if (res.status !== 200 || !Array.isArray(res.json) || !res.json.every(isObject)) unknown('which pull requests there are', res);
     return res.json.map((p) => (github ? githubPull(p) : gitlabPull(repo, p)));
   }
 
@@ -389,7 +391,7 @@ export function createForge({ log = () => {} } = {}) {
       state,
       resolveNode: (id) => resolveNode(target, id),
       pull: (number) => pull(target, repo, number),
-      pullsByHead: (ref, owner) => pullsByHead(target, repo, ref, owner),
+      pullsByHead: (ref, owner, ever) => pullsByHead(target, repo, ref, owner, ever),
       comment: (id) => comment(target, repo, id),
       assignees: (number) => assignees(target, repo, number),
       self: () => self(target),

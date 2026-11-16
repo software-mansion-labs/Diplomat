@@ -19,8 +19,9 @@ export function createInbound(host) {
   // The latest `ts` among the requests this host served, in this life and the ones
   // before it. The replay memory is this process's own, so what an earlier process
   // served is told from what it did not by its date alone: nothing dated up to
-  // `floor`, the latest it served, is served again.
-  let latest = Number(host.store.read('heard')?.ts) || 0;
+  // `floor`, the latest it served, is served again. A sender whose clock runs ahead
+  // dates its requests past this host's clock, and no start waits for such a date.
+  let latest = Math.min(Number(host.store.read('heard')?.ts) || 0, host.now());
   const floor = latest;
   // member -> its place for a body above the stranger's cap: `{ ticket, bytes, timer }`
   // from the `reserve` that gave it until the body's headers arrive, `{}` while the
@@ -75,10 +76,6 @@ export function createInbound(host) {
     if (!checked.ok) return reply({ effort, error: { code: checked.code, detail: checked.detail } });
     const { pool, kind, from, body, ts } = request;
     if (ts <= floor) return reply({ effort, error: { code: 'busy', detail: UNSERVED } });
-    if (ts > latest) {
-      latest = ts;
-      host.store.write('heard', { ts });
-    }
     const P = host.pools.get(pool);
     // Whoever this host does not take for a member gets one refusal, whatever the pool
     // and whatever it asked: it says nothing of the pools linked here.
@@ -86,6 +83,12 @@ export function createInbound(host) {
     if (!P || (kind !== 'hello' && !checked.member)) {
       host.gossip.farewell(pool, from);
       return outsider();
+    }
+    // Only what this host serves is remembered as served: a member's request, and the
+    // hello of a host a member invited.
+    if (ts > latest && (checked.member || host.gossip.invited(P, body))) {
+      latest = ts;
+      host.store.write('heard', { ts });
     }
     if (checked.member) host.peers.heard(from);
     const out = await host.handle(P, from, kind, body);

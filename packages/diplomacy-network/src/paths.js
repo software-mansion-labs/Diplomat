@@ -139,6 +139,12 @@ export const RETRY_MS = num('DN_RETRY_MS', 30 * 1000);
 export const JOIN_WAIT_MS = num('DN_JOIN_WAIT_MS', 2 * RETRY_MS);
 // How often a host looks at everything it holds for something that came due.
 export const TICK_MS = num('DN_TICK_MS', 10 * 1000);
+// A host whose clock moved this far between two looks was not running meanwhile - the
+// machine slept - and what it holds of its pools is as old as that.
+export const WAKE_GAP_MS = num('DN_WAKE_GAP_MS', 6 * TICK_MS);
+// How long a host that started or woke goes on asking the members of a pool what it
+// missed while none of them answers, before it goes on with what it holds.
+export const CATCH_UP_MS = num('DN_CATCH_UP_MS', 3 * 60 * 1000);
 export const PRUNE_INTERVAL_MS = num('DN_PRUNE_INTERVAL_MS', 10 * 60 * 1000);
 // How many claim rounds one host runs at a time.
 export const MAX_ROUNDS = 4;
@@ -251,6 +257,11 @@ export const SWEEP_MS = num('DN_SWEEP_MS', 10 * 60 * 1000);
 /// The pause before something that failed for want of docker is tried again: a stop that
 /// did not go through, the broker's listener.
 export const EXECUTOR_RETRY_MS = num('DN_EXECUTOR_RETRY_MS', 5000);
+/// How long a pool is left alone after a job of it could not be started on this machine,
+/// and twice as long after each such failure in a row.
+export const POOL_RETRY_MS = num('DN_POOL_RETRY_MS', 60 * 1000);
+/// The longest a pool is left alone for that.
+export const POOL_RETRY_MAX_MS = num('DN_POOL_RETRY_MAX_MS', 10 * 60 * 1000);
 /// jobs.json follows what the jobs have spent of the model this often.
 export const JOBS_WRITE_MS = num('DN_JOBS_WRITE_MS', 5000);
 /// A run's directory and its outcome are kept this long after the run ended.

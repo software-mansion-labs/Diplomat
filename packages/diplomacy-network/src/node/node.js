@@ -10,7 +10,7 @@ import { b64u } from '../core/canon.js';
 import { identityFromSeed } from '../core/identity.js';
 import { solveAsync } from '../core/pow.js';
 import { validPool } from '../core/records.js';
-import { SWITCH_OFF_WAIT_MS, TICK_MS } from '../paths.js';
+import { SWITCH_OFF_WAIT_MS, TICK_MS, WAKE_GAP_MS } from '../paths.js';
 import { createClaiming } from './claiming.js';
 import { claimKey, createGossip } from './gossip.js';
 import { createInbound } from './inbound.js';
@@ -61,7 +61,7 @@ export function createNode({
   const host = {
     id, self: id.pk, store, transport, clock, random, log, requester, executor, settings, solve, keys,
     now: () => clock.now(),
-    pools: new Map(), // pool id -> { id, link, pool, locks, seq, inviter, invites, farewell }
+    pools: new Map(), // pool id -> { id, link, pool, locks, seq, inviter, invites, farewell, stale, epoch, catching }
     away: new Map(), // pool id -> the link of a pool that is linked and that this host left
     // pool id -> the locks of a pool this host is not in now: one read from the store and
     // not linked yet, or one it left.
@@ -84,6 +84,7 @@ export function createNode({
   const links = store.read('links');
   let linked = Array.isArray(links?.pools);
   let [poked, touched, ticking] = [null, null, null];
+  let looked = clock.now();
   host.running = () => started;
 
   /// Tells the watchers, once for everything that changes in a short while.
@@ -154,12 +155,22 @@ export function createNode({
     },
   };
 
+  /// Notices a machine that slept: a clock that jumped between two looks. What it holds of
+  /// its pools is out of date from then on. A step looks, and so does whatever may not go
+  /// by an old state and may come before the step does.
+  host.look = () => {
+    const now = host.now();
+    if (now - looked > WAKE_GAP_MS / 1000) host.gossip.woke();
+    looked = now;
+  };
+
   /// What this host answers `from` for a request of `kind` in a pool: `{ body }` or `{ error, detail }`.
   host.handle = async (P, from, kind, body) => handlers[kind](P, from, body);
 
   function step() {
     poked = null;
     if (!started || !linked) return;
+    host.look();
     for (const part of [host.gossip, host.offers, host.runs, host.claiming]) {
       try {
         part.step();
@@ -243,7 +254,7 @@ export function createNode({
         try {
           host.touch();
           if (state === 'ready' && started) {
-            host.gossip.syncAll();
+            host.gossip.woke();
             host.poke();
           }
         } catch (err) {

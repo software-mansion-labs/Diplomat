@@ -1,6 +1,7 @@
 // A network in memory for the node's tests: transports that carry bytes between hosts
 // of one process, and the one virtual clock they all live by. Delay, loss and duplication
-// are drawn from a seed; pairs of hosts can be cut apart and a host taken down or killed.
+// are drawn from a seed; pairs of hosts can be cut apart and a host taken down, put to
+// sleep or killed.
 // Nothing here waits on real time: `run` carries out what is due, in order.
 
 import { onionAddress } from '../../src/core/identity.js';
@@ -80,7 +81,7 @@ export function createNet({ seed = 1 } = {}) {
   const now = () => T0 + Math.floor(ms / 1000);
   const pair = (a, b) => [a, b].sort().join('|');
   const delay = () => faults.minMs + rnd.int(faults.maxMs - faults.minMs + 1);
-  const linked = (a, b) => b && b.up && !b.dead && b.ready && !a.dead && !cuts.has(pair(a.name, b.name));
+  const linked = (a, b) => b && b.up && !b.dead && !b.asleep && b.ready && !a.dead && !a.asleep && !cuts.has(pair(a.name, b.name));
   // Everything a promise chain can do without a timer has happened once this resolves.
   const settled = () => new Promise((resolve) => { setImmediate(resolve); });
 
@@ -90,6 +91,11 @@ export function createNet({ seed = 1 } = {}) {
     while (queue.length > 0 && queue[0].t <= until) {
       const event = pop();
       if (event.cancelled || event.owner?.dead) continue;
+      // The timers of a machine that sleeps fire when it wakes.
+      if (event.owner?.asleep) {
+        event.owner.late.push(event);
+        continue;
+      }
       ms = event.t;
       event.fn();
       await settled();
@@ -122,7 +128,7 @@ export function createNet({ seed = 1 } = {}) {
   /// A transport for the host `name` whose key is `pk`, replacing any that name had.
   function transport(name, pk) {
     const host = {
-      name, pk, up: true, dead: false, ready: false, stopped: false, startDelayMs: 0,
+      name, pk, up: true, dead: false, asleep: false, late: [], ready: false, stopped: false, startDelayMs: 0,
       handler: async () => { throw new Error('no handler'); }, limit: () => 1 << 20, watchers: [],
     };
     hosts.set(name, host);
@@ -134,15 +140,18 @@ export function createNet({ seed = 1 } = {}) {
       return new Promise((resolve, reject) => {
         let open = true;
         const settle = (fn, value) => {
-          if (!open || host.dead) return;
+          // An answer that comes to a machine asleep is lost: its connections are gone.
+          if (!open || host.dead || host.asleep) return false;
           open = false;
           fn(value);
+          return true;
         };
         const fail = (code, after) => at(after, () => settle(reject, failure(code)), host);
         const target = byPk.get(to);
         const kind = kindOf(body);
         sent.push({ at: now(), from: name, to: target?.name ?? null, kind, bytes: body.length });
-        const heard = taps.map((tap) => tap({ from: name, to: target?.name ?? null, headers, kind, body })).filter((fn) => typeof fn === 'function');
+        const heard = taps.map((tap) => tap({ from: name, to: target?.name ?? null, headers, kind, body }))
+          .map((fn) => (typeof fn === 'function' ? { answered: fn } : fn)).filter(Boolean);
         if (host.stopped) return fail('stopped', 0);
         if (!host.ready || !host.up) return fail('unreachable', 0);
         fail('timeout', timeoutMs);
@@ -164,13 +173,13 @@ export function createNet({ seed = 1 } = {}) {
             if (body.length > bytes) out = 'http-413';
             else out = await target.handler(Buffer.from(body), { headers: all }).catch(() => 'http-500');
             release();
-            for (const fn of heard) fn(out);
+            for (const tap of heard) tap.answered?.(out);
             if (copy < copies - 1 || rnd.chance(faults.drop)) return;
             at(delay(), () => {
               if (!linked(host, target)) return;
               if (typeof out === 'string') settle(reject, failure(out));
               else if (out.length > maxResponseBytes) settle(reject, failure('too-large'));
-              else settle(resolve, out);
+              else if (settle(resolve, out)) for (const tap of heard) tap.reached?.(out);
             });
           });
         }
@@ -209,6 +218,8 @@ export function createNet({ seed = 1 } = {}) {
     /// Calls `fn({ from, to, headers, kind, body })` for every request a host makes. A
     /// function it returns is called with what the target made of each copy that reached
     /// it - the bytes of its answer, or the transport's code for none - heard or not.
+    /// `{ answered, reached }` in its place: `answered` is that function, and `reached`
+    /// is called with the answer the asking host got.
     tap: (fn) => taps.push(fn),
     /// Milliseconds of virtual time since the network began.
     ms: () => ms,
@@ -231,6 +242,15 @@ export function createNet({ seed = 1 } = {}) {
     /// Takes a host off the network or puts it back; it keeps running either way.
     down(name, off = true) {
       hosts.get(name).up = !off;
+    },
+    /// Puts a machine to sleep, or wakes it: asleep, its process stands still - nothing
+    /// reaches it, no answer comes to it, and its timers wait - while its clock goes on.
+    /// The timers that came due meanwhile fire `timersInMs` after it wakes.
+    sleep(name, on = true, { timersInMs = 0 } = {}) {
+      const host = hosts.get(name);
+      host.asleep = on;
+      if (on) return;
+      for (const event of host.late.splice(0)) at(timersInMs, () => event.cancelled || event.fn(), host);
     },
     /// Ends a host's process: its timers never fire and nothing it awaits ever arrives.
     kill(name) {
