@@ -337,7 +337,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
       // The work tree lives in a volume (a bind mount is an order of magnitude slower
       // under Docker Desktop); only this container's own run records are bound.
       '-v', `${volume}:/work`, '-v', `${runsDir}:/dn/runs`,
-      tag, 'sleep', 'infinity'];
+      tag, '/usr/bin/sleep', 'infinity'];
     let run = await docker(args(layerSized));
     // Only some storage (overlay on xfs with project quotas, btrfs, zfs) can hold a
     // layer to a size. Where it cannot, `usage` is the bound.

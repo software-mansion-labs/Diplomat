@@ -32,7 +32,10 @@ const STOP = fs.readFileSync(path.join(HERE, 'stop.sh'), 'utf8');
 // the group is there by the time it is named, and then becomes the runner. The host has
 // the group from its own command, before the job has run anything. The run's id is in
 // the runner's environment from its first moment: stop.sh finds a job's processes by it.
-const START = 'echo "$(DN_RUN_ID="$2" setsid sh -c \'echo "$$"; exec sh "$0" < /dev/null > /dev/null 2>&1\' "$1" &)"';
+// sh and setsid are named where the image put them, not found through the container's
+// PATH; root in the container can still replace them there (README, Stopping a job).
+// DN_ROOT is unset in a container (runner.sh).
+const START = 's="${DN_ROOT:-}/bin/sh"; echo "$(DN_RUN_ID="$2" "${DN_ROOT:-}/usr/bin/setsid" "$s" -c \'echo "$$"; exec "$0" "$1" < /dev/null > /dev/null 2>&1\' "$s" "$1" &)"';
 /// What a job that ended with its container says of it.
 export const CUT = 'the container was restarted to stop another job';
 // What a job that is given `adb` is told of it: executor/adb.js stands between.
@@ -218,7 +221,7 @@ export async function startJob({ run, container, spec, proxy, env = {}, forwards
   // Where the host put the directory, whatever stands at that name later.
   const realDir = path.join(fs.realpathSync(container.runsDir), runId);
   const job = { runId, container: container.name, dir, realDir, inside: `/dn/runs/${runId}`, pid: 0, stopping: false, stopped: false, cutting: false, cut: false, watching: null };
-  const started = await docker(['exec', container.name, 'sh', '-c', START, 'sh', `${job.inside}/run.sh`, runId]);
+  const started = await docker(['exec', container.name, '/bin/sh', '-c', START, 'sh', `${job.inside}/run.sh`, runId]);
   job.pid = started.code === 0 ? groupOf(started.stdout) : 0;
   if (!job.pid) throw new Error(`the job could not be started in ${container.name}: ${started.stderr.trim().split('\n').pop() || 'its process group was not said'}`);
   live.set(runId, job);
@@ -254,7 +257,7 @@ function groupOf(value) {
 }
 
 // stop.sh in the job's container, by one of its verbs.
-const ask = (job, verb, more, timeout) => docker(['exec', job.container, 'sh', '-c', STOP, 'sh', verb, job.runId, String(job.pid), ...more], { timeout });
+const ask = (job, verb, more, timeout) => docker(['exec', job.container, '/bin/sh', '-c', STOP, 'sh', verb, job.runId, String(job.pid), ...more], { timeout });
 
 // Whether the job still runs - its process group for `up`, anything of it for `left` -
 // as the container says in so many words: true, false, or null when nothing was said,

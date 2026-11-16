@@ -302,7 +302,7 @@ try {
     assert.equal(env.GIT_TERMINAL_PROMPT, '0');
     assert.equal(env.DN_RUN_ID, `${R}-1`);
     assert.equal(fs.existsSync(path.join(root, 'work', 'jobs', `${R}-1`)), false, 'the work tree is gone when the job is');
-    assert.ok(fs.existsSync(path.join(root, 'work', 'cache.git', 'HEAD')), 'the container keeps its copy of the repository');
+    assert.deepEqual(fs.readdirSync(path.join(root, 'work')), ['jobs'], 'and the container keeps no copy of the repository for the next one');
     assert.equal(forgeSeen.length, 0, 'the clone never went to the requester');
   });
 
@@ -371,7 +371,7 @@ try {
       '--storage-opt', `size=${16 * 2 ** 20}`,
       '--network', name,
       '-v', `${volumeOf(name)}:/work`, '-v', `${path.join(RUNS_DIR, '.containers', name)}:/dn/runs`,
-      imageTag(imageDir), 'sleep', 'infinity']);
+      imageTag(imageDir), '/usr/bin/sleep', 'infinity']);
     const all = calls().flat().join(' ');
     assert.doesNotMatch(all, /docker\.sock|--privileged|\.ssh|--(network|net|pid|ipc|uts|userns|cgroupns)[ =]host|--volumes-from|--device|-p \d|--publish/);
     assert.deepEqual(calls('volume').filter((c) => c[1] === 'create'), [['volume', 'create', ...labels(alpha.pool, PEER_A), volumeOf(name)]]);
@@ -492,14 +492,14 @@ try {
     taken.close();
   });
 
-  await check('the same peer on the same repository gets the same container again; its second clone borrows from the first', async () => {
+  await check('the same peer on the same repository gets the same container again; its second clone is whole and its own', async () => {
     const second = await launch(`${R}-2`, PEER_A, alpha, { base: 'pull/7/head' });
     assert.equal(second.container.name, first.container.name);
     assert.equal((await second.outcome).ok, true);
     assert.equal(calls('run').length, 1, 'one container, not two');
     const [head, , , , alternates] = agent(`${R}-2`, 'git').split('\n');
     assert.equal(head, alpha.pr, 'the pull request head, fetched from the mirror');
-    assert.match(alternates, /\/cache\.git\/objects$/);
+    assert.equal(alternates, '', 'it borrows from nothing in the container');
   });
 
   await check('another peer on the same repository, and the same peer on another repository, each get a container of their own', async () => {
@@ -706,8 +706,7 @@ try {
     assert.equal(calls('run').length, runs + 1);
     assert.equal(calls('run').at(-1).at(-3), newTag);
     assert.equal(calls('create').at(-1).at(-7), newTag, 'and its relay is of the new image too');
-    assert.equal(calls('volume').filter((c) => c[1] === 'rm').length, volumeRemovals, 'the work volume and its cache stay');
-    assert.match(agent(`${R}-19`, 'git').split('\n')[4], /cache\.git/);
+    assert.equal(calls('volume').filter((c) => c[1] === 'rm').length, volumeRemovals, 'the work volume stays');
 
     // A relay that outlived its container is of the image that container had: it is made again as well.
     fs.appendFileSync(path.join(imageDir, 'Dockerfile'), 'RUN true\n');

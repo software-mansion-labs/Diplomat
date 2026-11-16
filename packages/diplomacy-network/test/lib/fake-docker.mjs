@@ -4,8 +4,10 @@
 // A "container" is a directory: its volume is <root>/work, its bind mounts are links,
 // and what is exec'd in it runs on this host with DN_ROOT=<root>, with the container's
 // paths in the arguments translated and with shims for the tools only a container has
-// (setsid, flock, update-ca-certificates, and dash as sh where the host has one). What
-// is put in a session of its own there is what `restart` and `rm` kill.
+// (flock, update-ca-certificates). What is named there by its full path is the image's
+// own, and <root> holds the two that are: /bin/sh, dash where the host has one, and
+// /usr/bin/setsid. What is put in a session of its own there is what `restart` and `rm`
+// kill.
 // FAKE_DOCKER_PATH is put in front of PATH for what is exec'd, which is where a test
 // keeps its own `claude`. A network is a record that a container must name to be made
 // and that cannot be removed from under one; nothing is isolated, and the command a
@@ -221,7 +223,11 @@ switch (command) {
     }
     const root = file('roots', name);
     fs.rmSync(root, { recursive: true, force: true });
-    fs.mkdirSync(path.join(root, 'dn'), { recursive: true });
+    for (const d of ['dn', 'bin', 'usr/bin']) fs.mkdirSync(path.join(root, d), { recursive: true });
+    // The image's sh is dash, which is stricter than the bash a host may call sh.
+    fs.symlinkSync(fs.existsSync('/bin/dash') ? '/bin/dash' : '/bin/sh', path.join(root, 'bin/sh'));
+    // In place, as setsid(1) does for what is no group leader: the pid stays.
+    fs.writeFileSync(path.join(root, 'usr/bin/setsid'), '#!/bin/sh\necho $$ >> "$FAKE_DOCKER_PIDS"\nexec perl -MPOSIX -e \'POSIX::setsid(); exec { $ARGV[0] } @ARGV\' "$@"\n', { mode: 0o755 });
     const mounts = [];
     for (const v of opts['-v'] || []) {
       const [src, dst] = v.split(':');
@@ -296,10 +302,6 @@ switch (command) {
       const made = `${shims}.${process.pid}`;
       fs.mkdirSync(made, { recursive: true });
       const shim = (n, body) => fs.writeFileSync(path.join(made, n), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-      // In place, as setsid(1) does for what is no group leader: the pid stays.
-      shim('setsid', 'echo $$ >> "$FAKE_DOCKER_PIDS"\nexec perl -MPOSIX -e \'POSIX::setsid(); exec { $ARGV[0] } @ARGV\' "$@"');
-      // The image's sh is dash, which is stricter than the bash a host may call sh.
-      if (fs.existsSync('/bin/dash')) shim('sh', 'exec /bin/dash "$@"');
       // A lock on the caller's open file, as flock(1) takes it: two jobs starting at once
       // install the broker's certificate one after the other, as in the image.
       if (spawnSync('sh', ['-c', 'command -v flock']).status !== 0) {
@@ -324,7 +326,8 @@ switch (command) {
       PATH: [process.env.FAKE_DOCKER_PATH, shims, process.env.PATH].filter(Boolean).join(':'),
     };
     const translated = cmd.map(inside);
-    const r = spawnSync(translated[0], translated.slice(1), { env, cwd: c.root, stdio: 'inherit' });
+    const own = path.join(c.root, translated[0]);
+    const r = spawnSync(path.isAbsolute(translated[0]) && fs.existsSync(own) ? own : translated[0], translated.slice(1), { env, cwd: c.root, stdio: 'inherit' });
     process.exit(r.status ?? 137);
     break;
   }

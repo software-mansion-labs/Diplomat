@@ -94,6 +94,7 @@ const llm = createLLM();
 const broker = createBroker({ ca: createCA(), llm, mirrors, onForge });
 const PEER_A = 'pkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const PEER_B = 'pkBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
+const PEER_C = 'pkCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
 
 // A service of this machine that no job may reach.
 const hostSeen = [];
@@ -482,7 +483,47 @@ exit 0
     fs.writeFileSync(path.join(stays.dir, 'go'), '');
     assert.equal((await stays.outcome).ok, true);
     assert.equal(await sleeping(2), 0, 'with its last job over the container is restarted, and the stray is gone');
-    assert.equal(await sh('exec', stays.container.name, 'sh', '-c', 'ls /work/cache.git/HEAD'), '/work/cache.git/HEAD', 'its volume is as it was');
+    assert.equal(await sh('exec', stays.container.name, 'sh', '-c', 'ls -d /work/jobs'), '/work/jobs', 'its volume is as it was');
+  });
+
+  await check('what a job put first on the container\'s PATH, into git\'s system settings and templates and under /work runs neither for the host\'s start, questions and stop nor in the runner of the job beside it', async () => {
+    // Every planted program says who ran it: a job by its run id, the host by having none.
+    const plants = await launch('plants', PEER_C, { script: `
+trap '' TERM
+ran=/dn/runs/plants/ran.txt
+for t in sh setsid tr grep sleep rm; do
+  cat > /usr/local/bin/$t <<EOF
+#!/bin/dash
+echo "$t \\\${DN_RUN_ID:-host}" >> $ran
+exec /usr/bin/$t "\\$@"
+EOF
+  chmod +x /usr/local/bin/$t
+done
+mkdir -p /dn/runs/plants/hooks /usr/share/git-core/templates/hooks
+for at in /dn/runs/plants/hooks/post-checkout /usr/share/git-core/templates/hooks/post-checkout /dn/runs/plants/uploadpack; do
+  cat > $at <<EOF
+#!/bin/dash
+echo "$at \\\${DN_RUN_ID:-host}" >> $ran
+EOF
+  chmod +x $at
+done
+git config --file /etc/gitconfig core.hooksPath /dn/runs/plants/hooks
+git init --quiet --bare /work/cache.git
+git -C /work/cache.git config remote.origin.url /dn/runs/plants/elsewhere
+git -C /work/cache.git config remote.origin.uploadpack /dn/runs/plants/uploadpack
+echo planted > "$out/out-planted.txt"
+while [ ! -f "$out/go" ]; do /usr/bin/sleep 0.2; done
+exit 0
+` });
+    await until('the first job has planted', () => fs.existsSync(path.join(plants.dir, 'out-planted.txt')));
+    const beside = await launch('beside', PEER_C, { script: 'exit 0\n' });
+    assert.equal(beside.container.name, plants.container.name);
+    assert.equal((await beside.outcome).ok, true);
+    // The first job ignores TERM, so its stop waits out the grace and kills.
+    assert.equal((await stopJob(plants.run, containers)).state, 'stopped');
+    await plants.outcome;
+    const ran = [...new Set(fs.readFileSync(path.join(plants.dir, 'ran.txt'), 'utf8').trim().split('\n'))];
+    assert.deepEqual(ran, ['sh beside'], 'only the second job\'s own agent went through what was planted, by looking sh up on PATH');
   });
 
   if (process.env.DN_TEST_SKIP_CLAUDE) {
