@@ -324,6 +324,12 @@ enum TasksTest {
         let overlay = store.goalOverlay
         check("the asks show as queued", overlay.queuedIssues == [] && overlay.queuedPRs == [1821, 1822],
               "\(overlay)")
+        // One of the two as the Diplomacy Network leaves an ask whose offer ended unrun:
+        // out of the queue, still marked with the task that carried it.
+        store.queuedTasks.removeAll { $0.id == "review:\(key(1821))" }
+        if let at = store.requestedWork.firstIndex(where: { $0.key == "review:\(key(1821))" }) {
+            store.requestedWork[at].offered = "t-goal-1821"
+        }
         _ = await store.setGoalMode(fixture.auto, mode: .observe)
         check("switching the goal to observe withdraws its asks not started",
               !store.requestedWork.contains { ["review:\(key(1821))", "review:\(key(1822))"].contains($0.key) }

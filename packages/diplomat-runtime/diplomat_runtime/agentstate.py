@@ -1493,6 +1493,17 @@ def withdraw_on_forget(record: RunRecord, evidence: Evidence) -> str | None:
     return record.network if _outstanding(record, evidence) else None
 
 
+def withdraw_unstarted(record: RunRecord, evidence: Evidence) -> str | None:
+    """The task to withdraw when what asked for this run stops wanting it started, or
+    ``None`` when a machine has taken it or the network is finished with it. A task the
+    snapshot does not name, and an unread snapshot, count as not taken: the daemon
+    answers the withdrawal of a task it does not hold as done."""
+    if record.network is None:
+        return None
+    seen = evidence.network.value.get(record.network) if evidence.network.ok else None
+    return record.network if seen is None or seen.state == NET_POOLED else None
+
+
 def free_slots(limit: int, occupied: int) -> int:
     """Bays of the cap with nothing in them. Clamped, because a lowered cap and
     untracked agents can both put more agents on the box than the cap allows."""

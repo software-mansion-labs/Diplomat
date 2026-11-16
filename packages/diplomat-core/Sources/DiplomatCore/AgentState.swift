@@ -1378,6 +1378,16 @@ public enum AgentState {
         outstanding(record, evidence) ? record.network : nil
     }
 
+    /// The task to withdraw when what asked for this run stops wanting it started, or
+    /// `nil` when a machine has taken it or the network is finished with it. A task the
+    /// snapshot does not name, and an unread snapshot, count as not taken: the daemon
+    /// answers the withdrawal of a task it does not hold as done.
+    public static func withdrawUnstarted(_ record: RunRecord, evidence: Evidence) -> String? {
+        guard let task = record.network else { return nil }
+        guard let seen = evidence.network.value?[task] else { return task }
+        return seen.state == NetworkTask.pooled ? task : nil
+    }
+
     /// Bays of the cap with nothing in them. Clamped, because a lowered cap and
     /// untracked agents can both put more agents on the box than the cap allows.
     public static func freeSlots(limit: Int, occupied: Int) -> Int {

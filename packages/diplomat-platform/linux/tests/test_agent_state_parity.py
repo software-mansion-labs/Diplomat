@@ -136,6 +136,8 @@ def _python(records, evidence, now=T0, limit=LIMIT,
         "withdrawable": sorted(r.run_id for r in t.withdrawable),
         "withdrawOnForget": sorted(r.run_id for r in t.records
                                    if A.withdraw_on_forget(r, evidence) is not None),
+        "withdrawUnstarted": sorted(r.run_id for r in t.records
+                                    if A.withdraw_unstarted(r, evidence) is not None),
         "network": ({"present": {task: seen.to_json()
                                  for task, seen in evidence.network.value.items()}}
                     if evidence.network.ok else {"unavailable": evidence.network.reason}),
@@ -646,6 +648,8 @@ def test_the_network_fixture_reaches_what_it_claims_to(networked_results):
     assert python["withdrawable"] == ["merged-while-pooled"]
     assert python["withdrawOnForget"] == [
         "claimed-by-pool", "claimed-here", "merged-while-pooled", "pooled"]
+    assert python["withdrawUnstarted"] == [
+        "just-offered", "merged-while-pooled", "never-held", "pooled"]
     assert python["retirable"] == ["done", "merged-while-pooled", "never-held"]
     assert (python["reapable"], python["closeOnRetire"]) == ([], [])
     assert python["inFlight"] == {

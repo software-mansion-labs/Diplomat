@@ -2014,20 +2014,51 @@ class Store(QObject):
         return (str(op["id"]), asks) if asks else None
 
     def _withdraw_goal_asks(self, goal: tuple[str, dict[str, str]] | None) -> None:
-        """Cancel the asks of ``goal`` not started yet, and have the goal forget them, so
-        they are asked for again should it go back to auto."""
+        """Take back the asks of ``goal`` nothing has started - one waiting in the queue
+        is cancelled, one the Diplomacy Network carries that no machine has taken has
+        its offer withdrawn (:meth:`_withdraw_unstarted`) - and have the goal forget
+        them, so they are asked for again should it go back to auto."""
         if goal is None:
             return
         task_id, asks = goal
-        waiting = {key: q for key, q in asks.items()
+        waiting = {key for key, q in asks.items()
                    if any(e.id == q and e.job.requested for e in self.queued_tasks)}
-        if not waiting:
+        for key in waiting:
+            self.cancel_requested_work(asks[key])
+        gone = sorted(waiting | self._withdraw_unstarted(asks))
+        if not gone:
             return
-        for queue_key in waiting.values():
-            self.cancel_requested_work(queue_key)
-        error = self._edit_tracked_task({"op": "withdrawn", "id": task_id, "work": sorted(waiting)})
+        error = self._edit_tracked_task({"op": "withdrawn", "id": task_id, "work": gone})
         if error:
-            activity.log("auto", "goal", f"could not forget {', '.join(sorted(waiting))}: {error}")
+            activity.log("auto", "goal", f"could not forget {', '.join(gone)}: {error}")
+
+    def _withdraw_unstarted(self, asks: dict[str, str]) -> set[str]:
+        """Drop each of ``asks`` (a goal's work, by queue key) the network carries and
+        no machine has taken (:func:`agentstate.withdraw_unstarted`), withdrawing its
+        offer and dropping its run, and return the goal's keys of those. One a machine
+        is running is left to finish. A run is dropped whatever the daemon answers, as
+        one the operator forgets is."""
+        carried = {ask.offered: key for key, q in asks.items()
+                   for ask in self.requested_work if ask.key == q and ask.offered}
+        booked = {r.network: r for r in agentregistry.load() if r.network in carried}
+        # Asked afresh, as for a run the operator forgets.
+        evidence = agentstate.Evidence(network=self._network_evidence(
+            diplomacynetwork.state() if booked and diplomacynetwork.enabled() else None))
+        gone: dict[str, str] = {}
+        for task, key in carried.items():
+            run = booked.get(task)
+            if run is not None and agentstate.withdraw_unstarted(run, evidence) is None:
+                continue
+            self._forget_offered(task)
+            gone[key] = run.run_id if run is not None else ""
+            if run is not None:
+                self._withdraw(task, network.WITHDRAW_GOAL, run.label or run.run_id,
+                               run.source)
+        runs = set(gone.values()) - {""}
+        if runs:
+            self._write_book(lambda: agentregistry.forget(runs))
+            self.tasks_changed.emit()
+        return set(gone)
 
     def _poll_review_requests(self, roots: list[LocalRepo], complete: bool = True) -> None:
         """Dispatch the reviews requested of me in every root. A concluded record is

@@ -3359,7 +3359,7 @@ final class Store: ObservableObject {
     /// Whether the write landed. Only `.written` ends a spell of `.failed`: `.unchanged`
     /// touched no disk.
     @discardableResult
-    private func bookWritten(_ w: AgentRegistry.BookWrite) -> Bool {
+    func bookWritten(_ w: AgentRegistry.BookWrite) -> Bool {
         if w == .failed, !bookUnsaved {
             bookUnsaved = true
             AuditLog.log("auto", "warn",

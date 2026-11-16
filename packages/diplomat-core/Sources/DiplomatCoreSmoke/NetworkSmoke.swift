@@ -339,7 +339,8 @@ func networkSmoke() throws {
           && NetworkRoute.withdrawForgotten == "forgotten")
     check(NetworkRoute.withdrawStopped == "stopped"
           && NetworkRoute.withdrawNotBooked == "not booked"
-          && NetworkRoute.withdrawSwitchedOff == "switched off",
+          && NetworkRoute.withdrawSwitchedOff == "switched off"
+          && NetworkRoute.withdrawGoal == "its goal stopped",
           "the reasons an applet withdraws an offer for")
     check(sameBody(NetworkRoute.inviteBody(pool: "github.com/o/r"), ["pool": "github.com/o/r"])
           && sameBody(NetworkRoute.inviteBody(pool: "github.com/o/r", ttlSecs: 600),
@@ -673,6 +674,22 @@ func networkSmoke() throws {
               == ([], networkTask), "unmerged: withdrawn only when forgotten")
         check(withdrawn(.present([networkTask: Seen(state: "pooled")]), task: nil) == ([], nil),
               "a local run has no offer")
+        func unstarted(_ tasks: Observation<[String: Seen]>, task: String? = networkTask) -> String? {
+            AgentState.withdrawUnstarted(run(task: task), evidence: seen(tasks, merged: []))
+        }
+        check(unstarted(.present([networkTask: Seen(state: "pooled")])) == networkTask,
+              "in the pool, taken by nobody: withdrawn when what asked for it stops")
+        check(unstarted(.present([networkTask: Seen(state: "claimed", executor: "9f3c")])) == nil,
+              "a machine runs it: left to finish")
+        check(unstarted(.present([networkTask: Seen(state: "done", ok: true)])) == nil
+                && unstarted(.present([networkTask: Seen(state: "failed")])) == nil
+                && unstarted(.present([networkTask: Seen(state: "cancelled")])) == nil,
+              "the network is finished with it: nothing to withdraw")
+        check(unstarted(.present([:])) == networkTask
+                && unstarted(.unavailable("the daemon did not answer")) == networkTask,
+              "unnamed by the snapshot, or the snapshot unread: counted as not taken")
+        check(unstarted(.present([networkTask: Seen(state: "pooled")]), task: nil) == nil,
+              "a local run has no offer to take back")
     }
 
     section("network: the run book")

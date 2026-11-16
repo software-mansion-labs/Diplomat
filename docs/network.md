@@ -14,8 +14,12 @@ Network** switches it on, and from then on it gates every job on this machine:
 The daemon behind it is [`diplomacy-network`](../packages/diplomacy-network/README.md); the
 contract between two machines is its [PROTOCOL.md](../packages/diplomacy-network/PROTOCOL.md).
 
-It needs `tor` and `docker` on the machine. Without docker a machine still offers its jobs and
-acts for them, and takes none.
+It needs `tor` and `docker` on the machine, and `gh` or `glab` signed in for the forge each
+repository is on. The daemon looks for them on its `PATH` and in the usual install directories;
+`DN_TOR`, `DN_DOCKER`, `DN_GH` and `DN_GLAB` in the environment the daemon starts with name a
+binary anywhere else. Without docker a machine still offers its jobs and acts for them, and
+takes none. Without Tor it reaches no other machine. The Network screen shows what the daemon
+says is missing.
 
 <img alt="The Network screen" src="img/network.png" />
 
@@ -157,10 +161,13 @@ A job is leased two hours at a time. Before each lease ends the machine that off
 executor whether it is still working; an answer extends the lease, silence returns the job to
 the pool ten minutes later. A job gets three attempts.
 
-- **Hours a job of yours may take** - the limit from start to finish, 12 or more. Sent with every
-  job.
+- **Hours a job of yours may take** - the limit from start to finish. Sent with every job.
 - **Longest job this machine takes** - jobs allowed longer are left to other machines. Announced
   when joining a pool.
+
+Both are whole hours from 12 to 720 (30 days). A value written into `config.json` by hand is
+read the same way by Diplomat and by the daemon: rounded to the nearest whole hour, below 12 as
+12, above 720 as 720, and 12 when it is no number.
 
 ## The Network screen
 
@@ -190,15 +197,29 @@ A job offered to the network shows in the task list like any other: *in the pool
 this machine* or on another member's key, then finished or failed. A job started by hand whose
 offer the daemon has not answered yet reads *Offering to the pool…* until it has. Telemetry
 prices a job from what the executor reports; work another machine ran counts against no limit of
-this one.
+this one. A job that took more than one attempt is priced from the last alone: what an earlier
+attempt spent is in no figure.
 
-Work that was asked for - a sweep's PRs, a request from Slack - is answered by a job that ran,
-not by its offer. An offer that ends without having run (withdrawn, its pool left or closed, the
-network switched off) leaves what was asked for standing, as it was before the offer.
+Work that was asked for - a sweep's PRs, a goal's fixes and reviews, a request from Slack - is
+answered by a job that ran, not by its offer:
+
+- A job that **finished** answers it. So does one the network gave up on with its three attempts
+  used (*refused by the network*, or *failed on* a machine): it ran and came to nothing, as an
+  agent in a terminal can, and is not offered again.
+- Taking the offer back yourself ends it too: **Withdraw** on the Network screen, or the row's
+  ✕ in the task list. A goal that leaves auto takes back its own offers no machine has taken.
+- An offer that ends any other way without having run - its pool left or closed, the network
+  switched off, a daemon that no longer holds it - leaves what was asked for standing, and it is
+  offered again on the next poll.
+
+The daemon keeps an ended offer for a day. A job that ended while Diplomat was not running for
+longer than that reads *the network holds no such offer* when Diplomat is back: it is not
+priced, and what asked for it is offered again.
 
 Switching the network off withdraws this machine's open offers, stops the jobs it runs for the
-pool and frees their PRs and issues for agents in terminals again: what was asked for and had
-not run is started in a terminal like any other work.
+pool and frees their PRs and issues for agents in terminals again. Work that was asked for and
+had not run is started in a terminal from the queue on the next poll. A monitor's own find
+counts its offer as an attempt, so it is started again on that monitor's retry schedule.
 
 ## What it does not protect against
 

@@ -238,8 +238,8 @@ swaps the panel to a settings screen:
   a docker container, on this machine or another in the pool. See
   [Diplomacy Network](network.md), whose screen holds the pools, the invites, the two hours
   limits and the switch that lets jobs use this machine's devices. `networkEnabled`,
-  `networkRequiredMinimumH`, `networkMaximumAcceptedH` and `networkDevices` in
-  `~/.diplomat/config.json`.
+  `networkRequiredMinimumH`, `networkMaximumAcceptedH` (whole hours, 12 to 720; anything else
+  is rounded and held to that range) and `networkDevices` in `~/.diplomat/config.json`.
 - **Comms (Slack)** - the [Slack watcher](comms.md) (**default off**): the switch,
   keywords, a sender allowlist, one switch per thing it may do (queue reviews and
   fixes, bump queued work, investigate bug reports), the batch size and interval,
