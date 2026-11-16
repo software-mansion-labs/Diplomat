@@ -89,8 +89,7 @@ export function check(c, effort, counter) {
 }
 
 /// How much work each sender owes one target. A member has a window of its own; every
-/// stranger shares one, which also counts the requests refused before their signature
-/// could name a sender.
+/// stranger shares one.
 export class EffortMeter {
   #tiers;
   #windowSecs;
@@ -129,17 +128,13 @@ export class EffortMeter {
     return base * 2 ** doublings;
   }
 
-  /// Counts a request that passed its signature toward its sender.
+  /// Counts a request toward its sender: a member's toward that member, any other toward
+  /// the strangers.
   count(sender, member, now) {
     const { allow, cap } = this.#tiers[member ? 'member' : 'stranger'];
     const times = this.#times(sender, member);
     times.push(now);
     // Past the last doubling one more request changes nothing, so nothing older is kept.
     if (times.length > Math.max(1, allow * 2 ** (cap - 1))) times.shift();
-  }
-
-  /// Counts a request refused before its signature was checked: toward the strangers.
-  countFailure(now) {
-    this.count(null, false, now);
   }
 }

@@ -106,6 +106,13 @@ Every request carries its own proof of work. None is ever accepted without one.
 - **Signature.** `sig` covers the whole envelope including `pow`, so the work is bound to
   the sender key, the target key, the difficulty, the public seed and the work seed.
 
+The seed is public and names the hour, not anything the target chose: work for an hour to
+come can be done ahead of it. A request solved today for a `ts` a month from now is
+accepted in that hour. What bounds this is what a request costs when it arrives - it
+counts toward its sender's volume like any other, and the price it paid is the one it
+stated, checked against what is owed at that moment - and what its body may say then:
+a state hash, a claim or a ping of an earlier day holds for nothing.
+
 ### Required effort
 
 The target decides how much work a request owes; it rises with the requests it is
@@ -117,7 +124,9 @@ required(sender) = BASE << min(CAP, max(0, ceil(log2(n / ALLOW))))
 
 `n` counts the requests accepted from that sender in the last 60 seconds, this one
 included. A sender that is not a member of the request's pool on the target is a
-stranger: all strangers share one counter, and their `BASE` is 16 times higher.
+stranger: all strangers share one counter, and their `BASE` is 16 times higher. The
+price a request must meet is that of the sender it names: a member's for a key the
+target takes for a member of that pool, a stranger's for any other.
 
 | | BASE | ALLOW per 60 s | CAP |
 | --- | --- | --- | --- |
@@ -135,12 +144,27 @@ A target checks, cheapest first, and stops at the first failure:
 | `ts` within 300 s of its clock | `stale` |
 | `pow.epoch` is the epoch of `ts` | `stale` |
 | `effort` at least `required(from)` | `effort` |
-| the solution | `bad-request` |
-| the signature | `denied` |
+| the solution | `effort` |
+| the signature | `effort` |
 | `(from, nonce)` unseen | `replay` |
 
-Only a request that passed the signature counts toward its sender's `n`; a failure before
-that counts toward the stranger counter.
+A request is authenticated once its solution and its signature hold. What a target
+answers before that says nothing of the keys and pools it knows. Too little work, a
+solution that does not hold and a signature that is not the sender's get one refusal -
+`effort`, with the `detail` `the work or the signature of this request does not hold` -
+and every refusal up to there quotes one price as the `effort` of its envelope (section
+4): what a stranger owes at that moment, whatever key and pool the request named. So a
+request made of nothing, under the target's own key or a member's, in a pool the target
+is linked to or not, is answered alike. A member learns what it owes from the answers to
+its authenticated requests; one that paid too little pays the stranger's price once, and
+the answer to that names its own.
+
+What counts toward `n`: an authenticated request, toward its sender; and a request
+whose solution holds at a stranger's price and whose signature does not, toward the
+strangers. Nothing else. Work that was not done raises nobody's price. A solution at a
+member's price under a member's key, without that member's signature, raises neither
+that member's price nor the strangers': it costs its sender a member's `BASE` of hashes
+and the target one signature check, each time, at a price that does not rise.
 
 ### After a start
 
@@ -172,7 +196,10 @@ but `act` answers the same when asked again, and an `act` is carried out once fo
 A sender pays what the target's last answer asked for. It never pays more than the most
 the table above lets a target ask - 16384 << 12 = 262144 << 8 = 67 108 864 - and a target
 that asks for more is not sent that request again. A request refused for `effort` is sent
-again at the price asked, at most three times.
+again at the price asked, at most three times. A member whose own volume has taken its
+price above what a stranger owes, and that has lost count of it - it started again in
+that minute - is quoted the stranger's price, pays too little again, and after the third
+time leaves that request; a minute later its price has fallen.
 
 For one peer a host does at most 16384 << 14 = 268 435 456 hashes of work in any hour:
 four requests at the highest price, or 16384 at a member's base. Once that is spent it
@@ -188,8 +215,9 @@ hashes a second - however it prices itself.
 
 `effort` is what the target would require of this sender's next request. A refusal has
 `"ok": false` and `"error": { "code": "...", "detail": "..." }` in place of `body`;
-`detail` is at most 200 characters. Codes: `effort` (too little work; `effort` says how
-much), `stale` (clock or epoch), `replay`, `not-member`, `bad-request`, `denied`, and
+`detail` is at most 200 characters. Codes: `effort` (too little work, or work or a
+signature that does not hold; `effort` says what a stranger owes), `stale` (clock or
+epoch), `replay`, `not-member`, `bad-request`, `denied`, and
 `busy` (the target could not serve the request this once: it has only just started, it
 has no place free, or it failed - and only the first of these says so in a `detail`
 that is part of this contract, section 3). A request that is not the canonical form of anything
@@ -511,6 +539,22 @@ rule decides whose consent that needs: **a host's word binds its own offer and n
 other.** Every member consents to the claim being made; only the host of an offer gives
 that offer to it.
 
+**What the pool holds, and what stays with the offering host.** A job belongs to no
+machine: every member holds its offer, any member with a slot may take it, and none is
+asked before another. What the job needs in order to run stays with the host that
+offered it, and with that host alone. Only it backs a claim with the offer, hands out
+the prompt and the key (section 9), carries out every forge request of the run, and asks
+for the next lease (section 8). No other member can do any of that in its place: none
+holds the prompt or that host's access to the forge. So while the offering host is
+asleep or out of reach:
+
+- its job, when nobody has claimed it, cannot be taken - a claim no host backs is no
+  claim;
+- its job, when it is running, has no way to the forge from that moment, and the run is
+  stopped when its lease and the 10 minutes of grace are over;
+- its offer is in no pool once it was not signed again for 24 hours, and the host
+  cancels it when it returns ("A host that was away").
+
 A host with a free slot that sees a task with a free offer it may take (section 8):
 
 1. **Confirms its own state.** It computes `stateHash(asOf)` over what it holds. Whether
@@ -522,6 +566,23 @@ A host with a free slot that sees a task with a free offer it may take (section 
    member that has answered anything is **present**.
 3. **Sends a lock to every present member**: `{ taskId, round, asOf, hash }`, `round` a
    fresh random 8-byte value.
+
+**Whose consent a claim needs.** One consent cannot be done without: that of a host
+whose offer the claim takes. A claim no offering host backs holds nothing, however many
+members granted it, so no offer is ever taken while its host is silent. Beyond that,
+every member that answers must grant - one that is there and has locked the task for
+another executor, or holds another state, stops the round. A member that does not
+answer is written into the claim as absent, and the round goes on without it: a pool
+would otherwise run nothing while one laptop sleeps. Its consent is not needed for what
+consent is there to prevent. A lock keeps two executors from running one job. A job is
+run under a key, the key is issued for an offer by that offer's host alone, and that
+host gives its offer to one claim at a time under a number it gives once ("Which claim
+holds an offer"). So when two executors both claimed a task because a member between
+them was silent, the host of each offer tells them apart, and at most one holds that
+offer and is handed its key. What the silent member could have added is an offer of its
+own of the same task: that offer is in no claim made without it, and is taken into the
+run, or run by itself, when the member is back ("One run for every offer", "What
+remains").
 
 A member is absent only by this round's own request to it: what earlier requests came
 to decides how long the round waits, never whether it asks. A signed refusal is an
@@ -771,6 +832,28 @@ remains"). A task its own host offered to run at once waits for neither of the t
 
 Nothing in a record hides any of this.
 
+- **A job cannot do without the machine that offered it.** No machine owns a job, and
+  only one can serve it: the offering host backs the claim, hands out the prompt and
+  the key, carries out the forge requests and extends the lease (above). While that
+  host is asleep, its unclaimed jobs are taken by nobody, its running jobs cannot reach
+  the forge and stop at the end of their lease and its grace, and after a day its
+  offers are gone. A second machine that offers the same job, to the byte, is a second
+  host an executor can be given it by ("One run for every offer"); a run that has its
+  key from the machine that fell asleep is lost all the same.
+- **A member that does not answer is not asked for its consent.** A claim carries the
+  grant of every member that answered and the names of those that did not. What holds
+  without the absent ones is that an offer is one claim's at a time, by its host's word;
+  what does not hold is that the task is run once - the absent member may offer it too,
+  and that offer is run when it returns unless the first run took it in or did its very
+  job (below).
+- **A repository that was renamed or moved is two pools.** A pool is named by the
+  repository's forge slug, and nothing else ties two names to one repository. Machines
+  linked under the old name and machines linked under the new one share no offers and
+  no members.
+- **Work can be done ahead of its hour.** The seed of the proof of work names the hour
+  and nothing the target chose (section 3): a sender can solve requests for an hour to
+  come and send them then, at the price it solved for. What it owes is weighed on
+  arrival, and a body solved ahead says nothing current.
 - **One task, two runs.** One run does for every offer of a task only where one claim
   holds them all and they are offers of one job. Otherwise an offer is run by itself:
   - *Hosts out of each other's reach.* Two hosts that offer one task and cannot reach
@@ -931,8 +1014,10 @@ Nothing in a record hides any of this.
 
 Everything done on the forge for a task - reading an issue, posting a review, pushing a
 commit, opening a pull request - is done by the requester, on the executor's request. No
-credential of the requester crosses the network, and the executor needs none of its own
-for the forge.
+credential of the requester crosses the network. The executor's machine uses its own for
+one thing: it keeps a mirror of the repository current with the git access that machine
+has, and the job clones from that mirror. Everything else a job does on the forge goes
+through the requester.
 
 1. After its claim is committed, the executor asks a host whose offer the claim holds
    for the key. It pushes its claim to that host - a host gives a key only for a claim

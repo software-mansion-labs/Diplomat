@@ -21,9 +21,12 @@ await check('a burst raises what its sender owes; the sender pays and still gets
   for (let i = w.net.count({ from: 'a', to: 'b', since: w.net.now() - 59 }); i < POW.memberAllow; i += 1) {
     assert.deepEqual([(await sync(MEMBER)).ok, i], [true, i], 'inside the allowance the base effort is enough');
   }
+  // A request that has not paid is told what a stranger owes, whoever sent it: what a
+  // member owes is in the answers it gets as a member.
   const short = await sync(MEMBER);
-  assert.deepEqual([short.ok, short.code, short.effort], [false, 'effort', 2 * MEMBER], 'past it, the same work is too little');
-  assert.equal((await sync(2 * MEMBER)).ok, true);
+  assert.deepEqual([short.ok, short.code, short.effort], [false, 'effort', STRANGER], 'past it, the same work is too little');
+  const paid2 = await sync(2 * MEMBER);
+  assert.deepEqual([paid2.ok, paid2.effort], [true, 2 * MEMBER]);
   // The node itself is told the same, solves again and is heard.
   const sent = w.net.count({ from: 'a', to: 'b' });
   assert.ok(sent - before >= 2);
@@ -31,7 +34,7 @@ await check('a burst raises what its sender owes; the sender pays and still gets
   w.net.tap(({ from, kind, body }) => from === 'a' && kind === 'push' && paid.push(JSON.parse(body.toString('utf8')).pow.effort));
   const { taskId } = await a.node.offer(offerArgs('pr-1'));
   await w.net.until(() => w.task(b, taskId), { maxMs: 1000, stepMs: 10, what: 'the offer reaching b through the raised effort' });
-  assert.deepEqual(paid, [MEMBER, 2 * MEMBER], 'refused at the old price, heard at the one it was told');
+  assert.deepEqual(paid, [MEMBER, STRANGER], 'refused at the old price, heard at the one it was told');
   await w.run(120);
   assert.equal((await sync(MEMBER)).ok, true, 'a quiet minute later the base effort is enough again');
 });
@@ -46,7 +49,7 @@ await check('a stranger owes sixteen times a member\'s work, and all strangers p
   const hello = (from, effort) => w.request(from, a, 'hello', { member: {} }, { effort });
   const cheap = await hello(m1, MEMBER);
   assert.deepEqual([cheap.code, cheap.effort], ['effort', STRANGER]);
-  for (let i = 0; i < POW.strangerAllow - 1; i += 1) assert.equal((await hello(i % 2 ? m1 : m2, STRANGER)).code, 'not-member', 'paid for, it is looked at and refused as any outsider is');
+  for (let i = 0; i < POW.strangerAllow; i += 1) assert.equal((await hello(i % 2 ? m1 : m2, STRANGER)).code, 'not-member', 'paid for, it is looked at and refused as any outsider is');
   const crowded = await hello(m2, STRANGER);
   assert.deepEqual([crowded.code, crowded.effort], ['effort', 2 * STRANGER], 'one stranger\'s requests raise the price for the next');
 });
@@ -93,10 +96,10 @@ await check('a request that has not paid costs the host no signature check', asy
   };
   const flip = (text) => (text.startsWith('A') ? `B${text.slice(1)}` : `A${text.slice(1)}`);
   assert.deepEqual(await checked({ effort: MEMBER / 2 }), ['effort', 0], 'too little work');
-  assert.deepEqual(await checked({ effort: MEMBER, mangle: (r) => ({ ...r, pow: { ...r.pow, counter: flip(r.pow.counter) } }) }), ['bad-request', 0], 'work that solves nothing');
+  assert.deepEqual(await checked({ effort: MEMBER, mangle: (r) => ({ ...r, pow: { ...r.pow, counter: flip(r.pow.counter) } }) }), ['effort', 0], 'work that solves nothing');
   assert.deepEqual(await checked({ effort: MEMBER, ts: w.net.now() - 3600 }), ['stale', 0], 'an old request');
   assert.deepEqual(await checked({ bytes: Buffer.from('{"v":1') }), ['bad-request', 0], 'no envelope at all');
-  assert.deepEqual(await checked({ effort: MEMBER, mangle: (r) => ({ ...r, sig: flip(r.sig) }) }), ['denied', 1], 'paid for, with a bad signature');
+  assert.deepEqual(await checked({ effort: MEMBER, mangle: (r) => ({ ...r, sig: flip(r.sig) }) }), ['effort', 1], 'paid for, with a bad signature');
   assert.deepEqual(await checked({ effort: MEMBER }), ['ok', 1]);
 });
 

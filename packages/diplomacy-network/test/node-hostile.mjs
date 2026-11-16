@@ -74,7 +74,7 @@ await check('every kind of request, with a body of every wrong shape, gets a sig
   ];
   for (const options of envelopes) {
     const { said } = await say(w, evil, req, 'sync', { asOf: w.net.now(), hash: before }, { effort: POW.memberBase * 4, ...options });
-    assert.ok(['bad-request', 'denied', 'stale'].includes(said.split(':')[0]), `${options.bytes ?? options.mangle} -> ${said}`);
+    assert.ok(['bad-request', 'effort', 'stale'].includes(said.split(':')[0]), `${options.bytes ?? options.mangle} -> ${said}`);
   }
 
   assert.deepEqual(req.log.filter((line) => /could not be served|step failed/.test(line)), [], 'nothing threw');

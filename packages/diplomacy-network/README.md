@@ -323,6 +323,15 @@ differs has done nothing by that run: its offer is free again when the run ends 
 run next, by itself. Withdrawing or failing an offer on one machine changes nothing on
 another.
 
+No machine owns a task in the pool: any machine in it with a free slot may take it. But
+a task cannot do without the machine that offered it. Only that machine gives the task
+to the one that takes it, hands out the prompt and the key, makes every request to the
+forge, and keeps the run's lease going. While it is asleep or off, a task of its that
+nobody took is taken by nobody, a run of a task of its cannot reach the forge and is
+stopped when its lease ends - two hours at most, and ten minutes - and after a day its
+offers are gone from the pool. And a machine that does not answer when a task is taken
+is not waited for: the task is taken without it, with its name on the claim as absent.
+
 A machine that was asleep, off or without a network while its job was run for another
 machine's offer finds the run on record when it is back, and marks its own offer done
 without a second run. It asks the pool what it missed before it does anything for its

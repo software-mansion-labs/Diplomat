@@ -151,10 +151,10 @@ await check('all strangers share one counter, with a base sixteen times higher',
   assert.equal(POW.strangerBase, POW.memberBase * 16);
 });
 
-await check('a refused request counts toward the strangers and toward no member', () => {
+await check('a request counted toward the strangers counts toward no member', () => {
   const meter = new EffortMeter(small);
-  meter.countFailure(100);
-  meter.countFailure(100);
+  meter.count('eve', false, 100);
+  meter.count('mallory', false, 100);
   assert.equal(meter.required('eve', false, 100), 512);
   assert.equal(meter.required('alice', true, 100), 16);
 });
@@ -186,6 +186,6 @@ await check('the defaults are the protocol table', () => {
   assert.equal(meter.required('alice', true, 0), 32768);
   for (let i = 0; i < 100000; i++) meter.count('alice', true, 0);
   assert.equal(meter.required('alice', true, 0), 16384 * 2 ** 12);
-  for (let i = 0; i < 2000; i++) meter.countFailure(0);
+  for (let i = 0; i < 2000; i++) meter.count('eve', false, 0);
   assert.equal(meter.required('eve', false, 0), 262144 * 2 ** 8);
 });
