@@ -196,6 +196,7 @@ export async function createBench() {
 
     let child = null;
     let admitting = null;
+    let saying = null;
     const m = {
       name, home, base, env, token, gitlabToken, checkout, agentDir, dockerDir, configPath,
       socket: path.join(base, 'daemon.sock'),
@@ -254,16 +255,22 @@ export async function createBench() {
       linked: () => m.ok('/pools', { pools: [m.link] }),
       /// Says, and keeps saying, how many tasks this machine takes at a time, counted
       /// against its own snapshot as Diplomat counts.
-      admit(slots) {
-        clearInterval(admitting);
+      async admit(slots) {
         const say = async () => {
           const going = (await m.state())?.runs.filter((run) => run.endedAt === 0).length ?? 0;
           await m.call('POST', '/admit', { slots: Math.max(0, slots - going), reason: 'test' });
         };
-        admitting = setInterval(() => say().catch(() => {}), 400);
+        await m.quiet();
+        // One word at a time: a slow one is not overtaken by the next.
+        admitting = setInterval(() => { saying ??= say().catch(() => {}).finally(() => { saying = null; }); }, 400);
         return say();
       },
-      quiet() { clearInterval(admitting); },
+      /// Stops saying it. Resolved once a word that was on its way has been said: what
+      /// the test says next is the last word the daemon hears.
+      quiet() {
+        clearInterval(admitting);
+        return saying ?? Promise.resolve();
+      },
       setConfig(patch) {
         const next = { ...JSON.parse(fs.readFileSync(configPath, 'utf8')), ...patch };
         fs.writeFileSync(`${configPath}.tmp`, JSON.stringify(next));

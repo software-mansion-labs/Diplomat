@@ -180,7 +180,7 @@ try {
   await check('another requester gets a container of its own, and two jobs at once each act through their own requester', async () => {
     // Said once: a word repeated after the first claim counts that claim's run twice
     // for ten seconds, and the second task would wait them out.
-    b.quiet();
+    await b.quiet();
     await b.ok('/admit', { slots: 2 });
     const before = bench.forge.log.length;
     const prompt = (who) => ['wait both', `api POST /repos/acme/widgets/pulls/1/reviews {"event":"COMMENT","body":"from ${who}"}`, 'adb', `say done for ${who}`].join('\n');
