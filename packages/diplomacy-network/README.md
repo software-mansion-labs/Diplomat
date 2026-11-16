@@ -55,7 +55,7 @@ src/
     container.js   image, one container per peer and repository, its network and relay
     job.js         one run: prompt, start, watch, stop, outcome, and what is kept of it
     adb.js         the filter between a job and this machine's adb server
-    clear.js       removes everything this daemon made in docker
+    weigh.js       how long this machine holds back from a task, by what it has
     forward.mjs    inside a container: a job's forwards as local addresses
     runner.sh      inside a container: one job's environment, clone and agent
     stop.sh        handed to a container's sh: asks after one job's processes, ends them
@@ -94,9 +94,9 @@ closed at every start.
 | `runs.json` (0600) | the tasks this host runs or ran, and the tasks it gave up on |
 | `jobs.json` (0600) | the jobs going in this daemon's containers, for the daemon after it: the broker's port, and each job's container, proxy token, CA generation, process group, forwards and what it has spent of the model, the last no more than 5 s behind |
 | `tor/` | tor's data directory |
-| `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it |
+| `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it. A leaf is good for 90 days, is replaced from two weeks before its end, under a running job too, and is removed once past it |
 | `mirrors/<pool hash>.git` | bare mirrors. One is removed a day after its pool was last linked and not left |
-| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended |
+| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended, and `runs/.containers/<container>/` once it is empty and the container is gone |
 | `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed with its directory |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
@@ -110,8 +110,8 @@ changes.
 A job's directory is kept for the day after its end because the snapshot's `log` names a
 file in it, which is what the operator opens to see what the job did; nothing else reads
 it once the outcome is reported. `DN_RUN_KEEP_MS` and `DN_MIRROR_KEEP_MS` set the two
-days; both are looked at every 10 minutes, with the idle containers and the old
-certificate authorities. A container reads its run directory through a bind mount as
+days; both are looked at every 10 minutes, with the idle containers, the old
+certificate authorities and the certificates past their end. A container reads its run directory through a bind mount as
 its own root, which the engine maps to the operator (Docker Desktop, rootless docker) or
 to the host's root (rootful docker on Linux): either reads 0700 and 0600. Under
 `userns-remap` it is neither, and a job could not read its own prompt.
@@ -131,7 +131,8 @@ broker on the host and never present in a container. The first of these that exi
 used: `networkModelToken`, an API key or subscriber token kept for the network alone (on
 macOS the Keychain item with service `Diplomat-networkModelToken` under the user's
 account, elsewhere the file `~/.diplomat/network-model-token`); the Claude Code login;
-`ANTHROPIC_API_KEY` in the daemon's environment.
+`ANTHROPIC_API_KEY` in the daemon's environment. A Keychain item `security` has not
+answered for within 30 s (`DN_KEYCHAIN_TIMEOUT_MS`) counts as not there.
 
 ## Local socket
 
@@ -158,6 +159,7 @@ Every other answer is `{ error }` with a status that says whose fault it was:
 | 400 | the body is not what the route reads: not JSON (`The request body is not JSON.`), not an object, a member missing or of the wrong type or size. Members a route does not read are ignored |
 | 409 | the body is well formed and the network refuses it; `error` is a sentence fit to show the operator |
 | 404 | no such route |
+| 413 | the body is longer than 4 MiB of characters (`The request body is longer than 4194304 characters.`); it was read to its end and none of it kept |
 | 503 | the daemon is on its way out (`The Diplomacy Network daemon is stopping.`): nothing was done, and the daemon after it takes the same request. `GET /health` answers to the last |
 | 500 | a fault of the daemon's own; the same line is in `daemon.log`, and the daemon goes on |
 
@@ -165,7 +167,10 @@ Every other answer is `{ error }` with a status that says whose fault it was:
 wait for any other member to hear of it: the pool is told in the background, and the
 snapshot shows the offer `pooled` meanwhile. The commits a job makes are authored as
 `user.name` and `user.email` of the offering machine's checkout say; an offer from a
-checkout that has neither is refused.
+checkout that has neither is refused. How long a task may be is one limit: its prompt
+and options, as the task is sent to another machine, come to half a mebibyte at most,
+and a longer one is a 409 (`... its prompt and options are too long.`). The socket reads
+eight times that, so no task under the limit is cut short by how its JSON was written.
 
 `withdraw` is safe to repeat. A task this machine has no open offer of - one it never
 offered, one that already ended, one already withdrawn - is answered `{ ok: true,
@@ -262,7 +267,7 @@ for every host a claim of it needs - the hosts offering it, or every other membe
 this machine offers it: nobody can take it until the clocks agree. Otherwise it is empty.
 
 The same snapshot is written to `state.json` (0600), replaced whole and at most once a
-second, and once more as the daemon ends.
+second (`DN_STATE_WRITE_MS`), and once more as the daemon ends.
 
 ## What runs where
 
@@ -381,6 +386,11 @@ daemon makes sure of four things and starts the job:
   that size where its storage can (`--storage-opt size=`). Where it cannot - Docker
   Desktop's default storage refuses the option - `usage(name)` measures the layer, the
   `/work` volume and the run records, and `overQuota()` names the containers past it.
+  The daemon asks every 10 minutes (`DN_SWEEP_MS`). A container past its allowance is
+  discarded: its jobs are stopped and end as failed attempts with the reason `the
+  container outgrew its disk allowance` - whichever of them filled it would fill the
+  next one too, and three attempts are all a task gets - and the container goes with
+  its relay, its network, its volume and its run records.
 - **The relay.** On each container's network sits `dn-<pool part>-<peer part>-relay`:
   the same image running `image/relay.mjs`, which carries TCP from that network to the
   broker's port on this machine and to nothing else, 1024 connections at a time. It is
@@ -452,7 +462,10 @@ is done no job is started - a run that was still waiting for its key, or an offe
 with `now` in the daemon's first moment, waits for it - so a container holding a job is
 never restarted under it. A job that cannot be taken up - its container is gone, or the
 broker's port could not be had again - is stopped for that reason, and the node gives
-the task back. Every 15 s the jobs in this daemon's containers are held against the
+the task back. So that the port can be had again, the broker listens below the range
+Linux deals outgoing connections from, where that range leaves room below it: a port
+of the range may be given to some connection while the daemon is away, and cannot be
+listened on while that connection lasts, nor for a minute after. Every 15 s the jobs in this daemon's containers are held against the
 node's runs, and a job no run stands behind is stopped: one whose run was stopped
 while the engine did not answer, and one `jobs.json` no longer names, which is found by
 its run directory.
@@ -461,14 +474,19 @@ its run directory.
 can, its own run directory included. So nothing the host runs to ask after a job or to
 end it comes from there: `stop.sh` is handed to the container's `sh` as text, and the
 job's process group is the one the shell that started the job named to the daemon, kept
-in `jobs.json`, not the one the job's own `pid` file says. The order is always the same.
+in `jobs.json`; nothing a job writes says which processes are its own. A job whose
+group nobody kept - its daemon went between starting it and hearing the group, or
+`jobs.json` is gone - is not taken up: it is ended by its run id alone, which its
+runner and everything the runner starts carry in their environment from their first
+moment. The order is always the same.
 The job's proxy token is taken out of the broker first, so from that moment it reaches
 nothing - no forge, no model, no forward - however long the rest takes. Then its
 process group gets TERM, 5 s, and KILL, and so does every process outside the group
 that still carries the job's run id in its environment. The job counts as stopped only
 when the container itself says nothing of it is left. One that is still there 60 s
 (`DN_JOB_STOP_BOUND_MS`) after the first try - or a container in which nothing can be
-run any more - ends with its container, which is restarted; the other jobs in it, all
+run any more - ends with its container, which is restarted in its turn among whatever
+else is being done to that container; the other jobs in it, all
 the same requester's on the same repository, end as failed attempts with the reason
 `the container was restarted to stop another job`. A process that left the group and
 cleared its environment is known to nobody: it has no token either, and goes when the
@@ -502,7 +520,23 @@ server dialling out from this machine), `host:forward`, `killforward` and `list-
 request not listed here, and behind a device switch `reverse:` (a device's way to this
 machine's ports) and every `host` request. So a job names its device (`adb -s <serial>`
 or `ANDROID_SERIAL`), and an adb client of another version than the server's fails
-rather than replacing the server.
+rather than replacing the server: it asks the server's version, says the two differ,
+asks to stop the server (`host:kill`), and is told in the refusal that this machine's
+server is not replaced and that an adb of the server's version is what works. The
+image's adb is Debian bookworm's `adb` package, which speaks version 41 of adb's
+protocol (`adb version` prints 1.0.41), as every adb released since 2019 does; keep the
+host's adb at one of those.
+
+**Which machine takes Android work.** No machine tells another what devices it has, and
+a task is not told either. Each machine weighs a task by itself before it goes for it
+(`executor/weigh.js`): when the pool's linked checkout looks like Android work - an
+`android/` directory, an `app/src/main/AndroidManifest.xml`, or a `build.gradle`,
+`build.gradle.kts`, `settings.gradle` or `settings.gradle.kts` at its root - a machine
+with no device to give a job (`networkDevices` off, or on with no device its adb server
+lists as ready) waits 30 s (`DN_DEVICE_WAIT_MS`) longer before it goes for the task, so
+a machine with a device gets there first. A checkout is looked at once and again an
+hour later. Nothing is refused on this ground: a task no machine with a device took
+runs on one without.
 
 Anything else on the host - the device allocator, a tool-server - is forwarded only
 when the daemon's environment names it and `networkDevices` is on: `DN_FORWARDS` is a
@@ -513,8 +547,8 @@ local process can.
 
 A forward is a name that only its own job's proxy token opens; `executor/forward.mjs`,
 started with the job inside the container, turns it into the local address a tool
-expects, and it ends with the job. What a machine has is never published; it only
-weighs it when deciding whether to take a task.
+expects, and it ends with the job. What a machine has is never published; the one use
+it makes of it is that wait before going for a task.
 
 ## Tests
 

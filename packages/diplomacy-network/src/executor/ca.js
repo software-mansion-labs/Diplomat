@@ -48,7 +48,7 @@ function ecKey() {
     .privateKey.export({ type: 'sec1', format: 'pem' });
 }
 
-const expiresWithin = (pem, ms) => Date.parse(new crypto.X509Certificate(pem).validTo) - Date.now() < ms;
+const endOf = (pem) => Date.parse(new crypto.X509Certificate(pem).validTo);
 
 function caConfig(name, hosts, constrained) {
   // A DNS constraint also covers the name's subdomains. The two IP exclusions cover
@@ -78,11 +78,13 @@ function leafConfig(host) {
 /// The certificate authority kept under `dir`. `state()` is `{ state: 'idle' | 'ready' |
 /// 'missing' | 'failed', detail }`; `authority(hosts)` resolves to the CA made for
 /// exactly `hosts`, minting one when there is none or it is near its end: `{ id,
-/// certPath, hosts, constrained, leaf(host) -> { key, cert } }`. `kept(id)` is the
-/// generation of that id while it is on disk, or null: the one a job still running was
-/// started under.
-export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN } = {}) {
+/// certPath, hosts, constrained, leaf(host) -> { key, cert } }`. A leaf is the same
+/// object until its certificate is two weeks from its end, and one made anew from then
+/// on. `kept(id)` is the generation of that id while it is on disk, or null: the one a
+/// job still running was started under. `now` is the clock certificates are held to.
+export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN, now = Date.now } = {}) {
   let state = { state: 'idle', detail: '' };
+  const expiresWithin = (pem, ms) => endOf(pem) - now() < ms;
   const authorities = new Map(); // id -> authority
   let minting = Promise.resolve();
 
@@ -102,7 +104,7 @@ export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN }
     const meta = readJson(path.join(home, 'meta.json'));
     const certPath = path.join(home, 'ca.crt');
     if (!meta || !Array.isArray(meta.hosts) || !fs.existsSync(certPath) || !fs.existsSync(path.join(home, 'ca.key'))) return null;
-    const leaves = new Map(); // host -> Promise<{ key, cert }>
+    const leaves = new Map(); // host -> { made: Promise<{ key, cert }>, renewAt }
     const authority = {
       id,
       certPath,
@@ -113,11 +115,19 @@ export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN }
       leaf(host) {
         const h = certHost(host);
         if (!h || !covers(meta.hosts, h)) return Promise.reject(new Error(`certificate authority: no certificate for ${host}`));
-        if (!leaves.has(h)) {
-          const made = issue(home, h).catch((e) => { leaves.delete(h); throw fail(e); });
-          leaves.set(h, made);
-        }
-        return leaves.get(h);
+        const held = leaves.get(h);
+        // One being made is waited for, whatever the clock says of the one before it.
+        if (held && now() < held.renewAt) return held.made;
+        const entry = { renewAt: Infinity };
+        entry.made = issue(home, h).then((leaf) => {
+          entry.renewAt = endOf(leaf.cert) - LEAF_RENEW_MS;
+          return leaf;
+        }, (e) => {
+          if (leaves.get(h) === entry) leaves.delete(h);
+          throw fail(e);
+        });
+        leaves.set(h, entry);
+        return entry.made;
       },
     };
     authorities.set(id, authority);
@@ -176,7 +186,7 @@ export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN }
         await make();
       }
       fs.unlinkSync(path.join(tmp, 'ca.cnf'));
-      fs.writeFileSync(path.join(tmp, 'meta.json'), `${JSON.stringify({ hosts, constrained, createdAt: Math.floor(Date.now() / 1000) })}\n`);
+      fs.writeFileSync(path.join(tmp, 'meta.json'), `${JSON.stringify({ hosts, constrained, createdAt: Math.floor(now() / 1000) })}\n`);
       fs.renameSync(tmp, path.join(dir, id));
       log('ca', `minted ${id} for ${hosts.join(', ')}${constrained ? '' : ' (unconstrained)'}`);
       return id;
@@ -234,7 +244,32 @@ export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN }
     }
   }
 
-  return { state: () => state, authority, kept: (id) => (/^[0-9a-f]{12}$/.test(id) ? open(id) : null), prune };
+  /// Removes every leaf certificate past its end, with its key, from every generation
+  /// on disk: one that is asked for again is issued anew. Returns how many went.
+  function dropExpired() {
+    let gone = 0;
+    for (const { id } of generations()) {
+      const home = path.join(dir, id, 'leaves');
+      let names = [];
+      try { names = fs.readdirSync(home); } catch {}
+      for (const name of names) {
+        // `issue` makes a certificate beside the one it replaces, under a name of its own.
+        if (!name.endsWith('.crt') || /\.tmp\.\d+\.crt$/.test(name)) continue;
+        const base = path.join(home, name.slice(0, -'.crt'.length));
+        // Read, judged and removed in one turn: `issue` replaces both files in one of its own.
+        try {
+          if (!(endOf(fs.readFileSync(`${base}.crt`)) <= now())) continue;
+          fs.unlinkSync(`${base}.crt`);
+          fs.rmSync(`${base}.key`, { force: true });
+          gone += 1;
+        } catch {}
+      }
+    }
+    if (gone > 0) log('ca', `removed ${gone} leaf certificate(s) past their end`);
+    return gone;
+  }
+
+  return { state: () => state, authority, kept: (id) => (/^[0-9a-f]{12}$/.test(id) ? open(id) : null), prune, dropExpired };
 }
 
 function covers(hosts, host) {

@@ -119,24 +119,31 @@ export function listenSingleton({ server, socketPath, log, onListening }) {
 /// What a jsonServer handler returns for a route it does not serve.
 export const NO_ROUTE = Symbol('no route');
 
-/// Reads a JSON request body (capped at 1 MB) and answers with handle(route, body)'s
-/// result, or the statusCode/message of what it throws. `route` is "METHOD /path".
-/// `notJson` is the error a body that does not parse is answered with.
-export function jsonServer(handle, { notJson = 'invalid json' } = {}) {
+/// Reads a JSON request body and answers with handle(route, body)'s result, or the
+/// statusCode/message of what it throws. `route` is "METHOD /path". `notJson` is the
+/// error a body that does not parse is answered with. A body of more than `maxBody`
+/// characters is read to its end, kept no part of, and answered 413 with `tooLarge`.
+export function jsonServer(handle, { notJson = 'invalid json', maxBody = 1_000_000, tooLarge = 'request body too large' } = {}) {
   return http.createServer((req, res) => {
     const send = (code, obj) => {
       res.writeHead(code, { 'content-type': 'application/json' });
       res.end(JSON.stringify(obj));
     };
     let body = '';
+    let over = false;
     // A StringDecoder, so a multi-byte character split across two 'data' chunks is
     // reassembled rather than turned into U+FFFD.
     req.setEncoding('utf8');
     req.on('data', (c) => {
+      if (over) return;
       body += c;
-      if (body.length > 1_000_000) req.destroy();
+      if (body.length > maxBody) {
+        over = true;
+        body = '';
+      }
     });
     req.on('end', async () => {
+      if (over) return send(413, { error: tooLarge });
       let p = {};
       try { p = body ? JSON.parse(body) : {}; } catch { return send(400, { error: notJson }); }
       try {

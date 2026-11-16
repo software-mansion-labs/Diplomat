@@ -30,7 +30,12 @@ export const TOR_TUNING = {
   // The wait before a tor that died is started again, doubling per failed start.
   restartMinMs: 2000,
   restartMaxMs: 60 * 1000,
+  // How long a tor whose control connection closed is given to exit before the
+  // connection is blamed: a tor that dies closes it too, and its exit says why.
+  controlLossMs: 5000,
 };
+
+const CONTROL_LOST = 'tor closed its control connection';
 
 const MAX_LOG_LINE = 4096;
 
@@ -77,8 +82,9 @@ function pump(stream, onLine) {
 }
 
 // A control connection: `send(command)` resolves with the reply's lines or rejects with
-// tor's refusal, and every asynchronous event goes to `onEvent`.
-function openControl(port, onEvent) {
+// tor's refusal, every asynchronous event goes to `onEvent`, and `onClose` hears the
+// connection end, whether or not anything was being asked on it.
+function openControl(port, onEvent, onClose) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: '127.0.0.1', port });
     const waiting = [];
@@ -87,7 +93,8 @@ function openControl(port, onEvent) {
     socket.setEncoding('utf8');
     socket.on('error', () => {}); // the close that follows reports it
     socket.on('close', () => {
-      const lost = new Error('tor closed its control connection');
+      onClose();
+      const lost = new Error(CONTROL_LOST);
       for (const w of waiting.splice(0)) w.reject(lost);
       reject(lost);
     });
@@ -110,7 +117,7 @@ function openControl(port, onEvent) {
       }
     });
     const send = (command) => new Promise((res, rej) => {
-      if (socket.destroyed) return rej(new Error('tor closed its control connection'));
+      if (socket.destroyed) return rej(new Error(CONTROL_LOST));
       waiting.push({ resolve: res, reject: rej, verb: command.split(' ')[0] });
       socket.write(`${command}\r\n`);
     });
@@ -167,6 +174,7 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
     if (stopping) throw fail('stopped', 'the transport stopped');
     setState('starting', 'launching tor');
     let pollTimer = null;
+    let lossTimer = null;
     let abort;
     const aborted = new Promise((_, reject) => { abort = reject; });
     aborted.catch(() => {});
@@ -235,6 +243,7 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
       proc.stdout.destroy();
       proc.stderr.destroy();
       tor.control?.destroy();
+      clearTimeout(lossTimer);
       clearTimeout(publishTimer);
       fs.rmSync(files.pid, { force: true });
       fs.rmSync(files.port, { force: true });
@@ -284,6 +293,10 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
         if (event.split(' ')[2] !== 'UPLOADED') return;
         uploaded = true;
         if (tor.launched) confirmed();
+      }, () => {
+        // Only a launch waits on this connection, and a tor that is gone has said why.
+        if (tor.launched || proc.exitCode !== null || proc.signalCode !== null) return;
+        lossTimer = setTimeout(() => cancel(new Error(CONTROL_LOST)), t.controlLossMs);
       }));
       await step(tor.control.send(`AUTHENTICATE ${cookie.toString('hex')}`));
       // tor exits when this connection closes, which a killed daemon's does at once.
@@ -314,8 +327,11 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
       // line ran.
       if (uploaded) confirmed();
     } catch (err) {
+      // The close of a dying tor's connection can be seen before its exit, which says
+      // why: the launch is cancelled for the one or the other, and that is the reason.
+      const why = err.message === CONTROL_LOST ? await aborted.catch((seen) => seen) : err;
       await end(tor);
-      throw err;
+      throw why;
     }
   }
 

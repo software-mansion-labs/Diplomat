@@ -18,7 +18,10 @@ const script = (name, body) => {
   fs.writeFileSync(p, `#!/usr/bin/env node\n${body}\n`, { mode: 0o755 });
   return p;
 };
+const HUNG = path.join(scratch, 'hung.pids');
 process.env.DN_BASE_DIR = path.join(scratch, 'base');
+// However long this machine takes to start a stand-in, it is waited for.
+process.env.DN_KEYCHAIN_TIMEOUT_MS = String(3600 * 1000);
 process.env.DN_MODEL_TOKEN_PATH = path.join(scratch, 'network-model-token');
 process.env.DN_SECURITY = script('security', `
 const fs = require('fs');
@@ -26,6 +29,7 @@ const a = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(CALLS)}, 'security ' + a.join(' ') + '\\n');
 const at = (f) => (a.includes(f) ? a[a.indexOf(f) + 1] : '');
 const store = JSON.parse(fs.readFileSync(${JSON.stringify(STORE)}, 'utf8'));
+if (store.hangs) { fs.appendFileSync(${JSON.stringify(HUNG)}, process.pid + '\\n'); setInterval(() => {}, 1000); return; }
 const hit = store[at('-s') + '|' + at('-a')];
 if (a[0] !== 'find-generic-password' || !a.includes('-w') || hit === undefined) process.exit(44);
 console.log(hit);`);
@@ -57,7 +61,7 @@ const calls = () => (fs.existsSync(CALLS) ? fs.readFileSync(CALLS, 'utf8').split
 const claudeCalls = () => calls().filter((c) => c.startsWith('claude '));
 
 // One machine: a Keychain, a home, an environment and a clock.
-function world({ keychain = {}, file = null, env = {}, platform = 'darwin', explicitFile = null, plan = {} } = {}) {
+function world({ keychain = {}, file = null, env = {}, platform = 'darwin', explicitFile = null, plan = {}, keychainMs } = {}) {
   fs.rmSync(CALLS, { force: true });
   fs.writeFileSync(STORE, JSON.stringify(keychain));
   fs.writeFileSync(PLAN, JSON.stringify(plan));
@@ -70,7 +74,7 @@ function world({ keychain = {}, file = null, env = {}, platform = 'darwin', expl
   if (explicitFile) fs.writeFileSync(MODEL_TOKEN_PATH, explicitFile);
   const clock = { now: T0 };
   const logged = [];
-  const llm = createLLM({ log: (...a) => logged.push(a.join(' ')), env, platform, home, user: 'op', now: () => clock.now });
+  const llm = createLLM({ log: (...a) => logged.push(a.join(' ')), env, platform, home, user: 'op', now: () => clock.now, keychainMs });
   return { llm, clock, logged, home };
 }
 const REQUEST = { authorization: `Bearer ${PLACEHOLDER}`, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'claude-code-20250219', 'content-type': 'application/json' };
@@ -257,6 +261,21 @@ try {
     assert.equal((await w.llm.authorize(REQUEST)).authorization, 'Bearer sk-ant-oat01-b');
     assert.equal(await w.llm.refused({}), false, 'a request that carried no credential refuses nothing');
     assert.equal(w.llm.state().state, 'ready');
+  });
+
+  await check('a Keychain that does not answer is given up on after its time and its helper ended, and the sources that do answer count', async () => {
+    const w = world({ keychain: { hangs: true }, env: { ANTHROPIC_API_KEY: 'sk-ant-api03-env' }, keychainMs: 200 });
+    let late;
+    const state = await Promise.race([w.llm.load(), new Promise((resolve) => { late = setTimeout(resolve, 120000, 'still waiting for the Keychain'); })]);
+    clearTimeout(late);
+    assert.deepEqual(state, { state: 'ready', detail: 'ANTHROPIC_API_KEY' });
+    const helpers = fs.readFileSync(HUNG, 'utf8').split('\n').filter(Boolean).map(Number);
+    assert.equal(helpers.length, 3, 'the network token and the login under both lookups were asked for');
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    for (const end = Date.now() + 120000; helpers.some(alive);) {
+      assert.ok(Date.now() < end, 'a helper that was given up on still runs');
+      await new Promise((resolve) => { setTimeout(resolve, 20); });
+    }
   });
 
   await check('no token ever reaches the log, whatever happens to it', async () => {

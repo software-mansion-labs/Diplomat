@@ -156,6 +156,9 @@ export const GIT_TIMEOUT_MS = num('DN_GIT_TIMEOUT_MS', 120 * 1000);
 // Executor side.
 export const SECURITY_BIN = process.env.DN_SECURITY || 'security';
 export const CLAUDE_BIN = process.env.DN_CLAUDE || 'claude';
+// How long `security` is given to answer for one Keychain item. On a machine with every
+// core taken it is slow to start at all.
+export const KEYCHAIN_TIMEOUT_MS = num('DN_KEYCHAIN_TIMEOUT_MS', 30 * 1000);
 // The model token the operator set aside for the network (`networkModelToken`): a
 // generic-password item under this service in the macOS login Keychain, a file elsewhere.
 export const MODEL_TOKEN_KEYCHAIN = process.env.DN_MODEL_TOKEN_KEYCHAIN || 'Diplomat-networkModelToken';
@@ -178,6 +181,8 @@ export const CONTAINER_USAGE_TIMEOUT_MS = num('DN_CONTAINER_USAGE_TIMEOUT_MS', 5
 // leads to (loopback under Docker Desktop, the bridge gateway on Linux).
 export const BROKER_BIND = process.env.DN_BROKER_BIND || '';
 export const BROKER_PORT = num('DN_BROKER_PORT', 0);
+// Where Linux states the range of ports it deals outgoing connections from.
+export const LOCAL_PORTS_PATH = process.env.DN_LOCAL_PORTS_PATH || '/proc/sys/net/ipv4/ip_local_port_range';
 // One forge request's body, which is one `act` request's.
 export const FORGE_BODY_CAP = 48 * 2 ** 20;
 // How long a job's forge request waits for the requester's answer.
@@ -208,7 +213,10 @@ export const JOBS_PATH = path.join(BASE_DIR, 'jobs.json');
 /// network switched off: a single read can fall in the middle of a rewrite.
 export const CONFIG_UNREADABLE_POLLS = num('DN_CONFIG_UNREADABLE_POLLS', 5);
 /// The snapshot file is rewritten at most this often.
-export const STATE_WRITE_MS = 1000;
+export const STATE_WRITE_MS = num('DN_STATE_WRITE_MS', 1000);
+/// The longest body the local socket reads, in characters. An offer's prompt and options
+/// are held to half a mebibyte by the node, and JSON may write a character as six.
+export const SOCKET_BODY_CHARS = 4 * 2 ** 20;
 /// How often the docker engine and the model credential are looked at again.
 export const EXECUTOR_CHECK_MS = num('DN_EXECUTOR_CHECK_MS', 30 * 1000);
 /// How often the jobs in this daemon's containers are held against the node's runs.
@@ -240,6 +248,10 @@ export const TRANSPORT_RETRY_MAX_MS = num('DN_TRANSPORT_RETRY_MAX_MS', 5 * 60 * 
 /// How long the installer waits for a daemon it stopped to be gone. A daemon that is
 /// switched off first tells its pools, which SWITCH_OFF_WAIT_MS bounds.
 export const STOP_WAIT_MS = num('DN_STOP_WAIT_MS', SWITCH_OFF_WAIT_MS + 30 * 1000);
+
+// How long a machine with no device to give holds back from a task on an Android
+// project, so that a machine with a device gets to it first.
+export const DEVICE_WAIT_MS = num('DN_DEVICE_WAIT_MS', 30 * 1000);
 
 // `host:port` on this machine's loopback as `{ host, port }`, or null.
 function loopback(value) {

@@ -23,7 +23,7 @@ Object.assign(process.env, {
   DN_JOB_MODEL_REQUESTS: '12', DN_JOB_MODEL_BYTES: '300000',
   GIT_CONFIG_GLOBAL: path.join(scratch, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
 });
-const { createBroker, brokerBindAddress, deniedAddress, forgeHosts, forgeSshHosts, normalHost, MODEL_HOSTS } = await import('../src/executor/broker.js');
+const { createBroker, brokerBindAddress, quietPort, deniedAddress, forgeHosts, forgeSshHosts, normalHost, MODEL_HOSTS } = await import('../src/executor/broker.js');
 const { createCA } = await import('../src/executor/ca.js');
 const { createLLM, PLACEHOLDER } = await import('../src/executor/llm.js');
 const { createMirrors } = await import('../src/executor/mirror.js');
@@ -278,6 +278,15 @@ try {
     for (const none of [null, '', 'fe80::1']) {
       await assert.rejects(brokerBindAddress({ platform: 'linux', override: '', bridgeGateway: async () => none }), /no gateway address/);
     }
+  });
+
+  await check('the port is one below the range the system deals outgoing connections from, where it states one with room below it; the system\'s pick anywhere else', () => {
+    const picked = [];
+    const pick = (from, to) => { picked.push([from, to]); return from + 7; };
+    assert.deepEqual([quietPort({ range: '32768\t60999\n', pick }), quietPort({ range: '11000 65535', pick })], [10007, 10007]);
+    assert.deepEqual(picked, [[10000, 32768], [10000, 11000]], 'from 10000 up to the first port of the range, which is not one of them');
+    for (const range of ['10999 65535', '1024\t65535\n', '', 'not a range', null]) assert.equal(quietPort({ range, pick }), 0, String(range));
+    assert.equal(picked.length, 2);
   });
 
   await check('a job cannot be admitted before the broker listens', async () => {
@@ -875,6 +884,29 @@ try {
     r = await request(job, 'api.anthropic.com', { method: 'POST', path: '/v1/messages', headers: { 'x-api-key': 'sk-the-agents-own' }, body });
     assert.equal(providerSeen.at(-1).headers['x-api-key'], 'sk-the-agents-own');
     assert.doesNotMatch(logged.join('\n'), /the-real-key/);
+  });
+
+  await check('a certificate that nears its end under a running job is replaced there: the job\'s next connection is answered with the new one', async () => {
+    let ahead = 0;
+    const aging = createBroker({ ca: createCA({ dir: path.join(scratch, 'aging-ca'), now: () => Date.now() + ahead }), llm, mirrors, onForge, lookup, connect, upstreamCa: fs.readFileSync(providerCa.certPath) });
+    port = (await aging.start()).port;
+    try {
+      const j = await aging.addJob({ runId: 'aging', pool: alpha.pool });
+      const serial = async () => {
+        const s = await secure(j, 'api.github.com');
+        const { serialNumber } = s.getPeerX509Certificate();
+        s.destroy();
+        return serialNumber;
+      };
+      const first = await serial();
+      assert.equal(await serial(), first, 'one certificate while it is good');
+      // Issued for 90 days, replaced from two weeks before its end.
+      ahead = 80 * 24 * 3600 * 1000;
+      assert.notEqual(await serial(), first);
+    } finally {
+      await aging.stop();
+      port = at.port;
+    }
   });
 
   await check('a subscriber\'s login is sent as Authorization, with no API key header beside it', async () => {

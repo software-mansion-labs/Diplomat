@@ -107,6 +107,39 @@ try {
     assert.ok(Date.parse(x509(replaced.cert).validTo) - Date.now() > 60 * 24 * 3600 * 1000);
   });
 
+  await check('a leaf is handed out until two weeks before its end and made anew from then on, and one past its end is removed from disk with its key', async () => {
+    const DAY = 24 * 3600 * 1000;
+    const home = path.join(scratch, 'ca-aging');
+    let ahead = 0;
+    const aging = createCA({ dir: home, now: () => Date.now() + ahead });
+    const authority = await aging.authority(['github.com']);
+    const leaves = path.join(home, authority.id, 'leaves');
+    const one = await authority.leaf('github.com');
+    await authority.leaf('api.github.com');
+    // Issued for 90 days.
+    ahead = 75 * DAY;
+    assert.equal(await authority.leaf('github.com'), one, 'fifteen days before its end');
+    ahead = 77 * DAY;
+    const two = await authority.leaf('github.com');
+    assert.notEqual(x509(two.cert).serialNumber, x509(one.cert).serialNumber, 'thirteen days before its end');
+    assert.equal(two.key.equals(fs.readFileSync(path.join(leaves, 'github.com.key'))), true, 'and the one on disk is the new one');
+
+    ahead = 89 * DAY;
+    assert.equal(aging.dropExpired(), 0, 'near its end is not past it');
+    assert.deepEqual(fs.readdirSync(leaves).sort(), ['api.github.com.crt', 'api.github.com.key', 'github.com.crt', 'github.com.key']);
+    // What an issue that was cut short leaves is not a certificate to judge.
+    fs.writeFileSync(path.join(leaves, 'github.com.tmp.4242.crt'), fs.readFileSync(path.join(leaves, 'github.com.crt')));
+    fs.writeFileSync(path.join(leaves, 'notes.crt'), 'not a certificate\n');
+    ahead = 91 * DAY;
+    assert.equal(aging.dropExpired(), 2);
+    assert.deepEqual(fs.readdirSync(leaves).sort(), ['github.com.tmp.4242.crt', 'notes.crt']);
+    assert.deepEqual(fs.readdirSync(path.join(home, authority.id)).sort(), ['ca.crt', 'ca.key', 'leaves', 'meta.json'], 'the authority itself has ten years');
+    // Asked for again, it is issued again.
+    const three = await authority.leaf('api.github.com');
+    assert.ok(Date.parse(x509(three.cert).validTo) - Date.now() > 89 * DAY);
+    assert.equal(fs.existsSync(path.join(leaves, 'api.github.com.crt')), true);
+  });
+
   await check('the CA is worthless for a host it was not made for', async () => {
     assert.equal(first.constrained, true, 'this openssl writes name constraints');
     await assert.rejects(first.leaf('evil.example'), /no certificate for evil\.example/);

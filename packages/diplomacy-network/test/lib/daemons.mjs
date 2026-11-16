@@ -45,6 +45,9 @@ export async function until(what, fn, ms = 180000) {
 }
 
 let checks = 0;
+// Every machine of every bench: what each daemon logged last is printed with a failure,
+// since the bench removes the logs as it closes.
+const everyMachine = [];
 /// Runs one named check and prints how it went, like every other test file here.
 export async function check(name, fn) {
   const from = Date.now();
@@ -52,6 +55,7 @@ export async function check(name, fn) {
     await fn();
   } catch (err) {
     console.log(`FAIL ${name}`);
+    for (const m of everyMachine) console.log(`--- the end of ${m.name}'s daemon.log\n${m.log().split('\n').slice(-40).join('\n')}`);
     throw err;
   }
   checks += 1;
@@ -65,7 +69,7 @@ export const passed = () => checks;
 /// device for `host:transport:` and `host:tport:serial:` and answers the request that
 /// follows with `ran <request>`, and fails anything else. `asked` is every request it
 /// was sent. `{ port, asked, close() }`.
-export async function fakeAdb({ version = 41 } = {}) {
+export async function fakeAdb({ version = 41, devices = 'emulator-5554\tdevice\n' } = {}) {
   const asked = [];
   const frame = (text) => `${text.length.toString(16).padStart(4, '0')}${text}`;
   const server = net.createServer((socket) => {
@@ -82,7 +86,7 @@ export async function fakeAdb({ version = 41 } = {}) {
         if (/^host:transport:/.test(service)) { onDevice = true; socket.write('OKAY'); continue; }
         if (/^host:tport:serial:/.test(service)) { onDevice = true; socket.write('OKAY\x01\0\0\0\0\0\0\0'); continue; }
         const payload = {
-          'host:version': version.toString(16).padStart(4, '0'), 'host:devices': 'emulator-5554\tdevice\n',
+          'host:version': version.toString(16).padStart(4, '0'), 'host:devices': devices,
           'host:devices-l': 'emulator-5554          device product:sdk transport_id:1\n', 'host:features': 'shell_v2,cmd',
           'host:host-features': 'shell_v2,cmd', 'host-serial:emulator-5554:get-state': 'device',
         }[service];
@@ -325,6 +329,7 @@ export async function createBench() {
       },
     };
     machines.push(m);
+    everyMachine.push(m);
     return m;
   }
 
@@ -350,7 +355,9 @@ export async function createBench() {
       killDaemonsUnder(DAEMON, 'DN_SCRATCH', root);
       for (const m of machines) m.killJobs();
       await forge.close();
-      fs.rmSync(root, { recursive: true, force: true });
+      // What a killed daemon had asked of the stand-in engine can still be writing here:
+      // removed again until nothing is.
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 40, retryDelay: 100 });
     },
   };
 }

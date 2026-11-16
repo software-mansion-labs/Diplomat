@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
+import { createCA } from '../src/executor/ca.js';
 import { loopFaults } from '../src/transport/loop.js';
 import { POOL, check, createBench, passed, until } from './lib/daemons.mjs';
 
@@ -111,6 +112,15 @@ try {
     // Stopped the way an applet stops it: the run is left going.
     assert.deepEqual(await b.stop(), { code: 0, signal: null });
     assert.equal(alive(agentPid), true, 'the job outlives the daemon');
+    // A newer authority for the same hosts, as one is made when the last nears its end:
+    // the job trusts the one it was started under, and is answered from that one.
+    const authorities = path.join(b.base, 'ca');
+    const [started] = fs.readdirSync(authorities);
+    const { hosts, createdAt } = JSON.parse(fs.readFileSync(path.join(authorities, started, 'meta.json'), 'utf8'));
+    const aside = path.join(bench.root, 'aside-ca');
+    const newer = await createCA({ dir: aside }).authority(hosts);
+    fs.writeFileSync(path.join(aside, newer.id, 'meta.json'), JSON.stringify({ hosts, constrained: newer.constrained, createdAt: createdAt + 3600 }));
+    fs.renameSync(path.join(aside, newer.id), path.join(authorities, newer.id));
     await b.start();
     await until('the job taken up', () => new RegExp(`${run.runId} taken up in ${run.container}`).test(b.log()));
     await b.admit(1);

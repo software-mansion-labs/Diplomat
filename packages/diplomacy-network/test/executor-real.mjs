@@ -184,10 +184,10 @@ async function launch(runId, peer, { script = null, env = {}, prompt = 'Do nothi
   const outcome = watch(job).finally(() => { release(); broker.removeJob(runId); return containers.release({ name: container.name, runId }); });
   const out = (name) => fs.readFileSync(path.join(started.dir, `out-${name}.txt`), 'utf8').trim();
   const steps = () => Object.fromEntries(fs.readFileSync(path.join(started.dir, 'out-steps.txt'), 'utf8').trim().split('\n').map((l) => [l.split(' ')[0], Number(l.split(' ')[1])]));
-  return { run: job, container, proxy, dir: started.dir, outcome, out, steps };
+  return { run: job, container, proxy, dir: started.dir, group: started.pid, outcome, out, steps };
 }
 const unreached = (out) => out.split('\n').filter((l) => !/: no \(/.test(l));
-const groupAlive = async (job) => (await docker(['exec', job.container.name, 'sh', '-c', `kill -s 0 -- -${fs.readFileSync(path.join(job.dir, 'pid'), 'utf8').trim()}`])).code === 0;
+const groupAlive = async (job) => (await docker(['exec', job.container.name, 'sh', '-c', `kill -s 0 -- -${job.group}`])).code === 0;
 
 let tag = '';
 try {
@@ -472,7 +472,7 @@ exit 0
     const sleeping = async (n) => Number(await sh('exec', stays.container.name, 'sh', '-c', `pgrep -c -f "sleep 60[${n}]" || true`));
     assert.deepEqual([await sleeping(1), await sleeping(2)], [1, 1]);
 
-    const stopped = await stopJob(goes.run);
+    const stopped = await stopJob(goes.run, containers);
     assert.equal(stopped.state, 'stopped');
     assert.equal(await groupAlive(goes), false);
     assert.equal(await sleeping(1), 0, 'its background child went with it');
@@ -494,7 +494,7 @@ exit 0
       // While it runs: what every process in the container holds in its environment.
       await until('the agent is up', () => fs.existsSync(path.join(job.dir, 'log.jsonl')), 120000);
       const environ = await sh('exec', job.container.name, 'sh', '-c', 'cat /proc/[0-9]*/environ 2>/dev/null | tr "\\0" "\\n" | sort -u');
-      const guard = setTimeout(() => stopJob(job.run), 300000);
+      const guard = setTimeout(() => stopJob(job.run, containers), 300000);
       const outcome = await job.outcome;
       clearTimeout(guard);
       assert.equal(outcome.ok, true, JSON.stringify(outcome));

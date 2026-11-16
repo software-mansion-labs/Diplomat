@@ -7,6 +7,7 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pidAlive } from '../../daemon-core/src/fsio.js';
@@ -44,6 +45,28 @@ try {
     const count = (what) => a.log().split(what).length - 1;
     assert.deepEqual([count(`daemon listening ${a.socket} pid ${a.pid}`), count('transport: ready'), count('broker listening')], [1, 2, 2], 'one node, one transport and one broker for each of the two daemons');
     await a.kill();
+  });
+
+  await check('the broker listens below the ports the system deals outgoing connections, and waits for a port the operator named while something else has it', async () => {
+    const range = path.join(bench.root, 'local-ports');
+    fs.writeFileSync(range, '20000\t60999\n');
+    const listening = (m) => until(`${m.name}'s broker`, () => Number(/broker listening on 127\.0\.0\.1:(\d+)/.exec(m.log())?.[1]) || null);
+    const quiet = await bench.machine('quiet', { env: { DN_LOCAL_PORTS_PATH: range } }).start();
+    const port = await listening(quiet);
+    assert.ok(port >= 10000 && port < 20000, String(port));
+    await quiet.kill();
+
+    const squatter = net.createServer((socket) => socket.destroy());
+    await new Promise((resolve, reject) => { squatter.once('error', reject); squatter.listen(0, '127.0.0.1', resolve); });
+    const named = squatter.address().port;
+    const RETRY_MS = 300;
+    const fixed = await bench.machine('fixed', { env: { DN_BROKER_PORT: String(named), DN_EXECUTOR_RETRY_MS: String(RETRY_MS) } }).start();
+    const refusals = () => [...fixed.log().matchAll(/^\[(\S+)\] the broker is not listening: listen EADDRINUSE/gm)].map((m) => Date.parse(m[1]));
+    const times = await until('the port asked for three times', () => (refusals().length >= 3 ? refusals() : null));
+    assert.ok(times.slice(1).every((at, i) => at - times[i] >= RETRY_MS), `asked again no sooner than every ${RETRY_MS} ms: ${times.map((at) => at - times[0])}`);
+    await new Promise((resolve) => squatter.close(resolve));
+    assert.equal(await listening(fixed), named);
+    await fixed.kill();
   });
 
   await check('the socket answers, and every route works, while the transport is still coming up', async () => {
@@ -200,6 +223,38 @@ try {
     assert.deepEqual((await a.state()).offers, [], 'nothing refused left a trace');
     assert.deepEqual((await a.call('GET', '/health')).body, { ok: true, pid: a.pid });
     assert.doesNotMatch(a.log(), /failed:/, 'a refusal is no fault, and is not logged as one');
+
+    // How long a task may be is one limit, the node's, on the task as it is sent: half a
+    // mebibyte of prompt and options. It is met to the character, and past it the
+    // answer is the same sentence however long the prompt.
+    const sized = async (chars) => {
+      const answer = await a.call('POST', '/offer', offerBody('pr-9', { prompt: 'p'.repeat(chars) }));
+      if (answer.status === 200) await a.ok('/withdraw', { taskId: answer.body.taskId });
+      return answer;
+    };
+    const tooLong = { error: 'The task cannot be sent to another machine: its prompt and options are too long.' };
+    let [fits, over] = [2 ** 19 - 1024, 2 ** 19];
+    assert.equal((await sized(fits)).status, 200);
+    while (over - fits > 1) {
+      const mid = Math.floor((fits + over) / 2);
+      if ((await sized(mid)).status === 200) fits = mid;
+      else over = mid;
+    }
+    for (const chars of [over, 2 ** 19, 10 ** 6 + 1, 2 ** 20, 2 ** 20 + 1, 3 * 2 ** 20]) {
+      const answer = await sized(chars);
+      assert.deepEqual([chars, answer.status, answer.body], [chars, 409, tooLong]);
+    }
+    // The socket reads a body of 4 MiB of characters, which holds any task the node
+    // takes however its JSON is written; a longer one is read to its end and answered.
+    const body = (chars) => {
+      const head = JSON.stringify(offerBody('pr-9', { prompt: '' })).slice(0, -2);
+      return `${head}${'p'.repeat(chars - head.length - 2)}"}`;
+    };
+    assert.deepEqual(await a.call('POST', '/offer', undefined, { raw: body(4 * 2 ** 20) }), { status: 409, body: tooLong });
+    assert.deepEqual(await a.call('POST', '/offer', undefined, { raw: body(4 * 2 ** 20 + 1) }), { status: 413, body: { error: 'The request body is longer than 4194304 characters.' } });
+    assert.deepEqual(await a.call('POST', '/offer', undefined, { raw: body(6 * 2 ** 20) }), { status: 413, body: { error: 'The request body is longer than 4194304 characters.' } });
+    assert.deepEqual((await a.call('GET', '/health')).body, { ok: true, pid: a.pid });
+    assert.doesNotMatch(a.log(), /failed:/);
 
     // A fault of the daemon's own is a 500 with the reason, a line in the log, and no crash.
     fs.chmodSync(path.join(a.base, 'pools'), 0o500);

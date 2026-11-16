@@ -34,7 +34,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { CLAUDE_BIN, MODEL_TOKEN_KEYCHAIN, MODEL_TOKEN_PATH, SECURITY_BIN } from '../paths.js';
+import { CLAUDE_BIN, KEYCHAIN_TIMEOUT_MS, MODEL_TOKEN_KEYCHAIN, MODEL_TOKEN_PATH, SECURITY_BIN } from '../paths.js';
 
 /// What a container holds in place of every credential.
 export const PLACEHOLDER = 'dn-placeholder';
@@ -78,9 +78,10 @@ function loginIn(raw, where) {
 /// environment carries so its client sends the placeholder the right way. `authorize(headers)`
 /// resolves to the headers with the real credential in place of the placeholder and
 /// rejects when there is none. `refused(headers)` tells it the provider answered those
-/// headers with 401, and resolves to whether a different credential is on hand.
+/// headers with 401, and resolves to whether a different credential is on hand. A
+/// Keychain item that is not answered for within `keychainMs` counts as not there.
 export function createLLM({ log = () => {}, env = process.env, platform = process.platform, home = os.homedir(),
-  user = env.USER || os.userInfo().username, now = Date.now } = {}) {
+  user = env.USER || os.userInfo().username, now = Date.now, keychainMs = KEYCHAIN_TIMEOUT_MS } = {}) {
   let current = null;
   let state = { state: 'missing', detail: 'not read yet' };
   let lastRead = 0;
@@ -89,7 +90,7 @@ export function createLLM({ log = () => {}, env = process.env, platform = proces
   let reading = null;
   const refusedAt = new Map(); // token -> when
 
-  const keychain = (scope, service) => exec(SECURITY_BIN, ['find-generic-password', ...scope, '-s', service, '-w'], { timeout: 10000 });
+  const keychain = (scope, service) => exec(SECURITY_BIN, ['find-generic-password', ...scope, '-s', service, '-w'], { timeout: keychainMs });
 
   async function read() {
     const found = [];

@@ -25,6 +25,7 @@
 
 import crypto from 'node:crypto';
 import dns from 'node:dns';
+import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
 import os from 'node:os';
@@ -34,7 +35,7 @@ import { execFile, spawn } from 'node:child_process';
 import {
   BROKER_BIND, BROKER_PORT, CONTAINER_HOST, DOCKER_BIN, FORGE_ANSWER_TIMEOUT_MS, FORGE_BODY_CAP, FORGE_RESPONSE_MAX_BYTES,
   GIT_BIN, JOB_BODY_MS, JOB_BUFFER_BYTES, JOB_CONNECTIONS, JOB_FORGE_REQUESTS, JOB_HEADER_MS, JOB_IDLE_MS,
-  JOB_MODEL_BYTES, JOB_MODEL_REQUESTS, RELAY_HOST,
+  JOB_MODEL_BYTES, JOB_MODEL_REQUESTS, LOCAL_PORTS_PATH, RELAY_HOST,
 } from '../paths.js';
 import { carriesPlaceholder } from './llm.js';
 
@@ -185,6 +186,23 @@ export async function brokerBindAddress({ platform = process.platform, override 
   return gateway;
 }
 
+// Below this the ports with a service of their own sit close together.
+const QUIET_PORTS_FROM = 10000;
+
+function localPortRange() {
+  try { return fs.readFileSync(LOCAL_PORTS_PATH, 'utf8'); } catch { return null; }
+}
+
+/// A port for a listener that has to be had again after a restart: one no outgoing
+/// connection is dealt, or 0 for the system's pick. Linux deals outgoing connections
+/// the ports of one range, and a port so dealt cannot be listened on while its
+/// connection lasts, nor for a minute after. `range` is that range as the kernel states
+/// it ("first last"), null where the system states none; the port is below its first.
+export function quietPort({ range = localPortRange(), pick = crypto.randomInt } = {}) {
+  const first = Number(String(range).trim().split(/\s+/)[0]);
+  return first >= QUIET_PORTS_FROM + 1000 ? pick(QUIET_PORTS_FROM, first) : 0;
+}
+
 function dockerBridgeGateway() {
   return new Promise((resolve) => {
     execFile(DOCKER_BIN, ['network', 'inspect', 'bridge', '--format', '{{range .IPAM.Config}}{{.Gateway}} {{end}}'],
@@ -273,7 +291,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   };
   const jobs = new Map(); // runId -> job
   const tokens = new Map(); // token -> job
-  const contexts = new Map(); // "<authority id>/<host>" -> Promise<SecureContext>
+  const contexts = new WeakMap(); // a leaf as its authority hands it out -> SecureContext
   const spendHeard = new Set();
   let listening = null; // { host, port }
 
@@ -710,14 +728,12 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
 
   // ---- the requests inside a terminated connection
 
-  function contextFor(job, host) {
-    const key = `${job.authority.id}/${host}`;
-    if (!contexts.has(key)) {
-      const made = job.authority.leaf(host).then(({ key: k, cert }) => tls.createSecureContext({ key: k, cert }));
-      made.catch(() => contexts.delete(key));
-      contexts.set(key, made);
-    }
-    return contexts.get(key);
+  // By the leaf the job's authority has for the host now: one near its end is replaced
+  // there, under a job that runs on.
+  async function contextFor(job, host) {
+    const leaf = await job.authority.leaf(host);
+    if (!contexts.has(leaf)) contexts.set(leaf, tls.createSecureContext({ key: leaf.key, cert: leaf.cert }));
+    return contexts.get(leaf);
   }
 
   async function intercept(job, host, socket, head) {
@@ -1002,8 +1018,9 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   }
 
   /// Starts listening, on `port` when given: the port the jobs of an earlier daemon were
-  /// told. Resolves to `{ host, port }`.
-  async function start({ port = BROKER_PORT } = {}) {
+  /// told. Otherwise on the port the operator named, or one the next daemon can have
+  /// again. Resolves to `{ host, port }`.
+  async function start({ port = BROKER_PORT || quietPort() } = {}) {
     const host = await brokerBindAddress();
     await new Promise((resolve, reject) => {
       const failed = (err) => { outer.off('listening', up); reject(err); };

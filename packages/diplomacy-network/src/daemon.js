@@ -21,14 +21,14 @@ import { createLog } from '../../daemon-core/src/log.js';
 import { NO_ROUTE, jsonServer, listenSingleton, socketHealthy } from '../../daemon-core/src/serve.js';
 import { b64u } from './core/canon.js';
 import { identityFromSeed } from './core/identity.js';
-import { adbAnswers, createAdbFilter } from './executor/adb.js';
+import { adbDevices, createAdbFilter } from './executor/adb.js';
 import { createBroker } from './executor/broker.js';
 import { createCA } from './executor/ca.js';
-import { clearDocker } from './executor/clear.js';
 import { createContainers } from './executor/container.js';
 import { attachJob, forgetRuns, readOutcome, startJob, stopJob, unended, watch } from './executor/job.js';
 import { createLLM } from './executor/llm.js';
 import { createMirrors } from './executor/mirror.js';
+import { createWeighing } from './executor/weigh.js';
 import { createNode } from './node/node.js';
 import { createStore } from './node/store.js';
 import { authorize } from './requester/authorize.js';
@@ -36,9 +36,9 @@ import { createForge } from './requester/forge.js';
 import { rulesFor } from './requester/rules.js';
 import { createTransport } from './transport/index.js';
 import {
-  ADB_SERVER, BASE_DIR, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, DISCOVERY_PATH, EXECUTOR_CHECK_MS,
+  ADB_SERVER, BASE_DIR, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, CONTAINER_DISK_BYTES, DISCOVERY_PATH, EXECUTOR_CHECK_MS,
   EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GIT_BIN, HOURS_FLOOR, JOBS_PATH, JOBS_WRITE_MS, LOG_PATH,
-  MIRROR_KEEP_MS, RECONCILE_MS, RUN_KEEP_MS, SOCKET_PATH, STATE_PATH, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS,
+  MIRROR_KEEP_MS, RECONCILE_MS, RUN_KEEP_MS, SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS,
   TEST_FAULTS_PATH, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS,
 } from './paths.js';
 
@@ -197,7 +197,7 @@ const mirrors = createMirrors({ log });
 const broker = createBroker({ log, ca, llm, mirrors, onForge: (job, request) => node.actFor(job.runId)(request) });
 const containers = createContainers({ log, broker: () => broker.address() });
 
-const jobs = new Map(); // run id -> { container, pool, peer, token, generation, pid, forwards, release, stopping, ended }
+const jobs = new Map(); // run id -> { container, pool, peer, token, generation, pid, forwards, release, stopping, ended, verdict, gone }
 // Until the jobs an earlier daemon left were looked at, a run this daemon holds no job
 // for may still be running: nothing can be said of it, and no job is started, since a
 // container this daemon has counted no job in is restarted before its first.
@@ -211,7 +211,7 @@ let report = () => {};
 let savedJobs = '';
 const saveJobs = () => {
   const kept = Object.fromEntries([...jobs].map(([runId, { container, pool, peer, token, generation, pid, forwards }]) => [
-    runId, { container, pool, peer, token, generation, pid, forwards, spent: broker.spent?.(runId) ?? null },
+    runId, { container, pool, peer, token, generation, pid, forwards, spent: broker.spent(runId) },
   ]));
   const next = { port: broker.address()?.port ?? 0, jobs: kept };
   if (JSON.stringify(next) === savedJobs) return;
@@ -231,18 +231,20 @@ function poolOf(link) {
 
 // The adb server as jobs reach it: through the filter, never at its own address.
 const adb = createAdbFilter({ target: ADB_SERVER, log });
-let adbUp = false;
+// The devices the adb server lists as ready while jobs are given this machine's
+// devices; null while they are not, or no adb server answers.
+let attached = null;
 
 async function lookForAdb() {
-  adbUp = devicesOn && await adbAnswers(ADB_SERVER);
-  return adbUp;
+  attached = devicesOn ? await adbDevices(ADB_SERVER) : null;
+  return attached !== null;
 }
 
 // The snapshot's `devices`: `off` until the operator opts in, then `ready` while an adb
 // server answers and `none` while none does.
 function devicesState() {
   if (!devicesOn) return { state: 'off', detail: '' };
-  if (adbUp) return { state: 'ready', detail: '' };
+  if (attached !== null) return { state: 'ready', detail: '' };
   return { state: 'none', detail: ADB_SERVER ? `no adb server answers at ${ADB_SERVER.host}:${ADB_SERVER.port}` : 'DN_ADB_SERVER names no address on this machine' };
 }
 
@@ -260,14 +262,17 @@ async function openForwards(runId, only = null) {
 // The job is watched to its end; the node hears how it ended before anything of it is
 // taken down, so it never sees a job that is neither alive nor reported.
 function follow(runId) {
-  watch({ runId })
+  jobs.get(runId).gone = watch({ runId })
     .catch((err) => ({ ok: false, summary: `the run could not be watched: ${err?.message ?? err}` }))
     .then((outcome) => settle(runId, outcome));
 }
 
-async function settle(runId, outcome) {
+async function settle(runId, ended) {
   const job = jobs.get(runId);
   if (!job) return;
+  // A job this machine ended for a fault of its own making is a failed attempt, in the
+  // machine's words.
+  const outcome = job.verdict ? { ...ended, ok: false, state: 'failed', summary: job.verdict } : ended;
   log(`${runId} ended: ${outcome.state ?? 'failed'}${outcome.ok ? '' : ` (${outcome.summary})`}`);
   job.ended = true;
   report(runId, outcome);
@@ -332,7 +337,7 @@ function stopRun(runId, reason) {
     while (jobs.has(runId)) {
       try {
         // Null for a job that was never started or has ended: `settle` clears it away.
-        if ((await stopJob({ runId })) === null) return;
+        if ((await stopJob({ runId }, containers)) === null) return;
       } catch (err) {
         log(`${runId} could not be stopped: ${err?.message ?? err}`);
         await delay(EXECUTOR_RETRY_MS);
@@ -346,11 +351,15 @@ const executor = {
   // Only what can run right now is claimed: a claim this machine cannot serve keeps the
   // task from every machine that could.
   wouldTake: () => !ending && containers.dockerState().state === 'ready' && llm.state().state === 'ready',
+  // A task on an Android project is left a while to a machine with a device to give.
+  weigh: createWeighing({ checkoutOf: (pool) => links.get(pool)?.path ?? null, hasDevice: () => (attached?.length ?? 0) > 0 }),
   start: startRun,
   stop: stopRun,
   alive: (runId) => (jobs.has(runId) ? true : takenUp ? false : null),
   onEnd(fn) { report = fn; },
 };
+
+const OUTGREW = 'the container outgrew its disk allowance';
 
 // A job this daemon can no longer serve is given back: the node stops it for that
 // reason and releases its claim, which costs its requester no attempt. One the node
@@ -374,7 +383,14 @@ async function takeUp(kept) {
       }
       const container = await containers.adopt({ pool: was.pool, peer: was.peer, runId });
       if (!container) continue;
-      if (!attachJob({ runId, container, pid: was.pid || null })) {
+      if (!was.pid) {
+        // Its process group was never heard: nothing to watch it by, so it is ended.
+        log(`${runId} was being started when the daemon before this one went: stopping what there is of it in ${container.name}`);
+        if (attachJob({ runId, container })) await stopJob({ runId }, containers);
+        await containers.release({ name: container.name, runId });
+        continue;
+      }
+      if (!attachJob({ runId, container, pid: was.pid })) {
         await containers.release({ name: container.name, runId });
         continue;
       }
@@ -412,7 +428,7 @@ function reconcile() {
   for (const { runId, container } of unended()) {
     if (jobs.has(runId) || !attachJob({ runId, container })) continue;
     log(`stopping ${runId} in ${container.name}: this daemon holds no record of the job`);
-    stopJob({ runId }).catch((err) => log(`${runId} could not be stopped: ${err?.message ?? err}`));
+    stopJob({ runId }, containers).catch((err) => log(`${runId} could not be stopped: ${err?.message ?? err}`));
   }
 }
 
@@ -420,14 +436,32 @@ async function checkExecutor() {
   await Promise.all([containers.ensureImage().catch(() => {}), llm.load().catch(() => {}), lookForAdb()]);
 }
 
-// What is not kept for ever, looked at every SWEEP_MS, each on its own: a container no
-// job has used for CONTAINER_IDLE_MS, every certificate authority but the newest (a job
-// answers from the one it was started under), the directory and the outcome of a run
-// RUN_KEEP_MS after it ended, and the mirror of a pool that has not been linked, or has
-// been left, for MIRROR_KEEP_MS.
+// A container that holds more of this machine's disk than a container gets goes, and its
+// jobs with it: each is a failed attempt, since whichever of them filled it would fill
+// the next one too. One with a job still being started is looked at again next time.
+async function evict({ name, bytes, jobs: counted }) {
+  const held = counted.map((runId) => jobs.get(runId));
+  if (held.some((job) => !job?.gone)) return;
+  log(`${name} holds ${bytes} bytes of this machine's disk, over the ${CONTAINER_DISK_BYTES} a container gets: stopping its ${counted.length} job(s) and removing it`);
+  counted.forEach((runId, i) => {
+    held[i].verdict = OUTGREW;
+    stopRun(runId, OUTGREW);
+  });
+  await Promise.all(held.map((job) => job.gone));
+  await containers.discard(name);
+}
+
+// What is not kept for ever, looked at every SWEEP_MS, each on its own: a container
+// over its disk allowance, one no job has used for CONTAINER_IDLE_MS, every certificate
+// authority but the one each set of hosts is given next (a job is answered from the one
+// it was started under, so none goes while a job runs), a leaf certificate past its end,
+// the directory and the outcome of a run RUN_KEEP_MS after it ended, and the mirror of a
+// pool that has not been linked, or has been left, for MIRROR_KEEP_MS.
 const upkeep = [
+  ['containers over their disk allowance', async () => { for (const over of await containers.overQuota()) await evict(over); }],
   ['idle containers', () => containers.sweep()],
   ['old certificate authorities', () => { if (jobs.size === 0) ca.prune(); }],
+  ['certificates past their end', () => { ca.dropExpired(); }],
   ['ended runs', () => {
     const gone = forgetRuns({ olderThanMs: RUN_KEEP_MS });
     if (gone.length > 0) log(`forgot ${gone.length} run(s) that ended over ${Math.round(RUN_KEEP_MS / 3600000)} h ago`);
@@ -454,12 +488,13 @@ async function startExecutor() {
   const kept = readJson(JOBS_PATH) ?? {};
   const leftJobs = Object.keys(kept.jobs ?? {}).length > 0;
   while (!broker.address() && !ending) {
+    const told = leftJobs && kept.port > 0;
     try {
-      await broker.start(leftJobs && kept.port > 0 ? { port: kept.port } : {});
+      await broker.start(told ? { port: kept.port } : {});
     } catch (err) {
       log(`the broker is not listening: ${err?.message ?? err}`);
-      // Somebody else has the port the jobs were told: any port serves the next ones.
-      if (err?.code === 'EADDRINUSE') kept.port = 0;
+      // Somebody else has the port the jobs were told: another serves the next ones.
+      if (err?.code === 'EADDRINUSE' && told) kept.port = 0;
       else await delay(EXECUTOR_RETRY_MS);
     }
   }
@@ -545,7 +580,8 @@ const SHAPES = {
   pool: { id: POOL, path: text(4096), forge: [(v) => v === 'github' || v === 'gitlab', '"github" or "gitlab"'], identity: text(255, 0) },
   admit: { slots: whole(0, 1000), reason: optional(text(200, 0)) },
   offer: {
-    pool: POOL, kind: text(64), item: text(200), title: text(1000, 0), prompt: text(2 ** 20, 0), options: optional(plainObject),
+    // How long a prompt may be is the node's to say: it measures the task as it is sent.
+    pool: POOL, kind: text(64), item: text(200), title: text(1000, 0), prompt: [(v) => typeof v === 'string', 'text'], options: optional(plainObject),
     base: optional(text(300)), now: optional(flag),
   },
   withdraw: { taskId: text(600), reason: optional(text(1000, 0)) },
@@ -630,7 +666,7 @@ const server = jsonServer(async (route, body) => {
     if (!(err instanceof Refusal)) log(`${route} failed: ${err?.stack ?? err}`);
     throw err;
   }
-}, { notJson: 'The request body is not JSON.' });
+}, { notJson: 'The request body is not JSON.', maxBody: SOCKET_BODY_CHARS, tooLarge: `The request body is longer than ${SOCKET_BODY_CHARS} characters.` });
 
 // ---- the process
 
@@ -662,8 +698,7 @@ async function end({ off, why }) {
       const gone = (async () => { while (jobs.size > 0) await delay(100); })();
       await Promise.race([gone, delay(SWITCH_OFF_WAIT_MS)]);
       // A job that outlived its stop goes with its container here.
-      const cleared = await Promise.race([clearDocker(), delay(SWITCH_OFF_WAIT_MS)]);
-      if (cleared > 0) log(`removed ${cleared} container(s), network(s) and volume(s) of this daemon`);
+      await Promise.race([containers.removeAll(), delay(SWITCH_OFF_WAIT_MS)]);
     } else {
       await node?.stop();
     }

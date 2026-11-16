@@ -6,14 +6,18 @@
 // Run: node test/executor-adb.mjs
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
-import { adbAnswers, adbRequest, createAdbFilter } from '../src/executor/adb.js';
+import { adbDevices, adbRequest, createAdbFilter } from '../src/executor/adb.js';
 import { fakeAdb } from './lib/daemons.mjs';
 
 let checks = 0;
 const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };
 const frame = (text) => `${text.length.toString(16).padStart(4, '0')}${text}`;
+const KILL_WHY = ' (adb asks for this when its version is not the server\'s: this machine\'s adb server is not replaced, so use an adb of the server\'s version)';
 
 const server = await fakeAdb();
 const logged = [];
@@ -130,11 +134,11 @@ try {
     for (const service of REFUSED) {
       const said = await ask(service);
       const shown = service.slice(0, 60);
-      assert.equal(said, `FAIL${frame(`not offered to a task on this machine: ${shown}`)}`, service);
+      assert.equal(said, `FAIL${frame(`not offered to a task on this machine: ${shown}${service === 'host:kill' ? KILL_WHY : ''}`)}`, service);
       assert.equal(adbRequest(service), null, service);
     }
     assert.equal(await talk(['zzzzhost:version']), `FAIL${frame('not offered to a task on this machine: a request that is not in adb\'s framing')}`);
-    assert.equal(await talk([`${frame('host:kill')}${frame('host:version')}`]), `FAIL${frame('not offered to a task on this machine: host:kill')}`);
+    assert.equal(await talk([`${frame('host:kill')}${frame('host:version')}`]), `FAIL${frame(`not offered to a task on this machine: host:kill${KILL_WHY}`)}`);
     // What a job named is cut short and made printable before it is logged or said.
     const long = await ask(`host:connect:${'x'.repeat(200)}\n\x1b[2J`);
     assert.equal(long, `FAIL${frame(`not offered to a task on this machine: host:connect:${'x'.repeat(47)}`)}`);
@@ -144,16 +148,22 @@ try {
     assert.deepEqual(['host:devices', 'host:transport:emulator-5554', 'host:tport:serial:emulator-5554'].map(adbRequest), ['query', 'device', 'device']);
   });
 
-  await check('an adb server is one that answers in adb\'s words', async () => {
-    const other = net.createServer((socket) => socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'));
-    await new Promise((resolve) => other.listen(0, '127.0.0.1', resolve));
+  await check('an adb server is one that answers in adb\'s words, and its devices are the ones it lists as ready', async () => {
+    const said = async (answer) => {
+      const listener = net.createServer((socket) => socket.end(answer));
+      await new Promise((resolve) => listener.listen(0, '127.0.0.1', resolve));
+      const heard = await adbDevices({ host: '127.0.0.1', port: listener.address().port });
+      listener.close();
+      return heard;
+    };
     const silent = net.createServer(() => {});
     await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve));
     assert.deepEqual(await Promise.all([
-      adbAnswers({ host: '127.0.0.1', port: server.port }), adbAnswers(at), adbAnswers({ host: '127.0.0.1', port: other.address().port }),
-      adbAnswers({ host: '127.0.0.1', port: 1 }), adbAnswers(null), adbAnswers({ host: '127.0.0.1', port: silent.address().port }),
-    ]), [true, true, false, false, false, false]);
-    other.close();
+      adbDevices({ host: '127.0.0.1', port: server.port }), adbDevices(at), said('HTTP/1.1 400 Bad Request\r\n\r\n'), said('OKAYzzzz'), said('OKAY00'), said(`FAIL${frame('no')}`),
+      adbDevices({ host: '127.0.0.1', port: 1 }), adbDevices(null), adbDevices({ host: '127.0.0.1', port: silent.address().port }),
+    ]), [['emulator-5554'], ['emulator-5554'], null, null, null, null, null, null, null]);
+    assert.deepEqual(await said(`OKAY${frame('')}`), [], 'a server with nothing attached');
+    assert.deepEqual(await said(`OKAY${frame('R58M\tunauthorized\nemulator-5556\toffline\n[fe80::1]:5555\tdevice\nemulator-5554\tdevice\n')}`), ['[fe80::1]:5555', 'emulator-5554'], 'one that is not ready is no device to use');
     silent.close();
   });
 
@@ -183,6 +193,28 @@ try {
       assert.ok(same.asked.includes('host:devices'));
       await own.stop();
       await same.close();
+    });
+
+    await check('the real adb client of another version than the server is told why the server is not stopped for it, and nothing is stopped or left running', async () => {
+      const other = await fakeAdb({ version: client + 1 });
+      const own = createAdbFilter({ target: { host: '127.0.0.1', port: other.port } });
+      const { port } = await own.start();
+      // The client then tries to start a server of its own at the same address, which the
+      // filter holds, and writes its log where TMPDIR says.
+      const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-adb-'));
+      const r = await new Promise((resolve) => {
+        execFile('adb', ['-H', '127.0.0.1', '-P', String(port), 'devices'], { encoding: 'utf8', timeout: 120000, env: { ...process.env, TMPDIR: scratch } },
+          (err, stdout, stderr) => resolve({ code: err ? err.code ?? 1 : 0, said: `${stdout}${stderr}` }));
+      });
+      assert.notEqual(r.code, 0, r.said);
+      assert.ok(r.said.includes(`not offered to a task on this machine: host:kill${KILL_WHY}`), r.said);
+      assert.deepEqual([...new Set(other.asked)], ['host:version'], 'the server was asked its version and nothing else');
+      const check = net.connect({ host: '127.0.0.1', port });
+      await new Promise((resolve, reject) => { check.on('connect', resolve); check.on('error', reject); });
+      check.destroy();
+      await own.stop();
+      await other.close();
+      fs.rmSync(scratch, { recursive: true, force: true });
     });
   }
 
