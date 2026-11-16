@@ -174,12 +174,12 @@ export function createOffers(host) {
     end(host.pools.get(O.pool), O, 'cancelled', reason);
   }
 
-  /// This host gives the offer of `taskId` it made at `at` to a claim: how many times it
-  /// gave that offer away before, the number that orders the claims it backs. Null when
+  /// This host gives its open offer of `taskId` to a claim: how many times it has given
+  /// that offer away with this one, the number that orders the claims it backs. Null when
   /// it has no such offer open. The count is on disk before anyone sees it.
-  function nextGen(taskId, at) {
+  function nextGen(taskId) {
     const O = offers[taskId];
-    if (!O || !OPEN.includes(O.state) || O.createdAt !== at) return null;
+    if (!O || !OPEN.includes(O.state)) return null;
     O.gen += 1;
     save();
     return O.gen;
@@ -331,11 +331,11 @@ export function createOffers(host) {
       O.watch = null;
       const held = P.pool.get(claimKey(taskId, watched.executor));
       const same = held?.round === watched.round;
-      // The executor never said how the run ended and its claim does not say it ended:
-      // the lease lapsed, or the run outlived the hours this host gave it. A claim its
-      // executor ended without a word of this host's job counts for nothing: the offer is
-      // back in the pool as it was.
-      if (now >= watched.lapses && !(same && held.state !== 'held') && !O.reported.includes(watched.round)) {
+      // The hold ran out with no word of how the run ended: the lease lapsed, or the run
+      // outlived the hours this host gave it. A claim that let go of the offer before
+      // that - its executor ended it without a word of this host's job - counts for
+      // nothing: the offer is back in the pool as it was.
+      if (now >= watched.lapses && !O.reported.includes(watched.round)) {
         const going = same && isActive(held, now);
         fail(P, O, watched.round, going ? 'not finished in the hours this machine gives it' : 'the machine running it stopped answering');
         if (!OPEN.includes(O.state)) return undefined;

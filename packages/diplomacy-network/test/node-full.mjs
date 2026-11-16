@@ -46,8 +46,9 @@ await check('a host joins a pool that is as full as a pool gets and holds what e
   assert.ok(whole > DEFAULT_LIMIT, `the whole index, some ${whole} bytes, is more than one answer may be`);
 
   const answers = { hello: [], sync: [], pull: [] };
-  let pages = 0;
+  let [pages, pushed] = [0, 0];
   w.net.tap(({ to, kind, body }) => {
+    if (kind === 'push') pushed += JSON.parse(body.toString('utf8')).body.records.length;
     if (to !== 'a' || !Object.hasOwn(answers, kind)) return undefined;
     pages += kind === 'sync' && JSON.parse(body.toString('utf8')).body.after ? 1 : 0;
     return (out) => answers[kind].push(typeof out === 'string' ? out : out.length);
@@ -69,8 +70,11 @@ await check('a host joins a pool that is as full as a pool gets and holds what e
   await w.run(120);
   assert.deepEqual([w.task(b, one.taskId), w.task(a, other.taskId)], [null, null]);
   w.net.heal();
+  pushed = 0;
   await w.agreed([a, b], 30 * 60 * 1000);
   assert.deepEqual([w.task(b, one.taskId).offeredBy, w.task(a, other.taskId).offeredBy, w.records(a).length], [[a.pk], [b.pk], full + 3]);
+  // A page says what its host lacks in the range it covers, and no more is sent for it.
+  assert.ok(pushed <= 8, `${pushed} records were pushed for the two that differed`);
   assert.deepEqual([...new Set([...size('hello'), ...size('sync')])], ['a page']);
   assert.deepEqual([...a.log, ...b.log].filter((line) => /could not be served|step failed|failed:/.test(line)), []);
 });

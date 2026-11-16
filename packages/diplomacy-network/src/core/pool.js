@@ -326,13 +326,13 @@ export class Pool {
   /// `claim` is the claim that holds that offer at `now`, or null - of the claims its host
   /// backs for the offer it made at `createdAt`, the one the host gave the offer to last,
   /// while that claim is held, its executor a member, and its lease and the offer's hours
-  /// last. A claim the host gave the offer to before never holds it again. An offer is
-  /// its host's alone: no other host's record ends it, and no claim its host did not back
-  /// holds it. `offeredBy` lists the hosts of the open offers and `free` those whose offer
-  /// no claim holds; `hours` is the longest of the open offers and `createdAt` the
-  /// earliest. `state` is `claimed` while a claim holds an open offer, `available` while
-  /// offers are open and none is held, else `done` when an offer is done, else
-  /// `cancelled`; `claim` is the claim that holds the most of the open offers, or null.
+  /// last; when it does not, none holds the offer. An offer is its host's alone: no other
+  /// host's record ends it, and no claim its host did not back holds it. `offeredBy`
+  /// lists the hosts of the open offers and `free` those whose offer no claim holds;
+  /// `hours` is the longest of the open offers and `createdAt` the earliest. `state` is
+  /// `claimed` while a claim holds an open offer, `available` while offers are open and
+  /// none is held, else `done` when an offer is done, else `cancelled`; `claim` is the
+  /// claim that holds the most of the open offers, or null.
   tasks(now) {
     const settled = this.#at(now);
     if (this.#tasks?.settled === settled && this.#tasks.now === now) return this.#tasks.rows;

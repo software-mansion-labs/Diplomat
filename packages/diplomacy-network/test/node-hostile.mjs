@@ -9,7 +9,8 @@ import { buildClaim, buildGrant } from '../src/core/claims.js';
 import { KINDS, buildResponse, requestDigest } from '../src/core/envelope.js';
 import { sign, verify } from '../src/core/identity.js';
 import { buildPing } from '../src/core/lease.js';
-import { buildTaskId, offerRecord } from '../src/core/records.js';
+import { buildCapability } from '../src/core/capability.js';
+import { backers, buildTaskId, offerRecord } from '../src/core/records.js';
 import { POW } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
@@ -224,4 +225,87 @@ await check('a member whose index has one page after another is asked for so man
   await w.net.until(() => chains.length >= 2, { what: 'a second sync begun' });
   assert.equal(chains[0], 128);
   assert.deepEqual(a.log.filter((line) => /could not be served|step failed|failed:/.test(line)), []);
+});
+
+// Makes a member with no node answer as one that agrees would: it confirms every state
+// and grants every lock - backing the claim with what `backing()` gives, when it gives
+// anything - and says of the rest what `says(kind, body, from)` returns.
+function serving(evil, { backing = () => null, says = () => null } = {}) {
+  evil.transport.onRequest(async (bytes) => {
+    const request = JSON.parse(bytes.toString('utf8'));
+    const { kind, body, from } = request;
+    let answer = says(kind, body, from) ?? { accepted: [], refused: [], records: [] };
+    if (kind === 'sync') answer = { hash: body.hash };
+    if (kind === 'lock') {
+      const offer = backing();
+      answer = { grant: buildGrant(evil.id, { pool: POOL, taskId: body.taskId, executor: from, round: body.round, hash: body.hash, exp: body.asOf + 120, ...(offer ? { offer } : {}) }) };
+    }
+    return canon(buildResponse(evil.id, { re: requestDigest(request), effort: POW.memberBase, body: answer }));
+  });
+}
+const TASK = buildTaskId({ pool: POOL, kind: 'review', item: 'pr-1', identity: 'octocat' });
+const offerOf = (evil, now) => offerRecord(evil.id, {
+  pool: POOL, kind: 'review', item: 'pr-1', identity: 'octocat', seq: 0, at: now, title: 'Mine', minRequiredH: 12, createdAt: now, state: 'open',
+});
+
+await check('a key that names no job starts none: the run goes on asking', async () => {
+  const w = createWorld({ seed: 86 });
+  const all = await w.pool(['exe', 'by']);
+  const [exe] = all;
+  const evil = await w.intruder('evil', exe);
+  await w.net.until(() => all.every((h) => w.members(h).length === 3), { what: 'the intruder a member for everyone' });
+  const now = w.net.now();
+  let spec = {};
+  serving(evil, {
+    backing: () => ({ at: now, gen: 1, hours: 12 }),
+    says: (kind, body, from) => (kind !== 'key' ? null : {
+      capability: buildCapability(evil.id, { keyId: Buffer.alloc(16, 1), pool: POOL, taskId: TASK, executor: from, rules: [], exp: now + 7200 }),
+      secret: b64u(Buffer.alloc(32, 2)), ...spec,
+    }),
+  });
+  for (const h of all) await w.request(evil, h, 'push', { records: [offerOf(evil, now)] });
+  exe.slots = 1;
+  exe.node.admit({ slots: 1 });
+  await w.net.until(() => w.net.count({ from: 'exe', to: 'evil', kind: 'key' }) >= 3, { what: 'the key asked for again and again' });
+  assert.deepEqual([exe.executor.started.length, w.runOf(exe, TASK).state], [0, 'preparing']);
+  for (const named of [{ spec: 'do it' }, { spec: { prompt: 0.5 } }]) {
+    spec = named;
+    await w.run(60);
+    assert.deepEqual([exe.executor.started.length, w.runOf(exe, TASK).state], [0, 'preparing'], JSON.stringify(named));
+  }
+  // The same key with a job to name is a key.
+  spec = { spec: { prompt: 'do it' } };
+  await w.net.until(() => exe.executor.jobOf(TASK), { what: 'a job' });
+  assert.equal(exe.executor.jobOf(TASK).peer, evil.pk);
+  assert.deepEqual(exe.log.filter((line) => /could not be served|step failed|failed:/.test(line)), []);
+});
+
+await check('a run takes into its claim the offer it asked a host for, and no other that host answers with', async () => {
+  const w = createWorld({ seed: 87 });
+  const all = await w.pool(['a', 'exe']);
+  const [a, exe] = all;
+  const evil = await w.intruder('evil', a);
+  await w.net.until(() => all.every((h) => w.members(h).length === 3), { what: 'the intruder a member for everyone' });
+  let backing = null;
+  serving(evil, { backing: () => backing });
+  const { taskId } = await a.node.offer(offerArgs('pr-1'));
+  assert.equal(taskId, TASK);
+  exe.slots = 1;
+  exe.node.admit({ slots: 1 });
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+  // The member offers the task too, for 12 hours, and backs the claim for 720, then
+  // with an offer it made at another time.
+  const now = w.net.now();
+  for (const h of all) await w.request(evil, h, 'push', { records: [offerOf(evil, now)] });
+  for (const wrong of [{ at: now, gen: 1, hours: 720 }, { at: now - 1, gen: 1, hours: 12 }]) {
+    backing = wrong;
+    const since = w.net.now();
+    await w.net.until(() => w.net.count({ from: 'exe', to: 'evil', kind: 'lock', since }) >= 2, { what: 'the offer asked for' });
+    const claim = w.claim(a, taskId);
+    assert.deepEqual([backers(claim), claim.hours], [[a.pk], 12], JSON.stringify(wrong));
+  }
+  backing = { at: now, gen: 2, hours: 12 };
+  await w.net.until(() => backers(w.claim(a, taskId)).length === 2, { what: 'the offer taken into the claim' });
+  assert.deepEqual([backers(w.claim(a, taskId)).sort(), w.claim(a, taskId).hours], [[a.pk, evil.pk].sort(), 12]);
+  assert.deepEqual(all.flatMap((h) => h.log.filter((line) => /could not be served|step failed|failed:/.test(line))), []);
 });

@@ -136,10 +136,10 @@ class Host {
   }
 
   // The count its next backing of a claim carries, as a daemon keeps it on disk; null
-  // when the offer it made at `at` is not open.
-  nextGen(taskId, at) {
+  // when it has no offer of the task open.
+  nextGen(taskId) {
     const mine = this.pool.get(`offer/${taskId}/${this.pk}`);
-    if (mine?.state !== 'open' || mine.createdAt !== at) return null;
+    if (mine?.state !== 'open') return null;
     this.gave.set(taskId, (this.gave.get(taskId) ?? 0) + 1);
     return this.gave.get(taskId);
   }
@@ -181,7 +181,7 @@ class Host {
     if (kind === 'sync') return this.pool.answerSync(body, now);
     if (kind === 'pull') return this.pool.answerPull(body);
     if (kind === 'lock') {
-      return this.locks.answer({ pool: this.pool, identity: this.id, from, body, now, nextGen: (at) => this.nextGen(body.taskId, at) });
+      return this.locks.answer({ pool: this.pool, identity: this.id, from, body, now, nextGen: () => this.nextGen(body.taskId) });
     }
     if (kind === 'unlock') return this.locks.unlock({ from, body });
     if (kind === 'ping') return this.answerPing(from, body, now);
@@ -365,7 +365,7 @@ class Host {
     const { now } = this;
     const { taskId, round } = run;
     const granted = grants.map((g) => g.by);
-    const mine = own ? this.nextGen(taskId, own.at) : null;
+    const mine = own ? this.nextGen(taskId) : null;
     assert.ok(mine !== null || grants.some((g) => g.offer), `host ${this.index} committed a claim nobody backs`);
     assert.deepEqual([...granted, ...absent].sort(), [...run.snapshot.members].sort(), `(c) host ${this.index} committed without every member granting or absent`);
     for (const pk of run.heard) {

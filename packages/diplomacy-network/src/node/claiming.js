@@ -241,8 +241,7 @@ export function createClaiming(host) {
     // The word on slots may have changed, or gone stale, while the round ran.
     if (!run.own && took() >= slots()) return drop('no slot left');
     // This host's own offer of the task, when it has one, is the claim's by its own word.
-    const mine = own ? host.offers.nextGen(taskId, own.at) : null;
-    if (mine === null && !grants.some((grant) => grant.offer)) return drop('the offer it was for is gone');
+    const mine = own ? host.offers.nextGen(taskId) : null;
     const claim = buildClaim(host.id, {
       pool: P.id, taskId, round: round.round, gen, grants, absent, now: host.now(),
       ...(mine === null ? {} : { offer: { ...own, gen: mine } }),

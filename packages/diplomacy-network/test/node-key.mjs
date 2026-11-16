@@ -363,3 +363,21 @@ await check('what a task has used belongs to the task: every key issued for it c
   assert.deepEqual(asked(), [1, 2, 3, 4, 5, 1]);
   assert.deepEqual(w.stored(req, 'offers')[taskId].used, { asked: 1 });
 });
+
+await check('a key that is not there at the first ask is asked for a second later, then two, then four, and every half minute from then on', async () => {
+  const w = createWorld({ seed: 59 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const asked = [];
+  w.net.tap(({ from, kind }) => (from === 'exe' && kind === 'key' ? () => asked.push(w.net.ms()) : undefined));
+  const rules = req.requester.rulesFor.bind(req.requester);
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  // The rules are not to be had for the first five asks.
+  req.requester.rulesFor = (...args) => {
+    if (asked.length < 5) throw new Error('the rules are not there yet');
+    return rules(...args);
+  };
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+  const gaps = asked.slice(1).map((at, i) => Math.round((at - asked[i]) / 1000));
+  assert.deepEqual(gaps, [1, 2, 4, 30, 30]);
+  assert.equal(w.net.count({ from: 'exe', to: 'req', kind: 'key' }), 6);
+});
