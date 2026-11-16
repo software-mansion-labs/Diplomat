@@ -354,22 +354,34 @@ await check('an offer withdrawn before its run has a key ends the run all the sa
   assert.deepEqual([exe.executor.started.length, w.offerRow(req, taskId).state], [0, 'cancelled']);
 });
 
-await check('an offer whose run reports that it failed is waiting again from the moment the attempt is counted: nothing shows it claimed at its next attempt', async () => {
-  const w = createWorld({ seed: 20 });
-  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
-  const { taskId, job } = await going(w, req, exe, 'pr-1');
-  exe.slots = 0;
-  exe.node.admit({ slots: 0, reason: 'busy' });
-  const shown = () => {
-    const { state, attempt, executor } = w.offerRow(req, taskId);
-    return `${state} ${attempt} ${executor === exe.pk ? 'exe' : executor}`;
-  };
-  const seen = [];
-  req.node.onChange(() => seen.push(shown()));
-  // What the requester shows as it answers the report, before the executor ends its claim.
-  w.net.tap(({ from, kind }) => (from === 'exe' && kind === 'done' ? () => seen.push(shown()) : undefined));
-  exe.executor.end(job.runId, { ok: false, summary: 'no luck' });
-  await w.net.until(() => w.claim(req, taskId).state === 'released', { what: 'the claim given back' });
-  await w.run(5);
-  assert.deepEqual([...new Set(seen)], ['pooled 2 '], 'the row from the report on');
+await check('an offer whose run reports that it failed is waiting again from the moment the attempt is counted: nothing shows it claimed at its next attempt, for as long as the claim of that run is still on record', async () => {
+  for (const unheard of [0, 60]) {
+    const w = createWorld({ seed: 20 });
+    const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+    const { taskId, job } = await going(w, req, exe, 'pr-1');
+    exe.slots = 0;
+    exe.node.admit({ slots: 0, reason: 'busy' });
+    const shown = () => {
+      const { state, attempt, executor } = w.offerRow(req, taskId);
+      return `${state} ${attempt} ${executor === exe.pk ? 'exe' : executor}`;
+    };
+    const seen = [];
+    req.node.onChange(() => seen.push(shown()));
+    // What the requester shows as it answers the report, before the executor ends its
+    // claim - which the requester hears of `unheard` seconds later.
+    let told = 0;
+    w.net.tap(({ from, kind }) => (from === 'exe' && kind === 'done' ? () => {
+      if (unheard > 0 && (told += 1) === 1) w.net.cut('req', 'exe');
+      seen.push(shown());
+    } : undefined));
+    exe.executor.end(job.runId, { ok: false, summary: 'no luck' });
+    if (unheard > 0) {
+      await w.run(unheard);
+      assert.equal(w.claim(req, taskId).state, 'held', 'the claim is on record as it was');
+      w.net.heal();
+    }
+    await w.net.until(() => w.claim(req, taskId).state === 'released', { what: 'the claim given back' });
+    await w.run(5);
+    assert.deepEqual([...new Set(seen)], ['pooled 2 '], `the row from the report on, the end of the claim heard ${unheard} s later`);
+  }
 });
