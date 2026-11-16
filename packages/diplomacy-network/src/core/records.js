@@ -6,7 +6,15 @@ import { b64u, hash, unb64u } from './canon.js';
 import { sign, validPk, verify } from './identity.js';
 import { HOURS_CEILING, HOURS_FLOOR } from '../paths.js';
 
-export const LIMITS = { pool: 200, taskId: 400, title: 300, invite: 1024, attempt: 255, list: 256, time: 2 ** 40 };
+// `members` is how many member records a pool holds; `offers`, `claims` and `bytes` are
+// what one member may have live in a pool: the offers it signed, the claims it signed,
+// and the canonical size of all its records together. `spare` is how much of `bytes` a
+// host leaves free when it adds a record of its own, for the versions of its records
+// that are longer than the ones they replace.
+export const LIMITS = {
+  pool: 200, taskId: 400, title: 300, invite: 1024, attempt: 255, list: 256, time: 2 ** 40,
+  members: 256, offers: 64, claims: 64, bytes: 256 * 2 ** 10, spare: 32 * 2 ** 10,
+};
 
 const POOL = /^[a-z0-9][a-z0-9.-]*(\/[a-z0-9._-]+){2,}$/;
 const KIND = /^[a-z][a-z0-9-]{0,31}$/;
@@ -34,7 +42,8 @@ export function isBytes(v, n) {
   return unb64u(v)?.length === n;
 }
 
-function isHours(v) {
+/// Is this a number of hours a task may take: a whole number from the floor to the ceiling?
+export function isHours(v) {
   return Number.isSafeInteger(v) && v >= HOURS_FLOOR && v <= HOURS_CEILING;
 }
 
@@ -91,7 +100,7 @@ const taskIn = (pool) => (v) => {
 
 const GRANT = {
   pool: validPool, taskId: (v) => parseTaskId(v) !== null, executor: validPk, round: bytes(8), gen: isTime,
-  hash: bytes(32), by: validPk, exp: isTime, sig: bytes(64),
+  hours: isHours, hash: bytes(32), by: validPk, exp: isTime, sig: bytes(64),
 };
 const PING = {
   pool: validPool, taskId: (v) => parseTaskId(v) !== null, executor: validPk, round: bytes(8), n: isTime,

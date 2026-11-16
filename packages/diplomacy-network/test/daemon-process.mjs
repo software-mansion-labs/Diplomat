@@ -280,10 +280,10 @@ try {
       admit: { slots: 'int', at: 'int', reason: 'string' },
       pools: [{
         id: 'string', path: 'string', identity: 'string', hash: 'string', left: 'boolean',
-        members: [{ pk: 'string', self: 'boolean', maxAcceptedH: 'int', lastSeen: 'int', reachable: 'boolean' }],
+        members: [{ pk: 'string', self: 'boolean', maxAcceptedH: 'int', lastSeen: 'int', reachable: 'boolean', skew: 'boolean' }],
         tasks: [{
           taskId: 'string', kind: 'string', item: 'string', title: 'string', identity: 'string', hours: 'int', state: 'string',
-          offeredBy: ['string'], offeredHere: 'boolean', executor: 'string', executorHere: 'boolean', claimedAt: 'int',
+          blocked: 'string', offeredBy: ['string'], offeredHere: 'boolean', executor: 'string', executorHere: 'boolean', claimedAt: 'int',
           leaseUntil: 'int', deadline: 'int',
         }],
       }],
@@ -305,8 +305,9 @@ try {
     assert.deepEqual(state.admit, { slots: 0, at: state.admit.at, reason: 'busy' });
     assert.deepEqual([state.pools[0].id, state.pools[0].path, state.pools[0].identity, state.pools[0].left], [POOL, a.checkout, 'snap', false]);
     assert.deepEqual(state.pools[0].tasks.find((t) => t.taskId === later.taskId).offeredBy, [state.identity.pk]);
-    assert.deepEqual([done.outcome, done.executorHere, state.runs[0].state, state.runs[0].exit], [
-      { ok: true, summary: 'reviewed', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, false, 'finished', 0,
+    // A finished offer keeps the machine that ran it: here this one.
+    assert.deepEqual([done.outcome, done.executor, done.executorHere, state.runs[0].state, state.runs[0].exit], [
+      { ok: true, summary: 'reviewed', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, state.identity.pk, true, 'finished', 0,
     ]);
     assert.equal(fs.existsSync(state.runs[0].log), true, 'a run\'s log is a file on this machine');
 

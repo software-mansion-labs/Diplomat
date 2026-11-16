@@ -5,7 +5,7 @@
 import { hash, tagged, unb64u } from './canon.js';
 import { sign, validPk, verify } from './identity.js';
 import { leaseAt, verifyLease } from './lease.js';
-import { grantShaped, isAscending, isBytes, isObject, isTime, parseTaskId, shaped, signRecord } from './records.js';
+import { grantShaped, isAscending, isBytes, isHours, isObject, isTime, parseTaskId, shaped, signRecord } from './records.js';
 import { CLOCK_SKEW_SECS, GRANT_TTL_SECS, ROUND_TIMEOUT_MS } from '../paths.js';
 
 /// `rank(taskId, executor)`: 32 bytes every host computes alike. Lower wins.
@@ -24,9 +24,9 @@ export function rankDelay(taskId, executor, max) {
 }
 
 /// A member's signed consent to `executor` claiming `taskId` in `round`, as generation
-/// `gen`, on the state `hash`, until `exp`.
-export function buildGrant(identity, { pool, taskId, executor, round, gen, hash: stateHash, exp }) {
-  const grant = { pool, taskId, executor, round, gen, hash: stateHash, by: identity.pk, exp };
+/// `gen`, for `hours`, on the state `hash`, until `exp`.
+export function buildGrant(identity, { pool, taskId, executor, round, gen, hours, hash: stateHash, exp }) {
+  const grant = { pool, taskId, executor, round, gen, hours, hash: stateHash, by: identity.pk, exp };
   return { ...grant, sig: sign(identity, 'dn1/grant', grant) };
 }
 
@@ -46,15 +46,18 @@ export function buildClaim(identity, { pool, taskId, round, gen, hours, grants, 
 
 /// Null when a well-shaped claim holds for every host alike: its grants are from distinct
 /// members other than the executor and the absent, each signed, bound to this task,
-/// executor, round and generation, all for one state hash, and live when the claim was
-/// made; and its lease is the one its times dictate. Otherwise `bad-claim`, `bad-grant`,
-/// `bad-lease` or `bad-ping`.
+/// executor, round, generation and hours, all for one state hash, and live when the
+/// claim was made; and its lease is the one its times dictate. Otherwise `bad-claim`,
+/// `bad-grant`, `bad-lease` or `bad-ping`. Whether a host offering the task stands behind
+/// it is the pool's to say.
 export function verifyClaim(claim) {
   const signers = claim.grants.map((g) => g.by);
   if (!isAscending(signers, validPk)) return 'bad-claim';
   const outside = [claim.executor, ...signers];
   if (signers.includes(claim.executor) || claim.absent.some((pk) => outside.includes(pk))) return 'bad-claim';
-  const bound = { pool: claim.pool, taskId: claim.taskId, executor: claim.executor, round: claim.round, gen: claim.gen };
+  const bound = {
+    pool: claim.pool, taskId: claim.taskId, executor: claim.executor, round: claim.round, gen: claim.gen, hours: claim.hours,
+  };
   for (const grant of claim.grants) {
     if (grant.hash !== claim.grants[0].hash || grant.exp !== claim.grants[0].exp) return 'bad-grant';
     if (claim.claimedAt > grant.exp || claim.claimedAt < grant.exp - GRANT_TTL_SECS) return 'bad-grant';
@@ -96,6 +99,7 @@ export function keyHost(claim, offering) {
 
 const LOCK = {
   taskId: (v) => parseTaskId(v) !== null, round: (v) => isBytes(v, 8), asOf: isTime, hash: (v) => isBytes(v, 32),
+  hours: isHours,
 };
 const UNLOCK = { taskId: LOCK.taskId, round: LOCK.round };
 
@@ -133,6 +137,15 @@ export class LockTable {
     return true;
   }
 
+  /// Drops every lock that is no longer live at `now`; true when there was one.
+  prune(now) {
+    const before = this.#locks.size;
+    for (const [taskId, lock] of this.#locks) {
+      if (lock.exp < now) this.#locks.delete(taskId);
+    }
+    return this.#locks.size !== before;
+  }
+
   /// Drops the lock on a task when `executor` holds it for `round`: the executor unlocked,
   /// or its claim of that round was committed.
   release(taskId, executor, round) {
@@ -143,7 +156,8 @@ export class LockTable {
   /// A member's answer to a `lock` request from `from`: `{ body }` holding `{ grant }`,
   /// `{ challenge: { reason, holder? } }` or `{ stale: true }`, or `{ error }` with
   /// `bad-request`, `stale` (an `asOf` too far from `now`) or `not-member`. `pool` is the
-  /// member's own Pool and `identity` signs the grant.
+  /// member's own Pool and `identity` signs the grant, for the hours the task has in that
+  /// pool and no others.
   answer({ pool, identity, from, body, now }) {
     if (!shaped(body, LOCK) || parseTaskId(body.taskId).pool !== pool.id) return { error: 'bad-request' };
     if (Math.abs(body.asOf - now) > CLOCK_SKEW_SECS) return { error: 'stale' };
@@ -151,15 +165,17 @@ export class LockTable {
     if (!claimant) return { error: 'not-member' };
     if (pool.stateHash(body.asOf) !== body.hash) return { body: { stale: true } };
     const task = pool.task(body.taskId, now);
-    if (task?.state !== 'available' || !pool.claimSettled(body.taskId, body.asOf)) return { body: { challenge: { reason: 'unavailable' } } };
-    if (claimant.maxAcceptedH < task.hours) return { body: { challenge: { reason: 'hours' } } };
+    const gen = pool.nextGen(body.taskId, body.asOf);
+    // A claim record at the last generation a record can carry leaves none to grant.
+    const open = task?.state === 'available' && pool.claimSettled(body.taskId, body.asOf) && isTime(gen);
+    if (!open) return { body: { challenge: { reason: 'unavailable' } } };
+    if (claimant.maxAcceptedH < task.hours || body.hours !== task.hours) return { body: { challenge: { reason: 'hours' } } };
     const exp = body.asOf + GRANT_TTL_SECS;
     if (!this.hold(body.taskId, from, body.round, exp, now)) {
       return { body: { challenge: { reason: 'locked', holder: this.#locks.get(body.taskId).executor } } };
     }
     const grant = buildGrant(identity, {
-      pool: pool.id, taskId: body.taskId, executor: from, round: body.round, gen: pool.nextGen(body.taskId, body.asOf),
-      hash: body.hash, exp,
+      pool: pool.id, taskId: body.taskId, executor: from, round: body.round, gen, hours: task.hours, hash: body.hash, exp,
     });
     return { body: { grant } };
   }
@@ -270,8 +286,8 @@ export class ClaimRound {
     const s = this.#snapshot;
     if (shaped(body, { grant: grantShaped })) {
       const fine = verifyGrant(body.grant, {
-        pool: s.pool, taskId: this.taskId, executor: this.self, round: this.round, gen: s.gen, hash: s.hash,
-        by: from, exp: s.asOf + GRANT_TTL_SECS,
+        pool: s.pool, taskId: this.taskId, executor: this.self, round: this.round, gen: s.gen, hours: s.hours,
+        hash: s.hash, by: from, exp: s.asOf + GRANT_TTL_SECS,
       });
       if (!fine) return [this.#lock(from, true)];
       m.grant = body.grant;
@@ -350,8 +366,8 @@ export class ClaimRound {
     const m = this.#members.get(to);
     m.asked = true;
     m.locked = true;
-    const { asOf, hash: stateHash } = this.#snapshot;
-    const body = { taskId: this.taskId, round: this.round, asOf, hash: stateHash };
+    const { asOf, hash: stateHash, hours } = this.#snapshot;
+    const body = { taskId: this.taskId, round: this.round, asOf, hash: stateHash, hours };
     return { do: 'lock', to, wave: this.wave, body, ...(retry ? { retry } : {}) };
   }
 

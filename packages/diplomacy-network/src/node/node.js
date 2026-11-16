@@ -23,12 +23,34 @@ const CHANGE_DELAY_MS = 100;
 const OFF = 'the network was switched off';
 const CLOSED = 'the pool was closed';
 
+// `clock` with every timer's work fenced in: a callback that throws, or whose promise
+// rejects, would end the process, so it is logged and the host goes on.
+function fenced(clock, log) {
+  const failed = (err) => log(`what a timer started failed: ${err?.stack ?? err}`);
+  return {
+    now: () => clock.now(),
+    clearTimeout: (timer) => clock.clearTimeout(timer),
+    setTimeout: (fn, ms) => clock.setTimeout(() => {
+      try {
+        Promise.resolve(fn()).catch(failed);
+      } catch (err) {
+        failed(err);
+      }
+    }, ms),
+  };
+}
+
 /// The host. `store` is `createStore`'s; `transport` carries requests to and from other
 /// hosts; `clock` is `{ now(), setTimeout, clearTimeout }` with `now` in Unix seconds;
 /// `random(n)` answers n random bytes; `requester` knows the rules and the forge;
-/// `executor` runs jobs; `settings()` answers `{ requiredMinimumH, maximumAcceptedH }`;
+/// `executor` runs jobs, says whether it takes a task (`wouldTake(task)`) and may say how
+/// many more milliseconds this host waits before it goes for one (`weigh(task)`);
+/// `settings()` answers `{ requiredMinimumH, maximumAcceptedH }`;
 /// `solve(challenge, effort)` finds a proof of work, by default on a worker thread.
-export function createNode({ store, transport, clock, random, log = () => {}, requester, executor, settings, solve = solveAsync }) {
+export function createNode({
+  store, transport, clock: timers, random, log = () => {}, requester, executor, settings, solve = solveAsync,
+}) {
+  const clock = fenced(timers, log);
   let id = identityFromSeed(store.read('identity')?.seed ?? '');
   if (!id) {
     id = identityFromSeed(b64u(random(32)));
@@ -41,14 +63,16 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
     now: () => clock.now(),
     pools: new Map(), // pool id -> { id, link, pool, locks, seq, inviter, invites, farewell }
     away: new Map(), // pool id -> the link of a pool that is linked and that this host left
+    // pool id -> the locks of a pool this host is not in now: one read from the store and
+    // not linked yet, or one it left.
     heldLocks: store.read('locks') ?? {},
     saveKeys: () => store.write('keys', keys),
     saveLocks: () => store.write('locks', {
-      toJSON: () => Object.fromEntries([...host.pools.values()].map((P) => [P.id, P.locks.entries()])),
+      toJSON: () => ({ ...host.heldLocks, ...Object.fromEntries([...host.pools.values()].map((P) => [P.id, P.locks.entries()])) }),
     }),
     save: (P) => store.write(poolFile(P.id), {
       toJSON: () => ({
-        id: P.id, linked: true, seq: P.seq, inviter: P.inviter, invites: P.invites, left: P.farewell, records: P.pool.records(),
+        id: P.id, linked: true, seq: P.seq, inviter: P.inviter, invites: P.invites, ...P.farewell, records: P.pool.records(),
       }),
     }),
   };
@@ -112,7 +136,7 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
   if (linked) links.pools.forEach(host.gossip.link);
 
   const handlers = {
-    ...host.gossip.handlers, ...host.offers.handlers, ...host.runs.handlers,
+    ...host.gossip.handlers, ...host.offers.handlers, ...host.runs.handlers, ...inbound.handlers,
     lock(P, from, body) {
       const answer = P.locks.answer({ pool: P.pool, identity: id, from, body, now: host.now() });
       host.saveLocks();
@@ -168,16 +192,26 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
   }
 
   function poolRow(P, now) {
+    const members = P.pool.members(now);
+    const skewed = (pk) => host.peers.seen(pk).skew;
+    // Why nobody takes an available task: `clock` when this host's clock is too far from
+    // the clock of every host a claim of it needs - the hosts offering it, or every other
+    // member when this host offers it.
+    const blocked = (t) => {
+      const needed = t.offeredBy.includes(host.self) ? members.map((m) => m.pk).filter((pk) => pk !== host.self) : t.offeredBy;
+      return t.state === 'available' && needed.length > 0 && needed.every(skewed) ? 'clock' : '';
+    };
     return {
       id: P.id, path: P.link.path ?? '', identity: P.link.identity ?? '', hash: P.pool.stateHash(now), left: false,
-      members: P.pool.members(now).map((m) => ({
+      members: members.map((m) => ({
         pk: m.pk, self: m.pk === host.self, maxAcceptedH: m.maxAcceptedH,
-        ...(m.pk === host.self ? { lastSeen: now, reachable: transport.state().state === 'ready' } : host.peers.seen(m.pk)),
+        ...(m.pk === host.self
+          ? { lastSeen: now, reachable: transport.state().state === 'ready', skew: false } : host.peers.seen(m.pk)),
       })),
       tasks: P.pool.tasks(now).map((t) => ({
         taskId: t.taskId, kind: t.kind, item: t.item, title: t.title, identity: t.identity, hours: t.hours, state: t.state,
-        offeredBy: t.offeredBy, offeredHere: t.offeredBy.includes(host.self), executor: t.claim?.executor ?? '',
-        executorHere: t.claim?.executor === host.self, claimedAt: t.claim?.claimedAt ?? 0,
+        blocked: blocked(t), offeredBy: t.offeredBy, offeredHere: t.offeredBy.includes(host.self),
+        executor: t.claim?.executor ?? '', executorHere: t.claim?.executor === host.self, claimedAt: t.claim?.claimedAt ?? 0,
         leaseUntil: t.claim?.leaseUntil ?? 0, deadline: t.claim?.deadline ?? 0,
       })),
     };
@@ -195,10 +229,14 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
       transport.onRequest(inbound.receive);
       transport.limitFor(inbound.limit);
       transport.onState(({ state }) => {
-        host.touch();
-        if (state === 'ready' && started) {
-          host.gossip.syncAll();
-          host.poke();
+        try {
+          host.touch();
+          if (state === 'ready' && started) {
+            host.gossip.syncAll();
+            host.poke();
+          }
+        } catch (err) {
+          log(`a change of the transport's state could not be taken up: ${err?.stack ?? err}`);
         }
       });
       host.runs.start();
@@ -250,6 +288,9 @@ export function createNode({ store, transport, clock, random, log = () => {}, re
       for (const id of [...host.away.keys()]) {
         if (!listed(id)) host.gossip.forget(id);
       }
+      const unlinked = Object.keys(host.heldLocks).filter((id) => !listed(id));
+      for (const id of unlinked) delete host.heldLocks[id];
+      if (unlinked.length > 0) host.saveLocks();
       for (const info of list) {
         const P = host.pools.get(info.id);
         if (P) P.link = info;

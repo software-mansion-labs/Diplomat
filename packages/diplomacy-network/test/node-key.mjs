@@ -39,7 +39,7 @@ await check('a key goes to the executor of the committed claim, from the one hos
   const key = (from, to, body = { taskId, round: claim.round }) => w.request(from, to, 'key', body);
   assert.equal(said(await key(other, r1)), 'denied: no active claim of the task names that executor and round', 'not to another member');
   assert.equal(said(await key(exe, r1, { taskId, round })), 'denied: no active claim of the task names that executor and round', 'not for another round');
-  assert.equal(said(await key(exe, r2)), 'denied: another host answers for this claim', 'not from a host that did not grant the claim');
+  assert.equal(said(await key(exe, r2)), 'denied: no active claim of the task names that executor and round', 'not from a host that did not grant the claim');
   assert.equal(said(await key(exe, other)), 'denied: not offered by this host');
   assert.equal(said(await key(exe, r1, { taskId })), 'bad-request: ');
   const again = await key(exe, r1);
@@ -143,8 +143,8 @@ await check('an executor asks for its key again half a minute after each ask, ho
   const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
   // The requester drops out of reach as the first ask for the key leaves.
   let cut = false;
-  w.net.tap(({ from, headers }) => {
-    if (cut || from !== 'exe' || headers['dn-kind'] !== 'key') return;
+  w.net.tap(({ from, kind }) => {
+    if (cut || from !== 'exe' || kind !== 'key') return;
     cut = true;
     w.net.cut('req', 'exe');
   });
@@ -241,8 +241,8 @@ await check('a claim made for an offer that was taken back gets nothing from the
   const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
   // The requester grants the claim and drops out of reach before it hands over the key.
   let cut = false;
-  w.net.tap(({ from, headers }) => {
-    if (cut || from !== 'exe' || headers['dn-kind'] !== 'key') return;
+  w.net.tap(({ from, kind }) => {
+    if (cut || from !== 'exe' || kind !== 'key') return;
     cut = true;
     w.net.cut('req', 'exe');
   });
@@ -286,8 +286,8 @@ await check('the lapse of a claim made for an offer that was taken back is no fa
   const w = createWorld({ seed: 55 });
   const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
   let cut = false;
-  w.net.tap(({ from, headers }) => {
-    if (cut || from !== 'exe' || headers['dn-kind'] !== 'key') return;
+  w.net.tap(({ from, kind }) => {
+    if (cut || from !== 'exe' || kind !== 'key') return;
     cut = true;
     w.net.cut('req', 'exe');
   });

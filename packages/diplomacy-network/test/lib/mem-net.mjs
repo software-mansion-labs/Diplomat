@@ -27,6 +27,15 @@ export function prng(seed) {
 
 const failure = (code) => Object.assign(new Error(code), { code });
 
+// The kind an envelope names, or null for bytes that are no envelope.
+function kindOf(body) {
+  try {
+    return JSON.parse(body.toString('utf8')).kind ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /// The network. `sent` lists every request a host made, as `{ at, from, to, kind, bytes }`.
 export function createNet({ seed = 1 } = {}) {
   const rnd = prng(seed);
@@ -131,8 +140,9 @@ export function createNet({ seed = 1 } = {}) {
         };
         const fail = (code, after) => at(after, () => settle(reject, failure(code)), host);
         const target = byPk.get(to);
-        sent.push({ at: now(), from: name, to: target?.name ?? null, kind: headers['dn-kind'] ?? null, bytes: body.length });
-        for (const tap of taps) tap({ from: name, to: target?.name ?? null, headers, body });
+        const kind = kindOf(body);
+        sent.push({ at: now(), from: name, to: target?.name ?? null, kind, bytes: body.length });
+        for (const tap of taps) tap({ from: name, to: target?.name ?? null, headers, kind, body });
         if (host.stopped) return fail('stopped', 0);
         if (!host.ready || !host.up) return fail('unreachable', 0);
         fail('timeout', timeoutMs);
@@ -148,9 +158,12 @@ export function createNet({ seed = 1 } = {}) {
           at(sentAt, async () => {
             if (!linked(host, target)) return;
             const all = { ...headers, 'content-length': String(body.length) };
+            const says = target.limit(all);
+            const { bytes, release = () => {} } = typeof says === 'number' ? { bytes: says } : says;
             let out;
-            if (body.length > target.limit(all)) out = 'http-413';
+            if (body.length > bytes) out = 'http-413';
             else out = await target.handler(Buffer.from(body), { headers: all }).catch(() => 'http-500');
+            release();
             if (copy < copies - 1 || rnd.chance(faults.drop)) return;
             at(delay(), () => {
               if (!linked(host, target)) return;
@@ -192,7 +205,7 @@ export function createNet({ seed = 1 } = {}) {
     rnd, sent, faults, now, run, until, clock, transport, settled,
     /// How many timers of a host are waiting to fire.
     timers: (name) => queue.filter((event) => !event.cancelled && event.owner === hosts.get(name)).length,
-    /// Calls `fn({ from, to, headers, body })` for every request a host makes.
+    /// Calls `fn({ from, to, headers, kind, body })` for every request a host makes.
     tap: (fn) => taps.push(fn),
     /// Milliseconds of virtual time since the network began.
     ms: () => ms,

@@ -1,8 +1,10 @@
 // Five to seven hosts and a seeded run of everything that can happen to them at once:
 // offers, runs that finish, fail or vanish, requests under keys, withdrawals, restarts,
-// hosts off the network, cuts, lost and repeated requests, and hours passing. After every
-// step what must always hold is checked; at the end the network is mended and everything
-// offered must have ended, on every host alike.
+// hosts that leave the pool and come back, hosts switched off, a member that answers
+// nobody and pushes records no host may take, hosts off the network, cuts, lost and
+// repeated requests, and hours passing. After every step what must always hold is
+// checked; at the end the network is mended and everything offered must have ended, on
+// every host alike.
 //
 //   DN_SOAK_SEEDS  how many seeds to run (default 2)     DN_SOAK_STEPS  steps per seed (default 120)
 //   DN_SOAK_SEED   the first seed (default 1); a failure prints the seed to run again
@@ -11,6 +13,10 @@ import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, createWorld } from './lib/hosts.mjs';
 import { prng } from './lib/mem-net.mjs';
+import { buildClaim } from '../src/core/claims.js';
+import { sign } from '../src/core/identity.js';
+import { endClaim } from '../src/core/lease.js';
+import { LIMITS, memberRecord } from '../src/core/records.js';
 
 const SEEDS = Number(process.env.DN_SOAK_SEEDS ?? 2);
 const STEPS = Number(process.env.DN_SOAK_STEPS ?? 120);
@@ -23,27 +29,37 @@ async function soak(seed) {
   const pick = (list) => list[dice.int(list.length)];
   const names = Array.from({ length: 5 + dice.int(3) }, (_, i) => `h${i + 1}`);
   const all = await w.pool(names, Object.fromEntries(names.map((name, i) => [name, { slots: i < 2 ? 1 + dice.int(2) : dice.int(3) }])));
-  const tally = { steps: 0, offers: 0, acts: {}, jobs: 0, restarts: 0 };
+  const tally = { steps: 0, offers: 0, acts: {}, jobs: 0, restarts: 0, left: 0, hostile: 0 };
+  // A member with no node behind it: every round counts it absent, and what it pushes
+  // is signed by it and is no record a host may take.
+  const evil = w.stranger('evil');
+  const evilJoined = w.net.now();
+  const voucher = all[0].node.invite({ pool: POOL }).invite;
+  let evilSeq = -1;
   const trail = [];
   const broken = [];
   const atOnce = new Set(); // tasks offered to run at once, which take no slot
   const claims = new Map(); // "task|gen" -> Map("executor|round" -> { claimedAt, exp, granters })
   const secrets = new Map(); // "requester|task|round" -> secret
   const holders = new Map(); // keyId -> the one host seen holding it
-  const used = new Set(); // "keyId|seq" of every act request sent
+  const used = new Map(); // "keyId|seq" -> the mac of the act request sent under it
   const last = new Map(); // "requester|keyId" -> the highest seq its store has held
   let items = 0;
 
-  w.net.tap(({ from, headers, body }) => {
-    if (headers['dn-kind'] !== 'act') return;
-    const { keyId, seq } = JSON.parse(body.toString('utf8')).body;
-    if (used.has(`${keyId}|${seq}`)) broken.push(`${from} sent request number ${seq} twice under one key`);
-    used.add(`${keyId}|${seq}`);
+  w.net.tap(({ from, kind, body }) => {
+    if (kind !== 'act') return;
+    const { keyId, seq, mac } = JSON.parse(body.toString('utf8')).body;
+    // A request refused for want of work goes out again as it is, at the price asked: a
+    // number is never given to another request.
+    if ((used.get(`${keyId}|${seq}`) ?? mac) !== mac) broken.push(`${from} sent two requests as number ${seq} under one key`);
+    used.set(`${keyId}|${seq}`, mac);
   });
 
   const jobs = (h) => [...h.executor.jobs.values()].filter((job) => job.alive).map((job) => job.args);
   const everyJob = () => all.flatMap((h) => jobs(h).map((job) => ({ h, job })));
   const openOffers = () => all.flatMap((h) => h.node.snapshot().offers.filter((o) => !ENDED.includes(o.state)).map((o) => ({ h, o })));
+  const away = () => all.filter((h) => w.view(h).left);
+  const here = () => all.filter((h) => !w.view(h).left);
 
   // What holds at every moment, whatever the network does.
   function look() {
@@ -103,7 +119,7 @@ async function soak(seed) {
     [20, 'offer', async () => {
       if (openOffers().length >= 6) return 'full';
       const twin = dice.chance(0.15) ? pick(openOffers()) : null;
-      const h = pick(all.filter((x) => x !== twin?.h));
+      const h = pick(here().filter((x) => x !== twin?.h));
       const item = twin?.o.item ?? `pr-${items += 1}`;
       const now = dice.chance(0.1);
       const { taskId } = await h.node.offer({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p', now });
@@ -143,6 +159,55 @@ async function soak(seed) {
       await w.restart(h);
       tally.restarts += 1;
       return h.name;
+    }],
+    [3, 'leave', () => {
+      if (away().length >= 2) return 'two are away';
+      const h = pick(here());
+      h.node.leave({ pool: POOL });
+      tally.left += 1;
+      return h.name;
+    }],
+    [3, 'join', async () => {
+      const h = pick(away());
+      if (h) await h.node.join({ pool: POOL });
+      return h?.name ?? 'nobody is away';
+    }],
+    [2, 'switch off', async () => {
+      const h = pick(all);
+      await w.wait(h.node.switchOff({ waitMs: 5000 }));
+      await w.restart(h);
+      tally.restarts += 1;
+      return h.name;
+    }],
+    [8, 'hostile', async () => {
+      const h = pick(all);
+      const now = w.net.now();
+      const say = (kind, body, options) => w.request(evil, h, kind, body, { effort: 128, ...options }).catch(() => ({ ok: false, code: 'no answer' }));
+      const member = memberRecord(evil.id, { pool: POOL, seq: evilSeq += 1, at: now, joinedAt: evilJoined, maxAcceptedH: 12, voucher });
+      await say('hello', { member });
+      const resigned = (fields) => ({ ...fields, sig: sign(evil.id, 'dn1/rec', fields) });
+      const { sig: _, ...mine } = member;
+      const junk = [
+        resigned({ ...mine, seq: 2 ** 41 }), resigned({ ...mine, maxAcceptedH: 100000 }), resigned({ ...mine, pool: 'github.com/acme/other' }),
+        resigned({ ...mine, more: 1 }), resigned({ ...mine, at: now + 86400 }),
+      ];
+      const held = pick(w.records(h).filter((r) => r.type === 'claim'));
+      if (held) {
+        const { sig: __, ...theirs } = held;
+        const forged = (gen) => buildClaim(evil.id, { pool: POOL, taskId: held.taskId, round: 'AAAAAAAAAAA', gen, hours: held.hours, grants: [], absent: [], now });
+        junk.push(
+          forged(held.gen + 1), endClaim(evil.id, forged(held.gen + 1), 'released', now), endClaim(evil.id, forged(LIMITS.time), 'released', now),
+          resigned({ ...theirs, seq: held.seq + 1, at: now, state: 'released' }),
+        );
+      }
+      const record = pick(junk);
+      // One time in five the bytes are not the canonical form of the request either.
+      const respelled = dice.chance(0.2);
+      const answer = await say('push', { records: [record] }, respelled ? { bytes: (sent) => Buffer.concat([sent, Buffer.from(' ')]) } : {});
+      if (answer.ok && answer.body.accepted.length > 0) broken.push(`${h.name} took a record no host may take: ${JSON.stringify(record).slice(0, 300)}`);
+      if (respelled && answer.response && answer.response.error?.code !== 'bad-request') broken.push(`${h.name} served bytes that are no request`);
+      tally.hostile += answer.ok ? 1 : 0;
+      return `${h.name} ${answer.ok ? `refused it: ${answer.body.refused[0]?.code}` : answer.code ?? answer.response?.error?.code}`;
     }],
     [6, 'down', () => {
       const h = pick(all);
@@ -186,6 +251,7 @@ async function soak(seed) {
     for (const h of all) {
       w.net.down(h.name, false);
       h.slots = Math.max(h.slots, 2);
+      if (w.view(h).left) await h.node.join({ pool: POOL });
     }
     trail.push(`${w.net.now()} mended`);
     const settled = () => openOffers().length === 0 && everyJob().length === 0 && new Set(all.map((h) => w.view(h).hash)).size === 1;
@@ -211,5 +277,5 @@ async function soak(seed) {
 
 for (let seed = FIRST; seed < FIRST + SEEDS; seed += 1) {
   const t = await soak(seed);
-  console.log(`PASS soak seed ${seed}: ${STEPS} steps, ${t.offers} offers, ${t.jobs} jobs ended, ${t.restarts} restarts, acts ${JSON.stringify(t.acts)}`);
+  console.log(`PASS soak seed ${seed}: ${STEPS} steps, ${t.offers} offers, ${t.jobs} jobs ended, ${t.restarts} restarts, ${t.left} left, ${t.hostile} hostile records refused, acts ${JSON.stringify(t.acts)}`);
 }

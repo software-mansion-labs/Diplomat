@@ -169,7 +169,8 @@ check('a claim whose times are not the ones its start, hours and seq dictate is 
     'a longer first lease': [resign(executor, claim, { leaseUntil: claim.leaseUntil + 1 }), 'bad-lease'],
     'a shorter first lease': [resign(executor, claim, { leaseUntil: claim.leaseUntil - 1 }), 'bad-lease'],
     'a later deadline': [resign(executor, claim, { deadline: claim.deadline + 3600 }), 'bad-lease'],
-    'more hours than its deadline': [resign(executor, claim, { hours: 13 }), 'bad-lease'],
+    // Its grants are for the hours it was claimed with: a pool refuses it for them first.
+    'more hours than its deadline': [resign(executor, claim, { hours: 13 }), 'bad-lease', 'bad-grant'],
     'a lease two leases on': [resign(executor, next, { leaseUntil: next.leaseUntil + LEASE }), 'bad-lease'],
     'a first claim carrying a ping': [resign(executor, claim, { ping }), 'bad-ping'],
     'an extension without its ping': [resign(executor, claim, { seq: 1, leaseUntil: T0 + 2 * LEASE }), 'bad-ping'],
@@ -182,12 +183,12 @@ check('a claim whose times are not the ones its start, hours and seq dictate is 
     'an ended claim carrying a ping': [resign(executor, next, { state: 'completed' }), 'bad-lease'],
     'an ended claim leased past its deadline': [resign(executor, claim, { seq: 1, state: 'released', leaseUntil: claim.deadline + 1 }), 'bad-lease'],
   };
-  for (const [what, [record, code]] of Object.entries(bad)) {
+  for (const [what, [record, code, merged = code]] of Object.entries(bad)) {
     assert.equal(verifyLease(record), code, what);
     // A host that holds no claim for the task yet, so nothing but the record decides.
     const [blank] = club(3, T0, () => ({ maxAcceptedH: 48 }));
     blank.pool.merge(offer(hosts[0].id), T0);
-    assert.deepEqual(blank.pool.merge(record, due).refused, [{ key: `claim/${TASK}`, code }], what);
+    assert.deepEqual(blank.pool.merge(record, due).refused, [{ key: `claim/${TASK}`, code: merged }], what);
   }
   assert.equal(verifyLease(next), null);
   assert.throws(() => resign(executor, claim, { at: claim.claimedAt - 1 }), TypeError);
@@ -249,6 +250,8 @@ check('every version of a claim is dropped a day after it was signed, for every 
   assert.equal(hosts[0].pool.nextGen(TASK, T0 + DAY - 1), 1);
   assert.equal(hosts[0].pool.nextGen(TASK, T0 + DAY), 0);
   const ended = endClaim(executor, claim, 'completed', T0 + 100);
+  // The offer the claim stands on is signed again, so the claim's own age decides.
+  for (const h of hosts) h.pool.merge(offer(requester, { seq: 1, at: T0 + 400 }), T0 + 100);
   hosts[1].pool.merge(ended, T0 + 100);
   assert.ok(Object.hasOwn(hosts[1].pool.index(T0 + 100 + DAY - 1), key));
   assert.equal(Object.hasOwn(hosts[1].pool.index(T0 + 100 + DAY), key), false);

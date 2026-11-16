@@ -9,7 +9,6 @@ import { MAX_ACT_BODY_BYTES, MAX_BODY_BYTES, STRANGER_BODY_BYTES } from '../src/
 
 const body = (answer) => JSON.parse(Buffer.from(answer.body, 'base64').toString('utf8'));
 const offerArgs = (item, more = {}) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: `look at ${item}`, base: 'abc123', ...more });
-const actHeaders = (from, bytes) => ({ 'dn-from': from.pk, 'dn-pool': POOL, 'dn-kind': 'act', 'content-length': String(bytes) });
 
 // A claimed task with its job started: `{ taskId, job }`.
 async function going(w, requester, executor, item, more) {
@@ -36,10 +35,12 @@ await check('a task is offered, claimed, acted on under the requester\'s key, an
   }
   assert.deepEqual([w.offerRow(req, taskId).state, w.offerRow(req, taskId).executor], ['claimed', exe.pk]);
   assert.deepEqual([w.runOf(exe, taskId).state, w.runOf(exe, taskId).container], ['running', `box-${job.runId}`]);
-  assert.equal(req.transport.host.limit(actHeaders(exe, 5 * 2 ** 20)), MAX_ACT_BODY_BYTES, 'the key holder may send a pack');
-  assert.equal(req.transport.host.limit(actHeaders(exe, 5 * 2 ** 20)), STRANGER_BODY_BYTES, 'one at a time');
-  assert.equal(req.transport.host.limit(actHeaders(other, 5 * 2 ** 20)), STRANGER_BODY_BYTES, 'nobody else may');
-  assert.equal(req.transport.host.limit(actHeaders(other, 2 ** 19)), MAX_BODY_BYTES);
+  const reserve = async (from, bytes) => (await w.request(from, req, 'reserve', { kind: 'act', bytes })).code ?? 'ok';
+  assert.equal(await reserve(exe, MAX_ACT_BODY_BYTES), 'ok', 'the key holder may send a pack');
+  assert.equal(await reserve(exe, MAX_ACT_BODY_BYTES + 1), 'bad-request');
+  assert.equal(await reserve(other, MAX_BODY_BYTES + 1), 'bad-request', 'nobody else may');
+  assert.equal(await reserve(other, MAX_BODY_BYTES), 'ok');
+  assert.equal(await reserve(other, STRANGER_BODY_BYTES), 'bad-request', 'what anyone may send needs no place');
 
   // Three requests: two carried out, one no rule covers.
   req.requester.refuse('/secrets', 'this task may not read secrets');
@@ -69,10 +70,11 @@ await check('a task is offered, claimed, acted on under the requester\'s key, an
   const row = w.offerRow(req, taskId);
   assert.deepEqual(row.outcome, { ok: true, summary: 'all done', usd: 0.25, tokens: 1200, runner: 'claude', model: 'fable' });
   assert.deepEqual([row.pool, row.kind, row.item, row.title, row.attempt, row.endedAt > 0], [POOL, 'review', 'pr-7', 'Review pr-7', 1, true]);
+  assert.deepEqual([row.executor, row.executorHere], [exe.pk, false], 'an ended offer keeps the executor that ended it');
   assert.deepEqual([w.runOf(exe, taskId).state, w.runOf(exe, taskId).exit], ['finished', 0]);
   assert.equal(w.stored(req, 'keys').issued[taskId], undefined, 'no key is kept for a finished task');
   await w.run(600);
-  assert.equal(req.transport.host.limit(actHeaders(exe, 5 * 2 ** 20)), STRANGER_BODY_BYTES, 'without a key, no pack');
+  assert.equal(await reserve(exe, 5 * 2 ** 20), 'bad-request', 'without a key, no pack');
   const late = await w.wait(job.act(forgeRequest('GET', '/repos/o/r/pr-7/files')));
   assert.equal(late.status, 403);
   assert.equal(req.requester.calls.length, 6, 'a request after the end reaches nothing');
@@ -89,7 +91,7 @@ await check('an offer withdrawn while its task runs stops the run and frees the 
   await w.agreed([req, exe]);
   for (const h of [req, exe]) assert.deepEqual([w.task(h, taskId).state, w.task(h, taskId).executor], ['cancelled', '']);
   const row = w.offerRow(req, taskId);
-  assert.deepEqual([row.state, row.reason, row.executor], ['cancelled', 'x'.repeat(200), '']);
+  assert.deepEqual([row.state, row.reason, row.executor, row.executorHere], ['cancelled', 'x'.repeat(200), exe.pk, false], 'the row keeps who held it last');
   assert.equal(w.runOf(exe, taskId).state, 'stopped');
   assert.equal((await w.wait(job.act(forgeRequest('GET', '/repos/o/r/pr-1/files')))).status, 403);
   assert.equal(req.requester.calls.length, 0);

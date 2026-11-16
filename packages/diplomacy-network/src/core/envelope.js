@@ -8,8 +8,8 @@ import { challenge, check, epochAcceptable, epochOf, solveAsync, validEffort } f
 import { isBytes, isObject, isTime, shaped, validPool } from './records.js';
 import { CLOCK_SKEW_SECS, MAX_ACT_BODY_BYTES, MAX_BODY_BYTES } from '../paths.js';
 
-export const KINDS = ['hello', 'sync', 'pull', 'push', 'lock', 'unlock', 'ping', 'key', 'act', 'done'];
-export const CODES = ['effort', 'stale', 'replay', 'unknown-pool', 'not-member', 'bad-request', 'denied', 'busy'];
+export const KINDS = ['hello', 'sync', 'pull', 'push', 'lock', 'unlock', 'ping', 'key', 'act', 'done', 'reserve'];
+export const CODES = ['effort', 'stale', 'replay', 'not-member', 'bad-request', 'denied', 'busy'];
 const MAX_DETAIL = 200;
 
 const REQUEST = {

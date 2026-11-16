@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { b64u, canon, hash, tagged, u32be, u64be, unb64u } from '../src/core/canon.js';
+import { b64u, canon, hash, parseCanon, tagged, u32be, u64be, unb64u } from '../src/core/canon.js';
 import { generateIdentity, identityFromSeed, onionAddress, sign, torSecretKey, validPk, verify } from '../src/core/identity.js';
 
 function check(name, fn) {
@@ -19,6 +19,18 @@ check('a value two hosts could spell differently is refused', () => {
   for (const bad of [1.5, NaN, Infinity, 2 ** 53, null, undefined, new Date(0), new Map(), () => 0, { a: null }, [undefined]]) {
     assert.throws(() => canon(bad), TypeError, String(bad));
   }
+});
+
+check('only the canonical bytes of a value parse as that value', () => {
+  const value = { b: 1, a: [true, 'x', { z: 0, y: -2 }], 'A': 'é' };
+  assert.deepEqual(parseCanon(canon(value)), value);
+  assert.deepEqual(parseCanon(Buffer.from('[]')), []);
+  const others = [
+    '{"a":1,"b":2} ', ' {"a":1,"b":2}', '{"a": 1,"b":2}', '{"b":2,"a":1}', '{"a":1,"a":1,"b":2}', '{"a":1.0,"b":2}', '{"a":1e0,"b":2}',
+    '{"a":1.5}', '{"a":-0}', '{"\\u0061":1}', '{"a":"\\u0078"}', '{"a":1', '', 'undefined', '{"a":1,}', "{'a':1}",
+  ];
+  for (const text of others) assert.equal(parseCanon(Buffer.from(text)), null, text);
+  assert.equal(parseCanon(Buffer.from([0x7b, 0x22, 0xff, 0x22, 0x3a, 0x31, 0x7d])), null, 'bytes that are no UTF-8');
 });
 
 check('a hash covers buffers as they are and values in canonical form', () => {

@@ -108,7 +108,6 @@ export function createRuns(host) {
         const expect = { pool: P.id, taskId: run.taskId, executor: host.self, host: to };
         if (verifyCapability(body.capability, expect, host.now()).ok && isBytes(body.secret, 32) && isObject(body.spec)) {
           held[run.taskId] = { runId: run.runId, capability: body.capability, secret: body.secret, spec: body.spec, host: to, seq: -1 };
-          run.peer = to;
           host.saveKeys();
           save();
         } else if (host.now() + RETRY_MS / 1000 >= claim.leaseUntil) {
@@ -126,7 +125,9 @@ export function createRuns(host) {
   async function launch(run, P, task) {
     const { taskId, kind, item, title, identity, hours, offeredBy } = task;
     // The run, its key, and the fact that its job is being started are on disk before a
-    // job exists.
+    // job exists. The host a run acts through is the one its key says, whatever the run's
+    // own record got to say before the host last went down.
+    run.peer = held[run.taskId].host;
     run.launched = true;
     save();
     host.store.flush();
@@ -307,7 +308,7 @@ export function createRuns(host) {
       // Never sent, or refused for want of work before anything was done: it was not
       // carried out, whatever it was. A body refused unread is no such proof: it may be
       // the second copy of one the transport sent twice.
-      const unsent = answer.lost === 'offline' || answer.code === 'effort';
+      const unsent = answer.lost === 'offline' || answer.lost === 'no-place' || answer.lost === 'budget' || answer.code === 'effort';
       if (attempt === ACT_ATTEMPTS || !live(run)) return forgeAnswer(unsent ? 503 : 504, 'no answer from the requester');
       // An answer that was lost may belong to a request that was carried out: only one
       // that changes nothing is asked again.

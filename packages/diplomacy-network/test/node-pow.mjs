@@ -28,7 +28,7 @@ await check('a burst raises what its sender owes; the sender pays and still gets
   const sent = w.net.count({ from: 'a', to: 'b' });
   assert.ok(sent - before >= 2);
   const paid = [];
-  w.net.tap(({ from, headers, body }) => from === 'a' && headers['dn-kind'] === 'push' && paid.push(JSON.parse(body.toString('utf8')).pow.effort));
+  w.net.tap(({ from, kind, body }) => from === 'a' && kind === 'push' && paid.push(JSON.parse(body.toString('utf8')).pow.effort));
   const { taskId } = await a.node.offer(offerArgs('pr-1'));
   await w.net.until(() => w.task(b, taskId), { maxMs: 1000, stepMs: 10, what: 'the offer reaching b through the raised effort' });
   assert.deepEqual(paid, [MEMBER, 2 * MEMBER], 'refused at the old price, heard at the one it was told');
@@ -46,7 +46,7 @@ await check('a stranger owes sixteen times a member\'s work, and all strangers p
   const hello = (from, effort) => w.request(from, a, 'hello', { member: {} }, { effort });
   const cheap = await hello(m1, MEMBER);
   assert.deepEqual([cheap.code, cheap.effort], ['effort', STRANGER]);
-  for (let i = 0; i < POW.strangerAllow - 1; i += 1) assert.equal((await hello(i % 2 ? m1 : m2, STRANGER)).code, 'bad-request', 'paid for, it reaches the handler');
+  for (let i = 0; i < POW.strangerAllow - 1; i += 1) assert.equal((await hello(i % 2 ? m1 : m2, STRANGER)).code, 'not-member', 'paid for, it is looked at and refused as any outsider is');
   const crowded = await hello(m2, STRANGER);
   assert.deepEqual([crowded.code, crowded.effort], ['effort', 2 * STRANGER], 'one stranger\'s requests raise the price for the next');
 });
@@ -73,7 +73,7 @@ await check('a request delivered twice is carried out once', async () => {
   const request = forgeRequest('POST', '/repos/o/r/pr-1/comments', { body: 'once' });
   const first = await w.request(exe, req, 'act', { taskId, keyId, seq: 9, request, mac: actMac(unb64u(secret), { keyId, seq: 9, request }) });
   assert.equal(first.body.status, 200);
-  const raw = await w.wait(exe.transport.request(req.pk, first.sent, { headers: { 'dn-from': exe.pk, 'dn-pool': POOL, 'dn-kind': 'act' } }));
+  const raw = await w.wait(exe.transport.request(req.pk, first.sent));
   const second = verifyResponse(JSON.parse(raw.toString('utf8')), { request: first.request, from: req.pk });
   assert.deepEqual([second.ok, second.code], [false, 'replay']);
   assert.equal(performed().length, 6);
@@ -100,26 +100,64 @@ await check('a request that has not paid costs the host no signature check', asy
   assert.deepEqual(await checked({ effort: MEMBER }), ['ok', 1]);
 });
 
-await check('a host reads one large body per sender at a time and four in all, and none from a stranger', async () => {
+await check('a host reads a large body only for a ticket a member paid and signed for: one place per member, four in all', async () => {
   const w = createWorld({ seed: 65 });
   const [a, ...rest] = await w.pool(['a', 'b', 'c', 'd', 'e', 'f']);
-  const headers = (from, pool = POOL) => ({ 'dn-from': from.pk, 'dn-pool': pool, 'dn-kind': 'push' });
-  const limit = (from, bytes, pool) => a.transport.host.limit({ ...headers(from, pool), 'content-length': String(bytes) });
+  const limit = (headers, bytes) => a.transport.host.limit({ ...headers, 'content-length': String(bytes) });
+  const named = (from) => ({ 'dn-from': from.pk, 'dn-pool': POOL, 'dn-kind': 'push' });
   const mallory = w.stranger('mallory');
-  assert.equal(limit(mallory, 2 ** 19), STRANGER_BODY_BYTES);
-  assert.equal(limit(rest[0], 2 ** 19, 'github.com/acme/other'), STRANGER_BODY_BYTES, 'a member of some other pool is a stranger to this one');
-  assert.equal(limit(rest[0], 2 ** 21), STRANGER_BODY_BYTES, 'more than a member may send');
-  assert.deepEqual(rest.map((h) => limit(h, 2 ** 19)), [MAX_BODY_BYTES, MAX_BODY_BYTES, MAX_BODY_BYTES, MAX_BODY_BYTES, STRANGER_BODY_BYTES], 'four at once');
-  assert.equal(limit(rest[0], 2 ** 19), STRANGER_BODY_BYTES, 'one per sender');
-  // Refused before a byte of the body is read, whoever the headers name.
+  // Headers are words anybody can write: whoever they name, they buy the stranger's cap.
+  for (const headers of [{}, named(rest[0]), named(mallory), { 'dn-ticket': 'AAAAAAAAAAAAAAAAAAAAAA' }, { 'dn-ticket': '' }]) {
+    assert.equal(limit(headers, 2 ** 19), STRANGER_BODY_BYTES, JSON.stringify(headers));
+  }
   const big = Buffer.alloc(70000, 0x20);
-  await assert.rejects(w.wait(mallory.transport.request(a.pk, big, { headers: headers(mallory) })), { code: 'http-413' });
-  await assert.rejects(w.wait(mallory.transport.request(a.pk, big, { headers: headers(rest[0]) })), { code: 'http-413' });
-  // A place is given back when its body was served, or after a minute.
+  await assert.rejects(w.wait(mallory.transport.request(a.pk, big, { headers: named(rest[0]) })), { code: 'http-413' });
+
+  const reserve = (from, body = { kind: 'push', bytes: 2 ** 19 }, options) => w.request(from, a, 'reserve', body, options);
+  assert.equal((await reserve(mallory, undefined, { effort: 2048 })).code, 'not-member', 'a stranger reserves nothing');
+  for (const bad of [{}, { kind: 'push' }, { kind: 'push', bytes: STRANGER_BODY_BYTES }, { kind: 'push', bytes: MAX_BODY_BYTES + 1 },
+    { kind: 'act', bytes: 5 * 2 ** 20 }, { kind: 'shutdown', bytes: 2 ** 19 }, { kind: 'push', bytes: '524288' }, { kind: 'push', bytes: 2 ** 19, more: 1 }]) {
+    assert.equal((await reserve(rest[0], bad)).code, 'bad-request', JSON.stringify(bad));
+  }
+  assert.equal((await reserve(rest[0], { kind: 'push', bytes: MAX_BODY_BYTES })).ok, true, 'up to what a member may send');
+  const tickets = [];
+  for (const h of rest.slice(0, 4)) tickets.push((await reserve(h)).body.ticket);
+  assert.equal(new Set(tickets).size, 4);
+  const fifth = await reserve(rest[4]);
+  assert.deepEqual([fifth.code, fifth.detail], ['busy', 'no place for a large body is free'], 'four places in all');
+
+  // A ticket is good for the size it was asked for, once.
+  assert.equal(limit({ 'dn-ticket': tickets[0] }, 2 ** 19 + 1), STRANGER_BODY_BYTES, 'not for more than was reserved');
+  const place = limit({ 'dn-ticket': tickets[0] }, 2 ** 19);
+  assert.equal(place.bytes, 2 ** 19);
+  assert.equal(limit({ 'dn-ticket': tickets[0] }, 2 ** 19), STRANGER_BODY_BYTES, 'not twice');
+  assert.equal((await reserve(rest[0])).code, 'busy', 'one place per member: none while its body is read');
+  assert.equal((await reserve(rest[4])).code, 'busy', 'a body being read is one of the four');
+  // The place is taken for as long as the transport reads and serves the body, however
+  // long that is. A ticket not used within a minute is void, and its place free.
+  await w.run(600);
+  assert.equal((await reserve(rest[0])).code, 'busy');
+  for (const ticket of tickets.slice(1)) assert.equal(limit({ 'dn-ticket': ticket }, 2 ** 19), STRANGER_BODY_BYTES);
+  assert.equal((await reserve(rest[4])).ok, true);
+  place.release();
+  place.release();
+  // A member that asks again holds one ticket, the later one.
+  const first = (await reserve(rest[1])).body.ticket;
+  const second = (await reserve(rest[1])).body.ticket;
+  assert.notEqual(first, second);
+  assert.equal(limit({ 'dn-ticket': first }, 2 ** 19), STRANGER_BODY_BYTES);
+  for (const h of [rest[2], rest[3]]) assert.equal((await reserve(h)).ok, true);
+  assert.equal((await reserve(rest[0])).code, 'busy', 'a place given back is a place, not five');
+
+  // Words in headers repeated every minute take no place from a member that paid for one.
   await w.run(61);
-  const pushed = await w.request(rest[4], a, 'push', { records: ['x'.repeat(100000)] });
-  assert.deepEqual([pushed.ok, pushed.body.refused.length], [true, 1]);
-  assert.equal(limit(rest[4], 2 ** 19), MAX_BODY_BYTES);
+  for (let minute = 0; minute < 3; minute += 1) {
+    for (const h of rest.slice(0, 4)) limit({ ...named(h), 'content-length': String(2 ** 20) }, 2 ** 20);
+    const { ticket } = (await reserve(rest[4], { kind: 'push', bytes: 110000 })).body;
+    const pushed = await w.request(rest[4], a, 'push', { records: ['x'.repeat(100000)] }, { headers: { 'dn-ticket': ticket } });
+    assert.deepEqual([pushed.ok, pushed.body.refused.length], [true, 1], 'a real 100 kB push is read and answered');
+    await w.run(61);
+  }
 });
 
 await check('a large request refused unread may be the second copy of one that was read: a write is not sent again', async () => {
@@ -136,8 +174,8 @@ await check('a large request refused unread may be the second copy of one that w
   // The transport sends the first request twice. The second copy arrives while the
   // first is being carried out, and a host reads one large body per sender at a time.
   let acts = 0;
-  w.net.tap(({ headers }) => {
-    if (headers['dn-kind'] !== 'act') return;
+  w.net.tap(({ kind }) => {
+    if (kind !== 'act') return;
     acts += 1;
     w.net.faults.duplicate = acts === 1 ? 1 : 0;
   });

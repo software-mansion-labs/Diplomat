@@ -28,7 +28,7 @@ function trio(now = T0) {
   hosts.forEach((h) => h.pool.merge(offer(hosts[0].id), now));
   return hosts;
 }
-const lockBody = (pool, over = {}) => ({ taskId: TASK, round: roundId(1), asOf: T0, hash: pool.stateHash(over.asOf ?? T0), ...over });
+const lockBody = (pool, over = {}) => ({ taskId: TASK, round: roundId(1), asOf: T0, hash: pool.stateHash(over.asOf ?? T0), hours: 12, ...over });
 const ask = (member_, from, over = {}, now = T0) => member_.locks.answer({
   pool: member_.pool, identity: member_.id, from: from.id.pk, body: lockBody(member_.pool, over), now,
 });
@@ -64,7 +64,7 @@ check('a lock on an available task is granted: signed, bound to the round and th
   const { body } = ask(a, b);
   assert.deepEqual(Object.keys(body), ['grant']);
   const { sig, ...fields } = body.grant;
-  assert.deepEqual(fields, { pool: POOL, taskId: TASK, executor: b.id.pk, round: roundId(1), gen: 0, hash: a.pool.stateHash(T0), by: a.id.pk, exp: T0 + 120 });
+  assert.deepEqual(fields, { pool: POOL, taskId: TASK, executor: b.id.pk, round: roundId(1), gen: 0, hours: 12, hash: a.pool.stateHash(T0), by: a.id.pk, exp: T0 + 120 });
   assert.ok(verify(a.id.pk, 'dn1/grant', body.grant));
   assert.ok(verifyGrant(body.grant, { executor: b.id.pk, round: roundId(1), by: a.id.pk }));
   assert.equal(verifyGrant(body.grant, { executor: a.id.pk }), false);
@@ -114,8 +114,22 @@ check('a lock from a member that accepts fewer hours than the task needs is chal
   const hosts = club(3, T0, (i) => ({ maxAcceptedH: i === 2 ? 24 : 12 }));
   hosts.forEach((h) => h.pool.merge(offer(hosts[0].id, { minRequiredH: 24 }), T0));
   const [a, b, c] = hosts;
-  assert.deepEqual(ask(a, b), { body: { challenge: { reason: 'hours' } } });
-  assert.ok(ask(a, c).body.grant);
+  assert.deepEqual(ask(a, b, { hours: 24 }), { body: { challenge: { reason: 'hours' } } });
+  assert.equal(ask(a, c, { hours: 24 }).body.grant.hours, 24);
+});
+
+check('a lock is granted for the hours the task has in the member\'s own state and for no others', () => {
+  const hosts = club(3, T0, () => ({ maxAcceptedH: 720 }));
+  hosts.forEach((h) => h.pool.merge(offer(hosts[0].id, { minRequiredH: 24 }), T0));
+  const [a, b] = hosts;
+  for (const hours of [12, 23, 25, 720]) {
+    assert.deepEqual(ask(a, b, { hours }), { body: { challenge: { reason: 'hours' } } }, `${hours} hours asked of a task of 24`);
+    assert.equal(a.locks.holder(TASK, T0), null, 'and nothing is locked for it');
+  }
+  assert.equal(ask(a, b, { hours: 24 }).body.grant.hours, 24);
+  for (const bad of [11, 721, 24.5, '24', undefined]) {
+    assert.deepEqual(ask(a, b, { hours: bad }), { error: 'bad-request' }, `hours ${bad}`);
+  }
 });
 
 check('a lock for a task another executor holds is challenged with that holder', () => {
@@ -168,6 +182,28 @@ check('a lock binds until its grant expires, its executor unlocks, or the claim 
   assert.equal(m.locks.holder(TASK, T0), null);
 });
 
+check('a prune drops the locks that ran out, and says whether there was one', () => {
+  const [a, b] = trio();
+  ask(a, b);
+  assert.deepEqual([a.locks.prune(T0 + 120), a.locks.entries().length], [false, 1], 'live through its last second');
+  assert.deepEqual([a.locks.prune(T0 + 121), a.locks.entries().length], [true, 0]);
+  assert.equal(a.locks.prune(T0 + 122), false);
+});
+
+check('a task whose claim record is at the last generation a record carries has no next claim: no lock is granted and no round begun', () => {
+  const hosts = trio();
+  const [a, b, c] = hosts;
+  // A member that offers the task itself needs nobody's grant for a claim of it.
+  hosts.forEach((h) => h.pool.merge(offer(b.id), T0));
+  const last = endClaim(b.id, buildClaim(b.id, {
+    pool: POOL, taskId: TASK, round: roundId(3), gen: 2 ** 40, hours: 12, grants: [], absent: [a.id.pk, c.id.pk].sort(), now: T0,
+  }), 'released', T0);
+  for (const h of hosts) assert.deepEqual(h.pool.merge(last, T0).refused, []);
+  assert.equal(a.pool.task(TASK, T0).state, 'available');
+  assert.deepEqual(ask(a, c).body, { challenge: { reason: 'unavailable' } });
+  assert.equal(c.pool.claimSnapshot(TASK, T0).available, false);
+});
+
 check('a lock that is malformed, too far from the clock or from a stranger is an error', () => {
   const [a, b] = trio();
   const good = lockBody(a.pool);
@@ -202,14 +238,14 @@ function synced(over = {}) {
   const snapshot = { pool: POOL, asOf: T0, hash: HASH, gen: 0, hours: 12, members: [b.pk, c.pk], offering: [b.pk], available: true, eligible: true, ...over };
   const round = new ClaimRound({ taskId: TASK, self: a.pk, round: roundId(1), now: T0 });
   const started = round.rebase(snapshot, T0);
-  const grant = (by, more = {}) => buildGrant(by, { pool: POOL, taskId: TASK, executor: a.pk, round: roundId(1), gen: 0, hash: HASH, exp: T0 + 120, ...more });
+  const grant = (by, more = {}) => buildGrant(by, { pool: POOL, taskId: TASK, executor: a.pk, round: roundId(1), gen: 0, hours: 12, hash: HASH, exp: T0 + 120, ...more });
   return { a, b, c, round, snapshot, started, grant };
 }
 
 check('a round confirms its state with every member, then locks them, then commits their grants', () => {
   const { b, c, round, started, grant } = synced();
   const sync = (to) => ({ do: 'sync', to, wave: 1, body: { asOf: T0, hash: HASH } });
-  const lock = (to) => ({ do: 'lock', to, wave: 1, body: { taskId: TASK, round: roundId(1), asOf: T0, hash: HASH } });
+  const lock = (to) => ({ do: 'lock', to, wave: 1, body: { taskId: TASK, round: roundId(1), asOf: T0, hash: HASH, hours: 12 } });
   assert.deepEqual(started, [sync(b.pk), sync(c.pk)]);
   assert.equal(round.phase, 'sync');
   assert.deepEqual(round.onSync(b.pk, 1, { hash: HASH }, T0), []);
@@ -245,7 +281,7 @@ check('a member that challenged is neither granted nor absent: the round does no
   round.onSync(b.pk, 1, { hash: HASH }, T0);
   round.onSync(c.pk, 1, { hash: HASH }, T0);
   assert.deepEqual(round.onLock(b.pk, 1, { grant: grant(b) }, T0 + 1), []);
-  const again = { do: 'lock', to: c.pk, wave: 1, body: { taskId: TASK, round: roundId(1), asOf: T0, hash: HASH }, retry: true };
+  const again = { do: 'lock', to: c.pk, wave: 1, body: { taskId: TASK, round: roundId(1), asOf: T0, hash: HASH, hours: 12 }, retry: true };
   assert.deepEqual(round.onLock(c.pk, 1, { challenge: { reason: 'locked', holder: worse.pk } }, T0 + 1), [again], 're-sends its lock to the member that challenged');
   assert.deepEqual(round.noAnswer(c.pk, 1, T0 + 30), [again], 'a present member is never written off as absent');
   assert.deepEqual(round.absent, []);
@@ -331,14 +367,14 @@ check('a member whose state differs sends the round back to confirming, on a new
   assert.equal(round.onLock(c.pk, 3, { grant: grant(c, fresh) }, T0 + 5)[0].do, 'commit');
 });
 
-check('a grant that is not this round\'s, this member\'s or properly signed is not a grant', () => {
+check('a grant that is not this round\'s, this member\'s, for the hours asked or properly signed is not a grant', () => {
   const { a, b, c, round, grant } = synced();
   round.onSync(b.pk, 1, { hash: HASH }, T0);
   round.onSync(c.pk, 1, { hash: HASH }, T0);
   round.onLock(c.pk, 1, { grant: grant(c) }, T0);
   const wrong = [
     grant(b, { round: roundId(2) }), grant(b, { taskId: `${POOL}#review:pr-579@octocat` }), grant(b, { executor: c.pk }),
-    grant(b, { gen: 1 }), grant(b, { hash: b64u(Buffer.alloc(32, 1)) }), grant(b, { exp: T0 + 121 }), grant(b, { pool: 'github.com/acme/other' }),
+    grant(b, { gen: 1 }), grant(b, { hours: 24 }), grant(b, { hash: b64u(Buffer.alloc(32, 1)) }), grant(b, { exp: T0 + 121 }), grant(b, { pool: 'github.com/acme/other' }),
     grant(c), grant(a), { ...grant(b), sig: grant(c).sig }, { ...grant(b), extra: 1 }, 'grant', null,
   ];
   for (const [i, bad] of wrong.entries()) {
@@ -460,7 +496,7 @@ function committed() {
 
 check('a claim holds for every host only with each grant signed and bound to its task, executor, round and generation', () => {
   const { claim, executor, others } = committed();
-  const regrant = (by, over) => buildGrant(by, { pool: POOL, taskId: TASK, executor: executor.pk, round: claim.round, gen: 0, hash: claim.grants[0].hash, exp: claim.grants[0].exp, ...over });
+  const regrant = (by, over) => buildGrant(by, { pool: POOL, taskId: TASK, executor: executor.pk, round: claim.round, gen: 0, hours: 12, hash: claim.grants[0].hash, exp: claim.grants[0].exp, ...over });
   const withGrants = (grants, over = {}) => resign(executor, claim, { grants, ...over });
   assert.equal(verifyClaim(withGrants([regrant(others[0], {}), regrant(others[1], {})])), null);
   const bad = {
@@ -490,7 +526,7 @@ check('a claim holds for every host only with each grant signed and bound to its
 
 check('a claim names each granting member once, in order, and never its executor or an absent one', () => {
   const { claim, executor, others } = committed();
-  const self = buildGrant(executor, { pool: POOL, taskId: TASK, executor: executor.pk, round: claim.round, gen: 0, hash: claim.grants[0].hash, exp: claim.grants[0].exp });
+  const self = buildGrant(executor, { pool: POOL, taskId: TASK, executor: executor.pk, round: claim.round, gen: 0, hours: 12, hash: claim.grants[0].hash, exp: claim.grants[0].exp });
   const cases = [
     { grants: [claim.grants[1], claim.grants[0]] },
     { grants: [claim.grants[0], claim.grants[0]] },
@@ -569,7 +605,7 @@ check('a pool keeps the claim that stands, whichever of two it sees first', () =
   pool.merge(ended, T0 + 10);
   assert.equal(pool.nextGen(TASK, T0 + 10), 1);
   const lockTable = new LockTable();
-  const body = { taskId: TASK, round: roundId(5), asOf: T0 + 11, hash: pool.stateHash(T0 + 11) };
+  const body = { taskId: TASK, round: roundId(5), asOf: T0 + 11, hash: pool.stateHash(T0 + 11), hours: 12 };
   const { grant } = lockTable.answer({ pool, identity: m.id, from: worst.id.pk, body, now: T0 + 11 }).body;
   assert.equal(grant.gen, 1);
   const next = buildClaim(worst.id, { pool: POOL, taskId: TASK, round: roundId(5), gen: 1, hours: 12, grants: [grant], absent: [best.id.pk], now: T0 + 12 });

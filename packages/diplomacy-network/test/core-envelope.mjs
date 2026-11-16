@@ -255,7 +255,7 @@ await check('building a malformed request throws before any work is done', async
   assert.equal(solved, 0);
   await build({});
   assert.equal(solved, 1);
-  assert.deepEqual(KINDS, ['hello', 'sync', 'pull', 'push', 'lock', 'unlock', 'ping', 'key', 'act', 'done']);
+  assert.deepEqual(KINDS, ['hello', 'sync', 'pull', 'push', 'lock', 'unlock', 'ping', 'key', 'act', 'done', 'reserve']);
 });
 
 await check('a response is accepted only as the answer of that target to that request', async () => {
@@ -280,7 +280,7 @@ await check('a refusal carries its code, its detail and the effort owed next', a
   const long = buildResponse(bob, { re, error: { code: 'denied', detail: 'x'.repeat(5000) }, effort: 8 });
   assert.equal(verifyResponse(long, { request: asked, from: bob.pk }).detail.length, 200);
   assert.equal(verifyResponse(buildResponse(bob, { re, error: { code: 'busy' }, effort: 8 }), { request: asked, from: bob.pk }).detail, '');
-  assert.deepEqual(CODES, ['effort', 'stale', 'replay', 'unknown-pool', 'not-member', 'bad-request', 'denied', 'busy']);
+  assert.deepEqual(CODES, ['effort', 'stale', 'replay', 'not-member', 'bad-request', 'denied', 'busy']);
 });
 
 await check('a malformed response is no answer at all', async () => {

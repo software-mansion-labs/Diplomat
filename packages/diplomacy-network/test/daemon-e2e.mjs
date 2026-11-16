@@ -74,7 +74,7 @@ try {
 
     b.release('go');
     const done = await ended(a, taskId);
-    assert.deepEqual([done.state, done.outcome, done.executor], ['done', { ok: true, summary: 'reviewed the pull request', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, '']);
+    assert.deepEqual([done.state, done.outcome, done.executor, done.executorHere], ['done', { ok: true, summary: 'reviewed the pull request', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, pk.b, false], 'the ended offer keeps the machine that ran it');
     assert.deepEqual([done.requests, done.refused], [5, 3], 'four API requests and a push came under the key, and the rules refused three of them');
     await until('B\'s slot free', async () => (await runOf(b, taskId)).endedAt > 0);
     assert.deepEqual([(await runOf(b, taskId)).state, (await runOf(b, taskId)).exit], ['finished', 0]);

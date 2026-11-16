@@ -91,8 +91,9 @@ try {
       const offer = await offerOf(a, taskId);
       return offer.state === 'failed' ? offer : null;
     });
-    assert.deepEqual([failed.attempt, failed.reason, failed.outcome, failed.endedAt > 0, failed.executor], [
-      3, 'broke', { ok: false, summary: 'broke', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, true, '',
+    // The failed offer keeps the machine that held it last: this one, whose attempt was the third.
+    assert.deepEqual([failed.attempt, failed.reason, failed.outcome, failed.endedAt > 0, failed.executor, failed.executorHere], [
+      3, 'broke', { ok: false, summary: 'broke', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, true, a.pk, true,
     ]);
     await until('the task cancelled for the pool', async () => (await taskOf(c, taskId)).state === 'cancelled');
     await Promise.all([a.kill(), c.kill()]);

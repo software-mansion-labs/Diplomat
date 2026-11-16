@@ -25,6 +25,18 @@ function write(v) {
   throw new TypeError(`not a canonical value: ${v === null ? 'null' : typeof v}`);
 }
 
+/// The value `bytes` are the canonical form of, or null when they are the canonical form
+/// of nothing: not JSON, or JSON written any other way - a key given twice, a float,
+/// whitespace, keys out of order.
+export function parseCanon(bytes) {
+  try {
+    const value = JSON.parse(bytes.toString('utf8'));
+    return canon(value).equals(bytes) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
 /// SHA-256 of the concatenated parts; a part that is not a Buffer is canonicalised.
 export function hash(...parts) {
   const h = crypto.createHash('sha256');

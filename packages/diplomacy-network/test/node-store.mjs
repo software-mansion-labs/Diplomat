@@ -30,7 +30,7 @@ await check('nothing is on disk before a flush; a flush writes each changed docu
     assert.deepEqual(tree(dir), [], 'not before the flush');
     assert.equal(store.read('keys'), keys, 'yet the store answers with what it was told');
     store.flush();
-    assert.deepEqual(writes, ['keys', poolFile(POOL)], 'a hundred changes, one write');
+    assert.deepEqual(writes, [poolFile(POOL), 'keys'], 'a hundred changes, one write');
     assert.deepEqual(tree(dir), ['keys.json', 'pools', `${poolFile(POOL)}.json`], 'and no temporary file left');
     assert.deepEqual([mode(path.join(dir, 'keys.json')), mode(path.join(dir, `${poolFile(POOL)}.json`)), mode(path.join(dir, 'pools'))], [0o600, 0o600, 0o700]);
     assert.equal(Object.keys(createStore({ dir }).read('keys').issued).length, 100);
@@ -67,7 +67,7 @@ await check('a host on a real directory comes back as itself; with a file it can
     await w.wait(exe.node.join(req.node.invite({ pool: POOL })));
     const { taskId } = await req.node.offer({ pool: POOL, kind: 'review', item: 'pr-1', title: 't', prompt: 'p' });
     await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
-    assert.deepEqual(tree(dir), ['identity.json', 'keys.json', 'links.json', 'locks.json', 'offers.json', 'pools', `${poolFile(POOL)}.json`]);
+    assert.deepEqual(tree(dir), ['heard.json', 'identity.json', 'keys.json', 'links.json', 'locks.json', 'offers.json', 'pools', `${poolFile(POOL)}.json`]);
     for (const name of tree(dir).filter((n) => n.endsWith('.json'))) assert.equal(mode(path.join(dir, name)), 0o600, name);
     assert.ok(JSON.parse(fs.readFileSync(path.join(dir, 'keys.json'), 'utf8')).issued[taskId].secret);
 

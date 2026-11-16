@@ -47,7 +47,10 @@ export function fail(code, detail) {
 }
 
 /// The inbound half: an HTTP server on a loopback port of its own choosing that answers
-/// nothing but `POST /dn1`. `{ listen, onRequest, limitFor, close }`.
+/// nothing but `POST /dn1`. `{ listen, onRequest, limitFor, close }`. `limitFor(fn)`:
+/// `fn(headers)` answers the most bytes of that request's body to read, as a number or as
+/// `{ bytes, release }`; `release` is then called exactly once, when the request it sized
+/// is over - answered, refused, timed out or abandoned.
 export function createServer({ log, tune }) {
   const t = { ...HTTP_TUNING, ...tune };
   let handler = async () => { throw new Error('no request handler is set'); };
@@ -80,13 +83,24 @@ export function createServer({ log, tune }) {
     const declared = req.headers['content-length'];
     if (!/^\d+$/.test(declared ?? '')) return refuse(411);
     const length = Number(declared);
-    let allowed;
+    let says;
     try {
-      allowed = limit(req.headers);
+      says = limit(req.headers);
     } catch (err) {
       log(`transport: the limit callback failed: ${err?.stack ?? err}`);
       return refuse(500);
     }
+    const { bytes: allowed, release } = typeof says === 'number' ? { bytes: says } : says;
+    // What the limit callback set aside for this request is given back once: after the
+    // request was answered, or when it ended without its body ever reaching the handler.
+    let held = typeof release === 'function';
+    const free = () => {
+      if (!held) return;
+      held = false;
+      release();
+    };
+    let handled = false;
+    res.on('close', () => !handled && free());
     if (length > allowed) return refuse(413);
     if (req.headers.expect) res.writeContinue();
 
@@ -96,7 +110,9 @@ export function createServer({ log, tune }) {
     req.on('close', () => clearTimeout(deadline));
     req.on('end', () => {
       clearTimeout(deadline);
-      answer(Buffer.concat(chunks), req.headers, res);
+      if (res.writableEnded || res.destroyed) return; // refused on its deadline, or gone
+      handled = true;
+      answer(Buffer.concat(chunks), req.headers, res).then(free);
     });
   }
 

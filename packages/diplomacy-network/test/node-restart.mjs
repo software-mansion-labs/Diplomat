@@ -19,16 +19,18 @@ await check('a host that granted a lock still holds it after a restart: nobody e
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.agreed(all);
   const asOf = w.net.now();
-  const lock = (from, round) => w.request(from, req, 'lock', { taskId, round, asOf, hash: w.view(from).hash });
+  const lock = (from, round) => w.request(from, req, 'lock', { taskId, round, asOf, hash: w.view(from).hash, hours: 12 });
   const granted = await lock(a, 'AAAAAAAAAAA');
   assert.equal(granted.body.grant.executor, a.pk);
   await w.restart(req);
+  // A request made by hand is not sent again: it is dated after the last one req served before it went down.
+  await w.run(1);
   assert.equal(req.node.snapshot().offers[0].taskId, taskId, 'its offers are its own again');
   assert.deepEqual((await lock(b, 'BBBBBBBBBBA')).body, { challenge: { reason: 'locked', holder: a.pk } });
   assert.deepEqual((await lock(a, 'AAAAAAAAAAA')).body, granted.body, 'asked again, the holder gets the very same grant');
   await w.run(GRANT_TTL_SECS + 2 - (w.net.now() - asOf));
   const later = w.net.now();
-  const free = await w.request(b, req, 'lock', { taskId, round: 'BBBBBBBBBBA', asOf: later, hash: w.view(b).hash });
+  const free = await w.request(b, req, 'lock', { taskId, round: 'BBBBBBBBBBA', asOf: later, hash: w.view(b).hash, hours: 12 });
   assert.equal(free.body.grant.executor, b.pk, 'once the grant has run out the task can be granted again');
 });
 
@@ -284,8 +286,8 @@ await check('what a member answers after a pool was closed is not taken into it'
   // Back up, it asks b for what it missed, and its pool is closed while the answer is on
   // its way - unheard, so that b still answers.
   let pulling = false;
-  w.net.tap(({ from, headers }) => {
-    if (pulling || from !== 'a' || headers['dn-kind'] !== 'pull') return;
+  w.net.tap(({ from, kind }) => {
+    if (pulling || from !== 'a' || kind !== 'pull') return;
     pulling = true;
     w.net.clock('world').setTimeout(() => {
       a.transport.host.ready = false;

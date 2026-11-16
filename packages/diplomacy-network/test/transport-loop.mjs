@@ -413,11 +413,49 @@ try {
     assert.ok(p.bytesIn < 4096, `${p.bytesIn} bytes of a refused body were sent`);
     assert.equal(c.handled, handled);
 
-    c.t.limitFor((headers) => (headers['dn-kind'] === 'act' ? 3 * MIB : 1000));
-    assert.equal((await a.t.request(c.pk, Buffer.alloc(3 * MIB, 1), { ...options, headers: { 'dn-kind': 'act' } })).length, 3 * MIB);
-    assert.equal(await code(a.t.request(c.pk, Buffer.alloc(3 * MIB + 1, 1), { ...options, headers: { 'dn-kind': 'act' } })), 'http-413');
+    c.t.limitFor((headers) => (headers['dn-ticket'] === 'held' ? 3 * MIB : 1000));
+    assert.equal((await a.t.request(c.pk, Buffer.alloc(3 * MIB, 1), { ...options, headers: { 'dn-ticket': 'held' } })).length, 3 * MIB);
+    assert.equal(await code(a.t.request(c.pk, Buffer.alloc(3 * MIB + 1, 1), { ...options, headers: { 'dn-ticket': 'held' } })), 'http-413');
     assert.equal((await a.t.request(c.pk, Buffer.alloc(1000, 1))).length, 1000);
     assert.equal(await code(a.t.request(c.pk, Buffer.alloc(1001, 1))), 'http-413');
+  });
+
+  await check('what a limit set aside for a request is given back once: after the answer, on a refusal, and when the body never comes', async () => {
+    const c = await host({ tune: { bodyBaseMs: 200 } });
+    let [held, released] = [0, 0];
+    c.t.limitFor(() => {
+      held += 1;
+      return { bytes: 1000, release: () => { released += 1; } };
+    });
+    const freed = (n, what) => until(() => released === n, 2000, `the release ${what}`);
+    assert.equal((await a.t.request(c.pk, Buffer.alloc(1000, 1))).length, 1000);
+    await freed(1, 'after an answer');
+    assert.equal(await code(a.t.request(c.pk, Buffer.alloc(1001, 1))), 'http-413');
+    await freed(2, 'after a body over the limit');
+
+    // While the handler works on the body, what was set aside for it stays so.
+    let finish = null;
+    c.serve(() => new Promise((resolve) => { finish = () => resolve(Buffer.from('late')); }));
+    const pending = a.t.request(c.pk, say('x'));
+    await until(() => finish, 2000, 'the handler');
+    await sleep(300);
+    assert.deepEqual([held, released], [3, 2]);
+    finish();
+    assert.equal((await pending).toString(), 'late');
+    await freed(3, 'after a slow answer');
+    c.serve(async () => { throw new Error('the handler broke'); });
+    assert.equal(await code(a.t.request(c.pk, say('x'))), 'http-500');
+    await freed(4, 'after a handler that threw');
+
+    // Headers that promise a body: one that stops halfway is refused on its deadline, one
+    // whose sender hangs up is over at once.
+    const stalled = await raw(c, `POST /dn1 HTTP/1.1\r\nhost: x\r\ncontent-length: 500\r\n\r\nhalf`);
+    assert.equal(stalled.status, 408);
+    await freed(5, 'after a body that timed out');
+    await raw(c, `POST /dn1 HTTP/1.1\r\nhost: x\r\ncontent-length: 500\r\n\r\nhalf`, 20);
+    await freed(6, 'after a sender that hung up');
+    await sleep(300);
+    assert.deepEqual([held, released], [6, 6], 'once each');
   });
 
   await check('an answer over maxResponseBytes is too-large, whether its length was declared or not', async () => {

@@ -6,13 +6,13 @@
 // the order they arrived in: that is what lets two hosts holding the same records
 // compute the same hash.
 
-import { b64u, hash } from './canon.js';
+import { b64u, canon, hash } from './canon.js';
 import { claimPrecedence, compareClaims, precedenceShaped, verifyClaim } from './claims.js';
 import { eligible, isActive, taskHours } from './lease.js';
 import { acceptedSet, checkJoin, verifyVoucher, voucherOf } from './membership.js';
 import {
-  checkShape, checkSignature, compareVersions, isBytes, isObject, isTime, parseKey, recordDigest, shaped,
-  versionPrecedence,
+  LIMITS, checkShape, checkSignature, compareVersions, isBytes, isObject, isTime, parseKey, recordDigest, recordKey,
+  shaped, versionPrecedence,
 } from './records.js';
 import { CLOCK_SKEW_SECS, MEMBER_RETENTION_SECS, RECORD_RETENTION_SECS } from '../paths.js';
 
@@ -38,9 +38,50 @@ function disproof(record) {
   return record.type === 'claim' ? verifyClaim(record) : null;
 }
 
+// How far a member's record is from a root of the pool by vouchers: 0 for a record
+// without one, one more than its voucher's signer's otherwise, and Infinity when the
+// chain ends at a record that is not held or never ends.
+function depthOf(pk, members, memo) {
+  const path = [];
+  let at = pk;
+  while (!memo.has(at)) {
+    const entry = members.get(at);
+    const by = entry ? voucherOf(entry.record)?.by : null;
+    if (!entry || path.includes(at)) memo.set(at, Infinity);
+    else if (!by) memo.set(at, 0);
+    else {
+      path.push(at);
+      at = by;
+    }
+  }
+  let depth = memo.get(at);
+  while (path.length > 0) memo.set(path.pop(), depth += 1);
+  return memo.get(pk);
+}
+
+// The members a pool with more of them than it holds keeps: the ones nearest a root,
+// then the earliest to join, then the lowest key. A member is further from the root
+// than the one that vouched for it, so none is kept without that one. `self` is kept
+// before any of them: a host is a member of its own state, and where the others keep
+// no seat for it its hash is not theirs.
+function seated(pks, members, self) {
+  const memo = new Map();
+  const seniority = new Map(pks.map((pk) => [pk, [depthOf(pk, members, memo), members.get(pk).record.joinedAt]]));
+  const before = (a, b) => {
+    if (a === self || b === self) return a === self ? -1 : 1;
+    const [x, y] = [seniority.get(a), seniority.get(b)];
+    if (x[0] !== y[0]) return x[0] < y[0] ? -1 : 1;
+    if (x[1] !== y[1]) return x[1] - y[1];
+    return a < b ? -1 : 1;
+  };
+  return [...pks].sort(before).slice(0, LIMITS.members);
+}
+
 // The entries of `entries` that are live at `asOf` for `self`, and why each other one is
 // not. Members first, since an offer or a claim lives only while its signer does; then
-// offers, since a lease extension lives only while the offer its ping rests on does.
+// offers, since a claim lives only while an offer it rests on does. Offers and claims are
+// taken in key order, each against what its signer has left of its quota, so which ones
+// a member over its quota keeps does not depend on the order they arrived in.
 // Every version is judged by its own `at` alone, so a version that wins over another of
 // its key was signed no earlier and is never dropped before it.
 // The answer is the same for every time from `from` up to `until`: the retention of some
@@ -48,7 +89,7 @@ function disproof(record) {
 function settle(entries, self, asOf) {
   const live = new Map();
   const dead = new Map();
-  const of = (type) => [...entries.values()].filter((e) => e.type === type);
+  const of = (type) => [...entries.values()].filter((e) => e.type === type).sort((a, b) => (a.key < b.key ? -1 : 1));
   let [from, until] = [-Infinity, Infinity];
   const past = (moment) => {
     if (moment <= asOf) from = Math.max(from, moment);
@@ -70,27 +111,44 @@ function settle(entries, self, asOf) {
     if (by && members.has(by)) queue.push(by);
   }
   const accepted = acceptedSet(self, [...kept].map((pk) => members.get(pk).record));
+  const inside = [...kept].filter((pk) => accepted.has(pk));
+  const seats = inside.length > LIMITS.members ? new Set(seated(inside, members, self)) : null;
   const roster = new Map(); // pk -> the live member record
   const present = new Map(); // pk -> the record of a member: live, not left, signed lately
+  const used = new Map(); // pk -> what that member has live: { offers, claims, bytes }
   for (const [pk, e] of members) {
     if (!kept.has(pk)) dead.set(e.key, 'expired');
     else if (!accepted.has(pk)) dead.set(e.key, 'not-member');
+    else if (seats && !seats.has(pk)) dead.set(e.key, 'full');
     else {
       live.set(e.key, e);
       roster.set(pk, e.record);
+      used.set(pk, { offers: 0, claims: 0, bytes: e.size });
       if (!expired(e.record) && !e.record.left) present.set(pk, e.record);
     }
   }
+  const fits = (pk, kind, size) => {
+    const mine = used.get(pk);
+    if (mine[kind] >= LIMITS[kind] || mine.bytes + size > LIMITS.bytes) return false;
+    mine[kind] += 1;
+    mine.bytes += size;
+    return true;
+  };
   for (const e of of('offer')) {
     if (expired(e.record)) dead.set(e.key, 'expired');
     else if (!roster.has(e.record.host)) dead.set(e.key, 'not-member');
+    else if (!fits(e.record.host, 'offers', e.size)) dead.set(e.key, 'quota');
     else live.set(e.key, e);
   }
   for (const e of of('claim')) {
     const { record } = e;
+    const offers = (pk) => live.has(offerKey(record.taskId, pk));
     if (expired(record)) dead.set(e.key, 'expired');
     else if (!roster.has(record.executor)) dead.set(e.key, 'not-member');
-    else if (record.ping && !live.has(offerKey(record.taskId, record.ping.by))) dead.set(e.key, 'no-offer');
+    // A claim stands on the consent of a host that offers its task - its executor or a
+    // member that granted it - and an extension on the offer of the host that asked for it.
+    else if (![record.executor, ...record.grants.map((g) => g.by)].some(offers) || (record.ping && !offers(record.ping.by))) dead.set(e.key, 'no-offer');
+    else if (!fits(record.executor, 'claims', e.size)) dead.set(e.key, 'quota');
     else live.set(e.key, e);
   }
   return { live, dead, accepted, roster, present, from, until };
@@ -99,7 +157,7 @@ function settle(entries, self, asOf) {
 /// The records one host holds for one pool. `self` is the host's own public key: the
 /// members it accepts are the ones connected to it.
 export class Pool {
-  #entries = new Map(); // key -> { key, type, record, digest, precedence }
+  #entries = new Map(); // key -> { key, type, record, digest, size, precedence }
   #settled = null;
 
   constructor({ id, self }) {
@@ -120,10 +178,11 @@ export class Pool {
   /// key), dated past the clock tolerance (`future`), loses to the version already held
   /// (`older`), does not prove itself (`bad-signature`, `bad-voucher`, `bad-claim`,
   /// `bad-grant`, `bad-lease`, `bad-ping`), or would not be live here: past its retention
-  /// (`expired`), signed by nobody this host accepts (`not-member`), or extending a claim
-  /// for a host that does not offer its task (`no-offer`). A list is taken in together,
-  /// so a member record may let in the records that depend on it whatever their order.
-  /// Records no longer live are dropped.
+  /// (`expired`), signed by nobody this host accepts (`not-member`), a member more than
+  /// the pool holds (`full`), an offer or a claim beyond what its signer may have live
+  /// (`quota`), or a claim no host offering its task stands behind (`no-offer`). A list
+  /// is taken in together, so a member record may let in the records that depend on it
+  /// whatever their order. Records no longer live are dropped.
   merge(input, now) {
     const verdicts = [];
     const tentative = new Map(this.#entries);
@@ -136,7 +195,7 @@ export class Pool {
       }
       const { key } = shape;
       const entry = {
-        key, type: record.type, record, digest: recordDigest(record),
+        key, type: record.type, record, digest: recordDigest(record), size: canon(record).length,
         precedence: record.type === 'claim' ? claimPrecedence(record) : versionPrecedence(record),
       };
       const verdict = { key, digest: entry.digest, code: null };
@@ -172,6 +231,22 @@ export class Pool {
       else refused.push({ key, code: code ?? why.get(key) ?? settled.dead.get(key) ?? 'older' });
     }
     return { accepted: [...accepted], refused, fresh: [...fresh] };
+  }
+
+  /// Has the signer of this offer or claim room for it: would it be live here beside
+  /// everything else its signer has, with `LIMITS.spare` of the signer's bytes left over?
+  /// A host asks before it adds a record of its own, and may ask about one it has yet to
+  /// sign: what counts is the record's type, key, signer and size as given.
+  room(record) {
+    const signer = (r) => r.host ?? r.executor ?? r.pk;
+    const key = recordKey(record);
+    let [count, bytes] = [0, canon(record).length + LIMITS.spare];
+    for (const e of this.#entries.values()) {
+      if (signer(e.record) !== signer(record) || e.key === key) continue;
+      bytes += e.size;
+      if (e.type === record.type) count += 1;
+    }
+    return count < LIMITS[`${record.type}s`] && bytes <= LIMITS.bytes;
   }
 
   /// Drops the records that stopped being live.
@@ -313,7 +388,7 @@ export class Pool {
       hours: task?.hours ?? 0,
       members: this.members(now).map((m) => m.pk).filter((pk) => pk !== this.self),
       offering: task?.offeredBy ?? [],
-      available: task?.state === 'available' && this.claimSettled(taskId, now),
+      available: task?.state === 'available' && this.claimSettled(taskId, now) && isTime(this.nextGen(taskId, now)),
       eligible: Boolean(me && task && eligible(me.maxAcceptedH, task.hours)),
     };
   }

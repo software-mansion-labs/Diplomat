@@ -1,6 +1,7 @@
 // What a host keeps across restarts, as JSON documents under one directory:
 //
 //   identity.json           { seed }
+//   heard.json              { ts }: the latest date of a request this host served
 //   pools/<pool hash>.json  one pool: its link, this host's own sequence numbers, its records
 //   locks.json              the lock table of every pool
 //   keys.json               the keys this host issued and the keys it holds, secrets included
@@ -65,10 +66,17 @@ export function memoryDisk() {
   };
 }
 
+// A document rests on the ones before it here - a run on the key it holds, a key and a
+// lock on a pool's records - and is written after them, so a host that dies between two
+// writes of one flush finds nothing that rests on what never reached the disk.
+const ORDER = ['identity', 'heard', 'links', 'pools', 'locks', 'keys', 'offers', 'runs'];
+const rank = (name) => ORDER.indexOf(name.split('/')[0]);
+
 /// The store over `dir` (or over `disk`): `{ read(name), write(name, value), remove(name), flush() }`.
 /// `read` answers the stored value or null; a document that does not parse is moved
 /// aside, logged, and read as null. `write` only remembers the value: `flush` writes
-/// every value remembered since the last one, each file replaced atomically.
+/// every value remembered since the last one, each file replaced atomically, in the
+/// order the documents rest on one another.
 export function createStore({ dir, disk = fileDisk(dir), log = () => {} }) {
   const dirty = new Map(); // name -> the value to write, or undefined to remove the file
 
@@ -91,7 +99,7 @@ export function createStore({ dir, disk = fileDisk(dir), log = () => {} }) {
       dirty.set(name, undefined);
     },
     flush() {
-      for (const [name, value] of dirty) {
+      for (const [name, value] of [...dirty].sort(([a], [b]) => rank(a) - rank(b))) {
         if (value === undefined) disk.remove(name);
         else disk.write(name, `${JSON.stringify(value)}\n`);
       }

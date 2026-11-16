@@ -4,7 +4,7 @@
 
 import './fast-env.mjs';
 import assert from 'node:assert/strict';
-import { b64u } from '../../src/core/canon.js';
+import { b64u, canon } from '../../src/core/canon.js';
 import { buildRequest, verifyResponse } from '../../src/core/envelope.js';
 import { identityFromSeed } from '../../src/core/identity.js';
 import { solve } from '../../src/core/pow.js';
@@ -42,14 +42,28 @@ export function createWorld({ seed = 1 } = {}) {
     const life = h.transport.host;
     const disk = {
       ...h.disk,
-      write: (name, text) => life.dead || h.disk.write(name, text),
+      write(name, text) {
+        if (life.dead) return;
+        h.disk.write(name, text);
+        // `crashAfter` names the document whose write is the last thing the process does.
+        if (h.crashAfter === name) {
+          h.crashAfter = null;
+          net.kill(h.name);
+        }
+      },
       remove: (name) => life.dead || h.disk.remove(name),
     };
     h.node = createNode({
       store: createStore({ disk, log: (line) => h.log.push(line) }),
       transport: h.transport, clock: h.clock, random: (n) => net.rnd.bytes(n), log: (line) => h.log.push(line),
       requester: h.requester, executor: h.executor, settings: () => h.settings,
-      solve: (challenge, effort) => solve(challenge, effort).counter,
+      // `solved` lists the effort of every proof of work the host paid; a price no test
+      // means it to pay is a failure, not minutes of hashing.
+      solve(challenge, effort) {
+        h.solved.push(effort);
+        assert.ok(effort <= 2 ** 18, `${h.name} was made to pay ${effort}`);
+        return solve(challenge, effort).counter;
+      },
     });
     assert.equal(h.node.pk, h.pk);
     return h;
@@ -61,7 +75,8 @@ export function createWorld({ seed = 1 } = {}) {
     const id = identityFromSeed(b64u(net.rnd.bytes(32)));
     disk.write('identity', JSON.stringify({ seed: id.seed }));
     const h = {
-      name, pk: id.pk, id, disk, slots, pools, skew: 0, log: [], requester: fakeRequester(), executor: fakeExecutor(),
+      name, pk: id.pk, id, disk, slots, pools, skew: 0, log: [], solved: [], crashAfter: null,
+      requester: fakeRequester(), executor: fakeExecutor(),
       settings: { requiredMinimumH: 12, maximumAcceptedH: 12 },
     };
     hosts.set(name, h);
@@ -116,19 +131,28 @@ export function createWorld({ seed = 1 } = {}) {
         pool: POOL, seq: 0, at: now, joinedAt: now, maxAcceptedH: 12, voucher: inviter.node.invite({ pool: POOL }).invite,
       });
       const answer = await world.request(s, inviter, 'hello', { member }, { effort: 128 });
-      assert.equal(answer.ok, true, 'the intruder was let in');
+      assert.equal(answer.ok, true, `the intruder was let in: ${answer.code} ${answer.detail}`);
       return s;
     },
     /// One request made by hand, as `from`, with every part open to tampering: answers
     /// what `to` said - `{ ok, body }` or `{ ok, code, detail }`, with `effort`, the raw
     /// `response` and the `request` sent - or `{ invalid: true }` for an answer that is
     /// not a signed response to that request. `mangle` rewrites the envelope after it
-    /// was signed; `bytes` replaces the body sent altogether. With `drive` false the
-    /// network is left to the caller to run, so several requests can be on their way at once.
-    async request(from, to, kind, body, { effort = 8, pool = POOL, ts = net.now(), mangle, bytes, nonce = net.rnd.bytes(16), headers, drive = true } = {}) {
+    /// was signed; `bytes` replaces the body sent altogether, or as a function respells
+    /// the bytes that would be sent; `headers` go with it. What is sent is the envelope's
+    /// canonical form, or plain JSON when it has none. With `drive` false the network is
+    /// left to the caller to run, so several requests can be on their way at once.
+    async request(from, to, kind, body, { effort = 8, pool = POOL, ts = net.now(), mangle, bytes, nonce = net.rnd.bytes(16), headers = {}, drive = true } = {}) {
       const request = await buildRequest(from.id, { pool, kind, to: to.pk, ts, body, nonce, effort }, solver);
-      const sent = bytes ?? Buffer.from(JSON.stringify(mangle ? mangle(structuredClone(request)) : request));
-      const going = from.transport.request(to.pk, sent, { headers: headers ?? { 'dn-from': from.pk, 'dn-pool': pool, 'dn-kind': kind } });
+      const envelope = mangle ? mangle(structuredClone(request)) : request;
+      let sent = typeof bytes === 'function' ? undefined : bytes;
+      try {
+        sent ??= canon(envelope);
+      } catch {
+        sent = Buffer.from(JSON.stringify(envelope));
+      }
+      if (typeof bytes === 'function') sent = bytes(sent);
+      const going = from.transport.request(to.pk, sent, { headers });
       const raw = await (drive ? world.wait(going) : going);
       const response = JSON.parse(raw.toString('utf8'));
       const answer = verifyResponse(response, { request, from: to.pk });

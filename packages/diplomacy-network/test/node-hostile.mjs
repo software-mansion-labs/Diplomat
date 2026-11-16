@@ -8,9 +8,9 @@ import { b64u, hash } from '../src/core/canon.js';
 import { buildClaim, buildGrant } from '../src/core/claims.js';
 import { KINDS, buildResponse } from '../src/core/envelope.js';
 import { sign, verify } from '../src/core/identity.js';
-import { buildPing, extendClaim } from '../src/core/lease.js';
+import { buildPing } from '../src/core/lease.js';
 import { offerRecord } from '../src/core/records.js';
-import { LEASE_GRACE_SECS, POW } from '../src/paths.js';
+import { POW } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const ROUND = 'AAAAAAAAAAA';
@@ -97,7 +97,7 @@ await check('records that do not hold are refused one by one, each for its reaso
   const outsider = w.stranger('outsider');
   const mine = w.records(req).find((r) => r.type === 'offer');
   const offer = (id, more = {}) => offerRecord(id, { pool: POOL, kind: 'review', item: 'pr-9', identity: 'octocat', seq: 0, at: now, title: 't', minRequiredH: 12, createdAt: now, ...more });
-  const grantOf = async (round) => (await say(w, evil, a, 'lock', { taskId, round, asOf: now, hash: before })).body.grant;
+  const grantOf = async (round) => (await say(w, evil, a, 'lock', { taskId, round, asOf: now, hash: before, hours: 12 })).body.grant;
   const granted = await grantOf(ROUND);
   assert.equal(granted.executor, evil.pk);
   const claim = (fields) => buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, hours: 12, grants: [], absent: [], now, ...fields });
@@ -112,6 +112,9 @@ await check('records that do not hold are refused one by one, each for its reaso
     ['a claim whose grant was given for another round', claim({ round: 'BBBBBBBBBBA', grants: [granted], absent: [req.pk] }), 'bad-grant'],
     ['a claim whose grant names a member that never signed it', claim({ grants: [forgedGrant, granted].sort((x, y) => (x.by < y.by ? -1 : 1)) }), 'bad-grant'],
     ['a claim with a lease longer than its hours give', resign(claim({ grants: [granted], absent: [req.pk] }), evil.id, { leaseUntil: now + 99999 }), 'bad-lease'],
+    ['a claim for more hours than its grant is for', claim({ hours: 720, grants: [granted], absent: [req.pk] }), 'bad-grant'],
+    ['a claim no host offering the task granted', claim({ grants: [granted], absent: [req.pk] }), 'no-offer'],
+    ['a claim nobody granted', claim({ absent: [req.pk, a.pk].sort() }), 'no-offer'],
   ];
   for (const [what, record, code] of cases) {
     const { said, body } = await say(w, evil, req, 'push', { records: [record] });
@@ -121,7 +124,7 @@ await check('records that do not hold are refused one by one, each for its reaso
   assert.equal(w.task(req, taskId).state, 'available');
 });
 
-await check('a claim made behind every member\'s back gets no key, cannot be extended by its maker, and lapses', async () => {
+await check('a claim made behind every member\'s back is no claim: no host takes it, and it gets nothing from the requester', async () => {
   const w = createWorld({ seed: 83 });
   const all = await w.pool(['req', 'a']);
   const [req, a] = all;
@@ -132,27 +135,24 @@ await check('a claim made behind every member\'s back gets no key, cannot be ext
   const now = w.net.now();
   // Nobody was asked: the claim calls every other member absent, which is its maker's word alone.
   const claim = buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, hours: 12, grants: [], absent: [req.pk, a.pk].sort(), now });
-  for (const h of [req, a]) assert.equal((await say(w, evil, h, 'push', { records: [claim] })).body.accepted.length, 1);
-  assert.deepEqual([w.task(req, taskId).state, w.task(req, taskId).executor], ['claimed', evil.pk]);
-  assert.equal((await say(w, evil, req, 'key', { taskId, round: ROUND })).said, 'denied: another host answers for this claim');
+  for (const h of [req, a]) {
+    const pushed = await say(w, evil, h, 'push', { records: [claim] });
+    assert.deepEqual([pushed.body.accepted, pushed.body.refused.map((r) => r.code)], [[], ['no-offer']], h.name);
+    assert.deepEqual([w.task(h, taskId).state, w.claim(h, taskId)], ['available', undefined]);
+  }
+  assert.equal((await say(w, evil, req, 'key', { taskId, round: ROUND })).said, 'denied: no active claim of the task names that executor and round');
   assert.equal(w.stored(req, 'keys')?.issued?.[taskId], undefined);
   assert.equal((await say(w, evil, req, 'act', { taskId, keyId: ROUND, seq: 0, request: { method: 'GET', path: '/x', headers: {} }, mac: ROUND })).said.split(':')[0], 'denied');
   assert.deepEqual(req.requester.calls, []);
-
-  // Its maker cannot keep it past its first lease: only a host offering the task can ask for the next.
-  await w.run(claim.leaseUntil - 300 - w.net.now());
-  const forged = extendClaim(evil.id, claim, buildPing(evil.id, claim, w.net.now()), w.net.now());
-  const pushed = await say(w, evil, req, 'push', { records: [forged] });
-  assert.deepEqual([pushed.body.accepted, pushed.body.refused.map((r) => r.code)], [[], ['no-offer']]);
-  // Nor can it end the task, or anybody else's run.
-  assert.equal((await say(w, a, req, 'done', { taskId, round: ROUND, outcome: { ok: true, summary: 's', microUsd: 0, tokens: 0, runner: 'r', model: 'm' } })).said.split(':')[0], 'denied');
-  assert.equal(w.offerRow(req, taskId).state, 'claimed');
+  const outcome = { ok: true, summary: 's', microUsd: 0, tokens: 0, runner: 'r', model: 'm' };
+  for (const from of [evil, a]) assert.equal((await say(w, from, req, 'done', { taskId, round: ROUND, outcome })).said.split(':')[0], 'denied');
+  assert.equal(w.offerRow(req, taskId).state, 'pooled');
   a.slots = 1;
-  await w.run(claim.leaseUntil + LEASE_GRACE_SECS + 5 - w.net.now());
-  await w.net.until(() => a.executor.jobOf(taskId), { what: 'an honest member taking the task once the claim lapsed' });
+  a.node.admit({ slots: 1 });
+  await w.net.until(() => a.executor.jobOf(taskId), { what: 'an honest member taking the task' });
   const real = w.claim(req, taskId);
-  assert.deepEqual([real.executor, real.gen, real.grants.map((g) => g.by), real.absent], [a.pk, 1, [req.pk], [evil.pk]]);
-  assert.equal(w.offerRow(req, taskId).attempt, 2, 'what it did cost the offer: one of its attempts');
+  assert.deepEqual([real.executor, real.gen, real.grants.map((g) => g.by), real.absent], [a.pk, 0, [req.pk], [evil.pk]]);
+  assert.equal(w.offerRow(req, taskId).attempt, 1, 'what it did cost the offer nothing');
   await w.agreed(all);
 
   // A ping from a host that does not offer the task moves no lease.
@@ -164,7 +164,7 @@ await check('a claim made behind every member\'s back gets no key, cannot be ext
   // A lock is its holder's to give back, nobody else's.
   const second = await req.node.offer(offerArgs('pr-2'));
   await w.agreed(all);
-  const lock = (from) => say(w, from, req, 'lock', { taskId: second.taskId, round: ROUND, asOf: w.net.now(), hash: w.view(req).hash });
+  const lock = (from) => say(w, from, req, 'lock', { taskId: second.taskId, round: ROUND, asOf: w.net.now(), hash: w.view(req).hash, hours: 12 });
   assert.equal((await lock(a)).body.grant.executor, a.pk);
   assert.equal((await say(w, evil, req, 'unlock', { taskId: second.taskId, round: ROUND })).said, 'ok');
   assert.deepEqual((await lock(evil)).body, { challenge: { reason: 'locked', holder: a.pk } });
@@ -183,7 +183,7 @@ await check('an answer that is signed but names another request is no answer', a
     const { kind, body, from } = JSON.parse(bytes.toString('utf8'));
     answered += 1;
     const says = kind === 'lock'
-      ? { grant: buildGrant(evil.id, { pool: POOL, taskId: body.taskId, executor: from, round: body.round, gen: 0, hash: body.hash, exp: body.asOf + 120 }) }
+      ? { grant: buildGrant(evil.id, { pool: POOL, taskId: body.taskId, executor: from, round: body.round, gen: 0, hours: body.hours, hash: body.hash, exp: body.asOf + 120 }) }
       : { hash: body.hash ?? '', accepted: [], refused: [] };
     return Buffer.from(JSON.stringify(buildResponse(evil.id, { re: b64u(hash('another request')), body: says, effort: POW.memberBase })));
   });

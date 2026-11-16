@@ -139,7 +139,7 @@ await check('a claimant that stands down gives back the locks it was granted', a
   await w.agreed(all);
   const [better, worse] = outranks(taskId, x.pk, y.pk) ? [x, y] : [y, x];
   // The better-ranked host holds q's lock, by a request made by hand; its node sits idle.
-  const lock = (round) => ({ taskId, round, asOf: w.net.now(), hash: w.view(better).hash });
+  const lock = (round) => ({ taskId, round, asOf: w.net.now(), hash: w.view(better).hash, hours: 12 });
   const held = await w.request(better, q, 'lock', lock('AAAAAAAAAAA'));
   assert.equal(held.body.grant.executor, better.pk);
   // The worse-ranked one goes for the task: req grants it, q names the holder, it stands down.

@@ -5,13 +5,14 @@
 
 import assert from 'node:assert/strict';
 import { b64u, canon, hash } from '../src/core/canon.js';
+import { buildClaim, buildGrant } from '../src/core/claims.js';
 import { sign } from '../src/core/identity.js';
 import { acceptedSet, checkJoin, createInvite, inviteToken, parseInvite, verifyInvite, verifyVoucher } from '../src/core/membership.js';
 import { MAX_HELLO_CHAIN, MAX_PULL_KEYS, MAX_PUSH_RECORDS, Pool } from '../src/core/pool.js';
 import {
-  buildTaskId, checkShape, checkSignature, compareVersions, parseKey, parseTaskId, recordDigest, recordKey, signRecord, validPool,
+  LIMITS, buildTaskId, checkShape, checkSignature, compareVersions, parseKey, parseTaskId, recordDigest, recordKey, signRecord, validPool,
 } from '../src/core/records.js';
-import { POOL, T0, claimNow, club, ident, invite, member, offer, prng } from './lib/core-fixtures.mjs';
+import { POOL, T0, claimNow, club, ident, invite, member, offer, prng, roundId } from './lib/core-fixtures.mjs';
 
 function check(name, fn) {
   fn();
@@ -32,6 +33,7 @@ const poolOf = (id, records = [], now = T0) => {
   return pool;
 };
 const codes = (result) => result.refused.map((r) => r.code);
+const sum = (list) => list.reduce((total, n) => total + n, 0);
 
 check('a pool id is a lowercase forge slug of a host and at least two more segments', () => {
   for (const good of ['github.com/owner/repo', 'gitlab.com/group/sub/repo', 'git.example.org/a_b/c.d-e']) assert.ok(validPool(good), good);
@@ -573,4 +575,113 @@ check('a claim snapshot is what a round by this host starts from', () => {
   claimNow(hosts, 0, TASK, T0 + 8);
   const after = b.pool.claimSnapshot(TASK, T0 + 8);
   assert.deepEqual([after.available, after.gen], [false, 1]);
+});
+
+check('a pool holds 256 members: the nearest its root, then the earliest to join, then the lowest key; a host keeps a seat in its own state', () => {
+  const ids = Array.from({ length: 300 }, (_, i) => ident(100 + i));
+  const joined = (i) => T0 + (i % 150);
+  const records = [member(root), ...ids.map((id, i) => member(id, { voucher: invite(root, { n: i }), joinedAt: joined(i), at: T0 + 200 }))];
+  const now = T0 + 200;
+  const pool = poolOf(root);
+  const result = pool.merge(records, now);
+  const senior = ids.map((id, i) => ({ pk: id.pk, at: joined(i) })).sort((x, y) => x.at - y.at || (x.pk < y.pk ? -1 : 1)).map((m) => m.pk);
+  const seats = (p) => p.members(now).map((m) => m.pk).sort();
+  assert.deepEqual(seats(pool), [root.pk, ...senior.slice(0, 255)].sort());
+  assert.deepEqual([...new Set(codes(result))], ['full']);
+  assert.deepEqual(result.refused.map((r) => r.key).sort(), senior.slice(255).map((pk) => `member/${pk}`).sort());
+  assert.equal(poolOf(root, records.toReversed(), now).stateHash(now), pool.stateHash(now), 'whatever order they came in');
+  // One further from the root has no seat before any of them, however early it says it joined.
+  const deep = member(eve, { voucher: invite(ids[0], { n: 999 }), joinedAt: T0 - DAY, at: now });
+  assert.deepEqual(codes(pool.merge(deep, now)), ['full']);
+  // A host over the cap is a member where it looks, and the last of the others is not.
+  const last = ids.find((id) => id.pk === senior[299]);
+  const own = poolOf(last, records, now);
+  assert.deepEqual(seats(own), [root.pk, last.pk, ...senior.slice(0, 254)].sort());
+  assert.notEqual(own.stateHash(now), pool.stateHash(now));
+  assert.equal(poolOf(root, records.slice(0, 256), now).members(now).length, 256, 'a pool at the cap refuses nobody');
+});
+
+check('a member has 64 offers live, the lowest keys whatever order they came in; `room` says whether one more of its own fits', () => {
+  const [a, b] = club(2);
+  const offers = Array.from({ length: 70 }, (_, i) => offer(b.id, { item: `pr-${100 + i}`, title: 'x'.repeat(300) }));
+  assert.deepEqual(codes(a.pool.merge(offers, T0)), Array(6).fill('quota'));
+  b.pool.merge(offers.toReversed(), T0);
+  const items = (pool) => pool.records().filter((r) => r.type === 'offer').map((r) => r.item).sort();
+  assert.deepEqual(items(a.pool), offers.slice(0, LIMITS.offers).map((r) => r.item));
+  assert.deepEqual([items(b.pool), b.pool.stateHash(T0)], [items(a.pool), a.pool.stateHash(T0)]);
+  assert.deepEqual(codes(a.pool.merge(offer(a.id, { item: 'pr-999' }), T0)), [], 'another member has its own 64');
+  // A lower key takes the place of the highest one held.
+  assert.deepEqual(codes(a.pool.merge(offer(b.id, { item: 'pr-000' }), T0)), []);
+  assert.deepEqual([items(a.pool).filter((item) => item !== 'pr-999').slice(0, 2), items(a.pool).includes('pr-163')], [['pr-000', 'pr-100'], false]);
+
+  const [c, d] = club(2);
+  c.pool.merge(offers.slice(0, 63), T0);
+  assert.equal(c.pool.room(offers[63]), true, 'the 64th');
+  c.pool.merge(offers[63], T0);
+  assert.equal(c.pool.room(offers[64]), false, 'the 65th');
+  assert.equal(c.pool.room(offer(d.id, { item: 'pr-100', title: 'x'.repeat(300), seq: 1, at: T0 + 1 })), true, 'a later version of one it has');
+  assert.equal(c.pool.room(offer(c.id, { item: 'pr-1' })), true, 'what another member has takes nothing of this one\'s room');
+});
+
+check('the records of one member take 256 KiB at most: a claim past that is dead, and `room` keeps a host 32 KiB short of it', () => {
+  const granters = [root, ...Array.from({ length: 150 }, (_, i) => ident(300 + i))];
+  const records = [member(root), member(ann, { voucher: invite(root) }), ...granters.slice(1).map((id, i) => member(id, { voucher: invite(root, { n: i + 1 }) }))];
+  const tasks = Array.from({ length: 6 }, (_, i) => buildTaskId({ pool: POOL, kind: 'review', item: `pr-${i}`, identity: 'octocat' }));
+  records.push(...tasks.map((_, i) => offer(root, { item: `pr-${i}` })));
+  const claimOf = (taskId) => {
+    const bound = { pool: POOL, taskId, executor: ann.pk, round: roundId(1), gen: 0, hours: 12, hash: b64u(Buffer.alloc(32, 7)), exp: T0 + 120 };
+    const grants = granters.map((id) => buildGrant(id, bound)).sort((x, y) => (x.by < y.by ? -1 : 1));
+    return buildClaim(ann, { pool: POOL, taskId, round: roundId(1), gen: 0, hours: 12, grants, absent: [], now: T0 });
+  };
+  const claims = tasks.map(claimOf);
+  const size = (record) => canon(record).length;
+  const fit = Math.floor((LIMITS.bytes - size(records[1])) / size(claims[0]));
+  assert.ok(fit >= 2 && fit < claims.length, `${fit} claims of ${size(claims[0])} bytes fit`);
+  const pool = poolOf(root, records);
+  assert.deepEqual(codes(pool.merge(claims, T0)), Array(claims.length - fit).fill('quota'));
+  assert.deepEqual(tasks.map((taskId) => pool.task(taskId, T0).state), tasks.map((_, i) => (i < fit ? 'claimed' : 'available')), 'the lowest keys, the ones every host keeps');
+
+  const one = poolOf(root, records);
+  const mine = [size(records[1])];
+  for (const claim of claims) {
+    const fits = sum(mine) + size(claim) + LIMITS.spare <= LIMITS.bytes;
+    assert.equal(one.room(claim), fits, `after ${mine.length - 1} claims`);
+    if (fits) {
+      one.merge(claim, T0);
+      mine.push(size(claim));
+    }
+  }
+  assert.ok(mine.length - 1 >= 1 && mine.length - 1 < fit, 'room runs out before the quota does');
+});
+
+check('a claim stands only while a host that offers its task stands behind it: its executor, or a member that granted it', () => {
+  const hosts = club(4);
+  const [a, b, c, d] = hosts;
+  hosts.forEach((h) => h.pool.merge(offer(a.id), T0));
+  const now = T0 + 1;
+  const body = { taskId: TASK, round: roundId(1), asOf: now, hash: a.pool.stateHash(now), hours: 12 };
+  const grant = (h) => h.locks.answer({ pool: h.pool, identity: h.id, from: c.id.pk, body, now }).body.grant;
+  const pks = (list) => list.map((h) => h.id.pk).sort();
+  const claimBy = (granting, absent) => buildClaim(c.id, {
+    pool: POOL, taskId: TASK, round: roundId(1), gen: 0, hours: 12, absent: pks(absent), now,
+    grants: granting.map(grant).sort((x, y) => (x.by < y.by ? -1 : 1)),
+  });
+  for (const h of hosts) {
+    assert.deepEqual(codes(h.pool.merge(claimBy([b, d], [a]), now)), ['no-offer'], 'granted by members none of which offers the task');
+    assert.deepEqual(codes(h.pool.merge(claimBy([], [a, b, d]), now)), ['no-offer'], 'granted by nobody');
+    assert.equal(h.pool.task(TASK, now).state, 'available');
+  }
+  const held = claimBy([a, b], [d]);
+  for (const h of hosts) assert.deepEqual(codes(h.pool.merge(held, now)), [], 'granted by the host that offers it');
+  // A host that never held the offer has no claim to hold either.
+  const bare = poolOf(d.id, b.pool.records().filter((r) => r.type === 'member'), now);
+  assert.deepEqual(codes(bare.merge(held, now)), ['no-offer']);
+  assert.deepEqual(codes(bare.merge([held, offer(a.id)], now)), [], 'the two together are taken in, whatever their order');
+
+  // A member that offers a task is a requester of it: its own claim of it needs nobody's grant.
+  const others = club(3);
+  const [x, y] = others;
+  others.forEach((h) => h.pool.merge([offer(x.id), offer(y.id)], T0));
+  const own = buildClaim(y.id, { pool: POOL, taskId: TASK, round: roundId(2), gen: 0, hours: 12, grants: [], absent: pks([x, others[2]]), now });
+  for (const h of others) assert.deepEqual(codes(h.pool.merge(own, now)), []);
 });

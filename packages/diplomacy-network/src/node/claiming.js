@@ -1,6 +1,9 @@
 // Claiming (PROTOCOL.md section 7): which task a host with a free slot goes for, and the
 // round it drives to get it - the ClaimRound machine says what to send and when a claim
 // holds; this file sends it, feeds the answers back and never decides a claim itself.
+//
+// Whatever goes wrong inside a round ends that round and nothing else: it is taken off
+// the table, its locks are given back, and the task is tried again later.
 
 import { b64u } from '../core/canon.js';
 import { ClaimRound, buildClaim, rankDelay } from '../core/claims.js';
@@ -11,16 +14,19 @@ import {
 import { claimKey } from './gossip.js';
 
 const ROUND_TICK_MS = 5000;
+const MAX_WEIGH_MS = 60 * 1000;
+const FAILED_RETRY_MS = 10 * RETRY_MS;
 
 /// The claiming of `host`.
 export function createClaiming(host) {
   const rounds = new Map(); // taskId -> { P, taskId, round, snapshot, started, own, timer }
-  const waiting = new Map(); // taskId -> the timer of a rank delay
+  const waiting = new Map(); // taskId -> the timer of the wait before a round
   const later = new Map(); // taskId -> the time before which a task is left alone
   let admitted = { slots: 0, at: 0, reason: '' };
 
   const jitter = (ms) => Math.floor((host.random(4).readUInt32BE(0) / 2 ** 32) * ms);
   const sleep = (ms) => new Promise((resolve) => { host.clock.setTimeout(resolve, ms); });
+  const live = (run) => rounds.get(run.taskId) === run;
 
   /// Diplomat's word on how many more tasks this machine takes.
   function admit({ slots, reason = '' }) {
@@ -50,7 +56,9 @@ export function createClaiming(host) {
     const open = [];
     for (const P of host.pools.values()) {
       const me = P.pool.member(host.self, now);
-      if (!me) continue;
+      // Where the smallest claim there is would not fit beside what this host has in the
+      // pool, it goes for nothing.
+      if (!me || !P.pool.room({ type: 'claim', taskId: '', executor: host.self })) continue;
       for (const task of P.pool.tasks(now)) {
         if (task.state === 'available') open.push({ P, task, me });
       }
@@ -63,19 +71,26 @@ export function createClaiming(host) {
       if (!eligible(me.maxAcceptedH, task.hours) || host.runs.shuns(taskId, task.createdAt)) continue;
       const own = host.offers.atOnce(taskId);
       if (!own && taken() >= slots()) continue;
-      if (!wouldTake(P, task)) continue;
-      const delay = own ? 0 : rankDelay(taskId, host.self, RANK_DELAY_MS);
+      const verdict = weighed(P, task);
+      if (verdict === null) continue;
+      const delay = own ? 0 : rankDelay(taskId, host.self, RANK_DELAY_MS) + verdict;
       waiting.set(taskId, host.clock.setTimeout(() => begin(P, taskId, own), delay));
     }
   }
 
-  function wouldTake(P, task) {
+  // What this host's executor makes of a task: null when it does not take it, else how
+  // many more milliseconds this host waits before it goes for it. The executor weighs the
+  // task against what this machine has, and neither that nor the wait is told to anyone.
+  function weighed(P, task) {
     try {
       const { taskId, kind, item, title, identity, hours, offeredBy } = task;
-      return host.executor.wouldTake({ pool: P.id, taskId, kind, item, title, identity, hours, offeredBy }) === true;
+      const asked = { pool: P.id, taskId, kind, item, title, identity, hours, offeredBy };
+      if (host.executor.wouldTake(asked) !== true) return null;
+      const wait = Math.floor(Number(host.executor.weigh?.(asked) ?? 0));
+      return wait > 0 ? Math.min(MAX_WEIGH_MS, wait) : 0;
     } catch (err) {
       host.log(`the executor could not say whether it takes ${task.taskId}: ${err?.stack ?? err}`);
-      return false;
+      return null;
     }
   }
 
@@ -83,6 +98,8 @@ export function createClaiming(host) {
     waiting.delete(taskId);
     const now = host.now();
     if (host.pools.get(P.id) !== P || (!own && taken() >= slots())) return;
+    // Another host may have taken the task while this one waited.
+    if (P.pool.task(taskId, now)?.state !== 'available') return;
     const round = new ClaimRound({ taskId, self: host.self, round: b64u(host.random(8)), now });
     // The lock this host granted a rival stands: its round is waited out.
     if (!P.locks.hold(taskId, host.self, round.round, round.deadline, now)) {
@@ -92,49 +109,74 @@ export function createClaiming(host) {
     host.saveLocks();
     const run = { P, taskId, round, own, snapshot: null, started: now, timer: null };
     rounds.set(taskId, run);
-    rebase(run);
+    drive(run, () => rebased(run));
     const tick = () => {
-      if (round.over) return;
+      if (!live(run)) return;
       run.timer = host.clock.setTimeout(() => {
-        carry(run, round.tick(host.now()));
+        drive(run, () => round.tick(host.now()));
         tick();
       }, ROUND_TICK_MS);
     };
     tick();
   }
 
-  function rebase(run) {
-    if (run.round.over) return;
+  // What a round asks for on the state this host holds now.
+  function rebased(run) {
     const now = host.now();
     run.snapshot = run.P.pool.claimSnapshot(run.taskId, now);
-    carry(run, run.round.rebase(run.snapshot, now));
+    return run.round.rebase(run.snapshot, now);
+  }
+
+  // Carries out what `next` makes a round ask for. Whatever throws on the way ends that
+  // round.
+  function drive(run, next) {
+    try {
+      carry(run, next());
+    } catch (err) {
+      giveUp(run, err);
+    }
+  }
+
+  // A round that threw is over, whatever state it was left in: its task is left alone
+  // for a while, and every member it may hold a lock of is told to drop it.
+  function giveUp(run, err) {
+    host.log(`a claim round failed: ${err?.stack ?? err}`);
+    if (!live(run)) return;
+    end(run);
+    later.set(run.taskId, host.now() + FAILED_RETRY_MS / 1000);
+    for (const pk of run.snapshot?.members ?? []) unlock(run.P, pk, { taskId: run.taskId, round: run.round.round });
+    host.poke();
   }
 
   // One `sync` or `lock` of a round, and what its answer means to the round.
   async function put(run, action) {
     const { P, round } = run;
     for (;;) {
-      if (round.over) return;
+      if (!live(run)) return;
       const wait = host.peers.patience(action.to);
       const answer = await host.gossip.send(P, action.to, action.do, action.body, {
         fresh: true, timeoutMs: wait === 'short' ? PROBE_TIMEOUT_MS : REQUEST_TIMEOUT_MS,
       });
-      if (round.over) return;
+      if (!live(run)) return;
       const now = host.now();
-      if (answer.lost !== undefined && host.transport.state().state !== 'ready') {
+      const silent = answer.lost !== undefined;
+      if (silent && host.transport.state().state !== 'ready') {
         // This host's transport is down: the silence is its own, not the member's.
         carry(run, round.abort('offline'));
         return;
       }
-      if (answer.lost === undefined) {
-        // An answer, even a refusal, is a member that is there: it must agree and grant.
+      // An answer, even a refusal, is a member that is there: it must agree and grant.
+      // One whose clock is too far from this host's can agree to nothing either of them
+      // would take from the other: it is as good as silent.
+      if (!silent && answer.code !== 'stale') {
         const heard = action.do === 'sync' ? round.onSync : round.onLock;
         carry(run, heard.call(round, action.to, action.wave, answer.ok ? answer.body : null, now));
         return;
       }
       // A member this host has never reached may only be slow to dial: it is asked again
       // for a while before the round goes on without it.
-      const patient = wait === 'patient' && round.wave === action.wave && now * 1000 < run.started * 1000 + ROUND_PATIENCE_MS;
+      const patient = silent && wait === 'patient' && round.wave === action.wave
+        && now * 1000 < run.started * 1000 + ROUND_PATIENCE_MS;
       if (!patient) {
         carry(run, round.noAnswer(action.to, action.wave, now));
         return;
@@ -144,17 +186,17 @@ export function createClaiming(host) {
   }
 
   function carry(run, actions) {
-    const { P, round, taskId } = run;
+    const { P, round } = run;
     for (const action of actions) {
       if (action.do === 'sync' || action.do === 'lock') {
-        const go = () => put(run, action).catch((err) => host.log(`a claim round failed: ${err?.stack ?? err}`));
+        const go = () => put(run, action).catch((err) => giveUp(run, err));
         if (action.retry) host.clock.setTimeout(go, 1000 + jitter(2000));
         else go();
       } else if (action.do === 'resync') {
         const { wave } = round;
         host.clock.setTimeout(async () => {
           if (action.with) await host.gossip.syncWith(P, action.with).catch(() => {});
-          if (round.wave === wave) rebase(run);
+          if (live(run) && round.wave === wave) drive(run, () => rebased(run));
         }, 500 + jitter(1500));
       } else if (action.do === 'unlock') {
         unlock(P, action.to, action.body);
@@ -186,44 +228,41 @@ export function createClaiming(host) {
 
   function commit(run, { gen, hours, grants, absent }) {
     const { P, taskId, round } = run;
-    // The word on slots may have changed, or gone stale, while the round ran.
-    if (!run.own && took() >= slots()) {
+    // A round that is not committed after all gives the locks it was granted back.
+    const drop = (reason) => {
       for (const grant of grants) unlock(P, grant.by, { taskId, round: round.round });
-      standDown(run, 'no slot left');
-      return;
-    }
+      standDown(run, reason);
+    };
+    // The word on slots may have changed, or gone stale, while the round ran.
+    if (!run.own && took() >= slots()) return drop('no slot left');
     const claim = buildClaim(host.id, { pool: P.id, taskId, round: round.round, gen, hours, grants, absent, now: host.now() });
+    if (!P.pool.room(claim)) return drop('this host has as many claims in the pool as a member may');
     end(run);
-    if (host.take(P, claim).refused.length > 0) {
-      host.log(`the claim of ${taskId} this host committed does not hold in its own state`);
-      return;
-    }
+    if (host.take(P, claim).refused.length > 0) return drop('the claim does not hold in the state of this host');
     // The run is on record together with the claim it rests on, before anyone hears of either.
     host.runs.adopt(P, claim);
     host.gossip.spread(P, [claimKey(taskId)]);
+    return undefined;
   }
 
   /// A pool's state moved: a round that confirmed another state starts over on this one.
   function moved(P) {
     for (const run of [...rounds.values()]) {
-      if (run.P === P && run.snapshot && !run.round.over && P.pool.stateHash(run.snapshot.asOf) !== run.snapshot.hash) rebase(run);
+      if (run.P === P && run.snapshot && P.pool.stateHash(run.snapshot.asOf) !== run.snapshot.hash) drive(run, () => rebased(run));
     }
   }
 
   /// Gives up every round in a pool. Nothing is signed for it.
   function closing(P) {
     for (const run of [...rounds.values()]) {
-      if (run.P === P) carry(run, run.round.abort('closed'));
+      if (run.P === P) drive(run, () => run.round.abort('closed'));
     }
   }
 
   /// Gives up every round, saying nothing: the host is stopping.
   function stop() {
     for (const timer of waiting.values()) host.clock.clearTimeout(timer);
-    for (const run of rounds.values()) {
-      host.clock.clearTimeout(run.timer);
-      run.round.abort('stopped');
-    }
+    for (const run of rounds.values()) host.clock.clearTimeout(run.timer);
     waiting.clear();
     rounds.clear();
   }
