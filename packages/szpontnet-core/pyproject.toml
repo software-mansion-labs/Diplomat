@@ -14,10 +14,10 @@ license = { text = "MIT" }
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/latekvo/Diplomat/tree/main/packages/szpontnet-core"
-Source = "https://github.com/latekvo/Diplomat"
-Specification = "https://github.com/latekvo/Diplomat/tree/main/packages/szpontnet-spec"
-Issues = "https://github.com/latekvo/Diplomat/issues"
+Homepage = "https://github.com/software-mansion-labs/Diplomat/tree/main/packages/szpontnet-core"
+Source = "https://github.com/software-mansion-labs/Diplomat"
+Specification = "https://github.com/software-mansion-labs/Diplomat/tree/main/packages/szpontnet-spec"
+Issues = "https://github.com/software-mansion-labs/Diplomat/issues"
 
 [project.optional-dependencies]
 # Ed25519 device identity. Without it a node still runs, keyless - it advertises

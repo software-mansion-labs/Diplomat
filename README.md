@@ -1,5 +1,3 @@
-## Moved to https://github.com/software-mansion-labs/Diplomat
-
 # Diplomat
 
 **Diplomat automates the maintainer's job.** It runs a team of coding agents against your GitHub
