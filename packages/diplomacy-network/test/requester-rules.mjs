@@ -400,6 +400,16 @@ await check('GitLab: every kind reads what glab reads, in the pool\'s project on
     glab('GET', `${P}/pipelines/7/jobs`), glab('GET', `${P}/jobs/7/trace`), glab('GET', '/api/v4/user'),
     glab('POST', '/api/graphql', { query: '{currentUser{username}}' }), // glab api graphql -f query=...
     glab('GET', `${P}/repository/compare?from=main&to=feature&straight=true`), glab('GET', `${P}/repository/branches/feature`),
+    // repo view, repo view -b release/1.0: glab encodes a name's slashes and its dots.
+    glab('GET', `${P}/repository/files/README%2Emd?ref=main`), glab('GET', `${P}/repository/files/README%2Emd?ref=release%2F1.0`),
+    // api, with a file's path, a branch's and a tag's name spelled the one way GitLab takes them.
+    glab('GET', `${P}/repository/files/src%2Fmain.js?ref=main`), glab('GET', `${P}/repository/files/src%2Fmain.js/raw?ref=feature%2Flogin`), glab('GET', `${P}/repository/files/src%2flib%2Fmain.js/blame?ref=main`),
+    glab('GET', `${P}/repository/branches/feature%2Flogin`), glab('GET', `${P}/repository/branches/release%2F1%2E0`), glab('GET', `${P}/repository/commits/feature%2Flogin`),
+    glab('GET', `${P}/repository/commits/feature%2Flogin/diff`), glab('GET', `${P}/repository/tags/release%2F1.0`), glab('GET', `${P}/repository/tree?path=src%2Flib&ref=feature%2Flogin`),
+    glab('GET', '/api/v4/projects/99/repository/files/src%2Fmain.js/raw?ref=feature%2Flogin'), glab('GET', '/api/v4/projects/99/repository/branches/feature%2Flogin'),
+    glab('GET', `${P}/merge_requests?source_branch=feature%2Flogin`),
+    // No route of GitLab's: an encoded slash separates nothing there, and its router answers 404.
+    glab('GET', `${P}/repository/compare%2Fx`),
   ];
   const never = [
     // reads of this project whose answer is another project's, a person's address, or a write
@@ -407,6 +417,13 @@ await check('GitLab: every kind reads what glab reads, in the pool\'s project on
     glab('GET', `${P}/merge_requests/5/closes_issues`), glab('GET', `${P}/merge_requests/5/related_issues`), glab('GET', '/api/v4/projects/99/merge_requests/5/blocks'),
     glab('GET', `${P}/merge_requests/5/blockees`), glab('GET', `${P}/issues/421/links`), glab('GET', `${P}/issues/421/related_merge_requests`), glab('GET', `${P}/issues/421/closed_by`),
     glab('GET', `${P}/issues/421/user_agent_detail`), glab('GET', `${P}/merge_requests/5/merge_ref`),
+    // an encoded slash or dot aimed at one of those, at a route with pinned parameters or a cut answer, at a settings route, or sent in a write
+    glab('GET', `${P}/repository/files/..%2F..%2Fcompare`), glab('GET', `${P}/repository/files/..%2F..%2Fcompare/raw?ref=main`), glab('GET', `${P}/repository/branches/x%2F..%2F..%2Fmerge_requests%2F5%2Fmerge`),
+    glab('GET', `${P}/merge_requests/5%2Fmerge_ref`), glab('GET', `${P}/merge_requests/5%2fcloses_issues`), glab('GET', '/api/v4/projects/99/issues/421%2Flinks'), glab('GET', `${P}/merge_requests/5/merge_ref%2Ejson`),
+    glab('GET', `${P}/repository/compare.json%2Fx?from=main&to=x&from_project_id=100`), glab('GET', `${P}/repository/compare%2Ejson?from=main&to=x&from_project_id=100`),
+    glab('GET', `${P}/repository%2Fcompare?from=main&to=x&from_project_id=100`), glab('GET', `${P}/repository/branches%2Fmain`), glab('GET', `${P}/pipelines/7%2Fvariables`),
+    glab('GET', `${P}/protected_branches/feature%2Flogin`), glab('GET', `${P}%2Fvariables`), glab('GET', '/api/v4/projects/99%2Fvariables'),
+    glab('PUT', `${P}/merge_requests/5%2Fmerge`, {}), glab('DELETE', `${P}/repository/branches/feature%2Flogin`), glab('PUT', `${P}/repository/files/src%2Fmain.js`, { branch: 'fix-421', content: 'x', commit_message: 'x' }),
     glab('GET', '/api/v4/projects'), glab('GET', '/api/v4/projects?membership=true'), glab('GET', '/api/v4/projects/group%2Fsub%2Fother'), glab('GET', '/api/v4/projects/100/merge_requests/5'),
     glab('GET', '/api/v4/projects/group%2Fsub/merge_requests'), glab('GET', '/api/v4/projects/group%2Fsub%2Fproj%2F..%2Fother/issues'), glab('GET', '/api/v4/projects/99/../100'),
     glab('GET', `${P}/variables`), glab('POST', `${P}/variables`, { key: 'X', value: 'y' }), glab('GET', `${P}/hooks`), glab('GET', `${P}/deploy_keys`), glab('GET', `${P}/members/all`),
@@ -556,7 +573,7 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
 // The second spellings of one literal segment that a router could resolve to the first:
 // a character escaped (once and twice over), a letter in the other case, an extension.
 function respelled(segment) {
-  const out = new Set([`${segment}.json`, `${segment}.JSON`, `${segment}.txt`, `${segment}.x`, `${segment}.json.json`, segment.toUpperCase(), segment.toLowerCase()]);
+  const out = new Set([`${segment}.json`, `${segment}.JSON`, `${segment}.txt`, `${segment}.x`, `${segment}.json.json`, `${segment}%2Ejson`, `${segment}%2ejson.x`, segment.toUpperCase(), segment.toLowerCase()]);
   for (const at of [0, segment.length - 1]) {
     const c = segment[at];
     const put = (s) => segment.slice(0, at) + s + segment.slice(at + 1);
@@ -605,6 +622,27 @@ await check('no second spelling of any rule\'s path is decided by another rule, 
   assert.ok(asked > 20000, `only ${asked} spellings were tried`);
 });
 
+await check('no rule that refuses, pins or cuts is reached by its own path with a "/" of it encoded', async () => {
+  const plain = (rule) => Object.keys(rule).every((key) => ['host', 'method', 'path', 'fold'].includes(key));
+  let [asked, passed] = [0, 0];
+  for (const [rules, ctxFor] of everyRuleList()) {
+    const ctx = ctxFor();
+    for (const rule of rules) {
+      const segments = rule.path.slice(1).split('/').filter((s) => s !== '**').map((s) => (s === '*' ? '5' : s));
+      // One "/" encoded, in either case; then every one after a GitLab project's own segment.
+      const joined = segments.slice(1).flatMap((_, j) => ['%2F', '%2f'].map((slash) => `/${segments.slice(0, j + 1).join('/')}${slash}${segments.slice(j + 1).join('/')}`));
+      if (segments.length > 5) joined.push(`/${segments.slice(0, 4).join('/')}/${segments.slice(4).join('%2F')}`);
+      for (const path of joined) {
+        const verdict = await authorize(rules, { host: rule.host, method: rule.method, path, headers: {}, body: '' }, ctx);
+        asked++;
+        if (verdict.ok) passed++;
+        assert.ok(!verdict.ok || (plain(rule) && plain(verdict.rule)), `${rule.method} ${path} is allowed by the rule for ${verdict.rule?.path}`);
+      }
+    }
+  }
+  assert.ok(asked > 5000 && passed > 0, `${asked} spellings were tried and ${passed} allowed`);
+});
+
 await check('the routes a task is refused or given with pinned parameters cannot be reached by another spelling', async () => {
   const escape = /an escape of a letter, a digit, "-", "_" or "~"/;
   const second = /could be read as a route another rule of this task decides/;
@@ -619,8 +657,8 @@ await check('the routes a task is refused or given with pinned parameters cannot
       ['/merge_requests/5/related_issues.json', second], ['/merge_requests/5/blocks.json', second], ['/merge_requests/5/blockees.json', second], ['/issues/421/links.json', second],
       ['/issues/421/related_merge_requests.json', second], ['/issues/421/closed_by.json', second], ['/issues/421/user_agent_detail.json', second], ['/issues/421/user%5Fagent%5Fdetail', escape],
       ['/Issues/421/links', /no rule of this task/], ['/issues.json/421/links', /no rule of this task/], ['/issues/421/links/', /empty segment/], ['/issues/421/links;x', /must be encoded/], ['/issues/421/links%3Bx', /semicolon/],
-      ['/issues/421/./links', /dot segment/], ['/issues/421/x/../links', /dot segment/], ['/issues/421/x/%2e%2e/links', /encoded dot/], ['/issues/421//links', /empty segment/],
-      ['/issues/421/links%2ejson', /encoded dot/], ['/merge_requests/5/merge_ref%2F', /encoded slash/],
+      ['/issues/421/./links', /dot segment/], ['/issues/421/x/../links', /dot segment/], ['/issues/421/x/%2e%2e/links', /dot segment/], ['/issues/421//links', /empty segment/],
+      ['/issues/421/links%2ejson', second], ['/issues/421/links%2Ejson', second], ['/merge_requests/5/merge_ref%2F', /empty segment/],
     ]) await refused(gitlab('investigate'), glab('GET', `${project}${tail}`), glWorld(), why);
   }
   for (const [path, why] of [

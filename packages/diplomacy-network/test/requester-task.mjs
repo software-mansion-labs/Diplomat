@@ -738,6 +738,40 @@ await check('a read stays inside the pool\'s repository: no other repository, pr
   ]) await refused(onLab, glab('GET', path), labCtx(), pattern);
 });
 
+await check('a branch with a slash in its name is pushed, then read back by its name as each forge takes it', async () => {
+  const text = (answer) => Buffer.from(json(answer).content, 'base64').toString('utf8');
+  lab.at(lab.root);
+  const onLab = lab.commit('fix', { 'src/fix.js': 'fixed', 'README.md': 'read me' });
+  const labState = {};
+  const rules = labRules('issues', 'issue-421');
+  assert.match((await sent(rules, labPush([[ZERO, onLab, 'refs/heads/topic/x']]), labCtx(labState), GITLAB)).bytes.toString('latin1'), /ok refs\/heads\/topic\/x/);
+  assert.deepEqual(labState.branches, ['refs/heads/topic/x']);
+  // GitLab: one segment with the slash encoded, by the project's path or its number. The
+  // answer is cut like any branch's.
+  for (const project of [PROJECT, '/api/v4/projects/99']) {
+    assert.deepEqual(json(await sent(rules, glab('GET', `${project}/repository/branches/topic%2Fx`), labCtx(labState), GITLAB)),
+      { name: 'topic/x', commit: { id: onLab }, merged: false, protected: false, default: false, web_url: `https://${GITLAB_HOST}/group/sub/proj/-/tree/topic/x` });
+    assert.equal(text(await sent(rules, glab('GET', `${project}/repository/files/src%2Ffix.js?ref=topic%2Fx`), labCtx(labState), GITLAB)), 'fixed');
+    // As glab's own commands spell a file's name.
+    assert.equal(text(await sent(rules, glab('GET', `${project}/repository/files/README%2Emd?ref=topic%2Fx`), labCtx(labState), GITLAB)), 'read me');
+  }
+  // With the slash as it is, the path is a route GitLab does not have.
+  assert.equal((await sent(rules, glab('GET', `${PROJECT}/repository/branches/topic/x`), labCtx(labState), GITLAB)).status, 404);
+  assert.equal((await sent(rules, glab('POST', `${PROJECT}/merge_requests`, { title: 'Draft: t', source_branch: 'topic/x', target_branch: 'main', target_project_id: 99 }), labCtx(labState), GITLAB)).status, 201);
+  for (const games of ['topic%2F..%2Fmain', 'topic%2Fx%2F..%2F..%2F..%2Fmerge_requests%2F5%2Fmerge']) {
+    await refused(rules, glab('GET', `${PROJECT}/repository/branches/${games}`), labCtx(labState), /dot segment/);
+  }
+
+  // GitHub: the slash as it is. A ref is read by its full name.
+  hub.at(hub.root);
+  const onHub = hub.commit('fix', { 'src/fix.js': 'fixed' });
+  const hubState = {};
+  const issue = hubRules('issues', 'issue-422');
+  assert.match((await sent(issue, hubPush([[ZERO, onHub, 'refs/heads/topic/y']]), hubCtx(hubState))).bytes.toString('latin1'), /ok refs\/heads\/topic\/y/);
+  assert.deepEqual(json(await sent(issue, gh('GET', '/repos/o/r/git/ref/heads/topic/y'), hubCtx(hubState))), { ref: 'refs/heads/topic/y', object: { type: 'commit', sha: onHub } });
+  await refused(issue, gh('GET', '/repos/o/r/git/ref/heads/topic%2Fy'), hubCtx(hubState), /encoded slash/);
+});
+
 await check('the forge\'s answer about the repository itself comes back cut to what a job needs', async () => {
   for (const spelling of [PROJECT, '/api/v4/projects/99', `${PROJECT}?license=true`]) {
     const project = json(await sent(labRules('investigate', 'job-q'), glab('GET', spelling), labCtx(), GITLAB));

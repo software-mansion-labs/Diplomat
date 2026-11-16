@@ -130,8 +130,9 @@ export function parseStrictJson(buffer) {
 // malformed or that hides a byte with a meaning of its own in a path. A path may not
 // escape what needs no escape either: a forge's router reads "%63ompare" as "compare", so
 // with such escapes refused a route's name has the one spelling the rules are written in.
+// `name` is set for a segment in which GitLab defines an encoded slash and dot.
 const NEEDS_NO_ESCAPE = /[A-Za-z0-9_~-]/;
-function decode(raw, { plus, slash }) {
+function decode(raw, { plus, name }) {
   const bytes = [];
   for (let i = 0; i < raw.length; i++) {
     const c = raw[i];
@@ -142,8 +143,8 @@ function decode(raw, { plus, slash }) {
     const byte = parseInt(hex, 16);
     if (byte < 0x20 || byte === 0x7f) refuse('an encoded control character');
     if (!plus) {
-      if (byte === 0x2f && !slash) refuse('an encoded slash in the path');
-      if (byte === 0x2e || byte === 0x5c || byte === 0x25 || byte === 0x3b) refuse('an encoded dot, backslash, percent sign or semicolon in the path');
+      if (byte === 0x2f && !name) refuse('an encoded slash in the path');
+      if ((byte === 0x2e && !name) || byte === 0x5c || byte === 0x25 || byte === 0x3b) refuse('an encoded dot, backslash, percent sign or semicolon in the path');
       if (NEEDS_NO_ESCAPE.test(String.fromCharCode(byte))) refuse('an escape of a letter, a digit, "-", "_" or "~" in the path');
     }
     bytes.push(byte);
@@ -164,14 +165,21 @@ function normalise(request) {
   const rawQuery = cut === -1 ? null : path.slice(cut + 1);
   if (!PATH_CHARS.test(rawPath)) refuse('the path holds a character that must be encoded, a fragment or a ";"');
   const raw = rawPath.slice(1).split('/');
-  // The one place a forge defines an encoded slash: GitLab names a project by its
-  // URL-encoded path, as the single segment after /api/v4/projects/.
+  // GitLab takes a name as one segment, its slashes encoded, and glab encodes the name's
+  // dots as well: the project's path after /api/v4/projects/, and in a read under it a
+  // file's path, a branch's or a tag's name. GitLab's router matches the route before it
+  // decodes a slash, so that one separates nothing; an encoded dot it reads as a dot.
   const gitlabProject = raw[0] === 'api' && raw[1] === 'v4' && raw[2] === 'projects';
+  const read = (i) => gitlabProject && i > 3 && method.toUpperCase() === 'GET';
   const decoded = raw.map((segment, i) => {
-    if (segment === '') refuse('the path has an empty segment');
-    if (segment === '.' || segment === '..') refuse('the path has a dot segment');
-    return decode(segment, { slash: gitlabProject && i === 3 });
+    const parts = decode(segment, { name: (gitlabProject && i === 3) || read(i) }).split('/');
+    if (parts.includes('')) refuse('the path has an empty segment');
+    if (parts.includes('.') || parts.includes('..')) refuse('the path has a dot segment');
+    return parts.join('/');
   });
+  const segments = raw.map((segment) => segment.replace(/%2e/gi, '.'));
+  // The path as whatever decodes a slash before routing it would cut it up.
+  const apart = segments.flatMap((segment, i) => (read(i) ? segment.split(/%2f/i) : [segment]));
 
   const query = [];
   if (rawQuery !== null && rawQuery !== '') {
@@ -195,7 +203,7 @@ function normalise(request) {
 
   if (typeof body !== 'string' || body.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(body)) refuse('the body is not base64');
   return {
-    host: host.toLowerCase(), method: method.toUpperCase(), rawPath, rawQuery, segments: raw, decoded, query,
+    host: host.toLowerCase(), method: method.toUpperCase(), rawPath, rawQuery, segments, apart, decoded, query,
     headers: lower, body: Buffer.from(body, 'base64'),
   };
 }
@@ -205,9 +213,10 @@ function normalise(request) {
 // A rule's path against a request's: literal segments, "*" for exactly one, a trailing
 // "**" for any remainder. `fold` lists the segments compared without regard to case - the
 // ones that name the repository, which both forges resolve that way; any other literal
-// must equal the segment as sent. `loose` is the widest reading a forge's router could
-// give the path: no literal's case counts, and a segment may carry an extension
-// ("compare.json"), which GitLab's router takes off as the answer's format.
+// must equal the segment as sent, an encoded dot read as a dot. `loose` is the widest
+// reading a forge's router could give the path: no literal's case counts, and a segment
+// may carry an extension ("compare.json"), which GitLab's router takes off as the
+// answer's format.
 function pathMatches(rule, segments, loose) {
   const pattern = rule.path.slice(1).split('/');
   const fold = rule.fold || [];
@@ -506,14 +515,19 @@ export async function authorize(rules, request, given = {}) {
   try {
     const ctx = asking(given);
     const req = normalise(request);
-    const first = (loose) => (Array.isArray(rules) ? rules : []).find((r) => r.host === req.host && r.method === req.method && pathMatches(r, req.segments, loose));
-    const rule = first(false);
+    const list = Array.isArray(rules) ? rules : [];
+    const first = (segments, loose) => list.find((r) => r.host === req.host && r.method === req.method && pathMatches(r, segments, loose));
+    const rule = first(req.segments, false);
     if (!rule) refuse('no rule of this task allows the request');
     // A rule that refuses a route or pins its parameters stands before the wider rule
     // around it. A spelling the forge could still resolve to that route must not slip
     // past it into the wider one.
-    if (first(true) !== rule) refuse('the path could be read as a route another rule of this task decides: only a letter\'s case or an extension sets it apart');
+    if (first(req.segments, true) !== rule) refuse('the path could be read as a route another rule of this task decides: only a letter\'s case or an extension sets it apart');
     if (rule.deny !== undefined) refuse(rule.deny);
+    // Nor may the path become such a route, or one that is refused or that no rule knows,
+    // where a proxy decodes an encoded slash before the forge routes the request.
+    const cut = first(req.apart, true);
+    if (list.indexOf(cut) < list.indexOf(rule) || cut.deny !== undefined) refuse('the path, with its encoded slash read as a separator, is a route this task\'s rules decide otherwise');
     for (const [mark, why] of Object.entries(rule.without || {})) if (req.decoded.some((segment) => segment.includes(mark))) refuse(why);
     const named = checkQuery(rule, req);
     const encoding = lower(req.headers['content-encoding']);

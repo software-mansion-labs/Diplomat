@@ -205,6 +205,10 @@ export async function startFakeForge() {
         protection: { enabled: guarded, required_status_checks: { enforcement_level: guarded ? 'everyone' : 'off', contexts: [] } },
       } };
     }
+    if (method === 'GET' && (x = /^\/git\/ref\/heads\/(.+)$/.exec(rest))) {
+      const sha = revParse(m[1], `refs/heads/${x[1]}`);
+      return sha ? { status: 200, json: { ref: `refs/heads/${x[1]}`, object: { type: 'commit', sha } } } : { status: 404, json: { message: 'Not Found' } };
+    }
     if (method === 'GET' && (x = /^\/pulls\/(\d+)$/.exec(rest))) {
       const p = repo.pulls?.[x[1]];
       return p ? { status: 200, json: restPull(m[1], p) } : { status: 404, json: { message: 'Not Found' } };
@@ -271,10 +275,19 @@ export async function startFakeForge() {
       const heads = git(path.join(gitRoot, `${repoName.toLowerCase()}.git`), 'for-each-ref', '--format=%(refname:lstrip=2) %(objectname)', 'refs/heads');
       return { status: 200, json: heads.split('\n').filter(Boolean).map((line) => branchOf(...line.split(' '))) };
     }
-    if (method === 'GET' && (x = /^\/repository\/branches\/(.+)$/.exec(rest))) {
+    // A name is one segment to GitLab, its slashes encoded: a branch's path that goes deeper is no route.
+    if (method === 'GET' && (x = /^\/repository\/branches\/([^/]+)$/.exec(rest))) {
       const branch = decodeURIComponent(x[1]);
       const sha = revParse(repoName, `refs/heads/${branch}`);
       return sha ? { status: 200, json: branchOf(branch, sha) } : { status: 404, json: { message: '404 Branch Not Found' } };
+    }
+    if (method === 'GET' && rest.startsWith('/repository/branches/')) return { status: 404, json: { error: '404 Not Found' } };
+    if (method === 'GET' && (x = /^\/repository\/files\/([^/]+)$/.exec(rest))) {
+      const [file, ref] = [decodeURIComponent(x[1]), searchParams.get('ref')];
+      try {
+        const text = git(path.join(gitRoot, `${repoName.toLowerCase()}.git`), 'show', `refs/heads/${ref}:${file}`);
+        return { status: 200, json: { file_path: file, ref, encoding: 'base64', content: Buffer.from(text).toString('base64') } };
+      } catch { return { status: 404, json: { message: '404 File Not Found' } }; }
     }
     return { status: method === 'POST' ? 201 : 200, json: { path: pathname, ok: true, id: 1, iid: 5 } };
   }
