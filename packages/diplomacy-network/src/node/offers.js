@@ -133,7 +133,8 @@ export function createOffers(host) {
     if (O.failed.includes(round)) return;
     O.failed.push(round);
     O.reason = text(reason, MAX_REASON);
-    revoke(O.taskId);
+    // The key of a claim that holds the offer since is not this attempt's to take back.
+    if (issued[O.taskId]?.round === round) revoke(O.taskId);
     if (O.failed.length >= OFFER_ATTEMPTS) return end(P, O, 'failed', reason);
     Object.assign(O, { state: 'pooled', executor: '' });
     return publish(P, O);
