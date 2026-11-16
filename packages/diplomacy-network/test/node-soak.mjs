@@ -6,7 +6,7 @@
 // checked; at the end the network is mended and everything offered must have ended, on
 // every host alike.
 //
-//   DN_SOAK_SEEDS  how many seeds to run (default 2)     DN_SOAK_STEPS  steps per seed (default 120)
+//   DN_SOAK_SEEDS  how many seeds to run (default 4)     DN_SOAK_STEPS  steps per seed (default 120)
 //   DN_SOAK_SEED   the first seed (default 1); a failure prints the seed to run again
 
 import assert from 'node:assert/strict';
@@ -19,7 +19,7 @@ import { sign } from '../src/core/identity.js';
 import { endClaim } from '../src/core/lease.js';
 import { LIMITS, backers, backing, memberRecord, offerRecord } from '../src/core/records.js';
 
-const SEEDS = Number(process.env.DN_SOAK_SEEDS ?? 2);
+const SEEDS = Number(process.env.DN_SOAK_SEEDS ?? 4);
 const STEPS = Number(process.env.DN_SOAK_STEPS ?? 120);
 const FIRST = Number(process.env.DN_SOAK_SEED ?? 1);
 const ENDED = ['done', 'failed', 'cancelled'];

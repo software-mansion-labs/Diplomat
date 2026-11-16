@@ -4,12 +4,12 @@
 
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
-import { b64u, hash } from '../src/core/canon.js';
+import { b64u, canon, hash } from '../src/core/canon.js';
 import { buildClaim, buildGrant } from '../src/core/claims.js';
-import { KINDS, buildResponse } from '../src/core/envelope.js';
+import { KINDS, buildResponse, requestDigest } from '../src/core/envelope.js';
 import { sign, verify } from '../src/core/identity.js';
 import { buildPing } from '../src/core/lease.js';
-import { offerRecord } from '../src/core/records.js';
+import { buildTaskId, offerRecord } from '../src/core/records.js';
 import { POW } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
@@ -198,4 +198,30 @@ await check('an answer that is signed but names another request is no answer', a
   assert.ok(answered >= 1);
   assert.deepEqual([claim.grants.map((g) => g.by), claim.absent], [[req.pk], [evil.pk]], 'its grant is in no claim: it never answered');
   assert.equal(w.view(a).members.find((m) => m.pk === evil.pk).reachable, false);
+});
+
+await check('a member whose index has one page after another is asked for so many in a row and no more', async () => {
+  const w = createWorld({ seed: 85 });
+  const [a] = await w.pool(['a', 'b']);
+  const evil = await w.intruder('evil', a);
+  const taskId = buildTaskId({ pool: POOL, kind: 'review', item: 'pr-1', identity: 'octocat' });
+  // Each page names one record more, of one host more, that it never hands over.
+  const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  const keys = [...letters].flatMap((x) => [...letters].map((y) => `offer/${taskId}/${x}${y}${'A'.repeat(41)}`));
+  const chains = [];
+  evil.transport.onRequest(async (bytes) => {
+    const request = JSON.parse(bytes.toString('utf8'));
+    const { kind, body, from } = request;
+    let says = { accepted: [], refused: [], records: [] };
+    if (kind === 'sync' && from === a.pk) {
+      if (body.after === undefined) chains.push(0);
+      chains[chains.length - 1] += 1;
+      const key = keys.find((k) => k > (body.after ?? ''));
+      says = { hash: b64u(hash('another state')), index: { [key]: [[0], b64u(hash(key))] }, more: true };
+    }
+    return canon(buildResponse(evil.id, { re: requestDigest(request), effort: POW.memberBase, body: says }));
+  });
+  await w.net.until(() => chains.length >= 2, { what: 'a second sync begun' });
+  assert.equal(chains[0], 128);
+  assert.deepEqual(a.log.filter((line) => /could not be served|step failed|failed:/.test(line)), []);
 });

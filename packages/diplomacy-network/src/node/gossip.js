@@ -267,12 +267,12 @@ export function createGossip(host) {
   // answered with at `asOf`, and asks for the pages after it one by one.
   async function settle(P, pk, first, asOf) {
     let [page, at, after] = [first, asOf, ''];
-    for (let n = 0; n < MAX_INDEX_PAGES && open(P) && isObject(page?.index); n += 1) {
+    for (let n = 1; open(P) && isObject(page?.index); n += 1) {
       const more = page.more === true;
       const plan = P.pool.reconcile(page.index, at, { after, more });
       if (!plan) return;
       await exchange(P, pk, plan);
-      if (!more) return;
+      if (!more || n === MAX_INDEX_PAGES) return;
       [at, after] = [host.now(), Object.keys(page.index).sort().at(-1)];
       const answer = await host.peers.ask(P.id, pk, 'sync', { asOf: at, hash: P.pool.stateHash(at), after });
       page = answer.ok ? answer.body : null;
