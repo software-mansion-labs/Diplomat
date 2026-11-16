@@ -1821,23 +1821,6 @@ try {
       assert.deepEqual([1, 2, 3, 4, 5, 6].map((i) => read(`/six${i}`)), [1, 1, 1, 1, 0, 0]);
       await until(() => load().requests === 0 && load().waiting === 0 && load().forgeRequests === 0, 'what the closed connection held to be given back');
       await turn();
-
-      // A job that is removed has nothing more done for it: its requests that waited
-      // their turn, each on a connection of its own, are not let in as the others go.
-      const closing = [];
-      for (let i = 1; i <= 4; i++) {
-        const s = await secure(held, 'api.github.com');
-        s.on('error', () => {});
-        closing.push(new Promise((r) => { s.on('close', r); }));
-        s.write(get(`/last${i}`));
-        await until(() => load().requests === i, `last request ${i} to count`);
-      }
-      await waitFor('/last2');
-      const sent = pending.length;
-      b.removeJob('asks');
-      await within(Promise.all(closing), 'the removed job\'s connections to be closed');
-      for (let i = 0; i < 4; i++) await turn();
-      assert.deepEqual(pending.slice(sent).map((a) => a.path), [], 'nothing reaches the requester for a job that is gone');
     });
 
     // The same at the size a job gets, from one that sends a hundred thousand requests
@@ -2008,6 +1991,41 @@ try {
       assert.deepEqual((await Promise.all(asks)).map((r) => r.status), [200, 200, 200]);
       assert.equal(dials.slice(d).filter((to) => to === '160.79.104.10:443').length, 2, 'down a connection the job had');
       providerAnswer = okProvider;
+    });
+
+    // A request that gets no connection out in the time a request has is told so.
+    await withBroker({ limits: { upstreams: 1, bodyMs: 1500 } }, async (b) => {
+      const j = await b.addJob({ runId: 'out', pool: alpha.pool });
+      const first = net.connect(port, '127.0.0.1');
+      first.on('error', () => {});
+      first.write(proxied(j, 'http://h0.flood.test/'));
+      await until(() => open.size === 1, 'the one connection out to be taken');
+      const second = await within(viaProxy(j, 'http://h1.flood.test/'), 'a request that gets no connection out to be told so');
+      assert.deepEqual([second.status, JSON.parse(second.body).message], [503, 'this job\'s earlier requests hold all the broker gives one job at a time (48 MiB of bodies, forge requests in flight: 4, connections out: 1), and none ended within 1.5 s']);
+      first.destroy();
+      await until(() => open.size === 0 && b.load('out').requests === 0, 'the connection out to close with its request');
+    });
+
+    // A job that is removed has nothing more done for it. A request of its that waited
+    // for a connection out, on a connection older than the one it waited for, is not
+    // let in as that one goes: the newer connection is the first heard to close.
+    await withBroker({ limits: { upstreams: 1 } }, async (b) => {
+      const j = await b.addJob({ runId: 'out', pool: alpha.pool });
+      const waiter = await secure(j, 'api.anthropic.com');
+      waiter.on('error', () => {});
+      const holder = net.connect(port, '127.0.0.1');
+      holder.on('error', () => {});
+      holder.write(proxied(j, 'http://h0.flood.test/'));
+      await until(() => open.size === 1, 'the one connection out to be taken');
+      waiter.write(`POST /v1/messages HTTP/1.1\r\nHost: api.anthropic.com\r\nx-api-key: ${PLACEHOLDER}\r\nContent-Length: 2\r\n\r\n{}`);
+      await until(() => b.load('out').waiting === 1, 'the model request to wait for a connection out');
+      const d = dials.length;
+      const closed = new Promise((r) => { waiter.on('close', r); });
+      b.removeJob('out');
+      await within(closed, 'the removed job\'s connection to be closed');
+      const free = await b.addJob({ runId: 'free', pool: alpha.pool });
+      for (let i = 0; i < 4; i++) assert.equal((await viaProxy(free, 'http://plain.test/free')).status, 200);
+      assert.deepEqual(dials.slice(d).filter((to) => to === '160.79.104.10:443'), [], 'what waited as its job ended is not let in on the way out');
     });
 
     // At the size a job gets: eight thousand requests down one connection, each for a
