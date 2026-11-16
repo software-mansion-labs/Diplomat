@@ -135,10 +135,22 @@ try {
     assert.deepEqual([given.state, given.attempt, given.notTaking], ['pooled', 1, 'this machine could not start a job of this pool: docker run: no space left on device']);
     assert.equal(state.pools[0].notTaking, given.notTaking);
     assert.equal(waits(stuck)[0], `taking no job of ${POOL} for 3600 s: docker run: no space left on device`);
+    const onDisk = () => JSON.parse(fs.readFileSync(`${stuck.base}/state.json`, 'utf8')).pools[0]?.notTaking;
+    await until('state.json to say so too', () => onDisk() === given.notTaking);
     // Linked to another checkout, the pool is one nothing was found out about yet.
     fs.cpSync(stuck.checkout, `${stuck.checkout}2`, { recursive: true });
     await stuck.ok('/pools', { pools: [{ ...stuck.link, path: `${stuck.checkout}2` }] });
     await until('nothing held against the pool', async () => (await stuck.state()).pools[0].notTaking === '');
+    await until('state.json to say so too', () => onDisk() === '');
+
+    // So is one that is linked no longer, when its wait is over.
+    const gone = await bench.machine('nu', { env: { DN_POOL_RETRY_MS: '3000' } }).start();
+    fs.writeFileSync(`${gone.dockerDir}/fail-run`, 'no space left on device\n');
+    await said(gone, await own(gone), /^this machine could not start/);
+    await gone.ok('/pools', { pools: [] });
+    const from = (await gone.state()).updatedAt;
+    await until('the wait to be well over', async () => gone.exited || (await gone.state()).updatedAt >= from + 6);
+    assert.deepEqual([gone.exited, /\] uncaught: /.test(gone.log()), turns(gone).length], [false, false, 1]);
 
     const bare = await bench.machine('nd', { docker: 'none' }).start();
     const [noDocker, bareState] = await said(bare, await own(bare), /^docker is missing/);
@@ -180,7 +192,7 @@ try {
       return row.state === 'claimed' && fine.agent((await runsOf(fine, taken)).at(-1)?.runId)?.waiting === 'go';
     });
     assert.equal((await fine.state()).pools[0].notTaking, '');
-    await Promise.all([stuck, bare, keyless, slow, short, fine].map((m) => m.kill()));
+    await Promise.all([stuck, gone, bare, keyless, slow, short, fine].map((m) => m.kill()));
   });
 } finally {
   await bench.close();

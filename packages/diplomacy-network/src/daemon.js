@@ -38,9 +38,9 @@ import { createTransport } from './transport/index.js';
 import {
   ADB_SERVER, BASE_DIR, CLAUDE_BIN, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, CONTAINER_DISK_BYTES, DISCOVERY_PATH,
   DOCKER_BIN, EXECUTOR_CHECK_MS, EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GH_BIN, GIT_BIN, GLAB_BIN, HOURS_FLOOR,
-  JOBS_PATH, JOBS_WRITE_MS, LOG_PATH, MIRROR_KEEP_MS, OPENSSL_BIN, POOL_RETRY_MAX_MS, POOL_RETRY_MS, RECONCILE_MS, RUN_KEEP_MS, SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH,
-  OFF_REMOVES, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS, TEST_FAULTS_PATH, TEST_KNOBS, TOOL_PATH, TOR_BIN, TRANSPORT_RETRY_MAX_MS,
-  TRANSPORT_RETRY_MS, locate,
+  JOBS_PATH, JOBS_WRITE_MS, LOG_PATH, MIRROR_KEEP_MS, OPENSSL_BIN, POOL_RETRY_MAX_MS, POOL_RETRY_MS, RECONCILE_MS, RUN_KEEP_MS,
+  SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH, OFF_REMOVES, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS, TEST_FAULTS_PATH, TEST_KNOBS,
+  TOOL_PATH, TOR_BIN, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS, locate,
 } from './paths.js';
 
 // Prompts of private repositories, tokens and keys lie under the state directory, and
@@ -348,7 +348,6 @@ function leaveAlone({ id, path: checkout }, why) {
   const wait = Math.min(POOL_RETRY_MAX_MS, POOL_RETRY_MS * 2 ** (row - 1));
   stuck.set(id, { why, until: Date.now() + wait, row, path: checkout });
   log(`taking no job of ${id} for ${Math.round(wait / 1000)} s: ${why}`);
-  touch();
 }
 
 // A pool whose wait is over is taken from again once its mirror can be made, the one
@@ -360,7 +359,6 @@ async function retryPools() {
     const link = links.get(id);
     if (link?.path !== held.path) {
       stuck.delete(id);
-      touch();
       continue;
     }
     if (held.until > Date.now()) continue;
@@ -370,7 +368,6 @@ async function retryPools() {
       await mirrors.ensureMirror({ pool: poolOf(link), checkout: link.path });
       held.why = '';
       log(`taking jobs of ${id} again`);
-      touch();
     } catch (err) {
       leaveAlone(link, String(err?.message ?? err));
     }
@@ -418,11 +415,12 @@ async function startRun({ runId, pool: link, peer, spec }) {
     if (container) await containers.release({ name: container.name, runId }).catch(() => {});
     jobs.delete(runId);
     saveJobs();
-    // No job ran, and why not is this machine's own affair: the run is given back
-    // before the node hears of the failure, which it would count as an attempt.
+    // No job ran, and why not is this machine's own affair: the node has stopped the run
+    // and given it back by the time it hears of the failure, which it would count as an
+    // attempt.
     const why = String(err?.message ?? err);
     if (!ending) leaveAlone(link, why);
-    await giveBack(runId, `this machine could not start it: ${why}`);
+    giveBack(runId, `this machine could not start it: ${why}`);
     throw err;
   } finally {
     starting -= 1;
@@ -481,7 +479,7 @@ const OUTGREW = 'the container outgrew its disk allowance';
 // holds no run for is stopped here.
 function giveBack(runId, why) {
   log(`giving ${runId} back: ${why}`);
-  return node.stopRun({ runId, reason: why }).catch(() => stopRun(runId, why));
+  node.stopRun({ runId, reason: why }).catch(() => stopRun(runId, why));
 }
 
 // Takes up the jobs the daemon before this one left running: each is admitted to the
@@ -681,9 +679,10 @@ function touch() {
   writing ??= setTimeout(writeState, Math.max(0, written + STATE_WRITE_MS - Date.now()));
 }
 
-// The engine, the credential and the devices change without the node's knowing.
+// The engine, the credential, the devices and what is held against a pool change
+// without the node's knowing.
 function watchExecutor() {
-  const now = JSON.stringify([containers.dockerState(), llm.state(), devicesState()]);
+  const now = JSON.stringify([containers.dockerState(), llm.state(), devicesState(), [...stuck].map(([id, held]) => [id, held.why])]);
   if (now !== shown) touch();
   shown = now;
 }
