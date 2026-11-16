@@ -9,6 +9,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { GITLAB_POOL, POOL, check, createBench, passed, sleep, until } from './lib/daemons.mjs';
 import { GITLAB_HOST } from './lib/fake-forge.mjs';
 
@@ -17,11 +18,25 @@ const bench = await createBench();
 const offerOf = async (m, taskId) => (await m.state()).offers.find((o) => o.taskId === taskId);
 const runOf = async (m, taskId) => (await m.state()).runs.filter((r) => r.taskId === taskId).at(-1) ?? null;
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// Whether this host shows a process's environment, as a container's /proc does: where
+// it does not, the stand-in docker cannot find a job's processes by their run id.
+const PROC = fs.existsSync('/proc/self/environ');
+// What a daemon asked of a run's container since `from`, as [verb, run id, group].
+// Ends a process group this suite's stand-in docker could not: gone already is as good.
+const end = (group) => { try { process.kill(-group, 'SIGKILL'); } catch {} };
+const asked = (m, runId, from) => m.docker('exec').slice(from).filter((c) => c.includes(runId)).map((c) => c.slice(c.indexOf(runId) - 1, c.indexOf(runId) + 2));
 const done = (m, taskId) => until(`${taskId} done`, async () => (await offerOf(m, taskId)).state === 'done');
 // The run of a task on `m` once its agent waits for `file`.
 const waiting = (m, taskId, file) => until(`${m.name}'s agent to wait for ${file}`, async () => {
   const run = await runOf(m, taskId);
   return run && m.agent(run.runId)?.waiting === file ? run : null;
+});
+// A task's second attempt open to be taken: the first is counted when its run's end is
+// heard, and the offer is back in the pool one step of its requester later, when the
+// claim is seen to be gone.
+const backInThePool = (m, taskId) => until(`${taskId} back in the pool`, async () => {
+  const offer = await offerOf(m, taskId);
+  return offer.attempt === 2 && offer.state === 'pooled';
 });
 // A run as the node keeps it on disk, once it says there that its job is being started.
 const launched = (m, taskId) => until(`${m.name} to start the job of ${taskId}`, () => {
@@ -131,23 +146,69 @@ try {
     assert.equal(b.agent(own.runId).pid, ownPid);
   });
 
+  await check('a job whose process group the daemon before this one did not live to keep is ended by its run id, not by the group its own run directory names, and its container is left with no job', async () => {
+    const m = await bench.machine('lost', { env: { DN_SWEEP_MS: '200', DN_CONTAINER_IDLE_MS: '1500' } }).start();
+    await m.linked();
+    const { taskId } = await m.ok('/offer', { pool: POOL, kind: 'review', item: 'pr-4', title: 'Review', prompt: 'wait never\nsay never', now: true });
+    const run = await waiting(m, taskId, 'never');
+    await m.kill();
+    const file = path.join(m.base, 'jobs.json');
+    const kept = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const group = kept.jobs[run.runId].pid;
+    assert.ok(group > 1 && alive(group), 'the group the daemon kept');
+    // As a daemon leaves it that goes between starting a job and hearing its group.
+    kept.jobs[run.runId].pid = 0;
+    fs.writeFileSync(file, JSON.stringify(kept));
+    // What the job can write: the group of something that is not its own.
+    const bystander = spawn('sleep', ['600'], { detached: true, stdio: 'ignore' });
+    fs.writeFileSync(path.join(m.base, 'runs', run.runId, 'pid'), `${bystander.pid}\n`);
+    const execs = m.docker('exec').length;
+    try {
+      await m.start();
+      const line = `${run.runId} was being started when the daemon before this one went: stopping what there is of it in ${run.container}`;
+      await until('the job looked at', () => m.log().includes(line) || m.log().includes(`${run.runId} taken up`));
+      assert.ok(m.log().includes(line), m.log().slice(-1500));
+      await until('the run failed', async () => (await runOf(m, taskId)).state === 'failed');
+      assert.equal(alive(bystander.pid), true, 'the group its run directory named was not touched');
+      assert.equal(m.log().includes(`${run.runId} taken up`), false);
+      const ofIt = asked(m, run.runId, execs);
+      assert.ok(ofIt.length >= 2 && ofIt.every(([verb, , named]) => ['stop', 'left'].includes(verb) && named === '0'), JSON.stringify(ofIt));
+      if (PROC) await until('everything of the job gone', () => !alive(group));
+      // The node knew the run and not what became of its job: a failed attempt.
+      await backInThePool(m, taskId);
+      assert.equal((await offerOf(m, taskId)).reason, 'the run ended without saying how');
+      await until('its container, which holds no job, removed as idle', () => m.containers().length === 0);
+      assert.equal(alive(bystander.pid), true);
+    } finally {
+      bystander.kill('SIGKILL');
+      if (!PROC) end(group);
+    }
+    await m.kill();
+  });
+
   await check('a job the daemon has no record of any more is found in its container and stopped, once', async () => {
     await b.ok('/admit', { slots: 1 });
     const { taskId } = await a.ok('/offer', { pool: POOL, kind: 'review', item: 'pr-3', title: 'Review', prompt: 'wait never\nsay never' });
     const run = await waiting(b, taskId, 'never');
     const agentPid = b.agent(run.runId).pid;
     await b.kill();
-    assert.equal(Object.keys(JSON.parse(fs.readFileSync(path.join(b.base, 'jobs.json'), 'utf8')).jobs).includes(run.runId), true);
+    const group = JSON.parse(fs.readFileSync(path.join(b.base, 'jobs.json'), 'utf8')).jobs[run.runId].pid;
+    assert.ok(group > 1 && alive(group), 'the group the daemon kept');
     fs.rmSync(path.join(b.base, 'jobs.json'));
+    const execs = b.docker('exec').length;
     await b.start();
 
-    await until('the job stopped', () => !alive(agentPid));
     const line = `stopping ${run.runId} in ${run.container}: this daemon holds no record of the job`;
-    assert.ok(b.log().includes(line), b.log().slice(-1500));
+    await until('the job looked at', () => b.log().includes(line));
+    // Nobody holds its group any more: it is known by its run id.
+    await until('the job stopped', () => asked(b, run.runId, execs).some(([verb]) => verb === 'left'));
+    assert.ok(asked(b, run.runId, execs).every(([, , named]) => named === '0'), JSON.stringify(asked(b, run.runId, execs)));
+    if (PROC) await until('everything of the job gone', () => !alive(agentPid) && !alive(group));
+    else end(group);
     // The node knew the run and not what became of its job: a failed attempt.
     await until('the run failed on B', async () => (await runOf(b, taskId)).state === 'failed');
-    await until('the task back in the pool', async () => (await offerOf(a, taskId)).attempt === 2);
-    assert.deepEqual([(await offerOf(a, taskId)).state, (await offerOf(a, taskId)).reason], ['pooled', 'the run ended without saying how']);
+    await backInThePool(a, taskId);
+    assert.equal((await offerOf(a, taskId)).reason, 'the run ended without saying how');
     const outcome = await until('its end on record', () => {
       try { return JSON.parse(fs.readFileSync(path.join(b.base, 'runs', `${run.runId}.outcome.json`), 'utf8')); } catch { return null; }
     });

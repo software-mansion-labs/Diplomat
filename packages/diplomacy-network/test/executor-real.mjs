@@ -184,10 +184,10 @@ async function launch(runId, peer, { script = null, env = {}, prompt = 'Do nothi
   const outcome = watch(job).finally(() => { release(); broker.removeJob(runId); return containers.release({ name: container.name, runId }); });
   const out = (name) => fs.readFileSync(path.join(started.dir, `out-${name}.txt`), 'utf8').trim();
   const steps = () => Object.fromEntries(fs.readFileSync(path.join(started.dir, 'out-steps.txt'), 'utf8').trim().split('\n').map((l) => [l.split(' ')[0], Number(l.split(' ')[1])]));
-  return { run: job, container, proxy, dir: started.dir, outcome, out, steps };
+  return { run: job, container, proxy, dir: started.dir, group: started.pid, outcome, out, steps };
 }
 const unreached = (out) => out.split('\n').filter((l) => !/: no \(/.test(l));
-const groupAlive = async (job) => (await docker(['exec', job.container.name, 'sh', '-c', `kill -s 0 -- -${fs.readFileSync(path.join(job.dir, 'pid'), 'utf8').trim()}`])).code === 0;
+const groupAlive = async (job) => (await docker(['exec', job.container.name, 'sh', '-c', `kill -s 0 -- -${job.group}`])).code === 0;
 
 let tag = '';
 try {

@@ -83,6 +83,9 @@ const agent = (runId, what) => fs.readFileSync(path.join(agentDir, `${runId}.${w
 // Long enough for a machine with every core taken many times over.
 const until = async (what, fn, ms = 120000) => { for (const end = Date.now() + ms; Date.now() < end;) { if (await fn()) return; await sleep(25); } assert.fail(`never: ${what}`); };
 const pidAlive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// Whether this host shows a process's environment, as a container's /proc does: where
+// it does not, the stand-in docker cannot find a job's processes by their run id.
+const PROC = fs.existsSync('/proc/self/environ');
 const NAME = /^dn-[0-9a-z]{25}-[0-9a-z]{25}$/;
 const volumeOf = (name) => name.replace('dn-', 'dn-work-');
 const labels = (pool, peer) => ['--label', `dn.pool=${pool.id}`, '--label', `dn.peer=${peer}`, '--label', `dn.base=${BASE}`];
@@ -527,8 +530,7 @@ try {
     assert.equal(stays.container.name, goes.container.name);
     await until('both agents run', () => fs.existsSync(path.join(agentDir, `${R}-5.started`)) && fs.existsSync(path.join(agentDir, `${R}-6.started`)));
     assert.deepEqual(containers.list().find((c) => c.name === stays.container.name).jobs.sort(), [`${R}-5`, `${R}-6`]);
-    const pid = (r) => Number(fs.readFileSync(path.join(RUNS_DIR, r, 'pid'), 'utf8'));
-    const [staysPid, goesPid] = [pid(`${R}-5`), pid(`${R}-6`)];
+    const [staysPid, goesPid] = [stays.started.pid, goes.started.pid];
     assert.ok(pidAlive(staysPid) && pidAlive(goesPid));
 
     const stopped = await stopJob(goes.run, containers);
@@ -693,7 +695,7 @@ try {
     assert.equal((await joined.outcome).ok, true);
     assert.equal(calls('run').length, runs);
     assert.equal(fs.existsSync(path.join(agentDir, `${R}-17.started`)), true);
-    assert.ok(pidAlive(Number(fs.readFileSync(path.join(RUNS_DIR, `${R}-17`, 'pid'), 'utf8'))), 'and the running job was not disturbed');
+    assert.ok(pidAlive(before.started.pid), 'and the running job was not disturbed');
 
     await stopJob(before.run, containers);
     await before.outcome;
@@ -1091,21 +1093,29 @@ try {
     assert.equal(made().length, before + 3, 'tried once');
   });
 
-  await check('a stray container this daemon never used is removed once it has been seen idle for the full time', async () => {
+  await check('a stray container this daemon never used is removed once it has been seen idle for the full time, and so is one named the way an earlier daemon named them, with its relay, network and volume', async () => {
     const tag = await containers.ensureImage();
     const stray = containerName('github.com/dn-test/stray', PEER_A);
     execFileSync(FAKE, ['run', '-d', '--name', stray, '--label', `dn.base=${BASE}`, tag, 'sleep', 'infinity']);
+    // Sixteen hex digits for the pool and for the peer, and nothing on it but whose it is.
+    const old = 'dn-0f1e2d3c4b5a6978-8796a5b4c3d2e1f0';
+    const own = ['--label', `dn.base=${BASE}`];
+    execFileSync(FAKE, ['network', 'create', ...own, old]);
+    execFileSync(FAKE, ['volume', 'create', ...own, volumeOf(old)]);
+    for (const name of [old, `${old}-relay`]) execFileSync(FAKE, ['run', '-d', '--name', name, ...own, '--network', old, tag, 'sleep', 'infinity']);
+    const gone = (kind, name) => calls(kind).some((c) => (kind === 'rm' || c[1] === 'rm') && c.at(-1) === name);
+    const left = () => [gone('rm', stray), gone('rm', old), gone('rm', `${old}-relay`), gone('network', old), gone('volume', volumeOf(old))];
     await containers.sweep();
-    assert.ok(!calls('rm').some((c) => c.at(-1) === stray), 'first seen is not yet idle');
+    assert.deepEqual(left(), Array(5).fill(false), 'first seen is not yet idle');
     clock.now += 3601 * 1000;
     await containers.sweep();
-    assert.ok(calls('rm').some((c) => c.at(-1) === stray));
+    assert.deepEqual(left(), Array(5).fill(true));
   });
 
   await check('a stop the engine did not hear has stopped nothing: it is asked again until the job is gone', async () => {
     const job = await launch(`${R}-40`, PEER_A, alpha, { prompt: 'MODE=sleep' });
     await until('the agent runs', () => fs.existsSync(path.join(agentDir, `${R}-40.started`)));
-    const pid = Number(fs.readFileSync(path.join(RUNS_DIR, `${R}-40`, 'pid'), 'utf8'));
+    const { pid } = job.started;
     const asked = () => calls('exec').filter((c) => c[6] === 'stop' && c[7] === `${R}-40`).length;
     fs.writeFileSync(path.join(fakeDir, 'down'), '');
     let settled = false;
@@ -1143,14 +1153,13 @@ try {
       const run = { runId, pool: alpha.pool };
       const container = await containers.acquire({ pool: alpha.pool, peer: PEER_A, runId });
       const proxy = await broker.addJob({ ...run, peer: PEER_A });
-      await startJob({ run, container, spec: { ...SPEC, prompt }, proxy, env: { CLAUDE_CODE_OAUTH_TOKEN: 'dn-placeholder' } });
-      return container;
+      const started = await startJob({ run, container, spec: { ...SPEC, prompt }, proxy, env: { CLAUDE_CODE_OAUTH_TOKEN: 'dn-placeholder' } });
+      return { container, pid: started.pid };
     };
-    const container = await startOnly(`${R}-41`, 'MODE=sleep');
-    await startOnly(`${R}-42`, 'Review.');
+    const { container, pid } = await startOnly(`${R}-41`, 'MODE=sleep');
+    const short = await startOnly(`${R}-42`, 'Review.');
     await until('the long one runs', () => fs.existsSync(path.join(agentDir, `${R}-41.started`)));
     await until('the short one ended with nobody watching', () => fs.existsSync(path.join(RUNS_DIR, `${R}-42`, 'done')));
-    const pid = Number(fs.readFileSync(path.join(RUNS_DIR, `${R}-41`, 'pid'), 'utf8'));
 
     const fresh = createContainers({ log, now: () => clock.now, imageDir, broker: () => broker.address() });
     const [restarts, creates] = [calls('restart').length, calls('create').length];
@@ -1164,8 +1173,8 @@ try {
     assert.equal(pidAlive(pid), true);
     assert.equal(await fresh.adopt({ pool: { ...alpha.pool, id: 'github.com/dn-test/never-made' }, peer: PEER_A, runId: 'x' }), null, 'a container that is not there is nobody\'s');
 
-    assert.equal(later.attachJob({ runId: `${R}-41`, container: taken }), true);
-    assert.equal(later.attachJob({ runId: `${R}-42`, container: taken }), true);
+    assert.equal(later.attachJob({ runId: `${R}-41`, container: taken, pid }), true);
+    assert.equal(later.attachJob({ runId: `${R}-42`, container: taken, pid: short.pid }), true);
     assert.equal(later.attachJob({ runId: `${R}-43`, container: taken }), false, 'a run that never came up');
     assert.equal(later.attachJob({ runId: `../${R}-41`, container: taken }), false);
     await assert.rejects(later.watch({ runId: `${R}-43` }), /is not running/);
@@ -1184,13 +1193,12 @@ try {
 
   await check('a job that left a stop script and another job\'s process group in its run directory, and ignores TERM, is stopped by what the host itself holds, and nothing else is', async () => {
     const other = await launch(`${R}-50`, PEER_A, alpha, { prompt: 'MODE=sleep' });
-    const pid = (r) => Number(fs.readFileSync(path.join(RUNS_DIR, r, 'pid'), 'utf8'));
     const otherPid = other.started.pid;
     const run = { runId: `${R}-51`, pool: alpha.pool };
     const container = await containers.acquire({ pool: alpha.pool, peer: PEER_A, runId: `${R}-51` });
     const started = await startJob({ run, container, spec: { ...SPEC, prompt: `MODE=defy\nGROUP=${otherPid}` }, proxy: await broker.addJob({ ...run, peer: PEER_A }), env: { CLAUDE_CODE_OAUTH_TOKEN: 'dn-placeholder' } });
     await until('both agents run', () => [`${R}-50`, `${R}-51`].every((r) => fs.existsSync(path.join(agentDir, `${r}.started`))));
-    assert.deepEqual([pid(`${R}-50`), pid(`${R}-51`), fs.readFileSync(path.join(RUNS_DIR, `${R}-51`, 'stop.sh'), 'utf8')], [otherPid, otherPid, '#!/bin/sh\nexit 0\n'], 'what the job wrote');
+    assert.deepEqual([Number(fs.readFileSync(path.join(RUNS_DIR, `${R}-51`, 'pid'), 'utf8')), fs.readFileSync(path.join(RUNS_DIR, `${R}-51`, 'stop.sh'), 'utf8')], [otherPid, '#!/bin/sh\nexit 0\n'], 'what the job wrote');
     // The group the host has is the one its own start named, whatever the job wrote since.
     assert.ok(started.pid > 1 && started.pid !== otherPid && pidAlive(started.pid));
 
@@ -1203,10 +1211,34 @@ try {
     assert.equal(stopped.state, 'stopped');
     await until('its runner is dead', () => !pidAlive(started.pid));
     assert.equal(pidAlive(otherPid), true, 'the job whose group it named was not touched');
-    assert.deepEqual(calls('exec').filter((c) => c.some((a) => a.includes(`/dn/runs/${R}-51`))).map((c) => c.at(-1)), [`/dn/runs/${R}-51/run.sh`],
+    assert.deepEqual(calls('exec').filter((c) => c.some((a) => a.includes(`/dn/runs/${R}-51`))).map((c) => c.slice(-2)), [[`/dn/runs/${R}-51/run.sh`, `${R}-51`]],
       'nothing was run from its run directory but the runner, once');
     broker.removeJob(`${R}-51`);
     await containers.release({ name: container.name, runId: `${R}-51` });
+    await stopJob(other.run, containers);
+    await other.outcome;
+  });
+
+  await check('a job nobody kept the process group of is stopped by the run id its processes carry: the group its run directory names is not believed, and the job of that group runs on', async () => {
+    const other = await launch(`${R}-52`, PEER_A, alpha, { prompt: 'MODE=sleep' });
+    const run = { runId: `${R}-53`, pool: alpha.pool };
+    const container = await containers.acquire({ pool: alpha.pool, peer: PEER_A, runId: `${R}-53` });
+    const started = await startJob({ run, container, spec: { ...SPEC, prompt: `MODE=defy\nGROUP=${other.started.pid}` }, proxy: await broker.addJob({ ...run, peer: PEER_A }), env: { CLAUDE_CODE_OAUTH_TOKEN: 'dn-placeholder' } });
+    await until('both agents run', () => [`${R}-52`, `${R}-53`].every((r) => fs.existsSync(path.join(agentDir, `${r}.started`))));
+    assert.equal(Number(fs.readFileSync(path.join(RUNS_DIR, `${R}-53`, 'pid'), 'utf8')), other.started.pid, 'what the job wrote');
+    // The runner carries the run's id from the moment it is started, as everything it starts does.
+    if (PROC) assert.ok(fs.readFileSync(`/proc/${started.pid}/environ`, 'utf8').split('\0').includes(`DN_RUN_ID=${R}-53`));
+
+    const before = calls('exec').length;
+    assert.equal(later.attachJob({ runId: `${R}-53`, container }), true);
+    assert.equal((await later.stopJob(run, containers)).state, 'stopped');
+    assert.equal(pidAlive(other.started.pid), true, 'the job whose group it named was not touched');
+    const asked = calls('exec').slice(before).filter((c) => c.includes(`${R}-53`)).map((c) => c.slice(c.indexOf(`${R}-53`) - 1, c.indexOf(`${R}-53`) + 2));
+    assert.ok(asked.length >= 2 && asked.every(([verb, , group]) => ['stop', 'left'].includes(verb) && group === '0'), JSON.stringify(asked));
+    if (PROC) await until('its runner is dead', () => !pidAlive(started.pid));
+    else process.kill(-started.pid, 'SIGKILL');
+    broker.removeJob(`${R}-53`);
+    await containers.release({ name: container.name, runId: `${R}-53` });
     await stopJob(other.run, containers);
     await other.outcome;
   });

@@ -88,7 +88,7 @@ try {
     // Processes are found by their environment where there is a /proc to read it from.
     if (fs.existsSync('/proc/self/environ')) await until('the child it left gone', () => !alive(strays[0]));
     assert.deepEqual([alive(besidePid), b.agent(beside.runId).waiting, await proxyStatus(b, kept(b).jobs[beside.runId].token)], [true, 'other', 200], 'the job whose group it named was not touched');
-    assert.deepEqual(b.docker('exec').filter((c) => c.some((arg) => arg.includes('/dn/runs/')) && !/\/run\.sh$/.test(c.at(-1))), [], 'nothing is run from a run directory but the runner');
+    assert.deepEqual(b.docker('exec').filter((c) => c.some((arg) => arg.includes('/dn/runs/')) && !/\/run\.sh$/.test(c.at(-2))), [], 'nothing is run from a run directory but the runner');
     b.release('other');
     await until('the other job done', async () => (await offerOf(a, other.taskId)).state === 'done');
     await Promise.all([a.kill(), b.kill()]);

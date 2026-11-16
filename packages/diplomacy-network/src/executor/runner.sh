@@ -10,7 +10,6 @@
 set -u
 RUN="$(cd "$(dirname "$0")" && pwd)"
 ROOT="${DN_ROOT:-}"
-echo $$ > "$RUN/pid.tmp" && mv "$RUN/pid.tmp" "$RUN/pid"
 . "$RUN/env.sh"
 
 JOB="$ROOT/work/jobs/$DN_RUN_ID"

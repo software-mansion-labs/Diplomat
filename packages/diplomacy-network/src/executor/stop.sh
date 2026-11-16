@@ -11,7 +11,8 @@
 #
 # The job's process group covers what the agent started the ordinary way. Whatever left
 # that group (a daemon the agent launched) still carries DN_RUN_ID in its environment,
-# which is how it is found.
+# which is how it is found. A group of 0 is a job whose group the host does not hold:
+# it is known by its run id alone.
 
 verb="$1"
 id="$2"
@@ -27,7 +28,7 @@ strays() {
   done
 }
 # `-s SIG --`: dash takes no `--` after `-SIG`.
-group() { kill -s "$1" -- "-$pid" 2>/dev/null; }
+group() { [ "$pid" -gt 1 ] && kill -s "$1" -- "-$pid" 2>/dev/null; }
 signal() {
   group "$1"
   for p in $(strays); do kill -s "$1" "$p" 2>/dev/null; done

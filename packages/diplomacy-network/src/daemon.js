@@ -383,7 +383,15 @@ async function takeUp(kept) {
       }
       const container = await containers.adopt({ pool: was.pool, peer: was.peer, runId });
       if (!container) continue;
-      if (!attachJob({ runId, container, pid: was.pid || null })) {
+      if (!was.pid) {
+        // The daemon before this one went while it started the job, before the job's
+        // process group was heard: what there is of the job is ended, not watched.
+        log(`${runId} was being started when the daemon before this one went: stopping what there is of it in ${container.name}`);
+        if (attachJob({ runId, container })) await stopJob({ runId }, containers);
+        await containers.release({ name: container.name, runId });
+        continue;
+      }
+      if (!attachJob({ runId, container, pid: was.pid })) {
         await containers.release({ name: container.name, runId });
         continue;
       }

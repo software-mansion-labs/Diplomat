@@ -30,8 +30,9 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const STOP = fs.readFileSync(path.join(HERE, 'stop.sh'), 'utf8');
 // The runner in a session of its own, which says its process group from inside it, so
 // the group is there by the time it is named, and then becomes the runner. The host has
-// the group from its own command, before the job has run anything.
-const START = 'echo "$(setsid sh -c \'echo "$$"; exec sh "$0" < /dev/null > /dev/null 2>&1\' "$1" &)"';
+// the group from its own command, before the job has run anything. The run's id is in
+// the runner's environment from its first moment: stop.sh finds a job's processes by it.
+const START = 'echo "$(DN_RUN_ID="$2" setsid sh -c \'echo "$$"; exec sh "$0" < /dev/null > /dev/null 2>&1\' "$1" &)"';
 /// What a job that ended with its container says of it.
 export const CUT = 'the container was restarted to stop another job';
 // What a job that is given `adb` is told of it: executor/adb.js stands between.
@@ -217,7 +218,7 @@ export async function startJob({ run, container, spec, proxy, env = {}, forwards
   // Where the host put the directory, whatever stands at that name later.
   const realDir = path.join(fs.realpathSync(container.runsDir), runId);
   const job = { runId, container: container.name, dir, realDir, inside: `/dn/runs/${runId}`, pid: 0, stopping: false, stopped: false, cutting: false, cut: false, watching: null };
-  const started = await docker(['exec', container.name, 'sh', '-c', START, 'sh', `${job.inside}/run.sh`]);
+  const started = await docker(['exec', container.name, 'sh', '-c', START, 'sh', `${job.inside}/run.sh`, runId]);
   job.pid = started.code === 0 ? groupOf(started.stdout) : 0;
   if (!job.pid) throw new Error(`the job could not be started in ${container.name}: ${started.stderr.trim().split('\n').pop() || 'its process group was not said'}`);
   live.set(runId, job);
@@ -226,20 +227,22 @@ export async function startJob({ run, container, spec, proxy, env = {}, forwards
 
 /// Takes up a run that a daemon before this one started in `container` (`{ name,
 /// runsDir }`): `watch` and `stopJob` know it from here on. `pid` is the process group
-/// `startJob` resolved to; without it the one the run's directory names is believed,
-/// which the job could have rewritten. False when there is no process group to follow.
+/// `startJob` resolved to, as the host kept it. A job nobody kept the group of is known
+/// by the run id its processes carry and by nothing it wrote itself, which is enough to
+/// stop it. False for what is no run id, a group that is none, or a run with neither a
+/// group nor a directory among the container's.
 export function attachJob({ runId, container, pid = null }) {
-  if (!/^[A-Za-z0-9_-]{1,64}$/.test(runId)) return false;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(runId) || (pid !== null && !groupOf(pid))) return false;
   if (live.has(runId)) return true;
   let realDir;
-  try { realDir = path.join(fs.realpathSync(container.runsDir), runId); } catch { return false; }
-  const job = {
+  try {
+    realDir = path.join(fs.realpathSync(container.runsDir), runId);
+    if (pid === null && !fs.lstatSync(realDir).isDirectory()) return false;
+  } catch { return false; }
+  live.set(runId, {
     runId, container: container.name, dir: path.join(container.runsDir, runId), realDir, inside: `/dn/runs/${runId}`,
-    pid: 0, stopping: false, stopped: false, cutting: false, cut: false, watching: null,
-  };
-  job.pid = groupOf(pid ?? readOwn(job, 'pid', 32));
-  if (!job.pid) return false;
-  live.set(runId, job);
+    pid: pid === null ? 0 : groupOf(pid), stopping: false, stopped: false, cutting: false, cut: false, watching: null,
+  });
   return true;
 }
 

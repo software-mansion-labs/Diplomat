@@ -417,7 +417,11 @@ its run directory.
 can, its own run directory included. So nothing the host runs to ask after a job or to
 end it comes from there: `stop.sh` is handed to the container's `sh` as text, and the
 job's process group is the one the shell that started the job named to the daemon, kept
-in `jobs.json`, not the one the job's own `pid` file says. The order is always the same.
+in `jobs.json`; nothing a job writes says which processes are its own. A job whose
+group nobody kept - its daemon went between starting it and hearing the group, or
+`jobs.json` is gone - is not taken up: it is ended by its run id alone, which its
+runner and everything the runner starts carry in their environment from their first
+moment. The order is always the same.
 The job's proxy token is taken out of the broker first, so from that moment it reaches
 nothing - no forge, no model, no forward - however long the rest takes. Then its
 process group gets TERM, 5 s, and KILL, and so does every process outside the group
