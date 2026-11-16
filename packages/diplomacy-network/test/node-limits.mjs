@@ -11,7 +11,7 @@ import { createInvite, inviteToken } from '../src/core/membership.js';
 import { Pool } from '../src/core/pool.js';
 import { LIMITS, memberRecord, offerRecord } from '../src/core/records.js';
 import { poolFile } from '../src/node/store.js';
-import { POW, STRANGER_BODY_BYTES } from '../src/paths.js';
+import { MAX_BODY_BYTES, POW, STRANGER_BODY_BYTES } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const ROUND = 'AAAAAAAAAAA';
@@ -415,4 +415,24 @@ await check('what the store lost of a pool the host left, and what a member answ
   b.node.setPools([]);
   assert.deepEqual(b.node.snapshot().pools, []);
   assert.deepEqual(failures([a, b]), []);
+});
+
+await check('the largest job a host lets itself offer reaches its executor, in an answer well inside what a host takes for one, and a job one byte larger is refused where it is offered', async () => {
+  const w = createWorld({ seed: 84 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  let answer = 0;
+  w.net.tap(({ from, kind }) => (from === 'exe' && kind === 'key' ? { reached: (out) => { answer = out.length; } } : undefined));
+  // What a spec comes to beside its prompt.
+  const first = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(first.taskId), { what: 'a job' });
+  const job = exe.executor.jobOf(first.taskId);
+  const most = 512 * 2 ** 10 - (canon(job.spec).length - job.spec.prompt.length);
+  exe.executor.end(job.runId, {});
+  await w.net.until(() => w.offerRow(req, first.taskId).state === 'done', { what: 'the first job done' });
+  await assert.rejects(req.node.offer({ ...offerArgs('pr-2'), prompt: 'x'.repeat(most + 1) }), /cannot be sent to another machine: its prompt and options are too long/);
+  const { taskId } = await req.node.offer({ ...offerArgs('pr-2'), prompt: 'x'.repeat(most) });
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'the largest job' });
+  assert.equal(canon(exe.executor.jobOf(taskId).spec).length, 512 * 2 ** 10);
+  assert.ok(answer > 512 * 2 ** 10 && answer < 512 * 2 ** 10 + 4096 && answer < MAX_BODY_BYTES, `the answer with the key is ${answer} bytes`);
+  assert.deepEqual(failures([req, exe]), []);
 });
