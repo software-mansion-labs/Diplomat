@@ -250,7 +250,7 @@ export function createRuns(host) {
       }
       if (mine() && run.end !== 'drop') {
         const state = run.end === 'report' && run.outcome.ok ? 'completed' : 'released';
-        host.take(P, endClaim(host.id, claim, state, host.now()));
+        host.take(P, endClaim(host.id, claim, state, host.now(), run.spec));
         host.gossip.spread(P, [claimKey(run.taskId, host.self)]);
       }
       if (held[run.taskId]?.runId === run.runId) {

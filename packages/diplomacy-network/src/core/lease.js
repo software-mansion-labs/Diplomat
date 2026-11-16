@@ -35,12 +35,6 @@ export function speaksFor(claim, { from, round, now }) {
   return Boolean(claim) && claim.executor === from && claim.round === round && (claim.state !== 'held' || isActive(claim, now));
 }
 
-/// When the claim stops holding its task: the moment a held claim lapses unless it is
-/// extended, or the time an ended claim was signed.
-export function endsAt(claim) {
-  return claim.state === 'held' ? claim.leaseUntil + LEASE_GRACE_SECS : claim.at;
-}
-
 /// `{ from, until }`, the times a ping for the claim's next lease is acceptable from the
 /// host that backs it with `backed`, or null when the claim is not held or has reached
 /// the hours of that host's offer.
@@ -98,10 +92,11 @@ export function extendClaim(identity, claim, ping, now) {
   });
 }
 
-/// The claim's last version, with `state` `completed` or `released`.
-export function endClaim(identity, claim, state, now) {
+/// The claim's last version, with `state` `completed` or `released`. A completed claim
+/// names the job its run did: `spec`, the digest of the spec it was handed with its key.
+export function endClaim(identity, claim, state, now, spec) {
   const { sig: _, ping: __, ...fields } = claim;
-  return signRecord(identity, { ...fields, seq: claim.seq + 1, at: now, state });
+  return signRecord(identity, { ...fields, seq: claim.seq + 1, at: now, state, ...(state === 'completed' ? { spec } : {}) });
 }
 
 /// Null when a well-shaped claim's times are the ones its `claimedAt`, `hours` and `seq`

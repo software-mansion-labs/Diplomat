@@ -237,7 +237,7 @@ await check('the hours of a claim are those of the offers that back it: a host b
   await w.agreed(all);
   const at = w.net.now();
   const made = buildClaim(evil.id, { pool: POOL, taskId: quick.taskId, round: ROUND, gen: 0, grants: await granted(quick.taskId, at), absent: [], now: at });
-  assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [endClaim(evil.id, made, 'completed', at)] })), [[claimKey(quick.taskId, evil)], []]);
+  assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [endClaim(evil.id, made, 'completed', at, specDigest({ prompt: 'another job' }))] })), [[claimKey(quick.taskId, evil)], []]);
   await w.run(5);
   assert.deepEqual([w.offerRow(req, quick.taskId).executor, w.offerRow(req, quick.taskId).state, w.offerRow(req, quick.taskId).attempt], ['', 'pooled', 1], 'a claim ended without a word of the job counts for nothing');
   const done = (spec) => w.request(evil, req, 'done', { taskId: quick.taskId, round: ROUND, spec, outcome: OUTCOME });
