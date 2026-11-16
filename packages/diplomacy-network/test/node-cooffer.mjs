@@ -271,3 +271,25 @@ await check('a run leaves alone an offer of more hours than its machine accepts:
   await w.net.until(() => f.executor.jobOf(taskId), { maxMs: 5 * 60 * 1000, what: 'a job for the longer offer' });
   assert.deepEqual([backers(w.claim(a, taskId, f)), f.executor.jobOf(taskId).task.hours, e.executor.stopped, failures(all)], [[b.pk], 24, [], []]);
 });
+
+await check('a run that failed tells a host so once: the host that heard counts the attempt and is not told again while another is still to hear', async () => {
+  const w = createWorld({ seed: 47 });
+  const all = await w.pool(['a', 'b', 'e']);
+  const [a, b, e] = all;
+  const { taskId } = await a.node.offer(offerArgs('pr-1'));
+  await b.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  e.slots = 1;
+  e.node.admit({ slots: 1 });
+  await w.net.until(() => e.executor.jobOf(taskId), { what: 'a job' });
+  assert.deepEqual(backers(w.claim(a, taskId)).sort(), [a.pk, b.pk].sort());
+  w.net.cut('e', 'b');
+  e.executor.end(e.executor.jobOf(taskId).runId, { ok: false });
+  await w.net.until(() => w.offerRow(a, taskId).attempt === 2, { what: 'the attempt counted by the host that hears' });
+  await w.run(600);
+  assert.deepEqual([w.net.count({ from: 'e', to: 'a', kind: 'done' }), w.offerRow(b, taskId).attempt, w.claim(a, taskId).state], [1, 1, 'held']);
+  w.net.heal();
+  await w.net.until(() => w.offerRow(b, taskId).attempt === 2, { what: 'the attempt counted by the other' });
+  await w.net.until(() => w.claim(a, taskId).state === 'released', { what: 'the claim given back' });
+  assert.deepEqual([w.net.count({ from: 'e', to: 'a', kind: 'done' }), started(all), failures(all)], [1, 1, []]);
+});

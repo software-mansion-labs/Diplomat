@@ -118,6 +118,7 @@ export function createRuns(host) {
           return;
         }
         const hosts = keyHosts(run);
+        // Nobody to ask: what becomes of the run is said at the next step.
         if (hosts.length === 0) return;
         const to = hosts[tries % hosts.length];
         // The claim goes ahead of the question: a host gives a key only for a claim it holds.
@@ -292,7 +293,8 @@ export function createRuns(host) {
   // One run does for every offer of its task: a host whose offer no claim holds - it
   // offered the task after the claim was made, or could not be reached then - is asked to
   // back the claim as it stands, and this host's own such offer backs it at once. An
-  // offer whose hours the claim has outlived is not asked for: backed, it would not be held.
+  // offer whose hours the claim has outlived is not asked for: backed, it would not be
+  // held.
   async function seek(run, P) {
     const me = P.pool.member(host.self, host.now());
     const free = () => {
@@ -327,7 +329,7 @@ export function createRuns(host) {
           join(grant.offer, o.host, grant);
           return;
         }
-        // The two hosts hold different states: they are brought together, and it is asked again.
+        // The two hosts hold different states: brought together, the host is asked again.
         if (!answer.ok || answer.body.stale !== true) return;
         await host.gossip.syncWith(P, o.host);
       }

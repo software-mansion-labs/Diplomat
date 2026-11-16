@@ -8,7 +8,7 @@ import { b64u, canon, hash } from '../src/core/canon.js';
 import { buildClaim, buildGrant } from '../src/core/claims.js';
 import { KINDS, buildResponse, requestDigest } from '../src/core/envelope.js';
 import { sign, verify } from '../src/core/identity.js';
-import { buildPing } from '../src/core/lease.js';
+import { buildPing, endClaim } from '../src/core/lease.js';
 import { buildCapability } from '../src/core/capability.js';
 import { backers, buildTaskId, offerRecord } from '../src/core/records.js';
 import { POW } from '../src/paths.js';
@@ -308,4 +308,24 @@ await check('a run takes into its claim the offer it asked a host for, and no ot
   await w.net.until(() => backers(w.claim(a, taskId)).length === 2, { what: 'the offer taken into the claim' });
   assert.deepEqual([backers(w.claim(a, taskId)).sort(), w.claim(a, taskId).hours], [[a.pk, evil.pk].sort(), 12]);
   assert.deepEqual(all.flatMap((h) => h.log.filter((line) => /could not be served|step failed|failed:/.test(line))), []);
+});
+
+await check('a host that gives its offer under a number it had passed gives nothing: the claim holds no offer, asks nobody for a key and is given back', async () => {
+  const w = createWorld({ seed: 88 });
+  const all = await w.pool(['exe', 'by']);
+  const [exe, by] = all;
+  const evil = await w.intruder('evil', exe);
+  await w.net.until(() => all.every((h) => w.members(h).length === 3), { what: 'the intruder a member for everyone' });
+  const now = w.net.now();
+  // The member gave its offer a fifth time, to a claim of its own that ended, and gives it
+  // to the next claim as the first.
+  const own = buildClaim(evil.id, { pool: POOL, taskId: TASK, round: 'AAAAAAAAAAE', gen: 0, grants: [], absent: [by.pk, exe.pk].sort(), now, offer: { at: now, gen: 5, hours: 12 } });
+  for (const h of all) await w.request(evil, h, 'push', { records: [offerOf(evil, now), endClaim(evil.id, own, 'released', now)] });
+  serving(evil, { backing: () => ({ at: now, gen: 1, hours: 12 }) });
+  exe.slots = 1;
+  exe.node.admit({ slots: 1 });
+  await w.net.until(() => w.claim(by, TASK, exe)?.state === 'released', { what: 'the claim given back' });
+  assert.deepEqual(backers(w.claim(by, TASK, exe)), [evil.pk]);
+  assert.deepEqual([w.net.count({ from: 'exe', kind: 'key' }), exe.executor.started.length, w.runOf(exe, TASK).state], [0, 0, 'stopped']);
+  assert.deepEqual(exe.log.filter((line) => /could not be|step failed|failed:/.test(line)), []);
 });
