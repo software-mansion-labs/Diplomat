@@ -391,7 +391,8 @@ async function recall(ctx, pulls) {
     if (typeof ctx.branch !== 'function') refuse('nothing here can ask the forge about its branches');
     const cut = label.indexOf(':');
     const now = await ctx.branch(label.slice(cut + 1), cut < 0 ? undefined : label.slice(0, cut));
-    if (!state.reserved.includes(label) || !over('branches')(label) || (now !== null && now.sha !== state.sent[label])) continue;
+    // An answer that came back after another request sent the creation again is too old to use.
+    if (!over('branches')(label) || (now !== null && now.sha !== state.sent[label])) continue;
     drop(state.reserved, [label]);
     delete state.sent[label];
     if (now !== null) state.branches.push(label);

@@ -461,8 +461,9 @@ export const branchLabel = (ref, fork) => (fork === undefined ? ref : `${lower(f
 /// `head`, `fork`, `denyPaths`, `repo`), `segments` the request path's parts and `body`
 /// the request body. Resolves to `{ ok: true, created }` - the branches the push would
 /// create, each as `{ branch, sha }` with its `branchLabel` and the commit it would be at,
-/// for the caller to count against `create` - or `{ ok: false, reason }`. The push goes to the pool's repository, or under a rule with
-/// `fork` (an account) to that account's own fork of it. A ref may be created when
+/// for the caller to count against `create` - or `{ ok: false, reason }`. The push goes
+/// to the pool's repository, or under a rule with `fork` (an account) to that account's
+/// own fork of it. A ref may be created when
 /// `create` is positive and `refs` covers it, and updated when it is the head branch
 /// `head` names or one of `ctx.state.branches`, the branches the forge accepted from
 /// this task. The default branch and a branch the forge reports as protected are never

@@ -421,6 +421,12 @@ await check('what a request uses up is counted against the task, and a refused r
   assert.match((await late).reason, /pull request from fix-421 is on its way to the forge/);
   assert.deepEqual(used(), [['fix-422'], ['fix-421']]);
   conclude(second.request, { status: 201, body: Buffer.from('{}') });
+  // Two requests that both ask about the same unanswered one count it once.
+  const both = world({ branches: ['refs/heads/fix-1', 'refs/heads/fix-2', 'refs/heads/fix-3'] });
+  both.state.asked = ['fix-1'];
+  both.pulls[591] = { number: 591, open: true, author: 'me', headRepo: 'o/r', headRepoId: 1, headRef: 'fix-1' };
+  for (const verdict of await Promise.all([ask(draft('fix-2'), rules, both), ask(draft('fix-3'), rules, both)])) assert.equal(verdict.ok, true, verdict.reason);
+  assert.deepEqual([both.state.pulls, both.state.asked], [['fix-1'], ['fix-2', 'fix-3']]);
   // A pull request from a branch of the fork is looked for under the fork's account.
   const forked = world({ branches: ['me/r:refs/heads/fix-9'] });
   Object.assign(forked.state, { asked: ['me/r:fix-9'] });
@@ -446,6 +452,10 @@ await check('what a request uses up is counted against the task, and a refused r
   await allowed(assign([8, 7]), rules, ctx);
   await allowed(assign([8]), rules, ctx);
   for (const ids of [[7], [0], [], [7, 9], [8, 9, 7], [0, 8], [8, 0, 7], ['8', 7], '8', 8, { 0: 8 }, [8.5, 7], [8, 7, -3]]) await refused(assign(ids), /only add or remove this task's own account|is not a list of account ids/, rules, ctx);
+  // An id given twice is one account: it adds nobody and does not stand in for one left out.
+  await allowed(assign([8, 8, 7]), rules, ctx);
+  ctx.assigned = [8, 9];
+  for (const ids of [[8, 8], [8, 8, 7], [9, 9, 7]]) await refused(assign(ids), /only add or remove this task's own account/, rules, ctx);
   ctx.assigned = [7];
   for (const ids of [[0], [], [7]]) await allowed(assign(ids), rules, ctx);
   ctx.assigned = null;

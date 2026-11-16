@@ -336,12 +336,13 @@ const SCHEMA_FIELDS = table({ schema: 'fields inputFields enumValues args type o
 
 // A forge's tables. A field with a selection set leads from one context to the next (`in`,
 // `actor`, `foreign`, `event`, by the context it is selected in); `repo` is the pool's
-// repository itself, whose fields lead on as `in` says. A scalar is read freely inside the
-// pool's repository and from an allow-list everywhere else:
-//   repoLeaves  of the repository itself: what the REST answer about it holds (the
-//               repository `pick` of rules.js), under the names GraphQL has for it
-//   own         inside the repository, the names that tell of the account asking - what
-//               it may do there, its addresses, what it watches - and not of the repository
+// repository itself, whose fields lead on as `in` says. A scalar is read from an
+// allow-list on an account, a foreign object and a branch's protection, and freely on what
+// is in the pool's repository, but for `repoLeaves` and `own`:
+//   repoLeaves  the scalars read of the repository itself: what the REST answer about it
+//               holds (the repository `pick` of rules.js), under the names GraphQL has
+//   own         the names not read inside the repository: they tell of the account asking -
+//               what it may do there, its addresses, what it watches
 //   args        the arguments a field may take: paging, ordering and filters over what
 //               the object it is selected on holds
 //   ids         the arguments that name an object by its node id, which must turn out to

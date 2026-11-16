@@ -285,7 +285,7 @@ await check('one draft pull request per branch the task created, counted when th
   });
   await sent(rules, ghql(GH.prCreate), hubCtx(viaGraphql));
   off();
-  assert.deepEqual(viaGraphql.pulls, []);
+  assert.deepEqual([viaGraphql.pulls, viaGraphql.asked], [[], []], 'given back by the answer itself');
   await sent(rules, ghql(GH.prCreate), hubCtx(viaGraphql));
   assert.deepEqual(viaGraphql.pulls, ['fix-421']);
   await refused(rules, open('main'), hubCtx(viaGraphql), /has opened its pull request from fix-421/);

@@ -889,7 +889,8 @@ await check('a creation whose answer never came is settled by what the forge sho
   await refused(send([[ZERO, tip, 'refs/heads/other']], { ...ctx, branch: undefined }), /nothing here can ask the forge about its branches/);
   assert.deepEqual(ctx.state, held('refs/heads/unsaid'));
 
-  // A branch of the fork is looked for in the fork.
+  // A branch of the fork is looked for in the fork, where the pool's repository has none of that name.
+  git(forge, 'update-ref', '-d', 'refs/heads/lost');
   const sendFork = to('me/r', FORK_NEW);
   ctx = ctxFor();
   await lost(ctx, 'refs/heads/lost', sendFork);
@@ -907,7 +908,7 @@ await check('a creation whose answer never came is settled by what the forge sho
   assert.deepEqual(asked.filter((line) => line.startsWith('pulls')), []);
   assert.deepEqual(ctx.state.asked, ['fix-1']);
 
-  for (const [repo, ref] of [[forge, 'lost'], [forge, 'taken'], [forkGit, 'lost']]) git(repo, 'update-ref', '-d', `refs/heads/${ref}`);
+  for (const [repo, ref] of [[forge, 'taken'], [forkGit, 'lost']]) git(repo, 'update-ref', '-d', `refs/heads/${ref}`);
 });
 
 await check('the linked checkout is read and never written', async () => {
