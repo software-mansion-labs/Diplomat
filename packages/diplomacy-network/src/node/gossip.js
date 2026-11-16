@@ -351,7 +351,12 @@ export function createGossip(host) {
     P.catching = epoch;
     const pks = others(P);
     const waited = host.transport.state().state === 'ready' && host.now() - P.stale >= CATCH_UP_MS / 1000;
-    if (pks.length === 0 || waited) return caughtUp(P, epoch);
+    // With nobody to ask there was nothing to wait for, and nothing to say of it.
+    if (pks.length === 0) {
+      P.stale = null;
+      return undefined;
+    }
+    if (waited) return caughtUp(P, epoch);
     const asked = pks.map((pk) => meet(P, pk, { fresh: true }).then((heard) => heard && caughtUp(P, epoch))
       .catch((err) => host.log(`a pool could not be caught up: ${err?.stack ?? err}`)));
     // Where nobody answered, the next step asks again.
