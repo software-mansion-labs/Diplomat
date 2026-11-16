@@ -1,4 +1,6 @@
-# Diplomat (Szpont Yon)
+## Moved to https://github.com/software-mansion-labs/Diplomat
+
+# Diplomat
 
 **Diplomat automates the maintainer's job.** It runs a team of coding agents against your GitHub
 repos, around the clock: they review PRs, keep your branches mergeable, reproduce and fix incoming
