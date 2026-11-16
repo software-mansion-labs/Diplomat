@@ -1,8 +1,9 @@
 // Five to seven hosts and a seeded run of everything that can happen to them at once:
 // offers, runs that finish, fail or vanish, requests under keys, withdrawals, restarts,
-// hosts that leave the pool and come back, hosts switched off, a member that answers
-// nobody, pushes records no host may take and offers what the others offer, hosts off
-// the network, cuts, lost and repeated requests, and hours passing. After every step
+// hosts that leave the pool and come back, hosts switched off, machines that sleep
+// while another offers what they offer, a member that answers nobody, pushes records no
+// host may take, offers what the others offer and says a run of its own did their job,
+// hosts off the network, cuts, lost and repeated requests, and hours passing. After every step
 // what must always hold is checked; at the end the network is mended and everything
 // offered must have ended, on every host alike.
 //
@@ -13,11 +14,13 @@ import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, createWorld } from './lib/hosts.mjs';
 import { prng } from './lib/mem-net.mjs';
+import { specDigest } from '../src/core/capability.js';
 import { buildClaim } from '../src/core/claims.js';
 import { UNSERVED } from '../src/core/envelope.js';
 import { sign } from '../src/core/identity.js';
 import { endClaim } from '../src/core/lease.js';
 import { LIMITS, backers, backing, memberRecord, offerRecord } from '../src/core/records.js';
+import { ELSEWHERE } from '../src/node/offers.js';
 
 const SEEDS = Number(process.env.DN_SOAK_SEEDS ?? 4);
 const STEPS = Number(process.env.DN_SOAK_STEPS ?? 120);
@@ -30,7 +33,7 @@ async function soak(seed) {
   const pick = (list) => list[dice.int(list.length)];
   const names = Array.from({ length: 5 + dice.int(3) }, (_, i) => `h${i + 1}`);
   const all = await w.pool(names, Object.fromEntries(names.map((name, i) => [name, { slots: i < 2 ? 1 + dice.int(2) : dice.int(3) }])));
-  const tally = { steps: 0, offers: 0, acts: {}, jobs: 0, restarts: 0, left: 0, hostile: 0, rival: 0, resent: 0 };
+  const tally = { steps: 0, offers: 0, acts: {}, jobs: 0, restarts: 0, left: 0, slept: 0, hostile: 0, rival: 0, resent: 0 };
   // A member with no node behind it: every round counts it absent. What it pushes is
   // signed by it: records no host may take, and offers of what the others offer, with
   // claims of its own behind them, which are its to make and nothing to any other offer.
@@ -44,8 +47,10 @@ async function soak(seed) {
   const given = new Map(); // "host|task|at|gen" -> the "executor|round" that host gave that offer to
   const claimed = new Set(); // "task|executor" of every claim a host held
   const rival = new Map(); // taskId -> { createdAt, seq, state, hours } of the offer the member with no node made of it
+  const handed = new Map(); // taskId -> the digest of a job a host was handed for it
+  const elsewhere = new Set(); // "host|task|offeredAt" of every offer that ended by a run for another host's offer
   const performed = new Map(); // "path body" of a write -> how often a requester carried it out
-  const sendings = []; // { keyId, met } of every `act` sent: what its target made of it
+  const sendings = []; // { keyId, met } of every `act` sent: what its sender was told of it
   const secrets = new Map(); // "requester|task|round" -> secret
   const holders = new Map(); // keyId -> the one host seen holding it
   const used = new Map(); // "keyId|seq" -> the mac of the act request sent under it
@@ -62,10 +67,11 @@ async function soak(seed) {
     used.set(`${keyId}|${seq}`, mac);
     const sending = { keyId, met: 'nothing' };
     sendings.push(sending);
-    return (out) => {
-      const error = typeof out === 'string' ? null : JSON.parse(out.toString('utf8')).error;
-      const unserved = error?.code === 'busy' && error.detail === UNSERVED;
-      if (sending.met !== 'something') sending.met = unserved ? 'unserved' : 'something';
+    return {
+      reached: (out) => {
+        const { error } = JSON.parse(out.toString('utf8'));
+        sending.met = error?.code === 'busy' && error.detail === UNSERVED ? 'unserved' : 'something';
+      },
     };
   });
   for (const h of all) {
@@ -77,11 +83,15 @@ async function soak(seed) {
     };
   }
 
+  // A machine asleep stands still: nothing is asked of its node, and no job of its ends.
+  const awake = (h) => !h.transport.host.asleep;
   const jobs = (h) => [...h.executor.jobs.values()].filter((job) => job.alive).map((job) => job.args);
-  const everyJob = () => all.flatMap((h) => jobs(h).map((job) => ({ h, job })));
+  const everyJob = () => all.filter(awake).flatMap((h) => jobs(h).map((job) => ({ h, job })));
   const openOffers = () => all.flatMap((h) => h.node.snapshot().offers.filter((o) => !ENDED.includes(o.state)).map((o) => ({ h, o })));
-  const away = () => all.filter((h) => w.view(h).left);
-  const here = () => all.filter((h) => !w.view(h).left);
+  const away = () => all.filter((h) => awake(h) && w.view(h).left);
+  const here = () => all.filter((h) => awake(h) && !w.view(h).left);
+  // The job every offer of an item is for: the hosts offer it in the same words.
+  const offerOf = (item, now = false) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p', now });
 
   // What holds at every moment, whatever the network does.
   function look() {
@@ -90,6 +100,7 @@ async function soak(seed) {
       assert.deepEqual(h.log.filter((line) => /step failed|could not be served/.test(line)), [], `${h.name} threw`);
       const taking = jobs(h).filter((job) => !atOnce.has(job.task.taskId)).length;
       assert.ok(taking <= h.slots, `${h.name} runs ${taking} jobs on ${h.slots} slots`);
+      for (const job of jobs(h)) handed.set(job.task.taskId, specDigest(job.spec));
       for (const record of w.records(h)) {
         if (record.type !== 'claim') continue;
         claimed.add(`${record.taskId}|${record.executor}`);
@@ -106,6 +117,13 @@ async function soak(seed) {
       for (const o of h.node.snapshot().offers) {
         assert.notEqual(o.executor, evil.pk, `${h.name} gave ${o.item} to a machine that never asked for it`);
         assert.ok(o.state !== 'done' || o.outcome?.ok === true, `${o.item} is done without an outcome`);
+        // An offer that ended by a run for another host's offer names a host other than
+        // the run's own machine that gave that run its offer, and that host did.
+        if (o.state !== 'done' || o.outcome.summary !== ELSEWHERE) continue;
+        elsewhere.add(`${h.name}|${o.taskId}|${o.offeredAt}`);
+        assert.ok(o.backedBy.length > 0 && !o.backedBy.includes(o.executor) && !o.backedBy.includes(evil.pk), `${h.name} took ${w.name(o.executor)}'s own word that ${o.item} was done`);
+        const gave = (pk) => [...given].some(([id, to]) => id.startsWith(`${pk}|${o.taskId}|`) && to.startsWith(`${o.executor}|`));
+        assert.ok(o.backedBy.some(gave), `${h.name} ended ${o.item} by a run of ${w.name(o.executor)} that nobody gave an offer to`);
       }
       const keys = w.stored(h, 'keys') ?? {};
       for (const [taskId, K] of Object.entries(keys.issued ?? {})) {
@@ -154,9 +172,10 @@ async function soak(seed) {
       if (openOffers().length >= 6) return 'full';
       const twin = dice.chance(0.15) ? pick(openOffers()) : null;
       const h = pick(here().filter((x) => x !== twin?.h));
+      if (!h) return 'nobody is here';
       const item = twin?.o.item ?? `pr-${items += 1}`;
       const now = dice.chance(0.1);
-      const { taskId } = await h.node.offer({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p', now });
+      const { taskId } = await h.node.offer(offerOf(item, now));
       if (now) atOnce.add(taskId);
       tally.offers += 1;
       return `${h.name} ${item}${now ? ' now' : ''}${twin ? ' (a second offerer)' : ''}`;
@@ -171,7 +190,7 @@ async function soak(seed) {
       // later than now: what the job sends next is dated before that start.
       const one = pick(everyJob());
       const from = one && all.find((x) => x.pk === w.stored(one.h, 'keys')?.held?.[one.job.task.taskId]?.host);
-      if (!from || from === one.h) return 'no job with a key from another host';
+      if (!from || from === one.h || !awake(from)) return 'no job with a key from another host that is awake';
       const body = { asOf: w.net.now(), hash: w.view(from).hash };
       await w.request(evil, from, 'sync', body, { effort: 128, ts: w.net.now() + pick([1, 2, 6]) }).catch(() => {});
       await w.restart(from);
@@ -197,12 +216,12 @@ async function soak(seed) {
       return one ? `${one.h.name} ${one.job.task.item}` : 'no job';
     }],
     [4, 'withdraw', async () => {
-      const one = pick(openOffers());
+      const one = pick(openOffers().filter(({ h }) => awake(h)));
       if (one) await one.h.node.withdraw({ taskId: one.o.taskId, reason: 'soak' });
       return one ? `${one.h.name} ${one.o.item}` : 'no offer';
     }],
     [6, 'restart', async () => {
-      const h = pick(all);
+      const h = pick(all.filter(awake));
       await w.restart(h);
       tally.restarts += 1;
       return h.name;
@@ -210,6 +229,7 @@ async function soak(seed) {
     [3, 'leave', () => {
       if (away().length >= 2) return 'two are away';
       const h = pick(here());
+      if (!h) return 'nobody is here';
       h.node.leave({ pool: POOL });
       tally.left += 1;
       return h.name;
@@ -219,8 +239,30 @@ async function soak(seed) {
       if (h) await h.node.join({ pool: POOL });
       return h?.name ?? 'nobody is away';
     }],
+    [5, 'sleep', async () => {
+      // More often than not another machine offers what the one that goes to sleep
+      // offers: the machines of one operator find the same work.
+      const up = all.filter(awake);
+      if (up.length <= all.length - 2) return 'two are asleep';
+      const h = pick(up);
+      const mine = pick(h.node.snapshot().offers.filter((o) => !ENDED.includes(o.state)));
+      const other = pick(here().filter((x) => x !== h));
+      const twin = mine && other && dice.chance(0.6);
+      if (twin) {
+        await other.node.offer(offerOf(mine.item));
+        tally.offers += 1;
+      }
+      w.net.sleep(h.name);
+      tally.slept += 1;
+      return `${h.name}${twin ? `, and ${other.name} offers ${mine.item} too` : ''}`;
+    }],
+    [5, 'wake', () => {
+      const h = pick(all.filter((x) => !awake(x)));
+      if (h) w.net.sleep(h.name, false);
+      return h?.name ?? 'nobody is asleep';
+    }],
     [2, 'switch off', async () => {
-      const h = pick(all);
+      const h = pick(all.filter(awake));
       await w.wait(h.node.switchOff({ waitMs: 5000 }));
       await w.restart(h);
       tally.restarts += 1;
@@ -281,13 +323,18 @@ async function soak(seed) {
         pool: POOL, taskId, round: 'AAAAAAAAAAA', gen: pick([0, 1, LIMITS.time]), grants: [], absent: [], now, offer: { at: mine.createdAt, gen, hours: mine.hours },
       });
       const member = memberRecord(evil.id, { pool: POOL, seq: evilSeq += 1, at: now, joinedAt: evilJoined, maxAcceptedH: 12, voucher });
+      // One time in two it says its run did the very job the others offer: its word
+      // alone ends no offer of another host.
+      const job = specDigest({ taskId, kind: 'review', item, title: `Review ${item}`, identity: taskId.slice(taskId.lastIndexOf('@') + 1), prompt: 'p', options: {} });
+      assert.equal(handed.get(taskId) ?? job, job, 'the job it names is the one the others hand out');
+      const ran = dice.chance(0.5);
       for (const h of all) {
         const say = (kind, body) => w.request(evil, h, kind, body, { effort: 128 }).catch(() => ({ ok: false }));
         await say('hello', { member });
-        const answer = await say('push', { records: [offer, claim] });
+        const answer = await say('push', { records: [offer, claim, ...(ran ? [endClaim(evil.id, claim, 'completed', now, job)] : [])] });
         tally.rival += answer.ok ? answer.body.accepted.length : 0;
       }
-      return `${item} ${mine.state} for ${mine.hours} h, a claim as number ${gen}`;
+      return `${item} ${mine.state} for ${mine.hours} h, a claim as number ${gen}${ran ? ' that says the job is done' : ''}`;
     }],
     [6, 'down', () => {
       const h = pick(all);
@@ -325,26 +372,32 @@ async function soak(seed) {
       look();
     }
 
-    // The network is whole again and every host has room: everything offered comes to an end.
+    // The network is whole again, every machine is awake and has room: everything offered
+    // comes to an end.
     w.net.heal();
     Object.assign(w.net.faults, { drop: 0, duplicate: 0 });
     for (const h of all) {
+      w.net.sleep(h.name, false);
       w.net.down(h.name, false);
       h.slots = Math.max(h.slots, 2);
       if (w.view(h).left) await h.node.join({ pool: POOL });
     }
-    // The member with no node takes back what it still offers.
+    // The member with no node takes back what it still offers, and says once more how its
+    // other offers ended: nobody may have heard it the first time.
     for (const [taskId, mine] of rival) {
-      if (mine.state !== 'open') continue;
       const now = w.net.now();
       const [, item] = /:(.*)@/.exec(taskId);
       const offer = offerRecord(evil.id, {
         pool: POOL, kind: 'review', item, identity: taskId.slice(taskId.lastIndexOf('@') + 1), seq: mine.seq + 1, at: now, title: 'Mine too',
-        minRequiredH: mine.hours, createdAt: mine.createdAt, state: 'cancelled',
+        minRequiredH: mine.hours, createdAt: mine.createdAt, state: mine.state === 'open' ? 'cancelled' : mine.state,
       });
       const member = memberRecord(evil.id, { pool: POOL, seq: evilSeq += 1, at: now, joinedAt: evilJoined, maxAcceptedH: 12, voucher });
-      await w.request(evil, all[0], 'hello', { member }, { effort: 128 });
-      await w.request(evil, all[0], 'push', { records: [offer] }, { effort: 128 });
+      // Every host is told: one that has only just joined again may not take its word yet.
+      for (const h of all) {
+        const say = (kind, body) => w.request(evil, h, kind, body, { effort: 128 }).catch(() => ({ ok: false }));
+        await say('hello', { member });
+        await say('push', { records: [offer] });
+      }
     }
     trail.push(`${w.net.now()} mended`);
     const settled = () => openOffers().length === 0 && everyJob().length === 0 && new Set(all.map((h) => w.view(h).hash)).size === 1;
@@ -355,11 +408,11 @@ async function soak(seed) {
       look();
     }
     for (const h of all) {
-      for (const task of w.view(h).tasks) assert.ok(['done', 'cancelled'].includes(task.state), `${h.name} sees ${task.taskId} as ${task.state}`);
+      for (const task of w.view(h).tasks) assert.ok(['done', 'cancelled'].includes(task.state), `${h.name} sees ${task.taskId} as ${task.state}, offered by ${task.offeredBy.map(w.name)}`);
       const keys = w.stored(h, 'keys') ?? {};
       assert.deepEqual([Object.keys(keys.issued ?? {}), Object.keys(keys.held ?? {})], [[], []], `${h.name} keeps no key of a task that ended`);
     }
-    return tally;
+    return { ...tally, elsewhere: elsewhere.size };
   } catch (err) {
     console.log(`FAIL soak seed ${seed} at step ${tally.steps}; run it again with DN_SOAK_SEED=${seed} DN_SOAK_SEEDS=1 DN_SOAK_STEPS=${STEPS}`);
     console.log(trail.slice(-25).join('\n'));
@@ -369,5 +422,5 @@ async function soak(seed) {
 
 for (let seed = FIRST; seed < FIRST + SEEDS; seed += 1) {
   const t = await soak(seed);
-  console.log(`PASS soak seed ${seed}: ${STEPS} steps, ${t.offers} offers, ${t.jobs} jobs ended, ${t.restarts} restarts, ${t.left} left, ${t.hostile} hostile records refused, ${t.rival} records of a rival offer taken, ${t.resent} requests sent again, acts ${JSON.stringify(t.acts)}`);
+  console.log(`PASS soak seed ${seed}: ${STEPS} steps, ${t.offers} offers, ${t.jobs} jobs ended, ${t.restarts} restarts, ${t.left} left, ${t.slept} sleeps, ${t.elsewhere} offers ended by a run for another host's offer, ${t.hostile} hostile records refused, ${t.rival} records of a rival offer taken, ${t.resent} requests sent again, acts ${JSON.stringify(t.acts)}`);
 }

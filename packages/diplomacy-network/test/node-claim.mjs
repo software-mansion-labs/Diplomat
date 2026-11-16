@@ -162,6 +162,8 @@ await check('a host commits only with a slot still free, and counts nobody absen
   const all = await w.pool(['req', 'exe', 'slow'], { exe: { slots: 1 } });
   const [req, exe] = all;
   // The word on slots is taken back while the round waits for a member that says nothing.
+  // Once every host has asked the others what it missed, the next sync is a round's.
+  await w.run(2);
   w.net.cut('exe', 'slow');
   let since = w.net.now();
   const { taskId } = await req.node.offer(offerArgs('pr-1'));

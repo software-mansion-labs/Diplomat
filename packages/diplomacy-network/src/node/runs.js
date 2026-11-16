@@ -235,7 +235,8 @@ export function createRuns(host) {
           if (run.told + RETRY_MS / 1000 > host.now()) return;
           run.told = host.now();
           const body = { taskId: run.taskId, round: run.round, spec: run.spec, outcome: run.outcome };
-          const answers = await Promise.all(owed.map((pk) => host.gossip.send(P, pk, 'done', body)));
+          // How an offer ends hangs on the report: it is sent whatever gossip makes of its host.
+          const answers = await Promise.all(owed.map((pk) => host.gossip.send(P, pk, 'done', body, { fresh: true })));
           run.heard.push(...owed.filter((_, i) => answers[i].ok));
           save();
           // An offer its host ended for this report is ended here before the claim is:

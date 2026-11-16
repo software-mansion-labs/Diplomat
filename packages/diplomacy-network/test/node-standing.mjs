@@ -320,7 +320,7 @@ await check('a member whose clock is far off is absent from a round, a task whos
   req.skew = 400;
   free(exe);
   await w.net.until(() => exe.log.some((line) => line.includes(`claim of ${second.taskId} stood down: no-requester`)), { what: 'a round without the offerer' });
-  await w.net.until(() => member(req, exe).skew && member(req, off).skew, { what: 'the offerer seeing its clock is off' });
+  await w.net.until(() => member(req, exe).skew && member(req, off).skew && member(off, req).skew, { what: 'every host seeing the offerer\'s clock is off' });
   for (const h of all) assert.deepEqual([w.task(h, second.taskId).state, w.task(h, second.taskId).blocked], ['available', 'clock'], h.name);
   req.skew = 0;
   await w.net.until(() => exe.executor.jobOf(second.taskId), { what: 'the task claimed once the clocks agree' });

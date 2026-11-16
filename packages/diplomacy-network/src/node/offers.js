@@ -8,13 +8,18 @@
 import { b64u, canon, unb64u } from '../core/canon.js';
 import { SeqTracker, buildCapability, capabilityExp, checkAct, checkDone, specDigest } from '../core/capability.js';
 import { buildPing, heldUntil, isActive, pingDue } from '../core/lease.js';
-import { LIMITS, backing, buildTaskId, isBytes, isObject, offerRecord, parseTaskId, shaped } from '../core/records.js';
-import { OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETRY_MS } from '../paths.js';
+import { LIMITS, backers, backing, buildTaskId, isBytes, isObject, offerRecord, parseTaskId, shaped } from '../core/records.js';
+import { CLOCK_SKEW_SECS, OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETRY_MS } from '../paths.js';
 import { claimKey, hoursOf, offerKey } from './gossip.js';
 
 const OPEN = ['pooled', 'claimed'];
 const MAX_REASON = 200;
 const MAX_SPEC_BYTES = 512 * 2 ** 10;
+/// What the outcome of an offer says when its job was done by a run this host heard
+/// nothing from: one that another host gave its offer of the same job to.
+export const ELSEWHERE = 'run for another machine\'s offer of the same job';
+/// Why an offer its host could not sign again in time is cancelled.
+export const OUTLIVED = 'this machine was away for longer than an offer lasts';
 
 /// `value` as text with a space where each control character was: what a run says of
 /// itself reaches logs, terminals and the applets.
@@ -44,6 +49,7 @@ export function createOffers(host) {
   const offers = host.store.read('offers') ?? {}; // taskId -> the private half
   const issued = host.keys.issued; // taskId -> { round, secret, seq, capability }
   const turns = new Map(); // taskId -> the last request served under its key
+  const jobs = new WeakMap(); // an offer -> what names its job
 
   const save = () => host.store.write('offers', offers);
   // Cut first: a cut may fall inside a surrogate pair, and a record carries none halved.
@@ -68,6 +74,13 @@ export function createOffers(host) {
     return Object.fromEntries(Object.entries(spec).filter(([, value]) => value !== undefined));
   }
 
+  // What names the job of an offer: the digest of the spec it hands out, which is the
+  // same for as long as the offer is.
+  function jobOf(O) {
+    if (!jobs.has(O)) jobs.set(O, specDigest(specOf(O)));
+    return jobs.get(O);
+  }
+
   // The rules a task of this offer may act by, or null when there are none.
   async function rulesOf(P, O) {
     try {
@@ -83,8 +96,9 @@ export function createOffers(host) {
 
   function signed(P, O, state) {
     O.seq = Math.max(O.seq, P.pool.get(offerKey(O.taskId, host.self))?.seq ?? -1) + 1;
+    O.at = Math.max(host.now(), O.createdAt);
     return offerRecord(host.id, {
-      pool: P.id, kind: O.kind, item: O.item, identity: O.identity, seq: O.seq, at: Math.max(host.now(), O.createdAt),
+      pool: P.id, kind: O.kind, item: O.item, identity: O.identity, seq: O.seq, at: O.at,
       title: O.title, minRequiredH: O.hours, createdAt: O.createdAt, state,
       attempt: Math.min(LIMITS.attempt, O.failed.length + 1),
     });
@@ -174,12 +188,40 @@ export function createOffers(host) {
     end(host.pools.get(O.pool), O, 'cancelled', reason);
   }
 
+  // The claim of a run that did this offer's very job and ended well, or null: only a
+  // completed claim names a job. The run was claimed no earlier than this offer was made,
+  // the clocks' tolerance aside - one that began before says nothing of an offer made
+  // knowing of it, and a run this host gave an earlier offer of its own to is such a
+  // one. And its executor's word is not enough: a host other than the executor gave it
+  // an offer.
+  function elsewhere(P, O) {
+    return P.pool.claims(O.taskId, host.now()).find((claim) => claim.spec === jobOf(O)
+      && claim.claimedAt + CLOCK_SKEW_SECS >= O.createdAt && [undefined, O.createdAt].includes(backing(claim, host.self)?.at)
+      && backers(claim).some((pk) => pk !== claim.executor)) ?? null;
+  }
+
+  // An offer no claim holds whose job was done elsewhere is done: nothing is booked for
+  // it, and it says who ran the job and whose offer that run was given. True when so.
+  function finished(P, O) {
+    const ran = elsewhere(P, O);
+    if (!ran) return false;
+    O.ran = ran.executor;
+    O.backedBy = backers(ran).filter((pk) => pk !== ran.executor);
+    O.outcome = { ok: true, summary: ELSEWHERE, usd: 0, tokens: 0, runner: '', model: '' };
+    end(P, O, 'done');
+    return true;
+  }
+
   /// This host gives its open offer of `taskId` to a claim: how many times it has given
   /// that offer away with this one, the number that orders the claims it backs. Null when
-  /// it has no such offer open. The count is on disk before anyone sees it.
+  /// it has no such offer open, or will not give it: what it holds of the pool is not up
+  /// to date, or the job was done elsewhere. The count is on disk before anyone sees it.
   function nextGen(taskId) {
     const O = offers[taskId];
     if (!O || !OPEN.includes(O.state)) return null;
+    const P = host.pools.get(O.pool);
+    host.look();
+    if (P.stale !== null || finished(P, O)) return null;
     O.gen += 1;
     save();
     return O.gen;
@@ -294,7 +336,7 @@ export function createOffers(host) {
       const O = offers[body.taskId];
       if (!O || !OPEN.includes(O.state) || O.reported.includes(body.round) || !backs(O, claim)) return { body: {} };
       // The run did the job another host handed out: it says nothing of this host's.
-      if (body.spec !== specDigest(specOf(O))) return { body: {} };
+      if (body.spec !== jobOf(O)) return { body: {} };
       // The offer may be another claim's by now: this host gave it on.
       const current = holder(P, O);
       if (current && current.executor !== from) return { body: {} };
@@ -322,10 +364,14 @@ export function createOffers(host) {
   function stepOffer(P, O) {
     const now = host.now();
     const { taskId } = O;
+    const claim = holder(P, O);
+    if (!claim && finished(P, O)) return undefined;
+    // An offer nobody could have signed again in time is in no pool any more: this host
+    // was not running. Whether the work is still to do is for whoever offered it to say.
+    if (now >= O.at + RECORD_RETENTION_SECS) return end(P, O, 'cancelled', OUTLIVED);
     const mine = P.pool.get(offerKey(taskId, host.self));
     if (!mine || now - mine.at >= RESIGN_INTERVAL_MS / 1000) publish(P, O);
 
-    const claim = holder(P, O);
     const watched = O.watch;
     if (watched && watched.round !== claim?.round) {
       O.watch = null;
@@ -378,14 +424,15 @@ export function createOffers(host) {
 
   /// What came due for every offer: a record to sign again, a claim that ended or lapsed
   /// to count, a key to revoke, a ping to send. An ended offer is forgotten a day
-  /// after it ended, and a record that still says it is open is ended.
+  /// after it ended, and a record that still says it is open is ended. The offers of a
+  /// pool wait while what this host holds of it is not up to date.
   function step() {
     const now = host.now();
     for (const O of Object.values(offers)) {
       const P = host.pools.get(O.pool);
       if (OPEN.includes(O.state)) {
-        if (P) stepOffer(P, O);
-        else end(null, O, 'cancelled', 'the pool was closed');
+        if (!P) end(null, O, 'cancelled', 'the pool was closed');
+        else if (P.stale === null) stepOffer(P, O);
       } else if (now >= O.endedAt + RECORD_RETENTION_SECS) {
         delete offers[O.taskId];
         save();
@@ -418,7 +465,8 @@ export function createOffers(host) {
   function rows() {
     return Object.values(offers).map((O) => ({
       taskId: O.taskId, pool: O.pool, kind: O.kind, item: O.item, title: O.title, state: O.state,
-      executor: O.executor, executorHere: O.executor === host.self, attempt: Math.min(OFFER_ATTEMPTS, O.failed.length + 1),
+      executor: O.executor, executorHere: O.executor === host.self, backedBy: O.backedBy ?? [],
+      attempt: Math.min(OFFER_ATTEMPTS, O.failed.length + 1),
       requests: O.requests, refused: O.refused, outcome: O.outcome, reason: O.reason, offeredAt: O.offeredAt,
       endedAt: O.endedAt,
     }));
