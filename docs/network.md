@@ -119,8 +119,16 @@ and ends with the job.
 has created, in the repository or in your fork, is kept with the offer, so a second machine
 taking the job after the first failed, and the daemon after a restart, go on from the same
 count. A branch is the job's own - to push to again, to open its PR from - once the forge has
-said it accepted the push that created it. A push the forge declined uses nothing up; one whose
-answer never came stays counted.
+said it accepted the push that created it. A push the forge declined uses nothing up. One whose
+answer never came may have happened, and the forge knows: before the job's next push is judged
+the machine asks it for the branch. No such branch, and the count is free again; the branch at
+the commit that was sent, and it is the job's own; the branch at some other commit, and it stays
+counted and is nobody's to push to. A draft PR is counted the same way. One whose answer never
+came is settled before the job opens another, by asking the forge which PRs there are from that
+branch, open or closed: none, and the job may open it; any, and that is the job's one. While the
+forge does not answer the question, the request that waits on it is refused. The forge's answer
+is taken as it stands - a request the forge was still working on when it answered can land
+afterwards, and is then not counted.
 
 **Your own fork** is the repository under the account the repository was linked with that the
 forge itself calls a fork of this repository. The machine asks the forge whose it is and what it
@@ -134,21 +142,44 @@ Every job may read the repository it belongs to. Of what lies outside it and the
 points at - the fork a PR comes from, an issue elsewhere that mentions one here - it is told
 what the thing is (number, title, state, address; a fork's name and description) and nothing of
 what is inside it, and of the account that offered the job its public name. Nothing else of the
-account can be read: no other repository, no organisation, no setting, token or secret, and an
-answer about the repository itself goes out without its tokens, its permissions and its branch
-protection settings. (GitHub serves the commits of a repository's forks through the repository to
-whoever knows their id; the rules do not narrow what the forge itself calls part of the
-repository.)
+account can be read: no other repository, no organisation, no setting, token or secret.
+
+Of the repository itself a job is told a fixed list of facts - names and addresses, owner,
+description, visibility, default branch, language, topics, licence, dates, size, which of its
+features are switched on, which ways of merging it accepts - and nothing off the list: not its
+tokens, not its other settings, not its branch protection rules. Of a branch it is told whether
+the branch is protected and, on GitHub, whether a PR into it must be up to date before a merge.
+The list holds whichever way the agent asks, through the forge's REST API or through GraphQL,
+with one addition: on GitHub, GraphQL also tells the account's level of access to the
+repository, which `gh` reads before it opens a PR.
+
+A GraphQL request is refused whole when it asks for anything off that list, or for what the
+forge would say about the account that offered the job rather than about the repository: what
+that account may do to an issue, a PR or a comment, whether it is subscribed to one or has read
+it, its e-mail addresses. Which comments the account wrote is told, because `gh` asks. GitLab's
+REST answers are passed on with a few such facts in them: whether the account is subscribed to
+an MR, an issue or a label, and whether it may merge or approve an MR and has approved it.
+(GitHub serves the commits of a repository's forks through the repository to whoever knows
+their id; the rules do not narrow what the forge itself calls part of the repository.)
+
+A request reaches a rule by its plain address only. One that spells the address another way the
+forge might also understand - an escaped letter, an added extension, a doubled or trailing
+slash, different capitals - is refused, so a rule cannot be walked around by respelling.
 
 No job may merge, close, force-push, delete a branch, push to the default branch or to a branch
 the forge reports as protected, push to any repository but this one and your own fork of it, or
-touch settings, secrets or releases. No push may add, change or delete a CI definition, in any
-letter case: `.github/workflows/**` on GitHub; `.gitlab-ci.yml`, `.gitlab/ci/**` and the file the
-project is set to read its CI configuration from on GitLab - for a push to your fork, the file
-either project is set to read. What CI runs from the rest of the repository - a
-script, a Makefile, a file a definition includes from elsewhere - is a job's to change like any
-other file. Whether a name that does not exist yet would be protected once created is left to the
-forge, which enforces its own rules on the push.
+touch settings, secrets or releases. No pushed commit may add, change or delete a CI definition,
+in any letter case: `.github/workflows/**` on GitHub; `.gitlab-ci.yml`, `.gitlab/ci/**` and the
+file the project is set to read its CI configuration from on GitLab - for a push to your fork,
+the file either project is set to read. Each commit is held to its parents: at such a path it
+must hold exactly what one of them holds. A commit with one parent therefore changes nothing
+there. A merge may take a definition, or the lack of one, from any of the commits it merges, and
+every commit a push builds on without carrying it must already be on a branch of the repository
+pushed to - so a job can bring a CI definition onto its branch exactly as another branch of the
+repository has it, which is what merging the base branch does, and in no other form. What CI
+runs from the rest of the repository - a script, a Makefile, a file a definition includes from
+elsewhere - is a job's to change like any other file. Whether a name that does not exist yet
+would be protected once created is left to the forge, which enforces its own rules on the push.
 
 Before it allows a push or a write, the machine asks the forge what the rule depends on: where
 the branch is, which branch is the default, who opened the PR, who is assigned, whose a fork is.

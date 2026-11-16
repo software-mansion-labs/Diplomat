@@ -334,28 +334,61 @@ function table(groups) {
 const WRAPPERS = { nodes: 'same', edges: 'same', node: 'same', pageInfo: 'plain' };
 const SCHEMA_FIELDS = table({ schema: 'fields inputFields enumValues args type ofType possibleTypes interfaces' });
 
+// A forge's tables. A field with a selection set leads from one context to the next (`in`,
+// `actor`, `foreign`, `event`, by the context it is selected in); `repo` is the pool's
+// repository itself, whose fields lead on as `in` says. A scalar is read from an
+// allow-list on an account, a foreign object and a branch's protection, and freely on what
+// is in the pool's repository, but for `repoLeaves` and `own`:
+//   repoLeaves  the scalars read of the repository itself: what the REST answer about it
+//               holds (the repository `pick` of rules.js), under the names GraphQL has
+//   own         the names not read inside the repository: they tell of the account asking -
+//               what it may do there, its addresses, what it watches
+//   args        the arguments a field may take: paging, ordering and filters over what
+//               the object it is selected on holds
+//   ids         the arguments that name an object by its node id, which must turn out to
+//               be in the pool's repository
+// An argument in neither list could name another repository, or an object by an id
+// nothing here can place.
 const FORGES = {
   github: {
     actorLeaves: set('__typename id databaseId login name url avatarUrl resourcePath email date slug isViewer totalCount'),
     foreignLeaves: set(`__typename id databaseId number title url state stateReason name nameWithOwner isPrivate isFork isArchived
       isDraft closed optionId oid abbreviatedOid totalCount sshUrl description hasIssuesEnabled hasWikiEnabled viewerPermission`),
+    // `viewerPermission` has no REST counterpart: `gh pr create` reads the account's
+    // access level before it opens a pull request.
+    repoLeaves: set(`id databaseId fullDatabaseId name nameWithOwner isPrivate visibility isFork isArchived isDisabled isTemplate
+      url resourcePath sshUrl description descriptionHTML shortDescriptionHTML homepageUrl projectsUrl projectsResourcePath
+      isInOrganization hasIssuesEnabled hasProjectsEnabled hasWikiEnabled hasDiscussionsEnabled createdAt updatedAt pushedAt
+      diskUsage viewerPermission mergeCommitAllowed rebaseMergeAllowed squashMergeAllowed`),
+    // `gh` reads which comments the account wrote.
+    own: /viewer(?!DidAuthor$)/i,
+    args: set(`after before first last orderBy orderByState direction states labels query filterBy number since until skip
+      limit size baseRefName headRefName refName refPrefix qualifiedName tagName name path expression oid author
+      loginNames capabilities content itemTypes archivedStates includeArchived includeClosedPrs
+      includeStack enableDuplicate excludeUserLinked userLinkedOnly mergeType pullRequestNumber writersOnly
+      includeDeprecated`),
+    ids: set('pullRequestId'),
     in: table({
-      in: `pullRequest pullRequests issue issues issueOrPullRequest ref refs defaultBranchRef baseRef headRef target object
+      in: `pullRequest pullRequests issue issues issueOrPullRequest ref refs defaultBranchRef baseRef target object
         tree entries blame ranges commit commits history parents file files comments reviews latestReviews
         latestOpinionatedReviews viewerLatestReview reviewThreads replyTo pullRequestReview originalCommit mergeCommit
         potentialMergeCommit statusCheckRollup contexts checkSuite checkSuites checkRuns workflowRun workflow runs status
         steps annotations location start end labels label milestone milestones reactionGroups reactions userContentEdits
-        autoMergeRequest reviewRequests suggestedReviewers issueType subIssuesSummary release
-        releases releaseAssets languages deployments deployment latestStatus statuses signature mergeQueueEntry
+        autoMergeRequest reviewRequests suggestedReviewers subIssuesSummary release
+        releases releaseAssets languages signature mergeQueueEntry
         checkRunCountsByState statusContextCountsByState issueTemplates pullRequestTemplates codeowners contactLinks
         thread comment commentEdge subject assignable`,
       actor: `author editor owner mergedBy actor assignees assignedActors participants users reactors user creator committer
         authors pusher tagger requestedReviewer reviewer assignableUsers mentionableUsers suggestedActors enabledBy
         resolvedBy signer headRepositoryOwner onBehalfOf app`,
-      foreign: `repository headRepository baseRepository parent subIssues blockedBy blocking closingIssuesReferences
+      // A pull request's head branch is a branch of the repository it comes from.
+      foreign: `repository headRepository baseRepository headRef parent subIssues blockedBy blocking closingIssuesReferences
         closedByPullRequestsReferences associatedPullRequests projectItems projectCards trackedIssues trackedInIssues`,
-      event: 'timelineItems timeline',
+      event: 'timelineItems',
       protection: 'branchProtectionRule',
+      // An issue's type belongs to the repository's owner, and lists the issues of any
+      // repository named to it: its own scalars are read and nothing is selected from it.
+      plain: 'issueType',
     }),
     // `gh pr status` reads whether a pull request's base must be up to date before a
     // merge; the rest of a branch's protection is a setting no task has a use for.
@@ -374,13 +407,33 @@ const FORGES = {
   gitlab: {
     actorLeaves: set('__typename id username name webUrl avatarUrl state bot'),
     foreignLeaves: set('__typename id iid title state name path fullPath webUrl reference visibility'),
+    repoLeaves: set(`id name nameWithNamespace path fullPath description descriptionHtml visibility webUrl webPath sshUrlToRepo
+      httpUrlToRepo topics tagList archived createdAt lastActivityAt issuesEnabled mergeRequestsEnabled jobsEnabled
+      mergeRequestsFfOnlyEnabled squashReadOnly removeSourceBranchAfterMerge onlyAllowMergeIfPipelineSucceeds
+      onlyAllowMergeIfAllDiscussionsAreResolved`),
+    // What the account may do with a blob, a job or a pipeline, whether it is subscribed,
+    // and the address its replies to an issue go to.
+    own: /^can[A-Z]|^(createNoteEmail|subscribed|troubleshootJobWithAi)$/,
+    args: set(`after before first last limit offset sort order state scope status statuses types kind jobKind source sources
+      iid iids pipelineIid sha ref refType path paths blobPath recursive full format firstParent name title search in
+      searchIn searchPattern searchTerm fuzzySearch query filter not or customField labelName labels milestoneTitle
+      milestoneWildcardId releaseTag releaseTagWildcardId tagName author authorUsername username assigneeUsername
+      assigneeUsernames assigneeWildcardId reviewerUsername reviewerWildcardId ignoredReviewerUsername reviewState
+      reviewStates approvedBy approver mergedBy myReactionEmoji subscribed confidential draft archived retried
+      withArtifacts whenExecuted securityReportTypes environmentName sourceBranches targetBranches weight
+      weightWildcardId healthStatus healthStatusFilter epicWildcardId includeSubepics iterationTitle iterationWildcardId
+      createdAfter createdBefore updatedAfter updatedBefore closedAfter closedBefore mergedAfter mergedBefore
+      deployedAfter deployedBefore committedAfter committedBefore dueAfter dueBefore`),
+    ids: set(''),
     in: table({
       in: `mergeRequest mergeRequests issue issues discussions discussion notes position diffRefs diffStats diffStatsSummary
-        commits commitsWithoutMergeCommits pipelines headPipeline pipeline jobs stages detailedStatus labels milestone
-        repository tree trees blobs lastCommit userPermissions taskCompletionStatus approvalState rules release releases`,
+        commits commitsWithoutMergeCommits pipelines headPipeline pipeline jobs stages detailedStatus labels
+        repository tree trees blobs lastCommit taskCompletionStatus approvalState rules release releases`,
       actor: `author assignees reviewers user resolvedBy approvedBy mergeUser participants commenters updatedBy lastEditedBy
         eligibleApprovers`,
       foreign: 'project sourceProject targetProject group namespace relatedMergeRequests closingMergeRequests',
+      // A milestone may be a group's, with the releases of the group's other projects under it.
+      plain: 'milestone',
     }),
     actor: table({}),
     foreign: table({ foreign: 'namespace group' }),
@@ -452,10 +505,24 @@ export function searchConfined(q, repo) {
 
 // ------------------------------------------------------------------------ queries
 
-function walker(doc, forge) {
+// `lookups` takes the node ids the document's arguments name, for the caller to resolve.
+function walker(doc, forge, op, vars, lookups) {
   const tables = FORGES[forge];
   const done = new Set(); // "fragment name/context": a fragment is read once per context
   let fields = 0;
+
+  function checkArguments(sel) {
+    for (const { name } of sel.args) {
+      if (!tables.ids.has(name)) {
+        if (!tables.args.has(name)) refuse(`graphql: "${sel.name}" may not be given "${name}", which could name something outside the pool's repository`);
+        continue;
+      }
+      const id = argument(sel, name, op, vars);
+      if (id === null || id === undefined) continue;
+      if (typeof id !== 'string' || id === '') refuse(`graphql: "${name}" is not a node id`);
+      lookups.push({ id, need: { inRepo: true }, what: `"${sel.name}(${name}:)"` });
+    }
+  }
 
   function walk(selections, context, depth, active) {
     if (depth > MAX_DEPTH) refuse('graphql: selections are nested too deeply');
@@ -477,19 +544,23 @@ function walker(doc, forge) {
         if (context === 'actor' && !tables.actorLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read on a user or organisation`);
         if (context === 'foreign' && !tables.foreignLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read on an object outside the pool's repository`);
         if (context === 'protection' && !tables.protectionLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read of a branch's protection`);
+        if (context === 'repo' && !tables.repoLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" is not among what a task is told of the repository itself`);
+        if ((context === 'in' || context === 'event' || context === 'plain') && tables.own.test(sel.name)) refuse(`graphql: "${sel.name}" tells of the account asking, not of the repository`);
+        checkArguments(sel);
         continue;
       }
       const wrapper = WRAPPERS[sel.name];
       let next = wrapper === 'same' ? context : wrapper;
       if (context === 'schema') next = SCHEMA_FIELDS.get(sel.name);
       else if (context === 'plain') next = undefined;
-      else if (next === undefined) next = tables[context]?.get(sel.name);
+      else if (next === undefined) next = tables[context === 'repo' ? 'in' : context]?.get(sel.name);
       if (next === undefined) refuse(`graphql: "${sel.name}" is not a field this task may select into here`);
       // An argument on a field of an account or of a foreign object is a lookup from it:
       // `organization(login:)` on a user reaches any organisation the token can see.
       if ((context === 'actor' || context === 'foreign') && sel.args.length > 0 && !tables.lookups.has(sel.name)) {
         refuse(`graphql: "${sel.name}" takes arguments here, which would look another object up`);
       }
+      checkArguments(sel);
       walk(sel.selections, next, depth + 1, active);
     }
   }
@@ -516,7 +587,7 @@ const SEARCH_TYPES = new Set(['ISSUE', 'ISSUE_ADVANCED']);
 const sameRepo = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 
 function checkQuery(doc, op, vars, spec, lookups) {
-  const { walk, flatten } = walker(doc, spec.forge);
+  const { walk, flatten } = walker(doc, spec.forge, op, vars, lookups);
   const roots = new Set(spec.roots || []);
   const [owner, repoName] = spec.forge === 'github' ? spec.repo.split('/') : [];
   for (const field of flatten(op.selections, [], new Set(), 1)) {
@@ -529,13 +600,13 @@ function checkQuery(doc, op, vars, spec, lookups) {
         if (!sameRepo(argument(field, 'owner', op, vars), owner) || !sameRepo(argument(field, 'name', op, vars), repoName)) {
           refuse('graphql: "repository" does not name the pool\'s repository');
         }
-        walk(field.selections, 'in', 2, new Set());
+        walk(field.selections, 'repo', 2, new Set());
         break;
       }
       case 'project': {
         if (spec.forge !== 'gitlab') refuse('graphql: root field "project" is not allowed for this task');
         if (!sameRepo(argument(field, 'fullPath', op, vars), spec.repo)) refuse('graphql: "project" does not name the pool\'s project');
-        walk(field.selections, 'in', 2, new Set());
+        walk(field.selections, 'repo', 2, new Set());
         break;
       }
       case 'viewer':
@@ -560,7 +631,15 @@ function checkQuery(doc, op, vars, spec, lookups) {
         if (spec.forge !== 'github') refuse('graphql: root field "node" is not allowed for this task');
         const id = argument(field, 'id', op, vars);
         if (typeof id !== 'string' || id === '') refuse('graphql: "node" needs a literal id');
-        lookups.push({ id, need: { inRepo: true }, what: '"node"' });
+        // The id may be the repository's own, of which less is told than of what is in it.
+        let ofRepository;
+        try {
+          walker(doc, spec.forge, op, vars, []).walk(field.selections, 'repo', 2, new Set());
+        } catch (err) {
+          if (!(err instanceof Refused)) throw err;
+          ofRepository = err.message;
+        }
+        lookups.push({ id, need: { inRepo: true, ofRepository }, what: '"node"' });
         walk(field.selections, 'in', 2, new Set());
         break;
       }
@@ -642,7 +721,7 @@ export function knownMutations(forge) {
 }
 
 function checkMutation(doc, op, vars, spec, lookups, effects) {
-  const { walk, flatten } = walker(doc, spec.forge);
+  const { walk, flatten } = walker(doc, spec.forge, op, vars, lookups);
   const fields = flatten(op.selections, [], new Set(), 1);
   if (fields.length !== 1) refuse('graphql: a mutation must be exactly one field');
   const [field] = fields;
@@ -664,7 +743,7 @@ function checkMutation(doc, op, vars, spec, lookups, effects) {
       lookups.push({ id: val, need: rule, what: `${field.name}.${key}` });
     } else if (rule.assignees) {
       if (!Array.isArray(val) || val.some((l) => typeof l !== 'string')) refuse(`graphql: "${key}" is not a list of logins`);
-      lookups.push({ logins: val.map((l) => l.toLowerCase()), what: `${field.name}.${key}` });
+      lookups.push({ logins: val, what: `${field.name}.${key}` });
     } else if (rule.created) {
       if (typeof val !== 'string') refuse(`graphql: "${key}" is not a branch name`);
       effects.push({ head: val });
@@ -693,24 +772,35 @@ export function itemMismatch(item, node) {
   return null;
 }
 
+/// Whether an issue's new assignee list holds the same accounts as the one the forge
+/// holds, `self` aside. The lists are logins or account ids: a login's case and an
+/// account named twice change nothing.
+export function sameButSelf(held, wanted, self) {
+  const key = (account) => String(account).toLowerCase();
+  const others = (list) => JSON.stringify([...new Set(list.map(key))].filter((account) => account !== key(self)).sort());
+  return others(held) === others(wanted);
+}
+
 async function settle(lookups, spec, ctx) {
   if (lookups.length > MAX_NODE_LOOKUPS) refuse('graphql: the document addresses too many objects');
   if (lookups.some((l) => l.id !== undefined) && typeof ctx.resolveNode !== 'function') refuse('graphql: nothing here can resolve a node id');
+  const resolved = new Map();
   for (const { id, logins, need, what } of lookups) {
     if (logins) {
       if (spec.item?.type !== 'issue' || spec.item.number === undefined || typeof ctx.assignees !== 'function') refuse(`graphql: ${what}: this task has no issue to assign`);
       const now = await ctx.assignees(spec.item.number);
       if (!now) refuse(`graphql: ${what}: #${spec.item.number} is not an issue the forge would show`);
-      const held = now.map((l) => l.toLowerCase()).filter((l) => l !== spec.identity);
-      const others = logins.filter((l) => l !== spec.identity);
-      if (others.length !== held.length || others.some((l) => !held.includes(l))) refuse(`graphql: ${what} may only add or remove this task's own account`);
+      if (!sameButSelf(now, logins, spec.identity)) refuse(`graphql: ${what} may only add or remove this task's own account`);
       continue;
     }
-    const node = await ctx.resolveNode(id);
+    // `gh pr checks` names its pull request three times over.
+    if (!resolved.has(id)) resolved.set(id, await ctx.resolveNode(id));
+    const node = resolved.get(id);
     if (!node) refuse(`graphql: ${what} is not an object the forge would show`);
     if (!sameRepo(node.repo, spec.repo)) refuse(`graphql: ${what} is not in the pool's repository`);
     if (need.inRepo || need.repo) {
       if (need.repo && node.type !== 'Repository') refuse(`graphql: ${what} is not a repository`);
+      if (need.ofRepository !== undefined && node.type === 'Repository') refuse(need.ofRepository);
       continue;
     }
     if (!need.node.includes(node.type)) refuse(`graphql: ${what} is a ${node.type}`);

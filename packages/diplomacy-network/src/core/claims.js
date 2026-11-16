@@ -72,12 +72,14 @@ export function joinClaim(identity, claim, { grant, offer }) {
 /// Null when a well-shaped claim holds for every host alike: its grants are from distinct
 /// members other than the executor and the absent, each signed, bound to this task,
 /// executor and round, and not expired when the claim was made; a host backs it, and its
-/// hours are the longest any does for; and its lease is the one its times dictate.
+/// hours are the longest any does for; it names the job that was run when it is
+/// `completed` and at no other time; and its lease is the one its times dictate.
 /// Otherwise `bad-claim`, `bad-grant`, `bad-lease` or `bad-ping`. Whether a host that
 /// backs it offers the task is the pool's to say.
 export function verifyClaim(claim) {
   const signers = claim.grants.map((g) => g.by);
   if (!isAscending(signers, validPk)) return 'bad-claim';
+  if ((claim.spec !== undefined) !== (claim.state === 'completed')) return 'bad-claim';
   const outside = [claim.executor, ...signers];
   if (signers.includes(claim.executor) || claim.absent.some((pk) => outside.includes(pk))) return 'bad-claim';
   if (claim.hours !== hoursOf(claim)) return 'bad-claim';

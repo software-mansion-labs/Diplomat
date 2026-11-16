@@ -11,7 +11,7 @@ import { createInvite, inviteToken } from '../src/core/membership.js';
 import { Pool } from '../src/core/pool.js';
 import { LIMITS, memberRecord, offerRecord } from '../src/core/records.js';
 import { poolFile } from '../src/node/store.js';
-import { POW, STRANGER_BODY_BYTES } from '../src/paths.js';
+import { MAX_BODY_BYTES, POW, STRANGER_BODY_BYTES } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const ROUND = 'AAAAAAAAAAA';
@@ -287,19 +287,20 @@ await check('what a host served before it went down it does not serve after: the
   b.slots = 1;
   b.node.admit({ slots: 1 });
   await w.net.until(() => b.executor.jobOf(taskId), { what: 'the job' });
-  const downUntil = async () => {
-    const floor = w.net.now() + 30;
-    assert.equal((await w.request(b, a, 'sync', body(), { ts: floor })).ok, true);
+  // The host goes down in the second of the last request it served, and is back within it.
+  const downAt = async () => {
+    await w.net.until(() => w.net.ms() % 1000 < 100, { stepMs: 10, what: 'a second that has just begun' });
+    const floor = w.net.now();
+    assert.equal((await w.request(b, a, 'sync', body())).ok, true);
     await w.restart(a);
-    assert.ok(w.net.now() < floor);
-    await w.net.until(() => w.net.now() >= floor, { stepMs: 10, what: 'the last second it served' });
+    assert.equal(w.net.now(), floor);
     return floor;
   };
-  let floor = await downUntil();
+  let floor = await downAt();
   const second = await b.node.offer(offerArgs('pr-2'));
   await w.run(3);
   assert.deepEqual([w.net.count({ from: 'b', to: 'a', kind: 'push', since: floor }), Boolean(w.task(a, second.taskId))], [2, true]);
-  floor = await downUntil();
+  floor = await downAt();
   const act = b.node.actFor(b.executor.jobOf(taskId).runId);
   const write = (n) => w.wait(act(forgeRequest('POST', `/repos/o/r/pr-1/pack-${n}`, { pack: 'x' })));
   const performed = () => a.requester.calls.filter((c) => c.op === 'perform').length;
@@ -307,17 +308,18 @@ await check('what a host served before it went down it does not serve after: the
   w.net.tap(({ kind, body }) => kind === 'act' && seqs.push(JSON.parse(body.toString('utf8')).body.seq));
   assert.deepEqual([(await write(1)).status, seqs, performed()], [200, [0, 0], 1]);
 
-  // Refused so again, and under every number the run tries, it was still not carried
-  // out: the job is told so.
-  const far = w.net.now() + 60;
-  assert.equal((await w.request(b, a, 'sync', body(), { ts: far })).ok, true);
-  await w.restart(a);
-  assert.deepEqual([(await write(2)).status, performed(), w.net.now() < far], [503, 1, true]);
+  // A sender whose clock is behind the host's dates what it sends before that second for
+  // as long as it is behind. Refused so again, and under every number the run tries, the
+  // request was still not carried out: the job is told so.
+  await downAt();
+  b.skew = -40;
+  assert.deepEqual([(await write(2)).status, performed()], [503, 1]);
   assert.deepEqual(seqs.slice(2), [1, 1, 2, 2, 3, 3]);
+  b.skew = 0;
 
   // A request the host failed at may have been carried out all the same: that `act` is
   // sent once.
-  await w.net.until(() => w.net.now() > far, { what: 'the last second it served' });
+  await w.run(2);
   const store = a.disk.write.bind(a.disk);
   a.disk.write = (...args) => {
     if (performed() === 2) {
@@ -329,6 +331,49 @@ await check('what a host served before it went down it does not serve after: the
   assert.deepEqual([(await write(3)).status, performed(), seqs.length], [504, 2, 9]);
   assert.equal(a.log.filter((line) => line.includes('could not be served')).length, 1);
   assert.equal((await write(4)).status, 200);
+});
+
+await check('the second a host serves nothing up to after a start is that of the last request it served, and never one its own clock has not reached: a stranger moves it by nothing, a pool the host never linked by nothing, and a member whose clock runs ahead holds no start back', async () => {
+  const w = createWorld({ seed: 86 });
+  const [a, b] = await w.pool(['a', 'b']);
+  const body = () => ({ asOf: w.net.now(), hash: w.view(b).hash });
+  const s = w.stranger('s');
+  const quiet = () => w.net.until(() => w.stored(a, 'heard').ts < w.net.now() - 1, { stepMs: 100, what: 'two seconds in which the host served nothing' });
+
+  // Requests dated as far ahead as a clock may be, from a key that is nobody's: refused
+  // as any outsider's is, and on disk the host's last served second is what it was.
+  await quiet();
+  const before = w.stored(a, 'heard').ts;
+  const ahead = w.net.now() + 58;
+  const member = memberRecord(s.id, { pool: POOL, seq: 0, at: w.net.now(), joinedAt: w.net.now(), maxAcceptedH: 12 });
+  assert.deepEqual(refused(await w.request(s, a, 'hello', { member }, { effort: 128, ts: ahead })), [false, 'not-member', '']);
+  assert.deepEqual(refused(await w.request(s, a, 'sync', body(), { effort: 128, ts: ahead })), [false, 'not-member', '']);
+  assert.deepEqual(refused(await w.request(b, a, 'sync', body(), { effort: 128, pool: 'github.com/o/elsewhere', ts: ahead })), [false, 'not-member', '']);
+  assert.equal(w.stored(a, 'heard').ts, before);
+  await w.restart(a);
+  // A member whose clock is a second behind is served at once.
+  assert.equal((await w.request(b, a, 'sync', body(), { ts: w.net.now() - 1 })).ok, true, 'served after the start');
+
+  // A member's request dated ahead is served, and on disk under its date. After a start
+  // the host goes by its own clock: what is dated after the start is served.
+  await quiet();
+  const fast = w.net.now() + 58;
+  assert.equal((await w.request(b, a, 'sync', body(), { ts: fast })).ok, true);
+  assert.equal(w.stored(a, 'heard').ts, fast);
+  await w.restart(a);
+  const started = w.net.now();
+  assert.deepEqual(refused(await w.request(b, a, 'sync', body(), { ts: started })).slice(0, 2), [false, 'busy'], 'the second of the start itself is not served');
+  await w.net.until(() => w.net.now() > started, { stepMs: 10, what: 'the next second' });
+  assert.deepEqual([(await w.request(b, a, 'sync', body())).ok, w.net.now() < fast], [true, true], 'served long before the date that member gave');
+
+  // The newcomer a member invited is served its hello, and that counts as any request served.
+  await quiet();
+  const invited = memberRecord(s.id, {
+    pool: POOL, seq: 0, at: w.net.now(), joinedAt: w.net.now(), maxAcceptedH: 12, voucher: a.node.invite({ pool: POOL }).invite,
+  });
+  const hello = await w.request(s, a, 'hello', { member: invited }, { effort: 128 });
+  assert.deepEqual([hello.ok, w.stored(a, 'heard').ts], [true, hello.request.ts]);
+  assert.deepEqual(failures([a, b]), []);
 });
 
 await check('a host that dies between writing its key and writing its run starts the job once, through the host the key is from', async () => {
@@ -415,4 +460,24 @@ await check('what the store lost of a pool the host left, and what a member answ
   b.node.setPools([]);
   assert.deepEqual(b.node.snapshot().pools, []);
   assert.deepEqual(failures([a, b]), []);
+});
+
+await check('the largest job a host lets itself offer reaches its executor, in an answer well inside what a host takes for one, and a job one byte larger is refused where it is offered', async () => {
+  const w = createWorld({ seed: 84 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  let answer = 0;
+  w.net.tap(({ from, kind }) => (from === 'exe' && kind === 'key' ? { reached: (out) => { answer = out.length; } } : undefined));
+  // What a spec comes to beside its prompt.
+  const first = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(first.taskId), { what: 'a job' });
+  const job = exe.executor.jobOf(first.taskId);
+  const most = 512 * 2 ** 10 - (canon(job.spec).length - job.spec.prompt.length);
+  exe.executor.end(job.runId, {});
+  await w.net.until(() => w.offerRow(req, first.taskId).state === 'done', { what: 'the first job done' });
+  await assert.rejects(req.node.offer({ ...offerArgs('pr-2'), prompt: 'x'.repeat(most + 1) }), /cannot be sent to another machine: its prompt and options are too long/);
+  const { taskId } = await req.node.offer({ ...offerArgs('pr-2'), prompt: 'x'.repeat(most) });
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'the largest job' });
+  assert.equal(canon(exe.executor.jobOf(taskId).spec).length, 512 * 2 ** 10);
+  assert.ok(answer > 512 * 2 ** 10 && answer < 512 * 2 ** 10 + 4096 && answer < MAX_BODY_BYTES, `the answer with the key is ${answer} bytes`);
+  assert.deepEqual(failures([req, exe]), []);
 });

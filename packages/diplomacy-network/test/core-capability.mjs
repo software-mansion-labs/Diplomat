@@ -153,7 +153,7 @@ check('an outcome is reported by the executor of the claim the offering host hol
   assert.equal(verdict({ ...done, round: b64u(Buffer.alloc(8, 3)) }), 'denied: not the executor of this task', 'an earlier round of the same executor');
   assert.equal(verdict({ ...done, taskId: `${POOL}#review:pr-579@octocat` }), 'denied: not the executor of this task');
   for (const state of ['completed', 'released']) {
-    const ended = endClaim(hosts[1].id, claim, state, T0 + 50);
+    const ended = endClaim(hosts[1].id, claim, state, T0 + 50, b64u(Buffer.alloc(32, 7)));
     assert.equal(verdict(done, { claim: ended, now: lapse + 9000 }), 'ok', `after the executor ${state} it`);
     assert.equal(verdict(done, { claim: ended, from: third }), 'denied: not the executor of this task');
   }

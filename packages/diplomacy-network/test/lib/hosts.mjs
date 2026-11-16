@@ -104,7 +104,7 @@ export function createWorld({ seed = 1 } = {}) {
   const admitting = net.clock('world');
   const admit = () => {
     for (const h of hosts.values()) {
-      if (!h.transport.host.dead) say(h);
+      if (!h.transport.host.dead && !h.transport.host.asleep) say(h);
     }
     admitting.setTimeout(admit, 60000);
   };
@@ -169,10 +169,12 @@ export function createWorld({ seed = 1 } = {}) {
       await world.agreed(all);
       return all;
     },
-    /// Kills a host's process and starts it again on what its disk holds.
-    async restart(h, options) {
+    /// Kills a host's process and starts it again on what its disk holds; its transport
+    /// takes `transportMs` to come up.
+    async restart(h, { transportMs = 0, ...options } = {}) {
       net.kill(h.name);
       boot(h);
+      h.transport.host.startDelayMs = transportMs;
       await start(h, options);
       await net.until(() => h.transport.host.ready, { stepMs: 1, what: 'its transport' });
       return h;
