@@ -310,19 +310,27 @@ export function createOffers(host) {
         const context = await host.requester.context({ pool: P.link, task: specOf(O), state: (O.used ??= {}) });
         const verdict = await host.requester.authorize(K.capability.rules, body.request, context);
         save();
-        // The offer may have ended, or the claim, while the rules were asked.
-        if (issued[taskId] !== K) return { error: 'denied', detail: 'the key was taken back' };
-        if (verdict?.ok !== true) {
-          O.refused += 1;
-          save();
-          return { body: forgeAnswer(403, verdict?.reason ?? 'no rule covers this request') };
-        }
-        host.store.flush();
+        const request = verdict?.ok === true ? verdict.request ?? body.request : null;
+        let answer;
         try {
-          return { body: tidy(await host.requester.perform(verdict.request ?? body.request, { forge: P.link.forge, host: P.id.split('/')[0] })) };
-        } catch (err) {
-          return { body: forgeAnswer(502, `the forge could not be asked: ${err?.message ?? err}`) };
+          // The offer may have ended, or the claim, while the rules were asked.
+          if (issued[taskId] !== K) return { error: 'denied', detail: 'the key was taken back' };
+          if (!request) {
+            O.refused += 1;
+            return { body: forgeAnswer(403, verdict?.reason ?? 'no rule covers this request') };
+          }
+          host.store.flush();
+          try {
+            answer = await host.requester.perform(request, { forge: P.link.forge, host: P.id.split('/')[0] });
+            return { body: tidy(answer) };
+          } catch (err) {
+            return { body: forgeAnswer(502, `the forge could not be asked: ${err?.message ?? err}`) };
+          }
         } finally {
+          // The rules counted the request when they allowed it. One that got no answer
+          // here is settled with them as not sent: the forge is asked what became of it
+          // before the task's next one is judged.
+          if (request && !answer) host.requester.conclude(request);
           save();
           host.touch();
         }

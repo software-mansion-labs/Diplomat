@@ -5,12 +5,14 @@
 import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
+import { world as fakeForge } from './lib/world.mjs';
 import { unb64u } from '../src/core/canon.js';
 import { actMac } from '../src/core/capability.js';
 import { buildClaim } from '../src/core/claims.js';
 import { endClaim } from '../src/core/lease.js';
 import { backers } from '../src/core/records.js';
 import { LEASE_SECS } from '../src/paths.js';
+import { authorize as realAuthorize, conclude } from '../src/requester/authorize.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const said = ({ ok, code, detail }) => (ok ? 'ok' : `${code}: ${detail}`);
@@ -82,6 +84,7 @@ await check('a request under a key is its executor\'s alone, carries a number ne
   req.requester.broken = true;
   const down = await act(exe, 7);
   assert.deepEqual([down.ok, down.body.status], [true, 502]);
+  assert.deepEqual(req.requester.unsent, [request.path], 'and the requester is told that its request got no answer');
   assert.deepEqual([w.offerRow(req, taskId).requests, w.offerRow(req, taskId).refused], [3, 0]);
   req.requester.broken = false;
 
@@ -213,9 +216,11 @@ const FAILED = { ok: false, summary: 'it broke', microUsd: 0, tokens: 0, runner:
 
 // A requester and an executor with a job going, and `act(seq, request)`: a forge request
 // made by hand under the executor's key, left for the caller to run the network for.
-async function keyed(seed) {
+// `prepare(req)` runs before anything is offered.
+async function keyed(seed, prepare = () => {}) {
   const w = createWorld({ seed });
   const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  prepare(req);
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
   const { capability: { keyId }, secret } = w.stored(exe, 'keys').held[taskId];
@@ -252,7 +257,63 @@ await check('a request is not carried out once its key was taken back, however f
     await during(world);
     assert.equal(said(await w.wait(pending)), 'denied: the key was taken back', way);
     assert.deepEqual(req.requester.calls.filter((c) => c.op === 'perform'), [], way);
+    assert.deepEqual(req.requester.unsent, [write('reviews').path], `the requester is told: ${way}`);
   }
+});
+
+await check('a request the rules allowed and the forge was never asked is settled with the requester as not sent: the task may send it again, and what it used is kept as the requester left it', async () => {
+  // The requester's own rules, over a forge in memory: one draft pull request a task,
+  // from a branch it pushed.
+  const rules = [{
+    host: 'api.github.com', method: 'POST', path: '/repos/o/r/pulls',
+    body: { head: { created: true, required: true }, draft: { equals: true, required: true }, title: 'free', base: 'free' },
+  }];
+  const draft = forgeRequest('POST', '/repos/o/r/pulls', { head: 'fix-1', base: 'main', title: 't', draft: true });
+  const setup = async (seed) => {
+    const forge = fakeForge();
+    const seen = { state: null, down: false };
+    const world = await keyed(seed, (req) => Object.assign(req.requester, {
+      rulesFor: () => rules,
+      context({ state }) {
+        state.branches ??= ['refs/heads/fix-1'];
+        seen.state = state;
+        return { ...forge, state };
+      },
+      authorize: realAuthorize,
+      conclude,
+      async perform(request) {
+        if (seen.down) throw new Error('no route to the forge');
+        conclude(request, { status: 201, body: Buffer.from('{}') });
+        return { status: 201, headers: {}, body: '' };
+      },
+    }));
+    const used = async () => {
+      await world.w.run(1);
+      return world.w.stored(world.req, 'offers')[world.taskId].used;
+    };
+    return { ...world, forge, seen, used };
+  };
+  const counted = { branches: ['refs/heads/fix-1'], reserved: [], sent: {}, pulls: [], asked: ['fix-1'] };
+
+  // The forge cannot be reached, and the stand-in for it says nothing of the request to the rules.
+  const one = await setup(64);
+  one.seen.down = true;
+  assert.equal((await one.w.wait(one.act(0, draft))).body.status, 502);
+  assert.deepEqual(await one.used(), counted, 'counted, since nobody can say it was not opened');
+  one.seen.down = false;
+  assert.equal((await one.w.wait(one.act(1, draft))).body.status, 201, 'sent again');
+  assert.deepEqual(one.forge.listed, [['fix-1', undefined, true]], 'once the forge was asked what became of the first');
+  assert.deepEqual(await one.used(), { ...counted, pulls: ['fix-1'], asked: [] });
+
+  // The claim is given back while the rules are asked: the request is never sent.
+  const two = await setup(65);
+  const pending = two.act(0, draft);
+  await two.w.net.until(() => two.asked.n === 1, { stepMs: 5, what: 'the rules asked' });
+  await two.w.request(two.exe, two.req, 'push', { records: [endClaim(two.exe.id, two.w.claim(two.req, two.taskId), 'released', two.w.net.now())] }, { effort: 4096 });
+  assert.equal(said(await two.w.wait(pending)), 'denied: the key was taken back');
+  assert.deepEqual(await two.used(), counted);
+  const again = await realAuthorize(rules, draft, { ...two.forge, state: two.seen.state });
+  assert.deepEqual([again.ok, two.forge.listed], [true, [['fix-1', undefined, true]]], again.reason);
 });
 
 await check('requests under one key are carried out in the order of their numbers, however long the rules take over one', async () => {

@@ -56,6 +56,7 @@ await check('a task is offered, claimed, acted on under the requester\'s key, an
     ['authorize', 'files'], ['perform', 'files'], ['authorize', 'secrets'], ['authorize', 'reviews'], ['perform', 'reviews'],
     ['authorize', 'files'],
   ], 'every request is authorised before it is performed, and a refused one never is');
+  assert.deepEqual(req.requester.unsent, [], 'of a request that was answered or refused the requester is told nothing more');
   assert.deepEqual(req.requester.calls.filter((c) => c.op === 'authorize').map((c) => c.asked), [1, 2, 3, 4], 'the key\'s state is carried from one request to the next');
   assert.deepEqual(req.requester.calls.find((c) => c.op === 'perform'), {
     op: 'perform', path: '/repos/o/r/pr-7/files', forge: 'github', host: 'github.com', as: 'octocat',

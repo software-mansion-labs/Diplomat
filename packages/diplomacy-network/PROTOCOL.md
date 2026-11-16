@@ -1105,7 +1105,9 @@ on 4xx (or on errors and no payload). After any other outcome the host asks the 
 before the task's next pull request is checked, for the pull requests from that head in
 any state: none gives it back, any makes it the one this task opened. A creation whose
 request is still out is not asked about, and a question the forge does not settle refuses
-the request that waits on it.
+the request that waits on it. A request that was allowed and never got an answer from
+the forge - the key was taken back while it was checked, the forge could not be reached -
+does not count as still out: its outcome is not known, and the forge is asked.
 
 The rules a task receives come from the daemon's catalogue (`src/requester/rules.js`),
 keyed by forge and kind and pinned to the task's own item. A kind without an entry can be

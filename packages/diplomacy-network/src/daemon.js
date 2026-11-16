@@ -31,7 +31,7 @@ import { createMirrors } from './executor/mirror.js';
 import { createWeighing } from './executor/weigh.js';
 import { createNode } from './node/node.js';
 import { createStore } from './node/store.js';
-import { authorize } from './requester/authorize.js';
+import { authorize, conclude } from './requester/authorize.js';
 import { createForge } from './requester/forge.js';
 import { rulesFor } from './requester/rules.js';
 import { createTransport } from './transport/index.js';
@@ -175,6 +175,7 @@ const requester = {
     forge: link.forge, host: hostOf(link.id), repo: repoOf(link.id), checkout: link.path, state,
   }),
   authorize,
+  conclude,
   perform: forge.perform,
 };
 

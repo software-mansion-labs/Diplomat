@@ -42,7 +42,8 @@ function fenced(clock, log) {
 
 /// The host. `store` is `createStore`'s; `transport` carries requests to and from other
 /// hosts; `clock` is `{ now(), setTimeout, clearTimeout }` with `now` in Unix seconds;
-/// `random(n)` answers n random bytes; `requester` knows the rules and the forge;
+/// `random(n)` answers n random bytes; `requester` knows the rules and the forge, and is
+/// told (`conclude(request)`) of every request it allowed that got no answer from it;
 /// `executor` runs jobs, says whether it takes a task (`wouldTake(task)`) and may say how
 /// many more milliseconds this host waits before it goes for one (`weigh(task)`);
 /// `settings()` answers `{ requiredMinimumH, maximumAcceptedH }`;
