@@ -284,8 +284,9 @@ export const TRANSPORT_RETRY_MS = num('DN_TRANSPORT_RETRY_MS', 5000);
 /// That wait doubles after every start that fails, up to this.
 export const TRANSPORT_RETRY_MAX_MS = num('DN_TRANSPORT_RETRY_MAX_MS', 5 * 60 * 1000);
 /// How long the installer waits for a daemon it stopped to be gone. A daemon that is
-/// switched off first tells its pools, which SWITCH_OFF_WAIT_MS bounds.
-export const STOP_WAIT_MS = num('DN_STOP_WAIT_MS', SWITCH_OFF_WAIT_MS + 30 * 1000);
+/// switched off waits SWITCH_OFF_WAIT_MS at most three times - for its pools to hear, for
+/// its jobs to be taken down, for the engine to remove what it made - and 10 s for tor.
+export const STOP_WAIT_MS = num('DN_STOP_WAIT_MS', 3 * SWITCH_OFF_WAIT_MS + 15 * 1000);
 
 // How long a machine with no device to give holds back from a task on an Android
 // project, so that a machine with a device gets to it first.

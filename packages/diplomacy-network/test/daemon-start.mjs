@@ -6,7 +6,9 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
+import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { POOL, check, createBench, passed, until } from './lib/daemons.mjs';
 
@@ -151,12 +153,36 @@ try {
       assert.match(m.log(), new RegExp(`\\] the daemon could not start: .*${reason.source}`));
       assert.deepEqual([fs.existsSync(m.socket), fs.statSync(path.join(m.base, 'daemon.json'), { throwIfNoEntry: false })?.isFile() ?? false], [false, false]);
       assert.deepEqual(await m.install('--check'), { installed: true, daemonRunning: false, pid: null });
-      // As an applet starts it: the reason is in the answer.
+      // As an applet starts it: the reason is in the answer, which is not waited for as
+      // that of a daemon slow to come up is.
+      const from = Date.now();
       const answer = await m.install('--start-daemon');
+      assert.ok(Date.now() - from < 45000, `answered after ${Date.now() - from} ms`);
       assert.deepEqual([answer.ok, answer.daemonRunning, answer.pid], [false, false, null]);
       assert.match(answer.error, new RegExp(`^diplomacy-network daemon failed to start \\(exit 1\\): the daemon could not start: .*${reason.source}`));
     });
   }
+
+  await check('a daemon that is slow to answer is the daemon that was started: the installer waits for it, and says that it runs', async () => {
+    const m = bench.machine('slow');
+    fs.mkdirSync(m.base, { recursive: true });
+    // Something listens where the daemon will and answers nothing. The daemon asks it
+    // three times, 3 s each, before it takes the socket: longer than a start is given.
+    const silent = net.createServer(() => {}).listen(m.socket);
+    await once(silent, 'listening');
+    const answer = await m.install('--start-daemon');
+    try {
+      assert.deepEqual([answer.ok, answer.daemonRunning, answer.error], [true, true, undefined]);
+      assert.equal(JSON.parse(fs.readFileSync(path.join(m.base, 'daemon.json'), 'utf8')).pid, answer.pid);
+    } finally {
+      // The daemon first: closing a server removes the socket's file, whoever has it by now.
+      if (answer.pid) {
+        process.kill(answer.pid, 'SIGKILL');
+        await until('the daemon gone', () => { try { process.kill(answer.pid, 0); return false; } catch { return true; } });
+      }
+      silent.close();
+    }
+  });
 
   await check('a links.json that holds no list of pools is one Diplomat has yet to post: the daemon starts with no pool linked', async () => {
     const m = bench.machine('nolist');
