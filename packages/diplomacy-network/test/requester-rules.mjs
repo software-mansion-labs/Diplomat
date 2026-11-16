@@ -35,7 +35,8 @@ async function refused(rules, request, ctx = world(), pattern = /./) {
 // What every kind reads: gh's own queries and the REST reads the prompts ask for.
 const READS = [
   ...['prViewAuthor', 'prViewDefault', 'prProjectItems', 'prViewReviews', 'prViewMergeable', 'typeFields', 'prChecks', 'prList', 'prSearch', 'prStatus',
-    'issueView', 'issueList', 'userCurrent', 'repositoryInfo'].map((name) => ghql(GH[name])),
+    'issueView', 'issueList', 'userCurrent', 'repositoryInfo', 'repoView'].map((name) => ghql(GH[name])),
+  gh('GET', '/repos/o/r/readme'), // gh repo view
   { ...gh('GET', '/repos/o/r/pulls/578'), headers: { ...gh('GET', '/x').headers, accept: 'application/vnd.github.v3.diff' } }, // gh pr diff 578
   gh('GET', '/repos/o/r/pulls/578/comments'),
   gh('GET', '/repos/o/r/pulls/578/reviews'),
@@ -133,6 +134,15 @@ await check('a forge, kind, item or identity without an entry gets no rules at a
     { pool: 'github.example.com/o/r' }, { pool: undefined }, { options: null }, { kind: 'issues', item: 'pr-578' }, { kind: 'conflicts', item: 'issue-421' }, { kind: 'review-own', item: 'issue-421' },
     { item: 'job-x', options: { author: 'a b' } }]) {
     assert.equal(rulesFor({ ...base, ...bad }), null, JSON.stringify(bad));
+  }
+  // A number is one a forge can have: past 32 bits there is none, and past 53 it would
+  // not even be the number the item names.
+  for (const forge of [{}, { forge: 'gitlab', pool: 'gitlab.com/o/r' }]) {
+    for (const [kind, type] of [['review', 'pr'], ['conflicts', 'pr'], ['issues', 'issue']]) {
+      for (const n of ['2147483648', '4294967297', '9007199254740993', '9999999999999999']) assert.equal(rulesFor({ ...base, ...forge, kind, item: `${type}-${n}` }), null, `${kind} ${n}`);
+      const last = rulesFor({ ...base, ...forge, kind, item: `${type}-2147483647` });
+      assert.ok(kind === 'conflicts' ? last : last.some((rule) => /\/(pulls|issues|merge_requests)\/2147483647(\/|$)/.test(rule.path)), kind);
+    }
   }
   assert.equal(rulesFor({ ...base, forge: 'gitlab', pool: 'gitlab.com/o' }), null);
   assert.ok(rulesFor({ ...base, forge: 'gitlab', pool: 'gitlab.com/o/r' }));

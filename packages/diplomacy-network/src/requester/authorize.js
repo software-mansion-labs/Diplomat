@@ -302,7 +302,8 @@ async function checkBodyPins(spec, req, ctx, effects, given, fork) {
 const NUMBER = /^[1-9][0-9]{0,15}$/;
 function numberAt(req, index) {
   const segment = req.segments[index];
-  if (!segment || !NUMBER.test(segment)) refuse('the path does not name an object by number');
+  // A number past the safe range would be looked up as another one than the path names.
+  if (!segment || !NUMBER.test(segment) || !Number.isSafeInteger(Number(segment))) refuse('the path does not name an object by number');
   return Number(segment);
 }
 

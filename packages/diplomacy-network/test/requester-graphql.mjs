@@ -35,7 +35,7 @@ const IN = (inner, vars = '') => `query${vars} { repository(owner: "o", name: "r
 
 await check('every query the gh CLI sends for a task on o/r is allowed', async () => {
   const reads = ['prViewAuthor', 'prViewDefault', 'prProjectItems', 'prViewReviews', 'prViewMergeable', 'typeFields', 'prChecks', 'prList',
-    'prSearch', 'prStatus', 'issueView', 'issueList', 'issueForEdit', 'userCurrent', 'repositoryInfo', 'prForBranch', 'prForReady'];
+    'prSearch', 'prStatus', 'issueView', 'issueList', 'issueForEdit', 'userCurrent', 'repositoryInfo', 'prForBranch', 'prForReady', 'repoView'];
   for (const name of reads) {
     const verdict = await ask(spec(), GH[name].query, GH[name].variables);
     assert.equal(verdict.ok, true, `${name}: ${verdict.reason}`);

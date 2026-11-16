@@ -349,6 +349,11 @@ await check('a rule that asks the forge refuses when nothing can answer or the a
   await refused(req('DELETE', '/repos/o/r/pulls/999/reviews/1'), /not a pull request the forge would show/, any);
   await refused(req('DELETE', '/repos/o/r/pulls/abc/reviews/1'), /does not name an object by number/, any);
   await refused(req('DELETE', '/repos/o/r/pulls/0578/reviews/1'), /does not name an object by number/, any);
+  // A number past the safe range is not looked up as the nearest one that is.
+  const far = world();
+  far.pulls[9007199254740992] = { ...far.pulls[578], number: 9007199254740992 };
+  await allowed(req('DELETE', '/repos/o/r/pulls/9007199254740991/reviews/1'), any, { ...far, pull: async (number) => far.pulls[number + 1] });
+  await refused(req('DELETE', '/repos/o/r/pulls/9007199254740993/reviews/1'), /does not name an object by number/, any, far);
   await refused(req('DELETE', '/repos/o/r/pulls/578/reviews/1'), /nothing here can look a pull request up/, any, {});
   await allowed(req('POST', '/repos/o/r/pulls/579/x'), any);
   await refused(req('POST', '/repos/o/r/pulls/578/x'), /#578 was not opened by me/, any);

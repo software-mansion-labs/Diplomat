@@ -158,9 +158,13 @@ function parsePool(forge, pool) {
   return { host, repo: parts.join('/'), parts, projectId };
 }
 
+// The largest number a pull request or an issue can have: GitHub's GraphQL takes the
+// number as an `Int`, which is 32 bits wide.
+const MAX_ITEM_NUMBER = 2 ** 31 - 1;
+
 function parseItem(item) {
   const m = /^(pr|issue)-([1-9][0-9]{0,15})$/.exec(item || '');
-  if (m) return { type: m[1], number: Number(m[2]) };
+  if (m) return Number(m[2]) <= MAX_ITEM_NUMBER ? { type: m[1], number: Number(m[2]) } : null;
   return /^job-[A-Za-z0-9._-]{1,128}$/.test(item || '') ? { type: 'job' } : null;
 }
 
@@ -378,7 +382,8 @@ function gitlab({ kind, options, target, item, me }) {
 /// has no entry for. `forge` is "github" or "gitlab"; `kind` one of review, review-own,
 /// conflicts, issues, audit, investigate; `pool` the pool id (`github.com/owner/repo`), or
 /// `{ id, projectId }` to also allow a GitLab project's numeric spelling; `item` is
-/// `pr-<n>`, `issue-<n>` or `job-<id>`; `identity` the forge login the task acts as.
+/// `pr-<n>` or `issue-<n>` with a number up to 2147483647, or `job-<id>`; `identity` the
+/// forge login the task acts as.
 /// `options`: verdict, markReady, noPRs, assign, comment, readOnly, author.
 export function rulesFor({ forge, kind, options = {}, pool, item, identity }) {
   const target = parsePool(forge, pool);
