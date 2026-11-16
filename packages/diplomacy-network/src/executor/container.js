@@ -447,6 +447,13 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
       log('docker', `removing ${name}: idle for ${Math.round((now() - since) / 60000)} min`);
       await remove(name, { volume: true });
     })));
+    // The run records of a container that is gone are forgotten run by run; the
+    // directory they were in goes once it is empty. In the container's turn: a new one
+    // of that name binds the directory the moment it is made.
+    const records = await fs.promises.readdir(path.join(RUNS_DIR, '.containers')).catch(() => []);
+    await Promise.all(records.filter((name) => isJobName(name) && !names.includes(name)).map((name) => serial(name, async () => {
+      if (!known.has(name)) await fs.promises.rmdir(runsDirOf(name)).catch(() => {});
+    })));
   }
 
   // One run of the probe container beside `name`, on `image`: resolves to docker's answer.

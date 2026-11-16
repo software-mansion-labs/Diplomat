@@ -273,7 +273,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   };
   const jobs = new Map(); // runId -> job
   const tokens = new Map(); // token -> job
-  const contexts = new Map(); // "<authority id>/<host>" -> Promise<SecureContext>
+  const contexts = new WeakMap(); // a leaf as its authority hands it out -> SecureContext
   const spendHeard = new Set();
   let listening = null; // { host, port }
 
@@ -710,14 +710,12 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
 
   // ---- the requests inside a terminated connection
 
-  function contextFor(job, host) {
-    const key = `${job.authority.id}/${host}`;
-    if (!contexts.has(key)) {
-      const made = job.authority.leaf(host).then(({ key: k, cert }) => tls.createSecureContext({ key: k, cert }));
-      made.catch(() => contexts.delete(key));
-      contexts.set(key, made);
-    }
-    return contexts.get(key);
+  // By the leaf the job's authority has for the host now: one near its end is replaced
+  // there, under a job that runs on.
+  async function contextFor(job, host) {
+    const leaf = await job.authority.leaf(host);
+    if (!contexts.has(leaf)) contexts.set(leaf, tls.createSecureContext({ key: leaf.key, cert: leaf.cert }));
+    return contexts.get(leaf);
   }
 
   async function intercept(job, host, socket, head) {

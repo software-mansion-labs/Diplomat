@@ -453,15 +453,16 @@ async function evict({ name, bytes, jobs: counted }) {
 }
 
 // What is not kept for ever, looked at every SWEEP_MS, each on its own: a container
-// over its disk allowance, one no job has used for CONTAINER_IDLE_MS, every certificate authority but the one each set
-// of hosts is given next (a job is answered from the one it was started under, so none
-// goes while a job runs), the directory and the outcome of a run
-// RUN_KEEP_MS after it ended, and the mirror of a pool that has not been linked, or has
-// been left, for MIRROR_KEEP_MS.
+// over its disk allowance, one no job has used for CONTAINER_IDLE_MS, every certificate
+// authority but the one each set of hosts is given next (a job is answered from the one
+// it was started under, so none goes while a job runs), a leaf certificate past its end,
+// the directory and the outcome of a run RUN_KEEP_MS after it ended, and the mirror of a
+// pool that has not been linked, or has been left, for MIRROR_KEEP_MS.
 const upkeep = [
   ['containers over their disk allowance', async () => { for (const over of await containers.overQuota()) await evict(over); }],
   ['idle containers', () => containers.sweep()],
   ['old certificate authorities', () => { if (jobs.size === 0) ca.prune(); }],
+  ['certificates past their end', () => { ca.dropExpired(); }],
   ['ended runs', () => {
     const gone = forgetRuns({ olderThanMs: RUN_KEEP_MS });
     if (gone.length > 0) log(`forgot ${gone.length} run(s) that ended over ${Math.round(RUN_KEEP_MS / 3600000)} h ago`);

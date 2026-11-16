@@ -1112,6 +1112,32 @@ try {
     assert.deepEqual(left(), Array(5).fill(true));
   });
 
+  await check('the directory a container\'s run records were in goes once it is empty and the container is gone, and no other directory does', async () => {
+    const tag = await containers.ensureImage();
+    const dir = (name) => path.join(RUNS_DIR, '.containers', name);
+    const name = (pool, peer) => `dn-${pool.repeat(25)}-${peer.repeat(25)}`;
+    const [empty, full, left] = [name('a', 'b'), name('c', 'd'), name('e', 'f')];
+    for (const made of [dir(empty), path.join(dir(full), 'run-x'), dir(left), dir('notes'), dir(`${empty}-relay`)]) fs.mkdirSync(made, { recursive: true });
+    // One an earlier daemon left on the engine and this one has not used.
+    execFileSync(FAKE, ['run', '-d', '--name', left, '--label', `dn.base=${BASE}`, tag, 'sleep', 'infinity']);
+    // And one made while the sweep is on its way, after it listed the containers: no run
+    // is in it yet.
+    fs.writeFileSync(path.join(fakeDir, 'hold-network-ls'), '');
+    const listed = calls('network').length;
+    const sweeping = containers.sweep();
+    await until('the sweep past its list of containers', () => calls('network').length > listed);
+    const own = await containers.acquire({ pool: { ...beta.pool, id: 'github.com/dn-test/no-run-yet' }, peer: PEER_B, runId: `${R}-60` });
+    assert.deepEqual(fs.readdirSync(own.runsDir), []);
+    fs.rmSync(path.join(fakeDir, 'hold-network-ls'));
+    await sweeping;
+    assert.deepEqual([empty, full, left, 'notes', `${empty}-relay`].map((n) => fs.existsSync(dir(n))), [false, true, true, true, true]);
+    assert.equal(fs.existsSync(own.runsDir), true);
+    await containers.release({ name: own.name, runId: `${R}-60` });
+    await containers.discard(own.name);
+    execFileSync(FAKE, ['rm', '-f', left]);
+    for (const made of [full, left, 'notes', `${empty}-relay`]) fs.rmSync(dir(made), { recursive: true });
+  });
+
   await check('a stop the engine did not hear has stopped nothing: it is asked again until the job is gone', async () => {
     const job = await launch(`${R}-40`, PEER_A, alpha, { prompt: 'MODE=sleep' });
     await until('the agent runs', () => fs.existsSync(path.join(agentDir, `${R}-40.started`)));

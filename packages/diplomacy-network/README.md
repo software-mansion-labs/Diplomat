@@ -94,9 +94,9 @@ closed at every start.
 | `runs.json` (0600) | the tasks this host runs or ran, and the tasks it gave up on |
 | `jobs.json` (0600) | the jobs going in this daemon's containers, for the daemon after it: the broker's port, and each job's container, proxy token, CA generation, process group, forwards and what it has spent of the model, the last no more than 5 s behind |
 | `tor/` | tor's data directory |
-| `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it |
+| `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it. A leaf is good for 90 days, is replaced from two weeks before its end, under a running job too, and is removed once past it |
 | `mirrors/<pool hash>.git` | bare mirrors. One is removed a day after its pool was last linked and not left |
-| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended |
+| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended, and `runs/.containers/<container>/` once it is empty and the container is gone |
 | `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed with its directory |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
@@ -110,8 +110,8 @@ changes.
 A job's directory is kept for the day after its end because the snapshot's `log` names a
 file in it, which is what the operator opens to see what the job did; nothing else reads
 it once the outcome is reported. `DN_RUN_KEEP_MS` and `DN_MIRROR_KEEP_MS` set the two
-days; both are looked at every 10 minutes, with the idle containers and the old
-certificate authorities. A container reads its run directory through a bind mount as
+days; both are looked at every 10 minutes, with the idle containers, the old
+certificate authorities and the certificates past their end. A container reads its run directory through a bind mount as
 its own root, which the engine maps to the operator (Docker Desktop, rootless docker) or
 to the host's root (rootful docker on Linux): either reads 0700 and 0600. Under
 `userns-remap` it is neither, and a job could not read its own prompt.

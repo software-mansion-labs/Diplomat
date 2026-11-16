@@ -28,6 +28,18 @@ const exists = (...parts) => fs.existsSync(path.join(...parts));
 const names = (dir) => { try { return fs.readdirSync(dir).sort(); } catch { return []; } };
 const done = (m, taskId) => until(`${taskId} done`, async () => (await offerOf(m, taskId)).state === 'done');
 // A task this machine runs itself, at once.
+// A certificate for old.example, valid for the first three months of 2020.
+const ENDED_IN_2020 = `-----BEGIN CERTIFICATE-----
+MIIBejCCAR+gAwIBAgIBBTAKBggqhkjOPQQDAjAWMRQwEgYDVQQDDAtvbGQuZXhh
+bXBsZTAeFw0yMDAxMDEwMDAwMDBaFw0yMDA0MDEwMDAwMDBaMBYxFDASBgNVBAMM
+C29sZC5leGFtcGxlMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEv+1a/MDyccQt
+FD3gDvMESdyu1LqYJPEPPCFMWxSav677HhZA7FqcIceVbHqgxkacKshFlxuz9XhL
+I5DsbgucFKNeMFwwHQYDVR0OBBYEFKXKn+K6eNWvK3HZ3Gib53U4YE4DMDsGA1Ud
+IwQ0MDKhGqQYMBYxFDASBgNVBAMMC29sZC5leGFtcGxlghQhXHKx4/8NmTalIHR9
+0ijrVBnfuzAKBggqhkjOPQQDAgNJADBGAiEAoxNOIpfCXWV0swJPASfF/0VQPkra
+cJ/xtv6mO6fR068CIQDejVK/ZwQbp5iAASBOkQ4Md6mUK27YnPVFm64mUVkUGQ==
+-----END CERTIFICATE-----
+`;
 // The interval the first check's daemon writes its snapshot at.
 const STATE_WRITE_MS = 2000;
 const own = async (m, item, prompt) => (await m.ok('/offer', { pool: POOL, kind: item.startsWith('pr') ? 'review' : 'issues', item, title: item, prompt, now: true })).taskId;
@@ -100,7 +112,15 @@ try {
     const meta = JSON.parse(fs.readFileSync(path.join(ca, current, 'meta.json'), 'utf8'));
     fs.writeFileSync(path.join(ca, '0123456789ab', 'meta.json'), JSON.stringify({ ...meta, createdAt: meta.createdAt - 3600 }));
     fs.writeFileSync(path.join(ca, 'current'), `${current}\n`);
+    // A leaf that ended in 2020, among the ones the job is answered with.
+    const leaves = path.join(ca, current, 'leaves');
+    const issued = names(leaves);
+    fs.writeFileSync(path.join(leaves, 'old.example.crt'), ENDED_IN_2020);
+    fs.writeFileSync(path.join(leaves, 'old.example.key'), 'its key\n');
+    await until('the certificate past its end removed with its key', () => !exists(leaves, 'old.example.crt') && !exists(leaves, 'old.example.key'));
+    assert.match(up.log(), /ca removed 1 leaf certificate\(s\) past their end/);
     await moreSweeps(up);
+    assert.deepEqual(names(leaves), issued, 'and no other');
     assert.deepEqual([names(ca), up.containers().includes(run.container)], [['0123456789ab', current, 'current'].sort(), true], 'nothing goes while a job runs');
     up.release('held');
     await done(up, taskId);

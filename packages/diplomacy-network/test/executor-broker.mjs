@@ -877,6 +877,29 @@ try {
     assert.doesNotMatch(logged.join('\n'), /the-real-key/);
   });
 
+  await check('a certificate that nears its end under a running job is replaced there: the job\'s next connection is answered with the new one', async () => {
+    let ahead = 0;
+    const aging = createBroker({ ca: createCA({ dir: path.join(scratch, 'aging-ca'), now: () => Date.now() + ahead }), llm, mirrors, onForge, lookup, connect, upstreamCa: fs.readFileSync(providerCa.certPath) });
+    port = (await aging.start()).port;
+    try {
+      const j = await aging.addJob({ runId: 'aging', pool: alpha.pool });
+      const serial = async () => {
+        const s = await secure(j, 'api.github.com');
+        const { serialNumber } = s.getPeerX509Certificate();
+        s.destroy();
+        return serialNumber;
+      };
+      const first = await serial();
+      assert.equal(await serial(), first, 'one certificate while it is good');
+      // Issued for 90 days, replaced from two weeks before its end.
+      ahead = 80 * 24 * 3600 * 1000;
+      assert.notEqual(await serial(), first);
+    } finally {
+      await aging.stop();
+      port = at.port;
+    }
+  });
+
   await check('a subscriber\'s login is sent as Authorization, with no API key header beside it', async () => {
     const home = fs.mkdtempSync(path.join(scratch, 'home-'));
     fs.mkdirSync(path.join(home, '.claude'));
