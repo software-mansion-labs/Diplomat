@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
-import { outranks } from '../src/core/claims.js';
+import { outranks, rankDelay } from '../src/core/claims.js';
 import { PROBE_TIMEOUT_MS, RANK_DELAY_MS, REQUEST_TIMEOUT_MS } from '../src/paths.js';
 
 const offerArgs = (item, more = {}) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p', ...more });
@@ -217,15 +217,18 @@ await check('the word on slots is how many more: runs begun before it are not co
 
 await check('a host says in one line of its log where the time of each round went, and when a run had its key and its job began: seconds and counts, and nothing any member said', async () => {
   const w = createWorld({ seed: 39 });
-  const all = await w.pool(['req', 'exe', 'zzz']);
-  const [req, exe] = all;
+  const all = await w.pool(['req', 'exe', 'idle', 'zzz']);
+  const [req, exe, idle] = all;
   // One member sleeps, for long enough that the others give it a short time to answer.
   w.net.sleep('zzz');
   await w.run(600);
   const first = await req.node.offer(offerArgs('pr-1'));
   const second = await req.node.offer(offerArgs('pr-2'));
-  await w.agreed([req, exe]);
+  await w.agreed([req, exe, idle]);
   const about = (taskId) => exe.log.filter((line) => line.includes(` of ${taskId} `));
+  // What it said as it started: once for each time it had to ask what it missed.
+  const back = exe.log.filter((line) => line.includes(' is up to date '));
+  assert.ok(back.length > 0 && back.every((line) => /^\S+ is up to date \d+ s after this host came back to it$/.test(line)), back.join(' | '));
   const numbers = (line, shape) => {
     assert.match(line, shape);
     return shape.exec(line).slice(1).map(Number);
@@ -236,19 +239,22 @@ await check('a host says in one line of its log where the time of each round wen
   await w.net.until(() => exe.executor.jobOf(first.taskId), { what: 'a job' });
   const lines = about(first.taskId);
   assert.equal(lines.length, 3, lines.join(' | '));
-  const [begun, waited, over] = numbers(lines[0], /^claim of \S+ made - begun (\d+) s after the offer, after a wait of (\d+) ms, over in (\d+) s: 2 members asked, 1 answered, 1 absent, 1 gave an offer$/);
+  const [begun, waited, over] = numbers(lines[0], /^claim of \S+ made - begun (\d+) s after the offer, after a wait of (\d+) ms, over in (\d+) s: 3 members asked, 2 answered, 1 absent, 1 gave an offer$/);
   const sleeper = PROBE_TIMEOUT_MS / 1000;
-  assert.ok(waited <= RANK_DELAY_MS && begun >= Math.floor(waited / 1000) && over >= sleeper && over <= sleeper + 2, lines[0]);
+  assert.ok(waited === rankDelay(first.taskId, exe.pk, RANK_DELAY_MS) && begun >= Math.floor(waited / 1000) && over >= sleeper && over <= sleeper + 2, lines[0]);
   const [keyed] = numbers(lines[1], /^key of \S+ received (\d+) s after its claim, at ask 1$/);
   const [started] = numbers(lines[2], /^job of \S+ started (\d+) s after its claim$/);
   assert.ok(keyed <= 1 && started >= keyed && started <= 1, lines.slice(1).join(' | '));
 
-  // The host that offers the second task is gone when the round for it comes: nobody
-  // answers, and nobody gives an offer.
+  // The host that offers the second task is gone when the round for it comes: the one
+  // member that answers has no offer to give.
   w.net.sleep('req');
   exe.slots = 2;
   exe.node.admit({ slots: 1 });
   await w.net.until(() => about(second.taskId).length > 0, { what: 'a round for the second task' });
-  const [, , gone] = numbers(about(second.taskId)[0], /^claim of \S+ stood down: no-requester - begun (\d+) s after the offer, after a wait of (\d+) ms, over in (\d+) s: 2 members asked, 0 answered, 2 absent$/);
+  const [, , gone] = numbers(about(second.taskId)[0], /^claim of \S+ stood down: no-requester - begun (\d+) s after the offer, after a wait of (\d+) ms, over in (\d+) s: 3 members asked, 1 answered, 2 absent$/);
   assert.ok(gone >= REQUEST_TIMEOUT_MS / 1000 && gone <= REQUEST_TIMEOUT_MS / 1000 + 2, about(second.taskId)[0]);
+  // A member that stays tells it the state it holds, time and again.
+  await w.run(200);
+  assert.equal(exe.log.filter((line) => line.includes(' is up to date ')).length, back.length, 'a host that stayed says nothing more of being up to date');
 });
