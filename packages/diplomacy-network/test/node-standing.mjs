@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { specDigest } from '../src/core/capability.js';
-import { ClaimRound, LockTable, buildClaim } from '../src/core/claims.js';
+import { ClaimRound, LockTable, buildClaim, joinClaim } from '../src/core/claims.js';
 import { sign } from '../src/core/identity.js';
 import { endClaim } from '../src/core/lease.js';
 import { LIMITS, backers, offerRecord } from '../src/core/records.js';
@@ -367,4 +367,54 @@ await check('a host waits as long as its executor weighs a task before it goes f
   const own = await taken('pr-4', { by: slow, offer: { now: true } });
   assert.deepEqual([own.by, own.after < 10], ['slow', true], `after ${own.after} s`);
   assert.deepEqual(failures(all), []);
+});
+
+await check('a host that gave its offer to a claim holds the lock until it holds that claim with its grant in it: asked again it gives the same number, and nobody else is granted the task', async () => {
+  const w = createWorld({ seed: 97 });
+  const all = await w.pool(['req', 'by']);
+  const [req, by] = all;
+  const evil = await w.intruder('evil', req);
+  await w.net.until(() => all.every((h) => w.members(h).length === 3), { what: 'the intruder a member for everyone' });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  const now = w.net.now();
+  // A member that offers the task too and runs it by a claim of its own.
+  const offer = offerRecord(evil.id, {
+    pool: POOL, kind: 'review', item: 'pr-1', identity: taskId.split('@')[1], seq: 0, at: now, title: 'Mine', minRequiredH: 12, createdAt: now, state: 'open',
+  });
+  const claim = buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, grants: [], absent: [by.pk, req.pk].sort(), now, offer: { at: now, gen: 1, hours: 12 } });
+  for (const h of all) assert.deepEqual(verdict(await w.request(evil, h, 'push', { records: [offer, claim] })), [[`offer/${taskId}/${evil.pk}`, claimKey(taskId, evil)], []]);
+  const lock = async (from, round) => (await w.request(from, req, 'lock', { taskId, round, asOf: w.net.now(), hash: w.view(req).hash }, { effort: 4096 })).body;
+  // It asks the other host for its offer, for the claim it holds.
+  const { grant } = await lock(evil, ROUND);
+  assert.deepEqual([grant.offer.gen, grant.offer.hours, locksOf(w, req)], [1, 12, [taskId]]);
+  // The pool moves on, and the claim that round made is there without the grant.
+  await req.node.offer(offerArgs('pr-2'));
+  await w.run(5);
+  assert.deepEqual(locksOf(w, req), [taskId]);
+  assert.deepEqual(await lock(by, 'AAAAAAAAAAE'), { challenge: { reason: 'locked', holder: evil.pk } });
+  assert.equal((await lock(evil, ROUND)).grant.offer.gen, 1, 'the same round is given the offer the same time over');
+  assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [joinClaim(evil.id, claim, { grant })] })), [[claimKey(taskId, evil)], []]);
+  await w.run(5);
+  assert.deepEqual([locksOf(w, req), w.offerRow(req, taskId).state, w.offerRow(req, taskId).executor], [[], 'claimed', evil.pk]);
+  assert.deepEqual(failures(all), []);
+});
+
+await check('an offer made again in the second the one before was made is another offer: a claim of the first holds nothing of it', async () => {
+  const w = createWorld({ seed: 98 });
+  const all = await w.pool(['req', 'by']);
+  const [req, by] = all;
+  const evil = await w.intruder('evil', req);
+  await w.net.until(() => all.every((h) => w.members(h).length === 3), { what: 'the intruder a member for everyone' });
+  await w.net.run(1000 - (w.net.ms() % 1000));
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  const first = w.net.now();
+  const { grant } = (await w.request(evil, req, 'lock', { taskId, round: ROUND, asOf: first, hash: w.view(req).hash })).body;
+  assert.deepEqual(grant.offer, { at: first, gen: 1, hours: 12 });
+  const claim = buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, grants: [grant], absent: [by.pk], now: first });
+  assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [claim] })), [[claimKey(taskId, evil)], []]);
+  assert.deepEqual([w.task(req, taskId).state, w.task(req, taskId).executor], ['claimed', evil.pk]);
+  await req.node.withdraw({ taskId });
+  await req.node.offer(offerArgs('pr-1'));
+  assert.deepEqual([w.net.now(), w.task(req, taskId).state, w.task(req, taskId).executor], [first, 'available', '']);
 });

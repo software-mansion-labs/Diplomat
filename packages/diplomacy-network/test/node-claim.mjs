@@ -116,10 +116,13 @@ await check('a task that needs 24 hours is taken only by a host that accepts 24'
   await w.net.until(() => all.every((h) => w.members(h).length === 3), { what: 'the pool' });
   await w.agreed(all);
   assert.deepEqual(w.view(req).members.map((m) => [w.name(m.pk), m.maxAcceptedH]).sort(), [['long', 24], ['req', 12], ['short', 12]]);
+  const weighed = [];
+  short.executor.takes = (task) => weighed.push(task.taskId) > 0;
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.run(300);
   assert.deepEqual([w.task(short, taskId).hours, w.task(short, taskId).state], [24, 'available']);
   assert.equal(w.net.count({ from: 'short', kind: 'lock' }), 0, 'the host that accepts 12 asks nobody for it');
+  assert.deepEqual(weighed, [], 'nor its own executor whether it would take it');
   assert.deepEqual(short.log.filter((line) => line.includes('stood down')), [], 'and starts no round it would have to give up');
   long.slots = 1;
   long.node.admit({ slots: 1 });

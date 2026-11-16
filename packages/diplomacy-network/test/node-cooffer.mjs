@@ -120,6 +120,9 @@ await check('a host that offers a task of another host and gives its own offer t
     assert.deepEqual(backers(w.claim(a, taskId)).sort(), [a.pk, m.pk].sort());
     const first = e.executor.jobOf(taskId);
     keyFrom.add(w.name(first.peer));
+    // Which of them it asks first is the run's own draw: no host arranges to be the one.
+    assert.equal(first.peer, [a.pk, m.pk].sort()[w.stored(e, 'runs').runs[first.runId].pick % 2], `seed ${seed}`);
+    assert.equal(w.net.count({ from: 'e', kind: 'key' }), 1);
     finish(e, taskId);
     // Whichever job the run did, the other is still to do: the same machine takes it next.
     await w.net.until(() => e.executor.jobOf(taskId) && e.executor.jobOf(taskId).runId !== first.runId, { what: 'the other job' });
@@ -182,4 +185,89 @@ await check('a run that outlasts the hours of one of the offers it holds goes on
     if (seen > 0 && short > 0) break;
   }
   assert.ok(seen > 0 && short > 0, `a run with its key from either host: ${seen} and ${short}`);
+});
+
+await check('a machine that offers a task and runs it has the key from itself, and one that offers a task it already runs takes its own offer into that run', async () => {
+  const w = createWorld({ seed: 43 });
+  const all = await w.pool(['a', 'e']);
+  const [a, e] = all;
+  const { taskId } = await a.node.offer(offerArgs('pr-1'));
+  await e.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  e.slots = 1;
+  e.node.admit({ slots: 1 });
+  await w.net.until(() => e.executor.jobOf(taskId), { what: 'a job' });
+  assert.deepEqual([backers(w.claim(a, taskId)), e.executor.jobOf(taskId).peer, w.net.count({ from: 'e', to: 'a', kind: 'key' })], [[e.pk, a.pk], e.pk, 0]);
+  finish(e, taskId);
+  await w.net.until(() => all.every((h) => w.offerRow(h, taskId).state === 'done'), { what: 'both offers done' });
+
+  const second = (await a.node.offer(offerArgs('pr-2'))).taskId;
+  await w.net.until(() => e.executor.jobOf(second), { what: 'a job' });
+  assert.deepEqual([backers(w.claim(a, second)), e.executor.jobOf(second).peer], [[a.pk], a.pk]);
+  await e.node.offer(offerArgs('pr-2'));
+  await w.run(300);
+  assert.deepEqual([backers(w.claim(a, second)), w.offerRow(e, second).state, w.offerRow(e, second).executorHere, started(all)], [[e.pk, a.pk], 'claimed', true, 2]);
+  finish(e, second);
+  await w.net.until(() => all.every((h) => w.offerRow(h, second).state === 'done'), { what: 'both offers done' });
+  assert.deepEqual([w.offerRow(e, second).outcome, started(all), failures(all)], [w.offerRow(a, second).outcome, 2, []]);
+});
+
+await check('a run tells each host that offers its task how it ended until that host has heard, and no host twice', async () => {
+  const w = createWorld({ seed: 44 });
+  const all = await w.pool(['a', 'b', 'e']);
+  const [a, b, e] = all;
+  const { taskId } = await a.node.offer(offerArgs('pr-1'));
+  await b.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  e.slots = 1;
+  e.node.admit({ slots: 1 });
+  await w.net.until(() => e.executor.jobOf(taskId), { what: 'a job' });
+  assert.deepEqual(backers(w.claim(a, taskId)).sort(), [a.pk, b.pk].sort());
+  w.net.cut('e', 'b');
+  finish(e, taskId);
+  await w.net.until(() => w.offerRow(a, taskId).state === 'done', { what: 'the offer of the host that hears done' });
+  await w.run(600);
+  assert.deepEqual([w.net.count({ from: 'e', to: 'a', kind: 'done' }), w.offerRow(b, taskId).state, w.claim(a, taskId).state], [1, 'claimed', 'held']);
+  w.net.heal();
+  await w.net.until(() => w.offerRow(b, taskId).state === 'done', { what: 'the other offer done' });
+  await w.net.until(() => w.claim(a, taskId).state === 'completed', { what: 'the claim ended' });
+  assert.deepEqual([w.net.count({ from: 'e', to: 'a', kind: 'done' }), w.offerRow(b, taskId).outcome, started(all), failures(all)], [1, w.offerRow(a, taskId).outcome, 1, []]);
+});
+
+await check('a run whose key is from a host that takes its offer back stops, though its claim holds the offer of another host: that offer is in the pool again, at no attempt lost', async () => {
+  const w = createWorld({ seed: 45 });
+  const all = await w.pool(['a', 'b', 'e']);
+  const [a, b, e] = all;
+  const { taskId } = await a.node.offer(offerArgs('pr-1'));
+  await b.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  e.slots = 1;
+  e.node.admit({ slots: 1 });
+  await w.net.until(() => e.executor.jobOf(taskId), { what: 'a job' });
+  const job = e.executor.jobOf(taskId);
+  const [from, other] = job.peer === a.pk ? [a, b] : [b, a];
+  assert.deepEqual(backers(w.claim(a, taskId)).sort(), [a.pk, b.pk].sort());
+  from.node.withdraw({ taskId });
+  await w.net.until(() => e.executor.stopped.length > 0, { what: 'the job stopped' });
+  assert.deepEqual(e.executor.stopped, [{ runId: job.runId, reason: 'the task was withdrawn' }]);
+  await w.net.until(() => w.offerRow(other, taskId).state === 'pooled', { what: 'the other offer in the pool again' });
+  assert.deepEqual([w.offerRow(other, taskId).attempt, w.claim(other, taskId).state, failures(all)], [1, 'released', []]);
+});
+
+await check('a run leaves alone an offer of more hours than its machine accepts: another machine takes that offer', async () => {
+  const w = createWorld({ seed: 46 });
+  const all = await poolOf(w, { a: {}, b: { requires: 24 }, e: {}, f: { accepts: 24 } });
+  const [a, b, e, f] = all;
+  const { taskId } = await a.node.offer(offerArgs('pr-1'));
+  await b.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  e.slots = 1;
+  e.node.admit({ slots: 1 });
+  await w.net.until(() => e.executor.jobOf(taskId), { what: 'a job' });
+  await w.run(120);
+  assert.deepEqual([backers(w.claim(a, taskId, e)), w.offerRow(b, taskId).state], [[a.pk], 'pooled']);
+  f.slots = 1;
+  f.node.admit({ slots: 1 });
+  await w.net.until(() => f.executor.jobOf(taskId), { maxMs: 5 * 60 * 1000, what: 'a job for the longer offer' });
+  assert.deepEqual([backers(w.claim(a, taskId, f)), f.executor.jobOf(taskId).task.hours, e.executor.stopped, failures(all)], [[b.pk], 24, [], []]);
 });

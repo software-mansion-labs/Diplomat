@@ -142,7 +142,7 @@ export function createNode({
     ...host.gossip.handlers, ...host.offers.handlers, ...host.runs.handlers, ...inbound.handlers,
     lock(P, from, body) {
       const answer = P.locks.answer({
-        pool: P.pool, identity: id, from, body, now: host.now(), nextGen: (at) => host.offers.nextGen(body.taskId, at),
+        pool: P.pool, identity: id, from, body, now: host.now(), nextGen: () => host.offers.nextGen(body.taskId),
       });
       host.saveLocks();
       return answer;

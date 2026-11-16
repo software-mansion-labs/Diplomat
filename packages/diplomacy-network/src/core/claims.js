@@ -182,8 +182,8 @@ export class LockTable {
   /// `bad-request`, `stale` (an `asOf` too far from `now`) or `not-member`. `pool` is the
   /// member's own Pool and `identity` signs the grant. The grant backs the claim when the
   /// member offers the task itself, no claim holds that offer, and the claimant accepts
-  /// its hours: `nextGen(at)` then answers how many times the member gave the offer it
-  /// made at `at` away before, or null when it will not give it.
+  /// its hours: `nextGen()` then answers how many times the member has given that offer
+  /// away with this one, or null when it will not give it.
   answer({ pool, identity, from, body, now, nextGen }) {
     if (!shaped(body, LOCK) || parseTaskId(body.taskId).pool !== pool.id) return { error: 'bad-request' };
     if (Math.abs(body.asOf - now) > CLOCK_SKEW_SECS) return { error: 'stale' };
@@ -199,7 +199,7 @@ export class LockTable {
     }
     const mine = task.offers.find((o) => o.host === identity.pk);
     const again = before?.round === body.round && before.at === mine?.createdAt ? before.gen : undefined;
-    const gen = mine && !mine.claim && claimant.maxAcceptedH >= mine.hours ? again ?? nextGen(mine.createdAt) : null;
+    const gen = mine && !mine.claim && claimant.maxAcceptedH >= mine.hours ? again ?? nextGen() : null;
     if (gen !== null) Object.assign(this.#locks.get(body.taskId), { at: mine.createdAt, gen });
     const grant = buildGrant(identity, {
       pool: pool.id, taskId: body.taskId, executor: from, round: body.round, hash: body.hash, exp,

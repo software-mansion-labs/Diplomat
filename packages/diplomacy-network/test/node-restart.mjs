@@ -219,7 +219,10 @@ await check('a stopped host leaves no timer behind, whatever it was in the middl
   const first = await req.node.offer(offerArgs('pr-1'));
   req.requester.rulesFor = () => { throw new Error('the rules are gone'); };
   await w.net.until(() => w.runOf(exe, first.taskId), { what: 'a run waiting for its key' });
-  req.requester.rulesFor = () => [{ host: 'api.github.com', method: 'GET', path: '/**' }];
+  req.requester.rulesFor = (args) => {
+    if (args.item === 'pr-1') throw new Error('the rules are gone');
+    return [{ host: 'api.github.com', method: 'GET', path: '/**' }];
+  };
   w.net.cut('exe', 'silent');
   await w.run(15);
   exe.node.admit({ slots: 1 });
@@ -229,6 +232,7 @@ await check('a stopped host leaves no timer behind, whatever it was in the middl
   await w.net.until(() => JSON.stringify(w.stored(exe, 'locks')).includes(second.taskId), { stepMs: 5, what: 'a round under way' });
   exe.slots = 0;
   const said = exe.log.length;
+  assert.equal(w.runOf(exe, first.taskId).state, 'preparing');
   await exe.node.stop();
   await w.run(3600);
   assert.deepEqual(exe.log.slice(said).filter((line) => line.includes('stood down')), [], 'its rounds end with it, unsaid');

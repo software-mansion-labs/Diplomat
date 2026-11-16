@@ -118,14 +118,11 @@ export function createRuns(host) {
           return;
         }
         const hosts = keyHosts(run);
-        if (hosts.length === 0) {
-          halt(run, 'no machine that agreed to the claim offers the task', 'release');
-          return;
-        }
+        if (hosts.length === 0) return;
         const to = hosts[tries % hosts.length];
         // The claim goes ahead of the question: a host gives a key only for a claim it holds.
         if (to !== host.self) await host.gossip.send(P, to, 'push', { records: [claim] }, { fresh: true });
-        const answer = await host.gossip.send(P, to, 'key', { taskId: run.taskId, round: run.round }, { fresh: true });
+        const answer = await host.gossip.send(P, to, 'key', { taskId: run.taskId, round: run.round });
         if (run.state !== 'preparing' || !live(run)) return;
         const body = answer.ok ? answer.body : {};
         const expect = { pool: P.id, taskId: run.taskId, executor: host.self, host: to };
@@ -316,7 +313,7 @@ export function createRuns(host) {
     };
     await Promise.all(free().map(async (o) => {
       if (o.host === host.self) {
-        const gen = host.offers.nextGen(run.taskId, o.createdAt);
+        const gen = host.offers.nextGen(run.taskId);
         if (gen !== null) join({ at: o.createdAt, gen, hours: o.hours }, host.self);
         return;
       }

@@ -333,3 +333,23 @@ await check('what a run says of itself is told and shown without a control chara
   const row = w.offerRow(req, two.taskId);
   assert.deepEqual([row.outcome.summary, row.outcome.runner, row.outcome.model, row.reason], [clean, 'cl aude', 'fa ble', clean]);
 });
+
+await check('an offer withdrawn before its run has a key ends the run all the same', async () => {
+  const w = createWorld({ seed: 19 });
+  const all = await w.pool(['req', 'exe', 'by'], { exe: { slots: 1 } });
+  const [req, exe] = all;
+  // The requester drops out of the executor's reach as the first ask for the key leaves.
+  let cut = false;
+  w.net.tap(({ from, kind }) => {
+    if (cut || from !== 'exe' || kind !== 'key') return;
+    cut = true;
+    w.net.cut('req', 'exe');
+  });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => cut, { stepMs: 5, what: 'the first ask for the key' });
+  await req.node.withdraw({ taskId });
+  // The executor hears of it from the third member.
+  await w.net.until(() => w.runOf(exe, taskId).state === 'stopped', { maxMs: 10 * 60 * 1000, what: 'the run stopped' });
+  await w.net.until(() => w.claim(exe, taskId).state === 'released', { what: 'the claim given back' });
+  assert.deepEqual([exe.executor.started.length, w.offerRow(req, taskId).state], [0, 'cancelled']);
+});
