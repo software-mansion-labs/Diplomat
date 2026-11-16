@@ -1394,6 +1394,26 @@ def test_a_ping_whose_offer_the_switch_took_back_reads_never_started(
     assert [w.offered for w in comms_store.requested_work] == ["t1"], "kept for the next poll"
 
 
+def test_a_ping_whose_network_run_used_its_attempts_reads_that_it_failed(
+        comms_store, on, daemon, monkeypatch):
+    d = daemon(takes_offers(), state=snapshot(offers=[offer()]))
+    _spawn_recorder(monkeypatch)
+    message, decision = _ask(1, "review", 12)
+    _tick(comms_store, monkeypatch, (message, decision))
+    entry = next(t for t in comms_store.queued_tasks if t.id == qkey("review", 12))
+    assert comms_store._run_queued_task(entry, forced=True) == "spawned"
+
+    d.state = snapshot(offers=[offer(state="failed", reason="the container exited 137")])
+    comms_store._settle_agents()
+
+    assert _kinds_by_id()[message["id"]] == ["action", "started", "action", "finished"]
+    [item] = comms_store.comms_items
+    assert item["outcome"] == (
+        f"{comms.NETWORK_FAILED} (refused by the network: the container exited 137)")
+    assert item.get("finishedAt") and not comms.never_started(item)
+    assert comms_store.requested_work == [], "the ask ended with the run"
+
+
 @pytest.mark.parametrize("key, waiting", [(qkey("review-req", 12), True), (qkey("review", 12), False)])
 def test_only_a_monitors_find_that_left_the_queue_starts_from_the_rows(comms_store,
                                                                        monkeypatch, key,

@@ -36,6 +36,11 @@ def never_started(item: dict) -> bool:
     return str(item.get("outcome") or "").startswith(NEVER_STARTED)
 
 
+#: A ping's outcome when the Diplomacy Network gave its run up with its attempts used
+#: (``Store.commsNetworkFailedOutcome``).
+NETWORK_FAILED = "its run on the Diplomacy Network failed"
+
+
 #: A ping's outcome once a retry of a run that never started (or of work that left the
 #: queue) starts (``Store.commsRetriedOutcome``).
 RETRIED = "started on a later attempt"

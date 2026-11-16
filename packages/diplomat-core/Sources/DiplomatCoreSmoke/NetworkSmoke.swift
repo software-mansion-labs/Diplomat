@@ -545,6 +545,24 @@ func networkSmoke() throws {
           && verdict(Seen(state: "done", reason: "x")) == "failed: failed on the network",
           "a reason is read of a failed or cancelled offer alone")
     check(verdict(Seen(state: "limbo")) == "unknown: the network reports limbo")
+    func ending(_ task: Seen?, age: TimeInterval = 60) -> [Bool] {
+        let v = AgentState.resolveOne(run(age: age), evidence: seen(.present(
+            task.map { [networkTask: $0] } ?? [:])), now: now)
+        return [v.reported, v.spent]
+    }
+    check(ending(Seen(state: "done", ok: true)) == [true, false],
+          "a network run that went well is reported")
+    check(ending(Seen(state: "failed")) == [false, true] && ending(Seen(state: "done")) == [false, true],
+          "one the network gave up with its attempts used is spent")
+    check([Seen(state: "cancelled"), Seen(state: "pooled"), Seen(state: "claimed"), nil]
+            .allSatisfy { ending($0) == [false, false] } && ending(nil, age: 5) == [false, false],
+          "an offer that never ran is neither")
+    let wentWell = AgentState.resolveOne(
+        run(), evidence: seen(.present([networkTask: Seen(state: "done", ok: true)])), now: now)
+    check(AgentState.closeOnRetire(records: [run()], states: ["n1": wentWell]).isEmpty
+          && AgentState.closeOnRetire(records: [run(task: nil)], states: ["n1": wentWell])
+            .map(\.runID) == ["n1"],
+          "a run the network carried has no window to close")
     check(verdict(nil, age: 10) == "starting: offered 10s ago, not in the pool yet")
     check(verdict(nil, age: 20) == "starting: offered 20s ago, not in the pool yet"
           && verdict(nil, age: 21) == "failed: the network holds no such offer",

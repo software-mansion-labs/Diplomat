@@ -662,8 +662,13 @@ class Resolution:
     #: Whether the agent's own runner said its turn was over and went well: a CLI's
     #: ``idle`` turn report, or a session that went idle without failing. Every other
     #: ending (an exit, a gone pid, a backstop) is inferred, and says nothing about
-    #: whether the agent finished what it set out to do.
+    #: whether the agent finished what it set out to do. A run the network carried is
+    #: reported when its executor's outcome says it went well.
     reported: bool = False
+    #: Whether the network gave this run's offer up with its attempts used: the work
+    #: was taken as often as an offer allows and never went well. Every other failed
+    #: network run never ran: withdrawn, refused, or unknown to the daemon.
+    spent: bool = False
 
     @property
     def occupying(self) -> bool:
@@ -862,8 +867,10 @@ def resolve_one(record: RunRecord, evidence: Evidence, now: float,
             return done(MERGED, f"PR #{record.pr_number} is merged")
 
     if record.network is not None:
-        return done(*network_verdict(record.network, evidence.network,
-                                     now - record.dispatched_at))
+        out = done(*network_verdict(record.network, evidence.network,
+                                    now - record.dispatched_at))
+        return replace(out, reported=out.state == FINISHED,
+                       spent=network_spent(record.network, evidence.network))
 
     if evidence.sentinels.ok and record.run_id in evidence.sentinels.value:
         return done(FINISHED, "completion sentinel present")
@@ -942,6 +949,13 @@ def network_verdict(task: str, network: Observation, age: float) -> tuple[str, s
     if seen.state == NET_CANCELLED:
         return FAILED, f"withdrawn from the network{why}"
     return UNKNOWN, f"the network reports {seen.state}"
+
+
+def network_spent(task: str, network: Observation) -> bool:
+    """Whether the daemon ended the offer of ``task`` with its attempts used."""
+    seen = network.value.get(task) if network.ok else None
+    return seen is not None and (
+        seen.state == NET_FAILED or (seen.state == NET_DONE and not seen.ok))
 
 
 def past_deadline(record: RunRecord, tokens: Observation, now: float,
@@ -1437,15 +1451,16 @@ def close_on_retire(records: list[RunRecord],
                     states: dict[str, Resolution]) -> list[RunRecord]:
     """The automatic runs whose own runner reported the turn over
     (:attr:`Resolution.reported`): their window is closed as they retire, their work
-    being on GitHub or in a report. A panel run is the operator's session, and an
-    untracked agent's ``auto`` is the cap's assumption, not a dispatch.
+    being on GitHub or in a report. A panel run is the operator's session, an
+    untracked agent's ``auto`` is the cap's assumption, not a dispatch, and a run the
+    network carried has no window here.
 
     Unlike :func:`reapable`, a close that reaches nothing withholds no retirement: the
     record a live agent is released to (:func:`release_ended`) is the stillness
     backstop's.
     """
     return [r for r in records
-            if not r.untracked and r.source == SOURCE_AUTO
+            if not r.untracked and r.source == SOURCE_AUTO and r.runs_here
             and r.run_id in states and states[r.run_id].reported]
 
 

@@ -59,7 +59,8 @@ enum AgentStateCommand {
         }
         func verdict(_ s: AgentState.Resolution) -> [String: Any] {
             ["state": s.state.rawValue, "reason": s.reason, "wedged": s.wedged,
-             "expired": s.expired, "lapsed": s.lapsed, "reported": s.reported]
+             "expired": s.expired, "lapsed": s.lapsed, "reported": s.reported,
+             "spent": s.spent]
         }
         let out: [String: Any] = [
             "rows": t.rows.map { r, s in verdict(s).merging(["runId": r.runID]) { $1 } },

@@ -3092,8 +3092,10 @@ class Store(QObject):
 
         An ask the Diplomacy Network carries (:attr:`autofix.RequestedWork.offered`) is
         left out for as long as the book holds the run of its offer. Once that run has
-        left the book without finishing - withdrawn, refused, the switch turned off -
-        the ask is as it was before the offer, and is offered again here.
+        left the book without having run - withdrawn, unknown to the daemon, the switch
+        turned off - the ask is as it was before the offer, and is offered again here.
+        One the network gave up with its attempts used ends the ask, as a run in a
+        terminal that came to nothing does.
 
         An ask whose prompt will not assemble is skipped rather than allowed to end
         the cycle. The press assembles every prompt before storing anything, but the
@@ -3595,7 +3597,8 @@ class Store(QObject):
         self._retire_finished(t, snapshot, self._withdraw_merged(t) if networked else set())
         self._note_silent_probes()
         self._note_comms_runs({r.label: s.reason for r, s in t.rows
-                               if s.state == agentstate.FAILED})
+                               if s.state == agentstate.FAILED and not s.spent},
+                              {r.label: s.reason for r, s in t.rows if s.spent})
         return t
 
     def _note_silent_probes(self) -> None:
@@ -3919,7 +3922,9 @@ class Store(QObject):
         if not self._write_book(lambda: agentregistry.forget({r.run_id for r in gone})):
             return
         for r in gone:
-            if r.network and getattr(t.states.get(r.run_id), "state", None) == agentstate.FINISHED:
+            verdict = t.states.get(r.run_id)
+            if r.network and verdict is not None and (
+                    verdict.state == agentstate.FINISHED or verdict.spent):
                 self._forget_offered(r.network)
         concluded = autofix.concluded(gone, t.states)
         if concluded:
@@ -5095,7 +5100,8 @@ class Store(QObject):
             self.comms_changed.emit()
         return list(kept.values())
 
-    def _note_comms_runs(self, never_ran: dict[str, str] | None = None) -> None:
+    def _note_comms_runs(self, never_ran: dict[str, str] | None = None,
+                         spent: dict[str, str] | None = None) -> None:
         """Twin of ``noteCommsRuns``; runs on every settle, Comms on or off.
 
         A ping that took a monitor's queued work records `started` once an agent row is
@@ -5103,8 +5109,10 @@ class Store(QObject):
 
         A started run whose agent left the rows, and whose ask is not waiting again,
         records `finished` - or, when ``never_ran`` (label -> reason) says its command
-        never ran, :data:`comms.NEVER_STARTED`."""
+        never ran, :data:`comms.NEVER_STARTED`. One of ``spent`` (label -> reason), which
+        the network gave up with its attempts used, finishes saying so."""
         never_ran = never_ran or {}
+        spent = spent or {}
         waiting = {t.id for t in self.queued_tasks} | {t.id for t in self.starting_tasks}
 
         def monitors_find_out_of_the_queue(key: str) -> bool:
@@ -5143,6 +5151,9 @@ class Store(QObject):
                 continue
             if wearing(label, running) is not None:
                 continue
+            if (failed := wearing(label, spent)) is not None:
+                comms.append_event("action", str(item["message"]["id"]),
+                                   outcome=f"{comms.NETWORK_FAILED} ({spent[failed]})")
             comms.append_event("finished", str(item["message"]["id"]), label=label)
             wrote = True
         if wrote:

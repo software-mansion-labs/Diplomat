@@ -464,8 +464,13 @@ public enum AgentState {
         /// Whether the agent's own runner said its turn was over and went well: a CLI's
         /// `idle` turn report, or a session that went idle without failing. Every other
         /// ending (an exit, a gone pid, a backstop) is inferred, and says nothing about
-        /// whether the agent finished what it set out to do.
+        /// whether the agent finished what it set out to do. A run the network carried
+        /// is reported when its executor's outcome says it went well.
         public var reported: Bool = false
+        /// Whether the network gave this run's offer up with its attempts used: the
+        /// work was taken as often as an offer allows and never went well. Every other
+        /// failed network run never ran: withdrawn, refused, or unknown to the daemon.
+        public var spent: Bool = false
 
         public var occupying: Bool { AgentState.occupying.contains(state) && !lapsed }
     }
@@ -691,7 +696,10 @@ public enum AgentState {
         if let task = record.network {
             let (state, detail) = networkVerdict(task: task, network: evidence.network,
                                                  age: now - record.dispatchedAt)
-            return done(state, detail)
+            var out = done(state, detail)
+            out.reported = state == .finished
+            out.spent = networkSpent(task: task, network: evidence.network)
+            return out
         }
         if let sentinels = evidence.sentinels.value, sentinels.contains(record.runID) {
             return done(.finished, "completion sentinel present")
@@ -772,6 +780,13 @@ public enum AgentState {
         case NetworkTask.cancelled: return (.failed, "withdrawn from the network\(why)")
         default: return (.unknown, "the network reports \(seen.state)")
         }
+    }
+
+    /// Whether the daemon ended the offer of `task` with its attempts used.
+    public static func networkSpent(task: String,
+                                    network: Observation<[String: NetworkTask]>) -> Bool {
+        guard let seen = network.value?[task] else { return false }
+        return seen.state == NetworkTask.failed || (seen.state == NetworkTask.done && !seen.ok)
     }
 
     /// How long this run has been going, once that is long enough to call it over — nil
@@ -1324,8 +1339,9 @@ public enum AgentState {
 
     /// The automatic runs whose own runner reported the turn over
     /// (`Resolution.reported`): their window is closed as they retire, their work being
-    /// on GitHub, on GitLab or in a report. A panel run is the operator's session, and an
-    /// untracked agent's `auto` is the cap's assumption, not a dispatch.
+    /// on GitHub, on GitLab or in a report. A panel run is the operator's session, an
+    /// untracked agent's `auto` is the cap's assumption, not a dispatch, and a run the
+    /// network carried has no window here.
     ///
     /// Unlike `reapable`, a close that reaches nothing withholds no retirement: the
     /// record a live agent is released to (`releaseEnded`) is the stillness backstop's.
@@ -1333,7 +1349,7 @@ public enum AgentState {
                                      states: [String: Resolution]) -> [RunRecord] {
         records.filter { r in
             guard !r.untracked, r.source == AgentDispatchGate.Source.auto.rawValue,
-                  let s = states[r.runID] else { return false }
+                  r.runsHere, let s = states[r.runID] else { return false }
             return s.reported
         }
     }

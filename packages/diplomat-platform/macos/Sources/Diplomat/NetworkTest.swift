@@ -860,6 +860,17 @@ enum NetworkTest {
         let askPooled = ping(90260, startedBy: pooledTask)
         let askDone = ping(90262, startedBy: doneTask)
         store.refreshComms()
+        // Each run answers a review request, as the monitor's attempt records have it.
+        func reviewAsks() -> [String: ReviewAttempt] {
+            store.headlessJSON?["reviewReqAttempts"]
+                .flatMap { try? JSONDecoder().decode([String: ReviewAttempt].self, from: $0) } ?? [:]
+        }
+        store.headlessJSON = [:]
+        store.headlessJSON?["reviewReqAttempts"] = try? JSONEncoder().encode(
+            Dictionary(uniqueKeysWithValues: [90260, 90262].map {
+                ("o/r#\($0)", ReviewAttempt(requestedAt: "2026-01-01T00:00:00Z",
+                                            lastDispatchedAt: Date(), attempts: 1))
+            }))
         // The third finishes unseen: the settle the switch takes is the one that finds it.
         script.set(snapshot(offers: [
             offerRow(pooledTask, "pooled"), offerRow(claimedTask, "claimed", executor: away),
@@ -902,6 +913,11 @@ enum NetworkTest {
                 && pinged(askPooled)?.finishedAt == nil)
         check("…and one whose run the network had finished reads finished",
               pinged(askDone)?.finishedAt != nil && pinged(askDone)?.outcome == nil)
+        check("a review request is concluded by the network run that finished it alone",
+              reviewAsks()["o/r#90262"]?.concludedAt != nil && reviewAsks()["o/r#90260"] != nil
+                && reviewAsks()["o/r#90260"]?.concludedAt == nil)
+        check("…and no window is closed for a run that had none here",
+              feedDetails("kill-device").isEmpty)
         check("a run the network had finished is retired on its outcome instead",
               booked(doneTask) == nil && row(doneTask) == nil
                 && feedDetails(NetworkAudit.done).count == doneBefore + 1
@@ -989,8 +1005,9 @@ enum NetworkTest {
 
         // 26. An ask is answered by work that ran, not by its offer. Offered, it stands
         //     marked and is not offered twice; its run finishing forgets it, and so does
-        //     the operator taking the offer back; one whose offer ended unrun - failed,
-        //     or withdrawn as the switch goes off - is as it was, for the next drain.
+        //     the operator taking the offer back, and the network giving it up with its
+        //     attempts used; one whose offer ended unrun - its pool closed, or withdrawn
+        //     as the switch goes off - is as it was, for the next drain.
         startDaemon()
         script.set(snapshot())
         store.networkEnabled = true
@@ -1000,7 +1017,7 @@ enum NetworkTest {
         // Ends the cycle the refusals above staged work in.
         store.commitQueue()
         store.queuedTasks = []
-        let sweptPRs = [90280, 90281, 90282, 90283, 90284]
+        let sweptPRs = [90280, 90281, 90282, 90283, 90284, 90285]
         store.prs = sweptPRs.map { n in
             OpenPR(number: n, title: "PR \(n)", url: url(n), isDraft: true, author: "LatekVO",
                    createdAt: Date(), readyForReviewAt: nil, files: [], reviewDecision: nil,
@@ -1013,8 +1030,10 @@ enum NetworkTest {
         await store.drainQueuedTasks(snaps: [], closed: [])
         let carried = sweptPRs.map(taskOf)
         func asks() -> [String] { store.requestedWork.map { "\($0.number) \($0.offered)" } }
+        let askSpent = ping(90285, startedBy: carried[5])
+        store.refreshComms()
         check("an offered ask stands, marked with the task that carries it",
-              swept.queued == 5 && requests(NetworkRoute.offer).count == offersSwept + 5
+              swept.queued == 6 && requests(NetworkRoute.offer).count == offersSwept + 6
                 && asks() == zip(sweptPRs, carried).map { "\($0) \($1)" })
         script.set(snapshot(offers: carried.map { offerRow($0, "pooled") }))
         await store.settleAgents()
@@ -1022,21 +1041,29 @@ enum NetworkTest {
         store.commitQueue()
         await store.drainQueuedTasks(snaps: [], closed: [])
         check("…and is neither queued nor offered again while the pool holds it",
-              store.queuedTasks.isEmpty && AgentRegistry.load().count == 5
-                && requests(NetworkRoute.offer).count == offersSwept + 5)
+              store.queuedTasks.isEmpty && AgentRegistry.load().count == 6
+                && requests(NetworkRoute.offer).count == offersSwept + 6)
         check("the mark is stored with the ask",
               Store.decodeRequestedWork(try? JSONEncoder().encode(store.requestedWork),
                                         configured: "o/r").map(\.offered) == carried)
         script.set(snapshot(offers: [
             offerRow(carried[0], "pooled"), offerRow(carried[1], "pooled"),
             offerRow(carried[2], "done", executor: away, outcome: ["ok": true]),
-            offerRow(carried[3], "failed", reason: "no machine could run it"),
+            offerRow(carried[3], "cancelled", reason: "the pool was closed"),
             offerRow(carried[4], "pooled"),
+            offerRow(carried[5], "failed", reason: "the container exited 137"),
         ]))
         await store.settleAgents()
-        check("a run that finished forgets its ask; an offer that failed keeps it",
-              store.requestedWork.map(\.number) == [90280, 90281, 90283, 90284]
+        check("a run that finished forgets its ask; an offer that ended unrun keeps it",
+              store.requestedWork.map(\.number).prefix(4) == [90280, 90281, 90283, 90284]
                 && booked(carried[2]) == nil && booked(carried[3]) == nil)
+        check("an offer the network gave up with its attempts used ends its ask",
+              store.requestedWork.map(\.number) == [90280, 90281, 90283, 90284]
+                && booked(carried[5]) == nil)
+        check("…and a ping whose run that was reads that it failed, and is finished",
+              pinged(askSpent)?.outcome == Store.commsNetworkFailedOutcome
+                    + " (refused by the network: the container exited 137)"
+                && pinged(askSpent)?.finishedAt != nil)
         script.refuse(NetworkRoute.withdraw, (409, "The task is not yours."))
         if let theirs = poolTask(carried[4], here: false) {
             await store.stopNetworkTask(theirs, pool: "github.com/o/r")
@@ -1057,13 +1084,13 @@ enum NetworkTest {
         await store.settleAgents()
         store.offerRequestedWork()
         store.commitQueue()
-        check("the ask whose offer failed is queued again, unmarked",
+        check("the ask whose offer ended unrun is queued again, unmarked",
               store.queuedTasks.map(\.job.prNumber) == [90283]
                 && asks() == ["90280 \(carried[0])", "90281 \(carried[1])", "90283 "])
         await store.drainQueuedTasks(snaps: [], closed: [])
         let again = taskOf(90283)
         check("…and the drain offers it afresh",
-              requests(NetworkRoute.offer).count == offersSwept + 6
+              requests(NetworkRoute.offer).count == offersSwept + 7
                 && asks().last == "90283 \(again)")
         if let run = booked(again) { store.forgetRun(run.runID) }
         for _ in 0..<50 where store.requestedWork.count > 2 {

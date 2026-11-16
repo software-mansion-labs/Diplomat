@@ -123,7 +123,8 @@ def _python(records, evidence, now=T0, limit=LIMIT,
 
     def verdict(s: A.Resolution) -> dict:
         return {"state": s.state, "reason": s.reason, "wedged": s.wedged,
-                "expired": s.expired, "lapsed": s.lapsed, "reported": s.reported}
+                "expired": s.expired, "lapsed": s.lapsed, "reported": s.reported,
+                "spent": s.spent}
 
     return {
         "rows": [{"runId": r.run_id, **verdict(s)} for r, s in t.rows],

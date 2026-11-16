@@ -730,12 +730,14 @@ def test_only_the_agents_own_word_marks_a_run_reported():
     """``reported`` is what lets a review request's run end it without a retry
     (:func:`autofix.concluded`), so it must name only the rungs where the agent's own
     runner said the turn went well — never a sentinel, a session that ended, a gone
-    pid, a refused turn or a backstop, none of which says the agent meant to stop."""
+    pid, a refused turn or a backstop, none of which says the agent meant to stop. For
+    a run the network carried that word is its executor's outcome."""
     for name, record, evidence, _state, _reason in CASES:
         got = A.resolve_one(record, evidence, T0)
         by_report = got.reason.endswith(("its CLI reported the turn over",
                                          "its runner reported the turn over"))
-        assert got.reported is by_report, f"{name}: {got.reason!r}"
+        by_outcome = record.network is not None and got.state == A.FINISHED
+        assert got.reported is (by_report or by_outcome), f"{name}: {got.reason!r}"
     verdicts = [A.resolve_one(r, e, T0) for _n, r, e, _s, _rr in CASES]
     assert any(v.reported for v in verdicts)
     assert any(v.state == A.FINISHED and not v.reported for v in verdicts)
@@ -1604,6 +1606,22 @@ def test_the_deadline_never_applies_to_a_network_run():
                         ev(network=offer("claimed")), T0, A.RUN_DEADLINE)
     assert (old.state, old.expired, old.wedged, old.lapsed, old.reported) == (
         A.RUNNING, False, False, False, False)
+
+
+def test_a_network_run_is_reported_when_it_went_well_and_spent_when_its_attempts_are_used():
+    def flags(seen, age=60) -> tuple[bool, bool]:
+        v = A.resolve_one(net(dispatched_at=T0 - age), ev(network=seen), T0)
+        return v.reported, v.spent
+
+    assert flags(offer("done", ok=True)) == (True, False)
+    assert flags(offer("failed")) == (False, True)
+    assert flags(offer("done")) == (False, True)
+    for unrun in (offer("cancelled"), offer("pooled"), offer("claimed"), {}, NO_DAEMON):
+        assert flags(unrun) == (False, False), unrun
+    assert flags({}, age=5) == (False, False)
+    went_well = A.resolve_one(net(), ev(network=offer("done", ok=True)), T0)
+    assert A.close_on_retire([net()], {"n1": went_well}) == [], "it has no window here"
+    assert A.close_on_retire([net(network=None)], {"n1": went_well}) == [net(network=None)]
 
 
 def test_a_network_run_survives_the_book_and_a_local_one_carries_no_task():

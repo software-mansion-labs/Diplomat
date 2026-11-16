@@ -688,6 +688,26 @@ def test_an_ended_offer_is_booked_to_the_machine_its_row_names(
     assert task.anthropic is counted and task.tokens == 500
 
 
+@pytest.mark.parametrize("row, concluded", [
+    (offer(state="done", executor=PEER, executorHere=False, outcome={"ok": True}), True),
+    (offer(state="done", executor=PEER, executorHere=False, outcome={"ok": False}), False),
+    (offer(state="failed", reason="the container exited 137"), False),
+    (offer(state="cancelled", reason="pool closed"), False)])
+def test_a_review_request_is_concluded_by_the_network_run_that_finished_it(
+        store, on, daemon, row, concluded):
+    daemon(state=snapshot(offers=[row]))
+    book_network_run(ledger_key=autofix.ledger_key(
+        autofix.WORK_REVIEW_REQ, "https://github.com/o/r/pull/9", "abc"))
+    asked = autofix.ReviewAttempt("2026-01-01T00:00:00Z", time.time(), 1)
+    store._save_attempts("reviewReqAttempts", {"o/r#9": asked})
+    store._network_cycle()
+    assert agentregistry.load() == []
+    kept = store._load_attempts("reviewReqAttempts")["o/r#9"]
+    assert (kept.concluded_at is not None) is concluded
+    assert dataclasses.replace(kept, concluded_at=None) == asked
+    assert lines("kill-device") == [], "a run in a container has no window here"
+
+
 def test_a_run_with_no_ledger_entry_is_priced_into_none(store, on, daemon):
     daemon(state=snapshot(offers=[daemon_row(
         state=agentstate.NET_DONE, executor=ME, outcome=spent())]))
@@ -1454,7 +1474,24 @@ def test_an_ask_is_forgotten_when_its_network_run_finishes(swept_store, on, daem
 
 
 @pytest.mark.parametrize("ended", [
-    offer("t-pr-1", "failed", reason="no machine could run it"),
+    offer("t-pr-1", "failed", reason="the container exited 137"),
+    offer("t-pr-1", "done", executor=PEER, executorHere=False, outcome={"ok": False}),
+])
+def test_an_ask_whose_offer_used_its_attempts_is_not_offered_again(
+        swept_store, on, daemon, monkeypatch, ended):
+    d = daemon(names_tasks())
+    _spawn_recorder(monkeypatch)
+    swept(swept_store, d, monkeypatch)
+    d.state = snapshot(offers=[ended, offer("t-pr-2")])
+    swept_store._settle_agents()
+    assert [r.network for r in agentregistry.load()] == ["t-pr-2"]
+    assert asks(swept_store) == [(2, "t-pr-2")], "ended, as by a run here that came to nothing"
+    for _ in range(3):
+        _poll(swept_store, monkeypatch)
+    assert [b["item"] for b in d.sent("offer")] == ["pr-1", "pr-2"]
+
+
+@pytest.mark.parametrize("ended", [
     offer("t-pr-1", "cancelled", reason="pool closed"),
     None,  # the daemon holds no such offer any more
 ])

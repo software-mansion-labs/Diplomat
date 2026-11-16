@@ -1994,8 +1994,11 @@ final class Store: ObservableObject {
         if load < autoTasksMeasured { bringPollForward(capLoad: load) }
         if autoTasksMeasured != load { autoTasksMeasured = load }
         publishNetwork(pass)
-        let failed = pass.tick.rows.filter { $0.1.state == .failed }.map { ($0.0.label, $0.1.reason) }
-        noteCommsRuns(neverRan: Dictionary(failed, uniquingKeysWith: { first, _ in first }))
+        let failed = pass.tick.rows.filter { $0.1.state == .failed && !$0.1.spent }
+            .map { ($0.0.label, $0.1.reason) }
+        let spent = pass.tick.rows.filter { $0.1.spent }.map { ($0.0.label, $0.1.reason) }
+        noteCommsRuns(neverRan: Dictionary(failed, uniquingKeysWith: { first, _ in first }),
+                      spent: Dictionary(spent, uniquingKeysWith: { first, _ in first }))
     }
 
     /// Write back what a tick learns about a run: the pid its shell has since written,
@@ -2111,7 +2114,8 @@ final class Store: ObservableObject {
         // disk) is retired again next tick: nothing below may happen to one that stays,
         // or it is logged and priced twice.
         guard bookWritten(AgentRegistry.forget(Set(gone.map(\.runID)))) else { return }
-        for r in gone where t.states[r.runID]?.state == .finished {
+        for r in gone where t.states[r.runID]?.state == .finished
+            || t.states[r.runID]?.spent == true {
             forgetOffered(r.network ?? "")
         }
         let concluded = ReviewReconcile.concluded(gone, verdicts: t.states)
@@ -3897,8 +3901,10 @@ final class Store: ObservableObject {
     ///
     /// An ask the Diplomacy Network carries (`RequestedWork.offered`) is left out for as
     /// long as the book holds the run of its offer. Once that run has left the book
-    /// without finishing - withdrawn, refused, the switch turned off - the ask is as it
-    /// was before the offer, and is offered again here.
+    /// without having run - withdrawn, unknown to the daemon, the switch turned off -
+    /// the ask is as it was before the offer, and is offered again here. One the network
+    /// gave up with its attempts used ends the ask, as a run in a terminal that came to
+    /// nothing does.
     ///
     /// Not private: the queue self-test commits a cycle directly, which is the only way
     /// to exercise the offer without a live GitHub fetch.
