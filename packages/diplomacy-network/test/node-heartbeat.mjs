@@ -7,7 +7,7 @@ import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { buildPing } from '../src/core/lease.js';
 import { backing } from '../src/core/records.js';
-import { LEASE_GRACE_SECS, LEASE_SECS, OFFER_ATTEMPTS } from '../src/paths.js';
+import { GIVE_UP_WAIT_MS, LEASE_GRACE_SECS, LEASE_SECS, OFFER_ATTEMPTS } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const HOUR = 3600;
@@ -84,8 +84,8 @@ await check('a run still going at its deadline is stopped there, and counts as a
   const row = w.offerRow(req, taskId);
   assert.deepEqual([row.state, row.reason, row.outcome.ok], ['pooled', 'not finished by its deadline', false]);
   assert.equal(w.claim(req, taskId).state, 'released');
-  await w.run(900);
-  assert.equal(exe.executor.started.length, 1, 'the host that failed at it does not take it again');
+  await w.run(GIVE_UP_WAIT_MS / 1000 - 30);
+  assert.equal(exe.executor.started.length, 1, 'the host that failed at it leaves it alone for a while');
 });
 
 await check('a run that fails, a job that vanishes and a job that cannot start are three failed attempts', async () => {
@@ -114,6 +114,88 @@ await check('a run that fails, a job that vanishes and a job that cannot start a
   await w.agreed(all);
   for (const h of all) assert.equal(w.task(h, taskId).state, 'cancelled');
   assert.deepEqual([e1, e2, e3].map((h) => h.executor.started.length), [1, 1, 0]);
+});
+
+await check('a machine alone in its pool uses the three attempts of its offer: it leaves a task it failed at alone for two minutes, then for four, takes it again when nobody else did, and the offer ends failed', async () => {
+  const w = createWorld({ seed: 57 });
+  const [solo] = await w.pool(['solo'], { solo: { slots: 1 } });
+  const { taskId } = await solo.node.offer(offerArgs('pr-1'));
+  const [began, ended] = [[], []];
+  for (let attempt = 1; attempt <= OFFER_ATTEMPTS; attempt += 1) {
+    await w.net.until(() => solo.executor.jobOf(taskId), { what: `job ${attempt}` });
+    began.push(w.net.now());
+    assert.equal(w.offerRow(solo, taskId).attempt, attempt);
+    solo.executor.end(solo.executor.jobOf(taskId).runId, { ok: false, summary: `no luck ${attempt}` });
+    ended.push(w.net.now());
+  }
+  await w.net.until(() => w.offerRow(solo, taskId).state === 'failed', { what: 'the offer failed' });
+  // A host looks at what it may take every ten seconds.
+  const waits = [began[1] - ended[0], began[2] - ended[1]];
+  assert.deepEqual(waits.map((s, i) => s >= GIVE_UP_WAIT_MS / 1000 * 2 ** i && s <= GIVE_UP_WAIT_MS / 1000 * 2 ** i + 15), [true, true], `${waits}`);
+  assert.deepEqual([GIVE_UP_WAIT_MS, w.offerRow(solo, taskId).reason, w.task(solo, taskId).state], [2 * 60 * 1000, 'no luck 3', 'cancelled']);
+  await w.run(60);
+  // The task offered again is another offer: nothing of the one before is held against it.
+  await solo.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => solo.executor.jobOf(taskId), { maxMs: 20 * 1000, what: 'a job of the offer made again' });
+  solo.executor.end(solo.executor.jobOf(taskId).runId, { ok: false });
+  const failed = w.net.now();
+  await w.net.until(() => solo.executor.jobOf(taskId), { what: 'its second job' });
+  assert.equal(Math.round((w.net.now() - failed) / 60), 2);
+});
+
+await check('a machine that gives a task back time after time leaves it alone twice as long each time, up to an hour, and the offer loses no attempt by it', async () => {
+  const w = createWorld({ seed: 68 });
+  const [solo] = await w.pool(['solo'], { solo: { slots: 1 } });
+  solo.executor.failStart = 'local';
+  const { taskId } = await solo.node.offer(offerArgs('pr-1'));
+  const at = [];
+  for (let n = 1; n <= 8; n += 1) {
+    await w.net.until(() => solo.executor.stopped.length === n, { maxMs: 2 * HOUR * 1000, stepMs: 1000, what: `the claim given back, ${n}` });
+    at.push(w.net.now());
+  }
+  assert.deepEqual(at.slice(1).map((t, i) => Math.round((t - at[i]) / 60)), [2, 4, 8, 16, 32, 60, 60]);
+  assert.deepEqual([w.offerRow(solo, taskId).state, w.offerRow(solo, taskId).attempt, solo.executor.started.length], ['pooled', 1, 0]);
+});
+
+await check('a machine that failed at a task leaves it to the others first: one with a slot takes it meanwhile, and with none in the pool to take it, it goes for it again itself', async () => {
+  for (const taker of [true, false]) {
+    const w = createWorld({ seed: 58 });
+    const [req, exe, other] = await w.pool(['req', 'exe', 'other'], { exe: { slots: 1 } });
+    const { taskId } = await req.node.offer(offerArgs('pr-1'));
+    await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+    exe.executor.end(exe.executor.jobOf(taskId).runId, { ok: false });
+    await w.net.until(() => w.offerRow(req, taskId).attempt === 2, { what: 'the attempt counted' });
+    await w.run(GIVE_UP_WAIT_MS / 1000 - 30);
+    assert.equal(w.task(req, taskId).state, 'available', 'nobody has it');
+    if (taker) {
+      other.slots = 1;
+      other.node.admit({ slots: 1 });
+    }
+    await w.net.until(() => (taker ? other : exe).executor.jobOf(taskId), { what: 'the next job' });
+    await w.run(HOUR);
+    assert.deepEqual([exe.executor.started.length, other.executor.started.length], taker ? [1, 1] : [2, 0]);
+  }
+});
+
+await check('a job that could not be started for a fault of its own machine is no attempt of the offer: the claim is given back with no report, and the machine goes for the task again after its wait', async () => {
+  const w = createWorld({ seed: 60 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  exe.executor.failStart = 'local';
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => w.claim(req, taskId)?.state === 'released', { what: 'the claim given back' });
+  const gaveBack = w.net.now();
+  await w.run(15);
+  const run = Object.values(w.stored(exe, 'runs').runs)[0];
+  assert.deepEqual([run.state, run.outcome.summary, run.end], ['stopped', 'the run could not be started: no docker', 'over']);
+  const row = w.offerRow(req, taskId);
+  assert.deepEqual([row.state, row.attempt, row.reason, row.outcome], ['pooled', 1, '', null]);
+  assert.equal(w.net.count({ from: 'exe', to: 'req', kind: 'done' }), 0);
+  exe.executor.failStart = false;
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+  assert.equal(w.net.now() - gaveBack >= GIVE_UP_WAIT_MS / 1000 - 1, true, 'not before its wait is over');
+  exe.executor.end(exe.executor.jobOf(taskId).runId);
+  await w.net.until(() => w.offerRow(req, taskId).state === 'done', { what: 'the offer done' });
+  assert.equal(w.offerRow(req, taskId).attempt, 1);
 });
 
 await check('a lease is extended for a run that is going, never for a claim whose job is gone', async () => {

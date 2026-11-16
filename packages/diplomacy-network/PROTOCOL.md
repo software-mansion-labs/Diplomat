@@ -469,8 +469,23 @@ job that sent it no report; or cancelled because its host was away for longer th
 offer lasts (section 7 for the last two). An offer that a claim stops holding without a
 report is free again. That counts as a failed attempt when the hold ran out - the lease
 lapsed, or the claim outlived the offer's hours (section 8) - and counts for nothing
-when the executor ended its claim: a run that ends without a word of this host's job
-did another host's.
+when the executor ended its claim before that: its run did another host's job, was
+stopped on its machine, or never began for a fault of that machine's own.
+
+Giving a claim back is no way to keep an offer. For 60 s after a claim let go of an
+offer before its hold ran out, the offer's host gives that offer to no claim of the same
+executor: it grants that executor's `lock` without `offer` (section 7), and the other
+members go first.
+
+An executor does not go straight back to a task either. One that failed at a task, or
+gave its claim back, leaves the task to the other members for 2 minutes, and for twice
+as long each time it does so again while the earliest open offer of the task is the
+same one, up to an hour; then it may go for the task again. A machine alone in its pool
+so makes all three attempts at its own offer, 2 and 4 minutes apart, and the offer ends
+failed; with others in the pool, one with a free slot takes the task meanwhile. A run
+its machine's operator stopped is not taken up by that machine again while that offer
+stands. These waits are the executor's own, and no other host checks them: the 60 s
+are what a host holds a member to.
 
 An executor with an outcome to report sends `done` to every host that backs its claim,
 still offers the task and has not answered - again every 30 s, until each has answered
@@ -552,8 +567,9 @@ state. A member that offers the task itself may add `offer` to it, `{ at, gen, h
 and so **backs** the claim: the offer it made at `at` (that offer's `createdAt`) is the
 claim's, for `hours` (that offer's `minRequiredH`), as the `gen`th claim the host gave
 that offer to. It backs when its offer is open and free, the claimant's `maxAcceptedH`
-is at least those hours, and what it holds of the pool is up to date ("A host that was
-away"); otherwise its grant is consent and nothing more. `gen` is the host's own count
+is at least those hours, what it holds of the pool is up to date ("A host that was
+away"), and no claim of the claimant let go of that offer within the last 60 s (section
+6); otherwise its grant is consent and nothing more. `gen` is the host's own count
 for that offer, on its disk before anyone sees it, and one higher each time it gives the
 offer away; asked again by the same round while its lock stands, it answers with the
 same number. A claimant that offers the task itself backs its own claim the same way,
@@ -807,10 +823,10 @@ Nothing in a record hides any of this.
     waits the 60 s above before it goes for the other offers of that task.
   - *The view.* A task's row is made from all its open offers: the title of the first by
     key, the earliest `createdAt`, the longest hours. Hosts go for the tasks with the
-    earliest `createdAt` first, and a host that failed at a task leaves it alone for as
-    long as that `createdAt` stays what it was. So a member that offers a task too
-    changes what others see of it, when they go for it, and whether a host that gave it
-    up tries it again.
+    earliest `createdAt` first, and a host that failed at a task leaves it alone for a
+    while only as long as that `createdAt` stays what it was (section 6). So a member
+    that offers a task too changes what others see of it, when they go for it, and how
+    soon a host that gave it up tries it again.
 - **An outcome is the executor's word.** A host ends its offer `done` on the report of
   the executor it gave the offer to. A member that takes an offer and reports `ok`
   without doing the work has finished it, and so has a member through whose key the
@@ -839,7 +855,11 @@ Nothing in a record hides any of this.
   offers it was given for one lease and its grace, 2 h 10 min, and for as long after as
   its executor answers the pings, up to each offer's hours; a job's own executor answers
   only for a job that is going, and nothing shows another host whether it is. Each lapse
-  is a failed attempt of the offer, and the third cancels it. A member invited into a
+  is a failed attempt of the offer, and the third cancels it. A member that gives its
+  claim back before the lapse costs the offer no attempt and is given the offer again
+  60 s later (section 6): where no other member goes for the task in that minute, or
+  where a second member takes it then and does the same, the offer is kept from being
+  run for as long as they keep that up, and never ends failed. A member invited into a
   pool can do this to every task in it.
 - **A member that answers and does not grant** stops every round it is asked in: a round
   needs the grant of every present member, and stands down after 180 s without one.

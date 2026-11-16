@@ -10,7 +10,8 @@ import { joinClaim, verifyGrant } from '../core/claims.js';
 import { eligible, endClaim, extendClaim, heldUntil, isActive, verifyPing } from '../core/lease.js';
 import { backing, isBytes, isObject, pingShaped, shaped } from '../core/records.js';
 import {
-  ACT_BYTES_PER_SEC, ACT_TIMEOUT_MS, CLOCK_SKEW_SECS, MAX_ACT_BODY_BYTES, PROBE_TIMEOUT_MS, RECORD_RETENTION_SECS, RETRY_MS,
+  ACT_BYTES_PER_SEC, ACT_TIMEOUT_MS, CLOCK_SKEW_SECS, GIVE_UP_WAIT_MAX_MS, GIVE_UP_WAIT_MS, MAX_ACT_BODY_BYTES, PROBE_TIMEOUT_MS,
+  RECORD_RETENTION_SECS, RETRY_MS,
 } from '../paths.js';
 import { claimKey } from './gossip.js';
 import { forgeAnswer, plain } from './offers.js';
@@ -35,7 +36,10 @@ const worded = (outcome) => wireOutcome({
 export function createRuns(host) {
   const doc = host.store.read('runs') ?? {};
   const runs = isObject(doc.runs) ? doc.runs : {}; // runId -> the run
-  const shun = isObject(doc.shun) ? doc.shun : {}; // taskId -> the createdAt of the offer this host gave up on
+  // taskId -> { offered, count, until }: the offer of it, by its createdAt, this host gave
+  // up on, how many times, and until when it leaves the task alone - null for as long as
+  // that offer stands
+  const shun = isObject(doc.shun) ? doc.shun : {};
   const held = host.keys.held; // taskId -> { runId, capability, secret, spec, host, seq }
   const preparing = new Set(); // runIds whose key is being asked for
   const wrapping = new Set(); // runIds whose end is being reported
@@ -164,7 +168,10 @@ export function createRuns(host) {
         task: { taskId, kind, item, title, identity, hours, offeredBy },
       });
     } catch (err) {
-      conclude(run, { ok: false, summary: `the run could not be started: ${err?.message ?? err}` });
+      const reason = `the run could not be started: ${err?.message ?? err}`;
+      // A fault of this machine's own, with no job run, is no attempt of the offer's.
+      if (err?.local === true) halt(run, reason, 'release');
+      else conclude(run, { ok: false, summary: reason });
       return;
     }
     if (!live(run)) {
@@ -215,10 +222,15 @@ export function createRuns(host) {
     host.poke();
   }
 
-  // A task this host failed at or gave back is left to the others for as long as the
-  // offer its claim took stands.
-  function giveUpOn(run) {
-    shun[run.taskId] = run.offered;
+  // A task this host failed at or gave back is left to the others for a while, twice as
+  // long each time under the same offer: then, nobody having taken it, it is this host's
+  // to take again - a machine alone in its pool is all the attempts its offer has. One
+  // given up `forGood` is left alone for as long as that offer stands.
+  function giveUpOn(run, forGood = false) {
+    const before = shun[run.taskId];
+    const count = before?.offered === run.offered ? before.count + 1 : 1;
+    const wait = Math.min(GIVE_UP_WAIT_MAX_MS, GIVE_UP_WAIT_MS * 2 ** (count - 1));
+    shun[run.taskId] = { offered: run.offered, count, until: forGood ? null : host.now() + wait / 1000 };
   }
 
   // Settles what an ended run owes: its outcome and the job it ran told to every host that
@@ -318,7 +330,7 @@ export function createRuns(host) {
     };
     await Promise.all(free().map(async (o) => {
       if (o.host === host.self) {
-        const gen = host.offers.nextGen(run.taskId);
+        const gen = host.offers.nextGen(run.taskId, host.self);
         if (gen !== null) join({ at: o.createdAt, gen, hours: o.hours }, host.self);
         return;
       }
@@ -426,11 +438,13 @@ export function createRuns(host) {
   }
 
   /// Stops one run and gives its claim back. `reason` is what the run's record and its
-  /// job are told; without one it is the operator who stopped it.
-  function stopRun({ runId, reason = 'stopped by the operator' }) {
+  /// job are told; without one it is the operator who stopped it, and this host does not
+  /// take the task again while the offer its claim took stands.
+  function stopRun({ runId, reason }) {
     const run = Object.hasOwn(runs, runId) ? runs[runId] : null;
     if (!run || !live(run)) throw new Error('No such run is going on this machine.');
-    halt(run, reason, 'release');
+    giveUpOn(run, reason === undefined);
+    halt(run, reason ?? 'stopped by the operator', 'release', false);
   }
 
   /// Stops every run in a pool, for `reason`, and gives its claims back at once; the keys
@@ -500,8 +514,11 @@ export function createRuns(host) {
     since: (at) => Object.values(runs).filter((run) => live(run) && run.startedAt >= at).length,
     /// Is a run of that task going or still owed its report?
     has: (taskId) => Object.values(runs).some((run) => run.taskId === taskId && run.end !== 'over'),
-    /// Did this host give up on that offer of the task?
-    shuns: (taskId, createdAt) => shun[taskId] === createdAt,
+    /// Does this host leave that offer of the task alone, having given up on it?
+    shuns(taskId, createdAt) {
+      const given = shun[taskId];
+      return given?.offered === createdAt && (given.until === null || host.now() < given.until);
+    },
     /// The runs as the snapshot lists them.
     rows: () => Object.values(runs).map(({ runId, taskId, pool, peer, container, state, startedAt, endedAt, exit, log }) => (
       { runId, taskId, pool, peer, container, state, startedAt, endedAt, exit, log })),

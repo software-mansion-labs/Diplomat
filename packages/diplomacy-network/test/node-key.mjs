@@ -10,8 +10,9 @@ import { unb64u } from '../src/core/canon.js';
 import { actMac } from '../src/core/capability.js';
 import { buildClaim } from '../src/core/claims.js';
 import { endClaim } from '../src/core/lease.js';
+import { Pool } from '../src/core/pool.js';
 import { backers } from '../src/core/records.js';
-import { LEASE_SECS } from '../src/paths.js';
+import { LEASE_SECS, RETAKE_WAIT_MS } from '../src/paths.js';
 import { authorize as realAuthorize, conclude } from '../src/requester/authorize.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
@@ -190,6 +191,56 @@ await check('a key is one claim\'s: when a later claim holds the offer and its e
     assert.deepEqual([w.offerRow(req, taskId).attempt, issued().round, issued().secret], [counted, round, k2.secret], `${next} ${round}`);
     assert.equal(said(await act(one, k1, 0)), 'denied: not this key', 'the key of the claim before is worth nothing');
     assert.equal((await act(later, k2, 1)).body.status, 200);
+  }
+});
+
+await check('a claim that lets go of an offer before its hold ran out costs the offer nothing, and its executor is not given that offer again for a minute - asked before the host has looked at its offers again or after - while another member is given it at once', async () => {
+  const [R1, R2, R3, R4] = ['AAAAAAAAAAA', 'AAAAAAAAAAE', 'AAAAAAAAAAI', 'AAAAAAAAAAM'];
+  for (const looked of [true, false]) {
+    const w = createWorld({ seed: 67 });
+    const [req] = await w.pool(['req']);
+    await w.run(1);
+    const one = await w.intruder('one', req);
+    const two = await w.intruder('two', req);
+    const { taskId } = await req.node.offer(offerArgs('pr-1'));
+    const lock = (who, round, hash = w.view(req).hash, options = {}) => w.request(who, req, 'lock', { taskId, round, asOf: w.net.now(), hash }, options);
+    const unlock = (who, round) => w.request(who, req, 'unlock', { taskId, round });
+    const first = buildClaim(one.id, { pool: POOL, taskId, round: R1, gen: 0, grants: [(await lock(one, R1)).body.grant], absent: [two.pk], now: w.net.now() });
+    assert.equal((await w.request(one, req, 'push', { records: [first] })).body.accepted.length, 1);
+    // It sits on the task for an hour, and gives it back.
+    await w.run(3600);
+    assert.equal(w.offerRow(req, taskId).state, 'claimed');
+    const now = w.net.now();
+    const released = endClaim(one.id, first, 'released', now);
+    let again;
+    if (looked) {
+      await w.request(one, req, 'push', { records: [released] });
+      again = await lock(one, R2);
+    } else {
+      // Its next lock arrives with the end of its claim: it names the state that end makes.
+      const after = new Pool({ id: POOL, self: one.pk });
+      after.merge([...w.records(req), released], now);
+      Object.assign(w.net.faults, { minMs: 10, maxMs: 10 });
+      [, again] = await w.wait(Promise.all([
+        w.request(one, req, 'push', { records: [released] }, { drive: false }),
+        lock(one, R2, after.stateHash(now), { drive: false }),
+      ]));
+    }
+    assert.deepEqual([again.ok, Object.keys(again.body), again.body.grant?.offer], [true, ['grant'], undefined], `a lock and no offer with it, ${looked}`);
+    await unlock(one, R2);
+    // Another member is given the offer at once. It gives it back too, and both wait.
+    const granted = (await lock(two, R3)).body.grant;
+    assert.equal(granted.offer.gen, 2);
+    const second = buildClaim(two.id, { pool: POOL, taskId, round: R3, gen: 0, grants: [granted], absent: [one.pk], now: w.net.now() });
+    assert.equal((await w.request(two, req, 'push', { records: [second] })).body.accepted.length, 1);
+    await w.run(RETAKE_WAIT_MS / 1000 - 5);
+    await w.request(two, req, 'push', { records: [endClaim(two.id, second, 'released', w.net.now())] });
+    assert.equal((await lock(one, R4)).body.grant.offer, undefined, `not yet, ${looked}`);
+    await w.run(6);
+    assert.equal((await lock(one, R4)).body.grant.offer.gen, 3, `the one that let go a minute ago is given it again, ${looked}`);
+    await unlock(one, R4);
+    assert.equal((await lock(two, R2)).body.grant.offer, undefined, 'and not the one that let go since');
+    assert.deepEqual([w.offerRow(req, taskId).state, w.offerRow(req, taskId).attempt, RETAKE_WAIT_MS], ['pooled', 1, 60 * 1000]);
   }
 });
 
@@ -372,7 +423,8 @@ await check('a claim made for an offer that was taken back holds nothing of the 
   const first = w.claim(req, taskId);
   assert.deepEqual([first.state, first.gen, w.task(req, taskId).state], ['held', 0, 'available'], 'the claim of the first offer is a record, and the task is free');
   w.net.heal();
-  await w.net.until(() => exe.executor.jobOf(taskId), { maxMs: 10 * 60 * 1000, what: 'a job under a claim of the second offer' });
+  // The offer it gave up on is the first: the second it goes for at once.
+  await w.net.until(() => exe.executor.jobOf(taskId), { maxMs: 90 * 1000, what: 'a job under a claim of the second offer' });
   const job = exe.executor.jobOf(taskId);
   assert.equal(job.spec.prompt, 'the second prompt');
   const second = w.claim(req, taskId);

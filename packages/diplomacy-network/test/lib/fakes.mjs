@@ -67,7 +67,7 @@ export function fakeExecutor() {
       return this.takes(task);
     },
     start(args) {
-      if (this.failStart) throw new Error('no docker');
+      if (this.failStart) throw Object.assign(new Error('no docker'), { local: this.failStart === 'local' });
       this.started.push(args);
       jobs.set(args.runId, { args, alive: true });
       return { container: `box-${args.runId}`, log: `/logs/${args.runId}.jsonl` };

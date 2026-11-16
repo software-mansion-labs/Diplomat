@@ -9,7 +9,9 @@ import { b64u, canon, unb64u } from '../core/canon.js';
 import { SeqTracker, buildCapability, capabilityExp, checkAct, checkDone, specDigest } from '../core/capability.js';
 import { buildPing, heldUntil, isActive, pingDue } from '../core/lease.js';
 import { LIMITS, backers, backing, buildTaskId, isBytes, isObject, offerRecord, parseTaskId, shaped } from '../core/records.js';
-import { CLOCK_SKEW_SECS, OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETRY_MS } from '../paths.js';
+import {
+  CLOCK_SKEW_SECS, OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETAKE_WAIT_MS, RETRY_MS,
+} from '../paths.js';
 import { claimKey, hoursOf, offerKey } from './gossip.js';
 
 const OPEN = ['pooled', 'claimed'];
@@ -212,16 +214,31 @@ export function createOffers(host) {
     return true;
   }
 
-  /// This host gives its open offer of `taskId` to a claim: how many times it has given
-  /// that offer away with this one, the number that orders the claims it backs. Null when
-  /// it has no such offer open, or will not give it: what it holds of the pool is not up
-  /// to date, or the job was done elsewhere. The count is on disk before anyone sees it.
-  function nextGen(taskId) {
+  // A claim that let go of the offer before its hold ran out cost the offer nothing. Its
+  // executor is given the offer again only after a while, so that the other members go
+  // first: no member keeps an offer to itself by taking it up and giving it back.
+  function rest(O, claim, now) {
+    const watched = O.watch;
+    if (!watched || watched.round === claim?.round || now >= watched.lapses) return;
+    O.watch = null;
+    O.rests = { ...O.rests, [watched.executor]: now + RETAKE_WAIT_MS / 1000 };
+  }
+
+  /// This host gives its open offer of `taskId` to a claim of `executor`: how many times
+  /// it has given that offer away with this one, the number that orders the claims it
+  /// backs. Null when it has no such offer open, or will not give it: what it holds of
+  /// the pool is not up to date, the job was done elsewhere, or a claim of that executor
+  /// let go of the offer a moment ago. The count is on disk before anyone sees it.
+  function nextGen(taskId, executor) {
     const O = offers[taskId];
     if (!O || !OPEN.includes(O.state)) return null;
     const P = host.pools.get(O.pool);
     host.look();
     if (P.stale !== null || finished(P, O)) return null;
+    const now = host.now();
+    // The claim may have let go since this host last looked at its offers.
+    rest(O, holder(P, O), now);
+    if (now < O.rests?.[executor]) return null;
     O.gen += 1;
     save();
     return O.gen;
@@ -380,16 +397,15 @@ export function createOffers(host) {
     const mine = P.pool.get(offerKey(taskId, host.self));
     if (!mine || now - mine.at >= RESIGN_INTERVAL_MS / 1000) publish(P, O);
 
+    rest(O, claim, now);
     const watched = O.watch;
     if (watched && watched.round !== claim?.round) {
       O.watch = null;
       const held = P.pool.get(claimKey(taskId, watched.executor));
       const same = held?.round === watched.round;
       // The hold ran out with no word of how the run ended: the lease lapsed, or the run
-      // outlived the hours this host gave it. A claim that let go of the offer before
-      // that - its executor ended it without a word of this host's job - counts for
-      // nothing: the offer is back in the pool as it was.
-      if (now >= watched.lapses && !O.reported.includes(watched.round)) {
+      // outlived the hours this host gave it.
+      if (!O.reported.includes(watched.round)) {
         const going = same && isActive(held, now);
         fail(P, O, watched.round, going ? 'not finished in the hours this machine gives it' : 'the machine running it stopped answering');
         if (!OPEN.includes(O.state)) return undefined;

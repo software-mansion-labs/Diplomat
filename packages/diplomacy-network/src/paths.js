@@ -111,6 +111,14 @@ export const RETRY_MS = num('DN_RETRY_MS', 30 * 1000);
 // How long a host leaves an offer of a task that is running to that run before it goes
 // for it: the run asks for such an offer itself, when it hears of it and every RETRY_MS.
 export const JOIN_WAIT_MS = num('DN_JOIN_WAIT_MS', 2 * RETRY_MS);
+// How long a host leaves a task it failed at or gave back to the other members, doubling
+// each time it does so under the same offer, up to the cap.
+export const GIVE_UP_WAIT_MS = num('DN_GIVE_UP_WAIT_MS', 2 * 60 * 1000);
+export const GIVE_UP_WAIT_MAX_MS = num('DN_GIVE_UP_WAIT_MAX_MS', 60 * 60 * 1000);
+// A member whose claim let go of an offer before its hold ran out is given that offer
+// again no sooner than this much later: the other members go first. Less than
+// GIVE_UP_WAIT_MS, so a host that goes for a task again by itself is not turned away.
+export const RETAKE_WAIT_MS = num('DN_RETAKE_WAIT_MS', 60 * 1000);
 // How often a host looks at everything it holds for something that came due.
 export const TICK_MS = num('DN_TICK_MS', 10 * 1000);
 // A host whose clock moved this far between two looks was not running meanwhile - the

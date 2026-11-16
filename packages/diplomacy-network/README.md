@@ -91,8 +91,8 @@ closed at every start.
 | `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left |
 | `locks.json` (0600) | the claim locks this host granted |
 | `keys.json` (0600) | live capabilities this host issued or holds |
-| `offers.json` (0600) | the tasks this host asked for: prompt, counters, outcome, and what each has used of its rules' allowances |
-| `runs.json` (0600) | the tasks this host runs or ran, and the tasks it gave up on |
+| `offers.json` (0600) | the tasks this host asked for: prompt, counters, outcome, what each has used of its rules' allowances, and which members gave it back a moment ago |
+| `runs.json` (0600) | the tasks this host runs or ran, and the tasks it gave up on: how often, and until when it leaves each alone |
 | `jobs.json` (0600) | the jobs going in this daemon's containers, for the daemon after it: the broker's port, and each job's container, proxy token, CA generation, process group, forwards and what it has spent of the model, the last no more than 5 s behind |
 | `tor/` | tor's data directory |
 | `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it. A leaf is good for 90 days, is replaced from two weeks before its end, under a running job too, and is removed once past it |
@@ -151,7 +151,7 @@ daemon is up; the transport comes up behind it, and over Tor that takes minutes.
 | `POST /invite` | `{ pool, ttlSecs? }` | `{ invite }` |
 | `POST /join` | `{ invite }` or `{ pool }` | `{ pool }` - by invite into someone's pool, or back into a pool this machine left |
 | `POST /leave` | `{ pool }` | `{ ok: true }` |
-| `POST /stop-run` | `{ runId }` | `{ ok: true }` - the run is stopped and its claim released; the task is in the pool again for another machine |
+| `POST /stop-run` | `{ runId }` | `{ ok: true }` - the run is stopped and its claim released; the task is in the pool again for another machine, and this one does not take it again while that offer stands |
 
 Every other answer is `{ error }` with a status that says whose fault it was:
 
@@ -236,8 +236,12 @@ nobody holds it, `claimed` while an executor does, `done` when an executor finis
 well, `failed` when its attempts ran out (`reason` says how the last one ended), and
 `cancelled` once withdrawn, or once this machine was away for longer than an offer
 lasts (`reason` says which). `outcome` is null until an attempt has reported one. An
-ended offer stays in the list for a day, and keeps the `executor` and `executorHere` of
-the machine that last held it - the one that reported it done, or the last to hold it
+offer gets three attempts. A machine that failed at one leaves the task to the other
+machines for two minutes, then four, and goes for it again when none took it - so a
+machine alone in its pool makes all three itself. A claim given back with no job run -
+the run was stopped, or could not start for a fault of the machine that took it - uses
+up no attempt. An ended offer stays in the list for a day, and keeps the `executor` and
+`executorHere` of the machine that last held it - the one that reported it done, or the last to hold it
 before it failed or was cancelled; `executor` is empty only when nobody ever held it.
 
 An offer may also be `done` with no report: its job was run for another machine's offer
