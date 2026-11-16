@@ -504,7 +504,7 @@ export function createGossip(host) {
     sync(P, from, body) {
       const answer = P.pool.answerSync(body, host.now());
       // A member that holds exactly what this host holds has told it what it missed:
-      // nothing. That is as good as its answer to what this host asks.
+      // nothing.
       if (answer.body && !answer.body.index) caughtUp(P, P.epoch);
       return answer;
     },
