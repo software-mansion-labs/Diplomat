@@ -3385,8 +3385,9 @@ print("ReviewAudit assertions passed")
 // On the `.mine` prompt: softApprove quotes the move names in its example comment, so on a
 // `.theirs` prompt a move deleted from the fragment is still found there.
 section("review moves + absence pass")
-let moves = ["claims vs code", "nearest twin", "non-happy paths",
-             "inputs, reachability both ways", "what outlives the call"]
+// Named AND defined: the prompt is the agent's only copy of what a move means.
+let moves = ["claims vs code (", "nearest twin (", "non-happy paths (", "inputs (",
+             "reachability both ways (", "what outlives the call ("]
 let absencePass = ["a sibling that has it", "prose that promises it", "symmetry",
                    "and the mutation"]
 for swarmDepth in ["standard", "deep", "max"] {
@@ -3403,6 +3404,18 @@ for swarmDepth in ["standard", "deep", "max"] {
 let quickPrompt = ReviewConfig(depth: "quick", me: "latekvo").buildPrompt()
 check(!quickPrompt.contains("nearest twin"), "quick depth runs no swarm and names no moves")
 check(!quickPrompt.contains("a sibling that has it"), "quick depth carries no absence pass")
+for swarmDepth in ["deep", "max"] {
+    let p = IssueConfig(depth: swarmDepth, me: "latekvo").forIssue(7).buildPrompt()
+    for move in moves {
+        check(p.contains(move), "issues \(swarmDepth) depth names and defines the '\(move)' move")
+    }
+}
+// The prompt runs on machines that have none of the operator's files.
+for name in ["review", "issues", "audit", "conflicts"] {
+    let text = try! String(contentsOf: CoreAssets.assetsDir().appendingPathComponent("\(name).json"),
+                           encoding: .utf8)
+    check(!text.contains("CLAUDE.md"), "\(name).json defers to no CLAUDE.md the agent may not have")
+}
 print("review moves + absence pass assertions passed")
 
 // ---- Whether the PR is the right change at all ----
