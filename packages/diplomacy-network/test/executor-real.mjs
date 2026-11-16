@@ -212,6 +212,11 @@ try {
   const bridgeGateway = await sh('network', 'inspect', 'bridge', '--format', '{{range .IPAM.Config}}{{.Gateway}}{{end}}');
   const lan = Object.entries(os.networkInterfaces()).flatMap(([name, list]) => list.filter((i) => i.family === 'IPv4' && !i.internal && !/^(docker|br-|veth|bridge)/.test(name)).map((i) => i.address))[0];
   assert.ok(net.isIPv4(bridgeGateway) && net.isIPv4(lan), `${bridgeGateway} ${lan}`);
+  // Neighbours on this machine's own networks: the address beside its own, in each family.
+  const neighbour = lan.replace(/\d+$/, (d) => String(Number(d) ^ 1));
+  const own6 = Object.entries(os.networkInterfaces()).flatMap(([name, list]) => list.filter((i) => i.family === 'IPv6' && !i.internal && !/^(docker|br-|veth|bridge)/.test(name)))
+    .sort((a, b) => Number(a.address.startsWith('fe80')) - Number(b.address.startsWith('fe80')))[0]?.address.replace(/%.*$/, '') ?? '';
+  const neighbour6 = own6.replace(/.$/, (c) => (c === '1' ? '2' : '1'));
   await mirrors.ensureMirror({ pool, checkout });
   // Only the mirror has this commit: a clone that ends on it was answered by the mirror.
   fs.writeFileSync(path.join(checkout, 'only-in-mirror'), 'x\n');
@@ -232,6 +237,16 @@ step hostconnect "curl -sS -o /dev/null https://host.docker.internal:${hostPort}
 step bridge "curl -sS -o /dev/null -w '%{http_code}' http://${bridgeGateway}:${hostPort}/"
 step lan "curl -sS -o /dev/null -w '%{http_code}' http://${lan}:${hostPort}/"
 step notoken "curl -sS -o /dev/null -w '%{http_code}' -x http://dn-broker:${at.port} http://example.com/"
+step neighbour "curl -sS -m 20 -o /dev/null -w '%{http_code}' http://${neighbour}:${hostPort}/"
+step mapped "curl -sS -m 20 -o /dev/null -w '%{http_code}' 'http://[::ffff:${lan}]:${hostPort}/'"
+step neighbour6 "${neighbour6 ? `curl -sS -m 20 -o /dev/null -w '%{http_code}' 'http://[${neighbour6}]:${hostPort}/'` : 'echo 403'}"
+step dotted "curl -sS -o /dev/null -w '%{http_code}' 'https://api.github.com./repos/dn-test/alpha?spelled=dot'"
+step capitals "curl -sS -o /dev/null -w '%{http_code}' 'https://API.GitHub.com/repos/dn-test/alpha?spelled=capitals'"
+step otherport "curl -sS -m 20 -o /dev/null https://api.github.com:8443/"
+step sshhost "curl -sS -m 20 -o /dev/null https://ssh.github.com/"
+step plainforge "curl -sS -o /dev/null -w '%{http_code}' http://github.com/dn-test/alpha"
+step download "curl -sS -m 60 -o /dev/null -w '%{http_code}' https://codeload.github.com/"
+step bareaddress "curl -sS -m 60 -o /dev/null -w '%{http_code}' http://1.1.1.1/"
 step reach "python3 /dn/runs/bin/reach.py ${hostPort},2375 host.docker.internal=host.docker.internal:${hostPort} docker-desktop-host=192.168.65.254:${hostPort} bridge-gateway=${bridgeGateway}:${hostPort} bridge-gateway-docker-api=${bridgeGateway}:2375 lan=${lan}:${hostPort} lan-docker-api=${lan}:2375"
 step resolv "cat /etc/resolv.conf; getent hosts dn-broker"
 step head "git rev-parse HEAD && git config user.name && git config user.email"
@@ -267,6 +282,27 @@ exit 0
     assert.equal(tools.out('lan'), '403');
     assert.ok(!hostSeen.includes('proxy'), 'nothing came through the broker');
     assert.equal(tools.out('notoken'), '407', 'and the broker itself answers nothing without a token');
+  });
+
+  await check('a neighbour on any network of this machine is refused through the broker, in either family and however the address is written', () => {
+    console.log(`INFO neighbours tried: ${neighbour}, ::ffff:${lan}, ${neighbour6 || 'none (this machine has no IPv6 address off loopback)'}`);
+    assert.equal(tools.out('neighbour'), '403');
+    assert.equal(tools.out('mapped'), '403');
+    assert.equal(tools.out('neighbour6'), '403');
+  });
+
+  await check('the forge is read under every spelling of its hosts and on 443 only; its ssh host is refused, its download host and a bare address are the internet', () => {
+    assert.equal(tools.out('dotted'), '403');
+    assert.equal(tools.out('capitals'), '403');
+    for (const spelled of ['dot', 'capitals']) assert.ok(forgeSeen.some((x) => x.line === `GET api.github.com/repos/dn-test/alpha?spelled=${spelled}`), `the requester answered the one spelled with ${spelled}`);
+    assert.match(tools.out('otherport'), /403/);
+    assert.match(tools.out('sshhost'), /403/);
+    assert.equal(tools.out('plainforge'), '403');
+    assert.ok(!forgeSeen.some((x) => /codeload|ssh\.github|:8443/.test(x.line)));
+    console.log(`INFO through the broker: codeload.github.com answered ${tools.out('download')}, http://1.1.1.1/ answered ${tools.out('bareaddress')}`);
+    assert.match(tools.out('download'), /^[2-5]\d\d$/);
+    assert.notEqual(tools.out('download'), '403', 'not the broker\'s refusal');
+    assert.match(tools.out('bareaddress'), /^[23]\d\d$/);
   });
 
   await check('ignoring the proxy leads nowhere: not to the internet by name or address, TCP or UDP, not to this machine by any of its addresses, its network or its docker API, and the container\'s resolver knows no name outside', async () => {
