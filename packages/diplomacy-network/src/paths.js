@@ -147,6 +147,9 @@ export const GIT_TIMEOUT_MS = num('DN_GIT_TIMEOUT_MS', 120 * 1000);
 // Executor side.
 export const SECURITY_BIN = process.env.DN_SECURITY || 'security';
 export const CLAUDE_BIN = process.env.DN_CLAUDE || 'claude';
+// How long `security` is given to answer for one Keychain item. On a machine with every
+// core taken it is slow to start at all.
+export const KEYCHAIN_TIMEOUT_MS = num('DN_KEYCHAIN_TIMEOUT_MS', 30 * 1000);
 // The model token the operator set aside for the network (`networkModelToken`): a
 // generic-password item under this service in the macOS login Keychain, a file elsewhere.
 export const MODEL_TOKEN_KEYCHAIN = process.env.DN_MODEL_TOKEN_KEYCHAIN || 'Diplomat-networkModelToken';
