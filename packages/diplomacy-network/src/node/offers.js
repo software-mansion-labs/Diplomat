@@ -107,7 +107,7 @@ export function createOffers(host) {
   // Signs the next version of an offer's record and tells the pool.
   function publish(P, O, state = 'open', record = signed(P, O, state)) {
     host.take(P, record);
-    host.gossip.spread(P, [offerKey(O.taskId, host.self)]);
+    host.gossip.deliver(P, [offerKey(O.taskId, host.self)]);
     save();
   }
 
@@ -429,7 +429,7 @@ export function createOffers(host) {
       const { sig: _, ...fields } = record;
       const state = O?.state === 'done' ? 'done' : 'cancelled';
       host.take(P, offerRecord(host.id, { ...fields, seq: record.seq + 1, at: Math.max(host.now(), record.at), state }));
-      host.gossip.spread(P, [offerKey(record.taskId, host.self)]);
+      host.gossip.deliver(P, [offerKey(record.taskId, host.self)]);
     }
   }
 

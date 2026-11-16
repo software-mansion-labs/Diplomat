@@ -422,7 +422,16 @@ answered its `hello`, and a lease extension, by the offering host whose ping it 
 A record learned by `push` is not pushed on, and a push that goes unanswered is not
 repeated: every 60 s a host sends `sync` to every host whose member record it holds -
 less often, down to once in 10 minutes, to one that does not answer - which carries
-each record to whoever a push missed. A host that leaves a pool signs its member record
+each record to whoever a push missed. One record does not wait for that: an offer of the
+host's own - made, signed again or ended. A member that has not said it holds it is
+pushed it again 2 s after the first push, 5 s after that and 15 s after that, beside
+whatever push to that member is still unanswered. A member has said so when it answers a
+push that carried the record, or sends a `sync` that names the very state the host
+holds. Another offer signed meanwhile starts the three waits over, and goes in the same
+push. These are requests like any other push: none is sent while the host leaves the
+member alone after a request that went unanswered, none to a member that has not
+answered the host for 3 minutes, and what is still not acknowledged after the third is
+left to the `sync`. A host that leaves a pool signs its member record
 `left`, ends its claims, cancels its offers, and pushes all of it once. The locks it
 granted bind it through their `exp` all the same, should it join again before. It
 keeps the `left` record, and the keys of the members it left, for as long as it is not a

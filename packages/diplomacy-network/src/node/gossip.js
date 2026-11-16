@@ -1,15 +1,15 @@
 // Membership and the spread of records: a host's own member record in every pool it
 // linked, joining by invite, and keeping every member's state the same as its own - a
-// push of each record it signs or lets in, and a periodic sync that repairs what a push
-// missed.
+// push of each record it signs or lets in, repeated for an offer of its own, and a
+// periodic sync that repairs what a push missed.
 
 import { LockTable } from '../core/claims.js';
 import { createInvite, inviteToken, parseInvite, verifyInvite, voucherOf } from '../core/membership.js';
 import { MAX_HELLO_CHAIN, MAX_PUSH_RECORDS, Pool } from '../core/pool.js';
 import { LIMITS, checkShape, isObject, memberRecord, shaped } from '../core/records.js';
 import {
-  CATCH_UP_MS, HOURS_CEILING, HOURS_FLOOR, INVITE_TTL_SECS, PEER_BACKOFF_MAX_MS, PRUNE_INTERVAL_MS, RESIGN_INTERVAL_MS,
-  STRANGER_BODY_BYTES, SYNC_INTERVAL_MS,
+  CATCH_UP_MS, HOURS_CEILING, HOURS_FLOOR, INVITE_TTL_SECS, PEER_BACKOFF_MAX_MS, PRUNE_INTERVAL_MS, PUSH_REPEAT_MS,
+  RESIGN_INTERVAL_MS, STRANGER_BODY_BYTES, SYNC_INTERVAL_MS,
 } from '../paths.js';
 import { poolFile } from './store.js';
 
@@ -52,6 +52,9 @@ const asResult = (answer) => (answer.error ? { ok: false, code: answer.error, de
 /// The membership and gossip of `host`.
 export function createGossip(host) {
   const outbox = new Map(); // "pool pk" -> { keys, busy }: what is still to be pushed to that member
+  // "pool pk" -> { records, tries, timer }: the records of this host's own, by key, that
+  // member has not said it holds, how often they were pushed again, and the next time
+  const owed = new Map();
   const syncing = new Set(); // "pool pk" of every sync in flight
   const snubbed = new Map(); // "pool pk" -> when a member that refused a hello is greeted again
   const told = new Map(); // "pool pk" -> when a host is next told that this one left the pool
@@ -375,8 +378,8 @@ export function createGossip(host) {
         const keys = inOrder(box.keys);
         const { records, used } = batch(P, keys);
         for (const k of keys.slice(0, used)) box.keys.delete(k);
-        // A push that goes unanswered is not repeated: the next sync carries it.
-        if (records.length > 0) await send(P, pk, 'push', { records });
+        // A push that goes unanswered is left to the next sync, but for what `deliver` repeats.
+        if (records.length > 0 && (await send(P, pk, 'push', { records })).ok) holds(P, pk, records);
       }
     } finally {
       box.busy = false;
@@ -388,6 +391,51 @@ export function createGossip(host) {
     for (const pk of others(P)) {
       if (pk !== except) post(P, pk, keys);
     }
+  }
+
+  /// Pushes records of this host's own, under `keys`, to every member, and again after
+  /// each of PUSH_REPEAT_MS to a member that has not said it holds them: a push lost on
+  /// the way is not left to the next sync.
+  function deliver(P, keys) {
+    spread(P, keys);
+    for (const pk of others(P)) {
+      const key = `${P.id} ${pk}`;
+      if (!owed.has(key)) owed.set(key, { records: new Map(), tries: 0, timer: null });
+      const due = owed.get(key);
+      for (const k of keys) due.records.set(k, P.pool.get(k));
+      due.tries = 0;
+      repeat(P, pk, due);
+    }
+  }
+
+  // The next push of what a member is owed. It goes out beside whatever push to that
+  // member is still unanswered, and like every push only to a member gossip does not
+  // leave alone; one this host has not heard for long is left to the sync.
+  function repeat(P, pk, due) {
+    host.clock.clearTimeout(due.timer);
+    due.timer = host.clock.setTimeout(() => {
+      due.tries += 1;
+      if (due.tries < PUSH_REPEAT_MS.length) repeat(P, pk, due);
+      else owed.delete(`${P.id} ${pk}`);
+      if (!open(P) || host.peers.patience(pk) === 'short') return;
+      const { records } = batch(P, [...due.records.keys()]);
+      send(P, pk, 'push', { records }).then((answer) => answer.ok && holds(P, pk, records))
+        .catch((err) => host.log(`a push failed: ${err?.stack ?? err}`));
+    }, PUSH_REPEAT_MS[due.tries]);
+  }
+
+  // A member holds `records`, or with none named all this host holds: it is owed them
+  // no more.
+  function holds(P, pk, records) {
+    const key = `${P.id} ${pk}`;
+    const due = owed.get(key);
+    if (!due) return;
+    for (const [k, record] of due.records) {
+      if (!records || records.includes(record)) due.records.delete(k);
+    }
+    if (due.records.size > 0) return;
+    host.clock.clearTimeout(due.timer);
+    owed.delete(key);
   }
 
   // Syncs every pool with every member now.
@@ -504,8 +552,11 @@ export function createGossip(host) {
     sync(P, from, body) {
       const answer = P.pool.answerSync(body, host.now());
       // A member that holds exactly what this host holds has told it what it missed:
-      // nothing.
-      if (answer.body && !answer.body.index) caughtUp(P, P.epoch);
+      // nothing. And it is owed nothing.
+      if (answer.body && !answer.body.index) {
+        caughtUp(P, P.epoch);
+        holds(P, from);
+      }
       return answer;
     },
     pull(P, from, body) {
@@ -520,7 +571,7 @@ export function createGossip(host) {
   };
 
   return {
-    link, unlink, forget, tell, noPool, farewell, invited, send, syncWith, woke, spread, start, stop, step, invite, join,
+    link, unlink, forget, tell, noPool, farewell, invited, send, syncWith, woke, spread, deliver, start, stop, step, invite, join,
     handlers,
   };
 }

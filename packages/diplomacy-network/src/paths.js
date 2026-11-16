@@ -93,6 +93,9 @@ export const RANK_DELAY_MS = num('DN_RANK_DELAY_MS', 5000);
 export const PROBE_TIMEOUT_MS = num('DN_PROBE_TIMEOUT_MS', 15 * 1000);
 export const PEER_QUIET_MS = num('DN_PEER_QUIET_MS', 3 * SYNC_INTERVAL_MS);
 export const ROUND_PATIENCE_MS = num('DN_ROUND_PATIENCE_MS', ROUND_TIMEOUT_MS / 2);
+// A host pushes an offer of its own again to a member that has not said it holds it,
+// after each of these waits in turn.
+export const PUSH_REPEAT_MS = [2000, 5000, 15000];
 // After a request to a peer goes unanswered, gossip leaves that peer alone for this long,
 // doubling per failure up to the cap.
 export const PEER_BACKOFF_MS = num('DN_PEER_BACKOFF_MS', 5000);
