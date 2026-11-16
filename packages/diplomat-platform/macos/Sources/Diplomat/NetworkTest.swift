@@ -846,6 +846,20 @@ enum NetworkTest {
         check("three runs are booked and listed",
               AgentRegistry.load().count == 3 && row(pooledTask) != nil
                 && row(claimedTask) != nil && row(doneTask) != nil)
+        // A ping that took a run's start, as Comms logs it.
+        func ping(_ n: Int, startedBy task: String) -> String {
+            let ts = "17000\(n).000100"
+            let m = CommsMessage(id: "D0ALICE:\(ts)", channelID: "D0ALICE", channelName: "U0ALICE",
+                                 isDM: true, userID: "U0ALICE", userName: "alice", teamID: "T0",
+                                 text: "review #\(n)", ts: ts, permalink: "", reasons: [.dm])
+            CommsLog.append(CommsEvent(kind: .ping, id: m.id, message: m))
+            CommsLog.append(CommsEvent(kind: .started, id: m.id, label: booked(task)?.label))
+            return m.id
+        }
+        func pinged(_ id: String) -> CommsItem? { store.commsItems.first { $0.message.id == id } }
+        let askPooled = ping(90260, startedBy: pooledTask)
+        let askDone = ping(90262, startedBy: doneTask)
+        store.refreshComms()
         // The third finishes unseen: the settle the switch takes is the one that finds it.
         script.set(snapshot(offers: [
             offerRow(pooledTask, "pooled"), offerRow(claimedTask, "claimed", executor: away),
@@ -881,6 +895,13 @@ enum NetworkTest {
                     "Auto · Review-req · #90260 - withdrawn: the Diplomacy Network was switched off",
                     "Auto · Review-req · #90261 - withdrawn: the Diplomacy Network was switched off",
                 ])
+        check("a ping whose run was withdrawn reads that it never ran, not that it finished",
+              pinged(askPooled)?.label == "Auto · Review-req · #90260"
+                && pinged(askPooled)?.outcome == Store.commsNeverStartedOutcome
+                    + " (withdrawn: the Diplomacy Network was switched off)"
+                && pinged(askPooled)?.finishedAt == nil)
+        check("…and one whose run the network had finished reads finished",
+              pinged(askDone)?.finishedAt != nil && pinged(askDone)?.outcome == nil)
         check("a run the network had finished is retired on its outcome instead",
               booked(doneTask) == nil && row(doneTask) == nil
                 && feedDetails(NetworkAudit.done).count == doneBefore + 1

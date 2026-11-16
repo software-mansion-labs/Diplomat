@@ -292,9 +292,7 @@ def pools_listing(roots: Iterable[LocalRepo], roots_read: bool, others: Iterable
         return None, HELD_ROOT
     for path in unread:
         return None, held_unread(path)
-    roots = list(roots)
-    named = {r.key for r in roots}
-    repos = roots + [r for r in others if r.key not in named]
+    repos = [*roots, *others]
     for repo in repos:
         if not identities.get(repo.host, "").strip():
             return None, held_account(repo.slug)

@@ -330,8 +330,7 @@ public enum NetworkPools {
                                identities: [String: String]) -> Listing {
         guard rootsRead else { return .held(heldRoot) }
         if let path = unread.first { return .held(held(unread: path)) }
-        let named = Set(roots.map(\.key))
-        let repos = roots + others.filter { !named.contains($0.key) }
+        let repos = roots + others
         let nameless = repos.first {
             (identities[$0.host] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         }
