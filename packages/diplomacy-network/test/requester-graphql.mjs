@@ -3,7 +3,9 @@
 
 import assert from 'node:assert/strict';
 import { checkGraphql, itemMismatch, knownMutations, parseDocument, searchConfined } from '../src/requester/graphql.js';
+import { rulesFor } from '../src/requester/rules.js';
 import { GH } from './lib/captured.mjs';
+import { SCHEMA } from './lib/forge-schema.mjs';
 import { world } from './lib/world.mjs';
 
 async function check(name, fn) {
@@ -93,7 +95,7 @@ await check('an enormous or deeply nested document is refused before it is walke
   await refused(spec(), IN(`issues { nodes { title(a: ${'['.repeat(40)}1${']'.repeat(40)}) } }`), undefined, /nested too deeply/);
   await refused(spec(), IN('id '.repeat(30000)), undefined, /too large/);
   await refused(spec(), IN('a '.repeat(25000)), undefined, /too many tokens/);
-  await refused(spec(), IN('a '.repeat(6000)), undefined, /too many fields/);
+  await refused(spec(), IN('id '.repeat(6000)), undefined, /too many fields/);
   // Thirteen fragments, each spreading the next twice, would be 2^13 fields if a fragment
   // were walked once per spread; it is walked once per context.
   const fragments = Array.from({ length: 13 }, (_, i) => `fragment F${i} on Repository { ...F${i + 1} x${i}: id ...F${i + 1} }`).join(' ');
@@ -358,6 +360,13 @@ await check('assignment may add or remove only the task\'s own account', async (
   assert.match((await assign(['bob', 'me', 'mallory'])).reason, /only add or remove/);
   assert.match((await assign([])).reason, /only add or remove/);
   assert.match((await assign('me')).reason, /not a list of logins/);
+  // A login given twice, in one case or two, is one account: it does not stand in for one left out.
+  const two = () => Object.assign(world(), { assigned: ['alice', 'Bob'] });
+  for (const logins of [['alice', 'alice', 'me'], ['alice', 'Alice', 'me'], ['alice', 'ALICE'], ['bob', 'bob'], ['alice', 'bob', 'bob', 'mallory']]) {
+    assert.match((await assign(logins, two())).reason, /only add or remove this task's own account/, logins.join());
+  }
+  for (const logins of [['BOB', 'alice', 'bob', 'ME', 'me'], ['Alice', 'bob'], ['bob', 'alice', 'alice']]) assert.equal((await assign(logins, two())).ok, true, logins.join());
+  assert.equal((await assign(['BOB', 'alice'], Object.assign(world(), { assigned: ['Alice', 'bob', 'Me'] }))).ok, true, 'removing itself');
   await refused(issues, GH.assignSelf.query, { input: { assignableId: 'I_422', actorLogins: ['bob', 'me'] } }, /belongs to #422/);
   await refused(issues, GH.assignSelf.query, { input: { assignableId: 'I_421', actorLogins: ['bob'], actorIds: ['U_x'] } }, /"actorIds" is not an input/);
   await refused(spec({ mutations: ['replaceActorsForAssignable'], item: { type: 'pr', number: 578 } }), GH.assignSelf.query, { input: { assignableId: 'PR_578', actorLogins: ['me'] } }, /is a PullRequest|no issue to assign/);
@@ -404,4 +413,181 @@ await check('GitLab queries are confined to the pool\'s project, and GitLab gets
   await refused(gitlab, 'mutation { mergeRequestAccept(input: {projectPath: "group/sub/proj", iid: "5", sha: "x"}) { errors } }', undefined, /is not allowed/);
   assert.deepEqual(knownMutations('gitlab'), []);
   assert.match((await checkGraphql({ ...gitlab, forge: 'gitea' }, { query: '{ viewer { login } }' })).reason, /unknown forge/);
+});
+
+// ---- held to the forges' published schemas (test/lib/forge-schema.mjs)
+
+const LAB = (inner) => `{ project(fullPath: "group/sub/proj") { ${inner} } }`;
+const within = { github: (inner) => IN(`pullRequest(number: 578) { ${inner} }`), gitlab: (inner) => LAB(`issue(iid: "421") { ${inner} }`) };
+const specs = { github: spec(), gitlab };
+
+await check('no field is told by argument which repository or object to read from', async () => {
+  // An issue's type is the owner's, and lists the issues of whichever repository it is given.
+  const elsewhere = 'issues(repositoryId: "R_other", first: 100) { nodes { title body comments(first: 50) { nodes { body } } } }';
+  await refused(spec(), IN(`issueType(name: "Bug") { ${elsewhere} }`), undefined, /"issues" is not a field this task may select into here/);
+  await refused(spec(), IN(`issue(number: 1) { issueType { ${elsewhere} } }`), undefined, /"issues" is not a field this task may select into here/);
+  await refused(spec(), IN('issue(number: 1) { issueType { issues(first: 5) { nodes { title } } } }'), undefined, /"issues" is not a field this task may select into here/);
+  await allowed(spec(), IN('issue(number: 1) { issueType { id name description color } }'));
+  // The argument is refused wherever it is given, however its value is spelled.
+  await refused(spec(), IN(elsewhere), undefined, /"issues" may not be given "repositoryId"/);
+  await refused(spec(), IN('issues(repositoryId: $r) { totalCount }', '($r: ID)'), {}, /may not be given "repositoryId"/);
+  await refused(spec(), IN('pullRequest(number: 578) { title(repositoryId: "R_1") }'), undefined, /"title" may not be given "repositoryId"/);
+  await refused(spec(), `${IN('...F')} fragment F on Repository { issues(repositoryId: "R_1") { totalCount } }`, undefined, /may not be given "repositoryId"/);
+  await refused(issues, 'mutation($i: AddCommentInput!) { addComment(input: $i) { subject { ... on Issue { labels(repositoryId: "R_other") { totalCount } } } } }', { i: { subjectId: 'I_421', body: 'x' } }, /may not be given "repositoryId"/);
+  await refused(spec(), IN('issue(number: 421) { timelineItems(first: 1) { nodes { ... on LabeledEvent { createdAt(repositoryId: "R_other") } } } }'), undefined, /may not be given "repositoryId"/);
+  await refused(spec(), '{ viewer { avatarUrl(repositoryId: "R_other") } }', undefined, /may not be given "repositoryId"/);
+
+  // An argument that names an object by its id is resolved like `node(id:)`: `gh pr checks` asks which checks its pull request requires.
+  const required = (value) => IN(`pullRequest(number: 578) { commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 5) { nodes { ... on CheckRun { isRequired(pullRequestId: ${value}) } } } } } } } }`, '($id: ID)');
+  let ctx = world();
+  await allowed(spec(), required('"PR_578"'), undefined, ctx);
+  await allowed(spec(), required('$id'), { id: 'PR_578' }, ctx);
+  assert.deepEqual(ctx.asked, ['PR_578', 'PR_578']);
+  await refused(spec(), required('"PR_elsewhere"'), undefined, /"isRequired\(pullRequestId:\)" is not in the pool's repository/);
+  await refused(spec(), required('$id'), { id: 'PR_elsewhere' }, /"isRequired\(pullRequestId:\)" is not in the pool's repository/);
+  await refused(spec(), required('"nothing"'), undefined, /is not an object the forge would show/);
+  await refused(spec(), required('578'), undefined, /"pullRequestId" is not a node id/);
+  await refused(spec(), required('""'), undefined, /"pullRequestId" is not a node id/);
+  await refused(spec(), required('"PR_578"'), undefined, /nothing here can resolve/, {});
+  ctx = world();
+  await allowed(spec(), required('null'), undefined, ctx);
+  await allowed(spec(), required('$id'), {}, ctx);
+  assert.deepEqual(ctx.asked, [], 'no id was given');
+  // The same id named again is one object: gh's own document asks the forge once.
+  ctx = world();
+  await allowed(spec(), GH.prChecks.query, GH.prChecks.variables, ctx);
+  assert.deepEqual(ctx.asked, ['PR_578']);
+
+  await refused(gitlab, LAB('pipeline(id: "gid://gitlab/Ci::Pipeline/314") { status }'), undefined, /"pipeline" may not be given "id"/);
+  await refused(gitlab, LAB('pipelines(ids: ["gid://gitlab/Ci::Pipeline/314"]) { nodes { status } }'), undefined, /may not be given "ids"/);
+  await refused(gitlab, LAB('labels(includeAncestorGroups: true) { nodes { title } }'), undefined, /may not be given "includeAncestorGroups"/);
+  await allowed(gitlab, LAB('pipeline(iid: "5") { status } pipelines(sha: "abc", first: 3) { nodes { status } } labels(searchTerm: "bug") { nodes { title } }'));
+
+  // Every argument the schemas give a reachable field: one that names an object by id,
+  // or a repository, an owner or a group, is refused or resolved; the rest filter and page.
+  const selects = (name, type) => (/ID$/.test(type) && type !== 'GitObjectID' && name !== 'iid') || (/Ids?$/.test(name) && type === 'String')
+    || /repository|project|group|namespace|owner/i.test(name);
+  const carriers = { github: (arg) => IN(`pullRequests(${arg}: "PR_elsewhere") { totalCount }`), gitlab: (arg) => LAB(`issues(${arg}: "gid://gitlab/Project/7") { count }`) };
+  const kept = { github: 0, gitlab: 0 };
+  for (const forge of ['github', 'gitlab']) {
+    for (const entry of SCHEMA[forge].arguments) {
+      const [name, type] = entry.split('@')[0].split(':');
+      const verdict = await ask(specs[forge], carriers[forge](name));
+      assert.equal(verdict.ok, !selects(name, type), `${forge}: ${entry}: ${verdict.reason}`);
+      if (verdict.ok) kept[forge]++;
+    }
+  }
+  assert.deepEqual(kept, { github: 61, gitlab: 105 });
+});
+
+// The member of the forge's REST answer about the repository that holds what a GraphQL
+// field of the repository holds, or that it is worked out from.
+const REST_NAME = {
+  github: {
+    id: 'node_id', databaseId: 'id', fullDatabaseId: 'id', name: 'name', nameWithOwner: 'full_name', isPrivate: 'private', visibility: 'visibility',
+    isFork: 'fork', isArchived: 'archived', isDisabled: 'disabled', isTemplate: 'is_template', url: 'html_url', resourcePath: 'html_url',
+    sshUrl: 'ssh_url', description: 'description', descriptionHTML: 'description', shortDescriptionHTML: 'description', homepageUrl: 'homepage',
+    projectsUrl: 'html_url', projectsResourcePath: 'html_url', isInOrganization: 'owner', hasIssuesEnabled: 'has_issues',
+    hasProjectsEnabled: 'has_projects', hasWikiEnabled: 'has_wiki', hasDiscussionsEnabled: 'has_discussions', createdAt: 'created_at',
+    updatedAt: 'updated_at', pushedAt: 'pushed_at', diskUsage: 'size', mergeCommitAllowed: 'allow_merge_commit',
+    squashMergeAllowed: 'allow_squash_merge', rebaseMergeAllowed: 'allow_rebase_merge',
+    tempCloneToken: 'temp_clone_token', forkCount: 'forks_count', stargazerCount: 'stargazers_count', mirrorUrl: 'mirror_url',
+    deleteBranchOnMerge: 'delete_branch_on_merge', autoMergeAllowed: 'allow_auto_merge', allowUpdateBranch: 'allow_update_branch',
+    forkingAllowed: 'allow_forking', webCommitSignoffRequired: 'web_commit_signoff_required', archivedAt: 'archived_at',
+  },
+  gitlab: {
+    id: 'id', name: 'name', nameWithNamespace: 'name_with_namespace', path: 'path', fullPath: 'path_with_namespace', description: 'description',
+    descriptionHtml: 'description', visibility: 'visibility', webUrl: 'web_url', webPath: 'web_url', sshUrlToRepo: 'ssh_url_to_repo',
+    httpUrlToRepo: 'http_url_to_repo', topics: 'topics', tagList: 'topics', archived: 'archived', createdAt: 'created_at',
+    lastActivityAt: 'last_activity_at', issuesEnabled: 'issues_enabled', mergeRequestsEnabled: 'merge_requests_enabled', jobsEnabled: 'jobs_enabled',
+    mergeRequestsFfOnlyEnabled: 'merge_method', squashReadOnly: 'squash_option', removeSourceBranchAfterMerge: 'remove_source_branch_after_merge',
+    onlyAllowMergeIfPipelineSucceeds: 'only_allow_merge_if_pipeline_succeeds',
+    onlyAllowMergeIfAllDiscussionsAreResolved: 'only_allow_merge_if_all_discussions_are_resolved',
+    serviceDeskAddress: 'service_desk_address', forksCount: 'forks_count', starCount: 'star_count', wikiEnabled: 'wiki_enabled',
+    snippetsEnabled: 'snippets_enabled', lfsEnabled: 'lfs_enabled', sharedRunnersEnabled: 'shared_runners_enabled', publicJobs: 'public_jobs',
+    requestAccessEnabled: 'request_access_enabled', containerRegistryEnabled: 'container_registry_enabled', avatarUrl: 'avatar_url',
+    openIssuesCount: 'open_issues_count', importStatus: 'import_status', updatedAt: 'updated_at', mergeCommitTemplate: 'merge_commit_template',
+    squashCommitTemplate: 'squash_commit_template', suggestionCommitMessage: 'suggestion_commit_message',
+    autocloseReferencedIssues: 'autoclose_referenced_issues', allowMergeOnSkippedPipeline: 'allow_merge_on_skipped_pipeline',
+    printingMergeRequestLinkEnabled: 'printing_merge_request_link_enabled', ciConfigPathOrDefault: 'ci_config_path',
+  },
+};
+// What `gh pr create` reads of the repository before it opens a pull request, which the REST answer leaves out.
+const GH_READS = ['viewerPermission'];
+
+await check('of the repository itself GraphQL tells what the REST answer tells, and the access level gh reads before opening a pull request', async () => {
+  const about = (forge, pool, path) => rulesFor({ forge, kind: 'investigate', pool, item: 'job-1', identity: 'me' }).find((r) => r.method === 'GET' && r.path === path).pick;
+  const picked = { github: about('github', 'github.com/o/r', '/repos/o/r'), gitlab: about('gitlab', 'gitlab.example.com/group/sub/proj', '/api/v4/projects/group%2Fsub%2Fproj') };
+  const root = { github: IN, gitlab: LAB };
+  const told = { github: [], gitlab: [] };
+  for (const forge of ['github', 'gitlab']) {
+    for (const leaf of SCHEMA[forge].repositoryLeaves) {
+      const twin = picked[forge].includes(REST_NAME[forge][leaf]) || (forge === 'github' && GH_READS.includes(leaf));
+      const verdict = await ask(specs[forge], root[forge](leaf));
+      assert.equal(verdict.ok, twin, `${forge}: ${leaf}: ${verdict.reason}`);
+      if (twin) told[forge].push(leaf);
+      else assert.match(verdict.reason, /is not among what a task is told of the repository itself/);
+    }
+  }
+  assert.deepEqual([told.github.length, told.gitlab.length], [33, 25]);
+  // The repository reached by its node id is the repository.
+  const byId = (inner) => `{ node(id: "R_1") { ... on Repository { ${inner} } } }`;
+  await allowed(spec(), byId('id name squashMergeAllowed issues(first: 1) { nodes { title } }'));
+  // An id may name anything, so what is read by one is held to the rule for what is in the repository as well.
+  for (const leaf of ['viewerPermission', 'viewerPossibleCommitEmails', 'viewerCanAdminister']) {
+    await refused(spec(), byId(`id ${leaf}`), undefined, new RegExp(`"${leaf}" tells of the account asking`));
+  }
+  for (const leaf of ['tempCloneToken', 'deleteBranchOnMerge', 'forkCount']) {
+    await refused(spec(), byId(`id ${leaf}`), undefined, new RegExp(`"${leaf}" is not among what a task is told of the repository itself`));
+    await refused(spec(), `{ node(id: "R_1") { ...F } } fragment F on Repository { ${leaf} }`, undefined, /is not among what a task is told of the repository itself/);
+    await refused(spec(), `{ node(id: "R_1") { ... on RepositoryInfo { ${leaf} } } }`, undefined, /is not among what a task is told of the repository itself/);
+  }
+  // What is read of a pull request by its id is not held to the repository's list.
+  await allowed(spec(), '{ node(id: "PR_578") { ... on PullRequest { title mergeable } } }');
+  // No list of branch protection, by any name, and nothing of a deployment, which the REST rules serve no route to.
+  for (const field of ['branchProtectionRules(first: 5) { nodes { pattern } }', 'rulesets(first: 5) { nodes { name } }', 'ruleset(databaseId: 1) { name }',
+    'refs(refPrefix: "refs/heads/", first: 1) { nodes { rules(first: 1) { nodes { type } } } }', 'ref(qualifiedName: "refs/heads/main") { refUpdateRule { requiredApprovingReviewCount } }',
+    'collaborators(first: 5) { nodes { login } }', 'deployKeys(first: 1) { nodes { key } }', 'deployments(first: 1) { nodes { payload } }',
+    'object(expression: "main") { ... on Commit { deployments(first: 1) { nodes { payload environment } } } }']) {
+    await refused(spec(), IN(field), undefined, /is not a field this task may select into here/);
+  }
+  for (const field of ['branchRules { nodes { name } }', 'pushRules { denyDeleteTag }', 'ciVariables { nodes { key value } }', 'userPermissions { pushCode adminProject }',
+    'mergeRequest(iid: "5") { userPermissions { canMerge pushToSourceBranch } }', 'issue(iid: "421") { userPermissions { adminIssue } }',
+    'pipelines { nodes { userPermissions { updatePipeline } } }']) {
+    await refused(gitlab, LAB(field), undefined, /is not a field this task may select into here/);
+  }
+});
+
+await check('inside the repository nothing is told of the account asking but which comments it wrote', async () => {
+  const kept = { github: ['viewerDidAuthor'], gitlab: [] };
+  for (const forge of ['github', 'gitlab']) {
+    for (const leaf of SCHEMA[forge].accountLeaves) {
+      const verdict = await ask(specs[forge], within[forge](leaf));
+      assert.equal(verdict.ok, kept[forge].includes(leaf), `${forge}: ${leaf}: ${verdict.reason}`);
+      if (!verdict.ok) assert.match(verdict.reason, /tells of the account asking, not of the repository/);
+    }
+  }
+  // Among an issue's events, in a payload and on an issue's type as well.
+  const about = /"viewerCanUpdate" tells of the account asking/;
+  await refused(spec(), IN('issue(number: 421) { timelineItems(first: 5) { nodes { ... on IssueComment { body viewerCanUpdate } } } }'), undefined, about);
+  await refused(spec(), IN('issue(number: 421) { issueType { name viewerCanUpdate } }'), undefined, about);
+  await refused(issues, 'mutation($i: AddCommentInput!) { addComment(input: $i) { commentEdge { node { viewerCanUpdate } } } }', { i: { subjectId: 'I_421', body: 'x' } }, about);
+  await allowed(spec(), IN('issue(number: 421) { comments(first: 5) { nodes { body viewerDidAuthor } } timelineItems(first: 5) { nodes { ... on IssueComment { viewerDidAuthor } } } }'));
+  // An account's own fields stay what they were: the viewer's name, a parent's access level.
+  await allowed(spec(), '{ viewer { login isViewer } }');
+  await allowed(spec(), IN('parent { nameWithOwner viewerPermission }'));
+});
+
+await check('what an object points at outside the repository is named and not read: an old timeline, a head branch, a group milestone', async () => {
+  // The timeline that lists a commit of another repository as an event of its own.
+  await refused(spec(), IN('issue(number: 421) { timeline(first: 5) { nodes { ... on Commit { message zipballUrl } } } }'), undefined, /"timeline" is not a field this task may select into here/);
+  await allowed(spec(), IN('issue(number: 421) { timelineItems(first: 5) { nodes { ... on ReferencedEvent { commit { oid } } } } }'));
+  // A pull request's head branch lives in the repository the pull request comes from.
+  await allowed(spec(), IN('pullRequest(number: 578) { headRef { id name } baseRef { name target { oid } } }'));
+  await refused(spec(), IN('pullRequest(number: 578) { headRef { target { ... on Commit { checkSuites(first: 1) { nodes { conclusion } } } } } }'), undefined, /"target" is not a field this task may select into here/);
+  await refused(spec(), IN('pullRequest(number: 578) { headRef { prefix } }'), undefined, /"prefix" may not be read on an object outside the pool's repository/);
+  // A GitLab milestone may be a group's.
+  await allowed(gitlab, LAB('issue(iid: "421") { milestone { title dueDate state } }'));
+  await refused(gitlab, LAB('mergeRequest(iid: "5") { milestone { title releases { nodes { name descriptionHtml } } } }'), undefined, /"releases" is not a field this task may select into here/);
+  await allowed(gitlab, LAB('releases(first: 2) { nodes { name } }'));
 });
