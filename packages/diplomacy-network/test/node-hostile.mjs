@@ -97,10 +97,12 @@ await check('records that do not hold are refused one by one, each for its reaso
   const outsider = w.stranger('outsider');
   const mine = w.records(req).find((r) => r.type === 'offer');
   const offer = (id, more = {}) => offerRecord(id, { pool: POOL, kind: 'review', item: 'pr-9', identity: 'octocat', seq: 0, at: now, title: 't', minRequiredH: 12, createdAt: now, ...more });
-  const grantOf = async (round) => (await say(w, evil, a, 'lock', { taskId, round, asOf: now, hash: before, hours: 12 })).body.grant;
+  const grantOf = async (round) => (await say(w, evil, a, 'lock', { taskId, round, asOf: now, hash: before })).body.grant;
   const granted = await grantOf(ROUND);
   assert.equal(granted.executor, evil.pk);
-  const claim = (fields) => buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, hours: 12, grants: [], absent: [], now, ...fields });
+  // A claim that says its maker offers the task itself, which no record of the pool bears out.
+  const backed = { at: now, gen: 1, hours: 12 };
+  const claim = (fields) => buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, grants: [], absent: [], now, offer: backed, ...fields });
   const forgedGrant = { ...granted, by: req.pk };
   // A record signed with `id`'s key whatever host it names.
   const resign = ({ sig: _, ...fields }, id, change) => ({ ...fields, ...change, sig: sign(id, 'dn1/rec', { ...fields, ...change }) });
@@ -112,9 +114,10 @@ await check('records that do not hold are refused one by one, each for its reaso
     ['a claim whose grant was given for another round', claim({ round: 'BBBBBBBBBBA', grants: [granted], absent: [req.pk] }), 'bad-grant'],
     ['a claim whose grant names a member that never signed it', claim({ grants: [forgedGrant, granted].sort((x, y) => (x.by < y.by ? -1 : 1)) }), 'bad-grant'],
     ['a claim with a lease longer than its hours give', resign(claim({ grants: [granted], absent: [req.pk] }), evil.id, { leaseUntil: now + 99999 }), 'bad-lease'],
-    ['a claim for more hours than its grant is for', claim({ hours: 720, grants: [granted], absent: [req.pk] }), 'bad-grant'],
-    ['a claim no host offering the task granted', claim({ grants: [granted], absent: [req.pk] }), 'no-offer'],
-    ['a claim nobody granted', claim({ absent: [req.pk, a.pk].sort() }), 'no-offer'],
+    ['a claim for more hours than the offers behind it give', resign(claim({ grants: [granted], absent: [req.pk] }), evil.id, { hours: 720, deadline: now + 720 * 3600 }), 'bad-claim'],
+    ['a claim whose grant is made to give an offer its signer did not', claim({ grants: [{ ...granted, offer: backed }], absent: [req.pk] }), 'bad-grant'],
+    ['a claim behind which no offer of the pool stands', claim({ grants: [granted], absent: [req.pk] }), 'no-offer'],
+    ['a claim that names no offer at all', (({ offer: _, ...rest }) => resign(rest, evil.id, {}))(claim({ absent: [req.pk, a.pk].sort() })), 'bad-claim'],
   ];
   for (const [what, record, code] of cases) {
     const { said, body } = await say(w, evil, req, 'push', { records: [record] });
@@ -134,18 +137,18 @@ await check('a claim made behind every member\'s back is no claim: no host takes
   await w.agreed(all);
   const now = w.net.now();
   // Nobody was asked: the claim calls every other member absent, which is its maker's word alone.
-  const claim = buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, hours: 12, grants: [], absent: [req.pk, a.pk].sort(), now });
+  const claim = buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, grants: [], absent: [req.pk, a.pk].sort(), now, offer: { at: now, gen: 1, hours: 12 } });
   for (const h of [req, a]) {
     const pushed = await say(w, evil, h, 'push', { records: [claim] });
     assert.deepEqual([pushed.body.accepted, pushed.body.refused.map((r) => r.code)], [[], ['no-offer']], h.name);
     assert.deepEqual([w.task(h, taskId).state, w.claim(h, taskId)], ['available', undefined]);
   }
-  assert.equal((await say(w, evil, req, 'key', { taskId, round: ROUND })).said, 'denied: no active claim of the task names that executor and round');
+  assert.equal((await say(w, evil, req, 'key', { taskId, round: ROUND })).said, 'denied: no claim of that executor and round holds the offer of this host');
   assert.equal(w.stored(req, 'keys')?.issued?.[taskId], undefined);
   assert.equal((await say(w, evil, req, 'act', { taskId, keyId: ROUND, seq: 0, request: { method: 'GET', path: '/x', headers: {} }, mac: ROUND })).said.split(':')[0], 'denied');
   assert.deepEqual(req.requester.calls, []);
   const outcome = { ok: true, summary: 's', microUsd: 0, tokens: 0, runner: 'r', model: 'm' };
-  for (const from of [evil, a]) assert.equal((await say(w, from, req, 'done', { taskId, round: ROUND, outcome })).said.split(':')[0], 'denied');
+  for (const from of [evil, a]) assert.equal((await say(w, from, req, 'done', { taskId, round: ROUND, spec: b64u(hash({})), outcome })).said.split(':')[0], 'denied');
   assert.equal(w.offerRow(req, taskId).state, 'pooled');
   a.slots = 1;
   a.node.admit({ slots: 1 });
@@ -164,7 +167,7 @@ await check('a claim made behind every member\'s back is no claim: no host takes
   // A lock is its holder's to give back, nobody else's.
   const second = await req.node.offer(offerArgs('pr-2'));
   await w.agreed(all);
-  const lock = (from) => say(w, from, req, 'lock', { taskId: second.taskId, round: ROUND, asOf: w.net.now(), hash: w.view(req).hash, hours: 12 });
+  const lock = (from) => say(w, from, req, 'lock', { taskId: second.taskId, round: ROUND, asOf: w.net.now(), hash: w.view(req).hash });
   assert.equal((await lock(a)).body.grant.executor, a.pk);
   assert.equal((await say(w, evil, req, 'unlock', { taskId: second.taskId, round: ROUND })).said, 'ok');
   assert.deepEqual((await lock(evil)).body, { challenge: { reason: 'locked', holder: a.pk } });

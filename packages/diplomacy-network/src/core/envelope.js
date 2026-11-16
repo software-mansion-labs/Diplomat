@@ -10,6 +10,9 @@ import { CLOCK_SKEW_SECS, MAX_ACT_BODY_BYTES, MAX_BODY_BYTES } from '../paths.js
 
 export const KINDS = ['hello', 'sync', 'pull', 'push', 'lock', 'unlock', 'ping', 'key', 'act', 'done', 'reserve'];
 export const CODES = ['effort', 'stale', 'replay', 'not-member', 'bad-request', 'denied', 'busy'];
+/// The detail of the `busy` refusal of a request dated no later than the last one its
+/// target served before it started: nothing was done for that request.
+export const UNSERVED = 'dated before this host last started: send it again';
 const MAX_DETAIL = 200;
 
 const REQUEST = {

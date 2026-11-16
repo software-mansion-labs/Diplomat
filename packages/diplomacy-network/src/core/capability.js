@@ -4,11 +4,10 @@
 // src/requester/.
 
 import crypto from 'node:crypto';
-import { b64u, canon, unb64u } from './canon.js';
+import { b64u, canon, hash, unb64u } from './canon.js';
 import { sign, validPk, verify } from './identity.js';
-import { speaksFor } from './lease.js';
+import { heldUntil, speaksFor } from './lease.js';
 import { isBytes, isObject, isTime, parseTaskId, shaped, validPool } from './records.js';
-import { LEASE_GRACE_SECS } from '../paths.js';
 
 const MAX_RULES = 128;
 const MAX_PATH = 8192;
@@ -54,9 +53,10 @@ const CAPABILITY = {
   sig: (v) => isBytes(v, 64),
 };
 
-/// When a capability for this claim expires: with the claim's lease and grace.
-export function capabilityExp(claim) {
-  return claim.leaseUntil + LEASE_GRACE_SECS;
+/// When a capability for this claim expires, issued by the host that backs it with
+/// `backed`: when the claim stops holding that host's offer.
+export function capabilityExp(claim, backed) {
+  return heldUntil(claim, backed);
 }
 
 /// A capability signed by the issuing host: `executor` may make the requests `rules`
@@ -152,8 +152,20 @@ const OUTCOME = {
   runner: text(MAX_LABEL), model: text(MAX_LABEL),
 };
 const DONE = {
-  taskId: (v) => parseTaskId(v) !== null, round: (v) => isBytes(v, 8), outcome: (v) => shaped(v, OUTCOME),
+  taskId: (v) => parseTaskId(v) !== null, round: (v) => isBytes(v, 8), spec: (v) => isBytes(v, 32),
+  outcome: (v) => shaped(v, OUTCOME),
 };
+
+/// What names the job a host hands out with a key, to the executor that ran it and to
+/// every host that offers the task: the base64url hash of the spec, or null for a spec
+/// that has no canonical form.
+export function specDigest(spec) {
+  try {
+    return b64u(hash(spec));
+  } catch {
+    return null;
+  }
+}
 
 /// The outcome of a run as a `done` request carries it: whole numbers only, the cost in
 /// millionths of a dollar, every text cut to what the request allows.
@@ -168,8 +180,9 @@ export function wireOutcome({ ok, summary, usd, tokens, runner, model } = {}) {
 
 /// An offering host's checks on the body of a `done` request from `from`, the verified
 /// sender of its envelope: the body is well-formed, and `from` speaks for the round it
-/// names by `claim`, the claim record this host holds for the task (or null). No key and
-/// no MAC is involved: an offering host that issued no key must be able to check it too.
+/// names by `claim`, the claim record this host holds of the task by that executor (or
+/// null). No key and no MAC is involved: an offering host that issued no key must be
+/// able to check it too.
 /// Answers `{ ok: true }`, or `{ ok: false, code, detail }` with `bad-request` or `denied`.
 export function checkDone(body, { claim, from, now }) {
   if (!shaped(body, DONE)) return { ok: false, code: 'bad-request', detail: 'not a done body' };

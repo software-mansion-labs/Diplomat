@@ -4,10 +4,11 @@
 
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
+import { specDigest } from '../src/core/capability.js';
 import { ClaimRound, LockTable, buildClaim } from '../src/core/claims.js';
 import { sign } from '../src/core/identity.js';
 import { endClaim } from '../src/core/lease.js';
-import { LIMITS } from '../src/core/records.js';
+import { LIMITS, backers, offerRecord } from '../src/core/records.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const ROUND = 'AAAAAAAAAAA';
@@ -16,51 +17,93 @@ const said = (answer) => (answer.ok ? 'ok' : `${answer.code}${answer.detail ? `:
 const verdict = (answer) => [answer.body.accepted, answer.body.refused.map((r) => r.code)];
 const failures = (hosts) => hosts.flatMap((h) => h.log.filter((line) => /failed|could not be served/.test(line)));
 const locksOf = (w, h) => Object.values(w.stored(h, 'locks') ?? {}).flat().map(([taskId]) => taskId);
+const claimKey = (taskId, by) => `claim/${taskId}/${by.pk}`;
+// What names the job of an offer a host made, as that host works it out.
+function jobOf(w, h, taskId) {
+  const { kind, item, title, identity, prompt, options } = w.stored(h, 'offers')[taskId];
+  return specDigest({ taskId, kind, item, title, identity, prompt, options });
+}
 
 function free(h, slots = 1) {
   h.slots = slots;
   h.node.admit({ slots });
 }
 
-await check('a claim no host offering the task granted displaces nothing: not a generation later, not released, not at the last generation', async () => {
+await check('a member that offers a task another host offers too backs a claim of its own at the last generation a record carries, and signs its offer done and cancelled: the executor the other host granted is not stopped, its key stands, and that host\'s offer ends by its own run alone', async () => {
   const w = createWorld({ seed: 91 });
   const all = await w.pool(['req', 'exe', 'by']);
   const [req, exe, by] = all;
   const evil = await w.intruder('evil', req);
   await w.net.until(() => all.every((h) => w.members(h).length === 4), { what: 'the intruder a member for everyone' });
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  const push = async (h, record) => verdict(await w.request(evil, h, 'push', { records: [record] }));
+  const lock = async (h) => (await w.request(evil, h, 'lock', { taskId, round: ROUND, asOf: w.net.now(), hash: w.view(h).hash })).body;
   free(exe);
   await w.net.until(() => exe.executor.jobOf(taskId), { what: 'the task run by an honest member' });
   await w.agreed(all);
   const held = w.claim(req, taskId);
-  assert.deepEqual([held.executor, held.grants.map((g) => g.by).includes(req.pk)], [exe.pk, true]);
+  assert.deepEqual([held.executor, backers(held)], [exe.pk, [req.pk]]);
   const now = w.net.now();
-  const forged = (fields) => buildClaim(evil.id, {
-    pool: POOL, taskId, round: ROUND, gen: held.gen + 1, hours: 12, grants: [], absent: [req.pk, exe.pk, by.pk].sort(), now, ...fields,
+  const mine = (fields) => offerRecord(evil.id, {
+    pool: POOL, kind: 'review', item: 'pr-1', identity: taskId.split('@')[1], seq: 0, at: now, title: 'Mine', minRequiredH: 720, createdAt: now, ...fields,
   });
-  const { sig: _, ...released } = { ...held, seq: held.seq + 1, at: now, state: 'released' };
-  const records = [
-    ['a claim a generation later', forged({}), 'no-offer'],
-    ['a release a generation later', endClaim(evil.id, forged({}), 'released', now), 'no-offer'],
-    ['a release at the last generation a record carries', endClaim(evil.id, forged({ gen: LIMITS.time }), 'released', now), 'no-offer'],
-    ['the standing claim, released by another hand', { ...released, sig: sign(evil.id, 'dn1/rec', released) }, 'bad-signature'],
-  ];
+  const forged = buildClaim(evil.id, {
+    pool: POOL, taskId, round: ROUND, gen: LIMITS.time, grants: [], absent: [req.pk, exe.pk, by.pk].sort(), now,
+    offer: { at: now, gen: LIMITS.time, hours: 720 },
+  });
+  const { sig: _, offer: __, ...bare } = forged;
+  const { sig: ___, ...released } = { ...held, seq: held.seq + 1, at: now, state: 'released' };
   for (const h of all) {
-    for (const [what, record, code] of records) {
-      assert.deepEqual(verdict(await w.request(evil, h, 'push', { records: [record] })), [[], [code]], `${what}, pushed to ${h.name}`);
-    }
+    // While it offers nothing, nothing backs its claim; and no lock is to be had on a task no offer of which is free.
+    assert.deepEqual(await push(h, forged), [[], ['no-offer']], h.name);
+    assert.deepEqual(await push(h, { ...bare, sig: sign(evil.id, 'dn1/rec', bare) }), [[], ['bad-claim']], 'a claim that says nobody backs it');
+    assert.deepEqual(await push(h, { ...released, sig: sign(evil.id, 'dn1/rec', released) }), [[], ['bad-signature']], 'the standing claim, released by another hand');
+    assert.deepEqual(await lock(h), { challenge: { reason: 'unavailable' } });
   }
-  assert.match(said(await w.request(evil, req, 'done', { taskId, round: held.round, outcome: OUTCOME })), /^denied/, 'nor is the outcome its to report');
+  assert.match(said(await w.request(evil, req, 'done', { taskId, round: held.round, spec: w.spec(exe, taskId), outcome: OUTCOME })), /^denied/, 'nor is the outcome its to report');
+
+  // It offers the task itself. The host whose offer is claimed consents to its claim as
+  // any member does, and gives it nothing of its own offer.
+  for (const h of all) assert.deepEqual(await push(h, mine({})), [[`offer/${taskId}/${evil.pk}`], []]);
+  for (const h of all) {
+    const { grant } = await lock(h);
+    assert.deepEqual([grant.by, grant.executor, grant.offer], [h.pk, evil.pk, undefined], h.name);
+    await w.request(evil, h, 'unlock', { taskId, round: ROUND });
+  }
+  for (const h of all) assert.deepEqual(await push(h, forged), [[claimKey(taskId, evil)], []]);
   await w.run(60);
-  for (const h of all) assert.deepEqual([w.claim(h, taskId).executor, w.claim(h, taskId).round, w.claim(h, taskId).state], [exe.pk, held.round, 'held'], h.name);
-  assert.equal(w.offerRow(req, taskId).state, 'claimed');
-  assert.ok(w.stored(req, 'keys').issued[taskId], 'the key the requester issued stands');
+  const stands = () => {
+    for (const h of all) assert.deepEqual([w.claim(h, taskId, exe).round, w.claim(h, taskId, exe).state], [held.round, 'held'], h.name);
+    const row = w.offerRow(req, taskId);
+    assert.deepEqual([row.state, row.executor, row.attempt], ['claimed', exe.pk, 1]);
+    assert.deepEqual([w.task(req, taskId).executor, w.task(exe, taskId).executorHere], [exe.pk, true], 'each host shows the claim that holds its own offer, or is its own');
+    assert.ok(w.stored(req, 'keys').issued[taskId], 'the key the requester issued stands');
+    assert.deepEqual([exe.executor.stopped, w.runOf(exe, taskId).state], [[], 'running']);
+  };
+  stands();
+
+  // It signs its own offer done, then cancelled: that ends its own offer and no other.
+  for (const [seq, state] of [[1, 'done'], [2, 'cancelled']]) {
+    for (const h of all) assert.deepEqual(await push(h, mine({ seq, at: now + seq, state })), [[`offer/${taskId}/${evil.pk}`], []]);
+    await w.run(60);
+    stands();
+    assert.deepEqual([w.task(by, taskId).state, w.task(by, taskId).offeredBy], ['claimed', [req.pk]]);
+  }
   const job = exe.executor.jobOf(taskId);
-  assert.ok(job, 'and the job runs on');
+  assert.equal(job.task.hours, 12, 'the hours of the job are those of the offer it was handed out for');
   exe.executor.end(job.runId);
   await w.net.until(() => w.offerRow(req, taskId).state === 'done', { what: 'the offer done' });
   assert.deepEqual([w.offerRow(req, taskId).outcome.summary, w.offerRow(req, taskId).attempt], ['all done', 1]);
   assert.deepEqual(failures(all), []);
+
+  // An offer of more hours than an honest host accepts, made first, keeps nobody from the
+  // other host's offer of the task.
+  const at = w.net.now();
+  const second = taskId.replace('pr-1', 'pr-2');
+  for (const h of all) await push(h, mine({ item: 'pr-2', at, createdAt: at }));
+  await req.node.offer(offerArgs('pr-2'));
+  await w.net.until(() => exe.executor.jobOf(second), { what: 'the second task run' });
+  assert.deepEqual([backers(w.claim(exe, second)), exe.executor.jobOf(second).task.hours], [[req.pk], 12]);
 });
 
 await check('a claim round that throws - before it began, on its timer, on an answer, on a state that moved - is over: its locks are given back and the task is claimed later', async () => {
@@ -128,30 +171,59 @@ await check('what fails on a timer after it had waited for something ends nothin
   ]);
 });
 
-await check('the hours of a task are its offer\'s: no host grants a lock for others, and a claim for more than it was granted is no claim', async () => {
+await check('an executor that reports the end of a job in words nothing can be made of breaks nothing: it is on record, and the run counts as ended without a word', async () => {
+  const w = createWorld({ seed: 97 });
+  const all = await w.pool(['req', 'exe']);
+  const [req, exe] = all;
+  free(exe);
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'the task run' });
+  const { runId } = exe.executor.jobOf(taskId);
+  exe.executor.end(runId, { summary: { toString() { throw new TypeError('no words'); } } });
+  assert.deepEqual(exe.log.filter((line) => line.includes('could not be taken up')).map((line) => line.split('\n')[0]), [`the end of ${runId} could not be taken up: TypeError: no words`]);
+  await w.net.until(() => w.offerRow(req, taskId).attempt === 2, { what: 'the attempt counted as failed' });
+  assert.deepEqual([w.offerRow(req, taskId).reason, w.runOf(exe, taskId).state], ['the run ended without saying how', 'failed']);
+});
+
+await check('the hours of a claim are those of the offers that back it: a host backs a claim for the hours of its own offer, gives nothing to a claimant that accepts fewer, and a claim that states other hours is no claim', async () => {
   const w = createWorld({ seed: 93 });
   const all = await w.pool(['req', 'by']);
-  const [req] = all;
+  const [req, by] = all;
   const evil = await w.intruder('evil', req);
   await w.net.until(() => all.every((h) => w.members(h).length === 3), { what: 'the intruder a member for everyone' });
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.agreed(all);
   const now = w.net.now();
-  const lock = async (to, hours, id = taskId, asOf = now) => (await w.request(evil, to, 'lock', { taskId: id, round: ROUND, asOf, hash: w.view(to).hash, hours })).body;
-  for (const h of all) assert.deepEqual(await lock(h, 720), { challenge: { reason: 'hours' } }, h.name);
-  const grants = [];
-  for (const h of all) grants.push((await lock(h, 12)).grant);
-  grants.sort((x, y) => (x.by < y.by ? -1 : 1));
-  assert.deepEqual(grants.map((g) => g.hours), [12, 12]);
-  const claim = (hours) => buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, hours, grants, absent: [], now });
+  const lock = async (to, id = taskId, asOf = now) => (await w.request(evil, to, 'lock', { taskId: id, round: ROUND, asOf, hash: w.view(to).hash })).body;
+  const granted = async (id, asOf) => {
+    const grants = [];
+    for (const h of all) grants.push((await lock(h, id, asOf)).grant);
+    return grants.sort((x, y) => (x.by < y.by ? -1 : 1));
+  };
+  assert.equal((await w.request(evil, req, 'lock', { taskId, round: ROUND, asOf: now, hash: w.view(req).hash, hours: 12 })).code, 'bad-request', 'a lock asks for no hours');
+  const grants = await granted(taskId, now);
+  const created = w.stored(req, 'offers')[taskId].createdAt;
+  assert.deepEqual(grants.map((g) => [g.by, g.offer]).sort(), [[req.pk, { at: created, gen: 1, hours: 12 }], [by.pk, undefined]].sort());
+  const claim = buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, grants, absent: [], now });
+  const { sig: _, ...fields } = { ...claim, hours: 720, deadline: claim.claimedAt + 720 * 3600 };
   for (const h of all) {
-    assert.deepEqual(verdict(await w.request(evil, h, 'push', { records: [claim(720)] })), [[], ['bad-grant']], h.name);
+    assert.deepEqual(verdict(await w.request(evil, h, 'push', { records: [{ ...fields, sig: sign(evil.id, 'dn1/rec', fields) }] })), [[], ['bad-claim']], h.name);
     assert.equal(w.task(h, taskId).state, 'available');
   }
-  // For the hours it was granted the claim holds, and its deadline is the offer's.
-  assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [claim(12)] })), [[`claim/${taskId}`], []]);
+  // For the hours it is backed for the claim holds, and its deadline is the offer's.
+  assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [claim] })), [[claimKey(taskId, evil)], []]);
   const row = w.task(req, taskId);
   assert.deepEqual([row.executor, row.deadline - row.claimedAt], [evil.pk, 12 * 3600]);
+
+  // An offer of more hours than the claimant accepts is not given to it.
+  req.settings.requiredMinimumH = 24;
+  const long = await req.node.offer(offerArgs('pr-4'));
+  req.settings.requiredMinimumH = 12;
+  await w.agreed(all);
+  const witnessed = await granted(long.taskId, w.net.now());
+  assert.deepEqual(witnessed.map((g) => g.offer), [undefined, undefined]);
+  assert.throws(() => buildClaim(evil.id, { pool: POOL, taskId: long.taskId, round: ROUND, gen: 0, grants: witnessed, absent: [], now: w.net.now() }), TypeError);
+  assert.equal(w.stored(req, 'offers')[long.taskId].gen, 0, 'and is not counted as given');
 
   // An offer nobody ever held ends with no executor.
   const idle = await req.node.offer(offerArgs('pr-2'));
@@ -160,17 +232,17 @@ await check('the hours of a task are its offer\'s: no host grants a lock for oth
   assert.deepEqual([ended.state, ended.executor, ended.executorHere], ['cancelled', '', false]);
 
   // An offer keeps the executor that reported it done, also when its host first saw the
-  // claim after the run was over.
+  // claim after the run was over - and only for the job the offer is.
   const quick = await req.node.offer(offerArgs('pr-3'));
   await w.agreed(all);
   const at = w.net.now();
-  const granted = [];
-  for (const h of all) granted.push((await lock(h, 12, quick.taskId, at)).grant);
-  granted.sort((x, y) => (x.by < y.by ? -1 : 1));
-  const made = buildClaim(evil.id, { pool: POOL, taskId: quick.taskId, round: ROUND, gen: 0, hours: 12, grants: granted, absent: [], now: at });
-  assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [endClaim(evil.id, made, 'completed', at)] })), [[`claim/${quick.taskId}`], []]);
-  assert.equal(w.offerRow(req, quick.taskId).executor, '');
-  assert.equal((await w.request(evil, req, 'done', { taskId: quick.taskId, round: ROUND, outcome: OUTCOME })).ok, true);
+  const made = buildClaim(evil.id, { pool: POOL, taskId: quick.taskId, round: ROUND, gen: 0, grants: await granted(quick.taskId, at), absent: [], now: at });
+  assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [endClaim(evil.id, made, 'completed', at)] })), [[claimKey(quick.taskId, evil)], []]);
+  await w.run(5);
+  assert.deepEqual([w.offerRow(req, quick.taskId).executor, w.offerRow(req, quick.taskId).state, w.offerRow(req, quick.taskId).attempt], ['', 'pooled', 1], 'a claim ended without a word of the job counts for nothing');
+  const done = (spec) => w.request(evil, req, 'done', { taskId: quick.taskId, round: ROUND, spec, outcome: OUTCOME });
+  assert.deepEqual([(await done(jobOf(w, req, taskId))).body, w.offerRow(req, quick.taskId).state], [{}, 'pooled'], 'the outcome of another job is heard, and no more');
+  assert.equal((await done(jobOf(w, req, quick.taskId))).ok, true);
   const over = w.offerRow(req, quick.taskId);
   assert.deepEqual([over.state, over.executor, over.executorHere], ['done', evil.pk, false]);
 });
@@ -188,18 +260,17 @@ await check('an outcome reported for an offer that was withdrawn ends no later o
   await req.node.withdraw({ taskId, reason: 'changed' });
   const again = await req.node.offer(offerArgs('pr-1'));
   assert.equal(again.taskId, taskId);
-  w.net.heal();
-  const late = await w.request(exe, req, 'done', { taskId, round: first.round, outcome: OUTCOME });
-  assert.deepEqual([late.ok, late.body], [true, {}], 'heard, and no more');
-  // The claim holds the task until its executor lets go of it; the offer made since is
-  // not done by it, and its host asks for no extension of a claim it did not grant.
-  assert.deepEqual([w.offerRow(req, taskId).state, w.offerRow(req, taskId).outcome ?? null], ['claimed', null]);
-  await w.run(first.leaseUntil - 60 - w.net.now());
-  assert.deepEqual([w.claim(req, taskId).seq, w.net.count({ from: 'req', kind: 'ping' })], [first.seq, 0]);
   const old = exe.executor.jobOf(taskId).runId;
-  exe.executor.end(old, { summary: 'the old work' });
+  assert.deepEqual([w.offerRow(req, taskId).state, w.task(req, taskId).state], ['pooled', 'available'], 'the claim of the offer before holds nothing of this one');
+  w.net.heal();
+  const late = await w.request(exe, req, 'done', { taskId, round: first.round, spec: w.spec(exe, taskId), outcome: OUTCOME });
+  assert.deepEqual([late.ok, late.body], [true, {}], 'heard, and no more');
+  assert.deepEqual([w.offerRow(req, taskId).state, w.offerRow(req, taskId).outcome ?? null], ['pooled', null]);
+  // The executor learns that its claim holds no offer: it stops that run, gives the
+  // claim back and goes for the task as it is offered.
   await w.net.until(() => exe.executor.jobOf(taskId) && exe.executor.jobOf(taskId).runId !== old, { what: 'the task claimed for the offer made since' });
-  assert.deepEqual([w.offerRow(req, taskId).state, w.offerRow(req, taskId).outcome ?? null], ['claimed', null]);
+  assert.deepEqual(exe.executor.stopped, [{ runId: old, reason: 'the offer it ran for is no longer its claim\'s' }]);
+  assert.deepEqual([w.offerRow(req, taskId).state, w.offerRow(req, taskId).outcome ?? null, w.net.count({ from: 'req', kind: 'ping' })], ['claimed', null, 0]);
   exe.executor.end(exe.executor.jobOf(taskId).runId, { summary: 'the work asked for' });
   await w.net.until(() => w.offerRow(req, taskId).state === 'done', { what: 'the offer done' });
   assert.equal(w.offerRow(req, taskId).outcome.summary, 'the work asked for');

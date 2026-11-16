@@ -17,6 +17,9 @@ import { poolFile } from './store.js';
 // under the body any sender may send, so gossip never waits its turn at a large one.
 const BATCH = 256;
 const BATCH_BYTES = STRANGER_BODY_BYTES - 4096;
+// The pages of one member's index this host asks for in a row: twice what the index of a
+// pool at its caps comes to with the longest keys.
+const MAX_INDEX_PAGES = 128;
 // Why an invite that parses lets nobody in, by `verifyInvite`'s code.
 const UNUSABLE = {
   'bad-invite': 'That invite is not signed by the machine it names: ask for a new one.',
@@ -30,8 +33,8 @@ const inOrder = (keys) => [...keys].sort((a, b) => a.startsWith('claim/') - b.st
 export const memberKey = (pk) => `member/${pk}`;
 /// The key of a host's offer of a task.
 export const offerKey = (taskId, pk) => `offer/${taskId}/${pk}`;
-/// The key of the claim of a task.
-export const claimKey = (taskId) => `claim/${taskId}`;
+/// The key of a host's claim of a task.
+export const claimKey = (taskId, pk) => `claim/${taskId}/${pk}`;
 
 /// The hours a setting stands for: a whole number inside what a record may carry.
 export function hoursOf(value) {
@@ -43,10 +46,8 @@ export function hoursOf(value) {
 // and the members it left behind, or null.
 const gone = (doc) => (isObject(doc.left) && Array.isArray(doc.leftTo) ? { left: doc.left, leftTo: doc.leftTo } : null);
 
-/// What a handler answered, as the sender of a request sees it.
-export function asResult(answer) {
-  return answer.error ? { ok: false, code: answer.error, detail: answer.detail ?? '' } : { ok: true, body: answer.body };
-}
+// What a handler answered, as the sender of a request sees it.
+const asResult = (answer) => (answer.error ? { ok: false, code: answer.error, detail: answer.detail ?? '' } : { ok: true, body: answer.body });
 
 /// The membership and gossip of `host`.
 export function createGossip(host) {
@@ -258,9 +259,24 @@ export function createGossip(host) {
       return false;
     }
     snubbed.delete(key);
-    const plan = open(P) ? P.pool.reconcile(hello.body.index, host.now()) : null;
-    if (plan) await exchange(P, pk, plan);
+    await settle(P, pk, hello.body, host.now());
     return true;
+  }
+
+  // Reconciles with a member from the first page of its index, `first`, which it
+  // answered with at `asOf`, and asks for the pages after it one by one.
+  async function settle(P, pk, first, asOf) {
+    let [page, at, after] = [first, asOf, ''];
+    for (let n = 0; n < MAX_INDEX_PAGES && open(P) && isObject(page?.index); n += 1) {
+      const more = page.more === true;
+      const plan = P.pool.reconcile(page.index, at, { after, more });
+      if (!plan) return;
+      await exchange(P, pk, plan);
+      if (!more) return;
+      [at, after] = [host.now(), Object.keys(page.index).sort().at(-1)];
+      const answer = await host.peers.ask(P.id, pk, 'sync', { asOf: at, hash: P.pool.stateHash(at), after });
+      page = answer.ok ? answer.body : null;
+    }
   }
 
   /// Sends a request to a member of a pool and answers as `peers.ask` does. A member that
@@ -285,8 +301,7 @@ export function createGossip(host) {
       }
       const asOf = host.now();
       const answer = await send(P, pk, 'sync', { asOf, hash: P.pool.stateHash(asOf) });
-      const plan = answer.ok && open(P) && isObject(answer.body.index) ? P.pool.reconcile(answer.body.index, asOf) : null;
-      if (plan) await exchange(P, pk, plan);
+      if (answer.ok) await settle(P, pk, answer.body, asOf);
     } finally {
       syncing.delete(key);
     }

@@ -4,9 +4,10 @@
 
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { b64u, canon } from '../src/core/canon.js';
+import { b64u, canon, hash } from '../src/core/canon.js';
 import {
-  SeqTracker, actMac, buildCapability, capabilityExp, checkAct, checkDone, macOf, validForgeRequest, verifyCapability, wireOutcome,
+  SeqTracker, actMac, buildCapability, capabilityExp, checkAct, checkDone, macOf, specDigest, validForgeRequest, verifyCapability,
+  wireOutcome,
 } from '../src/core/capability.js';
 import { sign } from '../src/core/identity.js';
 import { endClaim } from '../src/core/lease.js';
@@ -29,14 +30,15 @@ const capability = (over = {}) => buildCapability(host, {
   keyId: Buffer.alloc(16, 5), pool: POOL, taskId: TASK, executor: executor.pk, rules: [REVIEWS], exp: T0 + 7800, ...over,
 });
 
-check('a capability is signed by the host that issues it and expires with the lease and its grace', () => {
+check('a capability is signed by the host that issues it and expires with the lease and its grace, and no later than its host\'s hours', () => {
   const cap = capability();
   assert.deepEqual(Object.keys(cap).sort(), ['executor', 'exp', 'host', 'keyId', 'pool', 'rules', 'sig', 'taskId']);
   assert.equal(cap.host, host.pk);
   assert.deepEqual(verifyCapability(cap, { host: host.pk, executor: executor.pk, taskId: TASK }, T0), { ok: true });
   assert.deepEqual(verifyCapability(cap, {}, T0 + 7799), { ok: true });
   assert.deepEqual(verifyCapability(cap, {}, T0 + 7800), { ok: false, code: 'expired' });
-  assert.equal(capabilityExp({ leaseUntil: T0 + 7200 }), T0 + 7800);
+  assert.equal(capabilityExp({ claimedAt: T0, leaseUntil: T0 + 7200 }, { hours: 12 }), T0 + 7800);
+  assert.equal(capabilityExp({ claimedAt: T0, leaseUntil: T0 + 14 * 3600 }, { hours: 12 }), T0 + 12 * 3600 + 600, 'another host backs the claim for longer');
 });
 
 check('a capability that is changed, forged, malformed or for someone else is refused', () => {
@@ -132,7 +134,11 @@ check('an outcome is reported by the executor of the claim the offering host hol
   assert.deepEqual(wireOutcome({ summary: 'x'.repeat(5000), usd: NaN, tokens: -4, model: null }), {
     ok: false, summary: 'x'.repeat(4000), microUsd: 0, tokens: 0, runner: '', model: '',
   });
-  const done = { taskId: TASK, round: claim.round, outcome };
+  const spec = { taskId: TASK, kind: 'review', prompt: 'Review it.' };
+  const done = { taskId: TASK, round: claim.round, spec: specDigest(spec), outcome };
+  assert.equal(specDigest(spec), b64u(hash(spec)));
+  assert.equal(specDigest({ ...spec, prompt: 'Review it. ' }) === specDigest(spec), false);
+  assert.equal(specDigest({ budget: 0.5 }), null, 'a spec with no canonical form names no job');
   const lapse = claim.leaseUntil + 600;
   const verdict = (body_, over = {}) => {
     const result = checkDone(body_, { claim, from: runner, now: T0 + 5, ...over });
@@ -152,6 +158,7 @@ check('an outcome is reported by the executor of the claim the offering host hol
     assert.equal(verdict(done, { claim: ended, from: third }), 'denied: not the executor of this task');
   }
   for (const bad of [null, {}, { ...done, keyId: 'x' }, { ...done, round: 'short' }, { ...done, outcome: { ...outcome, usd: 0.5 } },
+    { ...done, spec: 'short' }, (({ spec: _, ...rest }) => rest)(done),
     { ...done, outcome: { ...outcome, microUsd: 1.5 } }, { ...done, outcome: { ...outcome, ok: 'yes' } },
     { ...done, outcome: { ...outcome, summary: 'x'.repeat(4001) } }, { ...done, outcome: (({ model: _, ...rest }) => rest)(outcome) }]) {
     assert.equal(verdict(bad), 'bad-request: not a done body');

@@ -1,11 +1,13 @@
 // Claiming a task (PROTOCOL.md section 7): the rank that settles every tie, the locks a
-// member grants, the round a claimant runs to collect them, and which of two claims for
-// one task stands.
+// member grants, the round a claimant runs to collect them, and which of two versions of
+// a claim wins.
 
 import { hash, tagged, unb64u } from './canon.js';
 import { sign, validPk, verify } from './identity.js';
 import { leaseAt, verifyLease } from './lease.js';
-import { grantShaped, isAscending, isBytes, isHours, isObject, isTime, parseTaskId, shaped, signRecord } from './records.js';
+import {
+  LIMITS, backers, backing, grantShaped, isAscending, isBytes, isObject, isTime, parseTaskId, shaped, signRecord,
+} from './records.js';
 import { CLOCK_SKEW_SECS, GRANT_TTL_SECS, ROUND_TIMEOUT_MS } from '../paths.js';
 
 /// `rank(taskId, executor)`: 32 bytes every host computes alike. Lower wins.
@@ -23,10 +25,12 @@ export function rankDelay(taskId, executor, max) {
   return Math.floor((rank(taskId, executor).readUInt32BE(0) / 2 ** 32) * max);
 }
 
-/// A member's signed consent to `executor` claiming `taskId` in `round`, as generation
-/// `gen`, for `hours`, on the state `hash`, until `exp`.
-export function buildGrant(identity, { pool, taskId, executor, round, gen, hours, hash: stateHash, exp }) {
-  const grant = { pool, taskId, executor, round, gen, hours, hash: stateHash, by: identity.pk, exp };
+/// A member's signed consent to `executor` claiming `taskId` in `round`, on the state
+/// `hash`, until `exp`. With `offer` - `{ at, gen, hours }` - the member backs the claim:
+/// the offer of the task it made at `at` is the claim's, as the `gen`th it gave that
+/// offer to, for `hours`.
+export function buildGrant(identity, { pool, taskId, executor, round, hash: stateHash, exp, offer }) {
+  const grant = { pool, taskId, executor, round, hash: stateHash, by: identity.pk, exp, ...(offer ? { offer } : {}) };
   return { ...grant, sig: sign(identity, 'dn1/grant', grant) };
 }
 
@@ -36,86 +40,106 @@ export function verifyGrant(grant, expect) {
     && verify(grant.by, 'dn1/grant', grant);
 }
 
-/// A committed claim: the executor's signed record of a round every present member granted.
-export function buildClaim(identity, { pool, taskId, round, gen, hours, grants, absent, now }) {
-  return signRecord(identity, {
-    type: 'claim', pool, taskId, executor: identity.pk, round, gen, seq: 0, state: 'held', at: now,
-    claimedAt: now, ...leaseAt(now, hours, 0), hours, grants, absent,
-  });
+// The hours of a claim: the longest any host backs it for.
+const hoursOf = (claim) => Math.max(...backers(claim).map((pk) => backing(claim, pk).hours));
+
+/// A committed claim: the executor's signed record of a round every present member
+/// granted, as the `gen`th claim of the task this executor made. `offer`, when given, is
+/// what the executor backs it with as a host that offers the task itself.
+export function buildClaim(identity, { pool, taskId, round, gen, grants, absent, offer, now }) {
+  const fields = {
+    type: 'claim', pool, taskId, executor: identity.pk, round, gen, seq: 0, state: 'held', at: now, claimedAt: now,
+    grants, absent, ...(offer ? { offer } : {}),
+  };
+  const hours = hoursOf(fields);
+  return signRecord(identity, { ...fields, ...leaseAt(now, hours, 0), hours });
+}
+
+/// The held claim with one more host backing it - a member, by the `grant` it gave for
+/// the claim's round, or the executor, by the `offer` it backs it with: the same version
+/// of the claim, and its hours the longest any host now backs it for.
+export function joinClaim(identity, claim, { grant, offer }) {
+  const { sig: _, ...fields } = claim;
+  const next = grant ? {
+    ...fields,
+    grants: [...claim.grants.filter((g) => g.by !== grant.by), grant].sort((a, b) => (a.by < b.by ? -1 : 1)),
+    absent: claim.absent.filter((pk) => pk !== grant.by),
+  } : { ...fields, offer };
+  const hours = hoursOf(next);
+  return signRecord(identity, { ...next, hours, ...leaseAt(claim.claimedAt, hours, claim.seq) });
 }
 
 /// Null when a well-shaped claim holds for every host alike: its grants are from distinct
 /// members other than the executor and the absent, each signed, bound to this task,
-/// executor, round, generation and hours, all for one state hash, and live when the
-/// claim was made; and its lease is the one its times dictate. Otherwise `bad-claim`,
-/// `bad-grant`, `bad-lease` or `bad-ping`. Whether a host offering the task stands behind
-/// it is the pool's to say.
+/// executor and round, and given before the claim was made or after; a host backs it,
+/// and its hours are the longest any does for; and its lease is the one its times
+/// dictate. Otherwise `bad-claim`, `bad-grant`, `bad-lease` or `bad-ping`. Whether a host
+/// that backs it offers the task is the pool's to say.
 export function verifyClaim(claim) {
   const signers = claim.grants.map((g) => g.by);
   if (!isAscending(signers, validPk)) return 'bad-claim';
   const outside = [claim.executor, ...signers];
   if (signers.includes(claim.executor) || claim.absent.some((pk) => outside.includes(pk))) return 'bad-claim';
-  const bound = {
-    pool: claim.pool, taskId: claim.taskId, executor: claim.executor, round: claim.round, gen: claim.gen, hours: claim.hours,
-  };
+  if (claim.hours !== hoursOf(claim)) return 'bad-claim';
+  const bound = { pool: claim.pool, taskId: claim.taskId, executor: claim.executor, round: claim.round };
   for (const grant of claim.grants) {
-    if (grant.hash !== claim.grants[0].hash || grant.exp !== claim.grants[0].exp) return 'bad-grant';
-    if (claim.claimedAt > grant.exp || claim.claimedAt < grant.exp - GRANT_TTL_SECS) return 'bad-grant';
-    if (!verifyGrant(grant, bound)) return 'bad-grant';
+    if (claim.claimedAt > grant.exp || !verifyGrant(grant, bound)) return 'bad-grant';
   }
   return verifyLease(claim);
 }
 
-/// What orders a claim among the claims for its task: `[gen, executor, round, seq]`.
+/// What orders a claim among the versions of its key: `[gen, round, seq, backers]`, the
+/// last being how many hosts back it.
 export function claimPrecedence(claim) {
-  return [claim.gen, claim.executor, claim.round, claim.seq];
+  return [claim.gen, claim.round, claim.seq, backers(claim).length];
 }
 
 /// Is this shaped like a claim's precedence?
 export function precedenceShaped(p) {
-  return Array.isArray(p) && p.length === 4 && isTime(p[0]) && validPk(p[1]) && isBytes(p[2], 8) && isTime(p[3]);
+  return Array.isArray(p) && p.length === 4 && isTime(p[0]) && isBytes(p[1], 8) && isTime(p[2])
+    && Number.isSafeInteger(p[3]) && p[3] >= 0 && p[3] <= LIMITS.list + 1;
 }
 
-/// Which of two claims for `taskId` stands, each given as its precedence and its
-/// base64url record hash: negative when the first does, positive when the second does,
-/// zero for the same record. The later generation stands; within a generation the
-/// better-ranked executor; for one executor the lower round, then the higher `seq`, then
-/// the lower hash. Every pair is ordered, and the order is transitive.
-export function compareClaims(taskId, [genA, executorA, roundA, seqA], hashA, [genB, executorB, roundB, seqB], hashB) {
+/// Which of two versions of one executor's claim of one task wins, each given as its
+/// precedence and its base64url record hash: negative when the first does, positive when
+/// the second does, zero for the same record. The later `gen` wins; then the lower
+/// round, the higher `seq`, the more backers, the lower hash. Every pair is ordered, and
+/// the order is transitive.
+export function compareClaims([genA, roundA, seqA, backersA], hashA, [genB, roundB, seqB, backersB], hashB) {
   if (genA !== genB) return genB - genA;
-  if (executorA !== executorB) return Buffer.compare(rank(taskId, executorA), rank(taskId, executorB));
   if (roundA !== roundB) return roundA < roundB ? -1 : 1;
   if (seqA !== seqB) return seqB - seqA;
+  if (backersA !== backersB) return backersB - backersA;
   return Buffer.compare(unb64u(hashA), unb64u(hashB));
 }
 
-/// The host a claim's executor asks for the key: the lowest key among the hosts
-/// `offering` the task that granted the claim, the executor itself counted when it offers
-/// it. Null when none of them offers it.
-export function keyHost(claim, offering) {
-  const party = [claim.executor, ...claim.grants.map((g) => g.by)];
-  return offering.filter((pk) => party.includes(pk)).sort()[0] ?? null;
+/// Which of two claims holds the offer of `host`, which backs both: negative when `a`
+/// does, positive when `b` does. The one the host gave its offer to later - the higher
+/// `gen` of its backing - and, between two it gave the same, the better-ranked executor.
+export function compareBacked(host, a, b) {
+  const [genA, genB] = [backing(a, host).gen, backing(b, host).gen];
+  return genA !== genB ? genB - genA : Buffer.compare(rank(a.taskId, a.executor), rank(b.taskId, b.executor));
 }
 
 const LOCK = {
   taskId: (v) => parseTaskId(v) !== null, round: (v) => isBytes(v, 8), asOf: isTime, hash: (v) => isBytes(v, 32),
-  hours: isHours,
 };
 const UNLOCK = { taskId: LOCK.taskId, round: LOCK.round };
 
 /// The locks one member holds in one pool: at most one executor per task, each until its
 /// grant expires, the executor unlocks, or the claim is committed. A host's own claim
 /// round holds its task here too, until the round's deadline, which is how it refuses a
-/// rival's lock.
+/// rival's lock. A lock whose grant backs the claim keeps what it backs it with, `at` and
+/// `gen`: asked again in the same round, the member gives its offer the same time over.
 export class LockTable {
-  #locks = new Map(); // taskId -> { executor, round, exp }
+  #locks = new Map(); // taskId -> { executor, round, exp, at?, gen? }
 
   /// A table holding `entries`, as `entries()` returned them.
   constructor(entries = []) {
     for (const [taskId, lock] of entries) this.#locks.set(taskId, { ...lock });
   }
 
-  /// `[taskId, { executor, round, exp }]` for every lock held, to store or restore.
+  /// `[taskId, lock]` for every lock held, to store or restore.
   entries() {
     return [...this.#locks].map(([taskId, lock]) => [taskId, { ...lock }]);
   }
@@ -156,26 +180,30 @@ export class LockTable {
   /// A member's answer to a `lock` request from `from`: `{ body }` holding `{ grant }`,
   /// `{ challenge: { reason, holder? } }` or `{ stale: true }`, or `{ error }` with
   /// `bad-request`, `stale` (an `asOf` too far from `now`) or `not-member`. `pool` is the
-  /// member's own Pool and `identity` signs the grant, for the hours the task has in that
-  /// pool and no others.
-  answer({ pool, identity, from, body, now }) {
+  /// member's own Pool and `identity` signs the grant. The grant backs the claim when the
+  /// member offers the task itself, no claim holds that offer, and the claimant accepts
+  /// its hours: `nextGen(at)` then answers how many times the member gave the offer it
+  /// made at `at` away before, or null when it will not give it.
+  answer({ pool, identity, from, body, now, nextGen }) {
     if (!shaped(body, LOCK) || parseTaskId(body.taskId).pool !== pool.id) return { error: 'bad-request' };
     if (Math.abs(body.asOf - now) > CLOCK_SKEW_SECS) return { error: 'stale' };
     const claimant = pool.member(from, now);
     if (!claimant) return { error: 'not-member' };
     if (pool.stateHash(body.asOf) !== body.hash) return { body: { stale: true } };
     const task = pool.task(body.taskId, now);
-    const gen = pool.nextGen(body.taskId, body.asOf);
-    // A claim record at the last generation a record can carry leaves none to grant.
-    const open = task?.state === 'available' && pool.claimSettled(body.taskId, body.asOf) && isTime(gen);
-    if (!open) return { body: { challenge: { reason: 'unavailable' } } };
-    if (claimant.maxAcceptedH < task.hours || body.hours !== task.hours) return { body: { challenge: { reason: 'hours' } } };
+    if (!task || task.free.length === 0) return { body: { challenge: { reason: 'unavailable' } } };
     const exp = body.asOf + GRANT_TTL_SECS;
+    const before = this.holder(body.taskId, now);
     if (!this.hold(body.taskId, from, body.round, exp, now)) {
-      return { body: { challenge: { reason: 'locked', holder: this.#locks.get(body.taskId).executor } } };
+      return { body: { challenge: { reason: 'locked', holder: before.executor } } };
     }
+    const mine = task.offers.find((o) => o.host === identity.pk);
+    const again = before?.round === body.round && before.at === mine?.createdAt ? before.gen : undefined;
+    const gen = mine && !mine.claim && claimant.maxAcceptedH >= mine.hours ? again ?? nextGen(mine.createdAt) : null;
+    if (gen !== null) Object.assign(this.#locks.get(body.taskId), { at: mine.createdAt, gen });
     const grant = buildGrant(identity, {
-      pool: pool.id, taskId: body.taskId, executor: from, round: body.round, gen, hours: task.hours, hash: body.hash, exp,
+      pool: pool.id, taskId: body.taskId, executor: from, round: body.round, hash: body.hash, exp,
+      ...(gen === null ? {} : { offer: { at: mine.createdAt, gen, hours: mine.hours } }),
     });
     return { body: { grant } };
   }
@@ -190,7 +218,7 @@ export class LockTable {
 }
 
 const CHALLENGE = {
-  reason: (v) => ['unavailable', 'hours', 'locked'].includes(v),
+  reason: (v) => ['unavailable', 'locked'].includes(v),
 };
 
 /// One attempt by `self` to claim a task, as a state machine. It does nothing by itself:
@@ -202,8 +230,9 @@ const CHALLENGE = {
 /// - `{ do: 'resync', with }` - reconcile records with that member (`with` null: with
 ///   nobody, the grants are simply too old), then `rebase` on a fresh snapshot.
 /// - `{ do: 'unlock', to, body }` - send it; the answer does not matter.
-/// - `{ do: 'commit', gen, hours, grants, absent }` - sign the claim with `buildClaim` at
-///   the same `now` and push it. The round is over.
+/// - `{ do: 'commit', gen, grants, absent, own }` - sign the claim with `buildClaim` at the
+///   same `now` and push it; `own` is `{ at, hours }` of the claimant's own offer of the
+///   task when the claim takes it too, else null. The round is over.
 /// - `{ do: 'stand-down', reason }` - the round is over without a claim: `unavailable`,
 ///   `hours`, `outranked`, `no-requester` or `timeout`.
 ///
@@ -285,10 +314,14 @@ export class ClaimRound {
     if (!m || wave !== this.wave || !m.asked) return [];
     const s = this.#snapshot;
     if (shaped(body, { grant: grantShaped })) {
-      const fine = verifyGrant(body.grant, {
-        pool: s.pool, taskId: this.taskId, executor: this.self, round: this.round, gen: s.gen, hours: s.hours,
-        hash: s.hash, by: from, exp: s.asOf + GRANT_TTL_SECS,
-      });
+      const { offer } = body.grant;
+      const asked = s.backers[from];
+      // A member backs the claim with the offer the claimant saw it hold, or not at all.
+      const fine = (!offer || (asked !== undefined && offer.at === asked.at && offer.hours === asked.hours))
+        && verifyGrant(body.grant, {
+          pool: s.pool, taskId: this.taskId, executor: this.self, round: this.round, hash: s.hash, by: from,
+          exp: s.asOf + GRANT_TTL_SECS,
+        });
       if (!fine) return [this.#lock(from, true)];
       m.grant = body.grant;
       return this.#advance(now);
@@ -366,8 +399,8 @@ export class ClaimRound {
     const m = this.#members.get(to);
     m.asked = true;
     m.locked = true;
-    const { asOf, hash: stateHash, hours } = this.#snapshot;
-    const body = { taskId: this.taskId, round: this.round, asOf, hash: stateHash, hours };
+    const { asOf, hash: stateHash } = this.#snapshot;
+    const body = { taskId: this.taskId, round: this.round, asOf, hash: stateHash };
     return { do: 'lock', to, wave: this.wave, body, ...(retry ? { retry } : {}) };
   }
 
@@ -386,10 +419,10 @@ export class ClaimRound {
     if (now >= this.deadline) return this.#standDown('timeout');
     if (this.#tooOld(now)) return this.#restate();
     const grants = members.filter(([, m]) => m.grant).map(([, m]) => m.grant).sort((a, b) => (a.by < b.by ? -1 : 1));
-    const party = [this.self, ...grants.map((g) => g.by)];
-    if (!this.#snapshot.offering.some((pk) => party.includes(pk))) return this.#standDown('no-requester');
+    const { gen, own } = this.#snapshot;
+    if (!own && !grants.some((g) => g.offer)) return this.#standDown('no-requester');
     this.phase = 'committed';
-    return [{ do: 'commit', gen: this.#snapshot.gen, hours: this.#snapshot.hours, grants, absent: this.absent }];
+    return [{ do: 'commit', gen, grants, absent: this.absent, own }];
   }
 
   #standDown(reason) {

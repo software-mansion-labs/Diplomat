@@ -108,10 +108,13 @@ export function createNode({
   /// A pool's records changed: the store, the locks and the rounds that rest on them follow.
   host.moved = (P) => {
     P.seq = Math.max(P.seq, P.pool.get(`member/${host.self}`)?.seq ?? -1);
-    // A lock was granted for a claim to be made; once the claim is held it has done its work.
-    for (const [taskId] of P.locks.entries()) {
-      const claim = P.pool.get(claimKey(taskId));
-      if (claim) P.locks.release(taskId, claim.executor, claim.round);
+    // A lock was granted for a claim to carry the grant; once the claim held does, it
+    // has done its work.
+    for (const [taskId, lock] of P.locks.entries()) {
+      const claim = P.pool.get(claimKey(taskId, lock.executor));
+      if (claim?.round === lock.round && claim.grants.some((grant) => grant.by === host.self)) {
+        P.locks.release(taskId, lock.executor, lock.round);
+      }
     }
     host.save(P);
     host.saveLocks();
@@ -138,9 +141,10 @@ export function createNode({
   const handlers = {
     ...host.gossip.handlers, ...host.offers.handlers, ...host.runs.handlers, ...inbound.handlers,
     lock(P, from, body) {
-      const answer = P.locks.answer({ pool: P.pool, identity: id, from, body, now: host.now() });
+      const answer = P.locks.answer({
+        pool: P.pool, identity: id, from, body, now: host.now(), nextGen: (at) => host.offers.nextGen(body.taskId, at),
+      });
       host.saveLocks();
-      if (answer.body?.grant) host.offers.granted(body.taskId, body.round);
       return answer;
     },
     unlock(P, from, body) {
@@ -208,12 +212,18 @@ export function createNode({
         ...(m.pk === host.self
           ? { lastSeen: now, reachable: transport.state().state === 'ready', skew: false } : host.peers.seen(m.pk)),
       })),
-      tasks: P.pool.tasks(now).map((t) => ({
-        taskId: t.taskId, kind: t.kind, item: t.item, title: t.title, identity: t.identity, hours: t.hours, state: t.state,
-        blocked: blocked(t), offeredBy: t.offeredBy, offeredHere: t.offeredBy.includes(host.self),
-        executor: t.claim?.executor ?? '', executorHere: t.claim?.executor === host.self, claimedAt: t.claim?.claimedAt ?? 0,
-        leaseUntil: t.claim?.leaseUntil ?? 0, deadline: t.claim?.deadline ?? 0,
-      })),
+      tasks: P.pool.tasks(now).map((t) => {
+        // One row a task: where several claims hold offers of it, this host's own is the
+        // one shown, else the one that holds this host's offer, else the one that holds the most.
+        const claim = t.offers.find((o) => o.claim?.executor === host.self)?.claim
+          ?? t.offers.find((o) => o.host === host.self)?.claim ?? t.claim;
+        return {
+          taskId: t.taskId, kind: t.kind, item: t.item, title: t.title, identity: t.identity, hours: t.hours, state: t.state,
+          blocked: blocked(t), offeredBy: t.offeredBy, offeredHere: t.offeredBy.includes(host.self),
+          executor: claim?.executor ?? '', executorHere: claim?.executor === host.self, claimedAt: claim?.claimedAt ?? 0,
+          leaseUntil: claim?.leaseUntil ?? 0, deadline: claim?.deadline ?? 0,
+        };
+      }),
     };
   }
 

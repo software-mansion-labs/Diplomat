@@ -65,15 +65,22 @@ export function offer(id, over = {}) {
   });
 }
 
+// How many times a host gave an offer away: the count its next backing carries.
+function counter() {
+  let n = 0;
+  return () => (n += 1);
+}
+
 /// `n` hosts sharing the test pool: host 0 started it and invited every other. Each is
-/// `{ id, pool, locks }` and already holds every member record.
+/// `{ id, pool, locks, nextGen }` and already holds every member record; `nextGen` is
+/// what the host hands `LockTable.answer`.
 export function club(n, now = T0, over = () => ({})) {
   const ids = Array.from({ length: n }, (_, i) => ident(i));
   const members = ids.map((id, i) => member(id, { ...(i === 0 ? {} : { voucher: invite(ids[0], { n: i }) }), ...over(i) }));
   return ids.map((id) => {
     const pool = new Pool({ id: POOL, self: id.pk });
     pool.merge(members, now);
-    return { id, pool, locks: new LockTable() };
+    return { id, pool, locks: new LockTable(), nextGen: counter() };
   });
 }
 
@@ -97,12 +104,15 @@ export function claimNow(hosts, i, taskId, now, n = 0) {
     } else if (action.do === 'sync') {
       queue.push(...round.onSync(action.to, action.wave, peer(action.to).pool.answerSync(action.body, now).body, now));
     } else if (action.do === 'lock') {
-      const { pool, id, locks } = peer(action.to);
-      queue.push(...round.onLock(action.to, action.wave, locks.answer({ pool, identity: id, from: me.id.pk, body: action.body, now }).body, now));
+      const { pool, id, locks, nextGen } = peer(action.to);
+      queue.push(...round.onLock(action.to, action.wave, locks.answer({ pool, identity: id, from: me.id.pk, body: action.body, now, nextGen }).body, now));
     } else if (action.do === 'unlock') {
       peer(action.to).locks.unlock({ from: me.id.pk, body: action.body });
     } else if (action.do === 'commit') {
-      const claim = buildClaim(me.id, { pool: POOL, taskId, round: round.round, ...action, now });
+      const { gen, grants, absent, own } = action;
+      const claim = buildClaim(me.id, {
+        pool: POOL, taskId, round: round.round, gen, grants, absent, now, ...(own ? { offer: { ...own, gen: me.nextGen() } } : {}),
+      });
       for (const h of hosts) {
         h.pool.merge(claim, now);
         h.locks.release(taskId, claim.executor, claim.round);

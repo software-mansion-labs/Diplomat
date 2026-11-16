@@ -142,7 +142,7 @@ export function createNet({ seed = 1 } = {}) {
         const target = byPk.get(to);
         const kind = kindOf(body);
         sent.push({ at: now(), from: name, to: target?.name ?? null, kind, bytes: body.length });
-        for (const tap of taps) tap({ from: name, to: target?.name ?? null, headers, kind, body });
+        const heard = taps.map((tap) => tap({ from: name, to: target?.name ?? null, headers, kind, body })).filter((fn) => typeof fn === 'function');
         if (host.stopped) return fail('stopped', 0);
         if (!host.ready || !host.up) return fail('unreachable', 0);
         fail('timeout', timeoutMs);
@@ -164,6 +164,7 @@ export function createNet({ seed = 1 } = {}) {
             if (body.length > bytes) out = 'http-413';
             else out = await target.handler(Buffer.from(body), { headers: all }).catch(() => 'http-500');
             release();
+            for (const fn of heard) fn(out);
             if (copy < copies - 1 || rnd.chance(faults.drop)) return;
             at(delay(), () => {
               if (!linked(host, target)) return;
@@ -205,7 +206,9 @@ export function createNet({ seed = 1 } = {}) {
     rnd, sent, faults, now, run, until, clock, transport, settled,
     /// How many timers of a host are waiting to fire.
     timers: (name) => queue.filter((event) => !event.cancelled && event.owner === hosts.get(name)).length,
-    /// Calls `fn({ from, to, headers, kind, body })` for every request a host makes.
+    /// Calls `fn({ from, to, headers, kind, body })` for every request a host makes. A
+    /// function it returns is called with what the target made of each copy that reached
+    /// it - the bytes of its answer, or the transport's code for none - heard or not.
     tap: (fn) => taps.push(fn),
     /// Milliseconds of virtual time since the network began.
     ms: () => ms,

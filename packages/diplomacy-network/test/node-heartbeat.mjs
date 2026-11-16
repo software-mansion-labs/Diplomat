@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { buildPing } from '../src/core/lease.js';
+import { backing } from '../src/core/records.js';
 import { LEASE_GRACE_SECS, LEASE_SECS, OFFER_ATTEMPTS } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
@@ -45,8 +46,9 @@ await check('a host that dies holding a claim loses it when the lease and its gr
     await w.net.until(() => alive.some((h) => h.executor.jobOf(taskId)), { what: `attempt ${attempt} running` });
     const runner = alive.find((h) => h.executor.jobOf(taskId));
     await w.run(30);
-    const claim = w.claim(req, taskId);
-    assert.deepEqual([claim.executor, claim.gen, w.offerRow(req, taskId).attempt], [runner.pk, attempt - 1, attempt]);
+    const claim = w.claim(req, taskId, runner);
+    // Each executor's first claim of the task, and one more time the requester gave its offer.
+    assert.deepEqual([claim.gen, backing(claim, req.pk).gen, w.offerRow(req, taskId).attempt], [0, attempt, attempt]);
     assert.ok(w.stored(req, 'keys').issued[taskId], 'a key is out');
     w.net.kill(runner.name);
     dead.push(runner);

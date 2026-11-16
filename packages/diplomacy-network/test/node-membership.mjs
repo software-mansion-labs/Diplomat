@@ -260,7 +260,7 @@ await check('a lock a host granted binds it still when it left the pool, started
   const { taskId } = await a.node.offer(offerArgs('pr-1'));
   await w.agreed(all);
   const lock = async (from, round) => {
-    const answer = await w.request(from, b, 'lock', { taskId, round, asOf: w.net.now(), hash: w.view(b).hash, hours: 12 }, { effort: 128 });
+    const answer = await w.request(from, b, 'lock', { taskId, round, asOf: w.net.now(), hash: w.view(b).hash }, { effort: 128 });
     return answer.ok ? answer.body : `${answer.code}: ${answer.detail}`;
   };
   assert.equal((await lock(first, 'AAAAAAAAAAA')).grant.executor, first.pk);

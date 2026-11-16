@@ -7,7 +7,7 @@
 // routinely takes minutes, and an answer can be lost after the request was carried out.
 
 import { canon, parseCanon } from '../core/canon.js';
-import { buildRequest, verifyResponse } from '../core/envelope.js';
+import { UNSERVED, buildRequest, verifyResponse } from '../core/envelope.js';
 import { isBytes } from '../core/records.js';
 import {
   MAX_ACT_BODY_BYTES, MAX_BODY_BYTES, PEER_BACKOFF_MAX_MS, PEER_BACKOFF_MS, PEER_QUIET_MS, POW, REQUEST_TIMEOUT_MS,
@@ -96,9 +96,10 @@ export function createPeers(host) {
     // The transport sent these bytes twice and the first copy was carried out. Every
     // kind but `act` is asked again and answers the same; an `act` was performed.
     if (answer.code === 'replay') return kind === 'act' ? { ok: false, lost: 'replay' } : AGAIN;
-    if (answer.code === 'busy' && kind !== 'act' && first) {
+    if (answer.code === 'busy' && first && (kind !== 'act' || answer.detail === UNSERVED)) {
       // The peer could not serve it this once: it has only just started, or it has no
-      // place free. An `act` is not asked again here: it may have been performed.
+      // place free. An `act` is asked again only where the peer did nothing for it: one
+      // it failed at may have been performed.
       await sleep(BUSY_RETRY_MS);
       return AGAIN;
     }
