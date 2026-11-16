@@ -1,6 +1,6 @@
 # Settings
 
-The header **⚙︎** button (next to ↻, the Comms button, the Telemetry button and ⏻)
+The header **⚙︎** button (next to ↻, the Network, Comms and Telemetry buttons and ⏻)
 swaps the panel to a settings screen:
 
 - **GitHub username** - override the handle used by the "My …" tools, the wizards
@@ -236,8 +236,9 @@ swaps the panel to a settings screen:
 - **Offer every job to the Diplomacy Network** (**default off**) - with it on, no agent is
   started in a terminal: every job is offered to the shared pool of its repository and runs in
   a docker container, on this machine or another in the pool. See
-  [Diplomacy Network](network.md), whose screen holds the pools, the invites and the two hours
-  limits. `networkEnabled`, `networkRequiredMinimumH` and `networkMaximumAcceptedH` in
+  [Diplomacy Network](network.md), whose screen holds the pools, the invites, the two hours
+  limits and the switch that lets jobs use this machine's devices. `networkEnabled`,
+  `networkRequiredMinimumH`, `networkMaximumAcceptedH` and `networkDevices` in
   `~/.diplomat/config.json`.
 - **Comms (Slack)** - the [Slack watcher](comms.md) (**default off**): the switch,
   keywords, a sender allowlist, one switch per thing it may do (queue reviews and
@@ -258,7 +259,8 @@ swaps the panel to a settings screen:
 All of it persists across launches: in UserDefaults (`com.ignacy.diplomat`), except
 repo roots, agent runner and model, the automatic-task cap, the 4h give-up switch,
 the spending budget's four knobs, where the Slack token is read from (never the
-token itself) and the allocator daemon's two idle limits, which live in the shared `~/.diplomat/config.json` ([`AppConfig.swift`](../packages/diplomat-platform/macos/Sources/Diplomat/AppConfig.swift)).
+token itself), the allocator daemon's two idle limits and the Diplomacy Network's four
+settings (its switch, the two hours limits and the devices switch), which live in the shared `~/.diplomat/config.json` ([`AppConfig.swift`](../packages/diplomat-platform/macos/Sources/Diplomat/AppConfig.swift)).
 
 ## Definitions / heuristics (where it's deliberately loose)
 

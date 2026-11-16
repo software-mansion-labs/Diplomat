@@ -17,6 +17,8 @@ contract between two machines is its [PROTOCOL.md](../packages/diplomacy-network
 It needs `tor` and `docker` on the machine. Without docker a machine still offers its jobs and
 acts for them, and takes none.
 
+<img alt="The Network screen" src="img/network.png" />
+
 ## Pools
 
 One pool per repository, named by where the repository lives (`github.com/owner/repo`). A machine
@@ -70,8 +72,12 @@ needs.
   the host's own mirror; the model's API is forwarded with the host's credential added; anything
   else is tunnelled, so installing software works. Addresses of the host, its network and other
   containers are refused.
-- **Devices stay on the host.** A job reaches the host's adb server and tools only through
-  forwards opened for that job.
+- **Devices stay on the host, and jobs see none of them** until **Let jobs use this machine's
+  devices** is switched on (the Network screen's settings; off by default). With it on, a job
+  running here can use the Android devices and emulators attached to this machine through adb -
+  a phone on USB included - by a forward opened for that job, and an emulator can reach services
+  on this machine. Such a job can do with those devices whatever adb can, so switch it on only
+  for pools whose machines you trust with that. It applies to jobs started afterwards.
 - **A fuse.** One job gets 5000 model requests or 8 GiB of model traffic, then is refused.
 
 ## Acting in your name
@@ -144,18 +150,36 @@ the pool ten minutes later. A job gets three attempts.
 
 ## The Network screen
 
-Opened with the network button in the panel header. The daemon and whether Tor, docker and the model credential are ready; this machine's key and
-onion address; how much work it is taking and why not; the two hours settings; the network's
-lines of the activity feed; and a card per pool with its members (last seen, unreachable) and
-jobs (kind, state, where it runs, lease end). A job row offers **Stop** for a run on this
-machine - the job goes back to the pool - or **Withdraw** for one this machine offered.
+Opened with the network button in the panel header. The daemon and whether Tor, docker, the
+model credential and the devices are ready; this machine's key and onion address; how much work
+it is taking and why not; the two hours settings and the devices switch; the network's lines of
+the activity feed; and a card per pool with its members (last seen, unreachable) and jobs (kind,
+state, where it runs, lease end). A job row offers **Stop** for a run on this machine - the job
+goes back to the pool - or **Withdraw** for one this machine offered that runs elsewhere or
+nowhere yet. **Restart daemon** leaves the jobs in this machine's containers running; the daemon
+that starts takes them up.
+
+The daemon leaves a pool that is missing from the list Diplomat gives it, so the list is held
+back while it may be cut short: while a linked checkout cannot be read (a missing path, a
+volume not mounted, `git` failing on it) or the account a repository is worked as is not known
+yet. The screen then says which - *Pools are held back: /path cannot be read*, or *the account
+for owner/repo is not known yet* - and the pools stay as they were. Every cycle looks again. A
+folder under Other repos that was read and has no GitHub or GitLab remote is no pool and holds
+nothing back.
 
 A job offered to the network shows in the task list like any other: *in the pool*, *running on
-this machine* or on another member's key, then finished or failed. Telemetry prices it from what
-the executor reports; work another machine ran counts against no limit of this one.
+this machine* or on another member's key, then finished or failed. A job started by hand whose
+offer the daemon has not answered yet reads *Offering to the pool…* until it has. Telemetry
+prices a job from what the executor reports; work another machine ran counts against no limit of
+this one.
+
+Work that was asked for - a sweep's PRs, a request from Slack - is answered by a job that ran,
+not by its offer. An offer that ends without having run (withdrawn, its pool left or closed, the
+network switched off) leaves what was asked for standing, as it was before the offer.
 
 Switching the network off withdraws this machine's open offers, stops the jobs it runs for the
-pool and frees their PRs and issues for agents in terminals again.
+pool and frees their PRs and issues for agents in terminals again: what was asked for and had
+not run is started in a terminal like any other work.
 
 ## What it does not protect against
 

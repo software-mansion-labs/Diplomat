@@ -478,7 +478,7 @@ packages/
         RepoPaths.swift            locate this app's own checkout (DIPLOMAT_SELF_REPO → the checkout the bundle sits in → the one it recorded → ~/dev/diplomat),
                                    the sibling packages it reaches for, and the agents' repo roots
         AppConfig.swift            the cross-process settings file (~/.diplomat/config.json), shared with the
-                                   Linux applet and the two MCP daemons
+                                   Linux applet, the two MCP daemons and the Diplomacy Network daemon
       install/                 ← build-app + the autostart / auto-update (un)installers (launchd)
       tests/                   ← installers.sh: what those two installers write, run against stubs
     linux/                     ← Linux Qt6/PySide6 desktop app (see its README)

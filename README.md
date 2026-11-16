@@ -68,6 +68,8 @@ Whichever has room takes a job and runs it in a locked-down docker container tha
 credential; everything it does on the forge is done by the machine that asked, in its operator's
 name, and only what that job needs. [More](docs/network.md)
 
+<img alt="The Network screen" src="docs/img/network.png" />
+
 ### Devices - one simulator per agent
 
 A bundled MCP server gives every agent a simulator or emulator of its own, so parallel agents never
@@ -98,8 +100,8 @@ macOS 13+ and Linux. It clones Diplomat into `~/.diplomat/checkout`, builds it, 
 updates it in place. You need git, a Swift toolchain (Xcode on macOS,
 [swiftly](https://swift.org/install) on Linux), python3 on Linux, and a logged-in
 [`gh`](https://cli.github.com). A GitLab repo root also needs [`glab`](https://gitlab.com/gitlab-org/cli)
-signed in to its host. Optional: Node.js for the device allocator, tmux for Ghostty windows or on
-Linux.
+signed in to its host. Optional: Node.js for the device allocator and the Diplomacy Network, `tor`
+and docker for the Diplomacy Network, tmux for Ghostty windows or on Linux.
 
 ```bash
 szpont --plan          # print what it would do, and do none of it
@@ -123,6 +125,7 @@ Everything here can be changed in Settings (⚙︎).
 | Automatic agents running at once | **2** (1-16) |
 | Hold automatic work when the limit runs low | **on**: 95% confidence; until a task can be priced, keeps 20% of a window (or $1 of credit once Hermes has billed a task) |
 | Give up on an automatic run after 4 h | **on** |
+| Offer every job to the Diplomacy Network | **off** |
 | Agent runner | **Claude Code** (or OpenCode, Hermes) |
 | Comms (Slack watcher) | **off** |
 
