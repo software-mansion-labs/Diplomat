@@ -94,9 +94,9 @@ Slack text is written by other people, so Comms treats it as data from end to en
   is read again one result per call, where the sender and channel come before any text.
 - The **Investigate** agent's prompt quotes the message between untrusted-data markers - a message
   cannot close them early: every line of it is quoted with a leading "|" - and forbids,
-  whatever the message says: pushing, any GitHub write (PRs, issues, reviews, comments), posting
-  anywhere, and touching secrets. It works in its own worktree and its deliverable is the report
-  file - what you do with it is yours to decide.
+  whatever the message says: pushing, any write to a code host or issue tracker (PRs, issues,
+  reviews, comments), posting anywhere, and touching secrets. It works in its own worktree and its
+  deliverable is the report file - what you do with it is yours to decide.
 
 The agent itself still runs with your runner's usual permissions, as every Diplomat agent does. The
 fence and the rules are what stand between a crafted message and that agent; if that is more trust

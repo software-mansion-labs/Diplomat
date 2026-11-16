@@ -117,7 +117,7 @@ def test_an_investigation_round_trips_into_the_queue_and_its_prompt():
     prompt = out.stdout
     assert "BEGIN UNTRUSTED SLACK MESSAGE\n| Triage summary: login page crashes\n| Text:\n" \
            "| the login screen crashes on Android 14\nEND UNTRUSTED SLACK MESSAGE" in prompt
-    assert "you make no GitHub writes of any kind" in prompt
+    assert "you write nothing to any code host or issue tracker" in prompt
     assert "Never post, reply or react in Slack" in prompt
     assert f"Write the report to {config['reportPath']}" in prompt
     assert "Diplomat attribution tag" not in prompt
