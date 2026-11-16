@@ -387,6 +387,9 @@ def window_tokens(now: float | None = None, window_hours: float | None = None) -
                 continue
         except OSError:
             continue
+        # A message is one record per content block, back to back, each carrying the
+        # whole message's usage as it stood when that block was written.
+        last_id, counted = None, 0.0
         try:
             with path.open(encoding="utf-8") as fh:
                 for line in fh:
@@ -406,7 +409,14 @@ def window_tokens(now: float | None = None, window_hours: float | None = None) -
                     et = _entry_time(rec)
                     if et is not None and et < cutoff:
                         continue
-                    total += _token_cost(usage)
+                    cost = _token_cost(usage)
+                    message = rec.get("message")
+                    mid = message.get("id") if isinstance(message, dict) else None
+                    if isinstance(mid, str) and mid:
+                        if mid != last_id:
+                            last_id, counted = mid, 0.0
+                        cost, counted = cost - counted, cost
+                    total += cost
         except OSError:
             continue
     return total

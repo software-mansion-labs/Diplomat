@@ -11,7 +11,10 @@ anything Anthropic doesn't already write to disk:
 * **how much of this machine's spend went on the monitored repos** — sum every
   turn, split by whether its ``cwd`` is inside a repo root the agents work in;
 * **what one auto-task cost** — find the transcript whose opening user message *is*
-  the prompt we staged for that agent, and sum that file alone.
+  the prompt we staged for that agent, and sum it with its subagents' transcripts.
+
+A message is counted once: Claude Code writes one record per content block, back to
+back, each carrying the whole message's ``usage``.
 
 Two rules keep this cheap enough to run on a monitor poll:
 
@@ -140,13 +143,27 @@ def _usage_of(rec: dict) -> dict | None:
     return usage if isinstance(usage, dict) else None
 
 
-def _scan_chunk(data: bytes, roots: list[Path]) -> tuple[float, float, int]:
+def _message_id(rec: dict) -> str | None:
+    message = rec.get("message")
+    mid = message.get("id") if isinstance(message, dict) else None
+    return mid if isinstance(mid, str) and mid else None
+
+
+#: The message the last usage record belonged to, and what it has been counted for.
+Last = tuple[str, float]
+
+
+def _scan_chunk(data: bytes, roots: list[Path], last: Last | None = None
+                ) -> tuple[float, float, int, Last | None]:
     """Sum the tokens in a chunk of transcript, split repo vs other.
 
-    Returns ``(repo, other, consumed)`` where ``consumed`` is the number of bytes
-    that formed COMPLETE lines. A poll can land mid-write, so the trailing partial
-    line is left for the next scan rather than parsed and lost — that is the whole
-    reason the cursor advances by ``consumed`` and not by ``len(data)``.
+    Returns ``(repo, other, consumed, last)`` where ``consumed`` is the number of
+    bytes that formed COMPLETE lines. A poll can land mid-write, so the trailing
+    partial line is left for the next scan rather than parsed and lost — that is the
+    whole reason the cursor advances by ``consumed`` and not by ``len(data)``.
+
+    A record of the message ``last`` names adds only its excess over what that
+    message was already counted for; ``last`` carries that across one file's chunks.
     """
     repo = other = 0.0
     consumed = 0
@@ -167,13 +184,18 @@ def _scan_chunk(data: bytes, roots: list[Path]) -> tuple[float, float, int]:
         if usage is None:
             continue
         cost = _token_cost(usage)
+        mid = _message_id(rec)
+        if mid is not None:
+            counted = last[1] if last is not None and last[0] == mid else 0.0
+            last = (mid, cost)
+            cost -= counted
         if cost <= 0:
             continue
         if _is_repo_cwd(rec.get("cwd") or "", roots):
             repo += cost
         else:
             other += cost
-    return repo, other, consumed
+    return repo, other, consumed, last
 
 
 # MARK: - Cumulative totals
@@ -233,13 +255,14 @@ def totals() -> Totals:
                     continue
                 entry = {"offset": 0, "mtime": 0.0}
             offset = int(entry.get("offset") or 0)
+            last = _stored_last(entry.get("last"))
             # Truncated or replaced (a session id reused, a log rotated): the file
             # is shorter than where we stopped, so our offset points past the end
             # and every byte in it is unread. Start over rather than skip it.
             if st.st_size < offset:
-                offset = 0
+                offset, last = 0, None
             if st.st_size == offset:
-                files[key] = {"offset": offset, "mtime": st.st_mtime}
+                files[key] = _cursor(offset, st.st_mtime, last)
                 continue
             try:
                 with open(path, "rb") as fh:
@@ -247,10 +270,10 @@ def totals() -> Totals:
                     data = fh.read()
             except OSError:
                 continue
-            d_repo, d_other, consumed = _scan_chunk(data, roots)
+            d_repo, d_other, consumed, last = _scan_chunk(data, roots, last)
             repo += d_repo
             other += d_other
-            files[key] = {"offset": offset + consumed, "mtime": st.st_mtime}
+            files[key] = _cursor(offset + consumed, st.st_mtime, last)
 
     # Drop cursors for transcripts that are gone, so the state file tracks what is
     # on disk rather than growing forever. Deliberately NOT pruned by age: Claude
@@ -269,6 +292,22 @@ def totals() -> Totals:
             "files": files,
         })
     return Totals(repo=repo, other=other)
+
+
+def _cursor(offset: int, mtime: float, last: Last | None) -> dict:
+    entry: dict = {"offset": offset, "mtime": mtime}
+    if last is not None:
+        entry["last"] = [last[0], last[1]]
+    return entry
+
+
+def _stored_last(raw: object) -> Last | None:
+    if not isinstance(raw, list) or len(raw) != 2 or not isinstance(raw[0], str):
+        return None
+    try:
+        return raw[0], float(raw[1])
+    except (TypeError, ValueError):
+        return None
 
 
 # MARK: - Per-task attribution
@@ -318,7 +357,11 @@ def task_run(prompt: str, started_at: float, ended_at: float) -> TaskRun | None:
     for path, mtime in _candidates(root, started_at, ended_at):
         if _opening_prompt(path) != wanted:
             continue
-        return TaskRun(tokens=_file_tokens(path, roots), last_turn_at=mtime)
+        tokens = _file_tokens(path, roots)
+        # Its subagents' transcripts, which Claude Code keeps under <session>/.
+        for sub in sorted(path.with_suffix("").rglob("*.jsonl")):
+            tokens += _file_tokens(sub, roots)
+        return TaskRun(tokens=tokens, last_turn_at=mtime)
     return None
 
 
@@ -388,7 +431,7 @@ def _file_tokens(path: Path, roots: list[Path]) -> float:
         data = path.read_bytes()
     except OSError:
         return 0.0
-    repo, other, _consumed = _scan_chunk(data, roots)
+    repo, other, _consumed, _last = _scan_chunk(data, roots)
     return repo + other
 
 
