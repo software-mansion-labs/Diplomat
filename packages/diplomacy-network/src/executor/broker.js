@@ -20,8 +20,9 @@
 //
 // Everything a job sends is hostile. No handler lets an exception out (it would end the
 // daemon for every peer), no upstream connection serves two jobs, and what one job may
-// hold of this process at a time is bounded: connections, request bodies read whole,
-// forge requests in flight, and the time a request may take to arrive.
+// hold of this process at a time is bounded: connections, requests, connections out,
+// request bodies read whole, forge requests in flight, and the time a request may take
+// to arrive.
 
 import crypto from 'node:crypto';
 import dns from 'node:dns';
@@ -38,9 +39,19 @@ import {
   JOB_MODEL_BYTES, JOB_MODEL_REQUESTS, LOCAL_PORTS_PATH, RELAY_HOST,
 } from '../paths.js';
 import { carriesPlaceholder } from './llm.js';
+import { clip, createSparingLog } from './sparing.js';
 
 /// The model provider's hosts: the ones a job's requests gain this machine's credential on.
 export const MODEL_HOSTS = ['api.anthropic.com'];
+
+/// The most requests one job has in the broker at a time, those being answered and
+/// those waiting their turn together, on however many connections it sends them.
+export const JOB_REQUESTS = 256;
+
+/// The most requests of one job the broker carries upstream itself at a time, each
+/// down a connection out: its plain http requests and its requests to the model
+/// provider together. A tunnel has a connection out of its own.
+export const JOB_UPSTREAMS = 32;
 
 // Where the credential goes: inference and nothing else. The provider's other paths
 // (the account's profile, its usage, its files) answer a subscriber's token too, and no
@@ -159,7 +170,9 @@ function prefixBits(entry, length) {
 /// Whether the broker refuses to connect a job to `address`: this machine, anything on a
 /// network one of its interfaces is on (its LAN, the docker bridge, a neighbour on its
 /// public prefix), or any other address that is not the public internet. `interfaces` is
-/// read anew at every call, so a network joined a moment ago counts.
+/// read anew at every call, so a network joined a moment ago counts. A publicly
+/// addressed range this machine reaches by a route alone (behind a VPN, on another
+/// subnet of its site) is on no interface, and is not refused.
 export function deniedAddress(address, interfaces = os.networkInterfaces()) {
   const bytes = addressBytes(address);
   if (!bytes) return true;
@@ -280,15 +293,18 @@ function lowerKeys(headers) {
 /// or a Buffer). `lookup`, `connect` and `upstreamCa` replace name resolution, the
 /// outgoing TCP connection and the trust roots of the model provider: tests have no
 /// other way to stand in for the internet. `limits` replaces what one job may hold at a
-/// time and for how long: `{ connections, bufferBytes, forgeRequests, headerMs, bodyMs,
-/// idleMs, answerMs }`, by default the JOB_* tunables of paths.js and, for `answerMs`,
+/// time and for how long: `{ connections, requests, upstreams, bufferBytes,
+/// forgeRequests, headerMs, bodyMs, idleMs, answerMs }`, by default JOB_REQUESTS and
+/// JOB_UPSTREAMS, the JOB_* tunables of paths.js and, for `answerMs`,
 /// FORGE_ANSWER_TIMEOUT_MS.
 export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace = null,
   lookup = systemLookup, connect = systemConnect, upstreamCa = undefined, limits: given = {} } = {}) {
   const limits = {
-    connections: JOB_CONNECTIONS, bufferBytes: JOB_BUFFER_BYTES, forgeRequests: JOB_FORGE_REQUESTS,
+    connections: JOB_CONNECTIONS, requests: JOB_REQUESTS, upstreams: JOB_UPSTREAMS, bufferBytes: JOB_BUFFER_BYTES, forgeRequests: JOB_FORGE_REQUESTS,
     headerMs: JOB_HEADER_MS, bodyMs: JOB_BODY_MS, idleMs: JOB_IDLE_MS, answerMs: FORGE_ANSWER_TIMEOUT_MS, ...given,
   };
+  // What a job brings about as often as it likes is written once a minute for each kind.
+  const sparing = createSparingLog(log);
   const jobs = new Map(); // runId -> job
   const tokens = new Map(); // token -> job
   const contexts = new WeakMap(); // a leaf as its authority hands it out -> SecureContext
@@ -303,7 +319,12 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   // working on and nothing else.
   const guard = (fn, ...held) => (...args) => {
     const drop = (e) => {
-      log('broker', `a connection is dropped on a fault of the broker's own: ${e?.stack ?? e}`);
+      const fault = String(e?.stack ?? e);
+      // Told of by where it was thrown, which is what follows its message in the stack:
+      // one that repeats keeps no other out of the log, and a message has no say in it.
+      const message = String(e?.message ?? e);
+      const thrown = fault.slice(fault.indexOf(message) + message.length).split('\n')[1];
+      sparing(`fault ${thrown}`, 'broker', `a connection is dropped on a fault of the broker's own: ${fault.slice(0, 4000)}`);
       for (const s of [...held, ...args]) {
         try { if (s && typeof s.destroy === 'function') s.destroy(); } catch {}
       }
@@ -339,10 +360,11 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     throw new Refusal(502, `could not connect to ${host}:${port} (${last.code || last.message})`);
   }
 
-  // A job's own upstream connections: kept alive for its next request, never lent to
-  // another job, and closed with it.
-  function agentFor(job, wrap) {
-    const agent = new http.Agent({ keepAlive: true, maxSockets: 16, maxFreeSockets: 4 });
+  // A job's own upstream connections: never lent to another job, and closed with it.
+  // One request goes down each, and a request takes its place among the job's
+  // connections out before it is given one.
+  function agentFor(job, wrap, kept) {
+    const agent = new http.Agent(kept);
     agent.createConnection = (opts, cb) => {
       dial(opts.host, opts.port).then((raw) => {
         // A job that ended meanwhile: its request is torn down as its connection
@@ -384,14 +406,26 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     socket.once('close', () => job.sockets.delete(socket));
   }
 
+  // `socket` is where the requests that come down `client` are read from: `client`
+  // itself, or the terminated connection inside it. While the job is at its share of
+  // requests it is stopped, and stopped again whenever node starts it by itself: after
+  // each request, and for each body. Its server has the connection by now: node's own
+  // listener for the same event starts the reading, and this one has to come after it.
+  function reads(job, client, socket) {
+    job.clients.set(client, socket);
+    // Each request it has here watches it close, some from several places.
+    socket.setMaxListeners(0);
+    socket.on('resume', () => { if (job.stopped && job.clients.get(client) === socket) job.stopped.add(socket.pause()); });
+  }
+
   // A place among the job's connections for one of its container's, or false when the
   // job has as many as it gets.
   function seat(job, socket) {
     if (job.clients.has(socket)) return true;
     if (job.clients.size >= limits.connections) return false;
-    job.clients.add(socket);
     socket.once('close', () => job.clients.delete(socket));
     hold(job, socket);
+    reads(job, socket, socket);
     return true;
   }
   const crowded = () => `this job has ${limits.connections} connections open through the broker, the most a job gets at a time: close some`;
@@ -448,14 +482,19 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
 
   // A response is over when it closes or when its connection does: one that waits
   // behind an earlier answer on the same connection is not told that the connection
-  // went. Returns the function that ends the watching.
+  // went. `fn` is called once: a connection that closes under the answer being written
+  // closes that answer too, in the same breath. Returns the function that ends the
+  // watching.
   function over(res, fn) {
     const { socket } = res.req;
+    let told = false;
     const stop = () => {
       res.off('close', done);
       socket.off('close', done);
     };
     const done = () => {
+      if (told) return;
+      told = true;
       stop();
       fn();
     };
@@ -465,6 +504,34 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       socket.once('close', done);
     }
     return stop;
+  }
+
+  // ---- how many requests a job may have here at a time
+
+  // A request counts from its head to the end of its answer. At the job's share the
+  // connections its requests come on are read no further, so what it sends next waits
+  // with its sender, and so does the news that it closed one, until a request ends by
+  // its answer or its time. Node has by then parsed every request of the read at hand:
+  // one handed over past the share closes the connection it came on. A connection node
+  // had stopped itself, for a body nobody reads yet, is not started from here: that
+  // would read the body into memory.
+  function counted(job, req, res) {
+    if (job.asked >= limits.requests) {
+      req.socket.destroy();
+      return false;
+    }
+    job.asked += 1;
+    over(res, () => {
+      job.asked -= 1;
+      const { stopped } = job;
+      job.stopped = null;
+      for (const s of stopped ?? []) s.resume();
+    });
+    if (job.asked >= limits.requests) {
+      job.stopped = new Set();
+      for (const s of job.clients.values()) if (s && !s.isPaused()) job.stopped.add(s.pause());
+    }
+    return true;
   }
 
   // ---- how long a request may take to arrive
@@ -504,26 +571,30 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   // A request whose body is read whole (a forge request, a model request) takes its
   // place here first: the bytes it declares, or the most a request may carry when it
   // declares none, and a place among the forge requests when its answer is held whole
-  // too. One that does not fit waits, unread. A lease is given back when the response
-  // is over.
+  // too. One the broker carries upstream itself (a model request, a plain http one)
+  // takes a place among the job's connections out. One that does not fit waits, unread.
+  // A lease is given back when the response is over.
 
   // Whoever fits is let in, the earlier first. One that waits for bytes keeps back the
   // bodies behind it, and nothing else: a request with no body does not wait for one
-  // that has, and one that needs no place among the forge requests does not wait for one.
+  // that has, and one that needs no place among the forge requests, or no connection
+  // out, does not wait for one. The queue is never longer than the job's share of
+  // requests.
   function drain(job) {
     const { gate } = job;
     let bytesKept = false;
-    for (const waiter of [...gate.queue]) {
+    for (const waiter of gate.queue) {
       // A connection on its way out gets nothing; its request leaves the queue as it closes.
       if (waiter.socket.destroyed) continue;
       const noPlace = waiter.slot && gate.slots >= limits.forgeRequests;
+      const noWayOut = waiter.out && gate.outs >= limits.upstreams;
       const noBytes = waiter.need > 0 && (bytesKept || (gate.bytes > 0 && gate.bytes + waiter.need > limits.bufferBytes));
-      if (!noPlace && !noBytes) waiter.admit();
+      if (!noPlace && !noWayOut && !noBytes) waiter.admit();
       bytesKept ||= noBytes;
     }
   }
 
-  function enter(job, req, res, { slot, streamed = false }) {
+  function enter(job, req, res, { slot = false, out = false, streamed = false }) {
     const { gate } = job;
     const declared = req.headers['content-length'];
     if (declared !== undefined && !/^\d{1,15}$/.test(declared)) return Promise.reject(new Refusal(400, FRAMING));
@@ -531,7 +602,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     if (need > FORGE_BODY_CAP) {
       return Promise.reject(new Refusal(413, `the request body is over ${FORGE_BODY_CAP / 2 ** 20} MiB, the most the network carries in one request`));
     }
-    const lease = { bytes: 0, slot: false, left: false };
+    const lease = { bytes: 0, slot: false, out: false, left: false };
     lease.resize = (n) => {
       if (lease.left) return;
       gate.bytes += n - lease.bytes;
@@ -543,33 +614,35 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       lease.left = true;
       gate.bytes -= lease.bytes;
       if (lease.slot) gate.slots -= 1;
+      if (lease.out) gate.outs -= 1;
       drain(job);
     };
     return new Promise((resolve, reject) => {
-      const waiter = { need, slot, socket: req.socket };
+      const waiter = { need, slot, out, socket: req.socket };
       let unwatch = () => {};
       const settle = (fn, value) => {
         clearTimeout(timer);
         unwatch();
-        const at = gate.queue.indexOf(waiter);
-        if (at >= 0) gate.queue.splice(at, 1);
+        gate.queue.delete(waiter);
         fn(value);
       };
       const gone = () => { settle(reject, new Error('the client went away')); drain(job); };
       const timer = setTimeout(() => {
-        settle(reject, new Refusal(503, `this job's earlier requests hold all the broker reads for one job at a time (${limits.bufferBytes / 2 ** 20} MiB of bodies, forge requests in flight: ${limits.forgeRequests}), and none ended within ${limits.bodyMs / 1000} s`));
+        settle(reject, new Refusal(503, `this job's earlier requests hold all the broker gives one job at a time (${limits.bufferBytes / 2 ** 20} MiB of bodies, forge requests in flight: ${limits.forgeRequests}, connections out: ${limits.upstreams}), and none ended within ${limits.bodyMs / 1000} s`));
         drain(job);
       }, limits.bodyMs);
       waiter.admit = () => {
         lease.bytes = need;
         lease.slot = slot;
+        lease.out = out;
         gate.bytes += need;
         if (slot) gate.slots += 1;
+        if (out) gate.outs += 1;
         settle(resolve, lease);
         over(res, lease.leave);
       };
       waiter.drop = () => settle(reject, new Error('the client went away'));
-      gate.queue.push(waiter);
+      gate.queue.add(waiter);
       unwatch = over(res, gone);
       drain(job);
     });
@@ -622,6 +695,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       return sayAndClose(socket, DENY_407);
     }
     if (!seat(job, socket)) return refuse(socket, new Refusal(503, crowded()));
+    // What it carries from here on is no request for the broker to read off it.
+    job.clients.set(socket, null);
     const m = /^(\[[0-9a-fA-F:.]+\]|[^:[\]]+):(\d{1,5})$/.exec(req.url);
     const port = m ? Number(m[2]) : 0;
     const host = m ? normalHost(m[1]) : '';
@@ -641,7 +716,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       // everything else; which job may use it is settled by the token it came with.
       upstream = await (target ? systemConnect({ host: target.host || '127.0.0.1', port: target.port }) : dial(host, port));
     } catch (e) {
-      log('broker', job.info.runId, `refused ${host}:${port}: ${e.message}`);
+      sparing(`job ${job.info.runId} refused`, 'broker', job.info.runId, clip(`refused ${host}:${port}: ${e.message}`));
       return refuse(socket, e);
     }
     upstream.on('error', () => socket.destroy());
@@ -656,7 +731,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     upstream.pipe(socket);
   }));
 
-  outer.on('request', guard((req, res) => {
+  outer.on('request', guard(async (req, res) => {
     begun(req, res);
     const job = jobOf(req);
     if (!job) {
@@ -665,6 +740,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       return res.end();
     }
     if (!seat(job, req.socket)) return sendJson(res, 503, { message: crowded() });
+    if (!counted(job, req, res)) return undefined;
     let url;
     try { url = new URL(req.url); } catch { url = null; }
     const host = url ? normalHost(url.hostname) : '';
@@ -688,6 +764,9 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     else if (declared !== undefined) headers['content-length'] = String(Number(declared));
     const bodied = coding !== undefined || Number(declared ?? 0) > 0;
 
+    try { await enter(job, req, res, { out: true, streamed: true }); } catch (e) {
+      return sendJson(res, e.status || 502, { message: e.message });
+    }
     let up;
     try {
       up = http.request({ agent: job.plain, host, port, method: req.method, path: url.pathname + url.search, headers, setHost: false });
@@ -751,6 +830,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     secure.dn = { job, host };
     expectHead(secure);
     inner.emit('connection', secure);
+    reads(job, socket, secure);
   }
 
   // Each request on a terminated connection is judged on its own, however many came
@@ -761,6 +841,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     begun(req, res);
     const { job, host } = req.socket.dn;
     if (!live(job)) return res.destroy();
+    if (!counted(job, req, res)) return undefined;
     if (trace) trace(`${job.info.runId} ${req.method} https://${host}${req.url.split('?')[0]} [${Object.keys(req.headers).join(' ')}]`);
     if (!req.url.startsWith('/')) return sendJson(res, 400, { message: 'the request target must be a path' });
     const named = req.rawHeaders.filter((h, i) => i % 2 === 0 && h.toLowerCase() === 'host').length === 1 ? normalHost(req.headers.host.replace(/:\d+$/, '')) : null;
@@ -769,7 +850,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     if (coding !== undefined && coding.trim().toLowerCase() !== 'chunked') return sendJson(res, 400, { message: FRAMING });
     const handler = MODEL_HOSTS.includes(host) ? model : forge;
     return handler(job, host, req, res).catch((e) => {
-      if (e.message !== 'the client went away') log('broker', job.info.runId, `${req.method} ${host}: ${e.message}`);
+      if (e.message !== 'the client went away') sparing(`job ${job.info.runId} failed`, 'broker', job.info.runId, clip(`${req.method} ${host}: ${e.message}`));
       sendJson(res, e.status || 502, { message: e.message });
     });
   }));
@@ -802,8 +883,9 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       const mirror = mirrors.path(job.info.pool);
       if (!mirror) return reject(new Refusal(502, 'this executor holds no mirror of the repository'));
       const protocol = /^[A-Za-z0-9=:._-]{1,128}$/.test(req.headers['git-protocol'] || '') ? req.headers['git-protocol'] : '';
-      // The operator's own git configuration has no say in what a container is served.
-      const env = { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', ...(protocol ? { GIT_PROTOCOL: protocol } : {}) };
+      // The operator's own git configuration has no say in what a container is served:
+      // git is given no home to read one from, and is told to leave the system's alone.
+      const env = { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', ...(protocol ? { GIT_PROTOCOL: protocol } : {}) };
       const child = spawn(GIT_BIN, ['-c', 'uploadpack.allowFilter=true', 'upload-pack', '--stateless-rpc',
         ...(advertise ? ['--advertise-refs'] : []), mirror], { env, stdio: ['pipe', 'pipe', 'pipe'] });
       const kill = { destroy: () => child.kill('SIGKILL') };
@@ -883,13 +965,13 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   function heard(job) {
     const spent = { requests: job.spent.requests, bytes: job.spent.bytes };
     for (const fn of spendHeard) {
-      try { fn(job.info.runId, spent); } catch (e) { log('broker', `a spend listener failed: ${e?.message ?? e}`); }
+      try { fn(job.info.runId, spent); } catch (e) { sparing('spend listener', 'broker', `a spend listener failed: ${e?.message ?? e}`); }
     }
   }
 
   async function model(job, host, req, res) {
     // Read whole, because a refused credential is answered by sending it again.
-    const lease = await enter(job, req, res, { slot: false });
+    const lease = await enter(job, req, res, { out: true });
     const body = await collect(req);
     lease.resize(body.length);
     const base = { ...requestHeaders(req.headers, ['content-length', 'host']), host, 'content-length': String(body.length) };
@@ -925,7 +1007,9 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       upRes.resume();
     }
     upRes.on('error', () => res.destroy());
-    lease.leave();
+    // The answer is passed on as it comes: the request's bytes are given back here, its
+    // connection out when the answer is over.
+    lease.resize(0);
     if (!Number.isInteger(upRes.statusCode) || upRes.statusCode < 200 || upRes.statusCode > 599) {
       upRes.destroy();
       throw new Refusal(502, `the model provider answered with the status ${upRes.statusCode}, which is no HTTP answer`);
@@ -959,12 +1043,14 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     if (jobs.has(info.runId)) throw new Error(`job ${info.runId} is already admitted`);
     const job = {
       info, token, authority, intercept: new Set(hosts), ssh: new Set(forgeSshHosts(info.pool).map(normalHost)),
-      sockets: new Set(), clients: new Set(), forwards: new Map(),
+      sockets: new Set(), clients: new Map(), forwards: new Map(),
       spent: { requests: count(spent?.requests), bytes: count(spent?.bytes), said: false },
-      gate: { bytes: 0, slots: 0, queue: [] },
+      asked: 0, stopped: null,
+      gate: { bytes: 0, slots: 0, outs: 0, queue: new Set() },
     };
-    job.plain = agentFor(job, plainWrap);
-    job.model = agentFor(job, tlsWrap);
+    job.plain = agentFor(job, plainWrap, {});
+    // The provider's are kept for the job's next request: each costs a TLS handshake.
+    job.model = agentFor(job, tlsWrap, { keepAlive: true });
     jobs.set(info.runId, job);
     tokens.set(token, job);
     return { proxyUrl: `http://dn:${token}@${RELAY_HOST}:${listening.port}`, token, caCertPath: authority.certPath, generation: authority.id };
@@ -977,10 +1063,11 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     if (!job) return;
     jobs.delete(runId);
     tokens.delete(job.token);
-    for (const waiter of [...job.gate.queue]) waiter.drop();
+    for (const waiter of job.gate.queue) waiter.drop();
     job.plain.destroy();
     job.model.destroy();
     for (const s of job.sockets) s.destroy();
+    sparing.end(`job ${runId} `);
   }
 
   /// Gives a job a way to `target` (`{ host, port }` on this machine, the adb server for
@@ -1009,12 +1096,16 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     return () => spendHeard.delete(fn);
   }
 
-  /// What a job holds of the broker now: `{ connections, bytes, requests, waiting }` -
-  /// its container's connections, the bodies read whole, the forge requests in flight,
-  /// and the requests waiting their turn. Null for a job that is not admitted.
+  /// What a job holds of the broker now: `{ connections, requests, bytes, forgeRequests,
+  /// upstreams, waiting }` - its container's connections, its requests that have no
+  /// answer yet, the bodies read whole, the forge requests in flight, the requests being
+  /// carried upstream, and the requests waiting their turn for any of those three. Null
+  /// for a job that is not admitted.
   function load(runId) {
     const job = jobs.get(runId);
-    return job ? { connections: job.clients.size, bytes: job.gate.bytes, requests: job.gate.slots, waiting: job.gate.queue.length } : null;
+    if (!job) return null;
+    const { gate } = job;
+    return { connections: job.clients.size, requests: job.asked, bytes: gate.bytes, forgeRequests: gate.slots, upstreams: gate.outs, waiting: gate.queue.size };
   }
 
   /// Starts listening, on `port` when given: the port the jobs of an earlier daemon were

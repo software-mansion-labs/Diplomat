@@ -56,6 +56,7 @@ src/
     job.js         one run: prompt, start, watch, stop, outcome, and what is kept of it
     adb.js         the filter between a job and this machine's adb server
     weigh.js       how long this machine holds back from a task, by what it has
+    sparing.js     the log for what a job can cause as often as it likes
     forward.mjs    inside a container: a job's forwards as local addresses
     runner.sh      inside a container: one job's environment, clone and agent
     stop.sh        handed to a container's sh: asks after one job's processes, ends them
@@ -335,12 +336,13 @@ task's own once the forge's answer to the push says so.
 machine would take, the daemon runs the claim round. The node asks its executor adapter:
 `wouldTake(task)` says whether, and `weigh(task)`, when the adapter has one, how many
 more milliseconds this machine waits before it goes for that task - at most a minute,
-none for a task its own operator started with `now`. What that rests on stays on this
-machine. The claim made, the daemon asks for the key: itself, when this machine offers
-the task too, else one of the machines whose offer the claim holds, and the next of them
-whenever one gives none. The job is the one that machine hands out, and when it ends its
-outcome is told to every machine whose offer the claim was given. Having the key, the
-daemon makes sure of four things and starts the job:
+none for a task its own operator started with `now`. What that rests on is put in no
+message; the wait itself shows in when the machine goes for the task. The claim made,
+the daemon asks for the key: itself, when this machine offers the task too, else one of
+the machines whose offer the claim holds, and the next of them whenever one gives none.
+The job is the one that machine hands out, and when it ends its outcome is told to
+every machine whose offer the claim was given. Having the key, the daemon makes sure of
+four things and starts the job:
 
 - **The image.** One local image, built from `image/Dockerfile` and tagged by the hash of
   that directory. Debian, git, node, python, curl and the handful of tools agents reach
@@ -397,7 +399,10 @@ daemon makes sure of four things and starts the job:
   - everything else is tunnelled untouched, to the public internet only, so installing
     software works as usual. An address inside a network any interface of this machine
     is on, IPv4 or IPv6, is refused, and so is every range that is not publicly routed;
-    the interfaces are read at each connection. The hosts github.com hands downloads
+    the interfaces are read at each connection. What this machine reaches by a route
+    alone the broker does not know of: a publicly addressed range behind a VPN, or on
+    another subnet of the operator's site, is tunnelled to like the rest of the
+    internet. The hosts github.com hands downloads
     out from (`codeload.github.com`, `raw.githubusercontent.com`,
     `objects.githubusercontent.com`) and bare addresses are among the tunnels: they
     serve what is public, or what a link in the requester's own answer opens for a
@@ -410,17 +415,39 @@ daemon makes sure of four things and starts the job:
   connection is judged on its own: its `Host` must be the host the connection was opened
   to, and the job's token must still stand. The broker frames every body it passes on
   itself, refuses a request framed two ways, and keeps one job's upstream connections
-  apart from every other job's.
+  apart from every other job's: a plain http request goes down a connection of its own,
+  closed with it, and the model provider's are kept for the same job's next request.
 
-  One job holds so much of the broker and no more, each with its tunable:
-  `DN_JOB_CONNECTIONS` (256) connections; `DN_JOB_BUFFER_BYTES` (48 MiB) of request
-  bodies read whole at a time, which is what goes to the requester, to the mirror or
-  through a credential swap; `DN_JOB_FORGE_REQUESTS` (4) forge requests in flight, each
-  holding an answer of at most `DN_FORGE_RESPONSE_MAX_BYTES`. A request past these waits
-  its turn and is answered 503 when none comes. A request's head has
-  `DN_JOB_HEADER_MS` (30 s) to arrive, a body read whole `DN_JOB_BODY_MS` (5 min), and
-  a connection nothing moves on is closed after `DN_JOB_IDLE_MS` (30 min). Everything
-  else is streamed.
+  One job holds so much of the broker and no more:
+  - `DN_JOB_CONNECTIONS` (256) connections from its container;
+  - 256 requests at a time, those being answered and those waiting their turn
+    together, on however few connections it sends them. A job at that share is read
+    no further until one of them ends, by its answer or by its time running out: what
+    it sends meanwhile stays in its container, and a connection it closes meanwhile is
+    not seen to close. A request that had arrived by then closes the connection it
+    came on. What a tunnel carries is no request, and is read on;
+  - 32 requests at a time that the broker carries upstream itself, plain http ones
+    and the model's together, whatever number of hosts they name, each down one
+    connection out. A connection to the model provider that is kept for the job's
+    next request is beside those, and there are never more than 32 of them; a tunnel
+    is one of the job's connections and has one connection out. So a job has at most
+    320 connections out at a time;
+  - `DN_JOB_BUFFER_BYTES` (48 MiB) of request bodies read whole at a time, which is
+    what goes to the requester or through a credential swap;
+  - `DN_JOB_FORGE_REQUESTS` (4) forge requests in flight, each holding an answer of at
+    most `DN_FORGE_RESPONSE_MAX_BYTES` (32 MiB). A fetch answered from the mirror is
+    one of them, so a job has at most 4 `git upload-pack` processes on this machine.
+
+  A request past the last three waits its turn, unread, and is answered 503 when none
+  comes within `DN_JOB_BODY_MS`. A request's head has `DN_JOB_HEADER_MS` (30 s) to
+  arrive, a body read whole `DN_JOB_BODY_MS` (5 min), and a connection nothing moves on
+  is closed after `DN_JOB_IDLE_MS` (30 min). Everything else is streamed.
+
+  What a job brings about as often as it likes - a tunnel refused, a request that
+  failed, an adb request refused - is written to the daemon's log once a minute for
+  each kind, and for each job where the broker knows whose it is: the first at once,
+  the next with the number left out since. Of a job's own words such a line carries
+  300 characters at most, the unprintable ones replaced.
 
 The job itself is the agent runner in headless mode. Its exit is the completion signal;
 its log holds the cost. The daemon reports the outcome to the requester with `done`.
@@ -506,15 +533,16 @@ image's adb is Debian bookworm's `adb` package, which speaks version 41 of adb's
 protocol (`adb version` prints 1.0.41), as every adb released since 2019 does; keep the
 host's adb at one of those.
 
-**Which machine takes Android work.** No machine tells another what devices it has, and
+**Which machine takes Android work.** No message says what devices a machine has, and
 a task is not told either. Each machine weighs a task by itself before it goes for it
 (`executor/weigh.js`): when the pool's linked checkout looks like Android work - an
 `android/` directory, an `app/src/main/AndroidManifest.xml`, or a `build.gradle`,
 `build.gradle.kts`, `settings.gradle` or `settings.gradle.kts` at its root - a machine
 with no device to give a job (`networkDevices` off, or on with no device its adb server
 lists as ready) waits 30 s (`DN_DEVICE_WAIT_MS`) longer before it goes for the task, so
-a machine with a device gets there first. A checkout is looked at once and again an
-hour later. Nothing is refused on this ground: a task no machine with a device took
+a machine with a device gets there first. The wait has one fixed length, so a peer
+that sees when a machine went for such a task can tell that it held back, and so that
+it had no device to give. A checkout is looked at once and again an hour later. Nothing is refused on this ground: a task no machine with a device took
 runs on one without.
 
 Anything else on the host - the device allocator, a tool-server - is forwarded only
@@ -527,7 +555,7 @@ local process can.
 A forward is a name that only its own job's proxy token opens; `executor/forward.mjs`,
 started with the job inside the container, turns it into the local address a tool
 expects, and it ends with the job. What a machine has is never published; the one use
-it makes of it is that wait before going for a task.
+it makes of it is that wait before going for a task, which is also the one trace of it.
 
 ## Tests
 

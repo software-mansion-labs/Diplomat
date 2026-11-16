@@ -21,7 +21,9 @@ const KILL_WHY = ' (adb asks for this when its version is not the server\'s: thi
 
 const server = await fakeAdb();
 const logged = [];
-const filter = createAdbFilter({ target: { host: '127.0.0.1', port: server.port }, log: (...a) => logged.push(a.join(' ')) });
+// The filter writes a refusal to the log once a minute: its clock is this one.
+let clock = 0;
+const filter = createAdbFilter({ target: { host: '127.0.0.1', port: server.port }, log: (...a) => logged.push(a.join(' ')), now: () => clock });
 const at = await filter.start();
 
 // Everything the filter says to a client that writes `chunks` one after another, until
@@ -132,6 +134,7 @@ try {
   await check('every request by which the server would act on this machine is answered FAIL with the reason, the connection closed, and the server never hears it', async () => {
     const before = server.asked.length;
     for (const service of REFUSED) {
+      clock += 60000;
       const said = await ask(service);
       const shown = service.slice(0, 60);
       assert.equal(said, `FAIL${frame(`not offered to a task on this machine: ${shown}${service === 'host:kill' ? KILL_WHY : ''}`)}`, service);
@@ -140,11 +143,23 @@ try {
     assert.equal(await talk(['zzzzhost:version']), `FAIL${frame('not offered to a task on this machine: a request that is not in adb\'s framing')}`);
     assert.equal(await talk([`${frame('host:kill')}${frame('host:version')}`]), `FAIL${frame(`not offered to a task on this machine: host:kill${KILL_WHY}`)}`);
     // What a job named is cut short and made printable before it is logged or said.
+    clock += 60000;
     const long = await ask(`host:connect:${'x'.repeat(200)}\n\x1b[2J`);
     assert.equal(long, `FAIL${frame(`not offered to a task on this machine: host:connect:${'x'.repeat(47)}`)}`);
     assert.deepEqual(server.asked.slice(before), [], 'nothing reached the server');
-    assert.ok(logged.includes('adb refused a job: host:connect:127.0.0.1:1'));
+    assert.ok(logged.some((line) => line.startsWith('adb refused a job: host:connect:127.0.0.1:1')));
+    assert.match(logged.at(-1), /^adb refused a job: host:connect:x{47} /);
+    clock += 60000;
+    assert.equal(await ask('host:\x1b[2Jkill'), `FAIL${frame('not offered to a task on this machine: host:?[2Jkill')}`);
+    assert.equal(logged.at(-1), 'adb refused a job: host:?[2Jkill');
     assert.ok(logged.every((line) => /^[\x20-\x7e]+$/.test(line)));
+    // Refused over and over, a job is one line a minute, and the next says how many were left out.
+    const lines = logged.length;
+    for (let i = 0; i < 25; i++) await ask('host:kill');
+    assert.equal(logged.length, lines);
+    clock += 60000;
+    await ask('host:kill');
+    assert.deepEqual(logged.slice(lines), ['adb refused a job: host:kill (25 more of the kind were not written)']);
     assert.deepEqual(['host:devices', 'host:transport:emulator-5554', 'host:tport:serial:emulator-5554'].map(adbRequest), ['query', 'device', 'device']);
   });
 
