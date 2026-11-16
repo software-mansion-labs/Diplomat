@@ -22,6 +22,11 @@
 //   stall:<pct>           bootstrap stops at the first step at or past <pct>, with the
 //                         warning tor gives when it cannot get further
 //   die:<pct>             tor exits with an error there instead
+//   die-slowly            asked for its bootstrap phase, tor closes its control
+//                         connections instead of answering and exits with an error half
+//                         a second later
+//   drop-control:<pct>    tor closes its control connections there, once it has one, and
+//                         lives on
 //   reject-add-onion      ADD_ONION is refused
 //   wrong-service-id      ADD_ONION answers with another service's id
 //   no-descriptor         the descriptor is never uploaded
@@ -192,6 +197,15 @@ const emit = (event, text) => {
 };
 let socksPort = 0;
 
+// Every control connection closed and no new one taken, with tor going on.
+function dropControl() {
+  control.close();
+  for (const conn of controls) {
+    conn.owner = false;
+    conn.socket.destroy();
+  }
+}
+
 function command(conn, line) {
   const [verb, ...rest] = line.split(' ');
   const reply = (...lines) => conn.socket.write(lines.map((l) => `${l}\r\n`).join(''));
@@ -217,6 +231,10 @@ function command(conn, line) {
   }
   if (verb === 'GETINFO' && rest[0] === 'net/listeners/socks') {
     return reply(`250-net/listeners/socks="127.0.0.1:${socksPort}"`, '250 OK');
+  }
+  if (verb === 'GETINFO' && rest[0] === 'status/bootstrap-phase' && stages.has('die-slowly')) {
+    dropControl();
+    return setTimeout(() => die('The stand-in was told to die here.'), 500);
   }
   if (verb === 'GETINFO' && rest[0] === 'status/bootstrap-phase') {
     return reply(`250-status/bootstrap-phase=${status}`, '250 OK');
@@ -354,6 +372,11 @@ for (const step of STEPS) {
   say('notice', `Bootstrapped ${step[0]}% (${step[1]}): ${step[2]}`);
   report(progress(step));
   if (stages.has('die') && step[0] >= stages.get('die')) die('The stand-in was told to die here.');
+  if (stages.has('drop-control') && step[0] >= stages.get('drop-control')) {
+    while (controls.size === 0) await sleep(10);
+    dropControl();
+    break;
+  }
   if (stages.has('stall') && step[0] >= stages.get('stall')) {
     report(`WARN BOOTSTRAP PROGRESS=${step[0]} TAG=${step[1]} SUMMARY="${step[2]}" WARNING="Network is unreachable" REASON=NOROUTE COUNT=1 RECOMMENDATION=warn HOSTID="${'A'.repeat(40)}" HOSTADDR="192.0.2.1:9001"`);
     break;

@@ -335,6 +335,24 @@ try {
     assert.equal(fs.existsSync(path.join(h.dir, 'tor.pid')), false);
   });
 
+  await staged('a tor whose control connection is seen closing before its exit is still reported by its exit; one that closes it and lives on is ended and reported for that', async () => {
+    const timers = () => process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length;
+    const before = timers();
+    const dying = host('die-slowly');
+    await begin(dying, 'die-slowly');
+    await assert.rejects(dying.starting, /^Error: tor exited \(code 1\): The stand-in was told to die here\.$/);
+    assert.match(dying.t.state().detail, /^tor exited \(code 1\)/);
+    // The connection of a tor that is gone closes after it: nothing waits on that.
+    await sleep(100);
+    assert.equal(timers(), before, 'no timer is left of a tor that exited');
+
+    const deaf = host('drop-control', { tune: { controlLossMs: 200 } });
+    await begin(deaf, 'drop-control:25');
+    const pid = deaf.torPid();
+    await assert.rejects(within(60000, deaf.starting, 'the start of a tor that closed its control connection'), /^Error: tor closed its control connection$/);
+    assert.deepEqual([deaf.t.state().state, alive(pid), fs.existsSync(path.join(deaf.dir, 'tor.pid'))], ['failed', false, false]);
+  });
+
   await staged('a tor that cannot be run fails the start', async () => {
     const child = daemon(path.join(tmp, 'nobin'), { DN_TOR: path.join(tmp, 'no-such-tor') });
     assert.match(await child.said(), /^failed cannot run .*no-such-tor: spawn .* ENOENT/);
