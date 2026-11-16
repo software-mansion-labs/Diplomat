@@ -633,15 +633,16 @@ try {
       await assert.rejects(startJob({ run: { runId: bad, pool: alpha.pool }, container, spec: SPEC, proxy }), /not a run id/);
     }
     assert.equal(fs.existsSync(path.join(RUNS_DIR, 'escape')), false);
-    // Something the container put where a run's directory is to go, after the host
-    // cleared the name (here: the clearing is made to miss it). The run does not start,
-    // and its files, its token among them, are not left lying about.
-    fs.mkdirSync(path.join(container.runsDir, 'taken', 'x'), { recursive: true });
-    const realRm = fs.rmSync;
-    fs.rmSync = (p, o) => (p === path.join(container.runsDir, 'taken') ? undefined : realRm(p, o));
-    try {
-      await assert.rejects(startJob({ run: { runId: 'taken', pool: alpha.pool }, container, spec: SPEC, proxy }), /the run directory could not be put in place/);
-    } finally { fs.rmSync = realRm; }
+    // Something the container put where a run's directory is to go that the host cannot
+    // clear away (here: what this user may not empty; root may empty anything). The run
+    // does not start, and its files, its token among them, are not left lying about.
+    if (process.getuid() !== 0) {
+      fs.mkdirSync(path.join(container.runsDir, 'taken', 'x', 'y'), { recursive: true });
+      fs.chmodSync(path.join(container.runsDir, 'taken', 'x'), 0o000);
+      try {
+        await assert.rejects(startJob({ run: { runId: 'taken', pool: alpha.pool }, container, spec: SPEC, proxy }), /the run directory could not be put in place/);
+      } finally { fs.chmodSync(path.join(container.runsDir, 'taken', 'x'), 0o700); }
+    }
     assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.staging')), []);
     const live = await launch(`${R}-15`, PEER_A, alpha, { prompt: 'MODE=sleep' });
     await assert.rejects(startJob({ run: live.run, container, spec: SPEC, proxy }), /already started/);
