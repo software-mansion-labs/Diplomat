@@ -501,7 +501,7 @@ class QueuedTaskRow(QFrame):
     )
 
     def __init__(self, *, task_id: str, label: str, glyph: str, hex_color: str,
-                 paused: bool, cancellable: bool = False) -> None:
+                 paused: bool, cancellable: bool = False, refusal: str = "") -> None:
         super().__init__()
         self._task_id = task_id
         self._press: QPointF | None = None
@@ -529,6 +529,11 @@ class QueuedTaskRow(QFrame):
         )
         status.setStyleSheet(muted(9))
         col.addWidget(status)
+        if refusal:
+            # The daemon's own sentence: painted as it is, and shown whole on hover.
+            self.refusal = ElidedLabel(f"not offered: {refusal}", 9, "#FF9500")
+            self.refusal.setToolTip(plain_tooltip(refusal))
+            col.addWidget(self.refusal)
         row.addLayout(col, 1)
 
         if cancellable:

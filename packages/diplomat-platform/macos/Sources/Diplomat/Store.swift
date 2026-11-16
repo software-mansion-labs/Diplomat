@@ -84,6 +84,9 @@ final class Store: ObservableObject {
     /// Whether the feed has said the network is refusing automatic work, for the current
     /// spell of it.
     var networkUnavailableLogged = false
+    /// Why the network refused each queued job that it refused for a reason of the job's
+    /// own, by the job's label: what its row says, and what the feed has said.
+    @Published var networkJobRefusals: [String: String] = [:]
 
     // MARK: persisted settings
 
@@ -3455,6 +3458,14 @@ final class Store: ObservableObject {
         queuedTasks = ordered.compactMap { id in
             starting.contains(id) ? nil : staged.first { $0.id == id }
         }
+        let waiting = Set(staged.map(\.job.label))
+        forgetJobRefusals { waiting.contains($0) }
+    }
+
+    /// Drop the refusals of the jobs whose label `keep` does not hold.
+    func forgetJobRefusals(keeping keep: (String) -> Bool) {
+        let kept = networkJobRefusals.filter { keep($0.key) }
+        if kept != networkJobRefusals { networkJobRefusals = kept }
     }
 
     /// Run the queue down into whatever room this device has, in the operator's
@@ -3553,10 +3564,12 @@ final class Store: ObservableObject {
             switch await runQueuedTask(entry, forced: false) {
             case .failed: return
             // Every remaining entry would be priced against the same windows, or the
-            // same disk, or offered to the same daemon, and get the same answer, and the
-            // dispatch has already re-staged this one for the commit at the end of the
-            // cycle. Draining on would cost a round of refusals to no end.
-            case .unaffordable, .lowDisk, .networkRefused: return
+            // same disk, or offered to the same silent daemon, and get the same answer,
+            // and the dispatch has already re-staged this one for the commit at the end
+            // of the cycle. Draining on would cost a round of refusals to no end. A
+            // daemon that refused this job for a reason of the job's own is asked about
+            // the next.
+            case .unaffordable, .lowDisk, .networkDown: return
             default: break
             }
         }
@@ -3952,7 +3965,7 @@ final class Store: ObservableObject {
         // never draw it, since the allowlist answers for the review monitor's own
         // finds and an ask is not one (`AgentJob.counter`).
         case .inFlight, .atCapacity, .unaffordable, .lowDisk, .failed, .notAllowed,
-             .offering, .networkRefused: break
+             .offering, .networkRefused, .networkDown: break
         }
     }
 
@@ -4153,7 +4166,7 @@ final class Store: ObservableObject {
         case .offered:
             AuditLog.log("panel", "queue-run",
                          "\(entry.job.label) - offered for this machine to run at once")
-        case .networkRefused(let why):
+        case .networkRefused(let why), .networkDown(let why):
             error = "\(entry.job.label) was not offered: \(why)."
         // The rest are all logged by the step that decided them, but a feed line is
         // not an answer to a click: the row vanished and nothing opened, so say why
@@ -4327,8 +4340,12 @@ final class Store: ObservableObject {
         /// The offer was sent and the daemon gave no definite answer: the job is kept
         /// (`networkOffering`) until a later cycle books or drops it.
         case offering
-        /// The network did not take the job: a sentence fit to show the operator.
+        /// The daemon refused this job for a reason of the job's own, or no offer could
+        /// be made of it: a sentence fit to show the operator.
         case networkRefused(String)
+        /// No daemon took the offer - it did not answer, or is stopping - and none
+        /// takes any job while that lasts: a sentence fit to show the operator.
+        case networkDown(String)
         /// An agent launched, here or through the network: the signal to record the
         /// attempt and start the retry backoff. `.failed` deliberately does NOT count (a
         /// transient spawn error retries next poll), and counting a deferral or a
@@ -4522,8 +4539,10 @@ final class Store: ObservableObject {
     /// a pid and a window.
     ///
     /// A job the network does not take starts no agent here either. Automatic work is
-    /// staged back as held work is and offered again next cycle, with one feed line for
-    /// the spell; a job the operator started is answered with the sentence.
+    /// staged back as held work is and offered again next cycle. A refusal of the job's
+    /// own is said once for the job, in the feed and on its row (`networkJobRefusals`);
+    /// a daemon that takes no job has one feed line for the spell. A job the operator
+    /// started is answered with the sentence.
     ///
     /// An offer the daemon was sent and gave no definite answer to may be in the pool.
     /// Automatic work is offered again from the queue, which the daemon answers with the
@@ -4532,6 +4551,7 @@ final class Store: ObservableObject {
                                 attemptNumber: Int, forced: Bool,
                                 rowLabel: String) async -> DispatchOutcome {
         let refusal: String
+        var own = false
         switch NetworkOffer.from(
             verb: job.auditAction, ownPR: job.allows.ownPR, number: networkNumber(job),
             repoKey: networkRepoKey(job), label: job.label, prompt: job.prompt,
@@ -4540,6 +4560,7 @@ final class Store: ObservableObject {
             readOnly: job.allows.readOnly) {
         case .refused(let why):
             refusal = why
+            own = true
         case .offer(let offer):
             let (reply, reach) = await Task.detached(priority: .userInitiated) {
                 DiplomacyNetwork.ask(NetworkRoute.offer, offer.body)
@@ -4560,13 +4581,21 @@ final class Store: ObservableObject {
                 refusal = "the daemon named no task for the offer"
             case .refused(let why):
                 refusal = why
+                own = reach == .answered
             case .down:
                 refusal = DiplomacyNetwork.notAnswering
             }
         }
         if source == .auto {
             stageQueued(job, attemptNumber: attemptNumber)
-            if !networkUnavailableLogged {
+            if own {
+                if networkJobRefusals[job.label] != refusal {
+                    networkJobRefusals[job.label] = refusal
+                    AuditLog.log("auto", NetworkAudit.unavailable,
+                                 "\(job.label) was not offered: \(refusal)")
+                    refreshAudit()
+                }
+            } else if !networkUnavailableLogged {
                 networkUnavailableLogged = true
                 AuditLog.log("auto", NetworkAudit.unavailable,
                              "Holding auto work - the Diplomacy Network did not take "
@@ -4578,7 +4607,7 @@ final class Store: ObservableObject {
                          "\(job.label) was not offered: \(refusal)")
             refreshAudit()
         }
-        return .networkRefused(refusal)
+        return own ? .networkRefused(refusal) : .networkDown(refusal)
     }
 
     /// A job of the operator's whose offer was sent and not definitely answered.
@@ -4644,6 +4673,7 @@ final class Store: ObservableObject {
                            source: AgentDispatchGate.Source, attemptNumber: Int,
                            rowLabel: String) async -> DispatchOutcome {
         networkUnavailableLogged = false
+        forgetJobRefusals { $0 != job.label }
         guard !AgentRegistry.load().contains(where: { $0.network == task }) else {
             if source == .panel {
                 AuditLog.log("panel", "in-flight", "\(job.label) - already offered to \(pool)")
@@ -4891,7 +4921,7 @@ final class Store: ObservableObject {
             self.error = "Resolve \(label) failed to spawn — see the activity log."
         case .inFlight:
             self.error = "Resolve \(label): an agent is already on this PR."
-        case .networkRefused(let why):
+        case .networkRefused(let why), .networkDown(let why):
             self.error = "Resolve \(label) was not offered: \(why)."
         case .spawned, .offered, .offering, .banned, .atCapacity, .unaffordable, .lowDisk,
              .notAllowed:

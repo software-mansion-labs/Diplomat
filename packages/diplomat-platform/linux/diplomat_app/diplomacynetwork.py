@@ -174,13 +174,18 @@ VERDICT_OFFERING = "network_offering"
 
 
 class Refused(str):
-    """:data:`VERDICT_REFUSED`, carrying the words that say why."""
+    """:data:`VERDICT_REFUSED`, carrying the words that say why. ``own`` says the
+    refusal is of this one job - the daemon's definite answer to its offer, or an offer
+    that could not be made of it - where a daemon that did not answer, or is stopping,
+    takes no job at all."""
 
     sentence: str
+    own: bool
 
-    def __new__(cls, sentence: str) -> "Refused":
+    def __new__(cls, sentence: str, own: bool = False) -> "Refused":
         self = super().__new__(cls, VERDICT_REFUSED)
         self.sentence = sentence
+        self.own = own
         return self
 
 

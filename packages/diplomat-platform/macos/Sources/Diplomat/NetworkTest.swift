@@ -18,6 +18,7 @@ enum NetworkTest {
         private let lock = NSLock()
         private var snapshot: [String: Any] = [:]
         private var refusals: [String: (Int, String)] = [:]
+        private var refusedItems: [String: (Int, String)] = [:]
         private var offers = 0
         private var asked: [String: Int] = [:]
 
@@ -38,10 +39,18 @@ enum NetworkTest {
             refusals[route] = answer
         }
 
+        /// Answer the offers about `item` with this status and error until cleared with
+        /// nil.
+        func refuseOffer(item: String, _ answer: (Int, String)?) {
+            lock.lock(); defer { lock.unlock() }
+            refusedItems[item] = answer
+        }
+
         func respond(_ route: String, _ body: [String: Any]) -> (Int, String) {
             lock.lock(); defer { lock.unlock() }
             asked[route, default: 0] += 1
-            if let (status, error) = refusals[route] {
+            if let (status, error) = refusals[route]
+                ?? (body["item"] as? String).flatMap({ refusedItems[$0] }) {
                 return (status, NetworkTest.json(["error": error]))
             }
             switch route {
@@ -469,7 +478,7 @@ enum NetworkTest {
         let offersBefore = requests(NetworkRoute.offer).count
         let down = await store.dispatchAgent(job(90211), source: .auto)
         check("with the daemon down an automatic job is refused with the sentence",
-              down == .networkRefused(DiplomacyNetwork.notAnswering))
+              down == .networkDown(DiplomacyNetwork.notAnswering))
         store.commitQueue()
         check("…and staged back into the queue",
               store.queuedTasks.map(\.id)
@@ -478,7 +487,7 @@ enum NetworkTest {
         check("…logged once for the spell", feedDetails(NetworkAudit.unavailable).count == 1)
         let panelDown = await store.dispatchAgent(job(90213), source: .panel)
         check("a job the operator started gets the sentence",
-              panelDown == .networkRefused(DiplomacyNetwork.notAnswering)
+              panelDown == .networkDown(DiplomacyNetwork.notAnswering)
                 && statusText(for: panelDown, terminal: "Terminal")
                     == "Not offered: \(DiplomacyNetwork.notAnswering)")
         check("…and none of them asked for a terminal or booked a run",
@@ -1291,7 +1300,7 @@ enum NetworkTest {
                 && statusText(for: unsure, terminal: "Terminal") == "Offering to the pool…"
                 && !AgentRegistry.load().contains { $0.prNumber == 90301 })
         check("…while automatic work is refused as before, the queue offering it again",
-              await store.dispatchAgent(job(90302), source: .auto) == .networkRefused("boom")
+              await store.dispatchAgent(job(90302), source: .auto) == .networkDown("boom")
                 && offering() == [90301])
         store.commitQueue()
         store.queuedTasks = []
@@ -1336,6 +1345,104 @@ enum NetworkTest {
                   $0["taskId"] as? String == "task-off"
                       && $0["reason"] as? String == NetworkRoute.withdrawSwitchedOff
               })
+
+        // 35. A job the daemon refuses for a reason of the job's own waits on its row
+        //     with the reason, said once, and the queue goes on past it; a daemon that
+        //     takes no job stops the queue and marks no row.
+        store.networkEnabled = true
+        await store.networkLifecycle?.value
+        script.set(snapshot())
+        await store.runNetworkCycleOnce()
+        _ = AgentRegistry.forget(Set(AgentRegistry.load().map(\.runID)))
+        func queue(_ numbers: Int...) {
+            store.commitQueue()
+            store.queuedTasks = numbers.map { n in
+                Store.QueuedAgentTask(id: AgentTaskQueue.key(auditAction: "review-req", item: "o/r#\(n)"),
+                                job: job(n), attemptNumber: 1)
+            }
+        }
+        func offeredItems(since n: Int) -> [String] {
+            requests(NetworkRoute.offer).dropFirst(n).compactMap { $0["item"] as? String }
+        }
+        func said(since n: Int) -> [String] {
+            Array(feedDetails(NetworkAudit.unavailable).dropFirst(n))
+        }
+        let noRules = "That pool's rules name no review."
+        let label = "Review-req · #90401"
+        script.refuseOffer(item: item(90401), (409, noRules))
+        queue(90401, 90402)
+        var asked = requests(NetworkRoute.offer).count
+        let unavailable = feedDetails(NetworkAudit.unavailable).count
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        check("a job refused for a reason of its own does not stop the queue",
+              offeredItems(since: asked) == [item(90401), item(90402)]
+                && AgentRegistry.load().map(\.prNumber) == [90402])
+        store.commitQueue()
+        check("…and waits on its row with the reason",
+              store.queuedTasks.map(\.job.prNumber) == [90401]
+                && store.networkJobRefusals == [label: noRules])
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        store.commitQueue()
+        check("…said once for the job, however often it is refused",
+              said(since: unavailable) == ["\(label) was not offered: \(noRules)"]
+                && store.networkJobRefusals == [label: noRules])
+        script.refuseOffer(item: item(90401), (409, "o/r has no pool on this machine"))
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        store.commitQueue()
+        check("…and again for another reason",
+              said(since: unavailable).count == 2
+                && store.networkJobRefusals == [label: "o/r has no pool on this machine"])
+        script.refuseOffer(item: item(90401), nil)
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        check("the offer that goes through takes the reason off its row",
+              store.networkJobRefusals.isEmpty
+                && AgentRegistry.load().contains { $0.prNumber == 90401 })
+        var odd = job(90407)
+        odd.auditAction = "translate"
+        store.commitQueue()
+        store.queuedTasks = [
+            Store.QueuedAgentTask(id: AgentTaskQueue.key(auditAction: "review-req", item: "o/r#90407"),
+                                  job: odd, attemptNumber: 1),
+            Store.QueuedAgentTask(id: AgentTaskQueue.key(auditAction: "review-req", item: "o/r#90408"),
+                                  job: job(90408), attemptNumber: 1),
+        ]
+        asked = requests(NetworkRoute.offer).count
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        check("a job no offer can be made of is refused for a reason of its own",
+              offeredItems(since: asked) == [item(90408)]
+                && store.networkJobRefusals
+                    == ["Review-req · #90407": "the network runs no translate jobs"])
+        script.refuseOffer(item: item(90405), (409, noRules))
+        queue(90405)
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        store.commitQueue()
+        let waiting = store.networkJobRefusals
+        // A cycle that offers the job no more: its row goes.
+        store.commitQueue()
+        check("a row that left the queue takes its reason with it",
+              waiting == ["Review-req · #90405": noRules] && store.queuedTasks.isEmpty
+                && store.networkJobRefusals.isEmpty)
+        script.refuseOffer(item: item(90405), nil)
+        for (name, answer) in [("stopping", (503, "The Diplomacy Network daemon is stopping.")),
+                               ("at fault", (500, "boom"))] {
+            script.refuse(NetworkRoute.offer, answer)
+            queue(90403, 90404)
+            asked = requests(NetworkRoute.offer).count
+            await store.drainQueuedTasks(snaps: [], closed: [])
+            check("a daemon that is \(name) takes no job: the queue stops, and no row is marked",
+                  offeredItems(since: asked) == [item(90403)] && store.networkJobRefusals.isEmpty)
+        }
+        script.refuse(NetworkRoute.offer, (409, noRules))
+        queue(90406)
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        let marked = store.networkJobRefusals.count
+        store.networkEnabled = false
+        await store.networkLifecycle?.value
+        check("switching the network off forgets the reasons",
+              marked == 1 && store.networkJobRefusals.isEmpty)
+        script.refuse(NetworkRoute.offer, nil)
+        store.commitQueue()
+        store.queuedTasks = []
 
         print(pass ? "NETWORK TEST OK" : "NETWORK TEST FAILED")
         return pass

@@ -38,6 +38,7 @@ extension Store {
     func networkSwitched() {
         networkCycle = NetworkCycle()
         networkUnavailableLogged = false
+        networkJobRefusals = [:]
         let offering = networkOffering
         networkOffering = []
         if !networkEnabled {

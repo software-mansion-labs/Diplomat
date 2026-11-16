@@ -426,6 +426,9 @@ class Store(QObject):
         # Whether the feed has said the network is refusing automatic work, for the
         # current spell of it.
         self._network_unavailable_logged = False
+        # Why the network refused each queued job that it refused for a reason of the
+        # job's own, by the job's label: what its row says, and what the feed has said.
+        self.network_job_refusals: dict[str, str] = {}
         # The Devices screen's two remote-pool calls. Here, not on the screen: a
         # sign-in runs for up to ten minutes and must outlive the screen being closed.
         self.remote_sign_in = RemoteCall()
@@ -2566,7 +2569,7 @@ class Store(QObject):
             source, forced, verdict=job.verdict, mark_ready=job.mark_ready,
             no_prs=not job.opens_prs, read_only=not job.opens_prs)
         if isinstance(offer, str):
-            return self._network_refused(job, source, attempt, offer)
+            return self._network_refused(job, source, attempt, offer, own=True)
         reply = diplomacynetwork.send(network.ROUTE_OFFER, offer.body)
         if (source != autofix.SOURCE_AUTO and reply != deviceallocator.UNREACHABLE
                 and not diplomacynetwork.definite(reply)):
@@ -2578,8 +2581,11 @@ class Store(QObject):
             return diplomacynetwork.VERDICT_OFFERING
         task, why = self._offer_answer(reply)
         if task is None:
-            return self._network_refused(job, source, attempt, why)
+            return self._network_refused(
+                job, source, attempt, why,
+                own=diplomacynetwork.definite(reply) and not reply.ok)
         self._network_unavailable_logged = False
+        self._forget_job_refusals(lambda label: label != job.label)
         # The daemon answers an offer still open with the task it already has: the
         # run booked for it is this job's.
         if any(r.network == task for r in agentregistry.load()):
@@ -2667,13 +2673,21 @@ class Store(QObject):
         self.tasks_changed.emit()
 
     def _network_refused(self, job: autofix.AgentJob, source: str, attempt: int,
-                         why: str) -> diplomacynetwork.Refused:
-        """A job the network did not take. Automatic work waits in the queue, with one
-        feed line for the spell of it: until an offer goes through, or the switch
-        moves."""
+                         why: str, own: bool = False) -> diplomacynetwork.Refused:
+        """A job the network did not take. Automatic work waits in the queue. A
+        refusal of the job's ``own`` is said once for the job, in the feed and on its
+        row (:attr:`network_job_refusals`); one that holds every job has one feed line
+        for the spell of it: until an offer goes through, or the switch moves."""
         if source == autofix.SOURCE_AUTO:
             self._stage_queued(job, attempt)
-            if not self._network_unavailable_logged:
+            if own:
+                if self.network_job_refusals.get(job.label) != why:
+                    self.network_job_refusals = {**self.network_job_refusals, job.label: why}
+                    activity.log(source, network.AUDIT_UNAVAILABLE,
+                                 f"{job.label} was not offered: {why}")
+                    self.refresh_activity()
+                    self.tasks_changed.emit()
+            elif not self._network_unavailable_logged:
                 self._network_unavailable_logged = True
                 activity.log(source, network.AUDIT_UNAVAILABLE,
                              "Holding auto work - the Diplomacy Network did not take "
@@ -2683,7 +2697,12 @@ class Store(QObject):
             activity.log(source, network.AUDIT_UNAVAILABLE,
                          f"{job.label} was not offered: {why}")
             self.refresh_activity()
-        return diplomacynetwork.Refused(why)
+        return diplomacynetwork.Refused(why, own)
+
+    def _forget_job_refusals(self, keep) -> None:
+        """Drop the refusals of the jobs whose label ``keep`` does not hold."""
+        self.network_job_refusals = {
+            label: why for label, why in self.network_job_refusals.items() if keep(label)}
 
     def _auto_tasks_running(self) -> int:
         """How many bays of this device's cap are held right now — the number the cap
@@ -2893,6 +2912,8 @@ class Store(QObject):
         starting = {e.id for e in self.starting_tasks}
         before = self.queued_tasks
         self.queued_tasks = [by_id[k] for k in ordered if k not in starting]
+        waiting = {e.job.label for e in staged}
+        self._forget_job_refusals(waiting.__contains__)
         if self.queued_tasks != before:
             self.tasks_changed.emit()
 
@@ -3315,8 +3336,10 @@ class Store(QObject):
             # refusals to no end. The same holds for a disk below its floor.
             if verdict in (autofix.VERDICT_UNAFFORDABLE, autofix.VERDICT_LOW_DISK):
                 return
-            # So would every other be refused by the network that refused this one.
-            if verdict == diplomacynetwork.VERDICT_REFUSED:
+            # A daemon that did not answer, or is stopping, takes none of the rest
+            # either. One that refused this job for a reason of the job's own is asked
+            # about the next.
+            if verdict == diplomacynetwork.VERDICT_REFUSED and not verdict.own:
                 return
 
     def _drop_queued_task(self, task_id: str) -> None:
@@ -5706,6 +5729,7 @@ class Store(QObject):
             self.network_state = None
             self.network_answered = None
             self.network_refusals = {}
+            self.network_job_refusals = {}
             self.network_pools_held = ""
         self.network_changed.emit()
         self.tasks_changed.emit()

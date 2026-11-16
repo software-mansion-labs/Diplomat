@@ -870,6 +870,7 @@ class Panel(QWidget):
                 # GitHub is owed: dropping it would put it straight back on the next
                 # poll, so the button would do nothing anyone could see.
                 cancellable=task.job.requested,
+                refusal=self.store.network_job_refusals.get(task.job.label, ""),
             )
             row.run_requested.connect(
                 lambda tid=task.id: self.store.execute_queued_task_async(tid)

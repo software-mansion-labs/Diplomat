@@ -875,23 +875,150 @@ def test_the_queue_has_room_whenever_the_daemon_answers(store, on):
     assert not store._drain_has_room(full) and store._drain_has_room(0)
 
 
-def test_a_refusal_is_said_once_for_the_spell_of_it(store, on, daemon, monkeypatch):
-    refused = (409, {"error": "This machine is not in that pool."})
-    d = daemon({"/offer": refused})
+STOPPING = (503, {"error": "The Diplomacy Network daemon is stopping."})
+
+
+def test_a_daemon_that_takes_no_job_is_said_once_for_the_spell_of_it(
+        store, on, daemon, monkeypatch):
+    d = daemon({"/offer": STOPPING})
     calls = _spawn_recorder(monkeypatch)
     for n in (1, 2):
         verdict = store.dispatch_agent(job(n), autofix.SOURCE_AUTO)
-        assert verdict.sentence == "This machine is not in that pool."
+        assert verdict.sentence == "The Diplomacy Network daemon is stopping."
+        assert not verdict.own
     assert lines("network-unavailable") == [
         "Holding auto work - the Diplomacy Network did not take Review · #1: "
-        "This machine is not in that pool."]
+        "The Diplomacy Network daemon is stopping."]
+    assert store.network_job_refusals == {}
 
     d.routes["/offer"] = (200, {"taskId": "t3"})
     assert store.dispatch_agent(job(3), autofix.SOURCE_AUTO) == "spawned"
-    d.routes["/offer"] = refused
+    d.routes["/offer"] = STOPPING
     store.dispatch_agent(job(4), autofix.SOURCE_AUTO)
     assert len(lines("network-unavailable")) == 2, "an offer that went through ends the spell"
     assert calls == []
+
+
+NO_RULES = "That pool's rules name no review."
+
+
+def _refuses(*items):
+    """An ``/offer`` route refusing the jobs about ``items`` for a reason of their own,
+    and taking every other."""
+    def answer(body):
+        if body["item"] in items:
+            return 409, {"error": NO_RULES}
+        return 200, {"taskId": f"t-{body['item']}"}
+    return answer
+
+
+def _queue(store, *numbers) -> None:
+    store._staged_queue = []
+    store.queued_tasks = [autofix.QueuedTask(f"review-req:o/r#{n}", job(n), 1) for n in numbers]
+
+
+def test_a_job_refused_for_its_own_reason_does_not_stop_the_queue(
+        store, on, daemon, monkeypatch):
+    d = daemon({"/offer": _refuses("pr-6")})
+    calls = _spawn_recorder(monkeypatch)
+    store.auto_task_limit = 8
+    _queue(store, 6, 7)
+    store._drain_queued_tasks([], closed=set())
+    assert [b["item"] for b in d.sent("offer")] == ["pr-6", "pr-7"], "the next is asked about"
+    assert [r.network for r in agentregistry.load()] == ["t-pr-7"]
+    assert [e.id for e in store._staged_queue] == ["review-req:o/r#6"], "and it waits"
+    assert store.network_job_refusals == {"Review · #6": NO_RULES}
+    store.commit_queue()
+    assert [e.id for e in store.queued_tasks] == ["review-req:o/r#6"]
+    assert store.network_job_refusals == {"Review · #6": NO_RULES}, "its row keeps the reason"
+
+    _queue(store, 6)
+    store._drain_queued_tasks([], closed=set())
+    store.commit_queue()
+    assert lines("network-unavailable") == [f"Review · #6 was not offered: {NO_RULES}"], \
+        "said once for the job, however often it is refused"
+
+    d.routes["/offer"] = (409, {"error": "This machine is not in that pool."})
+    _queue(store, 6)
+    store._drain_queued_tasks([], closed=set())
+    assert lines("network-unavailable")[:-1] == [
+        "Review · #6 was not offered: This machine is not in that pool."], "and again for another"
+    assert calls == []
+
+
+def test_a_refusal_of_a_jobs_own_ends_with_the_offer_that_goes_through(
+        store, on, daemon, monkeypatch):
+    d = daemon({"/offer": _refuses("pr-6", "pr-8")})
+    _spawn_recorder(monkeypatch)
+    store.auto_task_limit = 8
+    _queue(store, 6, 8)
+    store._drain_queued_tasks([], closed=set())
+    assert set(store.network_job_refusals) == {"Review · #6", "Review · #8"}
+    changed = []
+    store.tasks_changed.connect(lambda: changed.append(dict(store.network_job_refusals)))
+
+    d.routes["/offer"] = _refuses("pr-8")
+    _queue(store, 6, 8)
+    store._drain_queued_tasks([], closed=set())
+    assert store.network_job_refusals == {"Review · #8": NO_RULES}
+
+    # A row that left the queue for any other reason takes its reason with it.
+    store.commit_queue()
+    assert changed[-1] == {"Review · #8": NO_RULES}
+    store._staged_queue = []
+    store.commit_queue()
+    assert store.network_job_refusals == {}
+    assert changed[-1] == {}, "before the panel is told the row went"
+
+
+def test_the_panel_is_told_of_a_reason_that_changed_under_a_row(store, on, daemon, monkeypatch):
+    d = daemon({"/offer": _refuses("pr-6")})
+    _spawn_recorder(monkeypatch)
+    told = []
+    store.tasks_changed.connect(lambda: told.append(dict(store.network_job_refusals)))
+    store.dispatch_agent(job(6), autofix.SOURCE_AUTO)
+    assert told == [{"Review · #6": NO_RULES}]
+    store.dispatch_agent(job(6), autofix.SOURCE_AUTO)
+    assert len(told) == 1, "a reason that stands is not news"
+    d.routes["/offer"] = (409, {"error": "This machine is not in that pool."})
+    store.dispatch_agent(job(6), autofix.SOURCE_AUTO)
+    assert told[1:] == [{"Review · #6": "This machine is not in that pool."}]
+
+
+@pytest.mark.parametrize("answer", [STOPPING, (500, {}), (200, {})],
+                         ids=["stopping", "a fault of the daemon's", "no task named"])
+def test_a_daemon_that_takes_no_job_stops_the_queue(store, on, daemon, monkeypatch, answer):
+    d = daemon({"/offer": answer})
+    _spawn_recorder(monkeypatch)
+    store.auto_task_limit = 8
+    _queue(store, 6, 7)
+    store._drain_queued_tasks([], closed=set())
+    assert [b["item"] for b in d.sent("offer")] == ["pr-6"], "the rest were not asked"
+    assert store.network_job_refusals == {}
+
+
+def test_a_job_no_offer_can_be_made_of_is_refused_for_its_own_reason(
+        store, on, daemon, monkeypatch):
+    d = daemon(takes_offers())
+    _spawn_recorder(monkeypatch)
+    store.auto_task_limit = 8
+    odd = dataclasses.replace(job(6), audit_action="translate")
+    store.queued_tasks = [autofix.QueuedTask("review-req:o/r#6", odd, 1),
+                          autofix.QueuedTask("review-req:o/r#7", job(7), 1)]
+    store._drain_queued_tasks([], closed=set())
+    assert [b["item"] for b in d.sent("offer")] == ["pr-7"]
+    assert store.network_job_refusals == {"Review · #6": "the network runs no translate jobs"}
+
+
+def test_switching_the_network_off_forgets_the_refusals(store, on, daemon, installer,
+                                                        monkeypatch):
+    daemon({"/offer": _refuses("pr-6")})
+    _spawn_recorder(monkeypatch)
+    store.dispatch_agent(job(6), autofix.SOURCE_AUTO)
+    assert store.network_job_refusals
+    store.set_network_enabled(False)
+    assert store.wait_for_background() == []
+    assert store.network_job_refusals == {}
 
 
 @pytest.mark.parametrize("answer, source, sentence", [

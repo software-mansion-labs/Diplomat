@@ -584,6 +584,7 @@ struct ContentView: View {
                 task: task,
                 tint: agentTaskTint(task.job.kind),
                 paused: store.isHeld(task),
+                refusal: store.networkJobRefusals[task.job.label],
                 onRun: { Task { await store.executeQueuedTask(task.id) } },
                 cancellable: task.job.requested,
                 onCancel: { store.cancelRequestedWork(task.id) },
@@ -1061,6 +1062,9 @@ private struct QueuedTaskRow: View {
     /// Its monitor is switched off, so nothing will start this by itself. Worth
     /// saying on the row: "queued" otherwise promises a start that is never coming.
     let paused: Bool
+    /// Why the Diplomacy Network refused this job, when it refused it for a reason of
+    /// the job's own.
+    let refusal: String?
     let onRun: () -> Void
     /// False for a monitor's row: dropping one would put it straight back on the next
     /// poll, so the button would do nothing anyone could see.
@@ -1116,6 +1120,10 @@ private struct QueuedTaskRow: View {
                         Text("· monitor off").font(.system(size: 9))
                             .foregroundStyle(.secondary)
                     }
+                }
+                if let refusal {
+                    Text(verbatim: "not offered: \(refusal)").font(.system(size: 9))
+                        .foregroundStyle(.orange).lineLimit(1).tooltip(refusal)
                 }
             }
             Spacer(minLength: 4)
