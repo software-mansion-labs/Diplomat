@@ -205,6 +205,7 @@ switch (command) {
     const networks = opts['--network'] || ['bridge'];
     for (const n of networks) if (n !== 'bridge' && n !== 'none' && !fs.existsSync(file('networks', `${n}.json`))) die(`docker: Error response from daemon: network ${n} not found`, 125);
     if (container(name)) die(`docker: Error response from daemon: Conflict. The container name "/${name}" is already in use.`, 125);
+    if (!rest[0]) die('docker: invalid reference format', 125);
     if (!fs.existsSync(file('images', encodeURIComponent(rest[0])))) die(`Unable to find image '${rest[0]}' locally`, 125);
     if (opts['--storage-opt'] && fs.existsSync(file('no-storage-opt'))) {
       die('docker: Error response from daemon: --storage-opt is supported only for overlay over xfs with \'pquota\' mount option\n\nRun \'docker run --help\' for more information', 125);
@@ -217,7 +218,11 @@ switch (command) {
         for (const [dst, m] of sizes) console.log(`${m.bytes}\t${dst}`);
         for (const [dst, m] of sizes) console.log(`${m.inodes}\t${dst}`);
       } else if (rest[1] === 'find' && rest.includes('-delete')) {
-        for (const n of fs.readdirSync(at[rest[2]])) fs.rmSync(path.join(at[rest[2]], n), { recursive: true, force: true });
+        // The path it is given, under whichever mount holds it; itself too unless -mindepth keeps it.
+        const dst = Object.keys(at).find((d) => rest[2] === d || rest[2].startsWith(`${d}/`));
+        const top = at[dst] + rest[2].slice(dst.length);
+        if (!rest.includes('-mindepth')) fs.rmSync(top, { recursive: true, force: true });
+        else for (const n of fs.readdirSync(top)) fs.rmSync(path.join(top, n), { recursive: true, force: true });
       }
       break;
     }

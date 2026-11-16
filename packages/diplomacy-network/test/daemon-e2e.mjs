@@ -148,7 +148,7 @@ try {
   });
 
   let second;
-  await check('a second task of the same requester runs in the same container: one that may push, pushes one new branch as the requester and nothing else', async () => {
+  await check('a second task of the same requester runs in a container of the same name, made anew: one that may push, pushes one new branch as the requester and nothing else', async () => {
     const before = bench.forge.log.length;
     const main = bench.branch('main');
     const { taskId } = await a.ok('/offer', {
@@ -172,8 +172,7 @@ try {
     ], 'exactly the writes the rules allow, each sent by the requester');
 
     assert.equal(second.container, first.container);
-    assert.deepEqual(b.containers().filter((n) => !n.endsWith('-relay')), [containerOf(pk.a)]);
-    assert.equal(b.docker('run').length, 1, 'made once');
+    assert.equal(b.docker('run').filter((c) => c.includes(containerOf(pk.a))).length, 2, 'made for each');
   });
 
   await check('another requester gets a container of its own, and two jobs at once each act through their own requester', async () => {
