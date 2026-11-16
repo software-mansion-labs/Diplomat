@@ -12,7 +12,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { daemonControl } from '../../daemon-core/src/daemon-control.js';
 import { pidAlive, readJson } from '../../daemon-core/src/fsio.js';
-import { clearDocker } from './executor/clear.js';
+import { createContainers } from './executor/container.js';
 import * as client from './ipc.js';
 import { CONFIG_PATH, DISCOVERY_PATH, STOP_WAIT_MS } from './paths.js';
 
@@ -49,7 +49,7 @@ async function stop() {
 async function stopForGood() {
   const error = await stop();
   const config = readJson(CONFIG_PATH);
-  if (!error && config !== null && typeof config === 'object' && config.networkEnabled !== true) await clearDocker();
+  if (!error && config !== null && typeof config === 'object' && config.networkEnabled !== true) await createContainers().removeAll();
   return error;
 }
 

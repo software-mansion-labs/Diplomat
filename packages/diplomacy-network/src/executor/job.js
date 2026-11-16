@@ -265,10 +265,10 @@ async function alive(job, verb = 'up') {
 
 // The job's container restarted, which ends every process in it: true once the engine
 // has done it. The other jobs in it end with it, and are not judged while it is asked.
-async function restart(job) {
+async function cut(job, restart) {
   const others = [...live.values()].filter((other) => other !== job && other.container === job.container);
   for (const other of others) other.cutting = true;
-  const done = (await docker(['restart', '-t', '0', job.container])).code === 0;
+  const done = await restart(job.container);
   for (const other of others) {
     other.cutting = false;
     other.cut ||= done;
@@ -326,8 +326,9 @@ export function watch(run) {
 /// Kills that run's processes, and only that run's, and marks it stopped; resolves to
 /// its outcome once they are gone, however long the engine takes to say so. A job that
 /// is not gone JOB_STOP_BOUND_MS after it was first asked ends with its container, which
-/// is restarted: every other job in it then ends as failed, with `CUT` for its summary.
-export async function stopJob(run) {
+/// is restarted by `containers.restart`, the container module's: every other job in it
+/// then ends as failed, with `CUT` for its summary.
+export async function stopJob(run, containers) {
   const job = live.get(run.runId);
   if (!job) return null;
   job.stopping = true;
@@ -339,7 +340,7 @@ export async function stopJob(run) {
   for (const from = Date.now(); ;) {
     await ask(job, 'stop', [grace], JOB_STOP_GRACE_MS + 30000);
     if ((await alive(job, 'left')) === false) break;
-    if (Date.now() - from >= JOB_STOP_BOUND_MS && await restart(job)) break;
+    if (Date.now() - from >= JOB_STOP_BOUND_MS && await cut(job, containers.restart)) break;
     await sleep(JOB_POLL_MS);
   }
   job.stopped = true;

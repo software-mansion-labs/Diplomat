@@ -65,7 +65,7 @@ Object.assign(process.env, {
   DN_CONTAINER_DISK_BYTES: String(16 * 2 ** 20),
   GIT_CONFIG_GLOBAL: path.join(scratch, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
 });
-const { createContainers, containerName, imageTag, IMAGE_DIR } = await import('../src/executor/container.js');
+const { createContainers, containerName, docker, imageTag, IMAGE_DIR } = await import('../src/executor/container.js');
 const { startJob, watch, stopJob, renderPrompt, readOutcome } = await import('../src/executor/job.js');
 // The same module as a daemon started later holds it: it knows of no job.
 const later = await import('../src/executor/job.js?later');
@@ -352,7 +352,7 @@ try {
     const ghost = await launch(`${R}-g`, PEER_A, alpha, { prompt: 'MODE=forward' }, {}, [{ name: 'echo' }]);
     assert.equal((await ghost.outcome).ok, true);
     assert.equal(agent(`${R}-g`, 'forward'), '');
-    await stopJob(holder.run);
+    await stopJob(holder.run, containers);
     await holder.outcome;
     echo.close();
   });
@@ -531,7 +531,7 @@ try {
     const [staysPid, goesPid] = [pid(`${R}-5`), pid(`${R}-6`)];
     assert.ok(pidAlive(staysPid) && pidAlive(goesPid));
 
-    const stopped = await stopJob(goes.run);
+    const stopped = await stopJob(goes.run, containers);
     assert.deepEqual(stopped, { ok: false, summary: 'stopped', usd: 0, tokens: 0, model: '', runner: 'claude', exit: null, state: 'stopped' });
     assert.equal(await goes.outcome, stopped);
     assert.deepEqual(readOutcome(`${R}-6`), stopped);
@@ -543,13 +543,13 @@ try {
     assert.equal(fs.existsSync(path.join(fakeDir, 'roots', stays.container.name, 'work', 'jobs', `${R}-6`)), false);
     assert.equal(fs.existsSync(path.join(fakeDir, 'roots', stays.container.name, 'work', 'jobs', `${R}-5`, 'repo', 'README')), true);
     assert.equal(calls('rm').length, 0, 'the container was never removed');
-    assert.equal(await stopJob(goes.run), null, 'stopping what has ended is nothing');
+    assert.equal(await stopJob(goes.run, containers), null, 'stopping what has ended is nothing');
     const restarts = calls('restart').length;
     await containers.release({ name: goes.container.name, runId: `${R}-6` });
     assert.equal(calls('restart').length, restarts, 'nor restarted under the job still in it');
 
     // The survivor ends on its own terms: here, by being stopped later.
-    assert.equal((await stopJob(stays.run)).state, 'stopped');
+    assert.equal((await stopJob(stays.run, containers)).state, 'stopped');
     await until('the survivor is dead too', () => !pidAlive(staysPid));
     await stays.outcome;
     assert.deepEqual(calls('restart').slice(restarts), [['restart', '-t', '0', stays.container.name]], 'with its last job gone the container is restarted: nothing a job started outlives it');
@@ -643,7 +643,7 @@ try {
     assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.staging')), []);
     const live = await launch(`${R}-15`, PEER_A, alpha, { prompt: 'MODE=sleep' });
     await assert.rejects(startJob({ run: live.run, container, spec: SPEC, proxy }), /already started/);
-    await stopJob(live.run);
+    await stopJob(live.run, containers);
     containers.release({ name: container.name, runId: 'x' });
     await assert.rejects(watch({ runId: 'never-started' }), /is not running/);
   });
@@ -663,7 +663,7 @@ try {
     assert.ok(calls('volume').some((c) => c[1] === 'rm' && c.at(-1) === idle.replace('dn-', 'dn-work-')), 'and its volume');
     assert.equal(fs.existsSync(path.join(fakeDir, 'networks', `${idle}.json`)), false);
     assert.equal(fs.existsSync(path.join(fakeDir, 'volumes', name.replace('dn-', 'dn-work-'))), true);
-    await stopJob(busy.run);
+    await stopJob(busy.run, containers);
     await busy.outcome;
 
     const before = calls('rm').length;
@@ -695,7 +695,7 @@ try {
     assert.equal(fs.existsSync(path.join(agentDir, `${R}-17.started`)), true);
     assert.ok(pidAlive(Number(fs.readFileSync(path.join(RUNS_DIR, `${R}-17`, 'pid'), 'utf8'))), 'and the running job was not disturbed');
 
-    await stopJob(before.run);
+    await stopJob(before.run, containers);
     await before.outcome;
     const volumeRemovals = calls('volume').filter((c) => c[1] === 'rm').length;
     const after = await launch(`${R}-19`, PEER_A, alpha);
@@ -1069,7 +1069,7 @@ try {
     const [{ fn, from, to, there, holds, secret }] = events;
     assert.deepEqual([fn, to, there], ['renameSync', path.join(container.runsDir, run.runId), false]);
     assert.ok(!under(records, from), `${from} is where no container looks`);
-    assert.deepEqual(holds, ['ca.crt', 'env.sh', 'forward.mjs', 'prompt.txt', 'run.sh', 'stop.sh'], 'and it is whole before it is seen');
+    assert.deepEqual(holds, ['ca.crt', 'env.sh', 'forward.mjs', 'prompt.txt', 'run.sh'], 'and it is whole before it is seen, with nothing the host runs to stop the job in it');
     assert.equal(secret, 0o600);
     assert.equal((await watch(run)).ok, true);
     broker.removeJob(run.runId);
@@ -1109,7 +1109,7 @@ try {
     const asked = () => calls('exec').filter((c) => c[6] === 'stop' && c[7] === `${R}-40`).length;
     fs.writeFileSync(path.join(fakeDir, 'down'), '');
     let settled = false;
-    const stopping = stopJob(job.run).then((outcome) => { settled = true; return outcome; });
+    const stopping = stopJob(job.run, containers).then((outcome) => { settled = true; return outcome; });
     await until('the engine was asked a second time', () => asked() >= 2);
     assert.equal(settled, false, 'the run is not called stopped');
     assert.equal(pidAlive(pid), true, 'and it is not');
@@ -1129,7 +1129,7 @@ try {
     fs.writeFileSync(path.join(fakeDir, 'hold-exec'), '');
     const before = asked();
     await until('the job is asked after', () => asked() > before);
-    const stopping = stopJob(job.run);
+    const stopping = stopJob(job.run, containers);
     process.kill(-job.started.pid, 'SIGKILL');
     await until('its runner is dead', () => !pidAlive(job.started.pid));
     fs.rmSync(path.join(fakeDir, 'hold-exec'));
@@ -1172,7 +1172,7 @@ try {
     const ended = await later.watch({ runId: `${R}-42` });
     assert.deepEqual([ended.ok, ended.state, ended.summary, ended.usd], [true, 'finished', `did ${R}-42`, 0.25]);
     assert.deepEqual(readOutcome(`${R}-42`), ended);
-    assert.equal((await later.stopJob({ runId: `${R}-41` })).state, 'stopped');
+    assert.equal((await later.stopJob({ runId: `${R}-41` }, containers)).state, 'stopped');
     await until('its runner is dead', () => !pidAlive(pid));
     for (const runId of [`${R}-41`, `${R}-42`]) broker.removeJob(runId);
     await fresh.release({ name: container.name, runId: `${R}-41` });
@@ -1199,7 +1199,7 @@ try {
     for (const none of [1, 0, -7, 1.5, '1', 'x']) assert.equal(later.attachJob({ runId: `${R}-51`, container, pid: none }), false, `a group of ${none}`);
     // The daemon after this one knows the job by what this one kept of it.
     assert.equal(later.attachJob({ runId: `${R}-51`, container, pid: started.pid }), true);
-    const stopped = await later.stopJob(run);
+    const stopped = await later.stopJob(run, containers);
     assert.equal(stopped.state, 'stopped');
     await until('its runner is dead', () => !pidAlive(started.pid));
     assert.equal(pidAlive(otherPid), true, 'the job whose group it named was not touched');
@@ -1207,8 +1207,28 @@ try {
       'nothing was run from its run directory but the runner, once');
     broker.removeJob(`${R}-51`);
     await containers.release({ name: container.name, runId: `${R}-51` });
-    await stopJob(other.run);
+    await stopJob(other.run, containers);
     await other.outcome;
+  });
+
+  await check('a container is restarted in its turn, after what was being done to it, and the answer is whether the engine did', async () => {
+    const container = await containers.acquire({ pool: alpha.pool, peer: PEER_A, runId: `${R}-60` });
+    const [restarts, inspects] = [calls('restart').length, calls('container').length];
+    // A second job is on its way into the container: the engine holds its first answer.
+    fs.writeFileSync(path.join(fakeDir, 'hold-container-inspect'), '');
+    const joining = containers.acquire({ pool: alpha.pool, peer: PEER_A, runId: `${R}-61` });
+    await until('the engine is asked about the container', () => calls('container').length > inspects);
+    const restarting = containers.restart(container.name);
+    // Time for a restart that waited for nothing to reach the engine.
+    for (let i = 0; i < 3; i++) await docker(['version']);
+    assert.equal(calls('restart').length, restarts, 'not while the container is being looked at');
+    fs.rmSync(path.join(fakeDir, 'hold-container-inspect'));
+    await joining;
+    assert.equal(await restarting, true);
+    assert.deepEqual(calls().at(-1), ['restart', '-t', '0', container.name]);
+    fs.writeFileSync(path.join(fakeDir, 'fail-restart'), 'Error response from daemon: cannot restart container\n');
+    assert.equal(await containers.restart(container.name), false, 'an engine that refused restarted nothing');
+    for (const runId of [`${R}-60`, `${R}-61`]) await containers.release({ name: container.name, runId });
   });
 
   await check('everything of this daemon on the engine is removed when asked, and nothing of anybody else', async () => {

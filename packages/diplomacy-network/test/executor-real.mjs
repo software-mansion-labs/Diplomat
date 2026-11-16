@@ -472,7 +472,7 @@ exit 0
     const sleeping = async (n) => Number(await sh('exec', stays.container.name, 'sh', '-c', `pgrep -c -f "sleep 60[${n}]" || true`));
     assert.deepEqual([await sleeping(1), await sleeping(2)], [1, 1]);
 
-    const stopped = await stopJob(goes.run);
+    const stopped = await stopJob(goes.run, containers);
     assert.equal(stopped.state, 'stopped');
     assert.equal(await groupAlive(goes), false);
     assert.equal(await sleeping(1), 0, 'its background child went with it');
@@ -494,7 +494,7 @@ exit 0
       // While it runs: what every process in the container holds in its environment.
       await until('the agent is up', () => fs.existsSync(path.join(job.dir, 'log.jsonl')), 120000);
       const environ = await sh('exec', job.container.name, 'sh', '-c', 'cat /proc/[0-9]*/environ 2>/dev/null | tr "\\0" "\\n" | sort -u');
-      const guard = setTimeout(() => stopJob(job.run), 300000);
+      const guard = setTimeout(() => stopJob(job.run, containers), 300000);
       const outcome = await job.outcome;
       clearTimeout(guard);
       assert.equal(outcome.ok, true, JSON.stringify(outcome));

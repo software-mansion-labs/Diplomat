@@ -55,7 +55,6 @@ src/
     container.js   image, one container per peer and repository, its network and relay
     job.js         one run: prompt, start, watch, stop, outcome, and what is kept of it
     adb.js         the filter between a job and this machine's adb server
-    clear.js       removes everything this daemon made in docker
     forward.mjs    inside a container: a job's forwards as local addresses
     runner.sh      inside a container: one job's environment, clone and agent
     stop.sh        handed to a container's sh: asks after one job's processes, ends them
@@ -331,6 +330,11 @@ machine. Having the key, the daemon makes sure of four things and starts the job
   that size where its storage can (`--storage-opt size=`). Where it cannot - Docker
   Desktop's default storage refuses the option - `usage(name)` measures the layer, the
   `/work` volume and the run records, and `overQuota()` names the containers past it.
+  The daemon asks every 10 minutes (`DN_SWEEP_MS`). A container past its allowance is
+  discarded: its jobs are stopped and end as failed attempts with the reason `the
+  container outgrew its disk allowance` - whichever of them filled it would fill the
+  next one too, and three attempts are all a task gets - and the container goes with
+  its relay, its network, its volume and its run records.
 - **The relay.** On each container's network sits `dn-<pool part>-<peer part>-relay`:
   the same image running `image/relay.mjs`, which carries TCP from that network to the
   broker's port on this machine and to nothing else, 1024 connections at a time. It is
@@ -418,7 +422,8 @@ process group gets TERM, 5 s, and KILL, and so does every process outside the gr
 that still carries the job's run id in its environment. The job counts as stopped only
 when the container itself says nothing of it is left. One that is still there 60 s
 (`DN_JOB_STOP_BOUND_MS`) after the first try - or a container in which nothing can be
-run any more - ends with its container, which is restarted; the other jobs in it, all
+run any more - ends with its container, which is restarted in its turn among whatever
+else is being done to that container; the other jobs in it, all
 the same requester's on the same repository, end as failed attempts with the reason
 `the container was restarted to stop another job`. A process that left the group and
 cleared its environment is known to nobody: it has no token either, and goes when the

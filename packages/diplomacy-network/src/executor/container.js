@@ -413,6 +413,12 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     });
   }
 
+  /// Restarts the container `name`, which ends every process in it, in its turn among
+  /// whatever else is being done to that container. Resolves to whether the engine did.
+  function restart(name) {
+    return serial(name, async () => (await docker(['restart', '-t', '0', name])).code === 0);
+  }
+
   const OWN = ['--filter', `label=dn.base=${BASE_DIR}`];
   const jobContainers = (names) => names.filter(isJobName);
 
@@ -557,6 +563,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     acquire,
     adopt,
     release,
+    restart,
     sweep,
     usage,
     overQuota,

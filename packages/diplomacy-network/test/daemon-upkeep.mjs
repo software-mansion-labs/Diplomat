@@ -90,15 +90,21 @@ try {
     const taskId = await own(up, 'pr-1', 'wait held\nsay swept');
     const run = await waiting(up, taskId, 'held');
     const ca = path.join(up.base, 'ca');
-    const current = fs.readFileSync(path.join(ca, 'current'), 'utf8').trim();
-    fs.mkdirSync(path.join(ca, '0123456789ab'));
+    // The job's authority; beside it an older one for the same hosts, and what is no
+    // authority at all.
+    const [current] = names(ca);
+    assert.deepEqual([names(ca).length, names(path.join(ca, current))], [1, ['ca.crt', 'ca.key', 'leaves', 'meta.json']]);
+    fs.cpSync(path.join(ca, current), path.join(ca, '0123456789ab'), { recursive: true });
+    const meta = JSON.parse(fs.readFileSync(path.join(ca, current, 'meta.json'), 'utf8'));
+    fs.writeFileSync(path.join(ca, '0123456789ab', 'meta.json'), JSON.stringify({ ...meta, createdAt: meta.createdAt - 3600 }));
+    fs.writeFileSync(path.join(ca, 'current'), `${current}\n`);
     await moreSweeps(up);
     assert.deepEqual([names(ca), up.containers().includes(run.container)], [['0123456789ab', current, 'current'].sort(), true], 'nothing goes while a job runs');
     up.release('held');
     await done(up, taskId);
     await until('the old authority pruned', () => !exists(ca, '0123456789ab'));
     await until('the idle container removed', () => up.containers().length === 0);
-    assert.deepEqual(names(ca), [current, 'current'].sort());
+    assert.deepEqual(names(ca), [current], 'the one a next job of these hosts is given stays');
     assert.match(up.log(), new RegExp(`removing ${run.container}: idle`));
 
     // Every change moves the snapshot; the file follows a second behind at most, and
@@ -206,8 +212,9 @@ try {
     walk(m.base);
     assert.deepEqual(open, []);
     const seen = (...parts) => exists(m.base, ...parts);
-    assert.deepEqual([seen('daemon.log'), seen('daemon.sock'), seen('identity.json'), seen('runs', '.containers'), seen('mirrors'), seen('ca', 'current'), seen('tor'), seen('jobs.json')],
-      Array(8).fill(true), 'the walk met every part of it');
+    const [authority] = names(path.join(m.base, 'ca'));
+    assert.deepEqual([seen('daemon.log'), seen('daemon.sock'), seen('identity.json'), seen('runs', '.containers'), seen('mirrors'), ...['ca.key', 'ca.crt', 'meta.json', path.join('leaves', 'api.github.com.key')].map((part) => seen('ca', authority, part)), seen('tor'), seen('jobs.json')],
+      Array(11).fill(true), 'the walk met every part of it');
     assert.ok(fs.readFileSync(path.join(m.base, 'daemon.log'), 'utf8').startsWith('from before\n'));
     assert.deepEqual(await m.stop(), { code: 0, signal: null });
   });
@@ -251,7 +258,7 @@ try {
     m.setConfig({ networkEnabled: false });
     assert.deepEqual(await gone(m), { code: 0, signal: null });
     assert.deepEqual([world(m), alive(agentPid)], [[0, 0, 0], false]);
-    assert.match(m.log(), /removed 4 container\(s\), network\(s\) and volume\(s\) of this daemon/);
+    assert.match(m.log(), /removed 2 container\(s\), 1 network\(s\) and 1 volume\(s\)/);
     assert.equal(exists(m.dockerDir, 'images', encodeURIComponent(m.docker('build')[0][m.docker('build')[0].indexOf('-t') + 1])), true, 'the image is kept');
 
     // A daemon that died with a job going. Stopped while the network is on, nothing is
@@ -270,12 +277,32 @@ try {
     assert.deepEqual([await n.install('--stop-daemon'), world(n), alive(leftPid)], [{ ok: true, daemonRunning: false, pid: null }, [0, 0, 0], false]);
   });
 
-  // The daemon hands on what the broker counts: asked of the broker itself, on a state
-  // directory of its own, whether it keeps such a count.
-  Object.assign(process.env, { DN_BASE_DIR: path.join(bench.root, 'probe'), DIPLOMAT_CONFIG: path.join(bench.root, 'probe.json') });
-  const { createBroker } = await import('../src/executor/broker.js');
-  if (typeof createBroker({}).spent !== 'function') console.log('SKIP what a job has spent of the model, kept for the daemon after it: the broker of this tree keeps no such count');
-  else await check('what a job has spent of the model is kept for the daemon after it, which counts on from there', async () => {
+  await check('a container that outgrew its disk allowance has its job stopped as a failed attempt that says so, and goes with its relay, its network, its volume and its run records', async () => {
+    const m = await bench.machine('q', { env: { DN_SWEEP_MS: '200', DN_CONTAINER_DISK_BYTES: String(4 * 2 ** 20) } }).start();
+    await m.linked();
+    const taskId = await own(m, 'pr-1', 'wait never\nsay never');
+    const run = await waiting(m, taskId, 'never');
+    const agentPid = m.agent(run.runId).pid;
+    const records = path.join(m.base, 'runs', '.containers', run.container);
+    await moreSweeps(m);
+    assert.deepEqual([m.containers().includes(run.container), alive(agentPid), exists(records, run.runId)], [true, true, true], 'within its allowance it is left alone');
+
+    const [volume] = names(path.join(m.dockerDir, 'volumes')).filter((n) => !n.endsWith('.labels'));
+    fs.writeFileSync(path.join(m.dockerDir, 'volumes', volume, 'big'), Buffer.alloc(5 * 2 ** 20, 1));
+    await until('the run failed', async () => (await m.state()).runs.find((r) => r.runId === run.runId).state === 'failed');
+    await until('the offer to say why', async () => (await offerOf(m, taskId)).reason === 'the container outgrew its disk allowance');
+    assert.equal((await offerOf(m, taskId)).attempt, 2, 'which cost the task an attempt');
+    await until('the container discarded', () => m.log().includes(`discarded ${run.container}`));
+    assert.match(m.log(), new RegExp(`${run.container} holds \\d+ bytes of this machine's disk, over the ${4 * 2 ** 20} a container gets: stopping its 1 job\\(s\\) and removing it`));
+    assert.equal(alive(agentPid), false);
+    assert.doesNotMatch(m.log(), /upkeep of .* failed/, 'it was removed once its job was gone, not tried before');
+    const removed = (kind, name) => m.docker(kind).some((c) => c.includes('rm') && c.at(-1) === name);
+    assert.deepEqual([m.docker('rm').some((c) => c.at(-1) === run.container), removed('network', run.container), removed('volume', volume)], [true, true, true]);
+    assert.deepEqual([exists(records, run.runId), fs.lstatSync(path.join(m.base, 'runs', run.runId), { throwIfNoEntry: false })], [false, undefined], 'its run records and the link to them');
+    await m.kill();
+  });
+
+  await check('what a job has spent of the model is kept for the daemon after it, which counts on from there', async () => {
     const m = await bench.machine('sp').start();
     await m.linked();
     const taskId = await own(m, 'pr-1', 'wait go\nmodel\nsay asked');
