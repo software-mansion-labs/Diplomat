@@ -117,8 +117,9 @@ try {
     const issued = names(leaves);
     fs.writeFileSync(path.join(leaves, 'old.example.crt'), ENDED_IN_2020);
     fs.writeFileSync(path.join(leaves, 'old.example.key'), 'its key\n');
-    await until('the certificate past its end removed with its key', () => !exists(leaves, 'old.example.crt') && !exists(leaves, 'old.example.key'));
-    assert.match(up.log(), /ca removed 1 leaf certificate\(s\) past their end/);
+    // The line is written once the files are gone.
+    await until('the certificate past its end removed with its key, and that said', () => !exists(leaves, 'old.example.crt') && !exists(leaves, 'old.example.key')
+      && /ca removed 1 leaf certificate\(s\) past their end/.test(up.log()));
     await moreSweeps(up);
     assert.deepEqual(names(leaves), issued, 'and no other');
     assert.deepEqual([names(ca), up.containers().includes(run.container)], [['0123456789ab', current, 'current'].sort(), true], 'nothing goes while a job runs');
@@ -160,8 +161,7 @@ try {
     assert.deepEqual([kept(ended), kept(going), exists(mirror)], [[true, true, true], [true, true, false], true], 'all of it is there the day it ended');
     // A day and an hour on: both runs, and the mirror of a pool that is still linked.
     for (const part of [parts(ended)[0], parts(ended)[2], parts(going)[0], mirror]) age(part, 25);
-    await until('the ended run forgotten', () => kept(ended).every((there) => !there));
-    assert.match(up.log(), /forgot 1 run\(s\) that ended over 24 h ago/);
+    await until('the ended run forgotten, and that said', () => kept(ended).every((there) => !there) && /forgot 1 run\(s\) that ended over 24 h ago/.test(up.log()));
     await moreSweeps(up);
     assert.deepEqual([kept(going), exists(mirror)], [[true, true, false], true], 'the run that goes on stays, and so does the mirror');
     assert.ok(Date.now() - fs.statSync(mirror).mtimeMs < 3600000, 'a linked pool\'s mirror is as young as the last sweep');
@@ -226,11 +226,12 @@ try {
 
     const open = [];
     const walk = (at) => {
-      const st = fs.lstatSync(at);
+      // What the daemon replaces a file by may be gone again before it is looked at.
+      const st = fs.lstatSync(at, { throwIfNoEntry: false });
       // A link has no mode of its own to speak of.
-      if (st.isSymbolicLink()) return;
+      if (!st || st.isSymbolicLink()) return;
       if ((st.mode & 0o077) !== 0) open.push(`${path.relative(m.base, at) || '.'} ${(st.mode & 0o777).toString(8)}`);
-      if (st.isDirectory()) for (const name of fs.readdirSync(at)) walk(path.join(at, name));
+      if (st.isDirectory()) for (const name of names(at)) walk(path.join(at, name));
     };
     walk(m.base);
     assert.deepEqual(open, []);

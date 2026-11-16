@@ -95,8 +95,7 @@ function lookForTools() {
     const at = locate(bin);
     if (located.get(tool) === at) continue;
     located.set(tool, at);
-    // One named by hand is said to be: a stand-in in a tool's place takes from the daemon
-    // whatever that tool gives it.
+    // One named by hand is said to be: a stand-in has whatever the daemon gives the tool.
     const named = bin === tool ? '' : `, which DN_${tool.toUpperCase()} names`;
     log(at ? `${tool} is ${at}${named}` : `${tool} is ${bin.includes('/') ? `not at ${bin}` : `in none of ${TOOL_PATH}`}`);
   }
@@ -346,8 +345,9 @@ const stuck = new Map();
 function leaveAlone({ id, path: checkout }, why) {
   const row = (stuck.get(id)?.row ?? 0) + 1;
   const wait = Math.min(POOL_RETRY_MAX_MS, POOL_RETRY_MS * 2 ** (row - 1));
-  stuck.set(id, { why, until: Date.now() + wait, row, path: checkout });
   log(`taking no job of ${id} for ${Math.round(wait / 1000)} s: ${why}`);
+  // Counted from when it was said.
+  stuck.set(id, { why, until: Date.now() + wait, row, path: checkout });
 }
 
 // A pool whose wait is over is taken from again once its mirror can be made, the one

@@ -63,7 +63,8 @@ try {
     const fixed = await bench.machine('fixed', { env: { DN_BROKER_PORT: String(named), DN_EXECUTOR_RETRY_MS: String(RETRY_MS) } }).start();
     const refusals = () => [...fixed.log().matchAll(/^\[(\S+)\] the broker is not listening: listen EADDRINUSE/gm)].map((m) => Date.parse(m[1]));
     const times = await until('the port asked for three times', () => (refusals().length >= 3 ? refusals() : null));
-    assert.ok(times.slice(1).every((at, i) => at - times[i] >= RETRY_MS), `asked again no sooner than every ${RETRY_MS} ms: ${times.map((at) => at - times[0])}`);
+    // A timer and the log's clock each count their own milliseconds: a wait of 300 can read as 299.
+    assert.ok(times.slice(1).every((at, i) => at - times[i] >= RETRY_MS - 10), `asked again no sooner than every ${RETRY_MS} ms: ${times.map((at) => at - times[0])}`);
     await new Promise((resolve) => squatter.close(resolve));
     assert.equal(await listening(fixed), named);
     await fixed.kill();
