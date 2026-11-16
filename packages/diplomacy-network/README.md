@@ -271,6 +271,21 @@ installed yet - is started again by the same daemon: after 5 s, then after twice
 each time, up to 5 minutes (`DN_TRANSPORT_RETRY_MS`, `DN_TRANSPORT_RETRY_MAX_MS`). Each
 try is a new transport behind the one the node holds.
 
+It runs `tor`, `docker`, `git`, `gh`, `glab`, `openssl` and `claude` by name. Diplomat,
+started by launchd or by a desktop session, is given the system's directories alone and
+so is the daemon it starts, so the daemon looks further: on the PATH it was given, then
+in the directories a user's installs put a tool in - Homebrew's (`/opt/homebrew/bin`,
+`/usr/local/bin`, `/home/linuxbrew/.linuxbrew/bin`), `~/.local/bin`, `~/bin`, Docker
+Desktop's (`~/.docker/bin` and the app's own), the nix profiles, MacPorts' and snap's
+(`DN_TOOL_DIRS`, colon-separated, in place of that list) - then beside `node` itself.
+Everything it starts is given that PATH, so `gh` finds `git` there and `docker` its
+credential helper. `DN_TOR`, `DN_DOCKER`, `DN_GIT`, `DN_GH`, `DN_GLAB`, `DN_OPENSSL` and
+`DN_CLAUDE` each name one tool by its path instead. Where each tool is, or that it is in
+none of those directories, is in `daemon.log` from the start and again whenever it
+changes: one installed while the daemon runs is found by the next try, with no restart.
+A `tor` that is nowhere is the snapshot's `transport.detail`, a `docker` that is nowhere
+its `docker.detail`.
+
 It ends in one of two ways. Stopped (`SIGTERM`, `SIGINT`, `install.js --stop-daemon`)
 with the network still on, it stops the node and the transport - and with it tor - and
 leaves its runs going in their containers for the daemon after it. Switched off

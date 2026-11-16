@@ -236,6 +236,7 @@ try {
     const docker = (await until('B\'s word on docker', async () => { const s = await b.state(); return s.docker.detail === 'not checked yet' ? null : s; })).docker;
     assert.equal(docker.state, 'missing');
     assert.match(docker.detail, /no-docker not found: every job runs in a container/);
+    assert.ok(b.log().includes(`] docker is not at ${b.env.DN_DOCKER}\n`), 'a tool named by its path is looked for there alone');
 
     const { taskId } = await a.ok('/offer', review('wait go\napi GET /repos/acme/widgets/pulls/1\napi DELETE /repos/acme/widgets\nsay told'));
     await until('B knows the task', async () => (await taskOf(b, taskId))?.state === 'available');

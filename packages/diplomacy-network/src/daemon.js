@@ -36,10 +36,10 @@ import { createForge } from './requester/forge.js';
 import { rulesFor } from './requester/rules.js';
 import { createTransport } from './transport/index.js';
 import {
-  ADB_SERVER, BASE_DIR, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, CONTAINER_DISK_BYTES, DISCOVERY_PATH, EXECUTOR_CHECK_MS,
-  EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GIT_BIN, HOURS_FLOOR, JOBS_PATH, JOBS_WRITE_MS, LOG_PATH,
-  MIRROR_KEEP_MS, RECONCILE_MS, RUN_KEEP_MS, SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS,
-  TEST_FAULTS_PATH, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS,
+  ADB_SERVER, BASE_DIR, CLAUDE_BIN, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, CONTAINER_DISK_BYTES, DISCOVERY_PATH,
+  DOCKER_BIN, EXECUTOR_CHECK_MS, EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GH_BIN, GIT_BIN, GLAB_BIN, HOURS_FLOOR,
+  JOBS_PATH, JOBS_WRITE_MS, LOG_PATH, MIRROR_KEEP_MS, OPENSSL_BIN, RECONCILE_MS, RUN_KEEP_MS, SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH,
+  STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS, TEST_FAULTS_PATH, TOOL_PATH, TOR_BIN, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS, locate,
 } from './paths.js';
 
 // Prompts of private repositories, tokens and keys lie under the state directory, and
@@ -53,11 +53,29 @@ try { fs.chmodSync(LOG_PATH, 0o600); } catch {}
 
 const log = createLog(LOG_PATH);
 const startedAt = Math.floor(Date.now() / 1000);
+// Every tool is run by its name on this PATH, and inherits it for its own helpers.
+process.env.PATH = TOOL_PATH;
 
 let node = null;
 let ending = false;
 const timers = [];
 const every = (ms, fn) => timers.push(setInterval(fn, ms));
+
+// ---- the tools
+
+const TOOLS = { tor: TOR_BIN, docker: DOCKER_BIN, git: GIT_BIN, gh: GH_BIN, glab: GLAB_BIN, openssl: OPENSSL_BIN, claude: CLAUDE_BIN };
+const located = new Map(); // a tool -> where it was last found, or null
+
+// Says where each tool is, and again when that changes: one installed while the daemon
+// runs is found by whatever runs it next.
+function lookForTools() {
+  for (const [tool, bin] of Object.entries(TOOLS)) {
+    const at = locate(bin);
+    if (located.get(tool) === at) continue;
+    located.set(tool, at);
+    log(at ? `${tool} is ${at}` : `${tool} is ${bin.includes('/') ? `not at ${bin}` : `in none of ${TOOL_PATH}`}`);
+  }
+}
 
 // ---- Diplomat's settings
 
@@ -773,6 +791,8 @@ function onListening() {
   // socket answers meanwhile.
   node.start().catch((err) => log(`the node did not start: ${err?.stack ?? err}`));
   startExecutor().catch((err) => log(`the executor side did not start: ${err?.stack ?? err}`));
+  lookForTools();
+  every(EXECUTOR_CHECK_MS, lookForTools);
   pollConfig();
   every(CONFIG_POLL_MS, pollConfig);
   every(STATE_WRITE_MS, watchExecutor);

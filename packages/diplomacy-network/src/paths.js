@@ -2,6 +2,7 @@
 // ~/.diplomat/network; DN_BASE_DIR redirects it, which is how the tests never touch the
 // real one.
 
+import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -30,6 +31,35 @@ export const CONFIG_PATH = process.env.DIPLOMAT_CONFIG
   ? home(process.env.DIPLOMAT_CONFIG)
   : path.join(os.homedir(), '.diplomat', 'config.json');
 export const CONFIG_POLL_MS = num('DN_CONFIG_POLL_MS', 1000);
+
+// Where a user's installs put a tool. An app started by launchd or by a desktop session
+// is given the system's directories alone, and so is everything it starts.
+const INSTALL_DIRS = [
+  '/opt/homebrew/bin', '/usr/local/bin', '~/.local/bin', '~/bin', '~/.docker/bin', '/Applications/Docker.app/Contents/Resources/bin',
+  '~/.nix-profile/bin', '/nix/var/nix/profiles/default/bin', '/run/current-system/sw/bin', '/home/linuxbrew/.linuxbrew/bin',
+  '/opt/local/bin', '/snap/bin',
+];
+/// The PATH the daemon looks for its tools on and gives to everything it starts, so
+/// that gh finds git and docker its credential helper: the one it was given, then the
+/// directories of a user's installs (DN_TOOL_DIRS, colon-separated, in their place),
+/// then node's own, for a tool that runs under `env node`.
+export const TOOL_PATH = [...new Set([
+  ...(process.env.PATH || '').split(':'),
+  ...(process.env.DN_TOOL_DIRS ? process.env.DN_TOOL_DIRS.split(':') : INSTALL_DIRS).map(home),
+  path.dirname(process.execPath),
+].filter(Boolean))].join(':');
+
+/// Where `tool` is: itself when it names a path, else the first file of that name on
+/// `searchPath` that can be run. Null when there is none.
+export function locate(tool, searchPath = TOOL_PATH) {
+  const runs = (file) => {
+    try {
+      fs.accessSync(file, fs.constants.X_OK);
+      return fs.statSync(file).isFile();
+    } catch { return false; }
+  };
+  return (tool.includes('/') ? [tool] : searchPath.split(':').map((dir) => path.join(dir, tool))).find(runs) ?? null;
+}
 
 export const TOR_BIN = process.env.DN_TOR || 'tor';
 export const DOCKER_BIN = process.env.DN_DOCKER || 'docker';

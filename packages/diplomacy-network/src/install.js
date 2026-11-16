@@ -14,7 +14,10 @@ import { daemonControl } from '../../daemon-core/src/daemon-control.js';
 import { pidAlive, readJson } from '../../daemon-core/src/fsio.js';
 import { createContainers } from './executor/container.js';
 import * as client from './ipc.js';
-import { CONFIG_PATH, DISCOVERY_PATH, STOP_WAIT_MS } from './paths.js';
+import { CONFIG_PATH, DISCOVERY_PATH, STOP_WAIT_MS, TOOL_PATH } from './paths.js';
+
+// docker is looked for where the daemon looks for it.
+process.env.PATH = TOOL_PATH;
 
 const { startDaemon, stopDaemon } = daemonControl({ client, discoveryPath: DISCOVERY_PATH, restartExitMs: STOP_WAIT_MS });
 

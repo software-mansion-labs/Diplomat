@@ -234,7 +234,7 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
     pump(proc.stderr, note);
     tor.exited = new Promise((resolve) => {
       proc.once('error', (err) => { // it never ran
-        tor.problem = err.message;
+        tor.problem = err.code === 'ENOENT' ? 'it is not installed where this machine\'s tools are looked for (DN_TOR names it by hand)' : err.message;
         resolve();
       });
       proc.once('exit', resolve);
