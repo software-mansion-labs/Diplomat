@@ -45,6 +45,9 @@ export async function until(what, fn, ms = 180000) {
 }
 
 let checks = 0;
+// Every machine of every bench: what each daemon logged last is printed with a failure,
+// since the bench removes the logs as it closes.
+const everyMachine = [];
 /// Runs one named check and prints how it went, like every other test file here.
 export async function check(name, fn) {
   const from = Date.now();
@@ -52,6 +55,7 @@ export async function check(name, fn) {
     await fn();
   } catch (err) {
     console.log(`FAIL ${name}`);
+    for (const m of everyMachine) console.log(`--- the end of ${m.name}'s daemon.log\n${m.log().split('\n').slice(-40).join('\n')}`);
     throw err;
   }
   checks += 1;
@@ -325,6 +329,7 @@ export async function createBench() {
       },
     };
     machines.push(m);
+    everyMachine.push(m);
     return m;
   }
 
@@ -350,7 +355,9 @@ export async function createBench() {
       killDaemonsUnder(DAEMON, 'DN_SCRATCH', root);
       for (const m of machines) m.killJobs();
       await forge.close();
-      fs.rmSync(root, { recursive: true, force: true });
+      // What a killed daemon had asked of the stand-in engine can still be writing here:
+      // removed again until nothing is.
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 40, retryDelay: 100 });
     },
   };
 }

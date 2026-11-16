@@ -21,10 +21,13 @@ const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { retu
 // Whether this host shows a process's environment, as a container's /proc does: where
 // it does not, the stand-in docker cannot find a job's processes by their run id.
 const PROC = fs.existsSync('/proc/self/environ');
-// What a daemon asked of a run's container since `from`, as [verb, run id, group].
 // Ends a process group this suite's stand-in docker could not: gone already is as good.
 const end = (group) => { try { process.kill(-group, 'SIGKILL'); } catch {} };
-const asked = (m, runId, from) => m.docker('exec').slice(from).filter((c) => c.includes(runId)).map((c) => c.slice(c.indexOf(runId) - 1, c.indexOf(runId) + 2));
+// What a daemon asked of a run's container since `from`, as [verb, run id, group]. A
+// look the daemon before it asked for as it was killed can reach the engine after it:
+// that one names the group that daemon kept, `kept`, which nothing tells the next one.
+const asked = (m, runId, from, kept) => m.docker('exec').slice(from).filter((c) => c.includes(runId))
+  .map((c) => c.slice(c.indexOf(runId) - 1, c.indexOf(runId) + 2)).filter(([verb, , named]) => verb !== 'up' || named !== String(kept));
 const done = (m, taskId) => until(`${taskId} done`, async () => (await offerOf(m, taskId)).state === 'done');
 // The run of a task on `m` once its agent waits for `file`.
 const waiting = (m, taskId, file) => until(`${m.name}'s agent to wait for ${file}`, async () => {
@@ -171,7 +174,7 @@ try {
       await until('the run failed', async () => (await runOf(m, taskId)).state === 'failed');
       assert.equal(alive(bystander.pid), true, 'the group its run directory named was not touched');
       assert.equal(m.log().includes(`${run.runId} taken up`), false);
-      const ofIt = asked(m, run.runId, execs);
+      const ofIt = asked(m, run.runId, execs, group);
       assert.ok(ofIt.length >= 2 && ofIt.every(([verb, , named]) => ['stop', 'left'].includes(verb) && named === '0'), JSON.stringify(ofIt));
       if (PROC) await until('everything of the job gone', () => !alive(group));
       // The node knew the run and not what became of its job: a failed attempt.
@@ -201,8 +204,8 @@ try {
     const line = `stopping ${run.runId} in ${run.container}: this daemon holds no record of the job`;
     await until('the job looked at', () => b.log().includes(line));
     // Nobody holds its group any more: it is known by its run id.
-    await until('the job stopped', () => asked(b, run.runId, execs).some(([verb]) => verb === 'left'));
-    assert.ok(asked(b, run.runId, execs).every(([, , named]) => named === '0'), JSON.stringify(asked(b, run.runId, execs)));
+    await until('the job stopped', () => asked(b, run.runId, execs, group).some(([verb]) => verb === 'left'));
+    assert.ok(asked(b, run.runId, execs, group).every(([, , named]) => named === '0'), JSON.stringify(asked(b, run.runId, execs, group)));
     if (PROC) await until('everything of the job gone', () => !alive(agentPid) && !alive(group));
     else end(group);
     // The node knew the run and not what became of its job: a failed attempt.
