@@ -91,6 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // No Dock icon for a one-shot.
             NSApp.setActivationPolicy(.accessory)
         } else {
+            // Only after terminateOthers: the LSUIElement bundle takes its Dock tile here,
+            // so it gets the kept-in-Dock one, not one beside it.
             NSApp.setActivationPolicy(.regular)
             NSApp.applicationIconImage = AppIcon.image()
             let store = Store()

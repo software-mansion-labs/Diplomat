@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# The macOS app's window and focus behaviour, end to end, inside a tart VM - never on
-# the machine you are working on. Builds Diplomat.app from this checkout on the host,
-# boots the VM headless, and drives the real bundle there: keys, clicks and
+# The macOS app's window, focus and Dock behaviour, end to end, inside a tart VM -
+# never on the machine you are working on. Builds Diplomat.app from this checkout on
+# the host, boots the VM headless, and drives the real bundle there: keys, clicks and
 # screenshots go through the VM's own VNC server (its virtual keyboard and mouse, so
 # no Accessibility grant is needed and nothing reaches the host's screen), commands
 # through `tart exec`.
@@ -45,6 +45,7 @@ MACOS="$ROOT/packages/diplomat-platform/macos"
   "$ROOT/packages/diplomat-core/assets" "$ROOT" "$STAGE/Diplomat.app"
 swiftc -O -o "$STAGE/winlist" "$ROOT/scripts/vm/winlist.swift"
 swiftc -O -o "$CACHE/ocr" "$ROOT/scripts/vm/ocr.swift"
+swiftc -O -o "$CACHE/dockdiff" "$ROOT/scripts/vm/dockdiff.swift"
 if [ ! -x "$CACHE/venv/bin/vncdo" ]; then
   python3 -m venv "$CACHE/venv" && "$CACHE/venv/bin/pip" -q install vncdotool
 fi
@@ -212,6 +213,35 @@ check "launching it opens the window" within 10 has_window
 check "…in the revived instance" same_pid "$REVIVED"
 check "…frontmost" within 5 front_is Diplomat
 check "its check with the app up never registers as an app" [ "$(registrations)" = 1 ]
+
+echo "== a relaunch keeps the app on its kept-in-Dock tile"
+vnc key alt-w
+check "the window is closed, clear of the Dock" within 5 no_window
+# Kept in the Dock as Keep in Dock records it, on top of the Dock the first run found:
+# stopping the VM can lose its last writes, the reset at the end among them.
+g "[ -f ~/diplomat-vm-dock.plist ] || { defaults export com.apple.dock ~/diplomat-vm-dock.plist && sync; }
+   defaults import com.apple.dock ~/diplomat-vm-dock.plist && \
+   defaults write com.apple.dock persistent-apps -array-add \"<dict><key>tile-type</key><string>file-tile</string>\
+<key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>file://$APP/</string>\
+<key>_CFURLStringType</key><integer>15</integer></dict></dict></dict>\" && killall Dock"
+sleep 8
+shot 7-dock-kept
+KEPT="$(pid)"
+# What the 06:00 job's relaunch runs.
+g "DIPLOMAT_BACKGROUND=1 open -n -g -j $APP"
+replaced() { local p; p="$(g "pgrep -x Diplomat")"; [ -n "$p" ] && ! grep -qx "$KEPT" <<<"$p"; }
+check "the relaunched instance replaces the running one" within 20 replaced
+sleep 5
+shot 7-dock-relaunched
+# A second tile, beside the kept one left blank, moves about a quarter of the Dock's
+# pixels; a badge appearing, well under 1%.
+dock_unchanged() {
+  local d; d="$("$CACHE/dockdiff" "$OUT/7-dock-kept.png" "$OUT/7-dock-relaunched.png")" || return 1
+  echo "        the Dock changed by $d%"
+  awk -v d="$d" 'BEGIN { exit !(d < 2) }'
+}
+check "…on the kept tile: the Dock looks as it did" dock_unchanged
+g "defaults import com.apple.dock ~/diplomat-vm-dock.plist && killall Dock"
 
 echo
 if [ "$FAILED" -eq 0 ]; then echo "vm: all passed  (screenshots: $OUT)"; else echo "vm: FAILED $FAILED  (screenshots: $OUT)"; fi
