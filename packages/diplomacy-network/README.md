@@ -53,10 +53,12 @@ src/
     llm.js         the model credential the broker adds
     mirror.js      the bare mirror a container clones from
     container.js   image, one container per peer and repository, its network and relay
-    job.js         one run: prompt, start, watch, outcome
+    job.js         one run: prompt, start, watch, stop, outcome, and what is kept of it
+    adb.js         the filter between a job and this machine's adb server
+    clear.js       removes everything this daemon made in docker
     forward.mjs    inside a container: a job's forwards as local addresses
     runner.sh      inside a container: one job's environment, clone and agent
-    stop.sh        inside a container: ends one job's process group
+    stop.sh        handed to a container's sh: asks after one job's processes, ends them
   daemon.js      the process: local socket, config, the node joined to its transport,
                  requester and executor
   install.js     what the applets run: --check, --start-daemon, --restart-daemon, --stop-daemon
@@ -71,7 +73,12 @@ test/            one self-contained *.mjs per subject, run by test/run-all.mjs
 
 ## State directory
 
-`~/.diplomat/network` (`DN_BASE_DIR` relocates it; every test does):
+`~/.diplomat/network` (`DN_BASE_DIR` relocates it; every test does). It holds prompts
+of private repositories, tokens and keys, so all of it is the operator's alone: the
+directory is 0700, every directory under it 0700 and every file 0600, whatever the umask
+of the process that started the daemon - the daemon runs under a umask of 077, tor, git
+and openssl with it - and a directory or a log an earlier daemon left more open is
+closed at every start.
 
 | File | Holds |
 | --- | --- |
@@ -85,12 +92,12 @@ test/            one self-contained *.mjs per subject, run by test/run-all.mjs
 | `keys.json` (0600) | live capabilities this host issued or holds |
 | `offers.json` (0600) | the tasks this host asked for: prompt, counters, outcome, and what each has used of its rules' allowances |
 | `runs.json` (0600) | the tasks this host runs or ran, and the tasks it gave up on |
-| `jobs.json` (0600) | the jobs going in this daemon's containers, for the daemon after it: the broker's port, each job's container, proxy token and CA generation |
+| `jobs.json` (0600) | the jobs going in this daemon's containers, for the daemon after it: the broker's port, and each job's container, proxy token, CA generation, process group, forwards and what it has spent of the model, the last no more than 5 s behind |
 | `tor/` | tor's data directory |
 | `ca/` (0700) | the broker's certificate authority |
-| `mirrors/<pool hash>.git` | bare mirrors |
-| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh` (0600), `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory |
-| `runs/<run id>.outcome.json` (0600) | that job's outcome, written by the daemon when the job ends, where no container can write |
+| `mirrors/<pool hash>.git` | bare mirrors. One is removed a day after its pool was last linked and not left |
+| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended |
+| `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed with its directory |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
 The node's documents are written in one order - identity, `heard`, links, pools, locks,
@@ -100,10 +107,21 @@ hosts has to be canonical. A pool's document holds at most 256 members with at m
 KiB of records each (PROTOCOL.md section 5), and is rewritten when a record of it
 changes.
 
+A job's directory is kept for the day after its end because the snapshot's `log` names a
+file in it, which is what the operator opens to see what the job did; nothing else reads
+it once the outcome is reported. `DN_RUN_KEEP_MS` and `DN_MIRROR_KEEP_MS` set the two
+days; both are looked at every 10 minutes, with the idle containers and the old
+certificate authorities. A container reads its run directory through a bind mount as
+its own root, which the engine maps to the operator (Docker Desktop, rootless docker) or
+to the host's root (rootful docker on Linux): either reads 0700 and 0600. Under
+`userns-remap` it is neither, and a job could not read its own prompt.
+
 Settings come from Diplomat's `config.json` (`DIPLOMAT_CONFIG` relocates it), re-read
-every second: `networkEnabled`, `networkRequiredMinimumH`, `networkMaximumAcceptedH`.
-The two hours settings take effect at the next offer and the next claim, without a
-restart, held to the 12 to 720 hours the network allows. The daemon switches off and
+every second: `networkEnabled`, `networkRequiredMinimumH`, `networkMaximumAcceptedH`,
+`networkDevices`. The two hours settings take effect at the next offer and the next
+claim, without a restart, held to the 12 to 720 hours the network allows.
+`networkDevices` is `true` or absent, and decides what the jobs started from then on are
+given of this machine's devices ("Devices" below). The daemon switches off and
 exits when `networkEnabled` is not `true`. A config that cannot be read says nothing
 until it has been unreadable five polls in a row - one read can fall in the middle of a
 rewrite - and then counts as switched off.
@@ -137,10 +155,10 @@ Every other answer is `{ error }` with a status that says whose fault it was:
 
 | Status | Means |
 | --- | --- |
-| 400 | the body is not what the route reads: not JSON, not an object, a member missing or of the wrong type or size. Members a route does not read are ignored |
+| 400 | the body is not what the route reads: not JSON (`The request body is not JSON.`), not an object, a member missing or of the wrong type or size. Members a route does not read are ignored |
 | 409 | the body is well formed and the network refuses it; `error` is a sentence fit to show the operator |
 | 404 | no such route |
-| 503 | the daemon is on its way out |
+| 503 | the daemon is on its way out (`The Diplomacy Network daemon is stopping.`): nothing was done, and the daemon after it takes the same request. `GET /health` answers to the last |
 | 500 | a fault of the daemon's own; the same line is in `daemon.log`, and the daemon goes on |
 
 `offer` answers as soon as the offer is signed and stored on this machine. It does not
@@ -177,7 +195,7 @@ linked repositories are kept across a restart of the daemon; `admit` is not.
 | --- | --- |
 | `--check` | `{ "installed": true, "daemonRunning": <bool>, "pid": <pid or null> }` - there is nothing to install, so `installed` is constant |
 | `--start-daemon` | `{ "ok": <bool>, "daemonRunning": <bool>, "pid": <pid or null>, "error"?: "<why>" }` - the daemon that already runs, or one started for it once its socket answers |
-| `--stop-daemon` | the same object: `ok` once no daemon is left, which with none running is at once |
+| `--stop-daemon` | the same object: `ok` once no daemon is left, which with none running is at once. With the network switched off in the settings it then removes what is left in docker of this state directory's daemons, which a daemon that died before it could switch off never did |
 | `--restart-daemon` | the same object: a stop, then a start |
 
 The snapshot:
@@ -188,6 +206,7 @@ The snapshot:
   "transport": { "state": "starting|bootstrapping|publishing|ready|failed", "detail": "" },
   "docker": { "state": "ready|missing|down|building|failed", "image": "", "detail": "" },
   "model": { "state": "ready|missing", "detail": "" },
+  "devices": { "state": "off|ready|none", "detail": "" },
   "admit": { "slots": 0, "at": 0, "reason": "" },
   "pools": [ { "id": "", "path": "", "identity": "", "hash": "", "left": false,
       "members": [ { "pk": "", "self": false, "maxAcceptedH": 12, "lastSeen": 0, "reachable": true,
@@ -213,7 +232,9 @@ offer stays in the list for a day, and keeps the `executor` and `executorHere` o
 machine that last held it - the one that reported it done, or the last to hold it before
 it failed or was cancelled; `executor` is empty only when nobody ever held it. `docker`
 and `model` say why this machine takes no work when it takes none: their `detail`
-carries the reason.
+carries the reason. `devices` is `off` until the operator sets `networkDevices`, then
+`ready` while an adb server answers on this machine and `none` while none does.
+`transport` is `failed`, with the reason, between a start that failed and the next one.
 
 A member's `skew` is true when its last answer said its clock and this machine's are
 more than 300 s apart: neither takes the other's requests, and a claim round goes on
@@ -231,13 +252,27 @@ the same directory finds the first answering and exits 0, naming it in the log. 
 listens on the socket, then builds the node over its store, its transport, and the two
 adapters below; the node itself knows no file, no socket and no docker.
 
+A transport that does not start - a machine that came up offline, a tor that is not
+installed yet - is started again by the same daemon: after 5 s, then after twice as long
+each time, up to 5 minutes (`DN_TRANSPORT_RETRY_MS`, `DN_TRANSPORT_RETRY_MAX_MS`). Each
+try is a new transport behind the one the node holds.
+
 It ends in one of two ways. Stopped (`SIGTERM`, `SIGINT`, `install.js --stop-daemon`)
 with the network still on, it stops the node and the transport - and with it tor - and
 leaves its runs going in their containers for the daemon after it. Switched off
 (`networkEnabled` not `true`, whether the daemon reads that itself or is stopped just
 after the setting was written), it first cancels every offer of its own that has not
-ended, stops its runs and releases their claims, tells its pools, and then exits. Both
-exit 0. A second signal ends it at once, with exit 1.
+ended, stops its runs and releases their claims, tells its pools, removes every
+container, relay, network and volume that carries this state directory in its `dn.base`
+label (the image stays), and then exits. Both exit 0. A second signal ends it at once,
+with exit 1.
+
+An exception nobody caught, in whatever event's handler, is written to `daemon.log` once
+with its stack (`uncaught: ...`) and the daemon goes on: the jobs it watches are worth
+more than the one event. The same exception - same message, same place - five times
+within a minute is one it does not get past, and it exits 1 with its runs left going, so
+that Diplomat starts it again. A promise nobody waited for is logged the same way
+(`unhandled: ...`) and never ends it.
 
 **Requester side.** `POST /offer` signs an offer record and pushes it to the pool. When a
 committed claim's executor asks for the key, the daemon issues a capability whose rules
@@ -315,25 +350,75 @@ missing.
 reads `jobs.json`, listens where the broker listened, and takes each job up where it
 stands: a job that ended meanwhile is reported with the outcome it left; one still
 running is watched again, in its container as it is, under the proxy token and the
-certificate authority it was started with. Until that is done no job is started, so a
-container holding a job is never restarted under it. A job that cannot be taken up - its
-container is gone, or the broker's port could not be had again - is stopped, and the
-node gives the task back. Every 15 s the jobs in this daemon's containers are held
-against the node's runs, and a job no run stands behind is stopped.
+certificate authority it was started with, with the forwards it was started with and
+its share of the model counted on from what `jobs.json` says it had spent. Until that
+is done no job is started - a run that was still waiting for its key, or an offer made
+with `now` in the daemon's first moment, waits for it - so a container holding a job is
+never restarted under it. A job that cannot be taken up - its container is gone, or the
+broker's port could not be had again - is stopped for that reason, and the node gives
+the task back. Every 15 s the jobs in this daemon's containers are held against the
+node's runs, and a job no run stands behind is stopped: one whose run was stopped
+while the engine did not answer, and one `jobs.json` no longer names, which is found by
+its run directory.
 
-**Devices.** Simulators, emulators and attached devices stay on the host. A container
-reaches them only through forwards the broker opens for a job. One is opened out of the
-box: `adb`, to the host's adb server, for every job started while that server answers on
-`127.0.0.1:5037` (`DN_ADB_SERVER` names another loopback address); the job finds it as
-`ADB_SERVER_SOCKET`. Anything else on the host - the device allocator, a tool-server -
-is forwarded only when the daemon's environment names it: `DN_FORWARDS` is a JSON object
-of name to `127.0.0.1:<port>`, and each becomes `DN_FORWARD_<NAME>` in every job. A
-target that is not on this machine's loopback is left out. A forward is a name that only
-its own job's proxy token opens; `executor/forward.mjs`, started with the job inside the
-container, turns it into the local address a tool expects, and it ends with the job. A
-forward is a plain TCP connection: a job that is given `adb` can do with the host's
-devices what `adb` can. What a machine has is never published; it only weighs it when
-deciding whether to take a task.
+**Stopping a job.** A job is root in its container and can write wherever the container
+can, its own run directory included. So nothing the host runs to ask after a job or to
+end it comes from there: `stop.sh` is handed to the container's `sh` as text, and the
+job's process group is the one the shell that started the job named to the daemon, kept
+in `jobs.json`, not the one the job's own `pid` file says. The order is always the same.
+The job's proxy token is taken out of the broker first, so from that moment it reaches
+nothing - no forge, no model, no forward - however long the rest takes. Then its
+process group gets TERM, 5 s, and KILL, and so does every process outside the group
+that still carries the job's run id in its environment. The job counts as stopped only
+when the container itself says nothing of it is left. One that is still there 60 s
+(`DN_JOB_STOP_BOUND_MS`) after the first try - or a container in which nothing can be
+run any more - ends with its container, which is restarted; the other jobs in it, all
+the same requester's on the same repository, end as failed attempts with the reason
+`the container was restarted to stop another job`. A process that left the group and
+cleared its environment is known to nobody: it has no token either, and goes when the
+container's last job ends, which restarts the container.
+
+**Devices.** Simulators, emulators and attached devices stay on the host, and a job is
+given nothing of them unless this machine's operator opts in: `networkDevices` in
+Diplomat's settings, off by default. A change holds for the jobs started after it; a job
+keeps what it was started with, across a restart of the daemon too, and loses it only
+when the setting is off at that restart.
+
+Opting in gives every job of every peer this: it can run what `adb` can on the devices
+and emulators attached to this machine - install and start apps, read and write their
+files, run a shell on them - and since an emulator reaches this machine's own loopback
+services (as `10.0.2.2`), so can a job that has a shell on one. That is a stranger's
+prompt driving a phone plugged in by USB; leave the setting off on a machine where that
+is not acceptable.
+
+With it on, each job started while an adb server answers on `127.0.0.1:5037`
+(`DN_ADB_SERVER` names another loopback address) gets a forward named `adb`, which it
+finds as `ADB_SERVER_SOCKET`. The forward does not lead to the adb server but to a
+filter in the daemon (`executor/adb.js`) that reads adb's own requests and passes on
+only these: `host:version`, `host:devices`, `host:devices-l`, `host:features`,
+`host:host-features`, `host-serial:<serial>:get-state|get-serialno|get-devpath|features`,
+and a switch to one named device (`host:transport:<serial>`, `host:tport:serial:<serial>`)
+followed by that device's own service. Everything else is answered `FAIL` with the
+reason, logged, and never reaches the server: `host:connect` and `disconnect` (the
+server dialling out from this machine), `host:forward`, `killforward` and `list-forward`
+(the server listening on this machine's ports), `host:kill`, `pair`, `mdns`,
+`track-devices`, `transport-any`, `transport-usb`, `transport-local`, `emulator`, any
+request not listed here, and behind a device switch `reverse:` (a device's way to this
+machine's ports) and every `host` request. So a job names its device (`adb -s <serial>`
+or `ANDROID_SERIAL`), and an adb client of another version than the server's fails
+rather than replacing the server.
+
+Anything else on the host - the device allocator, a tool-server - is forwarded only
+when the daemon's environment names it and `networkDevices` is on: `DN_FORWARDS` is a
+JSON object of name to `127.0.0.1:<port>`, and each becomes `DN_FORWARD_<NAME>` in
+every job. A target that is not on this machine's loopback is left out. Such a forward
+is a plain TCP connection, unfiltered: the job can say to that service whatever any
+local process can.
+
+A forward is a name that only its own job's proxy token opens; `executor/forward.mjs`,
+started with the job inside the container, turns it into the local address a tool
+expects, and it ends with the job. What a machine has is never published; it only
+weighs it when deciding whether to take a task.
 
 ## Tests
 
