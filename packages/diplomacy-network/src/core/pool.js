@@ -79,9 +79,10 @@ function seated(pks, members, self) {
 
 // The entries of `entries` that are live at `asOf` for `self`, and why each other one is
 // not. Members first, since an offer or a claim lives only while its signer does; then
-// offers, since a claim lives only while an offer of a host that backs it does. Offers and claims are
-// taken in key order, each against what its signer has left of its quota, so which ones
-// a member over its quota keeps does not depend on the order they arrived in.
+// offers, since a claim lives only while an offer of a host that backs it does. Offers
+// and claims are taken in key order, each against what its signer has left of its quota,
+// so which ones a member over its quota keeps does not depend on the order they arrived
+// in.
 // Every version is judged by its own `at` alone, so a version that wins over another of
 // its key was signed no earlier and is never dropped before it.
 // The answer is the same for every time from `from` up to `until`: the retention of some
@@ -178,9 +179,9 @@ export class Pool {
   /// `bad-grant`, `bad-lease`, `bad-ping`), or would not be live here: past its retention
   /// (`expired`), signed by nobody this host accepts (`not-member`), a member more than
   /// the pool holds (`full`), an offer or a claim beyond what its signer may have live
-  /// (`quota`), or a claim none of the hosts that back it offers the task of (`no-offer`). A list
-  /// is taken in together, so a member record may let in the records that depend on it
-  /// whatever their order. Records no longer live are dropped.
+  /// (`quota`), or a claim none of the hosts that back it offers the task of
+  /// (`no-offer`). A list is taken in together, so a member record may let in the records
+  /// that depend on it whatever their order. Records no longer live are dropped.
   merge(input, now) {
     const verdicts = [];
     const tentative = new Map(this.#entries);

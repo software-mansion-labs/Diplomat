@@ -2,9 +2,9 @@
 // offers, runs that finish, fail or vanish, requests under keys, withdrawals, restarts,
 // hosts that leave the pool and come back, hosts switched off, a member that answers
 // nobody, pushes records no host may take and offers what the others offer, hosts off
-// the network, cuts, lost and repeated requests, and hours passing. After every step what must always hold is
-// checked; at the end the network is mended and everything offered must have ended, on
-// every host alike.
+// the network, cuts, lost and repeated requests, and hours passing. After every step
+// what must always hold is checked; at the end the network is mended and everything
+// offered must have ended, on every host alike.
 //
 //   DN_SOAK_SEEDS  how many seeds to run (default 4)     DN_SOAK_STEPS  steps per seed (default 120)
 //   DN_SOAK_SEED   the first seed (default 1); a failure prints the seed to run again

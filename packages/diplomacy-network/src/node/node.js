@@ -214,7 +214,8 @@ export function createNode({
       })),
       tasks: P.pool.tasks(now).map((t) => {
         // One row a task: where several claims hold offers of it, this host's own is the
-        // one shown, else the one that holds this host's offer, else the one that holds the most.
+        // one shown, else the one that holds this host's offer, else the one that holds
+        // the most.
         const claim = t.offers.find((o) => o.claim?.executor === host.self)?.claim
           ?? t.offers.find((o) => o.host === host.self)?.claim ?? t.claim;
         return {
