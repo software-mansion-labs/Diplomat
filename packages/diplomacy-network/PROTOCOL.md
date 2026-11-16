@@ -993,8 +993,10 @@ is empty, `.` or `..`. An encoded dot is read as the dot it is, the one before a
 included. An encoded slash is part of its segment, which only a rule's `*` or `**` can
 match - GitLab's router matches a route before it decodes a name, so the slash separates
 nothing there - and the request is refused all the same when the path with each such slash
-read as a separator would be decided by an earlier rule, by a rule that refuses, or by no
-rule: that is the request a proxy that decodes before it forwards would hand the forge.
+read as a separator would be decided by no rule, or by another rule that carries more
+than a host, a method, a path and `fold`: that is the request a proxy that decodes before
+it forwards would hand the forge, and such a rule's check is one this request is not put
+through.
 
 - `path` is matched segment by segment: a literal, `*` for exactly one segment, or a
   trailing `**` for any remainder. `fold` lists the segments, counted from 0, that are
@@ -1032,7 +1034,16 @@ rule: that is the request a proxy that decodes before it forwards would hand the
   has the forge asked what the project named in that path segment is: the request is
   allowed only when it is the fork of `repo` that the account `owner` holds itself (see
   `fork` below), and a `created` branch of that rule is one this task created in that
-  fork. `pick` lists the members of the forge's JSON answer an executor
+  fork. `"run": { "segment": 5, "what": "run", "repo": "o/r" }` has the forge asked which
+  branch the CI run (GitLab: the pipeline) whose id stands in that segment ran for - with
+  `"what": "job"`, the run of the job whose id it is. The request is allowed when that is
+  a branch this task created; with `"base": true`, when it is the default branch of
+  `repo`; with `"head": { "number": 578 }` (`{ "author": "me" }`, `{ "notAuthor": "me" }`:
+  any open pull request so opened), when it is the head branch of that pull request, in
+  the repository the forge places that branch in. A run the forge does not show, and on
+  GitLab a pipeline for a tag, is refused. A GitLab pipeline for a merge request counts
+  for that merge request's source branch, and under `head` for that merge request alone.
+  `pick` lists the members of the forge's JSON answer an executor
   gets back - of each entry, when the answer is a list. An answer that is neither an
   object nor a list of objects is not passed on.
 - `{ "graphql": { "forge": "github", "repo": "o/r", "roots": [...], "mutations": [...],
@@ -1040,7 +1051,11 @@ rule: that is the request a proxy that decodes before it forwards would hand the
   confines the document, which must be exactly one query or mutation. A query may select
   only the listed root fields: `repository` (GitLab: `project`) pinned to the pool's own,
   the viewer's public scalars, a `search` confined as above, and `node(id:)` once the id
-  has been resolved to an object of the pool's repository. Below a root, a field with a
+  has been resolved to an object of the pool's repository. From the repository itself a
+  selection goes on to its pull requests, issues, refs and git objects, to the files GitHub
+  reads out of it (code owners, templates, contact links), to its owner and to what it is
+  a fork of (GitLab: merge requests, issues, the git repository, the group and the
+  namespace), and to nothing else it holds. Below a root, a field with a
   selection set must be one the reader knows the reach of, so a selection cannot walk from
   the repository to its owner's other repositories; on an account, or on an object that
   may live in another repository, such a field takes no argument, which would look
@@ -1094,7 +1109,8 @@ A rule carrying `graphql` or `git` never allows a request by its host, method an
 alone: its own check must pass too.
 
 Where a check asks the forge - who opened a pull request, where a branch is, which branch
-is the default, who is assigned, whose a repository is and what it is a fork of - only
+is the default, who is assigned, whose a repository is and what it is a fork of, which
+branch a CI run ran for - only
 an answer that settles the question is used. A
 forge that says there is no such thing has answered; a rate limit, an error or anything
 else has not, and the request is refused.
