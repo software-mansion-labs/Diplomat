@@ -173,13 +173,18 @@ goes back to the pool - or **Withdraw** for one this machine offered that runs e
 nowhere yet. **Restart daemon** leaves the jobs in this machine's containers running; the daemon
 that starts takes them up.
 
-The daemon leaves a pool that is missing from the list Diplomat gives it, so the list is held
-back while it may be cut short: while a linked checkout cannot be read (a missing path, a
-volume not mounted, `git` failing on it) or the account a repository is worked as is not known
-yet. The screen then says which - *Pools are held back: /path cannot be read*, or *the account
-for owner/repo is not known yet* - and the pools stay as they were. Every cycle looks again. A
-folder under Other repos that was read and has no GitHub or GitLab remote is no pool and holds
-nothing back.
+The daemon leaves a pool that is missing from the list Diplomat gives it, so what Diplomat
+cannot confirm is never dropped from that list. A repo root or a checkout under Other repos
+that cannot be read (a missing path, a volume not mounted, `git` failing on it) and a repository
+whose login on its forge is not known yet keep the pool the daemon last had for them, and the
+screen names each one and what ends it: */path cannot be read: its pool stays as the daemon
+last had it until the path can be read or is taken out of Settings*, or *The login for
+owner/repo on host is not known yet*. Every other pool follows Settings on the next cycle while
+that lasts: a repository linked since gains its pool, one taken out leaves its own, and the
+feed names each pool left and why. A root or a folder that was read and has no GitHub or GitLab
+remote is no pool and holds nothing back; a self-hosted GitLab is recognised by a host name
+starting with `gitlab.` or by `glab` being signed in to it. A list the daemon refuses is shown
+with the daemon's own sentence and sent again once a minute, or as soon as it changes.
 
 A job offered to the network shows in the task list like any other: *in the pool*, *running on
 this machine* or on another member's key, then finished or failed. A job started by hand whose

@@ -219,37 +219,58 @@ func networkSmoke() throws {
     section("network: the pools listing")
     let logins = ["github.com": "octocat", "gitlab.example.com": "me"]
     let other = PRRef.LocalRepo(owner: "a", repo: "b", path: "/w/b")
-    func listing(rootsRead: Bool = true, others: [PRRef.LocalRepo] = [other],
-                 unread: [String] = [], identities: [String: String] = logins)
+    func listing(others: [PRRef.LocalRepo] = [other], unread: [String] = [],
+                 identities: [String: String] = logins, known: [[String: String]] = [])
         -> NetworkPools.Listing {
-        NetworkPools.listing(roots: roots, rootsRead: rootsRead, others: others,
-                             unread: unread, identities: identities)
+        NetworkPools.listing(roots: roots, others: others, unread: unread,
+                             identities: identities,
+                             known: NetworkSnapshot(["pools": known]).pools)
     }
-    func ids(_ l: NetworkPools.Listing) -> [String]? {
-        if case .pools(let pools) = l { return pools.map(\.id) }
-        return nil
-    }
+    func ids(_ l: NetworkPools.Listing) -> [String] { l.pools.map(\.id) }
     let whole = ["github.com/o/r", "gitlab.example.com/g/sub/p", "github.com/x/y"]
-    check(ids(listing()) == whole + ["github.com/a/b"],
+    check(ids(listing()) == whole + ["github.com/a/b"] && listing().unconfirmed.isEmpty,
           "the roots, then what the other checkouts name: \(listing())")
     check(ids(listing(others: [roots[3], other])) == whole + ["github.com/a/b"],
           "a checkout of a root's repository adds no pool")
     check(ids(listing(others: [])) == whole, "a checkout naming no forge is left out")
-    check(listing(rootsRead: false) == .held("Pools are held back: a repo root cannot be read"),
-          "an unread root holds the list back")
-    check(listing(unread: ["~/gone", "/mnt/x"])
-          == .held("Pools are held back: ~/gone cannot be read"),
-          "an unread checkout holds the list back, the first one named")
-    check(listing(identities: ["github.com": "octocat"])
-          == .held("Pools are held back: the account for g/sub/p is not known yet")
-          && listing(identities: ["github.com": " ", "gitlab.example.com": "me"])
-          == .held("Pools are held back: the account for o/r is not known yet"),
-          "an unknown login holds the list back, its repository named")
-    check(listing(rootsRead: false, unread: ["/mnt/x"], identities: [:])
-          == .held(NetworkPools.heldRoot)
-          && listing(unread: ["/mnt/x"], identities: [:])
-          == .held(NetworkPools.held(unread: "/mnt/x")),
-          "the roots are named before a checkout, a checkout before a login")
+    let gone = ["id": "github.com/q/gone", "path": "/mnt/x", "identity": "octocat"]
+    let labGone = ["id": "gitlab.example.com/q/lab", "path": "/mnt/lab", "identity": "me"]
+    let stale = ["id": "github.com/q/stale", "path": "/w/stale", "identity": "octocat"]
+    let unread = listing(unread: ["/mnt/x", "/mnt/lab", "/mnt/new"], known: [stale, gone, labGone])
+    check(ids(unread) == whole + ["github.com/a/b", "github.com/q/gone", "gitlab.example.com/q/lab"]
+          && Array(unread.pools.suffix(2)) == [
+            NetworkPools.Pool(id: "github.com/q/gone", path: "/mnt/x", forge: "github",
+                              identity: "octocat"),
+            NetworkPools.Pool(id: "gitlab.example.com/q/lab", path: "/mnt/lab", forge: "gitlab",
+                              identity: "me")],
+          "the pool behind an unread path is said as the daemon had it, and one behind "
+            + "no listed path is left: \(unread.pools)")
+    check(unread.unconfirmed == ["/mnt/x", "/mnt/lab", "/mnt/new"].map {
+              "\($0) cannot be read: its pool stays as the daemon last had it until the "
+                + "path can be read or is taken out of Settings"
+          }, "each unread path is named, with what ends it: \(unread.unconfirmed)")
+    let noLab = listing(identities: ["github.com": "octocat"], known: [
+        ["id": "gitlab.example.com/g/sub/p", "path": "/old/p", "identity": "me"], stale])
+    check(ids(noLab) == ["github.com/o/r", "github.com/x/y", "github.com/a/b",
+                         "gitlab.example.com/g/sub/p"]
+          && noLab.pools.last == NetworkPools.Pool(id: "gitlab.example.com/g/sub/p",
+                                                   path: "/old/p", forge: "gitlab", identity: "me")
+          && noLab.unconfirmed == ["The login for g/sub/p on gitlab.example.com is not known "
+                                    + "yet: its pool stays as the daemon last had it until it is"],
+          "a repository whose login is unknown keeps the pool the daemon had: \(noLab)")
+    check(ids(listing(identities: ["github.com": "octocat"]))
+          == ["github.com/o/r", "github.com/x/y", "github.com/a/b"],
+          "…and has none the daemon never had, the others said all the same")
+    check(listing(identities: ["gitlab.example.com": "me"]).unconfirmed
+          == [("o/r", "github.com"), ("x/y", "github.com"), ("a/b", "github.com")].map {
+              NetworkPools.unconfirmed(account: $0.0, host: $0.1)
+          }, "each repository with no login is named once")
+    let read = listing(unread: ["/old/r"], known: [
+        ["id": "github.com/o/r", "path": "/old/r", "identity": "someone"]])
+    check(ids(read) == whole + ["github.com/a/b"]
+          && read.pools.first == NetworkPools.Pool(id: "github.com/o/r", path: "/w/r",
+                                                   forge: "github", identity: "octocat"),
+          "a pool that was read is said as read, not as the daemon had it")
     check(NetworkPools.body(githubOnly) == ["pools": [
         ["id": "github.com/o/r", "path": "/w/r", "forge": "github", "identity": "octocat"],
         ["id": "github.com/x/y", "path": "/w/y", "forge": "github", "identity": "octocat"]]],

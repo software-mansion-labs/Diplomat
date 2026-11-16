@@ -280,29 +280,64 @@ OTHER = LocalRepo("a", "b", "/w/b")
 WHOLE = ["github.com/o/r", "gitlab.example.com/g/sub/p", "github.com/x/y"]
 
 
-def _listing(roots_read=True, others=(OTHER,), unread=(), identities=LOGINS):
-    pools, held = N.pools_listing(ROOTS, roots_read, others, unread, identities)
-    return [p["id"] for p in pools] if pools is not None else held
+GONE = N.Pool("github.com/q/gone", path="/mnt/x", identity="octocat")
+LAB_GONE = N.Pool("gitlab.example.com/q/lab", path="/mnt/lab", identity="me")
+STALE = N.Pool("github.com/q/stale", path="/w/stale", identity="octocat")
+
+
+def _listing(others=(OTHER,), unread=(), identities=LOGINS, known=()):
+    return N.pools_listing(ROOTS, others, unread, identities, known)
+
+
+def _ids(listing) -> list[str]:
+    return [p["id"] for p in listing[0]]
 
 
 def test_the_listing_is_the_roots_then_what_the_other_checkouts_name():
-    assert _listing() == WHOLE + ["github.com/a/b"]
-    assert _listing(others=(ROOTS[3], OTHER)) == WHOLE + ["github.com/a/b"], (
+    assert _ids(_listing()) == WHOLE + ["github.com/a/b"] and _listing()[1] == []
+    assert _ids(_listing(others=(ROOTS[3], OTHER))) == WHOLE + ["github.com/a/b"], (
         "a checkout of a root's repository adds no pool")
-    assert _listing(others=()) == WHOLE, "a checkout naming no forge is left out"
-    assert N.pools_listing(ROOTS, True, (), (), LOGINS)[1] == ""
+    assert _ids(_listing(others=())) == WHOLE, "a checkout naming no forge is left out"
 
 
-def test_what_could_not_be_read_or_has_no_login_holds_the_listing_back():
-    assert _listing(roots_read=False) == "Pools are held back: a repo root cannot be read"
-    assert _listing(unread=("~/gone", "/mnt/x")) == (
-        "Pools are held back: ~/gone cannot be read")
-    assert _listing(identities={"github.com": "octocat"}) == (
-        "Pools are held back: the account for g/sub/p is not known yet")
-    assert _listing(identities={"github.com": " ", "gitlab.example.com": "me"}) == (
-        "Pools are held back: the account for o/r is not known yet")
-    assert _listing(roots_read=False, unread=("/mnt/x",), identities={}) == N.HELD_ROOT
-    assert _listing(unread=("/mnt/x",), identities={}) == N.held_unread("/mnt/x")
+def test_the_pool_behind_an_unread_path_is_said_as_the_daemon_had_it():
+    pools, unconfirmed = _listing(unread=("/mnt/x", "/mnt/lab", "/mnt/new"),
+                                  known=(STALE, GONE, LAB_GONE))
+    assert [p["id"] for p in pools] == WHOLE + [
+        "github.com/a/b", "github.com/q/gone", "gitlab.example.com/q/lab"], (
+        "and one behind no listed path is left")
+    assert pools[-2:] == [
+        {"id": "github.com/q/gone", "path": "/mnt/x", "forge": "github", "identity": "octocat"},
+        {"id": "gitlab.example.com/q/lab", "path": "/mnt/lab", "forge": "gitlab",
+         "identity": "me"}]
+    assert unconfirmed == [
+        f"{path} cannot be read: its pool stays as the daemon last had it until the path "
+        "can be read or is taken out of Settings" for path in ("/mnt/x", "/mnt/lab", "/mnt/new")]
+
+
+def test_a_repository_whose_login_is_unknown_keeps_the_pool_the_daemon_had():
+    was = N.Pool("gitlab.example.com/g/sub/p", path="/old/p", identity="me")
+    pools, unconfirmed = _listing(identities={"github.com": "octocat"}, known=(was, STALE))
+    assert [p["id"] for p in pools] == [
+        "github.com/o/r", "github.com/x/y", "github.com/a/b", "gitlab.example.com/g/sub/p"]
+    assert pools[-1] == {"id": "gitlab.example.com/g/sub/p", "path": "/old/p",
+                         "forge": "gitlab", "identity": "me"}
+    assert unconfirmed == ["The login for g/sub/p on gitlab.example.com is not known yet: "
+                           "its pool stays as the daemon last had it until it is"]
+    assert _ids(_listing(identities={"github.com": "octocat"})) == [
+        "github.com/o/r", "github.com/x/y", "github.com/a/b"], (
+        "and has none the daemon never had, the others said all the same")
+    assert _listing(identities={"gitlab.example.com": "me"})[1] == [
+        N.unconfirmed_account(repo, "github.com") for repo in ("o/r", "x/y", "a/b")], (
+        "each repository with no login is named once")
+
+
+def test_a_pool_that_was_read_is_said_as_read():
+    pools, _ = _listing(unread=("/old/r",), known=(
+        N.Pool("github.com/o/r", path="/old/r", identity="someone"),))
+    assert [p["id"] for p in pools] == WHOLE + ["github.com/a/b"]
+    assert pools[0] == {"id": "github.com/o/r", "path": "/w/r", "forge": "github",
+                        "identity": "octocat"}
 
 
 def test_the_pools_body():

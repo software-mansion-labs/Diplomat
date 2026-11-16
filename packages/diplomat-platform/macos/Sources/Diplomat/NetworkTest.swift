@@ -262,29 +262,72 @@ enum NetworkTest {
         check("…and the daemon's snapshot is published",
               store.networkAnswered == true && store.networkState?.pk == here)
 
-        // 4. `pools` waits for every linked repository's login.
-        check("pools are not posted while the GitHub login is unknown",
-              requests(NetworkRoute.pools).isEmpty)
+        // 4. `pools` says every linked repository; one that cannot be confirmed holds
+        //    back its own pool alone, which stays as the daemon has it.
+        func postedPools() -> [String] {
+            ((requests(NetworkRoute.pools).last?["pools"] as? [[String: String]]) ?? [])
+                .map { $0["id"] ?? "" }
+        }
+        func poolsPosted() -> Int { requests(NetworkRoute.pools).count }
+        let (noHubLogin, noLabLogin) = (
+            NetworkPools.unconfirmed(account: "o/r", host: "github.com"),
+            NetworkPools.unconfirmed(account: "acme/api", host: "gitlab.example.com"))
+        check("with no login known, the pool the daemon has is said as it has it",
+              poolsPosted() == 1
+                && requests(NetworkRoute.pools).last?["pools"] as? [[String: String]]
+                    == [["id": "github.com/o/r", "path": root.path, "forge": "github",
+                         "identity": "latekvo"]]
+                && store.networkPoolsHeld == "\(noHubLogin)\n\(noLabLogin)")
         store.me = "LatekVO"
         await store.runNetworkCycleOnce()
-        check("…nor while one repository's GitLab login is",
-              requests(NetworkRoute.pools).isEmpty)
+        check("a repository whose login is unknown holds back its own pool alone, and is named",
+              poolsPosted() == 1 && store.networkPoolsHeld == noLabLogin)
+        let asking = Date().timeIntervalSince1970
+        store.networkCycle.identitiesAskedAt = asking - 59
+        await store.runNetworkCycleOnce(now: asking)
+        check("the logins it lacks are not asked after on every cycle",
+              store.networkCycle.identitiesAskedAt == asking - 59)
+        store.networkCycle.identitiesAskedAt = asking - 60
+        await store.runNetworkCycleOnce(now: asking)
+        check("…and are once a minute", store.networkCycle.identitiesAskedAt == asking)
         store.pinGitLabMe("ilatka", host: "gitlab.example.com")
         await store.runNetworkCycleOnce()
-        let posted = requests(NetworkRoute.pools).first?["pools"] as? [[String: String]]
+        let posted = requests(NetworkRoute.pools).last?["pools"] as? [[String: String]]
         check("with every login known the whole list is posted once",
-              requests(NetworkRoute.pools).count == 1
+              poolsPosted() == 2 && store.networkPoolsHeld.isEmpty
                 && posted == [
                     ["id": "github.com/o/r", "path": root.path, "forge": "github",
                      "identity": "latekvo"],
                     ["id": "gitlab.example.com/acme/api", "path": lab.path, "forge": "gitlab",
                      "identity": "ilatka"],
                 ])
+        store.networkCycle.identitiesAskedAt = 0
         await store.runNetworkCycleOnce()
-        check("an unchanged list is not posted again", requests(NetworkRoute.pools).count == 1)
+        check("an unchanged list is not posted again, and with nothing unconfirmed no login "
+                + "is asked after",
+              poolsPosted() == 2 && store.networkCycle.identitiesAskedAt == 0)
 
-        //    An OTHER REPOS checkout that cannot be read holds the list back and says
-        //    so; one that names no forge is left out; a repair is posted next cycle.
+        //    A root that cannot be read keeps its pool as the daemon has it; one that
+        //    was read and names no forge is no pool. Neither holds another pool back.
+        let labPool = "gitlab.example.com/acme/api"
+        store.pinRoots([root, lab], linked: [lab], unread: [root.path])
+        await store.runNetworkCycleOnce()
+        check("a root that cannot be read keeps its pool as the daemon has it, and is named",
+              postedPools() == [labPool, "github.com/o/r"]
+                && store.networkPoolsHeld == NetworkPools.unconfirmed(unread: root.path))
+        let leftBefore = feedDetails(NetworkAudit.leave).count
+        store.pinRoots([root, lab], linked: [lab])
+        await store.runNetworkCycleOnce()
+        check("a root that was read and names no forge is no pool, and holds nothing back",
+              postedPools() == [labPool] && store.networkPoolsHeld.isEmpty
+                && feedDetails(NetworkAudit.leave).count == leftBefore + 1
+                && feedDetails(NetworkAudit.leave).last?.hasPrefix("Left github.com/o/r: ") == true)
+        store.pinRoots([root, lab])
+        await store.runNetworkCycleOnce()
+
+        //    An OTHER REPOS checkout that cannot be read keeps the pool the daemon has
+        //    for it until it can be, or is taken off the list; one that names no forge
+        //    is left out.
         func git(_ arguments: String...) {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -294,41 +337,98 @@ enum NetworkTest {
             try? proc.run()
             proc.waitUntilExit()
         }
-        func postedPools() -> [String] {
-            ((requests(NetworkRoute.pools).last?["pools"] as? [[String: String]]) ?? [])
-                .map { $0["id"] ?? "" }
-        }
         let bare = scratch.appendingPathComponent("bare").path
         let gone = scratch.appendingPathComponent("unmounted/tool").path
+        let whole = ["github.com/o/r", labPool]
         git("init", "-q", bare)
         store.localRepoPaths = [gone, bare]
+        var sent = poolsPosted()
         await store.runNetworkCycleOnce()
         await store.runNetworkCycleOnce()
-        check("a checkout that cannot be read holds the pools back and says which",
-              requests(NetworkRoute.pools).count == 1
-                && store.networkPoolsHeld == "Pools are held back: \(gone) cannot be read")
+        check("a checkout that cannot be read holds nothing else back, and is named",
+              poolsPosted() == sent && postedPools() == whole
+                && store.networkPoolsHeld == NetworkPools.unconfirmed(unread: gone))
         git("init", "-q", gone)
         git("-C", gone, "remote", "add", "origin", "https://github.com/acme/tool.git")
         await store.runNetworkCycleOnce()
         check("readable again, it is posted on the next cycle; one naming no forge is left out",
-              requests(NetworkRoute.pools).count == 2 && store.networkPoolsHeld.isEmpty
-                && postedPools() == ["github.com/o/r", "gitlab.example.com/acme/api",
-                                     "github.com/acme/tool"])
+              poolsPosted() == sent + 1 && store.networkPoolsHeld.isEmpty
+                && postedPools() == whole + ["github.com/acme/tool"])
+        let toolRow: [String: Any] = ["id": "github.com/acme/tool", "path": gone,
+                                      "identity": "latekvo"]
+        script.set(snapshot(more: [toolRow]))
+        try? FileManager.default.removeItem(atPath: gone)
+        await store.runNetworkCycleOnce()
+        check("gone again, its pool stays as the daemon has it",
+              poolsPosted() == sent + 1
+                && store.networkPoolsHeld == NetworkPools.unconfirmed(unread: gone))
+        git("-C", bare, "remote", "add", "origin", "https://github.com/acme/scratch.git")
+        await store.runNetworkCycleOnce()
+        check("…while a repository linked since gains its pool",
+              postedPools() == whole + ["github.com/acme/scratch", "github.com/acme/tool"])
         let bareConfig = bare + "/.git/config"
         let sound = (try? String(contentsOfFile: bareConfig, encoding: .utf8)) ?? ""
         try? "[remote \"origin\"\n".write(toFile: bareConfig, atomically: true, encoding: .utf8)
+        script.set(snapshot(more: [toolRow, ["id": "github.com/acme/scratch", "path": bare,
+                                             "identity": "latekvo"]]))
         await store.runNetworkCycleOnce()
-        check("a checkout git fails on holds the pools back as well",
-              requests(NetworkRoute.pools).count == 2
-                && store.networkPoolsHeld == "Pools are held back: \(bare) cannot be read")
+        check("a checkout git fails on is unread as well, its pool staying too",
+              postedPools().sorted() == (whole + ["github.com/acme/scratch",
+                                                  "github.com/acme/tool"]).sorted()
+                && store.networkPoolsHeld == [gone, bare]
+                    .map { NetworkPools.unconfirmed(unread: $0) }.joined(separator: "\n"))
         try? sound.write(toFile: bareConfig, atomically: true, encoding: .utf8)
+        git("-C", bare, "remote", "set-url", "origin", "https://github.com/acme/renamed.git")
+        let left = feedDetails(NetworkAudit.leave).count
         await store.runNetworkCycleOnce()
-        check("…until git reads it again", store.networkPoolsHeld.isEmpty)
+        check("a checkout that names another repository leaves the pool it named, and the "
+                + "feed says so",
+              postedPools() == whole + ["github.com/acme/renamed", "github.com/acme/tool"]
+                && Array(feedDetails(NetworkAudit.leave).dropFirst(left))
+                    == ["Left github.com/acme/scratch: \(bare) no longer names it"])
         store.localRepoPaths = []
         await store.runNetworkCycleOnce()
-        check("a checkout taken off the list leaves its pool",
-              requests(NetworkRoute.pools).count == 3
-                && postedPools() == ["github.com/o/r", "gitlab.example.com/acme/api"])
+        check("a path taken off the list leaves its pool, readable or not",
+              postedPools() == whole && store.networkPoolsHeld.isEmpty
+                && feedDetails(NetworkAudit.leave).last
+                    == "Left github.com/acme/scratch: \(bare) is no longer listed in Settings"
+                && feedDetails(NetworkAudit.leave).contains(
+                    "Left github.com/acme/tool: \(gone) is no longer listed in Settings"))
+        script.set(snapshot())
+
+        //    A list the daemon refuses is said once, shown, and sent again as it is no
+        //    more often than admit; one it did not settle is sent on the next cycle.
+        git("-C", bare, "remote", "set-url", "origin", "https://github.com/acme/scratch.git")
+        let refusedAt = Date().timeIntervalSince1970
+        let unavailableBefore = feedDetails(NetworkAudit.unavailable).count
+        script.refuse(NetworkRoute.pools, (409, "A pool is listed twice."))
+        store.localRepoPaths = [bare]
+        sent = poolsPosted()
+        await store.runNetworkCycleOnce(now: refusedAt)
+        await store.runNetworkCycleOnce(now: refusedAt + 59)
+        let refusal = "The daemon refused this machine's pools: A pool is listed twice."
+        check("a list the daemon refuses is shown and said once, and not sent again as it is",
+              poolsPosted() == sent + 1 && store.networkPoolsHeld == refusal
+                && Array(feedDetails(NetworkAudit.unavailable).dropFirst(unavailableBefore))
+                    == [refusal])
+        await store.runNetworkCycleOnce(now: refusedAt + 60)
+        check("…until a minute on",
+              poolsPosted() == sent + 2
+                && feedDetails(NetworkAudit.unavailable).count == unavailableBefore + 1)
+        script.refuse(NetworkRoute.pools, (500, "boom"))
+        store.localRepoPaths = []
+        await store.runNetworkCycleOnce(now: refusedAt + 61)
+        check("the list the daemon last took is no refused one",
+              poolsPosted() == sent + 2 && store.networkPoolsHeld.isEmpty)
+        store.localRepoPaths = [bare]
+        await store.runNetworkCycleOnce(now: refusedAt + 62)
+        await store.runNetworkCycleOnce(now: refusedAt + 63)
+        check("a list the daemon did not settle is sent again on the next cycle, with nothing said",
+              poolsPosted() == sent + 4 && store.networkPoolsHeld.isEmpty
+                && feedDetails(NetworkAudit.unavailable).count == unavailableBefore + 1)
+        script.refuse(NetworkRoute.pools, nil)
+        store.localRepoPaths = []
+        await store.runNetworkCycleOnce()
 
         // 5. `admit` is the cap less what runs here, said again when it changes and
         //    once a minute, and withheld for the reasons the local gate holds a job.
@@ -476,6 +576,7 @@ enum NetworkTest {
         // 10. Daemon down: an automatic job is staged back, a panel job gets the
         //     sentence, and neither starts an agent here.
         let offersBefore = requests(NetworkRoute.offer).count
+        let spells = feedDetails(NetworkAudit.unavailable).count
         let down = await store.dispatchAgent(job(90211), source: .auto)
         check("with the daemon down an automatic job is refused with the sentence",
               down == .networkDown(DiplomacyNetwork.notAnswering))
@@ -484,7 +585,8 @@ enum NetworkTest {
               store.queuedTasks.map(\.id)
                 == [AgentTaskQueue.key(auditAction: "review-req", item: "o/r#90211")])
         _ = await store.dispatchAgent(job(90212), source: .auto)
-        check("…logged once for the spell", feedDetails(NetworkAudit.unavailable).count == 1)
+        check("…logged once for the spell",
+              feedDetails(NetworkAudit.unavailable).count == spells + 1)
         let panelDown = await store.dispatchAgent(job(90213), source: .panel)
         check("a job the operator started gets the sentence",
               panelDown == .networkDown(DiplomacyNetwork.notAnswering)
@@ -751,7 +853,7 @@ enum NetworkTest {
         await store.leaveNetworkPool("github.com/o/r")
         check("leaving a pool names it and is logged",
               requests(NetworkRoute.leave).last?["pool"] as? String == "github.com/o/r"
-                && feedDetails(NetworkAudit.leave).count == 1)
+                && feedDetails(NetworkAudit.leave).last == "Left github.com/o/r")
         script.refuse(NetworkRoute.join, (409, "github.com/o/r is not linked on this machine"))
         await store.rejoinNetworkPool("github.com/o/r")
         check("a refused rejoin shows the daemon's sentence on the pool's panel",

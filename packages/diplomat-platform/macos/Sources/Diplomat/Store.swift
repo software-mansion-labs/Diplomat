@@ -68,7 +68,8 @@ final class Store: ObservableObject {
     /// What the daemon refused the Network screen's last action with, by the pool panel
     /// it was made in ("" for the one shown before any pool).
     @Published var networkRefusals: [String: String] = [:]
-    /// Why the daemon is not told this machine's pools (`NetworkPools.listing`), or "".
+    /// What of this machine's pools could not be confirmed (`NetworkPools.listing`), and
+    /// the daemon's refusal of the list, a line each; "" for neither.
     @Published var networkPoolsHeld = ""
     /// The operator's jobs whose offer the daemon was sent and gave no definite answer
     /// to (`settleOffering`).
@@ -178,6 +179,11 @@ final class Store: ObservableObject {
     /// Of the same reading: whether none of several root paths resolved, leaving the one
     /// root a guess that the first path checks out the configured repo (`RepoRoots.guessed`).
     private(set) var rootsGuessed = false
+    /// Of the same reading: the roots a path's own remote names, and the root paths
+    /// that could not be read (`RepoPaths.RootsReading`). Before a first reading every
+    /// path is unread.
+    private var rootsLinked: [PRRef.LocalRepo] = []
+    private var rootPathsUnread = RepoPaths.rootPaths.map(RepoRoots.expand)
     private var rootsPinned = false
 
     /// Re-resolve the roots off the main actor, and follow a change with the panel.
@@ -189,6 +195,8 @@ final class Store: ObservableObject {
         rootsResolved = next.complete
         primaryResolved = next.primaryResolved
         rootsGuessed = next.guessed
+        rootsLinked = next.linked
+        rootPathsUnread = next.unread
         if next.roots != roots {
             roots = next.roots
             showSelectedRepo()
@@ -197,14 +205,18 @@ final class Store: ObservableObject {
 
     /// Pin the roots, for headless self-tests only: resolved for real they are whatever
     /// the developer's own config.json lists. `complete`, `primary` and `guessed` stand
-    /// for `rootsResolved`, `primaryResolved` and `rootsGuessed`.
+    /// for `rootsResolved`, `primaryResolved` and `rootsGuessed`; `linked` (every pinned
+    /// root, unless given) and `unread` for `rootsLinked` and `rootPathsUnread`.
     func pinRoots(_ pinned: [PRRef.LocalRepo], complete: Bool = true, primary: Bool = true,
-                  guessed: Bool = false) {
+                  guessed: Bool = false, linked: [PRRef.LocalRepo]? = nil,
+                  unread: [String] = []) {
         guard Headless.active, !pinned.isEmpty else { return }
         rootsPinned = true
         rootsResolved = complete
         primaryResolved = primary
         rootsGuessed = guessed
+        rootsLinked = linked ?? pinned
+        rootPathsUnread = unread
         roots = pinned
         showSelectedRepo()
     }
@@ -2186,22 +2198,38 @@ final class Store: ObservableObject {
         if !same { networkState = snapshot }
     }
 
-    /// Every linked repository as a pool, with the login each is worked as, or why the
-    /// list is held back (`NetworkPools.listing`). A listed path with no checkout read
-    /// for it yet counts as unread.
+    /// Every linked repository as a pool, with the login each is worked as, and what
+    /// could not be confirmed, which stays as the daemon has it (`known`:
+    /// `NetworkPools.listing`). A listed path with no checkout read for it yet counts as
+    /// unread.
     ///
     /// GitHub's login is `gh`'s own and not the username override: the agents act as it.
-    func networkPools() -> NetworkPools.Listing {
-        let unread = localRepoPaths.filter { path in
+    func networkPools(known: [NetworkSnapshot.Pool]) -> NetworkPools.Listing {
+        let unread = rootPathsUnread + localRepoPaths.filter { path in
             !localRepoCheckouts.contains { $0.path == path && $0.read }
-        }
+        }.map { ($0 as NSString).expandingTildeInPath }
         let others = localRepos
         var identities: [String: String] = [:]
-        for repo in roots + others where identities[repo.host] == nil {
+        for repo in rootsLinked + others where identities[repo.host] == nil {
             identities[repo.host] = repo.isGitLab ? gitlabMe.known(host: repo.host) : me
         }
-        return NetworkPools.listing(roots: roots, rootsRead: rootsResolved, others: others,
-                                    unread: unread, identities: identities)
+        return NetworkPools.listing(roots: rootsLinked, others: others, unread: unread,
+                                    identities: identities, known: known)
+    }
+
+    /// Say in the feed which pools the daemon had that the list it just took omits,
+    /// each with what became of its path.
+    func logPoolsLeft(_ known: [NetworkSnapshot.Pool], said: [NetworkPools.Pool]) {
+        let listed = Set((RepoPaths.rootPaths + localRepoPaths).map {
+            ($0 as NSString).expandingTildeInPath
+        })
+        let left = known.filter { pool in !said.contains { $0.id == pool.id } }
+        for pool in left {
+            AuditLog.log("auto", NetworkAudit.leave, "Left \(pool.id): " + (
+                listed.contains(pool.path) ? "\(pool.path) no longer names it"
+                    : "\(pool.path) is no longer listed in Settings"))
+        }
+        if !left.isEmpty { refreshAudit() }
     }
 
     /// Ask for each GitLab login `networkPools` lacks: a host no root is on is read by

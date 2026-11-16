@@ -161,7 +161,7 @@ def on(monkeypatch):
     appconfig.set_bool(network.ENABLED_KEY, True)
     monkeypatch.setattr(review, "roots_guessed", lambda: False)
     monkeypatch.setattr(review, "roots_complete", lambda: True)
-    monkeypatch.setattr(review, "roots_reading", lambda: (review.repo_roots(), True))
+    monkeypatch.setattr(review, "roots_linking", lambda: (review.repo_roots(), []))
     monkeypatch.setattr("diplomat_app.bans.read", lambda: [])
 
 
@@ -202,7 +202,21 @@ def book_network_run(task="t1", number=9, *, age=0.0, ledger_key="", source=auto
 
 # MARK: - the cycle: pools
 
-def test_the_pools_are_posted_once_every_login_is_known(store, on, daemon, monkeypatch):
+GH = {"id": POOL, "path": "/src/r", "forge": "github", "identity": "alice"}
+LAB_POOL = {"id": "gitlab.example.com/group/sub/tool", "path": "/src/tool", "forge": "gitlab",
+            "identity": "bob"}
+TOOL = LocalRepo("acme", "tool", "/src/tool")
+TOOL_POOL = {"id": "github.com/acme/tool", "path": "/src/tool", "forge": "github",
+             "identity": "alice"}
+
+
+def has_pools(*pools) -> dict:
+    """A snapshot of a daemon holding these pools, each ``(id, path, identity)``."""
+    return snapshot(pools=[{"id": i, "path": path, "identity": who} for i, path, who in pools])
+
+
+def test_a_repository_with_no_login_holds_back_its_own_pool_alone(store, on, daemon,
+                                                                  monkeypatch):
     d = daemon()
     asked = []
 
@@ -216,41 +230,157 @@ def test_the_pools_are_posted_once_every_login_is_known(store, on, daemon, monke
 
     store._network_cycle_once(1000.0)
     store._network_cycle_once(1030.0)
-    assert d.sent("pools") == [], "a list missing a repository would make the daemon leave its pool"
+    assert d.sent("pools") == [{"pools": [GH]}], "the rest is said, once"
     assert store.network_pools_held == (
-        "Pools are held back: the account for group/sub/tool is not known yet")
+        "The login for group/sub/tool on gitlab.example.com is not known yet: its pool "
+        "stays as the daemon last had it until it is")
     assert asked == ["gitlab.example.com"], "an unknown login is not asked for on every cycle"
-    assert len(d.sent("admit")) == 1, "the admit goes whatever holds the pools back"
+    assert len(d.sent("admit")) == 1
+
+    d.state = has_pools((POOL, "/src/r", "alice"), (LAB_POOL["id"], "/src/tool", "bob"))
+    store._network_cycle_once(1035.0)
+    assert d.sent("pools")[1:] == [{"pools": [GH, LAB_POOL]}], "as the daemon had it"
 
     store._gitlab_me[LAB.host] = ("Bob", localrepos.glab_host_entry(LAB.host))
     store._network_cycle_once(1040.0)
     store._network_cycle_once(1050.0)
-    assert d.sent("pools") == [{"pools": [
-        {"id": POOL, "path": "/src/r", "forge": "github", "identity": "alice"},
-        {"id": "gitlab.example.com/group/sub/tool", "path": "/src/tool", "forge": "gitlab",
-         "identity": "bob"}]}], "and is said again only when it changed"
+    assert len(d.sent("pools")) == 2, "and is said again only when it changed"
     assert store.network_pools_held == ""
 
 
-@pytest.mark.parametrize("break_it, why", [
-    (lambda mp, st: mp.setattr(review, "roots_reading", lambda: (review.repo_roots(), False)),
-     "Pools are held back: a repo root cannot be read"),
-    (lambda mp, st: mp.setattr(localrepos, "resolve", lambda paths: [
-        localrepos.Checkout("/src/x", (LAB,), read=False)]),
-     "Pools are held back: /src/x cannot be read"),
-    (lambda mp, st: setattr(st, "me", ""),
-     "Pools are held back: the account for o/r is not known yet"),
-], ids=["a root unread", "a checkout unread", "no login"])
-def test_an_unresolved_repository_holds_the_pools_back(store, on, daemon, monkeypatch,
-                                                       break_it, why):
-    d = daemon()
+def test_an_unread_root_keeps_its_pool_and_holds_nothing_else_back(store, on, daemon,
+                                                                   monkeypatch):
+    d = daemon(state=has_pools((POOL, "/src/r", "alice"),
+                               ("github.com/o/gone", "/mnt/gone", "alice")))
+    monkeypatch.setattr(review, "roots_linking", lambda: ([], ["/src/r"]))
+    monkeypatch.setattr(localrepos, "resolve",
+                        lambda paths: [localrepos.Checkout("/src/tool", (TOOL,))])
     changed = []
     store.network_changed.connect(lambda: changed.append(store.network_pools_held))
-    break_it(monkeypatch, store)
     store._network_cycle()
-    assert d.sent("pools") == [] and len(d.sent("admit")) == 1
-    assert store.network_state is not None
-    assert store.network_pools_held == why and why in changed, "and the screen is told why"
+    assert d.sent("pools") == [{"pools": [TOOL_POOL, GH]}], (
+        "a repository linked since gains its pool, one taken out of Settings leaves its own")
+    why = ("/src/r cannot be read: its pool stays as the daemon last had it until the path "
+           "can be read or is taken out of Settings")
+    assert store.network_pools_held == why and why in changed, "and the screen is told"
+    assert lines("network-leave") == [
+        "Left github.com/o/gone: /mnt/gone is no longer listed in Settings"]
+    assert len(d.sent("admit")) == 1
+
+
+def test_an_unknown_github_login_keeps_the_pools_the_daemon_had(store, on, daemon):
+    d = daemon(state=has_pools((POOL, "/src/r", "alice")))
+    store.me = ""
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": [GH]}]
+    assert store.network_pools_held == network.unconfirmed_account("o/r", "github.com")
+
+
+def test_a_list_the_daemon_refuses_is_said_once_and_not_sent_again_as_it_is(
+        store, on, daemon, monkeypatch):
+    d = daemon({"/pools": (409, {"error": '"x" is not a pool id.'})})
+    for at in (1000.0, 1001.0, 1002.0):
+        store._network_cycle_once(at)
+    why = 'The daemon refused this machine\'s pools: "x" is not a pool id.'
+    assert len(d.sent("pools")) == 1
+    assert store.network_pools_held == why and lines("network-unavailable") == [why]
+
+    d.routes["/pools"] = (409, {"error": "A pool is listed twice."})
+    monkeypatch.setattr(localrepos, "resolve",
+                        lambda paths: [localrepos.Checkout("/src/tool", (TOOL,))])
+    store._network_cycle_once(1003.0)
+    assert d.sent("pools")[1:] == [{"pools": [GH, TOOL_POOL]}], "a list that changed is sent"
+    assert store.network_pools_held == (
+        "The daemon refused this machine's pools: A pool is listed twice.")
+    assert len(lines("network-unavailable")) == 2, "and another refusal is said"
+
+    d.routes["/pools"] = (200, {"ok": True})
+    store._network_cycle_once(1063.0)
+    assert len(d.sent("pools")) == 3 and store.network_pools_held == "", (
+        "taken, it clears the line")
+
+
+def test_a_refusal_is_moot_once_the_list_is_the_one_the_daemon_took(store, on, daemon,
+                                                                    monkeypatch):
+    d = daemon()
+    store._network_cycle_once(1000.0)
+    d.routes["/pools"] = (409, {"error": "A pool is listed twice."})
+    monkeypatch.setattr(localrepos, "resolve",
+                        lambda paths: [localrepos.Checkout("/src/tool", (TOOL,))])
+    store._network_cycle_once(1001.0)
+    assert store.network_pools_held != ""
+    monkeypatch.setattr(localrepos, "resolve", lambda paths: [])
+    store._network_cycle_once(1002.0)
+    assert len(d.sent("pools")) == 2 and store.network_pools_held == ""
+
+
+def test_a_list_the_daemon_did_not_settle_is_sent_again(store, on, daemon):
+    d = daemon({"/pools": (500, {})})
+    store._network_cycle_once(1000.0)
+    store._network_cycle_once(1001.0)
+    assert len(d.sent("pools")) == 2
+    assert store.network_pools_held == "" and lines("network-unavailable") == []
+
+
+REAL_LINKING = review.roots_linking
+
+
+@pytest.fixture
+def root_paths(monkeypatch):
+    """The roots read for real, from the paths the test lists."""
+    paths: list[str] = []
+    monkeypatch.setattr(review, "repo_root_paths", lambda: paths)
+    monkeypatch.setattr(review, "_roots_cache", None)
+    monkeypatch.setattr(review, "roots_linking", REAL_LINKING)
+    return paths
+
+
+def test_a_root_that_names_no_forge_is_skipped_and_holds_nothing_back(
+        store, on, daemon, root_paths, tmp_path):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    root_paths += [_checkout(tmp_path / "r", "https://github.com/o/r.git"),
+                   _checkout(tmp_path / "bucket", "https://bitbucket.org/acme/x.git"),
+                   _checkout(tmp_path / "bare"), str(folder)]
+    d = daemon()
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": [
+        {"id": POOL, "path": root_paths[0], "forge": "github", "identity": "alice"}]}]
+    assert store.network_pools_held == ""
+
+
+def test_a_lone_root_that_names_no_forge_is_no_pool(store, on, daemon, root_paths, tmp_path):
+    root_paths.append(_checkout(tmp_path / "bucket", "https://bitbucket.org/acme/x.git"))
+    d = daemon(state=has_pools((POOL, root_paths[0], "alice")))
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": []}], (
+        "the root that stands in for the configured repo is not one its path names")
+    assert store.network_pools_held == ""
+    assert lines("network-leave") == [f"Left {POOL}: {root_paths[0]} no longer names it"]
+
+
+def test_a_missing_root_is_unread_and_keeps_the_pool_the_daemon_had(
+        store, on, daemon, root_paths, tmp_path):
+    gone = str(tmp_path / "unmounted" / "r")
+    root_paths += [gone, _checkout(tmp_path / "other", "https://github.com/o/other.git")]
+    d = daemon(state=has_pools((POOL, gone, "alice")))
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": [
+        {"id": "github.com/o/other", "path": root_paths[1], "forge": "github",
+         "identity": "alice"},
+        {"id": POOL, "path": gone, "forge": "github", "identity": "alice"}]}]
+    assert store.network_pools_held == network.unconfirmed_unread(gone)
+
+
+def test_a_root_git_fails_on_is_unread(store, on, daemon, root_paths, tmp_path):
+    broken = tmp_path / "broken"
+    (broken / ".git").mkdir(parents=True)
+    root_paths.append(str(broken))
+    d = daemon(state=has_pools((POOL, str(broken), "alice")))
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": [
+        {"id": POOL, "path": str(broken), "forge": "github", "identity": "alice"}]}]
+    assert store.network_pools_held == network.unconfirmed_unread(str(broken))
 
 
 def _checkout(path, remote="") -> str:
@@ -261,30 +391,49 @@ def _checkout(path, remote="") -> str:
     return str(path)
 
 
-def test_an_unread_checkout_holds_the_pools_back_until_it_can_be_read(
+def test_an_unread_checkout_keeps_its_pool_until_it_is_read_or_taken_out(
         store, on, daemon, tmp_path):
     d = daemon()
     gone, bare = tmp_path / "unmounted" / "tool", _checkout(tmp_path / "scratch")
     store.other_repo_paths = [str(gone), bare]
     store._network_cycle_once(1000.0)
     store._network_cycle_once(1001.0)
-    assert d.sent("pools") == [], "a list without it would make the daemon leave its pool"
-    assert store.network_pools_held == f"Pools are held back: {gone} cannot be read"
+    assert d.sent("pools") == [{"pools": [GH]}], "the daemon had no pool behind it"
+    assert store.network_pools_held == network.unconfirmed_unread(str(gone))
 
     _checkout(gone, "https://github.com/acme/tool.git")
     store._network_cycle_once(1002.0)
-    assert d.sent("pools") == [{"pools": [
-        {"id": POOL, "path": "/src/r", "forge": "github", "identity": "alice"},
-        {"id": "github.com/acme/tool", "path": str(gone), "forge": "github",
-         "identity": "alice"}]}], "read again on the next cycle, with no restart"
+    tool = {"id": "github.com/acme/tool", "path": str(gone), "forge": "github",
+            "identity": "alice"}
+    assert d.sent("pools")[1:] == [{"pools": [GH, tool]}], (
+        "read again on the next cycle, with no restart")
     assert store.network_pools_held == ""
     assert [c.read for c in store.local_checkouts] == [True, True]
 
-    # Gone again after its pool was said: nothing is posted in the list's place.
+    # Gone again after its pool was said: the pool stays as the daemon has it.
     shutil.rmtree(gone)
+    d.state = has_pools((POOL, "/src/r", "alice"), ("github.com/acme/tool", str(gone), "alice"))
     store._network_cycle_once(1003.0)
-    assert len(d.sent("pools")) == 1
-    assert store.network_pools_held == f"Pools are held back: {gone} cannot be read"
+    assert len(d.sent("pools")) == 2, "the same list is not said again"
+    assert store.network_pools_held == network.unconfirmed_unread(str(gone))
+
+    # Taken out of Settings it holds nothing: its pool is left, and the feed says so.
+    store.other_repo_paths = [bare]
+    store._network_cycle_once(1004.0)
+    assert d.sent("pools")[2:] == [{"pools": [GH]}] and store.network_pools_held == ""
+    assert lines("network-leave") == [
+        f"Left github.com/acme/tool: {gone} is no longer listed in Settings"]
+
+
+def test_a_pool_whose_path_names_it_no_more_is_left_and_said(store, on, daemon, tmp_path):
+    mirror = _checkout(tmp_path / "mirror", "https://code.example.org/acme/mirror.git")
+    d = daemon(state=has_pools((POOL, "/src/r", "alice"),
+                               ("code.example.org/acme/mirror", mirror, "alice")))
+    store.other_repo_paths = [mirror]
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": [GH]}]
+    assert lines("network-leave") == [
+        f"Left code.example.org/acme/mirror: {mirror} no longer names it"]
 
 
 def test_a_checkout_with_no_forge_remote_is_left_out_and_holds_nothing_back(
@@ -320,7 +469,7 @@ def test_a_checkout_git_fails_on_is_unread_not_empty(tmp_path):
 def test_no_linked_repository_is_an_empty_list_once_the_roots_are_resolved(
         store, on, daemon, monkeypatch):
     d = daemon()
-    monkeypatch.setattr(review, "roots_reading", lambda: ([], True))
+    monkeypatch.setattr(review, "roots_linking", lambda: ([], []))
     store._network_cycle()
     assert d.sent("pools") == [{"pools": []}]
 
@@ -387,7 +536,11 @@ def test_a_post_the_daemon_refused_is_made_again(store, on, daemon):
                 "/pools": (400, {"error": "No such checkout."})})
     store._network_cycle_once(1000.0)
     store._network_cycle_once(1001.0)
-    assert (len(d.sent("pools")), len(d.sent("admit"))) == (2, 2)
+    assert (len(d.sent("pools")), len(d.sent("admit"))) == (1, 2)
+    store._network_cycle_once(1059.0)
+    store._network_cycle_once(1060.0)
+    assert len(d.sent("pools")) == 2, "a refused list is said again as often as admit is"
+    assert len(lines("network-unavailable")) == 1, "and its refusal once"
 
 
 def test_nothing_asks_the_daemon_with_the_switch_off(store, daemon, monkeypatch):

@@ -32,13 +32,9 @@ enum LocalRepos {
         }
     }
 
-    static func remotes(of path: String) -> String {
-        guard let ran = git(remoteQuery(path)), ran.status == 0 else { return "" }
-        return ran.out
-    }
-
-    /// `remotes(of:)` telling a checkout with no remote ("": `git config --get-regexp`
-    /// exits 1 on no match) from one `git` failed on (nil).
+    /// The remotes of the checkout at `path` as `git config` prints them: "" for one
+    /// with no remote (`git config --get-regexp` exits 1 on no match), nil for one `git`
+    /// failed on.
     static func readRemotes(of path: String) -> String? {
         guard let ran = git(remoteQuery(path)), ran.status == 0 || ran.status == 1 else {
             return nil

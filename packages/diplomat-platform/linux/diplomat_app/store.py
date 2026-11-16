@@ -261,6 +261,11 @@ class _NetworkCycle:
     #: heard none of them.
     daemon: str = ""
     pools: list[dict] | None = None
+    #: The list the daemon refused, its sentence, and when: said again as it is only
+    #: as often as ``admit`` is.
+    pools_refused: list[dict] | None = None
+    pools_refusal: str = ""
+    pools_refused_at: float = 0.0
     admit: network.Admit | None = None
     admit_at: float = 0.0
     #: When a daemon that is not answering may next be started, and the wait before
@@ -409,7 +414,8 @@ class Store(QObject):
         # What the daemon refused the Network screen's last action with, by the pool
         # panel it was made in ("" for the one shown before any pool).
         self.network_refusals: dict[str, str] = {}
-        # Why the daemon is not told this machine's pools (network.pools_listing), or "".
+        # What of this machine's pools could not be confirmed (network.pools_listing),
+        # and the daemon's refusal of the list, a line each; "" for neither.
         self.network_pools_held = ""
         # The operator's jobs whose offer the daemon was sent and did not settle
         # (_settle_offering). Replaced under its lock, never mutated.
@@ -5857,11 +5863,26 @@ class Store(QObject):
         memo = self._network_memo
         memo.start_after = memo.start_delay = 0.0
         memo.start_failure_logged = False
-        pools = self._network_pools(now)
-        if pools is not None and pools != memo.pools:
-            if diplomacynetwork.refusal(diplomacynetwork.send(
-                    network.ROUTE_POOLS, network.pools_body(pools))) is None:
-                memo.pools = pools
+        pools, unconfirmed = self._network_pools(now, snapshot)
+        if pools == memo.pools:
+            memo.pools_refused, memo.pools_refusal = None, ""
+        elif (pools != memo.pools_refused
+              or now - memo.pools_refused_at >= self.NETWORK_ADMIT_EVERY):
+            reply = diplomacynetwork.send(network.ROUTE_POOLS, network.pools_body(pools))
+            why = diplomacynetwork.refusal(reply)
+            if why is None:
+                memo.pools, memo.pools_refused, memo.pools_refusal = pools, None, ""
+                self._log_pools_left(snapshot, pools)
+            elif diplomacynetwork.definite(reply):
+                said = f"The daemon refused this machine's pools: {why}"
+                if (pools, said) != (memo.pools_refused, memo.pools_refusal):
+                    activity.log(autofix.SOURCE_AUTO, network.AUDIT_UNAVAILABLE, said)
+                    self.refresh_activity()
+                memo.pools_refused, memo.pools_refusal, memo.pools_refused_at = pools, said, now
+        held = "\n".join([*unconfirmed, *filter(None, [memo.pools_refusal])])
+        if held != self.network_pools_held:
+            self.network_pools_held = held
+            self.network_changed.emit()
         admit = self._network_admit(snapshot)
         if admit != memo.admit or now - memo.admit_at >= self.NETWORK_ADMIT_EVERY:
             if diplomacynetwork.refusal(diplomacynetwork.send(
@@ -5902,13 +5923,14 @@ class Store(QObject):
         except Exception:  # noqa: BLE001 - an unread login leaves the pools as they are
             return ""
 
-    def _network_pools(self, now: float) -> list[dict] | None:
-        """Every linked repository as a pool, with the login each is worked as, or None
-        while the list is held back (:func:`network.pools_listing`), which
-        :attr:`network_pools_held` then says why. The checkouts under Other repos are
-        read again here: one that could not be read may be back, and one may have
-        gained a remote."""
-        roots, complete = review.roots_reading()
+    def _network_pools(self, now: float,
+                       snapshot: network.Snapshot) -> tuple[list[dict], list[str]]:
+        """Every linked repository as a pool, with the login each is worked as, and
+        what could not be confirmed, which stays as ``snapshot`` has it
+        (:func:`network.pools_listing`). The checkouts under Other repos are read again
+        here: one that could not be read may be back, and one may have gained a
+        remote."""
+        roots, unread = review.roots_linking()
         checkouts = localrepos.resolve(self.other_repo_paths)
         if checkouts != self._local_checkouts:
             self._local_checkouts = checkouts
@@ -5918,12 +5940,22 @@ class Store(QObject):
         for repo in (*roots, *others):
             if repo.host not in identities:
                 identities[repo.host] = self._network_login(repo, now)
-        pools, held = network.pools_listing(
-            roots, complete, others, [c.path for c in checkouts if not c.read], identities)
-        if held != self.network_pools_held:
-            self.network_pools_held = held
-            self.network_changed.emit()
-        return pools
+        unread += [os.path.expanduser(c.path) for c in checkouts if not c.read]
+        return network.pools_listing(roots, others, unread, identities, snapshot.pools)
+
+    def _log_pools_left(self, snapshot: network.Snapshot, pools: list[dict]) -> None:
+        """Say in the feed which pools the daemon had that the list it just took
+        omits, each with what became of its path."""
+        said = {pool["id"] for pool in pools}
+        listed = {os.path.expanduser(p)
+                  for p in (*review.repo_root_paths(), *self.other_repo_paths)}
+        left = [pool for pool in snapshot.pools if pool.id not in said]
+        for pool in left:
+            activity.log(autofix.SOURCE_AUTO, network.AUDIT_LEAVE, f"Left {pool.id}: " + (
+                f"{pool.path} no longer names it" if pool.path in listed
+                else f"{pool.path} is no longer listed in Settings"))
+        if left:
+            self.refresh_activity()
 
     def _network_admit(self, snapshot: network.Snapshot) -> network.Admit:
         """How many more tasks this machine takes: what is left of the automatic cap

@@ -15,9 +15,14 @@ struct NetworkCycle {
     /// heard none of them.
     var daemon = ""
     var pools: [NetworkPools.Pool]?
+    /// The list the daemon refused, its sentence, and when: said again as it is only
+    /// as often as `admit` is.
+    var poolsRefused: [NetworkPools.Pool]?
+    var poolsRefusal = ""
+    var poolsRefusedAt: TimeInterval = 0
     var admit: NetworkAdmit.Answer?
     var admitAt: TimeInterval = 0
-    /// When the logins `pools` waits for were last asked after.
+    /// When the logins `pools` lacks were last asked after.
     var identitiesAskedAt: TimeInterval = 0
     var startAfter: TimeInterval = 0
     var startDelay: TimeInterval = 0
@@ -144,7 +149,7 @@ extension Store {
         networkCycle.startDelay = 0
         networkCycle.startAfter = 0
         networkCycle.startFailureLogged = false
-        await postNetworkPools(now: now)
+        await postNetworkPools(snapshot, now: now)
         await postNetworkAdmit(snapshot, now: now)
         await settleOffering(snapshot)
     }
@@ -163,27 +168,50 @@ extension Store {
         }
     }
 
-    /// Say this machine's pools when they changed. The OTHER REPOS checkouts are read
-    /// again first: one that could not be read may be back, and one may have gained a
-    /// remote.
-    private func postNetworkPools(now: TimeInterval) async {
+    /// Say this machine's pools when they changed, and publish what of them could not
+    /// be confirmed and a refusal of the list (`networkPoolsHeld`). The OTHER REPOS
+    /// checkouts are read again first: one that could not be read may be back, and one
+    /// may have gained a remote.
+    private func postNetworkPools(_ snapshot: NetworkSnapshot, now: TimeInterval) async {
         await rereadLocalRepos()
-        let listing = networkPools()
-        guard case .pools(let pools) = listing else {
-            if case .held(let why) = listing, networkPoolsHeld != why { networkPoolsHeld = why }
-            if now - networkCycle.identitiesAskedAt >= NetworkCycle.admitEvery {
-                networkCycle.identitiesAskedAt = now
-                await readNetworkIdentities()
-            }
-            return
+        let listing = networkPools(known: snapshot.pools)
+        if !listing.unconfirmed.isEmpty,
+           now - networkCycle.identitiesAskedAt >= NetworkCycle.admitEvery {
+            networkCycle.identitiesAskedAt = now
+            await readNetworkIdentities()
         }
-        if !networkPoolsHeld.isEmpty { networkPoolsHeld = "" }
-        guard pools != networkCycle.pools else { return }
-        let body = NetworkPools.body(pools)
-        let reply = await Task.detached(priority: .utility) {
-            DiplomacyNetwork.post(NetworkRoute.pools, body)
-        }.value
-        if case .ok = reply { networkCycle.pools = pools }
+        let pools = listing.pools
+        if pools == networkCycle.pools {
+            networkCycle.poolsRefused = nil
+            networkCycle.poolsRefusal = ""
+        } else if pools != networkCycle.poolsRefused
+                    || now - networkCycle.poolsRefusedAt >= NetworkCycle.admitEvery {
+            let body = NetworkPools.body(pools)
+            let (reply, reach) = await Task.detached(priority: .utility) {
+                DiplomacyNetwork.ask(NetworkRoute.pools, body)
+            }.value
+            switch reply {
+            case .ok:
+                networkCycle.pools = pools
+                networkCycle.poolsRefused = nil
+                networkCycle.poolsRefusal = ""
+                logPoolsLeft(snapshot.pools, said: pools)
+            case .refused(let why) where reach == .answered:
+                let said = "The daemon refused this machine's pools: \(why)"
+                if pools != networkCycle.poolsRefused || said != networkCycle.poolsRefusal {
+                    AuditLog.log("auto", NetworkAudit.unavailable, said)
+                    refreshAudit()
+                }
+                networkCycle.poolsRefused = pools
+                networkCycle.poolsRefusal = said
+                networkCycle.poolsRefusedAt = now
+            case .refused, .down:
+                break
+            }
+        }
+        let held = (listing.unconfirmed + [networkCycle.poolsRefusal].filter { !$0.isEmpty })
+            .joined(separator: "\n")
+        if networkPoolsHeld != held { networkPoolsHeld = held }
     }
 
     /// The free bays of the cap less what runs here for the network and for this
