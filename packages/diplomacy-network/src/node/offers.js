@@ -134,8 +134,9 @@ export function createOffers(host) {
     O.failed.push(round);
     O.reason = text(reason, MAX_REASON);
     revoke(O.taskId);
-    if (O.failed.length >= OFFER_ATTEMPTS) end(P, O, 'failed', reason);
-    else publish(P, O);
+    if (O.failed.length >= OFFER_ATTEMPTS) return end(P, O, 'failed', reason);
+    Object.assign(O, { state: 'pooled', executor: '' });
+    return publish(P, O);
   }
 
   /// Puts a task in a pool. The same task offered again while its offer is open is that
@@ -389,9 +390,12 @@ export function createOffers(host) {
       O.watch = { round: claim.round, executor: claim.executor, lapses: heldUntil(claim, backing(claim, host.self)) };
       O.ran = claim.executor;
     }
-    const state = claim ? 'claimed' : 'pooled';
-    if (O.state !== state || O.executor !== (claim?.executor ?? '')) {
-      Object.assign(O, { state, executor: claim?.executor ?? '' });
+    // A claim whose run said how it ended holds the offer until its executor ends it,
+    // and is nothing this host waits for.
+    const executor = claim && !O.reported.includes(claim.round) ? claim.executor : '';
+    const state = executor ? 'claimed' : 'pooled';
+    if (O.state !== state || O.executor !== executor) {
+      Object.assign(O, { state, executor });
       host.touch();
     }
     save();
