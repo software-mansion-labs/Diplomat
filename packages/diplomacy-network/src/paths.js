@@ -15,7 +15,7 @@ export const BASE_DIR = process.env.DN_BASE_DIR
 
 export const SOCKET_PATH = path.join(BASE_DIR, 'daemon.sock');
 export const DISCOVERY_PATH = path.join(BASE_DIR, 'daemon.json'); // {pid, identity, startedAt, socket}
-export const STATE_PATH = path.join(BASE_DIR, 'state.json'); // the snapshot the applets read
+export const STATE_PATH = path.join(BASE_DIR, 'state.json'); // the snapshot as the daemon last had it, for a person: the applets ask the socket
 export const LOG_PATH = path.join(BASE_DIR, 'daemon.log');
 export const IDENTITY_PATH = path.join(BASE_DIR, 'identity.json');
 export const KEYS_PATH = path.join(BASE_DIR, 'keys.json');
@@ -257,14 +257,28 @@ export const JOBS_WRITE_MS = num('DN_JOBS_WRITE_MS', 5000);
 export const RUN_KEEP_MS = num('DN_RUN_KEEP_MS', 24 * 3600 * 1000);
 /// A pool's mirror is kept this long after the pool was last linked and not left.
 export const MIRROR_KEEP_MS = num('DN_MIRROR_KEEP_MS', 24 * 3600 * 1000);
-/// An uncaught exception that comes back this many times within FAULT_WINDOW_MS ends
-/// the daemon.
+/// An uncaught exception that comes back this many times within FAULT_WINDOW_MS, or a
+/// timer's work that fails the same way this many times in a row, ends the daemon.
 export const FAULT_REPEATS = 5;
 /// The time within which a fault that comes back counts as the same trouble.
-export const FAULT_WINDOW_MS = 60 * 1000;
-/// Only for tests: a file whose lines the daemon throws, one per config poll, from a
-/// timer's handler.
+export const FAULT_WINDOW_MS = num('DN_FAULT_WINDOW_MS', 60 * 1000);
+/// Only for tests: a file whose lines the daemon throws, one per config poll.
 export const TEST_FAULTS_PATH = process.env.DN_TEST_FAULTS || '';
+/// What only a test sets, as `NAME=value`, of what this process was given: each takes
+/// from the daemon something the network rests on - Tor, the forge, the proof of work.
+export const TEST_KNOBS = Object.entries(process.env)
+  .filter(([name, value]) => /^DN_(TEST|POW)_/.test(name) || name === 'DN_FORGE_ORIGINS' || (name === 'DN_TRANSPORT' && value === 'loop'))
+  .map(([name, value]) => `${name}=${value}`).sort();
+/// What a machine that left the network has no further use for, removed once what it
+/// made in docker is gone: the records of its jobs, prompts among them, its mirrors, and
+/// the certificate authorities its containers trusted. Its key, its pools and what it
+/// offered stay: switched on again, it is the member it was.
+export const OFF_REMOVES = [RUNS_DIR, MIRRORS_DIR, CA_DIR];
+/// The longest the installer takes to answer, whatever it was asked. The applets kill an
+/// installer after 90 s and read no answer from one they killed (`installerTimeout` in
+/// NodePackage.swift, `INSTALLER_TIMEOUT_SECS` in deviceallocator.py): this has to stay
+/// under that, and STOP_WAIT_MS under this.
+export const INSTALLER_ANSWER_MS = num('DN_INSTALLER_ANSWER_MS', 75 * 1000);
 /// The wait before a transport whose start failed is made again and started.
 export const TRANSPORT_RETRY_MS = num('DN_TRANSPORT_RETRY_MS', 5000);
 /// That wait doubles after every start that fails, up to this.

@@ -118,6 +118,73 @@ try {
     assert.deepEqual(m.containers(), []);
   });
 
+  // What keeps a daemon from being built behind its socket, and what its reason reads like.
+  const UNSTARTABLE = [
+    ['daemon.json cannot be written', (m) => fs.mkdirSync(path.join(m.base, 'daemon.json', 'in the way'), { recursive: true }), /daemon\.json/],
+    ['a document of the store cannot be read', (m) => fs.mkdirSync(path.join(m.base, 'identity.json'), { recursive: true }), /EISDIR/],
+    ['DN_TRANSPORT names no transport', (m) => { m.env.DN_TRANSPORT = 'pigeon'; }, /unknown transport kind: pigeon/],
+  ];
+  for (const [i, [what, prepare, reason]] of UNSTARTABLE.entries()) {
+    await check(`a start that cannot be finished ends the daemon with a failure, leaves no socket to answer for it, and says why: ${what}`, async () => {
+      const m = bench.machine(`un${i}`);
+      prepare(m);
+      await assert.rejects(m.start(), /exited/);
+      assert.deepEqual(await m.exit, { code: 1, signal: null });
+      assert.match(m.log(), new RegExp(`\\] the daemon could not start: .*${reason.source}`));
+      assert.deepEqual([fs.existsSync(m.socket), fs.statSync(path.join(m.base, 'daemon.json'), { throwIfNoEntry: false })?.isFile() ?? false], [false, false]);
+      assert.deepEqual(await m.install('--check'), { installed: true, daemonRunning: false, pid: null });
+      // As an applet starts it: the reason is in the answer.
+      const answer = await m.install('--start-daemon');
+      assert.deepEqual([answer.ok, answer.daemonRunning, answer.pid], [false, false, null]);
+      assert.match(answer.error, new RegExp(`^diplomacy-network daemon failed to start \\(exit 1\\): the daemon could not start: .*${reason.source}`));
+    });
+  }
+
+  await check('a links.json that holds no list of pools is one Diplomat has yet to post: the daemon starts with no pool linked', async () => {
+    const m = bench.machine('nolist');
+    fs.mkdirSync(m.base, { recursive: true });
+    fs.writeFileSync(path.join(m.base, 'links.json'), '{"pools":5}\n');
+    await m.start();
+    assert.deepEqual((await m.state()).pools, []);
+    await m.linked();
+    assert.deepEqual((await m.state()).pools.map((pool) => pool.id), [POOL]);
+    await m.kill();
+  });
+
+  await check('a daemon says at its start which of a test\'s settings it was given, and shows a loop transport as one; given none, it says nothing', async () => {
+    const m = bench.machine('knobs');
+    m.env.DN_TEST_FAULTS = path.join(m.home, 'faults');
+    await m.start();
+    const said = (text) => text.split('\n').filter((line) => line.includes('which only a test does')).map((line) => line.replace(/^\[[^\]]+\] /, ''));
+    const knob = (name) => `${name}=${m.env[name]} is set, which only a test does: this daemon is not one to run on the network`;
+    assert.deepEqual(said(m.log()), ['DN_FORGE_ORIGINS', 'DN_POW_MEMBER_BASE', 'DN_POW_STRANGER_BASE', 'DN_TEST_FAULTS', 'DN_TRANSPORT'].map(knob));
+    const { transport } = await until('its transport', async () => { const now = await m.state(); return now.transport.state === 'ready' ? now : null; });
+    assert.match(transport.detail, /^loop \(test transport\): 127\.0\.0\.1:\d+$/);
+    await m.kill();
+
+    // As Diplomat starts it: over Tor, with the forge and the proof of work as they are.
+    const plain = bench.machine('plain', { transport: 'tor', timing: 'default' });
+    delete plain.env.DN_FORGE_ORIGINS;
+    await plain.start();
+    const { transport: tor } = await until('its transport', async () => { const now = await plain.state(); return now.transport.state === 'ready' ? now : null; });
+    assert.doesNotMatch(tor.detail, /test/);
+    assert.deepEqual(said(plain.log()), []);
+    await plain.kill();
+  });
+
+  await check('what a writer that died left half-written beside daemon.json, state.json and jobs.json is removed at the start; a living writer\'s is not', async () => {
+    const m = bench.machine('tmp');
+    fs.mkdirSync(m.base, { recursive: true });
+    // No process has this pid: it is above what either system deals.
+    const dead = 2 ** 22 + 7;
+    const left = ['daemon.json', 'state.json', 'jobs.json'].map((name) => `${name}.tmp.${dead}`);
+    const held = `state.json.tmp.${process.pid}`;
+    for (const name of [...left, held]) fs.writeFileSync(path.join(m.base, name), '{');
+    await m.start();
+    assert.deepEqual([...left, held].filter((name) => fs.existsSync(path.join(m.base, name))), [held]);
+    await m.kill();
+  });
+
   console.log(`\nall ${passed()} checks passed`);
 } finally {
   await bench.close();

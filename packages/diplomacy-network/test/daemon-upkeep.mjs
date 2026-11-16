@@ -242,6 +242,44 @@ try {
     assert.deepEqual(await m.stop(), { code: 0, signal: null });
   });
 
+  await check('a timer\'s work that fails the same way five times in a row ends the daemon, however far apart its turns are; a turn that works or another fault starts the count again, and a promise nobody waited for never ends it', async () => {
+    const m = bench.machine('t');
+    const file = path.join(m.home, 'faults');
+    // No two turns of a timer fall within this window: only the count in a row is left.
+    Object.assign(m.env, { DN_TEST_FAULTS: file, DN_FAULT_WINDOW_MS: '1', DN_CONFIG_UNREADABLE_POLLS: '1000000' });
+    await m.start();
+    const fault = (...lines) => { fs.writeFileSync(`${file}.new`, lines.map((line) => `${line}\n`).join('')); fs.renameSync(`${file}.new`, file); };
+    const thrown = () => count(m.log(), 'uncaught: Error: timer slow\n    at ');
+    // A turn of the timers with nothing to throw: the config poll has their period, and
+    // two polls have one such turn between them.
+    const good = fs.readFileSync(m.configPath, 'utf8');
+    const quietTurn = async () => {
+      const from = count(m.log(), 'config.json could not be read (');
+      fs.writeFileSync(m.configPath, good.slice(0, 20));
+      await until('two polls', () => count(m.log(), 'config.json could not be read (') >= from + 2);
+      fs.writeFileSync(m.configPath, good);
+    };
+    const slow = (n) => Array(n).fill('timer slow');
+
+    fault(...slow(4));
+    await until('four thrown', () => thrown() === 4);
+    await quietTurn();
+    fault(...slow(4));
+    await until('four more', () => thrown() === 8);
+    await quietTurn();
+    fault(...slow(2), 'timer other', ...slow(4));
+    await until('six more, another between them', () => thrown() === 14);
+    await quietTurn();
+    fault(...Array(6).fill('promise lost'));
+    await until('six promises lost', () => count(m.log(), 'unhandled: Error: promise lost\n    at ') === 6);
+    assert.deepEqual([(await m.call('GET', '/health')).status, count(m.log(), 'uncaught: Error: promise lost')], [200, 0]);
+
+    fault(...slow(5));
+    assert.deepEqual(await gone(m), { code: 1, signal: null });
+    assert.equal(thrown(), 19);
+    assert.match(m.log(), /the same fault 5 times in a row: exiting, to be started again\n$/);
+  });
+
   await check('a request that reaches the daemon while it stops is refused with a 503 and a sentence, and changes nothing', async () => {
     const m = await bench.machine('s', { env: { DN_SWITCH_OFF_WAIT_MS: '60000' } }).start();
     await m.linked();

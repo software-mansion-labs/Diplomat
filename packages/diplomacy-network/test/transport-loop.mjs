@@ -170,7 +170,7 @@ try {
 
   await check('a request reaches the peer\'s handler with its headers, and the answer comes back', async () => {
     assert.equal(a.t.address, onionAddress(a.pk));
-    assert.deepEqual(a.t.state(), { state: 'ready', detail: `127.0.0.1:${a.port}` });
+    assert.deepEqual(a.t.state(), { state: 'ready', detail: `loop (test transport): 127.0.0.1:${a.port}` });
     b.serve(async (body, info) => {
       assert.deepEqual(Object.keys(info), ['headers']);
       return say(JSON.stringify({ got: body.toString(), kind: info.headers['dn-kind'], length: body.length }));
@@ -595,7 +595,7 @@ try {
     assert.equal(await within(3000, inFlight, 'the request in flight'), 'stopped');
     assert.equal(await within(3000, held, 'the delayed request'), 'stopped');
     assert.equal(await code(c.t.request(b.pk, say('x'))), 'stopped');
-    assert.deepEqual(c.t.state(), { state: 'failed', detail: 'stopped' });
+    assert.deepEqual(c.t.state(), { state: 'failed', detail: 'loop (test transport): stopped' });
     assert.equal(fs.existsSync(path.join(dir, `${c.t.address}.addr`)), false);
     assert.equal(await code(a.t.request(c.pk, say('x'))), 'unreachable');
     assert.equal((await raw(c, post('{}'))).text, '');
@@ -610,7 +610,7 @@ try {
     const seen = [];
     t.onState((s) => { throw new Error(`a watcher that throws: ${s.state}`); });
     t.onState((s) => seen.push(s));
-    assert.deepEqual(t.state(), { state: 'starting', detail: 'not started' });
+    assert.deepEqual(t.state(), { state: 'starting', detail: 'loop (test transport): not started' });
     await t.start();
     await t.stop();
     assert.deepEqual(seen.map((s) => s.state), ['ready', 'failed']);
