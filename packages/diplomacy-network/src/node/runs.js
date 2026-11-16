@@ -331,11 +331,12 @@ export function createRuns(host) {
     };
   }
 
-  /// Stops one run and gives its claim back.
-  function stopRun({ runId }) {
+  /// Stops one run and gives its claim back. `reason` is what the run's record and its
+  /// job are told; without one it is the operator who stopped it.
+  function stopRun({ runId, reason = 'stopped by the operator' }) {
     const run = Object.hasOwn(runs, runId) ? runs[runId] : null;
     if (!run || !live(run)) throw new Error('No such run is going on this machine.');
-    halt(run, 'stopped by the operator', 'release');
+    halt(run, reason, 'release');
   }
 
   /// Stops every run in a pool, for `reason`, and gives its claims back at once; the keys

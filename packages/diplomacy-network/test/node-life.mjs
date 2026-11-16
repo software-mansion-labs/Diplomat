@@ -243,6 +243,17 @@ await check('a run stopped by the operator is stopped, its claim given back, and
   await assert.rejects(exe.node.stopRun({ runId: job.runId }), /No such run is going on this machine\./);
 });
 
+await check('a run the host stops for a reason of its own tells its job and its record that reason, and its claim is given back the same', async () => {
+  const w = createWorld({ seed: 23 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const { taskId, job } = await going(w, req, exe, 'pr-1');
+  await exe.node.stopRun({ runId: job.runId, reason: 'the broker could not listen where this job reaches it' });
+  assert.deepEqual(exe.executor.stopped, [{ runId: job.runId, reason: 'the broker could not listen where this job reaches it' }]);
+  assert.deepEqual([w.stored(exe, 'runs').runs[job.runId].state, w.stored(exe, 'runs').runs[job.runId].outcome.summary], ['stopped', 'the broker could not listen where this job reaches it']);
+  await w.net.until(() => w.task(req, taskId).state === 'available', { what: 'the task in the pool again' });
+  assert.equal(w.offerRow(req, taskId).attempt, 1);
+});
+
 await check('a host that is switched off cancels its offers, stops its runs and gives their claims back, tells the pool, and stops - a member still', async () => {
   const w = createWorld({ seed: 20 });
   const [a, b, c] = await w.pool(['a', 'b', 'c'], { a: { slots: 1 } });
