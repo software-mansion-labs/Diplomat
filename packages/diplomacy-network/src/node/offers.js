@@ -6,17 +6,15 @@
 // that never leaves this host: the prompt, the counters, the outcome.
 
 import { b64u, canon, unb64u } from '../core/canon.js';
-import { SeqTracker, buildCapability, capabilityExp, checkAct, checkDone } from '../core/capability.js';
-import { keyHost } from '../core/claims.js';
-import { buildPing, pingDue } from '../core/lease.js';
-import { LIMITS, buildTaskId, isBytes, isObject, offerRecord, parseTaskId, shaped } from '../core/records.js';
-import { LEASE_GRACE_SECS, OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETRY_MS } from '../paths.js';
+import { SeqTracker, buildCapability, capabilityExp, checkAct, checkDone, specDigest } from '../core/capability.js';
+import { buildPing, heldUntil, isActive, pingDue } from '../core/lease.js';
+import { LIMITS, backing, buildTaskId, isBytes, isObject, offerRecord, parseTaskId, shaped } from '../core/records.js';
+import { OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETRY_MS } from '../paths.js';
 import { claimKey, hoursOf, offerKey } from './gossip.js';
 
 const OPEN = ['pooled', 'claimed'];
 const MAX_REASON = 200;
 const MAX_SPEC_BYTES = 512 * 2 ** 10;
-const MAX_GRANTED = 16;
 
 /// `value` as text with a space where each control character was: what a run says of
 /// itself reaches logs, terminals and the applets.
@@ -141,8 +139,8 @@ export function createOffers(host) {
       taskId, pool, kind, item, identity, options, title: text(title, LIMITS.title), prompt: String(prompt ?? ''),
       base: base === undefined ? undefined : String(base), name: author.name, email: author.email,
       now: atOnce === true, hours: hoursOf(host.settings().requiredMinimumH), offeredAt: now, createdAt: now,
-      seq: before?.seq ?? -1,
-      state: 'pooled', executor: '', ran: '', failed: [], reported: [], granted: [], requests: 0, refused: 0, outcome: null,
+      seq: before?.seq ?? -1, gen: 0,
+      state: 'pooled', executor: '', ran: '', failed: [], reported: [], requests: 0, refused: 0, outcome: null,
       reason: '', endedAt: 0, watch: null, pinged: 0,
     };
     try {
@@ -153,11 +151,10 @@ export function createOffers(host) {
     if (!(await rulesOf(P, O))) throw new Error(`No rules exist for a "${kind}" task on ${P.link.forge}, so it cannot be offered.`);
     if (host.pools.get(pool) !== P) throw host.gossip.noPool(pool);
     if (offers[taskId] && OPEN.includes(offers[taskId].state)) return { taskId };
-    // An offer starts after everything that ended the task before: an end already in
-    // the pool must not end this one too.
-    for (const record of P.pool.records()) {
-      if (record.type === 'offer' && record.taskId === taskId && record.state !== 'open') O.createdAt = Math.max(O.createdAt, record.at + 1);
-    }
+    // An offer is told from the one this host made of the task before by when it was
+    // made: a claim of that one holds nothing of this one.
+    const last = P.pool.get(offerKey(taskId, host.self));
+    if (last) O.createdAt = Math.max(O.createdAt, last.createdAt + 1);
     // One more record than a member may have live would push another of this host's out.
     const record = signed(P, O, 'open');
     if (!P.pool.room(record)) {
@@ -177,39 +174,36 @@ export function createOffers(host) {
     end(host.pools.get(O.pool), O, 'cancelled', reason);
   }
 
-  /// This host granted a lock on `taskId` for `round`: a claim of that round is a claim
-  /// of the offer this host has open now.
-  function granted(taskId, round) {
+  /// This host gives the offer of `taskId` it made at `at` to a claim: how many times it
+  /// gave that offer away before, the number that orders the claims it backs. Null when
+  /// it has no such offer open. The count is on disk before anyone sees it.
+  function nextGen(taskId, at) {
     const O = offers[taskId];
-    if (!O || !OPEN.includes(O.state) || O.granted.includes(round)) return;
-    O.granted = [...O.granted, round].slice(-MAX_GRANTED);
+    if (!O || !OPEN.includes(O.state) || O.createdAt !== at) return null;
+    O.gen += 1;
     save();
+    return O.gen;
   }
 
-  // Was this claim made for this offer, and not for one of the task that ended before
-  // it? This host's own claim is dated by its own clock. Any other is made for the offer
-  // only when this host granted its round while the offer was open: a claim this host
-  // did not agree to gets nothing from it - no key, no heartbeat, no say in how the
-  // offer ends.
-  function madeFor(O, claim) {
-    if (claim.executor === host.self) return claim.claimedAt >= O.offeredAt;
-    return claim.grants.some((grant) => grant.by === host.self) && O.granted.includes(claim.round);
-  }
+  // Does this host back the claim with the offer it has open now, and not with one it
+  // made of the task before? A claim this host does not back gets nothing from it - no
+  // key, no heartbeat, no say in how the offer ends.
+  const backs = (O, claim) => backing(claim, host.self)?.at === O.createdAt;
 
-  // The claim that holds a task of this host right now for `executor` in `round`, by this
-  // host's own state, or null. A round whose run has said how it ended is over for this
-  // host while its claim still stands.
+  // The claim that holds this host's offer right now, by this host's own state, or null.
+  const holder = (P, O) => P.pool.task(O.taskId, host.now())?.offers.find((o) => o.host === host.self)?.claim ?? null;
+
+  // The claim that holds this host's offer right now for `executor` in `round`, or null.
+  // A round whose run has said how it ended is over for this host while its claim still
+  // holds.
   function standing(P, O, executor, round) {
-    const task = P.pool.task(O.taskId, host.now());
-    const claim = task?.claim;
-    const fine = claim && claim.executor === executor && claim.round === round && task.offeredBy.includes(host.self)
-      && madeFor(O, claim) && !O.reported.includes(round);
-    return fine ? { task, claim } : null;
+    const claim = holder(P, O);
+    return claim && claim.executor === executor && claim.round === round && !O.reported.includes(round) ? claim : null;
   }
 
   // A lease extension moves the key's expiry with it: same key, same secret.
   function refresh(K, claim) {
-    const exp = capabilityExp(claim);
+    const exp = capabilityExp(claim, backing(claim, host.self));
     if (K.capability.exp === exp) return;
     const { keyId, sig: _, host: __, ...rest } = K.capability;
     K.capability = buildCapability(host.id, { ...rest, keyId: unb64u(keyId), exp });
@@ -225,26 +219,24 @@ export function createOffers(host) {
       return inTurn(taskId, async () => {
         const O = offers[taskId];
         if (!O || !OPEN.includes(O.state)) return deny('not offered by this host');
-        let at = standing(P, O, from, round);
-        if (!at) return deny('no active claim of the task names that executor and round');
-        // The one host that answers is among those that granted the round: a claim made
-        // behind this host's back gets no key from it.
-        if (keyHost(at.claim, at.task.offeredBy) !== host.self) return deny('another host answers for this claim');
+        let claim = standing(P, O, from, round);
+        if (!claim) return deny('no claim of that executor and round holds the offer of this host');
         if (issued[taskId] && (issued[taskId].round !== round || issued[taskId].capability.executor !== from)) revoke(taskId);
         if (!issued[taskId]) {
           const rules = await rulesOf(P, O);
-          at = standing(P, O, from, round);
-          if (!rules || !at) return deny('the task can no longer be acted on');
+          claim = standing(P, O, from, round);
+          if (!rules || !claim) return deny('the task can no longer be acted on');
           issued[taskId] = {
             round, secret: b64u(host.random(32)), seq: -1,
             capability: buildCapability(host.id, {
-              keyId: host.random(16), pool: P.id, taskId, executor: from, rules, exp: capabilityExp(at.claim),
+              keyId: host.random(16), pool: P.id, taskId, executor: from, rules,
+              exp: capabilityExp(claim, backing(claim, host.self)),
             }),
           };
           host.saveKeys();
         }
         const K = issued[taskId];
-        refresh(K, at.claim);
+        refresh(K, claim);
         return { body: { capability: K.capability, secret: K.secret, spec: specOf(O) } };
       });
     },
@@ -257,7 +249,7 @@ export function createOffers(host) {
         const O = offers[taskId];
         if (!K || !O) return { error: 'denied', detail: 'no key' };
         const at = standing(P, O, from, K.round);
-        if (at) refresh(K, at.claim);
+        if (at) refresh(K, at);
         const seqs = new SeqTracker([[K.capability.keyId, K.seq]]);
         const checked = checkAct(body, { capability: K.capability, secret: unb64u(K.secret), seqs, from, now: host.now() });
         if (!checked.ok) return { error: checked.code, detail: checked.detail };
@@ -296,11 +288,16 @@ export function createOffers(host) {
     },
 
     done(P, from, body) {
-      const claim = typeof body?.taskId === 'string' ? P.pool.get(claimKey(body.taskId)) : null;
+      const claim = typeof body?.taskId === 'string' ? P.pool.get(claimKey(body.taskId, from)) : null;
       const checked = checkDone(body, { claim, from, now: host.now() });
       if (!checked.ok) return { error: checked.code, detail: checked.detail };
       const O = offers[body.taskId];
-      if (!O || !OPEN.includes(O.state) || O.reported.includes(body.round) || !madeFor(O, claim)) return { body: {} };
+      if (!O || !OPEN.includes(O.state) || O.reported.includes(body.round) || !backs(O, claim)) return { body: {} };
+      // The run did the job another host handed out: it says nothing of this host's.
+      if (body.spec !== specDigest(specOf(O))) return { body: {} };
+      // The offer may be another claim's by now: this host gave it on.
+      const current = holder(P, O);
+      if (current && current.executor !== from) return { body: {} };
       const { ok, summary, microUsd, tokens, runner, model } = body.outcome;
       O.reported.push(body.round);
       O.ran = from;
@@ -308,7 +305,8 @@ export function createOffers(host) {
       O.outcome = { ok, summary: plain(summary), usd: microUsd / 1e6, tokens, runner: plain(runner), model: plain(model) };
       if (ok) end(P, O, 'done');
       else fail(P, O, body.round, summary);
-      return { body: {} };
+      // The offer as the report leaves it: the executor holds it before it ends its claim.
+      return { body: { offer: P.pool.get(offerKey(O.taskId, host.self)) } };
     },
   };
 
@@ -317,41 +315,36 @@ export function createOffers(host) {
     // A lease hangs on the ping: it is sent whatever gossip makes of the executor.
     const answer = await host.gossip.send(P, claim.executor, 'ping', { ping: buildPing(host.id, claim, host.now()) }, { fresh: true });
     if (!answer.ok || !isObject(answer.body.claim) || host.pools.get(P.id) !== P) return;
-    const key = claimKey(O.taskId);
+    const key = claimKey(O.taskId, claim.executor);
     if (host.take(P, answer.body.claim).fresh.includes(key)) host.gossip.spread(P, [key], claim.executor);
-  }
-
-  // Has another host offering the task cancelled it since this offer was made?
-  function cancelledElsewhere(P, O) {
-    const now = host.now();
-    return P.pool.records().some((r) => r.type === 'offer' && r.taskId === O.taskId && r.host !== host.self
-      && r.state === 'cancelled' && r.at >= O.createdAt && P.pool.member(r.host, now));
   }
 
   function stepOffer(P, O) {
     const now = host.now();
     const { taskId } = O;
-    const doneAt = P.pool.doneAt(taskId, now);
-    if (doneAt !== null && doneAt >= O.createdAt) return end(P, O, 'done', 'finished through another machine offering it');
-    if (cancelledElsewhere(P, O)) return end(P, O, 'cancelled', 'cancelled by another machine offering it');
     const mine = P.pool.get(offerKey(taskId, host.self));
     if (!mine || now - mine.at >= RESIGN_INTERVAL_MS / 1000) publish(P, O);
 
-    const task = P.pool.task(taskId, now);
-    const claim = task?.claim ?? null;
-    const held = P.pool.get(claimKey(taskId));
+    const claim = holder(P, O);
     const watched = O.watch;
     if (watched && watched.round !== claim?.round) {
       O.watch = null;
-      const ended = held?.round === watched.round && held.state !== 'held';
-      // The claim is gone and its executor never said how it ended: it lapsed.
-      if (now >= watched.lapses && !ended && !O.reported.includes(watched.round)) {
-        fail(P, O, watched.round, 'the machine running it stopped answering');
+      const held = P.pool.get(claimKey(taskId, watched.executor));
+      const same = held?.round === watched.round;
+      // The executor never said how the run ended and its claim does not say it ended:
+      // the lease lapsed, or the run outlived the hours this host gave it. A claim its
+      // executor ended without a word of this host's job counts for nothing: the offer is
+      // back in the pool as it was.
+      if (now >= watched.lapses && !(same && held.state !== 'held') && !O.reported.includes(watched.round)) {
+        const going = same && isActive(held, now);
+        fail(P, O, watched.round, going ? 'not finished in the hours this machine gives it' : 'the machine running it stopped answering');
         if (!OPEN.includes(O.state)) return undefined;
       }
     }
-    if (claim && madeFor(O, claim)) O.watch = { round: claim.round, lapses: claim.leaseUntil + LEASE_GRACE_SECS };
-    if (claim) O.ran = claim.executor;
+    if (claim) {
+      O.watch = { round: claim.round, executor: claim.executor, lapses: heldUntil(claim, backing(claim, host.self)) };
+      O.ran = claim.executor;
+    }
     const state = claim ? 'claimed' : 'pooled';
     if (O.state !== state || O.executor !== (claim?.executor ?? '')) {
       Object.assign(O, { state, executor: claim?.executor ?? '' });
@@ -362,7 +355,7 @@ export function createOffers(host) {
     const K = issued[taskId];
     if (K && claim?.round === K.round && claim.executor === K.capability.executor) refresh(K, claim);
     else revoke(taskId);
-    if (claim && madeFor(O, claim) && pingDue(claim, now) && O.pinged + RETRY_MS / 1000 <= now) {
+    if (claim && pingDue(claim, backing(claim, host.self), now) && O.pinged + RETRY_MS / 1000 <= now) {
       O.pinged = now;
       ping(P, O, claim).catch((err) => host.log(`a ping failed: ${err?.stack ?? err}`));
     }
@@ -383,8 +376,8 @@ export function createOffers(host) {
     }
   }
 
-  /// What came due for every offer: an end another host signed, a record to sign again,
-  /// a lapse to count, a key to revoke, a ping to send. An ended offer is forgotten a day
+  /// What came due for every offer: a record to sign again, a claim that ended or lapsed
+  /// to count, a key to revoke, a ping to send. An ended offer is forgotten a day
   /// after it ended, and a record that still says it is open is ended.
   function step() {
     const now = host.now();
@@ -431,5 +424,5 @@ export function createOffers(host) {
     }));
   }
 
-  return { offer, withdraw, granted, step, closing, atOnce, keyHeldBy, rows, handlers };
+  return { offer, withdraw, nextGen, step, closing, atOnce, keyHeldBy, rows, handlers };
 }

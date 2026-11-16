@@ -3,7 +3,7 @@
 // the answer is a signed response: a handler that fails is a `busy` refusal, never a throw.
 
 import { b64u, canon, hash, parseCanon } from '../core/canon.js';
-import { KINDS, ReplayMemory, buildResponse, requestDigest, verifyRequest } from '../core/envelope.js';
+import { KINDS, ReplayMemory, UNSERVED, buildResponse, requestDigest, verifyRequest } from '../core/envelope.js';
 import { EffortMeter } from '../core/pow.js';
 import { shaped } from '../core/records.js';
 import {
@@ -74,7 +74,7 @@ export function createInbound(host) {
     const { effort } = checked;
     if (!checked.ok) return reply({ effort, error: { code: checked.code, detail: checked.detail } });
     const { pool, kind, from, body, ts } = request;
-    if (ts <= floor) return reply({ effort, error: { code: 'busy', detail: 'dated before this host last started: send it again' } });
+    if (ts <= floor) return reply({ effort, error: { code: 'busy', detail: UNSERVED } });
     if (ts > latest) {
       latest = ts;
       host.store.write('heard', { ts });

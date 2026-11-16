@@ -1,6 +1,6 @@
 // The three records a pool's state is made of (PROTOCOL.md section 5): their exact
 // shape, who signs each, the key each is stored under, and which of two versions of a
-// member or an offer wins. Which of two claims stands is in claims.js.
+// member or an offer wins. Which of two versions of a claim wins is in claims.js.
 
 import { b64u, hash, unb64u } from './canon.js';
 import { sign, validPk, verify } from './identity.js';
@@ -42,10 +42,8 @@ export function isBytes(v, n) {
   return unb64u(v)?.length === n;
 }
 
-/// Is this a number of hours a task may take: a whole number from the floor to the ceiling?
-export function isHours(v) {
-  return Number.isSafeInteger(v) && v >= HOURS_FLOOR && v <= HOURS_CEILING;
-}
+// A number of hours a task may take: a whole number from the floor to the ceiling.
+const isHours = (v) => Number.isSafeInteger(v) && v >= HOURS_FLOOR && v <= HOURS_CEILING;
 
 /// Is `value` a plain object holding every member of `required`, nothing outside
 /// `required` and `optional`, and does each member pass its test?
@@ -98,9 +96,13 @@ const taskIn = (pool) => (v) => {
   return parts !== null && parts.pool === pool;
 };
 
+// What a host that offers a task adds to its consent: the offer it made at `at` is the
+// claim's, as the `gen`th the host gave that offer to, for `hours`.
+const BACKING = { at: isTime, gen: isTime, hours: isHours };
+const backingShaped = (v) => shaped(v, BACKING);
 const GRANT = {
-  pool: validPool, taskId: (v) => parseTaskId(v) !== null, executor: validPk, round: bytes(8), gen: isTime,
-  hours: isHours, hash: bytes(32), by: validPk, exp: isTime, sig: bytes(64),
+  pool: validPool, taskId: (v) => parseTaskId(v) !== null, executor: validPk, round: bytes(8),
+  hash: bytes(32), by: validPk, exp: isTime, sig: bytes(64),
 };
 const PING = {
   pool: validPool, taskId: (v) => parseTaskId(v) !== null, executor: validPk, round: bytes(8), n: isTime,
@@ -109,7 +111,19 @@ const PING = {
 
 /// Is this shaped like a grant (section 7)? Its signature and what it binds are not checked.
 export function grantShaped(v) {
-  return shaped(v, GRANT);
+  return shaped(v, GRANT, { offer: backingShaped });
+}
+
+/// What `pk` backs a claim with - `{ at, gen, hours }`, its own word on its own offer of
+/// the task - or null: the executor's is the claim's own `offer`, a member's the `offer`
+/// of its grant.
+export function backing(claim, pk) {
+  return (pk === claim.executor ? claim.offer : claim.grants.find((grant) => grant.by === pk)?.offer) ?? null;
+}
+
+/// The hosts that back a claim, the executor first.
+export function backers(claim) {
+  return [...(claim.offer ? [claim.executor] : []), ...claim.grants.filter((grant) => grant.offer).map((grant) => grant.by)];
 }
 
 /// Is this shaped like a ping (section 8)? Its signature and what it binds are not checked.
@@ -142,14 +156,14 @@ const TYPES = {
   },
   claim: {
     signer: 'executor',
-    key: (r) => `claim/${r.taskId}`,
+    key: (r) => `claim/${r.taskId}/${r.executor}`,
     shape: (r) => shaped(r, {
       type: is('claim'), pool: validPool, taskId: taskIn(r.pool), executor: validPk, round: bytes(8),
       gen: isTime, seq: isTime, state: oneOf('held', 'released', 'completed'), at: isTime,
       claimedAt: isTime, leaseUntil: isTime, deadline: isTime, hours: isHours,
       grants: (v) => Array.isArray(v) && v.length <= LIMITS.list && v.every(grantShaped),
       absent: (v) => isAscending(v, validPk), sig: bytes(64),
-    }, { ping: pingShaped }) && r.at >= r.claimedAt,
+    }, { ping: pingShaped, offer: backingShaped }) && r.at >= r.claimedAt,
   },
 };
 
@@ -163,17 +177,17 @@ export function recordKey(record) {
 }
 
 /// What a key names in `pool` - `{ type: 'member', pk }`, `{ type: 'offer', taskId, host }`
-/// or `{ type: 'claim', taskId }` - or null when it is not a key of that pool.
+/// or `{ type: 'claim', taskId, executor }` - or null when it is not a key of that pool.
 export function parseKey(key, pool) {
   if (typeof key !== 'string' || key.length > LIMITS.taskId + 60) return null;
   const slash = key.indexOf('/');
   const [type, rest] = [key.slice(0, slash), key.slice(slash + 1)];
   if (type === 'member') return validPk(rest) ? { type, pk: rest } : null;
-  if (type === 'claim') return taskIn(pool)(rest) ? { type, taskId: rest } : null;
-  if (type !== 'offer') return null;
+  if (type !== 'offer' && type !== 'claim') return null;
   const last = rest.lastIndexOf('/');
-  const [taskId, host] = [rest.slice(0, last), rest.slice(last + 1)];
-  return taskIn(pool)(taskId) && validPk(host) ? { type, taskId, host } : null;
+  const [taskId, pk] = [rest.slice(0, last), rest.slice(last + 1)];
+  if (!taskIn(pool)(taskId) || !validPk(pk)) return null;
+  return type === 'offer' ? { type, taskId, host: pk } : { type, taskId, executor: pk };
 }
 
 /// `{ ok: true, key }` when the record has exactly the members its type allows, each

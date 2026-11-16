@@ -9,7 +9,7 @@ import { b64u } from '../core/canon.js';
 import { ClaimRound, buildClaim, rankDelay } from '../core/claims.js';
 import { eligible } from '../core/lease.js';
 import {
-  ADMIT_LAG_SECS, ADMIT_TTL_MS, MAX_ROUNDS, PROBE_TIMEOUT_MS, RANK_DELAY_MS, REQUEST_TIMEOUT_MS, RETRY_MS, ROUND_PATIENCE_MS,
+  ADMIT_LAG_SECS, ADMIT_TTL_MS, JOIN_WAIT_MS, MAX_ROUNDS, PROBE_TIMEOUT_MS, RANK_DELAY_MS, REQUEST_TIMEOUT_MS, RETRY_MS, ROUND_PATIENCE_MS,
 } from '../paths.js';
 import { claimKey } from './gossip.js';
 
@@ -60,20 +60,25 @@ export function createClaiming(host) {
       // pool, it goes for nothing.
       if (!me || !P.pool.room({ type: 'claim', taskId: '', executor: host.self })) continue;
       for (const task of P.pool.tasks(now)) {
-        if (task.state === 'available') open.push({ P, task, me });
+        // The hours of a task are those of the offers this host may take: an offer of
+        // more than it accepts is not its to weigh.
+        const mine = task.offers.filter((o) => !o.claim && eligible(me.maxAcceptedH, o.hours));
+        if (mine.length > 0) open.push({ P, task: { ...task, hours: Math.max(...mine.map((o) => o.hours)) } });
       }
     }
     open.sort((a, b) => a.task.createdAt - b.task.createdAt || (a.task.taskId < b.task.taskId ? -1 : 1));
-    for (const { P, task, me } of open) {
+    for (const { P, task } of open) {
       const { taskId } = task;
       if (rounds.size + waiting.size >= MAX_ROUNDS) break;
       if (rounds.has(taskId) || waiting.has(taskId) || host.runs.has(taskId) || later.has(taskId)) continue;
-      if (!eligible(me.maxAcceptedH, task.hours) || host.runs.shuns(taskId, task.createdAt)) continue;
+      if (host.runs.shuns(taskId, task.createdAt)) continue;
       const own = host.offers.atOnce(taskId);
       if (!own && taken() >= slots()) continue;
       const verdict = weighed(P, task);
       if (verdict === null) continue;
-      const delay = own ? 0 : rankDelay(taskId, host.self, RANK_DELAY_MS) + verdict;
+      // A run that holds another offer of the task takes this one in too: it is given
+      // the time to.
+      const delay = (task.state === 'claimed' ? JOIN_WAIT_MS : 0) + (own ? 0 : rankDelay(taskId, host.self, RANK_DELAY_MS) + verdict);
       waiting.set(taskId, host.clock.setTimeout(() => begin(P, taskId, own), delay));
     }
   }
@@ -99,7 +104,7 @@ export function createClaiming(host) {
     const now = host.now();
     if (host.pools.get(P.id) !== P || (!own && taken() >= slots())) return;
     // Another host may have taken the task while this one waited.
-    if (P.pool.task(taskId, now)?.state !== 'available') return;
+    if (!P.pool.claimSnapshot(taskId, now).eligible) return;
     const round = new ClaimRound({ taskId, self: host.self, round: b64u(host.random(8)), now });
     // The lock this host granted a rival stands: its round is waited out.
     if (!P.locks.hold(taskId, host.self, round.round, round.deadline, now)) {
@@ -226,7 +231,7 @@ export function createClaiming(host) {
     host.saveLocks();
   }
 
-  function commit(run, { gen, hours, grants, absent }) {
+  function commit(run, { gen, grants, absent, own }) {
     const { P, taskId, round } = run;
     // A round that is not committed after all gives the locks it was granted back.
     const drop = (reason) => {
@@ -235,13 +240,19 @@ export function createClaiming(host) {
     };
     // The word on slots may have changed, or gone stale, while the round ran.
     if (!run.own && took() >= slots()) return drop('no slot left');
-    const claim = buildClaim(host.id, { pool: P.id, taskId, round: round.round, gen, hours, grants, absent, now: host.now() });
+    // This host's own offer of the task, when it has one, is the claim's by its own word.
+    const mine = own ? host.offers.nextGen(taskId, own.at) : null;
+    if (mine === null && !grants.some((grant) => grant.offer)) return drop('the offer it was for is gone');
+    const claim = buildClaim(host.id, {
+      pool: P.id, taskId, round: round.round, gen, grants, absent, now: host.now(),
+      ...(mine === null ? {} : { offer: { ...own, gen: mine } }),
+    });
     if (!P.pool.room(claim)) return drop('this host has as many claims in the pool as a member may');
     end(run);
     if (host.take(P, claim).refused.length > 0) return drop('the claim does not hold in the state of this host');
     // The run is on record together with the claim it rests on, before anyone hears of either.
     host.runs.adopt(P, claim);
-    host.gossip.spread(P, [claimKey(taskId)]);
+    host.gossip.spread(P, [claimKey(taskId, host.self)]);
     return undefined;
   }
 

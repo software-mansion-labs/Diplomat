@@ -5,6 +5,7 @@
 import './fast-env.mjs';
 import assert from 'node:assert/strict';
 import { b64u, canon } from '../../src/core/canon.js';
+import { specDigest } from '../../src/core/capability.js';
 import { buildRequest, verifyResponse } from '../../src/core/envelope.js';
 import { identityFromSeed } from '../../src/core/identity.js';
 import { solve } from '../../src/core/pow.js';
@@ -195,8 +196,11 @@ export function createWorld({ seed = 1 } = {}) {
     name: (pk) => [...hosts.values()].find((h) => h.pk === pk)?.name ?? pk,
     /// The records a host's store holds for the pool.
     records: (h) => JSON.parse(h.disk.read([...h.disk.files.keys()].find((name) => name.startsWith('pools/')))).records,
-    /// The claim record a host's store holds for a task, or undefined.
-    claim: (h, taskId) => world.records(h).find((r) => r.type === 'claim' && r.taskId === taskId),
+    /// The claim record a host's store holds for a task - the one `by` made, when a host
+    /// is named - or undefined.
+    claim: (h, taskId, by) => world.records(h).find((r) => r.type === 'claim' && r.taskId === taskId && (!by || r.executor === by.pk)),
+    /// What names the job an executor was handed for a task, as its `done` request carries it.
+    spec: (h, taskId) => specDigest(world.stored(h, 'keys').held[taskId].spec),
     /// What a host's store holds under `name`, parsed.
     stored: (h, name) => JSON.parse(h.disk.read(name) ?? 'null'),
   };

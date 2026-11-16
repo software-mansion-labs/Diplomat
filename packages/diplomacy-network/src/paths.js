@@ -104,6 +104,9 @@ export const ACT_BYTES_PER_SEC = 32 * 2 ** 10;
 // How often an unanswered ping, key request or outcome report is sent again, and how
 // long a task whose round stood down is left alone.
 export const RETRY_MS = num('DN_RETRY_MS', 30 * 1000);
+// How long a host leaves an offer of a task that is running to that run before it goes
+// for it: the run asks for such an offer itself, when it hears of it and every RETRY_MS.
+export const JOIN_WAIT_MS = num('DN_JOIN_WAIT_MS', 2 * RETRY_MS);
 // How often a host looks at everything it holds for something that came due.
 export const TICK_MS = num('DN_TICK_MS', 10 * 1000);
 export const PRUNE_INTERVAL_MS = num('DN_PRUNE_INTERVAL_MS', 10 * 60 * 1000);

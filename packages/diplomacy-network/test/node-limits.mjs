@@ -254,7 +254,7 @@ await check('a lock is dropped once it has run out, whatever became of its task'
   const [req, a] = await w.pool(['req', 'a']);
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.agreed([req, a]);
-  const lock = await w.request(a, req, 'lock', { taskId, round: ROUND, asOf: w.net.now(), hash: w.view(req).hash, hours: 12 });
+  const lock = await w.request(a, req, 'lock', { taskId, round: ROUND, asOf: w.net.now(), hash: w.view(req).hash });
   assert.equal(lock.body.grant.executor, a.pk);
   const locks = () => Object.values(w.stored(req, 'locks')).flat().length;
   assert.equal(locks(), 1);
@@ -282,8 +282,8 @@ await check('what a host served before it went down it does not serve after: the
   await w.agreed([a, b]);
   assert.equal(w.view(a).members.find((m) => m.pk === b.pk).reachable, true);
 
-  // A node that is told so sends its request again, once and soon. An `act` it leaves to
-  // the run: for all the node knows it was carried out.
+  // A node that is told so sends its request again, once and soon - an `act` too, under
+  // the number it had: what was dated before the start was not carried out.
   b.slots = 1;
   b.node.admit({ slots: 1 });
   await w.net.until(() => b.executor.jobOf(taskId), { what: 'the job' });
@@ -302,9 +302,33 @@ await check('what a host served before it went down it does not serve after: the
   floor = await downUntil();
   const act = b.node.actFor(b.executor.jobOf(taskId).runId);
   const write = (n) => w.wait(act(forgeRequest('POST', `/repos/o/r/pr-1/pack-${n}`, { pack: 'x' })));
-  assert.deepEqual([(await write(1)).status, w.net.count({ from: 'b', to: 'a', kind: 'act', since: floor })], [504, 1]);
-  await w.run(2);
-  assert.equal((await write(2)).status, 200);
+  const performed = () => a.requester.calls.filter((c) => c.op === 'perform').length;
+  const seqs = [];
+  w.net.tap(({ kind, body }) => kind === 'act' && seqs.push(JSON.parse(body.toString('utf8')).body.seq));
+  assert.deepEqual([(await write(1)).status, seqs, performed()], [200, [0, 0], 1]);
+
+  // Refused so again, and under every number the run tries, it was still not carried
+  // out: the job is told so.
+  const far = w.net.now() + 60;
+  assert.equal((await w.request(b, a, 'sync', body(), { ts: far })).ok, true);
+  await w.restart(a);
+  assert.deepEqual([(await write(2)).status, performed(), w.net.now() < far], [503, 1, true]);
+  assert.deepEqual(seqs.slice(2), [1, 1, 2, 2, 3, 3]);
+
+  // A request the host failed at may have been carried out all the same: that `act` is
+  // sent once.
+  await w.net.until(() => w.net.now() > far, { what: 'the last second it served' });
+  const store = a.disk.write.bind(a.disk);
+  a.disk.write = (...args) => {
+    if (performed() === 2) {
+      a.disk.write = store;
+      throw new Error('the disk is full');
+    }
+    return store(...args);
+  };
+  assert.deepEqual([(await write(3)).status, performed(), seqs.length], [504, 2, 9]);
+  assert.equal(a.log.filter((line) => line.includes('could not be served')).length, 1);
+  assert.equal((await write(4)).status, 200);
 });
 
 await check('a host that dies between writing its key and writing its run starts the job once, through the host the key is from', async () => {

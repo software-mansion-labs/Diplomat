@@ -8,38 +8,38 @@ import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { unb64u } from '../src/core/canon.js';
 import { actMac } from '../src/core/capability.js';
 import { endClaim } from '../src/core/lease.js';
+import { backers } from '../src/core/records.js';
 import { LEASE_SECS } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const said = ({ ok, code, detail }) => (ok ? 'ok' : `${code}: ${detail}`);
 
-await check('a key goes to the executor of the committed claim, from the one host that granted it, once', async () => {
+await check('a key goes to the executor of the committed claim, from a host whose offer the claim holds, once', async () => {
   const w = createWorld({ seed: 41 });
   const all = await w.pool(['r1', 'r2', 'exe', 'other']);
   const [r1, r2, exe, other] = all;
   const { taskId } = await r1.node.offer(offerArgs('pr-1'));
+  // The offer of r2 is for more hours than the executor accepts: it is never the claim's.
+  r2.settings.requiredMinimumH = 24;
   await r2.node.offer(offerArgs('pr-1'));
   await w.agreed(all);
   const round = 'AAAAAAAAAAA';
-  assert.equal(said(await w.request(exe, r1, 'key', { taskId, round })), 'denied: no active claim of the task names that executor and round');
+  assert.equal(said(await w.request(exe, r1, 'key', { taskId, round })), 'denied: no claim of that executor and round holds the offer of this host');
 
-  // r2 is down while the task is claimed: it offers the task but granted nothing.
-  w.net.down('r2');
   exe.slots = 1;
   exe.node.admit({ slots: 1 });
   await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
-  w.net.down('r2', false);
   await w.agreed(all, 15 * 60 * 1000);
   const claim = w.claim(r2, taskId);
-  assert.deepEqual([claim.executor, claim.absent], [exe.pk, [r2.pk]]);
+  assert.deepEqual([claim.executor, claim.absent, backers(claim)], [exe.pk, [], [r1.pk]]);
   const held = w.stored(exe, 'keys').held[taskId];
   assert.deepEqual([held.host, held.capability.host, held.capability.executor, held.capability.exp], [r1.pk, r1.pk, exe.pk, claim.leaseUntil + 600]);
   assert.equal(r1.requester.rulesAsked, 2, 'once to offer, once to issue');
 
   const key = (from, to, body = { taskId, round: claim.round }) => w.request(from, to, 'key', body);
-  assert.equal(said(await key(other, r1)), 'denied: no active claim of the task names that executor and round', 'not to another member');
-  assert.equal(said(await key(exe, r1, { taskId, round })), 'denied: no active claim of the task names that executor and round', 'not for another round');
-  assert.equal(said(await key(exe, r2)), 'denied: no active claim of the task names that executor and round', 'not from a host that did not grant the claim');
+  assert.equal(said(await key(other, r1)), 'denied: no claim of that executor and round holds the offer of this host', 'not to another member');
+  assert.equal(said(await key(exe, r1, { taskId, round })), 'denied: no claim of that executor and round holds the offer of this host', 'not for another round');
+  assert.equal(said(await key(exe, r2)), 'denied: no claim of that executor and round holds the offer of this host', 'not from a host that does not back the claim');
   assert.equal(said(await key(exe, other)), 'denied: not offered by this host');
   assert.equal(said(await key(exe, r1, { taskId })), 'bad-request: ');
   const again = await key(exe, r1);
@@ -115,7 +115,7 @@ await check('a key dies with what it was issued for, and a number is spent befor
   // The run is reported as failed while its claim still stands.
   assert.equal((await act(failed, 0)).body.status, 200);
   const outcome = { ok: false, summary: 'it broke', microUsd: 0, tokens: 0, runner: 'r', model: 'm' };
-  assert.equal(said(await w.request(exe, req, 'done', { taskId: failed, round: w.claim(req, failed).round, outcome })), 'ok');
+  assert.equal(said(await w.request(exe, req, 'done', { taskId: failed, round: w.claim(req, failed).round, spec: w.spec(exe, failed), outcome })), 'ok');
   assert.equal(w.task(req, failed).state, 'claimed');
   assert.equal(said(await act(failed, 1)), 'denied: no key');
 
@@ -185,7 +185,7 @@ const write = (leaf) => forgeRequest('POST', `/repos/o/r/pr-1/${leaf}`, { n: 1 }
 await check('a request is not carried out once its key was taken back, however far the rules had got with it', async () => {
   const ways = {
     'the offer withdrawn': ({ req, taskId }) => req.node.withdraw({ taskId, reason: 'no longer wanted' }),
-    'the run reported as failed': ({ w, req, exe, taskId }) => w.request(exe, req, 'done', { taskId, round: w.claim(req, taskId).round, outcome: FAILED }, { effort: 4096 }),
+    'the run reported as failed': ({ w, req, exe, taskId }) => w.request(exe, req, 'done', { taskId, round: w.claim(req, taskId).round, spec: w.spec(exe, taskId), outcome: FAILED }, { effort: 4096 }),
     'the claim given back': ({ w, req, exe, taskId }) => w.request(exe, req, 'push', { records: [endClaim(exe.id, w.claim(req, taskId), 'released', w.net.now())] }, { effort: 4096 }),
     'the pool closed': ({ req }) => {
       req.pools = [];
@@ -213,7 +213,7 @@ await check('requests under one key are carried out in the order of their number
   assert.deepEqual(req.requester.calls.filter((c) => c.op === 'perform').map((c) => c.path.split('/').at(-1)), ['one', 'two']);
 });
 
-await check('a round that said how it ended is counted once and gets no second key; of two hosts that granted, one answers for the claim', async () => {
+await check('a round that said how it ended is counted once and gets no second key; each of two hosts that back the claim answers for its own offer', async () => {
   const w = createWorld({ seed: 52 });
   const [r1, r2, exe] = await w.pool(['r1', 'r2', 'exe'], { exe: { slots: 1 } });
   const { taskId } = await r1.node.offer(offerArgs('pr-1'));
@@ -222,21 +222,25 @@ await check('a round that said how it ended is counted once and gets no second k
   const [keeper, other] = exe.executor.jobOf(taskId).peer === r1.pk ? [r1, r2] : [r2, r1];
   const { round, grants } = w.claim(keeper, taskId);
   const ask = (to, kind, body) => w.request(exe, to, kind, body, { effort: 4096 });
-  assert.deepEqual(grants.map((g) => g.by).sort(), [r1.pk, r2.pk].sort(), 'both granted the claim');
-  assert.equal(said(await ask(other, 'key', { taskId, round })), 'denied: another host answers for this claim');
+  assert.deepEqual(grants.map((g) => [g.by, g.offer.gen]).sort(), [[r1.pk, 1], [r2.pk, 1]].sort(), 'both back the claim');
   const held = w.stored(exe, 'keys').held[taskId];
   assert.equal((await ask(keeper, 'key', { taskId, round })).body.secret, held.secret, 'asked again, the same key');
+  // The other host's key is its own: another secret, for what its own offer allows.
+  const second = (await ask(other, 'key', { taskId, round })).body;
+  assert.deepEqual([second.capability.host, second.secret === held.secret, second.spec], [other.pk, false, held.spec]);
   // The run reports that it failed, twice over: one failed attempt, and the key is dead.
-  for (let i = 0; i < 2; i += 1) assert.equal((await ask(keeper, 'done', { taskId, round, outcome: FAILED })).ok, true);
+  const spec = w.spec(exe, taskId);
+  for (let i = 0; i < 2; i += 1) assert.equal((await ask(keeper, 'done', { taskId, round, spec, outcome: FAILED })).ok, true);
   assert.equal(w.offerRow(keeper, taskId).attempt, 2);
   assert.equal(w.stored(keeper, 'keys').issued[taskId], undefined);
+  assert.deepEqual([w.offerRow(other, taskId).attempt, Object.keys(w.stored(other, 'keys').issued)], [1, [taskId]], 'what one host was told is nothing to the other');
   // Its claim still stands, and buys no new key with a fresh count of what it may do.
   assert.equal(w.claim(keeper, taskId).state, 'held');
-  assert.equal(said(await ask(keeper, 'key', { taskId, round })), 'denied: no active claim of the task names that executor and round');
+  assert.equal(said(await ask(keeper, 'key', { taskId, round })), 'denied: no claim of that executor and round holds the offer of this host');
   assert.equal(w.stored(keeper, 'keys').issued[taskId], undefined);
 });
 
-await check('a claim made for an offer that was taken back gets nothing from the offer made after it', async () => {
+await check('a claim made for an offer that was taken back holds nothing of the offer made after it: its executor gives it back and claims the task as it is offered', async () => {
   const w = createWorld({ seed: 53 });
   const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
   // The requester grants the claim and drops out of reach before it hands over the key.
@@ -252,14 +256,15 @@ await check('a claim made for an offer that was taken back gets nothing from the
   // Its operator takes the offer back and makes it again, with another prompt.
   await req.node.withdraw({ taskId, reason: 'the wrong prompt' });
   await req.node.offer({ ...offerArgs('pr-1'), prompt: 'the second prompt' });
+  const first = w.claim(req, taskId);
+  assert.deepEqual([first.state, first.gen, w.task(req, taskId).state], ['held', 0, 'available'], 'the claim of the first offer is a record, and the task is free');
   w.net.heal();
-  await w.run(600);
-  assert.equal(w.claim(req, taskId).state, 'held', 'the claim of the first offer stands');
-  assert.equal(exe.executor.started.length, 0, 'and is given no key');
-  // The executor gives it back before its lease ends, and claims the task as it is offered.
-  await w.net.until(() => exe.executor.jobOf(taskId), { maxMs: (LEASE_SECS + 600) * 1000, what: 'a job under a claim of the second offer' });
+  await w.net.until(() => exe.executor.jobOf(taskId), { maxMs: 10 * 60 * 1000, what: 'a job under a claim of the second offer' });
   const job = exe.executor.jobOf(taskId);
   assert.equal(job.spec.prompt, 'the second prompt');
+  const second = w.claim(req, taskId);
+  assert.deepEqual([second.gen, second.state, second.round === first.round], [1, 'held', false], 'its next claim of the task');
+  assert.equal(w.stored(exe, 'runs').runs[w.runOf(exe, taskId).runId].round, second.round);
   exe.executor.end(job.runId);
   await w.net.until(() => w.offerRow(req, taskId).state === 'done', { what: 'the offer done' });
   assert.deepEqual([w.offerRow(req, taskId).attempt, exe.executor.started.length], [1, 1], 'no failed attempt, and one job');
@@ -294,12 +299,12 @@ await check('the lapse of a claim made for an offer that was taken back is no fa
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.net.until(() => cut, { stepMs: 5, what: 'the first ask for the key' });
   await w.run(2);
+  assert.equal(w.claim(req, taskId).state, 'held', 'the requester holds the claim of the first offer');
+  // Its executor dies holding it.
+  w.net.kill('exe');
   await req.node.withdraw({ taskId, reason: 'the wrong prompt' });
   await req.node.offer({ ...offerArgs('pr-1'), prompt: 'the second prompt' });
   w.net.heal();
-  await w.net.until(() => w.claim(req, taskId)?.state === 'held', { what: 'the old claim known to the requester' });
-  // Its executor dies holding it.
-  w.net.kill('exe');
   await w.run(LEASE_SECS + 900);
   assert.deepEqual([w.task(req, taskId).state, w.offerRow(req, taskId).attempt], ['available', 1]);
 });

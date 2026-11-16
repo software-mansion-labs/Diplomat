@@ -149,7 +149,7 @@ await check('a host that closes a pool cancels its offers there, stops its runs 
   assert.equal(w.members(c).length, 1);
 });
 
-await check('two hosts offer one task: the run reports to both, and the task is done on both', async () => {
+await check('two hosts offer one task: one run takes both offers and reports to both, and each host ends its own offer on that report alone', async () => {
   const w = createWorld({ seed: 15 });
   const [r1, r2, exe] = await w.pool(['r1', 'r2', 'exe'], { exe: { slots: 1 } });
   const { taskId } = await r1.node.offer(offerArgs('pr-9'));
@@ -162,22 +162,25 @@ await check('two hosts offer one task: the run reports to both, and the task is 
   exe.executor.end(job.runId);
   await w.net.until(() => w.offerRow(near, taskId).state === 'done', { what: 'the nearer offer done' });
   assert.equal(w.offerRow(far, taskId).state, 'claimed', 'the other knows nothing yet');
+  assert.deepEqual([w.task(exe, taskId).state, w.task(exe, taskId).offeredBy, w.claim(exe, taskId).state], ['claimed', [far.pk], 'held'], 'the claim is kept for the host still to be told');
   w.net.heal();
   await w.net.until(() => w.offerRow(far, taskId).state === 'done', { what: 'the farther offer done' });
   await w.agreed([r1, r2, exe]);
   for (const h of [r1, r2, exe]) assert.deepEqual([w.task(h, taskId).state, w.task(h, taskId).offeredBy], ['done', []]);
-  assert.equal(w.offerRow(far, taskId).reason, 'finished through another machine offering it');
-  assert.equal(exe.executor.started.length, 1, 'nobody ran it a second time');
+  assert.deepEqual([w.offerRow(far, taskId).reason, w.offerRow(far, taskId).outcome], ['', w.offerRow(near, taskId).outcome], 'told by the run itself, the same as the other');
+  assert.deepEqual([exe.executor.started.length, w.claim(r1, taskId).state], [1, 'completed'], 'nobody ran it a second time');
 
-  // Cancelled by one of two offering hosts, it is cancelled by the other.
+  // Cancelled by one of two offering hosts, it is still the other's to offer.
+  exe.slots = 0;
+  exe.node.admit({ slots: 0 });
   const second = await r1.node.offer(offerArgs('pr-10'));
   await r2.node.offer(offerArgs('pr-10'));
   await w.agreed([r1, r2, exe]);
-  exe.slots = 0;
   await w.wait(r1.node.withdraw({ taskId: second.taskId, reason: 'closed' }));
-  await w.net.until(() => w.offerRow(r2, second.taskId).state === 'cancelled', { what: 'the sibling offer cancelled' });
   await w.agreed([r1, r2, exe]);
-  assert.equal(w.task(exe, second.taskId).state, 'cancelled');
+  await w.run(120);
+  assert.deepEqual([w.offerRow(r1, second.taskId).state, w.offerRow(r2, second.taskId).state], ['cancelled', 'pooled']);
+  assert.deepEqual([w.task(exe, second.taskId).state, w.task(exe, second.taskId).offeredBy], ['available', [r2.pk]]);
 });
 
 await check('a title is cut to what a record carries, and never through the middle of a character', async () => {
@@ -326,7 +329,7 @@ await check('what a run says of itself is told and shown without a control chara
   const two = await going(w, req, exe, 'pr-2');
   const { round } = w.claim(exe, two.taskId);
   const outcome = { ok: false, summary: dirty, microUsd: 0, tokens: 0, runner: 'cl\u0000aude', model: 'fa\nble' };
-  assert.equal((await w.request(exe, req, 'done', { taskId: two.taskId, round, outcome })).ok, true);
+  assert.equal((await w.request(exe, req, 'done', { taskId: two.taskId, round, spec: w.spec(exe, two.taskId), outcome })).ok, true);
   const row = w.offerRow(req, two.taskId);
   assert.deepEqual([row.outcome.summary, row.outcome.runner, row.outcome.model, row.reason], [clean, 'cl aude', 'fa ble', clean]);
 });

@@ -19,7 +19,7 @@ await check('a host that granted a lock still holds it after a restart: nobody e
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.agreed(all);
   const asOf = w.net.now();
-  const lock = (from, round) => w.request(from, req, 'lock', { taskId, round, asOf, hash: w.view(from).hash, hours: 12 });
+  const lock = (from, round) => w.request(from, req, 'lock', { taskId, round, asOf, hash: w.view(from).hash });
   const granted = await lock(a, 'AAAAAAAAAAA');
   assert.equal(granted.body.grant.executor, a.pk);
   await w.restart(req);
@@ -30,7 +30,7 @@ await check('a host that granted a lock still holds it after a restart: nobody e
   assert.deepEqual((await lock(a, 'AAAAAAAAAAA')).body, granted.body, 'asked again, the holder gets the very same grant');
   await w.run(GRANT_TTL_SECS + 2 - (w.net.now() - asOf));
   const later = w.net.now();
-  const free = await w.request(b, req, 'lock', { taskId, round: 'BBBBBBBBBBA', asOf: later, hash: w.view(b).hash, hours: 12 });
+  const free = await w.request(b, req, 'lock', { taskId, round: 'BBBBBBBBBBA', asOf: later, hash: w.view(b).hash });
   assert.equal(free.body.grant.executor, b.pk, 'once the grant has run out the task can be granted again');
 });
 

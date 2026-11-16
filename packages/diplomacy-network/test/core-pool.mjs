@@ -6,11 +6,12 @@
 import assert from 'node:assert/strict';
 import { b64u, canon, hash } from '../src/core/canon.js';
 import { buildClaim, buildGrant } from '../src/core/claims.js';
+import { buildPing, endClaim, extendClaim } from '../src/core/lease.js';
 import { sign } from '../src/core/identity.js';
 import { acceptedSet, checkJoin, createInvite, inviteToken, parseInvite, verifyInvite, verifyVoucher } from '../src/core/membership.js';
-import { MAX_HELLO_CHAIN, MAX_PULL_KEYS, MAX_PUSH_RECORDS, Pool } from '../src/core/pool.js';
+import { INDEX_PAGE_BYTES, MAX_HELLO_CHAIN, MAX_PULL_KEYS, MAX_PUSH_RECORDS, Pool } from '../src/core/pool.js';
 import {
-  LIMITS, buildTaskId, checkShape, checkSignature, compareVersions, parseKey, parseTaskId, recordDigest, recordKey, signRecord, validPool,
+  LIMITS, backers, backing, buildTaskId, checkShape, checkSignature, compareVersions, parseKey, parseTaskId, recordDigest, recordKey, signRecord, validPool,
 } from '../src/core/records.js';
 import { POOL, T0, claimNow, club, ident, invite, member, offer, prng, roundId } from './lib/core-fixtures.mjs';
 
@@ -62,8 +63,9 @@ check('each record is stored under the key the protocol names', () => {
   assert.equal(recordKey(offer(ann)), `offer/${TASK}/${ann.pk}`);
   assert.deepEqual(parseKey(`member/${ann.pk}`, POOL), { type: 'member', pk: ann.pk });
   assert.deepEqual(parseKey(`offer/${TASK}/${ann.pk}`, POOL), { type: 'offer', taskId: TASK, host: ann.pk });
-  assert.deepEqual(parseKey(`claim/${TASK}`, POOL), { type: 'claim', taskId: TASK });
-  for (const bad of ['member/nope', `offer/${TASK}`, `offer/${TASK}/nope`, `claim/${TASK}x y`, `claim/github.com/acme/other#review:pr-1@o`,
+  assert.deepEqual(parseKey(`claim/${TASK}/${ann.pk}`, POOL), { type: 'claim', taskId: TASK, executor: ann.pk });
+  for (const bad of ['member/nope', `offer/${TASK}`, `offer/${TASK}/nope`, `claim/${TASK}`, `claim/${TASK}/nope`, `claim/${TASK}x y/${ann.pk}`,
+    `claim/github.com/acme/other#review:pr-1@o/${ann.pk}`,
     `grant/${TASK}`, '', 'member', 5, null]) {
     assert.equal(parseKey(bad, POOL), null, String(bad));
   }
@@ -379,31 +381,53 @@ check('a finished task does not come back: the version that ended it outlives ev
   assert.equal(b.pool.task(TASK, dropped), null, 'forgotten, not reopened');
 });
 
-check('one of two hosts offering a task finishes it for both; an offer made after that offers it anew', () => {
-  const hosts = club(3);
+check('an offer is ended by its own host alone: done or cancelled by one of two hosts offering a task, the other\'s offer stands, and so does the claim that holds it', () => {
+  for (const state of ['done', 'cancelled']) {
+    const hosts = club(3);
+    const [a, b, c] = hosts;
+    const give = (records, now) => hosts.forEach((h) => h.pool.merge(records, now));
+    give([offer(a.id), offer(b.id)], T0);
+    const claim = claimNow(hosts, 2, TASK, T0 + 1);
+    assert.deepEqual(backers(claim), [a.id.pk, b.id.pk].sort(), 'one claim takes the offer of every host that gave it');
+    give(offer(a.id, { seq: 1, at: T0 + 500, state }), T0 + 500);
+    const left = c.pool.task(TASK, T0 + 500);
+    assert.deepEqual([left.state, left.offeredBy, left.free, left.claim], ['claimed', [b.id.pk], [], claim], state);
+    assert.deepEqual(left.offers, [{ host: b.id.pk, hours: 12, createdAt: T0, claim }]);
+    assert.equal(c.pool.get(recordKey(claim)), claim);
+    // The claim ends: the offer still open is free for the next one.
+    give(endClaim(c.id, claim, 'completed', T0 + 600), T0 + 600);
+    const free = c.pool.task(TASK, T0 + 600);
+    assert.deepEqual([free.state, free.free, free.claim], ['available', [b.id.pk], null]);
+    assert.equal(c.pool.claimSnapshot(TASK, T0 + 600).available, true);
+    // The task is done, or cancelled, once no offer of it is open; done when any says so.
+    give(offer(b.id, { seq: 1, at: T0 + 700, state: 'cancelled' }), T0 + 700);
+    assert.deepEqual([c.pool.task(TASK, T0 + 700).state, c.pool.task(TASK, T0 + 700).offers], [state, []]);
+  }
+});
+
+check('a claim holds the offer of each host that backs it for that offer\'s hours, and an offer made anew is no claim\'s', () => {
+  const hosts = club(3, T0, () => ({ maxAcceptedH: 48 }));
   const [a, b, c] = hosts;
   const give = (records, now) => hosts.forEach((h) => h.pool.merge(records, now));
-  give([offer(a.id), offer(b.id)], T0);
-  const claim = claimNow(hosts, 2, TASK, T0 + 1);
-  give(offer(a.id, { seq: 1, at: T0 + 500, state: 'done' }), T0 + 500);
-  const ended = c.pool.task(TASK, T0 + 500);
-  assert.deepEqual([ended.state, ended.offeredBy, ended.claim], ['done', [], null], 'the other host\'s open offer no longer offers it');
-  assert.equal(c.pool.claimSnapshot(TASK, T0 + 500).available, false);
-  assert.equal(c.pool.doneAt(TASK, T0 + 500), T0 + 500);
-  assert.equal(c.pool.get(`claim/${TASK}`), claim);
-  give(offer(b.id, { seq: 1, at: T0 + 600 }), T0 + 600);
-  assert.equal(c.pool.task(TASK, T0 + 600).state, 'done', 'signed again it is still the offer made before the end');
-  give(offer(b.id, { seq: 2, at: T0 + 700, createdAt: T0 + 500 }), T0 + 700);
-  assert.equal(c.pool.task(TASK, T0 + 700).state, 'done', 'created the second it ended is not after it');
-  give(offer(b.id, { seq: 3, at: T0 + 800, createdAt: T0 + 501 }), T0 + 800);
-  const anew = c.pool.task(TASK, T0 + 800);
-  assert.deepEqual([anew.offeredBy, anew.createdAt], [[b.id.pk], T0 + 501]);
-  assert.equal(anew.claim, claim, 'a claim still held holds it');
-  // Cancelling is each host's own: the task is cancelled only when no offer is left open.
-  give(offer(a.id, { seq: 2, at: T0 + 900, state: 'cancelled' }), T0 + 900);
-  assert.deepEqual([c.pool.task(TASK, T0 + 900).state, c.pool.doneAt(TASK, T0 + 900)], ['claimed', null]);
-  give(offer(b.id, { seq: 4, at: T0 + 901, createdAt: T0 + 501, state: 'cancelled' }), T0 + 901);
-  assert.equal(c.pool.task(TASK, T0 + 901).state, 'cancelled');
+  give([offer(a.id), offer(b.id, { minRequiredH: 24 })], T0);
+  let claim = claimNow(hosts, 2, TASK, T0 + 1);
+  assert.deepEqual([claim.hours, backing(claim, a.id.pk).hours, backing(claim, b.id.pk).hours], [24, 12, 24]);
+  const held = (now) => Object.fromEntries(a.pool.task(TASK, now).offers.map((o) => [o.host, o.claim?.round ?? null]));
+  // Extended by the host that gives it the longer hours, past the hours of the other.
+  for (let n = 1; n <= 6; n++) {
+    const at = claim.leaseUntil - 60;
+    claim = extendClaim(c.id, claim, buildPing(b.id, claim, at), at);
+    give(claim, at);
+  }
+  const end = claim.claimedAt + 12 * 3600 + 600;
+  assert.deepEqual(held(end - 1), { [a.id.pk]: claim.round, [b.id.pk]: claim.round });
+  assert.deepEqual(held(end), { [a.id.pk]: null, [b.id.pk]: claim.round }, 'the twelve hours of one host are over; the claim goes on for the other');
+  assert.deepEqual([a.pool.task(TASK, end).state, a.pool.task(TASK, end).free], ['claimed', [a.id.pk]]);
+  // The other host makes its offer anew: what backed the claim was the offer before.
+  give(offer(b.id, { seq: 1, at: end, createdAt: end, minRequiredH: 24 }), end);
+  assert.deepEqual(held(end), { [a.id.pk]: null, [b.id.pk]: null });
+  assert.equal(a.pool.task(TASK, end).state, 'available');
+  assert.equal(a.pool.get(recordKey(claim)), claim, 'the claim is held as a record, and holds nothing');
 });
 
 check('reconciling two indexes sends each key the one way it is needed', () => {
@@ -448,9 +472,54 @@ check('sync answers the hash, and the index only when the hashes differ', () => 
   assert.deepEqual(a.pool.answerSync({ asOf: T0 + 301, hash: b.pool.stateHash(T0) }, T0), { error: 'stale' });
   assert.deepEqual(a.pool.answerSync({ asOf: T0 - 301, hash: b.pool.stateHash(T0) }, T0), { error: 'stale' });
   assert.ok(a.pool.answerSync({ asOf: T0 + 300, hash: b.pool.stateHash(T0) }, T0).body);
-  for (const bad of [null, {}, { asOf: T0 }, { asOf: T0, hash: 'x' }, { asOf: '1', hash: same.body.hash }, { asOf: T0, hash: same.body.hash, more: 1 }]) {
+  for (const bad of [null, {}, { asOf: T0 }, { asOf: T0, hash: 'x' }, { asOf: '1', hash: same.body.hash }, { asOf: T0, hash: same.body.hash, more: 1 },
+    { asOf: T0, hash: same.body.hash, after: '' }, { asOf: T0, hash: same.body.hash, after: 'member/nobody' }]) {
     assert.deepEqual(a.pool.answerSync(bad, T0), { error: 'bad-request' }, JSON.stringify(bad));
   }
+});
+
+check('an index too long for one answer travels a page at a time: each page says whether keys remain past it, and a key is sent to the other side only by the page that would have held it', () => {
+  const hosts = club(60);
+  const [a, b] = hosts;
+  const offers = hosts.slice(1).flatMap((h, i) => Array.from({ length: LIMITS.offers }, (_, j) => offer(h.id, { item: `m${i}-pr-${j}` })));
+  a.pool.merge(offers, T0);
+  // The other host holds half of it, and two records of its own: one that sorts among
+  // the first keys and one that sorts after every other.
+  const [early, late] = [offer(a.id, { item: 'a-first' }), offer(a.id, { item: 'zz-last' })];
+  b.pool.merge([...offers.slice(0, offers.length / 2), early, late], T0);
+  const whole = a.pool.index(T0);
+  assert.ok(canon(whole).length > 2 * INDEX_PAGE_BYTES);
+  const pages = [];
+  for (let after = null; pages.length === 0 || pages.at(-1).more; after = Object.keys(pages.at(-1).index).at(-1)) {
+    const answer = a.pool.answerSync({ asOf: T0, hash: b.pool.stateHash(T0), ...(after ? { after } : {}) }, T0);
+    assert.equal(answer.body.hash, a.pool.stateHash(T0));
+    assert.ok(canon(answer.body.index).length <= INDEX_PAGE_BYTES);
+    pages.push(answer.body);
+  }
+  assert.ok(pages.length > 2);
+  assert.deepEqual(pages.map((page) => page.more), [...Array(pages.length - 1).fill(true), undefined]);
+  assert.deepEqual(pages.flatMap((page) => Object.keys(page.index)), Object.keys(whole), 'every key once, in order');
+  assert.deepEqual(Object.assign({}, ...pages.map((page) => page.index)), whole);
+  assert.deepEqual(a.pool.indexPage(T0), { index: pages[0].index, more: true });
+
+  let after = '';
+  const plans = pages.map((page) => {
+    const plan = b.pool.reconcile(page.index, T0, { after, more: page.more === true });
+    after = Object.keys(page.index).at(-1);
+    return plan;
+  });
+  assert.deepEqual(plans.map((plan) => plan.push), [[recordKey(early)], ...Array(pages.length - 2).fill([]), [recordKey(late)]]);
+  assert.deepEqual(plans.flatMap((plan) => plan.pull).sort(), offers.slice(offers.length / 2).map(recordKey).sort());
+  // Taken for the whole index, a page would have every key past it sent back.
+  assert.ok(b.pool.reconcile(pages[0].index, T0).push.length > 100);
+  // A page said to be followed by more holds a key past the one it was asked from.
+  assert.equal(b.pool.reconcile({}, T0, { more: true }), null);
+  assert.equal(b.pool.reconcile(pages[0].index, T0, { after: Object.keys(pages[0].index).at(-1), more: true }), null);
+
+  // A newcomer is answered the first page.
+  const newcomer = ident(40);
+  const answer = a.pool.answerHello({ member: member(newcomer, { voucher: invite(a.id, { exp: T0 + 600, n: 99 }) }) }, newcomer.pk, T0);
+  assert.deepEqual([answer.body, answer.body.more], [a.pool.indexPage(T0), true]);
 });
 
 check('pull answers the records held under well-formed keys, and push reports each record', () => {
@@ -529,7 +598,10 @@ check('a task is available while a member offers it open and nobody holds it', (
   const lowest = [a.id.pk, b.id.pk].sort()[0];
   assert.deepEqual(a.pool.task(TASK, T0), {
     taskId: TASK, kind: 'review', item: 'pr-578', identity: 'octocat', title: lowest === a.id.pk ? 'Review #578' : 'Review it',
-    hours: 24, createdAt: T0, state: 'available', offeredBy: [a.id.pk, b.id.pk].sort(), claim: null,
+    hours: 24, createdAt: T0, state: 'available', offeredBy: [a.id.pk, b.id.pk].sort(), free: [a.id.pk, b.id.pk].sort(),
+    offers: [{ host: a.id.pk, hours: 12, createdAt: T0, claim: null }, { host: b.id.pk, hours: 24, createdAt: T0, claim: null }]
+      .sort((x, y) => (x.host < y.host ? -1 : 1)),
+    claim: null,
   });
   give(offer(b.id, { seq: 1, at: T0 + 1, state: 'cancelled', minRequiredH: 24 }), T0 + 1);
   assert.equal(a.pool.task(TASK, T0 + 1).hours, 12, 'the largest among the open offers');
@@ -538,10 +610,10 @@ check('a task is available while a member offers it open and nobody holds it', (
   assert.equal(typeof claim, 'object');
   for (const h of hosts) {
     const task = h.pool.task(TASK, T0 + 2);
-    assert.deepEqual([task.state, task.claim], ['claimed', claim]);
+    assert.deepEqual([task.state, task.claim, task.free, task.offers], ['claimed', claim, [], [{ host: a.id.pk, hours: 12, createdAt: T0, claim }]]);
   }
   give(offer(a.id, { seq: 1, at: T0 + 3, state: 'done' }), T0 + 3);
-  assert.deepEqual([c.pool.task(TASK, T0 + 3).state, c.pool.task(TASK, T0 + 3).claim], ['done', null]);
+  assert.deepEqual([c.pool.task(TASK, T0 + 3).state, c.pool.task(TASK, T0 + 3).claim, c.pool.task(TASK, T0 + 3).offers], ['done', null, []]);
   give(offer(a.id, { seq: 2, at: T0 + 4, state: 'cancelled' }), T0 + 4);
   assert.equal(c.pool.task(TASK, T0 + 4).state, 'cancelled');
   assert.deepEqual(c.pool.tasks(T0 + 4).map((t) => t.taskId), [TASK]);
@@ -556,7 +628,7 @@ check('the offers and the claims of a member that left count for nothing', () =>
   const executorLeft = member(hosts[2].id, { voucher: invite(hosts[0].id, { n: 2 }), seq: 1, at: T0 + 2, left: true });
   a.pool.merge(executorLeft, T0 + 2);
   assert.deepEqual([a.pool.task(TASK, T0 + 2).state, a.pool.task(TASK, T0 + 2).claim], ['available', null]);
-  assert.equal(a.pool.get(`claim/${TASK}`), claim, 'the record is still held');
+  assert.equal(a.pool.get(recordKey(claim)), claim, 'the record is still held');
   a.pool.merge(member(b.id, { voucher: invite(hosts[0].id, { n: 1 }), seq: 1, at: T0 + 3, left: true }), T0 + 3);
   assert.equal(a.pool.task(TASK, T0 + 3), null);
 });
@@ -566,15 +638,27 @@ check('a claim snapshot is what a round by this host starts from', () => {
   const [a, b, c] = hosts;
   hosts.forEach((h) => h.pool.merge(offer(b.id, { minRequiredH: 24 }), T0));
   assert.deepEqual(a.pool.claimSnapshot(TASK, T0 + 7), {
-    pool: POOL, asOf: T0 + 7, hash: a.pool.stateHash(T0 + 7), gen: 0, hours: 24,
-    members: [b.id.pk, c.id.pk].sort(), offering: [b.id.pk], available: true, eligible: true,
+    pool: POOL, asOf: T0 + 7, hash: a.pool.stateHash(T0 + 7), gen: 0,
+    members: [b.id.pk, c.id.pk].sort(), backers: { [b.id.pk]: { at: T0, hours: 24 } }, own: null, available: true, eligible: true,
   });
-  assert.equal(c.pool.claimSnapshot(TASK, T0 + 7).eligible, false, 'it accepts 12 hours and the task needs 24');
+  const narrow = c.pool.claimSnapshot(TASK, T0 + 7);
+  assert.deepEqual([narrow.available, narrow.eligible, narrow.backers], [true, false, {}], 'it accepts 12 hours and the offer needs 24');
+  const offering = b.pool.claimSnapshot(TASK, T0 + 7);
+  assert.deepEqual([offering.own, offering.backers], [{ at: T0, hours: 24 }, {}], 'its own offer is not another member\'s to give');
+  // A second host offers the task for hours the narrow one accepts: that offer is its to take.
+  hosts.forEach((h) => h.pool.merge(offer(a.id, { at: T0 + 7, createdAt: T0 + 7 }), T0 + 7));
+  assert.deepEqual([c.pool.claimSnapshot(TASK, T0 + 7).eligible, c.pool.claimSnapshot(TASK, T0 + 7).backers], [true, { [a.id.pk]: { at: T0 + 7, hours: 12 } }]);
   const none = a.pool.claimSnapshot(`${POOL}#review:pr-1@octocat`, T0);
-  assert.deepEqual([none.available, none.eligible, none.offering, none.hours], [false, false, [], 0]);
-  claimNow(hosts, 0, TASK, T0 + 8);
+  assert.deepEqual([none.available, none.eligible, none.backers, none.own], [false, false, {}, null]);
+  const first = claimNow(hosts, 0, TASK, T0 + 8);
+  assert.deepEqual(backers(first), [a.id.pk, b.id.pk], 'its own offer and the other host\'s');
   const after = b.pool.claimSnapshot(TASK, T0 + 8);
-  assert.deepEqual([after.available, after.gen], [false, 1]);
+  assert.deepEqual([after.available, after.eligible, after.gen, after.own], [false, false, 0, null]);
+  // The count of a host's own claims of the task is the next one's gen, whoever else claimed it.
+  hosts.forEach((h) => h.pool.merge(endClaim(a.id, first, 'released', T0 + 9), T0 + 9));
+  assert.deepEqual([a.pool.claimSnapshot(TASK, T0 + 9).gen, c.pool.claimSnapshot(TASK, T0 + 9).gen], [1, 0]);
+  const second = claimNow(hosts, 0, TASK, T0 + 10, 1);
+  assert.deepEqual([second.gen, a.pool.get(recordKey(first)), backing(second, b.id.pk).gen], [1, second, 2]);
 });
 
 check('a pool holds 256 members: the nearest its root, then the earliest to join, then the lowest key; a host keeps a seat in its own state', () => {
@@ -629,9 +713,10 @@ check('the records of one member take 256 KiB at most: a claim past that is dead
   const tasks = Array.from({ length: 6 }, (_, i) => buildTaskId({ pool: POOL, kind: 'review', item: `pr-${i}`, identity: 'octocat' }));
   records.push(...tasks.map((_, i) => offer(root, { item: `pr-${i}` })));
   const claimOf = (taskId) => {
-    const bound = { pool: POOL, taskId, executor: ann.pk, round: roundId(1), gen: 0, hours: 12, hash: b64u(Buffer.alloc(32, 7)), exp: T0 + 120 };
-    const grants = granters.map((id) => buildGrant(id, bound)).sort((x, y) => (x.by < y.by ? -1 : 1));
-    return buildClaim(ann, { pool: POOL, taskId, round: roundId(1), gen: 0, hours: 12, grants, absent: [], now: T0 });
+    const bound = { pool: POOL, taskId, executor: ann.pk, round: roundId(1), hash: b64u(Buffer.alloc(32, 7)), exp: T0 + 120 };
+    const grants = granters.map((id) => buildGrant(id, { ...bound, ...(id === root ? { offer: { at: T0, gen: 1, hours: 12 } } : {}) }))
+      .sort((x, y) => (x.by < y.by ? -1 : 1));
+    return buildClaim(ann, { pool: POOL, taskId, round: roundId(1), gen: 0, grants, absent: [], now: T0 });
   };
   const claims = tasks.map(claimOf);
   const size = (record) => canon(record).length;
@@ -654,34 +739,50 @@ check('the records of one member take 256 KiB at most: a claim past that is dead
   assert.ok(mine.length - 1 >= 1 && mine.length - 1 < fit, 'room runs out before the quota does');
 });
 
-check('a claim stands only while a host that offers its task stands behind it: its executor, or a member that granted it', () => {
+check('a claim is a record only while a host that backs it offers the task, and holds the offers of the hosts that back it and no other', () => {
   const hosts = club(4);
   const [a, b, c, d] = hosts;
   hosts.forEach((h) => h.pool.merge(offer(a.id), T0));
   const now = T0 + 1;
-  const body = { taskId: TASK, round: roundId(1), asOf: now, hash: a.pool.stateHash(now), hours: 12 };
-  const grant = (h) => h.locks.answer({ pool: h.pool, identity: h.id, from: c.id.pk, body, now }).body.grant;
+  const body = { taskId: TASK, round: roundId(1), asOf: now, hash: a.pool.stateHash(now) };
+  const grant = (h) => h.locks.answer({ pool: h.pool, identity: h.id, from: c.id.pk, body, now, nextGen: h.nextGen }).body.grant;
   const pks = (list) => list.map((h) => h.id.pk).sort();
-  const claimBy = (granting, absent) => buildClaim(c.id, {
-    pool: POOL, taskId: TASK, round: roundId(1), gen: 0, hours: 12, absent: pks(absent), now,
-    grants: granting.map(grant).sort((x, y) => (x.by < y.by ? -1 : 1)),
+  const held = buildClaim(c.id, {
+    pool: POOL, taskId: TASK, round: roundId(1), gen: 0, absent: pks([d]), now, grants: [a, b].map(grant).sort((x, y) => (x.by < y.by ? -1 : 1)),
   });
-  for (const h of hosts) {
-    assert.deepEqual(codes(h.pool.merge(claimBy([b, d], [a]), now)), ['no-offer'], 'granted by members none of which offers the task');
-    assert.deepEqual(codes(h.pool.merge(claimBy([], [a, b, d]), now)), ['no-offer'], 'granted by nobody');
-    assert.equal(h.pool.task(TASK, now).state, 'available');
-  }
-  const held = claimBy([a, b], [d]);
-  for (const h of hosts) assert.deepEqual(codes(h.pool.merge(held, now)), [], 'granted by the host that offers it');
+  for (const h of hosts) assert.deepEqual(codes(h.pool.merge(held, now)), [], 'backed by the host that offers it');
   // A host that never held the offer has no claim to hold either.
   const bare = poolOf(d.id, b.pool.records().filter((r) => r.type === 'member'), now);
   assert.deepEqual(codes(bare.merge(held, now)), ['no-offer']);
   assert.deepEqual(codes(bare.merge([held, offer(a.id)], now)), [], 'the two together are taken in, whatever their order');
+  // The record goes with the offer record of the host that backs it.
+  const later = T0 + DAY + 301;
+  const stamp = hosts.map((h, i) => member(h.id, { ...(i ? { voucher: invite(a.id, { n: i }) } : {}), seq: 1, at: later }));
+  bare.merge(stamp, later);
+  assert.equal(bare.get(recordKey(held)), null);
 
-  // A member that offers a task is a requester of it: its own claim of it needs nobody's grant.
+  // A member that offers a task backs a claim of its own with it, at whatever numbers it
+  // likes, and needs nobody's grant: the claim holds its own offer and nothing of
+  // another host's, whose offer stays with the claim that host gave it to.
   const others = club(3);
-  const [x, y] = others;
-  others.forEach((h) => h.pool.merge([offer(x.id), offer(y.id)], T0));
-  const own = buildClaim(y.id, { pool: POOL, taskId: TASK, round: roundId(2), gen: 0, hours: 12, grants: [], absent: pks([x, others[2]]), now });
-  for (const h of others) assert.deepEqual(codes(h.pool.merge(own, now)), []);
+  const [x, y, z] = others;
+  others.forEach((h) => h.pool.merge(offer(x.id), T0));
+  const honest = claimNow(others, 2, TASK, T0);
+  const forged = { pool: POOL, taskId: TASK, round: roundId(2), grants: [], absent: pks([x, z]), now };
+  const unbacked = () => buildClaim(y.id, { ...forged, gen: 0 });
+  assert.throws(unbacked, TypeError, 'a claim nobody backs cannot even be signed');
+  const own = buildClaim(y.id, { ...forged, gen: 2 ** 40, offer: { at: now, gen: 2 ** 40, hours: 720 } });
+  for (const h of others) {
+    assert.deepEqual(codes(h.pool.merge(own, now)), ['no-offer'], 'not while it offers nothing');
+    assert.deepEqual(codes(h.pool.merge([offer(y.id, { at: now, createdAt: now, minRequiredH: 720 }), own], now)), []);
+    const task = h.pool.task(TASK, now);
+    assert.deepEqual(task.offers, [
+      { host: x.id.pk, hours: 12, createdAt: T0, claim: honest }, { host: y.id.pk, hours: 720, createdAt: now, claim: own },
+    ].sort((p, q) => (p.host < q.host ? -1 : 1)));
+    assert.deepEqual([task.state, task.free, h.pool.get(recordKey(honest))], ['claimed', [], honest]);
+    // Its own offer ended, its claim is no record any more a day later; the other is untouched.
+    assert.deepEqual(codes(h.pool.merge(offer(y.id, { seq: 1, at: now + 1, createdAt: now, minRequiredH: 720, state: 'done' }), now + 1)), []);
+    const after = h.pool.task(TASK, now + 1);
+    assert.deepEqual([after.state, after.claim, after.offers], ['claimed', honest, [{ host: x.id.pk, hours: 12, createdAt: T0, claim: honest }]]);
+  }
 });

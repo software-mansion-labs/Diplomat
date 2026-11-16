@@ -61,12 +61,13 @@ try {
     const again = await offerOf(a, taskId);
     assert.deepEqual([again.state, again.reason, again.executor], ['pooled', 'the machine running it stopped answering', '']);
 
-    // The next machine takes it under a later generation, and its agent fails.
+    // The next machine is the second the offer is given to, and its agent fails.
     await c.admit(1);
     const second = await waiting(c, taskId, 'go');
     assert.deepEqual([(await offerOf(a, taskId)).state, (await offerOf(a, taskId)).executor], ['claimed', c.pk]);
     const claims = JSON.parse(fs.readFileSync(path.join(c.base, 'pools', fs.readdirSync(path.join(c.base, 'pools'))[0]), 'utf8')).records.filter((r) => r.type === 'claim' && r.taskId === taskId);
-    assert.deepEqual(claims.map((r) => [r.executor, r.gen]), [[c.pk, 1]], 'the claim that stands is of the generation after the lapsed one');
+    const given = claims.map((r) => [r.executor, r.grants.find((g) => g.by === a.pk).offer.gen]).sort((x, y) => x[1] - y[1]);
+    assert.deepEqual(given, [[b.pk, 1], [c.pk, 2]], 'the offer is held by the claim its host gave it to last');
     c.release('go');
     await until('the second failure', async () => {
       const offer = await offerOf(a, taskId);

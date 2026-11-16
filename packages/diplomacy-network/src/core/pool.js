@@ -7,16 +7,18 @@
 // compute the same hash.
 
 import { b64u, canon, hash } from './canon.js';
-import { claimPrecedence, compareClaims, precedenceShaped, verifyClaim } from './claims.js';
-import { eligible, isActive, taskHours } from './lease.js';
+import { claimPrecedence, compareBacked, compareClaims, precedenceShaped, verifyClaim } from './claims.js';
+import { eligible, heldUntil } from './lease.js';
 import { acceptedSet, checkJoin, verifyVoucher, voucherOf } from './membership.js';
 import {
-  LIMITS, checkShape, checkSignature, compareVersions, isBytes, isObject, isTime, parseKey, recordDigest, recordKey,
-  shaped, versionPrecedence,
+  LIMITS, backers, backing, checkShape, checkSignature, compareVersions, isBytes, isObject, isTime, parseKey, recordDigest,
+  recordKey, shaped, versionPrecedence,
 } from './records.js';
 import { CLOCK_SKEW_SECS, MEMBER_RETENTION_SECS, RECORD_RETENTION_SECS } from '../paths.js';
 
 export const MAX_PULL_KEYS = 4096;
+/// The most bytes of index one answer carries: a response is a mebibyte at most.
+export const INDEX_PAGE_BYTES = 256 * 2 ** 10;
 export const MAX_PUSH_RECORDS = 1024;
 export const MAX_HELLO_CHAIN = 8;
 
@@ -26,9 +28,7 @@ const typeOfKey = (key) => key.slice(0, key.indexOf('/'));
 
 // Negative when the first version of `key` wins, positive when the second does.
 function order(key, precedenceA, digestA, precedenceB, digestB) {
-  return typeOfKey(key) === 'claim'
-    ? compareClaims(key.slice('claim/'.length), precedenceA, digestA, precedenceB, digestB)
-    : compareVersions(precedenceA, digestA, precedenceB, digestB);
+  return (typeOfKey(key) === 'claim' ? compareClaims : compareVersions)(precedenceA, digestA, precedenceB, digestB);
 }
 
 // Why a well-shaped record does not hold for every host alike, or null when it does.
@@ -79,7 +79,7 @@ function seated(pks, members, self) {
 
 // The entries of `entries` that are live at `asOf` for `self`, and why each other one is
 // not. Members first, since an offer or a claim lives only while its signer does; then
-// offers, since a claim lives only while an offer it rests on does. Offers and claims are
+// offers, since a claim lives only while an offer of a host that backs it does. Offers and claims are
 // taken in key order, each against what its signer has left of its quota, so which ones
 // a member over its quota keeps does not depend on the order they arrived in.
 // Every version is judged by its own `at` alone, so a version that wins over another of
@@ -142,12 +142,9 @@ function settle(entries, self, asOf) {
   }
   for (const e of of('claim')) {
     const { record } = e;
-    const offers = (pk) => live.has(offerKey(record.taskId, pk));
     if (expired(record)) dead.set(e.key, 'expired');
     else if (!roster.has(record.executor)) dead.set(e.key, 'not-member');
-    // A claim stands on the consent of a host that offers its task - its executor or a
-    // member that granted it - and an extension on the offer of the host that asked for it.
-    else if (![record.executor, ...record.grants.map((g) => g.by)].some(offers) || (record.ping && !offers(record.ping.by))) dead.set(e.key, 'no-offer');
+    else if (!backers(record).some((pk) => live.has(offerKey(record.taskId, pk)))) dead.set(e.key, 'no-offer');
     else if (!fits(record.executor, 'claims', e.size)) dead.set(e.key, 'quota');
     else live.set(e.key, e);
   }
@@ -159,6 +156,7 @@ function settle(entries, self, asOf) {
 export class Pool {
   #entries = new Map(); // key -> { key, type, record, digest, size, precedence }
   #settled = null;
+  #tasks = null; // { settled, now, rows }: the tasks last worked out
 
   constructor({ id, self }) {
     this.id = id;
@@ -180,7 +178,7 @@ export class Pool {
   /// `bad-grant`, `bad-lease`, `bad-ping`), or would not be live here: past its retention
   /// (`expired`), signed by nobody this host accepts (`not-member`), a member more than
   /// the pool holds (`full`), an offer or a claim beyond what its signer may have live
-  /// (`quota`), or a claim no host offering its task stands behind (`no-offer`). A list
+  /// (`quota`), or a claim none of the hosts that back it offers the task of (`no-offer`). A list
   /// is taken in together, so a member record may let in the records that depend on it
   /// whatever their order. Records no longer live are dropped.
   merge(input, now) {
@@ -270,6 +268,20 @@ export class Pool {
     return Object.fromEntries([...live.keys()].sort().map((key) => [key, [live.get(key).precedence, live.get(key).digest]]));
   }
 
+  /// One page of `index(asOf)`: `{ index }` with the keys after `after`, in key order, as
+  /// many as one answer carries, and `more: true` beside it when keys remain past them.
+  indexPage(asOf, after = '') {
+    const index = {};
+    let bytes = 0;
+    for (const [key, entry] of Object.entries(this.index(asOf))) {
+      if (key <= after) continue;
+      bytes += key.length + JSON.stringify(entry).length + 4;
+      if (bytes > INDEX_PAGE_BYTES) return { index, more: true };
+      index[key] = entry;
+    }
+    return { index };
+  }
+
   /// `stateHash(asOf)`, base64url.
   stateHash(asOf) {
     const settled = this.#at(asOf);
@@ -308,67 +320,58 @@ export class Pool {
     return [...roster.keys()].sort().map((pk) => roster.get(pk)).filter((m) => !m.left);
   }
 
-  /// Is the claim record held for the task, if any, signed no later than `asOf`? A claim
-  /// made on a state then is signed no earlier than the record it stands over, so it is
-  /// never dropped before that record.
-  claimSettled(taskId, asOf) {
-    const held = this.#entries.get(`claim/${taskId}`);
-    return !held || held.record.at <= asOf;
-  }
-
-  /// The generation a claim of the task made on the state at `asOf` belongs to: one past
-  /// the claim held for it, zero when none is.
-  nextGen(taskId, asOf) {
-    const claim = this.#at(asOf).live.get(`claim/${taskId}`);
-    return claim ? claim.record.gen + 1 : 0;
-  }
-
   /// Every task the pool's members offer, by task id, as
-  /// `{ taskId, kind, item, identity, title, hours, createdAt, state, offeredBy, claim }`.
-  /// A done offer ends the task for every offer created no later than it was signed, so
-  /// one of two hosts offering a task finishes it for both. `state` is `available` or
-  /// `claimed` while an offer of a member is open and not ended that way, else `done` when
-  /// one is done, else `cancelled`; `offeredBy` lists the hosts of those open offers and
-  /// `createdAt` is the earliest of them; `claim` is the claim record while the task is
-  /// claimed, else null.
+  /// `{ taskId, kind, item, identity, title, hours, createdAt, state, offeredBy, free, offers, claim }`.
+  /// Each open offer of a member is one of `offers`, `{ host, hours, createdAt, claim }`:
+  /// `claim` is the claim that holds that offer at `now`, or null - of the claims its host
+  /// backs for the offer it made at `createdAt`, the one the host gave the offer to last,
+  /// while that claim is held, its executor a member, and its lease and the offer's hours
+  /// last. A claim the host gave the offer to before never holds it again. An offer is
+  /// its host's alone: no other host's record ends it, and no claim its host did not back
+  /// holds it. `offeredBy` lists the hosts of the open offers and `free` those whose offer
+  /// no claim holds; `hours` is the longest of the open offers and `createdAt` the
+  /// earliest. `state` is `claimed` while a claim holds an open offer, `available` while
+  /// offers are open and none is held, else `done` when an offer is done, else
+  /// `cancelled`; `claim` is the claim that holds the most of the open offers, or null.
   tasks(now) {
-    const { live, present } = this.#at(now);
-    const member = (pk) => present.has(pk);
-    const offers = new Map();
+    const settled = this.#at(now);
+    if (this.#tasks?.settled === settled && this.#tasks.now === now) return this.#tasks.rows;
+    const { live, present } = settled;
+    const byTask = new Map(); // taskId -> { offers, claims }
+    const of = (taskId) => {
+      if (!byTask.has(taskId)) byTask.set(taskId, { offers: [], claims: [] });
+      return byTask.get(taskId);
+    };
     for (const key of [...live.keys()].sort()) {
       const { type, record } = live.get(key);
-      if (type !== 'offer' || !member(record.host)) continue;
-      if (!offers.has(record.taskId)) offers.set(record.taskId, []);
-      offers.get(record.taskId).push(record);
+      if (type === 'offer' && present.has(record.host)) of(record.taskId).offers.push(record);
+      if (type === 'claim') of(record.taskId).claims.push(record);
     }
-    return [...offers].map(([taskId, all]) => {
-      const done = all.filter((o) => o.state === 'done');
-      const open = all.filter((o) => o.state === 'open' && !done.some((d) => d.at >= o.createdAt));
-      const held = live.get(`claim/${taskId}`)?.record;
-      const claim = held && member(held.executor) && isActive(held, now) ? held : null;
+    const rows = [];
+    for (const [taskId, { offers: all, claims }] of byTask) {
+      if (all.length === 0) continue;
+      const open = all.filter((o) => o.state === 'open');
+      const offers = open.map((o) => {
+        const [last] = claims.filter((claim) => backing(claim, o.host)?.at === o.createdAt).sort((a, b) => compareBacked(o.host, a, b));
+        const holds = last && last.state === 'held' && present.has(last.executor) && now < heldUntil(last, backing(last, o.host));
+        return { host: o.host, hours: o.minRequiredH, createdAt: o.createdAt, claim: holds ? last : null };
+      });
+      const held = (claim) => offers.filter((o) => o.claim === claim).length;
+      const holding = claims.filter((claim) => held(claim) > 0).sort((a, b) => held(b) - held(a));
       const { kind, item, identity, title } = open[0] ?? all[0];
-      return {
+      rows.push({
         taskId, kind, item, identity, title,
-        hours: taskHours(open) ?? Math.max(...all.map((o) => o.minRequiredH)),
+        hours: Math.max(...(open.length > 0 ? open : all).map((o) => o.minRequiredH)),
         createdAt: Math.min(...(open.length > 0 ? open : all).map((o) => o.createdAt)),
-        state: open.length > 0 ? (claim ? 'claimed' : 'available') : done.length > 0 ? 'done' : 'cancelled',
-        offeredBy: open.map((o) => o.host),
-        claim: open.length > 0 ? claim : null,
-      };
-    });
-  }
-
-  /// The latest `at` among the done offers members hold for a task at `now`, or null when
-  /// none is done: an offer of that task created no later is ended by it.
-  doneAt(taskId, now) {
-    const { live, present } = this.#at(now);
-    let latest = null;
-    for (const { type, record } of live.values()) {
-      if (type === 'offer' && record.taskId === taskId && record.state === 'done' && present.has(record.host)) {
-        latest = Math.max(latest ?? 0, record.at);
-      }
+        state: open.length > 0 ? (holding.length > 0 ? 'claimed' : 'available') : all.some((o) => o.state === 'done') ? 'done' : 'cancelled',
+        offeredBy: offers.map((o) => o.host),
+        free: offers.filter((o) => !o.claim).map((o) => o.host),
+        offers,
+        claim: holding[0] ?? null,
+      });
     }
-    return latest;
+    this.#tasks = { settled, now, rows };
+    return rows;
   }
 
   /// One task of `tasks(now)`, or null when no member offers it.
@@ -377,27 +380,36 @@ export class Pool {
   }
 
   /// What a claim round by this host starts from at `now`:
-  /// `{ pool, asOf, hash, gen, hours, members, offering, available, eligible }` -
-  /// `members` are the other members, `offering` the hosts whose offer is open, `eligible`
-  /// whether this host is a member that accepts tasks of that many hours.
+  /// `{ pool, asOf, hash, gen, members, backers, own, available, eligible }` - `gen` counts
+  /// the claims of the task this host made before, `members` are the other members,
+  /// `backers` is `{ pk: { at, hours } }` for every other host whose open offer no claim
+  /// holds and whose hours this host accepts, `own` the same of this host's own such
+  /// offer or null, `available` whether any offer is free, `eligible` whether this host is
+  /// a member one of them is for.
   claimSnapshot(taskId, now) {
     const task = this.task(taskId, now);
     const me = this.member(this.self, now);
+    const before = this.#at(now).live.get(`claim/${taskId}/${this.self}`);
+    const free = (task?.offers ?? []).filter((o) => !o.claim && me && eligible(me.maxAcceptedH, o.hours));
+    const backers = Object.fromEntries(free.filter((o) => o.host !== this.self).map((o) => [o.host, { at: o.createdAt, hours: o.hours }]));
+    const mine = free.find((o) => o.host === this.self);
     return {
-      pool: this.id, asOf: now, hash: this.stateHash(now), gen: this.nextGen(taskId, now),
-      hours: task?.hours ?? 0,
+      pool: this.id, asOf: now, hash: this.stateHash(now), gen: before ? before.record.gen + 1 : 0,
       members: this.members(now).map((m) => m.pk).filter((pk) => pk !== this.self),
-      offering: task?.offeredBy ?? [],
-      available: task?.state === 'available' && this.claimSettled(taskId, now) && isTime(this.nextGen(taskId, now)),
-      eligible: Boolean(me && task && eligible(me.maxAcceptedH, task.hours)),
+      backers, own: mine ? { at: mine.createdAt, hours: mine.hours } : null,
+      available: Boolean(task) && task.free.length > 0,
+      eligible: free.length > 0,
     };
   }
 
   /// `{ pull, push }`: the keys to ask a member for and the keys to send it, given the
-  /// index it answered a `sync` at `asOf` with. A key goes one way only: to whichever
-  /// side holds the losing version or none. Null when the index is malformed.
-  reconcile(theirs, asOf) {
+  /// page of its index it answered with at `asOf`: the keys after `after`, to the end of
+  /// the index or, with `more`, as far as the page goes. A key goes one way only: to
+  /// whichever side holds the losing version or none. Null when the page is malformed.
+  reconcile(theirs, asOf, { after = '', more = false } = {}) {
     if (!isObject(theirs)) return null;
+    const last = more ? Object.keys(theirs).sort().at(-1) : null;
+    if (more && !(last > after)) return null;
     const mine = this.index(asOf);
     const pull = [];
     const push = [];
@@ -410,7 +422,7 @@ export class Pool {
       else if (mine[key][1] !== entry[1]) (order(key, mine[key][0], mine[key][1], entry[0], entry[1]) < 0 ? push : pull).push(key);
     }
     for (const key of Object.keys(mine)) {
-      if (!Object.hasOwn(theirs, key)) push.push(key);
+      if (!Object.hasOwn(theirs, key) && key > after && (last === null || key <= last)) push.push(key);
     }
     return { pull, push };
   }
@@ -431,16 +443,19 @@ export class Pool {
     if (!lets(body.member)) return { error: 'denied', detail: checkJoin(body.member, now).code };
     const { refused } = this.merge(records.filter(lets), now);
     if (!this.member(from, now)) return { error: 'denied', detail: refused.find((r) => r.key === memberKey(from))?.code ?? 'left' };
-    return { body: { index: this.index(now) } };
+    return { body: this.indexPage(now) };
   }
 
-  /// The answer to `sync`: `{ body: { hash } }`, with `index` beside it when the asker's
-  /// hash differs; `{ error }` with `bad-request`, or `stale` for an `asOf` too far from `now`.
+  /// The answer to `sync`: `{ body: { hash } }`, and beside it, when the asker's hash
+  /// differs, the page of the index after the key `after` (from its start when none is
+  /// given) as `indexPage` makes it; `{ error }` with `bad-request`, or `stale` for an
+  /// `asOf` too far from `now`.
   answerSync(body, now) {
-    if (!shaped(body, { asOf: isTime, hash: (v) => isBytes(v, 32) })) return { error: 'bad-request' };
+    const after = (v) => parseKey(v, this.id) !== null;
+    if (!shaped(body, { asOf: isTime, hash: (v) => isBytes(v, 32) }, { after })) return { error: 'bad-request' };
     if (Math.abs(body.asOf - now) > CLOCK_SKEW_SECS) return { error: 'stale' };
     const mine = this.stateHash(body.asOf);
-    return { body: mine === body.hash ? { hash: mine } : { hash: mine, index: this.index(body.asOf) } };
+    return { body: mine === body.hash ? { hash: mine } : { hash: mine, ...this.indexPage(body.asOf, body.after) } };
   }
 
   /// The answer to `pull`: `{ body: { records } }`, the records held under the keys asked
