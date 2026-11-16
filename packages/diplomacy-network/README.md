@@ -241,6 +241,15 @@ carries the reason. `devices` is `off` until the operator sets `networkDevices`,
 `ready` while an adb server answers on this machine and `none` while none does.
 `transport` is `failed`, with the reason, between a start that failed and the next one.
 
+A `tasks` row is one task, however many machines offer it: `claimed` while a claim holds
+any open offer of it, `available` while offers are open and none is held, `done` when
+none is open and one was done, else `cancelled`. `offeredBy` lists the machines whose
+offer is open and `hours` is the longest of those offers. `executor`, `claimedAt`,
+`leaseUntil` and `deadline` are those of one claim: this machine's own, else the one
+that holds this machine's offer, else the one that holds the most offers. What became of
+this machine's own offer is in `offers` and nowhere else: each machine's offer of a task
+ends by itself.
+
 A member's `skew` is true when its last answer said its clock and this machine's are
 more than 300 s apart: neither takes the other's requests, and a claim round goes on
 without that member. A task's `blocked` is `clock` while it is available and that is so
@@ -279,12 +288,28 @@ within a minute is one it does not get past, and it exits 1 with its runs left g
 that Diplomat starts it again. A promise nobody waited for is logged the same way
 (`unhandled: ...`) and never ends it.
 
-**Requester side.** `POST /offer` signs an offer record and pushes it to the pool. When a
-committed claim's executor asks for the key, the daemon issues a capability whose rules
-come from `requester/rules.js`, and from then on performs each allowed `act` request
-with this machine's own `gh` or `glab` credentials (`requester/forge.js`). It pings the
-executor before each lease runs out, and marks the offer done when the executor reports
-the outcome.
+**Requester side.** `POST /offer` signs an offer record and pushes it to the pool. A
+machine that takes the task asks this one for its offer, and this one gives it to one
+claim at a time. When the executor of the claim that holds the offer asks for the key,
+the daemon issues a capability whose rules come from `requester/rules.js`, and from then
+on performs each allowed `act` request with this machine's own `gh` or `glab`
+credentials (`requester/forge.js`). It pings that executor before each lease runs out,
+and marks the offer done when that executor reports the outcome of the job this machine
+hands out for it.
+
+**Several machines, one task.** Machines linked to one repository under one forge login
+that offer the same item offer one task, and it is run once: the claim of the machine
+that takes it holds the offer of every one of them it could reach, a machine that
+offers the task while the run is going is taken into that run, the job comes from one
+of the offering machines, and each marks its own offer done on that run's report. That
+takes the same job on each of them, to the byte - title, prompt, options, base revision,
+and the `user.name` and `user.email` its commits are authored with. A machine whose job
+differs has done nothing by that run: its offer is free again when the run ends and is
+run next, by itself. So is the offer of a machine that could not be told how the run
+ended - one that was off or asleep from then until the run's lease ran out. Withdrawing,
+failing or finishing an offer on one machine changes nothing on another. What a member
+that offers somebody else's task can and cannot do with it is in PROTOCOL.md, section 7,
+"What remains".
 
 A request is checked before it is sent (`requester/authorize.js`). Where the check
 depends on the forge - where a branch is, which branch is the default, whether it is
@@ -306,12 +331,16 @@ opened from each - is the task's, not the key's: it is kept with the offer in
 the task goes on from the same count and a restart forgets none of it. A branch is the
 task's own once the forge's answer to the push says so.
 
-**Executor side.** With `admit.slots` above zero and a task available that this machine
-would take, the daemon runs the claim round. The node asks its executor adapter:
+**Executor side.** With `admit.slots` above zero and a task with a free offer that this
+machine would take, the daemon runs the claim round. The node asks its executor adapter:
 `wouldTake(task)` says whether, and `weigh(task)`, when the adapter has one, how many
 more milliseconds this machine waits before it goes for that task - at most a minute,
 none for a task its own operator started with `now`. What that rests on stays on this
-machine. Having the key, the daemon makes sure of four things and starts the job:
+machine. The claim made, the daemon asks for the key: itself, when this machine offers
+the task too, else one of the machines whose offer the claim holds, and the next of them
+whenever one gives none. The job is the one that machine hands out, and when it ends its
+outcome is told to every machine whose offer the claim was given. Having the key, the
+daemon makes sure of four things and starts the job:
 
 - **The image.** One local image, built from `image/Dockerfile` and tagged by the hash of
   that directory. Debian, git, node, python, curl and the handful of tools agents reach
@@ -502,8 +531,11 @@ it makes of it is that wait before going for a task.
 `npm test` runs every `test/*.mjs`, with no network: the loopback transport, a stand-in
 tor, a fake forge and a fake docker. The `node-*.mjs` files run whole hosts on a network
 in memory with a clock of its own (`test/lib/mem-net.mjs`, `test/lib/hosts.mjs`):
-`node-standing.mjs` is what a member that means harm cannot do with a claim, and
-`node-limits.mjs` what a host does for whom and how much of it. The `daemon-*.mjs` files
+`node-standing.mjs` is what a member that means harm cannot do with a claim,
+`node-cooffer.mjs` one task offered by several machines, `node-limits.mjs` what a host
+does for whom and how much of it, `node-full.mjs` a pool at its caps, and
+`node-soak.mjs` seeded runs of everything at once (`DN_SOAK_SEEDS`, `DN_SOAK_STEPS` and
+`DN_SOAK_SEED` say how many, how long and from which seed). The `daemon-*.mjs` files
 start real daemon processes on scratch state directories (`test/lib/daemons.mjs`), with
 `test/lib/agent.mjs` standing in for the agent.
 
