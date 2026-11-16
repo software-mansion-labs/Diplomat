@@ -4,16 +4,17 @@
 // only inside its containers, and whose name constraints make it worthless for any host
 // outside the list it was minted for.
 //
-// A CA cannot grow its permitted list, so a host outside it (a self-hosted GitLab the
-// first time a pool on it runs) mints a new CA beside the old one. A job keeps the CA it
-// started with, which is why they are kept as generations: <dir>/<id>/{ca.key,ca.crt,
-// meta.json,leaves/<host>.{key,crt}} and <dir>/current naming the newest.
+// A CA's certificate is handed to the jobs that trust it, and it names every host it is
+// good for. So there is one CA per set of hosts, made for exactly that set: a job's CA
+// names its own pool's forge and the model provider, and tells it nothing of the forges
+// other pools on this machine use. A job keeps the CA it started with, which is why
+// they are kept as generations: <dir>/<id>/{ca.key,ca.crt,meta.json,leaves/<host>.{key,crt}}.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
-import { writeAtomic, readJson } from '../../../daemon-core/src/fsio.js';
+import { readJson } from '../../../daemon-core/src/fsio.js';
 import { CA_DIR, OPENSSL_BIN } from '../paths.js';
 
 const DAY_MS = 24 * 3600 * 1000;
@@ -75,10 +76,11 @@ function leafConfig(host) {
 }
 
 /// The certificate authority kept under `dir`. `state()` is `{ state: 'idle' | 'ready' |
-/// 'missing' | 'failed', detail }`; `authority(hosts)` resolves to the CA that may sign
-/// for all of `hosts`, minting one when the newest cannot: `{ id, certPath, hosts,
-/// constrained, leaf(host) -> { key, cert } }`. `kept(id)` is the generation of that id
-/// while it is on disk, or null: the one a job still running was started under.
+/// 'missing' | 'failed', detail }`; `authority(hosts)` resolves to the CA made for
+/// exactly `hosts`, minting one when there is none or it is near its end: `{ id,
+/// certPath, hosts, constrained, leaf(host) -> { key, cert } }`. `kept(id)` is the
+/// generation of that id while it is on disk, or null: the one a job still running was
+/// started under.
 export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN } = {}) {
   let state = { state: 'idle', detail: '' };
   const authorities = new Map(); // id -> authority
@@ -105,6 +107,7 @@ export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN }
       id,
       certPath,
       hosts: meta.hosts,
+      createdAt: Number(meta.createdAt) || 0,
       constrained: meta.constrained === true,
       expiring: () => expiresWithin(fs.readFileSync(certPath), CA_RENEW_MS),
       leaf(host) {
@@ -175,7 +178,6 @@ export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN }
       fs.unlinkSync(path.join(tmp, 'ca.cnf'));
       fs.writeFileSync(path.join(tmp, 'meta.json'), `${JSON.stringify({ hosts, constrained, createdAt: Math.floor(Date.now() / 1000) })}\n`);
       fs.renameSync(tmp, path.join(dir, id));
-      writeAtomic(path.join(dir, 'current'), `${id}\n`, 0o600);
       log('ca', `minted ${id} for ${hosts.join(', ')}${constrained ? '' : ' (unconstrained)'}`);
       return id;
     } catch (e) {
@@ -184,11 +186,14 @@ export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN }
     }
   }
 
-  function current() {
-    let id;
-    try { id = fs.readFileSync(path.join(dir, 'current'), 'utf8').trim(); } catch { return null; }
-    return /^[0-9a-f]{12}$/.test(id) ? open(id) : null;
+  // Every generation on disk, newest first.
+  function generations() {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch {}
+    return names.filter((n) => /^[0-9a-f]{12}$/.test(n)).map(open).filter(Boolean)
+      .sort((a, b) => b.createdAt - a.createdAt || (a.id < b.id ? 1 : -1));
   }
+  const setOf = (hosts) => hosts.join(' ');
 
   function authority(hosts) {
     const wanted = [...new Set(hosts.map((h) => {
@@ -199,15 +204,8 @@ export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN }
     // One at a time: two jobs asking for the same hosts at once must share one CA.
     const next = minting.then(async () => {
       try {
-        const have = current();
-        if (have && !have.expiring() && wanted.every((h) => covers(have.hosts, h))) {
-          state = { state: 'ready', detail: have.constrained ? '' : 'this openssl wrote no name constraints: the CA is valid for any host' };
-          return have;
-        }
-        // The hosts the newest CA already serves stay served, so its jobs' successors
-        // need no third CA.
-        const union = [...new Set([...(have && !have.expiring() ? have.hosts : []), ...wanted])].sort();
-        const made = open(await mint(union));
+        const have = generations().find((g) => setOf(g.hosts) === setOf(wanted) && !g.expiring());
+        const made = have ?? open(await mint(wanted));
         state = { state: 'ready', detail: made.constrained ? '' : 'this openssl wrote no name constraints: the CA is valid for any host' };
         return made;
       } catch (e) {
@@ -218,15 +216,19 @@ export function createCA({ dir = CA_DIR, log = () => {}, openssl = OPENSSL_BIN }
     return next;
   }
 
-  /// Removes every generation but the newest. Only for a daemon with no job running:
-  /// a job's connections are answered from the generation it started with.
+  /// Removes every generation but one of each set of hosts: the one `authority` hands
+  /// out, or the newest when all of a set are near their end. Only for a daemon with no
+  /// job running: a job's connections are answered from the generation it started with.
   function prune() {
-    let keep = '';
-    try { keep = fs.readFileSync(path.join(dir, 'current'), 'utf8').trim(); } catch {}
+    const keep = new Map(); // set of hosts -> id
+    const all = generations();
+    for (const g of [...all.filter((x) => !x.expiring()), ...all]) if (!keep.has(setOf(g.hosts))) keep.set(setOf(g.hosts), g.id);
+    const kept = new Set(keep.values());
     let names = [];
     try { names = fs.readdirSync(dir); } catch {}
     for (const n of names) {
-      if (n === 'current' || n === keep) continue;
+      // A generation this process is in the middle of minting is not yet one to judge.
+      if (kept.has(n) || n.endsWith(`.tmp.${process.pid}`)) continue;
       authorities.delete(n);
       fs.rmSync(path.join(dir, n), { recursive: true, force: true });
     }

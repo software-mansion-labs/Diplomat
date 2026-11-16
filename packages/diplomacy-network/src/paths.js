@@ -246,3 +246,19 @@ export const FORWARDS = (() => {
       .filter(([name, target]) => /^[a-z0-9-]{1,32}$/.test(name) && name !== 'adb' && target));
   } catch { return {}; }
 })();
+
+/// What one job may hold of the broker at a time. Its container's connections through it:
+export const JOB_CONNECTIONS = num('DN_JOB_CONNECTIONS', 256);
+/// The request bodies the broker reads whole before it carries them on (a forge request,
+/// a model request), in bytes over all of the job's requests; a request that would pass
+/// it waits unread for the ones before it. One request alone always fits.
+export const JOB_BUFFER_BYTES = num('DN_JOB_BUFFER_BYTES', FORGE_BODY_CAP);
+/// Its forge requests and mirror fetches in flight: each holds an answer of up to
+/// FORGE_RESPONSE_MAX_BYTES, or a git process on this machine.
+export const JOB_FORGE_REQUESTS = num('DN_JOB_FORGE_REQUESTS', 4);
+/// How long a job's connection may take to deliver a request's head (or the TLS
+/// handshake before it), how long a body read whole may take to arrive, and how long a
+/// connection may carry nothing at all before the broker closes it.
+export const JOB_HEADER_MS = num('DN_JOB_HEADER_MS', 30 * 1000);
+export const JOB_BODY_MS = num('DN_JOB_BODY_MS', 5 * 60 * 1000);
+export const JOB_IDLE_MS = num('DN_JOB_IDLE_MS', 30 * 60 * 1000);

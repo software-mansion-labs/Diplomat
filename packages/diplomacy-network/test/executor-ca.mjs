@@ -1,5 +1,5 @@
-// The broker's certificate authority: made once, constrained to the hosts it was made
-// for, its leaves reused from disk, a new generation when a host outside it is needed,
+// The broker's certificate authority: made once per set of hosts and constrained to
+// that set, its leaves reused from disk, another pool's hosts under a CA of their own,
 // and a clear state instead of a crash without openssl.
 // Run: node test/executor-ca.mjs
 
@@ -63,11 +63,11 @@ try {
     assert.doesNotMatch(text, /Digital Signature|Key Encipherment/);
   });
 
-  await check('asking again for hosts it covers returns the same CA, across a restart too', async () => {
-    assert.equal((await ca.authority(['api.github.com'])).id, first.id);
-    assert.equal((await ca.authority(['raw.api.github.com'])).id, first.id, 'a subdomain of a permitted name is covered');
+  await check('asking again for the same hosts, in any order or spelling, returns the same CA, across a restart too', async () => {
+    assert.equal((await ca.authority([...HOSTS].reverse())).id, first.id);
+    assert.equal((await ca.authority(['API.GitHub.com.', 'github.com', 'api.anthropic.com', 'github.com'])).id, first.id);
     assert.equal((await createCA({ dir }).authority(HOSTS)).id, first.id);
-    assert.deepEqual(fs.readdirSync(dir).sort(), ['current', first.id].sort());
+    assert.deepEqual(fs.readdirSync(dir), [first.id]);
   });
 
   await check('a leaf names its one host, is accepted under the CA for that host and refused for another', async () => {
@@ -125,32 +125,63 @@ try {
     }
   });
 
-  await check('a host outside the CA mints a new generation that covers the old hosts too, and the old one keeps working', async () => {
-    const second = await ca.authority(['gitlab.example.org', 'api.anthropic.com']);
+  await check('another pool\'s hosts get a CA of their own: the certificate a job is handed names its own pool\'s hosts and no other pool\'s', async () => {
+    const permitted = (authority) => execFileSync(OPENSSL_BIN, ['x509', '-in', authority.certPath, '-noout', '-text'], { encoding: 'utf8' })
+      .split('\n').filter((l) => /DNS:/.test(l)).map((l) => l.trim().replace(/^DNS:/, '')).sort();
+    const second = await ca.authority(['gitlab.corp-internal.example', 'api.anthropic.com']);
     assert.notEqual(second.id, first.id);
-    assert.deepEqual(second.hosts, [...HOSTS, 'gitlab.example.org'].sort());
-    assert.equal(fs.readFileSync(path.join(dir, 'current'), 'utf8').trim(), second.id);
-    assert.equal(await handshake(await second.leaf('gitlab.example.org'), fs.readFileSync(second.certPath), 'gitlab.example.org'), 'ok');
-    // A job that started under the first generation is still answered from it.
+    assert.deepEqual(second.hosts, ['api.anthropic.com', 'gitlab.corp-internal.example']);
+    assert.deepEqual(permitted(second), ['api.anthropic.com', 'gitlab.corp-internal.example']);
+    // The pool that came first is not named to the one that came later, nor the later one to a job admitted after it.
+    assert.deepEqual(permitted(first), [...HOSTS].sort());
+    const again = await ca.authority(HOSTS);
+    assert.equal(again.id, first.id, 'the first pool\'s next job gets the first pool\'s CA');
+    assert.doesNotMatch(fs.readFileSync(again.certPath, 'latin1'), /gitlab\.corp-internal\.example/);
+    assert.doesNotMatch(fs.readFileSync(second.certPath, 'latin1'), /github\.com/);
+    // Each signs for its own hosts and refuses the other's.
+    assert.equal(await handshake(await second.leaf('gitlab.corp-internal.example'), fs.readFileSync(second.certPath), 'gitlab.corp-internal.example'), 'ok');
     assert.equal(await handshake(await first.leaf('uploads.api.github.com'), fs.readFileSync(first.certPath), 'uploads.api.github.com'), 'ok');
-    assert.equal((await ca.authority(HOSTS)).id, second.id);
-    assert.notEqual(await handshake(await second.leaf('github.com'), fs.readFileSync(first.certPath), 'github.com'), 'ok');
+    await assert.rejects(second.leaf('github.com'), /no certificate for github\.com/);
+    await assert.rejects(first.leaf('gitlab.corp-internal.example'), /no certificate for gitlab\.corp-internal\.example/);
+    assert.notEqual(await handshake(await second.leaf('api.anthropic.com'), fs.readFileSync(first.certPath), 'api.anthropic.com'), 'ok', 'and neither is the other\'s trust root');
+    // A subset or a superset of a pool's hosts is another set: no CA serves it by naming more.
+    assert.notEqual((await ca.authority(['github.com'])).id, first.id);
   });
 
   await check('two jobs asking for the same hosts at once share one CA', async () => {
     const fresh = createCA({ dir: path.join(scratch, 'ca2') });
-    const [a, b, c] = await Promise.all([fresh.authority(['github.com']), fresh.authority(['github.com']), fresh.authority(['api.github.com'])]);
+    const [a, b, c] = await Promise.all([fresh.authority(['github.com']), fresh.authority(['github.com']), fresh.authority(['GitHub.com.'])]);
     assert.equal(b.id, a.id);
     assert.equal(c.id, a.id);
-    assert.deepEqual(fs.readdirSync(path.join(scratch, 'ca2')).sort(), ['current', a.id].sort());
+    assert.deepEqual(fs.readdirSync(path.join(scratch, 'ca2')), [a.id]);
   });
 
-  await check('pruning keeps the newest generation only', async () => {
-    assert.equal(fs.readdirSync(dir).length, 3);
-    ca.prune();
-    const now = fs.readFileSync(path.join(dir, 'current'), 'utf8').trim();
-    assert.deepEqual(fs.readdirSync(dir).sort(), ['current', now].sort());
-    assert.equal((await ca.authority(HOSTS)).id, now);
+  await check('a CA near its end is replaced for the next job, and pruning keeps the newest generation of each set of hosts', async () => {
+    const sets = () => fs.readdirSync(dir).filter((n) => n !== 'current').map((n) => JSON.parse(fs.readFileSync(path.join(dir, n, 'meta.json'), 'utf8')).hosts.join(' ')).sort();
+    assert.deepEqual(sets(), ['api.anthropic.com api.github.com github.com', 'api.anthropic.com gitlab.corp-internal.example', 'github.com']);
+    // The first pool's CA with three months left, as the next job finds it: a certificate
+    // of the same key and name, signed again to end sooner.
+    const home = path.join(dir, first.id);
+    const cnf = path.join(scratch, 'aging.cnf');
+    fs.writeFileSync(cnf, `[req]\ndistinguished_name=dn\nprompt=no\nx509_extensions=v3\n[dn]\nCN=Diplomacy Network broker ${first.id}\n[v3]\nbasicConstraints=critical,CA:TRUE,pathlen:0\nkeyUsage=critical,keyCertSign\n`);
+    execFileSync(OPENSSL_BIN, ['req', '-new', '-x509', '-key', path.join(home, 'ca.key'), '-config', cnf, '-days', '90', '-sha256', '-out', path.join(home, 'ca.crt')]);
+    // Its stamp an hour ahead, as a clock set back since leaves it: by age alone it
+    // would pass for the newest.
+    const meta = path.join(home, 'meta.json');
+    fs.writeFileSync(meta, `${JSON.stringify({ ...JSON.parse(fs.readFileSync(meta, 'utf8')), createdAt: Math.floor(Date.now() / 1000) + 3600 })}\n`);
+    const renewed = await createCA({ dir }).authority(HOSTS);
+    assert.notEqual(renewed.id, first.id);
+    assert.deepEqual(renewed.hosts, [...HOSTS].sort());
+    assert.ok(createCA({ dir }).kept(first.id), 'the old generation is still there for the jobs started under it');
+    // What an earlier version left beside the generations goes too.
+    fs.writeFileSync(path.join(dir, 'current'), `${first.id}\n`);
+    const fresh = createCA({ dir });
+    fresh.prune();
+    assert.equal(fs.existsSync(home), false, 'the older generation of a set is removed');
+    assert.equal(fs.existsSync(path.join(dir, 'current')), false);
+    assert.deepEqual(sets(), ['api.anthropic.com api.github.com github.com', 'api.anthropic.com gitlab.corp-internal.example', 'github.com'], 'and every set keeps one');
+    assert.equal(fresh.kept(first.id), null);
+    assert.equal((await fresh.authority(HOSTS)).id, renewed.id);
   });
 
   await check('what is not a DNS name gets no certificate', async () => {
