@@ -1293,6 +1293,8 @@ def test_switching_off_withdraws_the_unsettled_offers_the_daemon_holds(store, on
     store._settle_agents()
     assert d.sent("withdraw") == [{"taskId": "t7", "reason": "switched off"}]
     assert lines("network-withdraw") == ["Review · #9 - withdrawn (switched off)"]
+    assert lines("network-unavailable") == [
+        "Review · #10 was not offered: the Diplomacy Network is switched off"]
     assert store.network_offering == []
 
 

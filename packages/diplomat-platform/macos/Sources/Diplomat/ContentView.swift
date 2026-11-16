@@ -552,6 +552,13 @@ struct ContentView: View {
                           expanded: $tasksExpanded,
                           icon: "antenna.radiowaves.left.and.right",
                           caption: caption.isEmpty ? nil : caption)
+            // Above the fold of the section: with the network on, every row below waits
+            // on what this line says does not work.
+            if let trouble = store.networkTrouble {
+                NetworkTroubleRow(text: trouble) {
+                    withAnimation(.easeInOut(duration: 0.15)) { screen = .network }
+                }
+            }
             if tasksExpanded {
                 // Split around the switch that governs the queue, which draws where the
                 // queue starts. `.queued` sorts last, so the two halves are the one
@@ -1019,6 +1026,31 @@ private struct AgentTaskStatusLabel: View {
         case .free:          return .secondary
         case .queued:        return .secondary
         }
+    }
+}
+
+/// One line that says the Diplomacy Network does not work here, and opens its screen.
+/// The text is drawn as it is: part of it is the daemon's.
+private struct NetworkTroubleRow: View {
+    let text: String
+    let open: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9))
+                Text(verbatim: text)
+                    .font(.system(size: 10))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right").font(.system(size: 8))
+            }
+            .foregroundStyle(.red)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .tooltip(text)
     }
 }
 

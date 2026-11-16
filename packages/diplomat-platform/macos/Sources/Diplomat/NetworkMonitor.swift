@@ -284,15 +284,21 @@ extension Store {
     }
 
     /// The switch went off over jobs whose offer was never definitely answered: withdraw
-    /// each one the daemon turns out to hold.
+    /// each one the daemon turns out to hold, and say of every other that it was not
+    /// offered.
     private func withdrawOffering(_ offering: [OfferingJob]) async {
         guard !offering.isEmpty else { return }
         let snapshot = await Task.detached(priority: .utility) { DiplomacyNetwork.state() }.value
         for held in offering {
-            guard let task = held.task(in: snapshot) else { continue }
+            guard let task = held.task(in: snapshot) else {
+                AuditLog.log(held.source.rawValue, NetworkAudit.unavailable,
+                             "\(held.job.label) was not offered: \(DiplomacyNetwork.switchedOff)")
+                continue
+            }
             await withdraw(task, reason: NetworkRoute.withdrawSwitchedOff, label: held.rowLabel,
                            source: held.source.rawValue)
         }
+        refreshAudit()
     }
 
     @discardableResult

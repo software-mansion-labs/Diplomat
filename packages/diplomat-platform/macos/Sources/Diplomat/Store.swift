@@ -2184,6 +2184,12 @@ final class Store: ObservableObject {
         }
     }
 
+    /// The panel's line on what of the network does not work on this machine, or nil.
+    var networkTrouble: String? {
+        let line = NetworkTrouble.line(answered: networkAnswered, snapshot: networkState)
+        return line.isEmpty ? nil : line
+    }
+
     /// Publish what the daemon just answered, or that it did not.
     func noteNetworkState(_ snapshot: NetworkSnapshot?) {
         let answered = snapshot != nil

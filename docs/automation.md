@@ -282,7 +282,10 @@ platforms), and in `~/.diplomat/config.json` beside the task cap:
 - **Keep in hand until it can be priced** (`autoBudgetFloorPct`, `20`) - what a
   window must still have left while the ledger is too thin to price a task. Until at
   least five auto-tasks have finished and been priced, this is the whole of the
-  answer, so a fresh install spends down to 20% and no further.
+  answer, so a fresh install spends down to 20% and no further. It answers too when
+  the ledger prices a task above the whole window, which one count far beyond what a
+  task can spend does: no window could cover that price, so nothing would start for
+  the whole lookback.
 - **Keep on the account until it can be priced** (`autoBudgetReserveUsd`, `1.00`) -
   the same, in dollars, for a runner billed in money. A separate knob because a
   percentage of a credit balance is a percentage of however much was last topped up.

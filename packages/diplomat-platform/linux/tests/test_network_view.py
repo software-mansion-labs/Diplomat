@@ -32,6 +32,7 @@ pytest.importorskip("PySide6")
 
 RICH, STARTING, DOWN, OFF = (
     "network-screen", "network-screen-starting", "network-screen-down", "network-screen-off")
+FAILED = "network-screen-failed"
 DIPLOMAT, BENCH = "github.com/latekvo/diplomat", "github.com/latekvo/prompt-bench"
 
 
@@ -62,6 +63,18 @@ def seeded(monkeypatch):
         return store
 
     return seed
+
+
+@pytest.mark.parametrize("mode,line", [
+    (RICH, ""), (STARTING, ""), (OFF, ""),
+    (DOWN, "Diplomacy Network: the daemon is not answering"),
+    (FAILED, "Diplomacy Network: transport failed (tor not found: no other machine is "
+             "reached without it); docker missing (docker not found: every job runs in "
+             "a container)"),
+])
+def test_each_render_seeds_what_the_panel_says_of_the_network(seeded, mode, line):
+    store = seeded(mode)
+    assert network.trouble(store.network_answered, store.network_state) == line
 
 
 @pytest.fixture
@@ -628,7 +641,8 @@ def test_the_devices_switch_is_off_until_set_and_writes_its_config_key(
         "Off: jobs see no device. On: a job running here can use the Android devices and "
         "emulators attached to this machine through adb - including a phone on USB - and "
         "an emulator can reach services on this machine. Switch it on only for pools "
-        "whose machines you trust with that.")
+        "whose machines you trust with that. Either way it applies to jobs started "
+        "afterwards.")
     saved = dn.devices
     view = screen(STARTING)
     monkeypatch.setattr(dn, "devices", saved)  # the render's fixture answers for it

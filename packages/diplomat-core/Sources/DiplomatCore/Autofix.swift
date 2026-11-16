@@ -337,6 +337,9 @@ public enum AgentDispatchGate {
     /// which it meant.
     public static let unitPct = "pct"
     public static let unitUsd = "usd"
+    /// All of a rate-limit window, in `unitPct`: the most one task can be asked to fit
+    /// inside.
+    public static let wholeWindowPct = 100.0
 
     /// The configured confidence, snapped to a level `budgetConfidenceZ` has a
     /// quantile for.
@@ -435,6 +438,11 @@ public enum AgentDispatchGate {
     /// hand" — which is the whole of the answer on a machine whose ledger has not
     /// priced a task yet.
     ///
+    /// So does a rate limit whose task is priced above the whole window
+    /// (`wholeWindowPct`). No window could ever cover that, so held to it nothing would
+    /// start until the counts behind the price left the ledger's lookback, and one
+    /// count far beyond what a task can spend is all it takes to put the price there.
+    ///
     /// A ceiling with **no reading at all** is skipped, and a call where none has one
     /// is affordable. That is deliberate: a usage probe can be switched off
     /// (`DIPLOMAT_QUOTA_PROBE=0`, `DIPLOMAT_SPEND_PROBE=0`), logged out, or simply
@@ -449,8 +457,9 @@ public enum AgentDispatchGate {
                                     floor: Double,
                                     unit: String = unitPct) -> Budget {
         var tightest: Budget?
-        for (window, left, cost) in windows {
+        for (window, left, priced) in windows {
             guard let left = left else { continue }
+            let cost = unit == unitPct && (priced ?? 0) > wholeWindowPct ? nil : priced
             let needed = cost ?? floor
             if let best = tightest, left - needed >= best.left - best.needed {
                 continue   // an earlier ceiling is the binding one

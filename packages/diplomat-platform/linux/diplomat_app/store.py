@@ -2697,7 +2697,8 @@ class Store(QObject):
 
     def _withdraw_offering(self) -> None:
         """The switch went off over jobs whose offer was never settled: withdraw each
-        one the daemon turns out to hold, and keep none."""
+        one the daemon turns out to hold, say of every other that it was not offered,
+        and keep none."""
         with self._network_offering_lock:
             held, self.network_offering = self.network_offering, []
         if not held:
@@ -2707,6 +2708,10 @@ class Store(QObject):
             task = network.open_task(*h.key, snapshot)
             if task is not None:
                 self._withdraw(task, network.WITHDRAW_SWITCHED_OFF, h.row_label, h.source)
+            else:
+                activity.log(h.source, network.AUDIT_UNAVAILABLE,
+                             f"{h.job.label} was not offered: {diplomacynetwork.SWITCHED_OFF}")
+        self.refresh_activity()
         self.tasks_changed.emit()
 
     def _network_refused(self, job: autofix.AgentJob, source: str, attempt: int,

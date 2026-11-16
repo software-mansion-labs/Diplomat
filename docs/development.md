@@ -207,7 +207,11 @@ DIPLOMAT_RENDER=panel    ./Diplomat.app/Contents/MacOS/Diplomat  # snapshot a sc
                                                      #   network-screen (the Network screen over a synthetic
                                                      #   daemon snapshot: three pools, one of them left);
                                                      #   network-screen-starting (a daemon still coming up, no
-                                                     #   pool yet); network-screen-off (the switch off)
+                                                     #   pool yet); network-screen-failed (no tor and no docker
+                                                     #   to use); network-screen-down (the daemon not
+                                                     #   answering); network-screen-off (the switch off);
+                                                     #   network-panel (the main panel saying what of the
+                                                     #   network does not work)
                                                      #   audit[-issues|-prs|-all]
                                                      #   telemetry (the screen over a synthetic ledger, written to a
                                                      #   scratch dir); telemetry-panel (the same inside the panel)

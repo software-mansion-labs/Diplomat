@@ -1836,6 +1836,16 @@ check(AgentDispatchGate.budgetDecide([], floor: 20).affordable,
 let tie = AgentDispatchGate.budgetDecide(windows(30, 30, 10, 10), floor: 20)
 check(tie.window == windowFirst, "the first-listed ceiling wins an exact tie")
 check(tie.unit == AgentDispatchGate.unitPct, "a rate limit decides in percentages")
+let beyond = AgentDispatchGate.budgetDecide(windows(50, nil, 100.5, nil), floor: 20)
+check(beyond.affordable && !beyond.measured && beyond.needed == 20,
+      "a task priced above the whole window prices nothing: the floor answers")
+let whole = AgentDispatchGate.budgetDecide(windows(50, nil, 100, nil), floor: 20)
+check(!whole.affordable && whole.measured && whole.needed == 100,
+      "…and one priced at exactly the window still holds the work")
+let dear = AgentDispatchGate.budgetDecide([("key", 120, 100.5)], floor: 20,
+                                          unit: AgentDispatchGate.unitUsd)
+check(dear.affordable && dear.measured && dear.needed == 100.5,
+      "money has no whole window: a hundred dollars and more is a price like any other")
 
 // The same arithmetic in the other currency. Nothing in the gate may assume a
 // percentage: a $255 balance is not 255% of anything.

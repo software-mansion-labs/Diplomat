@@ -555,6 +555,28 @@ class Snapshot:
         )
 
 
+#: The states of a service that end what it is for until the operator acts. The
+#: Network screen draws them red, and the panel says so (:func:`trouble`).
+TROUBLE_STATES = frozenset({"failed", "missing", "down"})
+
+
+def trouble(answered: bool | None, snapshot: Snapshot | None) -> str:
+    """The panel's one line on what of the network does not work on this machine: a
+    daemon that was asked and did not answer, else each of the transport, docker and
+    the model credential that is in a :data:`TROUBLE_STATES` state, with the daemon's
+    detail. "" while nothing is wrong, the daemon has not been asked, or a service is
+    still coming up."""
+    if answered is False:
+        return "Diplomacy Network: the daemon is not answering"
+    if snapshot is None:
+        return ""
+    wrong = [f"{name} {service.state}" + (f" ({service.detail})" if service.detail else "")
+             for name, service in (("transport", snapshot.transport),
+                                   ("docker", snapshot.docker), ("model", snapshot.model))
+             if service.state in TROUBLE_STATES]
+    return "Diplomacy Network: " + "; ".join(wrong) if wrong else ""
+
+
 def _pool(p: dict) -> Pool:
     return Pool(
         id=p["id"], path=_text(p.get("path")), identity=_text(p.get("identity")),

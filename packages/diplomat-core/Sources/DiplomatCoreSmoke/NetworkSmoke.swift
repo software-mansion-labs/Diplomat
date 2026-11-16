@@ -460,6 +460,48 @@ func networkSmoke() throws {
           && NetworkSnapshot.parse(Data("{\"offers\": []}".utf8))?.offers == [],
           "no offers list is not an empty one")
 
+    section("network: the panel's line")
+    do {
+        func services(_ states: [String: (String, String)] = [:]) -> NetworkSnapshot? {
+            var doc: [String: Any] = [:]
+            for name in ["transport", "docker", "model"] {
+                let (state, detail) = states[name] ?? ("ready", "")
+                doc[name] = ["state": state, "detail": detail]
+            }
+            for (name, service) in states where doc[name] == nil {
+                doc[name] = ["state": service.0, "detail": service.1]
+            }
+            return NetworkSnapshot.parse(try? JSONSerialization.data(withJSONObject: doc))
+        }
+        let silent = "Diplomacy Network: the daemon is not answering"
+        check(NetworkTrouble.line(answered: nil, snapshot: nil) == ""
+                && NetworkTrouble.line(answered: true, snapshot: services()) == ""
+                && NetworkTrouble.line(answered: true, snapshot: nil) == "",
+              "nothing wrong, or nothing asked yet: no line")
+        check(NetworkTrouble.line(answered: false, snapshot: nil) == silent
+                && NetworkTrouble.line(answered: false, snapshot: services()) == silent,
+              "a daemon that did not answer, whatever it last said")
+        check(NetworkTrouble.line(answered: true, snapshot: services([
+            "transport": ("starting", "tor is 45% through its bootstrap"),
+            "docker": ("building", "building the job image")])) == "",
+              "a service coming up is no trouble")
+        check(NetworkTrouble.line(answered: true, snapshot: services([
+            "transport": ("failed", "tor not found")]))
+                == "Diplomacy Network: transport failed (tor not found)")
+        check(NetworkTrouble.line(answered: true, snapshot: services([
+            "docker": ("missing", "docker not found: every job runs in a container"),
+            "model": ("missing", "")]))
+                == "Diplomacy Network: docker missing (docker not found: every job runs in a "
+                    + "container); model missing",
+              "each service that does not work, with the daemon's detail")
+        check(NetworkTrouble.line(answered: true, snapshot: services(["transport": ("down", "")]))
+                == "Diplomacy Network: transport down"
+                && NetworkTrouble.line(answered: true,
+                                       snapshot: services(["devices": ("failed", "x")])) == ""
+                && NetworkTrouble.states == ["failed", "missing", "down"],
+              "the devices are not the panel's to report")
+    }
+
     section("network: the evidence")
     check(same(NetworkEvidence.tasks(nil), nil, "the daemon did not answer"),
           "a daemon that did not answer is unavailable, never an empty map")

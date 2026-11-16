@@ -619,6 +619,28 @@ public struct NetworkSnapshot: Equatable {
     }
 }
 
+/// What of the network does not work on this machine.
+public enum NetworkTrouble {
+    /// The states of a service that end what it is for until the operator acts. The
+    /// Network screen draws them red, and the panel says so (`line`).
+    public static let states: Set<String> = ["failed", "missing", "down"]
+
+    /// The panel's one line: a daemon that was asked and did not answer, else each of
+    /// the transport, docker and the model credential that is in one of `states`, with
+    /// the daemon's detail. "" while nothing is wrong, the daemon has not been asked, or
+    /// a service is still coming up.
+    public static func line(answered: Bool?, snapshot: NetworkSnapshot?) -> String {
+        if answered == false { return "Diplomacy Network: the daemon is not answering" }
+        guard let snapshot else { return "" }
+        let wrong = [("transport", snapshot.transport.state, snapshot.transport.detail),
+                     ("docker", snapshot.docker.state, snapshot.docker.detail),
+                     ("model", snapshot.model.state, snapshot.model.detail)]
+            .filter { states.contains($0.1) }
+            .map { "\($0.0) \($0.1)" + ($0.2.isEmpty ? "" : " (\($0.2))") }
+        return wrong.isEmpty ? "" : "Diplomacy Network: " + wrong.joined(separator: "; ")
+    }
+}
+
 /// What a snapshot says of this machine's own offers, as the agent-state resolver
 /// reads it (`AgentState.Evidence.network`).
 public enum NetworkEvidence {

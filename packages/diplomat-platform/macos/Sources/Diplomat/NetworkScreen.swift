@@ -157,8 +157,8 @@ struct NetworkScreen: View {
     private func serviceTint(_ state: String) -> Color {
         switch state {
         case "ready": return .green
-        case "failed", "missing", "down": return .red
         case "", "off": return .secondary
+        case let state where NetworkTrouble.states.contains(state): return .red
         default: return .orange
         }
     }

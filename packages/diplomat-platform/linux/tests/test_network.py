@@ -550,6 +550,39 @@ def test_no_offers_list_is_not_an_empty_one():
     assert N.Snapshot.parse(b'{"offers": []}').offers == ()
 
 
+def services(**states) -> N.Snapshot:
+    """A snapshot whose services are ready but for the ones named, each a
+    ``(state, detail)``."""
+    doc = {name: {"state": "ready", "detail": ""} for name in ("transport", "docker", "model")}
+    doc.update({name: {"state": state, "detail": detail}
+                for name, (state, detail) in states.items()})
+    return N.Snapshot.from_json(doc)
+
+
+@pytest.mark.parametrize("answered,snapshot,want", [
+    (None, None, ""),
+    (True, services(), ""),
+    (False, None, "Diplomacy Network: the daemon is not answering"),
+    (False, services(), "Diplomacy Network: the daemon is not answering"),
+    (True, None, ""),
+    (True, services(transport=("starting", "tor is 45% through its bootstrap"),
+                    docker=("building", "building the job image")), ""),
+    (True, services(transport=("failed", "tor not found")),
+     "Diplomacy Network: transport failed (tor not found)"),
+    (True, services(docker=("missing", "docker not found: every job runs in a container"),
+                    model=("missing", "")),
+     "Diplomacy Network: docker missing (docker not found: every job runs in a "
+     "container); model missing"),
+    (True, services(transport=("down", "")), "Diplomacy Network: transport down"),
+    (True, N.Snapshot.from_json({"devices": {"state": "failed", "detail": "x"}}), ""),
+], ids=["not asked", "all ready", "silent", "silent over an old snapshot", "no snapshot",
+        "coming up", "transport failed", "docker and model missing", "down",
+        "the devices are not the panel's"])
+def test_the_panel_line_says_what_of_the_network_does_not_work(answered, snapshot, want):
+    assert N.trouble(answered, snapshot) == want
+    assert N.TROUBLE_STATES == {"failed", "missing", "down"}
+
+
 # MARK: - network: the evidence
 
 

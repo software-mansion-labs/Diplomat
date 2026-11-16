@@ -19,7 +19,8 @@ repository is on. The daemon looks for them on its `PATH` and in the usual insta
 `DN_TOR`, `DN_DOCKER`, `DN_GH` and `DN_GLAB` in the environment the daemon starts with name a
 binary anywhere else. Without docker a machine still offers its jobs and acts for them, and
 takes none. Without Tor it reaches no other machine. The Network screen shows what the daemon
-says is missing.
+says is missing, and while tor, docker or the model credential is missing or failed, or the
+daemon does not answer, a red line above the task list says so and opens that screen.
 
 <img alt="The Network screen" src="img/network.png" />
 
@@ -219,7 +220,9 @@ priced, and what asked for it is offered again.
 Switching the network off withdraws this machine's open offers, stops the jobs it runs for the
 pool and frees their PRs and issues for agents in terminals again. Work that was asked for and
 had not run is started in a terminal from the queue on the next poll. A monitor's own find
-counts its offer as an attempt, so it is started again on that monitor's retry schedule.
+counts its offer as an attempt, so it is started again on that monitor's retry schedule. A job
+started by hand whose offer the daemon had not answered is withdrawn if the daemon turns out to
+hold it; of any other the feed says that it was not offered, and it is started nowhere.
 
 ## What it does not protect against
 

@@ -1286,7 +1286,7 @@ enum NetworkTest {
                     + "here can use the Android devices and emulators attached to this machine "
                     + "through adb - including a phone on USB - and an emulator can reach "
                     + "services on this machine. Switch it on only for pools whose machines "
-                    + "you trust with that.")
+                    + "you trust with that. Either way it applies to jobs started afterwards.")
 
         // 29. What the screen's buttons say they do.
         check("a restart is said to leave the jobs running",
@@ -1434,6 +1434,7 @@ enum NetworkTest {
                     == "Review-req · #90304 was not offered: o/r has no pool on this machine")
         script.refuse(NetworkRoute.offer, (500, "boom"))
         _ = await store.dispatchAgent(job(90305), source: .panel)
+        _ = await store.dispatchAgent(job(90306), source: .panel)
         script.refuse(NetworkRoute.offer, nil)
         script.set(snapshot(offers: [offerRow("task-off", "pooled", item: item(90305))]))
         // Switched off by another process: followed, and the offer it held withdrawn.
@@ -1447,6 +1448,9 @@ enum NetworkTest {
                   $0["taskId"] as? String == "task-off"
                       && $0["reason"] as? String == NetworkRoute.withdrawSwitchedOff
               })
+        check("…and one it does not hold is said not to have been offered",
+              feedDetails(NetworkAudit.unavailable).last
+                == "Review-req · #90306 was not offered: \(DiplomacyNetwork.switchedOff)")
 
         // 35. A job the daemon refuses for a reason of the job's own waits on its row
         //     with the reason, said once, and the queue goes on past it; a daemon that
@@ -1599,6 +1603,32 @@ enum NetworkTest {
         startDaemon()
         store.networkEnabled = false
         await store.networkLifecycle?.value
+
+        // 37. What of the network does not work here is the panel's line: nothing while
+        //     it is off or coming up, each failed service with the daemon's detail, and a
+        //     daemon that does not answer.
+        check("switched off, the panel says nothing of the network", store.networkTrouble == nil)
+        script.set(snapshot())
+        store.networkEnabled = true
+        await store.networkLifecycle?.value
+        await store.runNetworkCycleOnce()
+        check("…nor while every service is ready",
+              store.networkAnswered == true && store.networkTrouble == nil)
+        var broken = snapshot()
+        broken["transport"] = ["state": "failed", "detail": "tor not found"]
+        broken["docker"] = ["state": "building", "image": "", "detail": "building the job image"]
+        script.set(broken)
+        await store.runNetworkCycleOnce()
+        check("a transport that failed is said with the daemon's detail, a service coming up is not",
+              store.networkTrouble == "Diplomacy Network: transport failed (tor not found)")
+        stopDaemon()
+        await store.runNetworkCycleOnce()
+        check("a daemon that does not answer is said",
+              store.networkTrouble == "Diplomacy Network: the daemon is not answering")
+        startDaemon()
+        store.networkEnabled = false
+        await store.networkLifecycle?.value
+        check("…and switched off again, nothing is", store.networkTrouble == nil)
 
         print(pass ? "NETWORK TEST OK" : "NETWORK TEST FAILED")
         return pass
