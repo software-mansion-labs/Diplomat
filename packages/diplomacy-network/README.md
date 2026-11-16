@@ -97,8 +97,8 @@ closed at every start.
 | `tor/` | tor's data directory |
 | `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it. A leaf is good for 90 days, is replaced from two weeks before its end, under a running job too, and is removed once past it |
 | `mirrors/<pool hash>.git` | bare mirrors. One is removed a day after its pool was last linked and not left |
-| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended, and `runs/.containers/<container>/` once it is empty and the container is gone |
-| `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed with its directory |
+| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended - the directory first, and the link only once the directory is gone, so one that will not go is met again at the next look - and `runs/.containers/<container>/` once it is empty and the container is gone |
+| `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed once its directory is gone |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
 The node's documents are written in one order - identity, `heard`, links, pools, locks,
@@ -389,7 +389,19 @@ four things and starts the job:
     (`ssh.github.com`, `altssh.gitlab.com`). A name in capitals or with a trailing dot
     is the same name;
   - git fetch and clone of the pool's repository are answered from this machine's bare
-    mirror of it;
+    mirror of it. The mirror is filled by this machine's own git with the operator's
+    access to the repository, the one thing of the forge an executor needs of its own:
+    a machine that cannot read a repository starts no job on it. It is a mirror of the
+    repository the pool names, whatever the linked checkout's remotes are called. It is
+    fetched by a remote of that checkout that is the repository, as the operator
+    spelled it (`upstream` before `origin` before any other); else by the repository's
+    path in the spelling of a remote the checkout has on the same forge - ssh or https,
+    with the user and the port it has there, `ssh.github.com` and `altssh.gitlab.com`
+    counting as their forge - which is how a fork's checkout is used, or one whose
+    remote has a name the repository had; else over https, and a failure then says that
+    the checkout has no remote on that forge. A GitLab of one's own that is reached
+    over ssh under another host name than its API's is not known here to be the same
+    forge. A mirror that cannot be made fails the start with git's reason;
   - the model provider's API is forwarded with this machine's own credential added,
     until the job has had its share: past `DN_JOB_MODEL_REQUESTS` requests or
     `DN_JOB_MODEL_BYTES` bytes it is answered 429. Of the provider's answer the job
@@ -452,6 +464,20 @@ four things and starts the job:
 The job itself is the agent runner in headless mode. Its exit is the completion signal;
 its log holds the cost. The daemon reports the outcome to the requester with `done`.
 
+Everything in a job's directory is the job's to write, so the daemon reads `done` and
+the three logs in the directory that stands where it put it, never through a link,
+without waiting for a writer, off its own thread, and by their last bytes only: 32 of
+`done`, 4 MiB of `log.jsonl`, 2000 of `stderr.log` and `setup.log`. A pipe, a socket, a
+device or a directory in a file's place reads as nothing. Of the result line only
+positive numbers count, and the summary is cut at 4000 characters.
+
+The tokens and the cost are the job's own word, and this machine's budget is counted
+from them. They stand no higher than what the broker carried to the model for the job:
+one token for each byte of its model requests and their answers, and USD 80 for a
+million of those bytes - the dearest a token is sold at, the output of the top model in
+its fast mode as priced in November 2026. A job that sent the model nothing reports no
+tokens and no cost. An outcome of which a figure was lowered carries `capped: true`.
+
 A machine takes work only while its docker engine answers, the image is there and a
 model credential is; both are looked at again every 30 s, and the snapshot says which is
 missing. The engine must be Docker 27.1 or later, the first that makes a network with no
@@ -478,9 +504,13 @@ its run directory.
 
 **Stopping a job.** A job is root in its container and can write wherever the container
 can, its own run directory included. So nothing the host runs to ask after a job or to
-end it comes from there: `stop.sh` is handed to the container's `sh` as text, and the
-job's process group is the one the shell that started the job named to the daemon, kept
-in `jobs.json`; nothing a job writes says which processes are its own. A job whose
+end it is read from the run directory or from `/work`, and nothing is found through the
+container's `PATH`, which leads through `/usr/local/bin` first: the container's first
+process is `/usr/bin/sleep`, a job's runner is started by `/bin/sh` and
+`/usr/bin/setsid`, and `stop.sh` is handed to `/bin/sh` as text and looks for `tr`,
+`grep`, `sleep` and `rm` in `/usr/sbin:/usr/bin:/sbin:/bin`. The job's process group is
+the one the shell that started the job named to the daemon, kept in `jobs.json`;
+nothing a job writes says which processes are its own. A job whose
 group nobody kept - its daemon went between starting it and hearing the group, or
 `jobs.json` is gone - is not taken up: it is ended by its run id alone, which its
 runner and everything the runner starts carry in their environment from their first

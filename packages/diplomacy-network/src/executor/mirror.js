@@ -3,17 +3,46 @@
 // this machine keeps current with its own git credentials. That is the only place those
 // credentials are used, and it is on the host. The pool part is the 128 bits a
 // container's name carries for the pool: no two repositories share a mirror.
+//
+// A mirror is of the pool's repository, whatever the linked checkout's remotes are: the
+// checkout says how this machine reaches that forge, and lends its objects.
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { GIT_BIN, MIRRORS_DIR, MIRROR_TIMEOUT_MS } from '../paths.js';
+import { forgeSshHosts } from './broker.js';
 import { namePart } from './container.js';
+import { own } from './own-fault.js';
+
+// A remote URL in either spelling: all of it up to the repository's path, the host in
+// that, and the path.
+const REMOTE = /^((?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^:/]+)(?::\d+)?[:/])(.+?)(?:\.git)?\/?$/i;
 
 /// `host/owner/repo` in lowercase for any spelling of a remote URL, or null.
 export function remoteSlug(url) {
-  const m = /^(?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^:/]+)(?::\d+)?[:/](.+?)(?:\.git)?\/?$/i.exec(String(url).trim());
-  return m ? `${m[1]}/${m[2]}`.toLowerCase() : null;
+  const m = REMOTE.exec(String(url).trim());
+  return m ? `${m[2]}/${m[3]}`.toLowerCase() : null;
+}
+
+/// The URL the pool's repository is fetched by, `remotes` being a checkout's as `[[name,
+/// url]]`, `upstream` counting before `origin` and that before the rest: a remote that
+/// is the repository, as it is spelled; else the repository's path in the spelling of a
+/// remote on the same forge, which is how this machine reaches that forge - from a
+/// fork's checkout, or one whose remote has a name the repository had; else, `guessed`,
+/// https. A forge's other ssh host is that forge; the same path on any other host is
+/// another repository.
+export function fetchUrl(pool, remotes) {
+  const hosts = [pool.host, ...forgeSshHosts(pool)];
+  const repo = pool.id.slice(pool.id.indexOf('/') + 1);
+  const rank = (name) => ['upstream', 'origin', name].indexOf(name);
+  const there = remotes.map(([name, url]) => [name, url, REMOTE.exec(url)])
+    .filter(([, , m]) => m && hosts.includes(m[2].toLowerCase()))
+    .sort(([a], [b]) => rank(a) - rank(b));
+  const same = there.find(([, , m]) => m[3].toLowerCase() === repo.toLowerCase());
+  if (same) return { url: same[1], guessed: false };
+  if (there.length > 0) return { url: `${there[0][2][1]}${repo}.git`, guessed: false };
+  return { url: `https://${pool.id}.git`, guessed: true };
 }
 
 function git(args, { cwd, timeout = MIRROR_TIMEOUT_MS } = {}) {
@@ -31,9 +60,10 @@ function git(args, { cwd, timeout = MIRROR_TIMEOUT_MS } = {}) {
 }
 
 /// The mirrors under `dir`. `ensureMirror({ pool, checkout })` creates or refreshes the
-/// pool's mirror from the linked checkout's remote and resolves to `{ path, refreshed,
-/// error }`: a refresh that fails leaves the mirror as it was and says why; a mirror
-/// that cannot be created rejects. `path(pool)` is the mirror if there is one.
+/// pool's mirror by `fetchUrl` of the linked checkout's remotes and resolves to `{ path,
+/// refreshed, error }`: a refresh that fails leaves the mirror as it was and says why; a
+/// mirror that cannot be created rejects with an OwnFault. `path(pool)` is the mirror if
+/// there is one.
 /// `retain(pool)` marks a job as reading the mirror and returns the function that ends it.
 /// `sweep(pools, keepMs)` is told the pools whose mirrors are wanted now, and removes
 /// every other mirror that has not been wanted for `keepMs` and that no job reads; it
@@ -45,21 +75,17 @@ export function createMirrors({ log = () => {}, dir = MIRRORS_DIR } = {}) {
   const pathOf = (pool) => path.join(dir, `${namePart(pool.id)}.git`);
   const exists = (p) => fs.existsSync(path.join(p, 'HEAD'));
 
-  // The checkout's remote for the pool's repository: `upstream` in a fork's checkout,
-  // `origin` otherwise.
-  async function remoteUrl(pool, checkout) {
-    for (const name of ['upstream', 'origin']) {
-      // The URL as configured: `remote get-url` would answer with any insteadOf rewrite
-      // applied, and the pool is named by the address before it.
-      const url = (await git(['-C', checkout, 'config', '--get', `remote.${name}.url`], { timeout: 10000 }).catch(() => '')).trim();
-      if (url && remoteSlug(url) === pool.id.toLowerCase()) return url;
-    }
-    throw new Error(`${checkout} has no upstream or origin remote for ${pool.id}`);
+  // The checkout's remotes as configured: `remote get-url` would answer with any
+  // insteadOf rewrite applied, and the pool is named by the address before it.
+  async function remotesOf(checkout) {
+    const said = await git(['-C', checkout, 'config', '--get-regexp', '^remote\\..*\\.url$'], { timeout: 10000 }).catch(() => '');
+    return said.split('\n').filter(Boolean).map((line) => [line.slice('remote.'.length, line.indexOf(' ') - '.url'.length), line.slice(line.indexOf(' ') + 1).trim()]);
   }
 
   async function sync(pool, checkout) {
     const target = pathOf(pool);
-    const url = await remoteUrl(pool, checkout);
+    const { url, guessed } = fetchUrl(pool, await remotesOf(checkout));
+    const told = (e) => (guessed ? `${e.message} - ${checkout} has no remote on ${pool.host}, so ${pool.id} was asked for over https` : e.message);
     if (!exists(target)) {
       const tmp = `${target}.tmp.${process.pid}`;
       fs.rmSync(tmp, { recursive: true, force: true });
@@ -73,7 +99,7 @@ export function createMirrors({ log = () => {}, dir = MIRRORS_DIR } = {}) {
         fs.renameSync(tmp, target);
       } catch (e) {
         fs.rmSync(tmp, { recursive: true, force: true });
-        throw e;
+        throw new Error(told(e));
       }
       log('mirror', `created ${target} from ${remoteSlug(url)}`);
       return { path: target, refreshed: true, error: '' };
@@ -82,8 +108,8 @@ export function createMirrors({ log = () => {}, dir = MIRRORS_DIR } = {}) {
       await git(['-C', target, 'remote', 'set-url', 'origin', url], { timeout: 10000 });
       await git(['-C', target, 'remote', 'update', '--prune']);
     } catch (e) {
-      log('mirror', `refresh of ${pool.id} failed, serving it as it was: ${e.message}`);
-      return { path: target, refreshed: false, error: e.message };
+      log('mirror', `refresh of ${pool.id} failed, serving it as it was: ${told(e)}`);
+      return { path: target, refreshed: false, error: told(e) };
     }
     // Objects are collected only while no job reads the mirror: an upload-pack in
     // flight must never have a pack removed from under it.
@@ -95,7 +121,7 @@ export function createMirrors({ log = () => {}, dir = MIRRORS_DIR } = {}) {
 
   function ensureMirror({ pool, checkout }) {
     const target = pathOf(pool);
-    const run = (queues.get(target) || Promise.resolve()).then(() => sync(pool, checkout));
+    const run = (queues.get(target) || Promise.resolve()).then(() => own(sync(pool, checkout)));
     queues.set(target, run.catch(() => {}));
     return run;
   }
