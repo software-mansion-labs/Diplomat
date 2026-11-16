@@ -21,13 +21,14 @@ import { createLog } from '../../daemon-core/src/log.js';
 import { NO_ROUTE, jsonServer, listenSingleton, socketHealthy } from '../../daemon-core/src/serve.js';
 import { b64u } from './core/canon.js';
 import { identityFromSeed } from './core/identity.js';
-import { adbAnswers, createAdbFilter } from './executor/adb.js';
+import { adbDevices, createAdbFilter } from './executor/adb.js';
 import { createBroker } from './executor/broker.js';
 import { createCA } from './executor/ca.js';
 import { createContainers } from './executor/container.js';
 import { attachJob, forgetRuns, readOutcome, startJob, stopJob, unended, watch } from './executor/job.js';
 import { createLLM } from './executor/llm.js';
 import { createMirrors } from './executor/mirror.js';
+import { createWeighing } from './executor/weigh.js';
 import { createNode } from './node/node.js';
 import { createStore } from './node/store.js';
 import { authorize } from './requester/authorize.js';
@@ -230,18 +231,20 @@ function poolOf(link) {
 
 // The adb server as jobs reach it: through the filter, never at its own address.
 const adb = createAdbFilter({ target: ADB_SERVER, log });
-let adbUp = false;
+// The devices the adb server lists as ready while jobs are given this machine's
+// devices; null while they are not, or no adb server answers.
+let attached = null;
 
 async function lookForAdb() {
-  adbUp = devicesOn && await adbAnswers(ADB_SERVER);
-  return adbUp;
+  attached = devicesOn ? await adbDevices(ADB_SERVER) : null;
+  return attached !== null;
 }
 
 // The snapshot's `devices`: `off` until the operator opts in, then `ready` while an adb
 // server answers and `none` while none does.
 function devicesState() {
   if (!devicesOn) return { state: 'off', detail: '' };
-  if (adbUp) return { state: 'ready', detail: '' };
+  if (attached !== null) return { state: 'ready', detail: '' };
   return { state: 'none', detail: ADB_SERVER ? `no adb server answers at ${ADB_SERVER.host}:${ADB_SERVER.port}` : 'DN_ADB_SERVER names no address on this machine' };
 }
 
@@ -348,6 +351,8 @@ const executor = {
   // Only what can run right now is claimed: a claim this machine cannot serve keeps the
   // task from every machine that could.
   wouldTake: () => !ending && containers.dockerState().state === 'ready' && llm.state().state === 'ready',
+  // A task on an Android project is left a while to a machine with a device to give.
+  weigh: createWeighing({ checkoutOf: (pool) => links.get(pool)?.path ?? null, hasDevice: () => (attached?.length ?? 0) > 0 }),
   start: startRun,
   stop: stopRun,
   alive: (runId) => (jobs.has(runId) ? true : takenUp ? false : null),

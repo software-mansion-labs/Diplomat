@@ -338,6 +338,40 @@ try {
     await own.close();
   });
 
+  await check('a task on an Android project is taken by the machine that has a device to give while the ones with none hold back, and by one of those once it is alone', async () => {
+    const bare = await fakeAdb({ devices: '' });
+    const waits = { DN_DEVICE_WAIT_MS: '15000' };
+    // Who asks; who gives jobs no device; who gives them an adb server with nothing attached; who has an emulator.
+    const all = [bench.machine('w0'), bench.machine('w1', { env: waits }), bench.machine('w2', { env: { ...waits, DN_ADB_SERVER: `127.0.0.1:${bare.port}` } }),
+      bench.machine('w3', { env: { ...waits, DN_ADB_SERVER: `127.0.0.1:${adb.port}` } })];
+    const [asks, off, empty, has] = all;
+    for (const m of all) fs.mkdirSync(path.join(m.checkout, 'android'));
+    for (const m of [empty, has]) m.setConfig({ networkDevices: true });
+    await Promise.all(all.map((m) => m.start()));
+    await Promise.all(all.map((m) => m.linked()));
+    const joined = await asks.ok('/invite', { pool: POOL });
+    await Promise.all(all.slice(1).map((m) => m.ok('/join', { invite: joined.invite })));
+    await until('four members everywhere', async () => (await Promise.all(all.map((m) => m.state()))).every((s) => s.pools[0].members.length === 4));
+    await until('the adb servers found', async () => (await Promise.all([empty, has].map((m) => m.state()))).every((s) => s.devices.state === 'ready'));
+    for (const m of [off, empty, has]) await m.admit(1);
+
+    for (const item of ['issue-1', 'issue-2', 'issue-3', 'issue-4']) {
+      const { taskId } = await asks.ok('/offer', { pool: POOL, kind: 'issues', item, title: 'Fix the crash on start', prompt: 'say fixed' });
+      assert.equal((await ended(asks, taskId)).state, 'done');
+      assert.deepEqual(await Promise.all([off, empty, has].map(async (m) => (await runOf(m, taskId))?.state ?? null)), [null, null, 'finished'], `${item} ran where the device is`);
+      await until('the machine with the device free again', async () => (await has.state()).runs.every((r) => r.endedAt > 0));
+    }
+    // Nobody better placed: the task is taken after the wait, not refused.
+    assert.deepEqual(await has.stop(), { code: 0, signal: null });
+    const from = Date.now();
+    const { taskId } = await asks.ok('/offer', { pool: POOL, kind: 'issues', item: 'issue-5', title: 'Fix the crash on start', prompt: 'say fixed' });
+    assert.equal((await ended(asks, taskId)).state, 'done');
+    assert.ok(Date.now() - from >= 15000, `taken ${Date.now() - from} ms after it was offered`);
+    assert.equal((await Promise.all([off, empty].map((m) => runOf(m, taskId)))).filter((run) => run?.state === 'finished').length, 1);
+    await Promise.all([asks, off, empty].map((m) => m.kill()));
+    await bare.close();
+  });
+
   console.log(`\nall ${passed()} checks passed (${REPO})`);
 } finally {
   allocator.close();

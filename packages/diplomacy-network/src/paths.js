@@ -235,6 +235,10 @@ export const TRANSPORT_RETRY_MAX_MS = num('DN_TRANSPORT_RETRY_MAX_MS', 5 * 60 * 
 /// switched off first tells its pools, which SWITCH_OFF_WAIT_MS bounds.
 export const STOP_WAIT_MS = num('DN_STOP_WAIT_MS', SWITCH_OFF_WAIT_MS + 30 * 1000);
 
+// How long a machine with no device to give holds back from a task on an Android
+// project, so that a machine with a device gets to it first.
+export const DEVICE_WAIT_MS = num('DN_DEVICE_WAIT_MS', 30 * 1000);
+
 // `host:port` on this machine's loopback as `{ host, port }`, or null.
 function loopback(value) {
   const m = /^(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})$/.exec(String(value ?? ''));

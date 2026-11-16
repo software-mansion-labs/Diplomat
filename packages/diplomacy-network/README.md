@@ -55,6 +55,7 @@ src/
     container.js   image, one container per peer and repository, its network and relay
     job.js         one run: prompt, start, watch, stop, outcome, and what is kept of it
     adb.js         the filter between a job and this machine's adb server
+    weigh.js       how long this machine holds back from a task, by what it has
     forward.mjs    inside a container: a job's forwards as local addresses
     runner.sh      inside a container: one job's environment, clone and agent
     stop.sh        handed to a container's sh: asks after one job's processes, ends them
@@ -130,7 +131,8 @@ broker on the host and never present in a container. The first of these that exi
 used: `networkModelToken`, an API key or subscriber token kept for the network alone (on
 macOS the Keychain item with service `Diplomat-networkModelToken` under the user's
 account, elsewhere the file `~/.diplomat/network-model-token`); the Claude Code login;
-`ANTHROPIC_API_KEY` in the daemon's environment.
+`ANTHROPIC_API_KEY` in the daemon's environment. A Keychain item `security` has not
+answered for within 30 s (`DN_KEYCHAIN_TIMEOUT_MS`) counts as not there.
 
 ## Local socket
 
@@ -457,7 +459,23 @@ server dialling out from this machine), `host:forward`, `killforward` and `list-
 request not listed here, and behind a device switch `reverse:` (a device's way to this
 machine's ports) and every `host` request. So a job names its device (`adb -s <serial>`
 or `ANDROID_SERIAL`), and an adb client of another version than the server's fails
-rather than replacing the server.
+rather than replacing the server: it asks the server's version, says the two differ,
+asks to stop the server (`host:kill`), and is told in the refusal that this machine's
+server is not replaced and that an adb of the server's version is what works. The
+image's adb is Debian bookworm's `adb` package, which speaks version 41 of adb's
+protocol (`adb version` prints 1.0.41), as every adb released since 2019 does; keep the
+host's adb at one of those.
+
+**Which machine takes Android work.** No machine tells another what devices it has, and
+a task is not told either. Each machine weighs a task by itself before it goes for it
+(`executor/weigh.js`): when the pool's linked checkout looks like Android work - an
+`android/` directory, an `app/src/main/AndroidManifest.xml`, or a `build.gradle`,
+`build.gradle.kts`, `settings.gradle` or `settings.gradle.kts` at its root - a machine
+with no device to give a job (`networkDevices` off, or on with no device its adb server
+lists as ready) waits 30 s (`DN_DEVICE_WAIT_MS`) longer before it goes for the task, so
+a machine with a device gets there first. A checkout is looked at once and again an
+hour later. Nothing is refused on this ground: a task no machine with a device took
+runs on one without.
 
 Anything else on the host - the device allocator, a tool-server - is forwarded only
 when the daemon's environment names it and `networkDevices` is on: `DN_FORWARDS` is a
@@ -468,8 +486,8 @@ local process can.
 
 A forward is a name that only its own job's proxy token opens; `executor/forward.mjs`,
 started with the job inside the container, turns it into the local address a tool
-expects, and it ends with the job. What a machine has is never published; it only
-weighs it when deciding whether to take a task.
+expects, and it ends with the job. What a machine has is never published; the one use
+it makes of it is that wait before going for a task.
 
 ## Tests
 

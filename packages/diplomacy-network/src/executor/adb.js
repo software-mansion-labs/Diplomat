@@ -21,6 +21,10 @@ const QUERY = new RegExp(`^(?:host:(?:version|devices|devices-l|features|host-fe
 const DEVICE = new RegExp(`^host:(?:transport|tport:serial):${SERIAL}$`);
 const NOT_THE_DEVICES = /^(?:host[-:]|reverse:)/;
 
+// An adb client whose version is not the server's opens with a request to stop the
+// server, to start one of its own in its place.
+const KILL_WHY = ' (adb asks for this when its version is not the server\'s: this machine\'s adb server is not replaced, so use an adb of the server\'s version)';
+
 const frame = (text) => `${Buffer.byteLength(text, 'latin1').toString(16).padStart(4, '0')}${text}`;
 
 /// What a connection's first request is to the filter: `query` (answered by the server,
@@ -30,22 +34,29 @@ export function adbRequest(service) {
   return QUERY.test(service) ? 'query' : DEVICE.test(service) ? 'device' : null;
 }
 
-/// Does an adb server answer at `target` (`{ host, port }`)? Asked in adb's own words:
+/// The serials of the devices the adb server at `target` (`{ host, port }`) lists as
+/// ready for use, or null when no adb server answers there. Asked in adb's own words:
 /// some other listener on that port is nothing to hand a job.
-export function adbAnswers(target) {
+export function adbDevices(target) {
   return new Promise((resolve) => {
-    if (!target) return resolve(false);
+    if (!target) return resolve(null);
     const socket = net.connect(target);
     let said = '';
     const done = (answer) => { socket.destroy(); resolve(answer); };
-    socket.setTimeout(2000, () => done(false));
-    socket.on('error', () => done(false));
-    socket.on('connect', () => socket.write(frame('host:version')));
+    socket.setTimeout(2000, () => done(null));
+    socket.on('error', () => done(null));
+    socket.on('connect', () => socket.write(frame('host:devices')));
     socket.on('data', (chunk) => {
       said += chunk.toString('latin1');
-      if (said.length >= 4) done(said.startsWith('OKAY'));
+      if (said.length < 8 && 'OKAY'.startsWith(said.slice(0, 4))) return undefined;
+      const size = /^OKAY[0-9A-Fa-f]{4}/.test(said) ? parseInt(said.slice(4, 8), 16) : NaN;
+      if (Number.isNaN(size)) return done(null);
+      if (said.length < 8 + size) return undefined;
+      // One device a line: its serial, a tab, its state.
+      const lines = said.slice(8, 8 + size).split('\n').map((line) => line.split('\t'));
+      return done(lines.filter(([, state]) => state === 'device').map(([serial]) => serial));
     });
-    socket.on('close', () => resolve(false));
+    socket.on('close', () => resolve(null));
     return undefined;
   });
 }
@@ -74,7 +85,7 @@ function serve(client, target, log) {
     const what = service === false ? 'a request that is not in adb\'s framing' : service.slice(0, 60).replace(/[^\x20-\x7e]/g, '?');
     log('adb', `refused a job: ${what}`);
     client.off('data', read);
-    client.end(`FAIL${frame(`not offered to a task on this machine: ${what}`)}`);
+    client.end(`FAIL${frame(`not offered to a task on this machine: ${what}${service === 'host:kill' && stage === 'first' ? KILL_WHY : ''}`)}`);
     // A client that never closes its side is not waited for.
     client.setTimeout(5000, () => client.destroy());
     server?.destroy();

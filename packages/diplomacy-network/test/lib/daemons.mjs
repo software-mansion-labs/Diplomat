@@ -65,7 +65,7 @@ export const passed = () => checks;
 /// device for `host:transport:` and `host:tport:serial:` and answers the request that
 /// follows with `ran <request>`, and fails anything else. `asked` is every request it
 /// was sent. `{ port, asked, close() }`.
-export async function fakeAdb({ version = 41 } = {}) {
+export async function fakeAdb({ version = 41, devices = 'emulator-5554\tdevice\n' } = {}) {
   const asked = [];
   const frame = (text) => `${text.length.toString(16).padStart(4, '0')}${text}`;
   const server = net.createServer((socket) => {
@@ -82,7 +82,7 @@ export async function fakeAdb({ version = 41 } = {}) {
         if (/^host:transport:/.test(service)) { onDevice = true; socket.write('OKAY'); continue; }
         if (/^host:tport:serial:/.test(service)) { onDevice = true; socket.write('OKAY\x01\0\0\0\0\0\0\0'); continue; }
         const payload = {
-          'host:version': version.toString(16).padStart(4, '0'), 'host:devices': 'emulator-5554\tdevice\n',
+          'host:version': version.toString(16).padStart(4, '0'), 'host:devices': devices,
           'host:devices-l': 'emulator-5554          device product:sdk transport_id:1\n', 'host:features': 'shell_v2,cmd',
           'host:host-features': 'shell_v2,cmd', 'host-serial:emulator-5554:get-state': 'device',
         }[service];
