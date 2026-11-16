@@ -121,7 +121,8 @@ export const NO_ROUTE = Symbol('no route');
 
 /// Reads a JSON request body (capped at 1 MB) and answers with handle(route, body)'s
 /// result, or the statusCode/message of what it throws. `route` is "METHOD /path".
-export function jsonServer(handle) {
+/// `notJson` is the error a body that does not parse is answered with.
+export function jsonServer(handle, { notJson = 'invalid json' } = {}) {
   return http.createServer((req, res) => {
     const send = (code, obj) => {
       res.writeHead(code, { 'content-type': 'application/json' });
@@ -137,7 +138,7 @@ export function jsonServer(handle) {
     });
     req.on('end', async () => {
       let p = {};
-      try { p = body ? JSON.parse(body) : {}; } catch { return send(400, { error: 'invalid json' }); }
+      try { p = body ? JSON.parse(body) : {}; } catch { return send(400, { error: notJson }); }
       try {
         const result = await handle(`${req.method} ${req.url}`, p);
         if (result === NO_ROUTE) return send(404, { error: `unknown route ${req.url}` });
