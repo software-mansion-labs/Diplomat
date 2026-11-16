@@ -171,8 +171,9 @@ export async function startFakeForge() {
       base: { ref: p.base || 'main', repo: { full_name: repoName } },
     };
   };
+  // A repository is kept under its name in lower case, however a request spells it.
   const revParse = (repoName, ref) => {
-    try { return git(path.join(gitRoot, `${repoName}.git`), 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`); } catch { return null; }
+    try { return git(path.join(gitRoot, `${repoName.toLowerCase()}.git`),'rev-parse', '--verify', '--quiet', `${ref}^{commit}`); } catch { return null; }
   };
 
   function githubRest(method, url) {
