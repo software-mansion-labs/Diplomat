@@ -1,18 +1,14 @@
 // The bare mirror a container clones from. A job's `git clone https://<forge>/<o>/<r>.git`
-// never reaches the forge: the broker answers it from MIRRORS_DIR/<pool hash>.git, which
+// never reaches the forge: the broker answers it from MIRRORS_DIR/<pool part>.git, which
 // this machine keeps current with its own git credentials. That is the only place those
-// credentials are used, and it is on the host.
+// credentials are used, and it is on the host. The pool part is the 128 bits a
+// container's name carries for the pool: no two repositories share a mirror.
 
-import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 import { GIT_BIN, MIRRORS_DIR, MIRROR_TIMEOUT_MS } from '../paths.js';
-
-/// The sixteen hex digits a pool's mirror is named by.
-export function poolHash(id) {
-  return crypto.createHash('sha256').update(id).digest('hex').slice(0, 16);
-}
+import { namePart } from './container.js';
 
 /// `host/owner/repo` in lowercase for any spelling of a remote URL, or null.
 export function remoteSlug(url) {
@@ -40,12 +36,13 @@ function git(args, { cwd, timeout = MIRROR_TIMEOUT_MS } = {}) {
 /// that cannot be created rejects. `path(pool)` is the mirror if there is one.
 /// `retain(pool)` marks a job as reading the mirror and returns the function that ends it.
 /// `sweep(pools, keepMs)` is told the pools whose mirrors are wanted now, and removes
-/// every other mirror that has not been wanted for `keepMs` and that no job reads.
+/// every other mirror that has not been wanted for `keepMs` and that no job reads; it
+/// resolves once they are gone.
 export function createMirrors({ log = () => {}, dir = MIRRORS_DIR } = {}) {
   const queues = new Map(); // mirror path -> the last operation on it
   const readers = new Map(); // mirror path -> jobs reading it
 
-  const pathOf = (pool) => path.join(dir, `${poolHash(pool.id)}.git`);
+  const pathOf = (pool) => path.join(dir, `${namePart(pool.id)}.git`);
   const exists = (p) => fs.existsSync(path.join(p, 'HEAD'));
 
   // The checkout's remote for the pool's repository: `upstream` in a fork's checkout,
@@ -122,20 +119,24 @@ export function createMirrors({ log = () => {}, dir = MIRRORS_DIR } = {}) {
     }
     let names = [];
     try { names = fs.readdirSync(dir); } catch {}
+    const turns = [];
     for (const name of names) {
       const target = path.join(dir, name);
       let last = now;
       try { last = fs.statSync(target).mtimeMs; } catch {}
-      // What an interrupted clone left is as stale as a mirror nobody wants.
-      if (!/^[0-9a-f]{16}\.git(\.tmp\.\d+)?$/.test(name) || now - last < keepMs) continue;
+      // What an interrupted clone left is as stale as a mirror nobody wants. So is a
+      // mirror named by sixteen hex digits, which an earlier version made: nothing reads it.
+      if (!/^([0-9a-z]{25}|[0-9a-f]{16})\.git(\.tmp\.\d+)?$/.test(name) || now - last < keepMs) continue;
       // In the mirror's own turn: never from under a refresh, nor a job that came since.
       const turn = (queues.get(target) || Promise.resolve()).then(() => {
         if (readers.get(target)) return;
         fs.rmSync(target, { recursive: true, force: true });
-        log('mirror', `removed ${target}: its pool was not linked for ${Math.round(keepMs / 3600000)} h`);
+        log('mirror', `removed ${target}: no linked pool's mirror for ${Math.round(keepMs / 3600000)} h`);
       });
       queues.set(target, turn.catch(() => {}));
+      turns.push(queues.get(target));
     }
+    return Promise.all(turns);
   }
 
   return { ensureMirror, retain, sweep, path: (pool) => (exists(pathOf(pool)) ? pathOf(pool) : null) };

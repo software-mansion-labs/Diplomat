@@ -300,7 +300,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
   // that does not answer says nothing of the kind.
   async function absent(name) {
     const r = await docker(['container', 'inspect', '--format', '{{.Id}}', name]);
-    return r.code !== 0 && /no such (container|object)/i.test(r.stderr);
+    return /no such container/i.test(r.stderr);
   }
 
   // The container's network and the relay on it, made if missing and made again if the
@@ -410,7 +410,6 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
         }
         const left = await remove(name, there);
         if (left.length > 0) throw new Error(`what earlier jobs left under ${name} could not be removed (${left.join(', ')}), and no job is started beside it`);
-        known.delete(name);
         await ensureWayOut(name, tag, pool, peer);
         await create(name, tag, pool, peer);
         entry = { name, image: tag, jobs: new Set(), cut: false };
@@ -538,7 +537,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     const found = await inspect(name, { size: true });
     if (found && (!mine(found.labels) || !Number.isFinite(found.layerBytes))) return null;
     const mounts = [];
-    if (found && mine(await volumeLabels(volumeOf(name)))) mounts.push([volumeOf(name), '/v']);
+    if (mine(await volumeLabels(volumeOf(name)))) mounts.push([volumeOf(name), '/v']);
     if (await fs.promises.access(runsDirOf(name)).then(() => true, () => false)) mounts.push([runsDirOf(name), '/r']);
     if (mounts.length === 0) return found ? found.layerBytes : null;
     // The records of a container that is gone are measured from the image jobs are started in.

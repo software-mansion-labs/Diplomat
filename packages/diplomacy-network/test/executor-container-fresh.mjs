@@ -86,6 +86,7 @@ try {
     assert.deepEqual(containers.list().map((c) => c.jobs), [['two']]);
     await containers.release({ name, runId: 'two' });
     assert.equal(there('containers', `${name}.json`), false);
+    assert.equal(logged.at(-1), `docker removed ${name} with its last job`);
   });
 
   await check('a volume left under a pair\'s name with no container is not handed to that pair\'s next job', async () => {
@@ -123,6 +124,19 @@ try {
     await containers.release({ name, runId: 'three' });
   });
 
+  await check('a container the engine would not remove when its last job left goes at the first sweep that can remove it, with no idle time waited: it is not one an earlier daemon left', async () => {
+    const p = pool(6);
+    const name = containerName(p.id, PEER);
+    await containers.acquire({ pool: p, peer: PEER, runId: 'one' });
+    stage(`fail-rm-${name}`, 'Error response from daemon: removal of container is already in progress\n'.repeat(2));
+    await containers.release({ name, runId: 'one' });
+    assert.equal(logged.at(-1), `docker ${name} has no job left in it and is still there: the engine would not remove the container ${name}, the network ${name}`);
+    await containers.sweep();
+    assert.deepEqual([there('containers', `${name}.json`), containers.list().map((c) => c.name)], [true, [name]], 'refused again, and still this daemon\'s to remove');
+    await containers.sweep();
+    assert.deepEqual([there('containers', `${name}.json`), there('networks', `${name}.json`), containers.list()], [false, false, []]);
+  });
+
   await check('a container lost from under its jobs is left to their release: a sweep takes nothing of it while one is counted, and the last to leave takes what is left', async () => {
     const p = pool(5);
     const name = containerName(p.id, PEER);
@@ -150,7 +164,10 @@ try {
       fs.writeFileSync(at + '/hold-volume-rm', '');
       const asked = () => fs.readFileSync(at + '/calls.jsonl', 'utf8').includes('["volume","rm"');
       const leaving = c.release({ name: held.name, runId: 'r' });
-      while (!asked()) await new Promise((r) => setTimeout(r, 20));
+      for (const end = Date.now() + 60000; !asked();) {
+        if (Date.now() > end) throw new Error('never: the engine asked to remove the volume');
+        await new Promise((r) => setTimeout(r, 20));
+      }
       const from = Date.now();
       await leaving;
       console.log(JSON.stringify({ ms: Date.now() - from, said: said.at(-1), jobs: c.list().map((e) => e.jobs) }));`],
