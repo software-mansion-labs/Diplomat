@@ -115,8 +115,10 @@ export async function startFakeForge() {
     nodes: { U_me: viewer },
     // "owner/name" -> { id, pulls: { number: {...} }, issues: { number: {...} } }, and what
     // a test sets of a repository's settings: defaultBranch, protected (branch names),
-    // ciConfigPath (GitLab), parent (the repository it is a fork of; null for none) and
-    // spelled (its name in the forge's own letter case).
+    // ciConfigPath (GitLab), parent (the repository it is a fork of; null for none),
+    // spelled (its name in the forge's own letter case) and runs, its CI runs by id:
+    // { branch, jobs: [ids], repo (GitHub: the repository the branch is in, when another),
+    // tag: true or pull: number (GitLab: a tag's pipeline, a merge request's) }.
     repos: {},
     // REST review comment id -> node id
     comments: {},
@@ -171,6 +173,8 @@ export async function startFakeForge() {
       base: { ref: p.base || 'main', repo: { full_name: repoName } },
     };
   };
+  // A CI run by its id ("runs", "pipelines") or by the id of one of its jobs: [its id, the run].
+  const runOf = (repo, what, id) => Object.entries(repo.runs || {}).map(([n, run]) => [Number(n), run]).find(([n, run]) => (what === 'jobs' ? (run.jobs || []).includes(id) : n === id));
   // A repository is kept under its name in lower case, however a request spells it.
   const revParse = (repoName, ref) => {
     try { return git(path.join(gitRoot, `${repoName.toLowerCase()}.git`),'rev-parse', '--verify', '--quiet', `${ref}^{commit}`); } catch { return null; }
@@ -225,6 +229,14 @@ export async function startFakeForge() {
     }
     if (method === 'GET' && (x = /^\/pulls\/comments\/(\d+)$/.exec(rest))) {
       return data.comments[x[1]] ? { status: 200, json: { id: Number(x[1]), node_id: data.comments[x[1]] } } : { status: 404, json: { message: 'Not Found' } };
+    }
+    if (method === 'GET' && (x = /^\/actions\/(runs|jobs)\/(\d+)(\/logs)?$/.exec(rest))) {
+      const [id, run] = runOf(repo, x[1], Number(x[2])) || [];
+      if (!run) return { status: 404, json: { message: 'Not Found' } };
+      // A log is kept elsewhere: GitHub answers with where, for a minute.
+      if (x[3]) return { status: 302, json: null, headers: { location: `https://results.example/${x[1]}/${x[2]}/logs?sig=once` } };
+      if (x[1] === 'jobs') return { status: 200, json: { id: Number(x[2]), run_id: id, head_branch: run.branch, status: 'completed' } };
+      return { status: 200, json: { id, head_branch: run.branch, head_repository: { full_name: run.repo || repo.spelled || m[1] }, event: 'push', status: 'completed' } };
     }
     if (method === 'GET') return { status: 200, json: { path: pathname, ok: true }, headers: { link: '<https://api.github.com/next>; rel="next"', etag: '"abc"', 'x-ratelimit-remaining': '4999', 'x-github-request-id': 'REQ1', 'set-cookie': 'session=forge', 'www-authenticate': 'Basic realm="x"' } };
     return { status: method === 'DELETE' ? 204 : 201, json: method === 'DELETE' ? null : { id: 1, node_id: 'PRR_1', state: 'PENDING', html_url: 'https://github.com/o/r/pull/9', number: 9 } };
@@ -288,6 +300,16 @@ export async function startFakeForge() {
         const text = git(path.join(gitRoot, `${repoName.toLowerCase()}.git`), 'show', `refs/heads/${ref}:${file}`);
         return { status: 200, json: { file_path: file, ref, encoding: 'base64', content: Buffer.from(text).toString('base64') } };
       } catch { return { status: 404, json: { message: '404 File Not Found' } }; }
+    }
+    if (method === 'GET' && (x = /^\/(pipelines|jobs)\/(\d+)$/.exec(rest))) {
+      const [id, run] = runOf(repo, x[1], Number(x[2])) || [];
+      if (!run) return { status: 404, json: { message: '404 Not found' } };
+      // A merge request's pipeline runs for the ref GitLab keeps of the merge request.
+      const said = { ref: run.pull ? `refs/merge-requests/${run.pull}/head` : run.branch, tag: run.tag === true, status: 'success' };
+      return { status: 200, json: x[1] === 'jobs' ? { id: Number(x[2]), ...said, pipeline: { id, ...said } } : { id, ...said, source: run.pull ? 'merge_request_event' : 'push' } };
+    }
+    if (method === 'GET' && (x = /^\/jobs\/(\d+)\/trace$/.exec(rest))) {
+      return runOf(repo, 'jobs', Number(x[1])) ? { status: 200, text: `log of job ${x[1]}\n` } : { status: 404, json: { message: '404 Not found' } };
     }
     return { status: method === 'POST' ? 201 : 200, json: { path: pathname, ok: true, id: 1, iid: 5 } };
   }
@@ -359,8 +381,8 @@ export async function startFakeForge() {
       } catch (err) {
         answer = { status: 500, json: { message: String(err.message) } };
       }
-      res.writeHead(answer.status, { 'content-type': 'application/json; charset=utf-8', ...(answer.headers || {}) });
-      res.end(answer.json === null ? '' : JSON.stringify(answer.json));
+      res.writeHead(answer.status, { 'content-type': answer.text === undefined ? 'application/json; charset=utf-8' : 'text/plain', ...(answer.headers || {}) });
+      res.end(answer.text ?? (answer.json === null ? '' : JSON.stringify(answer.json)));
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

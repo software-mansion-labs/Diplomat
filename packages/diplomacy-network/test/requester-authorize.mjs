@@ -202,18 +202,24 @@ await check('a name GitLab takes as one segment may hold an encoded slash or dot
     rule('GET', `${P}/merge_requests/**`),
     rule('GET', `${P}/repository/**`),
     rule('GET', `${P}/pipelines/*`),
+    rule('GET', `${P}/issues/*/notes/*`),
     rule('GET', `${P}/issues/*`),
     rule('GET', `${P}/issues/*/links`, { deny: 'elsewhere' }),
+    rule('GET', `${P}/issues/*/notes`, { pull: { segment: 5, author: 'me' } }),
+    rule('GET', `${P}/issues/*/participants`, { pick: ['id'] }),
+    rule('GET', `${P}/issues/*/trace`, { run: { segment: 5, what: 'job', repo: 'group/sub/proj' } }),
     rule('PUT', `${P}/repository/**`),
     rule('GET', '/api/v4/projects/group%2Fmy.proj/issues/*'),
     rule('DELETE', '/api/v4/projects/group%2Fmy.proj/issues/*'),
     rule('GET', '/api/v4/groups/**', { fold: [] }),
   ];
   const gl = (path, method = 'GET') => req(method, path, { host: 'gitlab.example.com' });
-  // Sent as it came, and decided by the rule the path names as GitLab's router reads it.
+  // Sent as it came, and decided by the rule the path names as GitLab's router reads it:
+  // the path it would be with the slash decoded is that rule's too, or another's, before
+  // it or after, that asks nothing more of a request.
   for (const [path, index] of [['/repository/files/src%2Fmain.js', 4], ['/repository/files/src%2fmain%2Ejs/raw?ref=feature%2Flogin', 4], ['/repository/files/README%2Emd?ref=main', 4],
     ['/repository/files/%2Egithub%2Fworkflows%2Fci.yml/raw', 4], ['/repository/branches/feature%2Flogin', 2], ['/repository/branches/release%2F1%2e0', 2], ['/repository/branches/main.json', 2],
-    ['/repository/commits/feature%2Flogin/diff', 4], ['/repository/tags/release%2F1.0', 4], ['/repository/compare%2Fx', 4], ['/issues/5', 6]]) {
+    ['/repository/commits/feature%2Flogin/diff', 4], ['/repository/tags/release%2F1.0', 4], ['/repository/compare%2Fx', 4], ['/issues/5', 7], ['/issues/5%2Fnotes%2F7', 7]]) {
     const verdict = await allowed(gl(`${P}${path}`), rules);
     assert.equal(verdict.rule, rules[index], path);
     assert.equal(verdict.request.path, `${P}${path}`);
@@ -231,11 +237,11 @@ await check('a name GitLab takes as one segment may hold an encoded slash or dot
   for (const name of ['a%2F%2Fb', '%2Fa', 'a%2F', '%2f']) await refused(gl(`${P}/repository/files/${name}`), /empty segment/, rules);
 
   // An encoded slash is no separator to GitLab, and the request is refused where it would
-  // be one to a proxy in front: the route that makes is an earlier rule's, a refused one's
-  // or no rule's.
+  // be one to a proxy in front: the route that makes is no rule's, or that of a rule which
+  // refuses, pins, cuts the answer or asks the forge.
   const cut = /with its encoded slash read as a separator/;
   for (const tail of ['/merge_requests/5%2Fmerge_ref', '/merge_requests/5%2fmerge_ref', '/merge_requests/5%2FMerge_Ref.json', '/repository/branches%2Fmain', '/merge_requests/5%2E0%2Fmerge_ref%2Ejson',
-    '/pipelines/7%2Fvariables', '/issues/5%2Flinks', '/issues/5%2Flinks%2Ejson']) await refused(gl(`${P}${tail}`), cut, rules);
+    '/pipelines/7%2Fvariables', '/issues/5%2Flinks', '/issues/5%2Flinks%2Ejson', '/issues/578%2Fnotes', '/issues/5%2Fparticipants', '/issues/5%2Ftrace']) await refused(gl(`${P}${tail}`), cut, rules);
   // It stands for no "/" of a rule's own path either.
   for (const tail of ['/repository%2Fcompare?from=a', '/merge_requests%2F5', '/repository%2Ffiles%2Fx']) await refused(gl(`${P}${tail}`), /no rule/, rules);
   await refused(gl('/api/v4/projects/group%2Fsub%2Fproj%2Fissues/5'), /no rule/, rules);

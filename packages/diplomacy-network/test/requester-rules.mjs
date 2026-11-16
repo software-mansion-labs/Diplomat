@@ -32,19 +32,20 @@ async function refused(rules, request, ctx = world(), pattern = /./) {
   assert.match(verdict.reason, pattern, label(request));
 }
 
-// What every kind reads: gh's own queries and the REST reads the prompts ask for.
+// What every kind reads: gh's own queries, the repository's code, and what every pull
+// request and issue of it says.
 const READS = [
   ...['prViewAuthor', 'prViewDefault', 'prProjectItems', 'prViewReviews', 'prViewMergeable', 'typeFields', 'prChecks', 'prList', 'prSearch', 'prStatus',
     'issueView', 'issueList', 'userCurrent', 'repositoryInfo', 'repoView'].map((name) => ghql(GH[name])),
   gh('GET', '/repos/o/r/readme'), // gh repo view
   { ...gh('GET', '/repos/o/r/pulls/578'), headers: { ...gh('GET', '/x').headers, accept: 'application/vnd.github.v3.diff' } }, // gh pr diff 578
   gh('GET', '/repos/o/r/pulls/578/comments'),
-  gh('GET', '/repos/o/r/pulls/578/reviews'),
-  gh('GET', '/repos/o/r/pulls/578/files?per_page=100'),
-  gh('GET', '/repos/o/r/issues/421/comments'),
-  gh('GET', '/repos/o/r/actions/runs?exclude_pull_requests=true&per_page=2'), // gh run list
-  gh('GET', '/repos/o/r/actions/workflows?page=1&per_page=100'),
-  gh('GET', '/repos/o/r/actions/jobs/7/logs'),
+  gh('GET', '/repos/o/r/pulls/578/reviews'), gh('GET', '/repos/o/r/pulls/578/reviews/3/comments'), gh('GET', '/repos/o/r/pulls/comments/12'),
+  gh('GET', '/repos/o/r/pulls?state=all'), gh('GET', '/repos/o/r/pulls/579'), gh('GET', '/repos/o/r/issues?state=open'), gh('GET', '/repos/o/r/issues/421'),
+  gh('GET', '/repos/o/r/issues/421/comments'), gh('GET', '/repos/o/r/issues/422/comments'), gh('GET', '/repos/o/r/issues/comments/9'),
+  gh('GET', '/repos/o/r/git/trees/main?recursive=1'), gh('GET', '/repos/o/r/git/ref/heads/main'), gh('GET', '/repos/o/r/commits?sha=main'), gh('GET', '/repos/o/r/commits/abc123'),
+  gh('GET', '/repos/o/r/commits/abc123/status'), gh('GET', '/repos/o/r/check-runs/5/annotations'), gh('GET', '/repos/o/r/check-suites/5/check-runs'), gh('GET', '/repos/o/r/tags'),
+  gh('GET', '/repos/o/r/license'),
   gh('GET', '/search/issues?advanced_search=true&page=1&per_page=2&q=%28+fix+%29+repo%3Ao%2Fr+type%3Apr'), // gh search prs --repo o/r fix
   gh('GET', '/repos/o/r/contents/src/a.js?ref=main'),
   gh('GET', '/repos/o/r/commits/abc123/check-runs'),
@@ -165,6 +166,75 @@ await check('every kind reads what the real tools read, in the pool\'s repositor
   }
   await refused(github('investigate'), gh('GET', '/repos/o/r/issues/421/timeline'), world(), /holds issues and pull requests of other repositories/);
   await refused(github('investigate'), gh('GET', '/repos/o/r/compare/main...victim:main'), world(), /names another repository/);
+});
+
+// The rest of an item, for the task whose item it is.
+const pullInFull = (n) => [`pulls/${n}/files?per_page=100`, `pulls/${n}/commits`, `pulls/${n}/requested_reviewers`, `issues/${n}/events`, `issues/${n}/labels`].map((tail) => gh('GET', `/repos/o/r/${tail}`));
+const issueInFull = (n) => [`issues/${n}/events`, `issues/${n}/labels`, `issues/${n}/reactions`].map((tail) => gh('GET', `/repos/o/r/${tail}`));
+// What no kind reads: no captured query of gh asks for any of it.
+const UNREAD = ['actions/runs', 'actions/runs?exclude_pull_requests=true&per_page=2', 'actions/runs?branch=feature', 'actions/workflows?page=1&per_page=100', 'actions/workflows/ci.yml/runs',
+  'actions/artifacts', 'actions/artifacts/5/zip', 'actions/runs/7/artifacts', 'actions/caches', 'releases', 'releases/latest', 'releases/5/assets', 'releases/assets/5', 'releases/tags/v1',
+  'deployments', 'deployments/5/statuses', 'environments', 'events', 'issues/events', 'traffic/views', 'traffic/clones', 'contributors', 'stats/contributors', 'stats/commit_activity',
+  'tarball/main', 'zipball/main', 'collaborators', 'assignees', 'labels', 'milestones', 'languages', 'topics', 'comments', 'stargazers', 'subscribers', 'forks', 'teams',
+  'pulls/580/files', 'pulls/580/commits', 'issues/422/events', 'issues/422/labels'].map((tail) => gh('GET', `/repos/o/r/${tail}`));
+
+await check('a kind reads the rest of an item for its own item alone, and nothing its work has no use for', async () => {
+  const own = { review: pullInFull(578), 'review-own': pullInFull(579), conflicts: pullInFull(579), issues: issueInFull(421), audit: [], investigate: [] };
+  for (const kind of KINDS) {
+    for (const rules of [github(kind), github(kind, { noPRs: true, readOnly: true, verdict: true, markReady: true })]) {
+      for (const request of own[kind]) await allowed(rules, request);
+      for (const request of [...pullInFull(578), ...pullInFull(579), ...issueInFull(421)].filter((r) => !own[kind].some((mine) => mine.path === r.path))) await refused(rules, request, world(), /no rule of this task/);
+      for (const request of UNREAD) await refused(rules, request, world({ branches: ['refs/heads/fix-421'] }), /no rule of this task|no task reads the log/);
+    }
+  }
+  // A job reads in full whichever pull request the forge says it covers.
+  const all = github('review', {}, 'job-all');
+  for (const request of [...pullInFull(578), ...issueInFull(578)]) await allowed(all, request);
+  for (const part of ['pulls/579/files', 'issues/579/events']) await refused(all, gh('GET', `/repos/o/r/${part}`), world(), /#579 was opened by me/);
+  await refused(all, gh('GET', '/repos/o/r/pulls/580/files'), world(), /#580 is not open/);
+  await refused(all, gh('GET', '/repos/o/r/issues/421/events'), world(), /#421 is not a pull request the forge would show/);
+  await allowed(all, gh('GET', '/repos/o/r/pulls/579/comments'));
+  for (const request of pullInFull(579)) await allowed(github('review-own', {}, 'job-mine'), request);
+  for (const part of ['pulls/578/files', 'issues/578/labels']) await refused(github('review-own', {}, 'job-mine'), gh('GET', `/repos/o/r/${part}`), world(), /#578 was not opened by me/);
+  for (const kind of ['issues', 'audit', 'investigate']) await refused(github(kind, {}, 'job-x'), gh('GET', '/repos/o/r/pulls/578/files'), world(), /no rule of this task/);
+  // A task pinned to a pull request reads it whatever state it is in.
+  for (const request of pullInFull(580)) await allowed(github('conflicts', {}, 'pr-580'), request);
+  // A kind that is not about a pull request reads none in full, whatever its item names.
+  for (const request of [...pullInFull(578), ...issueInFull(578)]) await refused(github('investigate', {}, 'pr-578'), request, world(), /no rule of this task/);
+});
+
+await check('a CI run, its jobs and logs are read when the forge says it ran for a branch the task works on', async () => {
+  const of = (run) => [`actions/runs/${run}`, `actions/runs/${run}/jobs`, `actions/runs/${run}/logs`, `actions/runs/${run}/attempts/1`, `actions/runs/${run}/attempts/1/jobs`,
+    `actions/runs/${run}/attempts/1/logs`, `actions/jobs/${run + 70}`, `actions/jobs/${run + 70}/logs`].map((tail) => gh('GET', `/repos/o/r/${tail}`));
+  const foreign = /ran for a branch this task does not work on/;
+  // Each row: the rules, the runs they read, the branches the task made.
+  const rows = [
+    [github('review'), [7], []], [github('review', { verdict: true }), [7], []], [github('review-own'), [8], []], [github('conflicts'), [8], []],
+    [github('conflicts', {}, 'pr-581'), [11], []], [github('conflicts', {}, 'pr-580'), [15], []], [github('conflicts', {}, 'pr-999'), [], []],
+    [github('review', {}, 'job-all'), [7], []], [github('review-own', {}, 'job-mine'), [8, 11], []], [github('conflicts', { author: 'them' }, 'job-c'), [7], []],
+    [github('issues'), [], []], [github('issues'), [13], ['refs/heads/fix-421']], [github('issues'), [14], ['me/r:refs/heads/fix-421']],
+    [github('audit'), [9], []], [github('audit'), [9, 13, 14], ['refs/heads/fix-421', 'me/r:refs/heads/fix-421']], [github('audit', { readOnly: true }), [9], []],
+    [github('investigate'), [9], []], [github('review-own'), [8, 13], ['refs/heads/fix-421']],
+  ];
+  for (const [rules, mine, branches] of rows) {
+    for (const run of [7, 8, 9, 10, 11, 12, 13, 14, 15, 16]) {
+      for (const request of of(run)) {
+        if (mine.includes(run)) await allowed(rules, request, world({ branches }));
+        else await refused(rules, request, world({ branches }), foreign);
+      }
+    }
+    await refused(rules, gh('GET', '/repos/o/r/actions/runs/99/logs'), world({ branches }), /CI run 99 is not one the forge would show/);
+    await refused(rules, gh('GET', '/repos/o/r/actions/jobs/99/logs'), world({ branches }), /CI job 99 is not one the forge would show/);
+    await refused(rules, gh('GET', '/repos/o/r/actions/runs/7.json/logs'), world({ branches }), /does not name an object by number/);
+    const { run, ...blind } = world({ branches });
+    await refused(rules, gh('GET', `/repos/o/r/actions/runs/${mine[0] ?? 7}/logs`), blind, /nothing here can look a CI run up/);
+  }
+  // A pull request from a fork is looked for under the fork's owner.
+  const asking = world();
+  await allowed(github('review-own', {}, 'job-mine'), gh('GET', '/repos/o/r/actions/runs/11'), asking);
+  assert.deepEqual(asking.listed, [['forked', 'Me', undefined]]);
+  // A task that pushes nothing has no branch to watch.
+  for (const request of of(13)) await refused(github('issues', { noPRs: true }), request, world({ branches: ['refs/heads/fix-421'] }), /no rule of this task/);
 });
 
 await check('no kind, with any option, reaches another repository, a setting, a secret or the account', async () => {
@@ -385,6 +455,13 @@ const glWorld = (branches = []) => {
   };
   w.repos['me/proj'] = { id: 13, name: 'me/proj', owner: 'me', parent: 'group/sub/proj', defaultBranch: 'main', ciPaths: [] };
   w.pull = async (n) => w.pulls[n] ?? null;
+  // Pipeline 16 ran for merge request 6, 17 for a branch of the same name in the project.
+  const runs = { 7: 'feature', 9: 'main', 10: 'elsewhere', 13: 'fix-421', 17: 'forked' };
+  w.run = async (what, id) => {
+    const of = what === 'job' ? id - 70 : id;
+    if (of === 16) return { repo: '', ref: 'refs/heads/forked', pull: 6 };
+    return runs[of] ? { repo: 'group/sub/proj', ref: `refs/heads/${runs[of]}` } : null;
+  };
   w.pullsByHead = async (ref) => Object.values(w.pulls).filter((p) => ref === undefined || p.headRef === ref);
   w.assigned = [3];
   return w;
@@ -393,11 +470,12 @@ const glWorld = (branches = []) => {
 await check('GitLab: every kind reads what glab reads, in the pool\'s project only', async () => {
   // Captured from glab 1.128.0: mr view --comments, mr diff, mr list, issue view --comments, issue list, api.
   const reads = [
-    glab('GET', `${P}/merge_requests/5`), glab('GET', `${P}/merge_requests/5/discussions?page=1&per_page=20&sort=asc`), glab('GET', `${P}/merge_requests/5/versions`),
+    glab('GET', `${P}/merge_requests/5`), glab('GET', `${P}/merge_requests/5/discussions?page=1&per_page=20&sort=asc`), glab('GET', `${P}/merge_requests/6/notes`),
     glab('GET', `${P}/merge_requests?page=1&per_page=30&state=opened`), glab('GET', `${P}/issues/421`), glab('GET', `${P}/issues/421/notes?page=1&per_page=20&sort=asc`),
     glab('GET', `${P}/issues?in=title%2Cdescription&order_by=created_at&page=1&per_page=30&sort=desc&state=opened`), glab('GET', `${P}?license=true&with_custom_attributes=true`),
-    glab('GET', '/api/v4/projects/99/merge_requests/5/draft_notes'), glab('GET', '/api/v4/projects/Group%2FSub%2Fproj/merge_requests/5'), glab('GET', `${P}/repository/commits/abc123`),
-    glab('GET', `${P}/pipelines/7/jobs`), glab('GET', `${P}/jobs/7/trace`), glab('GET', '/api/v4/user'),
+    glab('GET', '/api/v4/projects/99/merge_requests/5/discussions/abc'), glab('GET', '/api/v4/projects/Group%2FSub%2Fproj/merge_requests/5'), glab('GET', `${P}/repository/commits/abc123`),
+    glab('GET', `${P}/repository/commits?ref_name=main`), glab('GET', `${P}/repository/commits/abc123/statuses`), glab('GET', `${P}/repository/blobs/abc123/raw`), glab('GET', `${P}/repository/tags`),
+    glab('GET', `${P}/issues/422/discussions`), glab('GET', '/api/v4/user'),
     glab('POST', '/api/graphql', { query: '{currentUser{username}}' }), // glab api graphql -f query=...
     glab('GET', `${P}/repository/compare?from=main&to=feature&straight=true`), glab('GET', `${P}/repository/branches/feature`),
     // repo view, repo view -b release/1.0: glab encodes a name's slashes and its dots.
@@ -408,9 +486,21 @@ await check('GitLab: every kind reads what glab reads, in the pool\'s project on
     glab('GET', `${P}/repository/commits/feature%2Flogin/diff`), glab('GET', `${P}/repository/tags/release%2F1.0`), glab('GET', `${P}/repository/tree?path=src%2Flib&ref=feature%2Flogin`),
     glab('GET', '/api/v4/projects/99/repository/files/src%2Fmain.js/raw?ref=feature%2Flogin'), glab('GET', '/api/v4/projects/99/repository/branches/feature%2Flogin'),
     glab('GET', `${P}/merge_requests?source_branch=feature%2Flogin`),
-    // No route of GitLab's: an encoded slash separates nothing there, and its router answers 404.
-    glab('GET', `${P}/repository/compare%2Fx`),
   ];
+  // The rest of a merge request or an issue, for the task whose item it is: what glab's mr diff and a review read.
+  const mrInFull = (n) => [`merge_requests/${n}/versions`, `merge_requests/${n}/draft_notes`, `merge_requests/${n}/changes`, `merge_requests/${n}/commits`, `merge_requests/${n}/pipelines`,
+    `merge_requests/${n}/approvals`].flatMap((tail) => [glab('GET', `${P}/${tail}`), glab('GET', `/api/v4/projects/99/${tail}`)]);
+  const issueInFull = (n) => [`issues/${n}/resource_label_events`, `issues/${n}/award_emoji`].map((tail) => glab('GET', `${P}/${tail}`));
+  const own = { review: mrInFull(5), 'review-own': mrInFull(5), conflicts: mrInFull(5), issues: issueInFull(421), audit: [], investigate: [] };
+  for (const request of [...mrInFull(5), ...issueInFull(5)]) await refused(gitlab('investigate', {}, 'pr-5'), request, glWorld(), /no rule of this task/);
+  // A job reads in full whichever merge request the forge says it covers.
+  for (const request of mrInFull(6)) await allowed(gitlab('review', {}, 'job-all'), request, glWorld());
+  for (const request of mrInFull(5)) await refused(gitlab('review', {}, 'job-all'), request, glWorld(), /#5 was opened by me/);
+  // What no kind reads.
+  const unread = ['repository/compare%2Fx', 'repository/contributors', 'repository/archive', 'repository/archive.tar.gz?sha=main', 'repository/changelog?version=1.0.0', 'repository/merge_base',
+    'repository/submodules/x', 'releases', 'releases/v1', 'releases/v1/assets/links', 'labels', 'milestones', 'milestones/1/issues', 'deployments', 'environments', 'events', 'members', 'users',
+    'languages', 'statistics', 'packages', 'snippets', 'wikis', 'merge_requests/6/changes', 'merge_requests/6/commits', 'merge_requests/6/pipelines', 'merge_requests/6/approvals',
+    'issues/422/resource_label_events', 'issues/422/award_emoji', 'issues/422/participants'].map((tail) => glab('GET', `${P}/${tail}`));
   const never = [
     // reads of this project whose answer is another project's, a person's address, or a write
     glab('GET', `${P}/repository/compare?from=main&to=x&from_project_id=100`), glab('GET', '/api/v4/projects/99/repository/compare?from=main&to=x&from_project_id=100'),
@@ -448,6 +538,8 @@ await check('GitLab: every kind reads what glab reads, in the pool\'s project on
   for (const kind of KINDS) {
     for (const options of [{}, { verdict: true, markReady: true }]) {
       for (const request of reads) await allowed(gitlab(kind, options), request, glWorld());
+      for (const request of own[kind]) await allowed(gitlab(kind, options), request, glWorld());
+      for (const request of [...mrInFull(5), ...issueInFull(421), ...unread].filter((r) => !own[kind].some((mine) => mine.path === r.path))) await refused(gitlab(kind, options), request, glWorld(), /no rule of this task/);
       for (const request of never) await refused(gitlab(kind, options), request, glWorld(['refs/heads/fix-421']));
     }
   }
@@ -464,6 +556,39 @@ await check('GitLab: every kind reads what glab reads, in the pool\'s project on
   }
   await refused(gitlab('investigate'), glab('GET', `${P}/repository/compare?from=main&to=x&from_project_id=100`), glWorld(), /"from_project_id"/);
   await refused(gitlab('investigate'), glab('GET', `${P}/merge_requests/5/merge_ref`), glWorld(), /writes a ref on the forge/);
+});
+
+await check('GitLab: a pipeline, its jobs and a job\'s log are read when the forge says it ran for a branch the task works on', async () => {
+  const foreign = /ran for a branch this task does not work on/;
+  // 16 is the pipeline of merge request 6, whose source branch is in a fork.
+  const lab = (run) => [`pipelines/${run}`, `pipelines/${run}/jobs`, `jobs/${run + 70}`, `jobs/${run + 70}/trace`].flatMap((tail) => [glab('GET', `${P}/${tail}`), glab('GET', `/api/v4/projects/99/${tail}`)]);
+  const labRows = [
+    [gitlab('review'), [7], []], [gitlab('conflicts'), [7], []], [gitlab('conflicts', {}, 'pr-6'), [16], []], [gitlab('review-own', {}, 'job-mine'), [7], []],
+    [gitlab('review', {}, 'job-all'), [16], []], [gitlab('issues'), [13], ['refs/heads/fix-421']], [gitlab('issues'), [], []], [gitlab('audit'), [9, 13], ['refs/heads/fix-421']],
+    [gitlab('investigate'), [9], []],
+  ];
+  for (const [rules, mine, branches] of labRows) {
+    for (const run of [7, 9, 10, 13, 16, 17]) {
+      for (const request of lab(run)) {
+        if (mine.includes(run)) await allowed(rules, request, glWorld(branches));
+        else await refused(rules, request, glWorld(branches), foreign);
+      }
+    }
+    await refused(rules, glab('GET', `${P}/jobs/99/trace`), glWorld(branches), /CI job 99 is not one the forge would show/);
+  }
+  for (const request of lab(13)) await refused(gitlab('issues', { noPRs: true }), request, glWorld(['refs/heads/fix-421']), /no rule of this task/);
+  // Two merge requests from forks may name their source branch alike: a pipeline is its own merge request's.
+  const twins = () => {
+    const w = glWorld();
+    w.pulls[9] = { number: 9, open: true, author: 'me', headRepo: '', headRepoId: 13, headRef: 'forked' };
+    return w;
+  };
+  for (const rules of [gitlab('review-own', {}, 'job-mine'), gitlab('conflicts', {}, 'pr-9')]) await refused(rules, glab('GET', `${P}/pipelines/16`), twins(), foreign);
+  await allowed(gitlab('review', {}, 'job-all'), glab('GET', `${P}/pipelines/16`), twins());
+  for (const request of [glab('GET', `${P}/pipelines`), glab('GET', `${P}/pipelines?ref=feature`), glab('GET', `${P}/jobs`), glab('GET', `${P}/jobs/77/artifacts`), glab('GET', `${P}/pipelines/7/variables`),
+    glab('GET', `${P}/pipelines/7/test_report`), glab('GET', `${P}/pipelines/latest`)]) {
+    for (const kind of KINDS) await refused(gitlab(kind), request, glWorld(['refs/heads/feature']), /no rule of this task|does not name an object by number/);
+  }
 });
 
 await check('GitLab: each kind writes what its GitHub twin writes, through the routes glab uses', async () => {
@@ -646,28 +771,32 @@ await check('no rule that refuses, pins or cuts is reached by its own path with 
 await check('the routes a task is refused or given with pinned parameters cannot be reached by another spelling', async () => {
   const escape = /an escape of a letter, a digit, "-", "_" or "~"/;
   const second = /could be read as a route another rule of this task decides/;
+  // Beside a route no kind is given there is no wider rule to slip into: its other spellings match nothing.
+  const none = /no rule of this task/;
   // GitLab resolves an escape and a format extension in a route's name (run against a
   // Grape app declared like GitLab's API); a compare with `from_project_id` reads another project.
   const far = '?from=a&to=b&from_project_id=4242&straight=true';
   for (const project of [P, '/api/v4/projects/99', '/api/v4/projects/Group%2fSub%2FProj']) {
     for (const [tail, why] of [
-      [`/repository/%63ompare${far}`, escape], [`/repository/compare.json${far}`, second], [`/repository/Compare${far}`, second], [`/repository/compar%65.json${far}`, escape],
-      [`/%72epository/compare${far}`, escape], [`/repository.json/compare${far}`, /no rule of this task/], [`/repository/compare.txt${far}`, second], [`/repository/%2563ompare${far}`, /percent sign/],
-      ['/merge_requests/5/merge%5Fref', escape], ['/merge_requests/5/merge_ref.json', second], ['/merge_requests/5/Merge_Ref', second], ['/merge_requests/5/closes_issues.json', second],
-      ['/merge_requests/5/related_issues.json', second], ['/merge_requests/5/blocks.json', second], ['/merge_requests/5/blockees.json', second], ['/issues/421/links.json', second],
-      ['/issues/421/related_merge_requests.json', second], ['/issues/421/closed_by.json', second], ['/issues/421/user_agent_detail.json', second], ['/issues/421/user%5Fagent%5Fdetail', escape],
+      [`/repository/%63ompare${far}`, escape], [`/repository/compare.json${far}`, none], [`/repository/Compare${far}`, none], [`/repository/compar%65.json${far}`, escape],
+      [`/%72epository/compare${far}`, escape], [`/repository.json/compare${far}`, /no rule of this task/], [`/repository/compare.txt${far}`, none], [`/repository/%2563ompare${far}`, /percent sign/],
+      ['/merge_requests/5/merge%5Fref', escape], ['/merge_requests/5/merge_ref.json', none], ['/merge_requests/5/Merge_Ref', none], ['/merge_requests/5/closes_issues.json', none],
+      ['/merge_requests/5/related_issues.json', none], ['/merge_requests/5/blocks.json', none], ['/merge_requests/5/blockees.json', none], ['/issues/421/links.json', none],
+      ['/issues/421/related_merge_requests.json', none], ['/issues/421/closed_by.json', none], ['/issues/421/user_agent_detail.json', none], ['/issues/421/user%5Fagent%5Fdetail', escape],
       ['/Issues/421/links', /no rule of this task/], ['/issues.json/421/links', /no rule of this task/], ['/issues/421/links/', /empty segment/], ['/issues/421/links;x', /must be encoded/], ['/issues/421/links%3Bx', /semicolon/],
       ['/issues/421/./links', /dot segment/], ['/issues/421/x/../links', /dot segment/], ['/issues/421/x/%2e%2e/links', /dot segment/], ['/issues/421//links', /empty segment/],
-      ['/issues/421/links%2ejson', second], ['/issues/421/links%2Ejson', second], ['/merge_requests/5/merge_ref%2F', /empty segment/],
+      ['/issues/421/links%2ejson', none], ['/issues/421/links%2Ejson', none], ['/merge_requests/5/merge_ref%2F', /empty segment/],
     ]) await refused(gitlab('investigate'), glab('GET', `${project}${tail}`), glWorld(), why);
   }
   for (const [path, why] of [
     ['/repos/o/r/issues/421/%74imeline', escape], ['/repos/o/r/issues/421/sub%5Fissues', escape], ['/repos/o/r/issues/421/%70arent', escape], ['/repos/o/r/issues/421/dependencie%73/blocked_by', escape],
-    ['/repos/o/r/issues/421/Timeline', second], ['/repos/o/r/issues/421/timeline.json', second], ['/repos/o/r/issues/421/SUB_ISSUES', second], ['/repos/o/r/issues/421/parent.json', second],
-    ['/repos/o/r/issues/421/Dependencies/blocked_by', second], ['/repos/o/r/issues/421/dependencies.json/blocked_by', second], ['/repos/o/r/Issues/421/timeline', /no rule of this task/],
+    ['/repos/o/r/issues/421/Timeline', none], ['/repos/o/r/issues/421/timeline.json', none], ['/repos/o/r/issues/421/SUB_ISSUES', none], ['/repos/o/r/issues/421/parent.json', none],
+    ['/repos/o/r/issues/421/Dependencies/blocked_by', none], ['/repos/o/r/issues/421/dependencies.json/blocked_by', none], ['/repos/o/r/Issues/421/timeline', /no rule of this task/],
     ['/repos/o/r/%69ssues/421/timeline', escape], ['/repos/o/r/issues/421/timeline/', /empty segment/], ['/repos/o/r/issues/421/%2574imeline', /percent sign/],
     ['/repos/o/r/%63ompare/main...victim:main', escape], ['/repos/o/r/Compare/main...victim:main', /no rule of this task/], ['/repos/o/r/compare.json/main...victim:main', /no rule of this task/],
     ['/repos/o/r/Branches/main/protection', /no rule of this task/], ['/repos/o/r/branche%73/main/protection', escape],
+    // Where an issue's number stands, a wider rule does follow the refused route.
+    ['/repos/o/r/issues/Events', second], ['/repos/o/r/issues/events.json', second], ['/repos/o/r/issues/EVENTS.x', second], ['/repos/o/r/issues/%65vents', escape],
   ]) await refused(github('investigate'), gh('GET', path), world(), why);
   // The whole answer about the repository or a branch is not to be had under another name.
   for (const path of ['/repos/o/r.json', '/repos/o/r/Branches', '/repos/o/r/branches.json', '/repos/o/r/Branches/main', '/repos/o/r/branches.json/main', '/User', '/user.json']) {
@@ -679,7 +808,7 @@ await check('the routes a task is refused or given with pinned parameters cannot
 
   // A file, a branch or a tag whose own name ends like a format or holds a route's name is still read.
   for (const path of ['/repos/o/r/contents/package.json', '/repos/o/r/contents/docs/timeline.json?ref=main', '/repos/o/r/contents/a%20b.md', '/repos/o/r/git/ref/tags/v1.0.json', '/repos/o/r/branches/v1.0.json',
-    '/repos/o/r/commits/v1.0.json', '/repos/o/r/compare/v1.0.json...main', '/repos/o/r/contents/issues/421/timeline', '/repos/o/r/issues/421/comments', '/repos/o/r/releases/tags/Compare']) {
+    '/repos/o/r/commits/v1.0.json', '/repos/o/r/compare/v1.0.json...main', '/repos/o/r/contents/issues/421/timeline', '/repos/o/r/issues/421/comments', '/repos/o/r/git/ref/tags/Compare']) {
     assert.equal((await allowed(github('investigate'), gh('GET', path))).request.path, path);
   }
   for (const tail of ['/repository/files/package.json?ref=main', '/repository/files/package.json/raw?ref=main', '/repository/files/compare.json?ref=main', '/repository/branches/v1.0.json',

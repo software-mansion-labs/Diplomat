@@ -6,7 +6,12 @@ const on = (number, author, more = {}) => ({ repo: 'o/r', item: 'pr', number, op
 /// The `ctx` of `authorize` over a small fixed forge: `o/r` with pull request 578 (opened
 /// by "them", head `feature`), 579 (opened by "me", head `mine`), 580 (closed), 581 (opened
 /// by "me" from `forked` in `me/r`, that account's fork of `o/r`) and issue 421. `me` is
-/// the account the credential belongs to. `ctx.asked` lists the node ids looked up and
+/// the account the credential belongs to. CI run 7 ran for the head of 578, 8 for the head
+/// of 579, 9 for the default branch, 10 for a branch no pull request is from, 11 for the
+/// head of 581 in the fork and 12 for a branch of that name in `o/r`, 13 and 14 for
+/// `fix-421` in `o/r` and in the fork, 15 for the head of 580, 16 for the fork's default
+/// branch; a run's one job has the run's id plus 70. The forge spells a repository's name
+/// in its own letter case. `ctx.asked` lists the node ids looked up and
 /// `ctx.listed` what `pullsByHead` was asked, as [ref, owner, ever].
 export function world({ branches = [] } = {}) {
   const repos = {
@@ -45,6 +50,12 @@ export function world({ branches = [] } = {}) {
     11: nodes.PRRC_mine, 12: nodes.PRRC_theirs, 13: nodes.PRRC_579,
     14: { ...nodes.PRRC_mine, pending: false }, 15: { ...nodes.PRRC_mine, author: 'someone' }, 16: { ...nodes.PRRC_mine, repo: 'o/other' },
   };
+  const runs = {
+    7: { repo: 'o/r', ref: 'refs/heads/feature' }, 8: { repo: 'o/r', ref: 'refs/heads/mine' }, 9: { repo: 'o/r', ref: 'refs/heads/main' },
+    10: { repo: 'o/r', ref: 'refs/heads/elsewhere' }, 11: { repo: 'Me/R', ref: 'refs/heads/forked' }, 12: { repo: 'o/r', ref: 'refs/heads/forked' },
+    13: { repo: 'O/R', ref: 'refs/heads/fix-421' }, 14: { repo: 'Me/R', ref: 'refs/heads/fix-421' }, 15: { repo: 'o/r', ref: 'refs/heads/old' },
+    16: { repo: 'me/r', ref: 'refs/heads/main' },
+  };
   const asked = [];
   const listed = [];
   return {
@@ -58,6 +69,7 @@ export function world({ branches = [] } = {}) {
       return Object.values(pulls).filter((p) => (ever || p.open) && (ref === undefined || p.headRef === ref));
     },
     async comment(id) { return comments[id] ?? null; },
+    async run(what, id) { return runs[what === 'job' ? id - 70 : id] ?? null; },
     async assignees() { return this.assigned; },
     async self() { return { id: 7, login: 'me' }; },
     async repository(of = 'o/r') { return repos[of] ?? null; },

@@ -51,9 +51,17 @@
 //   audit, investigate   unchanged: neither is about one number.
 //
 // Judgement calls:
-// - Reads are an allow-list of sub-trees, not "everything under the repository": Actions
-//   secrets and variables, hooks, deploy keys, collaborators, environments, security
-//   alerts and branch protection are settings a task has no use for and are not listed.
+// - Reads are listed by what a kind's work needs, not by what is harmless. Every kind
+//   reads the repository's code - files, refs, commits, a compare, the statuses and check
+//   results recorded on a commit - and, as context, what every pull request and issue of
+//   the repository says and what was said on it. A task reads the rest of an item - a
+//   pull request's files and commits, an issue's events - for its own item only: the PR
+//   or issue it is pinned to, or for a job a PR the forge says it covers. A CI run, its
+//   jobs and logs are read when the forge says the run is of a branch the task made, of
+//   the head branch of such a PR, or - audit and investigate, whose subject is the
+//   repository as it stands - of the default branch. Nothing else is listed: no list of
+//   runs, artifacts, releases, deployments, events, contributors, archives, labels,
+//   milestones, and none of the repository's settings.
 // - A read stays in the pool's repository. Inside the listed sub-trees, the routes whose
 //   answer is another repository's are refused by rules of their own (`deny`), a compare
 //   takes two refs of this repository, and a route that takes query parameters names
@@ -64,7 +72,9 @@
 //   job needs (`pick`): the whole answer holds a clone token or a runner registration
 //   token, the requester's permissions and the protection settings. A GraphQL document
 //   reads the same of the repository (`repoLeaves` in graphql.js), and on GitHub the
-//   requester's access level, which `gh pr create` asks for.
+//   requester's access level, which `gh pr create` asks for. From the repository it goes
+//   on to what every kind reads and to nothing else (`repo` there); below that it is
+//   checked by field name, the same for every pull request and issue.
 // - A push is addressed by the pull request, not by a branch name: the head branch is
 //   whatever the forge says that PR's head is when the push arrives, in the repository
 //   the forge says holds it.
@@ -99,16 +109,31 @@ export const AUDIT_BRANCHES = 24;
 const GITHUB_API = 'api.github.com';
 const GITHUB_GIT = 'github.com';
 
-// The sub-trees of a GitHub repository a task may read.
-const GITHUB_READS = [
-  'pulls/**', 'issues/**', 'commits/**', 'contents/**', 'git/**', 'tags',
-  'releases/**', 'labels/**', 'milestones/**', 'check-runs/**', 'check-suites/**', 'statuses/**', 'comments/**',
-  'languages', 'topics', 'contributors', 'readme/**', 'license', 'events', 'tarball/**', 'zipball/**',
-  'actions/runs/**', 'actions/jobs/**', 'actions/workflows/**', 'actions/artifacts/**',
+// What every kind reads of a GitHub repository's code: files, refs and commits, with what
+// is recorded on a commit - its comments, statuses and check results.
+const GITHUB_CODE = [
+  'contents/**', 'git/**', 'commits/**', 'tags', 'readme/**', 'license',
+  'check-runs/*', 'check-runs/*/annotations', 'check-suites/*', 'check-suites/*/check-runs',
 ];
-// Reads inside those sub-trees whose answer is not the repository's own: an issue's
-// timeline, sub-issues, parent and dependencies carry the issues and pull requests of
-// other repositories that refer to it.
+// And of every pull request and issue in it, as context: what it says and what was said
+// on it.
+const GITHUB_CONTEXT = [
+  'pulls', 'pulls/comments', 'pulls/comments/*', 'pulls/*', 'pulls/*/comments', 'pulls/*/reviews', 'pulls/*/reviews/*',
+  'pulls/*/reviews/*/comments', 'issues', 'issues/comments', 'issues/comments/*', 'issues/*', 'issues/*/comments',
+];
+// The rest of a pull request and of an issue, read by the task whose item it is. A pull
+// request is an issue as well.
+const GITHUB_PULL = ['files', 'commits', 'requested_reviewers', 'merge'];
+const GITHUB_ISSUE = ['events', 'labels', 'reactions'];
+// A CI run, its jobs and their logs, named by the id of the run or of a job: read when
+// the forge says the run is of a branch the task works on (`run`).
+const GITHUB_RUNS = [
+  ['actions/runs/*', 'run'], ['actions/runs/*/jobs', 'run'], ['actions/runs/*/logs', 'run'], ['actions/runs/*/attempts/*', 'run'],
+  ['actions/runs/*/attempts/*/jobs', 'run'], ['actions/runs/*/attempts/*/logs', 'run'], ['actions/jobs/*', 'job'], ['actions/jobs/*/logs', 'job'],
+];
+// Reads no kind is given, refused with the reason: an issue's timeline, sub-issues, parent
+// and dependencies carry the issues and pull requests of other repositories that refer
+// to it.
 const GITHUB_ELSEWHERE = ['issues/*/timeline', 'issues/*/sub_issues', 'issues/*/parent', 'issues/*/dependencies/**'];
 const GITHUB_ELSEWHERE_WHY = 'this answer holds issues and pull requests of other repositories';
 // What a task is told of the repository itself: not the clone token, the requester's
@@ -121,12 +146,18 @@ const GITHUB_REPO_PICK = [
 ];
 // A branch without its protection settings.
 const GITHUB_BRANCH_PICK = ['name', 'commit', 'protected'];
-const GITLAB_READS = [
-  'merge_requests/**', 'issues/**', 'repository/**', 'jobs/**', 'pipelines', 'pipelines/*', 'pipelines/*/jobs',
-  'labels/**', 'milestones/**', 'releases/**',
+// The same lists for GitLab. A branch's or a tag's name is one segment there, its slashes
+// encoded; "**" after it gives the path that name would be with them decoded a rule too.
+const GITLAB_CODE = ['repository/files/**', 'repository/tree', 'repository/blobs/**', 'repository/commits/**', 'repository/tags/**'];
+const GITLAB_CONTEXT = [
+  'merge_requests', 'merge_requests/*', 'merge_requests/*/notes', 'merge_requests/*/notes/*', 'merge_requests/*/discussions',
+  'merge_requests/*/discussions/*', 'issues', 'issues/*', 'issues/*/notes', 'issues/*/notes/*', 'issues/*/discussions', 'issues/*/discussions/*',
 ];
-// The same on GitLab, by reason: answers that hold other projects' issues and merge
-// requests, the address a person posted from, and a GET that writes a ref.
+const GITLAB_PULL = ['versions', 'versions/*', 'changes', 'diffs', 'raw_diffs', 'commits', 'pipelines', 'approvals', 'draft_notes', 'draft_notes/*', 'award_emoji'];
+const GITLAB_ISSUE = ['resource_label_events', 'resource_state_events', 'award_emoji'];
+const GITLAB_RUNS = [['pipelines/*', 'run'], ['pipelines/*/jobs', 'run'], ['jobs/*', 'job'], ['jobs/*/trace', 'job']];
+// Reads no kind is given, refused with the reason: answers that hold other projects'
+// issues and merge requests, the address a person posted from, and a GET that writes a ref.
 const GITLAB_DENIED = [
   [['merge_requests/*/closes_issues', 'merge_requests/*/related_issues', 'merge_requests/*/blocks', 'merge_requests/*/blockees',
     'issues/*/links', 'issues/*/related_merge_requests', 'issues/*/closed_by'], 'this answer holds issues and merge requests of other projects'],
@@ -183,6 +214,17 @@ function pullScope(kind, item, me, options) {
   return { type: 'pr', author: named || me };
 }
 
+const PULL_KINDS = ['review', 'review-own', 'conflicts'];
+
+// Whose CI runs a kind reads beside those of the branches the task itself made: the ones
+// of the head branch of a pull request it covers (`head`), or of the default branch
+// (`base`). Null for a task that has no branch to watch.
+function runScope(kind, options, who) {
+  if (who) return { head: who };
+  if (kind === 'issues') return options.noPRs === true ? null : {};
+  return { base: true };
+}
+
 // ------------------------------------------------------------------------ GitHub
 
 function github({ kind, options, target, item, me }) {
@@ -211,14 +253,14 @@ function github({ kind, options, target, item, me }) {
     } }));
   };
 
-  if (kind === 'review' || kind === 'review-own' || kind === 'conflicts') {
-    const scope = pullScope(kind, item, me, options);
+  const scope = PULL_KINDS.includes(kind) ? pullScope(kind, item, me, options) : null;
+  const who = scope && without(scope, 'type');
+  const n = scope?.number ?? '*';
+  // Without a number in the path, the forge is asked whose pull request it names.
+  const asked = scope && scope.number === undefined ? { pull: { segment: 4, ...who } } : {};
+  if (PULL_KINDS.includes(kind)) {
     if (!scope) return null;
     graphqlItem = scope;
-    const who = without(scope, 'type');
-    const n = scope.number ?? '*';
-    // Without a number in the path, the forge is asked whose pull request it names.
-    const asked = scope.number === undefined ? { pull: { segment: 4, ...who } } : {};
     if (kind === 'review') {
       const events = options.verdict === true ? ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] : ['COMMENT'];
       rules.push(api('POST', `${repo}/pulls/${n}/reviews`, { ...asked, body: { commit_id: 'free', body: 'free', comments: 'free', event: { oneOf: events } } }));
@@ -262,11 +304,18 @@ function github({ kind, options, target, item, me }) {
 
   rules.push(api('GET', repo, { pick: GITHUB_REPO_PICK }));
   for (const tree of GITHUB_ELSEWHERE) rules.push(api('GET', `${repo}/${tree}`, { deny: GITHUB_ELSEWHERE_WHY }));
+  // Where an issue's number stands, GitHub also takes "events".
+  rules.push(api('GET', `${repo}/issues/events`, { deny: 'no task reads the log of what was done to every issue' }));
   // "base...head" names a fork's branch as "owner:branch" or "owner:repo:branch"; a ref
   // of this repository holds no colon.
   rules.push(api('GET', `${repo}/compare/**`, { without: { ':': 'a compare whose side holds ":" names another repository' } }));
   rules.push(api('GET', `${repo}/branches`, { pick: GITHUB_BRANCH_PICK }), api('GET', `${repo}/branches/*`, { pick: GITHUB_BRANCH_PICK }));
-  for (const tree of GITHUB_READS) rules.push(api('GET', `${repo}/${tree}`));
+  for (const tree of [...GITHUB_CONTEXT, ...GITHUB_CODE]) rules.push(api('GET', `${repo}/${tree}`));
+  if (scope) for (const part of GITHUB_PULL) rules.push(api('GET', `${repo}/pulls/${n}/${part}`, asked));
+  const own = scope ? n : item.type === 'issue' ? item.number : undefined;
+  if (own !== undefined) for (const part of GITHUB_ISSUE) rules.push(api('GET', `${repo}/issues/${own}/${part}`, asked));
+  const runs = runScope(kind, options, who);
+  if (runs) for (const [tree, what] of GITHUB_RUNS) rules.push(api('GET', `${repo}/${tree}`, { run: { segment: 5, what, repo: target.repo, ...runs } }));
   rules.push({ host: GITHUB_API, method: 'GET', path: '/user', pick: ['login', 'id', 'node_id', 'type', 'name', 'html_url'] });
   // A search takes its query and how the answer is paged and ordered.
   rules.push({ host: GITHUB_API, method: 'GET', path: '/search/issues', query: {
@@ -320,13 +369,12 @@ function gitlab({ kind, options, target, item, me }) {
     }
   };
 
-  if (kind === 'review' || kind === 'review-own' || kind === 'conflicts') {
-    const scope = pullScope(kind, item, me, options);
+  const scope = PULL_KINDS.includes(kind) ? pullScope(kind, item, me, options) : null;
+  const who = scope && without(scope, 'type');
+  const asked = scope && scope.number === undefined ? { pull: { segment: 5, ...who } } : {};
+  const mr = `/merge_requests/${scope?.number ?? '*'}`;
+  if (PULL_KINDS.includes(kind)) {
     if (!scope) return null;
-    const who = without(scope, 'type');
-    const n = scope.number ?? '*';
-    const asked = scope.number === undefined ? { pull: { segment: 5, ...who } } : {};
-    const mr = `/merge_requests/${n}`;
     if (kind === 'review') {
       each('POST', `${mr}/draft_notes`, { ...asked, body: { note: prose, position: 'free', commit_id: 'free', in_reply_to_discussion_id: 'free' } });
       each('PUT', `${mr}/draft_notes/*`, { ...asked, body: { note: prose, position: 'free' } });
@@ -371,8 +419,12 @@ function gitlab({ kind, options, target, item, me }) {
   for (const [trees, why] of GITLAB_DENIED) for (const tree of trees) each('GET', `/${tree}`, { deny: why });
   // A compare takes two refs of this project; `from_project_id` would make one another project's.
   each('GET', '/repository/compare', { query: { from: 'free', to: 'free', straight: 'free', unidiff: 'free' } });
-  for (const tail of ['', '/*']) each('GET', `/repository/branches${tail}`, { pick: GITLAB_BRANCH_PICK });
-  for (const tree of GITLAB_READS) each('GET', `/${tree}`);
+  each('GET', '/repository/branches/**', { pick: GITLAB_BRANCH_PICK });
+  for (const tree of [...GITLAB_CONTEXT, ...GITLAB_CODE]) each('GET', `/${tree}`);
+  if (scope) for (const part of GITLAB_PULL) each('GET', `${mr}/${part}`, asked);
+  if (item.type === 'issue') for (const part of GITLAB_ISSUE) each('GET', `/issues/${item.number}/${part}`);
+  const runs = runScope(kind, options, who);
+  if (runs) for (const [tree, what] of GITLAB_RUNS) each('GET', `/${tree}`, { run: { segment: 5, what, repo: target.repo, ...runs } });
   rules.push({ host: target.host, method: 'GET', path: '/api/v4/user', pick: ['id', 'username', 'name', 'state', 'web_url'] });
   rules.push({ host: target.host, method: 'POST', path: '/api/graphql', graphql: { forge: 'gitlab', repo: target.repo, roots: GITLAB_ROOTS, mutations: [], identity: me } });
   return rules;

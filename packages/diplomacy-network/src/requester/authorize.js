@@ -26,6 +26,8 @@ const RECEIVE_PACK_TYPE = 'application/x-git-receive-pack-request';
 // posted in the requester's name is otherwise a way to do anything a quick action can.
 const COMMAND_LINE = /(^|[\r\n\v\f\u0085\u2028\u2029])[ \t]*\//;
 const MAX_PATH = 8192;
+// The members of a rule that decides by its path and nothing else.
+const BY_PATH_ALONE = new Set(['host', 'method', 'path', 'fold']);
 const MAX_JSON_DEPTH = 64;
 
 const approved = new WeakSet();
@@ -345,6 +347,27 @@ async function checkComment(spec, req, ctx) {
   if (spec.pending && comment.pending !== true) refuse(`comment ${id} is not part of a pending review`);
 }
 
+// A CI run named in the path by its id or by the id of one of its jobs: the forge is
+// asked which branch it ran for, and that must be a branch this task works on.
+async function checkRun(spec, req, ctx) {
+  if (typeof ctx.run !== 'function') refuse('nothing here can look a CI run up');
+  const id = numberAt(req, spec.segment);
+  const run = await ctx.run(spec.what, id);
+  if (!run) refuse(`CI ${spec.what} ${id} is not one the forge would show for a branch`);
+  const here = lower(run.repo) === lower(spec.repo);
+  if ((ctx.state?.branches ?? []).includes(branchLabel(run.ref, here ? undefined : run.repo))) return;
+  if (spec.base && here && run.ref === `refs/heads/${(await ctx.repository()).defaultBranch}`) return;
+  if (spec.head) {
+    const branch = run.ref.slice('refs/heads/'.length);
+    const pulls = spec.head.number === undefined ? await ctx.pullsByHead(branch, run.repo.split('/')[0]) : [await ctx.pull(spec.head.number)];
+    const { author, notAuthor } = spec.head;
+    const covered = (pull) => pull && lower(pull.headRepo) === lower(run.repo) && pull.headRef === branch && (run.pull ?? pull.number) === pull.number
+      && (author === undefined || lower(pull.author) === author) && lower(pull.author) !== notAuthor;
+    if (pulls.some(covered)) return;
+  }
+  refuse(`CI ${spec.what} ${id} ran for a branch this task does not work on`);
+}
+
 // A project named in the path that must be the task account's own fork of the pool's;
 // returns its name.
 async function checkProject(spec, req, ctx) {
@@ -524,10 +547,11 @@ export async function authorize(rules, request, given = {}) {
     // past it into the wider one.
     if (first(req.segments, true) !== rule) refuse('the path could be read as a route another rule of this task decides: only a letter\'s case or an extension sets it apart');
     if (rule.deny !== undefined) refuse(rule.deny);
-    // Nor may the path become such a route, or one that is refused or that no rule knows,
-    // where a proxy decodes an encoded slash before the forge routes the request.
+    // Nor may the path become a route no rule knows, or one whose rule holds a check this
+    // request is not put through, where a proxy decodes an encoded slash before the forge
+    // routes the request.
     const cut = first(req.apart, true);
-    if (list.indexOf(cut) < list.indexOf(rule) || cut.deny !== undefined) refuse('the path, with its encoded slash read as a separator, is a route this task\'s rules decide otherwise');
+    if (cut !== rule && !(cut && Object.keys(cut).every((key) => BY_PATH_ALONE.has(key)))) refuse('the path, with its encoded slash read as a separator, is a route this task\'s rules decide otherwise');
     for (const [mark, why] of Object.entries(rule.without || {})) if (req.decoded.some((segment) => segment.includes(mark))) refuse(why);
     const named = checkQuery(rule, req);
     const encoding = lower(req.headers['content-encoding']);
@@ -537,6 +561,7 @@ export async function authorize(rules, request, given = {}) {
     let body = req.body;
     if (rule.pull) await checkPull(rule.pull, req, ctx);
     if (rule.comment) await checkComment(rule.comment, req, ctx);
+    if (rule.run) await checkRun(rule.run, req, ctx);
     const fork = rule.project ? await checkProject(rule.project, req, ctx) : undefined;
     if (rule.git && req.method === 'GET') {
       if (body.length > 0) refuse('a read carries no body');

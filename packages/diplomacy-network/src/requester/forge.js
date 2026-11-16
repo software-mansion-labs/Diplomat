@@ -69,8 +69,8 @@ function glabConfigToken(host) {
 }
 
 /// The requester's side of the forge. `log` receives one line per request made, never a
-/// credential. Returns `{ perform, context, resolveNode, pull, pullsByHead, comment, assignees,
-/// self, repository, branch, projectId, fetchInto }`; every function but `perform` and
+/// credential. Returns `{ perform, context, resolveNode, pull, pullsByHead, comment, ciRun,
+/// assignees, self, repository, branch, projectId, fetchInto }`; every function but `perform` and
 /// `context` takes `{ forge, host }` first - "github" or "gitlab", and the host the
 /// credential is for. A lookup throws when the forge's answer does not settle its question.
 export function createForge({ log = () => {} } = {}) {
@@ -262,6 +262,39 @@ export function createForge({ log = () => {} } = {}) {
     return res.json.map((p) => (github ? githubPull(p) : gitlabPull(repo, p)));
   }
 
+  /// The branch a CI run of `repo` ran for, by the id of the run (on GitLab, the pipeline)
+  /// or of one of its jobs - `what` is "run" or "job": `{ repo, ref }`, the repository the
+  /// branch is in and its ref, or null when the forge has no such run or it ran for a tag.
+  /// A pipeline for a merge request ran for that merge request's source branch, and the
+  /// answer names the merge request as `pull`. GitHub names a tag's run by the tag alone,
+  /// so such a run reads as one of a branch so named.
+  async function ciRun(target, repo, what, id) {
+    const github = target.forge === 'github';
+    const said = `what CI ${what} ${id} ran for`;
+    const base = github ? `/repos/${repo}/actions` : project(repo);
+    const one = async (path, of) => {
+      const res = await api(target, 'GET', `${base}/${path}/${of}`);
+      if (missing(res)) return null;
+      if (res.status !== 200 || !isObject(res.json) || res.json.id !== of) unknown(said, res);
+      return res.json;
+    };
+    let found = await one(what === 'job' ? 'jobs' : github ? 'runs' : 'pipelines', id);
+    if (github && found && what === 'job') {
+      if (!Number.isSafeInteger(found.run_id)) unknown(said, { status: 200 });
+      found = await one('runs', found.run_id);
+    }
+    if (!found) return null;
+    const branch = github ? found.head_branch : found.ref;
+    const holder = github ? found.head_repository?.full_name : repo;
+    if (typeof branch !== 'string' || branch === '' || typeof holder !== 'string' || holder === '') unknown(said, { status: 200 });
+    // GitLab says when a pipeline is a tag's.
+    if (found.tag === true) return null;
+    const request = github ? null : /^refs\/merge-requests\/([1-9][0-9]{0,9})\/[a-z]+$/.exec(branch);
+    if (!request) return { repo: holder, ref: `refs/heads/${branch}` };
+    const from = await pull(target, repo, Number(request[1]));
+    return from && { repo: from.headRepo, ref: `refs/heads/${from.headRef}`, pull: from.number };
+  }
+
   /// A GitHub review comment of `repo` by its REST id, resolved like a node, or null.
   async function comment(target, repo, id) {
     if (target.forge !== 'github') return null;
@@ -393,6 +426,7 @@ export function createForge({ log = () => {} } = {}) {
       pull: (number) => pull(target, repo, number),
       pullsByHead: (ref, owner, ever) => pullsByHead(target, repo, ref, owner, ever),
       comment: (id) => comment(target, repo, id),
+      run: (what, id) => ciRun(target, repo, what, id),
       assignees: (number) => assignees(target, repo, number),
       self: () => self(target),
       repository: (of = repo) => repository(target, of),
@@ -401,5 +435,5 @@ export function createForge({ log = () => {} } = {}) {
     };
   }
 
-  return { perform, context, resolveNode, pull, pullsByHead, comment, assignees, self, repository, branch, projectId, fetchInto };
+  return { perform, context, resolveNode, pull, pullsByHead, comment, ciRun, assignees, self, repository, branch, projectId, fetchInto };
 }

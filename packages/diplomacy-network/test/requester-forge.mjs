@@ -176,12 +176,12 @@ await check('the answer comes back whole: status, body, and only the headers an 
   assert.deepEqual(JSON.parse(missing.bytes), { message: 'Not Found' });
 
   const big = crypto.randomBytes(10 * 2 ** 20);
-  forge.route('api.github.com', 'GET', /^\/repos\/o\/r\/tarball\/big$/, (req, res) => res.writeHead(200, { 'content-type': 'application/x-gzip' }).end(big));
-  forge.route('api.github.com', 'GET', /^\/repos\/o\/r\/tarball\/huge$/, (req, res) => res.writeHead(200, { 'content-type': 'application/x-gzip' }).end(Buffer.alloc(12 * 2 ** 20)));
-  const binary = await perform(rules('investigate', 'job-x'), gh('GET', '/repos/o/r/tarball/big'));
-  assert.equal(binary.headers['content-type'], 'application/x-gzip');
+  forge.route('api.github.com', 'GET', /^\/repos\/o\/r\/contents\/big\.bin$/, (req, res) => res.writeHead(200, { 'content-type': 'application/vnd.github.raw' }).end(big));
+  forge.route('api.github.com', 'GET', /^\/repos\/o\/r\/contents\/huge\.bin$/, (req, res) => res.writeHead(200, { 'content-type': 'application/vnd.github.raw' }).end(Buffer.alloc(12 * 2 ** 20)));
+  const binary = await perform(rules('investigate', 'job-x'), gh('GET', '/repos/o/r/contents/big.bin'));
+  assert.equal(binary.headers['content-type'], 'application/vnd.github.raw');
   assert.ok(binary.bytes.equals(big), 'ten mebibytes of binary arrive byte for byte');
-  await failing(perform(rules('investigate', 'job-x'), gh('GET', '/repos/o/r/tarball/huge')), /larger than a task may receive/);
+  await failing(perform(rules('investigate', 'job-x'), gh('GET', '/repos/o/r/contents/huge.bin')), /larger than a task may receive/);
 });
 
 await check('a write carries its checked body, and a pinned answer is cut to its public members', async () => {
@@ -249,9 +249,11 @@ await check('a refused request never reaches the forge, and perform sends nothin
 });
 
 await check('a redirect is handed back, not followed, so the credential goes nowhere else', async () => {
-  forge.route('api.github.com', 'GET', /^\/repos\/o\/r\/zipball\/main$/, (req, res) => res.writeHead(302, { location: `${strangerOrigin}/steal` }).end());
+  // As GitHub answers for a job's log: with the place it is kept at.
+  forge.data.repos['o/r'].runs = { 9: { branch: 'main', jobs: [91] } };
+  forge.route('api.github.com', 'GET', /^\/repos\/o\/r\/actions\/jobs\/91\/logs$/, (req, res) => res.writeHead(302, { location: `${strangerOrigin}/steal` }).end());
   const heard = strangers.length;
-  const res = await perform(rules('investigate', 'job-x'), gh('GET', '/repos/o/r/zipball/main'));
+  const res = await perform(rules('investigate', 'job-x'), gh('GET', '/repos/o/r/actions/jobs/91/logs'));
   assert.equal(res.status, 302);
   assert.equal(res.headers.location, `${strangerOrigin}/steal`);
   assert.equal(strangers.length, heard, 'the redirect\'s target was never contacted');
@@ -356,12 +358,14 @@ await check('the forge answers what the deep checks ask: nodes, pull requests, c
   assert.match((await authorize(issue, ghql(GH.assignSelf), ctxFor())).reason, /only add or remove this task's own account/);
 });
 
+// What `ask` resolves to while the forge answers `pattern` with `answer`.
+const json = (status, body) => (req, res) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
+const answered = async (host, method, pattern, answer, ask) => {
+  const remove = forge.route(host, method, pattern, answer);
+  try { return await ask(); } finally { remove(); }
+};
+
 await check('a lookup the forge did not settle throws: only the forge\'s own "no such thing" reads as absent', async () => {
-  const json = (status, body) => (req, res) => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(body));
-  const answered = async (host, method, pattern, answer, ask) => {
-    const remove = forge.route(host, method, pattern, answer);
-    try { return await ask(); } finally { remove(); }
-  };
   const feature = { name: 'feature', commit: { sha: B }, protected: false };
   const branchOf = /^\/repos\/o\/r\/branches\/feature$/;
   const ask = () => client.branch(GITHUB, 'o/r', 'refs/heads/feature');
@@ -440,6 +444,57 @@ await check('a lookup the forge did not settle throws: only the forge\'s own "no
   assert.deepEqual(await configured('https://ci.example/build.yml'), ['https://ci.example/build.yml']);
   await failing(configured(7), /did not say where the project reads its CI configuration from/);
   await failing(answered(GITLAB_HOST, 'GET', /^\/api\/v4\/projects\/group%2Fsub%2Fproj$/, json(200, { default_branch: 'main' }), () => client.repository(GITLAB, 'group/sub/proj')), /did not say where the project reads its CI configuration from/);
+});
+
+await check('the forge says which branch a CI run ran for: asked by the run or by a job of it, a merge request\'s pipeline by its source branch, a tag\'s not at all', async () => {
+  const lab = 'group/sub/proj';
+  forge.data.repos['o/r'].runs = { 7: { branch: 'feature', jobs: [71, 72] }, 9: { branch: 'main', jobs: [91] }, 11: { branch: 'feature', repo: 'Me/R', jobs: [111] } };
+  forge.data.repos[lab].runs = { 7: { branch: 'feature', jobs: [71] }, 16: { pull: 6, jobs: [161] }, 17: { pull: 77, jobs: [] }, 18: { branch: 'v1.0', tag: true, jobs: [181] } };
+  const feature = { repo: 'o/r', ref: 'refs/heads/feature' };
+  const before = forge.log.length;
+  assert.deepEqual(await client.ciRun(GITHUB, 'o/r', 'run', 7), feature);
+  assert.deepEqual(await client.ciRun(GITHUB, 'o/r', 'job', 72), feature);
+  // A job does not say whose repository its branch is in: its run is asked for.
+  assert.deepEqual(seen(before).map((r) => r.path), ['/repos/o/r/actions/runs/7', '/repos/o/r/actions/jobs/72', '/repos/o/r/actions/runs/7']);
+  assert.deepEqual(await client.ciRun(GITHUB, 'o/r', 'job', 111), { repo: 'Me/R', ref: 'refs/heads/feature' });
+  assert.deepEqual(await ctxFor().run('job', 91), { repo: 'o/r', ref: 'refs/heads/main' });
+  for (const [what, id] of [['run', 71], ['job', 7], ['run', 99]]) assert.equal(await client.ciRun(GITHUB, 'o/r', what, id), null, `${what} ${id}`);
+  assert.deepEqual(await client.ciRun(GITLAB, lab, 'run', 7), { repo: lab, ref: 'refs/heads/feature' });
+  assert.deepEqual(await client.ciRun(GITLAB, lab, 'job', 71), { repo: lab, ref: 'refs/heads/feature' });
+  // A merge request's pipeline: the merge request's source branch, in whichever project that is.
+  assert.deepEqual(await client.ciRun(GITLAB, lab, 'run', 16), { repo: '', ref: 'refs/heads/forked', pull: 6 });
+  assert.deepEqual(await client.ciRun(GITLAB, lab, 'job', 161), { repo: '', ref: 'refs/heads/forked', pull: 6 });
+  // Of a merge request that is gone, of a tag, or no run at all.
+  for (const [what, id] of [['run', 17], ['run', 18], ['job', 181], ['run', 71], ['job', 7], ['run', 99]]) assert.equal(await client.ciRun(GITLAB, lab, what, id), null, `${what} ${id}`);
+
+  // An answer that is no run, is another run's, or leaves the branch or its repository out has not said.
+  const run = { id: 7, head_branch: 'feature', head_repository: { full_name: 'o/r' } };
+  const runAt = /^\/repos\/o\/r\/actions\/runs\/7$/;
+  const askRun = () => client.ciRun(GITHUB, 'o/r', 'run', 7);
+  assert.deepEqual(await answered('api.github.com', 'GET', runAt, json(200, run), askRun), feature);
+  for (const [status, body] of [[403, { message: 'API rate limit exceeded' }], [500, {}], [404, {}], [403, run], [200, { ...run, id: 8 }], [200, { ...run, head_branch: null }], [200, { ...run, head_branch: '' }],
+    [200, { ...run, head_repository: null }], [200, { ...run, head_repository: { full_name: '' } }], [200, [run]]]) {
+    await failing(answered('api.github.com', 'GET', runAt, json(status, body), askRun), new RegExp(`the forge did not say what CI run 7 ran for \\(it answered ${status}\\)`));
+  }
+  const jobAt = /^\/repos\/o\/r\/actions\/jobs\/72$/;
+  const askJob = () => client.ciRun(GITHUB, 'o/r', 'job', 72);
+  const mark = forge.log.length;
+  for (const body of [{ id: 72 }, { id: 72, run_id: '7' }, { id: 73, run_id: 7 }]) await failing(answered('api.github.com', 'GET', jobAt, json(200, body), askJob), /did not say what CI job 72 ran for/);
+  assert.deepEqual(seen(mark).map((r) => r.path), Array(3).fill('/repos/o/r/actions/jobs/72'), 'no run is asked for by an id the forge did not give');
+  // Only GitLab keeps a ref of that shape: on GitHub it is a branch's name.
+  assert.deepEqual(await answered('api.github.com', 'GET', runAt, json(200, { ...run, head_branch: 'refs/merge-requests/579/head' }), askRun), { repo: 'o/r', ref: 'refs/heads/refs/merge-requests/579/head' });
+  assert.equal(await answered('api.github.com', 'GET', jobAt, json(200, { id: 72, run_id: 99 }), askJob), null);
+  const pipelineAt = /\/pipelines\/7$/;
+  const askPipeline = () => client.ciRun(GITLAB, lab, 'run', 7);
+  for (const [status, body] of [[429, { message: 'Retry later' }], [200, { id: 8, ref: 'feature' }], [200, { id: 7 }], [200, { id: 7, ref: '' }]]) {
+    await failing(answered(GITLAB_HOST, 'GET', pipelineAt, json(status, body), askPipeline), /did not say what CI run 7 ran for/);
+  }
+  // The ref GitLab keeps of a merge request is told by its whole shape; anything else is a branch's name.
+  assert.deepEqual(await answered(GITLAB_HOST, 'GET', pipelineAt, json(200, { id: 7, ref: 'refs/merge-requests/5/merge' }), askPipeline), { repo: lab, ref: 'refs/heads/feature', pull: 5 });
+  for (const name of ['refs/merge-requests/5', 'x/refs/merge-requests/5/head', 'refs/merge-requests/5/head/x', 'refs/merge-requests/05/head']) {
+    assert.deepEqual(await answered(GITLAB_HOST, 'GET', pipelineAt, json(200, { id: 7, ref: name, tag: false }), askPipeline), { repo: lab, ref: `refs/heads/${name}` }, name);
+  }
+  assert.equal(await answered(GITLAB_HOST, 'GET', pipelineAt, json(200, { id: 7, ref: 'feature', tag: true }), askPipeline), null);
 });
 
 await check('the quarantine\'s fetch asks one repository for commits by id or for its branches, and follows no redirect', async () => {
