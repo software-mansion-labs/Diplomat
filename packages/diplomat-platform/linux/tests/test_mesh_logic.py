@@ -1040,6 +1040,24 @@ def test_window_tokens_sums_recent_and_excludes_cache_reads(tmp_path, monkeypatc
     assert got == 175.0
 
 
+def test_window_tokens_counts_a_message_written_as_several_blocks_once(tmp_path, monkeypatch):
+    import json as _json
+    from datetime import datetime, timezone, timedelta
+    from szpontnet import usage
+    monkeypatch.setenv("HOME", str(tmp_path))
+    now = datetime.now(timezone.utc)
+    ts = (now - timedelta(hours=1)).isoformat()
+    proj = tmp_path / ".claude" / "projects" / "demo"
+    proj.mkdir(parents=True)
+    blocks = [("msg_1", 300), ("msg_1", 300), ("msg_1", 300), ("msg_2", 8), ("msg_2", 385)]
+    (proj / "session.jsonl").write_text("".join(_json.dumps({
+        "timestamp": ts,
+        "message": {"id": mid, "usage": {"input_tokens": n, "output_tokens": 0,
+                                          "cache_creation_input_tokens": 0}},
+    }) + "\n" for mid, n in blocks), encoding="utf-8")
+    assert usage.window_tokens(now.timestamp(), window_hours=5.0) == 685.0
+
+
 def test_token_state_thresholds(monkeypatch):
     from szpontnet import usage
     # Ceiling for pro = weight(1) * tokensPerWeight.
