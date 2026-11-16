@@ -117,7 +117,7 @@ try {
     await Promise.all([a.kill(), b.kill(), c.kill()]);
   });
 
-  await check('a job of this machine\'s own that it does not take says why in its row: the pool\'s jobs cannot be started here, docker is missing, there is no credential for the model, the transport is not up, or the job needs more hours than this machine accepts', async () => {
+  await check('a job of this machine\'s own that it does not take says why in its row: the pool\'s jobs cannot be started here, docker is missing or down, there is no credential for the model, the transport is not up, or the job needs more hours than this machine accepts', async () => {
     const own = async (m, more = {}) => {
       await m.linked();
       const { taskId } = await m.ok('/offer', review('pr-1', 'say done', { now: true, ...more }));
@@ -135,15 +135,24 @@ try {
     assert.deepEqual([given.state, given.attempt, given.notTaking], ['pooled', 1, 'this machine could not start a job of this pool: docker run: no space left on device']);
     assert.equal(state.pools[0].notTaking, given.notTaking);
     assert.equal(waits(stuck)[0], `taking no job of ${POOL} for 3600 s: docker run: no space left on device`);
-    const onDisk = () => JSON.parse(fs.readFileSync(`${stuck.base}/state.json`, 'utf8')).pools[0]?.notTaking;
-    await until('state.json to say so too', () => onDisk() === given.notTaking);
     // Linked to another checkout, the pool is one nothing was found out about yet.
     fs.cpSync(stuck.checkout, `${stuck.checkout}2`, { recursive: true });
     await stuck.ok('/pools', { pools: [{ ...stuck.link, path: `${stuck.checkout}2` }] });
     await until('nothing held against the pool', async () => (await stuck.state()).pools[0].notTaking === '');
+
+    // state.json follows what is held against a pool, on a machine nothing else happens on.
+    const quiet = bench.machine('nq', { env: { DN_POOL_RETRY_MS: '1000', DN_POOL_RETRY_MAX_MS: '1000' } });
+    const config = fs.readFileSync(quiet.env.GIT_CONFIG_GLOBAL, 'utf8');
+    fs.writeFileSync(quiet.env.GIT_CONFIG_GLOBAL, config.replaceAll(`127.0.0.1:${bench.forge.port}`, '127.0.0.1:1'));
+    await quiet.start();
+    const onDisk = () => JSON.parse(fs.readFileSync(`${quiet.base}/state.json`, 'utf8')).pools[0]?.notTaking;
+    const [waiting] = await said(quiet, await own(quiet), /^this machine could not start/);
+    await until('state.json to say why', () => onDisk() === waiting.notTaking);
+    fs.writeFileSync(quiet.env.GIT_CONFIG_GLOBAL, config);
+    await until('nothing held against the pool', async () => (await quiet.state()).pools[0].notTaking === '');
     await until('state.json to say so too', () => onDisk() === '');
 
-    // So is one that is linked no longer, when its wait is over.
+    // Nor is anything held against a pool that is linked no longer, when its wait is over.
     const gone = await bench.machine('nu', { env: { DN_POOL_RETRY_MS: '3000' } }).start();
     fs.writeFileSync(`${gone.dockerDir}/fail-run`, 'no space left on device\n');
     await said(gone, await own(gone), /^this machine could not start/);
@@ -162,6 +171,13 @@ try {
     assert.match((await bare.state()).pools[0].notTaking, /^docker is missing/);
     await bare.ok('/leave', { pool: POOL });
     assert.deepEqual((await bare.state()).pools.map((p) => [p.left, p.notTaking]), [[true, '']]);
+
+    const down = bench.machine('ne');
+    fs.writeFileSync(`${down.dockerDir}/down`, '');
+    await down.start();
+    const [noEngine, downState] = await said(down, await own(down), /^docker is down: the docker engine/);
+    assert.equal(noEngine.notTaking, `docker is down: ${downState.docker.detail}`);
+    assert.deepEqual(downState.runs, [], 'and it is not gone for');
 
     const keyless = bench.machine('nm');
     delete keyless.env.ANTHROPIC_API_KEY;
@@ -192,7 +208,7 @@ try {
       return row.state === 'claimed' && fine.agent((await runsOf(fine, taken)).at(-1)?.runId)?.waiting === 'go';
     });
     assert.equal((await fine.state()).pools[0].notTaking, '');
-    await Promise.all([stuck, gone, bare, keyless, slow, short, fine].map((m) => m.kill()));
+    await Promise.all([stuck, quiet, gone, bare, down, keyless, slow, short, fine].map((m) => m.kill()));
   });
 } finally {
   await bench.close();
