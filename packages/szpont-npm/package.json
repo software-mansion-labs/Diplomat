@@ -6,13 +6,13 @@
   "keywords": ["diplomat", "szpont", "szpontnet", "launcher", "desktop-app", "tray"],
   "license": "MIT",
   "author": "Ignacy Łątka",
-  "homepage": "https://github.com/latekvo/Diplomat",
+  "homepage": "https://github.com/software-mansion-labs/Diplomat",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/latekvo/Diplomat.git",
+    "url": "git+https://github.com/software-mansion-labs/Diplomat.git",
     "directory": "packages/szpont-npm"
   },
-  "bugs": "https://github.com/latekvo/Diplomat/issues",
+  "bugs": "https://github.com/software-mansion-labs/Diplomat/issues",
   "bin": {
     "szpont": "src/cli.js"
   },
