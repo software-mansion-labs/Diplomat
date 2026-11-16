@@ -153,9 +153,19 @@ sender sends it again in a fresh envelope with a `ts` of that moment - once, 1.5
 later, whatever its kind: an `act` goes out again under the `seq` it had (section 9).
 The counters behind `required` are the process's too, and start from nothing.
 
-A sender whose clock runs ahead of the target's, inside the 300 s, moves that mark ahead
-with it: after a start the requests of every other sender are `busy` until their own
-clocks have passed it.
+Only a request the host served moves that mark: one of a member, in a pool the host
+has linked, or the `hello` of a host that carries a member's invite. What is answered
+`not-member` moves nothing. And the mark is never ahead of the host's own clock at the
+start: where a sender whose clock runs ahead, inside the 300 s, left a later date on
+disk, the host serves nothing dated at or before the second it started in, and
+everything after. So a sender is `busy` after a target's start only for as long as its
+own clock is behind that mark.
+
+That leaves one request a host can serve twice: one dated after the second the host
+started in and served before it - its sender's clock was ahead by more than the host
+took to come back - when the same bytes arrive once more after the start. Every kind
+but `act` answers the same when asked again, and an `act` is carried out once for its
+`seq`, which is on disk (section 9).
 
 ### What a sender pays
 
@@ -259,13 +269,14 @@ taskId = <pool id> "#" <kind> ":" <item> "@" <identity>
 same login on the same item offer the same task; two different logins asking for the
 same item are two tasks.
 
-An offer is its host's alone. No record another host signs ends it, changes it or stands
-in for it: an offer ends when its own host signs it `done` or `cancelled`, and a host
-signs that for its own reasons only (section 6). Two hosts that offer one task have two
+An offer is its host's alone. No record another host signs changes it or stands in for
+it: an offer ends when its own host signs it `done` or `cancelled`, and a host signs
+that by the rules of sections 6 and 7 only. Two hosts that offer one task have two
 offers. What makes them one piece of work is the claim (section 7): one claim may hold
-both, one run then does for both, and each host ends its own offer on that run's report.
-An offer a host makes of a task it offered before is another offer, told from the
-earlier one by a later `createdAt`.
+both, one run then does for both, and each host ends its own offer on that run's report -
+or, where the report never reached it, on the record that run left (section 7). An
+offer a host makes of a task it offered before is another offer, told from the earlier
+one by a later `createdAt`.
 
 For each open offer of a member, the records say which claim **holds** it at a given
 moment, if any (section 7); an offer no claim holds is **free**. A task as a whole is a
@@ -325,7 +336,8 @@ held and on `asOf`, so two hosts holding the same records hash the same set:
 
 - Every version of an offer or a claim is live for 24 hours after its `at`, whatever its
   state. A host that still offers a task signs its open offer again, with a higher `seq`,
-  every 6 hours; a held claim is signed again by every lease extension.
+  every 6 hours, and one that could not for 24 hours cancels it (section 7); a held
+  claim is signed again by every lease extension.
 - Every version of a member record is live for 30 days after its `at`, and beyond that
   for as long as the voucher of a live member is signed by it: dropped, it would cut that
   member off.
@@ -442,21 +454,25 @@ third failed attempt, `cancelled`. The answer carries `offer`: the host's offer 
 as the report left it. Any other `done` is answered `{ }` and changes nothing - a run
 reports in vain to a host whose job it did not do, or whose offer is another run's.
 
-So an offer ends by its own host and in three ways only: withdrawn, out of attempts, or
-done by the report of a run the host gave it to. An offer that a claim stops holding
-without such a report is free again. That counts as a failed attempt when the hold ran
-out - the lease lapsed, or the claim outlived the offer's hours (section 8) - and counts
-for nothing when the executor ended its claim: a run that ends without a word of this
-host's job did another host's.
+So an offer ends by its own host and in these ways only: withdrawn; out of attempts;
+done by the report of a run the host gave it to; done by the record of a run of its very
+job that sent it no report; or cancelled because its host was away for longer than an
+offer lasts (section 7 for the last two). An offer that a claim stops holding without a
+report is free again. That counts as a failed attempt when the hold ran out - the lease
+lapsed, or the claim outlived the offer's hours (section 8) - and counts for nothing
+when the executor ended its claim: a run that ends without a word of this host's job
+did another host's.
 
 An executor with an outcome to report sends `done` to every host that backs its claim,
 still offers the task and has not answered - again every 30 s, until each has answered
 or the lease has less than 30 s left. It takes in the offer records the answers carry,
-and only then ends its claim: `completed` on an `ok` outcome, else `released`. Until
-then the claim holds what it was given: the offer of a host that heard of a failed
-attempt is free again when the claim ends, and so is the offer of a host that never
-heard, with no attempt counted. A run that never got a key has no job to report, and
-releases its claim.
+and only then ends its claim: `completed` on an `ok` outcome, else `released`. A
+`completed` claim carries `spec`, the job its run did, as its `done` named it; no other
+claim carries one. Until then the claim holds what it was given: the offer of a host
+that heard of a failed attempt is free again when the claim ends, and so is the offer of
+a host that never heard, with no attempt counted - a failed run leaves a `released`
+claim, which names no job and ends nobody's offer. A run that never got a key has no
+job to report, and releases its claim.
 
 A request may arrive twice, or be answered and the answer lost. Every kind is safe to
 send again in a fresh envelope: a `lock` of the same executor and round is granted the
@@ -515,17 +531,17 @@ A member answers a lock with:
   grant in it. A host's own round binds it the same way, from its start until it
   commits, stands down or times out.
 
-A grant is a member's consent to this executor claiming this task in this round, on
-this state. A member that offers the task itself may add `offer` to it,
-`{ at, gen, hours }`, and so **backs** the claim: the offer it made at `at` (that
-offer's `createdAt`) is the claim's, for `hours` (that offer's `minRequiredH`), as the
-`gen`th claim the host gave that offer to. It backs when its offer is open and free and
-the claimant's `maxAcceptedH` is at least those hours; otherwise its grant is consent
-and nothing more. `gen` is the host's own count for that offer, on its disk before
-anyone sees it, and one higher each time it gives the offer away; asked again by the
-same round while its lock stands, it answers with the same number. A claimant that
-offers the task itself backs its own claim the same way, with its own free offer and its
-own next number, as `offer` in the claim record.
+A grant is a member's consent to this executor claiming this task in this round, on this
+state. A member that offers the task itself may add `offer` to it, `{ at, gen, hours }`,
+and so **backs** the claim: the offer it made at `at` (that offer's `createdAt`) is the
+claim's, for `hours` (that offer's `minRequiredH`), as the `gen`th claim the host gave
+that offer to. It backs when its offer is open and free, the claimant's `maxAcceptedH`
+is at least those hours, and what it holds of the pool is up to date ("A host that was
+away"); otherwise its grant is consent and nothing more. `gen` is the host's own count
+for that offer, on its disk before anyone sees it, and one higher each time it gives the
+offer away; asked again by the same round while its lock stands, it answers with the
+same number. A claimant that offers the task itself backs its own claim the same way,
+with its own free offer and its own next number, as `offer` in the claim record.
 
 The claim holds only when every present member granted it on one `asOf` and `hash`, no
 later than `exp`, and at least one host backs it. A grant that backs it must be for the
@@ -550,9 +566,10 @@ none. `hours` is the longest any host backs the claim for. Every host checks of 
 what does not depend on its own state: each grant is signed by its `by`, names the
 claim's pool, task, executor and round, and has an `exp` no earlier than `claimedAt`;
 `hours` is the longest of its backings, so a claim no host backs is refused
-(`bad-claim`); and its lease is the one its times dictate (section 8). Who was absent is
-the claimant's word, and excuses nothing: a claim holds what its backings give it
-(below).
+(`bad-claim`); it carries `spec`, 32 bytes, when its `state` is `completed` and at no
+other time (`bad-claim`); and its lease is the one its times dictate (section 8). Who
+was absent is the claimant's word, and excuses nothing: a claim holds what its backings
+give it (below).
 
 ### Which claim holds an offer
 
@@ -611,6 +628,82 @@ outlived. To give it the time, a host that would go for a free offer of a task w
 60 s longer when a claim already holds another offer of that task, whatever the task
 is to that host.
 
+### A job that was run for another offer
+
+A host is not always there when its job is run: it was asleep, switched off or out of
+reach during the round, so no claim was given its offer, or during the report, so it
+never heard how the run it backed ended. Its offer is open and no claim's, and the job
+is done - for another host's offer, or for the offer of the very machine that ran it.
+The record the run left speaks for it. A host signs an open offer of its own
+`done` when no claim holds that offer and the pool holds a live claim record of the task
+of which all of this is true:
+
+- it is `completed`, and its `spec` is `H(canon(spec))` of the spec this host hands out
+  for the offer (section 9);
+- `claimedAt + 300 >= createdAt` of the offer: the run was claimed no earlier than the
+  offer was made, the 300 s two clocks may differ by aside. A run that began before that
+  says nothing of an offer made knowing of it;
+- this host backs it with that very offer or not at all: a run it gave an earlier offer
+  of its own to was over, for this host, when it offered the task again.
+
+Whose offers the run was given does not matter: a machine that ran the task it offers
+itself, backed by nobody else, leaves such a record too. Of two machines of one
+operator, when one runs its own offer while the other sleeps, the sleeper's offer is
+`done` when it wakes and the job is run once.
+
+A record that reaches a host - pushed, pulled, or brought by the executor's later
+`sync` - is weighed at once, also when a `lock` for the offer is being answered: the
+offer is done before it can be given away. An offer that a claim holds is not touched:
+it ends by that claim's run, so no record stops a run that is going.
+
+The host books nothing for an offer that ends this way: what the run cost is with the
+offer the run reported to. It keeps who ran the job and every host that backed that
+run, the executor among them when it ran its own offer.
+
+The spec is everything an executor is handed to run a task, and so everything the digest
+covers: the task id, kind, item and title, the forge login, the prompt and its options,
+the base revision, and the name and email commits are authored with. Two offers are
+offers of one job when all of that is the same to the byte. Then one run does for both,
+in one claim or by this rule; otherwise they are two jobs under one name, and each is
+run ("What remains").
+
+### A host that was away
+
+What a host holds of a pool is as old as the last moment it was there. A host is away,
+and its pools are **out of date**, from the moment it starts, from the moment it finds
+its clock more than 60 s past where it last looked - the machine slept - and from the
+moment its transport comes up. Until a member has told it what it missed, it holds back
+what it would do of its own accord for its offers by that state:
+
+- it backs no claim. A `lock` is granted as any member's is, without `offer`: its
+  consent to the claim, and nothing of its own given;
+- it signs no offer again, counts no lapse and no failed attempt, sends no ping.
+
+What it is asked - a `key`, an `act`, a `done` - it answers as ever. It asks by sending
+`sync` to every host whose member record it holds, at once and whatever it made of that
+host before. A pool is up to date as soon as one member has told the host what that
+member holds: the first to answer, once the host has pulled what that answer shows it
+lacks, or a member whose own `sync` to the host names the very state the host holds,
+which is the same word from the other side. A member that is asleep, or slow to be
+reached, keeps nobody waiting. With nobody to ask, the pool is up to date at once.
+When nobody answers, the host asks again, and after 180 s of that with its transport up
+it goes on with what it holds. A host that goes out of date again meanwhile starts
+over: what a member said before says nothing of what came after.
+
+Then it looks at its offers. One whose job was run meanwhile is `done` (above). One
+whose last version this host signed 24 hours ago or longer is `cancelled`: its record
+is live in no pool, nobody could have been given it since, and whether its job was run
+can no longer be told - the record of that run may have been dropped as well. Whoever
+offered the work offers it again when the forge still shows it undone. Every other
+offer goes on as before.
+
+The 24 hours are no gap. A run that ended while the host was away left its `completed`
+record at some `t` after the host last signed its offer, at `s`, and that record is live
+until `t + 24 h`, later than `s + 24 h`. So for as long as an offer is still open on its
+host's return, the record of a run of its job is still held by every member that ever
+held it. And a claimant that holds that record cannot be granted a lock by a host that
+lacks it: a lock is granted only on the state the claimant confirmed (step 2).
+
 ### Conflicts
 
 Every conflict is settled by a value all hosts compute alike.
@@ -636,8 +729,11 @@ Every conflict is settled by a value all hosts compute alike.
 To keep hosts from racing for the same task, a host waits before step 1 for a delay
 proportional to its rank on that task, up to 5 s. A host may wait longer, up to a minute
 more: how well a task suits a machine is weighed by the host that would take it, on what
-that machine has, and neither that nor the wait is told to anyone. A task its own host
-offered to run at once waits for neither of the two.
+that machine has. Nothing of that is announced or sent: no record and no request says
+what a machine has or how long it waited. It is not hidden from a member that watches:
+the rank delay follows from the task id and the host's key, so a member that offers
+such work and sees who takes it, and when, can infer whether that host waited ("What
+remains"). A task its own host offered to run at once waits for neither of the two.
 
 ### What remains
 
@@ -662,13 +758,26 @@ Nothing in a record hides any of this.
     host it has its key from, and reports to both; the other host changes nothing, and
     once that claim ends its offer is free, at no attempt lost, and its job is run next.
     Machines that are to share a run must be given the same job to the byte.
-  - *A host that did not hear how the run ended.* The executor reports for as long as
-    its lease lasts and then ends its claim (section 6). A host it could not reach in
-    that time - a machine that was switched off or asleep - has its offer free again,
-    and the job is run a second time once that host is back.
+  - *A host that was away when its job was run* ends its offer by the record of that
+    run ("A job that was run for another offer"). The job is run a second time all the
+    same where that rule does not reach:
+    - *the run was claimed more than 300 s before the offer was made*, and the offer was
+      never given to it: the host made its offer while the run was going and was gone
+      before the run could take that offer in.
+    - *nobody answered the host when it came back.* After 180 s it goes on with what it
+      holds, and gives its offer to whoever asks.
+    - *the first member to tell the host what it missed had missed the run too.* The
+      host goes by the first word it gets. From a member that was away as well it learns
+      nothing of the run, and gives its offer to the next claimant that holds no record
+      of it either. The record, when another member brings it, ends an offer no claim
+      holds; one that a claim holds by then ends by that claim's run.
+    - *the host was there and out of reach for more than a day.* It kept signing its
+      offer, and the record of the run was dropped before the host could hear of it.
 - **A member that offers a task another host offers too** is a requester of its own
   offer and of nothing else. It cannot stop a run, take an offer from the claim that
-  holds it, or end, fail or finish another host's offer. What is left to it:
+  holds it, or fail or cancel another host's offer; how another host's offer can be
+  made to end `done` is under "An outcome is the executor's word" and "One member that
+  holds a job" below. What is left to it:
   - *Being asked for the key.* An executor whose claim holds several offers asks their
     hosts for the key in an order that starts at a place it draws at random (section
     9). When it starts with this member, the run does the job this member hands out,
@@ -691,6 +800,25 @@ Nothing in a record hides any of this.
   without doing the work has finished it, and so has a member through whose key the
   work was done (above). What a host sees for itself is how many forge requests it
   served for the task.
+- **One member that holds a job can make a host that offers it end its offer unrun.**
+  A `completed` claim that names a job is its executor's word. A member offers the
+  task, claims its own offer, and signs that claim `completed` under the digest of
+  another host's job; a host whose offer of that job is open and free then signs it
+  `done`, unrun. The digest takes the job itself to compute - the prompt, its options
+  and the commit author, to the byte, none of which a record carries - so the member
+  must already hold that exact job: it offers the same work itself, or was handed it
+  with a key before. This is no more than any executor can do by taking a job and
+  reporting it done (above), and it gets the member less: no key is issued and no
+  forge request made, an offer that a claim holds is untouched, and the host keeps
+  whom it took for the executor and for its backers. The forge shows the work undone,
+  and Diplomat offers it again.
+- **What a machine has shows in what it takes.** A host weighs a task against what its
+  machine has and waits longer for one that suits it less ("Conflicts"). It announces
+  nothing and sends nothing of that. A member that offers such work and watches who
+  takes it, and when, can infer it all the same: the rank delay is anybody's to
+  compute, so one observation tells a host that waited from one that did not - a
+  machine with no device to give from one that has one. Any private preference shows
+  in who takes what.
 - **A member can take an offer and sit on it.** A claim made by the rules holds the
   offers it was given for one lease and its grace, 2 h 10 min, and for as long after as
   its executor answers the pings, up to each offer's hours; a job's own executor answers
@@ -760,7 +888,8 @@ Nothing in a record hides any of this.
   counted from `claimedAt`, is stopped and reported as a failed attempt, whatever hours
   the claim has left for another host.
 - An executor that finishes or gives up pushes its claim at `seq + 1` with `state`
-  `completed` or `released`, without a ping. A member that left holds no claim.
+  `completed` or `released`, without a ping, and a `completed` one with the `spec` of
+  the job it ran (section 6). A member that left holds no claim.
 
 ## 9. Acting as the requester
 

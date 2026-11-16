@@ -163,7 +163,7 @@ const TYPES = {
       claimedAt: isTime, leaseUntil: isTime, deadline: isTime, hours: isHours,
       grants: (v) => Array.isArray(v) && v.length <= LIMITS.list && v.every(grantShaped),
       absent: (v) => isAscending(v, validPk), sig: bytes(64),
-    }, { ping: pingShaped, offer: backingShaped }) && r.at >= r.claimedAt,
+    }, { ping: pingShaped, offer: backingShaped, spec: bytes(32) }) && r.at >= r.claimedAt,
   },
 };
 

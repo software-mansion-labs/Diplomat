@@ -7,6 +7,7 @@ import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { unb64u } from '../src/core/canon.js';
 import { actMac } from '../src/core/capability.js';
+import { buildClaim } from '../src/core/claims.js';
 import { endClaim } from '../src/core/lease.js';
 import { backers } from '../src/core/records.js';
 import { LEASE_SECS } from '../src/paths.js';
@@ -136,6 +137,57 @@ await check('a key dies with what it was issued for, and a number is spent befor
   await w.restart(req);
   assert.equal(said(await act(cut, 0)), 'denied: seq is not new');
   assert.equal((await act(cut, 1)).body.status, 200);
+});
+
+await check('a key is one claim\'s: when a later claim holds the offer and its executor asks before the host has looked at its offers again, the key issued before is void from that moment and the executor is issued one of its own - never the secret issued for the claim before, whether the later claim is another executor\'s, the same executor\'s next, or another executor\'s under the same round', async () => {
+  const [R1, R2] = ['AAAAAAAAAAA', 'AAAAAAAAAAE'];
+  for (const [next, round, counted] of [['two', R2, 2], ['one', R2, 2], ['two', R1, 1]]) {
+    const w = createWorld({ seed: 48 });
+    const [req] = await w.pool(['req']);
+    await w.run(1);
+    // Two executors with no node behind them: they answer no ping.
+    const one = await w.intruder('one', req);
+    const two = await w.intruder('two', req);
+    const later = next === 'one' ? one : two;
+    const { taskId } = await req.node.offer(offerArgs('pr-1'));
+    const claimed = async (who, id, gen) => {
+      const now = w.net.now();
+      const { grant } = (await w.request(who, req, 'lock', { taskId, round: id, asOf: now, hash: w.view(req).hash })).body;
+      return buildClaim(who.id, { pool: POOL, taskId, round: id, gen, grants: [grant], absent: [who === one ? two.pk : one.pk], now });
+    };
+    const issued = () => w.stored(req, 'keys').issued[taskId];
+    const request = forgeRequest('GET', '/repos/o/r/pr-1/files');
+    const act = (who, { capability: { keyId }, secret }, seq) => w.request(who, req, 'act', {
+      taskId, keyId, seq, request, mac: actMac(unb64u(secret), { keyId, seq, request }),
+    });
+
+    const first = await claimed(one, R1, 0);
+    assert.equal((await w.request(one, req, 'push', { records: [first] })).body.accepted.length, 1);
+    const k1 = (await w.request(one, req, 'key', { taskId, round: R1 })).body;
+    assert.deepEqual([k1.capability.executor, issued().round], [one.pk, R1]);
+
+    // Its lease runs out unanswered. From that second the claim holds the offer no
+    // longer, and the host, which looks at its offers every ten seconds, has not yet
+    // seen it.
+    const lapse = first.leaseUntil + 600;
+    await w.net.until(() => w.net.now() >= lapse, { stepMs: 10, maxMs: 3 * 3600 * 1000, what: 'the lease and its grace over' });
+    Object.assign(w.net.faults, { minMs: 10, maxMs: 10 });
+    const second = await claimed(later, round, later === one ? 1 : 0);
+    assert.deepEqual([backers(second), issued().secret], [[req.pk], k1.secret], 'the offer is given on while the first key is still on the books');
+    const [pushed, asked] = await w.wait(Promise.all([
+      w.request(later, req, 'push', { records: [second] }, { drive: false }),
+      w.request(later, req, 'key', { taskId, round }, { drive: false }),
+    ]));
+    assert.deepEqual([pushed.body.accepted.length, said(asked)], [1, 'ok'], `${next} ${round}`);
+    const k2 = asked.body;
+    assert.deepEqual([k2.capability.executor, k2.capability.keyId === k1.capability.keyId, k2.secret === k1.secret], [later.pk, false, false], `${next} ${round}`);
+    // The host looks at its offers: a lapse of the first claim that it counts as a failed
+    // attempt costs the claim that holds the offer now nothing.
+    await w.run(1);
+    assert.deepEqual([w.offerRow(req, taskId).attempt, issued().round, issued().secret], [counted, round, k2.secret], `${next} ${round}`);
+    assert.equal(said(await act(one, k1, 0)), 'denied: not this key', 'the key of the claim before is worth nothing');
+    assert.equal((await act(later, k2, 1)).body.status, 200);
+  }
 });
 
 await check('an executor asks for its key again half a minute after each ask, however long the requester stays out of reach', async () => {
