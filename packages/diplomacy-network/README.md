@@ -219,7 +219,8 @@ The snapshot:
       "exit": 0, "log": "" } ],
   "offers": [ { "taskId": "", "pool": "", "kind": "", "item": "", "title": "",
       "state": "pooled|claimed|done|failed|cancelled", "reason": "", "executor": "",
-      "executorHere": false, "offeredAt": 0, "attempt": 1, "requests": 0, "refused": 0,
+      "executorHere": false, "backedBy": [""], "offeredAt": 0, "attempt": 1, "requests": 0,
+      "refused": 0,
       "outcome": { "ok": true, "summary": "", "usd": 0, "tokens": 0, "runner": "", "model": "" },
       "endedAt": 0 } ] }
 ```
@@ -227,11 +228,20 @@ The snapshot:
 Every time is Unix seconds. `offers` are the tasks this machine asked for: `pooled` while
 nobody holds it, `claimed` while an executor does, `done` when an executor finished it
 well, `failed` when its attempts ran out (`reason` says how the last one ended), and
-`cancelled` once withdrawn. `outcome` is null until an attempt has reported one. An ended
-offer stays in the list for a day, and keeps the `executor` and `executorHere` of the
-machine that last held it - the one that reported it done, or the last to hold it before
-it failed or was cancelled; `executor` is empty only when nobody ever held it. `docker`
-and `model` say why this machine takes no work when it takes none: their `detail`
+`cancelled` once withdrawn, or once this machine was away for longer than an offer
+lasts (`reason` says which). `outcome` is null until an attempt has reported one. An
+ended offer stays in the list for a day, and keeps the `executor` and `executorHere` of
+the machine that last held it - the one that reported it done, or the last to hold it
+before it failed or was cancelled; `executor` is empty only when nobody ever held it.
+
+An offer may also be `done` with no report: its job was run for another machine's offer
+while this machine was away. Its `outcome` then has the `summary`
+`run for another machine's offer of the same job` and no cost, `executor` is the machine
+that ran the job, and `backedBy` lists the machines, other than that one, whose offers
+the run was given: who vouches that it took place. `backedBy` is empty for every other
+offer.
+
+`docker` and `model` say why this machine takes no work when it takes none: their `detail`
 carries the reason. `devices` is `off` until the operator sets `networkDevices`, then
 `ready` while an adb server answers on this machine and `none` while none does.
 `transport` is `failed`, with the reason, between a start that failed and the next one.
@@ -300,11 +310,22 @@ of the offering machines, and each marks its own offer done on that run's report
 takes the same job on each of them, to the byte - title, prompt, options, base revision,
 and the `user.name` and `user.email` its commits are authored with. A machine whose job
 differs has done nothing by that run: its offer is free again when the run ends and is
-run next, by itself. So is the offer of a machine that could not be told how the run
-ended - one that was off or asleep from then until the run's lease ran out. Withdrawing,
-failing or finishing an offer on one machine changes nothing on another. What a member
-that offers somebody else's task can and cannot do with it is in PROTOCOL.md, section 7,
-"What remains".
+run next, by itself. Withdrawing or failing an offer on one machine changes nothing on
+another.
+
+A machine that was asleep, off or without a network while its job was run for another
+machine's offer finds the run on record when it is back, and marks its own offer done
+without a second run. It asks the pool what it missed before it does anything for its
+offers - a moment when the others answer, a minute when one of them is asleep, three
+when none answers - and an offer it could not sign for a day it cancels: Diplomat
+offers the work again when the forge still shows it undone. Two cases still run a job
+twice. A machine that ran the task it offered itself, with no other machine's offer in
+its claim, is the only witness of that run, and its word alone ends no other machine's
+offer: of two machines, when one runs its own offer while the other sleeps, the sleeper
+has the job run again when it wakes. And two machines that cannot reach each other each
+have it run. The exact rules, and what a member that offers somebody else's task can
+and cannot do with it, are in PROTOCOL.md, section 7: "A job that was run for another
+offer", "A host that was away" and "What remains".
 
 A request is checked before it is sent (`requester/authorize.js`). Where the check
 depends on the forge - where a branch is, which branch is the default, whether it is
@@ -501,12 +522,13 @@ weighs it when deciding whether to take a task.
 tor, a fake forge and a fake docker. The `node-*.mjs` files run whole hosts on a network
 in memory with a clock of its own (`test/lib/mem-net.mjs`, `test/lib/hosts.mjs`):
 `node-standing.mjs` is what a member that means harm cannot do with a claim,
-`node-cooffer.mjs` one task offered by several machines, `node-limits.mjs` what a host
-does for whom and how much of it, `node-full.mjs` a pool at its caps, and
-`node-soak.mjs` seeded runs of everything at once (`DN_SOAK_SEEDS`, `DN_SOAK_STEPS` and
-`DN_SOAK_SEED` say how many, how long and from which seed). The `daemon-*.mjs` files
-start real daemon processes on scratch state directories (`test/lib/daemons.mjs`), with
-`test/lib/agent.mjs` standing in for the agent.
+`node-cooffer.mjs` one task offered by several machines, `node-asleep.mjs` a machine
+that was away while its job was run, `node-limits.mjs` what a host does for whom and
+how much of it, `node-full.mjs` a pool at its caps, and `node-soak.mjs` seeded runs of
+everything at once (`DN_SOAK_SEEDS`, `DN_SOAK_STEPS` and `DN_SOAK_SEED` say how many,
+how long and from which seed). The `daemon-*.mjs` files start real daemon processes on
+scratch state directories (`test/lib/daemons.mjs`), with `test/lib/agent.mjs` standing
+in for the agent.
 
 Three files reach for the real things, and print `SKIP` and pass without them:
 
