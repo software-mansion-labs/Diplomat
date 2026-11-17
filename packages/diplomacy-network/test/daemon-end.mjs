@@ -47,8 +47,8 @@ try {
     fs.writeFileSync(m.configPath, good);
     await m.start();
     await until('the job taken up', () => m.log().includes(`${run.runId} taken up in ${run.container}`));
-    // As an applet does it: the setting, then the signal.
-    m.setConfig({ networkEnabled: false });
+    // As an applet does it: the setting, then the signal. Anything but true is off.
+    m.setConfig({ networkEnabled: 0 });
     assert.deepEqual(await m.stop(), { code: 0, signal: null });
     assert.deepEqual([world(m), alive(agentPid)], [[0, 0, 0], false]);
     assert.doesNotMatch(m.log(), /ending: the network was switched off/, 'it was the signal that ended it');

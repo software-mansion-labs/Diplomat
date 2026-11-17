@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { GITLAB_POOL, POOL, check, createBench, passed, sleep, until } from './lib/daemons.mjs';
 import { GITLAB_HOST } from './lib/fake-forge.mjs';
 
@@ -64,7 +64,7 @@ async function pair(names, linkOf, pool) {
 }
 
 try {
-  await check('a run still waiting for its key when the daemon went is started by the next daemon only once the job left running is taken up: the container is not restarted under that job', async () => {
+  await check('a run still waiting for its key when the daemon went is started by the next daemon only once the job left running is taken up, and the model credential was looked for: the container is not restarted under that job, and its own job is given the credential there is', async () => {
     const [a, b] = await pair(['ka', 'kb'], (m) => m.gitlabLink(), GITLAB_POOL);
     // The forge does not say the project's number, so the requester asks for it again
     // whenever it makes a task's rules; later the answer is kept back, and with it the
@@ -96,6 +96,10 @@ try {
     // when the second run has its key and its job is to be started.
     const [restarts, made] = [b.docker('restart').length, b.docker('run').length];
     fs.writeFileSync(path.join(b.dockerDir, 'hold-version'), '');
+    // And Claude Code's login is slow to be read: a pipe nobody writes to yet.
+    const login = path.join(b.home, '.claude', '.credentials.json');
+    fs.mkdirSync(path.dirname(login), { recursive: true });
+    execFileSync('mkfifo', [login]);
     await b.start();
     const second = await launched(b, two.taskId);
     await sleep(TIME_TO_REACH_THE_CONTAINER);
@@ -103,8 +107,13 @@ try {
     fs.rmSync(path.join(b.dockerDir, 'hold-version'));
 
     await until('the first job taken up', () => b.log().includes(`${first.runId} taken up in ${first.container}`));
+    await sleep(TIME_TO_REACH_THE_CONTAINER);
+    assert.equal(b.agent(second.runId), null, 'held back while the credential is looked for');
+    const pipe = await until('the daemon to read the login', () => { try { return fs.openSync(login, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK); } catch { return null; } });
+    fs.rmSync(login);
+    fs.closeSync(pipe);
     const started = await waiting(b, two.taskId, 'two');
-    assert.deepEqual([started.runId, started.container], [second.runId, first.container], 'the same run, in the same container');
+    assert.deepEqual([started.runId, started.container, b.agent(second.runId).env.ANTHROPIC_API_KEY], [second.runId, first.container, 'dn-placeholder'], 'the same run, in the same container, with the credential in its place');
     assert.deepEqual([b.docker('restart').slice(restarts), b.docker('run').length, alive(firstPid), b.agent(first.runId).waiting], [[], made, true, 'one'], 'and the first job went on undisturbed');
     b.release('one');
     b.release('two');
