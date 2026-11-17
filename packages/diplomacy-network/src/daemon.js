@@ -595,10 +595,11 @@ async function evict({ name, bytes, jobs: counted }) {
 // What is not kept for ever, looked at every SWEEP_MS, each on its own: a container
 // over its disk allowance or not to be measured, what container.js's sweep takes - what
 // is left under a container's name that no job is in, and the images no job is started
-// in - every certificate authority but the one each set of hosts is given next (a job is answered from the one
-// it was started under, so none goes while a job runs), a leaf certificate past its end,
-// the directory and the outcome of a run RUN_KEEP_MS after it ended, and the mirror of a
-// pool that has not been linked, or has been left, for MIRROR_KEEP_MS.
+// in - every certificate authority but the one each set of hosts is given next (a job
+// is answered from the one it was started under, so none goes while a job runs), a leaf
+// certificate past its end, the directory and the outcome of a run RUN_KEEP_MS after it
+// ended, and the mirror of a pool that has not been linked, or has been left, for
+// MIRROR_KEEP_MS.
 const upkeep = [
   ['containers over their disk allowance', async () => { for (const over of await containers.overQuota()) await evict(over); }],
   ['what containers left behind', () => containers.sweep()],
