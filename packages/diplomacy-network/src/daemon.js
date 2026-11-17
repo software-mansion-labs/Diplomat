@@ -428,14 +428,11 @@ async function startRun({ runId, pool: link, peer, spec }) {
     if (container) await containers.release({ name: container.name, runId }).catch(() => {});
     jobs.delete(runId);
     saveJobs();
-    // An OwnFault: no job ran, and why not is this machine's own affair. The node has
-    // stopped the run and given it back by the time it hears of the failure, which it
-    // would count as an attempt - as it does any other, which the requester's jobs may
-    // have brought about.
-    if (err instanceof OwnFault) {
-      if (!ending) leaveAlone(link, err.message);
-      giveBack(runId, `this machine could not start it: ${err.message}`);
-    } else log(`${runId} could not be started: ${err?.message ?? err}`);
+    // An OwnFault: no job ran, and why not is this machine's own affair. The node gives
+    // such a run back at no attempt; any other failure it counts as one, since the
+    // requester's jobs may have brought it about.
+    if (err instanceof OwnFault && !ending) leaveAlone(link, err.message);
+    log(`${runId} could not be started: ${err?.message ?? err}`);
     throw err;
   } finally {
     starting -= 1;
