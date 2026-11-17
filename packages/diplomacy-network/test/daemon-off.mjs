@@ -6,6 +6,7 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { holdSocket } from '../../daemon-core/src/serve.js';
@@ -90,7 +91,16 @@ try {
     m.setConfig({ networkEnabled: true });
     await m.start();
     assert.deepEqual((await m.state()).offers.map((o) => [o.taskId, o.state]), [[taskId, 'cancelled']]);
+
+    // A store that lost its list of pools has nothing ended over them, and the answer
+    // counts only what was ended.
+    await offer(m, 'pr-2', 'say done');
     await m.kill();
+    fs.rmSync(path.join(m.base, 'links.json'));
+    m.setConfig({ networkEnabled: false });
+    const open = stored(m);
+    assert.deepEqual(await m.install('--stop-daemon'), { ...gone, ended: { offers: 0, runs: 0 } });
+    assert.deepEqual(stored(m), open);
   });
 
   await check('what a daemon ended itself the installer leaves as it is; a store it cannot end in is said, with docker cleared all the same; and a machine no daemon ran on is given no state', async () => {
@@ -141,7 +151,14 @@ try {
     assert.deepEqual(await new Promise((resolve) => { child.on('exit', (code, signal) => resolve({ code, signal })); }), { code: 0, signal: null });
     assert.match(m.log(), /\] the startup lock is held by a live daemon; deferring\n$/);
     assert.deepEqual(fs.readdirSync(m.base).sort(), ['daemon.log', 'daemon.sock', 'daemon.sock.lock']);
-    await release();
+    // A request whose end never comes does not keep the socket held.
+    const half = net.connect(m.socket).on('error', () => {});
+    await new Promise((resolve) => { half.write('GET /health HTTP/1.1\r\n', resolve); });
+    // The socket is held by this very process, which reads that as its loop goes round.
+    for (let turn = 0; turn < 3; turn += 1) await new Promise((resolve) => { setImmediate(resolve); });
+    let free = false;
+    release().then(() => { free = true; });
+    await until('the socket given up', () => free, 20000);
     assert.deepEqual(fs.readdirSync(m.base), ['daemon.log']);
 
     await m.start();
