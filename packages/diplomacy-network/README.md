@@ -248,7 +248,8 @@ The snapshot:
   "model": { "state": "ready|missing", "detail": "" },
   "devices": { "state": "off|ready|none", "detail": "" },
   "admit": { "slots": 0, "at": 0, "reason": "" },
-  "pools": [ { "id": "", "path": "", "identity": "", "hash": "", "left": false, "notTaking": "",
+  "pools": [ { "id": "", "path": "", "identity": "", "hash": "", "left": false, "joining": false,
+      "joinFailed": "", "notTaking": "",
       "members": [ { "pk": "", "self": false, "maxAcceptedH": 12, "lastSeen": 0, "reachable": true,
           "skew": false } ],
       "tasks": [ { "taskId": "", "kind": "", "item": "", "title": "", "identity": "", "hours": 12,
@@ -290,6 +291,11 @@ other offer.
 carries the reason. `devices` is `off` until the operator sets `networkDevices`, then
 `ready` while an adb server answers on this machine and `none` while none does.
 `transport` is `failed`, with the reason, between a start that failed and the next one.
+
+A pool's `joining` is true from the moment an invite is pasted until the machine that made
+it has answered or the invite has run out: this machine is a pool of one meanwhile. Its
+`joinFailed` is why the last invite let this machine in nowhere - what the other machine
+said, or that the invite ran out unanswered - and is empty once another invite is pasted.
 
 A pool's `notTaking` is why this machine takes none of that pool's jobs, in a sentence,
 and empty while it takes them: the transport is not up, docker is not ready, there is no

@@ -66,7 +66,7 @@ await check('a host that left a pool stays out of it, whatever its list of pools
   const [a, b, c] = await w.pool(['a', 'b', 'c']);
   c.node.leave({ pool: POOL });
   await w.net.until(() => w.members(a).length === 2 && w.members(b).length === 2, { what: 'c gone' });
-  const out = { id: POOL, path: '/repos/widgets', identity: 'Octocat', hash: '', left: true, members: [], tasks: [] };
+  const out = { id: POOL, path: '/repos/widgets', identity: 'Octocat', hash: '', left: true, joining: false, joinFailed: '', members: [], tasks: [] };
   assert.deepEqual(w.view(c), out);
   await assert.rejects(c.node.offer(offerArgs('pr-1')), /This machine left the pool .*: join it again first\./);
   assert.throws(() => c.node.invite({ pool: POOL }), /This machine left the pool/);
@@ -190,12 +190,20 @@ await check('a pool unlinked and linked again is a pool of the host\'s own, and 
   assert.deepEqual(w.members(a), [a.pk]);
   assert.match(late.log.join('\n'), /the invite to .* let this host in nowhere: that invite is no longer good/);
   assert.equal(w.net.count({ from: 'late', to: 'a', kind: 'hello' }), 1, 'an invite that was refused is given up');
+  // Its pool's row says that no join is under way and why the last one came to nothing,
+  // after a restart too.
+  const joinOf = (h) => [w.view(h).joining, w.view(h).joinFailed];
+  assert.deepEqual(joinOf(late), [false, 'that invite is no longer good']);
+  await w.restart(late);
+  assert.deepEqual(joinOf(late), [false, 'that invite is no longer good']);
   // One whose maker never answers is asked about until it runs out, and no longer.
   w.net.cut('late', 'a');
   await late.node.join(a.node.invite({ pool: POOL, ttlSecs: 600 }));
+  assert.deepEqual(joinOf(late), [true, ''], 'a join under way, with nothing held against it from the invite before');
   await w.run(600);
   const asked = w.net.count({ from: 'late', to: 'a', kind: 'hello' });
   await w.run(600);
+  assert.deepEqual(joinOf(late), [false, 'the invite ran out before the machine that made it answered']);
   w.net.heal();
   await w.run(60);
   assert.deepEqual([asked > 2, w.net.count({ from: 'late', to: 'a', kind: 'hello' }), w.members(a)], [true, asked, [a.pk]]);

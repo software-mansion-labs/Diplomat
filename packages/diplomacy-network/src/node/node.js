@@ -77,7 +77,8 @@ export function createNode({
     }),
     save: (P) => store.write(poolFile(P.id), {
       toJSON: () => ({
-        id: P.id, linked: true, seq: P.seq, joining: P.joining, invites: P.invites, ...P.farewell, records: P.pool.records(),
+        id: P.id, linked: true, seq: P.seq, joining: P.joining, joinFailed: P.joinFailed, invites: P.invites, ...P.farewell,
+        records: P.pool.records(),
       }),
     }),
   };
@@ -223,6 +224,7 @@ export function createNode({
     };
     return {
       id: P.id, path: P.link.path ?? '', identity: P.link.identity ?? '', hash: P.pool.stateHash(now), left: false,
+      joining: P.joining !== null, joinFailed: P.joinFailed,
       members: members.map((m) => ({
         pk: m.pk, self: m.pk === host.self, maxAcceptedH: m.maxAcceptedH,
         ...(m.pk === host.self
@@ -369,7 +371,8 @@ export function createNode({
         pools: [
           ...[...host.pools.values()].map((P) => poolRow(P, now)),
           ...[...host.away.values()].map((info) => ({
-            id: info.id, path: info.path ?? '', identity: info.identity ?? '', hash: '', left: true, members: [], tasks: [],
+            id: info.id, path: info.path ?? '', identity: info.identity ?? '', hash: '', left: true, joining: false, joinFailed: '',
+            members: [], tasks: [],
           })),
         ],
         runs: host.runs.rows(),

@@ -338,7 +338,7 @@ try {
       transport: said, docker: { state: 'string', image: 'string', detail: 'string' }, model: said, devices: said,
       admit: { slots: 'int', at: 'int', reason: 'string' },
       pools: [{
-        id: 'string', path: 'string', identity: 'string', hash: 'string', left: 'boolean', notTaking: 'string',
+        id: 'string', path: 'string', identity: 'string', hash: 'string', left: 'boolean', joining: 'boolean', joinFailed: 'string', notTaking: 'string',
         members: [{ pk: 'string', self: 'boolean', maxAcceptedH: 'int', lastSeen: 'int', reachable: 'boolean', skew: 'boolean' }],
         tasks: [{
           taskId: 'string', kind: 'string', item: 'string', title: 'string', identity: 'string', hours: 'int', state: 'string',

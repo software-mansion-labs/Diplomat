@@ -89,8 +89,9 @@ export function createGossip(host) {
       // made it has signed the voucher; the invites this host gave since it last became a
       // member, each `{ nonce, exp }` and, for the keys that came with it, `seats` - the
       // seat each was given, by key; and what is kept of the membership it left before
-      // this one.
-      joining: null, invites: [], farewell: gone(doc),
+      // this one. `joinFailed` says why the last invite let this host in nowhere, until
+      // the next one is pasted.
+      joining: null, joinFailed: '', invites: [], farewell: gone(doc),
       // Since when what this host holds of the pool may be out of date - it started, it
       // slept, its transport came up - or null once a member has said what it holds:
       // until then this host gives none of its offers away and looks after none. `epoch`
@@ -105,6 +106,7 @@ export function createGossip(host) {
       // must not make them the future, and this host a stranger to its own pool.
       P.pool.merge(doc.records, doc.records.reduce((latest, r) => (Number.isSafeInteger(r?.at) ? Math.max(latest, r.at) : latest), host.now()));
       if (isObject(doc.joining)) P.joining = doc.joining;
+      if (typeof doc.joinFailed === 'string') P.joinFailed = doc.joinFailed;
       if (Array.isArray(doc.invites)) P.invites = doc.invites;
     }
     return P;
@@ -285,9 +287,11 @@ export function createGossip(host) {
       // What the member answered with is no voucher.
     }
     if (record && verifyVoucher(record)) host.take(P, [...chain, record]);
+    const failed = own(P) !== record;
+    if (failed) P.joinFailed = answer.ok ? 'its voucher does not hold' : answer.detail || answer.code;
     host.save(P);
-    if (own(P) !== record) {
-      host.log(`the invite to ${P.id} let this host in nowhere: ${answer.ok ? 'its voucher does not hold' : answer.detail || answer.code}`);
+    if (failed) {
+      host.log(`the invite to ${P.id} let this host in nowhere: ${P.joinFailed}`);
       return;
     }
     // It holds nothing of the pool it is in from here on. The member that signed the
@@ -560,6 +564,7 @@ export function createGossip(host) {
       if (P.stale !== null && host.transport.state().state === 'ready' && now - P.stale >= CATCH_UP_MS / 1000) caughtUp(P, P.epoch);
       if (P.joining && now >= P.joining.exp) {
         P.joining = null;
+        P.joinFailed = 'the invite ran out before the machine that made it answered';
         host.save(P);
       }
       redeem(P).catch((err) => host.log(`an invite could not be redeemed: ${err?.stack ?? err}`));
@@ -617,6 +622,7 @@ export function createGossip(host) {
     if (parsed.by === host.self) throw new Error('That invite was made on this machine: it lets another machine in, not this one.');
     const P = host.pools.get(parsed.pool) ?? rejoin(parsed.pool);
     P.joining = { invite: token, by: parsed.by, exp: parsed.exp };
+    P.joinFailed = '';
     P.farewell = null;
     host.save(P);
     redeeming.delete(P.id);
