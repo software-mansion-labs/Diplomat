@@ -5,8 +5,10 @@
 //   node src/install.js --restart-daemon -> the same, after replacing a running daemon
 //   node src/install.js --stop-daemon    -> the same, once the daemon is gone; with the
 //                                           network switched off in Diplomat's config,
-//                                           what the daemon made in docker is gone too,
-//                                           and with it what OFF_REMOVES names
+//                                           also `ended: { offers, runs }`, what was
+//                                           left for this to end as a switch-off does,
+//                                           and what the daemon made in docker is gone
+//                                           too, and with it what OFF_REMOVES names
 // Nothing is installed anywhere: `installed` is true wherever this file runs, and is in
 // the answer because the applets read every installer's `--check` alike. Every flag is
 // answered within INSTALLER_ANSWER_MS.
@@ -15,9 +17,15 @@ import fs from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { daemonControl } from '../../daemon-core/src/daemon-control.js';
 import { pidAlive, readJson } from '../../daemon-core/src/fsio.js';
+import { createLog } from '../../daemon-core/src/log.js';
+import { holdSocket } from '../../daemon-core/src/serve.js';
 import { createContainers } from './executor/container.js';
 import * as client from './ipc.js';
-import { CONFIG_PATH, DISCOVERY_PATH, EXECUTOR_RETRY_MS, INSTALLER_ANSWER_MS, OFF_REMOVES, STOP_WAIT_MS, TOOL_PATH } from './paths.js';
+import { switchOffStored } from './node/offline.js';
+import { createStore } from './node/store.js';
+import {
+  BASE_DIR, CONFIG_PATH, DISCOVERY_PATH, EXECUTOR_RETRY_MS, INSTALLER_ANSWER_MS, LOG_PATH, OFF_REMOVES, SOCKET_PATH, STOP_WAIT_MS, TOOL_PATH,
+} from './paths.js';
 
 // docker is looked for where the daemon looks for it.
 process.env.PATH = TOOL_PATH;
@@ -49,15 +57,44 @@ async function stop() {
   return pid && pidAlive(pid) ? `the daemon (pid ${pid}) did not exit within ${STOP_WAIT_MS / 1000} s` : null;
 }
 
-// A daemon that is switched off removes what it made in docker as it ends, and then
-// what OFF_REMOVES names. One that was not there to be stopped, was killed past its end
-// or found the engine down left that standing, so it is done here again, and asked again
-// until the answer is due: an engine that is starting takes a while to answer. Like the
-// daemon, this takes only a config it can read for the network being off.
+// What a switch-off found left to end with no daemon running: `{ offers, runs }`.
+let ended = null;
+
+// A daemon that was not running when the network was switched off cancelled nothing it
+// offered and gave back nothing it ran: switched on again it would offer work Diplomat
+// has since started elsewhere. That is ended here, in its store, which is this
+// process's for as long as it holds the daemon's socket; while a daemon has the socket
+// or is taking it, the ending is that daemon's. An error message, or null.
+async function endStored() {
+  // No daemon ever ran here: there is no store.
+  if (!fs.existsSync(BASE_DIR)) return null;
+  let release = null;
+  try {
+    release = await holdSocket(SOCKET_PATH);
+    if (!release) return null;
+    const log = createLog(LOG_PATH);
+    ended = await switchOffStored({ store: createStore({ dir: BASE_DIR, log }), log });
+    log(`the network is switched off and no daemon runs: ${ended.offers} offer(s) cancelled, ${ended.runs} run(s) stopped and given back`);
+    return null;
+  } catch (err) {
+    return `what this machine offered and ran could not be ended in its store: ${err?.message ?? err}`;
+  } finally {
+    await release?.();
+  }
+}
+
+// A daemon that is switched off ends what it offered and ran, removes what it made in
+// docker, and then what OFF_REMOVES names. One that was not there to be stopped, was
+// killed past its end or found the engine down left some of that standing, so it is
+// done here again, the engine asked again until the answer is due: an engine that is
+// starting takes a while to answer. A store that could not be ended in keeps nothing in
+// docker standing, and is the error once docker is clear. Like the daemon, this takes
+// only a config it can read for the network being off.
 async function stopForGood() {
   const error = await stop();
   const config = readJson(CONFIG_PATH);
   if (error || config === null || typeof config !== 'object' || config.networkEnabled === true) return error;
+  const unended = await endStored();
   const containers = createContainers();
   const late = delay(Math.max(0, answerBy - Date.now()), 'the docker engine did not answer in time');
   // What the engine last said outlives an asking that the answer's time cut short.
@@ -66,7 +103,7 @@ async function stopForGood() {
     const left = await Promise.race([containers.removeAll().then(() => null, (err) => { said = String(err?.message ?? err); return said; }), late]);
     if (left === null) {
       for (const dir of OFF_REMOVES) fs.rmSync(dir, { recursive: true, force: true });
-      return null;
+      return unended;
     }
     if (Date.now() + EXECUTOR_RETRY_MS >= answerBy) return `the daemon is gone, but what it made in docker is still there: ${said ?? left}`;
     await delay(EXECUTOR_RETRY_MS);
@@ -89,7 +126,7 @@ if (Object.hasOwn(actions, flag)) {
     error = err?.message || String(err);
   }
   const pid = await running();
-  out = { ok: !error, daemonRunning: pid !== null, pid, ...(error ? { error } : {}) };
+  out = { ok: !error, daemonRunning: pid !== null, pid, ...(error ? { error } : {}), ...(ended ? { ended } : {}) };
 } else {
   const pid = await running();
   out = { installed: true, daemonRunning: pid !== null, pid };

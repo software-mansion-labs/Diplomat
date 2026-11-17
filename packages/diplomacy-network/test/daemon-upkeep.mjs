@@ -355,7 +355,7 @@ try {
     assert.deepEqual([await n.install('--stop-daemon'), world(n), alive(leftPid)], [{ ok: true, daemonRunning: false, pid: null }, [2, 1, 1], true]);
     fs.writeFileSync(n.configPath, '{"networkEnabled":true}');
     n.setConfig({ networkEnabled: false });
-    assert.deepEqual([await n.install('--stop-daemon'), world(n), alive(leftPid)], [{ ok: true, daemonRunning: false, pid: null }, [0, 0, 0], false]);
+    assert.deepEqual([await n.install('--stop-daemon'), world(n), alive(leftPid)], [{ ok: true, daemonRunning: false, pid: null, ended: { offers: 1, runs: 1 } }, [0, 0, 0], false]);
   });
 
   await check('a container that outgrew its disk allowance has its job stopped as a failed attempt that says so, and goes with its relay, its network, its volume and its run records', async () => {

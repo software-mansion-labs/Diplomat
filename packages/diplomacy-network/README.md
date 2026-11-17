@@ -41,6 +41,7 @@ src/
     inbound.js     what every request passes before anything is done for it
     peers.js       sending a request to a peer, and what is remembered about each
     store.js       what survives a restart, as JSON documents under one directory
+    offline.js     the switch-off of a host that is not running, done on its store
   requester/
     rules.js       the rule catalogue per forge and kind
     authorize.js   decides one forge request against a task's rules
@@ -221,7 +222,7 @@ installer, then kill it and have no answer.
 | --- | --- |
 | `--check` | `{ "installed": true, "daemonRunning": <bool>, "pid": <pid or null> }` - there is nothing to install, so `installed` is constant |
 | `--start-daemon` | `{ "ok": <bool>, "daemonRunning": <bool>, "pid": <pid or null>, "error"?: "<why>" }` - the daemon that already runs, or one started for it once its socket answers. A daemon that could not finish its start has exited by then, and `error` carries its reason |
-| `--stop-daemon` | the same object: `ok` once no daemon is left, which with none running is at once. With the network switched off in the settings it then removes what is left in docker of this state directory's daemons, and `runs/`, `mirrors/` and `ca/` with it - what a daemon that died before it could switch off, or found the engine down, never did. An engine that refuses is asked again every 5 s (`DN_EXECUTOR_RETRY_MS`) for as long as the answer may wait; with it still down or silent by then, `ok` is false and `error` says what is still there, and the next `--stop-daemon` does it again |
+| `--stop-daemon` | the same object: `ok` once no daemon is left, which with none running is at once. With the network switched off in the settings it then does what a daemon that was not running, died before it could switch off, or found the engine down never did. In the store it cancels every offer of this machine's own that has not ended, stops its runs and gives their claims back, under the records a switch-off signs: nobody is told then, and the pools hear when the daemon next starts. `ended` says how many, `{ "offers": <n>, "runs": <n> }` - both 0 after a daemon that switched itself off. The daemon's socket is held meanwhile and answers 503, so a daemon started in that moment exits and none runs; while a daemon has the socket or is taking it, the ending is that daemon's and the answer has no `ended`. It then removes what is left in docker of this state directory's daemons, and `runs/`, `mirrors/` and `ca/` with it. An engine that refuses is asked again every 5 s (`DN_EXECUTOR_RETRY_MS`) for as long as the answer may wait; with it still down or silent by then, `ok` is false and `error` says what is still there, and the next `--stop-daemon` does it again |
 | `--restart-daemon` | the same object: a stop, then a start |
 
 The snapshot:
@@ -348,7 +349,9 @@ start to find that out. Both ends exit 0, with one exception: a switch-off that 
 not take everything out of docker - the engine refused or did not answer, or a start
 outlasted the wait - says in `daemon.log` what may still be there, keeps `runs/`,
 `mirrors/` and `ca/`, and exits 1; `install.js --stop-daemon` removes it once the engine
-answers. A second signal ends the daemon at once, with exit 1.
+answers. A second signal ends the daemon at once, with exit 1. A daemon that was not
+running when the network was switched off ended nothing: `install.js --stop-daemon`,
+which the applets run at the switch, does it in its place.
 
 A daemon that ends after another took its socket over - it had answered nothing for
 longer than a start waits - leaves the socket and `daemon.json` to that one.
