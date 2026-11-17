@@ -681,6 +681,14 @@ enum NetworkTest {
                 && executedNow == .networkDown("The Diplomacy Network daemon is stopping.")
                 && store.networkAnswered == false
                 && requests(NetworkRoute.offer).count == offersBefore + 2)
+        store.networkAnswered = nil
+        script.refuse(NetworkRoute.offer, (503, "The Diplomacy Network daemon is stopping."))
+        let unasked = await store.dispatchAgent(job(90218), source: .auto)
+        script.refuse(NetworkRoute.offer, nil)
+        store.networkAnswered = false
+        check("…and automatic work asks a daemon not asked yet",
+              unasked == .networkDown("The Diplomacy Network daemon is stopping.")
+                && requests(NetworkRoute.offer).count == offersBefore + 3)
         stopDaemon()
         store.queuedTasks = []
 
