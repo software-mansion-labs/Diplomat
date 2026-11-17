@@ -85,7 +85,8 @@ the job and the machine's key, the same on every machine.
 What a machine has - simulators, attached devices, toolchains - is never announced. A machine
 weighs it by itself, in one case: a job on an Android project is left for half a minute by a
 machine that has no device to give, so that one with a device takes it first. If none does,
-the job runs on a machine without.
+the job runs on a machine without. The wait is visible to the pool all the same: a member that
+watches when a machine takes such jobs can tell whether it waited.
 
 ## Where a job runs
 
@@ -98,8 +99,10 @@ brought, and an older engine takes no job.
   jobs only with a credential for it: `networkModelToken`, a Claude Code login, or
   `ANTHROPIC_API_KEY` in the daemon's environment. Without one it takes nothing, and the screen
   reads *model missing*.
-- **One container per requesting machine and repository.** It runs every job that machine asks
-  for on that repository, and never another machine's or another repository's.
+- **One container per requesting machine and repository.** It runs the jobs that machine asks
+  for on that repository while any of them runs, and never another machine's or another
+  repository's. When the last of them ends it is removed with everything in it, and the next
+  job starts in a new one.
 - **No credential is inside it.** Not the forge's, not the model's.
 - **It reaches nothing but the broker.** The container sits on an internal network with one
   other: its relay, a second small container that runs no job and carries connections to a proxy
@@ -111,11 +114,15 @@ brought, and an older engine takes no job.
   its jobs; the model's API is forwarded with the
   host's credential added, and its answer comes back without the headers that describe the
   host's account; anything else is tunnelled to the public internet, so installing software
-  works. Addresses of the host, of every network the host is on, IPv4 or IPv6, and of other
-  containers are refused.
+  works. Addresses of the host, of every network one of the host's interfaces is on, of every
+  private or otherwise not publicly routed range, IPv4 or IPv6, and of other containers are
+  refused. A publicly addressed network the host reaches only by a route - behind a VPN, or
+  another subnet of its site - is not known to the broker and is reached like the rest of the
+  internet.
 - **It gets a bounded share of the host.** 8 GiB of memory, 4 CPUs, 4096 processes and 20 GiB of
-  disk per container; per job, 256 connections through the broker and 48 MiB of request bodies
-  held at a time. A container found holding more disk than that is removed, and the jobs in it
+  disk per container; per job, 256 connections through the broker, 256 requests on them at a
+  time, 32 connections out for the requests the broker carries itself, and 48 MiB of request
+  bodies held at a time. A container found holding more disk than that is removed, and the jobs in it
   end as failed attempts.
 - **Devices stay on the host, and jobs see none of them** until **Let jobs use this machine's
   devices** is switched on (the Network screen's settings; off by default). With it on, a job
@@ -338,9 +345,12 @@ hold it; of any other the feed says that it was not offered, and it is started n
   machines you would give that to.
 - **Your model quota runs your pool's jobs.** A job this machine takes spends this machine's
   model credential, up to the fuse.
-- **Jobs of one requester on one repository share a container** and can see each other: each
-  can read the other's files, and can read and use the other's key for that requester while both
-  run. A process a job leaves behind lives until the container's last job ends.
+- **Jobs of one requester on one repository that run at the same time share a container** and
+  can see each other: each can read and change the other's files, and can read and use the
+  other's key for that requester while both run. A job that starts while another still runs
+  joins that container, with whatever the jobs before it left there. A process a job leaves
+  behind lives until the last of them ends. Then the container is removed with its files, and a
+  job that starts after that finds nothing of them.
 - **What is public on the forge is the internet.** The hosts a forge hands downloads out from,
   and any site by its bare address, are reached like any other site: a job can fetch another
   public repository's files there without the requester seeing it. Nothing private opens that
