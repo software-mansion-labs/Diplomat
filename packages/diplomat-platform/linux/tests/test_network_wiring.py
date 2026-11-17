@@ -1068,12 +1068,16 @@ def test_automatic_work_is_not_offered_while_the_daemon_is_known_silent(
 
     entry = store.queued_tasks[0]
     store._execute_queued_task(entry)
-    assert [b["item"] for b in d.sent("offer")] == ["pr-1"], "the operator's start asks"
+    assert [b["item"] for b in d.sent("offer")] == ["pr-1"], "execute now asks"
+    d.routes["/offer"] = (200, {"taskId": "t4"})
+    assert store.dispatch_agent(job(4), autofix.SOURCE_PANEL) == "spawned"
+    assert [b["item"] for b in d.sent("offer")] == ["pr-1", "pr-4"], "and so does a start"
+    assert store.network_answered is False
     store._network_cycle()
     assert store.network_answered is True
     d.routes["/offer"] = (200, {"taskId": "t3"})
     assert store.dispatch_agent(job(3), autofix.SOURCE_AUTO) == "spawned"
-    assert [b["item"] for b in d.sent("offer")] == ["pr-1", "pr-3"] and calls == []
+    assert [b["item"] for b in d.sent("offer")] == ["pr-1", "pr-4", "pr-3"] and calls == []
 
 
 def test_a_job_whose_reported_cost_was_capped_says_so_where_it_ends(store, on, daemon):
@@ -2381,29 +2385,17 @@ def test_launch_retires_the_legacy_node_always_and_starts_the_daemon_only_when_o
     monkeypatch.setattr(app_module.DiplomatApp, "_build_tray", lambda self: None)
     monkeypatch.setattr(app_module.DiplomatApp, "trigger_refresh", lambda self: None)
     monkeypatch.delenv("DIPLOMAT_PREFILL", raising=False)
-    monkeypatch.delenv("DIPLOMAT_NETWORK_SECS", raising=False)
 
     app = app_module.DiplomatApp()
 
     assert called.count("retire_legacy_node_async") == 1
     assert called.count("start_network_async") == (1 if switch else 0)
-    assert app.network_timer.interval == 30_000
+    assert app.network_timer.interval == 30_000 < 2 * 60_000, (
+        "well inside the two minutes after which the daemon takes no task")
     del called[:]
     for slot in app.network_timer.slots:
         slot()
     assert called == ["run_network_cycle_async"]
-
-
-@pytest.mark.parametrize("raw, secs", [(None, 30.0), ("12", 12.0), ("600", 60.0),
-                                       ("1", 5.0), ("soon", 30.0)])
-def test_the_cycle_is_never_slower_than_the_admit_goes_stale(monkeypatch, raw, secs):
-    from diplomat_app import app as app_module
-
-    if raw is None:
-        monkeypatch.delenv("DIPLOMAT_NETWORK_SECS", raising=False)
-    else:
-        monkeypatch.setenv("DIPLOMAT_NETWORK_SECS", raw)
-    assert app_module.network_cycle_secs() == secs
 
 
 def test_the_agent_dump_asks_the_daemon_only_while_the_switch_is_on(

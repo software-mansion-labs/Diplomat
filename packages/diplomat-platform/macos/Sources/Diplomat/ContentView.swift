@@ -970,14 +970,25 @@ private struct AgentRunRow: View {
             AgentTaskStatusLabel(status: row.status)
             // WHY nothing is known: what to go and fix, a revoked automation permission
             // say, is named only there. A run the network carries always says where it
-            // is, there being no window to look in.
-            if row.state == .unknown || !row.record.runsHere, !row.reason.isEmpty {
-                Text("· \(row.reason)")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+            // is, there being no window to look in, and how long since it was offered.
+            if !row.reason.isEmpty {
+                if !row.record.runsHere {
+                    TimelineView(.periodic(from: Date(), by: 30)) { ctx in
+                        why(NetworkText.rowDetail(row.reason, offeredAt: row.record.dispatchedAt,
+                                                  now: ctx.date))
+                    }
+                } else if row.state == .unknown {
+                    why(row.reason)
+                }
             }
         }
+    }
+
+    private func why(_ text: String) -> some View {
+        Text("· \(text)")
+            .font(.system(size: 9))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
     }
 }
 

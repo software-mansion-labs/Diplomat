@@ -34,7 +34,9 @@ repository is on. The daemon looks for them on its `PATH` and in the usual insta
 binary anywhere else, and `DN_TOOL_DIRS` names other directories to look in. Without docker a machine still offers its jobs and acts for them, and
 takes none. Without Tor it reaches no other machine. The Network screen shows what the daemon
 says is missing, and while tor, docker or the model credential is missing or failed, or the
-daemon does not answer, a red line above the task list says so and opens that screen.
+daemon does not answer, a red line above the task list says so and opens that screen. While the
+daemon does not answer, automatic work waits in the queue without being offered; a job started
+by hand, or a queued one executed now, still asks it.
 
 <img alt="The Network screen" src="img/network.png" />
 
@@ -320,7 +322,9 @@ machine takes jobs of at most 12 h and this one needs 24*.
 
 A job offered to the network shows in the task list like any other: *in the pool*, *running on
 this machine* or on another member's key, then finished or failed. A job started by hand whose
-offer the daemon has not answered yet reads *Offering to the pool…* until it has. Telemetry
+offer the daemon has not answered yet reads *Offering to the pool…* until it has. That wait is
+held in memory alone: quit Diplomat first and the job is forgotten here, while the daemon may
+still hold its offer, which the Network screen then lists under its pool. Telemetry
 prices a job from what the executor reports; work another machine ran counts against no limit of
 this one. A job that took more than one attempt is priced from the last alone: what an earlier
 attempt spent is in no figure. Where the executor lowered the tokens or the cost a job reported

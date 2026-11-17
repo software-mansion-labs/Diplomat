@@ -25,6 +25,7 @@ struct NetworkScreen: View {
             if store.configSaveFailed {
                 Text(AllocatorUI.saveError).font(.system(size: 10)).foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
             if store.networkEnabled {
                 HStack(alignment: .top, spacing: 12) {
@@ -232,8 +233,12 @@ struct NetworkScreen: View {
                           _ value: Binding<Int>) -> some View {
         SettingRow(title: title, summary: summary) {
             HStack(spacing: 6) {
-                Text(NetworkText.hours(value.wrappedValue))
+                // Any whole hour can be typed; the setting keeps it inside the range.
+                TextField(title, value: value, format: .number.grouping(.never))
+                    .labelsHidden().textFieldStyle(.roundedBorder).controlSize(.small)
                     .font(.system(size: 10, weight: .bold).monospacedDigit())
+                    .multilineTextAlignment(.trailing).frame(width: 46)
+                Text("h").font(.system(size: 10, weight: .bold))
                 Stepper(title, value: value, in: DiplomacyNetwork.hoursRange,
                         step: DiplomacyNetwork.hoursStep)
                     .labelsHidden().controlSize(.small)
@@ -312,9 +317,10 @@ struct NetworkScreen: View {
 /// The Diplomacy Network's switch, as Settings and the Network screen both show it.
 struct NetworkSwitchRow: View {
     @EnvironmentObject var store: Store
+    var summary = NetworkText.explanation
 
     var body: some View {
-        SettingRow(title: NetworkText.switchTitle, summary: NetworkText.explanation) {
+        SettingRow(title: NetworkText.switchTitle, summary: summary) {
             Toggle(NetworkText.switchTitle, isOn: $store.networkEnabled)
                 .labelsHidden()
                 .toggleStyle(.switch)
@@ -333,24 +339,28 @@ struct NetworkJoinRow: View {
     @State private var invite = ""
     @State private var joining = false
 
-    private var token: String { invite.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var token: String? { NetworkText.joinable(invite, sending: joining) }
+
+    private func join() {
+        guard let token else { return }
+        joining = true
+        Task {
+            if await store.joinNetworkPool(invite: token, card: card) {
+                invite = ""
+                onDone()
+            }
+            joining = false
+        }
+    }
 
     var body: some View {
         HStack(spacing: 6) {
             WizardTextField(systemImage: "ticket", placeholder: NetworkText.invitePlaceholder,
                             text: $invite)
-            Button {
-                joining = true
-                Task {
-                    if await store.joinNetworkPool(invite: token, card: card) {
-                        invite = ""
-                        onDone()
-                    }
-                    joining = false
-                }
-            } label: { Text("Join").bold() }
-            .buttonStyle(.borderedProminent).controlSize(.small)
-            .disabled(token.isEmpty || joining)
+                .onSubmit(join)
+            Button(action: join) { Text("Join").bold() }
+                .buttonStyle(.borderedProminent).controlSize(.small)
+                .disabled(token == nil)
         }
     }
 }

@@ -177,6 +177,10 @@ extension NetworkSnapshot {
 enum NetworkText {
     static let explanation = "Every job is offered to a shared pool per repository and runs "
         + "in a docker container, possibly on another machine in the pool."
+    /// What Settings says under the switch, the Network screen being elsewhere.
+    static let settingsExplanation = explanation + " While it is on, no agent starts in a "
+        + "terminal on this machine. The pools and the hours a job may take are on the "
+        + "Network screen."
     static let offering = "Offering to the pool…"
     static let offeringHelp = "The daemon has not answered this job's offer. Diplomat asks "
         + "it again until it does."
@@ -288,6 +292,20 @@ enum NetworkText {
               offer.state == AgentState.NetworkTask.failed
                 || offer.state == AgentState.NetworkTask.cancelled else { return nil }
         return AgentState.networkVerdict(task: task, network: offers, age: 0).1
+    }
+
+    /// The invite a join row may send: what is typed without the space around it, or nil
+    /// for an empty field and while a join is being sent.
+    static func joinable(_ typed: String, sending: Bool) -> String? {
+        let token = typed.trimmingCharacters(in: .whitespacesAndNewlines)
+        return token.isEmpty || sending ? nil : token
+    }
+
+    /// The line under a run the network carries in the task list: where the daemon says
+    /// it is, and how long since it was offered once that is a minute or more.
+    static func rowDetail(_ reason: String, offeredAt: TimeInterval, now: Date) -> String {
+        let age = Fmt.duration(now.timeIntervalSince1970 - offeredAt)
+        return age == "just now" ? reason : "\(reason) · offered \(age) ago"
     }
 
     /// A pool card's line on why this machine takes none of its jobs, or nil.

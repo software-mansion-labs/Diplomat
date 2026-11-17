@@ -307,8 +307,7 @@ Also overridable: `DIPLOMAT_REPO` (the agents' working dir — outranks Settings
 *Repo roots* with one root, whose own default is `~/dev/<repo>`), `DIPLOMAT_CONFIG` (where the
 shared `config.json` lives),
 `DIPLOMAT_CORE_BIN`, `DIPLOMAT_AUTOFIX_SECS` (floor 30s), `DIPLOMAT_APIWATCH_SECS`
-(floor 5s), `DIPLOMAT_NETWORK_SECS` (the Diplomacy Network cycle, 30s; floor 5s, cap 60s),
-`DIPLOMAT_DIPLOMACY_NETWORK_DIR` (the `diplomacy-network` package whose installer starts the
+(floor 5s), `DIPLOMAT_DIPLOMACY_NETWORK_DIR` (the `diplomacy-network` package whose installer starts the
 daemon), `DIPLOMAT_SHELL`, `DIPLOMAT_NPM`.
 
 ## Tests

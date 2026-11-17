@@ -1,4 +1,6 @@
 import Foundation
+import AppKit
+import SwiftUI
 import DiplomatCore
 
 /// `DIPLOMAT_NETWORK_TEST=1`: the app's half of the Diplomacy Network (the core's is
@@ -664,6 +666,16 @@ enum NetworkTest {
               unseen == .networkDown(DiplomacyNetwork.notAnswering)
                 && store.networkAnswered == false
                 && requests(NetworkRoute.offer).count == offersBefore)
+        script.refuse(NetworkRoute.offer, (409, "not today"))
+        let pressed = await store.dispatchAgent(job(90217), source: .panel)
+        script.refuse(NetworkRoute.offer, (503, "The Diplomacy Network daemon is stopping."))
+        let executedNow = await store.dispatchAgent(job(90216), source: .auto, forced: true)
+        script.refuse(NetworkRoute.offer, nil)
+        check("…while what the operator starts, or has executed now, asks",
+              pressed == .networkRefused("not today")
+                && executedNow == .networkDown("The Diplomacy Network daemon is stopping.")
+                && store.networkAnswered == false
+                && requests(NetworkRoute.offer).count == offersBefore + 2)
         stopDaemon()
         store.queuedTasks = []
 
@@ -1036,6 +1048,90 @@ enum NetworkTest {
         check("jobs see no device until the setting says so",
               !store.networkDevices && !AppConfig.networkDevices
                 && AppConfig.read()[NetworkSettings.devicesKey] == nil)
+
+        //     The screen itself, in a window never ordered on screen: typing goes through
+        //     each field's editor. It asks the daemon nothing of its own here.
+        var noPools = snapshot()
+        noPools["pools"] = [[String: Any]]()
+        script.set(noPools)
+        await store.settleAgents()
+        let screen = NSHostingView(rootView: NetworkScreen(isPresented: .constant(true), live: false)
+            .environmentObject(store))
+        let screenWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 1400),
+                                    styleMask: [.borderless], backing: .buffered, defer: false)
+        screenWindow.isReleasedWhenClosed = false
+        screenWindow.contentView = screen
+        defer { screenWindow.contentView = nil }
+        func screenFields(_ view: NSView) -> [NSTextField] {
+            ((view as? NSTextField).map { [$0] } ?? []) + view.subviews.flatMap(screenFields)
+        }
+        func screenField(_ placeholder: String) -> NSTextField? {
+            screenFields(screen).first { $0.isEditable && $0.placeholderString == placeholder }
+        }
+        func screenShows(_ text: String) -> Bool {
+            screenFields(screen).contains { $0.stringValue == text }
+        }
+        func screenSettles(until done: () -> Bool) async {
+            for _ in 0..<60 {
+                screen.layoutSubtreeIfNeeded()
+                if done() { return }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+        }
+        func enter(_ text: String, in field: NSTextField) {
+            screenWindow.makeFirstResponder(field)
+            field.currentEditor()?.selectAll(nil)
+            field.currentEditor()?.insertText(text)
+            field.currentEditor()?.insertNewline(nil)
+        }
+        await screenSettles { screenField(NetworkText.invitePlaceholder) != nil }
+        let joinsBefore = requests(NetworkRoute.join).count
+        if let invite = screenField(NetworkText.invitePlaceholder) {
+            enter("  dn-typed ", in: invite)
+            await screenSettles { requests(NetworkRoute.join).count > joinsBefore }
+            check("Return in the invite field joins with what was typed",
+                  requests(NetworkRoute.join).count == joinsBefore + 1
+                    && requests(NetworkRoute.join).last?["invite"] as? String == "dn-typed")
+        } else {
+            check("the screen draws an invite field while this machine is in no pool", false)
+        }
+        check("an empty invite, or one being sent, is not sent",
+              NetworkText.joinable("  dn-x \n", sending: false) == "dn-x"
+                && NetworkText.joinable(" \n", sending: false) == nil
+                && NetworkText.joinable("dn-x", sending: true) == nil)
+        if let hours = screenField(NetworkText.requiredTitle) {
+            enter("100", in: hours)
+            await screenSettles { store.networkRequiredMinimumH == 100 }
+            check("any whole hour can be typed into an hours field",
+                  store.networkRequiredMinimumH == 100
+                    && AppConfig.read()[NetworkSettings.requiredMinimumHKey] as? Int == 100)
+            enter("5", in: hours)
+            await screenSettles {
+                store.networkRequiredMinimumH == NetworkSettings.hoursFloor
+                    && hours.stringValue == "\(NetworkSettings.hoursFloor)"
+            }
+            check("…and one outside the range is shown as the setting keeps it",
+                  store.networkRequiredMinimumH == NetworkSettings.hoursFloor
+                    && hours.stringValue == "\(NetworkSettings.hoursFloor)")
+        } else {
+            check("the screen draws an hours field that can be typed in", false)
+        }
+        check("the screen says nothing of a save while every change lands",
+              !store.configSaveFailed && !screenShows(AllocatorUI.saveError))
+        script.set(snapshot())
+        await store.settleAgents()
+        let drawnAt = Date(timeIntervalSince1970: 1_800_000_000)
+        check("a network run's row says how long since it was offered, from a minute on",
+              NetworkText.rowDetail("in the pool", offeredAt: drawnAt.timeIntervalSince1970 - 59,
+                                    now: drawnAt) == "in the pool"
+                && NetworkText.rowDetail("running on this machine",
+                                         offeredAt: drawnAt.timeIntervalSince1970 - 600,
+                                         now: drawnAt)
+                    == "running on this machine · offered 10m ago")
+        check("Settings says under the switch where the rest is",
+              NetworkText.settingsExplanation == NetworkText.explanation
+                + " While it is on, no agent starts in a terminal on this machine. The pools "
+                + "and the hours a job may take are on the Network screen.")
 
         // 22. An offer whose run cannot be booked is withdrawn, and says why. Every
         //     network verb has its row symbol.
@@ -1870,6 +1966,9 @@ enum NetworkTest {
                 && !AppConfig.update { _ in [:] }
                 && (try? Data(contentsOf: AppConfig.url)) == configWhole.dropLast(3)
                 && store.configSaveFailed)
+        await screenSettles { screenShows(AllocatorUI.saveError) }
+        check("…and the Network screen says the change was not saved",
+              screenShows(AllocatorUI.saveError))
         store.networkEnabled = false
         check("…and a switch that would not save stays where it was", store.networkEnabled)
         try? Data().write(to: AppConfig.url)

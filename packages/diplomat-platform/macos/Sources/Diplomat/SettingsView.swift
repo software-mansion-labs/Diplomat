@@ -21,6 +21,7 @@ struct SettingsView: View {
             if store.configSaveFailed {
                 Text(AllocatorUI.saveError).font(.system(size: 10)).foregroundStyle(.red)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
             // Two columns, same layout as the main panel: who the agents are and what
             // they may do on the left; the panel, the watchers and the environment on
@@ -1153,7 +1154,7 @@ struct SettingsView: View {
         SettingsCard(symbol: NetworkText.symbol, title: "DIPLOMACY NETWORK", tint: .purple,
                      pill: StatusPill(text: store.networkEnabled ? "on" : "off",
                                       tint: store.networkEnabled ? .purple : .secondary)) {
-            NetworkSwitchRow()
+            NetworkSwitchRow(summary: NetworkText.settingsExplanation)
         }
     }
 
