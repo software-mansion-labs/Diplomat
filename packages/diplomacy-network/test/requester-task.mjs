@@ -171,8 +171,8 @@ await check('a lookup the forge does not answer is never read as permission: ass
   await refused(hubRules('review', 'pr-578'), ghql(GH.addThread), hubCtx(), /the forge did not say what PRR_mine is/);
   off();
   // A forge that cannot be reached at all is a refusal too, with its reason.
-  const dead = createForge().context({ forge: 'github', host: 'github.example.com', repo: 'o/r', state: {} });
-  await refused(everyPull, open, dead, /is not a host of github/);
+  const dead = createForge().context({ forge: 'github', host: 'corp.ghe.com', repo: 'o/r', state: {} });
+  await refused(everyPull, open, dead, /is not a GitHub host this can ask/);
 });
 
 await check('a branch is the task\'s own once the forge accepted its creation, and not before', async () => {
@@ -705,7 +705,7 @@ await check('a read stays inside the pool\'s repository: no other repository, pr
   const rules = hubRules('investigate', 'job-q');
   const ctx = hubCtx();
   for (const ok of ['/repos/o/r/compare/main...feature', '/repos/o/r/compare/main...feature/x', '/repos/o/r/compare/v1.0..main', '/repos/o/r/compare/abc123...def456?per_page=1',
-    '/repos/o/r/issues/421', '/repos/o/r/issues/421/comments', '/repos/o/r/issues/421/events', '/repos/o/r/issues?creator=me', '/repos/o/r/pulls?head=someone:branch']) {
+    '/repos/o/r/issues/421', '/repos/o/r/issues/421/comments', '/repos/o/r/issues?creator=me', '/repos/o/r/pulls?head=someone:branch']) {
     assert.equal((await authorize(rules, gh('GET', ok), ctx)).ok, true, ok);
   }
   for (const [path, pattern] of [
@@ -720,10 +720,13 @@ await check('a read stays inside the pool\'s repository: no other repository, pr
     ['/repos/o/r/issues/421/dependencies/blocked_by', /other repositories/],
     ['/repos/o/r/assignees', /no rule/], ['/repos/o/r/assignees/bob', /no rule/], ['/repos/o/r/forks', /no rule/], ['/repos/o/r/collaborators', /no rule/],
   ]) await refused(rules, gh('GET', path), ctx, pattern);
+  // The rest of an issue or of a pull request is read by the task whose item it is.
+  assert.equal((await authorize(hubRules('issues', 'issue-421'), gh('GET', '/repos/o/r/issues/421/events'), ctx)).ok, true);
+  for (const part of ['issues/421/events', 'pulls/578/files']) await refused(rules, gh('GET', `/repos/o/r/${part}`), ctx, /no rule/);
 
   const onLab = labRules('investigate', 'job-q');
   for (const ok of [`${PROJECT}/repository/compare?from=main&to=feature`, `${PROJECT}/repository/compare?from=main&to=feature&straight=true&unidiff=true`, '/api/v4/projects/99/repository/compare?from=a&to=b',
-    `${PROJECT}/repository/tree?path=src&ref=main`, `${PROJECT}/merge_requests/5/changes`, `${PROJECT}/issues/421/notes`]) {
+    `${PROJECT}/repository/tree?path=src&ref=main`, `${PROJECT}/merge_requests/5/notes`, `${PROJECT}/issues/421/notes`]) {
     assert.equal((await authorize(onLab, glab('GET', ok), labCtx())).ok, true, ok);
   }
   for (const [path, pattern] of [
@@ -736,6 +739,92 @@ await check('a read stays inside the pool\'s repository: no other repository, pr
     [`${PROJECT}/issues/421/user_agent_detail`, /address/], [`${PROJECT}/merge_requests/5/merge_ref`, /writes/],
     [`${PROJECT}/forks`, /no rule/], [`${PROJECT}/members`, /no rule/],
   ]) await refused(onLab, glab('GET', path), labCtx(), pattern);
+});
+
+await check('a branch with a slash in its name is pushed, then read back by its name as each forge takes it', async () => {
+  const text = (answer) => Buffer.from(json(answer).content, 'base64').toString('utf8');
+  lab.at(lab.root);
+  const onLab = lab.commit('fix', { 'src/fix.js': 'fixed', 'README.md': 'read me' });
+  const labState = {};
+  const rules = labRules('issues', 'issue-421');
+  assert.match((await sent(rules, labPush([[ZERO, onLab, 'refs/heads/topic/x']]), labCtx(labState), GITLAB)).bytes.toString('latin1'), /ok refs\/heads\/topic\/x/);
+  assert.deepEqual(labState.branches, ['refs/heads/topic/x']);
+  // GitLab: one segment with the slash encoded, by the project's path or its number. The
+  // answer is cut like any branch's.
+  for (const project of [PROJECT, '/api/v4/projects/99']) {
+    assert.deepEqual(json(await sent(rules, glab('GET', `${project}/repository/branches/topic%2Fx`), labCtx(labState), GITLAB)),
+      { name: 'topic/x', commit: { id: onLab }, merged: false, protected: false, default: false, web_url: `https://${GITLAB_HOST}/group/sub/proj/-/tree/topic/x` });
+    assert.equal(text(await sent(rules, glab('GET', `${project}/repository/files/src%2Ffix.js?ref=topic%2Fx`), labCtx(labState), GITLAB)), 'fixed');
+    // As glab's own commands spell a file's name.
+    assert.equal(text(await sent(rules, glab('GET', `${project}/repository/files/README%2Emd?ref=topic%2Fx`), labCtx(labState), GITLAB)), 'read me');
+  }
+  // With the slash as it is, the path is a route GitLab does not have.
+  assert.equal((await sent(rules, glab('GET', `${PROJECT}/repository/branches/topic/x`), labCtx(labState), GITLAB)).status, 404);
+  assert.equal((await sent(rules, glab('POST', `${PROJECT}/merge_requests`, { title: 'Draft: t', source_branch: 'topic/x', target_branch: 'main', target_project_id: 99 }), labCtx(labState), GITLAB)).status, 201);
+  for (const games of ['topic%2F..%2Fmain', 'topic%2Fx%2F..%2F..%2F..%2Fmerge_requests%2F5%2Fmerge']) {
+    await refused(rules, glab('GET', `${PROJECT}/repository/branches/${games}`), labCtx(labState), /dot segment/);
+  }
+
+  // GitHub: the slash as it is. A ref is read by its full name.
+  hub.at(hub.root);
+  const onHub = hub.commit('fix', { 'src/fix.js': 'fixed' });
+  const hubState = {};
+  const issue = hubRules('issues', 'issue-422');
+  assert.match((await sent(issue, hubPush([[ZERO, onHub, 'refs/heads/topic/y']]), hubCtx(hubState))).bytes.toString('latin1'), /ok refs\/heads\/topic\/y/);
+  assert.deepEqual(json(await sent(issue, gh('GET', '/repos/o/r/git/ref/heads/topic/y'), hubCtx(hubState))), { ref: 'refs/heads/topic/y', object: { type: 'commit', sha: onHub } });
+  await refused(issue, gh('GET', '/repos/o/r/git/ref/heads/topic%2Fy'), hubCtx(hubState), /encoded slash/);
+});
+
+await check('a CI run, its jobs and their logs are read for a branch the task pushed or the default one where its kind reads that, and for no other', async () => {
+  const none = /is not one the forge would show/;
+  const other = /ran for a branch this task does not work on/;
+  hub.at(hub.root);
+  const onHub = hub.commit('ci', { 'src/ci.js': 'x' });
+  forge.data.repos['o/r'].runs = { 31: { branch: 'ci-fix', jobs: [311] }, 32: { branch: 'main', jobs: [321] }, 33: { branch: 'ci-fix', repo: 'them/r', jobs: [331] } };
+  const issue = hubRules('issues', 'issue-422');
+  const hubState = {};
+  await refused(issue, gh('GET', '/repos/o/r/actions/runs/31'), hubCtx(hubState), other);
+  assert.match((await sent(issue, hubPush([[ZERO, onHub, 'refs/heads/ci-fix']]), hubCtx(hubState))).bytes.toString('latin1'), /ok refs\/heads\/ci-fix/);
+  assert.equal(json(await sent(issue, gh('GET', '/repos/o/r/actions/runs/31'), hubCtx(hubState))).head_branch, 'ci-fix');
+  assert.equal(json(await sent(issue, gh('GET', '/repos/o/r/actions/jobs/311'), hubCtx(hubState))).run_id, 31);
+  // GitHub keeps a log elsewhere and answers with the place: the answer is handed back as it is.
+  const log = await sent(issue, gh('GET', '/repos/o/r/actions/jobs/311/logs'), hubCtx(hubState));
+  assert.deepEqual([log.status, log.headers.location], [302, 'https://results.example/jobs/311/logs?sig=once']);
+  // The default branch's, a branch's of the same name in another account's fork, and none.
+  for (const [path, why] of [['runs/32', other], ['jobs/321/logs', other], ['runs/33', other], ['jobs/331/logs', other], ['runs/99', none], ['jobs/31', none]]) {
+    await refused(issue, gh('GET', `/repos/o/r/actions/${path}`), hubCtx(hubState), why);
+  }
+  for (const list of ['actions/runs', 'actions/runs?branch=ci-fix', 'actions/workflows', 'actions/artifacts', 'actions/runs/31/artifacts']) await refused(issue, gh('GET', `/repos/o/r/${list}`), hubCtx(hubState), /no rule/);
+  // A task that pushes nothing reads the default branch's.
+  const look = hubRules('investigate', 'job-q');
+  assert.equal(json(await sent(look, gh('GET', '/repos/o/r/actions/runs/32'), hubCtx())).head_branch, 'main');
+  await refused(look, gh('GET', '/repos/o/r/actions/runs/31'), hubCtx(), other);
+  // A lookup the forge does not answer allows nothing.
+  const stop = failing('api.github.com', /\/actions\/runs\/31$/, 403, '{"message":"API rate limit exceeded"}');
+  await refused(issue, gh('GET', '/repos/o/r/actions/jobs/311/logs'), hubCtx(hubState), /did not say what CI job 311 ran for/);
+  stop();
+
+  lab.at(lab.root);
+  const onLab = lab.commit('ci', { 'src/ci.js': 'x' });
+  forge.pull('group/sub/proj', { number: 6, author: 'them', head: 'theirs', fork: true });
+  forge.data.repos['group/sub/proj'].runs = { 41: { branch: 'ci-fix', jobs: [411] }, 42: { branch: 'main', jobs: [421] }, 43: { pull: 6, jobs: [431] }, 44: { branch: 'ci-fix', tag: true, jobs: [441] } };
+  const labIssue = labRules('issues', 'issue-421');
+  const labState = {};
+  await refused(labIssue, glab('GET', `${PROJECT}/jobs/411/trace`), labCtx(labState), other);
+  assert.match((await sent(labIssue, labPush([[ZERO, onLab, 'refs/heads/ci-fix']]), labCtx(labState), GITLAB)).bytes.toString('latin1'), /ok refs\/heads\/ci-fix/);
+  for (const project of [PROJECT, '/api/v4/projects/99']) {
+    assert.equal(json(await sent(labIssue, glab('GET', `${project}/pipelines/41`), labCtx(labState), GITLAB)).ref, 'ci-fix');
+    assert.equal((await sent(labIssue, glab('GET', `${project}/jobs/411/trace`), labCtx(labState), GITLAB)).bytes.toString('utf8'), 'log of job 411\n');
+  }
+  // The default branch's, another's merge request's, a tag's of the branch's name, and none.
+  for (const [path, why] of [['pipelines/42', other], ['jobs/421/trace', other], ['pipelines/43', other], ['jobs/431/trace', other], ['pipelines/44', none], ['jobs/441/trace', none], ['pipelines/99', none]]) {
+    await refused(labIssue, glab('GET', `${PROJECT}/${path}`), labCtx(labState), why);
+  }
+  for (const list of ['pipelines', 'pipelines?ref=ci-fix', 'jobs', 'pipelines/41/variables', 'jobs/411/artifacts']) await refused(labIssue, glab('GET', `${PROJECT}/${list}`), labCtx(labState), /no rule|variables/);
+  assert.equal((await sent(labRules('investigate', 'job-q'), glab('GET', `${PROJECT}/jobs/421/trace`), labCtx(), GITLAB)).bytes.toString('utf8'), 'log of job 421\n');
+  // A reviewer of the merge request reads its pipeline.
+  assert.equal(json(await sent(labRules('review', 'pr-6'), glab('GET', `${PROJECT}/pipelines/43`), labCtx(), GITLAB)).id, 43);
+  await refused(labRules('review', 'pr-5'), glab('GET', `${PROJECT}/pipelines/43`), labCtx(), other);
 });
 
 await check('the forge\'s answer about the repository itself comes back cut to what a job needs', async () => {

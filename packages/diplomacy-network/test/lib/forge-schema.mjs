@@ -9,6 +9,7 @@ const words = (text) => text.split(/\s+/).filter(Boolean);
 /// Per forge:
 ///   repository        the type of the pool's repository itself
 ///   repositoryLeaves  every scalar field of that type
+///   repositoryObjects every other field of it: the ones a selection set is given to
 ///   accountLeaves     the scalar fields of the other reachable types that are named for
 ///                     the viewer, or described as being about the viewer or the current user
 ///   arguments         every argument of every field the tables accept on a reachable
@@ -32,6 +33,18 @@ export const SCHEMA = {
       viewerCanCreateProjects viewerCanSeeIssueFields viewerCanSubscribe viewerCanUpdateTopics
       viewerDefaultCommitEmail viewerDefaultMergeMethod viewerHasStarred viewerPermission
       viewerPossibleCommitEmails viewerSubscription visibility webCommitSignoffRequired`),
+    repositoryObjects: words(`
+      assignableUsers branchProtectionRules codeOfConduct codeowners collaborators commitComments contactLinks
+      contributingGuidelines defaultBranchRef dependencyGraphManifests deployKeys deployments discussion
+      discussionCategories discussionCategory discussions environment environments forks fundingLinks
+      interactionAbility issue issueFields issueOrPullRequest issueTemplates issueType issueTypes issues label
+      labels languages latestRelease licenseInfo mentionableUsers mergeQueue milestone milestones object owner
+      packages parent pinnedDiscussions pinnedEnvironments pinnedIssueFields pinnedIssues planFeatures
+      planningStatuses primaryLanguage project projectV2 projects projectsV2 pullRequest
+      pullRequestCreationCapConfig pullRequestTemplates pullRequests recentProjects ref refs release releases
+      repositoryCopilotCodeReviewSettings repositoryCustomPropertyValue repositoryCustomPropertyValues
+      repositoryTopics ruleset rulesets stargazers submodules suggestedActors templateRepository
+      viewerContentWarning vulnerabilityAlert vulnerabilityAlerts watchers`),
     accountLeaves: words(`
       isReadByViewer viewerCanApplySuggestion viewerCanAssign viewerCanClose viewerCanDelete
       viewerCanDeleteHeadRef viewerCanDisableAutoMerge viewerCanEditFiles viewerCanEnableAutoMerge
@@ -46,7 +59,6 @@ export const SCHEMA = {
       after:String@CheckRun.annotations archivedStates:ProjectCardArchivedState@Issue.projectCards
       author:CommitAuthor@Commit.history author:String@PullRequest.reviews
       baseRefName:String@Label.pullRequests before:String@CheckRun.annotations
-      capabilities:RepositorySuggestedActorFilter@Repository.suggestedActors
       content:ReactionContent@CommitComment.reactions direction:OrderDirection@Repository.refs
       enableDuplicate:Boolean@Issue.stateReason excludeUserLinked:Boolean@Issue.closedByPullRequestsReferences
       expression:String@Repository.object filterBy:CheckRunFilter@CheckSuite.checkRuns
@@ -57,23 +69,19 @@ export const SCHEMA = {
       itemTypes:IssueTimelineItemsItemType@Issue.timelineItems
       itemTypes:PullRequestTimelineItemsItemType@PullRequest.timelineItems labels:String@Label.issues
       last:Int@CheckRun.annotations limit:Int@Release.shortDescriptionHTML
-      loginNames:String@Repository.suggestedActors
       mergeType:PullRequestMergeMethod@PullRequest.viewerMergeBodyText
       name:String@ProjectV2Item.fieldValueByName number:Int@CheckRun.steps oid:GitObjectID@Repository.object
       orderBy:IssueCommentOrder@Issue.comments orderBy:IssueDependencyOrder@Issue.blockedBy
       orderBy:IssueOrder@Label.issues orderBy:LabelOrder@Discussion.labels
-      orderBy:LanguageOrder@Repository.languages orderBy:MilestoneOrder@Repository.milestones
       orderBy:PullRequestOrder@Commit.associatedPullRequests orderBy:ReactionOrder@CommitComment.reactions
-      orderBy:RefOrder@Repository.refs orderBy:ReleaseOrder@Repository.releases
-      orderBy:WorkflowRunOrder@Workflow.runs orderByState:Boolean@Issue.closedByPullRequestsReferences
+      orderBy:RefOrder@Repository.refs orderByState:Boolean@Issue.closedByPullRequestsReferences
       path:String@Commit.blame pullRequestId:ID@CheckRun.isRequired pullRequestNumber:Int@CheckRun.isRequired
-      qualifiedName:String@Repository.ref query:String@Issue.suggestedActors
-      refName:String@Repository.codeowners refPrefix:String@Repository.refs since:DateTime@Issue.timelineItems
-      since:GitTimestamp@Commit.history size:Int@Bot.avatarUrl skip:Int@Issue.timelineItems
-      states:IssueState@Label.issues states:MilestoneState@Repository.milestones
+      qualifiedName:String@Repository.ref query:String@Repository.refs refName:String@Repository.codeowners
+      refPrefix:String@Repository.refs since:DateTime@Issue.timelineItems since:GitTimestamp@Commit.history
+      size:Int@Bot.avatarUrl skip:Int@Issue.timelineItems states:IssueState@Label.issues
       states:PullRequestReviewState@PullRequest.reviews states:PullRequestState@Label.pullRequests
-      states:TrackedIssueStates@Issue.trackedIssuesCount tagName:String@Repository.release
-      until:GitTimestamp@Commit.history userLinkedOnly:Boolean@Issue.closedByPullRequestsReferences
+      states:TrackedIssueStates@Issue.trackedIssuesCount until:GitTimestamp@Commit.history
+      userLinkedOnly:Boolean@Issue.closedByPullRequestsReferences
       writersOnly:Boolean@PullRequest.latestOpinionatedReviews`),
   },
   gitlab: {
@@ -101,12 +109,57 @@ export const SCHEMA = {
       sharedRunnersEnabled snippetsEnabled squashCommitTemplate squashReadOnly sshUrlToRepo starCount
       suggestionCommitMessage tagList topics trackingKey transferInProgress updatedAt visibility
       vulnerabilityIdentifierSearch webBasedCommitSigningEnabled webPath webUrl wikiEnabled`),
+    repositoryObjects: words(`
+      agentConfigurations aiAgentIdentities aiCatalogItem aiCatalogItemConsumerForItem aiCatalogItems
+      aiFlowTriggers aiGovernanceMetrics aiGovernanceSessions aiGovernanceToolCalls aiMetrics aiUsageData
+      aiUserMetrics aiXrayReports alertManagementAlert alertManagementAlertStatusCounts alertManagementAlerts
+      alertManagementHttpIntegrations alertManagementIntegrations alertManagementPayloadFields analytics
+      analyzerStatuses apiFuzzingCiConfiguration approvalPolicies ascpComponents ascpScans autocompleteUsers
+      availableDeployKeys board boards branchRules ciAccessAuthorizedAgents ciCdSettings ciConfigVariables
+      ciDownstreamProjectSubscriptions ciJobTokenAuthLogs ciJobTokenScope ciJobTokenScopeAllowlist
+      ciPipelineCreationInputs ciPipelineCreationRequest ciSubscribedProjects ciSubscriptionsProjects
+      ciTemplate ciUpstreamProjectSubscriptions ciVariables clusterAgent clusterAgents codeCoverageSummary
+      commitReferences complianceControlStatus complianceFrameworks complianceRequirementStatuses
+      complianceStandardsAdherence componentUsages componentVersions components containerExpirationPolicy
+      containerProtectionRepositoryRules containerProtectionTagRules containerRepositories
+      containerTagsExpirationPolicy corpuses customAttributes customizableDashboardVisualizations
+      customizableDashboards dapFactoryConfiguration dapFactoryConfigurationValidation dastProfile
+      dastProfiles dastScannerProfiles dastSiteProfile dastSiteProfiles dastSiteValidations dataTransfer
+      defaultMergeRequestTarget dependencies dependencyFirewallActivitySummary dependencyFirewallRuleActivity
+      dependencyPaths dependencyProxyPackagesSetting dependencyTrackedRefs deployment detailedImportStatus
+      dora duoContextExclusionSettings duoWorkflowEvents duoWorkflowSessionArtifacts duoWorkflowStatusCheck
+      duoWorkflowWorkflows environment environments flowMetrics forkDetails forkTargets forkedFrom
+      forkingAccessLevel gitlabSubscriptionsPreviewBillableUserChange googleCloudArtifactRegistryRepository
+      grafanaIntegration group incidentManagementEscalationPolicies incidentManagementEscalationPolicy
+      incidentManagementOncallSchedules incidentManagementTimelineEvent incidentManagementTimelineEventTags
+      incidentManagementTimelineEvents inheritedCiVariables issue issueStatusCounts issues issuesAccessLevel
+      iterationCadences iterations jiraImports job jobAnalytics jobs label labels languages
+      licensedFeatureAvailability maxAccessLevel memberRoles mergeRequest mergeRequestViolations mergeRequests
+      mergeRequestsAccessLevel mergeTrains milestones mlExperiments mlModels namespace nestedEnvironments
+      newMergeRequestPipelines observabilityLogsLinks observabilityMetricsLinks observabilityTracesLinks orbit
+      packages packagesCleanupPolicy packagesProtectionRules pagesDeployments pathLocks pendingMemberApprovals
+      pipeline pipelineAnalytics pipelineCounts pipelineExecutionPolicies pipelineExecutionSchedulePolicies
+      pipelineScheduleStatusCounts pipelineSchedules pipelineTriggers pipelines policyStore projectMembers
+      projectPlanLimits pushRules recentIssueBoards release releases repository requirement
+      requirementStatesCount requirements rootGroup runnerCloudProvisioning runners sastCiConfiguration
+      savedReplies savedReply scanExecutionPolicies scanProfileStatuses scanResultPolicies securityAttributes
+      securityExclusion securityExclusions securityMetrics securityPolicies securityPolicyEligibleProjects
+      securityPolicyProject securityPolicyProjectLinkedGroups securityPolicyProjectLinkedNamespaces
+      securityPolicyProjectLinkedProjects securityPolicyProjectSuggestions securityScanProfiles
+      securityScanners securityTrackedRefs securityTrainingProviders securityTrainingUrls sentryDetailedError
+      sentryErrors services snippets sourcedMergeRequests statistics statisticsDetailsPaths targetBranchRules
+      terraformState terraformStateProtectionRules terraformStates timelogCategories timelogs
+      triageAndRemediationCoverage unprotectedBranches userAccessAuthorizedAgents userPermissions
+      valueStreamAnalytics valueStreamDashboardUsageOverview valueStreams visibleForks vulnerabilities
+      vulnerabilitiesCountByDay vulnerabilityArchives vulnerabilityImages vulnerabilityManagementPolicies
+      vulnerabilityScanners vulnerabilitySeveritiesCount vulnerabilityStatistic vulnerabilityWorkflowExecution
+      webhook wikiPages workItemStateCounts workItemTypes workItems`),
     accountLeaves: words(`
       canCurrentUserPushToBranch canModifyBlob canModifyBlobWithWebIde canPlayJob createNoteEmail subscribed
       troubleshootJobWithAi`),
     arguments: words(`
       after:String@ApprovalRule.approvedBy approvedBy:String@Project.mergeRequests
-      approver:String@Project.mergeRequests archived:Boolean@Project.labels assigneeId:String@Project.issue
+      approver:String@Project.mergeRequests assigneeId:String@Project.issue
       assigneeUsername:String@Project.issue assigneeUsernames:String@Project.issue
       assigneeWildcardId:AssigneeWildcardId@Project.issue author:String@Repository.commits
       authorUsername:String@Project.issue before:String@ApprovalRule.approvedBy
@@ -121,41 +174,33 @@ export const SCHEMA = {
       epicId:String@Project.issue epicWildcardId:EpicWildcardId@Project.issue
       filter:NotesFilterType@Commit.notes first:Int@ApprovalRule.approvedBy
       firstParent:Boolean@Repository.commits format:ShaFormat@Pipeline.sha full:Boolean@MergeRequest.reference
-      fuzzySearch:Boolean@Project.labels healthStatus:HealthStatus@Project.issue
-      healthStatusFilter:HealthStatusFilter@Project.issue id:CiPipelineID@Project.pipeline
-      ids:ID@Commit.pipelines ignoredReviewerUsername:String@Project.mergeRequests iid:ID@Project.pipeline
-      iid:String@Project.issue iids:String@Project.issue in:IssuableSearchableField@Project.issue
-      includeAncestorGroups:Boolean@Project.labels includeSubepics:Boolean@Project.issue
+      healthStatus:HealthStatus@Project.issue healthStatusFilter:HealthStatusFilter@Project.issue
+      ignoredReviewerUsername:String@Project.mergeRequests iid:String@Project.issue iids:String@Project.issue
+      in:IssuableSearchableField@Project.issue includeSubepics:Boolean@Project.issue
       iterationCadenceId:IterationsCadenceID@Project.issue iterationId:ID@Project.issue
       iterationTitle:String@Project.issue iterationWildcardId:IterationWildcardId@Project.issue
-      jobKind:CiJobKind@Pipeline.jobs kind:CiJobKind@Project.jobs labelName:String@Project.issue
-      labels:String@Project.mergeRequests last:Int@ApprovalRule.approvedBy limit:Int@CiJobConnection.count
-      mergedAfter:Time@Project.mergeRequests mergedBefore:Time@Project.mergeRequests
-      mergedBy:String@Project.mergeRequests milestoneTitle:String@Project.issue
-      milestoneWildcardId:MilestoneWildcardId@Project.issue myReactionEmoji:String@Project.issue
-      name:String@Project.jobs not:MergeRequestsResolverNegatedParams@Project.mergeRequests
+      jobKind:CiJobKind@Pipeline.jobs labelName:String@Project.issue labels:String@Project.mergeRequests
+      last:Int@ApprovalRule.approvedBy limit:Int@CiJobConnection.count mergedAfter:Time@Project.mergeRequests
+      mergedBefore:Time@Project.mergeRequests mergedBy:String@Project.mergeRequests
+      milestoneTitle:String@Project.issue milestoneWildcardId:MilestoneWildcardId@Project.issue
+      myReactionEmoji:String@Project.issue not:MergeRequestsResolverNegatedParams@Project.mergeRequests
       not:NegatedIssueFilterInput@Project.issue offset:Int@Repository.branchNames
       or:UnionedIssueFilterInput@Project.issue or:UnionedMergeRequestFilterInput@Project.mergeRequests
       order:CommitOrder@Repository.commits path:String@MergeRequest.diffStats paths:String@Repository.blobs
-      pipelineIid:String@Project.jobs query:UntrustedRegexp@Repository.commits
-      recursive:Boolean@Repository.tree ref:String@Commit.pipelines refType:RefType@Commit.pipelines
-      releaseTag:String@Project.issue releaseTagWildcardId:ReleaseTagWildcardId@Project.issue
-      retried:Boolean@Pipeline.jobs reviewState:MergeRequestReviewState@Project.mergeRequests
+      query:UntrustedRegexp@Repository.commits recursive:Boolean@Repository.tree ref:String@Repository.blobs
+      refType:RefType@Repository.blobs releaseTag:String@Project.issue
+      releaseTagWildcardId:ReleaseTagWildcardId@Project.issue retried:Boolean@Pipeline.jobs
+      reviewState:MergeRequestReviewState@Project.mergeRequests
       reviewStates:MergeRequestReviewState@Project.mergeRequests reviewerUsername:String@Project.mergeRequests
-      reviewerWildcardId:ReviewerWildcardId@Project.mergeRequests scope:PipelineScopeEnum@Commit.pipelines
-      search:String@Project.issue searchIn:LabelSearchFieldList@Project.labels
-      searchPattern:String@Repository.branchNames searchTerm:String@Project.labels
-      securityReportTypes:SecurityReportTypeEnum@Pipeline.jobs sha:String@Commit.pipelines
+      reviewerWildcardId:ReviewerWildcardId@Project.mergeRequests search:String@Project.issue
+      searchPattern:String@Repository.branchNames securityReportTypes:SecurityReportTypeEnum@Pipeline.jobs
       sort:IssueSort@Project.issue sort:MergeRequestSort@Project.mergeRequests
-      sort:ReleaseSort@Project.releases source:String@Commit.pipelines
-      sourceBranches:String@Project.mergeRequests sources:CiJobSource@Project.jobs
-      state:IssuableState@Project.issue state:MergeRequestState@Project.mergeRequests
-      status:PipelineStatusEnum@Commit.pipelines status:WorkItemWidgetStatusFilterInput@Project.issue
+      sourceBranches:String@Project.mergeRequests state:IssuableState@Project.issue
+      state:MergeRequestState@Project.mergeRequests status:WorkItemWidgetStatusFilterInput@Project.issue
       statuses:CiJobStatus@Pipeline.jobs subscribed:SubscriptionStatus@Project.issue
-      tagName:String@Project.release targetBranches:String@Project.mergeRequests title:String@Project.labels
-      types:IssueType@Project.issue updatedAfter:Time@Commit.pipelines updatedBefore:Time@Commit.pipelines
-      username:String@Commit.pipelines weight:String@Project.issue
+      targetBranches:String@Project.mergeRequests types:IssueType@Project.issue
+      updatedAfter:Time@Project.issue updatedBefore:Time@Project.issue weight:String@Project.issue
       weightWildcardId:WeightWildcardId@Project.issue whenExecuted:String@Pipeline.jobs
-      withArtifacts:Boolean@Project.jobs workItemTypeIds:WorkItemsTypeID@Project.issue`),
+      workItemTypeIds:WorkItemsTypeID@Project.issue`),
   },
 };

@@ -15,9 +15,14 @@ struct NetworkCycle {
     /// heard none of them.
     var daemon = ""
     var pools: [NetworkPools.Pool]?
+    /// The list the daemon refused, its sentence, and when: said again as it is only
+    /// as often as `admit` is.
+    var poolsRefused: [NetworkPools.Pool]?
+    var poolsRefusal = ""
+    var poolsRefusedAt: TimeInterval = 0
     var admit: NetworkAdmit.Answer?
     var admitAt: TimeInterval = 0
-    /// When the logins `pools` waits for were last asked after.
+    /// When the logins `pools` lacks were last asked after.
     var identitiesAskedAt: TimeInterval = 0
     var startAfter: TimeInterval = 0
     var startDelay: TimeInterval = 0
@@ -38,6 +43,7 @@ extension Store {
     func networkSwitched() {
         networkCycle = NetworkCycle()
         networkUnavailableLogged = false
+        networkJobRefusals = [:]
         let offering = networkOffering
         networkOffering = []
         if !networkEnabled {
@@ -106,15 +112,15 @@ extension Store {
         await runNetworkCycleOnce()
     }
 
-    /// End the mesh node an earlier Diplomat left running, whatever the switch says.
-    func endLegacyMeshNodes() async {
-        let ended = await Task.detached(priority: .utility) {
-            DiplomacyNetwork.endLegacyMeshNodes()
+    /// End the mesh node an earlier Diplomat left running and remove its directory,
+    /// whatever the switch says.
+    func retireLegacyMeshNode() async {
+        let line = await Task.detached(priority: .utility) {
+            let (asked, removed) = DiplomacyNetwork.retireLegacyMeshNode()
+            return DiplomacyNetwork.legacyRetiredLine(asked: asked, removed: removed)
         }.value
-        guard !ended.isEmpty else { return }
-        AuditLog.log("auto", NetworkAudit.stop,
-                     "Ended the retired mesh node (pid "
-                     + ended.map(String.init).joined(separator: ", ") + ")")
+        guard let line else { return }
+        AuditLog.log("auto", NetworkAudit.stop, line)
         refreshAudit()
     }
 
@@ -143,7 +149,7 @@ extension Store {
         networkCycle.startDelay = 0
         networkCycle.startAfter = 0
         networkCycle.startFailureLogged = false
-        await postNetworkPools(now: now)
+        await postNetworkPools(snapshot, now: now)
         await postNetworkAdmit(snapshot, now: now)
         await settleOffering(snapshot)
     }
@@ -162,27 +168,50 @@ extension Store {
         }
     }
 
-    /// Say this machine's pools when they changed. The OTHER REPOS checkouts are read
-    /// again first: one that could not be read may be back, and one may have gained a
-    /// remote.
-    private func postNetworkPools(now: TimeInterval) async {
+    /// Say this machine's pools when they changed, and publish what of them could not
+    /// be confirmed and a refusal of the list (`networkPoolsHeld`). The OTHER REPOS
+    /// checkouts are read again first: one that could not be read may be back, and one
+    /// may have gained a remote.
+    private func postNetworkPools(_ snapshot: NetworkSnapshot, now: TimeInterval) async {
         await rereadLocalRepos()
-        let listing = networkPools()
-        guard case .pools(let pools) = listing else {
-            if case .held(let why) = listing, networkPoolsHeld != why { networkPoolsHeld = why }
-            if now - networkCycle.identitiesAskedAt >= NetworkCycle.admitEvery {
-                networkCycle.identitiesAskedAt = now
-                await readNetworkIdentities()
-            }
-            return
+        let listing = networkPools(known: snapshot.pools)
+        if !listing.unconfirmed.isEmpty,
+           now - networkCycle.identitiesAskedAt >= NetworkCycle.admitEvery {
+            networkCycle.identitiesAskedAt = now
+            await readNetworkIdentities()
         }
-        if !networkPoolsHeld.isEmpty { networkPoolsHeld = "" }
-        guard pools != networkCycle.pools else { return }
-        let body = NetworkPools.body(pools)
-        let reply = await Task.detached(priority: .utility) {
-            DiplomacyNetwork.post(NetworkRoute.pools, body)
-        }.value
-        if case .ok = reply { networkCycle.pools = pools }
+        let pools = listing.pools
+        if pools == networkCycle.pools {
+            networkCycle.poolsRefused = nil
+            networkCycle.poolsRefusal = ""
+        } else if pools != networkCycle.poolsRefused
+                    || now - networkCycle.poolsRefusedAt >= NetworkCycle.admitEvery {
+            let body = NetworkPools.body(pools)
+            let (reply, reach) = await Task.detached(priority: .utility) {
+                DiplomacyNetwork.ask(NetworkRoute.pools, body)
+            }.value
+            switch reply {
+            case .ok:
+                networkCycle.pools = pools
+                networkCycle.poolsRefused = nil
+                networkCycle.poolsRefusal = ""
+                logPoolsLeft(snapshot.pools, said: pools)
+            case .refused(let why) where reach == .answered:
+                let said = "The daemon refused this machine's pools: \(why)"
+                if pools != networkCycle.poolsRefused || said != networkCycle.poolsRefusal {
+                    AuditLog.log("auto", NetworkAudit.unavailable, said)
+                    refreshAudit()
+                }
+                networkCycle.poolsRefused = pools
+                networkCycle.poolsRefusal = said
+                networkCycle.poolsRefusedAt = now
+            case .refused, .down:
+                break
+            }
+        }
+        let held = (listing.unconfirmed + [networkCycle.poolsRefusal].filter { !$0.isEmpty })
+            .joined(separator: "\n")
+        if networkPoolsHeld != held { networkPoolsHeld = held }
     }
 
     /// The free bays of the cap less what runs here for the network and for this
@@ -221,16 +250,55 @@ extension Store {
                        source: "panel")
     }
 
+    /// Drops each of `asks` (a goal's work, by queue key) the network carries and no
+    /// machine has taken (`AgentState.withdrawUnstarted`), withdrawing its offer and
+    /// dropping its run, and returns the goal's keys of those. One a machine is running
+    /// is left to finish. A run is dropped whatever the daemon answers, as one the
+    /// operator forgets is.
+    func withdrawUnstarted(asks: [String: String]) async -> Set<String> {
+        var carried: [(task: String, key: String)] = []
+        for (key, queueKey) in asks.sorted(by: { $0.key < $1.key }) {
+            if let ask = requestedWork.first(where: { $0.key == queueKey && !$0.offered.isEmpty }) {
+                carried.append((ask.offered, key))
+            }
+        }
+        let tasks = Set(carried.map(\.task))
+        let booked = AgentRegistry.load().filter { tasks.contains($0.network ?? "") }
+        // Asked afresh, as for a run the operator forgets.
+        let snapshot = booked.isEmpty ? nil
+            : await Task.detached(priority: .utility) { DiplomacyNetwork.state() }.value
+        let evidence = AgentState.Evidence(network: NetworkEvidence.tasks(snapshot))
+        var gone: Set<String> = [], runs: Set<String> = []
+        for (task, key) in carried {
+            let run = booked.first { $0.network == task }
+            if let run, AgentState.withdrawUnstarted(run, evidence: evidence) == nil { continue }
+            forgetOffered(task)
+            gone.insert(key)
+            guard let run else { continue }
+            await withdraw(task, reason: NetworkRoute.withdrawGoal,
+                           label: run.label.isEmpty ? run.runID : run.label, source: run.source)
+            runs.insert(run.runID)
+        }
+        if !runs.isEmpty, bookWritten(AgentRegistry.forget(runs)) { await settleAgents() }
+        return gone
+    }
+
     /// The switch went off over jobs whose offer was never definitely answered: withdraw
-    /// each one the daemon turns out to hold.
+    /// each one the daemon turns out to hold, and say of every other that it was not
+    /// offered.
     private func withdrawOffering(_ offering: [OfferingJob]) async {
         guard !offering.isEmpty else { return }
         let snapshot = await Task.detached(priority: .utility) { DiplomacyNetwork.state() }.value
         for held in offering {
-            guard let task = held.task(in: snapshot) else { continue }
+            guard let task = held.task(in: snapshot) else {
+                AuditLog.log(held.source.rawValue, NetworkAudit.unavailable,
+                             "\(held.job.label) was not offered: \(DiplomacyNetwork.switchedOff)")
+                continue
+            }
             await withdraw(task, reason: NetworkRoute.withdrawSwitchedOff, label: held.rowLabel,
                            source: held.source.rawValue)
         }
+        refreshAudit()
     }
 
     @discardableResult
@@ -254,32 +322,41 @@ extension Store {
     }
 
     /// Stop one task of a pool: its run, when this machine is the one running it, else
-    /// the offer this machine made of it.
+    /// the offer this machine made of it. A run that is not there to stop is said to be
+    /// so in the pool's card, and nothing is withdrawn in its place: the button said
+    /// the job goes back to the pool.
     func stopNetworkTask(_ task: NetworkSnapshot.Task, pool: String) async {
+        if task.executorHere {
+            await stopRun(of: task, pool: pool)
+        } else {
+            let reply = await withdraw(task.taskId, reason: NetworkRoute.withdrawStopped,
+                                       label: task.title, source: "panel")
+            if case .ok = reply { forgetOffered(task.taskId) }
+            noteNetworkReply(reply, about: pool)
+        }
+        await settleAgents()
+    }
+
+    private func stopRun(of task: NetworkSnapshot.Task, pool: String) async {
         // Asked afresh: the published snapshot may be a tick old, and a run that ended
         // since is not there to stop.
-        let runs = !task.executorHere ? [] : await Task.detached(priority: .userInitiated) {
-            DiplomacyNetwork.state()?.runs ?? []
+        let fresh = await Task.detached(priority: .userInitiated) { DiplomacyNetwork.state() }.value
+        guard let run = fresh?.runs.first(where: {
+            $0.taskId == task.taskId && NetworkAdmit.live.contains($0.state)
+        }) else {
+            networkRefusals[pool] = fresh == nil ? DiplomacyNetwork.notAnswering
+                                                 : DiplomacyNetwork.runEnded
+            return
+        }
+        let body = NetworkRoute.stopRunBody(run: run.runId)
+        let reply = await Task.detached(priority: .userInitiated) {
+            DiplomacyNetwork.post(NetworkRoute.stopRun, body)
         }.value
-        let run = runs.first { $0.taskId == task.taskId && NetworkAdmit.live.contains($0.state) }
-        let reply: DiplomacyNetwork.Reply
-        if let run {
-            let body = NetworkRoute.stopRunBody(run: run.runId)
-            reply = await Task.detached(priority: .userInitiated) {
-                DiplomacyNetwork.post(NetworkRoute.stopRun, body)
-            }.value
-            if case .ok = reply {
-                AuditLog.log("panel", NetworkAudit.stop,
-                             "\(task.title) - \(NetworkText.runStopped)")
-                refreshAudit()
-            }
-        } else {
-            reply = await withdraw(task.taskId, reason: NetworkRoute.withdrawStopped,
-                                   label: task.title, source: "panel")
-            if case .ok = reply { forgetOffered(task.taskId) }
+        if case .ok = reply {
+            AuditLog.log("panel", NetworkAudit.stop, "\(task.title) - \(NetworkText.runStopped)")
+            refreshAudit()
         }
         noteNetworkReply(reply, about: pool)
-        await settleAgents()
     }
 
     // MARK: pools

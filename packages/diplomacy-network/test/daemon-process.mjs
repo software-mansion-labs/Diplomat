@@ -63,7 +63,8 @@ try {
     const fixed = await bench.machine('fixed', { env: { DN_BROKER_PORT: String(named), DN_EXECUTOR_RETRY_MS: String(RETRY_MS) } }).start();
     const refusals = () => [...fixed.log().matchAll(/^\[(\S+)\] the broker is not listening: listen EADDRINUSE/gm)].map((m) => Date.parse(m[1]));
     const times = await until('the port asked for three times', () => (refusals().length >= 3 ? refusals() : null));
-    assert.ok(times.slice(1).every((at, i) => at - times[i] >= RETRY_MS), `asked again no sooner than every ${RETRY_MS} ms: ${times.map((at) => at - times[0])}`);
+    // A timer and the log's clock each count their own milliseconds: a wait of 300 can read as 299.
+    assert.ok(times.slice(1).every((at, i) => at - times[i] >= RETRY_MS - 10), `asked again no sooner than every ${RETRY_MS} ms: ${times.map((at) => at - times[0])}`);
     await new Promise((resolve) => squatter.close(resolve));
     assert.equal(await listening(fixed), named);
     await fixed.kill();
@@ -328,14 +329,14 @@ try {
     const offer = {
       taskId: 'string', pool: 'string', kind: 'string', item: 'string', title: 'string', state: 'string', reason: 'string',
       executor: 'string', executorHere: 'boolean', backedBy: ['string'], offeredAt: 'int', attempt: 'int', requests: 'int',
-      refused: 'int', endedAt: 'int',
+      refused: 'int', endedAt: 'int', notTaking: 'string',
     };
     shaped({ ...state, offers: [] }, {
       updatedAt: 'int', daemon: { pid: 'int', startedAt: 'int' }, identity: { pk: 'string', onion: 'string' },
       transport: said, docker: { state: 'string', image: 'string', detail: 'string' }, model: said, devices: said,
       admit: { slots: 'int', at: 'int', reason: 'string' },
       pools: [{
-        id: 'string', path: 'string', identity: 'string', hash: 'string', left: 'boolean',
+        id: 'string', path: 'string', identity: 'string', hash: 'string', left: 'boolean', notTaking: 'string',
         members: [{ pk: 'string', self: 'boolean', maxAcceptedH: 'int', lastSeen: 'int', reachable: 'boolean', skew: 'boolean' }],
         tasks: [{
           taskId: 'string', kind: 'string', item: 'string', title: 'string', identity: 'string', hours: 'int', state: 'string',
@@ -365,7 +366,8 @@ try {
     assert.deepEqual([done.outcome, done.executor, done.executorHere, state.runs[0].state, state.runs[0].exit], [
       { ok: true, summary: 'reviewed', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, state.identity.pk, true, 'finished', 0,
     ]);
-    assert.equal(fs.existsSync(state.runs[0].log), true, 'a run\'s log is a file on this machine');
+    // What a job wrote is under its run id, and the snapshot leads nobody to it.
+    assert.deepEqual([state.runs[0].log, fs.existsSync(path.join(a.base, 'runs', state.runs[0].runId, 'log.jsonl'))], ['', true]);
 
     const file = path.join(a.base, 'state.json');
     const onDisk = await until('state.json to follow', () => {

@@ -18,7 +18,11 @@ export const GITHUB_TOKEN = 'ghs_fakeforgetoken0123456789';
 export const GITLAB_TOKEN = 'glpat-fakeforgetoken0123';
 /// The host the GitLab side answers as.
 export const GITLAB_HOST = 'gitlab.example.com';
-const HOSTS = ['api.github.com', 'github.com', GITLAB_HOST];
+/// A GitHub Enterprise Server: the GitHub side again, its REST under /api/v3, its GraphQL
+/// at /api/graphql and git on the one host, behind a credential of its own.
+export const GHES_HOST = 'ghes.example.com';
+export const GHES_TOKEN = 'ghs_fakeenterprisetoken0123';
+const HOSTS = ['api.github.com', 'github.com', GITLAB_HOST, GHES_HOST];
 
 const GIT_ENV = {
   PATH: process.env.PATH,
@@ -59,7 +63,7 @@ export function fakeTools(dir) {
     return file;
   };
   return {
-    DN_GH: script('gh', `[ "$1 $2 $3" = "auth token --hostname" ] && [ "$4" = "github.com" ] && echo "${GITHUB_TOKEN}" && exit 0\nexit 1`),
+    DN_GH: script('gh', `[ "$1 $2 $3" = "auth token --hostname" ] || exit 1\n[ "$4" = "github.com" ] && echo "${GITHUB_TOKEN}" && exit 0\n[ "$4" = "${GHES_HOST}" ] && echo "${GHES_TOKEN}" && exit 0\nexit 1`),
     DN_GLAB: script('glab', `[ "$1 $2 $3 $4" = "config get token --host" ] && [ "$5" = "${GITLAB_HOST}" ] && echo "${GITLAB_TOKEN}" && exit 0\nexit 1`),
   };
 }
@@ -115,8 +119,10 @@ export async function startFakeForge() {
     nodes: { U_me: viewer },
     // "owner/name" -> { id, pulls: { number: {...} }, issues: { number: {...} } }, and what
     // a test sets of a repository's settings: defaultBranch, protected (branch names),
-    // ciConfigPath (GitLab), parent (the repository it is a fork of; null for none) and
-    // spelled (its name in the forge's own letter case).
+    // ciConfigPath (GitLab), parent (the repository it is a fork of; null for none),
+    // spelled (its name in the forge's own letter case) and runs, its CI runs by id:
+    // { branch, jobs: [ids], repo (GitHub: the repository the branch is in, when another),
+    // tag: true or pull: number (GitLab: a tag's pipeline, a merge request's) }.
     repos: {},
     // REST review comment id -> node id
     comments: {},
@@ -171,6 +177,8 @@ export async function startFakeForge() {
       base: { ref: p.base || 'main', repo: { full_name: repoName } },
     };
   };
+  // A CI run by its id ("runs", "pipelines") or by the id of one of its jobs: [its id, the run].
+  const runOf = (repo, what, id) => Object.entries(repo.runs || {}).map(([n, run]) => [Number(n), run]).find(([n, run]) => (what === 'jobs' ? (run.jobs || []).includes(id) : n === id));
   // A repository is kept under its name in lower case, however a request spells it.
   const revParse = (repoName, ref) => {
     try { return git(path.join(gitRoot, `${repoName.toLowerCase()}.git`),'rev-parse', '--verify', '--quiet', `${ref}^{commit}`); } catch { return null; }
@@ -205,6 +213,10 @@ export async function startFakeForge() {
         protection: { enabled: guarded, required_status_checks: { enforcement_level: guarded ? 'everyone' : 'off', contexts: [] } },
       } };
     }
+    if (method === 'GET' && (x = /^\/git\/ref\/heads\/(.+)$/.exec(rest))) {
+      const sha = revParse(m[1], `refs/heads/${x[1]}`);
+      return sha ? { status: 200, json: { ref: `refs/heads/${x[1]}`, object: { type: 'commit', sha } } } : { status: 404, json: { message: 'Not Found' } };
+    }
     if (method === 'GET' && (x = /^\/pulls\/(\d+)$/.exec(rest))) {
       const p = repo.pulls?.[x[1]];
       return p ? { status: 200, json: restPull(m[1], p) } : { status: 404, json: { message: 'Not Found' } };
@@ -221,6 +233,14 @@ export async function startFakeForge() {
     }
     if (method === 'GET' && (x = /^\/pulls\/comments\/(\d+)$/.exec(rest))) {
       return data.comments[x[1]] ? { status: 200, json: { id: Number(x[1]), node_id: data.comments[x[1]] } } : { status: 404, json: { message: 'Not Found' } };
+    }
+    if (method === 'GET' && (x = /^\/actions\/(runs|jobs)\/(\d+)(\/logs)?$/.exec(rest))) {
+      const [id, run] = runOf(repo, x[1], Number(x[2])) || [];
+      if (!run) return { status: 404, json: { message: 'Not Found' } };
+      // A log is kept elsewhere: GitHub answers with where, for a minute.
+      if (x[3]) return { status: 302, json: null, headers: { location: `https://results.example/${x[1]}/${x[2]}/logs?sig=once` } };
+      if (x[1] === 'jobs') return { status: 200, json: { id: Number(x[2]), run_id: id, head_branch: run.branch, status: 'completed' } };
+      return { status: 200, json: { id, head_branch: run.branch, head_repository: { full_name: run.repo || repo.spelled || m[1] }, event: 'push', status: 'completed' } };
     }
     if (method === 'GET') return { status: 200, json: { path: pathname, ok: true }, headers: { link: '<https://api.github.com/next>; rel="next"', etag: '"abc"', 'x-ratelimit-remaining': '4999', 'x-github-request-id': 'REQ1', 'set-cookie': 'session=forge', 'www-authenticate': 'Basic realm="x"' } };
     return { status: method === 'DELETE' ? 204 : 201, json: method === 'DELETE' ? null : { id: 1, node_id: 'PRR_1', state: 'PENDING', html_url: 'https://github.com/o/r/pull/9', number: 9 } };
@@ -271,10 +291,29 @@ export async function startFakeForge() {
       const heads = git(path.join(gitRoot, `${repoName.toLowerCase()}.git`), 'for-each-ref', '--format=%(refname:lstrip=2) %(objectname)', 'refs/heads');
       return { status: 200, json: heads.split('\n').filter(Boolean).map((line) => branchOf(...line.split(' '))) };
     }
-    if (method === 'GET' && (x = /^\/repository\/branches\/(.+)$/.exec(rest))) {
+    // A name is one segment to GitLab, its slashes encoded: a branch's path that goes deeper is no route.
+    if (method === 'GET' && (x = /^\/repository\/branches\/([^/]+)$/.exec(rest))) {
       const branch = decodeURIComponent(x[1]);
       const sha = revParse(repoName, `refs/heads/${branch}`);
       return sha ? { status: 200, json: branchOf(branch, sha) } : { status: 404, json: { message: '404 Branch Not Found' } };
+    }
+    if (method === 'GET' && rest.startsWith('/repository/branches/')) return { status: 404, json: { error: '404 Not Found' } };
+    if (method === 'GET' && (x = /^\/repository\/files\/([^/]+)$/.exec(rest))) {
+      const [file, ref] = [decodeURIComponent(x[1]), searchParams.get('ref')];
+      try {
+        const text = git(path.join(gitRoot, `${repoName.toLowerCase()}.git`), 'show', `refs/heads/${ref}:${file}`);
+        return { status: 200, json: { file_path: file, ref, encoding: 'base64', content: Buffer.from(text).toString('base64') } };
+      } catch { return { status: 404, json: { message: '404 File Not Found' } }; }
+    }
+    if (method === 'GET' && (x = /^\/(pipelines|jobs)\/(\d+)$/.exec(rest))) {
+      const [id, run] = runOf(repo, x[1], Number(x[2])) || [];
+      if (!run) return { status: 404, json: { message: '404 Not found' } };
+      // A merge request's pipeline runs for the ref GitLab keeps of the merge request.
+      const said = { ref: run.pull ? `refs/merge-requests/${run.pull}/head` : run.branch, tag: run.tag === true, status: 'success' };
+      return { status: 200, json: x[1] === 'jobs' ? { id: Number(x[2]), ...said, pipeline: { id, ...said } } : { id, ...said, source: run.pull ? 'merge_request_event' : 'push' } };
+    }
+    if (method === 'GET' && (x = /^\/jobs\/(\d+)\/trace$/.exec(rest))) {
+      return runOf(repo, 'jobs', Number(x[1])) ? { status: 200, text: `log of job ${x[1]}\n` } : { status: 404, json: { message: '404 Not found' } };
     }
     return { status: method === 'POST' ? 201 : 200, json: { path: pathname, ok: true, id: 1, iid: 5 } };
   }
@@ -320,7 +359,15 @@ export async function startFakeForge() {
   const expected = (host, url) => {
     if (host === 'api.github.com') return [...tokens].map((t) => `Bearer ${t}`);
     if (host === 'github.com') return [...tokens].map((t) => `Basic ${Buffer.from(`x-access-token:${t}`).toString('base64')}`);
+    if (host === GHES_HOST) return [url.startsWith('/api/') ? `Bearer ${GHES_TOKEN}` : `Basic ${Buffer.from(`x-access-token:${GHES_TOKEN}`).toString('base64')}`];
     return [...gitlabTokens].map((t) => (url.startsWith('/api/') ? `Bearer ${t}` : `Basic ${Buffer.from(`oauth2:${t}`).toString('base64')}`));
+  };
+
+  // A GitHub Enterprise Server's API. It says which version it is, among other things.
+  const enterprise = (method, url, body) => {
+    if (url === '/api/graphql') return graphql(body);
+    if (url === '/api/v3/meta') return { status: 200, json: { verifiable_password_authentication: false, installed_version: '3.15.2', domains: { actions: ['actions.ghes.example.com'] } } };
+    return url.startsWith('/api/v3/') ? githubRest(method, url.slice('/api/v3'.length)) : { status: 404, json: { message: 'Not Found' } };
   };
 
   const server = http.createServer((req, res) => {
@@ -339,15 +386,16 @@ export async function startFakeForge() {
       const custom = routes.find((r) => r.host === host && r.method === req.method && r.pattern.test(url));
       if (custom) { await custom.fn(req, res, body, url); return; }
       let answer;
-      if (host === 'github.com' || (host === GITLAB_HOST && !url.startsWith('/api/'))) { smartHttp(req, res, url, body); return; }
+      if (host === 'github.com' || (host !== 'api.github.com' && !url.startsWith('/api/'))) { smartHttp(req, res, url, body); return; }
       try {
-        if (url === '/graphql' || url === '/api/graphql') answer = graphql(body);
+        if (host === GHES_HOST) answer = enterprise(req.method, url, body);
+        else if (url === '/graphql' || url === '/api/graphql') answer = graphql(body);
         else answer = host === 'api.github.com' ? githubRest(req.method, url) : gitlabRest(req.method, url);
       } catch (err) {
         answer = { status: 500, json: { message: String(err.message) } };
       }
-      res.writeHead(answer.status, { 'content-type': 'application/json; charset=utf-8', ...(answer.headers || {}) });
-      res.end(answer.json === null ? '' : JSON.stringify(answer.json));
+      res.writeHead(answer.status, { 'content-type': answer.text === undefined ? 'application/json; charset=utf-8' : 'text/plain', ...(answer.headers || {}) });
+      res.end(answer.text ?? (answer.json === null ? '' : JSON.stringify(answer.json)));
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

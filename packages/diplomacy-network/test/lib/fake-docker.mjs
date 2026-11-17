@@ -4,8 +4,10 @@
 // A "container" is a directory: its volume is <root>/work, its bind mounts are links,
 // and what is exec'd in it runs on this host with DN_ROOT=<root>, with the container's
 // paths in the arguments translated and with shims for the tools only a container has
-// (setsid, flock, update-ca-certificates, and dash as sh where the host has one). What
-// is put in a session of its own there is what `restart` and `rm` kill.
+// (flock, update-ca-certificates). What is named there by its full path is the image's
+// own, and <root> holds the two that are: /bin/sh, dash where the host has one, and
+// /usr/bin/setsid. What is put in a session of its own there is what `restart` and `rm`
+// kill.
 // FAKE_DOCKER_PATH is put in front of PATH for what is exec'd, which is where a test
 // keeps its own `claude`. A network is a record that a container must name to be made
 // and that cannot be removed from under one; nothing is isolated, and the command a
@@ -153,20 +155,34 @@ switch (command) {
   }
 
   case 'image': {
-    const { rest } = parse(args.slice(1), ['--format']);
+    const { opts, rest } = parse(args.slice(1), ['--format', '--filter']);
+    const there = () => fs.existsSync(file('images', encodeURIComponent(rest[0])));
     if (args[0] === 'inspect') {
-      if (!fs.existsSync(file('images', encodeURIComponent(rest[0])))) die(`Error response from daemon: No such image: ${rest[0]}`);
+      if (!there()) die(`Error response from daemon: No such image: ${rest[0]}`);
       console.log('sha256:fake');
-    }
+    } else if (args[0] === 'ls') {
+      const want = (opts['--filter'] || []).map((f) => f.replace(/^label=/, ''));
+      for (const f of fs.readdirSync(file('images'))) {
+        if (want.every((w) => (readJson(file('images', f)) || []).includes(w))) console.log(decodeURIComponent(f));
+      }
+    } else if (args[0] === 'rm') {
+      if (!there()) die(`Error response from daemon: No such image: ${rest[0]}`);
+      // A container of an image holds it, running or not.
+      for (const f of fs.readdirSync(file('containers'))) {
+        const c = readJson(file('containers', f));
+        if (c && c.image === rest[0]) die(`Error response from daemon: conflict: unable to remove repository reference "${rest[0]}" (must force) - container ${c.name} is using its referenced image`);
+      }
+      fs.unlinkSync(file('images', encodeURIComponent(rest[0])));
+    } else die(`fake-docker: no such command: image ${args[0]}`, 2);
     break;
   }
 
   case 'build': {
-    const { opts, rest } = parse(args, ['-t', '--progress']);
+    const { opts, rest } = parse(args, ['-t', '--progress', '--label']);
     console.error('#1 [internal] load build definition from Dockerfile');
     if (!fs.existsSync(path.join(rest[0], 'Dockerfile'))) die('ERROR: failed to read dockerfile');
     console.error('#2 exporting to image');
-    fs.writeFileSync(file('images', encodeURIComponent(opts['-t'][0])), '');
+    fs.writeFileSync(file('images', encodeURIComponent(opts['-t'][0])), JSON.stringify(opts['--label'] || []));
     break;
   }
 
@@ -203,6 +219,7 @@ switch (command) {
     const networks = opts['--network'] || ['bridge'];
     for (const n of networks) if (n !== 'bridge' && n !== 'none' && !fs.existsSync(file('networks', `${n}.json`))) die(`docker: Error response from daemon: network ${n} not found`, 125);
     if (container(name)) die(`docker: Error response from daemon: Conflict. The container name "/${name}" is already in use.`, 125);
+    if (!rest[0]) die('docker: invalid reference format', 125);
     if (!fs.existsSync(file('images', encodeURIComponent(rest[0])))) die(`Unable to find image '${rest[0]}' locally`, 125);
     if (opts['--storage-opt'] && fs.existsSync(file('no-storage-opt'))) {
       die('docker: Error response from daemon: --storage-opt is supported only for overlay over xfs with \'pquota\' mount option\n\nRun \'docker run --help\' for more information', 125);
@@ -215,13 +232,21 @@ switch (command) {
         for (const [dst, m] of sizes) console.log(`${m.bytes}\t${dst}`);
         for (const [dst, m] of sizes) console.log(`${m.inodes}\t${dst}`);
       } else if (rest[1] === 'find' && rest.includes('-delete')) {
-        for (const n of fs.readdirSync(at[rest[2]])) fs.rmSync(path.join(at[rest[2]], n), { recursive: true, force: true });
+        // The path it is given, under whichever mount holds it; itself too unless -mindepth keeps it.
+        const dst = Object.keys(at).find((d) => rest[2] === d || rest[2].startsWith(`${d}/`));
+        const top = at[dst] + rest[2].slice(dst.length);
+        if (!rest.includes('-mindepth')) fs.rmSync(top, { recursive: true, force: true });
+        else for (const n of fs.readdirSync(top)) fs.rmSync(path.join(top, n), { recursive: true, force: true });
       }
       break;
     }
     const root = file('roots', name);
     fs.rmSync(root, { recursive: true, force: true });
-    fs.mkdirSync(path.join(root, 'dn'), { recursive: true });
+    for (const d of ['dn', 'bin', 'usr/bin']) fs.mkdirSync(path.join(root, d), { recursive: true });
+    // The image's sh is dash, which is stricter than the bash a host may call sh.
+    fs.symlinkSync(fs.existsSync('/bin/dash') ? '/bin/dash' : '/bin/sh', path.join(root, 'bin/sh'));
+    // In place, as setsid(1) does for what is no group leader: the pid stays.
+    fs.writeFileSync(path.join(root, 'usr/bin/setsid'), '#!/bin/sh\necho $$ >> "$FAKE_DOCKER_PIDS"\nexec perl -MPOSIX -e \'POSIX::setsid(); exec { $ARGV[0] } @ARGV\' "$@"\n', { mode: 0o755 });
     const mounts = [];
     for (const v of opts['-v'] || []) {
       const [src, dst] = v.split(':');
@@ -296,10 +321,6 @@ switch (command) {
       const made = `${shims}.${process.pid}`;
       fs.mkdirSync(made, { recursive: true });
       const shim = (n, body) => fs.writeFileSync(path.join(made, n), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
-      // In place, as setsid(1) does for what is no group leader: the pid stays.
-      shim('setsid', 'echo $$ >> "$FAKE_DOCKER_PIDS"\nexec perl -MPOSIX -e \'POSIX::setsid(); exec { $ARGV[0] } @ARGV\' "$@"');
-      // The image's sh is dash, which is stricter than the bash a host may call sh.
-      if (fs.existsSync('/bin/dash')) shim('sh', 'exec /bin/dash "$@"');
       // A lock on the caller's open file, as flock(1) takes it: two jobs starting at once
       // install the broker's certificate one after the other, as in the image.
       if (spawnSync('sh', ['-c', 'command -v flock']).status !== 0) {
@@ -324,7 +345,8 @@ switch (command) {
       PATH: [process.env.FAKE_DOCKER_PATH, shims, process.env.PATH].filter(Boolean).join(':'),
     };
     const translated = cmd.map(inside);
-    const r = spawnSync(translated[0], translated.slice(1), { env, cwd: c.root, stdio: 'inherit' });
+    const own = path.join(c.root, translated[0]);
+    const r = spawnSync(path.isAbsolute(translated[0]) && fs.existsSync(own) ? own : translated[0], translated.slice(1), { env, cwd: c.root, stdio: 'inherit' });
     process.exit(r.status ?? 137);
     break;
   }

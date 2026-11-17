@@ -1,7 +1,9 @@
-// How this machine weighs a task against what it has. What a machine has is never
-// told to anyone: the one thing that comes of it is how long this machine holds back
-// before it goes for a task, so that one better placed gets there first. It refuses
-// nothing: with nobody better placed, the task is taken here after the wait.
+// How this machine weighs a task against what it has. What a machine has is put in no
+// message: the one thing that comes of it is how long this machine holds back before it
+// goes for a task, so that one better placed gets there first. The wait is a fixed
+// length, so a peer that sees when this machine goes for a task can tell that it held
+// back, and from that what it lacks. It refuses nothing: with nobody better placed, the
+// task is taken here after the wait.
 //
 // What is weighed: work on an Android project wants a device, so a machine with none to
 // give lets one that has a device go first.

@@ -563,7 +563,7 @@ func axisText(_ s: String) -> Text {
 extension View {
     /// The panel's card chrome: padded content on a soft rounded tint. Every grouped
     /// block in the panel wears it — the activity feed, the ongoing-sessions list, the
-    /// device pool — so the corner radius and the tint
+    /// device pool - so the corner radius and the tint
     /// live in one place instead of once per card.
     ///
     /// `fill` is the whole colour, opacity included, because the one non-default card

@@ -145,7 +145,7 @@ class SpawnWizard(QWidget):
         cfg = self._config()
         label = self._label()
         # The SAME pipeline the auto-monitor rides - dedup, ban check,
-        # registration — only the trigger (this click) and its policies differ
+        # registration - only the trigger (this click) and its policies differ
         # (see autofix.dispatch_decide).
         payload = cfg.prompt_payload()
         job = autofix.AgentJob(

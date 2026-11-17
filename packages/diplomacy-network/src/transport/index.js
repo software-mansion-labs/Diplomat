@@ -18,11 +18,14 @@ import { torDriver } from './tor.js';
 /// `http-<status>`, `protocol` or `stopped`.
 export function createTransport({ kind = TRANSPORT, identity, dir, log = () => {}, tune = {} }) {
   const address = onionAddress(identity.pk);
-  let current = { state: 'starting', detail: 'not started' };
+  // Loopback TCP stands in for Tor in tests alone: whoever reads the state is told so.
+  const told = (detail) => (kind === 'loop' ? `loop (test transport): ${detail}` : detail);
+  let current = { state: 'starting', detail: told('not started') };
   const watchers = [];
   let phase = 'new'; // new -> started -> stopped
 
-  function setState(state, detail = '') {
+  function setState(state, said = '') {
+    const detail = told(said);
     if (phase === 'stopped' || (state === current.state && detail === current.detail)) return;
     current = { state, detail };
     log(`transport: ${state}${detail ? ` (${detail})` : ''}`);

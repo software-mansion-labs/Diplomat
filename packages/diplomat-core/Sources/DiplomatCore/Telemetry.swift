@@ -14,7 +14,7 @@ import Foundation
 /// The event vocabulary, per unit of auto-work (keyed by `AutofixWork.ledgerKey`):
 ///
 /// - `queued`  — a poll saw this work owed for the first time.
-/// - `started` — an agent was dispatched for it.
+/// - `started` - an agent was dispatched for it.
 /// - `done`    — the agent exited, carrying the tokens its own transcript accounts
 ///               for and, for a runner the provider bills in money, what it charged
 ///               and the model it charged for. Timed from its completion sentinel, or
@@ -219,7 +219,7 @@ public enum Telemetry {
             if fresh { order.append(key) }
             byKey[key] = task
         }
-        // Samples arrive in append order, which is chronological — but each is stamped
+        // Samples arrive in append order, which is chronological - but each is stamped
         // by its writer's wall clock, and two applets sharing a home append to one
         // file, so one can land out of order. Every consumer below walks consecutive
         // pairs, so sort once.

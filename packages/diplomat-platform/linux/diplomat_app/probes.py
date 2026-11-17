@@ -447,23 +447,13 @@ class _OpenCodeBackend:
         checkout at a time, so two sessions a second apart in the same directory is
         the ordinary case, not the pathological one.
 
-        A run with no port and no session is a 2.x run whose session was not bound at
-        its spawn, or a 1.x one whose port could not be had. The first is found
-        through the process table instead: every 2.x TUI's argv names its
-        session, and the one whose opening prompt is this run's staged prompt is this
-        run's. Bound, it is probed, priced and interrupted as one spawned here is.
+        A run with no port and no session is a 1.x one whose port could not be had: it
+        has no server to ask. A 2.x run's session is bound as it is spawned.
         """
         from diplomat_runtime import agentregistry, opencodeapi
 
         port = agentregistry.port(record.run_id)
         if port is None:
-            prompt = _staged_prompt(record.run_id)
-            if prompt is None:
-                return ""
-            for session_id in live_service_sessions():
-                if (session_id not in taken
-                        and opencodeapi.opening_prompt(session_id) == prompt):
-                    return session_id
             return ""
         listing = opencodeapi.sessions(port, directory)
         if listing is None:

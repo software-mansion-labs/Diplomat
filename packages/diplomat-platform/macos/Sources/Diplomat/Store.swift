@@ -68,7 +68,8 @@ final class Store: ObservableObject {
     /// What the daemon refused the Network screen's last action with, by the pool panel
     /// it was made in ("" for the one shown before any pool).
     @Published var networkRefusals: [String: String] = [:]
-    /// Why the daemon is not told this machine's pools (`NetworkPools.listing`), or "".
+    /// What of this machine's pools could not be confirmed (`NetworkPools.listing`), and
+    /// the daemon's refusal of the list, a line each; "" for neither.
     @Published var networkPoolsHeld = ""
     /// The operator's jobs whose offer the daemon was sent and gave no definite answer
     /// to (`settleOffering`).
@@ -84,6 +85,12 @@ final class Store: ObservableObject {
     /// Whether the feed has said the network is refusing automatic work, for the current
     /// spell of it.
     var networkUnavailableLogged = false
+    /// Whether the feed has said the shared config cannot be read, for the current spell
+    /// of it.
+    var configUnreadableLogged = false
+    /// Why the network refused each queued job that it refused for a reason of the job's
+    /// own, by the job's label: what its row says, and what the feed has said.
+    @Published var networkJobRefusals: [String: String] = [:]
 
     // MARK: persisted settings
 
@@ -175,6 +182,11 @@ final class Store: ObservableObject {
     /// Of the same reading: whether none of several root paths resolved, leaving the one
     /// root a guess that the first path checks out the configured repo (`RepoRoots.guessed`).
     private(set) var rootsGuessed = false
+    /// Of the same reading: the roots a path's own remote names, and the root paths
+    /// that could not be read (`RepoPaths.RootsReading`). Before a first reading every
+    /// path is unread.
+    private var rootsLinked: [PRRef.LocalRepo] = []
+    private var rootPathsUnread = RepoPaths.rootPaths.map(RepoRoots.expand)
     private var rootsPinned = false
 
     /// Re-resolve the roots off the main actor, and follow a change with the panel.
@@ -186,6 +198,8 @@ final class Store: ObservableObject {
         rootsResolved = next.complete
         primaryResolved = next.primaryResolved
         rootsGuessed = next.guessed
+        rootsLinked = next.linked
+        rootPathsUnread = next.unread
         if next.roots != roots {
             roots = next.roots
             showSelectedRepo()
@@ -194,14 +208,18 @@ final class Store: ObservableObject {
 
     /// Pin the roots, for headless self-tests only: resolved for real they are whatever
     /// the developer's own config.json lists. `complete`, `primary` and `guessed` stand
-    /// for `rootsResolved`, `primaryResolved` and `rootsGuessed`.
+    /// for `rootsResolved`, `primaryResolved` and `rootsGuessed`; `linked` (every pinned
+    /// root, unless given) and `unread` for `rootsLinked` and `rootPathsUnread`.
     func pinRoots(_ pinned: [PRRef.LocalRepo], complete: Bool = true, primary: Bool = true,
-                  guessed: Bool = false) {
+                  guessed: Bool = false, linked: [PRRef.LocalRepo]? = nil,
+                  unread: [String] = []) {
         guard Headless.active, !pinned.isEmpty else { return }
         rootsPinned = true
         rootsResolved = complete
         primaryResolved = primary
         rootsGuessed = guessed
+        rootsLinked = linked ?? pinned
+        rootPathsUnread = unread
         roots = pinned
         showSelectedRepo()
     }
@@ -444,7 +462,7 @@ final class Store: ObservableObject {
         }
     }
 
-    /// The spending budget's four knobs — same file as the cap above.
+    /// The spending budget's four knobs - same file as the cap above.
     ///
     /// Each normalises in memory as well as on disk, so the gate here and the file
     /// never hold different numbers. Changing any of
@@ -469,7 +487,9 @@ final class Store: ObservableObject {
             guard networkEnabled != oldValue, !readingConfig else { return }
             if writesConfig,
                !configSaved(AppConfig.setBool(NetworkSettings.enabledKey, networkEnabled)) {
-                readBack { networkEnabled = AppConfig.networkEnabled }
+                // A file that cannot be read says nothing of the switch.
+                let known = AppConfig.unreadable ? oldValue : AppConfig.networkEnabled
+                readBack { networkEnabled = known }
                 return
             }
             networkSwitched()
@@ -517,9 +537,18 @@ final class Store: ObservableObject {
 
     /// Take the network's settings as the shared file has them: the daemon acts on the
     /// file, and another process may have written it. A switch that moved is followed
-    /// as one moved here is.
+    /// as one moved here is. A file that is there and cannot be read says nothing - one
+    /// read can fall in the middle of a rewrite - so every setting stays as it was last
+    /// read, and the feed says so once for the spell.
     func rereadNetworkSettings() {
         guard writesConfig else { return }
+        let unreadable = AppConfig.unreadable
+        if unreadable, !configUnreadableLogged {
+            AuditLog.log("auto", "warn", AppConfig.unreadableNote)
+            refreshAudit()
+        }
+        configUnreadableLogged = unreadable
+        guard !unreadable else { return }
         let on = AppConfig.networkEnabled
         let switched = on != networkEnabled
         readBack {
@@ -973,7 +1002,7 @@ final class Store: ObservableObject {
     /// Queued work whose dispatch is under way: it has left the queue and its spawn
     /// has not answered yet.
     ///
-    /// That span is seconds long — a `ps` scan, an AppleScript terminal — and for
+    /// That span is seconds long - a `ps` scan, an AppleScript terminal - and for
     /// all of it the task is neither queued nor yet a session. It
     /// is held here so that it is a ROW throughout, saying what the click just did to
     /// it, rather than a gap where the operator's task used to be.
@@ -1309,7 +1338,7 @@ final class Store: ObservableObject {
             // afterwards; publishes the status either way, so it stands in for the
             // plain `refreshAllocatorInstall()` this used to do here.
             Task { await ensureAllocatorInstalled() }
-            Task { await endLegacyMeshNodes() }
+            Task { await retireLegacyMeshNode() }
         }
     }
 
@@ -1994,8 +2023,11 @@ final class Store: ObservableObject {
         if load < autoTasksMeasured { bringPollForward(capLoad: load) }
         if autoTasksMeasured != load { autoTasksMeasured = load }
         publishNetwork(pass)
-        let failed = pass.tick.rows.filter { $0.1.state == .failed }.map { ($0.0.label, $0.1.reason) }
-        noteCommsRuns(neverRan: Dictionary(failed, uniquingKeysWith: { first, _ in first }))
+        let failed = pass.tick.rows.filter { $0.1.state == .failed && !$0.1.spent }
+            .map { ($0.0.label, $0.1.reason) }
+        let spent = pass.tick.rows.filter { $0.1.spent }.map { ($0.0.label, $0.1.reason) }
+        noteCommsRuns(neverRan: Dictionary(failed, uniquingKeysWith: { first, _ in first }),
+                      spent: Dictionary(spent, uniquingKeysWith: { first, _ in first }))
     }
 
     /// Write back what a tick learns about a run: the pid its shell has since written,
@@ -2111,7 +2143,8 @@ final class Store: ObservableObject {
         // disk) is retired again next tick: nothing below may happen to one that stays,
         // or it is logged and priced twice.
         guard bookWritten(AgentRegistry.forget(Set(gone.map(\.runID)))) else { return }
-        for r in gone where t.states[r.runID]?.state == .finished {
+        for r in gone where t.states[r.runID]?.state == .finished
+            || t.states[r.runID]?.spent == true {
             forgetOffered(r.network ?? "")
         }
         let concluded = ReviewReconcile.concluded(gone, verdicts: t.states)
@@ -2154,7 +2187,7 @@ final class Store: ObservableObject {
 
     /// The network's half of a published pass: the snapshot the Network screen draws, and
     /// one feed line the first time an offer is seen claimed.
-    private func publishNetwork(_ pass: AgentPass) {
+    func publishNetwork(_ pass: AgentPass) {
         // A pass begun before the switch moved says nothing of the daemon as it is.
         guard pass.networkAsked, networkEnabled else { return }
         noteNetworkState(pass.network)
@@ -2163,6 +2196,12 @@ final class Store: ObservableObject {
             AuditLog.log(r.source, NetworkAudit.claimed,
                          "\(r.label.isEmpty ? r.runID : r.label) - \(verdict.reason)")
         }
+    }
+
+    /// The panel's line on what of the network does not work on this machine, or nil.
+    var networkTrouble: String? {
+        let line = NetworkTrouble.line(answered: networkAnswered, snapshot: networkState)
+        return line.isEmpty ? nil : line
     }
 
     /// Publish what the daemon just answered, or that it did not.
@@ -2179,22 +2218,38 @@ final class Store: ObservableObject {
         if !same { networkState = snapshot }
     }
 
-    /// Every linked repository as a pool, with the login each is worked as, or why the
-    /// list is held back (`NetworkPools.listing`). A listed path with no checkout read
-    /// for it yet counts as unread.
+    /// Every linked repository as a pool, with the login each is worked as, and what
+    /// could not be confirmed, which stays as the daemon has it (`known`:
+    /// `NetworkPools.listing`). A listed path with no checkout read for it yet counts as
+    /// unread.
     ///
     /// GitHub's login is `gh`'s own and not the username override: the agents act as it.
-    func networkPools() -> NetworkPools.Listing {
-        let unread = localRepoPaths.filter { path in
+    func networkPools(known: [NetworkSnapshot.Pool]) -> NetworkPools.Listing {
+        let unread = rootPathsUnread + localRepoPaths.filter { path in
             !localRepoCheckouts.contains { $0.path == path && $0.read }
-        }
+        }.map { ($0 as NSString).expandingTildeInPath }
         let others = localRepos
         var identities: [String: String] = [:]
-        for repo in roots + others where identities[repo.host] == nil {
+        for repo in rootsLinked + others where identities[repo.host] == nil {
             identities[repo.host] = repo.isGitLab ? gitlabMe.known(host: repo.host) : me
         }
-        return NetworkPools.listing(roots: roots, rootsRead: rootsResolved, others: others,
-                                    unread: unread, identities: identities)
+        return NetworkPools.listing(roots: rootsLinked, others: others, unread: unread,
+                                    identities: identities, known: known)
+    }
+
+    /// Say in the feed which pools the daemon had that the list it just took omits,
+    /// each with what became of its path.
+    func logPoolsLeft(_ known: [NetworkSnapshot.Pool], said: [NetworkPools.Pool]) {
+        let listed = Set((RepoPaths.rootPaths + localRepoPaths).map {
+            ($0 as NSString).expandingTildeInPath
+        })
+        let left = known.filter { pool in !said.contains { $0.id == pool.id } }
+        for pool in left {
+            AuditLog.log("auto", NetworkAudit.leave, "Left \(pool.id): " + (
+                listed.contains(pool.path) ? "\(pool.path) no longer names it"
+                    : "\(pool.path) is no longer listed in Settings"))
+        }
+        if !left.isEmpty { refreshAudit() }
     }
 
     /// Ask for each GitLab login `networkPools` lacks: a host no root is on is read by
@@ -3324,7 +3379,7 @@ final class Store: ObservableObject {
     /// Whether the write landed. Only `.written` ends a spell of `.failed`: `.unchanged`
     /// touched no disk.
     @discardableResult
-    private func bookWritten(_ w: AgentRegistry.BookWrite) -> Bool {
+    func bookWritten(_ w: AgentRegistry.BookWrite) -> Bool {
         if w == .failed, !bookUnsaved {
             bookUnsaved = true
             AuditLog.log("auto", "warn",
@@ -3451,6 +3506,14 @@ final class Store: ObservableObject {
         queuedTasks = ordered.compactMap { id in
             starting.contains(id) ? nil : staged.first { $0.id == id }
         }
+        let waiting = Set(staged.map(\.job.label))
+        forgetJobRefusals { waiting.contains($0) }
+    }
+
+    /// Drop the refusals of the jobs whose label `keep` does not hold.
+    func forgetJobRefusals(keeping keep: (String) -> Bool) {
+        let kept = networkJobRefusals.filter { keep($0.key) }
+        if kept != networkJobRefusals { networkJobRefusals = kept }
     }
 
     /// Run the queue down into whatever room this device has, in the operator's
@@ -3549,10 +3612,12 @@ final class Store: ObservableObject {
             switch await runQueuedTask(entry, forced: false) {
             case .failed: return
             // Every remaining entry would be priced against the same windows, or the
-            // same disk, or offered to the same daemon, and get the same answer, and the
-            // dispatch has already re-staged this one for the commit at the end of the
-            // cycle. Draining on would cost a round of refusals to no end.
-            case .unaffordable, .lowDisk, .networkRefused: return
+            // same disk, or offered to the same silent daemon, and get the same answer,
+            // and the dispatch has already re-staged this one for the commit at the end
+            // of the cycle. Draining on would cost a round of refusals to no end. A
+            // daemon that refused this job for a reason of the job's own is asked about
+            // the next.
+            case .unaffordable, .lowDisk, .networkDown: return
             default: break
             }
         }
@@ -3897,8 +3962,10 @@ final class Store: ObservableObject {
     ///
     /// An ask the Diplomacy Network carries (`RequestedWork.offered`) is left out for as
     /// long as the book holds the run of its offer. Once that run has left the book
-    /// without finishing - withdrawn, refused, the switch turned off - the ask is as it
-    /// was before the offer, and is offered again here.
+    /// without having run - withdrawn, unknown to the daemon, the switch turned off -
+    /// the ask is as it was before the offer, and is offered again here. One the network
+    /// gave up with its attempts used ends the ask, as a run in a terminal that came to
+    /// nothing does.
     ///
     /// Not private: the queue self-test commits a cycle directly, which is the only way
     /// to exercise the offer without a live GitHub fetch.
@@ -3946,7 +4013,7 @@ final class Store: ObservableObject {
         // never draw it, since the allowlist answers for the review monitor's own
         // finds and an ask is not one (`AgentJob.counter`).
         case .inFlight, .atCapacity, .unaffordable, .lowDisk, .failed, .notAllowed,
-             .offering, .networkRefused: break
+             .offering, .networkRefused, .networkDown: break
         }
     }
 
@@ -4054,7 +4121,7 @@ final class Store: ObservableObject {
     /// `queuedTasks` runs before the first suspension, so the panel shows the click
     /// landing and a second click finds nothing to start; the move out of
     /// `startingTasks` runs only once the row that replaces it is already published
-    /// (`dispatchAgent` books the run — `spawnTracked` — and awaits
+    /// (`dispatchAgent` books the run - `spawnTracked` - and awaits
     /// `settleAgents` before it returns, and `endStarting` resumes on that continuation
     /// without suspending again). Between them the task is a row the whole way: never
     /// drawn twice, and never missing.
@@ -4122,7 +4189,7 @@ final class Store: ObservableObject {
     /// The queued row's "execute now": start this task immediately, past the two holds
     /// that are the machine's own judgement.
     ///
-    /// It stays AUTO work — same `Auto · ` label, same auto-handled counter, and once
+    /// It stays AUTO work - same `Auto · ` label, same auto-handled counter, and once
     /// running it occupies a slot like any other automatic agent, so the rest of the
     /// queue waits behind it. Of the six
     /// asymmetries the gate draws between a click and a monitor tick (focus, capacity,
@@ -4135,7 +4202,7 @@ final class Store: ObservableObject {
     /// band before it suspends, so it reads as starting from the frame after the
     /// press, through the seconds the terminal spawn takes.
     /// The FEED line is written from the outcome instead, never ahead of it: the PR
-    /// can have gained an agent since the list was built, and the spawn can fail —
+    /// can have gained an agent since the list was built, and the spawn can fail -
     /// announcing "started" before asking would report a launch that never happened
     /// in both.
     func executeQueuedTask(_ id: String) async {
@@ -4147,7 +4214,7 @@ final class Store: ObservableObject {
         case .offered:
             AuditLog.log("panel", "queue-run",
                          "\(entry.job.label) - offered for this machine to run at once")
-        case .networkRefused(let why):
+        case .networkRefused(let why), .networkDown(let why):
             error = "\(entry.job.label) was not offered: \(why)."
         // The rest are all logged by the step that decided them, but a feed line is
         // not an answer to a click: the row vanished and nothing opened, so say why
@@ -4215,7 +4282,7 @@ final class Store: ObservableObject {
 
     /// One agent job, whoever triggers it. The trigger supplies WHAT to run (config
     /// → prompt, labels, PR identity); the pipeline owns everything that HAPPENS —
-    /// the ban check, in-flight dedup, spawn, tracking, counters — so
+    /// the ban check, in-flight dedup, spawn, tracking, counters - so
     /// a button click and a monitor tick cannot behave differently by accident.
     struct AgentJob: Equatable {
         var kind: String            // agent-row tint: "review" | "issues" | "conflicts" | "audit"
@@ -4321,8 +4388,12 @@ final class Store: ObservableObject {
         /// The offer was sent and the daemon gave no definite answer: the job is kept
         /// (`networkOffering`) until a later cycle books or drops it.
         case offering
-        /// The network did not take the job: a sentence fit to show the operator.
+        /// The daemon refused this job for a reason of the job's own, or no offer could
+        /// be made of it: a sentence fit to show the operator.
         case networkRefused(String)
+        /// No daemon took the offer - it did not answer, or is stopping - and none
+        /// takes any job while that lasts: a sentence fit to show the operator.
+        case networkDown(String)
         /// An agent launched, here or through the network: the signal to record the
         /// attempt and start the retry backoff. `.failed` deliberately does NOT count (a
         /// transient spawn error retries next poll), and counting a deferral or a
@@ -4516,8 +4587,10 @@ final class Store: ObservableObject {
     /// a pid and a window.
     ///
     /// A job the network does not take starts no agent here either. Automatic work is
-    /// staged back as held work is and offered again next cycle, with one feed line for
-    /// the spell; a job the operator started is answered with the sentence.
+    /// staged back as held work is and offered again next cycle. A refusal of the job's
+    /// own is said once for the job, in the feed and on its row (`networkJobRefusals`);
+    /// a daemon that takes no job has one feed line for the spell. A job the operator
+    /// started is answered with the sentence.
     ///
     /// An offer the daemon was sent and gave no definite answer to may be in the pool.
     /// Automatic work is offered again from the queue, which the daemon answers with the
@@ -4526,6 +4599,7 @@ final class Store: ObservableObject {
                                 attemptNumber: Int, forced: Bool,
                                 rowLabel: String) async -> DispatchOutcome {
         let refusal: String
+        var own = false
         switch NetworkOffer.from(
             verb: job.auditAction, ownPR: job.allows.ownPR, number: networkNumber(job),
             repoKey: networkRepoKey(job), label: job.label, prompt: job.prompt,
@@ -4534,6 +4608,7 @@ final class Store: ObservableObject {
             readOnly: job.allows.readOnly) {
         case .refused(let why):
             refusal = why
+            own = true
         case .offer(let offer):
             let (reply, reach) = await Task.detached(priority: .userInitiated) {
                 DiplomacyNetwork.ask(NetworkRoute.offer, offer.body)
@@ -4554,13 +4629,21 @@ final class Store: ObservableObject {
                 refusal = "the daemon named no task for the offer"
             case .refused(let why):
                 refusal = why
+                own = reach == .answered
             case .down:
                 refusal = DiplomacyNetwork.notAnswering
             }
         }
         if source == .auto {
             stageQueued(job, attemptNumber: attemptNumber)
-            if !networkUnavailableLogged {
+            if own {
+                if networkJobRefusals[job.label] != refusal {
+                    networkJobRefusals[job.label] = refusal
+                    AuditLog.log("auto", NetworkAudit.unavailable,
+                                 "\(job.label) was not offered: \(refusal)")
+                    refreshAudit()
+                }
+            } else if !networkUnavailableLogged {
                 networkUnavailableLogged = true
                 AuditLog.log("auto", NetworkAudit.unavailable,
                              "Holding auto work - the Diplomacy Network did not take "
@@ -4572,7 +4655,7 @@ final class Store: ObservableObject {
                          "\(job.label) was not offered: \(refusal)")
             refreshAudit()
         }
-        return .networkRefused(refusal)
+        return own ? .networkRefused(refusal) : .networkDown(refusal)
     }
 
     /// A job of the operator's whose offer was sent and not definitely answered.
@@ -4638,6 +4721,7 @@ final class Store: ObservableObject {
                            source: AgentDispatchGate.Source, attemptNumber: Int,
                            rowLabel: String) async -> DispatchOutcome {
         networkUnavailableLogged = false
+        forgetJobRefusals { $0 != job.label }
         guard !AgentRegistry.load().contains(where: { $0.network == task }) else {
             if source == .panel {
                 AuditLog.log("panel", "in-flight", "\(job.label) - already offered to \(pool)")
@@ -4885,13 +4969,13 @@ final class Store: ObservableObject {
             self.error = "Resolve \(label) failed to spawn — see the activity log."
         case .inFlight:
             self.error = "Resolve \(label): an agent is already on this PR."
-        case .networkRefused(let why):
+        case .networkRefused(let why), .networkDown(let why):
             self.error = "Resolve \(label) was not offered: \(why)."
         case .spawned, .offered, .offering, .banned, .atCapacity, .unaffordable, .lowDisk,
              .notAllowed:
             // `.atCapacity`, `.unaffordable` and `.lowDisk` are answers only a monitor
-            // gets — none of the automatic-task cap, the spending budget and the disk
-            // floor applies to a click — and `.notAllowed` speaks for the review
+            // gets - none of the automatic-task cap, the spending budget and the disk
+            // floor applies to a click - and `.notAllowed` speaks for the review
             // monitor's finds, never a conflict.
             break
         }

@@ -13,7 +13,6 @@ ROOT="${DN_ROOT:-}"
 . "$RUN/env.sh"
 
 JOB="$ROOT/work/jobs/$DN_RUN_ID"
-CACHE="$ROOT/work/cache.git"
 BUNDLE="$ROOT/etc/ssl/certs/ca-certificates.crt"
 STORE="$ROOT/usr/local/share/ca-certificates"
 
@@ -46,9 +45,10 @@ export SSL_CERT_FILE="$BUNDLE" CURL_CA_BUNDLE="$BUNDLE" GIT_SSL_CAINFO="$BUNDLE"
 export NODE_EXTRA_CA_CERTS="$BUNDLE" REQUESTS_CA_BUNDLE="$BUNDLE"
 
 # git's settings are this job's own: another job in the container commits as its own
-# requester and reaches the broker with its own token.
+# requester and reaches the broker with its own token. The container's system-wide
+# settings and templates are whatever a job beside this one made them: git reads neither.
 mkdir -p "$JOB" || fail "no room for the job under /work"
-export GIT_CONFIG_GLOBAL="$JOB/gitconfig" GIT_TERMINAL_PROMPT=0
+export GIT_CONFIG_GLOBAL="$JOB/gitconfig" GIT_CONFIG_NOSYSTEM=1 GIT_TEMPLATE_DIR= GIT_TERMINAL_PROMPT=0
 git config --global user.name "$DN_GIT_NAME"
 git config --global user.email "$DN_GIT_EMAIL"
 # Without this git asks the proxy which scheme it wants before sending the token: one
@@ -75,20 +75,9 @@ if [ -n "${DN_FORWARDS:-}" ]; then
   . "$RUN/forwards.sh"
 fi
 
-# The clone borrows from a bare copy the container keeps of the repository, so a second
-# job downloads only what is new. That copy is never collected: clones point into it.
-(
-  flock 9
-  if [ -d "$CACHE" ]; then
-    git -C "$CACHE" fetch --quiet origin '+refs/heads/*:refs/heads/*' || echo "dn: the cache was not refreshed"
-  else
-    rm -rf "$CACHE.tmp" \
-      && git clone --quiet --bare "$DN_REPO_URL" "$CACHE.tmp" \
-      && git -C "$CACHE.tmp" config gc.auto 0 \
-      && mv "$CACHE.tmp" "$CACHE" || echo "dn: no cache this time"
-  fi
-) 9> "$ROOT/work/.cache.lock"
-git clone --quiet --reference-if-able "$CACHE" "$DN_REPO_URL" "$JOB/repo" || fail "the repository could not be cloned from $DN_REPO_URL"
+# A whole clone from the broker, which answers from the host's mirror: a copy kept under
+# /work would be any other job's to rewrite.
+git clone --quiet "$DN_REPO_URL" "$JOB/repo" || fail "the repository could not be cloned from $DN_REPO_URL"
 cd "$JOB/repo" || fail "the clone is missing"
 if [ -n "${DN_BASE:-}" ]; then
   { git fetch --quiet origin "$DN_BASE" && git checkout --quiet --detach FETCH_HEAD; } \

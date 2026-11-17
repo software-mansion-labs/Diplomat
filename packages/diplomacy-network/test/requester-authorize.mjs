@@ -132,9 +132,10 @@ await check('a path with more than one reading is refused before any rule is tri
   ];
   for (const [path, pattern] of tricks) await refused(req('GET', path), pattern);
   const gl = (path) => req('GET', path, { host: 'gitlab.example.com' });
-  await refused(gl('/api/v4/projects/group%2Fsub%2Fproj/merge_requests/5%2F..%2F6'), /encoded slash/);
-  await refused(gl('/api/v4/projects/group%2F..%2F..%2Fother%2Fproj/merge_requests/5'), /no rule/);
-  await refused(gl('/api/v4/projects/group%2Fsub%2Fproj%2F%2e%2e/merge_requests/5'), /encoded dot/);
+  await refused(gl('/api/v4/projects/group%2Fsub%2Fproj/merge_requests/5%2F..%2F6'), /dot segment/);
+  await refused(gl('/api/v4/projects/group%2F..%2F..%2Fother%2Fproj/merge_requests/5'), /dot segment/);
+  await refused(gl('/api/v4/projects/group%2Fsub%2Fproj%2F%2e%2e/merge_requests/5'), /dot segment/);
+  await refused(gl('/api/v4/projects/group%2F%2Fsub%2Fproj/merge_requests/5'), /empty segment/);
   await refused(gl('/api/v4/projects%2Fgroup/merge_requests/5'), /encoded slash/);
   for (const bad of [null, 'GET /x', [], 5]) assert.equal((await authorize(RULES, bad)).ok, false);
 });
@@ -189,6 +190,77 @@ await check('a path a looser router would take to an earlier rule\'s route is re
     assert.equal(verdict.rule, rules[2]);
     assert.equal(verdict.request.path, path);
   }
+});
+
+await check('a name GitLab takes as one segment may hold an encoded slash or dot: in a read, under a project, where the rule has a wildcard', async () => {
+  const P = '/api/v4/projects/group%2Fsub%2Fproj';
+  const rule = (method, path, more = {}) => ({ host: 'gitlab.example.com', method, path, fold: [3], ...more });
+  const rules = [
+    rule('GET', `${P}/merge_requests/*/merge_ref`, { deny: 'elsewhere' }),
+    rule('GET', `${P}/repository/compare`, { query: { from: 'free' } }),
+    rule('GET', `${P}/repository/branches/*`, { pick: ['name'] }),
+    rule('GET', `${P}/merge_requests/**`),
+    rule('GET', `${P}/repository/**`),
+    rule('GET', `${P}/pipelines/*`),
+    rule('GET', `${P}/issues/*/notes/*`),
+    rule('GET', `${P}/issues/*`),
+    rule('GET', `${P}/issues/*/links`, { deny: 'elsewhere' }),
+    rule('GET', `${P}/issues/*/notes`, { pull: { segment: 5, author: 'me' } }),
+    rule('GET', `${P}/issues/*/participants`, { pick: ['id'] }),
+    rule('GET', `${P}/issues/*/trace`, { run: { segment: 5, what: 'job', repo: 'group/sub/proj' } }),
+    rule('PUT', `${P}/repository/**`),
+    rule('GET', '/api/v4/projects/group%2Fmy.proj/issues/*'),
+    rule('DELETE', '/api/v4/projects/group%2Fmy.proj/issues/*'),
+    rule('GET', '/api/v4/groups/**', { fold: [] }),
+  ];
+  const gl = (path, method = 'GET') => req(method, path, { host: 'gitlab.example.com' });
+  // Sent as it came, and decided by the rule the path names as GitLab's router reads it:
+  // the path it would be with the slash decoded is that rule's too, or another's, before
+  // it or after, that asks nothing more of a request.
+  for (const [path, index] of [['/repository/files/src%2Fmain.js', 4], ['/repository/files/src%2fmain%2Ejs/raw?ref=feature%2Flogin', 4], ['/repository/files/README%2Emd?ref=main', 4],
+    ['/repository/files/%2Egithub%2Fworkflows%2Fci.yml/raw', 4], ['/repository/branches/feature%2Flogin', 2], ['/repository/branches/release%2F1%2e0', 2], ['/repository/branches/main.json', 2],
+    ['/repository/commits/feature%2Flogin/diff', 4], ['/repository/tags/release%2F1.0', 4], ['/repository/compare%2Fx', 4], ['/issues/5', 7], ['/issues/5%2Fnotes%2F7', 7]]) {
+    const verdict = await allowed(gl(`${P}${path}`), rules);
+    assert.equal(verdict.rule, rules[index], path);
+    assert.equal(verdict.request.path, `${P}${path}`);
+  }
+  await allowed(gl(`${P}/repository/branches/feature%2Flogin`, 'get'), rules);
+  // The project's own segment takes both escapes whatever the method.
+  for (const method of ['GET', 'DELETE']) for (const project of ['group%2Fmy.proj', 'group%2Fmy%2Eproj', 'Group%2fMy%2eProj']) await allowed(gl(`/api/v4/projects/${project}/issues/5`, method), rules);
+  await refused(gl('/api/v4/projects/group%2Fmy%2Fproj/issues/5'), /no rule/, rules);
+
+  // A name's parts are a path's: none is empty or a dot segment.
+  for (const name of ['..%2F..%2Fcompare', 'a%2F..%2Fb', 'a%2F%2E%2E%2Fb', '%2E%2E', '.%2e%2Fx', 'a%2F.', 'x%2F..%2F..%2Fmerge_requests%2F5%2Fmerge']) {
+    await refused(gl(`${P}/repository/files/${name}/raw`), /dot segment/, rules);
+    await refused(gl(`${P}/repository/branches/${name}`), /dot segment/, rules);
+  }
+  for (const name of ['a%2F%2Fb', '%2Fa', 'a%2F', '%2f']) await refused(gl(`${P}/repository/files/${name}`), /empty segment/, rules);
+
+  // An encoded slash is no separator to GitLab, and the request is refused where it would
+  // be one to a proxy in front: the route that makes is no rule's, or that of a rule which
+  // refuses, pins, cuts the answer or asks the forge.
+  const cut = /with its encoded slash read as a separator/;
+  for (const tail of ['/merge_requests/5%2Fmerge_ref', '/merge_requests/5%2fmerge_ref', '/merge_requests/5%2FMerge_Ref.json', '/repository/branches%2Fmain', '/merge_requests/5%2E0%2Fmerge_ref%2Ejson',
+    '/pipelines/7%2Fvariables', '/issues/5%2Flinks', '/issues/5%2Flinks%2Ejson', '/issues/578%2Fnotes', '/issues/5%2Fparticipants', '/issues/5%2Ftrace']) await refused(gl(`${P}${tail}`), cut, rules);
+  // It stands for no "/" of a rule's own path either.
+  for (const tail of ['/repository%2Fcompare?from=a', '/merge_requests%2F5', '/repository%2Ffiles%2Fx']) await refused(gl(`${P}${tail}`), /no rule/, rules);
+  await refused(gl('/api/v4/projects/group%2Fsub%2Fproj%2Fissues/5'), /no rule/, rules);
+
+  // An encoded dot is a dot to GitLab's router, the one before a format included.
+  const second = /could be read as a route another rule of this task decides/;
+  for (const tail of ['/repository/compare%2Ejson?from=a&to=b', '/repository/compare%2ejson', '/merge_requests/5/merge_ref%2Ejson', '/repository/compare.json%2Fx', '/repository/Compare%2Ejson%2Fx']) await refused(gl(`${P}${tail}`), second, rules);
+
+  // Neither escape stands in a write past the project, outside a project's path, or on GitHub.
+  await allowed(gl(`${P}/repository/branches/main`, 'PUT'), rules);
+  await refused(gl(`${P}/repository/branches/feature%2Flogin`, 'PUT'), /encoded slash/, rules);
+  await refused(gl(`${P}/repository/files/README%2Emd`, 'PUT'), /encoded dot/, rules);
+  await allowed(gl('/api/v4/groups/a/b.c'), rules);
+  await refused(gl('/api/v4/groups/a%2Fb'), /encoded slash/, rules);
+  await refused(gl('/api/v4/groups/a/b%2Ec'), /encoded dot/, rules);
+  await refused(gl('/api/v4/groups/projects/x/y%2Fz'), /encoded slash/, rules);
+  await refused(gl('/api/v3/projects/x/y%2Fz'), /encoded slash/, rules);
+  await refused(gl('/x/v4/projects/x/y%2Fz'), /encoded slash/, rules);
+  for (const path of ['/repos/o/r/branches/feature%2Flogin', '/repos/o/r/pulls/a%2Fb', '/repos/o/r/pulls/README%2Emd', '/repos/o/r/pulls%2F578']) await refused(req('GET', path), /encoded slash|encoded dot/);
 });
 
 await check('a method is one of five, uppercased, and no header changes it', async () => {
@@ -349,6 +421,11 @@ await check('a rule that asks the forge refuses when nothing can answer or the a
   await refused(req('DELETE', '/repos/o/r/pulls/999/reviews/1'), /not a pull request the forge would show/, any);
   await refused(req('DELETE', '/repos/o/r/pulls/abc/reviews/1'), /does not name an object by number/, any);
   await refused(req('DELETE', '/repos/o/r/pulls/0578/reviews/1'), /does not name an object by number/, any);
+  // A number past the safe range is not looked up as the nearest one that is.
+  const far = world();
+  far.pulls[9007199254740992] = { ...far.pulls[578], number: 9007199254740992 };
+  await allowed(req('DELETE', '/repos/o/r/pulls/9007199254740991/reviews/1'), any, { ...far, pull: async (number) => far.pulls[number + 1] });
+  await refused(req('DELETE', '/repos/o/r/pulls/9007199254740993/reviews/1'), /does not name an object by number/, any, far);
   await refused(req('DELETE', '/repos/o/r/pulls/578/reviews/1'), /nothing here can look a pull request up/, any, {});
   await allowed(req('POST', '/repos/o/r/pulls/579/x'), any);
   await refused(req('POST', '/repos/o/r/pulls/578/x'), /#578 was not opened by me/, any);

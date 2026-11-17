@@ -219,37 +219,58 @@ func networkSmoke() throws {
     section("network: the pools listing")
     let logins = ["github.com": "octocat", "gitlab.example.com": "me"]
     let other = PRRef.LocalRepo(owner: "a", repo: "b", path: "/w/b")
-    func listing(rootsRead: Bool = true, others: [PRRef.LocalRepo] = [other],
-                 unread: [String] = [], identities: [String: String] = logins)
+    func listing(others: [PRRef.LocalRepo] = [other], unread: [String] = [],
+                 identities: [String: String] = logins, known: [[String: String]] = [])
         -> NetworkPools.Listing {
-        NetworkPools.listing(roots: roots, rootsRead: rootsRead, others: others,
-                             unread: unread, identities: identities)
+        NetworkPools.listing(roots: roots, others: others, unread: unread,
+                             identities: identities,
+                             known: NetworkSnapshot(["pools": known]).pools)
     }
-    func ids(_ l: NetworkPools.Listing) -> [String]? {
-        if case .pools(let pools) = l { return pools.map(\.id) }
-        return nil
-    }
+    func ids(_ l: NetworkPools.Listing) -> [String] { l.pools.map(\.id) }
     let whole = ["github.com/o/r", "gitlab.example.com/g/sub/p", "github.com/x/y"]
-    check(ids(listing()) == whole + ["github.com/a/b"],
+    check(ids(listing()) == whole + ["github.com/a/b"] && listing().unconfirmed.isEmpty,
           "the roots, then what the other checkouts name: \(listing())")
     check(ids(listing(others: [roots[3], other])) == whole + ["github.com/a/b"],
           "a checkout of a root's repository adds no pool")
     check(ids(listing(others: [])) == whole, "a checkout naming no forge is left out")
-    check(listing(rootsRead: false) == .held("Pools are held back: a repo root cannot be read"),
-          "an unread root holds the list back")
-    check(listing(unread: ["~/gone", "/mnt/x"])
-          == .held("Pools are held back: ~/gone cannot be read"),
-          "an unread checkout holds the list back, the first one named")
-    check(listing(identities: ["github.com": "octocat"])
-          == .held("Pools are held back: the account for g/sub/p is not known yet")
-          && listing(identities: ["github.com": " ", "gitlab.example.com": "me"])
-          == .held("Pools are held back: the account for o/r is not known yet"),
-          "an unknown login holds the list back, its repository named")
-    check(listing(rootsRead: false, unread: ["/mnt/x"], identities: [:])
-          == .held(NetworkPools.heldRoot)
-          && listing(unread: ["/mnt/x"], identities: [:])
-          == .held(NetworkPools.held(unread: "/mnt/x")),
-          "the roots are named before a checkout, a checkout before a login")
+    let gone = ["id": "github.com/q/gone", "path": "/mnt/x", "identity": "octocat"]
+    let labGone = ["id": "gitlab.example.com/q/lab", "path": "/mnt/lab", "identity": "me"]
+    let stale = ["id": "github.com/q/stale", "path": "/w/stale", "identity": "octocat"]
+    let unread = listing(unread: ["/mnt/x", "/mnt/lab", "/mnt/new"], known: [stale, gone, labGone])
+    check(ids(unread) == whole + ["github.com/a/b", "github.com/q/gone", "gitlab.example.com/q/lab"]
+          && Array(unread.pools.suffix(2)) == [
+            NetworkPools.Pool(id: "github.com/q/gone", path: "/mnt/x", forge: "github",
+                              identity: "octocat"),
+            NetworkPools.Pool(id: "gitlab.example.com/q/lab", path: "/mnt/lab", forge: "gitlab",
+                              identity: "me")],
+          "the pool behind an unread path is said as the daemon had it, and one behind "
+            + "no listed path is left: \(unread.pools)")
+    check(unread.unconfirmed == ["/mnt/x", "/mnt/lab", "/mnt/new"].map {
+              "\($0) cannot be read: its pool stays as the daemon last had it until the "
+                + "path can be read or is taken out of Settings"
+          }, "each unread path is named, with what ends it: \(unread.unconfirmed)")
+    let noLab = listing(identities: ["github.com": "octocat"], known: [
+        ["id": "gitlab.example.com/g/sub/p", "path": "/old/p", "identity": "me"], stale])
+    check(ids(noLab) == ["github.com/o/r", "github.com/x/y", "github.com/a/b",
+                         "gitlab.example.com/g/sub/p"]
+          && noLab.pools.last == NetworkPools.Pool(id: "gitlab.example.com/g/sub/p",
+                                                   path: "/old/p", forge: "gitlab", identity: "me")
+          && noLab.unconfirmed == ["The login for g/sub/p on gitlab.example.com is not known "
+                                    + "yet: its pool stays as the daemon last had it until it is"],
+          "a repository whose login is unknown keeps the pool the daemon had: \(noLab)")
+    check(ids(listing(identities: ["github.com": "octocat"]))
+          == ["github.com/o/r", "github.com/x/y", "github.com/a/b"],
+          "…and has none the daemon never had, the others said all the same")
+    check(listing(identities: ["gitlab.example.com": "me"]).unconfirmed
+          == [("o/r", "github.com"), ("x/y", "github.com"), ("a/b", "github.com")].map {
+              NetworkPools.unconfirmed(account: $0.0, host: $0.1)
+          }, "each repository with no login is named once")
+    let read = listing(unread: ["/old/r"], known: [
+        ["id": "github.com/o/r", "path": "/old/r", "identity": "someone"]])
+    check(ids(read) == whole + ["github.com/a/b"]
+          && read.pools.first == NetworkPools.Pool(id: "github.com/o/r", path: "/w/r",
+                                                   forge: "github", identity: "octocat"),
+          "a pool that was read is said as read, not as the daemon had it")
     check(NetworkPools.body(githubOnly) == ["pools": [
         ["id": "github.com/o/r", "path": "/w/r", "forge": "github", "identity": "octocat"],
         ["id": "github.com/x/y", "path": "/w/y", "forge": "github", "identity": "octocat"]]],
@@ -318,7 +339,8 @@ func networkSmoke() throws {
           && NetworkRoute.withdrawForgotten == "forgotten")
     check(NetworkRoute.withdrawStopped == "stopped"
           && NetworkRoute.withdrawNotBooked == "not booked"
-          && NetworkRoute.withdrawSwitchedOff == "switched off",
+          && NetworkRoute.withdrawSwitchedOff == "switched off"
+          && NetworkRoute.withdrawGoal == "its goal stopped",
           "the reasons an applet withdraws an offer for")
     check(sameBody(NetworkRoute.inviteBody(pool: "github.com/o/r"), ["pool": "github.com/o/r"])
           && sameBody(NetworkRoute.inviteBody(pool: "github.com/o/r", ttlSecs: 600),
@@ -438,6 +460,48 @@ func networkSmoke() throws {
           && NetworkSnapshot.parse(Data("{\"offers\": []}".utf8))?.offers == [],
           "no offers list is not an empty one")
 
+    section("network: the panel's line")
+    do {
+        func services(_ states: [String: (String, String)] = [:]) -> NetworkSnapshot? {
+            var doc: [String: Any] = [:]
+            for name in ["transport", "docker", "model"] {
+                let (state, detail) = states[name] ?? ("ready", "")
+                doc[name] = ["state": state, "detail": detail]
+            }
+            for (name, service) in states where doc[name] == nil {
+                doc[name] = ["state": service.0, "detail": service.1]
+            }
+            return NetworkSnapshot.parse(try? JSONSerialization.data(withJSONObject: doc))
+        }
+        let silent = "Diplomacy Network: the daemon is not answering"
+        check(NetworkTrouble.line(answered: nil, snapshot: nil) == ""
+                && NetworkTrouble.line(answered: true, snapshot: services()) == ""
+                && NetworkTrouble.line(answered: true, snapshot: nil) == "",
+              "nothing wrong, or nothing asked yet: no line")
+        check(NetworkTrouble.line(answered: false, snapshot: nil) == silent
+                && NetworkTrouble.line(answered: false, snapshot: services()) == silent,
+              "a daemon that did not answer, whatever it last said")
+        check(NetworkTrouble.line(answered: true, snapshot: services([
+            "transport": ("starting", "tor is 45% through its bootstrap"),
+            "docker": ("building", "building the job image")])) == "",
+              "a service coming up is no trouble")
+        check(NetworkTrouble.line(answered: true, snapshot: services([
+            "transport": ("failed", "tor not found")]))
+                == "Diplomacy Network: transport failed (tor not found)")
+        check(NetworkTrouble.line(answered: true, snapshot: services([
+            "docker": ("missing", "docker not found: every job runs in a container"),
+            "model": ("missing", "")]))
+                == "Diplomacy Network: docker missing (docker not found: every job runs in a "
+                    + "container); model missing",
+              "each service that does not work, with the daemon's detail")
+        check(NetworkTrouble.line(answered: true, snapshot: services(["transport": ("down", "")]))
+                == "Diplomacy Network: transport down"
+                && NetworkTrouble.line(answered: true,
+                                       snapshot: services(["devices": ("failed", "x")])) == ""
+                && NetworkTrouble.states == ["failed", "missing", "down"],
+              "the devices are not the panel's to report")
+    }
+
     section("network: the evidence")
     check(same(NetworkEvidence.tasks(nil), nil, "the daemon did not answer"),
           "a daemon that did not answer is unavailable, never an empty map")
@@ -545,6 +609,24 @@ func networkSmoke() throws {
           && verdict(Seen(state: "done", reason: "x")) == "failed: failed on the network",
           "a reason is read of a failed or cancelled offer alone")
     check(verdict(Seen(state: "limbo")) == "unknown: the network reports limbo")
+    func ending(_ task: Seen?, age: TimeInterval = 60) -> [Bool] {
+        let v = AgentState.resolveOne(run(age: age), evidence: seen(.present(
+            task.map { [networkTask: $0] } ?? [:])), now: now)
+        return [v.reported, v.spent]
+    }
+    check(ending(Seen(state: "done", ok: true)) == [true, false],
+          "a network run that went well is reported")
+    check(ending(Seen(state: "failed")) == [false, true] && ending(Seen(state: "done")) == [false, true],
+          "one the network gave up with its attempts used is spent")
+    check([Seen(state: "cancelled"), Seen(state: "pooled"), Seen(state: "claimed"), nil]
+            .allSatisfy { ending($0) == [false, false] } && ending(nil, age: 5) == [false, false],
+          "an offer that never ran is neither")
+    let wentWell = AgentState.resolveOne(
+        run(), evidence: seen(.present([networkTask: Seen(state: "done", ok: true)])), now: now)
+    check(AgentState.closeOnRetire(records: [run()], states: ["n1": wentWell]).isEmpty
+          && AgentState.closeOnRetire(records: [run(task: nil)], states: ["n1": wentWell])
+            .map(\.runID) == ["n1"],
+          "a run the network carried has no window to close")
     check(verdict(nil, age: 10) == "starting: offered 10s ago, not in the pool yet")
     check(verdict(nil, age: 20) == "starting: offered 20s ago, not in the pool yet"
           && verdict(nil, age: 21) == "failed: the network holds no such offer",
@@ -634,6 +716,22 @@ func networkSmoke() throws {
               == ([], networkTask), "unmerged: withdrawn only when forgotten")
         check(withdrawn(.present([networkTask: Seen(state: "pooled")]), task: nil) == ([], nil),
               "a local run has no offer")
+        func unstarted(_ tasks: Observation<[String: Seen]>, task: String? = networkTask) -> String? {
+            AgentState.withdrawUnstarted(run(task: task), evidence: seen(tasks, merged: []))
+        }
+        check(unstarted(.present([networkTask: Seen(state: "pooled")])) == networkTask,
+              "in the pool, taken by nobody: withdrawn when what asked for it stops")
+        check(unstarted(.present([networkTask: Seen(state: "claimed", executor: "9f3c")])) == nil,
+              "a machine runs it: left to finish")
+        check(unstarted(.present([networkTask: Seen(state: "done", ok: true)])) == nil
+                && unstarted(.present([networkTask: Seen(state: "failed")])) == nil
+                && unstarted(.present([networkTask: Seen(state: "cancelled")])) == nil,
+              "the network is finished with it: nothing to withdraw")
+        check(unstarted(.present([:])) == networkTask
+                && unstarted(.unavailable("the daemon did not answer")) == networkTask,
+              "unnamed by the snapshot, or the snapshot unread: counted as not taken")
+        check(unstarted(.present([networkTask: Seen(state: "pooled")]), task: nil) == nil,
+              "a local run has no offer to take back")
     }
 
     section("network: the run book")

@@ -385,13 +385,22 @@ enum Render {
             // installed, no snapshot.
             let _ = seedMachinesScreen(s, store: store)
             ContentView(showMachines: true).environment(\.renderNow, machinesNow)
+        case "network-panel":
+            // The whole panel over what "network-screen-failed" seeds: the task list
+            // says what of the network does not work.
+            let _ = seedNetworkScreen("network-screen-failed", store: store)
+            let _ = seedAutofix(store)
+            ContentView().frame(height: 580)
         case let s where s.hasPrefix("network-screen"):
             // Inside the panel, so the header's button is in the shot. Plain: a daemon
             // with every service ready, three pools (one of them left), members seen,
             // unseen and unreachable,
             // a task in each state, and two runs on this machine, one of them of a job
             // offered here. "-starting": the transport bootstrapping, the image building,
-            // no pools yet. "-off": the switch off.
+            // no pools yet. "-failed": the daemon up with no tor and no docker to use.
+            // "-down": the daemon asked, and not answering. "-off": the switch off.
+            // "-unsaved": the plain screen over a change config.json refused, the hours
+            // set so that this machine takes none of its own jobs.
             let _ = seedNetworkScreen(s, store: store)
             ContentView(showNetwork: true).environment(\.renderNow, machinesNow)
         case let s where s.hasPrefix("devices"):
@@ -972,7 +981,7 @@ enum Render {
                 prNumber: number, prURL: number.map { "https://github.com/x/pull/\($0)" } ?? "",
                 kind: kind, label: label, source: source.rawValue)
             record.untracked = untracked
-            // Every agent can be clicked — by the handle its spawn kept, or, for one
+            // Every agent can be clicked - by the handle its spawn kept, or, for one
             // nobody dispatched, by walking its own process out to the window showing it.
             record.tty = "ttys0\(number ?? 0)"
             let window = untracked ? nil
@@ -1021,7 +1030,7 @@ enum Render {
         // Pinned like the rows above, and for the same reason: the cap comes from the
         // shared config file, so an operator who raised theirs would change how many
         // empty bays this picture has. Two are held — the untracked agent and the one
-        // nothing is known about, both automatic — which leaves two free beside the one
+        // nothing is known about, both automatic - which leaves two free beside the one
         // the starting task has taken.
         store.autoTaskLimit = 5
         store.pinAutoTasksMeasured(2)
@@ -1335,7 +1344,8 @@ enum Render {
         return true
     }
 
-    /// `DIPLOMAT_RENDER=network-screen[-starting|-off]`: see the mode's case. The snapshot
+    /// `DIPLOMAT_RENDER=network-screen[-starting|-failed|-down|-unsaved|-off]`: see the mode's
+    /// case. The snapshot
     /// goes through the reader the daemon's answer does; no daemon is asked.
     @MainActor
     @discardableResult
@@ -1346,9 +1356,13 @@ enum Render {
             return true
         }
         store.networkEnabled = true
-        store.networkAnswered = true
+        store.networkAnswered = !mode.hasSuffix("down")
         store.networkRequiredMinimumH = 24
         store.networkMaximumAcceptedH = 48
+        if mode.hasSuffix("unsaved") {
+            store.networkRequiredMinimumH = 72
+            _ = seedUnsaved(store)
+        }
         let now = machinesNow.timeIntervalSince1970
         let here = "a3f91c07d2e845b6c0aa17f3"
         var doc: [String: Any] = [
@@ -1369,6 +1383,16 @@ enum Render {
         // held a JSON boolean.
         func snapshot(_ doc: [String: Any]) -> NetworkSnapshot? {
             NetworkSnapshot.parse(try? JSONSerialization.data(withJSONObject: doc))
+        }
+        guard !mode.hasSuffix("down") else { return true }
+        guard !mode.hasSuffix("failed") else {
+            doc["transport"] = ["state": "failed",
+                                "detail": "tor not found: no other machine is reached without it"]
+            doc["docker"] = ["state": "missing", "image": "",
+                             "detail": "docker not found: every job runs in a container"]
+            doc["admit"] = ["slots": 0, "at": now - 6, "reason": ""]
+            store.networkState = snapshot(doc)
+            return true
         }
         guard !mode.hasSuffix("starting") else {
             store.auditEntries = [

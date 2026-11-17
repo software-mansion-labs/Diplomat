@@ -163,6 +163,23 @@ def test_a_priced_ledger_refuses_a_window_that_cannot_cover_a_task(monkeypatch):
     assert budget.needed > 1.0
 
 
+def test_one_absurd_count_does_not_hold_the_work_for_the_lookback(monkeypatch):
+    """A count no task can have spent - a corrupt transcript, or a job in a container
+    reporting its own - prices a task at many windows. The floor answers instead."""
+    _ledger_with_priced_tasks(monkeypatch, [*_SPREAD, 9007199254740991.0])
+    _probe(monkeypatch, week=0.5)
+
+    budget = autobudget.decide()
+
+    assert budget.affordable
+    assert not budget.measured
+    assert (budget.left, budget.needed) == (pytest.approx(50.0), 20.0)
+
+    _probe(monkeypatch, week=0.19)
+    autobudget._reset_cache()
+    assert not autobudget.decide().affordable
+
+
 def test_the_same_ledger_proceeds_once_the_window_has_refilled(monkeypatch):
     _ledger_with_priced_tasks(monkeypatch, _SPREAD)
     _probe(monkeypatch, week=0.9)

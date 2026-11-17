@@ -355,7 +355,7 @@ try {
 
   await staged('a tor that cannot be run fails the start', async () => {
     const child = daemon(path.join(tmp, 'nobin'), { DN_TOR: path.join(tmp, 'no-such-tor') });
-    assert.match(await child.said(), /^failed cannot run .*no-such-tor: spawn .* ENOENT/);
+    assert.match(await child.said(), /^failed cannot run .*no-such-tor: it is not installed where this machine's tools are looked for \(DN_TOR names it by hand\)/);
     // Nothing of the failed start holds that process open.
     await until(() => child.exitCode !== null, 3000, 'the daemon exiting by itself');
   });

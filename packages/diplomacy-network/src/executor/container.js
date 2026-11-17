@@ -1,6 +1,10 @@
 // The image every job runs in and the containers made from it: exactly one per
-// requesting peer and repository, named dn-<pool part>-<peer part>, running many of that
-// peer's jobs on that repository and nobody else's, and nothing at all between jobs.
+// requesting peer and repository, named dn-<pool part>-<peer part>, running that peer's
+// jobs on that repository and nobody else's. It lasts as long as a job is in it: when
+// its last job leaves it is removed with its relay, its network and its /work volume,
+// and the pair's next job gets a new one from the image. Jobs that are in it at the
+// same time share all of it; nothing a job wrote is there for a job that came after
+// every job before it had left.
 //
 // Each part of the name is 128 bits of a SHA-256, so no peer can make a key whose name
 // is another peer's. And a name alone makes nothing a pair's own: the container, its
@@ -20,7 +24,8 @@
 // What a container may take of this machine: processes, memory without swap, CPUs, and
 // CONTAINER_DISK_BYTES of disk. The engine holds the writable layer to that size where
 // its storage can; `usage` measures the layer, the volume and the run records wherever
-// it cannot, and `overQuota` names the containers past it.
+// it cannot, and `overQuota` names the containers past it. The run records outlive the
+// container, so they are measured under its name while any are kept.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -31,6 +36,7 @@ import {
   BASE_DIR, CONTAINER_CPUS, CONTAINER_DISK_BYTES, CONTAINER_HOST, CONTAINER_IDLE_MS, CONTAINER_MEMORY, CONTAINER_PIDS,
   CONTAINER_USAGE_TIMEOUT_MS, DOCKER_BIN, IMAGE_BUILD_TIMEOUT_MS, IMAGE_REPO, RELAY_HOST, RUNS_DIR,
 } from '../paths.js';
+import { OwnFault, own } from './own-fault.js';
 
 /// The directory the image is built from.
 export const IMAGE_DIR = fileURLToPath(new URL('../../image/', import.meta.url));
@@ -52,6 +58,11 @@ const RELAY_LIMITS = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges', '
 const PROBE_LIMITS = ['--network', 'none', '--read-only', '--cap-drop=ALL', '--security-opt', 'no-new-privileges',
   '--pids-limit', '64', '--memory', '256m', '--memory-swap', '256m', '--cpus', '1'];
 const INODE_BYTES = 4096;
+// A name the engine could not size this many passes of `overQuota` running counts as
+// past its allowance: making a container unmeasurable does not make it unbounded. One
+// miss is a busy engine; three is what a job is given before it is called gone.
+export const UNMEASURED_PASSES = 3;
+const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 // The isolated gateway mode a job network is made with came in this release.
 const ENGINE_FLOOR = [27, 1];
@@ -72,9 +83,9 @@ function subnetFor(name, attempt) {
   return `10.213.${h[0]}.${h[1] & 0xf8}/29`;
 }
 
-// 128 bits of the hash in base 36: twenty-five characters, so a name with its longest
-// suffix stays inside the 63 a DNS label may have.
-const part = (s) => BigInt(`0x${crypto.createHash('sha256').update(s).digest('hex').slice(0, 32)}`).toString(36).padStart(25, '0');
+/// 128 bits of the hash in base 36: twenty-five characters, so a name with its longest
+/// suffix stays inside the 63 a DNS label may have.
+export const namePart = (s) => BigInt(`0x${crypto.createHash('sha256').update(s).digest('hex').slice(0, 32)}`).toString(36).padStart(25, '0');
 
 /// The image's tag: the hash of every file under `dir`, so an edited Dockerfile is a new
 /// image and an untouched one is never built twice.
@@ -93,7 +104,7 @@ export function imageTag(dir = IMAGE_DIR) {
 
 /// The container for one requesting peer on one pool.
 export function containerName(poolId, peer) {
-  return `dn-${part(poolId)}-${part(peer)}`;
+  return `dn-${namePart(poolId)}-${namePart(peer)}`;
 }
 
 /// Runs docker; resolves to `{ code, stdout, stderr }`, `code` null when it could not
@@ -130,7 +141,8 @@ const volumeOf = (name) => name.replace(/^dn-/, 'dn-work-');
 const lines = (stdout) => stdout.split('\n').map((l) => l.trim()).filter(Boolean);
 // A job container's name, by its shape: no relay, no probe, nothing docker reads as an option.
 const isJobName = (name) => /^dn-[0-9a-z-]+$/.test(name) && !/-(relay|probe)$/.test(name);
-const labelsFor = (pool, peer) => ['--label', `dn.pool=${pool.id}`, '--label', `dn.peer=${peer}`, '--label', `dn.base=${BASE_DIR}`];
+const OWN_LABEL = ['--label', `dn.base=${BASE_DIR}`];
+const labelsFor = (pool, peer) => ['--label', `dn.pool=${pool.id}`, '--label', `dn.peer=${peer}`, ...OWN_LABEL];
 const mine = (labels) => !!labels && labels['dn.base'] === BASE_DIR;
 
 // One container's run records, the only part of RUNS_DIR it is shown: a single shared
@@ -141,34 +153,46 @@ const runsDirOf = (name) => path.join(RUNS_DIR, '.containers', name);
 /// The image and the containers. `dockerState()` is the snapshot's `docker` member.
 /// `ensureImage()` resolves to the tag once the image exists, building it if it must.
 /// `acquire({ pool, peer, runId })` resolves to that pair's container `{ name, image,
-/// runsDir }` with the job counted as running in it, creating or replacing the
-/// container when it has to; `release({ name, runId })` ends the job's hold and, when it
-/// was the last one, restarts the container so nothing a job left running outlives it
-/// (it resolves once that is done).
+/// runsDir }` with the job counted as running in it: the one its jobs are running in,
+/// or, when none is, a new one made from the image after everything found under its
+/// name was removed. It rejects with an OwnFault when the engine, the image, another
+/// daemon's object under the name or the making of the new container is why; what
+/// earlier jobs left and a container that went from under its jobs reject plainly, being
+/// possibly those jobs' doing. `release({ name, runId })` ends the job's hold and, when
+/// it was the last one, removes the container with its relay, its network and its volume
+/// (it resolves once that is done): nothing a job left running or wrote is there for the
+/// next one.
 /// `adopt({ pool, peer, runId })` counts a job an earlier daemon started as running in
 /// that pair's container and resolves to the container, or to null when it is not there
 /// to be used; nothing in it is restarted.
-/// `sweep()` removes every container that has run nothing for CONTAINER_IDLE_MS, with its
-/// relay, network and volume, and any network or volume whose container is gone.
+/// `sweep()` removes what is under a name no job is counted in: at once what a removal
+/// left, a network or a volume without a container, and the run records of a container
+/// that is gone once no run among them is kept; a container no job of this daemon was
+/// ever in once it has been seen for CONTAINER_IDLE_MS. And every image this daemon
+/// built but the one jobs are started in, once no container is of it.
 /// `broker()` is the broker's `address()`: where relays lead.
-/// `usage`, `overQuota`, `discard` and `removeAll` are described where they are defined.
-/// `imageDir` is the directory the image is built from.
+/// `restart`, `usage`, `overQuota`, `erase`, `discard` and `removeAll` are described where
+/// they are defined. `imageDir` is the directory the image is built from.
 export function createContainers({ log = () => {}, now = Date.now, imageDir = IMAGE_DIR, broker = () => null } = {}) {
   let state = { state: 'down', image: '', detail: 'not checked yet' };
   let building = null;
   let engine = ''; // the engine's version, as it last said it
   let unfit = null; // { version, detail }: an engine seen to make a job network that is not isolated
   let layerSized = true; // whether the engine is asked to hold a writable layer to a size
-  const known = new Map(); // name -> { name, image, jobs: Set, lastUsed }
+  let unmeasured = new Map(); // name -> the passes of `overQuota` running that could not size it
+  const known = new Map(); // name -> { name, image, jobs: Set, cut }
   const strays = new Map(); // a container no job of this daemon has used -> when it was first seen
   const queues = new Map(); // name -> the last operation on it
+  const probes = new Map(); // name -> the last probe beside it
   const measuring = new Map(); // name -> the measurement of it under way
 
-  const serial = (name, fn) => {
-    const run = (queues.get(name) || Promise.resolve()).then(fn);
-    queues.set(name, run.catch(() => {}));
+  const turns = (last) => (name, fn) => {
+    const run = (last.get(name) || Promise.resolve()).then(fn);
+    last.set(name, run.catch(() => {}));
     return run;
   };
+  const serial = turns(queues);
+  const probeTurn = turns(probes);
 
   function fail(next, message) {
     state = { ...state, ...next };
@@ -197,7 +221,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     }
     state = { state: 'building', image: tag, detail: 'starting' };
     log('docker', `building ${tag}`);
-    const built = await docker(['build', '--progress', 'plain', '-t', tag, imageDir], {
+    const built = await docker(['build', '--progress', 'plain', ...OWN_LABEL, '-t', tag, imageDir], {
       timeout: IMAGE_BUILD_TIMEOUT_MS,
       onLine: (line) => { state = { state: 'building', image: tag, detail: line.slice(0, 200) }; },
     });
@@ -247,19 +271,41 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     }
     if (!why) return;
     log('docker', why);
-    throw new Error(why);
+    throw new OwnFault(why);
   }
 
-  // Everything under a container's name that is this daemon's; another daemon's object
-  // of the same name stays.
-  async function remove(name, { volume }) {
-    for (const c of [name, relayOf(name), probeOf(name)]) {
-      if (mine((await inspect(c))?.labels)) await docker(['rm', '-f', c]);
+  // What the engine holds under a container's name, in the order it can be removed in -
+  // a network goes after what is on it - each as `{ what, id, labels, rm }`, `rm` being
+  // what removes it.
+  async function under(name) {
+    const there = [];
+    for (const [what, id] of [['container', name], ['relay', relayOf(name)], ['probe', probeOf(name)]]) {
+      const found = await inspect(id);
+      if (found) there.push({ what, id, labels: found.labels, rm: ['rm', '-f', id] });
     }
-    if (mine((await network(name))?.labels)) await docker(['network', 'rm', name]);
-    if (volume && mine(await volumeLabels(volumeOf(name)))) await docker(['volume', 'rm', '-f', volumeOf(name)]);
-    known.delete(name);
-    strays.delete(name);
+    const net = await network(name);
+    if (net) there.push({ what: 'network', id: name, labels: net.labels, rm: ['network', 'rm', name] });
+    const held = await volumeLabels(volumeOf(name));
+    // A volume takes as long to remove as its files take to delete.
+    if (held) there.push({ what: 'volume', id: volumeOf(name), labels: held, rm: ['volume', 'rm', '-f', volumeOf(name)], timeout: CONTAINER_USAGE_TIMEOUT_MS });
+    return there;
+  }
+
+  // Removes what of `there` is this daemon's; another daemon's object of the same name
+  // stays. Resolves to what the engine would not remove, in words.
+  async function remove(name, there) {
+    const left = [];
+    for (const { what, id, labels, rm, timeout } of there ?? await under(name)) {
+      if (mine(labels) && (await docker(rm, { timeout })).code !== 0) left.push(`the ${what} ${id}`);
+    }
+    return left;
+  }
+
+  // Whether the engine says in so many words that it has no container `name`: an engine
+  // that does not answer says nothing of the kind.
+  async function absent(name) {
+    const r = await docker(['container', 'inspect', '--format', '{{.Id}}', name]);
+    return /no such container/i.test(r.stderr);
   }
 
   // The container's network and the relay on it, made if missing and made again if the
@@ -319,14 +365,9 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
   async function create(name, tag, pool, peer) {
     const volume = volumeOf(name);
     const runsDir = runsDirOf(name);
-    fs.mkdirSync(runsDir, { recursive: true });
-    // `docker volume create` answers with a volume that is already there, whoever made it.
-    const held = await volumeLabels(volume);
-    if (held) claim('volume', volume, held, pool, peer);
-    else {
-      const made = await docker(['volume', 'create', ...labelsFor(pool, peer), volume]);
-      if (made.code !== 0) throw new Error(`docker volume create: ${lastLine(made.stderr)}`);
-    }
+    await fs.promises.mkdir(runsDir, { recursive: true });
+    const made = await docker(['volume', 'create', ...labelsFor(pool, peer), volume]);
+    if (made.code !== 0) throw new Error(`docker volume create: ${lastLine(made.stderr)}`);
     const args = (sized) => ['run', '-d', '--init', '--name', name, ...labelsFor(pool, peer),
       '--cap-drop=ALL', ...CAPABILITIES.map((c) => `--cap-add=${c}`),
       '--security-opt', 'no-new-privileges',
@@ -337,7 +378,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
       // The work tree lives in a volume (a bind mount is an order of magnitude slower
       // under Docker Desktop); only this container's own run records are bound.
       '-v', `${volume}:/work`, '-v', `${runsDir}:/dn/runs`,
-      tag, 'sleep', 'infinity'];
+      tag, '/usr/bin/sleep', 'infinity'];
     let run = await docker(args(layerSized));
     // Only some storage (overlay on xfs with project quotas, btrfs, zfs) can hold a
     // layer to a size. Where it cannot, `usage` is the bound.
@@ -353,32 +394,34 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
   function acquire({ pool, peer, runId }) {
     const name = containerName(pool.id, peer);
     return serial(name, async () => {
-      const tag = await ensureImage();
+      const tag = await own(ensureImage());
       let entry = known.get(name);
-      let found = await inspect(name);
-      if (found) claim('container', name, found.labels, pool, peer);
-      const busy = !!entry && entry.jobs.size > 0;
-      // A container from another image is replaced, but never from under a job: that
-      // job's successors join it in the old image until it is idle.
-      if (found && !busy && (found.image !== tag || !found.running || found.network !== name)) {
-        await remove(name, { volume: false });
-        found = null;
-        entry = null;
-      }
-      if (busy && !(found && found.running)) throw new Error(`container ${name} is gone with ${entry.jobs.size} job(s) in it`);
-      await ensureWayOut(name, found ? found.image : tag, pool, peer);
-      if (!found) {
-        await create(name, tag, pool, peer);
-        entry = { name, image: tag, jobs: new Set(), lastUsed: now() };
-      } else if (!entry) {
-        // Left by an earlier daemon: whatever still runs in it belongs to no job.
-        await docker(['restart', '-t', '0', name]);
-        entry = { name, image: found.image, jobs: new Set(), lastUsed: now() };
+      // A job joins the jobs running in its pair's container, in the image they were
+      // started in. One whose jobs were ended by a restart holds only what they left.
+      if (entry && entry.jobs.size > 0 && !entry.cut) {
+        const found = await inspect(name);
+        if (found) claim('container', name, found.labels, pool, peer);
+        if (!found || !found.running) throw new Error(`container ${name} is gone with ${entry.jobs.size} job(s) in it`);
+        await ensureWayOut(name, found.image, pool, peer);
+      } else {
+        // Whatever stands under the name is of jobs that are over, or of an earlier
+        // daemon: a container, its writable layer and its volume are what such a job
+        // could write, so none of it is there when a job starts with no other beside it.
+        const there = await under(name);
+        // A probe carries no pair: it is this daemon's or it stays.
+        for (const what of ['container', 'network', 'relay', 'volume']) {
+          const held = there.find((o) => o.what === what);
+          if (held) claim(what, held.id, held.labels, pool, peer);
+        }
+        const left = await remove(name, there);
+        if (left.length > 0) throw new Error(`what earlier jobs left under ${name} could not be removed (${left.join(', ')}), and no job is started beside it`);
+        await own(ensureWayOut(name, tag, pool, peer));
+        await own(create(name, tag, pool, peer));
+        entry = { name, image: tag, jobs: new Set(), cut: false };
       }
       strays.delete(name);
       known.set(name, entry);
       entry.jobs.add(runId);
-      entry.lastUsed = now();
       return { name, image: entry.image, runsDir: runsDirOf(name) };
     });
   }
@@ -392,11 +435,10 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
       if (!found || !found.running || found.network !== name) return null;
       try { claim('container', name, found.labels, pool, peer); } catch { return null; }
       await ensureWayOut(name, found.image, pool, peer);
-      const entry = known.get(name) ?? { name, image: found.image, jobs: new Set(), lastUsed: now() };
+      const entry = known.get(name) ?? { name, image: found.image, jobs: new Set(), cut: false };
       strays.delete(name);
       known.set(name, entry);
       entry.jobs.add(runId);
-      entry.lastUsed = now();
       return { name, image: entry.image, runsDir: runsDirOf(name) };
     });
   }
@@ -405,78 +447,119 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     const entry = known.get(name);
     if (!entry) return Promise.resolve();
     entry.jobs.delete(runId);
-    entry.lastUsed = now();
-    // A job can start a process that sheds its group and its environment, which no
-    // stop of that job finds. With no job left there is nothing to spare.
     return serial(name, async () => {
-      if (known.get(name) === entry && entry.jobs.size === 0) await docker(['restart', '-t', '0', name]);
+      // A job that came meanwhile has a container of its own making under the name.
+      if (known.get(name) !== entry || entry.jobs.size > 0) return;
+      const left = await remove(name);
+      // Still known, with no job in it: the next sweep removes it, and so does the next job.
+      if (left.length > 0) return log('docker', `${name} has no job left in it and is still there: the engine would not remove ${left.join(', ')}`);
+      known.delete(name);
+      log('docker', `removed ${name} with its last job`);
     });
   }
 
   /// Restarts the container `name`, which ends every process in it, in its turn among
   /// whatever else is being done to that container. Resolves to whether the engine did.
+  /// The jobs counted in it are over with that, so no later job joins them: the next one
+  /// has the container made anew.
   function restart(name) {
-    return serial(name, async () => (await docker(['restart', '-t', '0', name])).code === 0);
+    return serial(name, async () => {
+      const done = (await docker(['restart', '-t', '0', name])).code === 0;
+      const entry = known.get(name);
+      if (done && entry) entry.cut = true;
+      return done;
+    });
   }
 
   const OWN = ['--filter', `label=dn.base=${BASE_DIR}`];
   const jobContainers = (names) => names.filter(isJobName);
 
+  // The links RUNS_DIR holds to runs, which `startJob` makes and no job can reach, by the
+  // container whose records each leads into: name -> the links. What is no link is
+  // under no name.
+  async function linked() {
+    const links = new Map();
+    for (const runId of await fs.promises.readdir(RUNS_DIR).catch(() => [])) {
+      const link = path.join(RUNS_DIR, runId);
+      const [, name] = (await fs.promises.readlink(link).catch(() => '')).split(path.sep);
+      links.set(name, [...(links.get(name) ?? []), link]);
+    }
+    return links;
+  }
+
   async function sweep() {
     const listed = await docker(['ps', '-a', ...OWN, '--format', '{{.Names}}']);
     if (listed.code !== 0) return;
     const names = jobContainers(lines(listed.stdout));
-    // A network whose container is gone carries nothing, and neither does the relay on
-    // it; a volume whose container is gone holds a cache nobody reads. Asked again in
-    // the container's turn: one may be on its way to them.
     const networks = await docker(['network', 'ls', ...OWN, '--format', '{{.Name}}']);
-    await Promise.all(lines(networks.stdout).filter((n) => !names.includes(n)).map((name) => serial(name, async () => {
-      if (!(await inspect(name))) await remove(name, { volume: false });
-    })));
     const volumes = await docker(['volume', 'ls', ...OWN, '--format', '{{.Name}}']);
-    const orphans = lines(volumes.stdout).filter((v) => v.startsWith('dn-work-')).map((v) => v.replace(/^dn-work-/, 'dn-')).filter((n) => !names.includes(n));
-    await Promise.all(orphans.map((name) => serial(name, async () => {
-      if (!known.get(name)?.jobs.size && !(await inspect(name))) await remove(name, { volume: true });
-    })));
+    const others = [...lines(networks.stdout), ...lines(volumes.stdout).filter((v) => v.startsWith('dn-work-')).map((v) => v.replace(/^dn-work-/, 'dn-'))];
     // One an earlier daemon left is idle from the moment it is first seen.
     for (const name of names) if (!known.has(name) && !strays.has(name)) strays.set(name, now());
-    await Promise.all(names.map((name) => serial(name, async () => {
+    // Each in the container's turn: one may be on its way to the name. A name with a job
+    // counted in it is left to that job's release.
+    await Promise.all(jobContainers([...new Set([...names, ...others])]).map((name) => serial(name, async () => {
       const entry = known.get(name);
-      const since = entry ? entry.lastUsed : strays.get(name);
-      if ((entry && entry.jobs.size > 0) || since === undefined || now() - since < CONTAINER_IDLE_MS) return;
-      log('docker', `removing ${name}: idle for ${Math.round((now() - since) / 60000)} min`);
-      await remove(name, { volume: true });
+      if (entry && entry.jobs.size > 0) return;
+      const there = await under(name);
+      // A container this daemon never put a job in may hold one an earlier daemon
+      // started, which is taken up or stopped by its run directory: it is given time.
+      if (!entry && there.some((o) => o.what === 'container')) {
+        const since = strays.get(name);
+        if (since === undefined || now() - since < CONTAINER_IDLE_MS) return;
+        log('docker', `removing ${name}: no job of this daemon in it for ${Math.round((now() - since) / 60000)} min`);
+      }
+      if ((await remove(name, there)).length > 0) return;
+      known.delete(name);
+      strays.delete(name);
     })));
-    // The run records of a container that is gone are forgotten run by run; the
-    // directory they were in goes once it is empty. In the container's turn: a new one
-    // of that name binds the directory the moment it is made.
+    // The run records of a container that is gone are forgotten run by run, by whoever
+    // keeps the runs; what else a job left among them goes with the directory once no
+    // run in it is kept. In the container's turn: a new one of that name binds the
+    // directory the moment it is made.
     const records = await fs.promises.readdir(path.join(RUNS_DIR, '.containers')).catch(() => []);
-    await Promise.all(records.filter((name) => isJobName(name) && !names.includes(name)).map((name) => serial(name, async () => {
-      if (!known.has(name)) await fs.promises.rmdir(runsDirOf(name)).catch(() => {});
+    const kept = await linked();
+    await Promise.all(jobContainers(records).filter((name) => !names.includes(name) && !kept.has(name)).map((name) => serial(name, async () => {
+      if (!known.has(name) && !(await wipe(name, '', true))) log('docker', `the run records of ${name} could not be removed: they are counted against its disk allowance until they are`);
     })));
+    // An image this daemon built, once jobs are started in another: by its label and its
+    // name both, since an image built on top of one carries the label too. The engine
+    // refuses one a container is of, and it is asked for again at the next sweep.
+    if (state.state !== 'ready') return;
+    const images = await docker(['image', 'ls', ...OWN, '--format', '{{.Repository}}:{{.Tag}}']);
+    for (const image of lines(images.stdout).filter((i) => i.startsWith(`${IMAGE_REPO}:`) && i !== state.image)) {
+      if ((await docker(['image', 'rm', image])).code === 0) log('docker', `removed the image ${image}: jobs are started in ${state.image}`);
+    }
   }
 
-  // One run of the probe container beside `name`, on `image`: resolves to docker's answer.
-  async function probe(name, image, extra, command) {
-    const args = ['run', '--rm', '--name', probeOf(name), '--label', `dn.probe=${name}`, '--label', `dn.base=${BASE_DIR}`,
-      ...PROBE_LIMITS, ...extra, image, ...command];
-    let r = await docker(args, { timeout: CONTAINER_USAGE_TIMEOUT_MS });
-    const left = async () => mine((await inspect(probeOf(name)))?.labels) && (await docker(['rm', '-f', probeOf(name)])).code === 0;
-    // A probe cut off by an earlier timeout still holds the name.
-    if (r.code !== 0 && /already in use/i.test(r.stderr) && await left()) r = await docker(args, { timeout: CONTAINER_USAGE_TIMEOUT_MS });
-    if (r.code === null) await left();
-    return r;
+  // One run of the probe container beside `name`, on `image`: resolves to docker's
+  // answer. In its turn among the probes of that name, which is one container's name.
+  function probe(name, image, extra, command) {
+    return probeTurn(name, async () => {
+      const args = ['run', '--rm', '--name', probeOf(name), '--label', `dn.probe=${name}`, '--label', `dn.base=${BASE_DIR}`,
+        ...PROBE_LIMITS, ...extra, image, ...command];
+      let r = await docker(args, { timeout: CONTAINER_USAGE_TIMEOUT_MS });
+      const left = async () => mine((await inspect(probeOf(name)))?.labels) && (await docker(['rm', '-f', probeOf(name)])).code === 0;
+      // A probe cut off by an earlier timeout still holds the name.
+      if (r.code !== 0 && /already in use/i.test(r.stderr) && await left()) r = await docker(args, { timeout: CONTAINER_USAGE_TIMEOUT_MS });
+      if (r.code === null) await left();
+      return r;
+    });
   }
 
   async function measure(name) {
     const found = await inspect(name, { size: true });
-    if (!found || !mine(found.labels) || !Number.isFinite(found.layerBytes)) return null;
+    if (found && (!mine(found.labels) || !Number.isFinite(found.layerBytes))) return null;
     const mounts = [];
     if (mine(await volumeLabels(volumeOf(name)))) mounts.push([volumeOf(name), '/v']);
-    if (fs.existsSync(runsDirOf(name))) mounts.push([runsDirOf(name), '/r']);
-    if (mounts.length === 0) return found.layerBytes;
+    if (await fs.promises.access(runsDirOf(name)).then(() => true, () => false)) mounts.push([runsDirOf(name), '/r']);
+    if (mounts.length === 0) return found ? found.layerBytes : null;
+    // The records of a container that is gone are measured from the image jobs are started in.
+    const image = found ? found.image : state.image;
     const inside = mounts.map(([, at]) => at).join(' ');
-    const r = await probe(name, found.image, ['--cap-add=DAC_READ_SEARCH', ...mounts.flatMap(([from, at]) => ['-v', `${from}:${at}:ro`])],
+    // Read-only, with no link followed and no file opened: what a job planted among its
+    // files is counted as the entry it is. A file with holes counts for what it holds.
+    const r = await probe(name, image, ['--cap-add=DAC_READ_SEARCH', ...mounts.flatMap(([from, at]) => ['-v', `${from}:${at}:ro`])],
       // du's own exit status says only that a file went away while it counted, which
       // under a running job is the usual case: the two totals are what is read.
       ['sh', '-c', `du -sxB1 ${inside}; du -sx --inodes ${inside}`]);
@@ -487,73 +570,108 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     }
     const blocks = counts.slice(0, mounts.length).reduce((a, b) => a + b, 0);
     const inodes = counts.slice(mounts.length).reduce((a, b) => a + b, 0);
-    return found.layerBytes + blocks + inodes * INODE_BYTES;
+    return (found ? found.layerBytes : 0) + blocks + inodes * INODE_BYTES;
   }
 
-  /// What the container `name` holds of this machine's disk, in bytes: its writable
-  /// layer, its /work volume and its run records, with 4096 bytes for every file and
-  /// directory in the last two so that empty files are not free. Null when it is not a
-  /// container of this daemon or the engine could not say.
+  /// What is held of this machine's disk under the container name `name`, in bytes: the
+  /// container's writable layer and its /work volume while there is one, and the run
+  /// records kept under the name, with 4096 bytes for every file and directory in the
+  /// last two so that empty files are not free. Null when nothing of this daemon is
+  /// under the name or the engine could not say.
   function usage(name) {
     if (!isJobName(name)) return Promise.resolve(null);
     if (!measuring.has(name)) measuring.set(name, measure(name).finally(() => measuring.delete(name)));
     return measuring.get(name);
   }
 
-  /// Every container of this daemon that holds more than CONTAINER_DISK_BYTES, as
-  /// `[{ name, bytes, jobs }]`: `jobs` are the run ids counted as running in it. Its
-  /// jobs are to be stopped and the container given to `discard`.
+  /// Every name of this daemon - a container, or the run records one left - under which
+  /// more than CONTAINER_DISK_BYTES is held, as `[{ name, bytes, jobs }]`: `jobs` are the
+  /// run ids counted as running in it. A name the engine could not size
+  /// UNMEASURED_PASSES calls running is among them, with `bytes` null. Its jobs are to
+  /// be stopped and the name given to `discard`.
   async function overQuota() {
     const listed = await docker(['ps', '-a', ...OWN, '--format', '{{.Names}}']);
     if (listed.code !== 0) return [];
+    const records = await fs.promises.readdir(path.join(RUNS_DIR, '.containers')).catch(() => []);
     const over = [];
-    for (const name of jobContainers(lines(listed.stdout))) {
+    const missed = new Map();
+    for (const name of new Set(jobContainers([...lines(listed.stdout), ...records]))) {
       const bytes = await usage(name);
-      if (bytes !== null && bytes > CONTAINER_DISK_BYTES) over.push({ name, bytes, jobs: [...(known.get(name)?.jobs ?? [])] });
+      if (bytes === null) missed.set(name, (unmeasured.get(name) ?? 0) + 1);
+      if (bytes > CONTAINER_DISK_BYTES || missed.get(name) >= UNMEASURED_PASSES) over.push({ name, bytes, jobs: [...(known.get(name)?.jobs ?? [])] });
     }
+    // A name that was sized, or is not there any more, starts from nothing.
+    unmeasured = missed;
     return over;
   }
 
+  // Removes the run records under `name`, or the run `runId`'s among them; resolves to
+  // whether they are gone. As this user only when no container of the name is there
+  // (`alone`): a job in one could move what is being walked and lead the walk elsewhere.
+  // Otherwise, and where this user may not (root's files in a bind mount on Linux),
+  // through the probe, where a link leads nowhere but into the probe's read-only root.
+  // The probe mounts the records' directory, which no job can replace, never a path in it.
+  async function wipe(name, runId, alone) {
+    const target = path.join(runsDirOf(name), runId);
+    const own = () => fs.promises.rm(target, { recursive: true, force: true });
+    const engine = () => probe(name, state.image, ['--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '-v', `${runsDirOf(name)}:/r`],
+      ['find', path.posix.join('/r', runId), ...(runId ? [] : ['-mindepth', '1']), '-delete']);
+    await (alone ? own().catch(async () => { await engine(); await own(); }) : engine())
+      .catch((e) => log('docker', `the run records ${target} could not be removed: ${e.message}`));
+    return fs.promises.lstat(target).then(() => false, (e) => e.code === 'ENOENT');
+  }
+
+  /// Removes the records of the run `runId` among those of the container `name`, with
+  /// everything in them, in that container's turn. Resolves to whether they are gone:
+  /// what could not be removed is still there to be counted, and to be tried again.
+  function erase(name, runId) {
+    if (!isJobName(name) || !RUN_ID.test(runId)) return Promise.resolve(false);
+    return serial(name, async () => wipe(name, runId, await absent(name)));
+  }
+
   /// Removes the container `name` with its relay, its network, its volume and its run
-  /// records (the links to them in RUNS_DIR too). Rejects while a job is still counted
-  /// as running in it: its jobs are stopped and released first.
+  /// records (the links to them in RUNS_DIR too); a name that has only run records left
+  /// loses those. Rejects while a job is still counted as running in it - its jobs are
+  /// stopped and released first - and when something of it could not be removed, with
+  /// the links left in place.
   function discard(name) {
     if (!isJobName(name)) return Promise.reject(new Error(`not a container's name: ${name}`));
     return serial(name, async () => {
       const entry = known.get(name);
       if (entry && entry.jobs.size > 0) throw new Error(`container ${name} still has ${entry.jobs.size} job(s) in it`);
-      const found = await inspect(name);
-      if (found && !mine(found.labels)) throw new Error(`the container ${name} belongs to another daemon on this machine (${found.labels['dn.base'] || 'unlabelled'})`);
-      const image = found ? found.image : state.image;
-      await remove(name, { volume: true });
-      const records = runsDirOf(name);
-      const clear = () => fs.promises.rm(records, { recursive: true, force: true });
-      await clear().catch(async () => {
-        // What root made in a bind mount on Linux is not this user's to delete: the
-        // engine empties the directory first.
-        if (image) await probe(name, image, ['--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '-v', `${records}:/r`], ['find', '/r', '-mindepth', '1', '-delete']);
-        await clear();
-      }).catch((e) => log('docker', `the run records of ${name} could not be removed: ${e.message}`));
-      for (const entryName of await fs.promises.readdir(RUNS_DIR).catch(() => [])) {
-        const link = path.join(RUNS_DIR, entryName);
-        try {
-          if (fs.readlinkSync(link).startsWith(`${path.join('.containers', name)}${path.sep}`)) fs.unlinkSync(link);
-        } catch {}
-      }
+      const there = await under(name);
+      const theirs = there.find((o) => o.what === 'container' && !mine(o.labels));
+      if (theirs) throw new Error(`the container ${name} belongs to another daemon on this machine (${theirs.labels['dn.base'] || 'unlabelled'})`);
+      const left = await remove(name, there);
+      if (left.length > 0 || !(await absent(name))) throw new Error(`${name} could not be removed: ${left.join(', ') || 'the engine does not say that it is gone'}`);
+      known.delete(name);
+      strays.delete(name);
+      if (!(await wipe(name, '', true))) throw new Error(`the run records of ${name} could not be removed`);
+      for (const link of (await linked()).get(name) ?? []) await fs.promises.unlink(link).catch(() => {});
       log('docker', `discarded ${name}`);
     });
   }
 
   /// Removes every container (job, relay and probe), network and volume labelled with
   /// this daemon's dn.base, whatever runs in them, and nothing else on the engine.
-  /// Resolves to what went: `{ containers, networks, volumes }`, each a list of names.
+  /// Resolves to what went: `{ containers, networks, volumes }`, each a list of names,
+  /// all empty on a machine with no docker. Rejects with what the engine said: at once
+  /// when it would not list, and with the first it would not remove once the rest was
+  /// tried.
   /// For a daemon that is switched off, with no job being started.
   async function removeAll() {
     await Promise.all([...queues.values()]);
     const gone = { containers: [], networks: [], volumes: [] };
+    const failed = [];
     const each = async (kind, list, rm) => {
       const listed = await docker(list);
-      for (const name of lines(listed.stdout)) if ((await docker([...rm, name])).code === 0) gone[kind].push(name);
+      if (listed.stderr === 'ENOENT') return;
+      if (listed.code !== 0) throw new Error(`the ${kind} could not be listed: ${lastLine(listed.stderr) || 'no answer'}`);
+      for (const name of lines(listed.stdout)) {
+        const removed = await docker([...rm, name]);
+        if (removed.code === 0) gone[kind].push(name);
+        else failed.push(`${name} could not be removed: ${lastLine(removed.stderr) || 'no answer'}`);
+      }
     };
     await each('containers', ['ps', '-a', ...OWN, '--format', '{{.Names}}'], ['rm', '-f']);
     await each('networks', ['network', 'ls', ...OWN, '--format', '{{.Name}}'], ['network', 'rm']);
@@ -561,6 +679,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     known.clear();
     strays.clear();
     log('docker', `removed ${gone.containers.length} container(s), ${gone.networks.length} network(s) and ${gone.volumes.length} volume(s)`);
+    if (failed.length > 0) throw new Error(failed[0]);
     return gone;
   }
 
@@ -574,8 +693,9 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     sweep,
     usage,
     overQuota,
+    erase,
     discard,
     removeAll,
-    list: () => [...known.values()].map((e) => ({ name: e.name, image: e.image, jobs: [...e.jobs], lastUsed: e.lastUsed })),
+    list: () => [...known.values()].map((e) => ({ name: e.name, image: e.image, jobs: [...e.jobs] })),
   };
 }

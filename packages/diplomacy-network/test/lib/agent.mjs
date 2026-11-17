@@ -15,9 +15,14 @@
 //   child                        leaves a process of its own session behind, its pid kept
 //   say <text>                   the result's text
 //   fail                         ends as an agent that reports an error
+//   unsent                       sends the model provider nothing for what the result names
+//   result                       the result now, with the steps after it still to come
 //
 // What each step got is kept in FAKE_AGENT_DIR/<run id>.json as it goes, with the
-// agent's pid and its environment, and the stream ends with a result that names a cost.
+// agent's pid and its environment, and the stream ends with a result that names a cost
+// and tokens. Where the model provider is stood in for (FAKE_MODEL_PORT), it has sent the
+// provider a request by then that could have held them: the host counts neither figure
+// above what it carried to the model for the job (job.js).
 
 import fs from 'node:fs';
 import http from 'node:http';
@@ -98,6 +103,9 @@ function adb(service) {
   });
 }
 
+// The model provider's headers, as the agent's own client sends them: the key is a placeholder.
+const provider = { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' };
+
 const prompt = fs.readFileSync(0, 'utf8');
 record.prompt = prompt;
 save();
@@ -105,6 +113,20 @@ console.log('{"type":"system","subtype":"init","model":"stand-in"}');
 
 let result = 'done';
 let ok = true;
+let unsent = false;
+let said = false;
+
+async function conclude() {
+  // 6000 bytes: more than the 120 tokens, and than the 5250 that USD 0.42 is the price of.
+  const body = JSON.stringify({ model: 'stand-in', max_tokens: 1, messages: [], pad: 'x'.repeat(5942) });
+  if (process.env.FAKE_MODEL_PORT && !unsent) record.spent = await api('POST', '/v1/messages', body, 'api.anthropic.com', provider);
+  console.log(JSON.stringify({
+    type: 'result', subtype: ok ? 'success' : 'error_during_execution', is_error: !ok, result, total_cost_usd: 0.42,
+    usage: { input_tokens: 100, output_tokens: 20 },
+  }));
+  said = true;
+}
+
 for (const line of prompt.slice(prompt.lastIndexOf('\n---\n') + 5).split('\n')) {
   const [verb, ...rest] = line.trim().split(' ');
   const step = { verb, args: rest };
@@ -112,7 +134,7 @@ for (const line of prompt.slice(prompt.lastIndexOf('\n---\n') + 5).split('\n')) 
     const [method, route, ...json] = rest;
     Object.assign(step, await api(method, route, json.length > 0 ? json.join(' ') : undefined));
   } else if (verb === 'model') {
-    Object.assign(step, await api('POST', '/v1/messages', '{"model":"stand-in","max_tokens":1,"messages":[]}', 'api.anthropic.com', { 'x-api-key': process.env.ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' }));
+    Object.assign(step, await api('POST', '/v1/messages', '{"model":"stand-in","max_tokens":1,"messages":[]}', 'api.anthropic.com', provider));
   } else if (verb === 'push') {
     fs.writeFileSync(`${rest[0].replace(/\W/g, '-')}.txt`, `${runId}\n`);
     git('add', '-A');
@@ -141,15 +163,16 @@ for (const line of prompt.slice(prompt.lastIndexOf('\n---\n') + 5).split('\n')) 
     result = rest.join(' ');
   } else if (verb === 'fail') {
     ok = false;
+  } else if (verb === 'unsent') {
+    unsent = true;
+  } else if (verb === 'result') {
+    await conclude();
   } else continue;
   record.steps.push(step);
   save();
 }
 
-console.log(JSON.stringify({
-  type: 'result', subtype: ok ? 'success' : 'error_during_execution', is_error: !ok, result, total_cost_usd: 0.42,
-  usage: { input_tokens: 100, output_tokens: 20 },
-}));
+if (!said) await conclude();
 record.ended = true;
 save();
 process.exit(ok ? 0 : 1);

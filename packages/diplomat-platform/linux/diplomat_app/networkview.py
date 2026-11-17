@@ -58,11 +58,24 @@ REQUIRED_SUMMARY = ("Counted from when a machine takes it. Only machines that ta
                     "this long run yours.")
 ACCEPTED_TITLE = "Longest job this machine takes"
 ACCEPTED_SUMMARY = "A job that may take longer is left to the other machines of its pool."
+
+
+def hours_note(required: int, accepted: int) -> str:
+    """What the two hours say together when a job of this machine's own may take longer
+    than the longest job it takes, else ""."""
+    if required <= accepted:
+        return ""
+    return (f"This machine takes none of its own jobs: one may take {required} h, and "
+            f"the longest job it takes is {accepted} h.")
+
+
 DEVICES_TITLE = "Let jobs use this machine's devices"
 DEVICES_SUMMARY = ("Off: jobs see no device. On: a job running here can use the Android "
                    "devices and emulators attached to this machine through adb - including "
                    "a phone on USB - and an emulator can reach services on this machine. "
-                   "Switch it on only for pools whose machines you trust with that.")
+                   "It is one switch for every pool this machine is in: switch it on only "
+                   "when you trust all their machines with that. Either way it applies to "
+                   "jobs started afterwards.")
 NO_POOLS = ("No pools yet. Each repository in Settings gets one once Diplomat knows "
             "which account works on it.")
 NO_MEMBERS = "No members listed yet."
@@ -97,7 +110,7 @@ def admit_line(admit: network.AdmitState) -> str:
 def service_tint(state: str) -> str:
     if state == "ready":
         return _GREEN
-    if state in ("failed", "missing", "down"):
+    if state in network.TROUBLE_STATES:
         return _RED
     return _GREY if state in ("", "off") else _ORANGE
 
@@ -550,6 +563,8 @@ class NetworkView(QWidget):
         body.addWidget(SettingRow(REQUIRED_TITLE, self.required_h, summary=REQUIRED_SUMMARY))
         self.accepted_h = self._hours_box(self._on_accepted_h)
         body.addWidget(SettingRow(ACCEPTED_TITLE, self.accepted_h, summary=ACCEPTED_SUMMARY))
+        self.hours_note = _note("", _ORANGE)
+        body.addWidget(self.hours_note)
         self.devices = SwitchToggle(_TEAL)
         self.devices.toggled.connect(self._on_devices)
         body.addWidget(SettingRow(DEVICES_TITLE, self.devices, summary=DEVICES_SUMMARY))
@@ -564,7 +579,13 @@ class NetworkView(QWidget):
                 box.blockSignals(True)
                 box.setValue(value)
                 box.blockSignals(False)
+        self._sync_hours_note()
         self.devices.setChecked(dn.devices())
+
+    def _sync_hours_note(self) -> None:
+        note = hours_note(self.required_h.value(), self.accepted_h.value())
+        self.hours_note.setText(note)
+        self.hours_note.setVisible(bool(note))
 
     def _on_switch(self, on: bool) -> None:
         # The switch following the setting is no change to make: its signal stays
@@ -576,9 +597,11 @@ class NetworkView(QWidget):
 
     def _on_required_h(self, value: int) -> None:
         self._save(lambda: dn.set_hours(network.REQUIRED_MINIMUM_H_KEY, value))
+        self._sync_hours_note()
 
     def _on_accepted_h(self, value: int) -> None:
         self._save(lambda: dn.set_hours(network.MAXIMUM_ACCEPTED_H_KEY, value))
+        self._sync_hours_note()
 
     def _on_devices(self, on: bool) -> None:
         # Following the setting is no change to make, as for the switch above.

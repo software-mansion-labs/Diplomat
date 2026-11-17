@@ -22,6 +22,10 @@ struct NetworkScreen: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            if store.configSaveFailed {
+                Text(AllocatorUI.saveError).font(.system(size: 10)).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if store.networkEnabled {
                 HStack(alignment: .top, spacing: 12) {
                     statusCard.frame(width: MainRoot.columnWidth, alignment: .topLeading)
@@ -157,8 +161,8 @@ struct NetworkScreen: View {
     private func serviceTint(_ state: String) -> Color {
         switch state {
         case "ready": return .green
-        case "failed", "missing", "down": return .red
         case "", "off": return .secondary
+        case let state where NetworkTrouble.states.contains(state): return .red
         default: return .orange
         }
     }
@@ -210,6 +214,11 @@ struct NetworkScreen: View {
                      $store.networkRequiredMinimumH)
             hoursRow(NetworkText.acceptedTitle, NetworkText.acceptedSummary,
                      $store.networkMaximumAcceptedH)
+            if let note = NetworkText.hoursNote(required: store.networkRequiredMinimumH,
+                                                accepted: store.networkMaximumAcceptedH) {
+                Text(note).font(.system(size: 10)).foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             SettingRow(title: NetworkText.devicesTitle, summary: NetworkText.devicesSummary) {
                 Toggle(NetworkText.devicesTitle, isOn: $store.networkDevices)
                     .labelsHidden()

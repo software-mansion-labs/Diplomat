@@ -83,6 +83,8 @@ try {
     const done = await ended(a, taskId);
     assert.deepEqual([done.state, done.outcome, done.executor, done.executorHere], ['done', { ok: true, summary: 'reviewed the pull request', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, pk.b, false], 'the ended offer keeps the machine that ran it');
     assert.deepEqual([done.requests, done.refused], [5, 3], 'four API requests and a push came under the key, and the rules refused three of them');
+    // The cost stands as the job named it: the model provider was sent that much, with B's credential.
+    assert.deepEqual(bench.model.seen, [{ method: 'POST', url: '/v1/messages', key: 'sk-ant-api03-stand-in', bytes: 6000 }]);
     await until('B\'s slot free', async () => (await runOf(b, taskId)).endedAt > 0);
     assert.deepEqual([(await runOf(b, taskId)).state, (await runOf(b, taskId)).exit], ['finished', 0]);
     for (const m of [a, b, c]) await until(`done on ${m.name}`, async () => (await m.state()).pools[0].tasks.find((t) => t.taskId === taskId).state === 'done');
@@ -148,7 +150,7 @@ try {
   });
 
   let second;
-  await check('a second task of the same requester runs in the same container: one that may push, pushes one new branch as the requester and nothing else', async () => {
+  await check('a second task of the same requester runs in a container of the same name, made anew: one that may push, pushes one new branch as the requester and nothing else', async () => {
     const before = bench.forge.log.length;
     const main = bench.branch('main');
     const { taskId } = await a.ok('/offer', {
@@ -172,8 +174,7 @@ try {
     ], 'exactly the writes the rules allow, each sent by the requester');
 
     assert.equal(second.container, first.container);
-    assert.deepEqual(b.containers().filter((n) => !n.endsWith('-relay')), [containerOf(pk.a)]);
-    assert.equal(b.docker('run').length, 1, 'made once');
+    assert.equal(b.docker('run').filter((c) => c.includes(containerOf(pk.a))).length, 2, 'made for each');
   });
 
   await check('another requester gets a container of its own, and two jobs at once each act through their own requester', async () => {

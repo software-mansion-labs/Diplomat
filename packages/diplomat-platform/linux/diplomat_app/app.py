@@ -191,7 +191,7 @@ class DiplomatApp:
 
         # The Diplomacy Network: its daemon is brought up at launch while the switch is
         # on, and each cycle after that no-ops while it is off.
-        self.store.end_legacy_nodes_async()
+        self.store.retire_legacy_node_async()
         if self.store.network_enabled:
             self.store.start_network_async()
         self.network_timer = QTimer()

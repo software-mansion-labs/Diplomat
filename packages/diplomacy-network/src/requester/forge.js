@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { authorized, conclude } from './authorize.js';
+import { githubApi } from './rules.js';
 import { FORGE_ORIGINS, FORGE_RESPONSE_MAX_BYTES, FORGE_TIMEOUT_MS, GH_BIN, GIT_BIN, GIT_TIMEOUT_MS, GLAB_BIN, TOKEN_TTL_MS } from '../paths.js';
 
 // What an executor may say to the forge about its request. Everything else is dropped:
@@ -69,8 +70,8 @@ function glabConfigToken(host) {
 }
 
 /// The requester's side of the forge. `log` receives one line per request made, never a
-/// credential. Returns `{ perform, context, resolveNode, pull, pullsByHead, comment, assignees,
-/// self, repository, branch, projectId, fetchInto }`; every function but `perform` and
+/// credential. Returns `{ perform, context, resolveNode, pull, pullsByHead, comment, ciRun,
+/// assignees, self, repository, branch, projectId, fetchInto }`; every function but `perform` and
 /// `context` takes `{ forge, host }` first - "github" or "gitlab", and the host the
 /// credential is for. A lookup throws when the forge's answer does not settle its question.
 export function createForge({ log = () => {} } = {}) {
@@ -92,19 +93,22 @@ export function createForge({ log = () => {} } = {}) {
   }
 
   const origin = (host) => (typeof FORGE_ORIGINS[host] === 'string' ? FORGE_ORIGINS[host].replace(/\/$/, '') : `https://${host}`);
+  // Where a forge serves its API beside git on `host`: GitLab under /api of that host.
+  // Null for a GitHub this cannot ask.
+  const apiOf = ({ forge, host }) => (forge === 'github' ? githubApi(host) : { host, rest: '/api' });
   // Smart HTTP takes a basic credential; both forges' APIs take a bearer one.
-  const isApi = (forge, request) => (forge === 'github' ? request.host === 'api.github.com' : request.path.startsWith('/api/'));
+  const isApi = (at, host, request) => request.host === at.host && (at.host !== host || request.path.startsWith('/api/'));
   const basic = (forge, value) => `Basic ${Buffer.from(`${forge === 'github' ? 'x-access-token' : 'oauth2'}:${value}`).toString('base64')}`;
-  const hostsOf = (forge, host) => (forge === 'github' ? (host === 'github.com' ? ['api.github.com', 'github.com'] : []) : [host]);
 
   async function send({ forge, host }, request) {
-    if (!hostsOf(forge, host).includes(request.host)) throw new Error(`forge: ${request.host} is not a host of ${forge} ${host}`);
+    const at = apiOf({ forge, host });
+    if (!at || (request.host !== at.host && request.host !== host)) throw new Error(`forge: ${request.host} is not a host of ${forge} ${host}`);
     const secret = await token(forge, host);
     const headers = { 'user-agent': USER_AGENT };
     for (const [name, value] of Object.entries(request.headers || {})) {
       if (REQUEST_HEADERS.has(name.toLowerCase())) headers[name.toLowerCase()] = value;
     }
-    headers.authorization = isApi(forge, request) ? `Bearer ${secret}` : basic(forge, secret);
+    headers.authorization = isApi(at, host, request) ? `Bearer ${secret}` : basic(forge, secret);
     const body = Buffer.isBuffer(request.body) ? request.body : Buffer.from(request.body || '', 'base64');
     const started = Date.now();
     let res;
@@ -137,7 +141,7 @@ export function createForge({ log = () => {} } = {}) {
 
   /// Sends a request `authorize` allowed and resolves to `{ status, headers, body }`, the
   /// body base64 and the headers cut to what an executor may see. `host` names the
-  /// credential ("github.com", or the GitLab host). Throws for a request `authorize` did
+  /// credential: the host of the pool's forge. Throws for a request `authorize` did
   /// not return, a host that is not the forge's, and a forge that cannot be reached.
   /// Whatever the outcome, the task's state is told what became of the request.
   async function perform(request, { forge, host }) {
@@ -171,13 +175,14 @@ export function createForge({ log = () => {} } = {}) {
   }
 
   // One request of this file's own, outside any task's rules: every caller builds its
-  // path from values it has already confined.
+  // path from values it has already confined. GitHub's GraphQL stands beside its REST.
   async function api(target, method, apiPath, json) {
-    const github = target.forge === 'github';
+    const at = apiOf(target);
+    if (!at) throw new Error(`forge: ${target.host} is not a GitHub host this can ask`);
     const res = await send(target, {
-      host: github ? 'api.github.com' : target.host,
+      host: at.host,
       method,
-      path: github ? apiPath : `/api${apiPath}`,
+      path: apiPath === '/graphql' ? at.graphql : `${at.rest}${apiPath}`,
       headers: { accept: 'application/json', ...(json ? { 'content-type': 'application/json' } : {}) },
       body: json ? Buffer.from(JSON.stringify(json)) : Buffer.alloc(0),
     });
@@ -260,6 +265,39 @@ export function createForge({ log = () => {} } = {}) {
     const res = await api(target, 'GET', github ? `/repos/${repo}/pulls?state=${state}&per_page=100${filter}` : `${project(repo)}/merge_requests?state=${state}&per_page=100${filter}`);
     if (res.status !== 200 || !Array.isArray(res.json) || !res.json.every(isObject)) unknown('which pull requests there are', res);
     return res.json.map((p) => (github ? githubPull(p) : gitlabPull(repo, p)));
+  }
+
+  /// The branch a CI run of `repo` ran for, by the id of the run (on GitLab, the pipeline)
+  /// or of one of its jobs - `what` is "run" or "job": `{ repo, ref }`, the repository the
+  /// branch is in and its ref, or null when the forge has no such run or it ran for a tag.
+  /// A pipeline for a merge request ran for that merge request's source branch, and the
+  /// answer names the merge request as `pull`. GitHub names a tag's run by the tag alone,
+  /// so such a run reads as one of a branch so named.
+  async function ciRun(target, repo, what, id) {
+    const github = target.forge === 'github';
+    const said = `what CI ${what} ${id} ran for`;
+    const base = github ? `/repos/${repo}/actions` : project(repo);
+    const one = async (path, of) => {
+      const res = await api(target, 'GET', `${base}/${path}/${of}`);
+      if (missing(res)) return null;
+      if (res.status !== 200 || !isObject(res.json) || res.json.id !== of) unknown(said, res);
+      return res.json;
+    };
+    let found = await one(what === 'job' ? 'jobs' : github ? 'runs' : 'pipelines', id);
+    if (github && found && what === 'job') {
+      if (!Number.isSafeInteger(found.run_id)) unknown(said, { status: 200 });
+      found = await one('runs', found.run_id);
+    }
+    if (!found) return null;
+    const branch = github ? found.head_branch : found.ref;
+    const holder = github ? found.head_repository?.full_name : repo;
+    if (typeof branch !== 'string' || branch === '' || typeof holder !== 'string' || holder === '') unknown(said, { status: 200 });
+    // GitLab says when a pipeline is a tag's.
+    if (found.tag === true) return null;
+    const request = github ? null : /^refs\/merge-requests\/([1-9][0-9]{0,9})\/[a-z]+$/.exec(branch);
+    if (!request) return { repo: holder, ref: `refs/heads/${branch}` };
+    const from = await pull(target, repo, Number(request[1]));
+    return from && { repo: from.headRepo, ref: `refs/heads/${from.headRef}`, pull: from.number };
   }
 
   /// A GitHub review comment of `repo` by its REST id, resolved like a node, or null.
@@ -358,8 +396,7 @@ export function createForge({ log = () => {} } = {}) {
   /// refs under that name. Resolves to whether git succeeded.
   async function fetchInto(target, { repo, env, wants = [], into }) {
     if (!into && (wants.length === 0 || wants.some((oid) => !/^[0-9a-f]{40,64}$/.test(oid)))) return false;
-    const gitHost = target.forge === 'github' ? 'github.com' : target.host;
-    if (!hostsOf(target.forge, target.host).includes(gitHost) || !/^[A-Za-z0-9._/-]+$/.test(repo)) return false;
+    if (!apiOf(target) || !/^[A-Za-z0-9._/-]+$/.test(repo)) return false;
     const secret = await token(target.forge, target.host);
     // The credential rides in the environment, not in argv where `ps` would show it, and
     // is not carried along a redirect.
@@ -373,8 +410,8 @@ export function createForge({ log = () => {} } = {}) {
       GIT_CONFIG_VALUE_1: 'false',
     };
     const what = into ? [`+refs/heads/*:${into}/*`] : wants;
-    const r = await run(GIT_BIN, ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', `${origin(gitHost)}/${repo}.git`, ...what], gitEnv);
-    log(`forge fetch ${gitHost}/${repo} ${into ? 'all branches' : `${wants.length} commit(s)`} -> ${r.ok ? 'ok' : 'failed'}`);
+    const r = await run(GIT_BIN, ['fetch', '--quiet', '--no-tags', '--no-write-fetch-head', `${origin(target.host)}/${repo}.git`, ...what], gitEnv);
+    log(`forge fetch ${target.host}/${repo} ${into ? 'all branches' : `${wants.length} commit(s)`} -> ${r.ok ? 'ok' : 'failed'}`);
     return r.ok;
   }
 
@@ -393,6 +430,7 @@ export function createForge({ log = () => {} } = {}) {
       pull: (number) => pull(target, repo, number),
       pullsByHead: (ref, owner, ever) => pullsByHead(target, repo, ref, owner, ever),
       comment: (id) => comment(target, repo, id),
+      run: (what, id) => ciRun(target, repo, what, id),
       assignees: (number) => assignees(target, repo, number),
       self: () => self(target),
       repository: (of = repo) => repository(target, of),
@@ -401,5 +439,5 @@ export function createForge({ log = () => {} } = {}) {
     };
   }
 
-  return { perform, context, resolveNode, pull, pullsByHead, comment, assignees, self, repository, branch, projectId, fetchInto };
+  return { perform, context, resolveNode, pull, pullsByHead, comment, ciRun, assignees, self, repository, branch, projectId, fetchInto };
 }

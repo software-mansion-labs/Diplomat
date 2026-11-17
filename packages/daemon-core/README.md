@@ -1,9 +1,11 @@
 # daemon-core
 
-What Diplomat's MCP servers share: the [device allocator](../device-allocator/README.md)
-and [remote machines](../remote-machines/README.md) each run a per-agent stdio MCP server
-in front of one daemon per machine, installed into Claude Code the same way. No
-dependencies and no build step; the packages import `src/*.js` by relative path.
+What Diplomat's daemons share. The [device allocator](../device-allocator/README.md) and
+[remote machines](../remote-machines/README.md) each run a per-agent stdio MCP server in
+front of one daemon per machine, installed into Claude Code the same way; the
+[Diplomacy Network](../diplomacy-network/README.md) is a daemon alone, started and
+stopped by Diplomat through its installer. No dependencies and no build step; the
+packages import `src/*.js` by relative path.
 
 | | |
 |---|---|
@@ -12,7 +14,8 @@ dependencies and no build step; the packages import `src/*.js` by relative path.
 | [`src/daemon-control.js`](src/daemon-control.js) | start, stop and replace a daemon from an installer, found by its socket or its daemon.json |
 | [`src/claude-install.js`](src/claude-install.js) | install into Claude Code at every layer an agent reads (MCP registration, rule, CLAUDE.md block, skill), and report drift from the checkout by content |
 | [`src/fsio.js`](src/fsio.js) | atomic writes, and pid liveness and identity |
-| [`src/log.js`](src/log.js) | the append-only daemon log |
+| [`src/log.js`](src/log.js) | the daemon log: a line a call, held to 16 MiB with the 16 MiB before them kept beside it as `<log>.1` |
 | [`src/test-runner.js`](src/test-runner.js), [`src/test-interrupt.js`](src/test-interrupt.js) | each package's `npm test`: every `test/*.mjs`, discovered rather than listed, and the cleanup a signal would otherwise skip |
 
-It has no tests of its own: both packages' suites drive it through their real daemons.
+It has no suite of its own: the three packages' suites drive it through their real
+daemons, and the log's bound is tested by diplomacy-network's `test/daemon-log.mjs`.

@@ -127,12 +127,13 @@ jobs:
             test -s "$RUNNER_TEMP/$mode.png"
           done
       # The Network screen: a daemon with every service ready, three pools (one of them
-      # left) and a task in each state; one still starting, with no pool yet; and the
-      # switch off.
+      # left) and a task in each state; one still starting, with no pool yet; one whose
+      # services failed; no daemon answering; a setting that did not save; the switch
+      # off. Then the whole panel over the failed services.
       - name: Headless network-screen render
         working-directory: packages/diplomat-platform/macos
         run: |
-          for mode in network-screen network-screen-starting network-screen-off; do
+          for mode in network-screen network-screen-starting network-screen-failed network-screen-down network-screen-unsaved network-screen-off network-panel; do
             DIPLOMAT_RENDER=$mode DIPLOMAT_RENDER_OUT="$RUNNER_TEMP/$mode.png" \
               swift run Diplomat
             test -s "$RUNNER_TEMP/$mode.png"

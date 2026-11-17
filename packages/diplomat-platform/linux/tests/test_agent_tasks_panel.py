@@ -235,6 +235,50 @@ def test_a_paused_monitors_row_says_nothing_will_start_it(panel):
     assert "monitor off" not in _row_text(_rows(panel, QueuedTaskRow)[0])
 
 
+def test_a_row_the_network_refused_says_why(panel):
+    """The daemon's sentence is a peer's rules as likely as not: painted as it is."""
+    task = _queued(512)
+    panel.store.queued_tasks = [task, _queued(513)]
+    panel.store.network_job_refusals = {task.job.label: "That pool's rules name no <b>review</b>."}
+    panel._rebuild_agent_tasks()
+    first, second = _rows(panel, QueuedTaskRow)
+    assert "not offered: That pool's rules name no <b>review</b>." in _row_text(first)
+    assert "&lt;b&gt;review" in first.refusal.toolTip()
+    assert "not offered" not in _row_text(second)
+
+
+def test_the_list_says_what_of_the_network_does_not_work(panel):
+    """One line under the header, the daemon's detail painted as it is, opening the
+    Network screen; gone with the trouble, and drawn while the list is folded."""
+    from diplomat_runtime import network
+
+    from diplomat_app.widgets import NoticeRow
+
+    panel._rebuild_agent_tasks()
+    assert _rows(panel, NoticeRow) == []
+
+    panel.store.network_answered = False
+    panel.store.network_changed.emit()
+    [notice] = _rows(panel, NoticeRow)
+    assert notice.text._full == "Diplomacy Network: the daemon is not answering"
+
+    panel.store.network_answered = True
+    panel.store.network_state = network.Snapshot.from_json(
+        {"transport": {"state": "failed", "detail": "<b>tor</b> not found"}})
+    panel._tasks_expanded = False
+    panel.store.network_changed.emit()
+    [notice] = _rows(panel, NoticeRow)
+    assert notice.text._full == "Diplomacy Network: transport failed (<b>tor</b> not found)"
+    assert "&lt;b&gt;tor" in notice.toolTip()
+    notice.clicked.emit()
+    assert panel._screen == "network"
+
+    panel.store.network_state = network.Snapshot.from_json(
+        {"transport": {"state": "ready", "detail": ""}})
+    panel.store.network_changed.emit()
+    assert _rows(panel, NoticeRow) == []
+
+
 def test_a_row_reads_as_the_session_it_will_become(panel):
     """Same label the activity feed and the agent will carry — a queued retry that
     dropped its "retry 2" would read as a first attempt."""

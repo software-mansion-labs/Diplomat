@@ -10,7 +10,6 @@ import dataclasses
 import json
 import os
 import shutil
-import signal
 import socketserver
 import subprocess
 import tempfile
@@ -161,7 +160,7 @@ def on(monkeypatch):
     appconfig.set_bool(network.ENABLED_KEY, True)
     monkeypatch.setattr(review, "roots_guessed", lambda: False)
     monkeypatch.setattr(review, "roots_complete", lambda: True)
-    monkeypatch.setattr(review, "roots_reading", lambda: (review.repo_roots(), True))
+    monkeypatch.setattr(review, "roots_linking", lambda: (review.repo_roots(), []))
     monkeypatch.setattr("diplomat_app.bans.read", lambda: [])
 
 
@@ -202,7 +201,21 @@ def book_network_run(task="t1", number=9, *, age=0.0, ledger_key="", source=auto
 
 # MARK: - the cycle: pools
 
-def test_the_pools_are_posted_once_every_login_is_known(store, on, daemon, monkeypatch):
+GH = {"id": POOL, "path": "/src/r", "forge": "github", "identity": "alice"}
+LAB_POOL = {"id": "gitlab.example.com/group/sub/tool", "path": "/src/tool", "forge": "gitlab",
+            "identity": "bob"}
+TOOL = LocalRepo("acme", "tool", "/src/tool")
+TOOL_POOL = {"id": "github.com/acme/tool", "path": "/src/tool", "forge": "github",
+             "identity": "alice"}
+
+
+def has_pools(*pools) -> dict:
+    """A snapshot of a daemon holding these pools, each ``(id, path, identity)``."""
+    return snapshot(pools=[{"id": i, "path": path, "identity": who} for i, path, who in pools])
+
+
+def test_a_repository_with_no_login_holds_back_its_own_pool_alone(store, on, daemon,
+                                                                  monkeypatch):
     d = daemon()
     asked = []
 
@@ -216,41 +229,157 @@ def test_the_pools_are_posted_once_every_login_is_known(store, on, daemon, monke
 
     store._network_cycle_once(1000.0)
     store._network_cycle_once(1030.0)
-    assert d.sent("pools") == [], "a list missing a repository would make the daemon leave its pool"
+    assert d.sent("pools") == [{"pools": [GH]}], "the rest is said, once"
     assert store.network_pools_held == (
-        "Pools are held back: the account for group/sub/tool is not known yet")
+        "The login for group/sub/tool on gitlab.example.com is not known yet: its pool "
+        "stays as the daemon last had it until it is")
     assert asked == ["gitlab.example.com"], "an unknown login is not asked for on every cycle"
-    assert len(d.sent("admit")) == 1, "the admit goes whatever holds the pools back"
+    assert len(d.sent("admit")) == 1
+
+    d.state = has_pools((POOL, "/src/r", "alice"), (LAB_POOL["id"], "/src/tool", "bob"))
+    store._network_cycle_once(1035.0)
+    assert d.sent("pools")[1:] == [{"pools": [GH, LAB_POOL]}], "as the daemon had it"
 
     store._gitlab_me[LAB.host] = ("Bob", localrepos.glab_host_entry(LAB.host))
     store._network_cycle_once(1040.0)
     store._network_cycle_once(1050.0)
-    assert d.sent("pools") == [{"pools": [
-        {"id": POOL, "path": "/src/r", "forge": "github", "identity": "alice"},
-        {"id": "gitlab.example.com/group/sub/tool", "path": "/src/tool", "forge": "gitlab",
-         "identity": "bob"}]}], "and is said again only when it changed"
+    assert len(d.sent("pools")) == 2, "and is said again only when it changed"
     assert store.network_pools_held == ""
 
 
-@pytest.mark.parametrize("break_it, why", [
-    (lambda mp, st: mp.setattr(review, "roots_reading", lambda: (review.repo_roots(), False)),
-     "Pools are held back: a repo root cannot be read"),
-    (lambda mp, st: mp.setattr(localrepos, "resolve", lambda paths: [
-        localrepos.Checkout("/src/x", (LAB,), read=False)]),
-     "Pools are held back: /src/x cannot be read"),
-    (lambda mp, st: setattr(st, "me", ""),
-     "Pools are held back: the account for o/r is not known yet"),
-], ids=["a root unread", "a checkout unread", "no login"])
-def test_an_unresolved_repository_holds_the_pools_back(store, on, daemon, monkeypatch,
-                                                       break_it, why):
-    d = daemon()
+def test_an_unread_root_keeps_its_pool_and_holds_nothing_else_back(store, on, daemon,
+                                                                   monkeypatch):
+    d = daemon(state=has_pools((POOL, "/src/r", "alice"),
+                               ("github.com/o/gone", "/mnt/gone", "alice")))
+    monkeypatch.setattr(review, "roots_linking", lambda: ([], ["/src/r"]))
+    monkeypatch.setattr(localrepos, "resolve",
+                        lambda paths: [localrepos.Checkout("/src/tool", (TOOL,))])
     changed = []
     store.network_changed.connect(lambda: changed.append(store.network_pools_held))
-    break_it(monkeypatch, store)
     store._network_cycle()
-    assert d.sent("pools") == [] and len(d.sent("admit")) == 1
-    assert store.network_state is not None
-    assert store.network_pools_held == why and why in changed, "and the screen is told why"
+    assert d.sent("pools") == [{"pools": [TOOL_POOL, GH]}], (
+        "a repository linked since gains its pool, one taken out of Settings leaves its own")
+    why = ("/src/r cannot be read: its pool stays as the daemon last had it until the path "
+           "can be read or is taken out of Settings")
+    assert store.network_pools_held == why and why in changed, "and the screen is told"
+    assert lines("network-leave") == [
+        "Left github.com/o/gone: /mnt/gone is no longer listed in Settings"]
+    assert len(d.sent("admit")) == 1
+
+
+def test_an_unknown_github_login_keeps_the_pools_the_daemon_had(store, on, daemon):
+    d = daemon(state=has_pools((POOL, "/src/r", "alice")))
+    store.me = ""
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": [GH]}]
+    assert store.network_pools_held == network.unconfirmed_account("o/r", "github.com")
+
+
+def test_a_list_the_daemon_refuses_is_said_once_and_not_sent_again_as_it_is(
+        store, on, daemon, monkeypatch):
+    d = daemon({"/pools": (409, {"error": '"x" is not a pool id.'})})
+    for at in (1000.0, 1001.0, 1002.0):
+        store._network_cycle_once(at)
+    why = 'The daemon refused this machine\'s pools: "x" is not a pool id.'
+    assert len(d.sent("pools")) == 1
+    assert store.network_pools_held == why and lines("network-unavailable") == [why]
+
+    d.routes["/pools"] = (409, {"error": "A pool is listed twice."})
+    monkeypatch.setattr(localrepos, "resolve",
+                        lambda paths: [localrepos.Checkout("/src/tool", (TOOL,))])
+    store._network_cycle_once(1003.0)
+    assert d.sent("pools")[1:] == [{"pools": [GH, TOOL_POOL]}], "a list that changed is sent"
+    assert store.network_pools_held == (
+        "The daemon refused this machine's pools: A pool is listed twice.")
+    assert len(lines("network-unavailable")) == 2, "and another refusal is said"
+
+    d.routes["/pools"] = (200, {"ok": True})
+    store._network_cycle_once(1063.0)
+    assert len(d.sent("pools")) == 3 and store.network_pools_held == "", (
+        "taken, it clears the line")
+
+
+def test_a_refusal_is_moot_once_the_list_is_the_one_the_daemon_took(store, on, daemon,
+                                                                    monkeypatch):
+    d = daemon()
+    store._network_cycle_once(1000.0)
+    d.routes["/pools"] = (409, {"error": "A pool is listed twice."})
+    monkeypatch.setattr(localrepos, "resolve",
+                        lambda paths: [localrepos.Checkout("/src/tool", (TOOL,))])
+    store._network_cycle_once(1001.0)
+    assert store.network_pools_held != ""
+    monkeypatch.setattr(localrepos, "resolve", lambda paths: [])
+    store._network_cycle_once(1002.0)
+    assert len(d.sent("pools")) == 2 and store.network_pools_held == ""
+
+
+def test_a_list_the_daemon_did_not_settle_is_sent_again(store, on, daemon):
+    d = daemon({"/pools": (500, {})})
+    store._network_cycle_once(1000.0)
+    store._network_cycle_once(1001.0)
+    assert len(d.sent("pools")) == 2
+    assert store.network_pools_held == "" and lines("network-unavailable") == []
+
+
+REAL_LINKING = review.roots_linking
+
+
+@pytest.fixture
+def root_paths(monkeypatch):
+    """The roots read for real, from the paths the test lists."""
+    paths: list[str] = []
+    monkeypatch.setattr(review, "repo_root_paths", lambda: paths)
+    monkeypatch.setattr(review, "_roots_cache", None)
+    monkeypatch.setattr(review, "roots_linking", REAL_LINKING)
+    return paths
+
+
+def test_a_root_that_names_no_forge_is_skipped_and_holds_nothing_back(
+        store, on, daemon, root_paths, tmp_path):
+    folder = tmp_path / "notes"
+    folder.mkdir()
+    root_paths += [_checkout(tmp_path / "r", "https://github.com/o/r.git"),
+                   _checkout(tmp_path / "bucket", "https://bitbucket.org/acme/x.git"),
+                   _checkout(tmp_path / "bare"), str(folder)]
+    d = daemon()
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": [
+        {"id": POOL, "path": root_paths[0], "forge": "github", "identity": "alice"}]}]
+    assert store.network_pools_held == ""
+
+
+def test_a_lone_root_that_names_no_forge_is_no_pool(store, on, daemon, root_paths, tmp_path):
+    root_paths.append(_checkout(tmp_path / "bucket", "https://bitbucket.org/acme/x.git"))
+    d = daemon(state=has_pools((POOL, root_paths[0], "alice")))
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": []}], (
+        "the root that stands in for the configured repo is not one its path names")
+    assert store.network_pools_held == ""
+    assert lines("network-leave") == [f"Left {POOL}: {root_paths[0]} no longer names it"]
+
+
+def test_a_missing_root_is_unread_and_keeps_the_pool_the_daemon_had(
+        store, on, daemon, root_paths, tmp_path):
+    gone = str(tmp_path / "unmounted" / "r")
+    root_paths += [gone, _checkout(tmp_path / "other", "https://github.com/o/other.git")]
+    d = daemon(state=has_pools((POOL, gone, "alice")))
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": [
+        {"id": "github.com/o/other", "path": root_paths[1], "forge": "github",
+         "identity": "alice"},
+        {"id": POOL, "path": gone, "forge": "github", "identity": "alice"}]}]
+    assert store.network_pools_held == network.unconfirmed_unread(gone)
+
+
+def test_a_root_git_fails_on_is_unread(store, on, daemon, root_paths, tmp_path):
+    broken = tmp_path / "broken"
+    (broken / ".git").mkdir(parents=True)
+    root_paths.append(str(broken))
+    d = daemon(state=has_pools((POOL, str(broken), "alice")))
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": [
+        {"id": POOL, "path": str(broken), "forge": "github", "identity": "alice"}]}]
+    assert store.network_pools_held == network.unconfirmed_unread(str(broken))
 
 
 def _checkout(path, remote="") -> str:
@@ -261,30 +390,49 @@ def _checkout(path, remote="") -> str:
     return str(path)
 
 
-def test_an_unread_checkout_holds_the_pools_back_until_it_can_be_read(
+def test_an_unread_checkout_keeps_its_pool_until_it_is_read_or_taken_out(
         store, on, daemon, tmp_path):
     d = daemon()
     gone, bare = tmp_path / "unmounted" / "tool", _checkout(tmp_path / "scratch")
     store.other_repo_paths = [str(gone), bare]
     store._network_cycle_once(1000.0)
     store._network_cycle_once(1001.0)
-    assert d.sent("pools") == [], "a list without it would make the daemon leave its pool"
-    assert store.network_pools_held == f"Pools are held back: {gone} cannot be read"
+    assert d.sent("pools") == [{"pools": [GH]}], "the daemon had no pool behind it"
+    assert store.network_pools_held == network.unconfirmed_unread(str(gone))
 
     _checkout(gone, "https://github.com/acme/tool.git")
     store._network_cycle_once(1002.0)
-    assert d.sent("pools") == [{"pools": [
-        {"id": POOL, "path": "/src/r", "forge": "github", "identity": "alice"},
-        {"id": "github.com/acme/tool", "path": str(gone), "forge": "github",
-         "identity": "alice"}]}], "read again on the next cycle, with no restart"
+    tool = {"id": "github.com/acme/tool", "path": str(gone), "forge": "github",
+            "identity": "alice"}
+    assert d.sent("pools")[1:] == [{"pools": [GH, tool]}], (
+        "read again on the next cycle, with no restart")
     assert store.network_pools_held == ""
     assert [c.read for c in store.local_checkouts] == [True, True]
 
-    # Gone again after its pool was said: nothing is posted in the list's place.
+    # Gone again after its pool was said: the pool stays as the daemon has it.
     shutil.rmtree(gone)
+    d.state = has_pools((POOL, "/src/r", "alice"), ("github.com/acme/tool", str(gone), "alice"))
     store._network_cycle_once(1003.0)
-    assert len(d.sent("pools")) == 1
-    assert store.network_pools_held == f"Pools are held back: {gone} cannot be read"
+    assert len(d.sent("pools")) == 2, "the same list is not said again"
+    assert store.network_pools_held == network.unconfirmed_unread(str(gone))
+
+    # Taken out of Settings it holds nothing: its pool is left, and the feed says so.
+    store.other_repo_paths = [bare]
+    store._network_cycle_once(1004.0)
+    assert d.sent("pools")[2:] == [{"pools": [GH]}] and store.network_pools_held == ""
+    assert lines("network-leave") == [
+        f"Left github.com/acme/tool: {gone} is no longer listed in Settings"]
+
+
+def test_a_pool_whose_path_names_it_no_more_is_left_and_said(store, on, daemon, tmp_path):
+    mirror = _checkout(tmp_path / "mirror", "https://code.example.org/acme/mirror.git")
+    d = daemon(state=has_pools((POOL, "/src/r", "alice"),
+                               ("code.example.org/acme/mirror", mirror, "alice")))
+    store.other_repo_paths = [mirror]
+    store._network_cycle()
+    assert d.sent("pools") == [{"pools": [GH]}]
+    assert lines("network-leave") == [
+        f"Left code.example.org/acme/mirror: {mirror} no longer names it"]
 
 
 def test_a_checkout_with_no_forge_remote_is_left_out_and_holds_nothing_back(
@@ -320,7 +468,7 @@ def test_a_checkout_git_fails_on_is_unread_not_empty(tmp_path):
 def test_no_linked_repository_is_an_empty_list_once_the_roots_are_resolved(
         store, on, daemon, monkeypatch):
     d = daemon()
-    monkeypatch.setattr(review, "roots_reading", lambda: ([], True))
+    monkeypatch.setattr(review, "roots_linking", lambda: ([], []))
     store._network_cycle()
     assert d.sent("pools") == [{"pools": []}]
 
@@ -387,7 +535,11 @@ def test_a_post_the_daemon_refused_is_made_again(store, on, daemon):
                 "/pools": (400, {"error": "No such checkout."})})
     store._network_cycle_once(1000.0)
     store._network_cycle_once(1001.0)
-    assert (len(d.sent("pools")), len(d.sent("admit"))) == (2, 2)
+    assert (len(d.sent("pools")), len(d.sent("admit"))) == (1, 2)
+    store._network_cycle_once(1059.0)
+    store._network_cycle_once(1060.0)
+    assert len(d.sent("pools")) == 2, "a refused list is said again as often as admit is"
+    assert len(lines("network-unavailable")) == 1, "and its refusal once"
 
 
 def test_nothing_asks_the_daemon_with_the_switch_off(store, daemon, monkeypatch):
@@ -688,6 +840,26 @@ def test_an_ended_offer_is_booked_to_the_machine_its_row_names(
     assert task.anthropic is counted and task.tokens == 500
 
 
+@pytest.mark.parametrize("row, concluded", [
+    (offer(state="done", executor=PEER, executorHere=False, outcome={"ok": True}), True),
+    (offer(state="done", executor=PEER, executorHere=False, outcome={"ok": False}), False),
+    (offer(state="failed", reason="the container exited 137"), False),
+    (offer(state="cancelled", reason="pool closed"), False)])
+def test_a_review_request_is_concluded_by_the_network_run_that_finished_it(
+        store, on, daemon, row, concluded):
+    daemon(state=snapshot(offers=[row]))
+    book_network_run(ledger_key=autofix.ledger_key(
+        autofix.WORK_REVIEW_REQ, "https://github.com/o/r/pull/9", "abc"))
+    asked = autofix.ReviewAttempt("2026-01-01T00:00:00Z", time.time(), 1)
+    store._save_attempts("reviewReqAttempts", {"o/r#9": asked})
+    store._network_cycle()
+    assert agentregistry.load() == []
+    kept = store._load_attempts("reviewReqAttempts")["o/r#9"]
+    assert (kept.concluded_at is not None) is concluded
+    assert dataclasses.replace(kept, concluded_at=None) == asked
+    assert lines("kill-device") == [], "a run in a container has no window here"
+
+
 def test_a_run_with_no_ledger_entry_is_priced_into_none(store, on, daemon):
     daemon(state=snapshot(offers=[daemon_row(
         state=agentstate.NET_DONE, executor=ME, outcome=spent())]))
@@ -855,23 +1027,150 @@ def test_the_queue_has_room_whenever_the_daemon_answers(store, on):
     assert not store._drain_has_room(full) and store._drain_has_room(0)
 
 
-def test_a_refusal_is_said_once_for_the_spell_of_it(store, on, daemon, monkeypatch):
-    refused = (409, {"error": "This machine is not in that pool."})
-    d = daemon({"/offer": refused})
+STOPPING = (503, {"error": "The Diplomacy Network daemon is stopping."})
+
+
+def test_a_daemon_that_takes_no_job_is_said_once_for_the_spell_of_it(
+        store, on, daemon, monkeypatch):
+    d = daemon({"/offer": STOPPING})
     calls = _spawn_recorder(monkeypatch)
     for n in (1, 2):
         verdict = store.dispatch_agent(job(n), autofix.SOURCE_AUTO)
-        assert verdict.sentence == "This machine is not in that pool."
+        assert verdict.sentence == "The Diplomacy Network daemon is stopping."
+        assert not verdict.own
     assert lines("network-unavailable") == [
         "Holding auto work - the Diplomacy Network did not take Review · #1: "
-        "This machine is not in that pool."]
+        "The Diplomacy Network daemon is stopping."]
+    assert store.network_job_refusals == {}
 
     d.routes["/offer"] = (200, {"taskId": "t3"})
     assert store.dispatch_agent(job(3), autofix.SOURCE_AUTO) == "spawned"
-    d.routes["/offer"] = refused
+    d.routes["/offer"] = STOPPING
     store.dispatch_agent(job(4), autofix.SOURCE_AUTO)
     assert len(lines("network-unavailable")) == 2, "an offer that went through ends the spell"
     assert calls == []
+
+
+NO_RULES = "That pool's rules name no review."
+
+
+def _refuses(*items):
+    """An ``/offer`` route refusing the jobs about ``items`` for a reason of their own,
+    and taking every other."""
+    def answer(body):
+        if body["item"] in items:
+            return 409, {"error": NO_RULES}
+        return 200, {"taskId": f"t-{body['item']}"}
+    return answer
+
+
+def _queue(store, *numbers) -> None:
+    store._staged_queue = []
+    store.queued_tasks = [autofix.QueuedTask(f"review-req:o/r#{n}", job(n), 1) for n in numbers]
+
+
+def test_a_job_refused_for_its_own_reason_does_not_stop_the_queue(
+        store, on, daemon, monkeypatch):
+    d = daemon({"/offer": _refuses("pr-6")})
+    calls = _spawn_recorder(monkeypatch)
+    store.auto_task_limit = 8
+    _queue(store, 6, 7)
+    store._drain_queued_tasks([], closed=set())
+    assert [b["item"] for b in d.sent("offer")] == ["pr-6", "pr-7"], "the next is asked about"
+    assert [r.network for r in agentregistry.load()] == ["t-pr-7"]
+    assert [e.id for e in store._staged_queue] == ["review-req:o/r#6"], "and it waits"
+    assert store.network_job_refusals == {"Review · #6": NO_RULES}
+    store.commit_queue()
+    assert [e.id for e in store.queued_tasks] == ["review-req:o/r#6"]
+    assert store.network_job_refusals == {"Review · #6": NO_RULES}, "its row keeps the reason"
+
+    _queue(store, 6)
+    store._drain_queued_tasks([], closed=set())
+    store.commit_queue()
+    assert lines("network-unavailable") == [f"Review · #6 was not offered: {NO_RULES}"], \
+        "said once for the job, however often it is refused"
+
+    d.routes["/offer"] = (409, {"error": "This machine is not in that pool."})
+    _queue(store, 6)
+    store._drain_queued_tasks([], closed=set())
+    assert lines("network-unavailable")[:-1] == [
+        "Review · #6 was not offered: This machine is not in that pool."], "and again for another"
+    assert calls == []
+
+
+def test_a_refusal_of_a_jobs_own_ends_with_the_offer_that_goes_through(
+        store, on, daemon, monkeypatch):
+    d = daemon({"/offer": _refuses("pr-6", "pr-8")})
+    _spawn_recorder(monkeypatch)
+    store.auto_task_limit = 8
+    _queue(store, 6, 8)
+    store._drain_queued_tasks([], closed=set())
+    assert set(store.network_job_refusals) == {"Review · #6", "Review · #8"}
+    changed = []
+    store.tasks_changed.connect(lambda: changed.append(dict(store.network_job_refusals)))
+
+    d.routes["/offer"] = _refuses("pr-8")
+    _queue(store, 6, 8)
+    store._drain_queued_tasks([], closed=set())
+    assert store.network_job_refusals == {"Review · #8": NO_RULES}
+
+    # A row that left the queue for any other reason takes its reason with it.
+    store.commit_queue()
+    assert changed[-1] == {"Review · #8": NO_RULES}
+    store._staged_queue = []
+    store.commit_queue()
+    assert store.network_job_refusals == {}
+    assert changed[-1] == {}, "before the panel is told the row went"
+
+
+def test_the_panel_is_told_of_a_reason_that_changed_under_a_row(store, on, daemon, monkeypatch):
+    d = daemon({"/offer": _refuses("pr-6")})
+    _spawn_recorder(monkeypatch)
+    told = []
+    store.tasks_changed.connect(lambda: told.append(dict(store.network_job_refusals)))
+    store.dispatch_agent(job(6), autofix.SOURCE_AUTO)
+    assert told == [{"Review · #6": NO_RULES}]
+    store.dispatch_agent(job(6), autofix.SOURCE_AUTO)
+    assert len(told) == 1, "a reason that stands is not news"
+    d.routes["/offer"] = (409, {"error": "This machine is not in that pool."})
+    store.dispatch_agent(job(6), autofix.SOURCE_AUTO)
+    assert told[1:] == [{"Review · #6": "This machine is not in that pool."}]
+
+
+@pytest.mark.parametrize("answer", [STOPPING, (500, {}), (200, {})],
+                         ids=["stopping", "a fault of the daemon's", "no task named"])
+def test_a_daemon_that_takes_no_job_stops_the_queue(store, on, daemon, monkeypatch, answer):
+    d = daemon({"/offer": answer})
+    _spawn_recorder(monkeypatch)
+    store.auto_task_limit = 8
+    _queue(store, 6, 7)
+    store._drain_queued_tasks([], closed=set())
+    assert [b["item"] for b in d.sent("offer")] == ["pr-6"], "the rest were not asked"
+    assert store.network_job_refusals == {}
+
+
+def test_a_job_no_offer_can_be_made_of_is_refused_for_its_own_reason(
+        store, on, daemon, monkeypatch):
+    d = daemon(takes_offers())
+    _spawn_recorder(monkeypatch)
+    store.auto_task_limit = 8
+    odd = dataclasses.replace(job(6), audit_action="translate")
+    store.queued_tasks = [autofix.QueuedTask("review-req:o/r#6", odd, 1),
+                          autofix.QueuedTask("review-req:o/r#7", job(7), 1)]
+    store._drain_queued_tasks([], closed=set())
+    assert [b["item"] for b in d.sent("offer")] == ["pr-7"]
+    assert store.network_job_refusals == {"Review · #6": "the network runs no translate jobs"}
+
+
+def test_switching_the_network_off_forgets_the_refusals(store, on, daemon, installer,
+                                                        monkeypatch):
+    daemon({"/offer": _refuses("pr-6")})
+    _spawn_recorder(monkeypatch)
+    store.dispatch_agent(job(6), autofix.SOURCE_AUTO)
+    assert store.network_job_refusals
+    store.set_network_enabled(False)
+    assert store.wait_for_background() == []
+    assert store.network_job_refusals == {}
 
 
 @pytest.mark.parametrize("answer, source, sentence", [
@@ -993,6 +1292,8 @@ def test_switching_off_withdraws_the_unsettled_offers_the_daemon_holds(store, on
     store._settle_agents()
     assert d.sent("withdraw") == [{"taskId": "t7", "reason": "switched off"}]
     assert lines("network-withdraw") == ["Review · #9 - withdrawn (switched off)"]
+    assert lines("network-unavailable") == [
+        "Review · #10 was not offered: the Diplomacy Network is switched off"]
     assert store.network_offering == []
 
 
@@ -1260,6 +1561,72 @@ def test_a_run_is_forgotten_whatever_the_daemon_answers(store, on):
         "Auto · Review · #9 - not withdrawn: the Diplomacy Network daemon is not answering"]
 
 
+def test_a_switch_read_from_one_config_says_nothing_of_another(tmp_path, monkeypatch):
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+    first.write_text('{"networkEnabled": true}')
+    second.write_text("{ not json")
+    monkeypatch.setenv("DIPLOMAT_CONFIG", str(first))
+    assert dn.enabled() is True
+    monkeypatch.setenv("DIPLOMAT_CONFIG", str(second))
+    assert dn.enabled() is False
+    monkeypatch.setenv("DIPLOMAT_CONFIG", str(first))
+    first.write_text("{ not json")
+    assert dn.enabled() is True
+    first.write_text('{"networkEnabled": "true"}')
+    assert dn.enabled() is False
+    first.write_text("{ not json")
+    assert dn.enabled() is False
+
+
+def unreadable_notes() -> list[str]:
+    return [line for line in lines("warn") if line == appconfig.unreadable_note()]
+
+
+def test_a_config_that_cannot_be_read_leaves_the_switch_as_it_was(store, on, daemon,
+                                                                 monkeypatch, tmp_path):
+    """One bad read is not "off": the daemon needs five, and on "off" the offers are
+    withdrawn, the runs retired and agents started in terminals on the same items."""
+    d = daemon(state=snapshot(offers=[daemon_row("t1")]))
+    run = book_network_run()
+    assert dn.enabled()
+    whole = appconfig.path().read_text(encoding="utf-8")
+    appconfig.path().write_text(whole.rstrip()[:-1], encoding="utf-8")
+    assert dn.enabled() and store.network_enabled, "one brace short"
+    store._settle_agents()
+    store._settle_agents()
+    assert d.sent("withdraw") == []
+    assert [r.run_id for r in agentregistry.load()] == [run.run_id]
+    assert len(unreadable_notes()) == 1, "said once for the spell"
+    # Every setting reads as its default meanwhile, the repo roots among them: the job
+    # has no pool, and is still not started in a terminal.
+    assert store.dispatch_agent(job(77), autofix.SOURCE_AUTO) == dn.VERDICT_REFUSED
+    with pytest.raises(OSError):
+        store.set_network_enabled(False)
+    assert dn.enabled(), "a switch that would not save stays where it was"
+
+    appconfig.path().write_text(whole, encoding="utf-8")
+    store._settle_agents()
+    appconfig.path().write_text("", encoding="utf-8")
+    store._settle_agents()
+    assert dn.enabled() and len(unreadable_notes()) == 2, "an empty file, a second spell"
+
+    # What can be read is believed: a value that is no boolean, and no file, are off.
+    appconfig.path().write_text('{"networkEnabled": "true"}', encoding="utf-8")
+    assert not dn.enabled()
+    appconfig.set_bool(network.ENABLED_KEY, True)
+    assert dn.enabled()
+    appconfig.path().unlink()
+    assert not dn.enabled()
+
+    # Read on from one file says nothing of another that cannot be read.
+    appconfig.set_bool(network.ENABLED_KEY, True)
+    assert dn.enabled()
+    other = tmp_path / "other.json"
+    other.write_text("{", encoding="utf-8")
+    monkeypatch.setenv("DIPLOMAT_CONFIG", str(other))
+    assert not dn.enabled()
+
+
 def pool_task(task, **fields) -> network.PoolTask:
     return network.PoolTask(task_id=task, kind="review", item="pr-9", title="Review · #9",
                             state="claimed", **fields)
@@ -1269,24 +1636,52 @@ def test_stop_ends_the_run_here_and_otherwise_withdraws(store, on, daemon):
     d = daemon(state=snapshot(runs=[{"runId": "r-7", "taskId": "t1", "state": "running"},
                                     {"runId": "r-6", "taskId": "t1", "state": "failed"},
                                     {"runId": "r-5", "taskId": "t3", "state": "finished"}]))
-    # The first runs here. The second runs elsewhere, and the third's run here has
-    # ended since the screen drew it: neither has a run to stop.
+    # The first runs here. The second runs elsewhere: its offer is taken back. The
+    # third's run here has ended since the screen drew it: there is nothing to stop,
+    # and the offer its button never spoke of stays.
     for task in (pool_task("t1", executor=ME, executor_here=True),
                  pool_task("t2", executor=PEER, offered_here=True),
                  pool_task("t3", executor=ME, executor_here=True)):
         store.stop_network_task_async(task, POOL)
         assert store.wait_for_background() == []
     assert d.sent("stop-run") == [{"runId": "r-7"}]
-    assert d.sent("withdraw") == [{"taskId": "t2", "reason": "stopped"},
-                                  {"taskId": "t3", "reason": "stopped"}]
+    assert d.sent("withdraw") == [{"taskId": "t2", "reason": "stopped"}]
     assert lines("network-stop") == [
         "Review · #9 - its run on this machine was stopped and the job is back in the pool"]
-    assert lines("network-withdraw") == ["Review · #9 - withdrawn (stopped)"] * 2
+    assert lines("network-withdraw") == ["Review · #9 - withdrawn (stopped)"]
     settled = "/state"  # each stop ends in a settle, which reads the daemon itself
     assert [path for _, path, _ in d.got] == [
         "/state", "/stop-run", settled, "/withdraw", settled,
-        "/state", "/withdraw", settled], "asked afresh for a task this machine runs"
-    assert store.network_refusals == {}
+        "/state", settled], "asked afresh for a task this machine runs"
+    assert store.network_refusals == {POOL: "That job's run on this machine has already ended."}
+    assert dn.RUN_ENDED == store.network_refusals[POOL]
+
+
+def test_stop_of_a_run_the_daemon_does_not_show_withdraws_nothing(store, on):
+    """The read timed out, or the daemon is down: Stop said the job goes back to the
+    pool, and a withdrawal would cancel this machine's own offer instead."""
+    store.stop_network_task_async(
+        pool_task("t1", executor=ME, executor_here=True, offered_here=True), POOL)
+    assert store.wait_for_background() == []
+    assert store.network_refusals == {POOL: dn.NOT_ANSWERING}
+    assert lines("network-withdraw") == []
+
+
+def test_a_run_booked_while_the_daemon_is_asked_is_not_judged_by_that_answer(
+        store, on, monkeypatch):
+    """The book is read before the daemon is asked: a snapshot older than an offer says
+    nothing of its run, and a row that ended before it must not end it."""
+    stale = network.Snapshot.from_json(
+        snapshot(offers=[daemon_row("t1", "failed", reason="the container exited 137")]))
+
+    def state():
+        book_network_run("t1")
+        return stale
+
+    monkeypatch.setattr(dn, "state", state)
+    store._settle_agents()
+    assert [r.network for r in agentregistry.load()] == ["t1"]
+    assert lines("network-failed") == []
 
 
 def test_a_stop_the_daemon_refuses_is_shown_in_its_pool(store, on, daemon):
@@ -1305,6 +1700,52 @@ def test_forget_leaves_a_local_run_alone(store, on, daemon):
     store.forget_network_run_async(local.run_id)
     assert store.wait_for_background() == []
     assert [m for m, _, _ in d.got] == [] and len(agentregistry.load()) == 1
+
+
+def test_forgetting_a_run_with_the_switch_off_asks_the_daemon_for_no_state(store, daemon):
+    d = daemon(state=snapshot(offers=[offer("t1", "pooled")]))
+    run = book_network_run()
+    store.forget_network_run_async(run.run_id)
+    assert store.wait_for_background() == []
+    assert [path for _, path, _ in d.got if path == "/state"] == []
+
+
+def test_a_held_offer_the_switch_emptied_while_it_was_sent_is_not_booked(store, on, daemon,
+                                                                         monkeypatch):
+    d = daemon({"/offer": (500, {})})
+    store.dispatch_agent(job(ledger_key="review:o/r#9"), autofix.SOURCE_PANEL)
+    assert len(store.network_offering) == 1
+    d.routes.update(takes_offers())
+    send = dn.send
+
+    def as_the_switch_goes_off(route, body=None, **kw):
+        reply = send(route, body, **kw)
+        if route == network.ROUTE_OFFER:
+            store.network_offering = []
+        return reply
+
+    monkeypatch.setattr(dn, "send", as_the_switch_goes_off)
+    store._network_cycle()
+    assert len(d.sent("offer")) == 2
+    assert agentregistry.load() == [] and store.network_offering == []
+    assert lines("network-offer") == []
+
+
+def test_a_task_that_runs_again_after_the_switch_went_off_is_said_again(store, on, daemon,
+                                                                        monkeypatch):
+    daemon(state=snapshot(offers=[offer("t1", "claimed", executor=PEER)]))
+    monkeypatch.setattr(da, "run_installer",
+                        lambda script, arg: {"daemonRunning": arg != "--stop-daemon"})
+    for said in (1, 2):
+        book_network_run("t1", 9)
+        store._network_cycle()
+        store._network_cycle()
+        assert len(lines("network-claimed")) == said
+        store.set_network_enabled(False)
+        assert store.wait_for_background() == []
+        assert agentregistry.load() == []
+        store.set_network_enabled(True)
+        assert store.wait_for_background() == []
 
 
 # MARK: - the switch going off
@@ -1454,7 +1895,24 @@ def test_an_ask_is_forgotten_when_its_network_run_finishes(swept_store, on, daem
 
 
 @pytest.mark.parametrize("ended", [
-    offer("t-pr-1", "failed", reason="no machine could run it"),
+    offer("t-pr-1", "failed", reason="the container exited 137"),
+    offer("t-pr-1", "done", executor=PEER, executorHere=False, outcome={"ok": False}),
+])
+def test_an_ask_whose_offer_used_its_attempts_is_not_offered_again(
+        swept_store, on, daemon, monkeypatch, ended):
+    d = daemon(names_tasks())
+    _spawn_recorder(monkeypatch)
+    swept(swept_store, d, monkeypatch)
+    d.state = snapshot(offers=[ended, offer("t-pr-2")])
+    swept_store._settle_agents()
+    assert [r.network for r in agentregistry.load()] == ["t-pr-2"]
+    assert asks(swept_store) == [(2, "t-pr-2")], "ended, as by a run here that came to nothing"
+    for _ in range(3):
+        _poll(swept_store, monkeypatch)
+    assert [b["item"] for b in d.sent("offer")] == ["pr-1", "pr-2"]
+
+
+@pytest.mark.parametrize("ended", [
     offer("t-pr-1", "cancelled", reason="pool closed"),
     None,  # the daemon holds no such offer any more
 ])
@@ -1491,6 +1949,98 @@ def test_an_offer_the_operator_takes_back_takes_its_ask_with_it(swept_store, on,
     swept_store.forget_network_run_async(run.run_id)
     assert swept_store.wait_for_background() == []
     assert asks(swept_store) == []
+
+
+def goal_of(store) -> tuple[str, dict[str, str]]:
+    """A goal whose dispatched work is every standing ask."""
+    return "t-goal", {f"review:o/r#{w.number}@abc": w.key for w in store.requested_work}
+
+
+def forgotten_by_goal(store, monkeypatch) -> list[dict]:
+    """The edits the goal's withdrawal makes of its task."""
+    ops: list[dict] = []
+    monkeypatch.setattr(store, "_edit_tracked_task", lambda op: ops.append(op))
+    store._withdraw_goal_asks(goal_of(store))
+    return ops
+
+
+def test_a_goal_that_stops_takes_back_its_offer_no_machine_has_taken(
+        swept_store, on, daemon, monkeypatch):
+    d = daemon(names_tasks())
+    _spawn_recorder(monkeypatch)
+    swept(swept_store, d, monkeypatch)
+    d.state = snapshot(offers=[offer("t-pr-1"), offer("t-pr-2", "claimed", executor=PEER)])
+    changed = []
+    swept_store.tasks_changed.connect(lambda: changed.append(1),
+                                      Qt.ConnectionType.DirectConnection)
+
+    ops = forgotten_by_goal(swept_store, monkeypatch)
+    assert [(b["taskId"], b["reason"]) for b in d.sent("withdraw")] == [
+        ("t-pr-1", "its goal stopped")]
+    assert lines("network-withdraw") == ["Review · #1 · deep - withdrawn (its goal stopped)"]
+    assert [r.network for r in agentregistry.load()] == ["t-pr-2"], "the run a machine has is left"
+    assert asks(swept_store) == [(2, "t-pr-2")]
+    assert ops == [{"op": "withdrawn", "id": "t-goal", "work": ["review:o/r#1@abc"]}]
+    assert changed
+
+
+def test_a_goal_that_stops_with_nothing_to_take_back_edits_nothing(
+        swept_store, on, daemon, monkeypatch):
+    d = daemon(names_tasks())
+    _spawn_recorder(monkeypatch)
+    swept(swept_store, d, monkeypatch)
+    d.state = snapshot(offers=[offer("t-pr-1", "claimed", executor=ME),
+                               offer("t-pr-2", "done", executor=PEER)])
+    assert forgotten_by_goal(swept_store, monkeypatch) == []
+    assert d.sent("withdraw") == [] and len(agentregistry.load()) == 2
+    assert asks(swept_store) == [(1, "t-pr-1"), (2, "t-pr-2")]
+
+
+@pytest.mark.parametrize("state", [None, snapshot()],
+                         ids=["daemon silent", "unnamed by the snapshot"])
+def test_a_goal_that_stops_takes_back_an_offer_it_cannot_see(swept_store, on, daemon,
+                                                             monkeypatch, state):
+    d = daemon(names_tasks())
+    _spawn_recorder(monkeypatch)
+    swept(swept_store, d, monkeypatch)
+    d.state = state
+    ops = forgotten_by_goal(swept_store, monkeypatch)
+    assert [b["taskId"] for b in d.sent("withdraw")] == ["t-pr-1", "t-pr-2"]
+    assert agentregistry.load() == [] and asks(swept_store) == []
+    assert [op["work"] for op in ops] == [["review:o/r#1@abc", "review:o/r#2@abc"]]
+
+
+def test_a_goal_that_stops_forgets_an_ask_whose_run_left_the_book(swept_store, on, daemon,
+                                                                  monkeypatch):
+    """The mark outlives the run until the next poll, which would offer the ask again."""
+    d = daemon(names_tasks())
+    _spawn_recorder(monkeypatch)
+    swept(swept_store, d, monkeypatch)
+    agentregistry.forget({r.run_id for r in agentregistry.load() if r.network == "t-pr-1"})
+    d.state = snapshot(offers=[offer("t-pr-2", "claimed", executor=PEER)])
+    ops = forgotten_by_goal(swept_store, monkeypatch)
+    assert d.sent("withdraw") == []
+    assert asks(swept_store) == [(2, "t-pr-2")]
+    assert [op["work"] for op in ops] == [["review:o/r#1@abc"]]
+
+
+def test_a_goal_that_stops_cancels_what_waits_and_withdraws_what_is_pooled(
+        swept_store, on, daemon, monkeypatch):
+    """One edit of the goal for both: the ask the queue holds and the one in the pool."""
+    d = daemon({"/offer": lambda body: (
+        (200, {"taskId": "t-pr-1"}) if body["item"] == "pr-1"
+        else (409, {"error": "That pool's rules name no review."}))})
+    _spawn_recorder(monkeypatch)
+    swept_store.request_review_sweep(_sweep(swept_store))
+    d.state = snapshot(offers=[offer("t-pr-1")])
+    _poll(swept_store, monkeypatch)
+    assert asks(swept_store) == [(1, "t-pr-1"), (2, "")]
+    assert [t.job.pr_number for t in swept_store.queued_tasks if t.job.requested] == [2]
+
+    ops = forgotten_by_goal(swept_store, monkeypatch)
+    assert asks(swept_store) == [] and agentregistry.load() == []
+    assert not [t for t in swept_store.queued_tasks if t.job.requested]
+    assert [op["work"] for op in ops] == [["review:o/r#1@abc", "review:o/r#2@abc"]]
 
 
 def test_a_withdraw_the_daemon_refused_keeps_the_ask(swept_store, on, daemon, monkeypatch):
@@ -1586,25 +2136,108 @@ def test_only_the_exact_module_is_the_legacy_node(argv, legacy):
     assert dn._is_legacy_node(argv) is legacy
 
 
-def test_the_launch_sweep_ends_the_legacy_node_alone_and_says_so_once(store, monkeypatch):
-    table = {11: ["python3", "-m", "szpontnet"],
-             12: ["node", "/src/szpontnet/daemon.js"],
-             13: ["python3", "-m", "diplomat_app"]}
+@pytest.fixture
+def mesh(monkeypatch):
+    """The retired node's directory, a process table and the signals sent: a pid that
+    is signalled leaves the table unless it is in ``deaf``."""
+    world = SimpleNamespace(
+        dir=dn.legacy_dir(), deaf=set(), killed=[],
+        table={11: ["python3", "-m", "szpontnet"],
+               12: ["python3", "-m", "szpontnet", "--port", "7"],
+               13: ["python3", "-m", "diplomat_app"]})
+
+    def kill(pid):
+        world.killed.append(pid)
+        if pid not in world.deaf:
+            del world.table[pid]
+
+    def names(pid):
+        world.dir.mkdir(parents=True, exist_ok=True)
+        (world.dir / "device.key").write_text("secret")
+        (world.dir / "state.json").write_text(json.dumps({"pid": pid}))
+
+    world.names = names
     monkeypatch.setattr(procscan, "scan_own_pids",
-                        lambda match: {pid for pid in table if match(pid)})
-    monkeypatch.setattr(procscan, "cmdline_tokens", lambda pid: table[pid])
-    killed = []
-    monkeypatch.setattr(dn.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+                        lambda match: {pid for pid in world.table if match(pid)})
+    monkeypatch.setattr(procscan, "cmdline_tokens", lambda pid: world.table[pid])
+    monkeypatch.setattr(dn, "_terminate", kill)
+    monkeypatch.setattr(dn, "LEGACY_EXIT_SECS", 0.3)
+    return world
 
-    store.end_legacy_nodes_async()
-    assert store.wait_for_background() == []
-    assert killed == [(11, signal.SIGTERM)]
-    assert lines("network-stop") == ["Ended the retired mesh node (pid 11)"]
 
-    del table[11]
-    store.end_legacy_nodes_async()
+def test_the_launch_ends_the_node_its_directory_names_and_removes_the_directory(store, mesh):
+    mesh.names(11)
+
+    store.retire_legacy_node_async()
     assert store.wait_for_background() == []
-    assert len(killed) == 1 and len(lines("network-stop")) == 1
+    assert mesh.killed == [11], "another -m szpontnet, kept elsewhere, is its operator's own"
+    assert not mesh.dir.exists()
+    assert lines("network-stop") == [
+        f"Ended the retired mesh node (pid 11) and removed {mesh.dir}, the retired "
+        "mesh's state and keys"]
+
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert mesh.killed == [11] and len(lines("network-stop")) == 1
+
+
+@pytest.mark.parametrize("state", [
+    '{"pid": 13}', '{"pid": 99}', '{"pid": "11"}', '{"pid": true}', '{"pid": 11.0}',
+    "[11]", "{ not json", None])
+def test_a_directory_that_names_no_running_node_is_removed_and_nothing_is_signalled(
+        store, mesh, state):
+    mesh.names(11)
+    if state is None:
+        (mesh.dir / "state.json").unlink()
+    else:
+        (mesh.dir / "state.json").write_text(state)
+    mesh.table[True] = mesh.table[11]
+
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert mesh.killed == [] and not mesh.dir.exists()
+    assert lines("network-stop") == [
+        f"Removed {mesh.dir}, the retired mesh's state and keys"]
+
+
+def test_a_node_that_does_not_quit_keeps_its_directory_for_the_next_launch(store, mesh):
+    mesh.names(11)
+    mesh.deaf.add(11)
+
+    began = time.monotonic()
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert 0.3 <= time.monotonic() - began < 3
+    assert mesh.killed == [11] and (mesh.dir / "device.key").exists()
+    assert lines("network-stop") == [
+        f"Asked the retired mesh node (pid 11) to quit: {mesh.dir} is removed once it has"]
+
+    mesh.deaf.clear()
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert mesh.killed == [11, 11] and not mesh.dir.exists()
+
+
+def test_no_directory_is_no_node_whatever_runs(store, mesh):
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert mesh.killed == [] and lines("network-stop") == []
+
+
+def test_a_signal_that_fails_is_no_node_asked(mesh, monkeypatch):
+    mesh.names(11)
+
+    def gone(pid):
+        del mesh.table[pid]
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(dn, "_terminate", gone)
+    assert dn.retire_legacy_node() == (None, mesh.dir)
+
+
+def test_the_suite_reaches_no_real_mesh_directory_and_signals_nothing(tmp_path):
+    assert dn.legacy_dir() == tmp_path / "mesh"
+    assert dn._terminate.__name__ == "no_signal"
 
 
 # MARK: - containers in the process table
@@ -1648,7 +2281,7 @@ def test_an_agent_in_a_container_is_no_agent_of_this_machine(monkeypatch, tmp_pa
 # MARK: - launch, and the agent dump
 
 @pytest.mark.parametrize("switch", [True, False])
-def test_launch_sweeps_the_legacy_node_always_and_starts_the_daemon_only_when_on(
+def test_launch_retires_the_legacy_node_always_and_starts_the_daemon_only_when_on(
         monkeypatch, switch):
     from diplomat_app import app as app_module
 
@@ -1692,7 +2325,7 @@ def test_launch_sweeps_the_legacy_node_always_and_starts_the_daemon_only_when_on
 
     app = app_module.DiplomatApp()
 
-    assert called.count("end_legacy_nodes_async") == 1
+    assert called.count("retire_legacy_node_async") == 1
     assert called.count("start_network_async") == (1 if switch else 0)
     assert app.network_timer.interval == 30_000
     del called[:]
