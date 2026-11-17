@@ -1386,6 +1386,26 @@ try {
     await containers.release({ name: next.name, runId: 'next' });
   });
 
+  await check('what the engine would not remove is said, the first of it, with the rest tried all the same; what it would not list ends the asking there', async () => {
+    const held = await containers.acquire({ pool: alpha.pool, peer: PEER_B, runId: 'kept' });
+    const left = () => [
+      fs.existsSync(path.join(fakeDir, 'containers', `${held.name}.json`)), fs.existsSync(path.join(fakeDir, 'networks', `${held.name}.json`)),
+      fs.existsSync(path.join(fakeDir, 'volumes', `${volumeOf(held.name)}.labels`)),
+    ];
+    assert.deepEqual(left(), [true, true, true]);
+    fs.writeFileSync(path.join(fakeDir, 'fail-network-rm'), 'Error response from daemon: network has active endpoints\n');
+    const refusals = path.join(fakeDir, 'fail-volume-rm');
+    fs.writeFileSync(refusals, 'Error response from daemon: volume is in use\nError response from daemon: volume is still in use\n');
+    await assert.rejects(containers.removeAll(), { message: `${held.name} could not be removed: Error response from daemon: network has active endpoints` });
+    const once = 'Error response from daemon: volume is still in use\n';
+    assert.deepEqual([left(), fs.readFileSync(refusals, 'utf8')], [[false, true, true], once], 'the volume was tried, after the network');
+    fs.writeFileSync(path.join(fakeDir, 'fail-network-ls'), 'Cannot connect to the Docker daemon\n');
+    await assert.rejects(containers.removeAll(), { message: 'the networks could not be listed: Cannot connect to the Docker daemon' });
+    assert.deepEqual([left(), fs.readFileSync(refusals, 'utf8')], [[false, true, true], once], 'and nothing is tried after the listing');
+    fs.rmSync(refusals);
+    assert.deepEqual(await containers.removeAll(), { containers: [], networks: [held.name], volumes: [volumeOf(held.name)] });
+  });
+
   console.log(`\nall ${checks} checks passed`);
 } finally {
   await broker.stop().catch(() => {});

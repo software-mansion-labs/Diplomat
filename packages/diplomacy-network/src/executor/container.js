@@ -654,14 +654,24 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
 
   /// Removes every container (job, relay and probe), network and volume labelled with
   /// this daemon's dn.base, whatever runs in them, and nothing else on the engine.
-  /// Resolves to what went: `{ containers, networks, volumes }`, each a list of names.
+  /// Resolves to what went: `{ containers, networks, volumes }`, each a list of names,
+  /// all empty on a machine with no docker. Rejects with what the engine said: at once
+  /// when it would not list, and with the first it would not remove once the rest was
+  /// tried.
   /// For a daemon that is switched off, with no job being started.
   async function removeAll() {
     await Promise.all([...queues.values()]);
     const gone = { containers: [], networks: [], volumes: [] };
+    const failed = [];
     const each = async (kind, list, rm) => {
       const listed = await docker(list);
-      for (const name of lines(listed.stdout)) if ((await docker([...rm, name])).code === 0) gone[kind].push(name);
+      if (listed.stderr === 'ENOENT') return;
+      if (listed.code !== 0) throw new Error(`the ${kind} could not be listed: ${lastLine(listed.stderr) || 'no answer'}`);
+      for (const name of lines(listed.stdout)) {
+        const removed = await docker([...rm, name]);
+        if (removed.code === 0) gone[kind].push(name);
+        else failed.push(`${name} could not be removed: ${lastLine(removed.stderr) || 'no answer'}`);
+      }
     };
     await each('containers', ['ps', '-a', ...OWN, '--format', '{{.Names}}'], ['rm', '-f']);
     await each('networks', ['network', 'ls', ...OWN, '--format', '{{.Name}}'], ['network', 'rm']);
@@ -669,6 +679,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     known.clear();
     strays.clear();
     log('docker', `removed ${gone.containers.length} container(s), ${gone.networks.length} network(s) and ${gone.volumes.length} volume(s)`);
+    if (failed.length > 0) throw new Error(failed[0]);
     return gone;
   }
 
