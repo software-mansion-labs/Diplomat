@@ -270,9 +270,9 @@ const saveJobs = () => {
   }
 };
 
-// What the broker has carried to the model for a job, or null: as the broker counts it
-// while the job is admitted there, and as it stood when the job was last seen there
-// otherwise. A job's own word of its tokens and its cost is held to it (job.js).
+// What the broker carried to the model for a job, or null: its count while the job is
+// admitted there, the last one seen once it is not. job.js holds the job's own figures
+// to it.
 function spentOf(runId) {
   const job = jobs.get(runId);
   if (job) job.spent = broker.spent(runId) ?? job.spent;
