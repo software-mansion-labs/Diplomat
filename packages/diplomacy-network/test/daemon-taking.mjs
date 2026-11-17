@@ -117,6 +117,24 @@ try {
     await Promise.all([a.kill(), b.kill(), c.kill()]);
   });
 
+  await check('a job that cannot be started in a container that was made is a failed attempt like any other: a requester\'s jobs can bring that about, so nothing is held against the pool and its next job is taken', async () => {
+    const [a, b] = await pool(['pa', 'pb']);
+    fs.writeFileSync(`${b.dockerDir}/fail-exec-sh`, 'exec failed: resource temporarily unavailable\n');
+    await b.admit(1);
+    const first = (await a.ok('/offer', review('pr-1', 'say done'))).taskId;
+    const run = await until('B\'s run of the task to end', async () => (await runsOf(b, first)).find((r) => r.endedAt > 0) ?? null);
+    assert.equal(run.state, 'failed');
+    assert.match(b.log(), new RegExp(`\\] ${run.runId} could not be started: the job could not be started in dn-\\S+: exec failed: resource temporarily unavailable\\n`));
+    await until('the attempt counted', async () => (await offerOf(a, first)).attempt === 2);
+    assert.deepEqual([turns(b), (await b.state()).pools[0].notTaking], [[], '']);
+    assert.deepEqual(b.containers(), [], 'the container made for it went with it');
+
+    const second = (await a.ok('/offer', review('pr-2', 'say done'))).taskId;
+    await until('the second job done by B', async () => (await offerOf(a, second)).state === 'done');
+    assert.deepEqual([(await offerOf(a, second)).executor, turns(b)], [b.pk, []]);
+    await Promise.all([a.kill(), b.kill()]);
+  });
+
   await check('a job of this machine\'s own that it does not take says why in its row: the pool\'s jobs cannot be started here, docker is missing or down, there is no credential for the model, the transport is not up, or the job needs more hours than this machine accepts', async () => {
     const own = async (m, more = {}) => {
       await m.linked();

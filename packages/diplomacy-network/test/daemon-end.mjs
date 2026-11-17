@@ -235,9 +235,9 @@ try {
     await m.linked();
     const run = await waiting(m, await own(m, 'pr-1', 'wait never\nsay never'), 'never');
     const agentPid = m.agent(run.runId).pid;
-    // The engine takes every listing and answers none.
-    const hold = path.join(m.dockerDir, 'hold-ps');
-    fs.writeFileSync(hold, '');
+    // The engine takes every listing and every removal of a container and answers none.
+    const holds = ['hold-ps', 'hold-rm'].map((name) => path.join(m.dockerDir, name));
+    for (const hold of holds) fs.writeFileSync(hold, '');
     m.setConfig({ networkEnabled: false });
     assert.deepEqual(await m.exit, { code: 1, signal: null });
     assert.match(m.log(), /\] switched off with what this daemon made in docker still there: the docker engine did not answer within 1\.5 s\n[^\n]*\] ended\n$/);
@@ -250,7 +250,7 @@ try {
     assert.ok(Date.now() - from < 30000, 'answered, and gone, with the engine still silent');
     assert.deepEqual(world(m), [2, 1, 1]);
 
-    fs.rmSync(hold);
+    for (const hold of holds) fs.rmSync(hold);
     assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null });
     assert.deepEqual([world(m), kept(m)], [[0, 0, 0], ['identity.json', 'pools', 'links.json', 'offers.json']]);
   });
@@ -319,6 +319,8 @@ try {
     assert.deepEqual(await a.exit, { code: 0, signal: null });
     assert.deepEqual([a.docker('run'), a.agent(early.runId), world(a)], [[], null, [0, 0, 0]]);
     assert.ok(!a.log().includes('] taking no job of '), 'a machine that is going holds nothing against the pool');
+    const stopping = (runId) => `] giving ${runId} back: this machine could not start it: this machine is stopping\n`;
+    assert.ok(a.log().includes(stopping(early.runId)), 'and the start is no attempt of the job\'s');
 
     // Its start waits for the engine to make its container.
     const b = await bench.machine('mid2', { env: { DN_SWITCH_OFF_WAIT_MS: '60000' } }).start();
@@ -333,6 +335,7 @@ try {
     fs.rmSync(hold);
     assert.deepEqual(await b.exit, { code: 0, signal: null });
     assert.deepEqual([jobStarts(b), b.agent(late.runId), world(b)], [[], null, [0, 0, 0]]);
+    assert.ok(b.log().includes(stopping(late.runId)));
   });
 
   await check('a start that outlasts the switch-off is said to be left, with a failure: a container the engine makes after the daemon went is removed by the installer', async () => {

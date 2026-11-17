@@ -168,7 +168,7 @@ async function oneJob({ model }) {
       assert.ok(failed.reason.length > 0, 'with a reason');
       const ended = await until('B\'s run over', async () => { const r = await runOf(b, taskId); return r.endedAt > 0 ? r : null; });
       assert.equal(ended.state, 'failed');
-      assert.ok(fs.statSync(ended.log).size > 0, 'the agent ran');
+      assert.ok(fs.statSync(path.join(b.base, 'runs', ended.runId, 'log.jsonl')).size > 0, 'the agent ran');
       assert.equal(api().length, 0, 'nothing reached the forge');
       assert.deepEqual(await a.ok('/withdraw', { taskId }), { ok: true, ended: true });
       console.log(`INFO without a model credential the attempt failed with: ${JSON.stringify(failed.reason)}`);

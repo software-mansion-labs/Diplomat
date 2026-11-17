@@ -195,10 +195,12 @@ try {
     await m.kill();
   });
 
-  await check('a daemon says at its start which of a test\'s settings it was given, which tools were named to it by hand, and shows a loop transport as one; given none, it says nothing', async () => {
-    const m = bench.machine('knobs');
+  await check('a daemon says at its start which of a test\'s settings it was given, which tools were named to it by hand, and which setting asked for no bound where one always holds, and shows a loop transport as one; given none, it says nothing', async () => {
+    const m = bench.machine('knobs', { env: { DN_CONTAINER_PIDS: '0', DN_JOB_IDLE_MS: '0' } });
     m.env.DN_TEST_FAULTS = path.join(m.home, 'faults');
     await m.start();
+    const unbounded = (text) => text.split('\n').filter((line) => line.includes('would leave no bound')).map((line) => line.replace(/^\[[^\]]+\] /, ''));
+    assert.deepEqual(unbounded(m.log()), ['DN_CONTAINER_PIDS', 'DN_JOB_IDLE_MS'].map((name) => `${name}=0 would leave no bound where one always holds: the default is used`));
     const said = (text) => text.split('\n').filter((line) => line.includes('which only a test does')).map((line) => line.replace(/^\[[^\]]+\] /, ''));
     const knob = (name) => `${name}=${m.env[name]} is set, which only a test does: this daemon is not one to run on the network`;
     assert.deepEqual(said(m.log()), ['DN_FORGE_ORIGINS', 'DN_POW_MEMBER_BASE', 'DN_POW_STRANGER_BASE', 'DN_TEST_FAULTS', 'DN_TRANSPORT'].map(knob));
@@ -214,7 +216,7 @@ try {
     await plain.start();
     const { transport: tor } = await until('its transport', async () => { const now = await plain.state(); return now.transport.state === 'ready' ? now : null; });
     assert.doesNotMatch(tor.detail, /test/);
-    assert.deepEqual(said(plain.log()), []);
+    assert.deepEqual([said(plain.log()), unbounded(plain.log())], [[], []]);
     await plain.kill();
   });
 

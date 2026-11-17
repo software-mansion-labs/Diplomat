@@ -15,6 +15,7 @@
 // follows one of the first two lines on the same connection.
 
 import net from 'node:net';
+import { createSparingLog } from './sparing.js';
 
 const SERIAL = '(?:[A-Za-z0-9._-]+|\\[[0-9A-Fa-f:.]+\\])(?::\\d{1,5})?';
 const QUERY = new RegExp(`^(?:host:(?:version|devices|devices-l|features|host-features)|host-serial:${SERIAL}:(?:get-state|get-serialno|get-devpath|features))$`);
@@ -61,7 +62,7 @@ export function adbDevices(target) {
   });
 }
 
-function serve(client, target, log) {
+function serve(client, target, sparing) {
   let pending = Buffer.alloc(0);
   let stage = 'first'; // then `device` after a switch to one, `query` after a query
   let server = null;
@@ -83,7 +84,7 @@ function serve(client, target, log) {
   const refuse = (service) => {
     // A job's own words, cut short and made printable for the log.
     const what = service === false ? 'a request that is not in adb\'s framing' : service.slice(0, 60).replace(/[^\x20-\x7e]/g, '?');
-    log('adb', `refused a job: ${what}`);
+    sparing('refused', 'adb', `refused a job: ${what}`);
     client.off('data', read);
     client.end(`FAIL${frame(`not offered to a task on this machine: ${what}${service === 'host:kill' && stage === 'first' ? KILL_WHY : ''}`)}`);
     // A client that never closes its side is not waited for.
@@ -121,13 +122,15 @@ function serve(client, target, log) {
 
 /// The filter in front of the adb server at `target` (`{ host, port }`). `start()`
 /// resolves to where it listens on this machine's loopback, `{ host, port }`, the same
-/// place every time; `stop()` ends it and every connection through it.
-export function createAdbFilter({ target, log = () => {} }) {
+/// place every time; `stop()` ends it and every connection through it. What it refuses
+/// is written to `log` once a minute, with the number of refusals since.
+export function createAdbFilter({ target, log = () => {}, now = Date.now }) {
+  const sparing = createSparingLog(log, { now });
   const sockets = new Set();
   const listener = net.createServer((client) => {
     sockets.add(client);
     client.on('close', () => sockets.delete(client));
-    serve(client, target, log);
+    serve(client, target, sparing);
   });
   let listening = null;
 

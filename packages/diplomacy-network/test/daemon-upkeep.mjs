@@ -2,8 +2,9 @@
 // after a start that failed, sweeps and prunes on its timers, forgets runs and mirrors
 // that are old, keeps its state directory to the operator, survives a fault in an
 // event's handler and gives up on one that keeps coming back, refuses requests while it
-// stops, takes what it made out of docker when the network is switched off, and keeps
-// what a job has spent of the model for the daemon after it.
+// stops, takes what it made out of docker when the network is switched off, holds what a
+// job says it took of the model to what it carried there for the job, and keeps what a
+// job has spent of the model for the daemon after it.
 // Real daemon processes on scratch directories, with the stand-in docker, tor, forge
 // and agent.
 // Run: node test/daemon-upkeep.mjs
@@ -98,7 +99,7 @@ try {
   });
 
   let up;
-  await check('the sweep and the prune fire on their timer: an idle container goes, an old certificate authority goes once no job runs, and state.json is written no more often than its interval under a burst of changes', async () => {
+  await check('the sweep and the prune fire on their timer: a container goes with its last job, an old certificate authority goes once no job runs, and state.json is written no more often than its interval under a burst of changes', async () => {
     up = await bench.machine('up', { env: { DN_SWEEP_MS: '200', DN_CONTAINER_IDLE_MS: '1500', DN_STATE_WRITE_MS: String(STATE_WRITE_MS) } }).start();
     await up.linked();
     const taskId = await own(up, 'pr-1', 'wait held\nsay swept');
@@ -117,17 +118,17 @@ try {
     const issued = names(leaves);
     fs.writeFileSync(path.join(leaves, 'old.example.crt'), ENDED_IN_2020);
     fs.writeFileSync(path.join(leaves, 'old.example.key'), 'its key\n');
-    await until('the certificate past its end removed with its key', () => !exists(leaves, 'old.example.crt') && !exists(leaves, 'old.example.key'));
-    assert.match(up.log(), /ca removed 1 leaf certificate\(s\) past their end/);
+    // The line is written once the files are gone.
+    await until('the certificate past its end removed with its key, and that said', () => !exists(leaves, 'old.example.crt') && !exists(leaves, 'old.example.key')
+      && /ca removed 1 leaf certificate\(s\) past their end/.test(up.log()));
     await moreSweeps(up);
     assert.deepEqual(names(leaves), issued, 'and no other');
     assert.deepEqual([names(ca), up.containers().includes(run.container)], [['0123456789ab', current, 'current'].sort(), true], 'nothing goes while a job runs');
     up.release('held');
     await done(up, taskId);
     await until('the old authority pruned', () => !exists(ca, '0123456789ab'));
-    await until('the idle container removed', () => up.containers().length === 0);
+    await until('the container removed with its last job', () => up.containers().length === 0 && up.log().includes(`removed ${run.container} with its last job`));
     assert.deepEqual(names(ca), [current], 'the one a next job of these hosts is given stays');
-    assert.match(up.log(), new RegExp(`removing ${run.container}: idle`));
 
     // Every change moves the snapshot; the file follows one interval behind at most, and
     // is not written more often than that. Four writes begin three intervals apart; the
@@ -160,8 +161,7 @@ try {
     assert.deepEqual([kept(ended), kept(going), exists(mirror)], [[true, true, true], [true, true, false], true], 'all of it is there the day it ended');
     // A day and an hour on: both runs, and the mirror of a pool that is still linked.
     for (const part of [parts(ended)[0], parts(ended)[2], parts(going)[0], mirror]) age(part, 25);
-    await until('the ended run forgotten', () => kept(ended).every((there) => !there));
-    assert.match(up.log(), /forgot 1 run\(s\) that ended over 24 h ago/);
+    await until('the ended run forgotten, and that said', () => kept(ended).every((there) => !there) && /forgot 1 run\(s\) that ended over 24 h ago/.test(up.log()));
     await moreSweeps(up);
     assert.deepEqual([kept(going), exists(mirror)], [[true, true, false], true], 'the run that goes on stays, and so does the mirror');
     assert.ok(Date.now() - fs.statSync(mirror).mtimeMs < 3600000, 'a linked pool\'s mirror is as young as the last sweep');
@@ -178,6 +178,24 @@ try {
     age(mirror, 25);
     await until('the mirror removed', () => !exists(mirror));
     assert.deepEqual(kept(going), [true, true, true], 'a run that ended a moment ago is kept');
+
+    // A directory this user cannot remove, as root's files in a job's records are on an
+    // engine that runs containers as root: the engine is asked to, and while it stands
+    // the run is not forgotten.
+    const locked = path.join(parts(going)[1], 'locked');
+    fs.mkdirSync(locked);
+    fs.writeFileSync(path.join(locked, 'file'), '');
+    fs.chmodSync(locked, 0o500);
+    const asked = () => up.docker('run').filter((call) => call.includes('find') && call.includes(`/r/${going.runId}`) && call.includes('-delete')).length;
+    for (const part of [parts(going)[0], parts(going)[2]]) age(part, 25);
+    try {
+      await until('the engine asked to remove it, twice', () => asked() >= 2);
+      assert.deepEqual(kept(going), [true, true, true], 'met again at the next look');
+    } finally {
+      // Whatever came of it, the bench can remove its own directory.
+      fs.chmodSync(locked, 0o700);
+    }
+    await until('the run forgotten', () => kept(going).every((there) => !there));
     await up.kill();
   });
 
@@ -226,11 +244,12 @@ try {
 
     const open = [];
     const walk = (at) => {
-      const st = fs.lstatSync(at);
+      // What the daemon replaces a file by may be gone again before it is looked at.
+      const st = fs.lstatSync(at, { throwIfNoEntry: false });
       // A link has no mode of its own to speak of.
-      if (st.isSymbolicLink()) return;
+      if (!st || st.isSymbolicLink()) return;
       if ((st.mode & 0o077) !== 0) open.push(`${path.relative(m.base, at) || '.'} ${(st.mode & 0o777).toString(8)}`);
-      if (st.isDirectory()) for (const name of fs.readdirSync(at)) walk(path.join(at, name));
+      if (st.isDirectory()) for (const name of names(at)) walk(path.join(at, name));
     };
     walk(m.base);
     assert.deepEqual(open, []);
@@ -319,7 +338,8 @@ try {
     m.setConfig({ networkEnabled: false });
     assert.deepEqual(await gone(m), { code: 0, signal: null });
     assert.deepEqual([world(m), alive(agentPid)], [[0, 0, 0], false]);
-    assert.match(m.log(), /removed 2 container\(s\), 1 network\(s\) and 1 volume\(s\)/);
+    // The stopped job's release took them; the daemon's end found nothing more.
+    assert.match(m.log(), new RegExp(`removed ${run.container} with its last job[\\s\\S]*removed 0 container\\(s\\), 0 network\\(s\\) and 0 volume\\(s\\)`));
     assert.equal(exists(m.dockerDir, 'images', encodeURIComponent(m.docker('build')[0][m.docker('build')[0].indexOf('-t') + 1])), true, 'the image is kept');
 
     // A daemon that died with a job going. Stopped while the network is on, nothing is
@@ -363,7 +383,40 @@ try {
     await m.kill();
   });
 
-  await check('what a job has spent of the model is kept for the daemon after it, which counts on from there', async () => {
+  await check('a container the engine does not measure, look after look, is held to no allowance: its job is stopped as a failed attempt that says so, and it goes', async () => {
+    const m = await bench.machine('um', { env: { DN_SWEEP_MS: '200', DN_CONTAINER_DISK_BYTES: String(2 ** 30) } }).start();
+    await m.linked();
+    const taskId = await own(m, 'pr-1', 'wait never\nsay never');
+    const run = await waiting(m, taskId, 'never');
+    await moreSweeps(m);
+    assert.equal(m.containers().includes(run.container), true, 'measured, it is left alone');
+    // The probe a container is measured by cannot be run.
+    fs.writeFileSync(path.join(m.dockerDir, 'fail-run-sh'), 'cannot start a stopped process\n'.repeat(3));
+    await until('the offer to say why', async () => (await offerOf(m, taskId)).reason === 'the container could not be measured against its disk allowance');
+    assert.equal((await offerOf(m, taskId)).attempt, 2, 'which cost the task an attempt');
+    await until('the container discarded', () => m.log().includes(`discarded ${run.container}`));
+    assert.match(m.log(), new RegExp(`\\] ${run.container} could not be measured against the ${2 ** 30} bytes of this machine's disk a container gets: stopping its 1 job\\(s\\) and removing it\n`));
+    assert.equal(count(m.log(), 'the disk use of'), 3, 'after three looks, not before');
+    await m.kill();
+  });
+
+  await check('what a job says it took of the model stands no higher than the traffic this machine carried to the model for it: one that sent nothing took nothing, and one stopped after it named its figures is held to what was carried before its way out was closed', async () => {
+    const m = await bench.machine('sw').start();
+    await m.linked();
+    const thrifty = await own(m, 'pr-1', 'unsent\nsay sent nothing');
+    await done(m, thrifty);
+    assert.deepEqual((await offerOf(m, thrifty)).outcome, { ok: true, summary: 'sent nothing', usd: 0, tokens: 0, runner: 'claude', model: '' });
+
+    const taskId = await own(m, 'pr-2', 'result\nwait never');
+    const run = await waiting(m, taskId, 'never');
+    await m.ok('/stop-run', { runId: run.runId });
+    const file = path.join(m.base, 'runs', `${run.runId}.outcome.json`);
+    const kept = await until('the stopped job\'s outcome', () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } });
+    assert.deepEqual([kept.state, kept.tokens, kept.usd], ['stopped', 120, 0.42]);
+    await m.kill();
+  });
+
+  await check('what a job has spent of the model is kept for the daemon after it, which counts on from there and holds the job\'s figures to it', async () => {
     const m = await bench.machine('sp').start();
     await m.linked();
     const taskId = await own(m, 'pr-1', 'wait go\nmodel\nsay asked');
@@ -385,6 +438,9 @@ try {
     const step = m.agent(run.runId).steps.find((s) => s.verb === 'model');
     assert.equal(step.status, 429);
     assert.match(JSON.stringify(step.body), /this job has used all of the model it gets on this executor/);
+    // 123 bytes could have held the 120 tokens it names, and USD 80 a million of its 0.42.
+    const { outcome } = await offerOf(m, taskId);
+    assert.deepEqual([outcome.tokens, outcome.usd], [120, 123 * 80 / 1e6]);
     await m.kill();
   });
 

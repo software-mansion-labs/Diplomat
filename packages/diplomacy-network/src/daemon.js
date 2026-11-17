@@ -28,6 +28,7 @@ import { createContainers } from './executor/container.js';
 import { attachJob, forgetRuns, readOutcome, startJob, stopJob, unended, watch } from './executor/job.js';
 import { createLLM } from './executor/llm.js';
 import { createMirrors } from './executor/mirror.js';
+import { OwnFault } from './executor/own-fault.js';
 import { createWeighing } from './executor/weigh.js';
 import { createNode } from './node/node.js';
 import { createStore } from './node/store.js';
@@ -38,7 +39,7 @@ import { createTransport } from './transport/index.js';
 import {
   ADB_SERVER, BASE_DIR, CLAUDE_BIN, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, CONTAINER_DISK_BYTES, DISCOVERY_PATH,
   DOCKER_BIN, EXECUTOR_CHECK_MS, EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GH_BIN, GIT_BIN, GLAB_BIN, HOURS_FLOOR,
-  JOBS_PATH, JOBS_WRITE_MS, LOG_PATH, MIRROR_KEEP_MS, OPENSSL_BIN, POOL_RETRY_MAX_MS, POOL_RETRY_MS, RECONCILE_MS, RUN_KEEP_MS,
+  JOBS_PATH, JOBS_WRITE_MS, LOG_PATH, MIRROR_KEEP_MS, NOT_BOUNDS, OPENSSL_BIN, POOL_RETRY_MAX_MS, POOL_RETRY_MS, RECONCILE_MS, RUN_KEEP_MS,
   SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH, OFF_REMOVES, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS, TEST_FAULTS_PATH, TEST_KNOBS,
   TOOL_PATH, TOR_BIN, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS, locate,
 } from './paths.js';
@@ -95,8 +96,7 @@ function lookForTools() {
     const at = locate(bin);
     if (located.get(tool) === at) continue;
     located.set(tool, at);
-    // One named by hand is said to be: a stand-in in a tool's place takes from the daemon
-    // whatever that tool gives it.
+    // One named by hand is said to be: a stand-in has whatever the daemon gives the tool.
     const named = bin === tool ? '' : `, which DN_${tool.toUpperCase()} names`;
     log(at ? `${tool} is ${at}${named}` : `${tool} is ${bin.includes('/') ? `not at ${bin}` : `in none of ${TOOL_PATH}`}`);
   }
@@ -240,10 +240,11 @@ const mirrors = createMirrors({ log });
 const broker = createBroker({ log, ca, llm, mirrors, onForge: (job, request) => node.actFor(job.runId)(request) });
 const containers = createContainers({ log, broker: () => broker.address() });
 
-const jobs = new Map(); // run id -> { container, pool, peer, token, generation, pid, forwards, release, stopping, ended, verdict, gone }
+const jobs = new Map(); // run id -> { container, pool, peer, token, generation, pid, forwards, spent, release, stopping, ended, verdict, gone }
 // Until the jobs an earlier daemon left were looked at, a run this daemon holds no job
-// for may still be running: nothing can be said of it, and no job is started, since a
-// container this daemon has counted no job in is restarted before its first.
+// for may still be running: nothing can be said of it, and no job is started, since
+// what stands under a container's name is removed for the first job this daemon counts
+// in it.
 let takenUp = false;
 const lookedAt = Promise.withResolvers();
 let report = () => {};
@@ -268,6 +269,15 @@ const saveJobs = () => {
     log(`jobs.json is as it was: ${err?.message ?? err}`);
   }
 };
+
+// What the broker carried to the model for a job, or null: its count while the job is
+// admitted there, the last one seen once it is not. job.js holds the job's own figures
+// to it.
+function spentOf(runId) {
+  const job = jobs.get(runId);
+  if (job) job.spent = broker.spent(runId) ?? job.spent;
+  return job?.spent ?? null;
+}
 
 // The pool as the executor's parts name it.
 function poolOf(link) {
@@ -346,8 +356,9 @@ const stuck = new Map();
 function leaveAlone({ id, path: checkout }, why) {
   const row = (stuck.get(id)?.row ?? 0) + 1;
   const wait = Math.min(POOL_RETRY_MAX_MS, POOL_RETRY_MS * 2 ** (row - 1));
-  stuck.set(id, { why, until: Date.now() + wait, row, path: checkout });
   log(`taking no job of ${id} for ${Math.round(wait / 1000)} s: ${why}`);
+  // Counted from when it was said.
+  stuck.set(id, { why, until: Date.now() + wait, row, path: checkout });
 }
 
 // A pool whose wait is over is taken from again once its mirror can be made, the one
@@ -369,7 +380,7 @@ async function retryPools() {
       held.why = '';
       log(`taking jobs of ${id} again`);
     } catch (err) {
-      leaveAlone(link, String(err?.message ?? err));
+      leaveAlone(link, err.message);
     }
   }
 }
@@ -380,7 +391,7 @@ async function startRun({ runId, pool: link, peer, spec }) {
   }
   // A daemon on its way out makes no container and starts no job: one that is switched
   // off has listed what it removes by then, or is about to.
-  const unlessEnding = () => { if (ending) throw new Error('this machine is stopping'); };
+  const unlessEnding = () => { if (ending) throw new OwnFault('this machine is stopping'); };
   // Not counted as being started while it waits: a daemon that ends first never gets to it.
   await lookedAt.promise;
   starting += 1;
@@ -401,26 +412,29 @@ async function startRun({ runId, pool: link, peer, spec }) {
       release, stopping: null, ended: false,
     });
     saveJobs();
-    const started = await startJob({ run: { runId, pool }, container, spec, proxy, env: llm.env(), forwards });
+    const started = await startJob({ run: { runId, pool }, container, spec, proxy, env: llm.env(), forwards, spent: () => spentOf(runId) });
     // The daemon after this one stops the job by this group, and by nothing the job can write.
     jobs.get(runId).pid = started.pid;
     saveJobs();
     log(`${runId} started in ${container.name} for ${peer}${forwards.length > 0 ? `, with ${forwards.map((f) => f.name).join(', ')} forwarded` : ''}`);
     stuck.delete(pool.id);
     follow(runId);
-    return { container: container.name, log: started.log };
+    // Where the job's stream is kept is not said: what stands there is the job's to write.
+    return { container: container.name };
   } catch (err) {
     broker.removeJob(runId);
     release();
     if (container) await containers.release({ name: container.name, runId }).catch(() => {});
     jobs.delete(runId);
     saveJobs();
-    // No job ran, and why not is this machine's own affair: the node has stopped the run
-    // and given it back by the time it hears of the failure, which it would count as an
-    // attempt.
-    const why = String(err?.message ?? err);
-    if (!ending) leaveAlone(link, why);
-    giveBack(runId, `this machine could not start it: ${why}`);
+    // An OwnFault: no job ran, and why not is this machine's own affair. The node has
+    // stopped the run and given it back by the time it hears of the failure, which it
+    // would count as an attempt - as it does any other, which the requester's jobs may
+    // have brought about.
+    if (err instanceof OwnFault) {
+      if (!ending) leaveAlone(link, err.message);
+      giveBack(runId, `this machine could not start it: ${err.message}`);
+    } else log(`${runId} could not be started: ${err?.message ?? err}`);
     throw err;
   } finally {
     starting -= 1;
@@ -436,6 +450,8 @@ function stopRun(runId, reason) {
   if (!job) return Promise.resolve();
   job.stopping ??= (async () => {
     log(`stopping ${runId}: ${reason}`);
+    // What was carried to the model for it is kept: its outcome is read after this.
+    spentOf(runId);
     broker.removeJob(runId);
     while (jobs.has(runId)) {
       try {
@@ -473,6 +489,7 @@ const executor = {
 };
 
 const OUTGREW = 'the container outgrew its disk allowance';
+const UNMEASURED = 'the container could not be measured against its disk allowance';
 
 // A job this daemon can no longer serve is given back: the node stops it for that
 // reason and releases its claim, which costs its requester no attempt. One the node
@@ -505,7 +522,7 @@ async function takeUp(kept) {
         await containers.release({ name: container.name, runId });
         continue;
       }
-      if (!attachJob({ runId, container, pid: was.pid })) {
+      if (!attachJob({ runId, container, pid: was.pid, spent: () => spentOf(runId) })) {
         await containers.release({ name: container.name, runId });
         continue;
       }
@@ -557,32 +574,39 @@ async function checkExecutor() {
 
 // A container that holds more of this machine's disk than a container gets goes, and its
 // jobs with it: each is a failed attempt, since whichever of them filled it would fill
-// the next one too. One with a job still being started is looked at again next time.
+// the next one too. So does one the engine has not measured for several looks running
+// (`bytes` null): what cannot be measured is held to no allowance. One with a job still
+// being started is looked at again next time.
 async function evict({ name, bytes, jobs: counted }) {
   const held = counted.map((runId) => jobs.get(runId));
   if (held.some((job) => !job?.gone)) return;
-  log(`${name} holds ${bytes} bytes of this machine's disk, over the ${CONTAINER_DISK_BYTES} a container gets: stopping its ${counted.length} job(s) and removing it`);
+  const [said, verdict] = bytes === null
+    ? [`${name} could not be measured against the ${CONTAINER_DISK_BYTES} bytes of this machine's disk a container gets`, UNMEASURED]
+    : [`${name} holds ${bytes} bytes of this machine's disk, over the ${CONTAINER_DISK_BYTES} a container gets`, OUTGREW];
+  log(`${said}: stopping its ${counted.length} job(s) and removing it`);
   counted.forEach((runId, i) => {
-    held[i].verdict = OUTGREW;
-    stopRun(runId, OUTGREW);
+    held[i].verdict = verdict;
+    stopRun(runId, verdict);
   });
   await Promise.all(held.map((job) => job.gone));
   await containers.discard(name);
 }
 
 // What is not kept for ever, looked at every SWEEP_MS, each on its own: a container
-// over its disk allowance, one no job has used for CONTAINER_IDLE_MS, every certificate
-// authority but the one each set of hosts is given next (a job is answered from the one
-// it was started under, so none goes while a job runs), a leaf certificate past its end,
-// the directory and the outcome of a run RUN_KEEP_MS after it ended, and the mirror of a
-// pool that has not been linked, or has been left, for MIRROR_KEEP_MS.
+// over its disk allowance or not to be measured, what container.js's sweep takes - what
+// is left under a container's name that no job is in, and the images no job is started
+// in - every certificate authority but the one each set of hosts is given next (a job
+// is answered from the one it was started under, so none goes while a job runs), a leaf
+// certificate past its end, the directory and the outcome of a run RUN_KEEP_MS after it
+// ended, and the mirror of a pool that has not been linked, or has been left, for
+// MIRROR_KEEP_MS.
 const upkeep = [
   ['containers over their disk allowance', async () => { for (const over of await containers.overQuota()) await evict(over); }],
-  ['idle containers', () => containers.sweep()],
+  ['what containers left behind', () => containers.sweep()],
   ['old certificate authorities', () => { if (jobs.size === 0) ca.prune(); }],
   ['certificates past their end', () => { ca.dropExpired(); }],
-  ['ended runs', () => {
-    const gone = forgetRuns({ olderThanMs: RUN_KEEP_MS });
+  ['ended runs', async () => {
+    const gone = await forgetRuns({ olderThanMs: RUN_KEEP_MS, containers });
     if (gone.length > 0) log(`forgot ${gone.length} run(s) that ended over ${Math.round(RUN_KEEP_MS / 3600000)} h ago`);
   }],
   ['mirrors', () => {
@@ -920,6 +944,7 @@ function setUp() {
   }, 0o600);
   log('daemon listening', SOCKET_PATH, 'pid', process.pid);
   for (const knob of TEST_KNOBS) log(`${knob} is set, which only a test does: this daemon is not one to run on the network`);
+  for (const said of NOT_BOUNDS) log(`${said} would leave no bound where one always holds: the default is used`);
 
   store = createStore({ dir: BASE_DIR, log });
   // The transport is made for the host's key, which the node would otherwise make itself.

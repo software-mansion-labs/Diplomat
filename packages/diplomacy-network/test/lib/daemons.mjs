@@ -2,7 +2,7 @@
 // under one scratch root - its state directory, Diplomat's config, a home, a git identity,
 // a forge credential, a checkout of the pool's repository and a stand-in docker - and
 // nothing a daemon is given leads to the operator's own. The machines share a loop
-// directory (their network) and a stand-in forge.
+// directory (their network), a stand-in forge and a stand-in model provider.
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { killDaemonsUnder, onInterrupt } from '../../../daemon-core/src/test-interrupt.js';
 import { GITLAB_HOST, git, startFakeForge } from './fake-forge.mjs';
+import { startFakeModel } from './fake-model.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// The daemon under test.
@@ -110,11 +111,12 @@ export async function fakeAdb({ version = 41, devices = 'emulator-5554\tdevice\n
   return { port: server.address().port, asked, close: () => new Promise((resolve) => server.close(resolve)) };
 }
 
-/// The bench: `{ root, forge, loopDir, machine(name, options), close() }`.
+/// The bench: `{ root, forge, model, loopDir, machine(name, options), close() }`.
 export async function createBench() {
   // The real path: a real docker engine is given directories under it to mount.
   const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dn-'));
   const forge = await startFakeForge();
+  const model = await startFakeModel(root);
   const loopDir = path.join(root, 'loop');
   // Where the stand-in tors find one another.
   const torNet = path.join(root, 'tor-net');
@@ -139,10 +141,11 @@ export async function createBench() {
 
   /// A machine, not yet started. `docker` is 'fake', 'none' (no docker binary) or 'real';
   /// `transport` is 'loop', 'tor' (the stand-in tor) or 'real-tor'; `model` is 'fake' (a
-  /// key that is no key) or 'real' (this machine's own Claude login, for which the
-  /// daemon keeps the real home); `timing` is 'fast' or 'default' (the network's own
+  /// key that is no key and, under the stand-in docker, the stand-in provider in place of
+  /// the real one) or 'real' (this machine's own Claude login, for which the daemon keeps
+  /// the real home); `timing` is 'fast' or 'default' (the network's own
   /// constants); `env` is put over everything else the daemon is given.
-  function machine(name, { docker = 'fake', transport = 'loop', model = 'fake', timing = 'fast', env: extra = {} } = {}) {
+  function machine(name, { docker = 'fake', transport = 'loop', model: provider = 'fake', timing = 'fast', env: extra = {} } = {}) {
     const home = path.join(root, name);
     const base = path.join(home, 'b');
     const bin = path.join(home, 'bin');
@@ -168,7 +171,7 @@ export async function createBench() {
       `[url "http://oauth2:${gitlabToken}@127.0.0.1:${forge.port}/h/${GITLAB_HOST}/"]`, `\tinsteadOf = https://${GITLAB_HOST}/`, '',
     ].join('\n'));
     const env = {
-      PATH: process.env.PATH, TMPDIR: os.tmpdir(), HOME: model === 'real' ? os.homedir() : home, LANG: 'C',
+      PATH: process.env.PATH, TMPDIR: os.tmpdir(), HOME: provider === 'real' ? os.homedir() : home, LANG: 'C',
       DN_SCRATCH: root, DN_BASE_DIR: base, DIPLOMAT_CONFIG: configPath,
       GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0',
       DN_FORGE_ORIGINS: forge.env.DN_FORGE_ORIGINS,
@@ -176,9 +179,12 @@ export async function createBench() {
       DN_GLAB: script('glab', `[ "$1 $2 $3 $4 $5" = "config get token --host ${GITLAB_HOST}" ] && echo "${gitlabToken}" && exit 0\nexit 1`),
       // No Keychain and no login of the operator's: the model credential is a key that
       // is no key.
-      ...(model === 'real' ? { DN_MODEL_TOKEN_PATH: path.join(home, 'model-token') } : {
+      ...(provider === 'real' ? { DN_MODEL_TOKEN_PATH: path.join(home, 'model-token') } : {
         DN_SECURITY: script('security', 'exit 44'), DN_CLAUDE: script('claude-cli', 'exit 1'), ANTHROPIC_API_KEY: 'sk-ant-api03-stand-in',
       }),
+      // The stand-in agent's requests to the model provider go to the stand-in one; the
+      // real agent's, in a real container, go where they always do.
+      ...(provider === 'real' || docker === 'real' ? {} : model.env),
       DN_TRANSPORT: transport === 'loop' ? 'loop' : 'tor', DN_LOOP_DIR: loopDir,
       ...(transport === 'tor' ? { DN_TOR: FAKE_TOR, FAKE_TOR_NET: torNet } : {}),
       // The real docker CLI finds its plugins and its engine through its own config
@@ -345,7 +351,7 @@ export async function createBench() {
   }
 
   return {
-    root, forge, loopDir, machine,
+    root, forge, model, loopDir, machine,
     /// The forge's requests so far that carried `token`, as `[method, host, path]`.
     sentWith(token) {
       const ways = [`Bearer ${token}`, ...['x-access-token', 'oauth2'].map((user) => `Basic ${Buffer.from(`${user}:${token}`).toString('base64')}`)];
@@ -366,6 +372,7 @@ export async function createBench() {
       killDaemonsUnder(DAEMON, 'DN_SCRATCH', root);
       for (const m of machines) m.killJobs();
       await forge.close();
+      await model.close();
       // What a killed daemon had asked of the stand-in engine can still be writing here:
       // removed again until nothing is.
       fs.rmSync(root, { recursive: true, force: true, maxRetries: 40, retryDelay: 100 });
