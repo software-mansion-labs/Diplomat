@@ -243,7 +243,7 @@ async function destination(rule, segments, ctx, refs) {
   const heads = [];
   for (const ref of refs || [null]) {
     const branch = ref === null ? undefined : ref.replace(/^refs\/heads\//, '');
-    for (const pull of await ctx.pullsByHead(branch, rule.fork)) if (mine(pull) && (branch === undefined || pull.headRef === branch)) heads.push(`refs/heads/${pull.headRef}`);
+    for (const pull of await ctx.pullsByHead(branch, rule.fork)) if (mine(pull)) heads.push(`refs/heads/${pull.headRef}`);
   }
   if (heads.length === 0) refuse(`no open pull request by ${scope.author} has its head branch here`);
   return { fork, heads };
@@ -460,9 +460,10 @@ export const branchLabel = (ref, fork) => (fork === undefined ? ref : `${lower(f
 /// The check for `POST .../git-receive-pack`. `rule` is the matched rule (`refs`, `create`,
 /// `head`, `fork`, `denyPaths`, `repo`), `segments` the request path's parts and `body`
 /// the request body. Resolves to `{ ok: true, created }` - the branches the push would
-/// create, by their `branchLabel`, for the caller to count against `create` - or
-/// `{ ok: false, reason }`. The push goes to the pool's repository, or under a rule with
-/// `fork` (an account) to that account's own fork of it. A ref may be created when
+/// create, each as `{ branch, sha }` with its `branchLabel` and the commit it would be at,
+/// for the caller to count against `create` - or `{ ok: false, reason }`. The push goes
+/// to the pool's repository, or under a rule with `fork` (an account) to that account's
+/// own fork of it. A ref may be created when
 /// `create` is positive and `refs` covers it, and updated when it is the head branch
 /// `head` names or one of `ctx.state.branches`, the branches the forge accepted from
 /// this task. The default branch and a branch the forge reports as protected are never
@@ -489,7 +490,7 @@ export function checkPush(rule, segments, body, ctx = {}) {
       if (ZERO.test(cmd.new)) refuse(`${cmd.ref}: a task may not delete a ref`);
       if (ZERO.test(cmd.old)) {
         if (!(rule.create > 0) || !covered(cmd.ref)) refuse(`${cmd.ref}: this task may not create that ref`);
-        created.push(branchLabel(cmd.ref, fork?.name));
+        created.push({ branch: branchLabel(cmd.ref, fork?.name), sha: cmd.new });
       } else if (!heads.includes(cmd.ref) && !own.includes(branchLabel(cmd.ref, fork?.name))) {
         refuse(`${cmd.ref}: this task may not update that ref`);
       }

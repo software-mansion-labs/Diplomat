@@ -371,8 +371,14 @@ export class Pool {
         claim: holding[0] ?? null,
       });
     }
-    this.#tasks = { settled, now, rows };
+    this.#tasks = { settled, now, rows, byTask };
     return rows;
+  }
+
+  /// The live claim records of a task at `now`, whatever their state.
+  claims(taskId, now) {
+    this.tasks(now);
+    return this.#tasks.byTask.get(taskId)?.claims ?? [];
   }
 
   /// One task of `tasks(now)`, or null when no member offers it.

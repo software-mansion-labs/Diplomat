@@ -3,10 +3,11 @@
 // Run: node test/core-lease.mjs
 
 import assert from 'node:assert/strict';
+import { b64u } from '../src/core/canon.js';
 import { verifyClaim } from '../src/core/claims.js';
 import { sign, verify } from '../src/core/identity.js';
 import {
-  buildPing, eligible, endClaim, endsAt, extendClaim, heldUntil, isActive, leaseAt, pingDue, pingWindow, speaksFor, verifyLease,
+  buildPing, eligible, endClaim, extendClaim, heldUntil, isActive, leaseAt, pingDue, pingWindow, speaksFor, verifyLease,
   verifyPing,
 } from '../src/core/lease.js';
 import { backing, signRecord } from '../src/core/records.js';
@@ -18,6 +19,7 @@ function check(name, fn) {
 }
 
 const TASK = `${POOL}#review:pr-578@octocat`;
+const JOB = b64u(Buffer.alloc(32, 7));
 const [LEASE, GRACE, LEAD, DAY] = [7200, 600, 600, 24 * 3600];
 
 // Three hosts; the first offers the task and the second holds it since T0.
@@ -85,13 +87,16 @@ check('a claim is leased two hours at a time from when it was made, never past i
 check('a claim is active while held and less than ten minutes past its lease', () => {
   const { claim, executor } = held();
   assert.deepEqual([T0, T0 + LEASE, T0 + LEASE + GRACE - 1, T0 + LEASE + GRACE].map((now) => isActive(claim, now)), [true, true, true, false]);
-  assert.equal(endsAt(claim), T0 + LEASE + GRACE);
   const released = endClaim(executor, claim, 'released', T0 + 50);
   assert.equal(isActive(released, T0 + 51), false);
-  assert.equal(endsAt(released), T0 + 50);
   assert.deepEqual([released.seq, released.state, released.at, released.leaseUntil, released.ping], [1, 'released', T0 + 50, claim.leaseUntil, undefined]);
   assert.equal(verifyClaim(released), null);
-  assert.equal(verifyClaim(endClaim(executor, claim, 'completed', T0 + 50)), null);
+  // A completed claim names the job its run did, and only a completed one does.
+  const completed = endClaim(executor, claim, 'completed', T0 + 50, JOB);
+  assert.deepEqual([completed.spec, released.spec, verifyClaim(completed)], [JOB, undefined, null]);
+  assert.equal(verifyClaim(resign(executor, released, { state: 'completed' })), 'bad-claim', 'completed, and no job named');
+  assert.equal(verifyClaim(resign(executor, released, { spec: JOB })), 'bad-claim', 'a job named by a claim that was given back');
+  assert.equal(verifyClaim(resign(executor, claim, { spec: JOB })), 'bad-claim', 'a job named by a claim still held');
 });
 
 check('a ping is due from ten minutes before the lease ends until the claim lapses', () => {
@@ -198,7 +203,7 @@ check('a claim whose times are not the ones its start, hours and seq dictate is 
     'a ping sent after the lapse': [resign(executor, next, { ping: repinged(requester, ping, { ts: T0 + LEASE + GRACE }) }), 'bad-ping'],
     'a ping whose signature is forged': [resign(executor, next, { ping: { ...ping, by: hosts[2].id.pk } }), 'bad-ping'],
     'an ended claim at seq 0': [resign(executor, claim, { state: 'released' }), 'bad-lease'],
-    'an ended claim carrying a ping': [resign(executor, next, { state: 'completed' }), 'bad-lease'],
+    'an ended claim carrying a ping': [resign(executor, next, { state: 'completed', spec: JOB }), 'bad-lease'],
     'an ended claim leased past its deadline': [resign(executor, claim, { seq: 1, state: 'released', leaseUntil: claim.deadline + 1 }), 'bad-lease'],
   };
   for (const [what, [record, code, merged = code]] of Object.entries(bad)) {
@@ -249,7 +254,7 @@ check('a lapsed claim makes its task available again for every host at the same 
 check('a claim its executor released or completed frees the task at once', () => {
   for (const state of ['released', 'completed']) {
     const { hosts, claim, executor } = held();
-    const ended = endClaim(executor, claim, state, T0 + 30);
+    const ended = endClaim(executor, claim, state, T0 + 30, JOB);
     for (const h of hosts) {
       assert.deepEqual(h.pool.merge(ended, T0 + 30).refused, []);
       assert.deepEqual([h.pool.task(TASK, T0 + 30).state, h.pool.task(TASK, T0 + 30).claim], ['available', null]);
@@ -265,7 +270,7 @@ check('every version of a claim is dropped a day after it was signed, for every 
   assert.equal(Object.hasOwn(hosts[0].pool.index(T0 + DAY), key), false);
   assert.equal(hosts[1].pool.claimSnapshot(TASK, T0 + DAY - 1).gen, 1, 'the executor\'s next claim of the task is its second');
   assert.equal(hosts[1].pool.claimSnapshot(TASK, T0 + DAY).gen, 0);
-  const ended = endClaim(executor, claim, 'completed', T0 + 100);
+  const ended = endClaim(executor, claim, 'completed', T0 + 100, JOB);
   // The offer the claim stands on is signed again, so the claim's own age decides.
   for (const h of hosts) h.pool.merge(offer(requester, { seq: 1, at: T0 + 400 }), T0 + 100);
   hosts[1].pool.merge(ended, T0 + 100);
@@ -314,7 +319,7 @@ check('only the executor of the claim a host holds speaks for its round, while i
   assert.equal(by(executor.pk, roundId(9), T0 + 5), false, 'another round');
   assert.equal(by(executor.pk, claim.round, T0 + 5, null), false, 'no claim held');
   for (const state of ['completed', 'released']) {
-    const ended = endClaim(executor, claim, state, T0 + 50);
+    const ended = endClaim(executor, claim, state, T0 + 50, JOB);
     assert.equal(by(executor.pk, claim.round, lapse + 5000, ended), true, `after it ${state} the claim itself`);
     assert.equal(by(requester.pk, claim.round, T0 + 60, ended), false);
   }

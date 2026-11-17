@@ -62,7 +62,9 @@
 //   can tell apart.
 // - The answer about the repository itself, and about a branch, goes out cut to what a
 //   job needs (`pick`): the whole answer holds a clone token or a runner registration
-//   token, the requester's permissions and the protection settings.
+//   token, the requester's permissions and the protection settings. A GraphQL document
+//   reads the same of the repository (`repoLeaves` in graphql.js), and on GitHub the
+//   requester's access level, which `gh pr create` asks for.
 // - A push is addressed by the pull request, not by a branch name: the head branch is
 //   whatever the forge says that PR's head is when the push arrives, in the repository
 //   the forge says holds it.
@@ -74,9 +76,10 @@
 // - A draft opened from a branch in the fork is still a pull request of the pool's
 //   repository: GitHub takes the head as "account:branch", GitLab opens the merge
 //   request on the fork's project with the pool's project as its pinned target.
-// - A push may not change CI definitions (`denyPaths`) except to what the forge already
-//   holds, which is what merging the base branch does. What a definition runs or includes
-//   from elsewhere in the repository is a file like any other.
+// - A pushed commit may not change CI definitions (`denyPaths`) from what one of its
+//   parents holds. A merge can so bring a definition in as any branch of the repository
+//   has it, which is what merging the base branch does. What a definition runs or
+//   includes from elsewhere in the repository is a file like any other.
 // - A review is written through the review lifecycle the review prompt prescribes; the
 //   one-call shortcuts (GraphQL addPullRequestReview, a top-level PR comment) are not
 //   listed, and a `review` task's replies are made inside review threads only.
@@ -114,7 +117,7 @@ const GITHUB_REPO_PICK = [
   'id', 'node_id', 'name', 'full_name', 'owner', 'private', 'visibility', 'fork', 'archived', 'disabled', 'is_template',
   'html_url', 'url', 'clone_url', 'ssh_url', 'git_url', 'description', 'homepage', 'default_branch', 'language', 'topics',
   'has_issues', 'has_projects', 'has_wiki', 'has_discussions', 'license', 'created_at', 'updated_at', 'pushed_at', 'size',
-  'open_issues_count',
+  'open_issues_count', 'allow_merge_commit', 'allow_squash_merge', 'allow_rebase_merge',
 ];
 // A branch without its protection settings.
 const GITHUB_BRANCH_PICK = ['name', 'commit', 'protected'];
@@ -140,6 +143,8 @@ const GITLAB_PROJECT_PICK = [
   'remove_source_branch_after_merge', 'only_allow_merge_if_pipeline_succeeds', 'only_allow_merge_if_all_discussions_are_resolved',
   'license', 'license_url',
 ];
+// A GitLab branch without who may push to it or merge into it, the requester included.
+const GITLAB_BRANCH_PICK = ['name', 'commit', 'merged', 'protected', 'default', 'web_url'];
 const GITHUB_ROOTS = ['repository', 'viewer', 'rateLimit', '__type', 'search', 'node'];
 const GITLAB_ROOTS = ['project', 'currentUser'];
 
@@ -362,6 +367,7 @@ function gitlab({ kind, options, target, item, me }) {
   for (const [trees, why] of GITLAB_DENIED) for (const tree of trees) each('GET', `/${tree}`, { deny: why });
   // A compare takes two refs of this project; `from_project_id` would make one another project's.
   each('GET', '/repository/compare', { query: { from: 'free', to: 'free', straight: 'free', unidiff: 'free' } });
+  for (const tail of ['', '/*']) each('GET', `/repository/branches${tail}`, { pick: GITLAB_BRANCH_PICK });
   for (const tree of GITLAB_READS) each('GET', `/${tree}`);
   rules.push({ host: target.host, method: 'GET', path: '/api/v4/user', pick: ['id', 'username', 'name', 'state', 'web_url'] });
   rules.push({ host: target.host, method: 'POST', path: '/api/graphql', graphql: { forge: 'gitlab', repo: target.repo, roots: GITLAB_ROOTS, mutations: [], identity: me } });

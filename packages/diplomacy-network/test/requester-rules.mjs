@@ -431,6 +431,10 @@ await check('GitLab: every kind reads what glab reads, in the pool\'s project on
     assert.ok(project.includes('default_branch') && project.includes('path_with_namespace'));
     for (const member of ['runners_token', 'import_url', 'service_desk_address', 'permissions', 'forked_from_project', 'shared_with_groups', 'ci_config_path']) assert.ok(!project.includes(member), member);
   }
+  // A branch goes out as GitHub's does: without who may push to it or merge into it.
+  for (const path of [`${P}/repository/branches`, `${P}/repository/branches?search=fix&per_page=100`, `${P}/repository/branches/feature`, '/api/v4/projects/99/repository/branches', '/api/v4/projects/99/repository/branches/v1.0']) {
+    assert.deepEqual((await allowed(gitlab('investigate'), glab('GET', path), glWorld())).request.pick, ['name', 'commit', 'merged', 'protected', 'default', 'web_url']);
+  }
   await refused(gitlab('investigate'), glab('GET', `${P}/repository/compare?from=main&to=x&from_project_id=100`), glWorld(), /"from_project_id"/);
   await refused(gitlab('investigate'), glab('GET', `${P}/merge_requests/5/merge_ref`), glWorld(), /writes a ref on the forge/);
 });
@@ -506,6 +510,10 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
     await refused(issues, glab('PUT', `${P}/issues/421`, { assignee_ids }), pushed(), /own account|not a list of account ids/);
   }
   await refused(issues, glab('PUT', `${P}/issues/421`, {}), pushed());
+  // An id given twice is one account, here as in a GraphQL assignment.
+  const held = () => Object.assign(pushed(), { assigned: [3, 4] });
+  for (const assignee_ids of [[3, 3, 7], [4, 4], [3, 3, 4, 8]]) await refused(issues, glab('PUT', `${P}/issues/421`, { assignee_ids }), held(), /own account/);
+  for (const assignee_ids of [[4, 3, 3, 7, 7], [3, 4, 4]]) await allowed(issues, glab('PUT', `${P}/issues/421`, { assignee_ids }), held());
   for (const request of [
     glab('PUT', `${P}/issues/422`, { assignee_ids: [3, 7] }), glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7], labels: 'x' }),
     glab('POST', `${P}/issues/422/notes`, { body: 'x' }), glab('POST', `${P}/issues/421/notes`, { body: '/close' }), glab('POST', `${P}/issues/421/notes?body=%2Fclose`, {}),
@@ -513,6 +521,9 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
     glab('POST', `${P}/merge_requests`, { ...create, description: 'd\n/merge' }), glab('POST', `${P}/merge_requests`, { ...create, merge_when_pipeline_succeeds: true }),
     glab('POST', `${P}/merge_requests?title=x`, create), glab('POST', `${P}/merge_requests`, { ...create, source_project_id: 100 }),
   ]) await refused(issues, request, pushed());
+  // A merge request is a draft by its title alone, so one sent without a title is not one.
+  await refused(issues, glab('POST', `${P}/merge_requests`, { ...create, title: undefined }), pushed(), /the body member "title" is required/);
+  await refused(issues, glab('POST', `${P}/merge_requests`, { ...create, source_branch: undefined }), pushed(), /the body member "source_branch" is required/);
   const noPRs = gitlab('issues', { noPRs: true });
   await allowed(noPRs, glab('POST', `${P}/issues/421/notes`, { body: 'findings' }), pushed());
   for (const request of [glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7] }), glab('POST', `${P}/merge_requests`, create), gitPush('gitlab.example.com', '/group/sub/proj.git')]) await refused(noPRs, request, pushed());
@@ -528,6 +539,105 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
   await refused(unnumbered, glab('GET', '/api/v4/projects/99/issues/421'), pushed());
   await refused(unnumbered, glab('POST', `${P}/merge_requests`, create), pushed());
   await allowed(unnumbered, glab('POST', `${P}/merge_requests`, { ...create, target_project_id: undefined }), pushed());
+});
+
+// ------------------------------------------------------- one spelling per route
+
+// The second spellings of one literal segment that a router could resolve to the first:
+// a character escaped (once and twice over), a letter in the other case, an extension.
+function respelled(segment) {
+  const out = new Set([`${segment}.json`, `${segment}.JSON`, `${segment}.txt`, `${segment}.x`, `${segment}.json.json`, segment.toUpperCase(), segment.toLowerCase()]);
+  for (const at of [0, segment.length - 1]) {
+    const c = segment[at];
+    const put = (s) => segment.slice(0, at) + s + segment.slice(at + 1);
+    const hex = c.charCodeAt(0).toString(16);
+    for (const escape of [`%${hex}`, `%${hex.toUpperCase()}`, `%25${hex}`]) out.add(put(escape));
+    out.add(put(c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));
+  }
+  out.delete(segment);
+  return [...out];
+}
+
+// Every rule list the catalogue can write for the two test pools.
+function everyRuleList() {
+  const lists = [];
+  const options = [{}, { verdict: true, markReady: true }, { noPRs: true }, { readOnly: true }, { author: 'them' }];
+  for (const kind of KINDS) {
+    for (const item of [ITEM[kind], 'job-sweep']) {
+      for (const o of options) {
+        lists.push([github(kind, o, item), world], [gitlab(kind, o, item.replace('578', '5').replace('579', '5')), glWorld]);
+        lists.push([rulesFor({ forge: 'gitlab', kind, options: o, pool: GITLAB_POOL.id, item: item.replace('578', '5').replace('579', '5'), identity: 'me' }), glWorld]);
+      }
+    }
+  }
+  return lists.filter(([rules]) => rules !== null);
+}
+
+await check('no second spelling of any rule\'s path is decided by another rule, on either forge', async () => {
+  let asked = 0;
+  for (const [rules, ctxFor] of everyRuleList()) {
+    const ctx = ctxFor();
+    for (const rule of rules) {
+      // A path the rule matches: a number for every "*", nothing for a trailing "**".
+      const segments = rule.path.slice(1).split('/').filter((s) => s !== '**');
+      for (const [i, literal] of segments.entries()) {
+        if (literal === '*') continue;
+        for (const spelled of respelled(literal)) {
+          const path = `/${segments.map((s, j) => (j === i ? spelled : s === '*' ? '5' : s)).join('/')}`;
+          const verdict = await authorize(rules, { host: rule.host, method: rule.method, path, headers: {}, body: '' }, ctx);
+          asked++;
+          assert.ok(!verdict.ok || verdict.rule === rule, `${rule.method} ${path} is decided by the rule for ${verdict.rule?.path}, not by the one for ${rule.path}`);
+          if (rule.deny !== undefined) assert.equal(verdict.ok, false, path);
+        }
+      }
+    }
+  }
+  assert.ok(asked > 20000, `only ${asked} spellings were tried`);
+});
+
+await check('the routes a task is refused or given with pinned parameters cannot be reached by another spelling', async () => {
+  const escape = /an escape of a letter, a digit, "-", "_" or "~"/;
+  const second = /could be read as a route another rule of this task decides/;
+  // GitLab resolves an escape and a format extension in a route's name (run against a
+  // Grape app declared like GitLab's API); a compare with `from_project_id` reads another project.
+  const far = '?from=a&to=b&from_project_id=4242&straight=true';
+  for (const project of [P, '/api/v4/projects/99', '/api/v4/projects/Group%2fSub%2FProj']) {
+    for (const [tail, why] of [
+      [`/repository/%63ompare${far}`, escape], [`/repository/compare.json${far}`, second], [`/repository/Compare${far}`, second], [`/repository/compar%65.json${far}`, escape],
+      [`/%72epository/compare${far}`, escape], [`/repository.json/compare${far}`, /no rule of this task/], [`/repository/compare.txt${far}`, second], [`/repository/%2563ompare${far}`, /percent sign/],
+      ['/merge_requests/5/merge%5Fref', escape], ['/merge_requests/5/merge_ref.json', second], ['/merge_requests/5/Merge_Ref', second], ['/merge_requests/5/closes_issues.json', second],
+      ['/merge_requests/5/related_issues.json', second], ['/merge_requests/5/blocks.json', second], ['/merge_requests/5/blockees.json', second], ['/issues/421/links.json', second],
+      ['/issues/421/related_merge_requests.json', second], ['/issues/421/closed_by.json', second], ['/issues/421/user_agent_detail.json', second], ['/issues/421/user%5Fagent%5Fdetail', escape],
+      ['/Issues/421/links', /no rule of this task/], ['/issues.json/421/links', /no rule of this task/], ['/issues/421/links/', /empty segment/], ['/issues/421/links;x', /must be encoded/], ['/issues/421/links%3Bx', /semicolon/],
+      ['/issues/421/./links', /dot segment/], ['/issues/421/x/../links', /dot segment/], ['/issues/421/x/%2e%2e/links', /encoded dot/], ['/issues/421//links', /empty segment/],
+      ['/issues/421/links%2ejson', /encoded dot/], ['/merge_requests/5/merge_ref%2F', /encoded slash/],
+    ]) await refused(gitlab('investigate'), glab('GET', `${project}${tail}`), glWorld(), why);
+  }
+  for (const [path, why] of [
+    ['/repos/o/r/issues/421/%74imeline', escape], ['/repos/o/r/issues/421/sub%5Fissues', escape], ['/repos/o/r/issues/421/%70arent', escape], ['/repos/o/r/issues/421/dependencie%73/blocked_by', escape],
+    ['/repos/o/r/issues/421/Timeline', second], ['/repos/o/r/issues/421/timeline.json', second], ['/repos/o/r/issues/421/SUB_ISSUES', second], ['/repos/o/r/issues/421/parent.json', second],
+    ['/repos/o/r/issues/421/Dependencies/blocked_by', second], ['/repos/o/r/issues/421/dependencies.json/blocked_by', second], ['/repos/o/r/Issues/421/timeline', /no rule of this task/],
+    ['/repos/o/r/%69ssues/421/timeline', escape], ['/repos/o/r/issues/421/timeline/', /empty segment/], ['/repos/o/r/issues/421/%2574imeline', /percent sign/],
+    ['/repos/o/r/%63ompare/main...victim:main', escape], ['/repos/o/r/Compare/main...victim:main', /no rule of this task/], ['/repos/o/r/compare.json/main...victim:main', /no rule of this task/],
+    ['/repos/o/r/Branches/main/protection', /no rule of this task/], ['/repos/o/r/branche%73/main/protection', escape],
+  ]) await refused(github('investigate'), gh('GET', path), world(), why);
+  // The whole answer about the repository or a branch is not to be had under another name.
+  for (const path of ['/repos/o/r.json', '/repos/o/r/Branches', '/repos/o/r/branches.json', '/repos/o/r/Branches/main', '/repos/o/r/branches.json/main', '/User', '/user.json']) {
+    await refused(github('investigate'), gh('GET', path), world(), /no rule of this task/);
+  }
+  for (const path of [`${P}.json`, '/api/v4/projects/99.json', '/api/v4/projects/099', '/api/v4/Projects/99', '/api/V4/projects/99', '/api/v4/User', '/api/v4/user.json']) {
+    await refused(gitlab('investigate'), glab('GET', path), glWorld(), /no rule of this task/);
+  }
+
+  // A file, a branch or a tag whose own name ends like a format or holds a route's name is still read.
+  for (const path of ['/repos/o/r/contents/package.json', '/repos/o/r/contents/docs/timeline.json?ref=main', '/repos/o/r/contents/a%20b.md', '/repos/o/r/git/ref/tags/v1.0.json', '/repos/o/r/branches/v1.0.json',
+    '/repos/o/r/commits/v1.0.json', '/repos/o/r/compare/v1.0.json...main', '/repos/o/r/contents/issues/421/timeline', '/repos/o/r/issues/421/comments', '/repos/o/r/releases/tags/Compare']) {
+    assert.equal((await allowed(github('investigate'), gh('GET', path))).request.path, path);
+  }
+  for (const tail of ['/repository/files/package.json?ref=main', '/repository/files/package.json/raw?ref=main', '/repository/files/compare.json?ref=main', '/repository/branches/v1.0.json',
+    '/repository/branches/Compare', '/repository/tags/v1.0.json', '/repository/commits/v1.0.json', '/merge_requests/5.json', '/repository/tree?path=src%2Flib&ref=main']) {
+    for (const project of [P, '/api/v4/projects/99']) assert.equal((await allowed(gitlab('investigate'), glab('GET', `${project}${tail}`), glWorld())).request.path, `${project}${tail}`);
+  }
 });
 
 await check('a mutation the document check does not know never reaches a rule list', async () => {
