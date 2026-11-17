@@ -428,19 +428,16 @@ export function createGossip(host) {
   // backoff and whatever sync with them is under way: that one may have asked before
   // there was anything to miss. The pool is up to date once one of them has answered and
   // this host holds what that one held - a member that is asleep keeps nobody waiting -
-  // or there is nobody to ask, or nobody has answered for CATCH_UP_MS with the transport
-  // up.
+  // or there is nobody to ask.
   function catchUp(P) {
     const { epoch } = P;
     P.catching = epoch;
     const pks = others(P);
-    const waited = host.transport.state().state === 'ready' && host.now() - P.stale >= CATCH_UP_MS / 1000;
     // With nobody to ask there was nothing to wait for, and nothing to say of it.
     if (pks.length === 0) {
       P.stale = null;
       return undefined;
     }
-    if (waited) return caughtUp(P, epoch);
     const asked = pks.map((pk) => meet(P, pk, { fresh: true }).then((heard) => heard && caughtUp(P, epoch))
       .catch((err) => host.log(`a pool could not be caught up: ${err?.stack ?? err}`)));
     // Where nobody answered, the next step asks again.
@@ -557,8 +554,10 @@ export function createGossip(host) {
     const now = host.now();
     for (const P of host.pools.values()) {
       // One asking at a time, and a new one at once for a pool that went out of date
-      // again: the answers to the asking before are not waited for.
+      // again: the answers to the asking before are not waited for. Whatever an asking
+      // is at, a pool is out of date for no longer than CATCH_UP_MS with the transport up.
       if (P.stale !== null && P.catching !== P.epoch) catchUp(P);
+      if (P.stale !== null && host.transport.state().state === 'ready' && now - P.stale >= CATCH_UP_MS / 1000) caughtUp(P, P.epoch);
       if (P.joining && now >= P.joining.exp) {
         P.joining = null;
         host.save(P);

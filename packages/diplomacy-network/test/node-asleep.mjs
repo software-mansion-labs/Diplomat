@@ -6,8 +6,9 @@
 
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
-import { b64u } from '../src/core/canon.js';
+import { b64u, canon } from '../src/core/canon.js';
 import { rankDelay } from '../src/core/claims.js';
+import { buildResponse, requestDigest } from '../src/core/envelope.js';
 import { backers } from '../src/core/records.js';
 import { ELSEWHERE, OUTLIVED } from '../src/node/offers.js';
 import { CATCH_UP_MS, CLOCK_SKEW_SECS, RANK_DELAY_MS, RECORD_RETENTION_SECS, REQUEST_TIMEOUT_MS } from '../src/paths.js';
@@ -121,6 +122,7 @@ await check('a machine that slept through two leases of a run that goes on count
     await w.net.until(() => w.claim(goes, taskId).leaseUntil > leaseUntil, { what: 'the machine caught up' });
     await w.run(60);
     assert.deepEqual([w.offerRow(goes, taskId).state, w.offerRow(goes, taskId).attempt, w.offerRow(goes, taskId).reason], ['claimed', 1, ''], away);
+    assert.equal(w.stored(goes, 'offers')[taskId].sat, undefined, `${away}: nothing is held against the executor by a state that was hours old`);
     finish(e, taskId);
     await w.net.until(() => [a, b].every((h) => w.offerRow(h, taskId).state === 'done'), { what: 'both offers done' });
     assert.deepEqual([w.offerRow(goes, taskId).outcome.summary, w.offerRow(goes, taskId).attempt, started(all), failures(all)], ['look at pr-1', 1, 1, []], away);
@@ -365,6 +367,39 @@ await check('a member that tells a returning machine the very state the machine 
   assert.equal(await given(2), null, 'and is no wiser');
   assert.deepEqual(await sync(w.view(l).hash), { hash: w.view(l).hash });
   assert.equal(await given(3), 1, 'told of the state it holds, it gives its offer');
+  assert.deepEqual(failures(all), []);
+});
+
+await check('a member that answers a returning machine late and a page at a time keeps it out of date no longer than one that does not answer at all: 3 minutes', async () => {
+  const w = createWorld({ seed: 126 });
+  const all = await w.pool(['l', 'd']);
+  const [l, d] = all;
+  const evil = await w.intruder('evil', d);
+  await w.net.until(() => all.every((h) => w.members(h).includes(evil.pk)), { what: 'the member known' });
+  await l.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  for (const name of ['l', 'd']) w.net.sleep(name);
+  await w.run(2 * HOUR);
+  // The one member awake answers every sync 55 s late with one more page of an index
+  // that never ends, and every pull 55 s late with nothing.
+  const clock = w.net.clock('evil');
+  const keys = Array.from({ length: 200 }, (_, i) => `member/${w.stranger(`nobody${i}`).pk}`).sort();
+  const asked = [];
+  evil.transport.onRequest(async (bytes) => {
+    const request = JSON.parse(bytes.toString('utf8'));
+    asked.push(request.kind);
+    await new Promise((resolve) => { clock.setTimeout(resolve, 55000); });
+    const page = { index: { [keys[asked.filter((kind) => kind === 'sync').length - 1]]: [[w.net.now()], b64u(Buffer.alloc(32, 9))] }, more: true };
+    return canon(buildResponse(evil.id, { re: requestDigest(request), effort: 8, body: request.kind === 'sync' ? page : { records: [] } }));
+  });
+  w.net.sleep('l', false);
+  const since = w.net.now();
+  const upToDate = () => l.log.filter((line) => line.includes(' is up to date '));
+  const before = upToDate().length;
+  await w.net.until(() => upToDate().length > before, { maxMs: 5 * HOUR * 1000, what: 'the machine up to date' });
+  const took = w.net.now() - since;
+  assert.ok(took >= CATCH_UP_MS / 1000 && took < CATCH_UP_MS / 1000 + 15, `up to date after ${took} s`);
+  assert.ok(asked.includes('pull'), 'it was following the pages');
   assert.deepEqual(failures(all), []);
 });
 

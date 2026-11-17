@@ -870,9 +870,10 @@ member holds: the first to answer, once the host has pulled what that answer sho
 lacks, or a member whose own `sync` to the host names the very state the host holds,
 which is the same word from the other side. A member that is asleep, or slow to be
 reached, keeps nobody waiting. With nobody to ask, the pool is up to date at once.
-When nobody answers, the host asks again, and after 180 s of that with its transport up
-it goes on with what it holds. A host that goes out of date again meanwhile starts
-over: what a member said before says nothing of what came after.
+When nobody answers, the host asks again. 180 s after it went out of date, with its
+transport up, it goes on with what it holds, whatever it was told by then: nothing, or
+part of what a member holds by a member that answers slowly and a page at a time. A
+host that goes out of date again meanwhile starts over: what a member said before says nothing of what came after.
 
 Then it looks at its offers. One whose job was run meanwhile is `done` (above). One
 whose last version this host signed 24 hours ago or longer is `cancelled`: its record
@@ -970,11 +971,13 @@ Nothing in a record hides any of this.
     - *the run was claimed more than 300 s before the offer was made*, and the offer was
       never given to it: the host made its offer while the run was going and was gone
       before the run could take that offer in.
-    - *nobody answered the host when it came back.* After 180 s it goes on with what it
-      holds, and gives its offer to whoever asks.
-    - *the first member to tell the host what it missed had missed the run too.* The
-      host goes by the first word it gets. From a member that was away as well it learns
-      nothing of the run, and gives its offer to the next claimant that holds no record
+    - *nobody answered the host when it came back*, or nobody was done answering. After
+      180 s it goes on with what it holds, and gives its offer to whoever asks.
+    - *the first member to tell the host what it missed had missed the run too*, or
+      meant to keep it from the host. The host goes by the first word it gets, and any
+      member can give it that word at once: the host's own `sync` names the state it
+      holds, and a `sync` that names the same state back makes it up to date. From a
+      member that was away as well it learns nothing of the run, and gives its offer to the next claimant that holds no record
       of it either. The record, when another member brings it, ends an offer no claim
       holds; one that a claim holds by then ends by that claim's run.
     - *the host was there and out of reach for more than a day.* It kept signing its
