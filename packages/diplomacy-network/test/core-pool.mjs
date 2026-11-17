@@ -8,12 +8,12 @@ import { b64u, canon, hash } from '../src/core/canon.js';
 import { buildClaim, buildGrant } from '../src/core/claims.js';
 import { buildPing, endClaim, extendClaim } from '../src/core/lease.js';
 import { sign } from '../src/core/identity.js';
-import { acceptedSet, checkJoin, createInvite, inviteToken, parseInvite, verifyInvite, verifyVoucher } from '../src/core/membership.js';
+import { createInvite, createVoucher, inviteToken, parseInvite, seating, verifyInvite, verifyVoucher } from '../src/core/membership.js';
 import { INDEX_PAGE_BYTES, MAX_HELLO_CHAIN, MAX_PULL_KEYS, MAX_PUSH_RECORDS, Pool } from '../src/core/pool.js';
 import {
   LIMITS, backers, backing, buildTaskId, checkShape, checkSignature, compareVersions, parseKey, parseTaskId, recordDigest, recordKey, signRecord, validPool,
 } from '../src/core/records.js';
-import { POOL, T0, claimNow, club, ident, invite, member, offer, prng, roundId } from './lib/core-fixtures.mjs';
+import { POOL, T0, claimNow, club, family, ident, invite, member, offer, prng, roundId, seat } from './lib/core-fixtures.mjs';
 
 function check(name, fn) {
   fn();
@@ -34,6 +34,7 @@ const poolOf = (id, records = [], now = T0) => {
   return pool;
 };
 const codes = (result) => result.refused.map((r) => r.code);
+const pk = (id) => id.pk;
 const sum = (list) => list.reduce((total, n) => total + n, 0);
 
 check('a pool id is a lowercase forge slug of a host and at least two more segments', () => {
@@ -72,7 +73,7 @@ check('each record is stored under the key the protocol names', () => {
 });
 
 check('a record with a missing, unknown or malformed member is refused', () => {
-  const samples = { member: member(ann, { voucher: invite(root) }), offer: offer(ann) };
+  const samples = { member: member(ann, { voucher: seat(root) }), offer: offer(ann) };
   for (const [type, good] of Object.entries(samples)) {
     assert.deepEqual(checkShape(good, POOL), { ok: true, key: recordKey(good) });
     for (const k of Object.keys(good)) {
@@ -92,7 +93,9 @@ check('a record with a missing, unknown or malformed member is refused', () => {
   for (const bad of [null, 5, 'member', [], [samples.member]]) assert.equal(checkShape(bad, POOL).code, 'bad-record');
   const m = samples.member;
   for (const over of [{ pk: m.pk.slice(1) }, { pk: `${m.pk}AAAA` }, { maxAcceptedH: 11 }, { maxAcceptedH: 721 }, { maxAcceptedH: 12.5 },
-    { left: 0 }, { joinedAt: T0 + 1 }, { voucher: {} }, { voucher: { invite: 5 } }, { voucher: { invite: 'x', more: 1 } }, { voucher: { invite: 'x'.repeat(1025) } }]) {
+    { left: 0 }, { joinedAt: T0 }, { era: -1 }, { voucher: { ...m.voucher, era: '0' } }, { voucher: {} }, { voucher: { invite: 'x' } }, { voucher: { ...m.voucher, more: 1 } }, { voucher: { ...m.voucher, seat: 15 } },
+    { voucher: { ...m.voucher, seat: -1 } }, { voucher: { ...m.voucher, seat: 0.5 } }, { voucher: { ...m.voucher, by: 'nope' } }, { voucher: { ...m.voucher, pk: 5 } },
+    { voucher: { ...m.voucher, at: 2 ** 41 } }, { voucher: { ...m.voucher, pool: 'x' } }, { voucher: { ...m.voucher, sig: 'AAAA' } }, { voucher: 'AAAA' }]) {
     assert.equal(checkShape({ ...m, ...over }, POOL).code, 'bad-record', JSON.stringify(over));
   }
   const o = samples.offer;
@@ -117,9 +120,9 @@ check('a record is signed by its own subject, over every member', () => {
 });
 
 check('the higher seq wins, and for one seq the lower hash, whichever comes first', () => {
-  const v0 = member(ann, { voucher: invite(root) });
-  const v1 = member(ann, { voucher: invite(root), seq: 1, at: T0 + 5 });
-  const twin = member(ann, { voucher: invite(root), seq: 1, at: T0 + 6 });
+  const v0 = member(ann, { voucher: seat(root) });
+  const v1 = member(ann, { voucher: seat(root), seq: 1, at: T0 + 5 });
+  const twin = member(ann, { voucher: seat(root), seq: 1, at: T0 + 6 });
   const [low, high] = [v1, twin].sort((a, b) => Buffer.compare(hash(a), hash(b)));
   assert.ok(compareVersions([1], recordDigest(low), [1], recordDigest(high)) < 0);
   assert.ok(compareVersions([0], recordDigest(low), [1], recordDigest(high)) > 0);
@@ -156,41 +159,45 @@ check('an invite token is the canonical form of a signed invite and nothing loos
   for (const [i, bad] of loose.entries()) assert.equal(parseInvite(bad), null, `case ${i}`);
 });
 
-check('a voucher holds only for an invite to this pool, from another key, unexpired when the member joined', () => {
-  assert.ok(verifyVoucher(member(root)), 'a root has none');
-  assert.ok(verifyVoucher(member(ann, { voucher: invite(root) })));
-  assert.ok(verifyVoucher(member(ann, { voucher: invite(root, { exp: T0 }) })), 'joined at the last second');
-  assert.equal(verifyVoucher(member(ann, { voucher: invite(root, { exp: T0 - 1 }) })), false, 'joined after it expired');
-  assert.equal(verifyVoucher(member(ann, { voucher: invite(ann) })), false, 'vouched for by itself');
-  assert.equal(verifyVoucher(member(ann, { voucher: invite(root, { pool: 'github.com/acme/other' }) })), false);
-  assert.equal(verifyVoucher(member(ann, { voucher: 'AAAA' })), false);
-  const forged = inviteToken({ ...createInvite(eve, { pool: POOL, exp: T0 + DAY, nonce: Buffer.alloc(16) }), by: root.pk });
+check('a voucher holds only for the pool and the key it names, from another key, dated no later than the record', () => {
+  assert.ok(verifyVoucher(member(root)), 'the first of a pool has none');
+  assert.ok(verifyVoucher(member(ann, { voucher: seat(root) })), 'given in the second the record was signed');
+  assert.equal(verifyVoucher(member(ann, { voucher: seat(root, { at: T0 + 1 }) })), false, 'given after the record was signed');
+  assert.equal(verifyVoucher(member(ann, { voucher: seat(ann) })), false, 'vouched for by itself');
+  assert.equal(verifyVoucher(member(ann, { voucher: seat(root, { pool: 'github.com/acme/other' }) })), false);
+  const forBen = member(ben, { voucher: seat(root) }).voucher;
+  assert.equal(verifyVoucher(member(ann, { voucher: forBen })), false, 'signed for another key');
+  const forged = { ...createVoucher(eve, { pool: POOL, era: 0, pk: ann.pk, seat: 0, at: T0 }), by: root.pk };
   assert.equal(verifyVoucher(member(ann, { voucher: forged })), false);
   const pool = poolOf(root, [member(root)]);
-  assert.deepEqual(codes(pool.merge([member(ann, { voucher: forged }), member(ben, { voucher: invite(ben) })], T0)), ['bad-voucher', 'bad-voucher']);
+  const bad = [member(ann, { voucher: forged }), member(ann, { voucher: forBen }), member(ben, { voucher: seat(ben) }), member(cat, { voucher: seat(root, { at: T0 + 1 }) })];
+  assert.deepEqual(codes(pool.merge(bad, T0)), ['bad-voucher', 'bad-voucher', 'bad-voucher', 'bad-voucher']);
 });
 
-check('a newcomer is let in only while its invite is unexpired', () => {
-  const fresh = member(ann, { voucher: invite(root, { exp: T0 + 100 }) });
-  assert.deepEqual(checkJoin(fresh, T0 - 5000), { ok: true });
-  assert.deepEqual(checkJoin(fresh, T0 + 99), { ok: true });
-  assert.deepEqual(checkJoin(fresh, T0 + 100), { ok: false, code: 'expired' });
-  assert.deepEqual(checkJoin(member(ann), T0), { ok: false, code: 'no-voucher' });
-});
-
-check('a host accepts exactly the keys connected to itself through vouchers', () => {
-  const records = [member(root), member(ann, { voucher: invite(root) }), member(ben, { voucher: invite(ann) }), member(cat, { voucher: invite(ben) })];
-  const island = [member(eve), member(ident(10), { voucher: invite(eve) })];
-  const all = new Set([root.pk, ann.pk, ben.pk, cat.pk]);
-  for (const self of [root, ann, ben, cat]) assert.deepEqual(acceptedSet(self.pk, [...records, ...island]), all);
-  assert.deepEqual(acceptedSet(eve.pk, [...records, ...island]), new Set([eve.pk, ident(10).pk]));
-  assert.deepEqual(acceptedSet(cat.pk, [records[3]]), new Set([cat.pk, ben.pk]), 'its own inviter, before holding that record');
-  assert.deepEqual(acceptedSet(root.pk, [records[0], records[2]]), new Set([root.pk]), 'a link is missing');
-  assert.deepEqual(acceptedSet(root.pk, []), new Set([root.pk]));
+check('a host accepts the keys seated under the member its own vouchers lead up to, two vouchers deep', () => {
+  const records = [member(root), member(ann, { voucher: seat(root) }), member(ben, { voucher: seat(ann) }), member(cat, { voucher: seat(ben) })];
+  const island = [member(eve), member(ident(10), { voucher: seat(eve) })];
+  const all = new Map([[root.pk, 0], [ann.pk, 1], [ben.pk, 2]]);
+  for (const self of [root, ann, ben]) assert.deepEqual(seating(self.pk, [...records, ...island]), all);
+  assert.deepEqual(seating(cat.pk, [...records, ...island]), new Map([[cat.pk, 0]]), 'one three vouchers deep has no seat, and is alone where it looks');
+  assert.deepEqual(seating(eve.pk, [...records, ...island]), new Map([[eve.pk, 0], [ident(10).pk, 1]]));
+  assert.deepEqual(seating(ben.pk, [records[2]]), new Map([[ben.pk, 0]]), 'before it holds its inviter\'s record');
+  assert.deepEqual(seating(root.pk, [records[0], records[2]]), new Map([[root.pk, 0]]), 'a link is missing');
+  assert.deepEqual(seating(root.pk, []), new Map([[root.pk, 0]]));
+  // A voucher is good for the membership of its signer it was signed in: one that began
+  // again seats none of those it let in before, and those it lets in now it seats.
+  const again = [member(root, { seq: 5, era: 5 }), records[1], records[2], member(cat, { voucher: seat(root, { n: 1, era: 5 }) })];
+  assert.deepEqual(seating(root.pk, again), new Map([[root.pk, 0], [cat.pk, 1]]));
+  assert.deepEqual(seating(ann.pk, again), new Map([[ann.pk, 0], [ben.pk, 1]]));
+  assert.deepEqual(seating(ben.pk, [...again.slice(0, 3), member(ann, { voucher: seat(root), seq: 7, era: 7 })]), new Map([[ben.pk, 0]]));
+  // Two keys that vouch for each other are a pool of their own, each seated once.
+  const loop = [member(ann, { voucher: seat(ben) }), member(ben, { voucher: seat(ann) })];
+  assert.deepEqual(seating(ann.pk, loop), new Map([[ben.pk, 0], [ann.pk, 1]]));
+  assert.deepEqual(seating(root.pk, [member(root), ...loop]), new Map([[root.pk, 0]]));
 });
 
 check('the members a host ends with do not depend on the order their records arrive in', () => {
-  const chain = [member(root), member(ann, { voucher: invite(root) }), member(ben, { voucher: invite(ann) }), member(cat, { voucher: invite(ben) })];
+  const chain = [member(root), member(ann, { voucher: seat(root) }), member(ben, { voucher: seat(ann) }), member(cat, { voucher: seat(root, { n: 1 }) })];
   const rng = prng(7);
   const expected = [root.pk, ann.pk, ben.pk, cat.pk].sort();
   let hashes = new Set();
@@ -213,40 +220,41 @@ check('the members a host ends with do not depend on the order their records arr
 check('a record signed by nobody the host accepts is refused, and taken once its signer is let in', () => {
   const pool = poolOf(root, [member(root)]);
   const stranger = member(eve);
-  const unvouched = member(ben, { voucher: invite(ann) });
+  const unvouched = member(ben, { voucher: seat(ann) });
   assert.deepEqual(codes(pool.merge([stranger, unvouched, offer(ann)], T0)), ['not-member', 'not-member', 'not-member']);
   assert.equal(pool.records().length, 1);
   assert.equal(pool.accepts(eve.pk, T0), false);
   assert.equal(pool.accepts(ben.pk, T0), false);
-  const result = pool.merge([offer(ben), unvouched, offer(ann), member(ann, { voucher: invite(root) })], T0);
+  const result = pool.merge([offer(ben), unvouched, offer(ann), member(ann, { voucher: seat(root) })], T0);
   assert.deepEqual(result.refused, []);
   assert.equal(result.accepted.length, 4);
   assert.deepEqual(result.fresh.sort(), result.accepted.sort());
   assert.deepEqual(pool.task(TASK, T0).offeredBy, [ann.pk, ben.pk].sort());
 });
 
-check('a joiner takes requests from its inviter before it holds the inviter\'s record', () => {
-  const joiner = poolOf(ann, [member(ann, { voucher: invite(root) })]);
+check('a host that holds its voucher and not its inviter\'s record is alone until that record comes', () => {
+  const joiner = poolOf(ann, [member(ann, { voucher: seat(root) })]);
+  assert.equal(joiner.accepts(root.pk, T0), false);
+  assert.deepEqual(joiner.members(T0).map(pk), [ann.pk]);
+  assert.deepEqual(joiner.merge(member(root), T0).refused, []);
+  assert.deepEqual([joiner.depth(root.pk, T0), joiner.depth(ann.pk, T0), joiner.depth(ben.pk, T0)], [0, 1, undefined]);
   assert.ok(joiner.accepts(root.pk, T0));
-  assert.equal(joiner.accepts(ben.pk, T0), false);
-  assert.deepEqual(joiner.members(T0).map((m) => m.pk), [ann.pk], 'but a member is a key whose record is held');
-  assert.equal(joiner.member(root.pk, T0), null);
 });
 
 check('a member that left is no member, and its record stays only while someone it vouched for needs it', () => {
-  const chain = [member(root), member(ann, { voucher: invite(root) }), member(ben, { voucher: invite(ann) })];
+  const chain = [member(root), member(ann, { voucher: seat(root) }), member(ben, { voucher: seat(ann) })];
   const pool = poolOf(root, chain);
-  const gone = member(ann, { voucher: invite(root), seq: 1, at: T0 + 100, left: true });
+  const gone = member(ann, { voucher: seat(root), seq: 1, at: T0 + 100, left: true });
   assert.deepEqual(pool.merge(gone, T0 + 100).refused, []);
   assert.equal(pool.accepts(ann.pk, T0 + 100), false);
   assert.equal(pool.member(ann.pk, T0 + 100), null);
   assert.deepEqual(pool.members(T0 + 100).map((m) => m.pk), [root.pk, ben.pk].sort());
   // Two months on, with the root and ben still signing their records.
   const later = T0 + 100 + 2 * MONTH;
-  pool.merge([member(root, { seq: 1, at: later }), member(ben, { voucher: invite(ann), seq: 1, at: later })], later);
+  pool.merge([member(root, { seq: 1, at: later }), member(ben, { voucher: seat(ann), seq: 1, at: later })], later);
   assert.ok(pool.get(`member/${ann.pk}`), 'ben is connected to the root only through it');
   assert.ok(pool.accepts(ben.pk, later));
-  const benGone = member(ben, { voucher: invite(ann), seq: 2, at: later + 200, left: true });
+  const benGone = member(ben, { voucher: seat(ann), seq: 2, at: later + 200, left: true });
   pool.merge([benGone, member(root, { seq: 2, at: later + 200 })], later + 200);
   pool.prune(later + 200 + MONTH + 299);
   assert.equal(pool.records().length, 3, 'kept through the retention and the clock tolerance');
@@ -255,7 +263,7 @@ check('a member that left is no member, and its record stays only while someone 
 });
 
 check('a member that stops signing its record is no member after a day, and keeps its place for thirty', () => {
-  const pool = poolOf(root, [member(root), member(ann, { voucher: invite(root) })]);
+  const pool = poolOf(root, [member(root), member(ann, { voucher: seat(root) })]);
   const signed = (seq, at) => member(root, { seq, at });
   assert.deepEqual(pool.members(T0 + DAY - 1).map((m) => m.pk), [root.pk, ann.pk].sort());
   pool.merge([signed(1, T0 + DAY), offer(ann, { at: T0 + DAY, createdAt: T0 + DAY })], T0 + DAY);
@@ -264,24 +272,25 @@ check('a member that stops signing its record is no member after a day, and keep
   assert.equal(pool.task(TASK, T0 + DAY), null, 'and what it offers counts for nothing');
   assert.ok(pool.accepts(ann.pk, T0 + DAY), 'its key is still one of the pool');
   assert.ok(Object.hasOwn(pool.index(T0 + MONTH - 1), `member/${ann.pk}`), 'and its record is part of the state');
-  const back = member(ann, { voucher: invite(root), seq: 1, at: T0 + 9 * DAY });
+  const back = member(ann, { voucher: seat(root), seq: 1, at: T0 + 9 * DAY });
   pool.merge(signed(2, T0 + 9 * DAY), T0 + 9 * DAY);
   assert.deepEqual(pool.merge(back, T0 + 9 * DAY).refused, [], 'signed again it is a member again, with no new invite');
   assert.deepEqual(pool.members(T0 + 9 * DAY).map((m) => m.pk), [root.pk, ann.pk].sort());
   assert.ok(pool.answerHello({ member: back }, ann.pk, T0 + 9 * DAY).body);
-  // Silent for thirty days it is forgotten, and comes back only by a fresh invite.
-  const [gone, stale] = [T0 + 9 * DAY + MONTH, member(ann, { voucher: invite(root), seq: 2, at: T0 + 9 * DAY + MONTH + 400 })];
+  // Silent for thirty days it is forgotten. Its voucher holds still: a record it signs
+  // now is taken, the one it signed then is not.
+  const [gone, fresh] = [T0 + 9 * DAY + MONTH, member(ann, { voucher: seat(root), seq: 2, at: T0 + 9 * DAY + MONTH + 400 })];
   pool.merge(signed(3, gone + 300), gone + 300);
   assert.equal(pool.get(`member/${ann.pk}`), null);
   assert.equal(pool.accepts(ann.pk, gone + 300), false);
-  assert.deepEqual(pool.answerHello({ member: stale }, ann.pk, gone + 400), { error: 'denied', detail: 'expired' });
-  assert.deepEqual(codes(pool.merge(back, gone + 400)), ['expired'], 'and its old record is not taken back');
+  assert.deepEqual(codes(pool.merge(back, gone + 400)), ['expired']);
+  assert.ok(pool.answerHello({ member: fresh }, ann.pk, gone + 400).body);
 });
 
 check('a version that says a member left outlives every version it replaced', () => {
-  const pool = poolOf(root, [member(root), member(ann, { voucher: invite(root) })]);
-  const resigned = member(ann, { voucher: invite(root), seq: 1, at: T0 + 20 * DAY });
-  const left = member(ann, { voucher: invite(root), seq: 2, at: T0 + 20 * DAY + 5, left: true });
+  const pool = poolOf(root, [member(root), member(ann, { voucher: seat(root) })]);
+  const resigned = member(ann, { voucher: seat(root), seq: 1, at: T0 + 20 * DAY });
+  const left = member(ann, { voucher: seat(root), seq: 2, at: T0 + 20 * DAY + 5, left: true });
   pool.merge([member(root, { seq: 1, at: T0 + 20 * DAY }), resigned, left], T0 + 20 * DAY + 5);
   const dropped = T0 + 20 * DAY + 5 + MONTH + 300;
   for (const now of [T0 + 21 * DAY, dropped - 1, dropped, dropped + DAY]) {
@@ -293,7 +302,7 @@ check('a version that says a member left outlives every version it replaced', ()
 
 check('a record dated past the clock tolerance is refused until its time comes', () => {
   const pool = poolOf(root, [member(root)]);
-  const early = member(ann, { voucher: invite(root), at: T0 + 301, joinedAt: T0 });
+  const early = member(ann, { voucher: seat(root), at: T0 + 301 });
   assert.deepEqual(codes(pool.merge(early, T0)), ['future']);
   assert.deepEqual(pool.merge(early, T0 + 1).refused, []);
 });
@@ -342,7 +351,7 @@ check('an offer signed again inside its retention stays, and keeps the day it wa
   for (let i = 0; i < 12; i++) {
     now += DAY / 4;
     seq += 1;
-    const again = [member(a.id, { seq, at: now }), member(b.id, { voucher: invite(a.id, { n: 1 }), seq, at: now }), offer(a.id, { seq, at: now })];
+    const again = [member(a.id, { seq, at: now }), member(b.id, { voucher: seat(a.id, { n: 1 }), seq, at: now }), offer(a.id, { seq, at: now })];
     assert.deepEqual(a.pool.merge(again, now).refused, []);
     const task = a.pool.task(TASK, now);
     assert.deepEqual([task.state, task.createdAt, task.offeredBy], ['available', T0, [a.id.pk]], `after ${i + 1} quarter days`);
@@ -357,7 +366,7 @@ check('a finished task does not come back: the version that ended it outlives ev
   // nothing after the first day.
   const versions = Array.from({ length: 9 }, (_, i) => offer(a.id, { seq: i, at: T0 + i * (DAY / 4) }));
   const done = offer(a.id, { seq: 9, at: T0 + 2 * DAY + 50, state: 'done' });
-  const stamp = (h, seq, at) => h.pool.merge(hosts.map((x, i) => member(x.id, { ...(i ? { voucher: invite(a.id, { n: i }) } : {}), seq, at })), at);
+  const stamp = (h, seq, at) => h.pool.merge(hosts.map((x, i) => member(x.id, { ...(i ? { voucher: seat(a.id, { n: i }) } : {}), seq, at })), at);
   for (const [i, version] of versions.entries()) {
     for (const h of i < 5 ? hosts : [a, b]) {
       stamp(h, i + 1, version.at);
@@ -519,7 +528,7 @@ check('an index too long for one answer travels a page at a time: each page says
 
   // A newcomer is answered the first page.
   const newcomer = ident(40);
-  const answer = a.pool.answerHello({ member: member(newcomer, { voucher: invite(a.id, { exp: T0 + 600, n: 99 }) }) }, newcomer.pk, T0);
+  const answer = a.pool.answerHello({ member: member(newcomer, { voucher: seat(hosts[5].id) }) }, newcomer.pk, T0);
   assert.deepEqual([answer.body, answer.body.more], [a.pool.indexPage(T0), true]);
 });
 
@@ -541,52 +550,50 @@ check('pull answers the records held under well-formed keys, and push reports ea
   }
 });
 
-check('hello lets in a newcomer with a fresh invite and answers the index', () => {
+check('hello lets in a newcomer with the voucher of a member and answers the index', () => {
   const host = poolOf(root, [member(root)]);
-  const hi = member(ann, { voucher: invite(root, { exp: T0 + 600 }) });
+  const hi = member(ann, { voucher: seat(root) });
   assert.deepEqual(host.answerHello({ member: hi }, ben.pk, T0), { error: 'bad-request' }, 'a record of another key');
   assert.deepEqual(host.answerHello({ member: hi, more: 1 }, ann.pk, T0), { error: 'bad-request' });
   assert.deepEqual(host.answerHello({ member: { pk: ann.pk } }, ann.pk, T0), { error: 'bad-request' });
-  assert.deepEqual(host.answerHello({ member: hi }, ann.pk, T0 + 600), { error: 'denied', detail: 'expired' });
-  assert.deepEqual(host.answerHello({ member: member(eve) }, eve.pk, T0), { error: 'denied', detail: 'no-voucher' });
-  assert.deepEqual(host.answerHello({ member: member(eve, { voucher: invite(ident(11)) }) }, eve.pk, T0), { error: 'denied', detail: 'not-member' });
+  assert.deepEqual(host.answerHello({ member: member(eve) }, eve.pk, T0), { error: 'denied', detail: 'not-member' });
+  assert.deepEqual(host.answerHello({ member: member(eve, { voucher: seat(ident(11)) }) }, eve.pk, T0), { error: 'denied', detail: 'not-member' });
+  assert.deepEqual(host.answerHello({ member: member(eve, { voucher: member(ann, { voucher: seat(root) }).voucher }) }, eve.pk, T0), { error: 'denied', detail: 'bad-voucher' });
   assert.equal(host.records().length, 1);
   const answer = host.answerHello({ member: hi }, ann.pk, T0 + 599);
   assert.deepEqual(answer, { body: { index: host.index(T0 + 599) } });
   assert.ok(host.member(ann.pk, T0 + 599));
-  assert.ok(host.answerHello({ member: hi }, ann.pk, T0 + 5000).body, 'a member it already holds needs no fresh invite');
-  const gone = member(ann, { voucher: invite(root, { exp: T0 + 600 }), seq: 1, at: T0 + 20, left: true });
+  assert.ok(host.answerHello({ member: hi }, ann.pk, T0 + 5000).body);
+  const gone = member(ann, { voucher: seat(root), seq: 1, at: T0 + 20, left: true });
   assert.deepEqual(host.answerHello({ member: gone }, ann.pk, T0 + 20), { error: 'denied', detail: 'left' });
-  // Nobody put it out: a newer record of its own brings it back, its invite long run out.
+  // Nobody put it out: a newer record of its own brings it back, by the voucher it had.
   assert.equal(host.accepts(ann.pk, T0 + 5000), false);
-  const back = member(ann, { voucher: invite(root, { exp: T0 + 600 }), seq: 2, at: T0 + 5000 });
+  const back = member(ann, { voucher: seat(root), seq: 2, at: T0 + 5000 });
   assert.ok(host.answerHello({ member: back }, ann.pk, T0 + 5000).body);
   assert.ok(host.member(ann.pk, T0 + 5000));
+  // Its inviter gave the seat to another key since: it has none.
+  assert.deepEqual(host.merge(member(ben, { voucher: seat(root, { at: T0 + 6000 }), at: T0 + 6000 }), T0 + 6000).refused, []);
+  const late = member(ann, { voucher: seat(root), seq: 3, at: T0 + 7000 });
+  assert.deepEqual(host.answerHello({ member: late }, ann.pk, T0 + 7000), { error: 'denied', detail: 'no-seat' });
+  assert.deepEqual(host.members(T0 + 7000).map(pk), [root.pk, ben.pk].sort());
 });
 
-check('hello carries the records that connect a newcomer to members the host knows', () => {
-  // The root invited ann, ann invited ben, ben invited cat; the host knows the root only.
+check('hello carries the records that lead from a newcomer to the first member of the pool', () => {
+  // The root invited ann, and ann invited ben; the host knows the root only.
   const host = poolOf(root, [member(root)]);
-  const soon = { exp: T0 + 600 };
-  const [annM, benM, catM] = [member(ann, { voucher: invite(root, soon) }), member(ben, { voucher: invite(ann, soon) }), member(cat, { voucher: invite(ben, soon) })];
-  assert.deepEqual(host.answerHello({ member: catM }, cat.pk, T0), { error: 'denied', detail: 'not-member' }, 'alone it reaches nobody the host accepts');
-  assert.deepEqual(host.answerHello({ member: catM, chain: [benM] }, cat.pk, T0), { error: 'denied', detail: 'not-member' }, 'nor with a link missing');
+  const [annM, benM, catM] = [member(ann, { voucher: seat(root) }), member(ben, { voucher: seat(ann) }), member(cat, { voucher: seat(ben) })];
+  assert.deepEqual(host.answerHello({ member: benM }, ben.pk, T0), { error: 'denied', detail: 'not-member' }, 'alone it reaches nobody the host accepts');
+  assert.deepEqual(host.answerHello({ member: benM, chain: [catM] }, ben.pk, T0), { error: 'denied', detail: 'not-member' }, 'nor with a record that is no link');
   assert.equal(host.records().length, 1, 'and nothing of a refused hello is kept');
-  for (const bad of [{ member: catM, chain: 'x' }, { member: catM, chain: Array(MAX_HELLO_CHAIN + 1).fill(benM) }, { member: catM, chain: [offer(ann)] },
-    { member: catM, chain: [{ junk: 1 }] }, { member: catM, chain: [member(ben, { pool: 'github.com/acme/other' })] }]) {
-    assert.deepEqual(host.answerHello(bad, cat.pk, T0), { error: 'bad-request' }, JSON.stringify(bad).slice(0, 60));
+  for (const bad of [{ member: benM, chain: 'x' }, { member: benM, chain: Array(MAX_HELLO_CHAIN + 1).fill(annM) }, { member: benM, chain: [offer(ann)] },
+    { member: benM, chain: [{ junk: 1 }] }, { member: benM, chain: [member(ann, { pool: 'github.com/acme/other' })] }]) {
+    assert.deepEqual(host.answerHello(bad, ben.pk, T0), { error: 'bad-request' }, JSON.stringify(bad).slice(0, 60));
   }
-  const answer = host.answerHello({ member: catM, chain: [benM, annM] }, cat.pk, T0);
+  const answer = host.answerHello({ member: benM, chain: [annM] }, ben.pk, T0);
   assert.deepEqual(answer, { body: { index: host.index(T0) } });
-  assert.deepEqual(host.members(T0).map((m) => m.pk), [root.pk, ann.pk, ben.pk, cat.pk].sort());
-  // A link the host has not accepted needs its own invite unexpired, like the newcomer.
-  const other = poolOf(root, [member(root)]);
-  const old = member(ann, { voucher: invite(root, { exp: T0 + 50 }) });
-  const viaOld = member(ben, { voucher: invite(ann, { exp: T0 + 9000 }), at: T0 + 60, joinedAt: T0 + 60 });
-  assert.deepEqual(other.answerHello({ member: viaOld, chain: [old] }, ben.pk, T0 + 60), { error: 'denied', detail: 'not-member' });
-  assert.equal(other.accepts(ann.pk, T0 + 60), false, 'an expired invite lets nobody in through somebody else\'s hello');
-  other.merge(old, T0 + 60);
-  assert.ok(other.answerHello({ member: viaOld }, ben.pk, T0 + 60).body, 'once a member brought that link, the newcomer needs no chain');
+  assert.deepEqual(host.members(T0).map(pk), [root.pk, ann.pk, ben.pk].sort());
+  // One three vouchers from the first has no seat, whatever it brings.
+  assert.deepEqual(host.answerHello({ member: catM, chain: [benM, annM] }, cat.pk, T0), { error: 'denied', detail: 'no-seat' });
 });
 
 check('a task is available while a member offers it open and nobody holds it', () => {
@@ -626,11 +633,11 @@ check('the offers and the claims of a member that left count for nothing', () =>
   hosts.forEach((h) => h.pool.merge(offer(b.id), T0));
   const claim = claimNow(hosts, 2, TASK, T0 + 1);
   assert.equal(a.pool.task(TASK, T0 + 1).state, 'claimed');
-  const executorLeft = member(hosts[2].id, { voucher: invite(hosts[0].id, { n: 2 }), seq: 1, at: T0 + 2, left: true });
+  const executorLeft = member(hosts[2].id, { voucher: seat(hosts[0].id, { n: 2 }), seq: 1, at: T0 + 2, left: true });
   a.pool.merge(executorLeft, T0 + 2);
   assert.deepEqual([a.pool.task(TASK, T0 + 2).state, a.pool.task(TASK, T0 + 2).claim], ['available', null]);
   assert.equal(a.pool.get(recordKey(claim)), claim, 'the record is still held');
-  a.pool.merge(member(b.id, { voucher: invite(hosts[0].id, { n: 1 }), seq: 1, at: T0 + 3, left: true }), T0 + 3);
+  a.pool.merge(member(b.id, { voucher: seat(hosts[0].id, { n: 1 }), seq: 1, at: T0 + 3, left: true }), T0 + 3);
   assert.equal(a.pool.task(TASK, T0 + 3), null);
 });
 
@@ -662,28 +669,60 @@ check('a claim snapshot is what a round by this host starts from', () => {
   assert.deepEqual([second.gen, a.pool.get(recordKey(first)), backing(second, b.id.pk).gen], [1, second, 2]);
 });
 
-check('a pool holds 256 members: the nearest its root, then the earliest to join, then the lowest key; a host keeps a seat in its own state', () => {
-  const ids = Array.from({ length: 300 }, (_, i) => ident(100 + i));
-  const joined = (i) => T0 + (i % 150);
-  const records = [member(root), ...ids.map((id, i) => member(id, { voucher: invite(root, { n: i }), joinedAt: joined(i), at: T0 + 200 }))];
+check('a member has 15 seats to give: of the records that name one, the latest voucher holds it, then the lowest key, whatever order they came in', () => {
+  const ids = Array.from({ length: 40 }, (_, i) => ident(100 + i));
   const now = T0 + 200;
+  const first = ids.slice(0, 15).map((id, n) => member(id, { voucher: seat(root, { n }), at: now }));
+  const second = ids.slice(15, 20).map((id, n) => member(id, { voucher: seat(root, { n, at: T0 + 100 }), at: now }));
+  const records = [member(root), ...first, ...second];
   const pool = poolOf(root);
   const result = pool.merge(records, now);
-  const senior = ids.map((id, i) => ({ pk: id.pk, at: joined(i) })).sort((x, y) => x.at - y.at || (x.pk < y.pk ? -1 : 1)).map((m) => m.pk);
-  const seats = (p) => p.members(now).map((m) => m.pk).sort();
-  assert.deepEqual(seats(pool), [root.pk, ...senior.slice(0, 255)].sort());
-  assert.deepEqual([...new Set(codes(result))], ['full']);
-  assert.deepEqual(result.refused.map((r) => r.key).sort(), senior.slice(255).map((pk) => `member/${pk}`).sort());
+  const seats = (p) => p.members(now).map(pk).sort();
+  assert.deepEqual(seats(pool), [root, ...ids.slice(5, 20)].map(pk).sort());
+  assert.deepEqual(result.refused, ids.slice(0, 5).map((id) => ({ key: `member/${id.pk}`, code: 'no-seat' })));
   assert.equal(poolOf(root, records.toReversed(), now).stateHash(now), pool.stateHash(now), 'whatever order they came in');
-  // One further from the root has no seat before any of them, however early it says it joined.
-  const deep = member(eve, { voucher: invite(ids[0], { n: 999 }), joinedAt: T0 - DAY, at: now });
-  assert.deepEqual(codes(pool.merge(deep, now)), ['full']);
-  // A host over the cap is a member where it looks, and the last of the others is not.
-  const last = ids.find((id) => id.pk === senior[299]);
-  const own = poolOf(last, records, now);
-  assert.deepEqual(seats(own), [root.pk, last.pk, ...senior.slice(0, 254)].sort());
+  assert.equal(poolOf(root, [...records.slice(0, 16), ...second.toReversed()], now).stateHash(now), pool.stateHash(now));
+  // A voucher older than the one that holds the seat seats nobody, and one as old only the lower key.
+  assert.deepEqual(codes(pool.merge(member(eve, { voucher: seat(root, { n: 3, at: T0 + 50 }), at: now }), now)), ['no-seat']);
+  const [low, high] = [ids[20], ids[21]].sort((x, y) => (x.pk < y.pk ? -1 : 1));
+  const twins = [high, low].map((id) => member(id, { voucher: seat(root, { n: 14, at: T0 + 150 }), at: now }));
+  for (const order of [twins, twins.toReversed()]) {
+    const tied = poolOf(root, records, now);
+    for (const record of order) tied.merge(record, now);
+    assert.deepEqual(seats(tied), [root, ...ids.slice(5, 14), ...ids.slice(15, 20), low].map(pk).sort());
+  }
+  // A member one voucher from the first gives seats, and one two vouchers from it none.
+  assert.deepEqual(pool.merge(member(ids[30], { voucher: seat(ids[5]), at: now }), now).refused, []);
+  assert.deepEqual([pool.depth(root.pk, now), pool.depth(ids[5].pk, now), pool.depth(ids[30].pk, now)], [0, 1, 2]);
+  assert.deepEqual(codes(pool.merge(member(ids[31], { voucher: seat(ids[30]), at: now }), now)), ['no-seat']);
+  // A host whose seat went to another key is the first of a pool of its own where it looks.
+  const own = poolOf(ids[0], records, now);
+  assert.deepEqual(seats(own), [ids[0].pk]);
   assert.notEqual(own.stateHash(now), pool.stateHash(now));
-  assert.equal(poolOf(root, records.slice(0, 256), now).members(now).length, 256, 'a pool at the cap refuses nobody');
+});
+
+check('one member makes no members but in its own seats: a voucher lets in the one key it names, and an invite in a record nobody', () => {
+  const honest = [root, ann, ben, cat];
+  const records = family(honest);
+  const pool = poolOf(root, records);
+  const now = T0 + 100;
+  const puppets = Array.from({ length: 256 }, (_, i) => ident(1000 + i));
+  // A record in the form of the build before this one, carrying an invite of the root's that ran out.
+  const token = invite(root, { exp: T0 + 50 });
+  const old = puppets.map((id) => resign(id, {
+    type: 'member', pool: POOL, pk: id.pk, seq: 0, at: now, joinedAt: 0, maxAcceptedH: 12, left: false, voucher: { invite: token },
+  }, {}));
+  assert.deepEqual([...new Set(codes(pool.merge(old, now)))], ['bad-record']);
+  // The voucher the root signed for ann, under other keys.
+  const reused = puppets.map((id) => resign(id, member(id, { at: now }), { voucher: records[1].voucher }));
+  assert.deepEqual([...new Set(codes(pool.merge(reused, now)))], ['bad-voucher']);
+  assert.deepEqual(pool.members(now).map(pk), honest.map(pk).sort());
+  // What ann has is her own 15 seats, and none below them.
+  const hers = puppets.slice(0, 16).map((id, n) => member(id, { voucher: seat(ann, { n: n % 15, at: T0 + n }), at: now }));
+  const under = puppets.slice(16, 20).map((id) => member(id, { voucher: seat(puppets[1]), at: now }));
+  assert.deepEqual(codes(pool.merge([...hers, ...under], now)), ['no-seat', 'no-seat', 'no-seat', 'no-seat', 'no-seat']);
+  assert.deepEqual(pool.members(now).map(pk), [...honest, ...puppets.slice(1, 16)].map(pk).sort());
+  assert.equal(pool.members(now).length, 4 + LIMITS.invitees);
 });
 
 check('a member has 64 offers live, the lowest keys whatever order they came in; `room` says whether one more of its own fits', () => {
@@ -710,7 +749,7 @@ check('a member has 64 offers live, the lowest keys whatever order they came in;
 
 check('the records of one member take 256 KiB at most: a claim past that is dead, and `room` keeps a host 32 KiB short of it', () => {
   const granters = [root, ...Array.from({ length: 150 }, (_, i) => ident(300 + i))];
-  const records = [member(root), member(ann, { voucher: invite(root) }), ...granters.slice(1).map((id, i) => member(id, { voucher: invite(root, { n: i + 1 }) }))];
+  const records = family([root, ann, ...granters.slice(1)]);
   const tasks = Array.from({ length: 6 }, (_, i) => buildTaskId({ pool: POOL, kind: 'review', item: `pr-${i}`, identity: 'octocat' }));
   records.push(...tasks.map((_, i) => offer(root, { item: `pr-${i}` })));
   const claimOf = (taskId) => {
@@ -758,7 +797,7 @@ check('a claim is a record only while a host that backs it offers the task, and 
   assert.deepEqual(codes(bare.merge([held, offer(a.id)], now)), [], 'the two together are taken in, whatever their order');
   // The record goes with the offer record of the host that backs it.
   const later = T0 + DAY + 301;
-  const stamp = hosts.map((h, i) => member(h.id, { ...(i ? { voucher: invite(a.id, { n: i }) } : {}), seq: 1, at: later }));
+  const stamp = hosts.map((h, i) => member(h.id, { ...(i ? { voucher: seat(a.id, { n: i }) } : {}), seq: 1, at: later }));
   bare.merge(stamp, later);
   assert.equal(bare.get(recordKey(held)), null);
 

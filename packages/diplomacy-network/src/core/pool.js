@@ -9,7 +9,7 @@
 import { b64u, canon, hash } from './canon.js';
 import { claimPrecedence, compareBacked, compareClaims, precedenceShaped, verifyClaim } from './claims.js';
 import { eligible, heldUntil } from './lease.js';
-import { acceptedSet, checkJoin, verifyVoucher, voucherOf } from './membership.js';
+import { seating, verifyVoucher } from './membership.js';
 import {
   LIMITS, backers, backing, checkShape, checkSignature, compareVersions, isBytes, isObject, isTime, parseKey, recordDigest,
   recordKey, shaped, versionPrecedence,
@@ -20,7 +20,7 @@ export const MAX_PULL_KEYS = 4096;
 /// The most bytes of index one answer carries: a response is a mebibyte at most.
 export const INDEX_PAGE_BYTES = 256 * 2 ** 10;
 export const MAX_PUSH_RECORDS = 1024;
-export const MAX_HELLO_CHAIN = 8;
+export const MAX_HELLO_CHAIN = LIMITS.depth;
 
 const memberKey = (pk) => `member/${pk}`;
 const offerKey = (taskId, host) => `offer/${taskId}/${host}`;
@@ -36,45 +36,6 @@ function disproof(record) {
   if (!checkSignature(record)) return 'bad-signature';
   if (record.type === 'member') return verifyVoucher(record) ? null : 'bad-voucher';
   return record.type === 'claim' ? verifyClaim(record) : null;
-}
-
-// How far a member's record is from a root of the pool by vouchers: 0 for a record
-// without one, one more than its voucher's signer's otherwise, and Infinity when the
-// chain ends at a record that is not held or never ends.
-function depthOf(pk, members, memo) {
-  const path = [];
-  let at = pk;
-  while (!memo.has(at)) {
-    const entry = members.get(at);
-    const by = entry ? voucherOf(entry.record)?.by : null;
-    if (!entry || path.includes(at)) memo.set(at, Infinity);
-    else if (!by) memo.set(at, 0);
-    else {
-      path.push(at);
-      at = by;
-    }
-  }
-  let depth = memo.get(at);
-  while (path.length > 0) memo.set(path.pop(), depth += 1);
-  return memo.get(pk);
-}
-
-// The members a pool with more of them than it holds keeps: the ones nearest a root,
-// then the earliest to join, then the lowest key. A member is further from the root
-// than the one that vouched for it, so none is kept without that one. `self` is kept
-// before any of them: a host is a member of its own state, and where the others keep
-// no seat for it its hash is not theirs.
-function seated(pks, members, self) {
-  const memo = new Map();
-  const seniority = new Map(pks.map((pk) => [pk, [depthOf(pk, members, memo), members.get(pk).record.joinedAt]]));
-  const before = (a, b) => {
-    if (a === self || b === self) return a === self ? -1 : 1;
-    const [x, y] = [seniority.get(a), seniority.get(b)];
-    if (x[0] !== y[0]) return x[0] < y[0] ? -1 : 1;
-    if (x[1] !== y[1]) return x[1] - y[1];
-    return a < b ? -1 : 1;
-  };
-  return [...pks].sort(before).slice(0, LIMITS.members);
 }
 
 // The entries of `entries` that are live at `asOf` for `self`, and why each other one is
@@ -108,19 +69,16 @@ function settle(entries, self, asOf) {
     const pk = queue.pop();
     if (kept.has(pk)) continue;
     kept.add(pk);
-    const by = voucherOf(members.get(pk).record)?.by;
-    if (by && members.has(by)) queue.push(by);
+    const by = members.get(pk).record.voucher?.by;
+    if (members.has(by)) queue.push(by);
   }
-  const accepted = acceptedSet(self, [...kept].map((pk) => members.get(pk).record));
-  const inside = [...kept].filter((pk) => accepted.has(pk));
-  const seats = inside.length > LIMITS.members ? new Set(seated(inside, members, self)) : null;
+  const accepted = seating(self, [...kept].map((pk) => members.get(pk).record));
   const roster = new Map(); // pk -> the live member record
   const present = new Map(); // pk -> the record of a member: live, not left, signed lately
   const used = new Map(); // pk -> what that member has live: { offers, claims, bytes }
   for (const [pk, e] of members) {
     if (!kept.has(pk)) dead.set(e.key, 'expired');
-    else if (!accepted.has(pk)) dead.set(e.key, 'not-member');
-    else if (seats && !seats.has(pk)) dead.set(e.key, 'full');
+    else if (!accepted.has(pk)) dead.set(e.key, accepted.has(e.record.voucher?.by) ? 'no-seat' : 'not-member');
     else {
       live.set(e.key, e);
       roster.set(pk, e.record);
@@ -153,7 +111,7 @@ function settle(entries, self, asOf) {
 }
 
 /// The records one host holds for one pool. `self` is the host's own public key: the
-/// members it accepts are the ones connected to it.
+/// members it accepts are the ones seated in the pool it is in.
 export class Pool {
   #entries = new Map(); // key -> { key, type, record, digest, size, precedence }
   #settled = null;
@@ -177,8 +135,11 @@ export class Pool {
   /// key), dated past the clock tolerance (`future`), loses to the version already held
   /// (`older`), does not prove itself (`bad-signature`, `bad-voucher`, `bad-claim`,
   /// `bad-grant`, `bad-lease`, `bad-ping`), or would not be live here: past its retention
-  /// (`expired`), signed by nobody this host accepts (`not-member`), a member more than
-  /// the pool holds (`full`), an offer or a claim beyond what its signer may have live
+  /// (`expired`), signed by nobody this host accepts (`not-member`), a member whose
+  /// voucher is an accepted key's and gives it no seat (`no-seat`: another record holds
+  /// that seat, its signer has none to give, or its signer began another membership
+  /// since), an offer or a claim beyond what its
+  /// signer may have live
   /// (`quota`), or a claim none of the hosts that back it offers the task of
   /// (`no-offer`). A list is taken in together, so a member record may let in the records
   /// that depend on it whatever their order. Records no longer live are dropped.
@@ -290,13 +251,25 @@ export class Pool {
     return settled.hash;
   }
 
-  /// Is `pk` connected to this host by vouchers at `now`, whatever its member record says?
+  /// Has `pk` a seat in this host's pool at `now`, whatever its member record says?
   vouched(pk, now) {
     return this.#at(now).accepted.has(pk);
   }
 
-  /// Does this host take requests from `pk` at `now`: a key connected to it by vouchers
-  /// whose member record, when held, does not say it left?
+  /// How many vouchers `pk` is from the member that started the pool, as this host sees
+  /// it at `now`; undefined for a key without a seat.
+  depth(pk, now) {
+    return this.#at(now).accepted.get(pk);
+  }
+
+  /// The member whose seats `pk` sits among at `now`: the one that seated it, for a key
+  /// two vouchers from the first member, and `pk` itself for any other.
+  branch(pk, now) {
+    return this.depth(pk, now) === LIMITS.depth ? this.get(memberKey(pk)).voucher.by : pk;
+  }
+
+  /// Does this host take requests from `pk` at `now`: a key with a seat whose member
+  /// record does not say it left?
   accepts(pk, now) {
     return this.vouched(pk, now) && this.#at(now).roster.get(pk)?.left !== true;
   }
@@ -435,20 +408,16 @@ export class Pool {
   }
 
   /// The answer to `hello` from `from`: `{ body: { index } }` once its member record is
-  /// held and it is accepted, else `{ error }` with `bad-request` or `denied`. `chain`,
-  /// when given, is the member records that connect the sender to members this host may
-  /// know; they are taken in together with the sender's own. A key no voucher connects
-  /// to this host yet, the sender's or one of its chain, must also pass `checkJoin`: a
-  /// chain record that does not is left out. A key that left is connected still: nobody
-  /// put it out, and a newer record of its own brings it back.
+  /// held and it is a member, else `{ error }` with `bad-request` or `denied`. `chain`,
+  /// when given, is the member records that lead from the sender to the member that
+  /// started the pool; they are taken in together with the sender's own. A key that left
+  /// has its seat still: nobody put it out, and a newer record of its own brings it back.
   answerHello(body, from, now) {
     const chain = (v) => Array.isArray(v) && v.length <= MAX_HELLO_CHAIN;
     if (!shaped(body, { member: isObject }, { chain }) || body.member.pk !== from) return { error: 'bad-request' };
     const records = [body.member, ...(body.chain ?? [])];
     if (!records.every((r) => checkShape(r, this.id).ok && r.type === 'member')) return { error: 'bad-request' };
-    const lets = (record) => this.vouched(record.pk, now) || checkJoin(record, now).ok;
-    if (!lets(body.member)) return { error: 'denied', detail: checkJoin(body.member, now).code };
-    const { refused } = this.merge(records.filter(lets), now);
+    const { refused } = this.merge(records, now);
     if (!this.member(from, now)) return { error: 'denied', detail: refused.find((r) => r.key === memberKey(from))?.code ?? 'left' };
     return { body: this.indexPage(now) };
   }

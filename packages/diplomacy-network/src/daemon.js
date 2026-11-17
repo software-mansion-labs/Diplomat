@@ -32,7 +32,7 @@ import { OwnFault } from './executor/own-fault.js';
 import { createWeighing } from './executor/weigh.js';
 import { createNode } from './node/node.js';
 import { createStore } from './node/store.js';
-import { authorize } from './requester/authorize.js';
+import { authorize, conclude } from './requester/authorize.js';
 import { createForge } from './requester/forge.js';
 import { rulesFor } from './requester/rules.js';
 import { createTransport } from './transport/index.js';
@@ -218,6 +218,7 @@ const requester = {
     forge: link.forge, host: hostOf(link.id), repo: repoOf(link.id), checkout: link.path, state,
   }),
   authorize,
+  conclude,
   perform: forge.perform,
 };
 
@@ -427,14 +428,11 @@ async function startRun({ runId, pool: link, peer, spec }) {
     if (container) await containers.release({ name: container.name, runId }).catch(() => {});
     jobs.delete(runId);
     saveJobs();
-    // An OwnFault: no job ran, and why not is this machine's own affair. The node has
-    // stopped the run and given it back by the time it hears of the failure, which it
-    // would count as an attempt - as it does any other, which the requester's jobs may
-    // have brought about.
-    if (err instanceof OwnFault) {
-      if (!ending) leaveAlone(link, err.message);
-      giveBack(runId, `this machine could not start it: ${err.message}`);
-    } else log(`${runId} could not be started: ${err?.message ?? err}`);
+    // An OwnFault: no job ran, and why not is this machine's own affair. The node gives
+    // such a run back at no attempt; any other failure it counts as one, since the
+    // requester's jobs may have brought it about.
+    if (err instanceof OwnFault && !ending) leaveAlone(link, err.message);
+    log(`${runId} could not be started: ${err?.message ?? err}`);
     throw err;
   } finally {
     starting -= 1;
@@ -670,7 +668,10 @@ function snapshot() {
     const pool = rows.find((row) => row.id === offer.pool);
     const most = pool?.members.find((member) => member.self)?.maxAcceptedH;
     const needs = pool?.tasks.find((task) => task.taskId === offer.taskId)?.hours;
-    return pool?.notTaking || (needs > most ? `this machine takes jobs of at most ${most} h and this one needs ${needs}` : '');
+    if (pool?.notTaking) return pool.notTaking;
+    if (needs > most) return `this machine takes jobs of at most ${most} h and this one needs ${needs}`;
+    if (offer.leftForGood) return 'its run was stopped on this machine, which does not take it again';
+    return offer.leftUntil > 0 ? `this machine failed at it or gave it back, and leaves it to the others until ${new Date(offer.leftUntil * 1000).toISOString()}` : '';
   };
   return {
     updatedAt, daemon: { pid: process.pid, startedAt }, identity, transport,

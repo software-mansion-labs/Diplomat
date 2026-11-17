@@ -226,9 +226,14 @@ await check('a host says in one line of its log where the time of each round wen
   const second = await req.node.offer(offerArgs('pr-2'));
   await w.agreed([req, exe, idle]);
   const about = (taskId) => exe.log.filter((line) => line.includes(` of ${taskId} `));
-  // What it said as it started: once for each time it had to ask what it missed.
-  const back = exe.log.filter((line) => line.includes(' is up to date '));
-  assert.ok(back.length > 0 && back.every((line) => /^\S+ is up to date \d+ s after this host came back to it$/.test(line)), back.join(' | '));
+  // A host says once that it is up to date, each time it had to ask what it missed: one
+  // that came back to a pool with members in it, not one that began a pool alone.
+  const upToDate = (h) => h.log.filter((line) => line.includes(' is up to date '));
+  await w.restart(idle);
+  await w.agreed([req, exe, idle]);
+  assert.deepEqual([upToDate(req), upToDate(idle).length], [[], 1]);
+  assert.match(upToDate(idle)[0], /^\S+ is up to date \d+ s after this host came back to it$/);
+  const back = upToDate(exe);
   const numbers = (line, shape) => {
     assert.match(line, shape);
     return shape.exec(line).slice(1).map(Number);

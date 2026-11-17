@@ -8,9 +8,9 @@
 
 import { b64u } from '../core/canon.js';
 import { identityFromSeed } from '../core/identity.js';
-import { solveAsync } from '../core/pow.js';
+import { solverPool } from '../core/pow.js';
 import { validPool } from '../core/records.js';
-import { SWITCH_OFF_WAIT_MS, TICK_MS, WAKE_GAP_MS } from '../paths.js';
+import { POW_WORKERS, SWITCH_OFF_WAIT_MS, TICK_MS, WAKE_GAP_MS } from '../paths.js';
 import { createClaiming } from './claiming.js';
 import { claimKey, createGossip } from './gossip.js';
 import { createInbound } from './inbound.js';
@@ -42,13 +42,18 @@ function fenced(clock, log) {
 
 /// The host. `store` is `createStore`'s; `transport` carries requests to and from other
 /// hosts; `clock` is `{ now(), setTimeout, clearTimeout }` with `now` in Unix seconds;
-/// `random(n)` answers n random bytes; `requester` knows the rules and the forge;
+/// `random(n)` answers n random bytes; `requester` knows the rules and the forge, and is
+/// told (`conclude(request)`) of every request it allowed that got no answer from it;
 /// `executor` runs jobs, says whether it takes a task (`wouldTake(task)`) and may say how
-/// many more milliseconds this host waits before it goes for one (`weigh(task)`);
+/// many more milliseconds this host waits before it goes for one (`weigh(task)`); a
+/// `start` that throws is a failed attempt of the offer, but for an error named
+/// `OwnFault` - no job ran, for a fault of this machine's own - whose claim is given
+/// back at no attempt lost;
 /// `settings()` answers `{ requiredMinimumH, maximumAcceptedH }`;
-/// `solve(challenge, effort)` finds a proof of work, by default on a worker thread.
+/// `solve(challenge, effort)` finds a proof of work, by default on one of POW_WORKERS
+/// threads.
 export function createNode({
-  store, transport, clock: timers, random, log = () => {}, requester, executor, settings, solve = solveAsync,
+  store, transport, clock: timers, random, log = () => {}, requester, executor, settings, solve = solverPool(POW_WORKERS),
 }) {
   const clock = fenced(timers, log);
   let id = identityFromSeed(store.read('identity')?.seed ?? '');
@@ -61,7 +66,7 @@ export function createNode({
   const host = {
     id, self: id.pk, store, transport, clock, random, log, requester, executor, settings, solve, keys,
     now: () => clock.now(),
-    pools: new Map(), // pool id -> { id, link, pool, locks, seq, inviter, invites, farewell, stale, epoch, catching }
+    pools: new Map(), // pool id -> { id, link, pool, locks, seq, joining, invites, farewell, stale, epoch, catching }
     away: new Map(), // pool id -> the link of a pool that is linked and that this host left
     // pool id -> the locks of a pool this host is not in now: one read from the store and
     // not linked yet, or one it left.
@@ -72,7 +77,7 @@ export function createNode({
     }),
     save: (P) => store.write(poolFile(P.id), {
       toJSON: () => ({
-        id: P.id, linked: true, seq: P.seq, inviter: P.inviter, invites: P.invites, ...P.farewell, records: P.pool.records(),
+        id: P.id, linked: true, seq: P.seq, joining: P.joining, invites: P.invites, ...P.farewell, records: P.pool.records(),
       }),
     }),
   };
@@ -143,7 +148,7 @@ export function createNode({
     ...host.gossip.handlers, ...host.offers.handlers, ...host.runs.handlers, ...inbound.handlers,
     lock(P, from, body) {
       const answer = P.locks.answer({
-        pool: P.pool, identity: id, from, body, now: host.now(), nextGen: () => host.offers.nextGen(body.taskId),
+        pool: P.pool, identity: id, from, body, now: host.now(), nextGen: () => host.offers.nextGen(body.taskId, from),
       });
       host.saveLocks();
       return answer;

@@ -38,12 +38,24 @@ every sender gets the 64 KiB, whoever it says it is.
 - A member may reserve up to 1 MiB, and a member that holds a live key of the target
   (section 9) up to 48 MiB for an `act`.
 - A ticket is good for one request, and is void when that request's headers have not
-  arrived 60 s after it was given. A member that reserves again gives up the ticket it
+  arrived 10 s after it was given. A member that reserves again gives up the ticket it
   held.
-- A member has one place at a time and a target four in all, counting the tickets not
-  yet used and the bodies being read and served. A place is free again once its request
-  was answered, refused or abandoned, however long that took. A `reserve` that finds no
-  place free is answered `busy`.
+- A target has four places in all, counting the tickets not yet used and the bodies
+  being read and served, and a member has one at a time between itself and the keys
+  that sit where it does: a key two vouchers from the first member shares one place
+  with the member that seated it and with the other keys in that member's seats
+  (section 5). A place is free again once its request was answered, refused or
+  abandoned, however long that took. A `reserve` that finds no place free is answered
+  `busy`.
+- A ticket that brought no whole body - it ran out, its member reserved again, or the
+  body its headers announced did not come whole in the time a body has - is a ticket
+  unused. The first costs nothing. From the second running, the member's `reserve` is
+  answered `busy` for 60 s, twice as long each time, up to an hour. A body that came
+  whole, whatever it held, ends the count.
+- When all four places are taken, a member that had no place in the last 60 s takes
+  the oldest ticket not yet used of a member that had one: that ticket is void, and
+  its member is not counted as having left it unused. A body being read is never put
+  out.
 
 A request over what the target will read is answered with HTTP status 413 and no envelope;
 its sender may send it again, with a ticket of its own each time, unless it is an `act`:
@@ -66,7 +78,9 @@ strings as UTF-8, and numbers restricted to integers in the safe range. Floats, 
 inside records, and duplicate keys are invalid. `H(x)` is SHA-256. Every signature is
 Ed25519 over `tag || 0x00 || canon(object without its "sig" member)`, where `tag` is an
 ASCII domain tag (`dn1/req`, `dn1/res`, `dn1/rec`, `dn1/grant`, `dn1/ping`, `dn1/invite`,
-`dn1/cap`). Times are integer Unix seconds.
+`dn1/voucher`, `dn1/cap`). Times are integer Unix seconds. The seven points of small
+order are no keys, with either sign bit: a signature made of nothing verifies under one
+for some messages, and whatever names such a key is refused as malformed.
 
 Where a hash is written as a concatenation, a key is its 32 raw bytes, a nonce its raw
 bytes, a string its UTF-8 bytes and a hash its 32 raw bytes. Inside JSON every byte
@@ -106,6 +120,13 @@ Every request carries its own proof of work. None is ever accepted without one.
 - **Signature.** `sig` covers the whole envelope including `pow`, so the work is bound to
   the sender key, the target key, the difficulty, the public seed and the work seed.
 
+The seed is public and names the hour, not anything the target chose: work for an hour to
+come can be done ahead of it. A request solved today for a `ts` a month from now is
+accepted in that hour. What bounds this is what a request costs when it arrives - it
+counts toward its sender's volume like any other, and the price it paid is the one it
+stated, checked against what is owed at that moment - and what its body may say then:
+a state hash, a claim or a ping of an earlier day holds for nothing.
+
 ### Required effort
 
 The target decides how much work a request owes; it rises with the requests it is
@@ -117,7 +138,9 @@ required(sender) = BASE << min(CAP, max(0, ceil(log2(n / ALLOW))))
 
 `n` counts the requests accepted from that sender in the last 60 seconds, this one
 included. A sender that is not a member of the request's pool on the target is a
-stranger: all strangers share one counter, and their `BASE` is 16 times higher.
+stranger: all strangers share one counter, and their `BASE` is 16 times higher. The
+price a request must meet is that of the sender it names: a member's for a key the
+target takes for a member of that pool, a stranger's for any other.
 
 | | BASE | ALLOW per 60 s | CAP |
 | --- | --- | --- | --- |
@@ -135,12 +158,27 @@ A target checks, cheapest first, and stops at the first failure:
 | `ts` within 300 s of its clock | `stale` |
 | `pow.epoch` is the epoch of `ts` | `stale` |
 | `effort` at least `required(from)` | `effort` |
-| the solution | `bad-request` |
-| the signature | `denied` |
+| the solution | `effort` |
+| the signature | `effort` |
 | `(from, nonce)` unseen | `replay` |
 
-Only a request that passed the signature counts toward its sender's `n`; a failure before
-that counts toward the stranger counter.
+A request is authenticated once its solution and its signature hold. What a target
+answers before that says nothing of the keys and pools it knows. Too little work, a
+solution that does not hold and a signature that is not the sender's get one refusal -
+`effort`, with the `detail` `the work or the signature of this request does not hold` -
+and every refusal up to there quotes one price as the `effort` of its envelope (section
+4): what a stranger owes at that moment, whatever key and pool the request named. So a
+request made of nothing, under the target's own key or a member's, in a pool the target
+is linked to or not, is answered alike. A member learns what it owes from the answers to
+its authenticated requests; one that paid too little pays the stranger's price once, and
+the answer to that names its own.
+
+What counts toward `n`: an authenticated request, toward its sender; and a request
+whose solution holds at a stranger's price and whose signature does not, toward the
+strangers. Nothing else. Work that was not done raises nobody's price. A solution at a
+member's price under a member's key, without that member's signature, raises neither
+that member's price nor the strangers': it costs its sender a member's `BASE` of hashes
+and the target one signature check, each time, at a price that does not rise.
 
 ### After a start
 
@@ -154,7 +192,8 @@ later, whatever its kind: an `act` goes out again under the `seq` it had (sectio
 The counters behind `required` are the process's too, and start from nothing.
 
 Only a request the host served moves that mark: one of a member, in a pool the host
-has linked, or the `hello` of a host that carries a member's invite. What is answered
+has linked, or a `hello` that brings an invite the host made or the record of a key a
+member gave a seat. What is answered
 `not-member` moves nothing. And the mark is never ahead of the host's own clock at the
 start: where a sender whose clock runs ahead, inside the 300 s, left a later date on
 disk, the host serves nothing dated at or before the second it started in, and
@@ -172,13 +211,29 @@ but `act` answers the same when asked again, and an `act` is carried out once fo
 A sender pays what the target's last answer asked for. It never pays more than the most
 the table above lets a target ask - 16384 << 12 = 262144 << 8 = 67 108 864 - and a target
 that asks for more is not sent that request again. A request refused for `effort` is sent
-again at the price asked, at most three times.
+again at the price asked, at most three times. A member whose own volume has taken its
+price above what a stranger owes, and that has lost count of it - it started again in
+that minute - is quoted the stranger's price, pays too little again, and after the third
+time leaves that request; a minute later its price has fallen.
 
 For one peer a host does at most 16384 << 14 = 268 435 456 hashes of work in any hour:
-four requests at the highest price, or 16384 at a member's base. Once that is spent it
-sends that peer nothing until the hour has moved on. So the most one member can make
-another host work is that much an hour - about four minutes of one core at a million
-hashes a second - however it prices itself.
+four requests at the highest price, or 16384 at a member's base. For all its peers
+together it does at most four times that, 16384 << 16 = 1 073 741 824: 18 minutes of one
+core at a million hashes a second. Past either it sends nothing it would have to pay for
+until the hour has moved on - except to a peer it has known for an hour, which it goes
+on paying up to 16384 << 8 = 4 194 304 hashes an hour, 256 requests at a member's base
+price, whatever the others took. So the members that ask for the most make a host work
+1 073 741 824 hashes an hour between them, however many keys they have seated, and
+cannot keep it from asking the members it knew before them. The floors of 240 peers add
+at most 1 006 632 960 hashes to such an hour, 17 minutes of a core, and that only when
+every one of them is asked for its whole. A host knows a peer from the first request to
+it or from it since the host started. A request a host does not pay for was not
+answered: a claim round goes on without that member as without one that is silent
+(section 7).
+
+A host works on 2 proofs at a time, each on a thread of its own, the cheapest of those
+waiting first: a proof at the highest price, about a minute of a core, keeps a cheap
+one waiting no longer than the proofs already begun.
 
 ## 4. Response envelope
 
@@ -188,8 +243,9 @@ hashes a second - however it prices itself.
 
 `effort` is what the target would require of this sender's next request. A refusal has
 `"ok": false` and `"error": { "code": "...", "detail": "..." }` in place of `body`;
-`detail` is at most 200 characters. Codes: `effort` (too little work; `effort` says how
-much), `stale` (clock or epoch), `replay`, `not-member`, `bad-request`, `denied`, and
+`detail` is at most 200 characters. Codes: `effort` (too little work, or work or a
+signature that does not hold; `effort` says what a stranger owes), `stale` (clock or
+epoch), `replay`, `not-member`, `bad-request`, `denied`, and
 `busy` (the target could not serve the request this once: it has only just started, it
 has no place free, or it failed - and only the first of these says so in a `detail`
 that is part of this contract, section 3). A request that is not the canonical form of anything
@@ -210,8 +266,9 @@ whole set for every pool it is in.
 Two versions with the same precedence are ordered by `H(canon(record))`, lower wins.
 
 ```json
-{ "type": "member", "pool": "...", "pk": "...", "seq": 3, "at": 1794000900, "joinedAt": 1794000000,
-  "maxAcceptedH": 12, "voucher": { "invite": "<invite token>" }, "left": false, "sig": "..." }
+{ "type": "member", "pool": "...", "pk": "...", "seq": 3, "at": 1794000900, "era": 0,
+  "maxAcceptedH": 12, "left": false, "sig": "...",
+  "voucher": { "pool": "...", "by": "<pk>", "era": 0, "pk": "...", "seat": 4, "at": 1794000000, "sig": "..." } }
 
 { "type": "offer", "pool": "...", "taskId": "...", "host": "<pk>", "seq": 1, "at": 1794000000,
   "kind": "review", "item": "pr-578", "identity": "octocat", "title": "...",
@@ -223,24 +280,23 @@ Every record carries `at`, the time that version was signed. A record dated more
 version of a record of its own with an `at` no earlier than the version before.
 `offer.state` is `open`, `cancelled` or `done`; `createdAt` is when the host began to
 offer the task and stays the same through every version until the offer ends. An offer
-never carries the prompt. A member that started its pool has no `voucher`.
+never carries the prompt. A member that started its pool has no `voucher`; `era` and the
+voucher are told under Membership below.
 
 Limits: a pool id is at most 200 characters, `host/owner/repo` or deeper, of `a-z`,
 `0-9`, `.`, `_` and `-`; `kind` is `[a-z][a-z0-9-]{0,31}`; `item` is
 `[a-z0-9][a-z0-9._-]{0,63}`; `identity` is `[a-z0-9][a-z0-9._-]{0,99}`; `title` is at
 most 300 characters with no control character; hours are 12 to 720; `attempt` is 1 to
-255; a claim lists at most 256 grants and 256 absent members; a time, a `seq` or a `gen`
-is at most 2^40.
+255; a `seat` is 0 to 14; a claim lists at most 256 grants and 256 absent members; a
+time, a `seq`, an `era` or a `gen` is at most 2^40.
 
 ### How much a pool holds
 
-- **256 members.** When a host accepts more member records than that, the live ones are
-  the 256 most senior: the fewest vouchers away from a member that has none, then the
-  earliest `joinedAt`, then the lowest `pk`. A member is further from the root than the
-  one that vouched for it, so none is seated without that one. The others are not live
-  (`full`). A host counts itself first in its own state: a host the others have no seat
-  for is a member only where it looks itself, and its hash is nobody else's. A host makes
-  no invite while it holds 256 member records of a pool.
+- **241 members**: the first, the 15 it seats, and the 15 each of those seats (Membership,
+  below). A member record that is given no seat is not live (`no-seat`). A host the
+  others have no seat for is a member only where it looks itself, and its hash is nobody
+  else's. A host makes no invite while every seat it has is held by a member, and none
+  at all two vouchers from the first member.
 - **Per member: 64 offers, 64 claims, 256 KiB.** A member has at most 64 offers and 64
   claims live, and its live records - its member record, the offers and the claims it
   signed - take at most 256 KiB together in canonical form. Offers, then claims, are
@@ -252,7 +308,7 @@ is at most 2^40.
   versions of a record being longer than the first.
 
 So a member's records never take more than 256 KiB of a pool, and a pool's never more
-than 64 MiB, which takes every seat filled to its quota. A host keeps a pool as one
+than 61 MiB, which takes every seat filled to its quota. A host keeps a pool as one
 document and writes it whole when a record changes; a pool of ten members with 64 offers
 each is half a megabyte. A claim carries the grant of every member that gave one, about
 0.5 KiB plus 0.4 KiB per grant, and an executor's claims of the last day share its 256
@@ -286,44 +342,94 @@ is held, **done** when none is open and one is `done`, else **cancelled**.
 
 ### Membership
 
-A host enters a pool with an invite: `{ "pool", "by": "<pk>", "exp", "nonce", "sig" }`,
-signed by a member and handed over out of band as a token, the base64url of its canonical
-form. `nonce` is 16 random bytes. Its `member` record carries the token as `voucher`; the
-voucher holds when the invite is for that pool, signed by another key than the member's,
-and `joinedAt` is no later than `exp`.
+A pool begins with a host that links a repository and joins nobody: its `member` record
+has no `voucher`, and it is the pool's **first member**. Every other member sits in a
+**seat** a member gave it. A member has 15 seats to give, numbered 0 to 14. The first
+member's are one voucher from it, the seats of the members in those are two, and a
+member two vouchers from the first has none to give: a pool holds 1 + 15 + 225 = 241
+members.
 
-A host **accepts** the keys connected to itself through vouchers: itself, the signer of
-its own invite, anyone vouched for by a member it accepts, and the voucher signer of any
-member it accepts. A host that starts a pool has no voucher and is its own root. Nothing
-else joins a pool. The pool's **members** are the accepted keys whose `member` record is
-held, does not say `left`, and was signed within the last 24 hours: they are who a claim
-needs the consent of, and the only hosts whose offers and claims count. A host that stays
-in a pool signs its member record again, with a higher `seq`, every 6 hours. One that
-stops is no member a day later, and nobody waits for it; its key stays accepted for as
-long as its record is live (below), so it comes back by signing the record again.
+An **invite** is `{ "pool", "by": "<pk>", "exp", "nonce", "sig" }`, signed by the member
+that makes it under `dn1/invite` and handed over out of band as a token, the base64url
+of its canonical form. `nonce` is 16 random bytes. It is in no record and is shown to
+nobody but its maker: the host that was handed one sends `hello { invite }` to `by`,
+and is answered with a voucher. An invite is good until `exp`, for every key that
+brings it, each for a seat of its own.
 
-A host lets in a key it has not accepted before only by `hello`, and only while the
-invite is unexpired. Any member that accepts the invite's signer can be greeted, not only
-the signer. A member a host learns of from another member needs no unexpired invite: that
-member let it in.
+A **voucher** is `{ "pool", "by": "<pk>", "era", "pk", "seat", "at", "sig" }`, signed by
+`by` under `dn1/voucher`: the member `by`, in its membership numbered `era`, gave its
+seat `seat` to the key `pk` at `at`, by its own clock. A member record carries the
+voucher of its seat. The voucher holds when it is for that record's pool and key, is
+signed by another key, and is dated no later than the record; a record with one that
+does not is refused (`bad-voucher`). So a voucher lets in the one key its signer named,
+and nobody makes a member of a key in a seat that is not its own to give.
+
+A member record carries `era`, the `seq` of the first record of the membership it
+belongs to. A host that links a pool it holds no record of its own for begins a
+membership, as the first member of a pool of one; signing its record again, leaving,
+coming back and joining by an invite all keep the era. A voucher counts only while the
+record of its signer is of the era it names: a host that left a pool, unlinked it and
+linked it again has given no seat.
+
+**Who is seated** follows from the member records a host holds, and is the same on every
+host that holds the same records:
+
+- The host follows its own voucher to its signer, that one's to its signer, and so on,
+  for as long as the signer's record is held and of the era the voucher names. Where
+  that ends is the first member.
+- Under a seated key, each of its seats goes to the record with the latest voucher `at`
+  for that seat, and among equals to the lowest `pk`. A key is seated once, at the
+  place nearest the first member, and nothing is seated more than two vouchers from it.
+- A host that finds itself in no seat under that first member is the first member where
+  it looks, with whatever is seated under itself.
+
+A member record that is given no seat is not live: `no-seat` when the signer of its
+voucher is seated, `not-member` otherwise. The pool's **members** are the seated keys
+whose `member` record is held, does not say `left`, and was signed within the last 24
+hours: they are who a claim needs the consent of, and the only hosts whose offers and
+claims count. A host that stays in a pool signs its member record again, with a higher
+`seq`, every 6 hours. One that stops is no member a day later, and nobody waits for it;
+it keeps its seat, and comes back by signing the record again.
+
+**Whose word a seat is.** Nothing orders members but the vouchers above them, so the
+only keys that can take a member's seat are the one that gave it and the one that gave
+that one its own: by a later voucher for the seat, or by leaving the era the vouchers
+were given in. No record another member signs moves anybody. A member one voucher from
+the first decides who sits in its own 15 seats and nowhere else - itself and 15 keys, 16
+seats of the 241, and m such members together 16 m; a member two vouchers out holds its
+own seat and gives none; the first member decides every seat.
+
+**Giving a seat.** A host answers `hello { invite }` only for an invite of its own that
+it made in the membership it is in and that has not run out. The key gets the seat it
+holds or was given by an unexpired invite before; else a seat that no member holds and
+no unexpired invite has given to a key that has not taken it yet; else, of the seats
+whose holders left or have signed no record for 24 hours, the one whose holder's record
+is the oldest. A host with none of those, or two vouchers from the first member,
+answers `denied` with the detail `no-seat`; the other details are `bad-invite`,
+`wrong-pool`, `expired` and `that invite is no longer good` (not this host's, or made
+before it began the membership it is in). The answer is `{ voucher, chain }`: the voucher
+dated by the host's clock at that moment, and the member records that lead from the host
+to the first member, the host's own first.
+
+**Joining.** The newcomer signs its member record with the voucher, dated no earlier
+than the voucher, takes in the chain, and greets the member that invited it and then the
+others with `hello { member, chain? }`. The host it greets may not have heard yet of the
+member that seated it, so `chain` carries the member records between the newcomer and
+the first member - at most 2. The greeted host takes them in together with the
+newcomer's record, before it decides. Joining costs a newcomer two requests at a
+stranger's price (section 3).
 
 A member that left was put out by nobody, and comes back as the member it was: it signs
-its record again - a higher `seq`, the voucher it held, no `left` - and greets the
-members it knew. A host whose vouchers still connect it to that key lets it in by that
-`hello`, with no unexpired invite. A member record is held for 30 days after it was
-signed; a host that stayed away longer is forgotten, and enters by a new invite.
+its record again - a higher `seq`, the voucher it holds, no `left` - and greets the
+members it knew. A member record is held for 30 days after it was signed. A host that
+stayed away longer is forgotten, and is back the moment it signs its record again,
+unless its seat went to another key meanwhile: then it enters by a new invite.
 
-An invite is good for the membership it was given in. A host keeps the nonce of every
-unexpired invite it signed since it last became a member, and lets in nobody by an invite
-of its own that is not among them: one it signed before it left the pool, or before it
-lost what it stored.
-
-The host a newcomer greets may not have heard yet of the member that invited it. So
-`hello` carries a `chain` beside the newcomer's own record: the member records that lead
-from it toward the pool's root - its inviter's, that one's inviter's, and so on - at most
-8 of them. The greeted host takes them in together with the newcomer's record, before it
-decides. A record of the chain whose key it has not accepted before is held to the same
-rule as the newcomer's: its invite must be unexpired, or it is left out.
+A member record of any other form - one with a `joinedAt`, without an `era`, or with an
+invite for a voucher - is no record (`bad-record`), wherever it comes from, a host's own
+store included. A host whose store holds no record of its own that is one begins a
+membership: it is the first member of a pool of one, with the offers it had, and the
+other machines join it by invite.
 
 ### Live records and the state hash
 
@@ -341,7 +447,7 @@ held and on `asOf`, so two hosts holding the same records hash the same set:
 - Every version of a member record is live for 30 days after its `at`, and beyond that
   for as long as the voucher of a live member is signed by it: dropped, it would cut that
   member off.
-- A member is live only while its key is accepted and it has a seat (above). An offer or
+- A member record is live only while it has a seat (above). An offer or
   a claim is live only while the member record of its signer is, and while it fits its
   signer's quota (above).
 - A claim is live only while a host that backs it (section 7) has a live offer record of
@@ -370,16 +476,18 @@ ended, and a held claim of its own with no run behind it it signs `released`.
 ## 6. Requests between members
 
 Every kind but `hello` is refused with `not-member` unless `from` is a key the target
-accepts in `pool` whose member record, when held, does not say `left`. A sender a host
+seats in `pool` whose member record does not say `left`. A sender a host
 does not take for a member gets that one refusal, with an empty `detail`, whatever the
 pool - one the host is a member of, one it left, one it never heard of - and whatever it
 asked: the answer says nothing about the pools a host is linked to. A `hello` that is
-refused is answered the same way, unless it carries an invite to the pool signed by a
-key the host accepts: its sender was asked in, and is told why it is not let in.
+refused is answered the same way, unless it brings an invite the host signed for that
+pool, or a member record whose voucher holds and is signed by a key the host seats: its
+sender was asked in, and is told why it is not let in.
 
 | Kind | Body | Answer |
 | --- | --- | --- |
-| `hello` | `{ member, chain? }` - the sender's own record, and the records leading to its root | `{ index, more? }` |
+| `hello` | `{ member, chain? }` - the sender's own record, and the records leading to the first member | `{ index, more? }` |
+| `hello` | `{ invite }` - an invite the target made, as its token | `{ voucher, chain }` (section 5) |
 | `sync` | `{ asOf, hash, after? }` | `{ hash }`, plus `{ index, more? }` when the hashes differ |
 | `pull` | `{ keys }` | `{ records }` |
 | `push` | `{ records }` | `{ accepted, refused: [{ key, code }] }` |
@@ -409,7 +517,7 @@ ahead of the claims that rest on them. `accepted` lists the keys the target now 
 pushed; a refused record has an empty `key` when it is too malformed to have one, and its
 `code` is `bad-record`, `wrong-pool`, `future`, `older` (the target holds a version that
 wins), `bad-signature`, `bad-voucher`, `bad-claim`, `bad-grant`, `bad-lease`, `bad-ping`,
-or the reason it would not be live (section 5): `expired`, `not-member`, `full`, `quota`
+or the reason it would not be live (section 5): `expired`, `not-member`, `no-seat`, `quota`
 or `no-offer`. Records pushed together are taken in together, so a member record lets in
 the records that depend on it, and an offer the claim that rests on it, whatever their
 order.
@@ -422,9 +530,18 @@ answered its `hello`, and a lease extension, by the offering host whose ping it 
 A record learned by `push` is not pushed on, and a push that goes unanswered is not
 repeated: every 60 s a host sends `sync` to every host whose member record it holds -
 less often, down to once in 10 minutes, to one that does not answer - which carries
-each record to whoever a push missed. A host that leaves a pool signs its member record
+each record to whoever a push missed. One record does not wait for that: an offer of the
+host's own - made, signed again or ended. A member that has not said it holds it is
+pushed it again 2 s after the first push, 5 s after that and 15 s after that, beside
+whatever push to that member is still unanswered. A member has said so when it answers a
+push that carried the record, or sends a `sync` that names the very state the host
+holds. Another offer signed meanwhile starts the three waits over, and goes in the same
+push. These are requests like any other push: none is sent while the host leaves the
+member alone after a request that went unanswered, none to a member that has not
+answered the host for 3 minutes, and what is still not acknowledged after the third is
+left to the `sync`. A host that leaves a pool signs its member record
 `left`, ends its claims, cancels its offers, and pushes all of it once. The locks it
-granted bind it through their `exp` all the same, should it join again before. It
+granted bind it for their 120 s all the same, should it join again before. It
 keeps the `left` record, and the keys of the members it left, for as long as it is not a
 member again: one of those keys that asks it about the pool has not heard, and is pushed
 that record, at most once in 10 minutes. Nobody else is sent anything. A host dials,
@@ -436,7 +553,9 @@ as long as its record is fresh.
 
 `done` tells a host that offers a task how the run of its job ended: `outcome` is
 `{ ok, summary, microUsd, tokens, runner, model }`, the cost in millionths of a dollar,
-`summary` at most 4000 characters, and `spec` names the job that was run:
+`summary` at most 4000 characters. An outcome may carry `capped: true` beside those,
+meaning the executor lowered the tokens or the cost the job named to what it measured.
+`spec` names the job that was run:
 `H(canon(spec))` of the spec the executor was handed with its key (section 9). Its
 envelope is all that authenticates it. The host takes it only when the envelope's sender
 is the executor of a claim record the host holds for that task, `round` is that claim's
@@ -459,9 +578,35 @@ done by the report of a run the host gave it to; done by the record of a run of 
 job that sent it no report; or cancelled because its host was away for longer than an
 offer lasts (section 7 for the last two). An offer that a claim stops holding without a
 report is free again. That counts as a failed attempt when the hold ran out - the lease
-lapsed, or the claim outlived the offer's hours (section 8) - and counts for nothing
-when the executor ended its claim: a run that ends without a word of this host's job
-did another host's.
+lapsed, or the claim outlived the offer's hours (section 8) - on a claim that had held
+the offer for 2 hours at the least since the host first saw it do so, and that either
+had the host's key or was past its first lease. It counts for nothing when the executor
+ended its claim before that: its run did another host's job, was stopped on its machine,
+or never began for a fault of that machine's own.
+
+A hold that ran out in any other way was no attempt at the job: the claim was dated
+back so as to lapse as it landed, or its executor never asked for the key and nobody
+extended its lease. The offer loses nothing by it. Its host then gives it to no claim of
+that executor for 2 hours, twice as long each time under the same offer, up to 24 hours;
+nor to a claim of any key that sits where that executor does - for a key two vouchers
+from the first member, the member that seated it and every key in that member's seats;
+for a member one voucher from the first, itself and the keys in its own seats (section
+5). So the keys one member seats take no more turns at this than one key.
+
+Giving a claim back is no way to keep an offer. For 60 s after a claim let go of an
+offer before its hold ran out, the offer's host gives that offer to no claim of the same
+executor: it grants that executor's `lock` without `offer` (section 7), and the other
+members go first.
+
+An executor does not go straight back to a task either. One that failed at a task, or
+gave its claim back, leaves the task to the other members for 2 minutes, and for twice
+as long each time it does so again while the earliest open offer of the task is the
+same one, up to an hour; then it may go for the task again. A machine alone in its pool
+so makes all three attempts at its own offer, 2 and 4 minutes apart, and the offer ends
+failed; with others in the pool, one with a free slot takes the task meanwhile. A run
+its machine's operator stopped is not taken up by that machine again while that offer
+stands. These waits are the executor's own, and no other host checks them: the 60 s
+are what a host holds a member to.
 
 An executor with an outcome to report sends `done` to every host that backs its claim,
 still offers the task and has not answered - again every 30 s, until each has answered
@@ -487,6 +632,22 @@ rule decides whose consent that needs: **a host's word binds its own offer and n
 other.** Every member consents to the claim being made; only the host of an offer gives
 that offer to it.
 
+**What the pool holds, and what stays with the offering host.** A job belongs to no
+machine: every member holds its offer, any member with a slot may take it, and none is
+asked before another. What the job needs in order to run stays with the host that
+offered it, and with that host alone. Only it backs a claim with the offer, hands out
+the prompt and the key (section 9), carries out every forge request of the run, and asks
+for the next lease (section 8). No other member can do any of that in its place: none
+holds the prompt or that host's access to the forge. So while the offering host is
+asleep or out of reach:
+
+- its job, when nobody has claimed it, cannot be taken - a claim no host backs is no
+  claim;
+- its job, when it is running, has no way to the forge from that moment, and the run is
+  stopped when its lease and the 10 minutes of grace are over;
+- its offer is in no pool once it was not signed again for 24 hours, and the host
+  cancels it when it returns ("A host that was away").
+
 A host with a free slot that sees a task with a free offer it may take (section 8):
 
 1. **Confirms its own state.** It computes `stateHash(asOf)` over what it holds. Whether
@@ -499,6 +660,23 @@ A host with a free slot that sees a task with a free offer it may take (section 
 3. **Sends a lock to every present member**: `{ taskId, round, asOf, hash }`, `round` a
    fresh random 8-byte value.
 
+**Whose consent a claim needs.** One consent cannot be done without: that of a host
+whose offer the claim takes. A claim no offering host backs holds nothing, however many
+members granted it, so no offer is ever taken while its host is silent. Beyond that,
+every member that answers must grant - one that is there and has locked the task for
+another executor, or holds another state, stops the round. A member that does not
+answer is written into the claim as absent, and the round goes on without it: a pool
+would otherwise run nothing while one laptop sleeps. Its consent is not needed for what
+consent is there to prevent. A lock keeps two executors from running one job. A job is
+run under a key, the key is issued for an offer by that offer's host alone, and that
+host gives its offer to one claim at a time under a number it gives once ("Which claim
+holds an offer"). So when two executors both claimed a task because a member between
+them was silent, the host of each offer tells them apart, and at most one holds that
+offer and is handed its key. What the silent member could have added is an offer of its
+own of the same task: that offer is in no claim made without it, and is taken into the
+run, or run by itself, when the member is back ("One run for every offer", "What
+remains").
+
 A member is absent only by this round's own request to it: what earlier requests came
 to decides how long the round waits, never whether it asks. A signed refusal is an
 answer, and its sender is present - but for `stale`: a member whose clock is more than
@@ -510,7 +688,14 @@ the wait for one member's answer is:
 - 60 s for a member that answered the claimant within the last 3 minutes;
 - 60 s, asked again until the round is 90 s old, for a member the claimant has known for
   less than 3 minutes and never reached;
-- 15 s for any other.
+- 15 s for any other: one that has not answered the claimant for 3 minutes.
+
+A claimant that starts again has reached nobody yet. It keeps on disk which members had
+not answered it for 3 minutes when a request to them last failed, and since when, until
+one answers: such a member gets the 15 s from the first round on, not the wait of one
+never reached. A silence that began more than 24 h ago is not gone by. Nothing else
+changes for that member: it is asked in every round, counted absent when it does not
+answer, and has its say when it does.
 
 A host claims only while it has a slot to run the task in, and looks again before it
 commits: a claimant whose slot went while its round ran unlocks every member that
@@ -526,8 +711,8 @@ A member answers a lock with:
   of the task (`unavailable`), or when it has already granted or is itself claiming the
   task for another executor (`locked`, with that executor as `holder`);
 - `{ grant }` otherwise: `{ pool, taskId, executor, round, hash, by, exp, offer?, sig }`,
-  signed, with `exp = asOf + 120`. A granted lock binds the member through `exp` by its
-  own clock, or until an `unlock`, or until it holds the claim of that round with its
+  signed, with `exp = asOf + 120`. A granted lock binds the member for 120 s from its
+  answer, by its own clock, or until an `unlock`, or until it holds the claim of that round with its
   grant in it. A host's own round binds it the same way, from its start until it
   commits, stands down or times out.
 
@@ -536,8 +721,9 @@ state. A member that offers the task itself may add `offer` to it, `{ at, gen, h
 and so **backs** the claim: the offer it made at `at` (that offer's `createdAt`) is the
 claim's, for `hours` (that offer's `minRequiredH`), as the `gen`th claim the host gave
 that offer to. It backs when its offer is open and free, the claimant's `maxAcceptedH`
-is at least those hours, and what it holds of the pool is up to date ("A host that was
-away"); otherwise its grant is consent and nothing more. `gen` is the host's own count
+is at least those hours, what it holds of the pool is up to date ("A host that was
+away"), and no claim of the claimant let go of that offer within the last 60 s (section
+6); otherwise its grant is consent and nothing more. `gen` is the host's own count
 for that offer, on its disk before anyone sees it, and one higher each time it gives the
 offer away; asked again by the same round while its lock stands, it answers with the
 same number. A claimant that offers the task itself backs its own claim the same way,
@@ -686,9 +872,10 @@ member holds: the first to answer, once the host has pulled what that answer sho
 lacks, or a member whose own `sync` to the host names the very state the host holds,
 which is the same word from the other side. A member that is asleep, or slow to be
 reached, keeps nobody waiting. With nobody to ask, the pool is up to date at once.
-When nobody answers, the host asks again, and after 180 s of that with its transport up
-it goes on with what it holds. A host that goes out of date again meanwhile starts
-over: what a member said before says nothing of what came after.
+When nobody answers, the host asks again. 180 s after it went out of date, with its
+transport up, it goes on with what it holds, whatever it was told by then: nothing, or
+part of what a member holds by a member that answers slowly and a page at a time. A
+host that goes out of date again meanwhile starts over: what a member said before says nothing of what came after.
 
 Then it looks at its offers. One whose job was run meanwhile is `done` (above). One
 whose last version this host signed 24 hours ago or longer is `cancelled`: its record
@@ -739,6 +926,28 @@ remains"). A task its own host offered to run at once waits for neither of the t
 
 Nothing in a record hides any of this.
 
+- **A job cannot do without the machine that offered it.** No machine owns a job, and
+  only one can serve it: the offering host backs the claim, hands out the prompt and
+  the key, carries out the forge requests and extends the lease (above). While that
+  host is asleep, its unclaimed jobs are taken by nobody, its running jobs cannot reach
+  the forge and stop at the end of their lease and its grace, and after a day its
+  offers are gone. A second machine that offers the same job, to the byte, is a second
+  host an executor can be given it by ("One run for every offer"); a run that has its
+  key from the machine that fell asleep is lost all the same.
+- **A member that does not answer is not asked for its consent.** A claim carries the
+  grant of every member that answered and the names of those that did not. What holds
+  without the absent ones is that an offer is one claim's at a time, by its host's word;
+  what does not hold is that the task is run once - the absent member may offer it too,
+  and that offer is run when it returns unless the first run took it in or did its very
+  job (below).
+- **A repository that was renamed or moved is two pools.** A pool is named by the
+  repository's forge slug, and nothing else ties two names to one repository. Machines
+  linked under the old name and machines linked under the new one share no offers and
+  no members.
+- **Work can be done ahead of its hour.** The seed of the proof of work names the hour
+  and nothing the target chose (section 3): a sender can solve requests for an hour to
+  come and send them then, at the price it solved for. What it owes is weighed on
+  arrival, and a body solved ahead says nothing current.
 - **One task, two runs.** One run does for every offer of a task only where one claim
   holds them all and they are offers of one job. Otherwise an offer is run by itself:
   - *Hosts out of each other's reach.* Two hosts that offer one task and cannot reach
@@ -764,11 +973,13 @@ Nothing in a record hides any of this.
     - *the run was claimed more than 300 s before the offer was made*, and the offer was
       never given to it: the host made its offer while the run was going and was gone
       before the run could take that offer in.
-    - *nobody answered the host when it came back.* After 180 s it goes on with what it
-      holds, and gives its offer to whoever asks.
-    - *the first member to tell the host what it missed had missed the run too.* The
-      host goes by the first word it gets. From a member that was away as well it learns
-      nothing of the run, and gives its offer to the next claimant that holds no record
+    - *nobody answered the host when it came back*, or nobody was done answering. After
+      180 s it goes on with what it holds, and gives its offer to whoever asks.
+    - *the first member to tell the host what it missed had missed the run too*, or
+      meant to keep it from the host. The host goes by the first word it gets, and any
+      member can give it that word at once: the host's own `sync` names the state it
+      holds, and a `sync` that names the same state back makes it up to date. From a
+      member that was away as well it learns nothing of the run, and gives its offer to the next claimant that holds no record
       of it either. The record, when another member brings it, ends an offer no claim
       holds; one that a claim holds by then ends by that claim's run.
     - *the host was there and out of reach for more than a day.* It kept signing its
@@ -791,10 +1002,10 @@ Nothing in a record hides any of this.
     waits the 60 s above before it goes for the other offers of that task.
   - *The view.* A task's row is made from all its open offers: the title of the first by
     key, the earliest `createdAt`, the longest hours. Hosts go for the tasks with the
-    earliest `createdAt` first, and a host that failed at a task leaves it alone for as
-    long as that `createdAt` stays what it was. So a member that offers a task too
-    changes what others see of it, when they go for it, and whether a host that gave it
-    up tries it again.
+    earliest `createdAt` first, and a host that failed at a task leaves it alone for a
+    while only as long as that `createdAt` stays what it was (section 6). So a member
+    that offers a task too changes what others see of it, when they go for it, and how
+    soon a host that gave it up tries it again.
 - **An outcome is the executor's word.** A host ends its offer `done` on the report of
   the executor it gave the offer to. A member that takes an offer and reports `ok`
   without doing the work has finished it, and so has a member through whose key the
@@ -820,29 +1031,95 @@ Nothing in a record hides any of this.
   machine with no device to give from one that has one. Any private preference shows
   in who takes what.
 - **A member can take an offer and sit on it.** A claim made by the rules holds the
-  offers it was given for one lease and its grace, 2 h 10 min, and for as long after as
-  its executor answers the pings, up to each offer's hours; a job's own executor answers
-  only for a job that is going, and nothing shows another host whether it is. Each lapse
-  is a failed attempt of the offer, and the third cancels it. A member invited into a
+  offers it was given for one lease and its grace, 2 h 10 min. With the key of an
+  offer's host - or with a second host of its own that offers the same job, backs the
+  claim and extends its lease - it holds that offer for as long after as its executor
+  answers the pings,
+  up to the offer's hours; a job's own executor answers only for a job that is going,
+  and nothing shows another host whether it is. Each such lapse is a failed attempt of
+  the offer, and the third ends it `failed`: none comes sooner than 2 hours after the
+  host saw the claim, so three take 6 hours at the least. Without the key, or dated back
+  to lapse sooner, a claim costs the offer no attempt, and the host keeps the offer from
+  that member and the keys seated with it for 2 hours, then 4, up to 24: the offer is
+  held for 2 h 10 min at the most and is then free for 2 hours at the least. Each member
+  one voucher from the first has such a turn of its own, and the first member one for
+  itself and for each key it seats. The wait falls on every key in that member's seats,
+  so a machine seated by a member that sat on an offer waits for that offer with it. A
+  member that gives its
+  claim back before the lapse costs the offer no attempt and is given the offer again
+  60 s later (section 6): where no other member goes for the task in that minute, or
+  where a second member takes it then and does the same, the offer is kept from being
+  run for as long as they keep that up, and never ends failed. A member invited into a
   pool can do this to every task in it.
 - **A member that answers and does not grant** stops every round it is asked in: a round
-  needs the grant of every present member, and stands down after 180 s without one.
+  needs the grant of every present member, and stands down after 180 s without one. A
+  member that answers every request with a demand for the most work does the same to a
+  host until that host has done for it what it does for one peer in an hour,
+  268 435 456 hashes: for the rest of that hour the host's rounds go on without it, as
+  without a member that is silent.
+- **Four keys that ask for the most use up a host's hour of work.** What a host does for
+  all its peers in an hour is four times what it does for one, and a member one voucher
+  from the first has 16 keys. For the rest of that hour the host pays only the peers it
+  has known for an hour, 256 requests at the base price each: enough for its claim rounds
+  and its gossip with them, and nothing for a peer it met since. A host knows nobody for
+  an hour after it started, so in the first hour of a host that just started no peer of
+  its has that share (section 3).
 - **A lock costs one request.** A member can ask every member for a lock on a task and
-  commit nothing. Each lock binds for 120 s, and while it does that member grants no
+  commit nothing. Each lock binds for 120 s of its giver's clock, and while it does that member grants no
   other executor one. Asking again keeps the task locked, at the price of the requests
   (section 3).
-- **A grant is good for 120 s.** A claim signed inside that time and shown later is
+- **A grant is good for 120 s of its claimant's clock**, which the giver takes from the
+  claimant within 300 s of its own. A claim signed inside that time and shown later is
   taken in when it surfaces. It holds an offer only when no claim its host gave that
   offer to since is on record, and no longer than its lease, which began when it was
   signed.
-- **Members are whoever members invite.** A member that invites keys of its own has a
-  voice in every round and a quota of records for each of them, up to the pool's 256
-  seats.
+- **Members are whoever members seat.** A member one voucher from the first has 15
+  seats, and can put keys of its own in them: each has a voice in every round and a
+  quota of records, 16 voices and 4 MiB for one such member, 16 m for m of them, and all
+  241 for the first member. It can also give those seats to new keys as often as it
+  likes: each key a host has never reached is waited for once, about 90 s, by every
+  round of that host (section 7).
+- **A seat is the word of the members above it.** The member that gave a seat, and the
+  one that gave that member its own, take it away by a later voucher for it, and nothing
+  tells the member that lost it: the hosts that seat it no longer answer it as they
+  answer a stranger. A host that leaves a pool,
+  unlinks it and links it again has begun another membership: wherever its new record
+  arrives, the members it had seated are seated no longer, though it meant only to come
+  back, and each of them joins again by invite.
+- **Nothing puts a member out, and no key is ever changed.** There is no request and no
+  command that removes a member another member seated: a host gives a seat to another
+  key only once its holder left or went a day without signing. A member that misbehaves
+  stays for as long as it signs. What the others can do is make a pool without it: one
+  of them leaves the pool, unlinks the repository and links it again, which makes it the
+  first member of a pool of one, and every other honest machine joins that by invite.
+  The pool they left is the misbehaving member's alone, and the offers and claims
+  recorded there count for nothing in the other. A machine whose key was stolen has no
+  other remedy either: its identity is that key.
 - **A claim lives no longer than the offer records behind it.** When the last offer
   record of the hosts that back it is dropped, a day after it was signed, the claim goes
   with it, also the record of a claim that ended.
+- **Four members that keep sending large bodies hold the four places.** A member and
+  the keys it seats have one place between them, so this takes four members that sit in
+  no one else's seats, or the first member, which has a place for itself and one for
+  each key it seats. Each sends whole bodies of 1 MiB as slowly as a body may come, 52 s,
+  and reserves again at once: a `reserve` then finds a place only in the moments
+  between, and a large `push` or `act` of another member is refused meanwhile. It costs
+  them the bytes and one proof of work a body. A member with a live key of the target
+  may announce an `act` of 48 MiB and hold its one place for the 26 minutes that body
+  has, at a ticket unused each time it does not come.
+- **A ticket taken by a member that had none is a request refused.** The member that
+  held it sends its body all the same and gets 413: a `push` goes out again in its
+  time, and an `act` is not sent again and fails for its job. It happens to a member that
+  takes a second place inside a minute, at a target whose four places are all taken, in
+  the instant between its `reserve` and its body.
+- **A ticket waits 10 s, and the work for the body is done inside them.** A sender is
+  asked more work than it does in 10 s only after a burst of its own requests - past
+  512 times a member's base price at a million hashes a second - and until that price
+  is down its large requests find their tickets void.
+- **Members seated by one member wait for one another's large bodies** at each target,
+  one at a time.
 - **A full pool is slow to enter.** The index of a pool at its caps is some 20 pages and
-  its records up to 64 MiB, pulled 60 KiB at a time: about a thousand requests, each
+  its records up to 61 MiB, pulled 60 KiB at a time: about a thousand requests, each
   paid for (section 3).
 
 ## 8. Hours, leases and the heartbeat
@@ -861,7 +1138,8 @@ Nothing in a record hides any of this.
   than `min(leaseUntil, claimedAt + h * 3600) + 600`, `h` the hours of that offer: with
   its lease and 10 minutes of grace, and never past the offer's own hours.
 - From 10 minutes before `leaseUntil` to 10 minutes after it, a host whose offer the
-  claim holds sends the executor a `ping`, again every 30 s until it is answered:
+  claim holds, and that gave the executor its key for that claim, sends the executor a
+  `ping`, again every 30 s until it is answered:
   `{ pool, taskId, executor, round, n, by, ts, sig }` with `n` the `seq` it asks for, one
   more than the claim's. A host sends none once `leaseUntil` has reached
   `claimedAt + h * 3600` for its own offer: that offer has no lease left to give. The
@@ -895,8 +1173,9 @@ Nothing in a record hides any of this.
 
 Everything done on the forge for a task - reading an issue, posting a review, pushing a
 commit, opening a pull request - is done by the requester, on the executor's request. No
-credential of the requester crosses the network, and the executor needs none of its own
-for the forge.
+credential of the requester crosses the network. The executor uses none of its own for
+anything a task does on the forge; it needs its own read access to the repository over
+git, with which it fetches what a job clones.
 
 1. After its claim is committed, the executor asks a host whose offer the claim holds
    for the key. It pushes its claim to that host - a host gives a key only for a claim
@@ -1141,7 +1420,9 @@ on 4xx (or on errors and no payload). After any other outcome the host asks the 
 before the task's next pull request is checked, for the pull requests from that head in
 any state: none gives it back, any makes it the one this task opened. A creation whose
 request is still out is not asked about, and a question the forge does not settle refuses
-the request that waits on it.
+the request that waits on it. A request that was allowed and never got an answer from
+the forge - the key was taken back while it was checked, the forge could not be reached -
+does not count as still out: its outcome is not known, and the forge is asked.
 
 The rules a task receives come from the daemon's catalogue (`src/requester/rules.js`),
 keyed by forge and kind and pinned to the task's own item. A kind without an entry can be

@@ -34,9 +34,25 @@ export function identityFromSeed(seed) {
   return { pk: b64u(pk), seed: b64u(bytes) };
 }
 
-/// Is this a well-formed public key (32 bytes, base64url)?
+// The points of small order, as bytes with the sign bit cleared. Where the crypto library
+// takes one for a key, a signature with R the identity and S zero verifies under it for
+// messages nobody signed.
+const SMALL_ORDER = [
+  '00'.repeat(32),
+  `01${'00'.repeat(31)}`,
+  '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05',
+  'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a',
+  `ec${'ff'.repeat(30)}7f`,
+  `ed${'ff'.repeat(30)}7f`,
+  `ee${'ff'.repeat(30)}7f`,
+];
+
+/// Is this a well-formed public key: 32 bytes, base64url, and no point of small order?
 export function validPk(pk) {
-  return unb64u(pk)?.length === 32;
+  const bytes = unb64u(pk);
+  if (bytes?.length !== 32) return false;
+  bytes[31] &= 0x7f;
+  return !SMALL_ORDER.includes(bytes.toString('hex'));
 }
 
 /// The base64url signature of `tag || 0x00 || canon(object without "sig")`.

@@ -7,16 +7,16 @@ import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { forgeRequest } from './lib/fakes.mjs';
 import { canon } from '../src/core/canon.js';
 import { buildResponse, requestDigest } from '../src/core/envelope.js';
-import { createInvite, inviteToken } from '../src/core/membership.js';
+import { createVoucher } from '../src/core/membership.js';
 import { Pool } from '../src/core/pool.js';
 import { LIMITS, memberRecord, offerRecord } from '../src/core/records.js';
 import { poolFile } from '../src/node/store.js';
-import { MAX_BODY_BYTES, POW, STRANGER_BODY_BYTES } from '../src/paths.js';
+import { MAX_BODY_BYTES, POW, POW_HOURLY, STRANGER_BODY_BYTES } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const ROUND = 'AAAAAAAAAAA';
 const MOST = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
-const HOURLY = POW.memberBase * 2 ** 14;
+const { peer: HOURLY, all: HOURLY_ALL, floor: HOURLY_FLOOR } = POW_HOURLY;
 const failures = (hosts) => hosts.flatMap((h) => h.log.filter((line) => /failed|could not be served/.test(line)));
 const sum = (list) => list.reduce((total, n) => total + n, 0);
 const refused = (answer) => [answer.ok, answer.code, answer.detail];
@@ -97,27 +97,74 @@ await check('a host pays a peer no more than an honest target can ask, asks no m
   assert.deepEqual(failures([a]), []);
 });
 
-await check('a pool holds 256 members: the next is refused, no invite is made, and a host among 255 that never answer still claims', async () => {
+await check('a host works for all its peers together no more in an hour than it says, however many ask for the most; a member it has known for an hour it asks all the same, and one that priced itself out it waits for no longer than for a silent one', async () => {
+  const w = createWorld({ seed: 75 });
+  const [a, b] = await w.pool(['a', 'b']);
+  await w.run(3700);
+  // Twelve keys in a's seats, each asking the most for every request.
+  const { all, records } = w.crowd(a, 12, 1);
+  for (const m of all) answering(m, () => ({ error: { code: 'effort', detail: '' }, effort: MOST }));
+  assert.deepEqual((await w.request(b, a, 'push', { records }, { effort: POW.memberBase * 4 })).body.refused, []);
+  await w.run(3600);
+  const paid = [];
+  for (let hour = 0; hour < 2; hour += 1) {
+    const from = a.solved.length;
+    const since = w.net.now();
+    await w.run(3600);
+    paid.push(sum(a.solved.slice(from)));
+    assert.ok(w.net.count({ from: 'a', to: 'b', kind: 'sync', since }) >= 30, 'the member it knows is asked through the hour');
+  }
+  assert.deepEqual(paid.map((n) => n <= HOURLY_ALL + HOURLY_FLOOR && n > HOURLY_ALL - MOST), [true, true], `paid ${paid} an hour, of ${HOURLY_ALL}`);
+  // Its own round does not wait on the keys it cannot pay: they are absent, and b is asked.
+  const since = w.net.now();
+  const { taskId } = await a.node.offer({ ...offerArgs('pr-1'), now: true });
+  await w.net.until(() => a.executor.jobOf(taskId), { what: 'its own task claimed' });
+  const claim = w.claim(a, taskId);
+  assert.deepEqual([w.net.now() - since < 40, claim.grants.map((g) => g.by), claim.absent.length], [true, [b.pk], 12]);
+  assert.deepEqual(failures([a]), []);
+});
+
+await check('a member that asks for more work whatever it is paid stops a round like one that does not grant, until this host has done for it what it does for one peer in an hour: then the round goes on without it', async () => {
+  const w = createWorld({ seed: 76 });
+  const [a, b] = await w.pool(['a', 'b']);
+  const { all, records } = w.crowd(a, 2, 1);
+  // They ask for a little more than they were paid, each time: members that are there, and do not grant.
+  let most = false;
+  for (const m of all) answering(m, (request) => ({ error: { code: 'effort', detail: '' }, effort: most ? MOST : request.pow.effort + POW.memberBase }));
+  assert.deepEqual((await w.request(b, a, 'push', { records }, { effort: POW.memberBase * 4 })).body.refused, []);
+  const { taskId } = await a.node.offer({ ...offerArgs('pr-1'), now: true });
+  await w.run(100);
+  assert.equal(Boolean(a.executor.jobOf(taskId)), false, 'the round waits on a member that answers');
+  most = true;
+  const since = w.net.now();
+  await w.net.until(() => a.executor.jobOf(taskId), { what: 'its own task claimed' });
+  const claim = w.claim(a, taskId);
+  assert.deepEqual([w.net.now() - since < 200, claim.grants.map((g) => g.by), claim.absent], [true, [b.pk], all.map((m) => m.pk).sort()], `claimed after ${w.net.now() - since} s`);
+});
+
+await check('a pool holds 241 members, 15 under each of the first 16: the next has no seat, no invite is made, and a host among 240 that never answer still claims', async () => {
   const w = createWorld({ seed: 73 });
   const [a] = await w.pool(['a']);
   await w.net.until(() => a.transport.host.ready, { what: 'its transport' });
-  const evil = await w.intruder('evil', a);
   const now = w.net.now();
-  const voucher = inviteToken(createInvite(evil.id, { pool: POOL, exp: now + 3600, nonce: w.net.rnd.bytes(16) }));
-  const puppet = (joinedAt) => memberRecord(w.stranger('puppet').id, { pool: POOL, seq: 0, at: now, joinedAt, maxAcceptedH: 12, voucher });
-  const push = async (records) => (await w.request(evil, a, 'push', { records }, { effort: POW.memberBase * 4 })).body;
-  const puppets = Array.from({ length: LIMITS.members - 2 }, () => puppet(now - 10));
-  for (let i = 0; i < puppets.length; i += 32) assert.deepEqual((await push(puppets.slice(i, i + 32))).refused, []);
+  const { all, records } = w.crowd(a, LIMITS.members - 1);
+  const [evil] = all;
+  assert.equal((await w.request(evil, a, 'hello', { member: records[0] }, { effort: POW.strangerBase })).ok, true);
+  const push = async (pushed) => (await w.request(evil, a, 'push', { records: pushed }, { effort: POW.memberBase * 4 })).body;
+  for (let i = 1; i < records.length; i += 32) assert.deepEqual((await push(records.slice(i, i + 32))).refused, []);
   assert.equal(w.members(a).length, LIMITS.members);
-  // One more is refused; one that joined before the others takes the seat of the last of them.
-  assert.deepEqual((await push([puppet(now), puppet(now)])).refused.map((r) => r.code), ['full', 'full']);
-  const senior = puppet(now - 20);
-  assert.deepEqual((await push([senior])).accepted, [`member/${senior.pk}`]);
-  assert.deepEqual([w.members(a).length, w.members(a).includes(senior.pk)], [LIMITS.members, true]);
+  // Nobody is seated beside them: not under a member two vouchers from the first, and
+  // not in a seat that is held, by a voucher older than its holder's.
+  const puppet = (by, seat, at) => {
+    const id = w.stranger('puppet');
+    return memberRecord(id.id, { pool: POOL, seq: 0, at: now, era: 0, maxAcceptedH: 12, voucher: createVoucher(by, { pool: POOL, era: 0, pk: id.pk, seat, at }) });
+  };
+  assert.deepEqual((await push([puppet(all[20].id, 0, now), puppet(evil.id, 3, now - 1), puppet(a.id, 3, now - 1)])).refused.map((r) => r.code), ['no-seat', 'no-seat', 'no-seat']);
   const late = w.stranger('late');
-  const hello = await w.request(late, a, 'hello', { member: memberRecord(late.id, { pool: POOL, seq: 0, at: now, joinedAt: now, maxAcceptedH: 12, voucher }) }, { effort: POW.strangerBase * 4 });
-  assert.deepEqual(refused(hello), [false, 'denied', 'full']);
-  assert.throws(() => a.node.invite({ pool: POOL }), /has the 256 members a pool holds/);
+  const lates = memberRecord(late.id, { pool: POOL, seq: 0, at: now, era: 0, maxAcceptedH: 12, voucher: createVoucher(evil.id, { pool: POOL, era: 0, pk: late.pk, seat: 3, at: now - 1 }) });
+  assert.deepEqual(refused(await w.request(late, a, 'hello', { member: lates }, { effort: POW.strangerBase * 4 })), [false, 'denied', 'no-seat']);
+  assert.equal(w.members(a).length, LIMITS.members);
+  assert.throws(() => a.node.invite({ pool: POOL }), /Every one of the 15 machines this one may invite/);
   // Everyone but this host is absent, and the claim that says so is one a record can hold.
   const { taskId } = await a.node.offer({ ...offerArgs('pr-1'), now: true });
   await w.net.until(() => a.executor.jobOf(taskId), { what: 'its own task claimed' });
@@ -188,8 +235,7 @@ await check('a claim that would not fit beside what its host has in the pool is 
   const evil = await w.intruder('evil', a);
   const now = w.net.now();
   // 200 members that never answer: every claim of the host lists them all as absent.
-  const voucher = inviteToken(createInvite(evil.id, { pool: POOL, exp: now + 3600, nonce: w.net.rnd.bytes(16) }));
-  const puppets = Array.from({ length: 200 }, () => memberRecord(w.stranger('puppet').id, { pool: POOL, seq: 0, at: now, joinedAt: now, maxAcceptedH: 12, voucher }));
+  const puppets = w.crowd(a, 200, 1).records;
   for (let i = 0; i < puppets.length; i += 40) await w.request(evil, a, 'push', { records: puppets.slice(i, i + 40) }, { effort: POW.memberBase * 4 });
   assert.equal(w.members(a).length, 202);
   const size = (record) => canon(record).length;
@@ -278,6 +324,14 @@ await check('what a host served before it went down it does not serve after: the
   assert.equal((await w.request(b, a, 'sync', body(), { ts: first.request.ts })).code, 'busy', 'nor another request of that second');
   await w.run(2);
   assert.equal((await w.request(b, a, 'sync', body())).ok, true, 'a request made since is served');
+  // What is on disk is the latest date served, in whatever order the requests came.
+  await w.run(10);
+  const latest = w.net.now();
+  assert.equal((await w.request(b, a, 'sync', body(), { ts: latest })).ok, true);
+  assert.equal((await w.request(b, a, 'sync', body(), { ts: latest - 3 })).ok, true, 'one dated before it, served after it');
+  assert.ok(w.stored(a, 'heard').ts >= latest);
+  await w.restart(a);
+  assert.equal((await w.request(b, a, 'sync', body(), { ts: latest - 1 })).code, 'busy', 'nothing dated up to the latest is served by the next process');
   const { taskId } = await a.node.offer(offerArgs('pr-1'));
   await w.agreed([a, b]);
   assert.equal(w.view(a).members.find((m) => m.pk === b.pk).reachable, true);
@@ -342,10 +396,12 @@ await check('the second a host serves nothing up to after a start is that of the
 
   // Requests dated as far ahead as a clock may be, from a key that is nobody's: refused
   // as any outsider's is, and on disk the host's last served second is what it was.
+  // The newcomer's two hellos were a stranger's, and count for a minute.
+  await w.run(61);
   await quiet();
   const before = w.stored(a, 'heard').ts;
   const ahead = w.net.now() + 58;
-  const member = memberRecord(s.id, { pool: POOL, seq: 0, at: w.net.now(), joinedAt: w.net.now(), maxAcceptedH: 12 });
+  const member = memberRecord(s.id, { pool: POOL, seq: 0, at: w.net.now(), era: 0, maxAcceptedH: 12 });
   assert.deepEqual(refused(await w.request(s, a, 'hello', { member }, { effort: 128, ts: ahead })), [false, 'not-member', '']);
   assert.deepEqual(refused(await w.request(s, a, 'sync', body(), { effort: 128, ts: ahead })), [false, 'not-member', '']);
   assert.deepEqual(refused(await w.request(b, a, 'sync', body(), { effort: 128, pool: 'github.com/o/elsewhere', ts: ahead })), [false, 'not-member', '']);
@@ -368,10 +424,7 @@ await check('the second a host serves nothing up to after a start is that of the
 
   // The newcomer a member invited is served its hello, and that counts as any request served.
   await quiet();
-  const invited = memberRecord(s.id, {
-    pool: POOL, seq: 0, at: w.net.now(), joinedAt: w.net.now(), maxAcceptedH: 12, voucher: a.node.invite({ pool: POOL }).invite,
-  });
-  const hello = await w.request(s, a, 'hello', { member: invited }, { effort: 128 });
+  const hello = await w.request(s, a, 'hello', a.node.invite({ pool: POOL }), { effort: 128 });
   assert.deepEqual([hello.ok, w.stored(a, 'heard').ts], [true, hello.request.ts]);
   assert.deepEqual(failures([a, b]), []);
 });

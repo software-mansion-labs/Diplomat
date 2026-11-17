@@ -405,7 +405,7 @@ try {
     await m.linked();
     const thrifty = await own(m, 'pr-1', 'unsent\nsay sent nothing');
     await done(m, thrifty);
-    assert.deepEqual((await offerOf(m, thrifty)).outcome, { ok: true, summary: 'sent nothing', usd: 0, tokens: 0, runner: 'claude', model: '' });
+    assert.deepEqual((await offerOf(m, thrifty)).outcome, { ok: true, summary: 'sent nothing', usd: 0, tokens: 0, runner: 'claude', model: '', capped: true });
 
     const taskId = await own(m, 'pr-2', 'result\nwait never');
     const run = await waiting(m, taskId, 'never');

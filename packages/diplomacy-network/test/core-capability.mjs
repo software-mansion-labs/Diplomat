@@ -131,6 +131,10 @@ check('an outcome is reported by the executor of the claim the offering host hol
   const outcome = wireOutcome({ ok: true, summary: 'reviewed', usd: 0.4215, tokens: 91234.2, runner: 'claude', model: 'opus' });
   assert.deepEqual(outcome, { ok: true, summary: 'reviewed', microUsd: 421500, tokens: 91234, runner: 'claude', model: 'opus' });
   assert.doesNotThrow(() => canon(outcome));
+  // An outcome of which the executor lowered a figure says so, and no other says anything of it.
+  const lowered = wireOutcome({ ok: true, summary: 'reviewed', usd: 0.1, tokens: 10, runner: 'claude', model: 'opus', capped: true });
+  assert.deepEqual(lowered, { ok: true, summary: 'reviewed', microUsd: 100000, tokens: 10, runner: 'claude', model: 'opus', capped: true });
+  for (const capped of [false, undefined, 1, 'true']) assert.equal('capped' in wireOutcome({ ok: true, capped }), false, String(capped));
   assert.deepEqual(wireOutcome({ summary: 'x'.repeat(5000), usd: NaN, tokens: -4, model: null }), {
     ok: false, summary: 'x'.repeat(4000), microUsd: 0, tokens: 0, runner: '', model: '',
   });
@@ -145,6 +149,9 @@ check('an outcome is reported by the executor of the claim the offering host hol
     return result.ok ? 'ok' : `${result.code}: ${result.detail}`;
   };
   assert.equal(verdict(done), 'ok');
+  assert.equal(verdict({ ...done, outcome: lowered }), 'ok');
+  assert.equal(verdict({ ...done, outcome: { ...outcome, capped: false } }), 'ok');
+  assert.equal(verdict({ ...done, outcome: { ...outcome, capped: 1 } }), 'bad-request: not a done body');
   assert.equal(verdict(done, { now: lapse - 1 }), 'ok');
   assert.equal(verdict(done, { now: lapse }), 'denied: not the executor of this task', 'a claim that lapsed');
   assert.equal(verdict(done, { from: third }), 'denied: not the executor of this task', 'another member, though it knows the round');

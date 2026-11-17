@@ -7,7 +7,7 @@ import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { unb64u } from '../src/core/canon.js';
 import { actMac } from '../src/core/capability.js';
-import { GRANT_TTL_SECS, LEASE_GRACE_SECS, LEASE_SECS } from '../src/paths.js';
+import { GRANT_TTL_SECS, LEASE_GRACE_SECS, LEASE_SECS, PEER_QUIET_MS, PROBE_TIMEOUT_MS, RECORD_RETENTION_SECS, REQUEST_TIMEOUT_MS } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const get = (item, leaf) => forgeRequest('GET', `/repos/o/r/${item}/${leaf}`);
@@ -28,7 +28,7 @@ await check('a host that granted a lock still holds it after a restart: nobody e
   assert.equal(req.node.snapshot().offers[0].taskId, taskId, 'its offers are its own again');
   assert.deepEqual((await lock(b, 'BBBBBBBBBBA')).body, { challenge: { reason: 'locked', holder: a.pk } });
   assert.deepEqual((await lock(a, 'AAAAAAAAAAA')).body, granted.body, 'asked again, the holder gets the very same grant');
-  await w.run(GRANT_TTL_SECS + 2 - (w.net.now() - asOf));
+  await w.run(GRANT_TTL_SECS + 2);
   const later = w.net.now();
   const free = await w.request(b, req, 'lock', { taskId, round: 'BBBBBBBBBBA', asOf: later, hash: w.view(b).hash });
   assert.equal(free.body.grant.executor, b.pk, 'once the grant has run out the task can be granted again');
@@ -247,11 +247,11 @@ await check('a host started with its clock an hour behind keeps its place in the
   const [a, b] = all;
   await w.run(600);
   const doc = () => w.stored(b, [...b.disk.files.keys()].find((name) => name.startsWith('pools/')));
-  const { records, inviter } = doc();
+  const { records } = doc();
   b.skew = -3600;
   await w.restart(b);
   await w.run(120);
-  assert.deepEqual([doc().records.length, doc().inviter], [records.length, inviter], 'what it held it still holds');
+  assert.equal(doc().records.length, records.length, 'what it held it still holds');
   assert.ok(doc().records.find((r) => r.type === 'member' && r.pk === b.pk).voucher, 'and it did not found a pool of its own');
   b.skew = 0;
   await w.run(300);
@@ -304,4 +304,61 @@ await check('what a member answers after a pool was closed is not taken into it'
   await w.run(120);
   const doc = w.stored(a, [...a.disk.files.keys()].find((name) => name.startsWith('pools/')));
   assert.deepEqual([doc.linked, doc.records], [false, undefined]);
+});
+
+await check('a host that starts again knows which members had long been silent when it last ran: it gives each the short time to answer, and counts it absent as ever', async () => {
+  const w = createWorld({ seed: 88 });
+  const [req, exe, zzz] = await w.pool(['req', 'exe', 'zzz'], { exe: { slots: 1 } });
+  const silent = () => w.stored(exe, 'peers')?.silent;
+  let n = 0;
+  // How long the round of a task offered now takes the executor, in seconds, and who it counts absent.
+  const round = async () => {
+    n += 1;
+    const { taskId } = await req.node.offer(offerArgs(`pr-${n}`));
+    await w.net.until(() => exe.executor.jobOf(taskId), { maxMs: 15 * 60 * 1000, what: `job ${n}` });
+    const line = exe.log.find((l) => l.startsWith(`claim of ${taskId} made`));
+    exe.executor.end(exe.executor.jobOf(taskId).runId);
+    await w.net.until(() => w.offerRow(req, taskId).state === 'done', { what: `task ${n} done` });
+    return [Number(/over in (\d+) s/.exec(line)[1]), w.claim(req, taskId).absent];
+  };
+  const short = PROBE_TIMEOUT_MS / 1000;
+  const long = REQUEST_TIMEOUT_MS / 1000;
+
+  w.net.sleep('zzz');
+  const slept = w.net.now();
+  await w.net.until(() => silent()?.[zzz.pk], { what: 'the sleeper known to be silent' });
+  const since = silent();
+  assert.deepEqual(Object.keys(since), [zzz.pk], 'the member it asked in vain for long, and no other');
+  assert.ok(since[zzz.pk] > slept && since[zzz.pk] <= w.net.now(), `asleep at ${slept}, silent since ${since[zzz.pk]}`);
+  await w.run(900);
+  assert.deepEqual(silent(), since, 'since when is said once, however often it is asked in vain after');
+  await w.restart(exe);
+  let [took, absent] = await round();
+  assert.ok(took >= short && took <= short + 2, `${took} s for a member known to be silent`);
+  assert.deepEqual(absent, [zzz.pk]);
+
+  // The member answers again: nothing is held against it. Then its machine goes down,
+  // and one request to it fails: that is not being silent for long. To the host that
+  // starts again it is a member never reached, asked for as long as such a one.
+  w.net.sleep('zzz', false);
+  await w.net.until(() => Object.keys(silent()).length === 0, { what: 'the mark gone' });
+  await w.agreed([req, exe, zzz]);
+  w.net.kill('zzz');
+  await w.net.until(() => !w.view(exe).members.find((m) => m.pk === zzz.pk).reachable, { what: 'a request to it failed' });
+  await w.run(1);
+  assert.deepEqual(silent(), {});
+  await w.restart(exe);
+  [took, absent] = await round();
+  assert.ok(took >= long, `${took} s for a member never reached`);
+  assert.deepEqual(absent, [zzz.pk]);
+
+  // A silence that began longer ago than a record lives says nothing: such a member
+  // is no member, or has become one again.
+  for (const [age, fits] of [[RECORD_RETENTION_SECS, (s) => s >= long], [RECORD_RETENTION_SECS - 60, (s) => s <= short + 2]]) {
+    await w.run(PEER_QUIET_MS / 1000 + 300);
+    exe.disk.write('peers', JSON.stringify({ silent: { [zzz.pk]: w.net.now() - age } }));
+    await w.restart(exe);
+    [took] = await round();
+    assert.ok(fits(took), `${took} s for a member silent since ${age} s ago`);
+  }
 });

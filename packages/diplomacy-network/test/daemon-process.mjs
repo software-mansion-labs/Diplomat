@@ -331,7 +331,7 @@ try {
     const offer = {
       taskId: 'string', pool: 'string', kind: 'string', item: 'string', title: 'string', state: 'string', reason: 'string',
       executor: 'string', executorHere: 'boolean', backedBy: ['string'], offeredAt: 'int', attempt: 'int', requests: 'int',
-      refused: 'int', endedAt: 'int', notTaking: 'string',
+      refused: 'int', endedAt: 'int', leftUntil: 'int', leftForGood: 'boolean', tooLong: 'boolean', notTaking: 'string',
     };
     shaped({ ...state, offers: [] }, {
       updatedAt: 'int', daemon: { pid: 'int', startedAt: 'int' }, identity: { pk: 'string', onion: 'string' },
@@ -348,7 +348,7 @@ try {
       }],
       runs: [{
         runId: 'string', taskId: 'string', pool: 'string', peer: 'string', container: 'string', state: 'string', startedAt: 'int',
-        endedAt: 'int', exit: 'int', log: 'string',
+        endedAt: 'int', exit: 'int',
       }],
       offers: 'array',
     }, 'snapshot');
@@ -369,7 +369,7 @@ try {
       { ok: true, summary: 'reviewed', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, state.identity.pk, true, 'finished', 0,
     ]);
     // What a job wrote is under its run id, and the snapshot leads nobody to it.
-    assert.deepEqual([state.runs[0].log, fs.existsSync(path.join(a.base, 'runs', state.runs[0].runId, 'log.jsonl'))], ['', true]);
+    assert.deepEqual([Object.hasOwn(state.runs[0], 'log'), fs.existsSync(path.join(a.base, 'runs', state.runs[0].runId, 'log.jsonl'))], [false, true]);
 
     const file = path.join(a.base, 'state.json');
     const onDisk = await until('state.json to follow', () => {

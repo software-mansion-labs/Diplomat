@@ -1,5 +1,5 @@
 // The envelopes: a request passes a target's checks only when all of them hold, each
-// failure is refused with its own code at the cheapest check that sees it, and a response
+// failure is refused at the cheapest check that sees it, and a response
 // answers exactly the request it names.
 // Run: node test/core-envelope.mjs
 
@@ -122,10 +122,10 @@ await check('a request whose epoch is not the one its ts falls in is stale', asy
   }
 });
 
-await check('a request with less work than its sender owes is refused and told how much', async () => {
+await check('a request with less work than its sender owes is refused, and told what a stranger owes', async () => {
   const { ctx } = target();
   const cheap = verifyRequest(await request({ effort: 7 }), ctx());
-  assert.deepEqual([cheap.ok, cheap.code, cheap.effort], [false, 'effort', 8]);
+  assert.deepEqual([cheap.ok, cheap.code, cheap.effort], [false, 'effort', 64]);
   const stranger = verifyRequest(await request({ effort: 8 }, carol), ctx());
   assert.deepEqual([stranger.ok, stranger.code], [false, 'effort']);
   assert.ok(stranger.effort >= 64);
@@ -144,7 +144,8 @@ await check('the effort owed doubles as accepted requests pile up, and the answe
   }
   assert.deepEqual(efforts, [8, 8, 16, 16, 16, 32, 32]);
   const short = verifyRequest(await request({ nonce: nonce(8), effort: 16 }), ctx());
-  assert.deepEqual([short.code, short.effort], ['effort', 32]);
+  assert.deepEqual([short.code, short.effort], ['effort', 64]);
+  assert.equal(verifyRequest(await request({ nonce: nonce(8), effort: 32 }), ctx()).ok, true);
 });
 
 await check('a counter that does not solve the challenge is refused', async () => {
@@ -153,7 +154,7 @@ await check('a counter that does not solve the challenge is refused', async () =
   const counter = Buffer.from(good.pow.counter, 'base64url');
   counter[7] ^= 1;
   const result = verifyRequest(resealed(good, { pow: { ...good.pow, counter: b64u(counter) } }), ctx());
-  assert.deepEqual([result.ok, result.code], [false, 'bad-request']);
+  assert.deepEqual([result.ok, result.code], [false, 'effort']);
 });
 
 await check('work solved for one request does not carry over to another body, target or sender', async () => {
@@ -161,20 +162,20 @@ await check('work solved for one request does not carry over to another body, ta
   for (const over of [{ body: { asOf: T0 + 1 } }, { kind: 'pull' }, { ts: T0 + 1 }, { pool: 'github.com/acme/other' }]) {
     const { ctx } = target();
     const result = verifyRequest(resealed(good, over), ctx({ isMember: () => true }));
-    assert.deepEqual([result.ok, result.code], [false, 'bad-request'], JSON.stringify(over));
+    assert.deepEqual([result.ok, result.code], [false, 'effort'], JSON.stringify(over));
   }
   const { ctx } = target();
   const stolen = verifyRequest(resealed(good, { from: carol.pk }, carol), ctx({ isMember: () => true }));
-  assert.deepEqual([stolen.ok, stolen.code], [false, 'bad-request']);
+  assert.deepEqual([stolen.ok, stolen.code], [false, 'effort']);
 });
 
-await check('a request not signed by its sender is denied', async () => {
+await check('a request not signed by its sender is refused as one that has not paid', async () => {
   const good = await request();
   const forged = [resealed(good, {}, carol), { ...good, sig: b64u(Buffer.alloc(64, 1)) }];
   for (const envelope of forged) {
     const { ctx } = target();
     const result = verifyRequest(envelope, ctx());
-    assert.deepEqual([result.ok, result.code], [false, 'denied']);
+    assert.deepEqual([result.ok, result.code], [false, 'effort']);
   }
 });
 
@@ -195,8 +196,8 @@ await check('the first failing check names the refusal: to, then ts, then effort
     [await request(far), 'bad-request'],
     [await request({ ts: T0 + 900, effort: 1 }), 'stale'],
     [resealed(await request({ effort: 1 }), {}, carol), 'effort'],
-    [resealed(await request(), { body: { asOf: 0 } }, carol), 'bad-request'],
-    [resealed(await request(), {}, carol), 'denied'],
+    [resealed(await request(), { body: { asOf: 0 } }, carol), 'effort'],
+    [resealed(await request(), {}, carol), 'effort'],
   ];
   // A signature is the dearest check: nothing refused before it has cost the target one.
   const checked = [];
@@ -215,7 +216,7 @@ await check('the first failing check names the refusal: to, then ts, then effort
   assert.equal(tally.signatures, 2);
 });
 
-await check('a request that passed its signature counts toward its sender, any other toward the strangers', async () => {
+await check('a request that passed its signature counts toward its sender, a replay too', async () => {
   const { ctx, meter } = target();
   const envelope = await request({ effort: 64 });
   verifyRequest(envelope, ctx());
@@ -223,13 +224,60 @@ await check('a request that passed its signature counts toward its sender, any o
   verifyRequest(envelope, ctx());
   assert.equal(meter.required(alice.pk, true, T0), 16, 'two replays and the original are three requests of alice');
   assert.equal(meter.required(carol.pk, false, T0), 64);
-  verifyRequest(resealed(envelope, {}, carol), ctx());
-  verifyRequest(await request({ to: carol.pk, nonce: nonce(5) }), ctx());
-  verifyRequest(null, ctx());
-  assert.equal(meter.required(carol.pk, false, T0), 128, 'three refusals are three requests of the strangers');
-  verifyRequest(await request({ ts: T0 + 900, nonce: nonce(6) }), ctx());
-  assert.equal(meter.required(alice.pk, true, T0), 16);
-  assert.equal(meter.required(carol.pk, false, T0), 256, 'and a fourth doubles what a stranger owes again');
+  const strange = await request({ effort: 64 }, carol);
+  verifyRequest(strange, ctx());
+  verifyRequest(strange, ctx());
+  assert.deepEqual([meter.required(alice.pk, true, T0), meter.required(carol.pk, false, T0)], [16, 128], 'and a stranger\'s toward the strangers');
+});
+
+await check('what a request that is not authenticated is answered says nothing of the keys and pools its target knows: one refusal and one price, the strangers\', whoever it says it is from', async () => {
+  const mine = (pool, pk) => pool === POOL && [alice.pk, bob.pk].includes(pk);
+  const said = (envelope) => {
+    const { ctx } = target();
+    const { ok, code, detail, effort } = verifyRequest(envelope, ctx({ isMember: mine }));
+    return { ok, code, detail, effort };
+  };
+  const fixed = { ok: false, code: 'effort', detail: 'the work or the signature of this request does not hold', effort: 64 };
+  // No work and no signature: a linked pool and the target's own key, a member's key, a
+  // stranger's key, and a pool the target is not in.
+  const blank = (from, pool) => ({ ...unsigned, from, pool });
+  const unsigned = { ...(await request({ effort: 1 })), pow: { epoch: Math.floor(T0 / 3600), nonce: b64u(nonce(1)), effort: 1, counter: b64u(Buffer.alloc(8)) }, sig: b64u(Buffer.alloc(64)) };
+  for (const [from, pool] of [[bob.pk, POOL], [alice.pk, POOL], [carol.pk, POOL], [bob.pk, 'github.com/acme/other']]) {
+    assert.deepEqual(said(blank(from, pool)), fixed, `${from === bob.pk ? 'own' : from === alice.pk ? 'member' : 'stranger'} ${pool}`);
+  }
+  // Work at a member's price under a member's name, and no signature of that member.
+  assert.deepEqual(said(resealed(await request(), {}, carol)), fixed);
+  assert.deepEqual(said({ ...(await request()), sig: b64u(Buffer.alloc(64, 1)) }), fixed);
+  // A member that paid too little is told the same: its price is in the answers it gets as a member.
+  const { ctx, meter } = target();
+  for (let i = 0; i < 3; i += 1) meter.count(alice.pk, true, T0);
+  const short = verifyRequest(await request(), ctx({ isMember: mine }));
+  assert.deepEqual([short.code, short.detail, short.effort], ['effort', fixed.detail, 64]);
+  const paid = verifyRequest(await request({ effort: 16 }), ctx({ isMember: mine }));
+  assert.deepEqual([paid.ok, paid.effort], [true, 16]);
+  // The date and the address are refused as they are, at the same price.
+  assert.deepEqual(said(await request({ ts: T0 + 900 })), { ok: false, code: 'stale', detail: 'ts is too far from this clock', effort: 64 });
+  assert.deepEqual(said(await request({ to: carol.pk })), { ok: false, code: 'bad-request', detail: 'addressed to another host', effort: 64 });
+});
+
+await check('work that does not hold raises nobody\'s price, and work under a member\'s name that the member did not sign raises neither the member\'s nor the strangers\'', async () => {
+  const { ctx, meter } = target();
+  const prices = () => [meter.required(alice.pk, true, T0), meter.required(carol.pk, false, T0)];
+  for (let i = 0; i < 20; i += 1) {
+    verifyRequest(null, ctx());
+    verifyRequest(await request({ to: carol.pk }), ctx());
+    verifyRequest(await request({ ts: T0 + 900 }), ctx());
+    verifyRequest(await request({ effort: 1 }), ctx());
+    verifyRequest(await request({ effort: 1 }, carol), ctx());
+    verifyRequest(resealed(await request(), { body: { asOf: 0 } }), ctx());
+    verifyRequest(resealed(await request(), {}, carol), ctx());
+  }
+  assert.deepEqual(prices(), [8, 64]);
+  // A stranger's work that holds counts toward the strangers, signed by it or not.
+  const strange = await request({ effort: 64, nonce: nonce(7) }, carol);
+  verifyRequest({ ...strange, sig: b64u(Buffer.alloc(64, 1)) }, ctx());
+  verifyRequest({ ...strange, sig: b64u(Buffer.alloc(64, 1)) }, ctx());
+  assert.deepEqual(prices(), [8, 128]);
 });
 
 await check('a pair is remembered while its epoch is acceptable and forgotten after', () => {

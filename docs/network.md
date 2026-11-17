@@ -58,7 +58,10 @@ away its offers are cancelled. A machine with jobs out has to stay awake.
 
 - **Joining.** The first machine to link a repository has a pool of one. Another machine joins by
   an **invite**: **Copy invite** on the pool's card, sent to the other operator by any means,
-  pasted into **Join...** there. An invite is good for a day.
+  pasted into **Join...** there. An invite is good for a day, and the machine that made it has
+  to be reachable when it is used: it is the one that seats the newcomer. A machine can seat
+  15 others, and so can each of those the first machine seated, which makes 241 machines the
+  most a pool holds.
 - **Leaving.** **Leave** stops this machine taking the pool's jobs and offering to it. It stays
   left until **Rejoin**. After a month away the pool no longer knows the machine, and it needs
   an invite again.
@@ -271,7 +274,9 @@ is refused. A refused request comes back to the agent with the reason.
 A job is leased two hours at a time. Before each lease ends the machine that offered it asks the
 executor whether it is still working; an answer extends the lease, silence returns the job to
 the pool ten minutes later. A job gets three attempts, on whichever machines take it - the same
-one three times in a pool of one - and after the third the offer ends as failed. A start that
+one three times in a pool of one - and after the third the offer ends as failed. A machine
+that failed at a job or gave it back leaves it to the others for two minutes, twice as long
+each time, an hour at most. A start that
 fails inside a container that was made is a failed attempt. A job a machine cannot start for a
 reason of its own - it cannot fetch the repository, has no engine or image, or cannot make the
 container - never ran: it goes back to the pool at no cost to its three attempts, and the

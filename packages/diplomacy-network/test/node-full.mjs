@@ -1,13 +1,14 @@
-// A pool at its caps - as many members as it holds, each with as many offers and as many
-// claims as one member may have live - is still a pool a host can join: it takes in every
-// record, and no answer on the way is larger than a response may be.
+// A pool at its caps - as many members as it holds but for the seats its newcomer has to
+// give, each with as many offers and as many claims as one member may have live - is
+// still a pool a host can join: it takes in every record, and no answer on the way is
+// larger than a response may be.
 
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { canon } from '../src/core/canon.js';
 import { buildClaim, buildGrant } from '../src/core/claims.js';
 import { INDEX_PAGE_BYTES } from '../src/core/pool.js';
-import { LIMITS, buildTaskId, memberRecord, offerRecord } from '../src/core/records.js';
+import { LIMITS, buildTaskId, offerRecord } from '../src/core/records.js';
 import { DEFAULT_LIMIT } from '../src/transport/http.js';
 
 const ROUND = 'AAAAAAAAAAA';
@@ -17,11 +18,9 @@ await check('a host joins a pool that is as full as a pool gets and holds what e
   const a = w.add('a');
   await w.start(a);
   const now = w.net.now();
-  const voucher = a.node.invite({ pool: POOL }).invite;
-  // Every member but the two hosts: each offers all it may, and claims all it may of
-  // what the next one offers.
-  const others = Array.from({ length: LIMITS.members - 2 }, (_, i) => w.stranger(`m${i}`));
-  const records = others.map((m) => memberRecord(m.id, { pool: POOL, seq: 0, at: now, joinedAt: now, maxAcceptedH: 12, voucher }));
+  // Every member but the two hosts, a seat of the first left free for the second: each
+  // offers all it may, and claims all it may of what the next one offers.
+  const { all: others, records } = w.crowd(a, LIMITS.members - 2 - LIMITS.invitees, 1);
   others.forEach((m, i) => {
     const taker = others[(i + 1) % others.length];
     for (let j = 0; j < LIMITS.offers; j += 1) {
@@ -41,7 +40,7 @@ await check('a host joins a pool that is as full as a pool gets and holds what e
   a.disk.write(file, JSON.stringify({ ...doc, records: [...doc.records, ...records] }));
   await w.restart(a);
   const full = 1 + others.length * (1 + LIMITS.offers + LIMITS.claims);
-  assert.deepEqual([w.records(a).length, w.members(a).length], [full, LIMITS.members - 1]);
+  assert.deepEqual([w.records(a).length, w.members(a).length], [full, LIMITS.members - 1 - LIMITS.invitees]);
   const whole = canon(Object.fromEntries(w.records(a).map((r) => [`${r.type}/${r.taskId ?? ''}/${r.host ?? r.executor ?? r.pk}`, [[r.seq], 'A'.repeat(43)]]))).length;
   assert.ok(whole > DEFAULT_LIMIT, `the whole index, some ${whole} bytes, is more than one answer may be`);
 
@@ -57,7 +56,7 @@ await check('a host joins a pool that is as full as a pool gets and holds what e
   await w.start(b);
   await b.node.join(a.node.invite({ pool: POOL }));
   await w.agreed([a, b], 30 * 60 * 1000);
-  assert.deepEqual([w.records(b).length, w.members(b).length], [full + 1, LIMITS.members]);
+  assert.deepEqual([w.records(b).length, w.members(b).length], [full + 1, LIMITS.members - LIMITS.invitees]);
   const size = (kind) => answers[kind].map((bytes) => (typeof bytes === 'number' && bytes <= INDEX_PAGE_BYTES + 4096 ? 'a page' : bytes));
   assert.deepEqual([...new Set([...size('hello'), ...size('sync')])], ['a page']);
   assert.ok(pages >= Math.floor(whole / INDEX_PAGE_BYTES), `the index took ${pages + 1} pages`);
