@@ -12,6 +12,7 @@ import math
 import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
 from . import jsoninput
@@ -619,11 +620,27 @@ def trouble(answered: bool | None, snapshot: Snapshot | None) -> str:
     return "Diplomacy Network: " + "; ".join(wrong) if wrong else ""
 
 
+_UTC_TIME = re.compile(
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z")
+
+
+def local_times(sentence: str) -> str:
+    """``sentence`` with each UTC time the daemon wrote in it, as in ``…until
+    2026-11-17T10:30:56.000Z``, as this machine's clock reads it: ``…until 11:30``."""
+    def clock(found: re.Match) -> str:
+        try:
+            at = datetime.strptime(found[0][:19] + "+0000", "%Y-%m-%dT%H:%M:%S%z")
+        except ValueError:
+            return found[0]
+        return at.astimezone().strftime("%H:%M")
+    return _UTC_TIME.sub(clock, sentence)
+
+
 def _pool(p: dict) -> Pool:
     return Pool(
         id=p["id"], path=_text(p.get("path")), identity=_text(p.get("identity")),
         hash=_text(p.get("hash")), left=_flag(p.get("left")),
-        not_taking=_text(p.get("notTaking")),
+        not_taking=local_times(_text(p.get("notTaking"))),
         members=tuple(
             Member(pk=m["pk"], is_self=_flag(m.get("self")),
                    max_accepted_h=_integer(m.get("maxAcceptedH")),
@@ -664,7 +681,8 @@ def _offer(o: dict) -> OfferState:
                         runner=_text(out.get("runner")), model=_text(out.get("model")),
                         capped=_flag(out.get("capped")))
         if isinstance(out, dict) else None,
-        ended_at=_number(o.get("endedAt")), not_taking=_text(o.get("notTaking")))
+        ended_at=_number(o.get("endedAt")),
+        not_taking=local_times(_text(o.get("notTaking"))))
 
 
 UNANSWERED = "the daemon did not answer"

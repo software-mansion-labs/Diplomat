@@ -2184,7 +2184,8 @@ def test_invite_join_and_leave_post_and_are_logged(store, on, daemon):
         [{"pool": POOL}], [{"invite": "dn1-other"}], [{"pool": POOL}])
     assert [(e.action, e.detail) for e in activity.read()
             if e.action in ("network-invite", "network-join", "network-leave")] == [
-        ("network-leave", f"Left {POOL}"), ("network-join", f"Joined {POOL}"),
+        ("network-leave", f"Left {POOL}"), ("network-join", f"Joining {POOL}: the machine that made the invite seats this one "
+                         "once it is reached"),
         ("network-invite", f"Made an invite to {POOL}")]
     assert "dn1-secret" not in json.dumps([e.detail for e in activity.read()])
     assert store.network_refusals == {}

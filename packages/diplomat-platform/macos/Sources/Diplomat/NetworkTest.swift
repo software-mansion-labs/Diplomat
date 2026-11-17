@@ -962,7 +962,9 @@ enum NetworkTest {
               await store.joinNetworkPool(invite: "dn-y", card: "github.com/o/r")
                 && store.networkRefusals["github.com/o/r"] == nil
                 && requests(NetworkRoute.join).last?["invite"] as? String == "dn-y"
-                && feedDetails(NetworkAudit.join).count == 1)
+                && feedDetails(NetworkAudit.join)
+                    == ["Joining github.com/o/r: the machine that made the invite seats this "
+                        + "one once it is reached"])
         await store.leaveNetworkPool("github.com/o/r")
         check("leaving a pool names it and is logged",
               requests(NetworkRoute.leave).last?["pool"] as? String == "github.com/o/r"

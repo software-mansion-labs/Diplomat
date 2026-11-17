@@ -6,8 +6,8 @@ pin it against its own expectations only. This file runs one fixture through bot
 (``diplomat-core network``) and demands the same answers: the hours a stored value
 reads as, the pool a git remote names, the hosts the requester has rules for, the kind
 and the body an offer is made as, the task a snapshot holds for an offer, the pools
-list, why a job of this machine's own waits, and the panel's line on what of the
-network does not work.
+list, why a job of this machine's own waits, the clock time a sentence of the daemon's
+names, and the panel's line on what of the network does not work.
 """
 
 from __future__ import annotations
@@ -17,6 +17,8 @@ import os
 import subprocess
 
 import pytest
+
+from pathlib import Path
 
 from diplomat_runtime import autofix, localrepos
 from diplomat_runtime import network as N
@@ -150,10 +152,33 @@ SNAPSHOTS = [
 ]
 
 HELD = len(SNAPSHOTS) - 1
+
+#: What the daemon package's bench answered `GET /state` with: two machines of one
+#: pool before, while and after a job, and a machine alone in its pool whose own job
+#: is too long for it, was given back, or had its figures lowered.
+DAEMON = json.loads(Path(__file__).with_name("daemon_snapshots.json").read_text("utf-8"))
+REAL = len(SNAPSHOTS)
+SNAPSHOTS += DAEMON.values()
+WIDGETS = "github.com/acme/widgets"
+TOO_LONG = "this machine takes jobs of at most 12 h and this one needs 24"
+LEFT = "this machine failed at it or gave it back, and leaves it to the others until "
+
+#: Sentences of the daemon's, with and without a UTC time in them.
+TIMES = [
+    LEFT + "2026-11-17T10:30:56.000Z", LEFT + "2026-11-17T18:45:00Z",
+    "from 2026-01-01T00:00:00.5Z to 2026-07-01T01:00:00.000Z, twice",
+    "docker is down: no engine", "", "until 2026-13-17T10:30:56.000Z",
+    "until 2026-11-17T25:30:56.000Z", "until 2026-11-17T10:30:61.000Z",
+    "until 2026-02-30T10:30:56.000Z", "until 2026-11-17T10:30:56.000",
+    "until 2026-11-17 10:30:56Z", "until 2026-11-17T10:30:56.000z",
+    "until \u0662\u0660\u0662\u0666-11-17T10:30:56Z", "2026-11-17T10:30:56Z2026-11-17T10:31:56Z",
+]
 NOT_TAKING = [{"task": task, "pool": pool, "snapshot": at}
               for at, pools in ((HELD, (0, 1)), (1, (0, 1, 2)), (None, (0,)))
               for pool in pools
               for task in ("t-down", "t-short", "t-free", "t-taken", "t-lab", "t-open", "")]
+NOT_TAKING += [{"task": offer["taskId"], "pool": 0, "snapshot": REAL + at}
+               for at, seen in enumerate(DAEMON.values()) for offer in seen["offers"]]
 
 OPEN_TASK = [{"pool": pool, "kind": kind, "item": item, "snapshot": at}
              for at in (None, 0, 1)
@@ -161,6 +186,8 @@ OPEN_TASK = [{"pool": pool, "kind": kind, "item": item, "snapshot": at}
                  (POOL, "review", "pr-9"), (POOL, "review", "pr-10"), (POOL, "review", "pr-11"),
                  (POOL, "issues", "issue-4"), (POOL, "issues", "pr-9"), (LAB, "review", "pr-9"),
                  ("github.com/O/R", "review", "pr-9"), (POOL, "Review", "pr-9"), ("", "", ""))]
+OPEN_TASK += [{"pool": WIDGETS, "kind": "review", "item": "pr-1", "snapshot": REAL + at}
+              for at in range(len(DAEMON))]
 
 TROUBLE = [{"answered": answered, "snapshot": at}
            for answered in (None, False, True)
@@ -195,7 +222,7 @@ LISTING = [
 
 PAYLOAD = {"hours": HOURS, "remotes": REMOTES, "rules": RULES, "kinds": KINDS,
            "offers": OFFERS, "snapshots": SNAPSHOTS, "openTask": OPEN_TASK,
-           "trouble": TROUBLE, "notTaking": NOT_TAKING, "listing": LISTING}
+           "trouble": TROUBLE, "notTaking": NOT_TAKING, "listing": LISTING, "times": TIMES}
 
 
 def _python() -> dict:
@@ -239,6 +266,7 @@ def _python() -> dict:
                      for r in OPEN_TASK],
         "trouble": [N.trouble(r["answered"], snapshot(r)) for r in TROUBLE],
         "listing": [listing(r) for r in LISTING],
+        "times": [N.local_times(sentence) for sentence in TIMES],
     }
 
 
@@ -259,7 +287,7 @@ def _differing(rows: list, swift: list, python: list) -> list:
 @pytest.mark.parametrize("member, rows", [
     ("hours", HOURS), ("pools", REMOTES), ("rules", RULES), ("kinds", KINDS),
     ("offers", OFFERS), ("openTask", OPEN_TASK), ("trouble", TROUBLE),
-    ("notTaking", NOT_TAKING), ("listing", LISTING)])
+    ("notTaking", NOT_TAKING), ("listing", LISTING), ("times", TIMES)])
 def test_the_twins_agree(twins, member, rows):
     swift, python = twins
     assert _differing(rows, swift[member], python[member]) == []
@@ -274,7 +302,8 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
     assert {None, POOL, "github.com/owner/repo", "gitlab.com/group/sub/r", LAB} <= pools
     assert set(python["kinds"]) == {None, "review", "review-own", "conflicts", "issues",
                                     "audit", "investigate"}
-    assert {None, "t-open", "t-issue", "t-lab"} == set(python["openTask"])
+    assert {None, "t-open", "t-issue", "t-lab", f"{WIDGETS}#review:pr-1@ra",
+            f"{WIDGETS}#review:pr-1@rs", f"{WIDGETS}#review:pr-1@rl"} == set(python["openTask"])
     assert "" in python["trouble"] and len(set(python["trouble"])) >= 6
     assert any(row["unconfirmed"] for row in python["listing"])
     assert any(len(row["pools"]) >= 3 for row in python["listing"])
@@ -288,4 +317,18 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
             "the network runs no nudge jobs", "no repository to offer it into"} == refusals
     assert any(isinstance(row, dict) and row["pool"] == "github.mycorp.com/o/r"
                for row in python["offers"])
-    assert set(python["notTaking"]) == {"", DOWN, SHORT}
+    left = DAEMON["left-until"]["offers"][0]["notTaking"]
+    assert left.startswith(LEFT + "2026-") and left.endswith("Z")
+    assert set(python["notTaking"]) == {"", DOWN, SHORT, TOO_LONG, N.local_times(left)}
+    assert N.local_times(left) != left
+
+
+def test_a_time_the_daemon_wrote_reads_by_this_machines_clock_on_both(kolkata):
+    """The table above agrees in whatever zone the suite runs in, UTC among them."""
+    proc = subprocess.run([CORE_BIN, "network"], input=json.dumps({"times": TIMES}).encode(),
+                          capture_output=True, timeout=60, check=False)
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    swift = json.loads(proc.stdout)["times"]
+    assert swift == [N.local_times(sentence) for sentence in TIMES]
+    assert swift[:3] == [LEFT + "16:00", LEFT + "00:15", "from 05:30 to 06:30, twice"]
+    assert swift[-1] == "16:0016:01" and swift[3:-1] == TIMES[3:-1]

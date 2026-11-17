@@ -103,6 +103,42 @@ def test_why_a_job_of_this_machines_own_waits_is_said_where_the_pool_does_not_sa
     assert N.not_taking("u", free, N.Snapshot()) == "", "a snapshot with no offers list"
 
 
+LEFT = "this machine failed at it or gave it back, and leaves it to the others until "
+
+
+@pytest.mark.parametrize("sentence, said", [
+    (LEFT + "2026-11-17T10:30:56.000Z", LEFT + "16:00"),
+    (LEFT + "2026-11-17T18:45:00Z", LEFT + "00:15"),
+    ("from 2026-01-01T00:00:00.5Z to 2026-07-01T01:00:00.000Z, twice",
+     "from 05:30 to 06:30, twice"),
+    ("docker is down: no engine", None),
+    ("", None),
+    ("until 2026-13-17T10:30:56.000Z", None),
+    ("until 2026-11-17T25:30:56.000Z", None),
+    ("until 2026-11-17T10:30:56.000", None),
+    ("until 2026-11-17 10:30:56Z", None),
+    ("until 2026-11-17T10:30:56.000z", None),
+    ("until \u0662\u0660\u0662\u0666-11-17T10:30:56Z", None),
+])
+def test_a_utc_time_in_a_sentence_of_the_daemons_reads_by_this_machines_clock(
+        kolkata, sentence, said):
+    assert N.local_times(sentence) == (sentence if said is None else said)
+
+
+def test_what_holds_this_machine_back_names_its_times_by_this_machines_clock(kolkata):
+    until = LEFT + "2026-11-17T10:30:56.000Z"
+    snap = N.Snapshot.from_json({
+        "pools": [{"id": "p", "notTaking": "nothing taken before 2026-11-17T10:00:00.000Z"},
+                  {"id": "q", "notTaking": until}],
+        "offers": [{"taskId": "t", "state": "pooled", "notTaking": until,
+                    "leftUntil": 1794911456, "leftForGood": False, "tooLong": False}]})
+    assert [p.not_taking for p in snap.pools] == ["nothing taken before 15:30", LEFT + "16:00"]
+    assert snap.offers[0].not_taking == LEFT + "16:00"
+    assert N.tasks(snap).value["t"].not_taking == LEFT + "16:00"
+    assert N.not_taking("t", snap.pools[0], snap) == LEFT + "16:00"
+    assert N.not_taking("t", snap.pools[1], snap) == "", "said once, by the pool"
+
+
 def test_an_outcome_says_whether_its_cost_was_capped():
     def read(outcome) -> N.Snapshot:
         return N.Snapshot.from_json({"offers": [

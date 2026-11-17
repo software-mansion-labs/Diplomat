@@ -59,7 +59,8 @@ away its offers are cancelled. A machine with jobs out has to stay awake.
 - **Joining.** The first machine to link a repository has a pool of one. Another machine joins by
   an **invite**: **Copy invite** on the pool's card, sent to the other operator by any means,
   pasted into **Join...** there. An invite is good for a day, and the machine that made it has
-  to be reachable when it is used: it is the one that seats the newcomer. A machine can seat
+  to be reachable when it is used: it is the one that seats the newcomer. Until it has, the
+  feed says *Joining ...* and the pool's card shows this machine alone in it. A machine can seat
   15 others, and so can each of those the first machine seated, which makes 241 machines the
   most a pool holds.
 - **Leaving.** **Leave** stops this machine taking the pool's jobs and offering to it. It stays
@@ -323,7 +324,9 @@ A pool's card says why this machine takes none of that pool's jobs while it take
 or the model credential missing, Tor not ready, or a job of that pool it could not start - in
 the daemon's words. A job of this machine's own that waits in the pool says on its row why this
 machine does not take it itself, where the card does not say it for every job already: *this
-machine takes jobs of at most 12 h and this one needs 24*.
+machine takes jobs of at most 12 h and this one needs 24*, that its run was stopped here, or
+that this machine failed at it or gave it back and until when it leaves it to the others. A
+time in such a sentence is this machine's clock time.
 
 A job offered to the network shows in the task list like any other: *in the pool*, *running on
 this machine* or on another member's key, then finished or failed. A job started by hand whose

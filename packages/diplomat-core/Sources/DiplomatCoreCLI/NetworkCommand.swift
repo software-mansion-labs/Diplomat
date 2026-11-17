@@ -10,6 +10,7 @@ import Foundation
 /// { "hours": [ <any JSON value>, … ],
 ///   "remotes": [ "<git remote URL>", … ],
 ///   "rules": [ "<forge host>", … ],
+///   "times": [ "<a sentence of the daemon's>", … ],
 ///   "kinds": [ {"verb", "ownPR"}, … ],
 ///   "offers": [ {"verb", "ownPR", "number", "repoKey", "label", "prompt", "panel",
 ///                "forced"}, … ],
@@ -44,6 +45,7 @@ enum NetworkCommand {
             return NetworkOffer.pool(repoKey: repo.key) ?? NSNull()
         }
         out["rules"] = (obj["rules"] as? [String] ?? []).map { NetworkPools.hasRules(host: $0) }
+        out["times"] = (obj["times"] as? [String] ?? []).map(NetworkSnapshot.localTimes)
         out["offers"] = rows("offers").map { row -> Any in
             switch NetworkOffer.from(
                 verb: row["verb"] as? String ?? "", ownPR: JSONInput.flag(row["ownPR"]),

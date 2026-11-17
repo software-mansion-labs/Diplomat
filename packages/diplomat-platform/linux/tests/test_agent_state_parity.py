@@ -669,6 +669,61 @@ def test_the_network_fixture_reaches_what_it_claims_to(networked_results):
     assert [r["network"] for r in python["records"]][:3] == [None, TASK, ISSUE_TASK]
 
 
+#: What the daemon package's bench answered `GET /state` with (see
+#: ``test_network_parity.py``).
+with open(os.path.join(os.path.dirname(__file__), "daemon_snapshots.json"),
+          encoding="utf-8") as _f:
+    DAEMON = json.load(_f)
+
+
+def _offered(snapshot: dict):
+    """A run booked for each offer of ``snapshot``, and one it never held, looked at as
+    the snapshot was written."""
+    tasks = [o["taskId"] for o in snapshot["offers"]] + ["github.com/acme/widgets#review:pr-7@x"]
+    records = [net(run_id=f"offer-{n}", dispatched_at=snapshot["updatedAt"] - 600,
+                   pr_number=n + 1, network=task) for n, task in enumerate(tasks)]
+    return records, ev(), snapshot["updatedAt"]
+
+
+@pytest.mark.parametrize("name", list(DAEMON))
+def test_a_snapshot_of_the_stand_in_daemon_is_read_the_same_by_both(name, kolkata):
+    records, evidence, now = _offered(DAEMON[name])
+    payload = _payload(records, evidence, now=now, snapshot=DAEMON[name])
+    assert _swift(payload) == _python_decoding(payload)
+
+
+def test_the_stand_in_daemons_snapshots_are_read_for_what_they_say(kolkata):
+    def read(name: str) -> dict:
+        records, evidence, now = _offered(DAEMON[name])
+        return _python(records, evidence, now=now, snapshot=DAEMON[name])
+
+    def first(name: str) -> tuple[str, str]:
+        verdict = read(name)["states"]["offer-0"]
+        return verdict["state"], verdict["reason"]
+
+    assert first("joining") == (A.FAILED, "the network holds no such offer")
+    assert first("requester-pooled") == (
+        A.STARTING, "in the pool, not taken here: docker is down: not checked yet")
+    assert first("requester-claimed") == (A.RUNNING, "running on mEaOJkBj")
+    assert first("requester-done") == (A.FINISHED, "finished on mEaOJkBj")
+    assert first("too-long") == (
+        A.STARTING, "in the pool, not taken here: this machine takes jobs of at most 12 h "
+                    "and this one needs 24")
+    left = DAEMON["left-until"]["offers"][0]
+    assert left["leftUntil"] == 1794911456 and left["notTaking"].endswith("10:30:56.000Z")
+    assert first("left-until") == (
+        A.STARTING, "in the pool, not taken here: this machine failed at it or gave it back, "
+                    "and leaves it to the others until 16:00")
+    assert first("capped") == (A.FINISHED, "finished on this machine, its reported cost capped")
+    assert DAEMON["capped"]["offers"][0]["outcome"]["capped"] is True
+    assert "capped" not in DAEMON["requester-done"]["offers"][0]["outcome"]
+    runs = read("executor-finished")["networkSnapshot"]["runs"]
+    assert [r["state"] for r in runs] == ["finished"] and "log" not in runs[0]
+    assert "log" not in DAEMON["executor-finished"]["runs"][0]
+    assert read("executor-running")["networkRunning"] == 1
+    assert len(read("joining")["networkSnapshot"]["pools"][0]["members"]) == 1
+
+
 def _spoil(edit) -> dict:
     snapshot = _snapshot()
     edit(snapshot)

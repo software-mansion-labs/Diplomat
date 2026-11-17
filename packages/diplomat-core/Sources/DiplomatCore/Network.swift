@@ -581,6 +581,26 @@ public struct NetworkSnapshot: Equatable {
         data.flatMap { JSONInput.parse($0) }.map(NetworkSnapshot.init)
     }
 
+    /// `sentence` with each UTC time the daemon wrote in it, as in "…until
+    /// 2026-11-17T10:30:56.000Z", as this machine's clock reads it: "…until 11:30".
+    public static func localTimes(_ sentence: String) -> String {
+        guard let times = try? NSRegularExpression(
+            pattern: "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z")
+        else { return sentence }
+        let utc = DateFormatter()
+        utc.locale = Locale(identifier: "en_US_POSIX")
+        utc.timeZone = TimeZone(secondsFromGMT: 0)
+        utc.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        var out = sentence
+        let whole = NSRange(sentence.startIndex..., in: sentence)
+        for found in times.matches(in: sentence, range: whole).reversed() {
+            guard let range = Range(found.range, in: out),
+                  let at = utc.date(from: String(out[range].prefix(19))) else { continue }
+            out.replaceSubrange(range, with: Fmt.clock(at))
+        }
+        return out
+    }
+
     /// From a document `JSONInput.parse` read.
     public init(_ d: [String: Any]) {
         func text(_ raw: Any?) -> String { raw as? String ?? "" }
@@ -634,7 +654,8 @@ public struct NetworkSnapshot: Equatable {
             }
             return Pool(id: id, path: text(p["path"]), identity: text(p["identity"]),
                         hash: text(p["hash"]), left: JSONInput.flag(p["left"]),
-                        notTaking: text(p["notTaking"]), members: members, tasks: tasks)
+                        notTaking: Self.localTimes(text(p["notTaking"])),
+                        members: members, tasks: tasks)
         }
         runs = rows(d["runs"]).compactMap { r in
             guard let runId = r["runId"] as? String, !runId.isEmpty else { return nil }
@@ -662,7 +683,7 @@ public struct NetworkSnapshot: Equatable {
                              requests: integer(o["requests"]) ?? 0,
                              refused: integer(o["refused"]) ?? 0,
                              outcome: outcome, endedAt: number(o["endedAt"]),
-                             notTaking: text(o["notTaking"]))
+                             notTaking: Self.localTimes(text(o["notTaking"])))
             }
         }
     }

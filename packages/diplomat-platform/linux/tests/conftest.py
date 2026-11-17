@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import pytest
 
@@ -502,3 +503,18 @@ def _drain_qt_widgets():
     app = QApplication.instance()
     if app is not None:
         drain_qt_widgets(app)
+
+
+@pytest.fixture
+def kolkata():
+    """This machine's clock, and that of every process the test starts, five and a half
+    hours ahead of UTC."""
+    before = os.environ.get("TZ")
+    os.environ["TZ"] = "Asia/Kolkata"
+    time.tzset()
+    yield
+    if before is None:
+        del os.environ["TZ"]
+    else:
+        os.environ["TZ"] = before
+    time.tzset()

@@ -447,6 +447,29 @@ func networkSmoke() throws {
           && (holding.offers ?? []).map(\.notTaking) == [hoursShort, "", ""]
           && heldSeen["t"]?.notTaking == hoursShort && heldSeen["u"]?.notTaking == "",
           "what holds this machine back is read of a pool and of an offer")
+    let leftSaid = "this machine failed at it or gave it back, and leaves it to the others until "
+    func clock(_ unix: TimeInterval) -> String { Fmt.clock(Date(timeIntervalSince1970: unix)) }
+    // 2026-11-17T10:30:56Z, and half an hour before it.
+    let (leftAt, before) = (clock(1_794_911_456), clock(1_794_909_600))
+    check(NetworkSnapshot.localTimes(leftSaid + "2026-11-17T10:30:56.000Z") == leftSaid + leftAt
+          && NetworkSnapshot.localTimes("from 2026-11-17T10:00:00Z to 2026-11-17T10:30:56.5Z, twice")
+            == "from \(before) to \(leftAt), twice",
+          "a UTC time in a sentence of the daemon's reads by this machine's clock")
+    check(["docker is down: no engine", "", "until 2026-13-17T10:30:56.000Z",
+           "until 2026-11-17T25:30:56.000Z", "until 2026-11-17T10:30:56.000",
+           "until 2026-11-17 10:30:56Z", "until 2026-11-17T10:30:56.000z",
+           "until \u{0662}\u{0660}\u{0662}\u{0666}-11-17T10:30:56Z"]
+            .allSatisfy { NetworkSnapshot.localTimes($0) == $0 },
+          "a sentence with no such time, or with no time at all in its place, is as it was")
+    let timed = NetworkSnapshot([
+        "pools": [["id": "p", "notTaking": "nothing taken before 2026-11-17T10:00:00.000Z"]],
+        "offers": [["taskId": "t", "state": "pooled",
+                    "notTaking": leftSaid + "2026-11-17T10:30:56.000Z", "leftUntil": 1_794_911_456,
+                    "leftForGood": false, "tooLong": false]]])
+    check(timed.pools[0].notTaking == "nothing taken before \(before)"
+          && timed.offers?[0].notTaking == leftSaid + leftAt
+          && NetworkEvidence.tasks(timed).value?["t"]?.notTaking == leftSaid + leftAt,
+          "what holds this machine back names its times by this machine's clock")
     let waiting = NetworkSnapshot(["offers": [
         ["taskId": "t", "state": "pooled", "notTaking": "docker is down"],
         ["taskId": "u", "state": "pooled", "notTaking": hoursShort],
