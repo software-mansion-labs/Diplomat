@@ -518,7 +518,7 @@ export function createRuns(host) {
     /// a time, Infinity for as long as the offer stands, or 0 when it does not.
     left(taskId, createdAt) {
       const given = shun[taskId];
-      if (given?.offered !== createdAt) return 0;
+      if (!given || given.offered !== createdAt) return 0;
       if (given.until === null) return Infinity;
       return host.now() < given.until ? given.until : 0;
     },
