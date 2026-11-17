@@ -11,8 +11,8 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { containerName } from '../src/executor/container.js';
-import { GITLAB_POOL, POOL, REPO, check, createBench, fakeAdb, passed, until } from './lib/daemons.mjs';
-import { GITLAB_HOST } from './lib/fake-forge.mjs';
+import { GHES_POOL, GITLAB_POOL, POOL, REPO, check, createBench, fakeAdb, passed, until } from './lib/daemons.mjs';
+import { GHES_HOST, GHES_TOKEN, GITLAB_HOST } from './lib/fake-forge.mjs';
 
 const bench = await createBench();
 const adb = await fakeAdb();
@@ -249,6 +249,32 @@ try {
     assert.deepEqual([...new Set(seen.filter((r) => !r.path.startsWith('/api/')).map((r) => `${by(r)} ${r.path.replace('/acme/widgets.git/', '')}`))].sort(),
       ['b git-upload-pack', 'b info/refs?service=git-upload-pack'], 'the clone is the executor\'s mirror, fetched as the executor');
     assert.equal(bench.branch('sneaky'), null);
+  });
+
+  await check('a GitHub Enterprise Server pool: the job\'s gh is pointed at the pool\'s one host, where its requests are read and carried out by the requester under /api/v3, and github.com\'s own paths and hosts are no part of it', async () => {
+    await Promise.all([a, b].map((m) => m.ok('/pools', { pools: [m.link, m.gitlabLink(), m.ghesLink()] })));
+    const { invite } = await a.ok('/invite', { pool: GHES_POOL });
+    assert.deepEqual(await b.ok('/join', { invite }), { pool: GHES_POOL });
+    const poolOn = async (m) => (await m.state()).pools.find((p) => p.id === GHES_POOL);
+    await until('two members of the Enterprise Server\'s pool', async () => (await poolOn(a)).members.length === 2 && (await poolOn(b)).members.length === 2);
+
+    const before = bench.forge.log.length;
+    const pull = '/repos/acme/widgets/pulls/1';
+    const { taskId } = await a.ok('/offer', {
+      pool: GHES_POOL, kind: 'review', item: 'pr-1', title: 'Review it on the server',
+      prompt: [`api GET /api/v3${pull}`, `api GET ${pull}`, 'say reviewed on the server'].join('\n'),
+    });
+    assert.equal(taskId, `${GHES_POOL}#review:pr-1@a`);
+    assert.equal((await ended(a, taskId)).outcome.summary, 'reviewed on the server');
+    const run = await runOf(b, taskId);
+    const { steps, env } = b.agent(run.runId);
+    assert.deepEqual(went(steps), [['api', 200], ['api', 403], ['say', null]], JSON.stringify(steps));
+    assert.deepEqual([env.GH_HOST, env.GITLAB_HOST, env.GH_TOKEN], [GHES_HOST, undefined, 'dn-placeholder']);
+    assert.deepEqual([run.container, run.pool], [containerOf(pk.a, GHES_POOL), GHES_POOL], 'a container of that pool\'s own');
+    const seen = bench.forge.log.slice(before).filter((r) => r.headers.authorization);
+    assert.deepEqual([...new Set(seen.map((r) => r.host))], [GHES_HOST], 'nothing of it went to github.com');
+    assert.deepEqual(seen.filter((r) => r.path.startsWith('/api/') && !r.path.endsWith('/meta')).map((r) => [r.method, r.path, r.headers.authorization]),
+      [['GET', `/api/v3${pull}`, `Bearer ${GHES_TOKEN}`]], 'the one request the rules allow, with the credential gh holds for that host');
   });
 
   await check('a task offered with `now` is run by the machine that offered it, in a container, whatever it admits', async () => {

@@ -171,6 +171,8 @@ try {
       ['/pools', { pools: [{ id: POOL, path: 7, forge: 'github', identity: 'me' }] }, 400, /^"path" must be text of 1 to 4096 characters\.$/],
       ['/pools', { pools: [a.link, a.link] }, 400, /^A pool is listed twice\.$/],
       ['/pools', { pools: [{ ...a.link, id: 'not a pool' }] }, 409, /^"not a pool" is not a pool id\.$/],
+      // A pool's id names a host and no port: a forge on another port than 443 has no pool.
+      ['/pools', { pools: [{ ...a.link, id: 'ghes.example.com:8443/acme/widgets' }] }, 409, /^"ghes\.example\.com:8443\/acme\/widgets" is not a pool id\.$/],
       ['/admit', { slots: '2' }, 400, /^"slots" must be a whole number from 0 to 1000\.$/],
       ['/admit', { slots: -1 }, 400, /^"slots" must be/],
       ['/admit', { slots: 1.5 }, 400, /^"slots" must be/],

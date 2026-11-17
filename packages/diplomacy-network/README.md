@@ -585,11 +585,15 @@ four things and starts the job:
   container's traffic leaves through it:
   - the forge's API and git push go to the requester as `act` requests. The forge is
     every host it takes a login or serves repositories on: for github.com that is
-    `github.com`, `api.github.com`, `uploads.github.com` and `gist.github.com`, for a
-    GitLab its one host. They are read on port 443 and refused on every other port and
-    over plain http, as are the hosts the forge serves git over ssh on
-    (`ssh.github.com`, `altssh.gitlab.com`). A name in capitals or with a trailing dot
-    is the same name;
+    `github.com`, `api.github.com`, `uploads.github.com` and `gist.github.com`; for a
+    GitHub Enterprise Server and for a GitLab it is the pool's one host, which the
+    job's `gh` or `glab` is pointed at (`GH_HOST`, `GITLAB_HOST`). They are read on
+    port 443 and refused on every other port and over plain http, as are the hosts the
+    forge serves git over ssh on (`ssh.github.com`, `altssh.gitlab.com`). A name in
+    capitals or with a trailing dot is the same name. A forge on another port has no
+    pool, since a pool's id names a host and no port; and a GitHub pool on a subdomain
+    of github.com, on ghe.com or on a subdomain of it has no rules, so no task of it
+    is offered and no job of it comes here;
   - git fetch and clone of the pool's repository are answered from this machine's bare
     mirror of it. The mirror is filled by this machine's own git with the operator's
     access to the repository, the one thing of the forge an executor needs of its own:
