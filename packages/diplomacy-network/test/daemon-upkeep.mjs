@@ -2,8 +2,9 @@
 // after a start that failed, sweeps and prunes on its timers, forgets runs and mirrors
 // that are old, keeps its state directory to the operator, survives a fault in an
 // event's handler and gives up on one that keeps coming back, refuses requests while it
-// stops, takes what it made out of docker when the network is switched off, and keeps
-// what a job has spent of the model for the daemon after it.
+// stops, takes what it made out of docker when the network is switched off, holds what a
+// job says it took of the model to what it carried there for the job, and keeps what a
+// job has spent of the model for the daemon after it.
 // Real daemon processes on scratch directories, with the stand-in docker, tor, forge
 // and agent.
 // Run: node test/daemon-upkeep.mjs
@@ -364,7 +365,23 @@ try {
     await m.kill();
   });
 
-  await check('what a job has spent of the model is kept for the daemon after it, which counts on from there', async () => {
+  await check('what a job says it took of the model stands no higher than the traffic this machine carried to the model for it: one that sent nothing took nothing, and one stopped after it named its figures is held to what was carried before its way out was closed', async () => {
+    const m = await bench.machine('sw').start();
+    await m.linked();
+    const thrifty = await own(m, 'pr-1', 'unsent\nsay sent nothing');
+    await done(m, thrifty);
+    assert.deepEqual((await offerOf(m, thrifty)).outcome, { ok: true, summary: 'sent nothing', usd: 0, tokens: 0, runner: 'claude', model: '' });
+
+    const taskId = await own(m, 'pr-2', 'result\nwait never');
+    const run = await waiting(m, taskId, 'never');
+    await m.ok('/stop-run', { runId: run.runId });
+    const file = path.join(m.base, 'runs', `${run.runId}.outcome.json`);
+    const kept = await until('the stopped job\'s outcome', () => { try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; } });
+    assert.deepEqual([kept.state, kept.tokens, kept.usd], ['stopped', 120, 0.42]);
+    await m.kill();
+  });
+
+  await check('what a job has spent of the model is kept for the daemon after it, which counts on from there and holds the job\'s figures to it', async () => {
     const m = await bench.machine('sp').start();
     await m.linked();
     const taskId = await own(m, 'pr-1', 'wait go\nmodel\nsay asked');
@@ -386,6 +403,9 @@ try {
     const step = m.agent(run.runId).steps.find((s) => s.verb === 'model');
     assert.equal(step.status, 429);
     assert.match(JSON.stringify(step.body), /this job has used all of the model it gets on this executor/);
+    // 123 bytes could have held the 120 tokens it names, and USD 80 a million of its 0.42.
+    const { outcome } = await offerOf(m, taskId);
+    assert.deepEqual([outcome.tokens, outcome.usd], [120, 123 * 80 / 1e6]);
     await m.kill();
   });
 

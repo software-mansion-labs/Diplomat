@@ -28,6 +28,7 @@ import { createContainers } from './executor/container.js';
 import { attachJob, forgetRuns, readOutcome, startJob, stopJob, unended, watch } from './executor/job.js';
 import { createLLM } from './executor/llm.js';
 import { createMirrors } from './executor/mirror.js';
+import { OwnFault } from './executor/own-fault.js';
 import { createWeighing } from './executor/weigh.js';
 import { createNode } from './node/node.js';
 import { createStore } from './node/store.js';
@@ -239,7 +240,7 @@ const mirrors = createMirrors({ log });
 const broker = createBroker({ log, ca, llm, mirrors, onForge: (job, request) => node.actFor(job.runId)(request) });
 const containers = createContainers({ log, broker: () => broker.address() });
 
-const jobs = new Map(); // run id -> { container, pool, peer, token, generation, pid, forwards, release, stopping, ended, verdict, gone }
+const jobs = new Map(); // run id -> { container, pool, peer, token, generation, pid, forwards, spent, release, stopping, ended, verdict, gone }
 // Until the jobs an earlier daemon left were looked at, a run this daemon holds no job
 // for may still be running: nothing can be said of it, and no job is started, since a
 // container this daemon has counted no job in is restarted before its first.
@@ -267,6 +268,15 @@ const saveJobs = () => {
     log(`jobs.json is as it was: ${err?.message ?? err}`);
   }
 };
+
+// What the broker has carried to the model for a job, or null: as the broker counts it
+// while the job is admitted there, and as it stood when the job was last seen there
+// otherwise. A job's own word of its tokens and its cost is held to it (job.js).
+function spentOf(runId) {
+  const job = jobs.get(runId);
+  if (job) job.spent = broker.spent(runId) ?? job.spent;
+  return job?.spent ?? null;
+}
 
 // The pool as the executor's parts name it.
 function poolOf(link) {
@@ -369,7 +379,7 @@ async function retryPools() {
       held.why = '';
       log(`taking jobs of ${id} again`);
     } catch (err) {
-      leaveAlone(link, String(err?.message ?? err));
+      leaveAlone(link, err.message);
     }
   }
 }
@@ -380,7 +390,7 @@ async function startRun({ runId, pool: link, peer, spec }) {
   }
   // A daemon on its way out makes no container and starts no job: one that is switched
   // off has listed what it removes by then, or is about to.
-  const unlessEnding = () => { if (ending) throw new Error('this machine is stopping'); };
+  const unlessEnding = () => { if (ending) throw new OwnFault('this machine is stopping'); };
   // Not counted as being started while it waits: a daemon that ends first never gets to it.
   await lookedAt.promise;
   starting += 1;
@@ -401,7 +411,7 @@ async function startRun({ runId, pool: link, peer, spec }) {
       release, stopping: null, ended: false,
     });
     saveJobs();
-    const started = await startJob({ run: { runId, pool }, container, spec, proxy, env: llm.env(), forwards });
+    const started = await startJob({ run: { runId, pool }, container, spec, proxy, env: llm.env(), forwards, spent: () => spentOf(runId) });
     // The daemon after this one stops the job by this group, and by nothing the job can write.
     jobs.get(runId).pid = started.pid;
     saveJobs();
@@ -415,12 +425,14 @@ async function startRun({ runId, pool: link, peer, spec }) {
     if (container) await containers.release({ name: container.name, runId }).catch(() => {});
     jobs.delete(runId);
     saveJobs();
-    // No job ran, and why not is this machine's own affair: the node has stopped the run
-    // and given it back by the time it hears of the failure, which it would count as an
-    // attempt.
-    const why = String(err?.message ?? err);
-    if (!ending) leaveAlone(link, why);
-    giveBack(runId, `this machine could not start it: ${why}`);
+    // An OwnFault: no job ran, and why not is this machine's own affair. The node has
+    // stopped the run and given it back by the time it hears of the failure, which it
+    // would count as an attempt - as it does any other, which the requester's jobs may
+    // have brought about.
+    if (err instanceof OwnFault) {
+      if (!ending) leaveAlone(link, err.message);
+      giveBack(runId, `this machine could not start it: ${err.message}`);
+    } else log(`${runId} could not be started: ${err?.message ?? err}`);
     throw err;
   } finally {
     starting -= 1;
@@ -436,6 +448,8 @@ function stopRun(runId, reason) {
   if (!job) return Promise.resolve();
   job.stopping ??= (async () => {
     log(`stopping ${runId}: ${reason}`);
+    // What was carried to the model for it is kept: its outcome is read after this.
+    spentOf(runId);
     broker.removeJob(runId);
     while (jobs.has(runId)) {
       try {
@@ -505,7 +519,7 @@ async function takeUp(kept) {
         await containers.release({ name: container.name, runId });
         continue;
       }
-      if (!attachJob({ runId, container, pid: was.pid })) {
+      if (!attachJob({ runId, container, pid: was.pid, spent: () => spentOf(runId) })) {
         await containers.release({ name: container.name, runId });
         continue;
       }
@@ -581,8 +595,8 @@ const upkeep = [
   ['idle containers', () => containers.sweep()],
   ['old certificate authorities', () => { if (jobs.size === 0) ca.prune(); }],
   ['certificates past their end', () => { ca.dropExpired(); }],
-  ['ended runs', () => {
-    const gone = forgetRuns({ olderThanMs: RUN_KEEP_MS });
+  ['ended runs', async () => {
+    const gone = await forgetRuns({ olderThanMs: RUN_KEEP_MS, containers });
     if (gone.length > 0) log(`forgot ${gone.length} run(s) that ended over ${Math.round(RUN_KEEP_MS / 3600000)} h ago`);
   }],
   ['mirrors', () => {
