@@ -255,9 +255,8 @@ def retire_legacy_node() -> tuple[int | None, Path | None]:
     included. That node is the pid the directory's ``state.json`` names, while that
     pid is a ``python -m szpontnet`` of this user: a node kept anywhere else is its
     operator's own program. One still running after ``LEGACY_EXIT_SECS`` keeps the
-    directory.
-    Returns the pid asked to quit and the directory removed, each None when there was
-    none. Blocking."""
+    directory. Returns the pid asked to quit and the directory removed, each None when
+    there was none. Blocking."""
     where = legacy_dir()
     if not where.is_dir():
         return None, None

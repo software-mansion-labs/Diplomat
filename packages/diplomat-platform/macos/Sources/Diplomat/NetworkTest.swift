@@ -774,7 +774,8 @@ enum NetworkTest {
                 && booked("task-5") == nil)
         func poolTask(_ id: String, here executorHere: Bool) -> NetworkSnapshot.Task? {
             let doc = snapshot(
-                runs: [["runId": "run-9", "taskId": "t-here", "state": "running"]],
+                runs: [["runId": "run-9", "taskId": "t-here", "state": "running"],
+                       ["runId": "run-8", "taskId": "t-ended", "state": "done"]],
                 tasks: [["taskId": id, "kind": "review", "item": "pr-1", "title": "Review · #1",
                          "state": "claimed", "offeredHere": true, "executor": executorHere ? here : away,
                          "executorHere": executorHere]])
@@ -1728,13 +1729,15 @@ enum NetworkTest {
         // 42. A socket nothing listens on was not reached, which an offer may rely on:
         //     no answer from a daemon that was reached leaves the offer in doubt.
         stopDaemon()
+        let staleSocket = FakeDaemon.stale(path: socket)
         let unheard = await Task.detached {
             DiplomacyNetwork.package.send(NetworkRoute.offer, timeoutSecs: 2)
         }.value
         startDaemon()
         var notReached = false
         if case .unreachable = unheard { notReached = true }
-        check("a request to a socket nothing listens on was not delivered", notReached)
+        check("a request to a socket file nothing listens on was not delivered",
+              staleSocket && notReached)
 
         // 43. A pass begun before the switch went off says nothing of the daemon as it is.
         script.set(snapshot(offers: [offerRow("task-stale", "claimed", executor: away)]))
