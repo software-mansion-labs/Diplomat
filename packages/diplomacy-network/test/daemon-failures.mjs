@@ -236,6 +236,7 @@ try {
     const docker = (await until('B\'s word on docker', async () => { const s = await b.state(); return s.docker.detail === 'not checked yet' ? null : s; })).docker;
     assert.equal(docker.state, 'missing');
     assert.match(docker.detail, /no-docker not found: every job runs in a container/);
+    assert.ok(b.log().includes(`] docker is not at ${b.env.DN_DOCKER}\n`), 'a tool named by its path is looked for there alone');
 
     const { taskId } = await a.ok('/offer', review('wait go\napi GET /repos/acme/widgets/pulls/1\napi DELETE /repos/acme/widgets\nsay told'));
     await until('B knows the task', async () => (await taskOf(b, taskId))?.state === 'available');
@@ -261,6 +262,30 @@ try {
     assert.deepEqual([(await offerOf(a, taskId)).requests, (await offerOf(a, taskId)).refused], [2, 1]);
     assert.equal(bench.sentWith(a.token).length, 0, 'nothing reached the forge in A\'s name');
     await Promise.all([a.kill(), b.kill(), c.kill()]);
+  });
+
+  await check('a machine with no credential for the model takes nothing and says why, and takes the task once it has one', async () => {
+    const [a, b] = await pool(['ma', 'mb'], { mb: { env: { ANTHROPIC_API_KEY: '' } } });
+    await b.admit(1);
+    const model = (await until('B\'s word on the model', async () => { const s = await b.state(); return s.model.detail === 'not read yet' ? null : s; })).model;
+    assert.deepEqual(model, { state: 'missing', detail: 'no networkModelToken, no Claude Code login and no ANTHROPIC_API_KEY on this machine' });
+    assert.equal((await b.state()).docker.state, 'ready');
+
+    const { taskId } = await a.ok('/offer', review('say taken'));
+    await until('B knows the task', async () => (await taskOf(b, taskId))?.state === 'available');
+    const from = (await b.state()).updatedAt;
+    await until('B to have had its chance', async () => {
+      const s = await b.state();
+      assert.deepEqual([s.pools[0].tasks[0].state, s.runs], ['available', []], 'a machine that could not run it must not hold it');
+      return s.updatedAt >= from + 3;
+    });
+    // The operator sets a token aside for the network: in the Keychain on a Mac, in a file elsewhere.
+    fs.writeFileSync(b.env.DN_SECURITY, '#!/bin/sh\ncase "$*" in *Diplomat-networkModelToken*) echo sk-ant-api03-stand-in;; *) exit 44;; esac\n');
+    fs.mkdirSync(path.join(b.home, '.diplomat'), { recursive: true });
+    fs.writeFileSync(path.join(b.home, '.diplomat', 'network-model-token'), 'sk-ant-api03-stand-in\n', { mode: 0o600 });
+    await until('the offer done', async () => (await offerOf(a, taskId)).state === 'done');
+    assert.equal((await offerOf(a, taskId)).executor, b.pk);
+    await Promise.all([a.kill(), b.kill()]);
   });
 
   await check('a word on free slots goes stale: a daemon that has not heard from Diplomat takes nothing until it hears again', async () => {

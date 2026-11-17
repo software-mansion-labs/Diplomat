@@ -186,6 +186,11 @@ struct NodePackage {
         return depsInstalled
     }
 
+    /// How long an installer is waited for before it is killed, which leaves no answer.
+    /// The Diplomacy Network's answers within `INSTALLER_ANSWER_MS` (its `src/paths.js`),
+    /// which has to stay under this.
+    static let installerTimeout: TimeInterval = 90
+
     func runInstaller(_ arg: String) -> AllocatorInstall {
         guard packageAvailable, let node = Self.resolveNode() else { return .unknown }
         let p = Process()
@@ -199,7 +204,7 @@ struct NodePackage {
         do { try p.run() } catch { return .unknown }
         // Bound the wait so a hung node can never deadlock the caller.
         let watchdog = DispatchWorkItem { if p.isRunning { p.terminate() } }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 90, execute: watchdog)
+        DispatchQueue.global().asyncAfter(deadline: .now() + Self.installerTimeout, execute: watchdog)
         let data = outPipe.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
         watchdog.cancel()
