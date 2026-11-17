@@ -72,7 +72,7 @@ export function createClaiming(host) {
       const { taskId } = task;
       if (rounds.size + waiting.size >= MAX_ROUNDS) break;
       if (rounds.has(taskId) || waiting.has(taskId) || host.runs.has(taskId) || later.has(taskId)) continue;
-      if (host.runs.shuns(taskId, task.createdAt)) continue;
+      if (host.runs.left(taskId, task.createdAt) !== 0) continue;
       const own = host.offers.atOnce(taskId);
       if (!own && taken() >= slots()) continue;
       const verdict = weighed(P, task);

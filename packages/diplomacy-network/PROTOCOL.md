@@ -553,7 +553,9 @@ as long as its record is fresh.
 
 `done` tells a host that offers a task how the run of its job ended: `outcome` is
 `{ ok, summary, microUsd, tokens, runner, model }`, the cost in millionths of a dollar,
-`summary` at most 4000 characters, and `spec` names the job that was run:
+`summary` at most 4000 characters. An outcome may carry `capped: true` beside those,
+meaning the executor lowered the tokens or the cost the job named to what it measured.
+`spec` names the job that was run:
 `H(canon(spec))` of the spec the executor was handed with its key (section 9). Its
 envelope is all that authenticates it. The host takes it only when the envelope's sender
 is the executor of a claim record the host holds for that task, `round` is that claim's
@@ -1158,10 +1160,9 @@ Nothing in a record hides any of this.
 
 Everything done on the forge for a task - reading an issue, posting a review, pushing a
 commit, opening a pull request - is done by the requester, on the executor's request. No
-credential of the requester crosses the network. The executor's machine uses its own for
-one thing: it keeps a mirror of the repository current with the git access that machine
-has, and the job clones from that mirror. Everything else a job does on the forge goes
-through the requester.
+credential of the requester crosses the network. The executor uses none of its own for
+anything a task does on the forge; it needs its own read access to the repository over
+git, with which it fetches what a job clones.
 
 1. After its claim is committed, the executor asks a host whose offer the claim holds
    for the key. It pushes its claim to that host - a host gives a key only for a claim

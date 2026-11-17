@@ -67,10 +67,10 @@ export function fakeExecutor() {
       return this.takes(task);
     },
     start(args) {
-      if (this.failStart) throw Object.assign(new Error('no docker'), { local: this.failStart === 'local' });
+      if (this.failStart) throw Object.assign(new Error('no docker'), this.failStart === 'local' ? { name: 'OwnFault' } : {});
       this.started.push(args);
       jobs.set(args.runId, { args, alive: true });
-      return { container: `box-${args.runId}`, log: `/logs/${args.runId}.jsonl` };
+      return { container: `box-${args.runId}` };
     },
     stop(runId, reason) {
       this.stopped.push({ runId, reason });

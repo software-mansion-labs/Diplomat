@@ -112,8 +112,7 @@ changes.
 A job's directory is kept for the day after its end for the operator to see what the job
 did: `runs/<run id>/log.jsonl` is the agent's stream. It is the job's own writing - a job
 can put a link, a pipe or a file of any size in its place - so the snapshot names no file
-of it, and a run's `log` there is empty; nothing else reads the directory once the outcome
-is reported. A machine that leaves the network has no further use
+of it; nothing else reads the directory once the outcome is reported. A machine that leaves the network has no further use
 for any of it: when the network is switched off, `runs/`, `mirrors/` and `ca/` are
 removed whole, once nothing is left in docker that could still write there. Its key, its
 pools, its links and what it offered stay - switched on again it is the member it was -
@@ -256,21 +255,22 @@ The snapshot:
           "executor": "", "executorHere": false, "claimedAt": 0, "leaseUntil": 0, "deadline": 0 } ] } ],
   "runs": [ { "runId": "", "taskId": "", "pool": "", "peer": "", "container": "",
       "state": "preparing|running|finished|failed|stopped", "startedAt": 0, "endedAt": 0,
-      "exit": 0, "log": "" } ],
+      "exit": 0 } ],
   "offers": [ { "taskId": "", "pool": "", "kind": "", "item": "", "title": "",
       "state": "pooled|claimed|done|failed|cancelled", "reason": "", "executor": "",
       "executorHere": false, "backedBy": [""], "offeredAt": 0, "attempt": 1, "requests": 0,
       "refused": 0,
       "outcome": { "ok": true, "summary": "", "usd": 0, "tokens": 0, "runner": "", "model": "" },
-      "endedAt": 0, "notTaking": "" } ] }
+      "endedAt": 0, "leftUntil": 0, "leftForGood": false, "tooLong": false, "notTaking": "" } ] }
 ```
 
 Every time is Unix seconds. `offers` are the tasks this machine asked for: `pooled` while
 nobody holds it, `claimed` while an executor does, `done` when an executor finished it
 well, `failed` when its attempts ran out (`reason` says how the last one ended), and
 `cancelled` once withdrawn, or once this machine was away for longer than an offer
-lasts (`reason` says which). `outcome` is null until an attempt has reported one. An
-offer gets three attempts. A machine that failed at one leaves the task to the other
+lasts (`reason` says which). `outcome` is null until an attempt has reported one, and
+carries `"capped": true` beside the rest when the machine that ran the job lowered the
+tokens or the cost the job named to what it measured. An offer gets three attempts. A machine that failed at one leaves the task to the other
 machines for two minutes, then four, and goes for it again when none took it - so a
 machine alone in its pool makes all three itself. A claim given back with no job run -
 the run was stopped, or could not start for a fault of the machine that took it - uses
@@ -294,10 +294,17 @@ A pool's `notTaking` is why this machine takes none of that pool's jobs, in a se
 and empty while it takes them: the transport is not up, docker is not ready, there is no
 credential for the model, or the last job of the pool could not be started here
 ("Executor side" below). An offer's `notTaking` is why this machine does not take that
-job of its own while it is `pooled`: its pool's `notTaking`, or
+job of its own while it is `pooled`: its pool's `notTaking`;
 `this machine takes jobs of at most 12 h and this one needs 24` when
-`networkRequiredMinimumH` is above `networkMaximumAcceptedH`. It is empty for a job
-this machine is free to take, and for one that is not `pooled`. `admit` is Diplomat's
+`networkRequiredMinimumH` is above `networkMaximumAcceptedH`;
+`its run was stopped on this machine, which does not take it again` once the operator
+stopped a run of it here; or
+`this machine failed at it or gave it back, and leaves it to the others until <time>`.
+It is empty for a job this machine is free to take, and for one that is not `pooled`.
+The last three are in the row as it comes from the node too, for a `pooled` offer:
+`tooLong`, `leftForGood`, and `leftUntil` - the Unix second until which the machine
+leaves the job alone, 0 when it does not. A machine alone in its pool takes the job
+itself when that time has come. `admit` is Diplomat's
 word and is said nowhere else: with no slot free a job waits unless its operator
 started it with `now`.
 

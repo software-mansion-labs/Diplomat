@@ -7,7 +7,7 @@
 
 import { b64u, canon, unb64u } from '../core/canon.js';
 import { SeqTracker, buildCapability, capabilityExp, checkAct, checkDone, specDigest } from '../core/capability.js';
-import { buildPing, heldUntil, isActive, pingDue } from '../core/lease.js';
+import { buildPing, eligible, heldUntil, isActive, pingDue } from '../core/lease.js';
 import { LIMITS, backers, backing, buildTaskId, isBytes, isObject, offerRecord, parseTaskId, shaped } from '../core/records.js';
 import {
   CLOCK_SKEW_SECS, KEYLESS_WAIT_MAX_MS, KEYLESS_WAIT_MS, LEASE_SECS, OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETAKE_WAIT_MS,
@@ -377,11 +377,13 @@ export function createOffers(host) {
       // The offer may be another claim's by now: this host gave it on.
       const current = holder(P, O);
       if (current && current.executor !== from) return { body: {} };
-      const { ok, summary, microUsd, tokens, runner, model } = body.outcome;
+      const { ok, summary, microUsd, tokens, runner, model, capped } = body.outcome;
       O.reported.push(body.round);
       O.ran = from;
       // The executor's own words: another machine wrote them.
-      O.outcome = { ok, summary: plain(summary), usd: microUsd / 1e6, tokens, runner: plain(runner), model: plain(model) };
+      O.outcome = {
+        ok, summary: plain(summary), usd: microUsd / 1e6, tokens, runner: plain(runner), model: plain(model), ...(capped === true ? { capped } : {}),
+      };
       if (ok) end(P, O, 'done');
       else fail(P, O, body.round, summary);
       // The offer as the report leaves it: the executor holds it before it ends its claim.
@@ -512,15 +514,26 @@ export function createOffers(host) {
     return Object.values(issued).some((K) => K.capability.executor === pk && now < K.capability.exp);
   }
 
-  /// The offers as the snapshot lists them.
+  /// The offers as the snapshot lists them. Of one that waits in the pool a row says what
+  /// keeps this host from running it itself: `leftUntil`, until when the host leaves the
+  /// task to the others, having failed at it or given it back, or 0; `leftForGood`, that
+  /// its operator stopped a run of it here; `tooLong`, that it needs more hours than
+  /// this host accepts.
   function rows() {
-    return Object.values(offers).map((O) => ({
-      taskId: O.taskId, pool: O.pool, kind: O.kind, item: O.item, title: O.title, state: O.state,
-      executor: O.executor, executorHere: O.executor === host.self, backedBy: O.backedBy ?? [],
-      attempt: Math.min(OFFER_ATTEMPTS, O.failed.length + 1),
-      requests: O.requests, refused: O.refused, outcome: O.outcome, reason: O.reason, offeredAt: O.offeredAt,
-      endedAt: O.endedAt,
-    }));
+    const now = host.now();
+    return Object.values(offers).map((O) => {
+      const P = O.state === 'pooled' ? host.pools.get(O.pool) : null;
+      const left = P ? host.runs.left(O.taskId, P.pool.task(O.taskId, now)?.createdAt) : 0;
+      const me = P?.pool.member(host.self, now);
+      return {
+        taskId: O.taskId, pool: O.pool, kind: O.kind, item: O.item, title: O.title, state: O.state,
+        executor: O.executor, executorHere: O.executor === host.self, backedBy: O.backedBy ?? [],
+        attempt: Math.min(OFFER_ATTEMPTS, O.failed.length + 1),
+        requests: O.requests, refused: O.refused, outcome: O.outcome, reason: O.reason, offeredAt: O.offeredAt,
+        endedAt: O.endedAt, leftUntil: Number.isFinite(left) ? left : 0, leftForGood: left === Infinity,
+        tooLong: Boolean(me) && !eligible(me.maxAcceptedH, O.hours),
+      };
+    });
   }
 
   return { offer, withdraw, nextGen, step, closing, atOnce, keyHeldBy, rows, handlers };

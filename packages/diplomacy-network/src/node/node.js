@@ -46,8 +46,8 @@ function fenced(clock, log) {
 /// told (`conclude(request)`) of every request it allowed that got no answer from it;
 /// `executor` runs jobs, says whether it takes a task (`wouldTake(task)`) and may say how
 /// many more milliseconds this host waits before it goes for one (`weigh(task)`); a
-/// `start` that throws is a failed attempt of the offer, but for an error with
-/// `local: true` - no job ran, for a fault of this machine's own - whose claim is given
+/// `start` that throws is a failed attempt of the offer, but for an error named
+/// `OwnFault` - no job ran, for a fault of this machine's own - whose claim is given
 /// back at no attempt lost;
 /// `settings()` answers `{ requiredMinimumH, maximumAcceptedH }`;
 /// `solve(challenge, effort)` finds a proof of work, by default on one of POW_WORKERS

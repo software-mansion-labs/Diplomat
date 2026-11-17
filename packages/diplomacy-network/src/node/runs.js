@@ -87,7 +87,7 @@ export function createRuns(host) {
     const runId = `run-${host.random(6).toString('hex')}`;
     runs[runId] = {
       runId, taskId: claim.taskId, pool: P.id, round: claim.round, peer: '', container: '', state: 'preparing',
-      startedAt: host.now(), endedAt: 0, exit: 0, log: '', outcome: null, end: null, told: 0, revoked: false,
+      startedAt: host.now(), endedAt: 0, exit: 0, outcome: null, end: null, told: 0, revoked: false,
       launched: false, offered: P.pool.task(claim.taskId, host.now())?.createdAt ?? 0, sought: 0,
       pick: host.random(4).readUInt32BE(0), spec: '', heard: [],
     };
@@ -170,7 +170,7 @@ export function createRuns(host) {
     } catch (err) {
       const reason = `the run could not be started: ${err?.message ?? err}`;
       // A fault of this machine's own, with no job run, is no attempt of the offer's.
-      if (err?.local === true) halt(run, reason, 'release');
+      if (err?.name === 'OwnFault') halt(run, reason, 'release');
       else conclude(run, { ok: false, summary: reason });
       return;
     }
@@ -179,7 +179,7 @@ export function createRuns(host) {
       stopJob(run, 'stopped while starting');
       return;
     }
-    Object.assign(run, { state: 'running', container: String(handle?.container ?? ''), log: String(handle?.log ?? '') });
+    Object.assign(run, { state: 'running', container: String(handle?.container ?? '') });
     host.log(`job of ${taskId} started ${host.now() - run.startedAt} s after its claim`);
     save();
     host.store.flush();
@@ -514,13 +514,16 @@ export function createRuns(host) {
     since: (at) => Object.values(runs).filter((run) => live(run) && run.startedAt >= at).length,
     /// Is a run of that task going or still owed its report?
     has: (taskId) => Object.values(runs).some((run) => run.taskId === taskId && run.end !== 'over'),
-    /// Does this host leave that offer of the task alone, having given up on it?
-    shuns(taskId, createdAt) {
+    /// Until when this host leaves that offer of the task alone, having given up on it:
+    /// a time, Infinity for as long as the offer stands, or 0 when it does not.
+    left(taskId, createdAt) {
       const given = shun[taskId];
-      return given?.offered === createdAt && (given.until === null || host.now() < given.until);
+      if (given?.offered !== createdAt) return 0;
+      if (given.until === null) return Infinity;
+      return host.now() < given.until ? given.until : 0;
     },
     /// The runs as the snapshot lists them.
-    rows: () => Object.values(runs).map(({ runId, taskId, pool, peer, container, state, startedAt, endedAt, exit, log }) => (
-      { runId, taskId, pool, peer, container, state, startedAt, endedAt, exit, log })),
+    rows: () => Object.values(runs).map(({ runId, taskId, pool, peer, container, state, startedAt, endedAt, exit }) => (
+      { runId, taskId, pool, peer, container, state, startedAt, endedAt, exit })),
   };
 }

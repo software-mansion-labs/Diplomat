@@ -671,7 +671,10 @@ function snapshot() {
     const pool = rows.find((row) => row.id === offer.pool);
     const most = pool?.members.find((member) => member.self)?.maxAcceptedH;
     const needs = pool?.tasks.find((task) => task.taskId === offer.taskId)?.hours;
-    return pool?.notTaking || (needs > most ? `this machine takes jobs of at most ${most} h and this one needs ${needs}` : '');
+    if (pool?.notTaking) return pool.notTaking;
+    if (needs > most) return `this machine takes jobs of at most ${most} h and this one needs ${needs}`;
+    if (offer.leftForGood) return 'its run was stopped on this machine, which does not take it again';
+    return offer.leftUntil > 0 ? `this machine failed at it or gave it back, and leaves it to the others until ${new Date(offer.leftUntil * 1000).toISOString()}` : '';
   };
   return {
     updatedAt, daemon: { pid: process.pid, startedAt }, identity, transport,

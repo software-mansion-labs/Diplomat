@@ -226,7 +226,20 @@ try {
       return row.state === 'claimed' && fine.agent((await runsOf(fine, taken)).at(-1)?.runId)?.waiting === 'go';
     });
     assert.equal((await fine.state()).pools[0].notTaking, '');
-    await Promise.all([stuck, quiet, gone, bare, down, keyless, slow, short, fine].map((m) => m.kill()));
+
+    // A job this machine gave back it leaves to the others for a while, and says until
+    // when. Alone in its pool it takes the job itself once that wait and the pool's are over.
+    const lone = await bench.machine('nl', { env: { DN_POOL_RETRY_MS: '1000', DN_POOL_RETRY_MAX_MS: '1000', DN_GIVE_UP_WAIT_MS: '8000' } }).start();
+    fs.writeFileSync(`${lone.dockerDir}/fail-run`, 'no space left on device\n');
+    const mine = await own(lone);
+    const [left] = await said(lone, mine, /^this machine failed at it or gave it back/);
+    assert.deepEqual([left.state, left.attempt, left.leftForGood, left.tooLong, left.notTaking], [
+      'pooled', 1, false, false, `this machine failed at it or gave it back, and leaves it to the others until ${new Date(left.leftUntil * 1000).toISOString()}`,
+    ]);
+    await until('its own job done', async () => (await offerOf(lone, mine)).state === 'done');
+    const after = await offerOf(lone, mine);
+    assert.deepEqual([after.attempt, after.leftUntil, after.notTaking, after.endedAt >= left.leftUntil], [1, 0, '', true]);
+    await Promise.all([stuck, quiet, gone, bare, down, keyless, slow, short, fine, lone].map((m) => m.kill()));
   });
 } finally {
   await bench.close();
