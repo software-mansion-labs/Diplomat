@@ -374,6 +374,16 @@ code, and not to labels, milestones, releases, runs or people. Below the root it
 checked by field name, so what REST gives for one item it gives for every pull request
 and issue of the repository.
 
+A pool's rules stand on the hosts its forge serves the repository on. github.com has its
+API on `api.github.com` and git on `github.com`. A GitHub Enterprise Server has both on
+the pool's host, REST under `/api/v3` and GraphQL at `/api/graphql`: its tasks get
+github.com's rules there, with the credential `gh` holds for that host, and one rule
+more - `GET /api/v3/meta`, cut to the server's version, which `gh` asks for before
+`pr view`, `issue view`, `pr create` and a search. A GitHub pool on a subdomain of
+github.com or of ghe.com (GitHub Enterprise Cloud with data residency) gets no rules, so
+no task of it is offered: `gh` reaches that API on `api.<host>`, a name nothing here
+speaks to.
+
 A request reaches a rule in one spelling: a path that escapes a character needing no
 escape is refused, and so is one that a forge's router could read as the route of a rule
 standing earlier - by a letter's case or an added extension. A name GitLab takes as one

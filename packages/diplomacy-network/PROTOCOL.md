@@ -972,6 +972,14 @@ A rule allows one shape of forge request:
 { "host": "api.github.com", "method": "POST", "path": "/repos/o/r/pulls/578/reviews", "fold": [1, 2] }
 ```
 
+The host is one the pool's forge serves the repository on. For github.com that is
+`api.github.com` for the API and `github.com` for git. A GitHub Enterprise Server and a
+GitLab serve both on the pool's host: the server's REST under `/api/v3` and its GraphQL
+at `/api/graphql`, so the rule above reads `"host": "ghes.example.com", "path":
+"/api/v3/repos/o/r/pulls/578/reviews", "fold": [3, 4]` there; GitLab's REST under
+`/api/v4`. A GitHub pool whose host is a subdomain of github.com or of ghe.com has no
+rules, its API being on a third name.
+
 A request is first brought to one spelling and refused when it has more than one reading:
 the method is one of GET, POST, PUT, PATCH, DELETE; the host is a plain lowercase name; the
 path is absolute, with no empty or dot segment, no fragment, no `;`, no encoded slash,

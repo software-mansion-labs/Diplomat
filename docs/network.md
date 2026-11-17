@@ -99,7 +99,10 @@ brought, and an older engine takes no job.
 The machine that offered a job performs every forge request the agent makes, with its own `gh` or
 `glab` login, after checking the request against the rules of that job's kind. The key that lets
 an executor ask is handed over once the job is taken, works for that executor and that job only,
-and ends with the job.
+and ends with the job. A repository on a GitHub Enterprise Server or on a GitLab of your own is
+acted on at its own address, with the login `gh` or `glab` holds for it. GitHub Enterprise Cloud
+with data residency (an address under `ghe.com`) is not supported: no job is offered for a
+repository there.
 
 | Job | May write |
 |---|---|
