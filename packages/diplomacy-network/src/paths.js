@@ -25,6 +25,26 @@ const bound = (name, fallback) => {
   if (n === 0) NOT_BOUNDS.push(`${name}=${process.env[name]}`);
   return n || fallback;
 };
+// The same for an amount docker reads, a number with or without a unit ("8g", "1.5"),
+// which is given to it as it was said.
+const amount = (name, fallback) => {
+  const said = (process.env[name] ?? '').trim();
+  const n = Number.parseFloat(said);
+  if (n === 0) NOT_BOUNDS.push(`${name}=${process.env[name]}`);
+  return n > 0 ? said : fallback;
+};
+/// What this process was given that only a test sets, as `NAME=value` in the order of
+/// their names: each takes from the daemon something the network rests on - Tor, the
+/// forge, the proof of work, a figure the protocol fixes. The daemon says each at its
+/// start and lists them in its snapshot.
+export const TEST_KNOBS = [];
+// A figure the protocol fixes, which the members of a pool count on in one another: set
+// to anything but its default, it is a test's.
+const agreed = (name, fallback) => {
+  const n = num(name, fallback);
+  if (n !== fallback) TEST_KNOBS.push(`${name}=${process.env[name]}`);
+  return n;
+};
 
 export const BASE_DIR = process.env.DN_BASE_DIR
   ? home(process.env.DN_BASE_DIR)
@@ -89,13 +109,14 @@ export const TRANSPORT = process.env.DN_TRANSPORT || 'tor';
 export const LOOP_DIR = process.env.DN_LOOP_DIR || path.join(BASE_DIR, 'loop');
 
 // Protocol constants (PROTOCOL.md). The env overrides exist for tests, which cannot wait
-// two hours for a lease or burn a quarter second per stranger request.
+// two hours for a lease or burn a quarter second per stranger request: each is read
+// with `agreed`, down to where the requester's side begins.
 export const POW = {
-  memberBase: num('DN_POW_MEMBER_BASE', 16384),
-  memberAllow: num('DN_POW_MEMBER_ALLOW', 30),
+  memberBase: agreed('DN_POW_MEMBER_BASE', 16384),
+  memberAllow: agreed('DN_POW_MEMBER_ALLOW', 30),
   memberCap: 12,
-  strangerBase: num('DN_POW_STRANGER_BASE', 262144),
-  strangerAllow: num('DN_POW_STRANGER_ALLOW', 4),
+  strangerBase: agreed('DN_POW_STRANGER_BASE', 262144),
+  strangerAllow: agreed('DN_POW_STRANGER_ALLOW', 4),
   strangerCap: 8,
   windowSecs: 60,
   epochSecs: 3600,
@@ -115,99 +136,97 @@ export const MAX_ACT_BODY_BYTES = 48 * 2 ** 20;
 export const STRANGER_BODY_BYTES = 64 * 2 ** 10;
 export const HOURS_FLOOR = 12;
 export const HOURS_CEILING = 720;
-export const LEASE_SECS = num('DN_LEASE_SECS', 7200);
-export const LEASE_GRACE_SECS = num('DN_LEASE_GRACE_SECS', 600);
-export const PING_LEAD_SECS = num('DN_PING_LEAD_SECS', 600);
-export const GRANT_TTL_SECS = num('DN_GRANT_TTL_SECS', 120);
+export const LEASE_SECS = agreed('DN_LEASE_SECS', 7200);
+export const LEASE_GRACE_SECS = agreed('DN_LEASE_GRACE_SECS', 600);
+export const PING_LEAD_SECS = agreed('DN_PING_LEAD_SECS', 600);
+export const GRANT_TTL_SECS = agreed('DN_GRANT_TTL_SECS', 120);
 // Every offer and claim version, and a member's standing as a member, lasts this long
 // after the version was signed. It must stay far longer than a lease and its grace.
-export const RECORD_RETENTION_SECS = num('DN_RECORD_RETENTION_SECS', 24 * 3600);
+export const RECORD_RETENTION_SECS = agreed('DN_RECORD_RETENTION_SECS', 24 * 3600);
 // A member record is kept this long after it was signed: a host that was away for less
 // comes back with a version signed again, and needs no invite for it.
-export const MEMBER_RETENTION_SECS = num('DN_MEMBER_RETENTION_SECS', 30 * 24 * 3600);
+export const MEMBER_RETENTION_SECS = agreed('DN_MEMBER_RETENTION_SECS', 30 * 24 * 3600);
 // A host signs its member record and its open offers again this often, four times
 // inside their retention.
-export const RESIGN_INTERVAL_MS = num('DN_RESIGN_INTERVAL_MS', (RECORD_RETENTION_SECS * 1000) / 4);
+export const RESIGN_INTERVAL_MS = agreed('DN_RESIGN_INTERVAL_MS', (RECORD_RETENTION_SECS * 1000) / 4);
 export const INVITE_TTL_SECS = 24 * 3600;
 export const OFFER_ATTEMPTS = 3;
 
 // One request to a peer, the circuit and the proof of work included.
-export const REQUEST_TIMEOUT_MS = num('DN_REQUEST_TIMEOUT_MS', 60 * 1000);
+export const REQUEST_TIMEOUT_MS = agreed('DN_REQUEST_TIMEOUT_MS', 60 * 1000);
 // How long a claim round waits for the members that have not answered.
-export const ROUND_TIMEOUT_MS = num('DN_ROUND_TIMEOUT_MS', 3 * 60 * 1000);
+export const ROUND_TIMEOUT_MS = agreed('DN_ROUND_TIMEOUT_MS', 3 * 60 * 1000);
 // Every pool is reconciled with every member this often.
-export const SYNC_INTERVAL_MS = num('DN_SYNC_INTERVAL_MS', 60 * 1000);
+export const SYNC_INTERVAL_MS = agreed('DN_SYNC_INTERVAL_MS', 60 * 1000);
 // The longest a host waits, by its rank on a task, before starting to claim it.
-export const RANK_DELAY_MS = num('DN_RANK_DELAY_MS', 5000);
+export const RANK_DELAY_MS = agreed('DN_RANK_DELAY_MS', 5000);
 // A claim round asks every member afresh, whatever the gossip thinks of it. A member that
 // answered within PEER_QUIET_MS is given a whole REQUEST_TIMEOUT_MS. One this host has
 // never reached and has known for less than that is asked again until ROUND_PATIENCE_MS of
 // the round have passed: a first circuit to an onion service can take minutes. Any other
 // gets PROBE_TIMEOUT_MS, so a sleeping machine costs a round seconds - also the round of
 // a host that starts again, which keeps on disk which members were that long silent.
-export const PROBE_TIMEOUT_MS = num('DN_PROBE_TIMEOUT_MS', 15 * 1000);
-export const PEER_QUIET_MS = num('DN_PEER_QUIET_MS', 3 * SYNC_INTERVAL_MS);
-export const ROUND_PATIENCE_MS = num('DN_ROUND_PATIENCE_MS', ROUND_TIMEOUT_MS / 2);
+export const PROBE_TIMEOUT_MS = agreed('DN_PROBE_TIMEOUT_MS', 15 * 1000);
+export const PEER_QUIET_MS = agreed('DN_PEER_QUIET_MS', 3 * SYNC_INTERVAL_MS);
+export const ROUND_PATIENCE_MS = agreed('DN_ROUND_PATIENCE_MS', ROUND_TIMEOUT_MS / 2);
 // A host pushes an offer of its own again to a member that has not said it holds it,
 // after each of these waits in turn.
 export const PUSH_REPEAT_MS = [2000, 5000, 15000];
 // After a request to a peer goes unanswered, gossip leaves that peer alone for this long,
 // doubling per failure up to the cap.
-export const PEER_BACKOFF_MS = num('DN_PEER_BACKOFF_MS', 5000);
-export const PEER_BACKOFF_MAX_MS = num('DN_PEER_BACKOFF_MAX_MS', 10 * 60 * 1000);
+export const PEER_BACKOFF_MS = agreed('DN_PEER_BACKOFF_MS', 5000);
+export const PEER_BACKOFF_MAX_MS = agreed('DN_PEER_BACKOFF_MAX_MS', 10 * 60 * 1000);
 // One `act` request, the forge call and the push check on the requester's side included;
 // a body is given ACT_BYTES_PER_SEC on top of it.
-export const ACT_TIMEOUT_MS = num('DN_ACT_TIMEOUT_MS', 5 * 60 * 1000);
+export const ACT_TIMEOUT_MS = agreed('DN_ACT_TIMEOUT_MS', 5 * 60 * 1000);
 export const ACT_BYTES_PER_SEC = 32 * 2 ** 10;
 // How often an unanswered ping, key request or outcome report is sent again, and how
 // long a task whose round stood down is left alone.
-export const RETRY_MS = num('DN_RETRY_MS', 30 * 1000);
+export const RETRY_MS = agreed('DN_RETRY_MS', 30 * 1000);
 // How long a host leaves an offer of a task that is running to that run before it goes
 // for it: the run asks for such an offer itself, when it hears of it and every RETRY_MS.
-export const JOIN_WAIT_MS = num('DN_JOIN_WAIT_MS', 2 * RETRY_MS);
+export const JOIN_WAIT_MS = agreed('DN_JOIN_WAIT_MS', 2 * RETRY_MS);
 // How long a host leaves a task it failed at or gave back to the other members, doubling
 // each time it does so under the same offer, up to the cap.
-export const GIVE_UP_WAIT_MS = num('DN_GIVE_UP_WAIT_MS', 2 * 60 * 1000);
-export const GIVE_UP_WAIT_MAX_MS = num('DN_GIVE_UP_WAIT_MAX_MS', 60 * 60 * 1000);
+export const GIVE_UP_WAIT_MS = agreed('DN_GIVE_UP_WAIT_MS', 2 * 60 * 1000);
+export const GIVE_UP_WAIT_MAX_MS = agreed('DN_GIVE_UP_WAIT_MAX_MS', 60 * 60 * 1000);
 // A member whose claim let go of an offer before its hold ran out is given that offer
 // again no sooner than this much later: the other members go first. Less than
 // GIVE_UP_WAIT_MS, so a host that goes for a task again by itself is not turned away.
-export const RETAKE_WAIT_MS = num('DN_RETAKE_WAIT_MS', 60 * 1000);
+export const RETAKE_WAIT_MS = agreed('DN_RETAKE_WAIT_MS', 60 * 1000);
 // A member whose claim lapsed without having had the key of an offer and held it for a
 // whole lease is given that offer again no sooner than this much later, twice as long each time under
 // the same offer, up to the most.
-export const KEYLESS_WAIT_MS = num('DN_KEYLESS_WAIT_MS', 2 * 3600 * 1000);
-export const KEYLESS_WAIT_MAX_MS = num('DN_KEYLESS_WAIT_MAX_MS', 24 * 3600 * 1000);
+export const KEYLESS_WAIT_MS = agreed('DN_KEYLESS_WAIT_MS', 2 * 3600 * 1000);
+export const KEYLESS_WAIT_MAX_MS = agreed('DN_KEYLESS_WAIT_MAX_MS', 24 * 3600 * 1000);
 // How many proofs of work a host works on at a time, each on a thread of its own.
-export const POW_WORKERS = num('DN_POW_WORKERS', 2);
+export const POW_WORKERS = agreed('DN_POW_WORKERS', 2);
 // How often a host looks at everything it holds for something that came due.
-export const TICK_MS = num('DN_TICK_MS', 10 * 1000);
+export const TICK_MS = agreed('DN_TICK_MS', 10 * 1000);
 // A host whose clock moved this far between two looks was not running meanwhile - the
 // machine slept - and what it holds of its pools is as old as that.
-export const WAKE_GAP_MS = num('DN_WAKE_GAP_MS', 6 * TICK_MS);
+export const WAKE_GAP_MS = agreed('DN_WAKE_GAP_MS', 6 * TICK_MS);
 // How long a host that started or woke goes on asking the members of a pool what it
 // missed while none of them answers, before it goes on with what it holds.
-export const CATCH_UP_MS = num('DN_CATCH_UP_MS', 3 * 60 * 1000);
-export const PRUNE_INTERVAL_MS = num('DN_PRUNE_INTERVAL_MS', 10 * 60 * 1000);
+export const CATCH_UP_MS = agreed('DN_CATCH_UP_MS', 3 * 60 * 1000);
+export const PRUNE_INTERVAL_MS = agreed('DN_PRUNE_INTERVAL_MS', 10 * 60 * 1000);
 // How many claim rounds one host runs at a time.
 export const MAX_ROUNDS = 4;
 // How long a ticket for a large body is good before the body's headers arrive. A member
 // whose tickets go unused twice running or more gets none for this long, twice as long
 // each time, up to the most. A member counts as having just had a place for this long.
-export const TICKET_WAIT_MS = num('DN_TICKET_WAIT_MS', 10 * 1000);
-export const TICKET_REST_MS = num('DN_TICKET_REST_MS', 60 * 1000);
-export const TICKET_REST_MAX_MS = num('DN_TICKET_REST_MAX_MS', 60 * 60 * 1000);
+export const TICKET_WAIT_MS = agreed('DN_TICKET_WAIT_MS', 10 * 1000);
+export const TICKET_REST_MS = agreed('DN_TICKET_REST_MS', 60 * 1000);
+export const TICKET_REST_MAX_MS = agreed('DN_TICKET_REST_MAX_MS', 60 * 60 * 1000);
 // How many bodies above the stranger's cap a host reads at once, over all senders.
 export const MAX_LARGE_BODIES = 4;
 // Diplomat's last word on free slots is trusted this long.
-export const ADMIT_TTL_MS = num('DN_ADMIT_TTL_MS', 120 * 1000);
+export const ADMIT_TTL_MS = agreed('DN_ADMIT_TTL_MS', 120 * 1000);
 // Diplomat counts its free slots from a snapshot it read a moment before it states them:
 // a run begun within this long before the statement may be missing from that count.
 export const ADMIT_LAG_SECS = 10;
 // How long a host that is switched off waits for the members to hear what it ended.
-export const SWITCH_OFF_WAIT_MS = num('DN_SWITCH_OFF_WAIT_MS', 15 * 1000);
-// A container no job of this daemon was ever in is removed once it has been seen for this long.
-export const CONTAINER_IDLE_MS = num('DN_CONTAINER_IDLE_MS', 6 * 3600 * 1000);
+export const SWITCH_OFF_WAIT_MS = agreed('DN_SWITCH_OFF_WAIT_MS', 15 * 1000);
 
 // Acting as the requester (PROTOCOL.md section 9). Where each forge host is reached:
 // {"api.github.com":"http://127.0.0.1:1234"} sends that host's requests to a stand-in,
@@ -249,8 +268,10 @@ export const IMAGE_REPO = process.env.DN_IMAGE_REPO || 'diplomat-agent';
 export const IMAGE_BUILD_TIMEOUT_MS = bound('DN_IMAGE_BUILD_TIMEOUT_MS', 30 * 60 * 1000);
 // What one container may use of this machine.
 export const CONTAINER_PIDS = bound('DN_CONTAINER_PIDS', 4096);
-export const CONTAINER_MEMORY = process.env.DN_CONTAINER_MEMORY || '8g';
-export const CONTAINER_CPUS = process.env.DN_CONTAINER_CPUS || '4';
+export const CONTAINER_MEMORY = amount('DN_CONTAINER_MEMORY', '8g');
+export const CONTAINER_CPUS = amount('DN_CONTAINER_CPUS', '4');
+// A container no job of this daemon was ever in is removed once it has been seen for this long.
+export const CONTAINER_IDLE_MS = num('DN_CONTAINER_IDLE_MS', 6 * 3600 * 1000);
 // The most one container may hold of this machine's disk: its writable layer, its /work
 // volume and its run records together.
 export const CONTAINER_DISK_BYTES = num('DN_CONTAINER_DISK_BYTES', 20 * 2 ** 30);
@@ -308,6 +329,9 @@ export const SWEEP_MS = num('DN_SWEEP_MS', 10 * 60 * 1000);
 /// The pause before something that failed for want of docker is tried again: a stop that
 /// did not go through, the broker's listener.
 export const EXECUTOR_RETRY_MS = num('DN_EXECUTOR_RETRY_MS', 5000);
+/// How long a daemon that starts asks an engine that does not answer after the jobs the
+/// daemon before it left, before it gives them back.
+export const ENGINE_WAIT_MS = num('DN_ENGINE_WAIT_MS', 60 * 1000);
 /// How long a pool is left alone after a job of it could not be started on this machine,
 /// and twice as long after each such failure in a row.
 export const POOL_RETRY_MS = num('DN_POOL_RETRY_MS', 60 * 1000);
@@ -326,16 +350,16 @@ export const FAULT_REPEATS = 5;
 export const FAULT_WINDOW_MS = num('DN_FAULT_WINDOW_MS', 60 * 1000);
 /// Only for tests: a file whose lines the daemon throws, one per config poll.
 export const TEST_FAULTS_PATH = process.env.DN_TEST_FAULTS || '';
-/// What only a test sets, as `NAME=value`, of what this process was given: each takes
-/// from the daemon something the network rests on - Tor, the forge, the proof of work.
-export const TEST_KNOBS = Object.entries(process.env)
-  .filter(([name, value]) => /^DN_(TEST|POW)_/.test(name) || name === 'DN_FORGE_ORIGINS' || (name === 'DN_TRANSPORT' && value === 'loop'))
-  .map(([name, value]) => `${name}=${value}`).sort();
+// With the protocol's figures above, the rest of what only a test sets.
+TEST_KNOBS.push(...Object.entries(process.env)
+  .filter(([name, value]) => /^DN_TEST_/.test(name) || name === 'DN_FORGE_ORIGINS' || (name === 'DN_TRANSPORT' && value === 'loop'))
+  .map(([name, value]) => `${name}=${value}`));
+TEST_KNOBS.sort();
 /// What a machine that left the network has no further use for, removed once what it
 /// made in docker is gone: the records of its jobs, prompts among them, its mirrors, and
 /// the certificate authorities its containers trusted. Its key, its pools and what it
 /// offered stay: switched on again, it is the member it was.
-export const OFF_REMOVES = [RUNS_DIR, MIRRORS_DIR, CA_DIR];
+export const OFF_REMOVES = [CA_DIR, MIRRORS_DIR, RUNS_DIR];
 /// The longest the installer takes to answer, whatever it was asked. The applets kill an
 /// installer after 90 s and read no answer from one they killed (`installerTimeout` in
 /// NodePackage.swift, `INSTALLER_TIMEOUT_SECS` in deviceallocator.py): this has to stay
@@ -348,7 +372,7 @@ export const TRANSPORT_RETRY_MAX_MS = num('DN_TRANSPORT_RETRY_MAX_MS', 5 * 60 * 
 /// How long the installer waits for a daemon it stopped to be gone. A daemon that is
 /// switched off waits SWITCH_OFF_WAIT_MS at most three times - for its pools to hear, for
 /// its jobs to be taken down, each with its container when it was the last in it, for the
-/// engine to remove what else it made - and 10 s for tor.
+/// engine to remove what else it made and the run records it is asked to - and 10 s for tor.
 export const STOP_WAIT_MS = num('DN_STOP_WAIT_MS', 3 * SWITCH_OFF_WAIT_MS + 15 * 1000);
 
 // How long a machine with no device to give holds back from a task on an Android
