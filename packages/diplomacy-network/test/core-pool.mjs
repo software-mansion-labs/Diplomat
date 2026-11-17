@@ -192,8 +192,26 @@ check('a host accepts the keys seated under the member its own vouchers lead up 
   assert.deepEqual(seating(ben.pk, [...again.slice(0, 3), member(ann, { voucher: seat(root), seq: 7, era: 7 })]), new Map([[ben.pk, 0]]));
   // Two keys that vouch for each other are a pool of their own, each seated once.
   const loop = [member(ann, { voucher: seat(ben) }), member(ben, { voucher: seat(ann) })];
-  assert.deepEqual(seating(ann.pk, loop), new Map([[ben.pk, 0], [ann.pk, 1]]));
+  const [low, high] = [ann.pk, ben.pk].sort();
+  for (const self of [ann, ben]) assert.deepEqual(seating(self.pk, loop), new Map([[high, 0], [low, 1]]), 'vouchers of one second: the higher key is the first member');
   assert.deepEqual(seating(root.pk, [member(root), ...loop]), new Map([[root.pk, 0]]));
+});
+
+check('a chain of vouchers that closes on itself ends at the record in it with the latest voucher, for every host that holds it', () => {
+  // root seated ann and cat, ann seated ben - and root signed a record under a voucher of ann's.
+  const rest = [member(ben, { voucher: seat(ann, { n: 1 }) }), member(cat, { voucher: seat(root, { n: 1 }) })];
+  const closed = (rootAt, annAt) => [member(root, { seq: 1, at: T0 + 9, voucher: seat(ann, { at: rootAt }) }), member(ann, { at: T0 + 9, voucher: seat(root, { at: annAt }) }), ...rest];
+  const under = (top, next, ...last) => new Map([[top.pk, 0], [next.pk, 1], ...last.map((id) => [id.pk, 2])]);
+  for (const self of [root, ann, ben, cat]) {
+    // The voucher root holds is the later: it counts for nothing, and root is the first member.
+    assert.deepEqual(seating(self.pk, closed(T0 + 5, T0)), new Map([[root.pk, 0], [ann.pk, 1], [cat.pk, 1], [ben.pk, 2]]), 'the pool as it was');
+  }
+  for (const self of [root, ann, ben]) assert.deepEqual(seating(self.pk, closed(T0, T0 + 5)), new Map([[ann.pk, 0], [root.pk, 1], [ben.pk, 1], [cat.pk, 2]]));
+  // Three keys in a ring, and one seated by a key of the ring: whichever of them looks.
+  const ring = [member(root, { voucher: seat(ben, { at: T0 + 1 }) }), member(ann, { voucher: seat(root, { at: T0 + 3 }) }), member(ben, { voucher: seat(ann, { at: T0 + 2 }) }), member(cat, { voucher: seat(ben, { n: 1, at: T0 + 7 }) })];
+  for (const self of [root, ann, ben]) assert.deepEqual(seating(self.pk, ring), under(ann, ben, root, cat));
+  assert.deepEqual(seating(cat.pk, ring), under(ann, ben, root, cat));
+  for (const self of [root, ann, ben, cat]) assert.deepEqual(seating(self.pk, [...ring].reverse()), under(ann, ben, root, cat), 'in whatever order the records are held');
 });
 
 check('the members a host ends with do not depend on the order their records arrive in', () => {

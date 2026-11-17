@@ -208,18 +208,22 @@ export function createGossip(host) {
   // stopped signing their record.
   const others = (P) => P.pool.known(host.now()).map((m) => m.pk).filter((pk) => pk !== host.self);
 
-  // The member records that lead from this host to the member that started the pool.
-  function chainOf(P) {
+  // The member records that lead from `pk`, this host unless named, to the member that
+  // started the pool.
+  function chainOf(P, pk = host.self) {
     const chain = [];
-    let record = own(P);
-    while (chain.length < MAX_HELLO_CHAIN) {
+    let record = P.pool.get(memberKey(pk));
+    while (record && chain.length < MAX_HELLO_CHAIN) {
       const next = P.pool.get(memberKey(record.voucher?.by));
-      if (!next || next.pk === host.self || chain.includes(next)) break;
+      if (!next || chain.includes(next)) break;
       chain.push(next);
       record = next;
     }
     return chain;
   }
+
+  // Does `lower` sit in a seat `upper` gave, or in one a key so seated gave?
+  const under = (P, lower, upper) => chainOf(P, lower).some((record) => record.pk === upper);
 
   // The seat of this host's that `pk` gets at `now`: the one it holds or was given by an
   // invite still good, else one that no member holds and no such invite gave away, else
@@ -254,6 +258,8 @@ export function createGossip(host) {
     // it left the pool, or holds no note of, lets nobody in.
     const given = invite.by === host.self ? P.invites.find((made) => made.nonce === invite.nonce) : null;
     if (!given) return { error: 'denied', detail: 'that invite is no longer good' };
+    // A seat under this host for a key this host sits under would close the chain.
+    if (under(P, host.self, from)) return { error: 'denied', detail: 'the maker of that invite sits under the key that brings it' };
     const seat = seatFor(P, from, now);
     if (seat === null) return { error: 'denied', detail: 'no-seat' };
     given.seats = { ...given.seats, [from]: seat };
@@ -620,7 +626,11 @@ export function createGossip(host) {
     const verdict = verifyInvite(parsed, { pool: parsed.pool, now: host.now() });
     if (!verdict.ok) throw new Error(UNUSABLE[verdict.code]);
     if (parsed.by === host.self) throw new Error('That invite was made on this machine: it lets another machine in, not this one.');
-    const P = host.pools.get(parsed.pool) ?? rejoin(parsed.pool);
+    const linked = host.pools.get(parsed.pool);
+    if (linked && under(linked, parsed.by, host.self)) {
+      throw new Error(`The machine that made that invite came into the pool ${parsed.pool} through this one, which is in it already: an invite takes a machine in under its maker. To move this machine, use an invite of a machine that did not come in through it.`);
+    }
+    const P = linked ?? rejoin(parsed.pool);
     P.joining = { invite: token, by: parsed.by, exp: parsed.exp };
     P.joinFailed = '';
     P.farewell = null;

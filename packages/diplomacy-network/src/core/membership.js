@@ -65,10 +65,12 @@ export function verifyVoucher(record) {
 /// map from each to how many vouchers it is from the top: the member `self`'s own chain
 /// of vouchers leads up to, the members that hold a seat of it, and so on down to
 /// `LIMITS.depth`. A voucher counts while its signer's record is of the membership the
-/// voucher was signed in. Of the records that name one seat, the one with the latest
-/// voucher holds it, then the one with the lowest key. Where that leaves `self` without a
-/// seat the top is `self`: a host is a member of its own state. The result does not
-/// depend on the order of `records`.
+/// voucher was signed in. A chain that closes on itself has its top at the record in it
+/// with the latest voucher, then the highest key: that voucher counts for nothing. Of the
+/// records that name one seat, the one with the latest voucher holds it, then the one with
+/// the lowest key. Where that leaves `self` without a seat the top is `self`: a host is a
+/// member of its own state. The result does not depend on the order of `records`, nor,
+/// for the keys seated under one top, on which of them `self` is.
 export function seating(self, records) {
   const held = new Map(records.map((record) => [record.pk, record]));
   // The key whose seat a record is for, when that key's record is held and of the
@@ -89,7 +91,7 @@ export function seating(self, records) {
       for (const by of level) {
         const seats = new Map();
         for (const record of under.get(by) ?? []) {
-          // A chain of vouchers may close on itself: a key is seated once, at its highest.
+          // A key is seated once, at its highest: the top of a closed chain in no seat.
           if (depth.has(record.pk)) continue;
           const { seat, at } = record.voucher;
           const rival = seats.get(seat);
@@ -105,8 +107,12 @@ export function seating(self, records) {
     return depth;
   };
   const chain = [self];
-  for (let by = inviter(held.get(self) ?? {}); by !== undefined && !chain.includes(by); by = inviter(held.get(by))) chain.push(by);
-  const top = chain.at(-1);
+  let by = inviter(held.get(self) ?? {});
+  for (; by !== undefined && !chain.includes(by); by = inviter(held.get(by))) chain.push(by);
+  // `by` is where the chain closed, when it did: the keys from there on are the loop.
+  const loop = by === undefined ? [] : chain.slice(chain.indexOf(by));
+  const later = (a, b) => a.voucher.at > b.voucher.at || (a.voucher.at === b.voucher.at && a.pk > b.pk);
+  const top = loop.reduce((last, pk) => (later(held.get(pk), held.get(last)) ? pk : last), chain.at(-1));
   const seated = below(top);
   return seated.has(self) ? seated : below(self);
 }

@@ -480,3 +480,56 @@ await check('a store of member records without vouchers is a pool of the host\'s
   await w.net.until(() => b.executor.jobOf(taskId), { what: 'the job running at the host that joined again' });
   assert.deepEqual(w.members(a), [a.pk, b.pk].sort());
 });
+
+await check('a machine joins by no invite of a machine that came into the pool through it, and a member seats no key it sits under: the pool stays one', async () => {
+  const w = createWorld({ seed: 37 });
+  const [r, a, h] = await w.pool(['r', 'a', 'h']);
+  const [b, c] = [w.add('b'), w.add('c')];
+  for (const [x, by] of [[b, a], [c, h]]) {
+    await w.start(x);
+    await x.node.join(by.node.invite({ pool: POOL }));
+  }
+  const all = [r, a, h, b, c];
+  await w.net.until(() => all.every((x) => w.members(x).length === 5), { what: 'five members' });
+  await w.agreed(all);
+  const hash = w.view(r).hash;
+  const through = /^Error: The machine that made that invite came into the pool .* through this one, which is in it already: an invite takes a machine in under its maker\. To move this machine, use an invite of a machine that did not come in through it\.$/;
+  const made = (by) => ({ invite: inviteToken(createInvite(by.id, { pool: POOL, exp: w.net.now() + 3600, nonce: w.net.rnd.bytes(16) })) });
+  await assert.rejects(r.node.join(a.node.invite({ pool: POOL })), through);
+  await assert.rejects(r.node.join(made(b)), through, 'two vouchers out');
+  await assert.rejects(a.node.join(made(b)), through);
+  assert.deepEqual([w.view(r).joining, w.view(a).joining], [false, false]);
+  // The member that made an invite judges the same of a key that brings it all the same.
+  const ask = async (from, to, body) => {
+    const { ok, code, detail, body: answer } = await w.request(from, to, 'hello', body, { effort: 4096 });
+    return ok ? answer : [code, detail];
+  };
+  const above = ['denied', 'the maker of that invite sits under the key that brings it'];
+  assert.deepEqual(await ask(r, a, a.node.invite({ pool: POOL })), above);
+  assert.deepEqual(await ask(r, h, h.node.invite({ pool: POOL })), above);
+  assert.equal((await ask(h, a, a.node.invite({ pool: POOL }))).voucher.by, a.pk, 'a key beside it is given a seat');
+  await w.run(30 * 60);
+  for (const x of all) assert.deepEqual([w.members(x).length, w.view(x).hash], [5, hash], x.name);
+});
+
+await check('two machines that each began the pool and join by one another\'s invite in one moment are one pool with one first member, whichever of its machines looks', async () => {
+  const w = createWorld({ seed: 38 });
+  const names = ['r1', 'a', 'x', 'r2', 'b', 'y'];
+  const [r1, a, x, r2, b, y] = names.map((name) => w.add(name));
+  for (const h of [r1, a, x, r2, b, y]) await w.start(h);
+  for (const [h, by] of [[a, r1], [x, a], [b, r2], [y, b]]) {
+    await h.node.join(by.node.invite({ pool: POOL }));
+    await w.net.until(() => w.members(by).includes(h.pk) && w.members(h).includes(by.pk), { what: `${h.name} a member` });
+  }
+  await w.agreed([r1, a, x]);
+  await w.agreed([r2, b, y]);
+  const [to2, to1] = [r2.node.invite({ pool: POOL }), r1.node.invite({ pool: POOL })];
+  r1.node.join(to2);
+  r2.node.join(to1);
+  await w.run(30 * 60);
+  // One of the two is the first member; the machine three vouchers from it has no seat.
+  const [top, low] = w.records(r1).find((rec) => rec.pk === r1.pk).voucher.at > w.records(r2).find((rec) => rec.pk === r2.pk).voucher.at ? [[r1, a, x, r2, b], y] : [[r2, b, y, r1, a], x];
+  const members = top.map((h) => h.pk).sort();
+  for (const h of top) assert.deepEqual([w.members(h), w.view(h).hash], [members, w.view(top[0]).hash], h.name);
+  assert.equal(members.includes(low.pk), false);
+});

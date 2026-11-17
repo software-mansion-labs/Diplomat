@@ -376,7 +376,11 @@ host that holds the same records:
 
 - The host follows its own voucher to its signer, that one's to its signer, and so on,
   for as long as the signer's record is held and of the era the voucher names. Where
-  that ends is the first member.
+  that ends is the first member. A chain that closes on itself - each key in it sits
+  under the next, and the last under the first - ends at the record in it whose voucher
+  has the latest `at`, among equals the highest `pk`: that voucher counts for nothing,
+  and its key is the first member, whichever host looks and wherever its own chain
+  enters the loop.
 - Under a seated key, each of its seats goes to the record with the latest voucher `at`
   for that seat, and among equals to the lowest `pk`. A key is seated once, at the
   place nearest the first member, and nothing is seated more than two vouchers from it.
@@ -394,10 +398,13 @@ it keeps its seat, and comes back by signing the record again.
 **Whose word a seat is.** Nothing orders members but the vouchers above them, so the
 only keys that can take a member's seat are the one that gave it and the one that gave
 that one its own: by a later voucher for the seat, or by leaving the era the vouchers
-were given in. No record another member signs moves anybody. A member one voucher from
-the first decides who sits in its own 15 seats and nowhere else - itself and 15 keys, 16
-seats of the 241, and m such members together 16 m; a member two vouchers out holds its
-own seat and gives none; the first member decides every seat.
+were given in. The keys a member seated sit where that member sits: one that signs its
+record under another voucher, or under none, is followed there by the keys in its seats,
+on every host that takes that record. No record of any other member moves anybody. A
+member one voucher from the first decides who sits in its own 15 seats and nowhere
+else - itself and 15 keys, 16 seats of the 241, and m such members together 16 m; a
+member two vouchers out holds its own seat and gives none; the first member decides
+every seat.
 
 **Giving a seat.** A host answers `hello { invite }` only for an invite of its own that
 it made in the membership it is in and that has not run out. The key gets the seat it
@@ -406,8 +413,10 @@ no unexpired invite has given to a key that has not taken it yet; else, of the s
 whose holders left or have signed no record for 24 hours, the one whose holder's record
 is the oldest. A host with none of those, or two vouchers from the first member,
 answers `denied` with the detail `no-seat`; the other details are `bad-invite`,
-`wrong-pool`, `expired` and `that invite is no longer good` (not this host's, or made
-before it began the membership it is in). The answer is `{ voucher, chain }`: the voucher
+`wrong-pool`, `expired`, `that invite is no longer good` (not this host's, or made
+before it began the membership it is in) and `the maker of that invite sits under the
+key that brings it`: a host gives no seat to the key that seated it, nor to the key
+that seated that one. The answer is `{ voucher, chain }`: the voucher
 dated by the host's clock at that moment, and the member records that lead from the host
 to the first member, the host's own first.
 
@@ -417,7 +426,9 @@ others with `hello { member, chain? }`. The host it greets may not have heard ye
 member that seated it, so `chain` carries the member records between the newcomer and
 the first member - at most 2. The greeted host takes them in together with the
 newcomer's record, before it decides. Joining costs a newcomer two requests at a
-stranger's price (section 3).
+stranger's price (section 3). A host takes no invite made by a key that sits under it -
+one it seated, or one such a key seated: it is in that pool already, above the invite's
+maker, and joining under it would close the chain.
 
 A member that left was put out by nobody, and comes back as the member it was: it signs
 its record again - a higher `seq`, the voucher it holds, no `left` - and greets the
@@ -1082,7 +1093,12 @@ Nothing in a record hides any of this.
 - **A seat is the word of the members above it.** The member that gave a seat, and the
   one that gave that member its own, take it away by a later voucher for it, and nothing
   tells the member that lost it: the hosts that seat it no longer answer it as they
-  answer a stranger. A host that leaves a pool,
+  answer a stranger. A member one voucher from the first that signs its record under a
+  voucher of a key of its own, or under none, takes the keys it seated with it: each of
+  them takes the record, finds that member or its key for the first member, and holds a
+  pool of that member's keys and one another, while the hosts under the first member
+  refuse the record and count them members for a day more. Nothing tells those keys'
+  operators but the members their pool's row lists. A host that leaves a pool,
   unlinks it and links it again has begun another membership: wherever its new record
   arrives, the members it had seated are seated no longer, though it meant only to come
   back, and each of them joins again by invite.
