@@ -311,7 +311,7 @@ enum TasksTest {
         }
         check("the reviews are the review-request monitor's, mine reviewed as mine",
               reviews.map { "\($0.0.depth) \($0.0.specificPR) \($0.0.specificAuthor) @\($0.1)" }
-                == ["max 1821 theirs @contributor-x", "max 1822 mine @"],
+                == ["standard 1821 theirs @contributor-x", "max 1822 mine @"],
               "\(reviews.map { "\($0.0.depth) \($0.0.specificPR) \($0.0.specificAuthor) @\($0.1)" })")
         let recorded = view(fixture.auto)?.task.dispatched.keys.sorted() ?? []
         check("and records them dispatched", recorded == ["fix:\(ref(1820))", "review:\(ref(1821))@a1b2c3d4",

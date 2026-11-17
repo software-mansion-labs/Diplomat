@@ -291,11 +291,10 @@ extension Store {
         }
     }
 
-    /// A goal PR's review at the review-request monitor's settings (the most thorough
-    /// depth), comments only: no request's files are at hand to weigh a verdict against.
+    /// A goal PR's review at the review-request monitor's depth (max for our own branches), comments only: no request's files are at hand to weigh a verdict against.
     func goalReviewAsk(_ item: GoalWork) -> RequestedWork {
         let mine = !effectiveMe.isEmpty && item.author?.lowercased() == effectiveMe.lowercased()
-        var cfg = ReviewConfig(depth: "max", target: .specific, me: effectiveMe, markReady: false,
+        var cfg = ReviewConfig(depth: mine ? "max" : "standard", target: .specific, me: effectiveMe, markReady: false,
                                leaveReviews: true, replyToReviews: false, specificPR: String(item.number),
                                finalPass: false, softApprove: softApproveEnabled,
                                specificAuthor: mine ? .mine : .theirs)

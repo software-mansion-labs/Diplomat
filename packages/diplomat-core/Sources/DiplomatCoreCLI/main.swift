@@ -207,6 +207,7 @@ case "review":
         softApprove: flag("softApprove", true),
         specificAuthor: specificAuthor(obj["specificAuthor"] as? String)
     )
+    cfg.automaticVerdict = obj["automaticVerdict"] as? Bool
     cfg.localRepos = localRepos
     cfg.home = homeRepo
     prompt = cfg.buildPrompt()

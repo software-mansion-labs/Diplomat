@@ -594,12 +594,22 @@ def test_review_request_verdict_gating(store, monkeypatch):
     store.review_requests_enabled = True
     store.auto_approve_enabled = True
     calls = _spawn_recorder(monkeypatch, finish=True)
-    # A clean PR by a trusted author → verdict allowed (final_pass=true in prompt).
+    # Capture the inputs actually dispatched on each path.
+    configs = []
+
+    def capture(config):
+        configs.append(config)
+        return "review"
+
+    monkeypatch.setattr("diplomat_runtime.promptcore.build_prompt", capture)
+    # A trusted author's review may submit a verdict at the focused depth.
     reqs = [_req(requested_at="2026-01-02", author_association="MEMBER", files=["a.py"])]
     monkeypatch.setattr("diplomat_app.autofixmonitor.fetch_review_requests", lambda *a, **k: reqs)
     store._poll_review_requests([ROOT])
     assert len(calls) == 1 and "review" in calls[0]["prompt"]
     assert store.review_requests_handled == 1
+    assert configs[0]["depth"] == "standard" and configs[0]["automaticVerdict"]
+    assert not configs[0]["finalPass"]
 
     # A different SKILL PR → verdict withheld: still dispatched (comments-only).
     calls.clear()
@@ -609,6 +619,8 @@ def test_review_request_verdict_gating(store, monkeypatch):
                         lambda *a, **k: skill_reqs)
     store._poll_review_requests([ROOT])
     assert len(calls) == 1  # dispatched (comments-only)
+    assert configs[1]["depth"] == "standard" and not configs[1].get("automaticVerdict")
+    assert not configs[1]["finalPass"]
 
 
 def test_unaddressed_count_and_ban_skip(store, monkeypatch):

@@ -33,8 +33,9 @@ prompt:
 - **Scope** - *Review draft PRs* and *Review ready-for-review PRs* (both on by
   default; hidden for a specific PR, which is already one exact PR). Untick both
   and SPAWN greys out - there'd be nothing left to review.
-- **Review depth** - a slider from a quick static read → standard swarm →
-  swarm + hard reproductions → full E2E, swarming until one clean pass.
+- **Review depth** - a slider from a quick static read → focused review →
+  swarm + hard reproductions → full E2E. The focused review verifies credible
+  findings in one pass.
 - **Mark clean PRs ready for review** - *(never on someone else's)* flip
   perfectly-clean drafts to ready.
 - **Leave per-line reviews** - *(never on my own)* post formal per-line reviews;
@@ -46,15 +47,20 @@ prompt:
   APPROVE. It posts even with *Leave reviews* off.
 - **✨ Final E2E pass + verdict** - *(highlighted, off by default; others' and
   unknown-author PRs only - never my own, there is no self-approval)* appends a
-  culminating full-E2E pass on the real binaries with big swarms: APPROVE
-  perfectly-clean PRs (after confirming past issues are resolved),
-  APPROVE-with-comments when only LOW findings are left, or leave **changes
-  requested** on real blockers.
+  final E2E check of the affected workflows. A verified blocker warrants a change
+  request. Non-blocking findings and optional coverage advice allow approval.
 
-Whatever the depth, every review judges the PR's **premise** before its diff: what it
-sets out to solve, whether its diagnosis and assumptions hold against the code, and
-whether the change removes the cause or only hides the symptom. A proven workaround for
-a cause the repo could fix at its origin is a finding of at least MEDIUM.
+Inline findings identify behavior the PR makes worse than its target branch’s merge
+base, or a supported case where the submitted change fails its stated purpose.
+Each thread gives the trigger, expected and observed behavior, and impact. A partial
+fix can pass review. Incidental existing defects stay in the operator’s summary.
+Filing a follow-up issue requires an explicit request.
+
+On someone else’s PR, a re-review covers changes since the last submitted Diplomat
+review and outstanding findings. If the previous head can’t be compared reliably,
+the reviewer uses the full PR diff. A thread ends when its original reproduction
+passes. If reverting the central behavior leaves tests green, the reviewer may put
+one optional coverage suggestion in the review body.
 
 Contextual controls (the action checkboxes, the someone-else's handle field, and the
 single-PR field) **appear only where they apply** - for a specific PR the wizard
