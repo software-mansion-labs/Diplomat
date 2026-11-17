@@ -1043,14 +1043,27 @@ Nothing in a record hides any of this.
   that member and the keys seated with it for 2 hours, then 4, up to 24: the offer is
   held for 2 h 10 min at the most and is then free for 2 hours at the least. Each member
   one voucher from the first has such a turn of its own, and the first member one for
-  itself and for each key it seats. A member that gives its
+  itself and for each key it seats. The wait falls on every key in that member's seats,
+  so a machine seated by a member that sat on an offer waits for that offer with it. A
+  member that gives its
   claim back before the lapse costs the offer no attempt and is given the offer again
   60 s later (section 6): where no other member goes for the task in that minute, or
   where a second member takes it then and does the same, the offer is kept from being
   run for as long as they keep that up, and never ends failed. A member invited into a
   pool can do this to every task in it.
 - **A member that answers and does not grant** stops every round it is asked in: a round
-  needs the grant of every present member, and stands down after 180 s without one.
+  needs the grant of every present member, and stands down after 180 s without one. A
+  member that answers every request with a demand for the most work does the same to a
+  host until that host has done for it what it does for one peer in an hour,
+  268 435 456 hashes: for the rest of that hour the host's rounds go on without it, as
+  without a member that is silent.
+- **Four keys that ask for the most use up a host's hour of work.** What a host does for
+  all its peers in an hour is four times what it does for one, and a member one voucher
+  from the first has 16 keys. For the rest of that hour the host pays only the peers it
+  has known for an hour, 256 requests at the base price each: enough for its claim rounds
+  and its gossip with them, and nothing for a peer it met since. A host knows nobody for
+  an hour after it started, so in the first hour of a host that just started no peer of
+  its has that share (section 3).
 - **A lock costs one request.** A member can ask every member for a lock on a task and
   commit nothing. Each lock binds for 120 s of its giver's clock, and while it does that member grants no
   other executor one. Asking again keeps the task locked, at the price of the requests
