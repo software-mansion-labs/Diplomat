@@ -18,16 +18,10 @@ import Foundation
 ///   comms-feed    [--limit N]  stdout = the folded [CommsItem], newest first (default 200).
 ///   comms-effect  stdin = {"decision", "message", "toggles", "settings"?}; stdout = the
 ///                 CommsEffect.
-///   comms-reply   stdin = CommsReplyRequest ({"message", "decision", "queued"?, "away",
-///                 "toggles", "settings"}); posts the reply that is due, if any, under
-///                 Claude Code's Slack login; stdout = {"outcome": "sent" | "failed: …" |
-///                 "skipped: …" | null, "text": "…" | null}.
-///   comms-reply-merge  stdin = {"requests": [CommsReplyRequest]}; stdout = one per Slack
-///                 message (`CommsReplyRequest.merged`), for one `comms-reply` each.
 ///
-/// The tick, the auth and the reply reach Slack under Claude Code's own Slack login
-/// (`SlackToken`), which `DIPLOMAT_SLACK_TOKEN` overrides. The tick, the feed, the effect
-/// and the reply read and write `$DIPLOMAT_COMMS_DIR` (default `~/.diplomat/comms`).
+/// The tick and the auth reach Slack under Claude Code's own Slack login (`SlackToken`),
+/// which `DIPLOMAT_SLACK_TOKEN` overrides. The tick, the feed and the effect read and write
+/// `$DIPLOMAT_COMMS_DIR` (default `~/.diplomat/comms`).
 enum CommsCommand {
     static func tick(_ input: Data) {
         let settings = decode(CommsSettings.self, input, "CommsSettings")
@@ -96,16 +90,6 @@ enum CommsCommand {
                                   toggles: req.toggles ?? CommsToggles(),
                                   settings: req.settings ?? CommsSettings(),
                                   reportDir: CommsLog.reportsDir()))
-    }
-
-    static func reply(_ input: Data) {
-        emitJSON(CommsReplier.reply(decode(CommsReplyRequest.self, input, "CommsReplyRequest")))
-    }
-
-    private struct ReplyMergeInput: Decodable { let requests: [CommsReplyRequest] }
-
-    static func replyMerge(_ input: Data) {
-        emitJSON(CommsReplyRequest.merged(decode(ReplyMergeInput.self, input, "{requests}").requests))
     }
 
     static func investigatePrompt(_ input: Data) -> String {
