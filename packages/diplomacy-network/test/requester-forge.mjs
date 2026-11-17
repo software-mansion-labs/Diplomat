@@ -71,7 +71,8 @@ fs.writeFileSync(path.join(scratch, 'glab', 'config.yml'), `git_protocol: ssh\nt
 Object.assign(process.env, forge.env, {
   DN_GH: countingGh,
   GLAB_CONFIG_DIR: path.join(scratch, 'glab'),
-  DN_FORGE_ORIGINS: JSON.stringify({ ...JSON.parse(forge.env.DN_FORGE_ORIGINS), 'gitlab.file.example': strangerOrigin, 'gitlab.dead.example': 'http://127.0.0.1:9' }),
+  DN_FORGE_ORIGINS: JSON.stringify({ ...JSON.parse(forge.env.DN_FORGE_ORIGINS), 'gitlab.file.example': strangerOrigin, 'gitlab.dead.example': 'http://127.0.0.1:9',
+    'gitlab.port.example:8443': strangerOrigin, 'gitlab.quoted.example:8443': strangerOrigin }),
   DN_FORGE_RESPONSE_MAX_BYTES: String(11 * 2 ** 20),
   DN_FORGE_TIMEOUT_MS: '1500',
 });
@@ -283,6 +284,30 @@ await check('the token is read from gh once, kept briefly, and appears in no log
   assert.ok(logLines.length > 10 && errors.length > 10);
   for (const text of [...logLines, ...errors]) for (const secret of secrets) assert.ok(!text.includes(secret), text);
   assert.ok(logLines.every((line) => !line.includes('?')), 'a log line carries no query string');
+});
+
+await check('a host\'s token in glab\'s config file comes from that host\'s own entry: a host named with a port, in quotes or not, is another entry', async () => {
+  fs.writeFileSync(path.join(scratch, 'glab', 'config.yml'), [
+    'hosts:',
+    '    gitlab.file.example:', '        api_protocol: https', '        user: me',
+    '    gitlab.port.example:8443:', '        token: glpat-of-the-port',
+    '    "gitlab.quoted.example:8443":', '        token: glpat-of-the-quoted',
+    '    gitlab.empty.example:', '        user: me',
+    '    gitlab.last.example: # a name this does not read', '        token: glpat-of-the-last',
+    'other:',
+    '    gitlab.file.example:', '        token: glpat-of-no-host',
+    ''].join('\n'));
+  const fresh = createForge();
+  const heard = strangers.length;
+  // An entry without a token has none, whatever the entries after it hold.
+  for (const host of ['gitlab.file.example', 'gitlab.empty.example', 'gitlab.last.example', 'gitlab.port.example', 'gitlab.quoted.example']) {
+    await failing(fresh.projectId({ forge: 'gitlab', host }, 'group/sub/proj'), new RegExp(`^forge: no gitlab credential for ${host.replaceAll('.', '\\.')} on this machine$`));
+  }
+  assert.equal(strangers.length, heard, 'nothing was sent');
+  for (const [host, secret] of [['gitlab.port.example:8443', 'glpat-of-the-port'], ['gitlab.quoted.example:8443', 'glpat-of-the-quoted']]) {
+    assert.equal(await fresh.projectId({ forge: 'gitlab', host }, 'group/sub/proj'), 1);
+    assert.equal(strangers.at(-1).headers.authorization, `Bearer ${secret}`);
+  }
 });
 
 await check('the forge answers what the deep checks ask: nodes, pull requests, comments, branches, the account', async () => {
