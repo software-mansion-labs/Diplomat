@@ -257,7 +257,7 @@ def _search(args: dict) -> dict:
 class _Slack(BaseHTTPRequestHandler):
     """Slack's MCP server as the core speaks to it: JSON-RPC over POST, ``initialize``
     opening a session every later request must name in ``Mcp-Session-Id``, and the tools
-    the watcher and the replier call answering in the server's own text."""
+    the watcher calls answering in the server's own text."""
 
     messages: list = []
     #: ``(method, params)`` of each request let through.
@@ -299,9 +299,6 @@ class _Slack(BaseHTTPRequestHandler):
         elif (method == "tools/call" and name == "slack_search_public_and_private"
               and args.get("filters", "") in ("", "is:dm")):
             result = {"content": [{"type": "text", "text": json.dumps(_search(args))}]}
-        elif method == "tools/call" and name == "slack_send_message":
-            result = {"content": [{"type": "text", "text": json.dumps(
-                {"ok": True, "ts": "1508284999.000001"})}]}
         else:
             result = {"isError": True, "content": [{
                 "type": "text", "text": "execution_failed: parameter_validation_failed"}]}
@@ -392,7 +389,7 @@ def _first_tick(settings: dict) -> int:
     first = _core("comms-tick", stdin=settings)
     assert first.returncode == 0, first.stderr
     assert json.loads(first.stdout) == {
-        "me": {"userID": "UME", "teamID": "Ours", "handle": "operator", "name": "The"},
+        "me": {"userID": "UME", "teamID": "Ours", "handle": "operator"},
         "pings": [], "items": [], "error": None, "notices": []}
     path = _comms_dir() / "state.json"
     state = json.loads(path.read_text())
@@ -435,8 +432,7 @@ def test_comms_tick_runs_end_to_end_through_the_binary(tmp_path, slack, monkeypa
         f"https://ours.slack.test/archives/D1/p{secs + 5}000100")
     assert result["items"][0]["decision"] == {
         "action": "review", "number": 12, "targets": [{"action": "review", "number": 12}],
-        "language": "en", "summary": "Review PR 12", "reason": "a direct ask",
-        "evidence": ""}
+        "summary": "Review PR 12", "reason": "a direct ask", "evidence": ""}
     searches = _tools("slack_search_public_and_private")
     assert [(s.get("filters"), s.get("keywords"), s["after"]) for s in searches] == [
         ("is:dm", None, str(secs)), (None, ["<@UME>"], str(secs)),
@@ -538,8 +534,7 @@ def test_one_message_asking_for_two_kinds_is_a_row_and_an_effect_for_each(tmp_pa
     monkeypatch.setenv("DIPLOMAT_CLAUDE", str(_stub_claude(tmp_path, {
         "action": "review", "targets": [{"action": "review", "number": 12},
                                         {"action": "fix_issue", "number": 34}],
-        "language": "en", "summary": "Review 12, fix 34", "reason": "two asks",
-        "evidence": ""})))
+        "summary": "Review 12, fix 34", "reason": "two asks", "evidence": ""})))
     settings = {"flushAfterSecs": 0}
     secs = _first_tick(settings)
     _Slack.messages = [_message(f"{secs + 5}.000100", "UALICE",

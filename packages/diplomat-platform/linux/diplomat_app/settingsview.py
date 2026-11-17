@@ -1113,42 +1113,6 @@ class SettingsView(QWidget):
             inner, "Batch interval", intervals, st.comms_flush_after_secs,
             "comms_flush_after_secs", Fmt.duration,
             "How old the newest ping of a shorter batch gets before it is triaged anyway.")
-        self._sw_comms_replies = self._comms_switch(
-            inner, "Reply in Slack", st.comms_replies, "comms_replies",
-            "Only while you are away; work is queued either way. In the message's language "
-            "(Polish or English), only ever in the conversation it was written in, and at "
-            "most once per message.")
-        self._comms_reply_kinds, kinds = nested_settings(_BLUE)
-        inner.addWidget(self._comms_reply_kinds)
-        self._comms_reply_kinds.setVisible(st.comms_replies)
-        self._sw_comms_replies.toggled.connect(self._comms_reply_kinds.setVisible)
-        self._sw_comms_reply_questions = self._comms_switch(
-            kinds, "Reply to questions", st.comms_reply_to_questions,
-            "comms_reply_to_questions",
-            "A question your repo's documentation answers gets that answer.")
-        self._sw_comms_reply_reviews = self._comms_switch(
-            kinds, "Reply to review asks", st.comms_reply_to_reviews, "comms_reply_to_reviews",
-            "A review a ping queued, or found queued or running, gets a reply saying when "
-            "it should be done.")
-        self._sw_comms_reply_fixes = self._comms_switch(
-            kinds, "Reply to fix asks", st.comms_reply_to_fixes, "comms_reply_to_fixes",
-            "So does a fix.")
-        self._sw_comms_reply_investigations = self._comms_switch(
-            kinds, "Reply to investigations", st.comms_reply_to_investigations,
-            "comms_reply_to_investigations", "So does an investigation.")
-        _, step, most = comms.away_after_secs()
-        self._comms_away = SliderSetting(
-            label="Away after", minimum=step, maximum=most, step=step,
-            min_label=Fmt.duration(step), max_label=Fmt.duration(most), tint=_BLUE,
-        )
-        self._comms_away.set_badge_text(Fmt.duration)
-        self._comms_away.set_value(st.comms_away_after_secs)
-        self._comms_away.changed.connect(
-            lambda secs: setattr(self.store, "comms_away_after_secs", secs))
-        inner.addWidget(self._track(SettingRow(
-            "Away after", self._comms_away, stacked=True,
-            detail="How long your session must have been locked before Comms replies "
-                   "for you.")))
         self._sw_comms_notify = self._comms_switch(
             inner, "Notify on new pings", st.comms_notify, "comms_notify",
             "A tray notification per new ping.")
