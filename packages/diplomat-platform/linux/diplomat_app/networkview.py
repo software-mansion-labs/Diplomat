@@ -145,6 +145,19 @@ def ending(task: str, snapshot: network.Snapshot | None) -> str | None:
     return agentstate.network_verdict(task, offers, 0)[1]
 
 
+def pool_held(pool: network.Pool) -> str:
+    """A pool card's line on why this machine takes none of its jobs, else ""."""
+    return (f"This machine takes none of this pool's jobs: {pool.not_taking}"
+            if pool.not_taking else "")
+
+
+def task_held(task: str, pool: network.Pool, snapshot: network.Snapshot | None) -> str:
+    """A task row's line on why this machine does not take that job of its own, where
+    the pool's card does not say it already (:func:`network.not_taking`), else ""."""
+    why = network.not_taking(task, pool, snapshot)
+    return f"This machine is not taking this job: {why}" if why else ""
+
+
 def place(task: network.PoolTask) -> str:
     """Where a pool's task is and until when: "on this machine · lease to 14:05"."""
     parts = []
@@ -250,6 +263,8 @@ class PoolPanel(QWidget):
             return
         n = len(pool.members)
         pill.set_state(f"{n} member{'' if n == 1 else 's'}", _TEAL)
+        if pool_held(pool):
+            col.addWidget(_note(pool_held(pool), _ORANGE))
         col.addWidget(_plain("Members", _SECTION))
         if not pool.members:
             col.addWidget(_note(NO_MEMBERS))
@@ -259,7 +274,8 @@ class PoolPanel(QWidget):
         if not pool.tasks:
             col.addWidget(_note(NO_TASKS))
         for task in pool.tasks:
-            col.addWidget(self._task(task))
+            col.addWidget(self._task(
+                task, task_held(task.task_id, pool, store.network_state)))
 
         self._buttons = QWidget(self)
         buttons = QHBoxLayout(self._buttons)
@@ -324,7 +340,7 @@ class PoolPanel(QWidget):
             row.addWidget(seen)
         return row
 
-    def _task(self, t: network.PoolTask) -> QFrame:
+    def _task(self, t: network.PoolTask, held: str) -> QFrame:
         box = QFrame(self)
         box.setObjectName("poolTask")
         box.setStyleSheet("#poolTask { background-color: rgba(128,128,128,0.08);"
@@ -355,9 +371,9 @@ class PoolPanel(QWidget):
             foot.addWidget(stop)
             self.stops[t.task_id] = stop
         col.addLayout(foot)
-        why = ending(t.task_id, self._store.network_state)
-        if why:
-            col.addWidget(_note(why, _ORANGE))
+        for why in (ending(t.task_id, self._store.network_state), held):
+            if why:
+                col.addWidget(_note(why, _ORANGE))
         return box
 
     def _invite(self) -> None:

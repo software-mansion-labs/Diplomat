@@ -9,14 +9,18 @@ import Foundation
 /// ```
 /// { "hours": [ <any JSON value>, … ],
 ///   "remotes": [ "<git remote URL>", … ],
+///   "rules": [ "<forge host>", … ],
 ///   "kinds": [ {"verb", "ownPR"}, … ],
+///   "offers": [ {"verb", "ownPR", "number", "repoKey", "label", "prompt", "panel",
+///                "forced"}, … ],
 ///   "snapshots": [ <the daemon's /state>, … ],
 ///   "openTask": [ {"pool", "kind", "item", "snapshot": <index or null>}, … ],
 ///   "trouble": [ {"answered": true|false|null, "snapshot": <index or null>}, … ],
+///   "notTaking": [ {"task", "pool": <index into the snapshot's pools>, "snapshot"}, … ],
 ///   "listing": [ {"roots", "others", "unread", "identities", "snapshot"}, … ] }
 /// ```
 /// Output: one answer per input row under the same member (`pools` for `remotes`),
-/// with sorted keys.
+/// with sorted keys. An offer is its body, or the sentence it was refused with.
 enum NetworkCommand {
     static func run(_ obj: [String: Any]) {
         let snapshots = (obj["snapshots"] as? [[String: Any]] ?? []).map(NetworkSnapshot.init)
@@ -38,6 +42,23 @@ enum NetworkCommand {
             guard let at = PRRef.LocalRepo.coordinates(remoteURL: url) else { return NSNull() }
             let repo = PRRef.LocalRepo(owner: at.owner, repo: at.repo, path: "", host: at.host)
             return NetworkOffer.pool(repoKey: repo.key) ?? NSNull()
+        }
+        out["rules"] = (obj["rules"] as? [String] ?? []).map { NetworkPools.hasRules(host: $0) }
+        out["offers"] = rows("offers").map { row -> Any in
+            switch NetworkOffer.from(
+                verb: row["verb"] as? String ?? "", ownPR: JSONInput.flag(row["ownPR"]),
+                number: row["number"] as? Int, repoKey: row["repoKey"] as? String ?? "",
+                label: row["label"] as? String ?? "", prompt: row["prompt"] as? String ?? "",
+                source: JSONInput.flag(row["panel"]) ? .panel : .auto,
+                forced: JSONInput.flag(row["forced"])) {
+            case .offer(let offer): return offer.body
+            case .refused(let why): return why
+            }
+        }
+        out["notTaking"] = rows("notTaking").map { row -> String in
+            guard let snapshot = snapshot(row), let at = row["pool"] as? Int else { return "" }
+            return NetworkEvidence.notTaking(task: row["task"] as? String ?? "",
+                                             pool: snapshot.pools[at], in: snapshot)
         }
         out["kinds"] = rows("kinds").map { row -> Any in
             NetworkOffer.kind(verb: row["verb"] as? String ?? "",

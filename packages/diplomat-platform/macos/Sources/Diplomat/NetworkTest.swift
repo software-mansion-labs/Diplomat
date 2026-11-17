@@ -656,6 +656,15 @@ enum NetworkTest {
               AgentSpawner.refusedTerminals == refusedBefore
                 && AgentRegistry.load().count == 1
                 && requests(NetworkRoute.offer).count == offersBefore)
+        //     Known silent, an automatic job is not offered at all, whatever stands on
+        //     the socket by then: the cycle is what finds the daemon back.
+        startDaemon()
+        let unseen = await store.dispatchAgent(job(90216), source: .auto)
+        check("automatic work is not offered while the daemon is known silent",
+              unseen == .networkDown(DiplomacyNetwork.notAnswering)
+                && store.networkAnswered == false
+                && requests(NetworkRoute.offer).count == offersBefore)
+        stopDaemon()
         store.queuedTasks = []
 
         // 11. A silent daemon is started again, each try waiting longer.
@@ -726,10 +735,14 @@ enum NetworkTest {
         check("a second job is offered", isOffered(await store.dispatchAgent(job(90220), source: .auto)))
         script.set(snapshot(offers: [offerRow("task-2", "done", executor: here, outcome: [
             "ok": true, "summary": "", "usd": 0.5, "tokens": 9000, "runner": "claude", "model": "m",
+            "capped": true,
         ])]))
         await store.settleAgents()
         check("a task this machine ran keeps the runner its outcome names",
               ledger("done", key: ledgerKey(90220)).first?["runner"] as? String == "claude")
+        check("…and one whose reported cost the executor lowered says so where it ends",
+              feedDetails(NetworkAudit.done).last?
+                .hasSuffix("finished on this machine, its reported cost capped") == true)
         check("a third job is offered", isOffered(await store.dispatchAgent(job(90221), source: .auto)))
         script.set(snapshot(offers: [offerRow("task-3", "failed", executor: away,
                                               reason: "the container exited 137", outcome: [
@@ -824,6 +837,7 @@ enum NetworkTest {
                 && requests(NetworkRoute.withdraw).count == sentBefore.1
                 && store.networkRefusals["github.com/o/r"] == DiplomacyNetwork.notAnswering)
         script.set(snapshot())
+        await store.settleAgents()
 
         // 17. What holds a network job: a pause. Not a full local cap, not a low disk.
         store.queueAutoRun = false
@@ -972,6 +986,30 @@ enum NetworkTest {
                 && NetworkText.ending(of: "t-open", in: leftSnap) == nil
                 && NetworkText.ending(of: "t-old", in: leftSnap) == nil
                 && NetworkText.ending(of: "t-spent", in: nil) == nil)
+
+        let noDocker = "docker is missing: docker not found"
+        let short = "this machine takes jobs of at most 12 h and this one needs 24"
+        func held(_ task: String, _ why: String, state: String = "pooled") -> [String: Any] {
+            offerRow(task, state).merging(["notTaking": why]) { $1 }
+        }
+        let heldSnap = NetworkSnapshot.parse(Data(json(snapshot(
+            offers: [held("t-long", short), held("t-down", noDocker),
+                     held("t-taken", short, state: "claimed"), offerRow("t-free", "pooled")],
+            more: [["id": "github.com/o/held", "notTaking": noDocker]])).utf8))
+        let (takes, holds) = (heldSnap?.pools.first, heldSnap?.pools.last)
+        check("a pool this machine takes no job of says why on its card, and no other does",
+              holds.flatMap(NetworkText.poolHeld)
+                == "This machine takes none of this pool's jobs: \(noDocker)"
+                && takes != nil && takes.flatMap(NetworkText.poolHeld) == nil)
+        check("a job of this machine's own that it does not take says why on its row",
+              takes.flatMap { NetworkText.taskHeld("t-long", pool: $0, in: heldSnap) }
+                == "This machine is not taking this job: \(short)")
+        check("…and one the pool's card speaks for, one taken, one it would take say nothing",
+              holds != nil && takes != nil
+                && holds.flatMap { NetworkText.taskHeld("t-down", pool: $0, in: heldSnap) } == nil
+                && takes.flatMap { NetworkText.taskHeld("t-taken", pool: $0, in: heldSnap) } == nil
+                && takes.flatMap { NetworkText.taskHeld("t-free", pool: $0, in: heldSnap) } == nil
+                && takes.flatMap { NetworkText.taskHeld("t-long", pool: $0, in: nil) } == nil)
 
         // 21. The hours are kept inside the daemon's range.
         store.networkRequiredMinimumH = 5
@@ -1401,6 +1439,29 @@ enum NetworkTest {
         check("…and one that names no directory goes to the primary root's pool",
               isOffered(await store.dispatchAgent(audit(in: nil), source: .panel))
                 && requests(NetworkRoute.offer).last?["pool"] as? String == "github.com/o/r")
+
+        //     A linked repository on a host the network has no rules for has no pool, the
+        //     screen is told why, and none of its jobs is offered.
+        let cloud = PRRef.LocalRepo(owner: "acme", repo: "cloud",
+                                    path: scratch.appendingPathComponent("cloud").path,
+                                    host: "acme.ghe.com")
+        store.pinRoots([root, lab, cloud])
+        store.pinGitLabMe("ilatka", host: cloud.host)
+        let (poolsBeforeCloud, offersBeforeCloud) = (
+            requests(NetworkRoute.pools).count, requests(NetworkRoute.offer).count)
+        await store.runNetworkCycleOnce()
+        check("a repository on a host the network has no rules for has no pool, and is named",
+              requests(NetworkRoute.pools).count == poolsBeforeCloud
+                && store.networkPoolsHeld
+                    == "acme/cloud is on acme.ghe.com, which the Diplomacy Network has no "
+                        + "rules for: it has no pool and none of its jobs is offered")
+        check("…and a job in it is refused without asking the daemon",
+              await store.dispatchAgent(audit(in: cloud.path), source: .panel)
+                == .networkRefused("the network has no rules for a repository on acme.ghe.com")
+                && requests(NetworkRoute.offer).count == offersBeforeCloud)
+        store.pinRoots([root, lab])
+        await store.runNetworkCycleOnce()
+        check("…and off the list it is named no more", store.networkPoolsHeld.isEmpty)
 
         // 31. A request body is not an argument of curl: one longer than an argument list
         //     may be arrives whole.

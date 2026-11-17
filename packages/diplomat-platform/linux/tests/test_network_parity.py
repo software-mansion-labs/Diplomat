@@ -4,8 +4,9 @@
 cycle and every draw, so neither can delegate to the other, and each side's own tests
 pin it against its own expectations only. This file runs one fixture through both
 (``diplomat-core network``) and demands the same answers: the hours a stored value
-reads as, the pool a git remote names, the kind an offer is made as, the task a
-snapshot holds for an offer, the pools list, and the panel's line on what of the
+reads as, the pool a git remote names, the hosts the requester has rules for, the kind
+and the body an offer is made as, the task a snapshot holds for an offer, the pools
+list, why a job of this machine's own waits, and the panel's line on what of the
 network does not work.
 """
 
@@ -17,7 +18,7 @@ import subprocess
 
 import pytest
 
-from diplomat_runtime import localrepos
+from diplomat_runtime import autofix, localrepos
 from diplomat_runtime import network as N
 from diplomat_runtime.prref import LocalRepo
 
@@ -68,6 +69,23 @@ REMOTES = [
     "https://github.com/o/.git", "git@gitlab.acme.example:platform/sub/api.git",
 ]
 
+RULES = [
+    "github.com", "github.com:443", "www.github.com", "api.github.com", "ghe.com",
+    "acme.ghe.com", "a.b.ghe.com", "acme.ghe.com:8443", "github.localhost",
+    "x.github.localhost", "github.localhost:3000", "ghe.com:", "github.mycorp.com",
+    "ghes.corp", "ghes.corp:8443", "ghes.corp:", "notgithub.com", "myghe.com", "xghe.com",
+    "github.com.evil.example", "gitlab.com", "gitlab.example.com", "localhost", "ghe.com:x",
+    "ghe.com:12x", "a:1:ghe.com", "ghe.com:1:2", "GHE.COM", "", ":", ":443", ".ghe.com",
+    "ghe.com.", "github.com:", "github.com:x", "ghe.com:\u0663", "x.github.com:80",
+]
+
+OFFERS = [{"verb": verb, "ownPR": False, "number": number, "repoKey": key, "label": label,
+           "prompt": "p", "panel": panel, "forced": False}
+          for verb in ("review-req", "issues", "audit", "nudge")
+          for key in ("o/r", "O/R", "acme.ghe.com/o/r", "gitlab.ghe.com/g/sub/p",
+                      "www.github.com/o/r", "github.mycorp.com/o/r", "gitlab.com/g/p", "r", "")
+          for number, label, panel in ((7, "Auto · #7", False), (None, "", True))]
+
 KINDS = [{"verb": verb, "ownPR": own}
          for verb in ("review-req", "review", "comms-review", "review-reply", "conflicts",
                       "issues", "comms-fix", "audit", "investigate", "comms-investigate",
@@ -78,12 +96,13 @@ POOL, LAB = "github.com/o/r", "gitlab.acme.example/platform/api"
 
 
 def _offer(task: str, state: str, *, pool: str = POOL, kind: str = "review",
-           item: str = "pr-9") -> dict:
+           item: str = "pr-9", not_taking: str = "") -> dict:
     ended = state in ("done", "failed", "cancelled")
     return {"taskId": task, "pool": pool, "kind": kind, "item": item, "title": "T",
             "state": state, "executor": "", "executorHere": False, "attempt": 1,
             "requests": 0, "refused": 0, "outcome": None, "reason": "",
-            "offeredAt": 1_799_990_000, "endedAt": 1_800_000_000 if ended else 0}
+            "offeredAt": 1_799_990_000, "endedAt": 1_800_000_000 if ended else 0,
+            "notTaking": not_taking}
 
 
 def _snapshot(*, offers=(), pools=(), **services) -> dict:
@@ -95,9 +114,12 @@ def _snapshot(*, offers=(), pools=(), **services) -> dict:
             "offers": list(offers), **services}
 
 
-def _pool(pool: str, path: str, identity: str) -> dict:
+def _pool(pool: str, path: str, identity: str, not_taking: str = "") -> dict:
     return {"id": pool, "path": path, "identity": identity, "left": False, "members": [],
-            "tasks": []}
+            "tasks": [], "notTaking": not_taking}
+
+
+DOWN, SHORT = "docker is down: no engine", "this machine takes jobs of at most 12 h"
 
 
 SNAPSHOTS = [
@@ -119,7 +141,19 @@ SNAPSHOTS = [
               devices={"state": "none", "detail": "no adb server answers"}),
     _snapshot(transport={"state": "down"}, devices={"state": "failed"}),
     _snapshot(transport={"state": "odd"}, docker={}, model={"state": ""}),
+    _snapshot(offers=[_offer("t-down", "pooled", not_taking=DOWN),
+                      _offer("t-short", "pooled", item="pr-2", not_taking=SHORT),
+                      _offer("t-free", "pooled", item="pr-3"),
+                      _offer("t-taken", "claimed", item="pr-4", not_taking=SHORT),
+                      _offer("t-lab", "pooled", pool=LAB, not_taking=DOWN)],
+              pools=[_pool(POOL, "/src/r", "octocat", DOWN), _pool(LAB, "/src/api", "ilatka")]),
 ]
+
+HELD = len(SNAPSHOTS) - 1
+NOT_TAKING = [{"task": task, "pool": pool, "snapshot": at}
+              for at, pools in ((HELD, (0, 1)), (1, (0, 1, 2)), (None, (0,)))
+              for pool in pools
+              for task in ("t-down", "t-short", "t-free", "t-taken", "t-lab", "t-open", "")]
 
 OPEN_TASK = [{"pool": pool, "kind": kind, "item": item, "snapshot": at}
              for at in (None, 0, 1)
@@ -137,7 +171,10 @@ API = {"owner": "platform", "repo": "api", "path": "/src/api", "host": "gitlab.a
 TOOL = {"owner": "acme", "repo": "tool", "path": "/mnt/tool", "host": "github.com"}
 TWIN = {"owner": "O", "repo": "R", "path": "/src/r-again", "host": "github.com"}
 GROUPED = {"owner": "group/sub", "repo": "r", "path": "/src/g", "host": "gitlab.com"}
-BOTH = {"github.com": "octocat", "gitlab.acme.example": "ilatka", "gitlab.com": "ila"}
+GHE = {"owner": "o", "repo": "r", "path": "/src/ghe", "host": "acme.ghe.com"}
+SUB = {"owner": "g/sub", "repo": "p", "path": "/src/sub", "host": "gitlab.github.com"}
+BOTH = {"github.com": "octocat", "gitlab.acme.example": "ilatka", "gitlab.com": "ila",
+        "acme.ghe.com": "octocat"}
 
 LISTING = [
     {"roots": roots, "others": others, "unread": unread, "identities": identities,
@@ -152,10 +189,13 @@ LISTING = [
         ([ROOT], [], ["/mnt/tool", "/src/api", "/nowhere"], BOTH),
         ([ROOT, API], [TOOL], ["/mnt/tool"], {}),
         ([API], [ROOT], [], {"gitlab.acme.example": "ilatka"}),
+        ([ROOT, GHE], [SUB, GHE, API], [], BOTH),
+        ([GHE], [SUB], ["/src/ghe"], {}),
     )]
 
-PAYLOAD = {"hours": HOURS, "remotes": REMOTES, "kinds": KINDS, "snapshots": SNAPSHOTS,
-           "openTask": OPEN_TASK, "trouble": TROUBLE, "listing": LISTING}
+PAYLOAD = {"hours": HOURS, "remotes": REMOTES, "rules": RULES, "kinds": KINDS,
+           "offers": OFFERS, "snapshots": SNAPSHOTS, "openTask": OPEN_TASK,
+           "trouble": TROUBLE, "notTaking": NOT_TAKING, "listing": LISTING}
 
 
 def _python() -> dict:
@@ -177,9 +217,23 @@ def _python() -> dict:
             row["unread"], row["identities"], seen.pools if seen else [])
         return {"pools": pools, "unconfirmed": unconfirmed}
 
+    def offer(row: dict) -> dict | str:
+        made = N.offer_for(row["verb"], row["ownPR"], row["number"], row["repoKey"],
+                           row["label"], row["prompt"],
+                           autofix.SOURCE_PANEL if row["panel"] else autofix.SOURCE_AUTO,
+                           row["forced"])
+        return made if isinstance(made, str) else made.body
+
+    def not_taking(row: dict) -> str:
+        seen = snapshot(row)
+        return N.not_taking(row["task"], seen.pools[row["pool"]], seen) if seen else ""
+
     return {
         "hours": [N.hours(v) for v in HOURS],
         "pools": [pool(url) for url in REMOTES],
+        "rules": [N.has_rules(host) for host in RULES],
+        "offers": [offer(row) for row in OFFERS],
+        "notTaking": [not_taking(row) for row in NOT_TAKING],
         "kinds": [N.kind_for(k["verb"], k["ownPR"]) for k in KINDS],
         "openTask": [N.open_task(r["pool"], r["kind"], r["item"], snapshot(r))
                      for r in OPEN_TASK],
@@ -203,8 +257,9 @@ def _differing(rows: list, swift: list, python: list) -> list:
 
 
 @pytest.mark.parametrize("member, rows", [
-    ("hours", HOURS), ("pools", REMOTES), ("kinds", KINDS), ("openTask", OPEN_TASK),
-    ("trouble", TROUBLE), ("listing", LISTING)])
+    ("hours", HOURS), ("pools", REMOTES), ("rules", RULES), ("kinds", KINDS),
+    ("offers", OFFERS), ("openTask", OPEN_TASK), ("trouble", TROUBLE),
+    ("notTaking", NOT_TAKING), ("listing", LISTING)])
 def test_the_twins_agree(twins, member, rows):
     swift, python = twins
     assert _differing(rows, swift[member], python[member]) == []
@@ -223,3 +278,14 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
     assert "" in python["trouble"] and len(set(python["trouble"])) >= 6
     assert any(row["unconfirmed"] for row in python["listing"])
     assert any(len(row["pools"]) >= 3 for row in python["listing"])
+    assert python["rules"].count(False) >= 10 and python["rules"].count(True) >= 15
+    assert sum("has no rules for" in " ".join(row["unconfirmed"])
+               for row in python["listing"]) == 6
+    refusals = {row for row in python["offers"] if isinstance(row, str)}
+    assert {"the network has no rules for a repository on acme.ghe.com",
+            "the network has no rules for a repository on gitlab.ghe.com",
+            "the network has no rules for a repository on www.github.com",
+            "the network runs no nudge jobs", "no repository to offer it into"} == refusals
+    assert any(isinstance(row, dict) and row["pool"] == "github.mycorp.com/o/r"
+               for row in python["offers"])
+    assert set(python["notTaking"]) == {"", DOWN, SHORT}

@@ -184,6 +184,30 @@ func networkSmoke() throws {
         check(offer("review-req", key: key) == .refused("no repository to offer it into"),
               "`\(key)` names no repository")
     }
+    let hosts: [(String, Bool)] = [
+        ("github.com", true), ("github.com:443", false), ("www.github.com", false),
+        ("api.github.com", false), ("ghe.com", false), ("acme.ghe.com", false),
+        ("a.b.ghe.com", false), ("acme.ghe.com:8443", false), ("github.localhost", false),
+        ("x.github.localhost", false), ("github.localhost:3000", false), ("ghe.com:", false),
+        ("github.mycorp.com", true), ("ghes.corp", true), ("ghes.corp:8443", true),
+        ("ghes.corp:", true), ("notgithub.com", true), ("myghe.com", true), ("xghe.com", true),
+        ("github.com.evil.example", true), ("gitlab.com", true), ("gitlab.example.com", true),
+        ("localhost", true), ("ghe.com:x", true), ("ghe.com:12x", true), ("a:1:ghe.com", true),
+        ("ghe.com:1:2", true), ("GHE.COM", true),
+    ]
+    for (host, ruled) in hosts {
+        check(NetworkPools.hasRules(host: host) == ruled,
+              "the requester \(ruled ? "has" : "has no") rules for `\(host)`")
+    }
+    for (key, host) in [("acme.ghe.com/o/r", "acme.ghe.com"),
+                        ("gitlab.ghe.com/g/sub/p", "gitlab.ghe.com"),
+                        ("www.github.com/o/r", "www.github.com")] {
+        check(offer("review-req", key: key)
+              == .refused("the network has no rules for a repository on \(host)"),
+              "a job on `\(host)` is refused")
+    }
+    check(made(offer("review-req", key: "github.mycorp.com/o/r"))?.pool == "github.mycorp.com/o/r",
+          "a job on any other host is offered into its pool")
     check(offer("nudge") == .refused("the network runs no nudge jobs"), "an unknown verb is refused")
     check(made(offer("audit", number: nil, label: "", prompt: "abc"))?.title
           == "audit job-ba7816bf8f01cfea", "an unlabelled job is titled by what it is")
@@ -271,6 +295,21 @@ func networkSmoke() throws {
           && read.pools.first == NetworkPools.Pool(id: "github.com/o/r", path: "/w/r",
                                                    forge: "github", identity: "octocat"),
           "a pool that was read is said as read, not as the daemon had it")
+    let ghe = PRRef.LocalRepo(owner: "o", repo: "r", path: "/w/ghe", host: "acme.ghe.com")
+    let was = [["id": "acme.ghe.com/o/r", "path": "/w/ghe", "identity": "me"]]
+    let noRules = "o/r is on acme.ghe.com, which the Diplomacy Network has no rules for: it "
+        + "has no pool and none of its jobs is offered"
+    let unruled = listing(others: [other, ghe, ghe],
+                          identities: logins.merging(["acme.ghe.com": "me"]) { a, _ in a },
+                          known: was)
+    check(ids(unruled) == whole + ["github.com/a/b"] && unruled.unconfirmed == [noRules],
+          "a repository on a host without rules has no pool, not the one the daemon had "
+            + "either, and is named once: \(unruled)")
+    let alone = NetworkPools.listing(roots: [ghe], others: [], unread: [], identities: [:],
+                                     known: NetworkSnapshot(["pools": was]).pools)
+    check(alone.pools.isEmpty && alone.unconfirmed == [noRules],
+          "with no login known there it is not said to wait for one: \(alone)")
+    check(NetworkPools.linked(roots: [ghe], identities: ["acme.ghe.com": "me"]).isEmpty)
     check(NetworkPools.body(githubOnly) == ["pools": [
         ["id": "github.com/o/r", "path": "/w/r", "forge": "github", "identity": "octocat"],
         ["id": "github.com/x/y", "path": "/w/y", "forge": "github", "identity": "octocat"]]],
@@ -391,7 +430,55 @@ func networkSmoke() throws {
           && ran[0].pool == "github.com/o/r" && ran[0].peer == "eeeeffff00001111"
           && ran[0].container == "dn-h1-p1" && ran[0].state == "running"
           && ran[0].startedAt == 1794000150 && ran[0].endedAt == 0 && ran[0].exit == 0
-          && ran[0].log == "/l/1" && ran[1].endedAt == 1794000100)
+          && ran[1].endedAt == 1794000100)
+    let bare: [String: Any] = ["runId": "r", "taskId": "t", "state": "running", "exit": 0]
+    check(NetworkSnapshot(["runs": [bare.merging(["log": "/l/1"]) { a, _ in a }]])
+          == NetworkSnapshot(["runs": [bare]]),
+          "a run row carries no log, whatever the daemon sends")
+    let hoursShort = "this machine takes jobs of at most 12 h and this one needs 24"
+    let holding = NetworkSnapshot([
+        "pools": [["id": "p", "notTaking": "docker is down"], ["id": "q"],
+                  ["id": "r", "notTaking": 5]],
+        "offers": [["taskId": "t", "state": "pooled", "notTaking": hoursShort],
+                   ["taskId": "u", "state": "pooled"],
+                   ["taskId": "v", "state": "pooled", "notTaking": ["x"]]]])
+    let heldSeen = NetworkEvidence.tasks(holding).value ?? [:]
+    check(holding.pools.map(\.notTaking) == ["docker is down", "", ""]
+          && (holding.offers ?? []).map(\.notTaking) == [hoursShort, "", ""]
+          && heldSeen["t"]?.notTaking == hoursShort && heldSeen["u"]?.notTaking == "",
+          "what holds this machine back is read of a pool and of an offer")
+    let waiting = NetworkSnapshot(["offers": [
+        ["taskId": "t", "state": "pooled", "notTaking": "docker is down"],
+        ["taskId": "u", "state": "pooled", "notTaking": hoursShort],
+        ["taskId": "w", "state": "claimed", "notTaking": "stale"],
+        ["taskId": "x", "state": "pooled"]]])
+    let (heldPool, freePool) = (holding.pools[0], holding.pools[1])
+    func why(_ task: String, _ pool: NetworkSnapshot.Pool,
+             _ snapshot: NetworkSnapshot?) -> String {
+        NetworkEvidence.notTaking(task: task, pool: pool, in: snapshot)
+    }
+    check(why("t", heldPool, waiting) == "" && why("t", freePool, waiting) == "docker is down",
+          "why a job of this machine's own waits is said where the pool does not say it")
+    check(why("u", heldPool, waiting) == hoursShort && why("w", freePool, waiting) == ""
+          && why("x", heldPool, waiting) == "" && why("none", freePool, waiting) == ""
+          && why("u", freePool, nil) == "" && why("u", freePool, NetworkSnapshot([:])) == "",
+          "…and only of a job that waits, in a snapshot that lists offers")
+    func capped(_ outcome: Any) -> NetworkSnapshot {
+        NetworkSnapshot(["offers": [["taskId": "t", "state": "done", "outcome": outcome]]])
+    }
+    let yes = JSONInput.parse(Data(#"{"ok": true, "capped": true}"#.utf8)) ?? [:]
+    check(capped(yes).offers?[0].outcome?.capped == true
+          && NetworkEvidence.tasks(capped(yes)).value?["t"]?.capped == true,
+          "an outcome says its cost was capped")
+    for absent in [#"{"ok": true}"#, #"{"capped": false}"#, #"{"capped": 1}"#,
+                   #"{"capped": "true"}"#] {
+        let outcome = JSONInput.parse(Data(absent.utf8)) ?? [:]
+        check(capped(outcome).offers?[0].outcome?.capped == false
+              && NetworkEvidence.tasks(capped(outcome)).value?["t"]?.capped == false,
+              "…and \(absent) says it was not")
+    }
+    check(NetworkEvidence.tasks(capped(NSNull())).value?["t"]?.capped == false,
+          "an offer with no outcome was not capped")
     let offered = snap.offers ?? []
     check(offered.count == 4 && offered[0].taskId == networkTask
           && offered[0].state == "claimed" && offered[0].executor == "eeeeffff00001111"
@@ -608,6 +695,21 @@ func networkSmoke() throws {
           && verdict(Seen(state: "done", ok: true, reason: "x")) == "finished: finished on the network"
           && verdict(Seen(state: "done", reason: "x")) == "failed: failed on the network",
           "a reason is read of a failed or cancelled offer alone")
+    check(verdict(Seen(state: "pooled", notTaking: "docker is down: no engine"))
+          == "starting: in the pool, not taken here: docker is down: no engine",
+          "an offer this machine does not take while it waits says why")
+    check(verdict(Seen(state: "claimed", executor: "eeeeffff00001111", notTaking: "x"))
+          == "running: running on eeeeffff"
+          && verdict(Seen(state: "failed", notTaking: "x")) == "failed: refused by the network",
+          "why it was not taken is read of a pooled offer alone")
+    check(verdict(Seen(state: "done", executor: "eeeeffff00001111", ok: true, capped: true))
+          == "finished: finished on eeeeffff, its reported cost capped"
+          && verdict(Seen(state: "done", executor: "eeeeffff00001111", executorHere: true,
+                          capped: true))
+          == "failed: failed on this machine, its reported cost capped",
+          "a job that ended with its cost capped by its executor says so")
+    check(verdict(Seen(state: "claimed", executor: "eeeeffff00001111", capped: true))
+          == "running: running on eeeeffff", "a cap is read of a done offer alone")
     check(verdict(Seen(state: "limbo")) == "unknown: the network reports limbo")
     func ending(_ task: Seen?, age: TimeInterval = 60) -> [Bool] {
         let v = AgentState.resolveOne(run(age: age), evidence: seen(.present(

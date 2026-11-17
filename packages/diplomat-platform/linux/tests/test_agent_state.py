@@ -85,9 +85,10 @@ def net(**kw) -> A.RunRecord:
 
 
 def offer(state: str, executor: str = "", here: bool = False,
-          ok: bool = False, reason: str = "") -> dict[str, A.NetworkTask]:
+          ok: bool = False, reason: str = "", not_taking: str = "",
+          capped: bool = False) -> dict[str, A.NetworkTask]:
     """A snapshot's word on :data:`TASK` alone."""
-    return {TASK: A.NetworkTask(state, executor, here, ok, reason)}
+    return {TASK: A.NetworkTask(state, executor, here, ok, reason, not_taking, capped)}
 
 
 #: The network's evidence when its daemon did not answer.
@@ -666,6 +667,24 @@ CASES = [
     ("a reason is not read of an offer done but not well",
      net(), ev(network=offer("done", reason="x")),
      A.FAILED, "failed on the network"),
+    ("an offer this machine does not take while it waits says why",
+     net(), ev(network=offer("pooled", not_taking="docker is down: no engine")),
+     A.STARTING, "in the pool, not taken here: docker is down: no engine"),
+    ("why it was not taken is not read of a claimed offer",
+     net(), ev(network=offer("claimed", PEER, not_taking="x")),
+     A.RUNNING, "running on eeeeffff"),
+    ("why it was not taken is not read of an offer that ended",
+     net(), ev(network=offer("failed", not_taking="x")),
+     A.FAILED, "refused by the network"),
+    ("a finished job whose cost the executor capped says so",
+     net(), ev(network=offer("done", PEER, ok=True, capped=True)),
+     A.FINISHED, "finished on eeeeffff, its reported cost capped"),
+    ("a job done but not well whose cost the executor capped says so",
+     net(), ev(network=offer("done", PEER, here=True, capped=True)),
+     A.FAILED, "failed on this machine, its reported cost capped"),
+    ("a cap is not read of an offer that is not done",
+     net(), ev(network=offer("claimed", PEER, capped=True)),
+     A.RUNNING, "running on eeeeffff"),
     ("an offer in a state this build does not know is unknown",
      net(), ev(network=offer("limbo")),
      A.UNKNOWN, "the network reports limbo"),

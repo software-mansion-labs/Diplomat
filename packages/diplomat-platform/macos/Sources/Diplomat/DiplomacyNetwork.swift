@@ -290,6 +290,20 @@ enum NetworkText {
         return AgentState.networkVerdict(task: task, network: offers, age: 0).1
     }
 
+    /// A pool card's line on why this machine takes none of its jobs, or nil.
+    static func poolHeld(_ pool: NetworkSnapshot.Pool) -> String? {
+        pool.notTaking.isEmpty ? nil
+            : "This machine takes none of this pool's jobs: \(pool.notTaking)"
+    }
+
+    /// A task row's line on why this machine does not take that job of its own, where
+    /// the pool's card does not say it already (`NetworkEvidence.notTaking`), or nil.
+    static func taskHeld(_ task: String, pool: NetworkSnapshot.Pool,
+                         in snapshot: NetworkSnapshot?) -> String? {
+        let why = NetworkEvidence.notTaking(task: task, pool: pool, in: snapshot)
+        return why.isEmpty ? nil : "This machine is not taking this job: \(why)"
+    }
+
     /// Where a pool's task is and until when: "on this machine · lease to 14:05".
     static func place(_ task: NetworkSnapshot.Task) -> String {
         var parts: [String] = []

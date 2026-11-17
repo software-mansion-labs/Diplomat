@@ -210,6 +210,9 @@ def offer_for(verb: str, own_pr: bool, number: int | None, repo_key: str, label:
     pool = pool_for(repo_key)
     if pool is None:
         return "no repository to offer it into"
+    host = pool.split("/", 1)[0]
+    if not has_rules(host):
+        return no_rules(host)
     options = {KIND_REVIEW: {OPTION_VERDICT: verdict},
                KIND_REVIEW_OWN: {OPTION_MARK_READY: mark_ready},
                KIND_ISSUES: {OPTION_NO_PRS: no_prs},
@@ -242,6 +245,28 @@ def pool_for(repo_key: str) -> str | None:
     return f"{GITHUB}/{key}" if len(parts) == 2 else key
 
 
+#: GitHub's own names. On each but github.com itself, and on every name under one,
+#: ``gh`` looks for the API on another name again.
+_GITHUB_NAMES = (GITHUB, "ghe.com", "github.localhost")
+
+
+def has_rules(host: str) -> bool:
+    """Whether the daemon's requester has rules for a repository on ``host`` (its
+    ``githubApi``): for github.com and for every host that is none of GitHub's own
+    names - not for a subdomain of github.com, nor for ghe.com, github.localhost or
+    anything under them. A port after the name is not part of it."""
+    if host == GITHUB:
+        return True
+    name, colon, port = host.rpartition(":")
+    if not colon or any(c not in "0123456789" for c in port):
+        name = host
+    return not any(name == own or name.endswith("." + own) for own in _GITHUB_NAMES)
+
+
+def no_rules(host: str) -> str:
+    return f"the network has no rules for a repository on {host}"
+
+
 def item_for(kind: str, number: int | None, prompt: str) -> str:
     """What the task is pinned to: the pull request or issue the kind works on, else a
     name for this prompt alone."""
@@ -256,12 +281,13 @@ def item_for(kind: str, number: int | None, prompt: str) -> str:
 def linked_pools(roots: Iterable[LocalRepo], identities: Mapping[str, str]) -> list[dict]:
     """The repositories this machine links to pools, one per root, the first root
     winning an id. ``identities`` maps a forge host to the login work is done as there;
-    a root on a host with none is left out, a task id being built on that login."""
+    a root on a host with none is left out, a task id being built on that login, and
+    so is one on a host the network has no rules for (:func:`has_rules`)."""
     out: dict[str, dict] = {}
     for root in roots:
         identity = identities.get(root.host, "").strip().lower()
         pool = pool_for(root.key)
-        if not identity or pool is None or pool in out:
+        if not identity or pool is None or pool in out or not has_rules(root.host):
             continue
         out[pool] = {"id": pool, "path": root.path,
                      "forge": "gitlab" if root.is_gitlab else "github",
@@ -279,16 +305,23 @@ def unconfirmed_account(repo: str, host: str) -> str:
             "daemon last had it until it is")
 
 
+def unsupported(repo: str, host: str) -> str:
+    return (f"{repo} is on {host}, which the Diplomacy Network has no rules for: it has "
+            "no pool and none of its jobs is offered")
+
+
 def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
                   unread: Iterable[str], identities: Mapping[str, str],
                   known: Iterable["Pool"]) -> tuple[list[dict], list[str]]:
-    """What ``POST /pools`` is to say, and a sentence for each thing that could not be
-    confirmed.
+    """What ``POST /pools`` is to say, and a sentence for each repository that has no
+    pool of its own making: one that could not be confirmed, and one on a host the
+    network has no rules for.
 
     Every linked repository is a pool: the roots, then what the Other repos checkouts
     name that no root does (``others``). A root or a checkout that was read and names no
-    forge is no pool, and is in neither list. What could not be confirmed is said as the
-    daemon last had it (``known``, its snapshot's pools): the pool at a path that could
+    forge is no pool, and is in neither list; a repository on a host without rules
+    (:func:`has_rules`) is no pool either, and is named. What could not be confirmed is
+    said as the daemon last had it (``known``, its snapshot's pools): the pool at a path that could
     not be read (``unread``), and the pool of a repository whose forge login is unknown.
     The daemon leaves a pool the list omits, so the list is never cut short by what is
     unknown, and a repository taken out of Settings leaves its pool whatever else
@@ -297,10 +330,11 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
     pools = linked_pools(repos, identities)
     listed = {pool["id"] for pool in pools}
     nameless: dict[str, LocalRepo] = {}
+    unruled: dict[str, LocalRepo] = {}
     for repo in repos:
         pool = pool_for(repo.key)
         if pool is not None and pool not in listed:
-            nameless.setdefault(pool, repo)
+            (nameless if has_rules(repo.host) else unruled).setdefault(pool, repo)
     unread = list(unread)
     for pool in known:
         if pool.id not in listed and (pool.path in unread or pool.id in nameless):
@@ -309,7 +343,8 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
                           "forge": "github" if pool.id.startswith(f"{GITHUB}/") else "gitlab",
                           "identity": pool.identity})
     return pools, [*map(unconfirmed_unread, unread),
-                   *(unconfirmed_account(r.slug, r.host) for r in nameless.values())]
+                   *(unconfirmed_account(r.slug, r.host) for r in nameless.values()),
+                   *(unsupported(r.slug, r.host) for r in unruled.values())]
 
 
 def pools_body(pools: list[dict]) -> dict:
@@ -421,6 +456,9 @@ class Pool:
     tasks: tuple[PoolTask, ...] = ()
     #: Whether this machine left the pool: it takes and offers nothing there.
     left: bool = False
+    #: Why this machine takes none of the pool's jobs, in the daemon's sentence; ""
+    #: while it takes them.
+    not_taking: str = ""
 
 
 @dataclass(frozen=True)
@@ -435,7 +473,6 @@ class Run:
     started_at: float | None = None
     ended_at: float | None = None
     exit: int | None = None
-    log: str = ""
 
 
 @dataclass(frozen=True)
@@ -446,6 +483,9 @@ class Outcome:
     tokens: float | None = None
     runner: str = ""
     model: str = ""
+    #: Whether the executor lowered the tokens or the cost the job named to what it
+    #: measured itself.
+    capped: bool = False
 
 
 @dataclass(frozen=True)
@@ -470,6 +510,9 @@ class OfferState:
     #: document gave none.
     executor_here: bool | None = None
     offered_at: float | None = None
+    #: Why this machine does not take this job of its own while it is ``pooled``, in
+    #: the daemon's sentence; "" for a job it is free to take.
+    not_taking: str = ""
 
 
 def _object(raw: Any) -> dict:
@@ -547,8 +590,7 @@ class Snapshot:
                     pool=_text(r.get("pool")), peer=_text(r.get("peer")),
                     container=_text(r.get("container")), state=_text(r.get("state")),
                     started_at=_number(r.get("startedAt")),
-                    ended_at=_number(r.get("endedAt")), exit=_integer(r.get("exit")),
-                    log=_text(r.get("log")))
+                    ended_at=_number(r.get("endedAt")), exit=_integer(r.get("exit")))
                 for r in _rows(d.get("runs")) if _text(r.get("runId"))),
             offers=(tuple(_offer(o) for o in _rows(offers) if _text(o.get("taskId")))
                     if isinstance(offers, list) else None),
@@ -581,6 +623,7 @@ def _pool(p: dict) -> Pool:
     return Pool(
         id=p["id"], path=_text(p.get("path")), identity=_text(p.get("identity")),
         hash=_text(p.get("hash")), left=_flag(p.get("left")),
+        not_taking=_text(p.get("notTaking")),
         members=tuple(
             Member(pk=m["pk"], is_self=_flag(m.get("self")),
                    max_accepted_h=_integer(m.get("maxAcceptedH")),
@@ -618,9 +661,10 @@ def _offer(o: dict) -> OfferState:
         refused=_integer(o.get("refused")) or 0,
         outcome=Outcome(ok=_flag(out.get("ok")), summary=_text(out.get("summary")),
                         usd=_number(out.get("usd")), tokens=_number(out.get("tokens")),
-                        runner=_text(out.get("runner")), model=_text(out.get("model")))
+                        runner=_text(out.get("runner")), model=_text(out.get("model")),
+                        capped=_flag(out.get("capped")))
         if isinstance(out, dict) else None,
-        ended_at=_number(o.get("endedAt")))
+        ended_at=_number(o.get("endedAt")), not_taking=_text(o.get("notTaking")))
 
 
 UNANSWERED = "the daemon did not answer"
@@ -646,8 +690,20 @@ def tasks(snapshot: Snapshot | None) -> Observation:
             state=o.state, executor=o.executor,
             executor_here=o.executor_here if o.executor_here is not None
             else (bool(o.executor) and o.executor == snapshot.pk) or o.task_id in here,
-            ok=o.outcome.ok if o.outcome else False, reason=o.reason)
+            ok=o.outcome.ok if o.outcome else False, reason=o.reason,
+            not_taking=o.not_taking, capped=o.outcome.capped if o.outcome else False)
         for o in snapshot.offers})
+
+
+def not_taking(task: str, pool: Pool, snapshot: Snapshot | None) -> str:
+    """Why this machine does not take the job it offered as ``task`` while that waits
+    in ``pool``, where the reason is the job's own: "" for a job it is free to take, and
+    for one held back by what holds every job of the pool back (:attr:`Pool.not_taking`),
+    which the pool says once."""
+    offers = (snapshot.offers if snapshot else None) or ()
+    said = next((o.not_taking for o in offers
+                 if o.task_id == task and o.state == NET_POOLED), "")
+    return "" if said == pool.not_taking else said
 
 
 def open_task(pool: str, kind: str, item: str, snapshot: Snapshot | None) -> str | None:

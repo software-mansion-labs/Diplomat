@@ -220,6 +220,10 @@ public enum NetworkOffer {
         guard let pool = pool(repoKey: repoKey) else {
             return .refused("no repository to offer it into")
         }
+        let host = String(pool.prefix { $0 != "/" })
+        guard NetworkPools.hasRules(host: host) else {
+            return .refused(NetworkPools.noRules(host: host))
+        }
         let options: [String: Bool]
         switch kind {
         case kindReview: options = [optionVerdict: verdict]
@@ -290,9 +294,32 @@ public enum NetworkPools {
         }
     }
 
+    /// GitHub's own names. On each but github.com itself, and on every name under one,
+    /// `gh` looks for the API on another name again.
+    private static let githubNames = [PRRef.LocalRepo.github, "ghe.com", "github.localhost"]
+
+    /// Whether the daemon's requester has rules for a repository on `host` (its
+    /// `githubApi`): for github.com and for every host that is none of GitHub's own
+    /// names - not for a subdomain of github.com, nor for ghe.com, github.localhost or
+    /// anything under them. A port after the name is not part of it.
+    public static func hasRules(host: String) -> Bool {
+        if host == PRRef.LocalRepo.github { return true }
+        var name = Substring(host)
+        if let colon = host.lastIndex(of: ":"),
+           host[host.index(after: colon)...].allSatisfy({ $0.isASCII && $0.isNumber }) {
+            name = host[..<colon]
+        }
+        return !githubNames.contains { name == $0 || name.hasSuffix(".\($0)") }
+    }
+
+    public static func noRules(host: String) -> String {
+        "the network has no rules for a repository on \(host)"
+    }
+
     /// One pool per root, the first root winning an id. `identities` maps a forge host
     /// to the login work is done as there; a root on a host with none is left out, a
-    /// task id being built on that login.
+    /// task id being built on that login, and so is one on a host the network has no
+    /// rules for (`hasRules`).
     public static func linked(roots: [PRRef.LocalRepo],
                               identities: [String: String]) -> [Pool] {
         var seen = Set<String>()
@@ -300,7 +327,8 @@ public enum NetworkPools {
         for root in roots {
             let identity = (identities[root.host] ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard !identity.isEmpty, let id = NetworkOffer.pool(repoKey: root.key),
+            guard !identity.isEmpty, hasRules(host: root.host),
+                  let id = NetworkOffer.pool(repoKey: root.key),
                   seen.insert(id).inserted else { continue }
             out.append(Pool(id: id, path: root.path,
                             forge: root.isGitLab ? "gitlab" : "github", identity: identity))
@@ -308,8 +336,9 @@ public enum NetworkPools {
         return out
     }
 
-    /// What `POST /pools` is to say, and a sentence for each thing that could not be
-    /// confirmed.
+    /// What `POST /pools` is to say, and a sentence for each repository that has no
+    /// pool of its own making: one that could not be confirmed, and one on a host the
+    /// network has no rules for.
     public struct Listing: Equatable {
         public let pools: [Pool]
         public let unconfirmed: [String]
@@ -323,10 +352,15 @@ public enum NetworkPools {
         "The login for \(repo) on \(host) is not known yet: its pool stays as the "
             + "daemon last had it until it is"
     }
+    public static func unsupported(_ repo: String, host: String) -> String {
+        "\(repo) is on \(host), which the Diplomacy Network has no rules for: it has "
+            + "no pool and none of its jobs is offered"
+    }
 
     /// Every linked repository as a pool: the roots, then what the OTHER REPOS
     /// checkouts name that no root does (`others`). A root or a checkout that was read
-    /// and names no forge is no pool, and is in neither list. What could not be
+    /// and names no forge is no pool, and is in neither list; a repository on a host
+    /// without rules (`hasRules`) is no pool either, and is named. What could not be
     /// confirmed is said as the daemon last had it (`known`, its snapshot's pools): the
     /// pool at a path that could not be read (`unread`), and the pool of a repository
     /// whose forge login is unknown. The daemon leaves a pool the list omits, so the
@@ -339,10 +373,15 @@ public enum NetworkPools {
         var pools = linked(roots: repos, identities: identities)
         var listed = Set(pools.map(\.id))
         var nameless: [(id: String, repo: PRRef.LocalRepo)] = []
+        var unruled: [(id: String, repo: PRRef.LocalRepo)] = []
         for repo in repos {
             guard let id = NetworkOffer.pool(repoKey: repo.key), !listed.contains(id),
-                  !nameless.contains(where: { $0.id == id }) else { continue }
-            nameless.append((id, repo))
+                  !(nameless + unruled).contains(where: { $0.id == id }) else { continue }
+            if hasRules(host: repo.host) {
+                nameless.append((id, repo))
+            } else {
+                unruled.append((id, repo))
+            }
         }
         for pool in known where !listed.contains(pool.id)
             && (unread.contains(pool.path) || nameless.contains { $0.id == pool.id }) {
@@ -353,7 +392,8 @@ public enum NetworkPools {
                               identity: pool.identity))
         }
         return Listing(pools: pools, unconfirmed: unread.map { unconfirmed(unread: $0) }
-            + nameless.map { unconfirmed(account: $0.repo.slug, host: $0.repo.host) })
+            + nameless.map { unconfirmed(account: $0.repo.slug, host: $0.repo.host) }
+            + unruled.map { unsupported($0.repo.slug, host: $0.repo.host) })
     }
 
     public static func body(_ pools: [Pool]) -> [String: [[String: String]]] {
@@ -460,6 +500,9 @@ public struct NetworkSnapshot: Equatable {
         public let hash: String
         /// Whether this machine left the pool: it takes and offers nothing there.
         public let left: Bool
+        /// Why this machine takes none of the pool's jobs, in the daemon's sentence; ""
+        /// while it takes them.
+        public let notTaking: String
         public let members: [Member]
         public let tasks: [Task]
     }
@@ -475,7 +518,6 @@ public struct NetworkSnapshot: Equatable {
         public let startedAt: Double?
         public let endedAt: Double?
         public let exit: Int?
-        public let log: String
     }
 
     public struct Outcome: Equatable {
@@ -485,6 +527,9 @@ public struct NetworkSnapshot: Equatable {
         public let tokens: Double?
         public let runner: String
         public let model: String
+        /// Whether the executor lowered the tokens or the cost the job named to what
+        /// it measured itself.
+        public let capped: Bool
     }
 
     public struct Offer: Equatable {
@@ -508,6 +553,9 @@ public struct NetworkSnapshot: Equatable {
         public let refused: Int
         public let outcome: Outcome?
         public let endedAt: Double?
+        /// Why this machine does not take this job of its own while it is `pooled`, in
+        /// the daemon's sentence; "" for a job it is free to take.
+        public let notTaking: String
     }
 
     public let updatedAt: Double?
@@ -586,15 +634,14 @@ public struct NetworkSnapshot: Equatable {
             }
             return Pool(id: id, path: text(p["path"]), identity: text(p["identity"]),
                         hash: text(p["hash"]), left: JSONInput.flag(p["left"]),
-                        members: members, tasks: tasks)
+                        notTaking: text(p["notTaking"]), members: members, tasks: tasks)
         }
         runs = rows(d["runs"]).compactMap { r in
             guard let runId = r["runId"] as? String, !runId.isEmpty else { return nil }
             return Run(runId: runId, taskId: text(r["taskId"]), pool: text(r["pool"]),
                        peer: text(r["peer"]), container: text(r["container"]),
                        state: text(r["state"]), startedAt: number(r["startedAt"]),
-                       endedAt: number(r["endedAt"]), exit: integer(r["exit"]),
-                       log: text(r["log"]))
+                       endedAt: number(r["endedAt"]), exit: integer(r["exit"]))
         }
         offers = (d["offers"] as? [Any]).map { list in
             list.compactMap { $0 as? [String: Any] }.compactMap { o in
@@ -602,7 +649,8 @@ public struct NetworkSnapshot: Equatable {
                 let outcome = (o["outcome"] as? [String: Any]).map { out in
                     Outcome(ok: JSONInput.flag(out["ok"]), summary: text(out["summary"]),
                             usd: number(out["usd"]), tokens: number(out["tokens"]),
-                            runner: text(out["runner"]), model: text(out["model"]))
+                            runner: text(out["runner"]), model: text(out["model"]),
+                            capped: JSONInput.flag(out["capped"]))
                 }
                 return Offer(taskId: taskId, pool: text(o["pool"]), kind: text(o["kind"]),
                              item: text(o["item"]), title: text(o["title"]),
@@ -613,7 +661,8 @@ public struct NetworkSnapshot: Equatable {
                              attempt: integer(o["attempt"]) ?? 0,
                              requests: integer(o["requests"]) ?? 0,
                              refused: integer(o["refused"]) ?? 0,
-                             outcome: outcome, endedAt: number(o["endedAt"]))
+                             outcome: outcome, endedAt: number(o["endedAt"]),
+                             notTaking: text(o["notTaking"]))
             }
         }
     }
@@ -666,9 +715,22 @@ public enum NetworkEvidence {
             out[offer.taskId] = AgentState.NetworkTask(
                 state: offer.state, executor: offer.executor,
                 executorHere: offer.executorHere ?? (mine || here.contains(offer.taskId)),
-                ok: offer.outcome?.ok ?? false, reason: offer.reason)
+                ok: offer.outcome?.ok ?? false, reason: offer.reason,
+                notTaking: offer.notTaking, capped: offer.outcome?.capped ?? false)
         }
         return .present(out)
+    }
+
+    /// Why this machine does not take the job it offered as `task` while that waits in
+    /// `pool`, where the reason is the job's own: "" for a job it is free to take, and
+    /// for one held back by what holds every job of the pool back (`Pool.notTaking`),
+    /// which the pool says once.
+    public static func notTaking(task: String, pool: NetworkSnapshot.Pool,
+                                 in snapshot: NetworkSnapshot?) -> String {
+        let said = snapshot?.offers?.first {
+            $0.taskId == task && $0.state == AgentState.NetworkTask.pooled
+        }?.notTaking ?? ""
+        return said == pool.notTaking ? "" : said
     }
 
     /// The task the daemon holds for an offer of `item` as `kind` to `pool`: its open

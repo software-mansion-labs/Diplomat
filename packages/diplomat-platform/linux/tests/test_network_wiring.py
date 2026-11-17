@@ -275,6 +275,29 @@ def test_an_unknown_github_login_keeps_the_pools_the_daemon_had(store, on, daemo
     assert store.network_pools_held == network.unconfirmed_account("o/r", "github.com")
 
 
+def test_a_repository_on_a_host_without_rules_has_no_pool_and_none_of_its_jobs_is_offered(
+        store, on, daemon, monkeypatch):
+    d = daemon(takes_offers())
+    calls = _spawn_recorder(monkeypatch)
+    cloud = LocalRepo("acme", "cloud", "/src/cloud", host="acme.ghe.com")
+    monkeypatch.setattr(localrepos, "resolve",
+                        lambda paths: [localrepos.Checkout("/src/cloud", (cloud,))])
+    store._gitlab_me[cloud.host] = ("Bob", localrepos.glab_host_entry(cloud.host))
+    changed = []
+    store.network_changed.connect(lambda: changed.append(store.network_pools_held))
+    store._network_cycle()
+    why = ("acme/cloud is on acme.ghe.com, which the Diplomacy Network has no rules for: "
+           "it has no pool and none of its jobs is offered")
+    assert d.sent("pools") == [{"pools": [GH]}]
+    assert store.network_pools_held == why and why in changed
+
+    there = autofix.AgentJob(kind="audit", audit_action="audit", label="Audit", prompt="A",
+                             checkout="/src/cloud")
+    assert store.dispatch_agent(there, autofix.SOURCE_PANEL).sentence == (
+        "the network has no rules for a repository on acme.ghe.com")
+    assert d.sent("offer") == [] and calls == []
+
+
 def test_a_list_the_daemon_refuses_is_said_once_and_not_sent_again_as_it_is(
         store, on, daemon, monkeypatch):
     d = daemon({"/pools": (409, {"error": '"x" is not a pool id.'})})
@@ -812,7 +835,7 @@ def test_the_run_reads_where_it_is_as_the_snapshot_moves_and_is_priced_once(
         "at": 1_794_000_000.0, "ev": "done", "key": "review:o/r#9", "tokens": 81_000,
         "runner": dn.RUNNER_ELSEWHERE, "usd": 0.42, "model": "opus"}]
     (done,) = lines("network-done")
-    assert done.startswith("Auto · Review · #9") and "finished on 9f3c1a77" in done
+    assert done.startswith("Auto · Review · #9") and done.endswith("finished on 9f3c1a77")
     assert calls == [] and len(d.sent("offer")) == 1 and d.sent("withdraw") == []
 
 
@@ -1025,6 +1048,43 @@ def test_the_queue_has_room_whenever_the_daemon_answers(store, on):
     assert store._drain_has_room(full)
     appconfig.set_bool(network.ENABLED_KEY, False)
     assert not store._drain_has_room(full) and store._drain_has_room(0)
+
+
+def test_automatic_work_is_not_offered_while_the_daemon_is_known_silent(
+        store, on, daemon, monkeypatch):
+    d = daemon(takes_offers())
+    calls = _spawn_recorder(monkeypatch)
+    store.network_answered = False
+
+    verdicts = [store.dispatch_agent(job(n), autofix.SOURCE_AUTO) for n in (1, 2)]
+    assert [(v, v.sentence, v.own) for v in verdicts] == [
+        (dn.VERDICT_REFUSED, dn.NOT_ANSWERING, False)] * 2
+    assert d.sent("offer") == [], "an offer would wait out its timeout"
+    store.commit_queue()
+    assert [e.id for e in store.queued_tasks] == ["review-req:o/r#1", "review-req:o/r#2"]
+    assert lines("network-unavailable") == [
+        "Holding auto work - the Diplomacy Network did not take Review · #1: "
+        "the Diplomacy Network daemon is not answering"]
+
+    entry = store.queued_tasks[0]
+    store._execute_queued_task(entry)
+    assert [b["item"] for b in d.sent("offer")] == ["pr-1"], "the operator's start asks"
+    store._network_cycle()
+    assert store.network_answered is True
+    d.routes["/offer"] = (200, {"taskId": "t3"})
+    assert store.dispatch_agent(job(3), autofix.SOURCE_AUTO) == "spawned"
+    assert [b["item"] for b in d.sent("offer")] == ["pr-1", "pr-3"] and calls == []
+
+
+def test_a_job_whose_reported_cost_was_capped_says_so_where_it_ends(store, on, daemon):
+    daemon(state=snapshot(offers=[offer(
+        state="done", executor=PEER, endedAt=1_794_000_000.0,
+        outcome={"ok": True, "usd": 0.42, "tokens": 81_000, "capped": True})]))
+    book_network_run(ledger_key="review:o/r#9")
+    store._network_cycle()
+    assert agentregistry.load() == []
+    (done,) = lines("network-done")
+    assert done.endswith("finished on 9f3c1a77, its reported cost capped")
 
 
 STOPPING = (503, {"error": "The Diplomacy Network daemon is stopping."})

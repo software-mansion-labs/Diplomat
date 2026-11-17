@@ -2602,6 +2602,10 @@ class Store(QObject):
         work is offered again from the queue, which the daemon answers with the task
         it holds; a job the operator started is kept in :attr:`network_offering`
         (:data:`diplomacynetwork.VERDICT_OFFERING`).
+
+        While the daemon is known not to answer (:attr:`network_answered`) automatic
+        work is not offered at all: each offer would wait out its timeout, and it is
+        the network cycle that finds the daemon back. What the operator starts asks.
         """
         repo_key, number = self._offer_target(job)
         offer = network.offer_for(
@@ -2610,6 +2614,8 @@ class Store(QObject):
             no_prs=not job.opens_prs, read_only=not job.opens_prs)
         if isinstance(offer, str):
             return self._network_refused(job, source, attempt, offer, own=True)
+        if source == autofix.SOURCE_AUTO and not forced and self.network_answered is False:
+            return self._network_refused(job, source, attempt, diplomacynetwork.NOT_ANSWERING)
         reply = diplomacynetwork.send(network.ROUTE_OFFER, offer.body)
         if (source != autofix.SOURCE_AUTO and reply != deviceallocator.UNREACHABLE
                 and not diplomacynetwork.definite(reply)):

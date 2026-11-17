@@ -502,6 +502,35 @@ def test_an_offer_that_failed_or_was_withdrawn_says_why_under_its_task(screen):
     assert nv.ending("t377", state) is None and nv.ending("t390", None) is None
 
 
+def test_what_holds_this_machine_back_is_said_on_the_pools_card_and_the_jobs_row(screen):
+    from diplomat_app import networkview as nv
+
+    fetch = ("this machine could not start a job of this pool: its repository could not "
+             "be fetched")
+    card = f"This machine takes none of this pool's jobs: {fetch}"
+    view = screen(RICH)
+    first, second = (texts(p) for p in view.panels)
+    assert second.index(card) == second.index("Members") - 1 and card not in first
+    assert not [line for line in first + second if "not taking this job" in line], (
+        "the plain render's own job is one this machine would take")
+
+    short = "this machine takes jobs of at most 48 h and this one needs 72"
+    row = f"This machine is not taking this job: {short}"
+    view = screen(UNSAVED)
+    first = texts(view.panels[0])
+    assert first.count(row) == 1
+    assert row in first[first.index("Review · #405") + 1:first.index("Issues · #377 · deep")]
+
+    pool = view.store.network_state.pools[0]
+    _with(view, pools=(dataclasses.replace(pool, not_taking=short),))
+    first = texts(view.panels[0])
+    assert f"This machine takes none of this pool's jobs: {short}" in first
+    assert row not in first, "the card says it for every job of the pool"
+    state = view.store.network_state
+    assert nv.task_held("t405", pool, state) == row and nv.task_held("t398", pool, state) == ""
+    assert nv.pool_held(pool) == "" and nv.task_held("t405", pool, None) == ""
+
+
 def test_a_title_or_pool_id_from_elsewhere_is_drawn_as_it_is_and_takes_no_width(screen):
     from diplomat_app.widgets import ElidedLabel
 

@@ -146,10 +146,13 @@ brought, and an older engine takes no job.
 The machine that offered a job performs every forge request the agent makes, with its own `gh` or
 `glab` login, after checking the request against the rules of that job's kind. The key that lets
 an executor ask is handed over once the job is taken, works for that executor and that job only,
-and ends with the job. A repository on a GitHub Enterprise Server or on a GitLab of your own is
-acted on at its own address, with the login `gh` or `glab` holds for it. GitHub Enterprise Cloud
-with data residency (an address under `ghe.com`) is not supported: no job is offered for a
-repository there.
+and ends with the job. A repository on a GitLab of your own is acted on at its own address, with
+the login `glab` holds for it. The daemon has github.com's rules for a GitHub Enterprise Server
+as well, at that server's address, but Diplomat links only repositories on github.com and on a
+GitLab, so one on a GitHub Enterprise Server has no pool. The network has no rules for an
+address under `ghe.com` (GitHub Enterprise Cloud with data residency), for a subdomain of
+`github.com` or for `github.localhost`: a repository linked there has no pool, no job is offered
+for it, and the Network screen names it.
 
 | Job | May write |
 |---|---|
@@ -309,12 +312,20 @@ remote is no pool and holds nothing back; a self-hosted GitLab is recognised by 
 starting with `gitlab.` or by `glab` being signed in to it. A list the daemon refuses is shown
 with the daemon's own sentence and sent again once a minute, or as soon as it changes.
 
+A pool's card says why this machine takes none of that pool's jobs while it takes none - docker
+or the model credential missing, Tor not ready, or a job of that pool it could not start - in
+the daemon's words. A job of this machine's own that waits in the pool says on its row why this
+machine does not take it itself, where the card does not say it for every job already: *this
+machine takes jobs of at most 12 h and this one needs 24*.
+
 A job offered to the network shows in the task list like any other: *in the pool*, *running on
 this machine* or on another member's key, then finished or failed. A job started by hand whose
 offer the daemon has not answered yet reads *Offering to the pool…* until it has. Telemetry
 prices a job from what the executor reports; work another machine ran counts against no limit of
 this one. A job that took more than one attempt is priced from the last alone: what an earlier
-attempt spent is in no figure.
+attempt spent is in no figure. Where the executor lowered the tokens or the cost a job reported
+to what it measured, the job's last line in the task list and in the feed ends *its reported
+cost capped*.
 
 Work that was asked for - a sweep's PRs, a goal's fixes and reviews, a request from Slack - is
 answered by a job that ran, not by its offer:

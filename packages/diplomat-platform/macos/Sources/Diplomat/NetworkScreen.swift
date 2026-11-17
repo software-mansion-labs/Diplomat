@@ -379,6 +379,7 @@ struct NetworkPoolPanel: View {
                 note(NetworkText.leftNote)
                 leftActions
             } else {
+                if let held = NetworkText.poolHeld(pool) { note(held, tint: .orange) }
                 section("Members") {
                     if pool.members.isEmpty { note(NetworkText.noMembers) }
                     ForEach(pool.members, id: \.pk) { member($0) }
@@ -440,7 +441,9 @@ struct NetworkPoolPanel: View {
     private func task(_ t: NetworkSnapshot.Task) -> some View {
         let place = NetworkText.place(t)
         let open = t.state == "available" || t.state == "claimed"
-        let ending = NetworkText.ending(of: t.taskId, in: store.networkState)
+        let notes = [NetworkText.ending(of: t.taskId, in: store.networkState),
+                     NetworkText.taskHeld(t.taskId, pool: pool, in: store.networkState)]
+            .compactMap { $0 }
         let stop = NetworkText.stopButton(t)
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
@@ -463,8 +466,8 @@ struct NetworkPoolPanel: View {
                     .tooltip(stop.help)
                 }
             }
-            if let ending {
-                Text(ending).font(.system(size: 9)).foregroundStyle(.orange)
+            ForEach(notes, id: \.self) { line in
+                Text(line).font(.system(size: 9)).foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }

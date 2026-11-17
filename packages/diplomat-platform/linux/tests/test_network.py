@@ -68,6 +68,60 @@ FULL_SNAPSHOT = """
 
 PANEL, AUTO = autofix.SOURCE_PANEL, autofix.SOURCE_AUTO
 
+HOURS_SHORT = "this machine takes jobs of at most 12 h and this one needs 24"
+
+
+# MARK: - network: what the snapshot says of this machine
+
+
+def test_what_holds_this_machine_back_is_read_of_a_pool_and_of_an_offer():
+    snap = N.Snapshot.from_json({
+        "pools": [{"id": "p", "notTaking": "docker is down"}, {"id": "q"},
+                  {"id": "r", "notTaking": 5}],
+        "offers": [{"taskId": "t", "state": "pooled", "notTaking": HOURS_SHORT},
+                   {"taskId": "u", "state": "pooled"},
+                   {"taskId": "v", "state": "pooled", "notTaking": ["x"]}]})
+    assert [p.not_taking for p in snap.pools] == ["docker is down", "", ""]
+    assert [o.not_taking for o in snap.offers] == [HOURS_SHORT, "", ""]
+    seen = N.tasks(snap).value
+    assert (seen["t"].not_taking, seen["u"].not_taking) == (HOURS_SHORT, "")
+
+
+def test_why_a_job_of_this_machines_own_waits_is_said_where_the_pool_does_not_say_it():
+    held, free = N.Pool("p", not_taking="docker is down"), N.Pool("q")
+    snap = N.Snapshot.from_json({"offers": [
+        {"taskId": "t", "state": "pooled", "notTaking": "docker is down"},
+        {"taskId": "u", "state": "pooled", "notTaking": HOURS_SHORT},
+        {"taskId": "w", "state": "claimed", "notTaking": "stale"},
+        {"taskId": "x", "state": "pooled"}]})
+    assert N.not_taking("t", held, snap) == "", "the pool says it once for every job"
+    assert N.not_taking("t", free, snap) == "docker is down"
+    assert N.not_taking("u", held, snap) == HOURS_SHORT
+    assert N.not_taking("w", free, snap) == "", "only of a job that waits"
+    assert N.not_taking("x", held, snap) == "" and N.not_taking("none", free, snap) == ""
+    assert N.not_taking("u", free, None) == ""
+    assert N.not_taking("u", free, N.Snapshot()) == "", "a snapshot with no offers list"
+
+
+def test_an_outcome_says_whether_its_cost_was_capped():
+    def read(outcome) -> N.Snapshot:
+        return N.Snapshot.from_json({"offers": [
+            {"taskId": "t", "state": "done", "outcome": outcome}]})
+
+    assert read({"ok": True, "capped": True}).offers[0].outcome.capped is True
+    for absent in ({"ok": True}, {"capped": False}, {"capped": 1}, {"capped": "true"}):
+        assert read(absent).offers[0].outcome.capped is False, absent
+    assert N.tasks(read({"capped": True})).value["t"].capped is True
+    assert N.tasks(read({})).value["t"].capped is False
+    assert N.tasks(read(None)).value["t"].capped is False, "an offer with no outcome"
+
+
+def test_a_run_row_carries_no_log_whatever_the_daemon_sends():
+    row = {"runId": "r", "taskId": "t", "state": "running", "exit": 0}
+    with_log = N.Snapshot.from_json({"runs": [{**row, "log": "/l/1"}]})
+    assert with_log == N.Snapshot.from_json({"runs": [row]})
+    assert with_log.runs[0].run_id == "r"
+
 
 # MARK: - network: the dispatch gate
 
@@ -227,6 +281,37 @@ def test_a_key_that_names_no_repository_is_refused(key):
     assert _offer("review-req", key=key) == "no repository to offer it into"
 
 
+HOSTS = [
+    ("github.com", True), ("github.com:443", False), ("www.github.com", False),
+    ("api.github.com", False), ("ghe.com", False), ("acme.ghe.com", False),
+    ("a.b.ghe.com", False), ("acme.ghe.com:8443", False), ("github.localhost", False),
+    ("x.github.localhost", False), ("github.localhost:3000", False), ("ghe.com:", False),
+    ("github.mycorp.com", True), ("ghes.corp", True), ("ghes.corp:8443", True),
+    ("ghes.corp:", True), ("notgithub.com", True), ("myghe.com", True), ("xghe.com", True),
+    ("github.com.evil.example", True), ("gitlab.com", True), ("gitlab.example.com", True),
+    ("localhost", True), ("ghe.com:x", True), ("ghe.com:12x", True), ("a:1:ghe.com", True),
+    ("ghe.com:1:2", True), ("GHE.COM", True),
+]
+
+
+@pytest.mark.parametrize("host, ruled", HOSTS)
+def test_the_hosts_the_requester_has_rules_for(host, ruled):
+    """The daemon's ``githubApi`` (``requester/rules.js``), host for host."""
+    assert N.has_rules(host) is ruled
+
+
+@pytest.mark.parametrize("key, host", [
+    ("acme.ghe.com/o/r", "acme.ghe.com"), ("gitlab.ghe.com/g/sub/p", "gitlab.ghe.com"),
+    ("www.github.com/o/r", "www.github.com")])
+def test_a_job_on_a_host_without_rules_is_refused(key, host):
+    assert _offer("review-req", key=key) == \
+        f"the network has no rules for a repository on {host}"
+
+
+def test_a_job_on_any_other_host_is_offered_into_its_pool():
+    assert _offer("review-req", key="github.mycorp.com/o/r").pool == "github.mycorp.com/o/r"
+
+
 def test_an_unknown_verb_is_refused():
     assert _offer("nudge") == "the network runs no nudge jobs"
 
@@ -338,6 +423,23 @@ def test_a_pool_that_was_read_is_said_as_read():
     assert [p["id"] for p in pools] == WHOLE + ["github.com/a/b"]
     assert pools[0] == {"id": "github.com/o/r", "path": "/w/r", "forge": "github",
                         "identity": "octocat"}
+
+
+GHE = LocalRepo("o", "r", "/w/ghe", "acme.ghe.com")
+NO_RULES = ("o/r is on acme.ghe.com, which the Diplomacy Network has no rules for: it has "
+            "no pool and none of its jobs is offered")
+
+
+def test_a_repository_on_a_host_without_rules_has_no_pool_and_is_named():
+    was = N.Pool("acme.ghe.com/o/r", path="/w/ghe", identity="me")
+    logins = {**LOGINS, "acme.ghe.com": "me"}
+    pools, said = N.pools_listing(ROOTS, (OTHER, GHE, GHE), (), logins, (was,))
+    assert [p["id"] for p in pools] == WHOLE + ["github.com/a/b"], (
+        "not the pool it would make, and not the one the daemon had for it")
+    assert said == [NO_RULES], "named once"
+    assert N.pools_listing([GHE], (), (), {}, (was,)) == ([], [NO_RULES]), (
+        "with no login known there it is not said to wait for one")
+    assert N.linked_pools([GHE], {"acme.ghe.com": "me"}) == []
 
 
 def test_the_pools_body():
@@ -455,8 +557,7 @@ def test_the_readmes_snapshot_decodes():
     assert [r.run_id for r in snap.runs] == ["run-1", "run-0"]
     assert snap.runs[0] == N.Run(
         run_id="run-1", task_id=TASK, pool="github.com/o/r", peer="eeeeffff00001111",
-        container="dn-h1-p1", state="running", started_at=1794000150, ended_at=0, exit=0,
-        log="/l/1")
+        container="dn-h1-p1", state="running", started_at=1794000150, ended_at=0, exit=0)
     assert snap.runs[1].ended_at == 1794000100
     assert len(snap.offers) == 4
     assert snap.offers[0] == N.OfferState(

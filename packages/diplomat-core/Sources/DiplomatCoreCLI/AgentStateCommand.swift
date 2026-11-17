@@ -119,7 +119,7 @@ enum AgentStateCommand {
         guard let tasks = o.value else { return ["unavailable": o.reason] }
         return ["present": tasks.mapValues { t -> [String: Any] in
             ["state": t.state, "executor": t.executor, "executorHere": t.executorHere,
-             "ok": t.ok, "reason": t.reason]
+             "ok": t.ok, "reason": t.reason, "notTaking": t.notTaking, "capped": t.capped]
         }]
     }
 
@@ -138,7 +138,7 @@ enum AgentStateCommand {
                       "reason": s.admit.reason],
             "pools": s.pools.map { p -> [String: Any] in
                 ["id": p.id, "path": p.path, "identity": p.identity, "hash": p.hash,
-                 "left": p.left,
+                 "left": p.left, "notTaking": p.notTaking,
                  "members": p.members.map { m -> [String: Any] in
                      ["pk": m.pk, "self": m.isSelf, "maxAcceptedH": opt(m.maxAcceptedH),
                       "lastSeen": opt(m.lastSeen), "reachable": m.reachable]
@@ -156,7 +156,7 @@ enum AgentStateCommand {
                 ["runId": r.runId, "taskId": r.taskId, "pool": r.pool, "peer": r.peer,
                  "container": r.container, "state": r.state,
                  "startedAt": opt(r.startedAt), "endedAt": opt(r.endedAt),
-                 "exit": opt(r.exit), "log": r.log]
+                 "exit": opt(r.exit)]
             },
             "offers": opt(s.offers?.map { o -> [String: Any] in
                 ["taskId": o.taskId, "pool": o.pool, "kind": o.kind, "item": o.item,
@@ -165,9 +165,10 @@ enum AgentStateCommand {
                  "offeredAt": opt(o.offeredAt), "attempt": o.attempt, "requests": o.requests, "refused": o.refused,
                  "outcome": opt(o.outcome.map { out -> [String: Any] in
                      ["ok": out.ok, "summary": out.summary, "usd": opt(out.usd),
-                      "tokens": opt(out.tokens), "runner": out.runner, "model": out.model]
+                      "tokens": opt(out.tokens), "runner": out.runner, "model": out.model,
+                      "capped": out.capped]
                  }),
-                 "endedAt": opt(o.endedAt)]
+                 "endedAt": opt(o.endedAt), "notTaking": o.notTaking]
             }),
         ]
     }
@@ -244,7 +245,9 @@ enum AgentStateCommand {
                         executor: t["executor"] as? String ?? "",
                         executorHere: JSONInput.flag(t["executorHere"]),
                         ok: JSONInput.flag(t["ok"]),
-                        reason: t["reason"] as? String ?? "")
+                        reason: t["reason"] as? String ?? "",
+                        notTaking: t["notTaking"] as? String ?? "",
+                        capped: JSONInput.flag(t["capped"]))
                 }
                 return out
             })

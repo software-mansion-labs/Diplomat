@@ -348,14 +348,22 @@ public enum AgentState {
         /// The daemon's sentence on a `failed` or `cancelled` offer; "" when it gave
         /// none.
         public var reason: String
+        /// The daemon's sentence on why this machine does not take a `pooled` offer of
+        /// its own; "" for one it is free to take.
+        public var notTaking: String
+        /// Whether the executor lowered what the job said it used to what it measured.
+        public var capped: Bool
 
         public init(state: String, executor: String = "", executorHere: Bool = false,
-                    ok: Bool = false, reason: String = "") {
+                    ok: Bool = false, reason: String = "", notTaking: String = "",
+                    capped: Bool = false) {
             self.state = state
             self.executor = executor
             self.executorHere = executorHere
             self.ok = ok
             self.reason = reason
+            self.notTaking = notTaking
+            self.capped = capped
         }
     }
 
@@ -754,7 +762,9 @@ public enum AgentState {
     /// `spawnGrace` to appear, the wait a spawn's pid file gets, since the offer and the
     /// snapshot are written at different instants; past it the offer never reached the
     /// pool. An offer the network gave up on, or one that was withdrawn, is followed by
-    /// the daemon's reason where it gave one.
+    /// the daemon's reason where it gave one; one this machine does not take while it
+    /// waits, by the daemon's sentence on why; and a job that ended, by a word on a cost
+    /// its executor capped.
     public static func networkVerdict(task: String,
                                       network: Observation<[String: NetworkTask]>,
                                       age: TimeInterval) -> (RunState, String) {
@@ -772,10 +782,14 @@ public enum AgentState {
             : seen.executor.isEmpty ? "the network" : String(seen.executor.prefix(8))
         let why = seen.reason.isEmpty ? "" : ": \(seen.reason)"
         switch seen.state {
-        case NetworkTask.pooled: return (.starting, "in the pool")
+        case NetworkTask.pooled:
+            return (.starting, "in the pool"
+                + (seen.notTaking.isEmpty ? "" : ", not taken here: \(seen.notTaking)"))
         case NetworkTask.claimed: return (.running, "running on \(place)")
         case NetworkTask.done:
-            return seen.ok ? (.finished, "finished on \(place)") : (.failed, "failed on \(place)")
+            let capped = seen.capped ? ", its reported cost capped" : ""
+            return seen.ok ? (.finished, "finished on \(place)\(capped)")
+                : (.failed, "failed on \(place)\(capped)")
         case NetworkTask.failed: return (.failed, "refused by the network\(why)")
         case NetworkTask.cancelled: return (.failed, "withdrawn from the network\(why)")
         default: return (.unknown, "the network reports \(seen.state)")

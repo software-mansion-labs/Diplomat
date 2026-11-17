@@ -4595,6 +4595,10 @@ final class Store: ObservableObject {
     /// An offer the daemon was sent and gave no definite answer to may be in the pool.
     /// Automatic work is offered again from the queue, which the daemon answers with the
     /// task it holds; a job the operator started is kept in `networkOffering`.
+    ///
+    /// While the daemon is known not to answer (`networkAnswered`) automatic work is not
+    /// offered at all: each offer would wait out its timeout, and it is the network cycle
+    /// that finds the daemon back. What the operator starts asks.
     private func offerToNetwork(_ job: AgentJob, source: AgentDispatchGate.Source,
                                 attemptNumber: Int, forced: Bool,
                                 rowLabel: String) async -> DispatchOutcome {
@@ -4610,6 +4614,10 @@ final class Store: ObservableObject {
             refusal = why
             own = true
         case .offer(let offer):
+            if source == .auto, !forced, networkAnswered == false {
+                refusal = DiplomacyNetwork.notAnswering
+                break
+            }
             let (reply, reach) = await Task.detached(priority: .userInitiated) {
                 DiplomacyNetwork.ask(NetworkRoute.offer, offer.body)
             }.value

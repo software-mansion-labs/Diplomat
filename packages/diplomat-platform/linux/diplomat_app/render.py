@@ -315,13 +315,18 @@ def _network_screen_fixture(store: Store, mode: str) -> None:
                  task(390, "review", "Review-req · #390 (@olek)", "cancelled")]},
             {"id": "github.com/latekvo/prompt-bench", "path": "/src/prompt-bench",
              "identity": "latekvo", "hash": "b2",
+             "notTaking": "this machine could not start a job of this pool: "
+                          "its repository could not be fetched",
              "members": [{"pk": me, "self": True, "maxAcceptedH": 12,
                           "lastSeen": now - 4, "reachable": True}],
              "tasks": []}],
         "runs": [{"runId": "r1", "taskId": "t398", "pool": "github.com/latekvo/diplomat",
                   "peer": me, "container": "dn-r1", "state": "running",
                   "startedAt": now - 1490}],
-        "offers": []})
+        "offers": [{"taskId": "t405", "pool": "github.com/latekvo/diplomat",
+                    "kind": "review-own", "item": "pr-405", "state": "pooled",
+                    "notTaking": "this machine takes jobs of at most 48 h and this one "
+                                 "needs 72" if unsaved else ""}]})
 
 
 def _machines_screen_fixture(store: Store, mode: str) -> None:

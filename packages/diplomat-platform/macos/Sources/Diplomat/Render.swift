@@ -1447,6 +1447,8 @@ enum Render {
              ]] as [String: Any],
             ["id": "gitlab.com/acme/platform/api", "path": "/Users/dev/api", "identity": "ilatka",
              "hash": "17b0e3aa",
+             "notTaking": "this machine could not start a job of this pool: "
+                + "its repository could not be fetched",
              "members": [member(here, hours: 48, seen: 0)],
              "tasks": [[String: Any]]()] as [String: Any],
             ["id": "github.com/latekvo/dotfiles", "path": "/Users/dev/dotfiles",
@@ -1454,15 +1456,18 @@ enum Render {
              "members": [[String: Any]](), "tasks": [[String: Any]]()] as [String: Any],
         ]
         func offer(_ id: String, _ kind: String, _ title: String, _ state: String,
-                   reason: String = "", executor: String = "") -> [String: Any] {
+                   reason: String = "", executor: String = "",
+                   notTaking: String = "") -> [String: Any] {
             ["taskId": id, "pool": "github.com/software-mansion/argent", "kind": kind,
              "item": title, "title": title, "state": state, "reason": reason,
              "executor": executor, "executorHere": executor == here,
              "offeredAt": now - 2400, "attempt": state == "failed" ? 3 : 1,
-             "requests": 0, "refused": 0]
+             "requests": 0, "refused": 0, "notTaking": notTaking]
         }
         doc["offers"] = [
-            offer("t-review", "review", "Review · #512", "pooled"),
+            offer("t-review", "review", "Review · #512", "pooled",
+                  notTaking: mode.hasSuffix("unsaved")
+                    ? "this machine takes jobs of at most 48 h and this one needs 72" : ""),
             offer("t-own", "conflicts", "Resolve · #508", "claimed", executor: here),
             offer("t-away", "issues", "Issues · #431", "claimed", executor: near),
             offer("t-gone", "review-own", "Review · #498", "cancelled", reason: "merged"),

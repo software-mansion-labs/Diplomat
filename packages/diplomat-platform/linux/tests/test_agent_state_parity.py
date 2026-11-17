@@ -86,7 +86,7 @@ def _dump(s: N.Snapshot) -> dict:
         "admit": {"slots": s.admit.slots, "at": s.admit.at, "reason": s.admit.reason},
         "pools": [{
             "id": p.id, "path": p.path, "identity": p.identity, "hash": p.hash,
-            "left": p.left,
+            "left": p.left, "notTaking": p.not_taking,
             "members": [{"pk": m.pk, "self": m.is_self, "maxAcceptedH": m.max_accepted_h,
                          "lastSeen": m.last_seen, "reachable": m.reachable}
                         for m in p.members],
@@ -99,7 +99,7 @@ def _dump(s: N.Snapshot) -> dict:
                       for t in p.tasks]} for p in s.pools],
         "runs": [{"runId": r.run_id, "taskId": r.task_id, "pool": r.pool, "peer": r.peer,
                   "container": r.container, "state": r.state, "startedAt": r.started_at,
-                  "endedAt": r.ended_at, "exit": r.exit, "log": r.log} for r in s.runs],
+                  "endedAt": r.ended_at, "exit": r.exit} for r in s.runs],
         "offers": None if s.offers is None else [{
             "taskId": o.task_id, "pool": o.pool, "kind": o.kind, "item": o.item,
             "title": o.title, "state": o.state, "reason": o.reason,
@@ -109,8 +109,8 @@ def _dump(s: N.Snapshot) -> dict:
             "outcome": None if o.outcome is None else {
                 "ok": o.outcome.ok, "summary": o.outcome.summary, "usd": o.outcome.usd,
                 "tokens": o.outcome.tokens, "runner": o.outcome.runner,
-                "model": o.outcome.model},
-            "endedAt": o.ended_at} for o in s.offers],
+                "model": o.outcome.model, "capped": o.outcome.capped},
+            "endedAt": o.ended_at, "notTaking": o.not_taking} for o in s.offers],
     }
 
 
@@ -537,6 +537,8 @@ AUDIT_TASK = "github.com/o/r#audit:job-0b77ab9a731995c3@octocat"
 POOLED_TASK = "github.com/o/r#conflicts:pr-5@octocat"
 #: This machine's own key in :func:`_snapshot`.
 SELF = "aaaabbbbccccdddd"
+#: Why :func:`_snapshot`'s pooled offer is not taken by the machine that made it.
+HOURS_SHORT = "this machine takes jobs of at most 12 h and this one needs 24"
 
 
 def _snapshot() -> dict:
@@ -552,7 +554,7 @@ def _snapshot() -> dict:
         "admit": {"slots": 2, "at": 1794000290, "reason": ""},
         "pools": [{
             "id": "github.com/o/r", "path": "/w/r", "identity": "octocat", "hash": "h1",
-            "left": False,
+            "left": False, "notTaking": "",
             "members": [
                 {"pk": SELF, "self": True, "maxAcceptedH": 24, "lastSeen": 1794000299,
                  "reachable": True},
@@ -567,10 +569,10 @@ def _snapshot() -> dict:
         "runs": [
             {"runId": "run-1", "taskId": TASK, "pool": "github.com/o/r", "peer": PEER,
              "container": "dn-h1-p1", "state": "running", "startedAt": 1794000150,
-             "endedAt": 0, "exit": 0, "log": "/l/1"},
+             "endedAt": 0, "exit": 0},
             {"runId": "run-0", "taskId": AUDIT_TASK, "pool": "github.com/o/r",
              "peer": PEER, "container": "dn-h1-p1", "state": "finished",
-             "startedAt": 1794000000, "endedAt": 1794000100, "exit": 0, "log": "/l/0"}],
+             "startedAt": 1794000000, "endedAt": 1794000100, "exit": 0}],
         "offers": [
             {"taskId": TASK, "pool": "github.com/o/r", "kind": "review", "item": "pr-337",
              "title": "Auto · Review · #337", "state": "claimed", "reason": "",
@@ -585,11 +587,12 @@ def _snapshot() -> dict:
              "reason": "", "executor": SELF, "offeredAt": 1794000000, "attempt": 1,
              "requests": 9, "refused": 0,
              "outcome": {"ok": True, "summary": "clean", "usd": 0.42, "tokens": 12345,
-                         "runner": "claude", "model": "opus"}, "endedAt": 1794000100},
+                         "runner": "claude", "model": "opus", "capped": True},
+             "endedAt": 1794000100},
             {"taskId": POOLED_TASK, "pool": "github.com/o/r", "kind": "conflicts",
              "item": "pr-5", "title": "Conflicts · #5", "state": "pooled", "reason": "",
              "executor": "", "offeredAt": 1794000070, "attempt": 1, "requests": 0,
-             "refused": 0}],
+             "refused": 0, "notTaking": HOURS_SHORT}],
     }
 
 
@@ -637,8 +640,8 @@ def test_the_network_fixture_reaches_what_it_claims_to(networked_results):
         "local": "pid 1 alive; working",
         "claimed-here": "running on this machine",
         "claimed-by-pool": "running on this machine",
-        "done": "finished on this machine",
-        "pooled": "in the pool",
+        "done": "finished on this machine, its reported cost capped",
+        "pooled": f"in the pool, not taken here: {HOURS_SHORT}",
         "merged-while-pooled": "PR #305 is merged",
         "never-held": "the network holds no such offer",
         "just-offered": "offered 3s ago, not in the pool yet",
@@ -660,8 +663,8 @@ def test_the_network_fixture_reaches_what_it_claims_to(networked_results):
         **{k: v for k, v in _snapshot().items()
            if k not in ("daemon", "identity", "offers")},
         "pid": 4321, "startedAt": 1794000000, "pk": SELF, "onion": "abc.onion",
-        "offers": [{"outcome": None, "endedAt": None, "executorHere": None, **o}
-                   for o in _snapshot()["offers"]],
+        "offers": [{"outcome": None, "endedAt": None, "executorHere": None,
+                    "notTaking": "", **o} for o in _snapshot()["offers"]],
     }
     assert [r["network"] for r in python["records"]][:3] == [None, TASK, ISSUE_TASK]
 
@@ -697,14 +700,15 @@ _SPOILT_SNAPSHOTS = {
         s["pools"][0]["members"][0].update(self=1, reachable="yes"),
         s["pools"][0]["tasks"][0].update(offeredHere=1.0, executorHere=1),
         s["offers"][0].update(executorHere=0), s["offers"][3].update(executorHere="yes"),
-        s["offers"][2]["outcome"].update(ok=1))),
+        s["offers"][2]["outcome"].update(ok=1, capped=1))),
     "text that is not": _spoil(lambda s: (
         s["identity"].update(pk=5, onion=None),
         s["transport"].update(state=True, detail=["x"]),
         s["offers"][0].update(state=3, executor=None, pool=1, kind=None, item=[],
                               title=False, reason={"why": "x"}),
         s["runs"][0].update(state=None, taskId=9, log=False),
-        s["pools"][0].update(path=1, identity=None, hash=[]),
+        s["offers"][3].update(notTaking=["x"]),
+        s["pools"][0].update(path=1, identity=None, hash=[], notTaking=5),
         s["pools"][0]["tasks"][0].update(offeredBy=["a", 2, None], kind=4))),
     "rows without their identity": _spoil(lambda s: (
         s["offers"].extend([{"state": "done"}, "x", 3, {"taskId": ""}, {"taskId": 5}]),
@@ -725,6 +729,13 @@ _SPOILT_SNAPSHOTS = {
         s["offers"][0].update(state="failed", reason="the container exited 137"),
         s["offers"][3].update(state="cancelled", reason="merged"))),
     "a pool this machine left": _spoil(lambda s: s["pools"][0].update(left=True)),
+    "a pool whose jobs this machine does not take": _spoil(lambda s: (
+        s["pools"][0].update(notTaking="docker is down: no engine"),
+        s["offers"][3].update(notTaking="docker is down: no engine"))),
+    "rows as an earlier daemon wrote them": _spoil(lambda s: (
+        s["pools"][0].pop("notTaking"), s["offers"][3].pop("notTaking"),
+        s["offers"][2]["outcome"].pop("capped"),
+        s["runs"][0].update(log="/l/1"), s["runs"][1].update(log=""))),
     "the same task offered twice": _spoil(lambda s: s["offers"].append(
         {"taskId": TASK, "state": "done", "executor": SELF, "outcome": {"ok": True}})),
     "members nobody asked for": _spoil(lambda s: (
@@ -773,12 +784,20 @@ def test_the_spoilt_snapshots_that_carry_the_offers_own_fields_reach_them():
         "claimed-here", "claimed-by-pool", "done", "pooled")} == {
         "claimed-here": "running on eeeeffff",
         "claimed-by-pool": "running on 99998888",
-        "done": "finished on aaaabbbb",
+        "done": "finished on aaaabbbb, its reported cost capped",
         "pooled": "running on this machine"}
     why = read("offers that say why they ended")["states"]
     assert (why["claimed-here"]["reason"], why["pooled"]["reason"]) == (
         "refused by the network: the container exited 137",
         "withdrawn from the network: merged")
+    held = read("a pool whose jobs this machine does not take")
+    assert held["networkSnapshot"]["pools"][0]["notTaking"] == "docker is down: no engine"
+    assert held["states"]["pooled"]["reason"] == \
+        "in the pool, not taken here: docker is down: no engine"
+    earlier = read("rows as an earlier daemon wrote them")
+    assert (earlier["states"]["pooled"]["reason"], earlier["states"]["done"]["reason"]) == (
+        "in the pool", "finished on this machine")
+    assert "log" not in earlier["networkSnapshot"]["runs"][0]
     assert read("a pool this machine left")["networkSnapshot"]["pools"][0]["left"] is True
     assert read("flags that are not")["networkSnapshot"]["pools"][0]["left"] is False
 
@@ -811,7 +830,11 @@ def test_a_record_carrying_a_removed_meshs_keys_is_read_the_same_by_both():
 
 
 @pytest.mark.parametrize("value", [None, [], "claimed", {TASK: "claimed"},
-                                   {TASK: {"state": 3, "executorHere": 1, "ok": "yes"}}],
+                                   {TASK: {"state": 3, "executorHere": 1, "ok": "yes"}},
+                                   {TASK: {"state": "pooled", "notTaking": "x"}},
+                                   {TASK: {"state": "pooled", "notTaking": 4}},
+                                   {TASK: {"state": "done", "ok": True, "capped": True}},
+                                   {TASK: {"state": "done", "ok": True, "capped": 1}}],
                          ids=repr)
 def test_network_evidence_that_did_not_decode_is_read_the_same_by_both(value):
     payload = _payload([net()], ev(network=offer("claimed", PEER, here=True)))
