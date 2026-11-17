@@ -4,15 +4,29 @@ A peer-to-peer network of Diplomat machines, over Tor, that share the work on th
 they have in common. It is off by default. **Settings → Offer every job to the Diplomacy
 Network** switches it on, and from then on it gates every job on this machine:
 
-- Diplomat starts no agent in a terminal. Every job - a monitor's, the queue's, a wizard's - is
+- Diplomat starts no job in a terminal. Every job - a monitor's, the queue's, a wizard's - is
   **offered** to the pool of its repository.
 - Some machine in that pool with a free slot **takes** it. That may be this one.
 - Whoever takes it runs it in a **docker container**. Your own jobs on your own machine too.
 - Everything the agent does on GitHub or GitLab is done by the machine that offered the job,
   **in its operator's name**, and only what that job needs.
 
+The switch gates jobs: agents that work on a repository. Outside it are:
+
+- **Agents already running in terminals** when it is switched on. They run on.
+- **The device allocator's repair agent.** A simulator or emulator reported broken gets `claude`
+  in a terminal on this machine. It maintains the machine, works on no repository, and stays on
+  the host.
+- **Model calls that use no tools**: the Comms classifier and its replies, the grouping of tasks
+  into goals, and the daemon's renewal of the Claude Code login.
+- **The terminals that sign a provider in.**
+
 The daemon behind it is [`diplomacy-network`](../packages/diplomacy-network/README.md); the
 contract between two machines is its [PROTOCOL.md](../packages/diplomacy-network/PROTOCOL.md).
+
+A Diplomat with the network replaces the mesh of earlier versions. At launch it ends the mesh
+node such a version left running - the process `~/.diplomat/mesh/state.json` names, while that is
+a `python -m szpontnet` - and removes `~/.diplomat/mesh` with the keys in it. The feed says so.
 
 It needs `tor` and `docker` on the machine, and `gh` or `glab` signed in for the forge each
 repository is on. The daemon looks for them on its `PATH` and in the usual install directories;
@@ -32,7 +46,13 @@ no other.
 
 A pool's state - who is in it, which jobs are open, who is working on what - is a set of signed
 records that every member keeps. Members compare a hash of that state and exchange whatever
-differs, so no machine is in charge of a pool and none owns a job.
+differs, so no machine is in charge of a pool, and any member may take any job.
+
+A job stays tied to the machine that offered it all the same. Only that machine confirms a
+claim, hands out the prompt and the key, performs the forge requests and extends the lease. While
+it is asleep or offline none of its unclaimed jobs can be taken, a job of its that is running
+loses its forge access at once and is stopped ten minutes after its lease ends, and after a day
+away its offers are cancelled. A machine with jobs out has to stay awake.
 
 - **Joining.** The first machine to link a repository has a pool of one. Another machine joins by
   an **invite**: **Copy invite** on the pool's card, sent to the other operator by any means,
@@ -52,7 +72,10 @@ stranger owes far more than a member.
 
 A machine takes work while it has room: the task cap in Settings, less what it already runs, and
 nothing while the disk is low, the budget gate holds, or automatic work is paused. A job started
-by hand in the panel is taken by this machine at once.
+by hand in the panel is not held to that room: this machine takes it at once when it can take
+jobs at all - Tor and docker ready, a Claude credential on the machine - and the job's hours are
+within the longest job it takes. Otherwise the job waits in the pool for another machine, and
+the Network screen shows what this machine lacks.
 
 To take a job a machine confirms the pool's state with every member, asks every member for a
 lock on the job, and commits only when all that answered agreed. A member that does not answer
@@ -71,14 +94,21 @@ In a container built from one local image: Debian with git, node, python, curl, 
 needs. The machine needs Docker 27.1 or newer: a job's network is made in a mode that release
 brought, and an older engine takes no job.
 
+- **The agent is Claude Code**, whatever runner Settings selects for terminals. A machine takes
+  jobs only with a credential for it: `networkModelToken`, a Claude Code login, or
+  `ANTHROPIC_API_KEY` in the daemon's environment. Without one it takes nothing, and the screen
+  reads *model missing*.
 - **One container per requesting machine and repository.** It runs every job that machine asks
   for on that repository, and never another machine's or another repository's.
 - **No credential is inside it.** Not the forge's, not the model's.
-- **It reaches nothing but the broker.** The container sits alone on an internal network; its
-  only way out is a relay to a proxy on the host. Through it: the forge's API and `git push` go
+- **It reaches nothing but the broker.** The container sits on an internal network with one
+  other: its relay, a second small container that runs no job and carries connections to a proxy
+  on the host and nowhere else. Through it: the forge's API and `git push` go
   to the machine that offered the job, on every host the forge takes a login or serves
   repositories on, over https on port 443 and no other way; `git clone` and `fetch` of the
-  repository are answered from the host's own mirror; the model's API is forwarded with the
+  repository are answered from the host's own mirror, which the machine running the job fills
+  with its own git access to the repository - one that cannot clone the repository cannot run
+  its jobs; the model's API is forwarded with the
   host's credential added, and its answer comes back without the headers that describe the
   host's account; anything else is tunnelled to the public internet, so installing software
   works. Addresses of the host, of every network the host is on, IPv4 or IPv6, and of other
@@ -91,8 +121,10 @@ brought, and an older engine takes no job.
   devices** is switched on (the Network screen's settings; off by default). With it on, a job
   running here can use the Android devices and emulators attached to this machine through adb -
   a phone on USB included - by a forward opened for that job, and an emulator can reach services
-  on this machine. Such a job can do with those devices whatever a shell on them can, so switch
-  it on only for pools whose machines you trust with that; what adb does on this machine itself -
+  on this machine. The switch is one for the whole machine, not one per pool: with it on, every
+  job this machine takes, from any member of any pool it is in, can do with those devices
+  whatever a shell on them can. Switch it on only when every machine in every one of those pools
+  is trusted with that. What adb does on this machine itself -
   connecting to an address, pairing, forwarding or reversing a port, stopping its server - is
   refused. It applies to jobs started afterwards.
 - **A fuse.** One job gets 5000 model requests or 8 GiB of model traffic on this machine's
@@ -191,11 +223,15 @@ is refused. A refused request comes back to the agent with the reason.
 
 A job is leased two hours at a time. Before each lease ends the machine that offered it asks the
 executor whether it is still working; an answer extends the lease, silence returns the job to
-the pool ten minutes later. A job gets three attempts.
+the pool ten minutes later. A job gets three attempts, on whichever machines take it - the same
+one three times in a pool of one - and after the third the offer ends as failed.
 
 - **Hours a job of yours may take** - the limit from start to finish. Sent with every job.
 - **Longest job this machine takes** - jobs allowed longer are left to other machines. Announced
   when joining a pool.
+
+The two are independent. With the first above the second this machine takes none of its own
+jobs, and the screen says so beside the fields.
 
 Both are whole hours from 12 to 720 (30 days). A value written into `config.json` by hand is
 read the same way by Diplomat and by the daemon: rounded to the nearest whole hour, below 12 as
@@ -209,8 +245,9 @@ it is taking and why not; the two hours settings and the devices switch; the net
 the activity feed; and a card per pool with its members (last seen, unreachable) and jobs (kind,
 state, where it runs, lease end). A job row offers **Stop** for a run on this machine - the job
 goes back to the pool - or **Withdraw** for one this machine offered that runs elsewhere or
-nowhere yet. **Restart daemon** leaves the jobs in this machine's containers running; the daemon
-that starts takes them up.
+nowhere yet. **Stop** asks the daemon what runs here first: a run that ended since the screen
+drew it is neither stopped nor withdrawn, and the card says so. **Restart daemon** leaves the
+jobs in this machine's containers running; the daemon that starts takes them up.
 
 The daemon leaves a pool that is missing from the list Diplomat gives it, so what Diplomat
 cannot confirm is never dropped from that list. A repo root or a checkout under Other repos
@@ -248,6 +285,12 @@ The daemon keeps an ended offer for a day. A job that ended while Diplomat was n
 longer than that reads *the network holds no such offer* when Diplomat is back: it is not
 priced, and what asked for it is offered again.
 
+A `config.json` that is there and cannot be read as settings switches nothing. Diplomat keeps
+the switch as it last read it, withdraws and starts nothing on that reading, saves no setting
+over the file, and says so in the feed. The daemon takes five such reads, a second apart, and
+then stops as it does when switched off; Diplomat still starts no agent in a terminal, and the
+panel's red line says when the daemon does not answer.
+
 Switching the network off withdraws this machine's open offers, stops the jobs it runs for the
 pool and frees their PRs and issues for agents in terminals again. Work that was asked for and
 had not run is started in a terminal from the queue on the next poll. A monitor's own find
@@ -272,6 +315,8 @@ hold it; of any other the feed says that it was not offered, and it is started n
   way, since no container holds a credential.
 - **A sleeping member counts as absent**, so a job can be taken without it. The machine that
   offered the job hands out one key per job, which is what keeps two executors from acting on it.
+- **A job needs its offering machine awake.** Asleep, it hands out no key and performs no forge
+  request, so its jobs stand still or stop (see Pools).
 - **A split pool can run a job twice.** When two machines that both offered the same job lose
   sight of each other, each side can hand it to an executor of its own until they meet again.
 - **Pools are small.** A pool's whole state travels in one message; it is built for the handful

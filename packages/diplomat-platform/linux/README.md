@@ -307,7 +307,9 @@ Also overridable: `DIPLOMAT_REPO` (the agents' working dir — outranks Settings
 *Repo roots* with one root, whose own default is `~/dev/<repo>`), `DIPLOMAT_CONFIG` (where the
 shared `config.json` lives),
 `DIPLOMAT_CORE_BIN`, `DIPLOMAT_AUTOFIX_SECS` (floor 30s), `DIPLOMAT_APIWATCH_SECS`
-(floor 5s), `DIPLOMAT_SHELL`, `DIPLOMAT_NPM`.
+(floor 5s), `DIPLOMAT_NETWORK_SECS` (the Diplomacy Network cycle, 30s; floor 5s, cap 60s),
+`DIPLOMAT_DIPLOMACY_NETWORK_DIR` (the `diplomacy-network` package whose installer starts the
+daemon), `DIPLOMAT_SHELL`, `DIPLOMAT_NPM`.
 
 ## Tests
 
@@ -350,6 +352,17 @@ python tests/test_logic.py        # the logic tests, dependency-free (no pytest)
 - `tests/test_selfupdate.py` - fetch/merge/rebuild/relaunch, incl. the divergence case.
 - `tests/test_allocator_update.py` - when a launch installs the device allocator,
   when it refreshes a stale one, and when it must leave an uninstall alone.
+- `tests/test_network.py` - the Diplomacy Network gate's pure half: what a job is offered
+  as, what this machine admits, how the daemon's snapshot reads. Mirrored case for case by
+  the core's `NetworkSmoke.swift`.
+- `tests/test_network_parity.py` - one fixture through `network.py` and the core's
+  `diplomat-core network`: the hours, the pool a git remote names, offer kinds, the task a
+  snapshot holds for an offer, the pools list and the panel's line must come out the same.
+- `tests/test_network_wiring.py` - the Store behind the switch against a stand-in daemon on
+  a socket: every spawn site offering instead, the cycle's posts, withdrawals, the retired
+  mesh node, and a settings file that cannot be read.
+- `tests/test_network_view.py` - the Network screen and the panel's line about the network,
+  over the stores the render modes seed.
 - `tests/conftest.py` - redirects `QSettings`, the shared `~/.diplomat/config.json`,
   the activity feed and `~/.claude` to per-test temp dirs (and switches the quota
   probe off), so tests never read your transcripts, spend your token on a live
@@ -376,6 +389,9 @@ diplomat_app/
   migrate.py      brings an installed login entry up to what install-autostart.sh writes
   glyphs.py       monochrome tool glyphs, size-normalised and tinted
   deviceallocator.py  bridge to the allocator daemon's state.json + Node installer
+  diplomacynetwork.py  bridge to the Diplomacy Network daemon: its socket, its installer's
+                  daemon verbs, the switch as last read, the retired mesh node
+  networkview.py  the Network screen: the daemon's status, the hours, one card per pool
   telemetryview.py  the Telemetry screen: the bell curves, the rate-limit windows, the backlog series, the token split
   widgets.py      cards, chips, rows
   panel.py        the main window (header, search, grid, results, agent tasks, devices)
