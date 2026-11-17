@@ -208,7 +208,7 @@ await check('a member whose index has one page after another is asked for so man
   const taskId = buildTaskId({ pool: POOL, kind: 'review', item: 'pr-1', identity: 'octocat' });
   // Each page names one record more, of one host more, that it never hands over.
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const keys = [...letters].flatMap((x) => [...letters].map((y) => `offer/${taskId}/${x}${y}${'A'.repeat(41)}`));
+  const keys = [...letters].flatMap((x) => [...letters].map((y) => `offer/${taskId}/${x}${y}${'Q'.repeat(41)}`));
   const chains = [];
   evil.transport.onRequest(async (bytes) => {
     const request = JSON.parse(bytes.toString('utf8'));

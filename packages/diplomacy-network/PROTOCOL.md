@@ -66,7 +66,9 @@ strings as UTF-8, and numbers restricted to integers in the safe range. Floats, 
 inside records, and duplicate keys are invalid. `H(x)` is SHA-256. Every signature is
 Ed25519 over `tag || 0x00 || canon(object without its "sig" member)`, where `tag` is an
 ASCII domain tag (`dn1/req`, `dn1/res`, `dn1/rec`, `dn1/grant`, `dn1/ping`, `dn1/invite`,
-`dn1/cap`). Times are integer Unix seconds.
+`dn1/voucher`, `dn1/cap`). Times are integer Unix seconds. The seven points of small
+order are no keys, with either sign bit: a signature made of nothing verifies under one
+for some messages, and whatever names such a key is refused as malformed.
 
 Where a hash is written as a concatenation, a key is its 32 raw bytes, a nonce its raw
 bytes, a string its UTF-8 bytes and a hash its 32 raw bytes. Inside JSON every byte
@@ -178,7 +180,8 @@ later, whatever its kind: an `act` goes out again under the `seq` it had (sectio
 The counters behind `required` are the process's too, and start from nothing.
 
 Only a request the host served moves that mark: one of a member, in a pool the host
-has linked, or the `hello` of a host that carries a member's invite. What is answered
+has linked, or a `hello` that brings an invite the host made or the record of a key a
+member gave a seat. What is answered
 `not-member` moves nothing. And the mark is never ahead of the host's own clock at the
 start: where a sender whose clock runs ahead, inside the 300 s, left a later date on
 disk, the host serves nothing dated at or before the second it started in, and
@@ -238,8 +241,9 @@ whole set for every pool it is in.
 Two versions with the same precedence are ordered by `H(canon(record))`, lower wins.
 
 ```json
-{ "type": "member", "pool": "...", "pk": "...", "seq": 3, "at": 1794000900, "joinedAt": 1794000000,
-  "maxAcceptedH": 12, "voucher": { "invite": "<invite token>" }, "left": false, "sig": "..." }
+{ "type": "member", "pool": "...", "pk": "...", "seq": 3, "at": 1794000900, "era": 0,
+  "maxAcceptedH": 12, "left": false, "sig": "...",
+  "voucher": { "pool": "...", "by": "<pk>", "era": 0, "pk": "...", "seat": 4, "at": 1794000000, "sig": "..." } }
 
 { "type": "offer", "pool": "...", "taskId": "...", "host": "<pk>", "seq": 1, "at": 1794000000,
   "kind": "review", "item": "pr-578", "identity": "octocat", "title": "...",
@@ -251,24 +255,23 @@ Every record carries `at`, the time that version was signed. A record dated more
 version of a record of its own with an `at` no earlier than the version before.
 `offer.state` is `open`, `cancelled` or `done`; `createdAt` is when the host began to
 offer the task and stays the same through every version until the offer ends. An offer
-never carries the prompt. A member that started its pool has no `voucher`.
+never carries the prompt. A member that started its pool has no `voucher`; `era` and the
+voucher are told under Membership below.
 
 Limits: a pool id is at most 200 characters, `host/owner/repo` or deeper, of `a-z`,
 `0-9`, `.`, `_` and `-`; `kind` is `[a-z][a-z0-9-]{0,31}`; `item` is
 `[a-z0-9][a-z0-9._-]{0,63}`; `identity` is `[a-z0-9][a-z0-9._-]{0,99}`; `title` is at
 most 300 characters with no control character; hours are 12 to 720; `attempt` is 1 to
-255; a claim lists at most 256 grants and 256 absent members; a time, a `seq` or a `gen`
-is at most 2^40.
+255; a `seat` is 0 to 14; a claim lists at most 256 grants and 256 absent members; a
+time, a `seq`, an `era` or a `gen` is at most 2^40.
 
 ### How much a pool holds
 
-- **256 members.** When a host accepts more member records than that, the live ones are
-  the 256 most senior: the fewest vouchers away from a member that has none, then the
-  earliest `joinedAt`, then the lowest `pk`. A member is further from the root than the
-  one that vouched for it, so none is seated without that one. The others are not live
-  (`full`). A host counts itself first in its own state: a host the others have no seat
-  for is a member only where it looks itself, and its hash is nobody else's. A host makes
-  no invite while it holds 256 member records of a pool.
+- **241 members**: the first, the 15 it seats, and the 15 each of those seats (Membership,
+  below). A member record that is given no seat is not live (`no-seat`). A host the
+  others have no seat for is a member only where it looks itself, and its hash is nobody
+  else's. A host makes no invite while every seat it has is held by a member, and none
+  at all two vouchers from the first member.
 - **Per member: 64 offers, 64 claims, 256 KiB.** A member has at most 64 offers and 64
   claims live, and its live records - its member record, the offers and the claims it
   signed - take at most 256 KiB together in canonical form. Offers, then claims, are
@@ -280,7 +283,7 @@ is at most 2^40.
   versions of a record being longer than the first.
 
 So a member's records never take more than 256 KiB of a pool, and a pool's never more
-than 64 MiB, which takes every seat filled to its quota. A host keeps a pool as one
+than 61 MiB, which takes every seat filled to its quota. A host keeps a pool as one
 document and writes it whole when a record changes; a pool of ten members with 64 offers
 each is half a megabyte. A claim carries the grant of every member that gave one, about
 0.5 KiB plus 0.4 KiB per grant, and an executor's claims of the last day share its 256
@@ -314,44 +317,94 @@ is held, **done** when none is open and one is `done`, else **cancelled**.
 
 ### Membership
 
-A host enters a pool with an invite: `{ "pool", "by": "<pk>", "exp", "nonce", "sig" }`,
-signed by a member and handed over out of band as a token, the base64url of its canonical
-form. `nonce` is 16 random bytes. Its `member` record carries the token as `voucher`; the
-voucher holds when the invite is for that pool, signed by another key than the member's,
-and `joinedAt` is no later than `exp`.
+A pool begins with a host that links a repository and joins nobody: its `member` record
+has no `voucher`, and it is the pool's **first member**. Every other member sits in a
+**seat** a member gave it. A member has 15 seats to give, numbered 0 to 14. The first
+member's are one voucher from it, the seats of the members in those are two, and a
+member two vouchers from the first has none to give: a pool holds 1 + 15 + 225 = 241
+members.
 
-A host **accepts** the keys connected to itself through vouchers: itself, the signer of
-its own invite, anyone vouched for by a member it accepts, and the voucher signer of any
-member it accepts. A host that starts a pool has no voucher and is its own root. Nothing
-else joins a pool. The pool's **members** are the accepted keys whose `member` record is
-held, does not say `left`, and was signed within the last 24 hours: they are who a claim
-needs the consent of, and the only hosts whose offers and claims count. A host that stays
-in a pool signs its member record again, with a higher `seq`, every 6 hours. One that
-stops is no member a day later, and nobody waits for it; its key stays accepted for as
-long as its record is live (below), so it comes back by signing the record again.
+An **invite** is `{ "pool", "by": "<pk>", "exp", "nonce", "sig" }`, signed by the member
+that makes it under `dn1/invite` and handed over out of band as a token, the base64url
+of its canonical form. `nonce` is 16 random bytes. It is in no record and is shown to
+nobody but its maker: the host that was handed one sends `hello { invite }` to `by`,
+and is answered with a voucher. An invite is good until `exp`, for every key that
+brings it, each for a seat of its own.
 
-A host lets in a key it has not accepted before only by `hello`, and only while the
-invite is unexpired. Any member that accepts the invite's signer can be greeted, not only
-the signer. A member a host learns of from another member needs no unexpired invite: that
-member let it in.
+A **voucher** is `{ "pool", "by": "<pk>", "era", "pk", "seat", "at", "sig" }`, signed by
+`by` under `dn1/voucher`: the member `by`, in its membership numbered `era`, gave its
+seat `seat` to the key `pk` at `at`, by its own clock. A member record carries the
+voucher of its seat. The voucher holds when it is for that record's pool and key, is
+signed by another key, and is dated no later than the record; a record with one that
+does not is refused (`bad-voucher`). So a voucher lets in the one key its signer named,
+and nobody makes a member of a key in a seat that is not its own to give.
+
+A member record carries `era`, the `seq` of the first record of the membership it
+belongs to. A host that links a pool it holds no record of its own for begins a
+membership, as the first member of a pool of one; signing its record again, leaving,
+coming back and joining by an invite all keep the era. A voucher counts only while the
+record of its signer is of the era it names: a host that left a pool, unlinked it and
+linked it again has given no seat.
+
+**Who is seated** follows from the member records a host holds, and is the same on every
+host that holds the same records:
+
+- The host follows its own voucher to its signer, that one's to its signer, and so on,
+  for as long as the signer's record is held and of the era the voucher names. Where
+  that ends is the first member.
+- Under a seated key, each of its seats goes to the record with the latest voucher `at`
+  for that seat, and among equals to the lowest `pk`. A key is seated once, at the
+  place nearest the first member, and nothing is seated more than two vouchers from it.
+- A host that finds itself in no seat under that first member is the first member where
+  it looks, with whatever is seated under itself.
+
+A member record that is given no seat is not live: `no-seat` when the signer of its
+voucher is seated, `not-member` otherwise. The pool's **members** are the seated keys
+whose `member` record is held, does not say `left`, and was signed within the last 24
+hours: they are who a claim needs the consent of, and the only hosts whose offers and
+claims count. A host that stays in a pool signs its member record again, with a higher
+`seq`, every 6 hours. One that stops is no member a day later, and nobody waits for it;
+it keeps its seat, and comes back by signing the record again.
+
+**Whose word a seat is.** Nothing orders members but the vouchers above them, so the
+only keys that can take a member's seat are the one that gave it and the one that gave
+that one its own: by a later voucher for the seat, or by leaving the era the vouchers
+were given in. No record another member signs moves anybody. A member one voucher from
+the first decides who sits in its own 15 seats and nowhere else - itself and 15 keys, 16
+seats of the 241, and m such members together 16 m; a member two vouchers out holds its
+own seat and gives none; the first member decides every seat.
+
+**Giving a seat.** A host answers `hello { invite }` only for an invite of its own that
+it made in the membership it is in and that has not run out. The key gets the seat it
+holds or was given by an unexpired invite before; else a seat that no member holds and
+no unexpired invite has given to a key that has not taken it yet; else, of the seats
+whose holders left or have signed no record for 24 hours, the one whose holder's record
+is the oldest. A host with none of those, or two vouchers from the first member,
+answers `denied` with the detail `no-seat`; the other details are `bad-invite`,
+`wrong-pool`, `expired` and `that invite is no longer good` (not this host's, or made
+before it began the membership it is in). The answer is `{ voucher, chain }`: the voucher
+dated by the host's clock at that moment, and the member records that lead from the host
+to the first member, the host's own first.
+
+**Joining.** The newcomer signs its member record with the voucher, dated no earlier
+than the voucher, takes in the chain, and greets the member that invited it and then the
+others with `hello { member, chain? }`. The host it greets may not have heard yet of the
+member that seated it, so `chain` carries the member records between the newcomer and
+the first member - at most 2. The greeted host takes them in together with the
+newcomer's record, before it decides. Joining costs a newcomer two requests at a
+stranger's price (section 3).
 
 A member that left was put out by nobody, and comes back as the member it was: it signs
-its record again - a higher `seq`, the voucher it held, no `left` - and greets the
-members it knew. A host whose vouchers still connect it to that key lets it in by that
-`hello`, with no unexpired invite. A member record is held for 30 days after it was
-signed; a host that stayed away longer is forgotten, and enters by a new invite.
+its record again - a higher `seq`, the voucher it holds, no `left` - and greets the
+members it knew. A member record is held for 30 days after it was signed. A host that
+stayed away longer is forgotten, and is back the moment it signs its record again,
+unless its seat went to another key meanwhile: then it enters by a new invite.
 
-An invite is good for the membership it was given in. A host keeps the nonce of every
-unexpired invite it signed since it last became a member, and lets in nobody by an invite
-of its own that is not among them: one it signed before it left the pool, or before it
-lost what it stored.
-
-The host a newcomer greets may not have heard yet of the member that invited it. So
-`hello` carries a `chain` beside the newcomer's own record: the member records that lead
-from it toward the pool's root - its inviter's, that one's inviter's, and so on - at most
-8 of them. The greeted host takes them in together with the newcomer's record, before it
-decides. A record of the chain whose key it has not accepted before is held to the same
-rule as the newcomer's: its invite must be unexpired, or it is left out.
+A member record of any other form - one with a `joinedAt`, without an `era`, or with an
+invite for a voucher - is no record (`bad-record`), wherever it comes from, a host's own
+store included. A host whose store holds no record of its own that is one begins a
+membership: it is the first member of a pool of one, with the offers it had, and the
+other machines join it by invite.
 
 ### Live records and the state hash
 
@@ -369,7 +422,7 @@ held and on `asOf`, so two hosts holding the same records hash the same set:
 - Every version of a member record is live for 30 days after its `at`, and beyond that
   for as long as the voucher of a live member is signed by it: dropped, it would cut that
   member off.
-- A member is live only while its key is accepted and it has a seat (above). An offer or
+- A member record is live only while it has a seat (above). An offer or
   a claim is live only while the member record of its signer is, and while it fits its
   signer's quota (above).
 - A claim is live only while a host that backs it (section 7) has a live offer record of
@@ -398,16 +451,18 @@ ended, and a held claim of its own with no run behind it it signs `released`.
 ## 6. Requests between members
 
 Every kind but `hello` is refused with `not-member` unless `from` is a key the target
-accepts in `pool` whose member record, when held, does not say `left`. A sender a host
+seats in `pool` whose member record does not say `left`. A sender a host
 does not take for a member gets that one refusal, with an empty `detail`, whatever the
 pool - one the host is a member of, one it left, one it never heard of - and whatever it
 asked: the answer says nothing about the pools a host is linked to. A `hello` that is
-refused is answered the same way, unless it carries an invite to the pool signed by a
-key the host accepts: its sender was asked in, and is told why it is not let in.
+refused is answered the same way, unless it brings an invite the host signed for that
+pool, or a member record whose voucher holds and is signed by a key the host seats: its
+sender was asked in, and is told why it is not let in.
 
 | Kind | Body | Answer |
 | --- | --- | --- |
-| `hello` | `{ member, chain? }` - the sender's own record, and the records leading to its root | `{ index, more? }` |
+| `hello` | `{ member, chain? }` - the sender's own record, and the records leading to the first member | `{ index, more? }` |
+| `hello` | `{ invite }` - an invite the target made, as its token | `{ voucher, chain }` (section 5) |
 | `sync` | `{ asOf, hash, after? }` | `{ hash }`, plus `{ index, more? }` when the hashes differ |
 | `pull` | `{ keys }` | `{ records }` |
 | `push` | `{ records }` | `{ accepted, refused: [{ key, code }] }` |
@@ -437,7 +492,7 @@ ahead of the claims that rest on them. `accepted` lists the keys the target now 
 pushed; a refused record has an empty `key` when it is too malformed to have one, and its
 `code` is `bad-record`, `wrong-pool`, `future`, `older` (the target holds a version that
 wins), `bad-signature`, `bad-voucher`, `bad-claim`, `bad-grant`, `bad-lease`, `bad-ping`,
-or the reason it would not be live (section 5): `expired`, `not-member`, `full`, `quota`
+or the reason it would not be live (section 5): `expired`, `not-member`, `no-seat`, `quota`
 or `no-offer`. Records pushed together are taken in together, so a member record lets in
 the records that depend on it, and an offer the claim that rests on it, whatever their
 order.
@@ -954,14 +1009,33 @@ Nothing in a record hides any of this.
   taken in when it surfaces. It holds an offer only when no claim its host gave that
   offer to since is on record, and no longer than its lease, which began when it was
   signed.
-- **Members are whoever members invite.** A member that invites keys of its own has a
-  voice in every round and a quota of records for each of them, up to the pool's 256
-  seats.
+- **Members are whoever members seat.** A member one voucher from the first has 15
+  seats, and can put keys of its own in them: each has a voice in every round and a
+  quota of records, 16 voices and 4 MiB for one such member, 16 m for m of them, and all
+  241 for the first member. It can also give those seats to new keys as often as it
+  likes: each key a host has never reached is waited for once, about 90 s, by every
+  round of that host (section 7).
+- **A seat is the word of the members above it.** The member that gave a seat, and the
+  one that gave that member its own, take it away by a later voucher for it, and nothing
+  tells the member that lost it: the hosts that seat it no longer answer it as they
+  answer a stranger. A host that leaves a pool,
+  unlinks it and links it again has begun another membership: wherever its new record
+  arrives, the members it had seated are seated no longer, though it meant only to come
+  back, and each of them joins again by invite.
+- **Nothing puts a member out, and no key is ever changed.** There is no request and no
+  command that removes a member another member seated: a host gives a seat to another
+  key only once its holder left or went a day without signing. A member that misbehaves
+  stays for as long as it signs. What the others can do is make a pool without it: one
+  of them leaves the pool, unlinks the repository and links it again, which makes it the
+  first member of a pool of one, and every other honest machine joins that by invite.
+  The pool they left is the misbehaving member's alone, and the offers and claims
+  recorded there count for nothing in the other. A machine whose key was stolen has no
+  other remedy either: its identity is that key.
 - **A claim lives no longer than the offer records behind it.** When the last offer
   record of the hosts that back it is dropped, a day after it was signed, the claim goes
   with it, also the record of a claim that ended.
 - **A full pool is slow to enter.** The index of a pool at its caps is some 20 pages and
-  its records up to 64 MiB, pulled 60 KiB at a time: about a thousand requests, each
+  its records up to 61 MiB, pulled 60 KiB at a time: about a thousand requests, each
   paid for (section 3).
 
 ## 8. Hours, leases and the heartbeat

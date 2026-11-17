@@ -8,8 +8,9 @@ import { b64u, canon } from '../../src/core/canon.js';
 import { specDigest } from '../../src/core/capability.js';
 import { buildRequest, verifyResponse } from '../../src/core/envelope.js';
 import { identityFromSeed } from '../../src/core/identity.js';
+import { createVoucher } from '../../src/core/membership.js';
 import { solve } from '../../src/core/pow.js';
-import { memberRecord } from '../../src/core/records.js';
+import { LIMITS, memberRecord } from '../../src/core/records.js';
 import { createNode } from '../../src/node/node.js';
 import { createStore, memoryDisk } from '../../src/node/store.js';
 import { fakeExecutor, fakeRequester } from './fakes.mjs';
@@ -123,15 +124,34 @@ export function createWorld({ seed = 1 } = {}) {
       transport.host.ready = true;
       return { name, pk: id.pk, id, transport };
     },
+    /// `n` members with no node behind them, as `{ all, records }`: they hold the seats
+    /// `founder` has after its first `taken`, and then the seats of those, in order.
+    crowd(founder, n, taken = 0) {
+      const now = net.now();
+      const all = Array.from({ length: n }, (_, i) => world.stranger(`crowd${i}`));
+      const direct = LIMITS.invitees - taken;
+      const records = all.map((m, i) => {
+        const by = i < direct ? founder.id : all[Math.floor((i - direct) / LIMITS.invitees)].id;
+        const seat = i < direct ? taken + i : (i - direct) % LIMITS.invitees;
+        const voucher = createVoucher(by, { pool: POOL, era: 0, pk: m.pk, seat, at: now });
+        return memberRecord(m.id, { pool: POOL, seq: 0, at: now, era: 0, maxAcceptedH: 12, voucher });
+      });
+      return { all, records };
+    },
     /// A member with a key and a transport and no node behind it: it joined by
     /// `inviter`'s invite, answers nothing, and does only what a test makes it do.
     async intruder(name, inviter) {
       const s = world.stranger(name);
-      const now = net.now();
-      const member = memberRecord(s.id, {
-        pool: POOL, seq: 0, at: now, joinedAt: now, maxAcceptedH: 12, voucher: inviter.node.invite({ pool: POOL }).invite,
-      });
-      const answer = await world.request(s, inviter, 'hello', { member }, { effort: 128 });
+      // Strangers share one price, which rises with every one of them that says hello.
+      const hello = async (body) => {
+        const first = await world.request(s, inviter, 'hello', body, { effort: 128 });
+        return first.code === 'effort' ? world.request(s, inviter, 'hello', body, { effort: first.effort }) : first;
+      };
+      const vouched = await hello(inviter.node.invite({ pool: POOL }));
+      assert.equal(vouched.ok, true, `the intruder was given a voucher: ${vouched.code} ${vouched.detail}`);
+      const { voucher } = vouched.body;
+      s.member = memberRecord(s.id, { pool: POOL, seq: 0, at: Math.max(net.now(), voucher.at), era: 0, maxAcceptedH: 12, voucher });
+      const answer = await hello({ member: s.member });
       assert.equal(answer.ok, true, `the intruder was let in: ${answer.code} ${answer.detail}`);
       return s;
     },

@@ -247,11 +247,11 @@ await check('a host started with its clock an hour behind keeps its place in the
   const [a, b] = all;
   await w.run(600);
   const doc = () => w.stored(b, [...b.disk.files.keys()].find((name) => name.startsWith('pools/')));
-  const { records, inviter } = doc();
+  const { records } = doc();
   b.skew = -3600;
   await w.restart(b);
   await w.run(120);
-  assert.deepEqual([doc().records.length, doc().inviter], [records.length, inviter], 'what it held it still holds');
+  assert.equal(doc().records.length, records.length, 'what it held it still holds');
   assert.ok(doc().records.find((r) => r.type === 'member' && r.pk === b.pk).voucher, 'and it did not found a pool of its own');
   b.skew = 0;
   await w.run(300);

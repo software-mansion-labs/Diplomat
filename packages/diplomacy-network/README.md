@@ -21,7 +21,7 @@ src/
     pow.js         seed, challenge, solve, verify, the effort a sender owes
     envelope.js    request and response envelopes: build, verify
     records.js     member, offer and claim records: shape, signature, precedence
-    membership.js  invites and the accepted-member set
+    membership.js  invites, vouchers and who is seated
     pool.js        one pool's record set: merge, index, state hash, task view
     claims.js      locks, grants, ranks, the claim round's decisions
     lease.js       hours, leases, pings, extensions, lapse
@@ -104,7 +104,7 @@ closed at every start.
 The node's documents are written in one order - identity, `heard`, `peers`, links, pools, locks,
 keys, offers, runs - each whole, through a temporary file: a run is on disk only after
 the key it was started with. They are read back as plain JSON; only what travels between
-hosts has to be canonical. A pool's document holds at most 256 members with at most 256
+hosts has to be canonical. A pool's document holds at most 241 members with at most 256
 KiB of records each (PROTOCOL.md section 5), and is rewritten when a record of it
 changes.
 
@@ -181,7 +181,20 @@ and on switch-off without keeping count. Only a malformed body is refused.
 `join` by invite needs the invite's repository linked on this machine first; otherwise
 it is refused with `The pool <id> is not linked on this machine.` An invite that is no
 invite, has run out, is not signed by the machine it names, or was made on this machine
-is refused with a sentence saying which.
+is refused with a sentence saying which. `join` answers once the invite is kept: the
+machine that made it is asked for a seat then, and again, less and less often, until it
+answers or the invite runs out. When that machine gives none, the log says `the invite
+to <pool> let this host in nowhere: <why>` and this machine stays the only member of
+its own pool. An invite lets in every machine that brings it before it runs out.
+
+`invite` is refused when this machine has no seat to give (PROTOCOL.md section 5):
+`This machine is 2 invites away from the one that started the pool <id>, and invites
+nobody: ask a machine nearer to that one.` or `Every one of the 15 machines this one may
+invite into the pool <id> is a member of it: ask another machine of the pool.`
+
+Member records signed by a build that knew no vouchers are not read. A machine that
+finds none of its own that it can read is the only member of its pool, with the tasks
+it offered, and the other machines join it by invite again.
 
 `pools` is the whole list every time, so Diplomat posts it only when it knows every
 linked repository and whose account each is: a list cut short makes this machine leave

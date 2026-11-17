@@ -1,5 +1,6 @@
-// Who is in a pool (PROTOCOL.md section 5): invites, the voucher a member record carries,
-// and the set of members a host accepts - everyone connected to itself through vouchers.
+// Who is in a pool (PROTOCOL.md section 5): the invite a host is asked in by, the voucher
+// the inviter signs for that host's key, and the members a host accepts - the seats under
+// the member that started the pool, as the member records it holds fill them.
 
 import { b64u, canon, unb64u } from './canon.js';
 import { sign, validPk, verify } from './identity.js';
@@ -43,63 +44,69 @@ export function verifyInvite(invite, { pool, now }) {
   return { ok: true };
 }
 
-// Parsing a token is a JSON parse and a re-encode, and a pool asks for the same record's
-// voucher on every state hash.
-const vouchers = new WeakMap();
-
-/// The invite a member record carries as its voucher, or null when it has none or the
-/// token is malformed.
-export function voucherOf(record) {
-  if (!record.voucher) return null;
-  if (!vouchers.has(record)) vouchers.set(record, parseInvite(record.voucher.invite));
-  return vouchers.get(record);
+/// A voucher: `identity`, in the membership it numbers `era`, gives its seat number
+/// `seat` in `pool` to the key `pk`, at `at`.
+export function createVoucher(identity, { pool, era, pk, seat, at }) {
+  const voucher = { pool, by: identity.pk, era, pk, seat, at };
+  return { ...voucher, sig: sign(identity, 'dn1/voucher', voucher) };
 }
 
 /// Does a member record's voucher hold for every host alike? True for a record without
-/// one (a pool's root); otherwise the invite must be for the record's pool, signed by
-/// another key, and not expired when the member says it joined.
+/// one (the member that started a pool); otherwise the voucher must be for the record's
+/// pool and key, signed by another key, and dated no later than the record.
 export function verifyVoucher(record) {
-  if (!record.voucher) return true;
-  const invite = voucherOf(record);
-  return invite !== null && invite.by !== record.pk && record.joinedAt <= invite.exp
-    && verifyInvite(invite, { pool: record.pool }).ok;
+  const { voucher } = record;
+  if (!voucher) return true;
+  return voucher.pool === record.pool && voucher.pk === record.pk && voucher.by !== record.pk && voucher.at <= record.at
+    && verify(voucher.by, 'dn1/voucher', voucher);
 }
 
-/// May a host that has never seen this member let it in at `now`? `{ ok: true }` while
-/// its invite is unexpired; otherwise `{ ok: false, code }` with `no-voucher` or
-/// `expired`. A member a host learns of from another member needs no such check: that
-/// member already let it in.
-export function checkJoin(record, now) {
-  const invite = voucherOf(record);
-  if (!invite) return { ok: false, code: 'no-voucher' };
-  return invite.exp <= now ? { ok: false, code: 'expired' } : { ok: true };
-}
-
-/// The public keys `self` accepts, given member records whose vouchers already verified:
-/// every key connected to `self` by vouchers, whichever way each voucher points. The
-/// result does not depend on the order of `records`.
-export function acceptedSet(self, records) {
-  const links = new Map();
-  const link = (a, b) => {
-    if (!links.has(a)) links.set(a, []);
-    links.get(a).push(b);
-  };
+/// The keys `self` accepts, given member records whose vouchers already verified, as a
+/// map from each to how many vouchers it is from the top: the member `self`'s own chain
+/// of vouchers leads up to, the members that hold a seat of it, and so on down to
+/// `LIMITS.depth`. A voucher counts while its signer's record is of the membership the
+/// voucher was signed in. Of the records that name one seat, the one with the latest
+/// voucher holds it, then the one with the lowest key. Where that leaves `self` without a
+/// seat the top is `self`: a host is a member of its own state. The result does not
+/// depend on the order of `records`.
+export function seating(self, records) {
+  const held = new Map(records.map((record) => [record.pk, record]));
+  // The key whose seat a record is for, when that key's record is held and of the
+  // voucher's membership.
+  const inviter = ({ voucher }) => (voucher && held.get(voucher.by)?.era === voucher.era ? voucher.by : undefined);
+  const under = new Map(); // pk -> the records that are for a seat of that key
   for (const record of records) {
-    const by = voucherOf(record)?.by;
-    if (by) {
-      link(record.pk, by);
-      link(by, record.pk);
-    }
+    const by = inviter(record);
+    if (by === undefined) continue;
+    if (!under.has(by)) under.set(by, []);
+    under.get(by).push(record);
   }
-  const accepted = new Set([self]);
-  const queue = [self];
-  while (queue.length > 0) {
-    for (const next of links.get(queue.pop()) ?? []) {
-      if (!accepted.has(next)) {
-        accepted.add(next);
-        queue.push(next);
+  const below = (top) => {
+    const depth = new Map([[top, 0]]);
+    let level = [top];
+    for (let d = 1; d <= LIMITS.depth; d += 1) {
+      const next = [];
+      for (const by of level) {
+        const seats = new Map();
+        for (const record of under.get(by) ?? []) {
+          // A chain of vouchers may close on itself: a key is seated once, at its highest.
+          if (depth.has(record.pk)) continue;
+          const { seat, at } = record.voucher;
+          const rival = seats.get(seat);
+          if (!rival || at > rival.voucher.at || (at === rival.voucher.at && record.pk < rival.pk)) seats.set(seat, record);
+        }
+        for (const { pk } of seats.values()) {
+          depth.set(pk, d);
+          next.push(pk);
+        }
       }
+      level = next;
     }
-  }
-  return accepted;
+    return depth;
+  };
+  const chain = [self];
+  for (let by = inviter(held.get(self) ?? {}); by !== undefined && !chain.includes(by); by = inviter(held.get(by))) chain.push(by);
+  const top = chain.at(-1);
+  const seated = below(top);
+  return seated.has(self) ? seated : below(self);
 }

@@ -65,7 +65,7 @@ export function createNode({
   const host = {
     id, self: id.pk, store, transport, clock, random, log, requester, executor, settings, solve, keys,
     now: () => clock.now(),
-    pools: new Map(), // pool id -> { id, link, pool, locks, seq, inviter, invites, farewell, stale, epoch, catching }
+    pools: new Map(), // pool id -> { id, link, pool, locks, seq, joining, invites, farewell, stale, epoch, catching }
     away: new Map(), // pool id -> the link of a pool that is linked and that this host left
     // pool id -> the locks of a pool this host is not in now: one read from the store and
     // not linked yet, or one it left.
@@ -76,7 +76,7 @@ export function createNode({
     }),
     save: (P) => store.write(poolFile(P.id), {
       toJSON: () => ({
-        id: P.id, linked: true, seq: P.seq, inviter: P.inviter, invites: P.invites, ...P.farewell, records: P.pool.records(),
+        id: P.id, linked: true, seq: P.seq, joining: P.joining, invites: P.invites, ...P.farewell, records: P.pool.records(),
       }),
     }),
   };

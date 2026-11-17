@@ -18,7 +18,10 @@ await check('a burst raises what its sender owes; the sender pays and still gets
   await w.run(61);
   const sync = (effort) => w.request(a, b, 'sync', { asOf: w.net.now(), hash: w.view(a).hash }, { effort });
   const before = w.net.count({ from: 'a', to: 'b' });
-  for (let i = w.net.count({ from: 'a', to: 'b', since: w.net.now() - 59 }); i < POW.memberAllow; i += 1) {
+  // The host's own requests to that member count like the ones made here.
+  const recent = () => w.net.count({ from: 'a', to: 'b', since: w.net.now() - 59 });
+  while (recent() < POW.memberAllow) {
+    const i = recent();
     assert.deepEqual([(await sync(MEMBER)).ok, i], [true, i], 'inside the allowance the base effort is enough');
   }
   // A request that has not paid is told what a stranger owes, whoever sent it: what a
@@ -96,7 +99,8 @@ await check('a request that has not paid costs the host no signature check', asy
   };
   const flip = (text) => (text.startsWith('A') ? `B${text.slice(1)}` : `A${text.slice(1)}`);
   assert.deepEqual(await checked({ effort: MEMBER / 2 }), ['effort', 0], 'too little work');
-  assert.deepEqual(await checked({ effort: MEMBER, mangle: (r) => ({ ...r, pow: { ...r.pow, counter: flip(r.pow.counter) } }) }), ['effort', 0], 'work that solves nothing');
+  // At a price where another counter solves by chance once in thousands of times.
+  assert.deepEqual(await checked({ effort: MEMBER * 2 ** 12, mangle: (r) => ({ ...r, pow: { ...r.pow, counter: flip(r.pow.counter) } }) }), ['effort', 0], 'work that solves nothing');
   assert.deepEqual(await checked({ effort: MEMBER, ts: w.net.now() - 3600 }), ['stale', 0], 'an old request');
   assert.deepEqual(await checked({ bytes: Buffer.from('{"v":1') }), ['bad-request', 0], 'no envelope at all');
   assert.deepEqual(await checked({ effort: MEMBER, mangle: (r) => ({ ...r, sig: flip(r.sig) }) }), ['effort', 1], 'paid for, with a bad signature');

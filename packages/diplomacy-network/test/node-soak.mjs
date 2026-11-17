@@ -2,8 +2,9 @@
 // offers, runs that finish, fail or vanish, requests under keys, withdrawals, restarts,
 // hosts that leave the pool and come back, hosts switched off, machines that sleep
 // while another offers what they offer, a member that answers nobody, pushes records no
-// host may take, offers what the others offer and says a run of its own did their job,
-// hosts off the network, cuts, lost and repeated requests, and hours passing. After
+// host may take, makes members of keys of its own in every way it can think of, offers
+// what the others offer and says a run of its own did their job, hosts off the network,
+// cuts, lost and repeated requests, and hours passing. After
 // every step what must always hold is checked; at the end the network is mended and
 // everything offered must have ended, on every host alike.
 //
@@ -18,6 +19,7 @@ import { specDigest } from '../src/core/capability.js';
 import { buildClaim } from '../src/core/claims.js';
 import { UNSERVED } from '../src/core/envelope.js';
 import { sign } from '../src/core/identity.js';
+import { createInvite, createVoucher, inviteToken } from '../src/core/membership.js';
 import { endClaim, isActive } from '../src/core/lease.js';
 import { LIMITS, backers, backing, memberRecord, offerRecord } from '../src/core/records.js';
 import { ELSEWHERE } from '../src/node/offers.js';
@@ -34,13 +36,16 @@ async function soak(seed) {
   const names = Array.from({ length: 5 + dice.int(3) }, (_, i) => `h${i + 1}`);
   const all = await w.pool(names, Object.fromEntries(names.map((name, i) => [name, { slots: i < 2 ? 1 + dice.int(2) : dice.int(3) }])));
   const tally = { steps: 0, offers: 0, acts: {}, jobs: 0, restarts: 0, left: 0, slept: 0, hostile: 0, rival: 0, resent: 0 };
-  // A member with no node behind it: every round counts it absent. What it pushes is
-  // signed by it: records no host may take, and offers of what the others offer, with
-  // claims of its own behind them, which are its to make and nothing to any other offer.
-  const evil = w.stranger('evil');
+  // A member with no node behind it, let in by the first host: every round counts it
+  // absent. What it pushes is signed by it: records no host may take, keys of its own in
+  // the seats it has to give, and offers of what the others offer, with claims of its
+  // own behind them, which are its to make and nothing to any other offer.
+  const evil = await w.intruder('evil', all[0]);
   const evilJoined = w.net.now();
-  const voucher = all[0].node.invite({ pool: POOL }).invite;
-  let evilSeq = -1;
+  const { voucher } = evil.member;
+  let evilSeq = 0;
+  const evilRecord = (now) => memberRecord(evil.id, { pool: POOL, seq: evilSeq += 1, at: Math.max(now, voucher.at), era: 0, maxAcceptedH: 12, voucher });
+  const puppets = []; // the keys it gave a seat of its own
   const trail = [];
   const broken = [];
   const atOnce = new Set(); // tasks offered to run at once, which take no slot
@@ -101,6 +106,14 @@ async function soak(seed) {
       assert.deepEqual(h.log.filter((line) => /step failed|could not be served/.test(line)), [], `${h.name} threw`);
       const taking = jobs(h).filter((job) => !atOnce.has(job.task.taskId)).length;
       assert.ok(taking <= h.slots, `${h.name} runs ${taking} jobs on ${h.slots} slots`);
+      // Whoever had a seat has it: no record of another member's making takes it away.
+      // The member with no node has the seats it was given to give, and no more.
+      if (!w.view(h).left) {
+        const seated = w.records(h).filter((r) => r.type === 'member');
+        for (const g of [...all, evil]) assert.ok(seated.some((r) => r.pk === g.pk), `${h.name} holds no seat for ${g.name}`);
+        const extra = seated.filter((r) => r.pk !== evil.pk && !all.some((g) => g.pk === r.pk));
+        assert.ok(extra.length <= LIMITS.invitees && extra.every((r) => r.voucher.by === evil.pk && puppets.includes(r.pk)), `${h.name} seats ${extra.length} keys nobody but the member with no node let in`);
+      }
       for (const job of jobs(h)) handed.set(job.task.taskId, specDigest(job.spec));
       for (const record of w.records(h)) {
         if (record.type !== 'claim') continue;
@@ -276,13 +289,26 @@ async function soak(seed) {
       const h = pick(all);
       const now = w.net.now();
       const say = (kind, body, options) => w.request(evil, h, kind, body, { effort: 128, ...options }).catch(() => ({ ok: false, code: 'no answer' }));
-      const member = memberRecord(evil.id, { pool: POOL, seq: evilSeq += 1, at: now, joinedAt: evilJoined, maxAcceptedH: 12, voucher });
+      const member = evilRecord(now);
       await say('hello', { member });
       const resigned = (fields) => ({ ...fields, sig: sign(evil.id, 'dn1/rec', fields) });
       const { sig: _, ...mine } = member;
+      // Members of its own making: a key under the voucher that names its own, under an
+      // invite, in a seat it has not got, under a voucher of a membership it never had,
+      // under one dated after the record, and under a key that has a seat of its own.
+      const puppet = w.stranger('puppet');
+      const made = (fields) => {
+        const record = { type: 'member', pool: POOL, pk: puppet.pk, seq: 0, at: now, era: 0, maxAcceptedH: 12, left: false, ...fields };
+        return { ...record, sig: sign(puppet.id, 'dn1/rec', record) };
+      };
+      const seatOf = (by, over = {}) => createVoucher(by, { pool: POOL, era: 0, pk: puppet.pk, seat: dice.int(LIMITS.invitees), at: now, ...over });
       const junk = [
         resigned({ ...mine, seq: 2 ** 41 }), resigned({ ...mine, maxAcceptedH: 100000 }), resigned({ ...mine, pool: 'github.com/acme/other' }),
         resigned({ ...mine, more: 1 }), resigned({ ...mine, at: now + 86400 }),
+        made({ voucher }), made({ joinedAt: 0, voucher: { invite: inviteToken(createInvite(evil.id, { pool: POOL, exp: now - 1, nonce: w.net.rnd.bytes(16) })) } }),
+        made({ voucher: { ...seatOf(evil.id), seat: LIMITS.invitees } }), made({ voucher: seatOf(evil.id, { era: 1 }) }),
+        made({ voucher: seatOf(evil.id, { at: now + 1 }) }), made({ voucher: seatOf(w.stranger('nobody').id) }),
+        made({ voucher: seatOf(puppet.id) }),
       ];
       // A claim of a task its maker offers nothing of, and the claim of another, released.
       const held = pick(w.records(h).filter((r) => r.type === 'claim' && r.executor !== evil.pk && !rival.has(r.taskId)));
@@ -305,6 +331,23 @@ async function soak(seed) {
       tally.hostile += answer.ok ? 1 : 0;
       return `${h.name} ${answer.ok ? `refused it: ${answer.body.refused[0]?.code}` : answer.code ?? answer.response?.error?.code}`;
     }],
+    [4, 'puppet', async () => {
+      // The member with no node gives a seat of its own to a key of its making, and tries
+      // a seat under that key for another: the first is its to give, whoever held it
+      // before, and the second is nobody's.
+      const h = pick(all);
+      const now = w.net.now();
+      const say = (kind, body) => w.request(evil, h, kind, body, { effort: 128 }).catch(() => ({ ok: false, code: 'no answer' }));
+      const [one, under] = [w.stranger('puppet'), w.stranger('puppet')];
+      const record = (id, by) => memberRecord(id.id, {
+        pool: POOL, seq: 0, at: now, era: 0, maxAcceptedH: 12, voucher: createVoucher(by, { pool: POOL, era: 0, pk: id.pk, seat: dice.int(LIMITS.invitees), at: now }),
+      });
+      puppets.push(one.pk);
+      await say('hello', { member: evilRecord(now) });
+      const answer = await say('push', { records: [record(one, evil.id), record(under, one.id)] });
+      if (answer.ok && answer.body.accepted.some((key) => key.endsWith(under.pk))) broken.push(`${h.name} seated a key three vouchers from the first host`);
+      return `${h.name} ${answer.ok ? `took ${answer.body.accepted.length}` : answer.code}`;
+    }],
     [6, 'rival', async () => {
       // The member with no node offers what another host offers, for any hours, backs a
       // claim of its own with that offer as any number, and signs the offer done or
@@ -326,7 +369,7 @@ async function soak(seed) {
       const claim = buildClaim(evil.id, {
         pool: POOL, taskId, round: 'AAAAAAAAAAA', gen: pick([0, 1, LIMITS.time]), grants: [], absent: [], now, offer: { at: mine.createdAt, gen, hours: mine.hours },
       });
-      const member = memberRecord(evil.id, { pool: POOL, seq: evilSeq += 1, at: now, joinedAt: evilJoined, maxAcceptedH: 12, voucher });
+      const member = evilRecord(now);
       // One time in two it says its run did the very job the others offer.
       const job = specDigest({ taskId, kind: 'review', item, title: `Review ${item}`, identity: taskId.slice(taskId.lastIndexOf('@') + 1), prompt: 'p', options: {} });
       assert.equal(handed.get(taskId) ?? job, job, 'the job it names is the one the others hand out');
@@ -395,7 +438,7 @@ async function soak(seed) {
         pool: POOL, kind: 'review', item, identity: taskId.slice(taskId.lastIndexOf('@') + 1), seq: mine.seq + 1, at: now, title: 'Mine too',
         minRequiredH: mine.hours, createdAt: mine.createdAt, state: mine.state === 'open' ? 'cancelled' : mine.state,
       });
-      const member = memberRecord(evil.id, { pool: POOL, seq: evilSeq += 1, at: now, joinedAt: evilJoined, maxAcceptedH: 12, voucher });
+      const member = evilRecord(now);
       // Every host is told: one that has only just joined again may not take its word yet.
       for (const h of all) {
         const say = (kind, body) => w.request(evil, h, kind, body, { effort: 128 }).catch(() => ({ ok: false }));
@@ -415,6 +458,7 @@ async function soak(seed) {
       await w.run(60);
       look();
     }
+    assert.equal(new Set(all.map((h) => w.members(h).join())).size, 1, 'every host names the same members');
     for (const h of all) {
       for (const task of w.view(h).tasks) assert.ok(['done', 'cancelled'].includes(task.state), `${h.name} sees ${task.taskId} as ${task.state}, offered by ${task.offeredBy.map(w.name)}`);
       const keys = w.stored(h, 'keys') ?? {};
