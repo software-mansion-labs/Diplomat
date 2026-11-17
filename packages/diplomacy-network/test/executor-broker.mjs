@@ -1965,8 +1965,10 @@ try {
       assert.deepEqual([made, most], [2, 2]);
       // One that ends makes room for the next.
       clients[0].destroy();
-      await until(() => made === 3, 'the third to be connected');
-      assert.deepEqual([open.size, most], [2, 2]);
+      // The far end may see the new connection before the close of the one it replaces,
+      // so the count is the broker's.
+      await until(() => made === 3 && open.size === 2, 'the third to be connected in the place of the first');
+      assert.deepEqual([b.load('out').upstreams, b.load('out').waiting], [2, 2]);
       for (const c of clients) c.destroy();
       await until(() => open.size === 0 && b.load('out').requests === 0, 'the connections out to close with their requests');
       assert.equal(made <= 5, true);
