@@ -65,7 +65,7 @@ REMOTES = [
     "https://codeberg.org/o/r", "ftp://github.com/o/r", "https://github.com/o/r?x=1",
     "https://github.com/o/r#frag", "https://github.com/o r/r", "git@github.com:o/r.git extra",
     "https://github.com/ö/r", "git@gitlab.com:group/sub/r", "https://gitlab.com/o/.git",
-    "https://github.com/o/.git",
+    "https://github.com/o/.git", "git@gitlab.acme.example:platform/sub/api.git",
 ]
 
 KINDS = [{"verb": verb, "ownPR": own}
@@ -213,7 +213,7 @@ def test_the_twins_agree(twins, member, rows):
 def test_the_fixture_reaches_what_it_claims_to(twins):
     """Agreement on a fixture that only ever reaches the defaults proves nothing."""
     _, python = twins
-    assert len(HOURS) >= 74 and len(REMOTES) >= 71
+    assert len(HOURS) == 75 and len(REMOTES) == 72
     assert {12, 13, 14, 24, 25, 36, 48, 101, 720} <= set(python["hours"])
     pools = set(python["pools"])
     assert {None, POOL, "github.com/owner/repo", "gitlab.com/group/sub/r", LAB} <= pools
