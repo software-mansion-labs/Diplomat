@@ -92,6 +92,8 @@ export function createGossip(host) {
       // this one. `joinFailed` says why the last invite let this host in nowhere, until
       // the next one is pasted.
       joining: null, joinFailed: '', invites: [], farewell: gone(doc),
+      // The members that refused this host's hello and have answered it nothing since.
+      refusedBy: new Set(),
       // Since when what this host holds of the pool may be out of date - it started, it
       // slept, its transport came up - or null once a member has said what it holds:
       // until then this host gives none of its offers away and looks after none. `epoch`
@@ -301,7 +303,9 @@ export function createGossip(host) {
       return;
     }
     // It holds nothing of the pool it is in from here on. The member that signed the
-    // voucher is shown the record that carries it, and then every member is asked.
+    // voucher is shown the record that carries it, and then every member is asked: what
+    // any of them refused it before, it refused another record.
+    for (const pk of P.refusedBy) snubbed.delete(`${P.id} ${pk}`);
     P.stale = host.now();
     P.epoch += 1;
     P.catching = P.epoch;
@@ -357,7 +361,10 @@ export function createGossip(host) {
     if (!hello.ok) {
       // A member that will not have this host is not asked again every minute. One that
       // could not serve the request this once said nothing of the kind.
-      if (hello.code && hello.code !== 'busy') snubbed.set(key, host.now() + PEER_BACKOFF_MAX_MS / 1000);
+      if (hello.code && hello.code !== 'busy') {
+        snubbed.set(key, host.now() + PEER_BACKOFF_MAX_MS / 1000);
+        P.refusedBy.add(pk);
+      }
       return false;
     }
     snubbed.delete(key);
@@ -401,9 +408,16 @@ export function createGossip(host) {
     }
     const asOf = host.now();
     const answer = await send(P, pk, 'sync', { asOf, hash: P.pool.stateHash(asOf) }, options);
-    if (answer.ok) await settle(P, pk, answer.body, asOf);
+    if (answer.ok) {
+      P.refusedBy.delete(pk);
+      await settle(P, pk, answer.body, asOf);
+    }
     return answer.ok;
   }
+
+  /// Has every other host this one keeps in touch with in a pool refused its hello: does
+  /// it hold a seat nowhere but in its own state?
+  const unseated = (P) => others(P).length > 0 && others(P).every((pk) => P.refusedBy.has(pk));
 
   /// Brings this host and one member to the same state, unless that is under way.
   async function syncWith(P, pk) {
@@ -676,6 +690,7 @@ export function createGossip(host) {
 
   return {
     link, unlink, forget, tell, noPool, farewell, invited, send, syncWith, woke, spread, deliver, start, stop, step, invite, join,
+    unseated,
     handlers,
   };
 }

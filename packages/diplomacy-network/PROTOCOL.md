@@ -432,9 +432,20 @@ maker, and joining under it would close the chain.
 
 A member that left was put out by nobody, and comes back as the member it was: it signs
 its record again - a higher `seq`, the voucher it holds, no `left` - and greets the
-members it knew. A member record is held for 30 days after it was signed. A host that
-stayed away longer is forgotten, and is back the moment it signs its record again,
-unless its seat went to another key meanwhile: then it enters by a new invite.
+members it knew. A member record is held for 30 days after it was signed, and for as
+long after that as the voucher of a record that is held was signed by its key. A host's
+own record is the exception in its own store: it holds that, and so the era and the
+voucher of its membership, whatever its age. A host that stayed away longer than 30
+days is forgotten by the others unless a member it seated kept signing, and is back the
+moment it signs its record again - the next version of the one it held, under the same
+voucher - unless its seat went to another key meanwhile: then its record is given no
+seat, and it enters by a new invite. The members it had seated were members all the
+while, and are when it is back.
+
+A host that every other host it knows of in a pool has refused - its seat was given
+away, the member that gave it began another membership, or a move of the members above
+it left it more than two vouchers from the first - holds a seat in its own state alone.
+It learns of it by those refusals and nothing else, and gets in again by an invite.
 
 A member record of any other form - one with a `joinedAt`, without an `era`, or with an
 invite for a voucher - is no record (`bad-record`), wherever it comes from, a host's own
@@ -1099,9 +1110,11 @@ Nothing in a record hides any of this.
   pool of that member's keys and one another, while the hosts under the first member
   refuse the record and count them members for a day more. Nothing tells those keys'
   operators but the members their pool's row lists. A host that leaves a pool,
-  unlinks it and links it again has begun another membership: wherever its new record
-  arrives, the members it had seated are seated no longer, though it meant only to come
-  back, and each of them joins again by invite.
+  unlinks it and links it again has begun another membership, though it meant only to
+  come back: the members it had seated take none of its new records, since no voucher of
+  theirs leads to that membership, and go on as the pool they were, under the record it
+  signed last in the old one. It is a pool of one, and each of them that is to be with it
+  joins it by invite.
 - **Nothing puts a member out, and no key is ever changed.** There is no request and no
   command that removes a member another member seated: a host gives a seat to another
   key only once its holder left or went a day without signing. A member that misbehaves

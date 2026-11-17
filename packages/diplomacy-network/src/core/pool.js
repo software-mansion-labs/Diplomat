@@ -62,7 +62,9 @@ function settle(entries, self, asOf) {
 
   const members = new Map(of('member').map((e) => [e.record.pk, e]));
   const kept = new Set();
-  const queue = [...members.values()].filter((e) => !past(e.record.at + MEMBER_RETENTION_SECS)).map((e) => e.record.pk);
+  // A host's own member record stays whatever its age: it is the membership the host
+  // signs again when it is back.
+  const queue = [...members.values()].filter((e) => e.record.pk === self || !past(e.record.at + MEMBER_RETENTION_SECS)).map((e) => e.record.pk);
   // A member record past its retention stays for as long as a kept member's voucher is
   // signed by it: dropped, it would cut everyone it vouched for off from the rest.
   while (queue.length > 0) {

@@ -224,7 +224,7 @@ export function createNode({
     };
     return {
       id: P.id, path: P.link.path ?? '', identity: P.link.identity ?? '', hash: P.pool.stateHash(now), left: false,
-      joining: P.joining !== null, joinFailed: P.joinFailed,
+      joining: P.joining !== null, joinFailed: P.joinFailed, unseated: host.gossip.unseated(P),
       members: members.map((m) => ({
         pk: m.pk, self: m.pk === host.self, maxAcceptedH: m.maxAcceptedH,
         ...(m.pk === host.self
@@ -371,7 +371,7 @@ export function createNode({
         pools: [
           ...[...host.pools.values()].map((P) => poolRow(P, now)),
           ...[...host.away.values()].map((info) => ({
-            id: info.id, path: info.path ?? '', identity: info.identity ?? '', hash: '', left: true, joining: false, joinFailed: '',
+            id: info.id, path: info.path ?? '', identity: info.identity ?? '', hash: '', left: true, joining: false, joinFailed: '', unseated: false,
             members: [], tasks: [],
           })),
         ],

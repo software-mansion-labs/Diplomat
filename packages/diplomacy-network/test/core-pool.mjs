@@ -305,6 +305,18 @@ check('a member that stops signing its record is no member after a day, and keep
   assert.ok(pool.answerHello({ member: fresh }, ann.pk, gone + 400).body);
 });
 
+check('a host holds its own member record whatever its age, and the records its voucher leads up through: the others have forgotten it, and take it back by the record it signs next', () => {
+  const records = [member(root), member(ann, { voucher: seat(root) }), member(ben, { voucher: seat(ann) })];
+  const late = T0 + MONTH + 300;
+  const [mine, theirs] = [poolOf(ann, records), poolOf(root, records)];
+  for (const pool of [mine, theirs]) pool.merge(member(root, { seq: 1, at: late }), late);
+  assert.deepEqual(mine.records().map(recordKey), [`member/${ann.pk}`, `member/${root.pk}`].sort(), 'its own, and the one that seated it');
+  assert.deepEqual([mine.member(ann.pk, late), mine.vouched(ann.pk, late)], [null, true], 'no member until it signs again');
+  assert.deepEqual(theirs.records().map(recordKey), [`member/${root.pk}`]);
+  const again = member(ann, { voucher: seat(root), seq: 1, at: late });
+  for (const pool of [mine, theirs]) assert.deepEqual([pool.merge(again, late).refused, pool.members(late).map((m) => m.pk)], [[], [root.pk, ann.pk].sort()]);
+});
+
 check('a version that says a member left outlives every version it replaced', () => {
   const pool = poolOf(root, [member(root), member(ann, { voucher: seat(root) })]);
   const resigned = member(ann, { voucher: seat(root), seq: 1, at: T0 + 20 * DAY });
