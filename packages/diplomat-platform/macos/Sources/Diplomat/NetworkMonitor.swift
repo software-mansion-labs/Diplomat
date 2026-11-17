@@ -385,8 +385,7 @@ extension Store {
         noteNetworkReply(reply, about: card)
         guard case .ok(let answer) = reply else { return false }
         AuditLog.log("panel", NetworkAudit.join,
-                     "Joining \(answer?["pool"]?.string ?? "a pool"): the machine that made "
-                     + "the invite seats this one once it is reached")
+                     "Joining \(answer?["pool"]?.string ?? "a pool"): \(NetworkText.seatedLater)")
         refreshAudit()
         await runNetworkCycleOnce()
         return true

@@ -410,6 +410,15 @@ func networkSmoke() throws {
         """.utf8))
     check(left?.pools.map(\.left) == [true, false, false],
           "a pool is left only on the daemon's word")
+    let joins = NetworkSnapshot.parse(Data("""
+        {"pools": [{"id": "a", "joining": true}, {"id": "b", "joinFailed": "no-seat"},
+                   {"id": "c"}, {"id": "d", "joining": 1, "joinFailed": 5},
+                   {"id": "e", "joining": "true", "joinFailed": ["no-seat"]},
+                   {"id": "f", "joining": true, "joinFailed": "its voucher does not hold"}]}
+        """.utf8))?.pools ?? []
+    check(joins.map(\.joining) == [true, false, false, false, false, true]
+          && joins.map(\.joinFailed) == ["", "no-seat", "", "", "", "its voucher does not hold"],
+          "a join under way and why the last invite failed are read of a pool")
     let members = snap.pools[0].members
     check(members.map(\.pk) == ["aaaabbbbccccdddd", "eeeeffff00001111"]
           && members.map(\.isSelf) == [true, false]

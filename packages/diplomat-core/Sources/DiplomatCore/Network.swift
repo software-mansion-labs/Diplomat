@@ -500,6 +500,12 @@ public struct NetworkSnapshot: Equatable {
         public let hash: String
         /// Whether this machine left the pool: it takes and offers nothing there.
         public let left: Bool
+        /// Whether an invite pasted here waits for the machine that made it: this machine
+        /// is the pool's only member meanwhile.
+        public let joining: Bool
+        /// Why the last invite let this machine in nowhere, in the daemon's words; "" for
+        /// none.
+        public let joinFailed: String
         /// Why this machine takes none of the pool's jobs, in the daemon's sentence; ""
         /// while it takes them.
         public let notTaking: String
@@ -654,6 +660,8 @@ public struct NetworkSnapshot: Equatable {
             }
             return Pool(id: id, path: text(p["path"]), identity: text(p["identity"]),
                         hash: text(p["hash"]), left: JSONInput.flag(p["left"]),
+                        joining: JSONInput.flag(p["joining"]),
+                        joinFailed: text(p["joinFailed"]),
                         notTaking: Self.localTimes(text(p["notTaking"])),
                         members: members, tasks: tasks)
         }

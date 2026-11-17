@@ -145,6 +145,16 @@ def ending(task: str, snapshot: network.Snapshot | None) -> str | None:
     return agentstate.network_verdict(task, offers, 0)[1]
 
 
+def pool_joining(pool: network.Pool) -> str:
+    """A pool card's line while an invite pasted here waits for its maker, else ""."""
+    return f"Joining: {dn.SEATED_LATER}" if pool.joining else ""
+
+
+def pool_join_failed(pool: network.Pool) -> str:
+    """A pool card's line on why the last invite let this machine in nowhere, else ""."""
+    return f"The last invite came to nothing: {pool.join_failed}" if pool.join_failed else ""
+
+
 def pool_held(pool: network.Pool) -> str:
     """A pool card's line on why this machine takes none of its jobs, else ""."""
     return (f"This machine takes none of this pool's jobs: {pool.not_taking}"
@@ -263,6 +273,10 @@ class PoolPanel(QWidget):
             return
         n = len(pool.members)
         pill.set_state(f"{n} member{'' if n == 1 else 's'}", _TEAL)
+        if pool_joining(pool):
+            col.addWidget(_note(pool_joining(pool)))
+        if pool_join_failed(pool):
+            col.addWidget(_note(pool_join_failed(pool), _ORANGE))
         if pool_held(pool):
             col.addWidget(_note(pool_held(pool), _ORANGE))
         col.addWidget(_plain("Members", _SECTION))

@@ -1447,6 +1447,9 @@ enum Render {
              ]] as [String: Any],
             ["id": "gitlab.com/acme/platform/api", "path": "/Users/dev/api", "identity": "ilatka",
              "hash": "17b0e3aa",
+             "joining": !mode.hasSuffix("unsaved"),
+             "joinFailed": mode.hasSuffix("unsaved")
+                ? "the invite ran out before the machine that made it answered" : "",
              "notTaking": "this machine could not start a job of this pool: "
                 + "its repository could not be fetched",
              "members": [member(here, hours: 48, seen: 0)],

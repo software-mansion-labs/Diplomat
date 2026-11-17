@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 
 import pytest
 
@@ -86,7 +87,8 @@ def _dump(s: N.Snapshot) -> dict:
         "admit": {"slots": s.admit.slots, "at": s.admit.at, "reason": s.admit.reason},
         "pools": [{
             "id": p.id, "path": p.path, "identity": p.identity, "hash": p.hash,
-            "left": p.left, "notTaking": p.not_taking,
+            "left": p.left, "joining": p.joining, "joinFailed": p.join_failed,
+            "notTaking": p.not_taking,
             "members": [{"pk": m.pk, "self": m.is_self, "maxAcceptedH": m.max_accepted_h,
                          "lastSeen": m.last_seen, "reachable": m.reachable}
                         for m in p.members],
@@ -554,7 +556,7 @@ def _snapshot() -> dict:
         "admit": {"slots": 2, "at": 1794000290, "reason": ""},
         "pools": [{
             "id": "github.com/o/r", "path": "/w/r", "identity": "octocat", "hash": "h1",
-            "left": False, "notTaking": "",
+            "left": False, "joining": False, "joinFailed": "", "notTaking": "",
             "members": [
                 {"pk": SELF, "self": True, "maxAcceptedH": 24, "lastSeen": 1794000299,
                  "reachable": True},
@@ -702,18 +704,22 @@ def test_the_stand_in_daemons_snapshots_are_read_for_what_they_say(kolkata):
         return verdict["state"], verdict["reason"]
 
     assert first("joining") == (A.FAILED, "the network holds no such offer")
-    assert first("requester-pooled") == (
-        A.STARTING, "in the pool, not taken here: docker is down: not checked yet")
-    assert first("requester-claimed") == (A.RUNNING, "running on mEaOJkBj")
-    assert first("requester-done") == (A.FINISHED, "finished on mEaOJkBj")
+    held = DAEMON["requester-pooled"]["offers"][0]["notTaking"]
+    assert held and first("requester-pooled") == (
+        A.STARTING, f"in the pool, not taken here: {held}")
+    other = DAEMON["requester-claimed"]["offers"][0]["executor"][:8]
+    assert len(other) == 8 and first("requester-claimed") == (A.RUNNING, f"running on {other}")
+    assert first("requester-done") == (A.FINISHED, f"finished on {other}")
     assert first("too-long") == (
         A.STARTING, "in the pool, not taken here: this machine takes jobs of at most 12 h "
                     "and this one needs 24")
     left = DAEMON["left-until"]["offers"][0]
-    assert left["leftUntil"] == 1794911456 and left["notTaking"].endswith("10:30:56.000Z")
+    until = left["leftUntil"]
+    assert left["notTaking"].endswith(time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(until)))
     assert first("left-until") == (
         A.STARTING, "in the pool, not taken here: this machine failed at it or gave it back, "
-                    "and leaves it to the others until 16:00")
+                    "and leaves it to the others until "
+                    + time.strftime("%H:%M", time.gmtime(until + 5.5 * 3600)))
     assert first("capped") == (A.FINISHED, "finished on this machine, its reported cost capped")
     assert DAEMON["capped"]["offers"][0]["outcome"]["capped"] is True
     assert "capped" not in DAEMON["requester-done"]["offers"][0]["outcome"]
@@ -721,7 +727,12 @@ def test_the_stand_in_daemons_snapshots_are_read_for_what_they_say(kolkata):
     assert [r["state"] for r in runs] == ["finished"] and "log" not in runs[0]
     assert "log" not in DAEMON["executor-finished"]["runs"][0]
     assert read("executor-running")["networkRunning"] == 1
-    assert len(read("joining")["networkSnapshot"]["pools"][0]["members"]) == 1
+    waiting, refused = (read(name)["networkSnapshot"]["pools"][0]
+                        for name in ("joining", "join-failed"))
+    assert (waiting["joining"], waiting["joinFailed"], len(waiting["members"])) == (True, "", 1)
+    assert (refused["joining"], refused["joinFailed"], len(refused["members"])) == (
+        False, "that invite is no longer good", 1)
+    assert DAEMON["requester-pooled"]["pools"][0]["joining"] is False
 
 
 def _spoil(edit) -> dict:
@@ -751,7 +762,7 @@ _SPOILT_SNAPSHOTS = {
         s["pools"][0]["tasks"][0].update(hours=12.0, claimedAt=None),
         s["pools"][0]["members"][0].update(maxAcceptedH=True, lastSeen="x"))),
     "flags that are not": _spoil(lambda s: (
-        s["pools"][0].update(left=1),
+        s["pools"][0].update(left=1, joining=1),
         s["pools"][0]["members"][0].update(self=1, reachable="yes"),
         s["pools"][0]["tasks"][0].update(offeredHere=1.0, executorHere=1),
         s["offers"][0].update(executorHere=0), s["offers"][3].update(executorHere="yes"),
@@ -763,7 +774,7 @@ _SPOILT_SNAPSHOTS = {
                               title=False, reason={"why": "x"}),
         s["runs"][0].update(state=None, taskId=9, log=False),
         s["offers"][3].update(notTaking=["x"]),
-        s["pools"][0].update(path=1, identity=None, hash=[], notTaking=5),
+        s["pools"][0].update(path=1, identity=None, hash=[], notTaking=5, joinFailed=["x"]),
         s["pools"][0]["tasks"][0].update(offeredBy=["a", 2, None], kind=4))),
     "rows without their identity": _spoil(lambda s: (
         s["offers"].extend([{"state": "done"}, "x", 3, {"taskId": ""}, {"taskId": 5}]),
@@ -784,11 +795,16 @@ _SPOILT_SNAPSHOTS = {
         s["offers"][0].update(state="failed", reason="the container exited 137"),
         s["offers"][3].update(state="cancelled", reason="merged"))),
     "a pool this machine left": _spoil(lambda s: s["pools"][0].update(left=True)),
+    "a pool whose invite waits for its maker": _spoil(
+        lambda s: s["pools"][0].update(joining=True)),
+    "a pool whose last invite came to nothing": _spoil(
+        lambda s: s["pools"][0].update(joinFailed="no-seat")),
     "a pool whose jobs this machine does not take": _spoil(lambda s: (
         s["pools"][0].update(notTaking="docker is down: no engine"),
         s["offers"][3].update(notTaking="docker is down: no engine"))),
     "rows as an earlier daemon wrote them": _spoil(lambda s: (
         s["pools"][0].pop("notTaking"), s["offers"][3].pop("notTaking"),
+        s["pools"][0].pop("joining"), s["pools"][0].pop("joinFailed"),
         s["offers"][2]["outcome"].pop("capped"),
         s["runs"][0].update(log="/l/1"), s["runs"][1].update(log=""))),
     "the same task offered twice": _spoil(lambda s: s["offers"].append(
@@ -855,6 +871,15 @@ def test_the_spoilt_snapshots_that_carry_the_offers_own_fields_reach_them():
     assert "log" not in earlier["networkSnapshot"]["runs"][0]
     assert read("a pool this machine left")["networkSnapshot"]["pools"][0]["left"] is True
     assert read("flags that are not")["networkSnapshot"]["pools"][0]["left"] is False
+
+    def join(name: str) -> tuple[bool, str]:
+        pool = read(name)["networkSnapshot"]["pools"][0]
+        return pool["joining"], pool["joinFailed"]
+
+    assert join("a pool whose invite waits for its maker") == (True, "")
+    assert join("a pool whose last invite came to nothing") == (False, "no-seat")
+    assert join("flags that are not") == (False, "") == join("text that is not")
+    assert join("rows as an earlier daemon wrote them") == (False, "")
 
 
 @pytest.mark.parametrize("value", [7, "", None, True, ["t"], {"taskId": "t"}],

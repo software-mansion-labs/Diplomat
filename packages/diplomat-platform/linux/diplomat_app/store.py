@@ -6190,7 +6190,7 @@ class Store(QObject):
             activity.log(autofix.SOURCE_PANEL, network.AUDIT_JOIN,
                          f"Rejoined {rejoined}" if rejoined else
                          f"Joining {pool if isinstance(pool, str) and pool else 'a pool'}: "
-                         "the machine that made the invite seats this one once it is reached")
+                         f"{diplomacynetwork.SEATED_LATER}")
             self.refresh_activity()
             self.network_joined.emit(card, True)
             self._network_cycle()
