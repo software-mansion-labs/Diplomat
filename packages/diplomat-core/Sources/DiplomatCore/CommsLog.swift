@@ -97,15 +97,14 @@ public enum CommsLog {
         PrivateFiles.prepare(reportsDir(in: dir))
     }
 
-    /// Under the lock (`PrivateFiles.append`); false when the line is not all on disk.
-    @discardableResult
-    public static func append(_ event: CommsEvent, in dir: URL = dir) -> Bool {
-        guard var line = try? encoder.encode(event) else { return false }
+    /// Under the lock (`PrivateFiles.append`).
+    public static func append(_ event: CommsEvent, in dir: URL = dir) {
+        guard var line = try? encoder.encode(event) else { return }
         line.append(UInt8(ascii: "\n"))
         prepare(dir)
-        return PrivateFiles.locked(lockURL(in: dir)) {
+        _ = PrivateFiles.locked(lockURL(in: dir)) {
             PrivateFiles.append(line, to: eventsURL(in: dir), maxBytes: maxBytes)
-        } ?? false
+        }
     }
 
     /// Oldest first; a torn or foreign line costs only that line.

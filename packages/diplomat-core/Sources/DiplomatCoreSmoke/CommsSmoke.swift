@@ -3117,7 +3117,7 @@ private func multiRepoSmoke() throws {
     let rows = CommsTickResult.Item.targets(asked("x"), both, maxTargets: 20)
     let base = asked("x").id
     check(rows.map(\.message.id) == [base + "#" + second + "#12", base]
-          && rows.allSatisfy { $0.message.messageID == base },
+          && rows.allSatisfy { CommsMessage.messageID(of: $0.message.id) == base },
           "…each its own row, the other repo's id naming it: \(rows.map(\.message.id))")
     let reports = scratchDir("multi-reports")
     defer { try? FileManager.default.removeItem(at: reports) }

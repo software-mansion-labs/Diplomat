@@ -70,8 +70,6 @@ public struct CommsMessage: Codable, Equatable, Sendable {
     public static let targetSeparator: Character = "#"
 
     /// The Slack message's own id, whichever of its targets' rows this is.
-    public var messageID: String { Self.messageID(of: id) }
-
     public static func messageID(of id: String) -> String {
         String(id.prefix { $0 != targetSeparator })
     }
