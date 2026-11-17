@@ -144,6 +144,12 @@ export const CATCH_UP_MS = num('DN_CATCH_UP_MS', 3 * 60 * 1000);
 export const PRUNE_INTERVAL_MS = num('DN_PRUNE_INTERVAL_MS', 10 * 60 * 1000);
 // How many claim rounds one host runs at a time.
 export const MAX_ROUNDS = 4;
+// How long a ticket for a large body is good before the body's headers arrive. A member
+// whose tickets go unused twice running or more gets none for this long, twice as long
+// each time, up to the most. A member counts as having just had a place for this long.
+export const TICKET_WAIT_MS = num('DN_TICKET_WAIT_MS', 10 * 1000);
+export const TICKET_REST_MS = num('DN_TICKET_REST_MS', 60 * 1000);
+export const TICKET_REST_MAX_MS = num('DN_TICKET_REST_MAX_MS', 60 * 60 * 1000);
 // How many bodies above the stranger's cap a host reads at once, over all senders.
 export const MAX_LARGE_BODIES = 4;
 // Diplomat's last word on free slots is trusted this long.

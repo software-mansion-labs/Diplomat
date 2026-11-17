@@ -38,12 +38,24 @@ every sender gets the 64 KiB, whoever it says it is.
 - A member may reserve up to 1 MiB, and a member that holds a live key of the target
   (section 9) up to 48 MiB for an `act`.
 - A ticket is good for one request, and is void when that request's headers have not
-  arrived 60 s after it was given. A member that reserves again gives up the ticket it
+  arrived 10 s after it was given. A member that reserves again gives up the ticket it
   held.
-- A member has one place at a time and a target four in all, counting the tickets not
-  yet used and the bodies being read and served. A place is free again once its request
-  was answered, refused or abandoned, however long that took. A `reserve` that finds no
-  place free is answered `busy`.
+- A target has four places in all, counting the tickets not yet used and the bodies
+  being read and served, and a member has one at a time between itself and the keys
+  that sit where it does: a key two vouchers from the first member shares one place
+  with the member that seated it and with the other keys in that member's seats
+  (section 5). A place is free again once its request was answered, refused or
+  abandoned, however long that took. A `reserve` that finds no place free is answered
+  `busy`.
+- A ticket that brought no whole body - it ran out, its member reserved again, or the
+  body its headers announced did not come whole in the time a body has - is a ticket
+  unused. The first costs nothing. From the second running, the member's `reserve` is
+  answered `busy` for 60 s, twice as long each time, up to an hour. A body that came
+  whole, whatever it held, ends the count.
+- When all four places are taken, a member that had no place in the last 60 s takes
+  the oldest ticket not yet used of a member that had one: that ticket is void, and
+  its member is not counted as having left it unused. A body being read is never put
+  out.
 
 A request over what the target will read is answered with HTTP status 413 and no envelope;
 its sender may send it again, with a ticket of its own each time, unless it is an `act`:
@@ -1068,6 +1080,26 @@ Nothing in a record hides any of this.
 - **A claim lives no longer than the offer records behind it.** When the last offer
   record of the hosts that back it is dropped, a day after it was signed, the claim goes
   with it, also the record of a claim that ended.
+- **Four members that keep sending large bodies hold the four places.** A member and
+  the keys it seats have one place between them, so this takes four members that sit in
+  no one else's seats, or the first member, which has a place for itself and one for
+  each key it seats. Each sends whole bodies of 1 MiB as slowly as a body may come, 52 s,
+  and reserves again at once: a `reserve` then finds a place only in the moments
+  between, and a large `push` or `act` of another member is refused meanwhile. It costs
+  them the bytes and one proof of work a body. A member with a live key of the target
+  may announce an `act` of 48 MiB and hold its one place for the 26 minutes that body
+  has, at a ticket unused each time it does not come.
+- **A ticket taken by a member that had none is a request refused.** The member that
+  held it sends its body all the same and gets 413: a `push` goes out again in its
+  time, and an `act` is not sent again and fails for its job. It happens to a member that
+  takes a second place inside a minute, at a target whose four places are all taken, in
+  the instant between its `reserve` and its body.
+- **A ticket waits 10 s, and the work for the body is done inside them.** A sender is
+  asked more work than it does in 10 s only after a burst of its own requests - past
+  512 times a member's base price at a million hashes a second - and until that price
+  is down its large requests find their tickets void.
+- **Members seated by one member wait for one another's large bodies** at each target,
+  one at a time.
 - **A full pool is slow to enter.** The index of a pool at its caps is some 20 pages and
   its records up to 61 MiB, pulled 60 KiB at a time: about a thousand requests, each
   paid for (section 3).

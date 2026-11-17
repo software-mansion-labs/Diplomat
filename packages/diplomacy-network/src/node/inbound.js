@@ -7,7 +7,8 @@ import { KINDS, ReplayMemory, UNSERVED, buildResponse, requestDigest, verifyRequ
 import { EffortMeter } from '../core/pow.js';
 import { shaped } from '../core/records.js';
 import {
-  MAX_ACT_BODY_BYTES, MAX_BODY_BYTES, MAX_LARGE_BODIES, POW, REQUEST_TIMEOUT_MS, STRANGER_BODY_BYTES,
+  MAX_ACT_BODY_BYTES, MAX_BODY_BYTES, MAX_LARGE_BODIES, POW, STRANGER_BODY_BYTES, TICKET_REST_MAX_MS, TICKET_REST_MS,
+  TICKET_WAIT_MS,
 } from '../paths.js';
 
 /// The inbound half of `host`: `{ limit, receive, handlers, tally }`. `tally` counts the
@@ -23,10 +24,30 @@ export function createInbound(host) {
   // dates its requests past this host's clock, and no start waits for such a date.
   let latest = Math.min(Number(host.store.read('heard')?.ts) || 0, host.now());
   const floor = latest;
-  // member -> its place for a body above the stranger's cap: `{ ticket, bytes, timer }`
-  // from the `reserve` that gave it until the body's headers arrive, `{}` while the
-  // body is read and served.
+  // member -> its place for a body above the stranger's cap: `{ ticket, bytes, again,
+  // branch }` from the `reserve` that gave it until the body's headers arrive -
+  // `again` for a member that had a place a moment before - and `{ branch, whole }`
+  // while the body is read and served. The oldest ticket comes first. A timer finds
+  // its ticket gone when the ticket was used, given up or taken.
   const places = new Map();
+  const reading = new Map(); // ticket -> the place its body is read in
+  const had = new Map(); // member -> when it last had a place
+  // member -> `{ times, until }`: how many of its tickets running brought no whole body,
+  // and until when it is given no other.
+  const unused = new Map();
+
+  // A ticket of `from` brought no body: the second running costs the member a wait.
+  function wasted(from) {
+    const times = (unused.get(from)?.times ?? 0) + 1;
+    const rest = times < 2 ? 0 : Math.min(TICKET_REST_MAX_MS, TICKET_REST_MS * 2 ** (times - 2)) / 1000;
+    unused.set(from, { times, until: host.now() + rest });
+  }
+
+  // The ticket `from` holds is void and its place free.
+  function lapse(from) {
+    wasted(from);
+    places.delete(from);
+  }
 
   /// The most bytes of a request with these headers the transport may read. It runs
   /// before any signature is checked, on headers anybody can write, so the headers buy
@@ -39,10 +60,17 @@ export function createInbound(host) {
     const length = Number(headers['content-length']);
     for (const [from, place] of places) {
       if (typeof ticket !== 'string' || place.ticket !== ticket || !(length <= place.bytes)) continue;
-      host.clock.clearTimeout(place.timer);
-      const reading = {};
-      places.set(from, reading);
-      return { bytes: place.bytes, release: () => places.get(from) === reading && places.delete(from) };
+      const read = { branch: place.branch, whole: false };
+      places.set(from, read);
+      reading.set(ticket, read);
+      const release = () => {
+        if (!reading.delete(ticket)) return;
+        places.delete(from);
+        had.set(from, host.now());
+        if (read.whole) unused.delete(from);
+        else wasted(from);
+      };
+      return { bytes: place.bytes, release };
     }
     return STRANGER_BODY_BYTES;
   }
@@ -50,20 +78,35 @@ export function createInbound(host) {
   const handlers = {
     /// A member asks for a place to send one request of `kind` of up to `bytes`: a member
     /// has one place at a time, there are MAX_LARGE_BODIES over all members, and only the
-    /// holder of a key of this host gets the `act` cap. A ticket not used in time is void.
+    /// holder of a key of this host gets the `act` cap. A member and the keys in its seats
+    /// have one place between them. A ticket is void when the body's headers have not
+    /// come TICKET_WAIT_MS later, and a member whose tickets bring no whole body gets
+    /// none for a while. When no place is free, a member that had none for
+    /// TICKET_REST_MS takes the oldest unused ticket of a member that had.
     reserve(P, from, body) {
       const cap = body.kind === 'act' && host.offers.keyHeldBy(from) ? MAX_ACT_BODY_BYTES : MAX_BODY_BYTES;
       const fine = shaped(body, {
         kind: (v) => KINDS.includes(v), bytes: (v) => Number.isSafeInteger(v) && v > STRANGER_BODY_BYTES && v <= cap,
       });
       if (!fine) return { error: 'bad-request' };
-      const mine = places.get(from);
-      const taken = mine ? !mine.ticket : places.size >= MAX_LARGE_BODIES;
-      if (taken) return { error: 'busy', detail: 'no place for a large body is free' };
-      host.clock.clearTimeout(mine?.timer);
-      const place = { ticket: b64u(host.random(16)), bytes: body.bytes };
-      place.timer = host.clock.setTimeout(() => places.get(from) === place && places.delete(from), REQUEST_TIMEOUT_MS);
+      const now = host.now();
+      const full = { error: 'busy', detail: 'no place for a large body is free' };
+      if (places.has(from) && !places.get(from).ticket) return full;
+      // Asking again leaves the ticket before unused.
+      if (places.has(from)) lapse(from);
+      if (now < unused.get(from)?.until) return { error: 'busy', detail: 'the tickets this member took went unused' };
+      const branch = P.pool.branch(from, now);
+      if ([...places.values()].some((held) => held.branch === branch)) return full;
+      const again = now - had.get(from) < TICKET_REST_MS / 1000;
+      if (places.size >= MAX_LARGE_BODIES) {
+        const [other] = [...places].find(([, held]) => held.ticket && held.again) ?? [];
+        if (again || other === undefined) return full;
+        places.delete(other);
+      }
+      const place = { ticket: b64u(host.random(16)), bytes: body.bytes, again, branch };
+      host.clock.setTimeout(() => places.get(from) === place && lapse(from), TICKET_WAIT_MS);
       places.set(from, place);
+      had.set(from, now);
       return { body: { ticket: place.ticket } };
     },
   };
@@ -100,8 +143,11 @@ export function createInbound(host) {
   }
 
   /// The signed response to the bytes of one request. Only the canonical form of a
-  /// request is one: any other spelling of the same JSON is refused as malformed.
-  async function receive(bytes) {
+  /// request is one: any other spelling of the same JSON is refused as malformed. A
+  /// body that came whole made use of the ticket in its `headers`, whatever it holds.
+  async function receive(bytes, { headers } = {}) {
+    const read = reading.get(headers?.['dn-ticket']);
+    if (read) read.whole = true;
     tally.requests += 1;
     const request = parseCanon(bytes);
     const re = requestDigest(request) ?? b64u(hash(bytes));

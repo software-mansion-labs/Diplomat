@@ -127,6 +127,7 @@ await check('a host reads a large body only for a ticket a member paid and signe
     assert.equal((await reserve(rest[0], bad)).code, 'bad-request', JSON.stringify(bad));
   }
   assert.equal((await reserve(rest[0], { kind: 'push', bytes: MAX_BODY_BYTES })).ok, true, 'up to what a member may send');
+  await w.run(61);
   const tickets = [];
   for (const h of rest.slice(0, 4)) tickets.push((await reserve(h)).body.ticket);
   assert.equal(new Set(tickets).size, 4);
@@ -141,20 +142,25 @@ await check('a host reads a large body only for a ticket a member paid and signe
   assert.equal((await reserve(rest[0])).code, 'busy', 'one place per member: none while its body is read');
   assert.equal((await reserve(rest[4])).code, 'busy', 'a body being read is one of the four');
   // The place is taken for as long as the transport reads and serves the body, however
-  // long that is. A ticket not used within a minute is void, and its place free.
+  // long that is. A ticket not used within 10 s is void, and its place free.
   await w.run(600);
   assert.equal((await reserve(rest[0])).code, 'busy');
   for (const ticket of tickets.slice(1)) assert.equal(limit({ 'dn-ticket': ticket }, 2 ** 19), STRANGER_BODY_BYTES);
-  assert.equal((await reserve(rest[4])).ok, true);
+  const first = (await reserve(rest[4])).body.ticket;
+  await a.transport.host.handler(Buffer.from('{}'), { headers: { 'dn-ticket': tickets[0] } });
   place.release();
   place.release();
   // A member that asks again holds one ticket, the later one.
-  const first = (await reserve(rest[1])).body.ticket;
-  const second = (await reserve(rest[1])).body.ticket;
+  const second = (await reserve(rest[4])).body.ticket;
   assert.notEqual(first, second);
   assert.equal(limit({ 'dn-ticket': first }, 2 ** 19), STRANGER_BODY_BYTES);
-  for (const h of [rest[2], rest[3]]) assert.equal((await reserve(h)).ok, true);
-  assert.equal((await reserve(rest[0])).code, 'busy', 'a place given back is a place, not five');
+  for (const h of rest.slice(1, 4)) assert.equal((await reserve(h)).ok, true);
+  const fifth2 = await reserve(rest[0]);
+  assert.deepEqual([fifth2.code, fifth2.detail], ['busy', 'no place for a large body is free'], 'a place given back is a place, not five, and its member had one until just then');
+  const kept = limit({ 'dn-ticket': second }, 2 ** 19);
+  assert.equal(kept.bytes, 2 ** 19, 'and takes no ticket from the one that has it');
+  await a.transport.host.handler(Buffer.from('{}'), { headers: { 'dn-ticket': second } });
+  kept.release();
 
   // Words in headers repeated every minute take no place from a member that paid for one.
   await w.run(61);
@@ -190,4 +196,99 @@ await check('a large request refused unread may be the second copy of one that w
   await w.run(30);
   assert.equal(answer.status, 504, 'the job is told the outcome is not known');
   assert.equal(req.requester.calls.filter((c) => c.op === 'perform').length, 1, 'and the comment is posted once');
+});
+
+await check('keys that take every place for a large body and send none keep no job\'s large request out: a ticket is void 10 s on, a member that had no place for a minute takes the ticket of one that just had, and a key whose tickets go unused gets none for a minute, twice as long each time, up to an hour', async () => {
+  const w = createWorld({ seed: 66 });
+  const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+  const { all: hogs, records } = w.crowd(req, 5, 1);
+  assert.deepEqual((await w.request(exe, req, 'push', { records }, { effort: POW.memberBase * 4 })).body.refused, []);
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'the job running' });
+  const job = exe.executor.jobOf(taskId);
+  const large = async () => {
+    const since = w.net.now();
+    const { status } = await w.wait(job.act(forgeRequest('POST', '/repos/o/r/pr-1/comments', { body: 'x'.repeat(120 * 1024) })));
+    return [status, w.net.now() - since < 5];
+  };
+  const [TICKET, UNUSED, NONE] = ['ticket', 'the tickets this member took went unused', 'no place for a large body is free'];
+  const reserve = async (from) => {
+    const answer = await w.request(from, req, 'reserve', { kind: 'push', bytes: 100000 }, { effort: POW.memberBase * 64 });
+    return answer.ok ? TICKET : answer.detail;
+  };
+  const four = hogs.slice(0, 4);
+  // Four keys take the four places. None of them just had one, so a fifth waits - 10 s.
+  assert.deepEqual(await Promise.all(four.map(reserve)), [TICKET, TICKET, TICKET, TICKET]);
+  assert.equal(await reserve(hogs[4]), NONE);
+  await w.run(9);
+  assert.equal(await reserve(hogs[4]), NONE);
+  await w.run(2);
+  // They take them again, and now each just had one: the job's host had none, and does not wait.
+  for (const key of four) assert.equal(await reserve(key), TICKET);
+  assert.deepEqual(await large(), [200, true]);
+  // It took the oldest of the four, whose key did not leave it unused. The others did, twice.
+  await w.run(11);
+  assert.deepEqual(await Promise.all(four.map(reserve)), [TICKET, UNUSED, UNUSED, UNUSED]);
+  // Half an hour of it, every key asking every 10 s: each of the job's requests gets through,
+  // and the keys get fewer tickets all the time.
+  const got = [];
+  let served = 0;
+  for (let n = 0; n < 180; n += 1) {
+    got.push((await Promise.all(hogs.map(reserve))).filter((answer) => answer === TICKET).length);
+    await w.run(10);
+    if (n % 9 === 8) served += (await large())[0] === 200 ? 1 : 0;
+  }
+  const tickets = (from, to) => got.slice(from, to).reduce((a, b) => a + b, 0);
+  assert.deepEqual([served, tickets(0, 180) <= 30, tickets(90, 180) <= 5], [20, true, true], `${tickets(0, 180)} tickets, ${tickets(90, 180)} in the second half`);
+  // A key that uses its ticket begins again at none unused. The first unused costs nothing,
+  // the second a minute, and so on up to an hour.
+  await w.run(3601);
+  const [key] = hogs;
+  const { ticket } = (await w.request(key, req, 'reserve', { kind: 'push', bytes: 110000 }, { effort: POW.memberBase * 64 })).body;
+  assert.equal((await w.request(key, req, 'push', { records: ['x'.repeat(100000)] }, { headers: { 'dn-ticket': ticket }, effort: POW.memberBase * 64 })).ok, true);
+  assert.equal(await reserve(key), TICKET);
+  await w.run(11);
+  for (const wait of [60, 120, 240, 480, 960, 1920, 3600, 3600]) {
+    assert.equal(await reserve(key), TICKET, `before the wait of ${wait} s`);
+    await w.run(wait - 4);
+    assert.equal(await reserve(key), UNUSED, `${wait} s`);
+    await w.run(16);
+  }
+});
+
+await check('a member and the keys in its seats have one place for a large body between them, and a body announced that never comes whole is a ticket unused', async () => {
+  const w = createWorld({ seed: 67 });
+  const [req, exe] = await w.pool(['req', 'exe']);
+  const evil = await w.intruder('evil', req);
+  const { all: puppets, records } = w.crowd(evil, 3);
+  assert.deepEqual((await w.request(evil, req, 'push', { records }, { effort: MEMBER * 4 })).body.refused, []);
+  const [UNUSED, NONE] = ['the tickets this member took went unused', 'no place for a large body is free'];
+  const reserve = async (from) => {
+    const answer = await w.request(from, req, 'reserve', { kind: 'push', bytes: 100000 }, { effort: MEMBER * 64 });
+    return answer.ok ? answer.body.ticket : answer.detail;
+  };
+  const announce = (ticket) => req.transport.host.limit({ 'dn-ticket': ticket, 'content-length': '100000' });
+  const ticket = await reserve(evil);
+  assert.deepEqual([await reserve(puppets[0]), await reserve(puppets[1])], [NONE, NONE], 'the place of the member that seated them is theirs');
+  assert.equal((await reserve(exe)).length, 22, 'a member seated elsewhere has its own');
+  // The headers of a body hold the place for as long as the transport waits for the rest.
+  const place = announce(ticket);
+  await w.run(30);
+  assert.deepEqual([place.bytes, await reserve(puppets[0])], [100000, NONE]);
+  place.release();
+  assert.equal((await reserve(puppets[0])).length, 22);
+  assert.equal(await reserve(evil), NONE, 'nor has the member a place while a key it seated has one');
+  await w.run(11);
+  // The body that never came was the member's first ticket wasted, and the next is its second.
+  announce(await reserve(evil)).release();
+  assert.equal(await reserve(evil), UNUSED);
+  await w.run(56);
+  assert.equal(await reserve(evil), UNUSED);
+  await w.run(5);
+  // A place is given back once: what its member reserved since is its own.
+  const later = await reserve(evil);
+  place.release();
+  assert.equal(announce(later).bytes, 100000);
+  // A member that reserves again left the ticket it had unused.
+  assert.deepEqual([(await reserve(exe)).length, await reserve(exe)], [22, UNUSED]);
 });
