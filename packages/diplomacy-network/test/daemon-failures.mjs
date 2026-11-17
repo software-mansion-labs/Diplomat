@@ -269,7 +269,7 @@ try {
     await b.admit(1);
     const model = (await until('B\'s word on the model', async () => { const s = await b.state(); return s.model.detail === 'not read yet' ? null : s; })).model;
     assert.deepEqual(model, { state: 'missing', detail: 'no networkModelToken, no Claude Code login and no ANTHROPIC_API_KEY on this machine' });
-    assert.equal((await b.state()).docker.state, 'ready');
+    await until('B\'s image to be built', async () => (await b.state()).docker.state === 'ready');
 
     const { taskId } = await a.ok('/offer', review('say taken'));
     await until('B knows the task', async () => (await taskOf(b, taskId))?.state === 'available');
