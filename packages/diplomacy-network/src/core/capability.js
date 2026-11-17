@@ -153,7 +153,7 @@ const OUTCOME = {
 };
 const DONE = {
   taskId: (v) => parseTaskId(v) !== null, round: (v) => isBytes(v, 8), spec: (v) => isBytes(v, 32),
-  outcome: (v) => shaped(v, OUTCOME),
+  outcome: (v) => shaped(v, OUTCOME, { capped: (c) => typeof c === 'boolean' }),
 };
 
 /// What names the job a host hands out with a key, to the executor that ran it and to
@@ -168,13 +168,14 @@ export function specDigest(spec) {
 }
 
 /// The outcome of a run as a `done` request carries it: whole numbers only, the cost in
-/// millionths of a dollar, every text cut to what the request allows.
-export function wireOutcome({ ok, summary, usd, tokens, runner, model } = {}) {
+/// millionths of a dollar, every text cut to what the request allows, and `capped: true`
+/// for one whose executor lowered the tokens or the cost its job named.
+export function wireOutcome({ ok, summary, usd, tokens, runner, model, capped } = {}) {
   const whole = (v) => (Number.isFinite(v) && v > 0 ? Math.min(Math.round(v), Number.MAX_SAFE_INTEGER) : 0);
   const cut = (v, max) => String(v ?? '').toWellFormed().slice(0, max);
   return {
     ok: ok === true, summary: cut(summary, MAX_SUMMARY), microUsd: whole(usd * 1e6), tokens: whole(tokens),
-    runner: cut(runner, MAX_LABEL), model: cut(model, MAX_LABEL),
+    runner: cut(runner, MAX_LABEL), model: cut(model, MAX_LABEL), ...(capped === true ? { capped } : {}),
   };
 }
 

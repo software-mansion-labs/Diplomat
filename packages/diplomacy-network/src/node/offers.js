@@ -7,9 +7,12 @@
 
 import { b64u, canon, unb64u } from '../core/canon.js';
 import { SeqTracker, buildCapability, capabilityExp, checkAct, checkDone, specDigest } from '../core/capability.js';
-import { buildPing, heldUntil, isActive, pingDue } from '../core/lease.js';
+import { buildPing, eligible, heldUntil, isActive, pingDue } from '../core/lease.js';
 import { LIMITS, backers, backing, buildTaskId, isBytes, isObject, offerRecord, parseTaskId, shaped } from '../core/records.js';
-import { CLOCK_SKEW_SECS, OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETRY_MS } from '../paths.js';
+import {
+  CLOCK_SKEW_SECS, KEYLESS_WAIT_MAX_MS, KEYLESS_WAIT_MS, LEASE_SECS, OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETAKE_WAIT_MS,
+  RETRY_MS,
+} from '../paths.js';
 import { claimKey, hoursOf, offerKey } from './gossip.js';
 
 const OPEN = ['pooled', 'claimed'];
@@ -107,7 +110,7 @@ export function createOffers(host) {
   // Signs the next version of an offer's record and tells the pool.
   function publish(P, O, state = 'open', record = signed(P, O, state)) {
     host.take(P, record);
-    host.gossip.spread(P, [offerKey(O.taskId, host.self)]);
+    host.gossip.deliver(P, [offerKey(O.taskId, host.self)]);
     save();
   }
 
@@ -130,7 +133,6 @@ export function createOffers(host) {
   // An attempt failed: the run said so, or its claim lapsed. The task goes back to the
   // pool until it has failed too often.
   function fail(P, O, round, reason) {
-    if (O.failed.includes(round)) return;
     O.failed.push(round);
     O.reason = text(reason, MAX_REASON);
     // The key of a claim that holds the offer since is not this attempt's to take back.
@@ -212,16 +214,42 @@ export function createOffers(host) {
     return true;
   }
 
-  /// This host gives its open offer of `taskId` to a claim: how many times it has given
-  /// that offer away with this one, the number that orders the claims it backs. Null when
-  /// it has no such offer open, or will not give it: what it holds of the pool is not up
-  /// to date, or the job was done elsewhere. The count is on disk before anyone sees it.
-  function nextGen(taskId) {
+  // A claim that let go of the offer before its hold ran out cost the offer nothing. Its
+  // executor is given the offer again only after a while, so that the other members go
+  // first: no member keeps an offer to itself by taking it up and giving it back.
+  function rest(O, claim, now) {
+    const watched = O.watch;
+    if (!watched || watched.round === claim?.round || now >= watched.lapses) return;
+    O.watch = null;
+    O.rests = { ...O.rests, [watched.executor]: now + RETAKE_WAIT_MS / 1000 };
+  }
+
+  // A claim lapsed that held the offer for less than a lease - dated back, or joined by
+  // this host's grant late in its lease - or that ended with its first lease and never
+  // had this host's key: no run was given its time, and the offer lost no attempt. The wait is on
+  // every key that sits where the executor does, and doubles each time: a member with
+  // keys of its own in its seats takes no more turns than one key.
+  function sat(P, O, executor, now) {
+    const branch = P.pool.branch(executor, now);
+    const times = (O.sat?.[branch]?.times ?? 0) + 1;
+    O.sat = { ...O.sat, [branch]: { times, until: now + Math.min(KEYLESS_WAIT_MAX_MS, KEYLESS_WAIT_MS * 2 ** (times - 1)) / 1000 } };
+  }
+
+  /// This host gives its open offer of `taskId` to a claim of `executor`: how many times
+  /// it has given that offer away with this one, the number that orders the claims it
+  /// backs. Null when it has no such offer open, or will not give it: what it holds of
+  /// the pool is not up to date, the job was done elsewhere, a claim of that executor let
+  /// go of the offer a moment ago, or one from among its seats sat on the offer unkeyed. The count is on disk before anyone sees it.
+  function nextGen(taskId, executor) {
     const O = offers[taskId];
     if (!O || !OPEN.includes(O.state)) return null;
     const P = host.pools.get(O.pool);
     host.look();
     if (P.stale !== null || finished(P, O)) return null;
+    const now = host.now();
+    // The claim may have let go since this host last looked at its offers.
+    rest(O, holder(P, O), now);
+    if (now < O.rests?.[executor] || now < O.sat?.[P.pool.branch(executor, now)]?.until) return null;
     O.gen += 1;
     save();
     return O.gen;
@@ -260,7 +288,7 @@ export function createOffers(host) {
       const deny = (detail) => ({ error: 'denied', detail });
       return inTurn(taskId, async () => {
         const O = offers[taskId];
-        if (!O || !OPEN.includes(O.state)) return deny('not offered by this host');
+        if (!O) return deny('not offered by this host');
         let claim = standing(P, O, from, round);
         if (!claim) return deny('no claim of that executor and round holds the offer of this host');
         if (issued[taskId] && (issued[taskId].round !== round || issued[taskId].capability.executor !== from)) revoke(taskId);
@@ -310,19 +338,27 @@ export function createOffers(host) {
         const context = await host.requester.context({ pool: P.link, task: specOf(O), state: (O.used ??= {}) });
         const verdict = await host.requester.authorize(K.capability.rules, body.request, context);
         save();
-        // The offer may have ended, or the claim, while the rules were asked.
-        if (issued[taskId] !== K) return { error: 'denied', detail: 'the key was taken back' };
-        if (verdict?.ok !== true) {
-          O.refused += 1;
-          save();
-          return { body: forgeAnswer(403, verdict?.reason ?? 'no rule covers this request') };
-        }
-        host.store.flush();
+        const request = verdict?.ok === true ? verdict.request ?? body.request : null;
+        let answer;
         try {
-          return { body: tidy(await host.requester.perform(verdict.request ?? body.request, { forge: P.link.forge, host: P.id.split('/')[0] })) };
-        } catch (err) {
-          return { body: forgeAnswer(502, `the forge could not be asked: ${err?.message ?? err}`) };
+          // The offer may have ended, or the claim, while the rules were asked.
+          if (issued[taskId] !== K) return { error: 'denied', detail: 'the key was taken back' };
+          if (!request) {
+            O.refused += 1;
+            return { body: forgeAnswer(403, verdict?.reason ?? 'no rule covers this request') };
+          }
+          host.store.flush();
+          try {
+            answer = await host.requester.perform(request, { forge: P.link.forge, host: P.id.split('/')[0] });
+            return { body: tidy(answer) };
+          } catch (err) {
+            return { body: forgeAnswer(502, `the forge could not be asked: ${err?.message ?? err}`) };
+          }
         } finally {
+          // The rules counted the request when they allowed it. One that got no answer
+          // here is settled with them as not sent: the forge is asked what became of it
+          // before the task's next one is judged.
+          if (request && !answer) host.requester.conclude(request);
           save();
           host.touch();
         }
@@ -340,11 +376,13 @@ export function createOffers(host) {
       // The offer may be another claim's by now: this host gave it on.
       const current = holder(P, O);
       if (current && current.executor !== from) return { body: {} };
-      const { ok, summary, microUsd, tokens, runner, model } = body.outcome;
+      const { ok, summary, microUsd, tokens, runner, model, capped } = body.outcome;
       O.reported.push(body.round);
       O.ran = from;
       // The executor's own words: another machine wrote them.
-      O.outcome = { ok, summary: plain(summary), usd: microUsd / 1e6, tokens, runner: plain(runner), model: plain(model) };
+      O.outcome = {
+        ok, summary: plain(summary), usd: microUsd / 1e6, tokens, runner: plain(runner), model: plain(model), ...(capped === true ? { capped } : {}),
+      };
       if (ok) end(P, O, 'done');
       else fail(P, O, body.round, summary);
       // The offer as the report leaves it: the executor holds it before it ends its claim.
@@ -372,23 +410,33 @@ export function createOffers(host) {
     const mine = P.pool.get(offerKey(taskId, host.self));
     if (!mine || now - mine.at >= RESIGN_INTERVAL_MS / 1000) publish(P, O);
 
+    rest(O, claim, now);
     const watched = O.watch;
     if (watched && watched.round !== claim?.round) {
       O.watch = null;
       const held = P.pool.get(claimKey(taskId, watched.executor));
       const same = held?.round === watched.round;
       // The hold ran out with no word of how the run ended: the lease lapsed, or the run
-      // outlived the hours this host gave it. A claim that let go of the offer before
-      // that - its executor ended it without a word of this host's job - counts for
-      // nothing: the offer is back in the pool as it was.
-      if (now >= watched.lapses && !O.reported.includes(watched.round)) {
+      // outlived the hours this host gave it.
+      if (O.reported.includes(watched.round)) {
+        // The run said how it ended.
+      } else if (watched.lapses - watched.since < LEASE_SECS || !(watched.extended || watched.keyed)) {
+        sat(P, O, watched.executor, now);
+      } else {
         const going = same && isActive(held, now);
         fail(P, O, watched.round, going ? 'not finished in the hours this machine gives it' : 'the machine running it stopped answering');
         if (!OPEN.includes(O.state)) return undefined;
       }
     }
     if (claim) {
-      O.watch = { round: claim.round, executor: claim.executor, lapses: heldUntil(claim, backing(claim, host.self)) };
+      // `since` is when this host first saw the claim hold its offer; a claim past its
+      // first lease was `extended` for a host that backs it; `keyed` is whether it has
+      // this host's key, noted here because a later claim's may replace the key before
+      // this host looks again.
+      O.watch = {
+        round: claim.round, executor: claim.executor, since: watched?.round === claim.round ? watched.since : now,
+        extended: claim.seq > 0, keyed: issued[taskId]?.round === claim.round, lapses: heldUntil(claim, backing(claim, host.self)),
+      };
       O.ran = claim.executor;
     }
     // A claim whose run said how it ended holds the offer until its executor ends it,
@@ -404,7 +452,8 @@ export function createOffers(host) {
     const K = issued[taskId];
     if (K && claim?.round === K.round && claim.executor === K.capability.executor) refresh(K, claim);
     else revoke(taskId);
-    if (claim && pingDue(claim, backing(claim, host.self), now) && O.pinged + RETRY_MS / 1000 <= now) {
+    // This host asks for the next lease of a run that has its key, and of no other.
+    if (claim && issued[taskId]?.round === claim.round && pingDue(claim, backing(claim, host.self), now) && O.pinged + RETRY_MS / 1000 <= now) {
       O.pinged = now;
       ping(P, O, claim).catch((err) => host.log(`a ping failed: ${err?.stack ?? err}`));
     }
@@ -421,7 +470,7 @@ export function createOffers(host) {
       const { sig: _, ...fields } = record;
       const state = O?.state === 'done' ? 'done' : 'cancelled';
       host.take(P, offerRecord(host.id, { ...fields, seq: record.seq + 1, at: Math.max(host.now(), record.at), state }));
-      host.gossip.spread(P, [offerKey(record.taskId, host.self)]);
+      host.gossip.deliver(P, [offerKey(record.taskId, host.self)]);
     }
   }
 
@@ -464,15 +513,26 @@ export function createOffers(host) {
     return Object.values(issued).some((K) => K.capability.executor === pk && now < K.capability.exp);
   }
 
-  /// The offers as the snapshot lists them.
+  /// The offers as the snapshot lists them. Of one that waits in the pool a row says what
+  /// keeps this host from running it itself: `leftUntil`, until when the host leaves the
+  /// task to the others, having failed at it or given it back, or 0; `leftForGood`, that
+  /// its operator stopped a run of it here; `tooLong`, that it needs more hours than
+  /// this host accepts.
   function rows() {
-    return Object.values(offers).map((O) => ({
-      taskId: O.taskId, pool: O.pool, kind: O.kind, item: O.item, title: O.title, state: O.state,
-      executor: O.executor, executorHere: O.executor === host.self, backedBy: O.backedBy ?? [],
-      attempt: Math.min(OFFER_ATTEMPTS, O.failed.length + 1),
-      requests: O.requests, refused: O.refused, outcome: O.outcome, reason: O.reason, offeredAt: O.offeredAt,
-      endedAt: O.endedAt,
-    }));
+    const now = host.now();
+    return Object.values(offers).map((O) => {
+      const P = O.state === 'pooled' ? host.pools.get(O.pool) : null;
+      const left = P ? host.runs.left(O.taskId, P.pool.task(O.taskId, now)?.createdAt) : 0;
+      const me = P?.pool.member(host.self, now);
+      return {
+        taskId: O.taskId, pool: O.pool, kind: O.kind, item: O.item, title: O.title, state: O.state,
+        executor: O.executor, executorHere: O.executor === host.self, backedBy: O.backedBy ?? [],
+        attempt: Math.min(OFFER_ATTEMPTS, O.failed.length + 1),
+        requests: O.requests, refused: O.refused, outcome: O.outcome, reason: O.reason, offeredAt: O.offeredAt,
+        endedAt: O.endedAt, leftUntil: Number.isFinite(left) ? left : 0, leftForGood: left === Infinity,
+        tooLong: Boolean(me) && !eligible(me.maxAcceptedH, O.hours),
+      };
+    });
   }
 
   return { offer, withdraw, nextGen, step, closing, atOnce, keyHeldBy, rows, handlers };

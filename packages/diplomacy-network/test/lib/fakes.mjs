@@ -14,13 +14,14 @@ export function forgeRequest(method, path, body = null) {
 
 /// A requester with rules for the kinds in `kinds`: a task may reach what lies under its
 /// own item, and what is performed is the request with the requester's name put on it.
-/// `calls` lists every `authorize` and `perform` as `{ op, path, ... }`; `refuse(part,
-/// reason)` makes it refuse every request whose path holds `part`; `broken` makes the
-/// forge unreachable.
+/// `calls` lists every `authorize` and `perform` as `{ op, path, ... }`, and `unsent` the
+/// path of every allowed request it was told got no answer; `refuse(part, reason)` makes
+/// it refuse every request whose path holds `part`; `broken` makes the forge unreachable.
 export function fakeRequester({ kinds = ['review', 'fix'] } = {}) {
   const refusals = [];
   return {
     calls: [],
+    unsent: [],
     broken: false,
     rulesAsked: 0,
     refuse: (part, reason) => refusals.push({ part, reason }),
@@ -38,6 +39,9 @@ export function fakeRequester({ kinds = ['review', 'fix'] } = {}) {
       if (refusal) return { ok: false, reason: refusal.reason };
       if (!rule) return { ok: false, reason: 'no rule covers this request' };
       return { ok: true, request: { ...request, headers: { ...request.headers, authorization: rule.as } } };
+    },
+    conclude(request) {
+      this.unsent.push(request.path);
     },
     async perform(request, { forge, host }) {
       this.calls.push({ op: 'perform', path: request.path, forge, host, as: request.headers.authorization ?? null });
@@ -63,10 +67,10 @@ export function fakeExecutor() {
       return this.takes(task);
     },
     start(args) {
-      if (this.failStart) throw new Error('no docker');
+      if (this.failStart) throw Object.assign(new Error('no docker'), this.failStart === 'local' ? { name: 'OwnFault' } : {});
       this.started.push(args);
       jobs.set(args.runId, { args, alive: true });
-      return { container: `box-${args.runId}`, log: `/logs/${args.runId}.jsonl` };
+      return { container: `box-${args.runId}` };
     },
     stop(runId, reason) {
       this.stopped.push({ runId, reason });

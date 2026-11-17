@@ -77,6 +77,61 @@ export function solveAsync(c, effort, { signal } = {}) {
   });
 }
 
+/// What a host paid its peers in the last hour, in hashes expected, and whether it pays
+/// more: `peer` is the most for one peer, `all` the most for all of them together, and
+/// `floor` what a peer known for `floorAfter` seconds is paid whatever the others took.
+export class Spending {
+  #limits;
+  #all = { paid: [], spent: 0 };
+  #peers = new Map();
+
+  constructor(limits) {
+    this.#limits = limits;
+  }
+
+  /// Takes `effort` for the peer `pk`, known since `since`, out of this hour at `now`;
+  /// false, with nothing taken, when that much is not left.
+  pay(pk, since, effort, now) {
+    if (!this.#peers.has(pk)) this.#peers.set(pk, { paid: [], spent: 0 });
+    const one = this.#peers.get(pk);
+    for (const purse of [one, this.#all]) {
+      while (purse.paid.length > 0 && purse.paid[0][0] <= now - 3600) purse.spent -= purse.paid.shift()[1];
+    }
+    const { peer, all, floor, floorAfter } = this.#limits;
+    if (one.spent + effort > peer) return false;
+    const anyway = now - since >= floorAfter && one.spent + effort <= floor;
+    if (!anyway && this.#all.spent + effort > all) return false;
+    for (const purse of [one, this.#all]) {
+      purse.paid.push([now, effort]);
+      purse.spent += effort;
+    }
+    return true;
+  }
+}
+
+/// A `solve(c, effort, { signal })` that works on at most `workers` proofs at a time,
+/// each on a thread of its own, and takes the cheapest of those waiting first: a proof
+/// at the highest price keeps no cheap one waiting longer than the ones already begun.
+export function solverPool(workers, run = solveAsync) {
+  const waiting = [];
+  let running = 0;
+  const next = () => {
+    while (running < workers && waiting.length > 0) {
+      const job = waiting.shift();
+      running += 1;
+      run(job.c, job.effort, job.options).then(job.resolve, job.reject).finally(() => {
+        running -= 1;
+        next();
+      });
+    }
+  };
+  return (c, effort, options) => new Promise((resolve, reject) => {
+    const at = waiting.findIndex((other) => other.effort > effort);
+    waiting.splice(at < 0 ? waiting.length : at, 0, { c, effort, options, resolve, reject });
+    next();
+  });
+}
+
 if (!isMainThread && workerData?.dn1pow) {
   const { challenge: c, effort } = workerData.dn1pow;
   parentPort.postMessage(solve(Buffer.from(c), effort).counter);
@@ -89,8 +144,7 @@ export function check(c, effort, counter) {
 }
 
 /// How much work each sender owes one target. A member has a window of its own; every
-/// stranger shares one, which also counts the requests refused before their signature
-/// could name a sender.
+/// stranger shares one.
 export class EffortMeter {
   #tiers;
   #windowSecs;
@@ -129,17 +183,13 @@ export class EffortMeter {
     return base * 2 ** doublings;
   }
 
-  /// Counts a request that passed its signature toward its sender.
+  /// Counts a request toward its sender: a member's toward that member, any other toward
+  /// the strangers.
   count(sender, member, now) {
     const { allow, cap } = this.#tiers[member ? 'member' : 'stranger'];
     const times = this.#times(sender, member);
     times.push(now);
     // Past the last doubling one more request changes nothing, so nothing older is kept.
     if (times.length > Math.max(1, allow * 2 ** (cap - 1))) times.shift();
-  }
-
-  /// Counts a request refused before its signature was checked: toward the strangers.
-  countFailure(now) {
-    this.count(null, false, now);
   }
 }

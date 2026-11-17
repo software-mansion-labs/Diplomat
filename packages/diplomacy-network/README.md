@@ -21,7 +21,7 @@ src/
     pow.js         seed, challenge, solve, verify, the effort a sender owes
     envelope.js    request and response envelopes: build, verify
     records.js     member, offer and claim records: shape, signature, precedence
-    membership.js  invites and the accepted-member set
+    membership.js  invites, vouchers and who is seated
     pool.js        one pool's record set: merge, index, state hash, task view
     claims.js      locks, grants, ranks, the claim round's decisions
     lease.js       hours, leases, pings, extensions, lapse
@@ -88,12 +88,13 @@ closed at every start.
 | `state.json` | the snapshot as the daemon last had it, for a person looking into a daemon that no longer answers: the applets ask the socket |
 | `identity.json` (0600) | the host key |
 | `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it, or at or before the second of the start where that time is ahead of this machine's clock |
+| `peers.json` (0600) | the machines this host has asked in vain for more than 3 minutes, and since when: after a start a claim round waits 15 s for each of them, not the 90 s and more it gives a machine it has yet to reach |
 | `links.json` (0600) | the linked repositories, as Diplomat last posted them |
 | `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left |
 | `locks.json` (0600) | the claim locks this host granted |
 | `keys.json` (0600) | live capabilities this host issued or holds |
-| `offers.json` (0600) | the tasks this host asked for: prompt, counters, outcome, and what each has used of its rules' allowances |
-| `runs.json` (0600) | the tasks this host runs or ran, and the tasks it gave up on |
+| `offers.json` (0600) | the tasks this host asked for: prompt, counters, outcome, what each has used of its rules' allowances, and which members gave it back a moment ago |
+| `runs.json` (0600) | the tasks this host runs or ran, and the tasks it gave up on: how often, and until when it leaves each alone |
 | `jobs.json` (0600) | the jobs going in this daemon's containers, for the daemon after it: the broker's port, and each job's container, proxy token, CA generation, process group, forwards and what it has spent of the model, the last no more than 5 s behind |
 | `tor/` | tor's data directory |
 | `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it. A leaf is good for 90 days, is replaced from two weeks before its end, under a running job too, and is removed once past it |
@@ -102,18 +103,17 @@ closed at every start.
 | `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed once its directory is gone |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
-The node's documents are written in one order - identity, `heard`, links, pools, locks,
+The node's documents are written in one order - identity, `heard`, `peers`, links, pools, locks,
 keys, offers, runs - each whole, through a temporary file: a run is on disk only after
 the key it was started with. They are read back as plain JSON; only what travels between
-hosts has to be canonical. A pool's document holds at most 256 members with at most 256
+hosts has to be canonical. A pool's document holds at most 241 members with at most 256
 KiB of records each (PROTOCOL.md section 5), and is rewritten when a record of it
 changes.
 
 A job's directory is kept for the day after its end for the operator to see what the job
 did: `runs/<run id>/log.jsonl` is the agent's stream. It is the job's own writing - a job
 can put a link, a pipe or a file of any size in its place - so the snapshot names no file
-of it, and a run's `log` there is empty; nothing else reads the directory once the outcome
-is reported. A machine that leaves the network has no further use
+of it; nothing else reads the directory once the outcome is reported. A machine that leaves the network has no further use
 for any of it: when the network is switched off, `runs/`, `mirrors/` and `ca/` are
 removed whole, once nothing is left in docker that could still write there. Its key, its
 pools, its links and what it offered stay - switched on again it is the member it was -
@@ -170,7 +170,7 @@ daemon is up; the transport comes up behind it, and over Tor that takes minutes.
 | `POST /invite` | `{ pool, ttlSecs? }` | `{ invite }` |
 | `POST /join` | `{ invite }` or `{ pool }` | `{ pool }` - by invite into someone's pool, or back into a pool this machine left |
 | `POST /leave` | `{ pool }` | `{ ok: true }` |
-| `POST /stop-run` | `{ runId }` | `{ ok: true }` - the run is stopped and its claim released; the task is in the pool again for another machine |
+| `POST /stop-run` | `{ runId }` | `{ ok: true }` - the run is stopped and its claim released; the task is in the pool again for another machine, and this one does not take it again while that offer stands |
 
 Every other answer is `{ error }` with a status that says whose fault it was:
 
@@ -200,7 +200,20 @@ and on switch-off without keeping count. Only a malformed body is refused.
 `join` by invite needs the invite's repository linked on this machine first; otherwise
 it is refused with `The pool <id> is not linked on this machine.` An invite that is no
 invite, has run out, is not signed by the machine it names, or was made on this machine
-is refused with a sentence saying which.
+is refused with a sentence saying which. `join` answers once the invite is kept: the
+machine that made it is asked for a seat then, and again, less and less often, until it
+answers or the invite runs out. When that machine gives none, the log says `the invite
+to <pool> let this host in nowhere: <why>` and this machine stays the only member of
+its own pool. An invite lets in every machine that brings it before it runs out.
+
+`invite` is refused when this machine has no seat to give (PROTOCOL.md section 5):
+`This machine is 2 invites away from the one that started the pool <id>, and invites
+nobody: ask a machine nearer to that one.` or `Every one of the 15 machines this one may
+invite into the pool <id> is a member of it: ask another machine of the pool.`
+
+Member records signed by a build that knew no vouchers are not read. A machine that
+finds none of its own that it can read is the only member of its pool, with the tasks
+it offered, and the other machines join it by invite again.
 
 `pools` is the whole list every time, so Diplomat posts it only when it knows every
 linked repository and whose account each is: a list cut short makes this machine leave
@@ -243,22 +256,27 @@ The snapshot:
           "executor": "", "executorHere": false, "claimedAt": 0, "leaseUntil": 0, "deadline": 0 } ] } ],
   "runs": [ { "runId": "", "taskId": "", "pool": "", "peer": "", "container": "",
       "state": "preparing|running|finished|failed|stopped", "startedAt": 0, "endedAt": 0,
-      "exit": 0, "log": "" } ],
+      "exit": 0 } ],
   "offers": [ { "taskId": "", "pool": "", "kind": "", "item": "", "title": "",
       "state": "pooled|claimed|done|failed|cancelled", "reason": "", "executor": "",
       "executorHere": false, "backedBy": [""], "offeredAt": 0, "attempt": 1, "requests": 0,
       "refused": 0,
       "outcome": { "ok": true, "summary": "", "usd": 0, "tokens": 0, "runner": "", "model": "" },
-      "endedAt": 0, "notTaking": "" } ] }
+      "endedAt": 0, "leftUntil": 0, "leftForGood": false, "tooLong": false, "notTaking": "" } ] }
 ```
 
 Every time is Unix seconds. `offers` are the tasks this machine asked for: `pooled` while
 nobody holds it, `claimed` while an executor does, `done` when an executor finished it
 well, `failed` when its attempts ran out (`reason` says how the last one ended), and
 `cancelled` once withdrawn, or once this machine was away for longer than an offer
-lasts (`reason` says which). `outcome` is null until an attempt has reported one. An
-ended offer stays in the list for a day, and keeps the `executor` and `executorHere` of
-the machine that last held it - the one that reported it done, or the last to hold it
+lasts (`reason` says which). `outcome` is null until an attempt has reported one, and
+carries `"capped": true` beside the rest when the machine that ran the job lowered the
+tokens or the cost the job named to what it measured. An offer gets three attempts. A machine that failed at one leaves the task to the other
+machines for two minutes, then four, and goes for it again when none took it - so a
+machine alone in its pool makes all three itself. A claim given back with no job run -
+the run was stopped, or could not start for a fault of the machine that took it - uses
+up no attempt. An ended offer stays in the list for a day, and keeps the `executor` and
+`executorHere` of the machine that last held it - the one that reported it done, or the last to hold it
 before it failed or was cancelled; `executor` is empty only when nobody ever held it.
 
 An offer may also be `done` with no report: its job was run for another machine's offer
@@ -277,10 +295,17 @@ A pool's `notTaking` is why this machine takes none of that pool's jobs, in a se
 and empty while it takes them: the transport is not up, docker is not ready, there is no
 credential for the model, or the last job of the pool could not be started here
 ("Executor side" below). An offer's `notTaking` is why this machine does not take that
-job of its own while it is `pooled`: its pool's `notTaking`, or
+job of its own while it is `pooled`: its pool's `notTaking`;
 `this machine takes jobs of at most 12 h and this one needs 24` when
-`networkRequiredMinimumH` is above `networkMaximumAcceptedH`. It is empty for a job
-this machine is free to take, and for one that is not `pooled`. `admit` is Diplomat's
+`networkRequiredMinimumH` is above `networkMaximumAcceptedH`;
+`its run was stopped on this machine, which does not take it again` once the operator
+stopped a run of it here; or
+`this machine failed at it or gave it back, and leaves it to the others until <time>`.
+It is empty for a job this machine is free to take, and for one that is not `pooled`.
+The last three are in the row as it comes from the node too, for a `pooled` offer:
+`tooLong`, `leftForGood`, and `leftUntil` - the Unix second until which the machine
+leaves the job alone, 0 when it does not. A machine alone in its pool takes the job
+itself when that time has come. `admit` is Diplomat's
 word and is said nowhere else: with no slot free a job waits unless its operator
 started it with `now`.
 
@@ -403,6 +428,15 @@ differs has done nothing by that run: its offer is free again when the run ends 
 run next, by itself. Withdrawing or failing an offer on one machine changes nothing on
 another.
 
+No machine owns a task in the pool: any machine in it with a free slot may take it. But
+a task cannot do without the machine that offered it. Only that machine gives the task
+to the one that takes it, hands out the prompt and the key, makes every request to the
+forge, and keeps the run's lease going. While it is asleep or off, a task of its that
+nobody took is taken by nobody, a run of a task of its cannot reach the forge and is
+stopped when its lease ends - two hours at most, and ten minutes - and after a day its
+offers are gone from the pool. And a machine that does not answer when a task is taken
+is not waited for: the task is taken without it, with its name on the claim as absent.
+
 A machine that was asleep, off or without a network while its job was run for another
 machine's offer finds the run on record when it is back, and marks its own offer done
 without a second run. It asks the pool what it missed before it does anything for its
@@ -491,7 +525,7 @@ or `claim of <task> stood down: <why> - ...` with the same numbers - then
 `job of <task> started 0 s after its claim`. The wait is the one of the machine's rank
 and of what it weighed; a member counts as absent once the round stopped waiting for it;
 and a round that stood down leaves its task alone for 30 to 60 s. A machine that came
-back also says when it could go on:
+back to a pool with other machines in it also says, once, when it could go on:
 `<pool> is up to date 0 s after this host came back to it`.
 
 **Executor side.** With `admit.slots` above zero and a task with a free offer that this

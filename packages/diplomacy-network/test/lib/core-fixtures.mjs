@@ -5,9 +5,9 @@ import crypto from 'node:crypto';
 import { b64u } from '../../src/core/canon.js';
 import { ClaimRound, LockTable, buildClaim } from '../../src/core/claims.js';
 import { identityFromSeed } from '../../src/core/identity.js';
-import { createInvite, inviteToken } from '../../src/core/membership.js';
+import { createInvite, createVoucher, inviteToken } from '../../src/core/membership.js';
 import { Pool } from '../../src/core/pool.js';
-import { memberRecord, offerRecord } from '../../src/core/records.js';
+import { LIMITS, memberRecord, offerRecord } from '../../src/core/records.js';
 
 export const POOL = 'github.com/acme/widgets';
 export const T0 = 1794000000;
@@ -52,9 +52,26 @@ export function invite(by, { exp = T0 + 86400, n = 0, pool = POOL } = {}) {
   return inviteToken(createInvite(by, { pool, exp, nonce: digest(`invite ${n}`).subarray(0, 16) }));
 }
 
-/// A member record of the test pool; `over` replaces any field.
+/// What `member` signs a voucher from: seat `n` of `by` in the test pool, given at `at`
+/// in its membership `era`.
+export function seat(by, { n = 0, at = T0, pool = POOL, era = 0 } = {}) {
+  return { by, n, at, pool, era };
+}
+
+/// A member record of the test pool; `over` replaces any field. A `voucher` made by
+/// `seat` is signed for this member's key; any other is carried as it is.
 export function member(id, over = {}) {
-  return memberRecord(id, { pool: POOL, seq: 0, at: T0, joinedAt: T0, maxAcceptedH: 12, ...over });
+  const { by, n, at, pool, era } = over.voucher ?? {};
+  const voucher = by?.seed ? createVoucher(by, { pool, era, pk: id.pk, seat: n, at }) : over.voucher;
+  return memberRecord(id, { pool: POOL, seq: 0, at: T0, era: 0, maxAcceptedH: 12, ...over, voucher });
+}
+
+/// The member records of `ids` as one pool: the first started it, the next
+/// `LIMITS.invitees` hold its seats - the nth its seat n, the last its seat 0 - and the ones after them the
+/// seats of those, in order.
+export function family(ids, over = () => ({})) {
+  const parent = (i) => (i <= LIMITS.invitees ? 0 : 1 + Math.floor((i - 1 - LIMITS.invitees) / LIMITS.invitees));
+  return ids.map((id, i) => member(id, { ...(i === 0 ? {} : { voucher: seat(ids[parent(i)], { n: (i <= LIMITS.invitees ? i : i - 1) % LIMITS.invitees }) }), ...over(i) }));
 }
 
 /// An offer of the test pool's "review pr-578 as octocat"; `over` replaces any field.
@@ -71,12 +88,13 @@ function counter() {
   return () => (n += 1);
 }
 
-/// `n` hosts sharing the test pool: host 0 started it and invited every other. Each is
+/// `n` hosts sharing the test pool: host 0 started it, and the others hold the seats
+/// under it as `family` gives them. Each is
 /// `{ id, pool, locks, nextGen }` and already holds every member record; `nextGen` is
 /// what the host hands `LockTable.answer`.
 export function club(n, now = T0, over = () => ({})) {
   const ids = Array.from({ length: n }, (_, i) => ident(i));
-  const members = ids.map((id, i) => member(id, { ...(i === 0 ? {} : { voucher: invite(ids[0], { n: i }) }), ...over(i) }));
+  const members = family(ids, over);
   return ids.map((id) => {
     const pool = new Pool({ id: POOL, self: id.pk });
     pool.merge(members, now);

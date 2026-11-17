@@ -9,8 +9,9 @@ import { buildClaim, buildGrant } from '../src/core/claims.js';
 import { KINDS, buildResponse, requestDigest } from '../src/core/envelope.js';
 import { sign, verify } from '../src/core/identity.js';
 import { buildPing, endClaim } from '../src/core/lease.js';
-import { buildCapability } from '../src/core/capability.js';
-import { backers, buildTaskId, offerRecord } from '../src/core/records.js';
+import { buildCapability, specDigest, wireOutcome } from '../src/core/capability.js';
+import { createVoucher } from '../src/core/membership.js';
+import { backers, buildTaskId, memberRecord, offerRecord } from '../src/core/records.js';
 import { POW } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
@@ -74,7 +75,7 @@ await check('every kind of request, with a body of every wrong shape, gets a sig
   ];
   for (const options of envelopes) {
     const { said } = await say(w, evil, req, 'sync', { asOf: w.net.now(), hash: before }, { effort: POW.memberBase * 4, ...options });
-    assert.ok(['bad-request', 'denied', 'stale'].includes(said.split(':')[0]), `${options.bytes ?? options.mangle} -> ${said}`);
+    assert.ok(['bad-request', 'effort', 'stale'].includes(said.split(':')[0]), `${options.bytes ?? options.mangle} -> ${said}`);
   }
 
   assert.deepEqual(req.log.filter((line) => /could not be served|step failed/.test(line)), [], 'nothing threw');
@@ -208,7 +209,7 @@ await check('a member whose index has one page after another is asked for so man
   const taskId = buildTaskId({ pool: POOL, kind: 'review', item: 'pr-1', identity: 'octocat' });
   // Each page names one record more, of one host more, that it never hands over.
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const keys = [...letters].flatMap((x) => [...letters].map((y) => `offer/${taskId}/${x}${y}${'A'.repeat(41)}`));
+  const keys = [...letters].flatMap((x) => [...letters].map((y) => `offer/${taskId}/${x}${y}${'Q'.repeat(41)}`));
   const chains = [];
   evil.transport.onRequest(async (bytes) => {
     const request = JSON.parse(bytes.toString('utf8'));
@@ -328,4 +329,133 @@ await check('a host that gives its offer under a number it had passed gives noth
   assert.deepEqual(backers(w.claim(by, TASK, exe)), [evil.pk]);
   assert.deepEqual([w.net.count({ from: 'exe', kind: 'key' }), exe.executor.started.length, w.runOf(exe, TASK).state], [0, 0, 'stopped']);
   assert.deepEqual(exe.log.filter((line) => /could not be|step failed|failed:/.test(line)), []);
+});
+
+await check('a claim dated back to lapse as it lands, or whose executor never asks for the key, costs the offer no attempt, and that executor and the keys seated with it wait twice as long for the offer each time', async () => {
+  const w = createWorld({ seed: 92 });
+  const [v] = await w.pool(['v']);
+  await w.net.until(() => v.transport.host.ready, { what: 'its transport' });
+  const [evil, other] = [await w.intruder('evil', v), await w.intruder('other', v)];
+  // A key of the member's own in one of its seats.
+  const puppet = w.stranger('puppet');
+  const seat = createVoucher(evil.id, { pool: POOL, era: 0, pk: puppet.pk, seat: 0, at: w.net.now() });
+  const seated = memberRecord(puppet.id, { pool: POOL, seq: 0, at: w.net.now(), era: 0, maxAcceptedH: 12, voucher: seat });
+  assert.deepEqual((await say(w, evil, v, 'push', { records: [seated] }, { effort: 4096 })).body.refused, []);
+  const { taskId } = await v.node.offer(offerArgs('pr-1'));
+  let rounds = 0;
+  // A lock the host really gives `who`, and a claim of `who`'s own making on it, dated
+  // `dated` s from the lock: what the host made of it.
+  const grab = async (who, dated = 0, then = async () => {}) => {
+    const now = w.net.now();
+    const round = b64u(Buffer.from([0, 0, 0, 0, 0, 0, 1, rounds += 1]));
+    // It stays a member: its record is signed again as the hours go by.
+    const mine = w.records(v).find((r) => r.type === 'member' && r.pk === who.pk);
+    if (now - mine.at > 3600) await say(w, who, v, 'push', { records: [memberRecord(who.id, { ...mine, seq: mine.seq + 1, at: now })] }, { effort: 4096 });
+    const { grant } = (await say(w, who, v, 'lock', { taskId, round, asOf: now, hash: w.view(v).hash }, { effort: 4096 })).body;
+    if (!grant?.offer) {
+      await say(w, who, v, 'unlock', { taskId, round }, { effort: 4096 });
+      return 'not given';
+    }
+    const claim = buildClaim(who.id, { pool: POOL, taskId, round, gen: grant.offer.gen, grants: [grant], absent: [evil, other, puppet].filter((m) => m !== who).map((m) => m.pk).sort(), now: now + dated });
+    const { body } = await say(w, who, v, 'push', { records: [claim] }, { effort: 4096 });
+    await then(round);
+    return body.refused[0]?.code ?? 'held';
+  };
+  const row = () => [w.offerRow(v, taskId).state, w.offerRow(v, taskId).attempt];
+  const lapse = async () => {
+    const since = w.net.now();
+    await w.net.until(() => w.offerRow(v, taskId).state !== 'claimed', { maxMs: 4 * 3600 * 1000, what: 'the claim lapsed' });
+    return Math.round((w.net.now() - since) / 600);
+  };
+  const key = async (round) => assert.equal((await say(w, evil, v, 'key', { taskId, round }, { effort: 4096 })).said, 'ok');
+  assert.equal(await grab(evil, 121), 'bad-grant', 'dated after its grant ran out');
+  await w.run(121);
+  // A claim dated two hours back, its key asked for, to lapse as it lands: no attempt
+  // of the offer's, which is not that member's again for 2 hours, nor a key's it seated.
+  assert.equal(await grab(evil, -7780, key), 'held');
+  assert.deepEqual([await lapse(), row()], [0, ['pooled', 1]]);
+  assert.deepEqual([await grab(evil), await grab(puppet)], ['not given', 'not given']);
+  const hoursTo = async (who, most) => {
+    for (let h = 0; h <= most; h += 1) {
+      if (await grab(who) === 'held') return h;
+      await w.run(3600);
+    }
+    return null;
+  };
+  // One never asked for its key holds the offer for a lease and its grace, unasked for
+  // more, and costs it nothing either: the wait is 4 hours then, and anyone else's none.
+  assert.equal(await hoursTo(puppet, 4), 2);
+  assert.deepEqual([row(), await lapse(), row()], [['claimed', 1], 13, ['pooled', 1]]);
+  assert.deepEqual([w.net.count({ from: 'v', to: 'evil', kind: 'ping' }) > 0, w.net.count({ from: 'v', to: 'puppet', kind: 'ping' })], [true, 0], 'a claim that never asked for its key is asked for no lease');
+  await w.run(3 * 3600);
+  assert.deepEqual([await grab(evil), await grab(other)], ['not given', 'held']);
+  await lapse();
+  assert.deepEqual([row(), await hoursTo(evil, 3)], [['pooled', 1], 0]);
+  // With the key in hand the same lapse is an attempt of the offer's.
+  await lapse();
+  await w.run(9 * 3600);
+  assert.equal(await grab(evil, 0, key), 'held');
+  await lapse();
+  assert.deepEqual([row(), w.offerRow(v, taskId).reason], [['pooled', 2], 'the machine running it stopped answering']);
+  // The wait doubles as far as a day.
+  assert.equal(await grab(evil), 'held');
+  await lapse();
+  assert.equal(await hoursTo(evil, 20), 16);
+  await lapse();
+  assert.equal(await hoursTo(evil, 40), 24);
+  // A run that says it failed is one attempt, however often it says so, and though its
+  // claim then holds the offer until it lapses.
+  await lapse();
+  const told = (body) => say(w, other, v, 'done', body, { effort: 4096 });
+  const report = async (round) => {
+    const { body } = await say(w, other, v, 'key', { taskId, round }, { effort: 4096 });
+    const done = { taskId, round, spec: specDigest(body.spec), outcome: wireOutcome({ ok: false, summary: 'it broke' }) };
+    assert.deepEqual([(await told(done)).said, row()], ['ok', ['pooled', 3]]);
+    assert.deepEqual([(await told(done)).body, row()], [{}, ['pooled', 3]]);
+  };
+  assert.equal(await grab(other, 0, report), 'held');
+  await w.run(3 * 3600);
+  assert.deepEqual([row(), w.offerRow(v, taskId).reason], [['pooled', 3], 'it broke']);
+  // What a run reports of an offer its host took back changes nothing of that offer.
+  let late = null;
+  assert.equal(await grab(other, 0, async (round) => {
+    const { body } = await say(w, other, v, 'key', { taskId, round }, { effort: 4096 });
+    late = { taskId, round, spec: specDigest(body.spec), outcome: wireOutcome({ ok: true, summary: 'done after all' }) };
+  }), 'held');
+  await v.node.withdraw({ taskId });
+  assert.deepEqual([(await told(late)).body, w.offerRow(v, taskId).state, w.offerRow(v, taskId).outcome.summary], [{}, 'cancelled', 'it broke']);
+  assert.equal(w.records(v).find((r) => r.type === 'offer' && r.taskId === taskId).state, 'cancelled');
+});
+
+await check('a host that gave a rival its lock on a task starts no round of its own on that task while the lock binds', async () => {
+  const w = createWorld({ seed: 94 });
+  const all = await w.pool(['req', 'v']);
+  const [req, v] = all;
+  const evil = await w.intruder('evil', req);
+  await w.net.until(() => all.every((h) => w.members(h).includes(evil.pk)), { what: 'the member known' });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  const since = w.net.now();
+  assert.equal((await say(w, evil, v, 'lock', { taskId, round: ROUND, asOf: since, hash: w.view(v).hash })).body.grant.executor, evil.pk);
+  v.slots = 1;
+  v.node.admit({ slots: 1 });
+  await w.run(110 - (w.net.now() - since));
+  assert.deepEqual([w.net.count({ from: 'v', kind: 'lock', since }), v.executor.started.length], [0, 0]);
+  await w.net.until(() => v.executor.jobOf(taskId), { what: 'its own round once the lock ran out' });
+  assert.ok(w.net.now() - since >= 120, `${w.net.now() - since} s after the lock`);
+});
+
+await check('a lock binds for 120 s by the clock of the member that gave it, whatever time its claimant names', async () => {
+  const w = createWorld({ seed: 93 });
+  const all = await w.pool(['req', 'a', 'b']);
+  const [req, a, b] = all;
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  const lock = (from, round, ahead = 0) => say(w, from, req, 'lock', { taskId, round, asOf: w.net.now() + ahead, hash: w.view(req).hash });
+  const given = w.net.now();
+  assert.equal((await lock(a, ROUND, 300)).body.grant.exp, given + 300 + 120, 'the grant is good for the time its claimant asked about');
+  await w.run(119 - (w.net.now() - given));
+  assert.deepEqual((await lock(b, 'BBBBBBBBBBA')).body.challenge, { reason: 'locked', holder: a.pk });
+  await w.run(3);
+  assert.equal((await lock(b, 'BBBBBBBBBBA')).body.grant.executor, b.pk);
 });

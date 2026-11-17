@@ -194,9 +194,9 @@ export class LockTable {
     if (pool.stateHash(body.asOf) !== body.hash) return { body: { stale: true } };
     const task = pool.task(body.taskId, now);
     if (!task || task.free.length === 0) return { body: { challenge: { reason: 'unavailable' } } };
-    const exp = body.asOf + GRANT_TTL_SECS;
     const before = this.holder(body.taskId, now);
-    if (!this.hold(body.taskId, from, body.round, exp, now)) {
+    // The lock binds by this member's clock, whatever time the claimant says it is.
+    if (!this.hold(body.taskId, from, body.round, now + GRANT_TTL_SECS, now)) {
       return { body: { challenge: { reason: 'locked', holder: before.executor } } };
     }
     const mine = task.offers.find((o) => o.host === identity.pk);
@@ -204,7 +204,7 @@ export class LockTable {
     const gen = mine && !mine.claim && claimant.maxAcceptedH >= mine.hours ? again ?? nextGen() : null;
     if (gen !== null) Object.assign(this.#locks.get(body.taskId), { at: mine.createdAt, gen });
     const grant = buildGrant(identity, {
-      pool: pool.id, taskId: body.taskId, executor: from, round: body.round, hash: body.hash, exp,
+      pool: pool.id, taskId: body.taskId, executor: from, round: body.round, hash: body.hash, exp: body.asOf + GRANT_TTL_SECS,
       ...(gen === null ? {} : { offer: { at: mine.createdAt, gen, hours: mine.hours } }),
     });
     return { body: { grant } };

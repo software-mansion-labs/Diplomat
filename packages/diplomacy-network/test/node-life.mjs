@@ -5,7 +5,7 @@
 import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
-import { MAX_ACT_BODY_BYTES, MAX_BODY_BYTES, STRANGER_BODY_BYTES } from '../src/paths.js';
+import { GIVE_UP_WAIT_MS, MAX_ACT_BODY_BYTES, MAX_BODY_BYTES, STRANGER_BODY_BYTES } from '../src/paths.js';
 
 const body = (answer) => JSON.parse(Buffer.from(answer.body, 'base64').toString('utf8'));
 const offerArgs = (item, more = {}) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: `look at ${item}`, base: 'abc123', ...more });
@@ -56,6 +56,7 @@ await check('a task is offered, claimed, acted on under the requester\'s key, an
     ['authorize', 'files'], ['perform', 'files'], ['authorize', 'secrets'], ['authorize', 'reviews'], ['perform', 'reviews'],
     ['authorize', 'files'],
   ], 'every request is authorised before it is performed, and a refused one never is');
+  assert.deepEqual(req.requester.unsent, [], 'of a request that was answered or refused the requester is told nothing more');
   assert.deepEqual(req.requester.calls.filter((c) => c.op === 'authorize').map((c) => c.asked), [1, 2, 3, 4], 'the key\'s state is carried from one request to the next');
   assert.deepEqual(req.requester.calls.find((c) => c.op === 'perform'), {
     op: 'perform', path: '/repos/o/r/pr-7/files', forge: 'github', host: 'github.com', as: 'octocat',
@@ -237,8 +238,8 @@ await check('a run stopped by the operator is stopped, its claim given back, and
   assert.deepEqual(exe.executor.stopped, [{ runId: job.runId, reason: 'stopped by the operator' }]);
   assert.equal(w.runOf(exe, taskId).state, 'stopped');
   await w.net.until(() => w.task(req, taskId).state === 'available', { what: 'the task in the pool again' });
-  // The machine that gave it up has a free slot, and leaves the task alone.
-  await w.run(600);
+  // The machine whose operator stopped it has a free slot, and leaves the task alone.
+  await w.run(3 * 3600);
   assert.deepEqual([w.task(req, taskId).state, exe.executor.started.length], ['available', 1]);
   other.slots = 1;
   await w.net.until(() => other.executor.jobOf(taskId), { maxMs: 3 * 60 * 1000, what: 'a job on another machine' });
@@ -255,6 +256,10 @@ await check('a run the host stops for a reason of its own tells its job and its 
   assert.deepEqual([w.stored(exe, 'runs').runs[job.runId].state, w.stored(exe, 'runs').runs[job.runId].outcome.summary], ['stopped', 'the broker could not listen where this job reaches it']);
   await w.net.until(() => w.task(req, taskId).state === 'available', { what: 'the task in the pool again' });
   assert.equal(w.offerRow(req, taskId).attempt, 1);
+  // What the host gave back by itself it goes for again after its wait, nobody else having taken it.
+  const gaveBack = w.net.now();
+  await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job again' });
+  assert.deepEqual([Math.round((w.net.now() - gaveBack) / 60), w.offerRow(req, taskId).attempt], [GIVE_UP_WAIT_MS / 60000, 1]);
 });
 
 await check('a host that is switched off cancels its offers, stops its runs and gives their claims back, tells the pool, and stops - a member still', async () => {
@@ -288,6 +293,10 @@ await check('a host that is switched off cancels its offers, stops its runs and 
   await w.restart(a, { named: false });
   await w.net.until(() => a.executor.started.length === 2, { maxMs: 5 * 60 * 1000, what: 'the task taken again' });
   assert.equal(a.executor.started[1].task.taskId, theirs.taskId);
+  // At once, too: what it gave back at switch-off is not a task it gave up on.
+  await w.wait(a.node.switchOff());
+  await w.restart(a, { named: false });
+  await w.net.until(() => a.executor.started.length === 3, { maxMs: 100 * 1000, what: 'the task taken a third time' });
 
   // Cut off, and with a job that will not stop, it stops all the same when its wait is
   // over; the others hear what it ended once it is back.

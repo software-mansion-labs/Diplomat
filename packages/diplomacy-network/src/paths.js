@@ -100,6 +100,13 @@ export const POW = {
   windowSecs: 60,
   epochSecs: 3600,
 };
+// The work a host does for its peers in an hour, in hashes expected. For one peer: 16384
+// requests at a member's base price, or four at the most any target may ask. For all of
+// them together four times that. And what it does all the same for a peer it has known
+// for `floorAfter` seconds, whatever the others took: 256 requests at the base price.
+// The keys a member seats are new to every host, so they take from the whole and leave
+// the floors to the peers a host knew before them.
+export const POW_HOURLY = { peer: POW.memberBase * 2 ** 14, all: POW.memberBase * 2 ** 16, floor: POW.memberBase * 2 ** 8, floorAfter: 3600 };
 export const CLOCK_SKEW_SECS = 300;
 // The largest request body, and the larger one an `act` request may carry. A sender that
 // is not a member of the request's pool gets the stranger's cap.
@@ -136,10 +143,14 @@ export const RANK_DELAY_MS = num('DN_RANK_DELAY_MS', 5000);
 // answered within PEER_QUIET_MS is given a whole REQUEST_TIMEOUT_MS. One this host has
 // never reached and has known for less than that is asked again until ROUND_PATIENCE_MS of
 // the round have passed: a first circuit to an onion service can take minutes. Any other
-// gets PROBE_TIMEOUT_MS, so a sleeping machine costs a round seconds.
+// gets PROBE_TIMEOUT_MS, so a sleeping machine costs a round seconds - also the round of
+// a host that starts again, which keeps on disk which members were that long silent.
 export const PROBE_TIMEOUT_MS = num('DN_PROBE_TIMEOUT_MS', 15 * 1000);
 export const PEER_QUIET_MS = num('DN_PEER_QUIET_MS', 3 * SYNC_INTERVAL_MS);
 export const ROUND_PATIENCE_MS = num('DN_ROUND_PATIENCE_MS', ROUND_TIMEOUT_MS / 2);
+// A host pushes an offer of its own again to a member that has not said it holds it,
+// after each of these waits in turn.
+export const PUSH_REPEAT_MS = [2000, 5000, 15000];
 // After a request to a peer goes unanswered, gossip leaves that peer alone for this long,
 // doubling per failure up to the cap.
 export const PEER_BACKOFF_MS = num('DN_PEER_BACKOFF_MS', 5000);
@@ -154,6 +165,21 @@ export const RETRY_MS = num('DN_RETRY_MS', 30 * 1000);
 // How long a host leaves an offer of a task that is running to that run before it goes
 // for it: the run asks for such an offer itself, when it hears of it and every RETRY_MS.
 export const JOIN_WAIT_MS = num('DN_JOIN_WAIT_MS', 2 * RETRY_MS);
+// How long a host leaves a task it failed at or gave back to the other members, doubling
+// each time it does so under the same offer, up to the cap.
+export const GIVE_UP_WAIT_MS = num('DN_GIVE_UP_WAIT_MS', 2 * 60 * 1000);
+export const GIVE_UP_WAIT_MAX_MS = num('DN_GIVE_UP_WAIT_MAX_MS', 60 * 60 * 1000);
+// A member whose claim let go of an offer before its hold ran out is given that offer
+// again no sooner than this much later: the other members go first. Less than
+// GIVE_UP_WAIT_MS, so a host that goes for a task again by itself is not turned away.
+export const RETAKE_WAIT_MS = num('DN_RETAKE_WAIT_MS', 60 * 1000);
+// A member whose claim lapsed without having had the key of an offer and held it for a
+// whole lease is given that offer again no sooner than this much later, twice as long each time under
+// the same offer, up to the most.
+export const KEYLESS_WAIT_MS = num('DN_KEYLESS_WAIT_MS', 2 * 3600 * 1000);
+export const KEYLESS_WAIT_MAX_MS = num('DN_KEYLESS_WAIT_MAX_MS', 24 * 3600 * 1000);
+// How many proofs of work a host works on at a time, each on a thread of its own.
+export const POW_WORKERS = num('DN_POW_WORKERS', 2);
 // How often a host looks at everything it holds for something that came due.
 export const TICK_MS = num('DN_TICK_MS', 10 * 1000);
 // A host whose clock moved this far between two looks was not running meanwhile - the
@@ -165,6 +191,12 @@ export const CATCH_UP_MS = num('DN_CATCH_UP_MS', 3 * 60 * 1000);
 export const PRUNE_INTERVAL_MS = num('DN_PRUNE_INTERVAL_MS', 10 * 60 * 1000);
 // How many claim rounds one host runs at a time.
 export const MAX_ROUNDS = 4;
+// How long a ticket for a large body is good before the body's headers arrive. A member
+// whose tickets go unused twice running or more gets none for this long, twice as long
+// each time, up to the most. A member counts as having just had a place for this long.
+export const TICKET_WAIT_MS = num('DN_TICKET_WAIT_MS', 10 * 1000);
+export const TICKET_REST_MS = num('DN_TICKET_REST_MS', 60 * 1000);
+export const TICKET_REST_MAX_MS = num('DN_TICKET_REST_MAX_MS', 60 * 60 * 1000);
 // How many bodies above the stranger's cap a host reads at once, over all senders.
 export const MAX_LARGE_BODIES = 4;
 // Diplomat's last word on free slots is trusted this long.

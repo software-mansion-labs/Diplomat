@@ -71,6 +71,29 @@ check('a signature binds the tag, the signer and every member but sig', () => {
   assert.equal(verify(id.pk, 'dn1/rec', { ...signed, bad: 1.5 }), false);
 });
 
+check('a point of small order is no public key: a signature nobody made would verify under it', () => {
+  const small = ['00'.repeat(32), `01${'00'.repeat(31)}`, '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05',
+    'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a', `ec${'ff'.repeat(30)}7f`, `ed${'ff'.repeat(30)}7f`, `ee${'ff'.repeat(30)}7f`];
+  // R the identity and S zero: what such a key takes for a signature of one message in eight at least.
+  const forged = b64u(Buffer.concat([Buffer.from(`01${'00'.repeat(31)}`, 'hex'), Buffer.alloc(32)]));
+  for (const hex of small) {
+    for (const sign of [0, 0x80]) {
+      const bytes = Buffer.from(hex, 'hex');
+      bytes[31] |= sign;
+      const pk = b64u(bytes);
+      const taken = Array.from({ length: 64 }, (_, i) => verify(pk, 'dn1/rec', { n: i }, forged)).filter(Boolean).length;
+      assert.ok(taken > 0, `${hex} is of small order`);
+      assert.equal(validPk(pk), false, bytes.toString('hex'));
+    }
+  }
+  const honest = unb64u(generateIdentity().pk);
+  assert.equal(validPk(b64u(honest)), true);
+  honest[0] = 0xec;
+  honest.fill(0xff, 1, 31);
+  honest[31] = 0x3f;
+  assert.equal(validPk(b64u(honest)), true, 'a key that differs from such a point in one byte');
+});
+
 check('the onion address and tor key match what tor derives', () => {
   // RFC 8032 test vector 1, and the address tor's own test suite gives that key.
   const seed = Buffer.from('9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60', 'hex');

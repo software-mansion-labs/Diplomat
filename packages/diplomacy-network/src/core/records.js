@@ -6,14 +6,15 @@ import { b64u, hash, unb64u } from './canon.js';
 import { sign, validPk, verify } from './identity.js';
 import { HOURS_CEILING, HOURS_FLOOR } from '../paths.js';
 
-// `members` is how many member records a pool holds; `offers`, `claims` and `bytes` are
-// what one member may have live in a pool: the offers it signed, the claims it signed,
-// and the canonical size of all its records together. `spare` is how much of `bytes` a
-// host leaves free when it adds a record of its own, for the versions of its records
-// that are longer than the ones they replace.
+// `invitees` is how many seats a member has to give, and `depth` how many vouchers a
+// member may be from the one that started its pool; `members` is what that comes to.
+// `offers`, `claims` and `bytes` are what one member may have live in a pool: the offers
+// it signed, the claims it signed, and the canonical size of all its records together.
+// `spare` is how much of `bytes` a host leaves free when it adds a record of its own, for
+// the versions of its records that are longer than the ones they replace.
 export const LIMITS = {
   pool: 200, taskId: 400, title: 300, invite: 1024, attempt: 255, list: 256, time: 2 ** 40,
-  members: 256, offers: 64, claims: 64, bytes: 256 * 2 ** 10, spare: 32 * 2 ** 10,
+  invitees: 15, depth: 2, members: 1 + 15 + 15 * 15, offers: 64, claims: 64, bytes: 256 * 2 ** 10, spare: 32 * 2 ** 10,
 };
 
 const POOL = /^[a-z0-9][a-z0-9.-]*(\/[a-z0-9._-]+){2,}$/;
@@ -136,11 +137,14 @@ const TYPES = {
     signer: 'pk',
     key: (r) => `member/${r.pk}`,
     shape: (r) => shaped(r, {
-      type: is('member'), pool: validPool, pk: validPk, seq: isTime, at: isTime, joinedAt: isTime,
+      type: is('member'), pool: validPool, pk: validPk, seq: isTime, at: isTime, era: isTime,
       maxAcceptedH: isHours, left: bool, sig: bytes(64),
     }, {
-      voucher: (v) => shaped(v, { invite: (t) => typeof t === 'string' && t.length <= LIMITS.invite }),
-    }) && r.at >= r.joinedAt,
+      voucher: (v) => shaped(v, {
+        pool: validPool, by: validPk, era: isTime, pk: validPk, seat: (n) => isUint(n) && n < LIMITS.invitees, at: isTime,
+        sig: bytes(64),
+      }),
+    }),
   },
   offer: {
     signer: 'host',
@@ -215,11 +219,12 @@ export function signRecord(identity, fields) {
   return record;
 }
 
-/// A signed member record. `voucher` is the invite token, absent for a pool's own root.
-export function memberRecord(identity, { pool, seq, at, joinedAt, maxAcceptedH, voucher, left = false }) {
+/// A signed member record. `era` numbers the membership it is of: the `seq` of the first
+/// record of that membership. `voucher` is what the member that let this one in signed
+/// for its key, absent for the member that started the pool.
+export function memberRecord(identity, { pool, seq, at, era, maxAcceptedH, voucher, left = false }) {
   return signRecord(identity, {
-    type: 'member', pool, pk: identity.pk, seq, at, joinedAt, maxAcceptedH, left,
-    ...(voucher ? { voucher: { invite: voucher } } : {}),
+    type: 'member', pool, pk: identity.pk, seq, at, era, maxAcceptedH, left, ...(voucher ? { voucher } : {}),
   });
 }
 

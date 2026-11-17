@@ -43,6 +43,9 @@ export function requestDigest(request) {
   }
 }
 
+// What a request that is not authenticated is refused with.
+const UNPAID = 'the work or the signature of this request does not hold';
+
 /// A signed request envelope from `identity` to `to`, its proof of work solved at
 /// `effort`. `nonce` is 16 fresh random bytes; `solver(challenge, effort)` returns the
 /// 8-byte counter or a promise of it. Throws when a part is malformed.
@@ -86,39 +89,40 @@ export class ReplayMemory {
 /// Checks a request a target received, cheapest check first, stopping at the first that
 /// fails: shape and size, `to`, `ts`, the epoch, the effort owed, the solution, the
 /// signature, the replay memory. Answers `{ ok: true, request, member, re, effort }`, or
-/// `{ ok: false, code, detail, re, effort }` with `bad-request`, `stale`, `effort`,
-/// `denied` or `replay`. `effort` is what the sender's next request owes; `re` is null
-/// when the request has no canonical form.
+/// `{ ok: false, code, detail, re, effort }` with `bad-request`, `stale`, `effort` or
+/// `replay`. `effort` is what the sender's next request owes; `re` is null when the
+/// request has no canonical form.
+///
+/// A request is authenticated once its work and its signature hold. Until then its
+/// refusal says nothing of who it names: too little work, work that does not solve its
+/// challenge and a signature that is not its sender's are refused alike, and every
+/// refusal quotes what a stranger owes.
 ///
 /// `self` is the target's key, `size` the request's length in bytes as received,
 /// `isMember(pool, pk)` whether the target accepts that key in that pool. `meter` and
-/// `replay` are the target's own and are updated: a request that passed its signature
-/// counts toward its sender, any other toward the strangers. `tally`, when given, has its
-/// `signatures` raised by one for a request that got as far as its signature check.
+/// `replay` are the target's own and are updated: an authenticated request counts toward
+/// its sender, and one whose work holds at a stranger's price, unsigned, toward the
+/// strangers. Nothing else counts: work that was not done raises nobody's price, and
+/// work under a member's name is not that member's until the signature says so. `tally`,
+/// when given, has its `signatures` raised by one for a request that got as far as its
+/// signature check.
 export function verifyRequest(request, { self, now, size, meter, replay, isMember, tally }) {
   const re = requestDigest(request);
+  const refuse = (code, detail) => ({ ok: false, code, detail, re, effort: meter.required(null, false, now) });
   const shapely = re !== null && shaped(request, REQUEST)
     && size <= (request.kind === 'act' ? MAX_ACT_BODY_BYTES : MAX_BODY_BYTES);
-  if (!shapely) {
-    meter.countFailure(now);
-    return { ok: false, code: 'bad-request', detail: 'not a request envelope', re, effort: meter.required(null, false, now) };
-  }
+  if (!shapely) return refuse('bad-request', 'not a request envelope');
   const { from, pool, pow } = request;
-  const member = Boolean(isMember(pool, from));
-  const refuse = (code, detail) => {
-    meter.countFailure(now);
-    return { ok: false, code, detail, re, effort: meter.required(from, member, now) };
-  };
   if (request.to !== self) return refuse('bad-request', 'addressed to another host');
   if (Math.abs(request.ts - now) > CLOCK_SKEW_SECS) return refuse('stale', 'ts is too far from this clock');
   if (pow.epoch !== epochOf(request.ts)) return refuse('stale', 'epoch is not the one ts falls in');
-  const owed = meter.required(from, member, now);
-  if (pow.effort < owed) return refuse('effort', `this request owes ${owed}`);
+  const member = Boolean(isMember(pool, from));
   const c = challengeOf(request, { epoch: pow.epoch, nonce: unb64u(pow.nonce), effort: pow.effort });
-  if (!check(c, pow.effort, unb64u(pow.counter))) return refuse('bad-request', 'the proof of work does not solve its challenge');
-  if (tally) tally.signatures += 1;
-  if (!verify(from, 'dn1/req', request)) return refuse('denied', 'bad signature');
-  meter.count(from, member, now);
+  const paid = pow.effort >= meter.required(from, member, now) && check(c, pow.effort, unb64u(pow.counter));
+  if (paid && tally) tally.signatures += 1;
+  const signed = paid && verify(from, 'dn1/req', request);
+  if (signed || (paid && !member)) meter.count(from, member, now);
+  if (!signed) return refuse('effort', UNPAID);
   const effort = meter.required(from, member, now);
   if (replay.seen(from, pow.nonce, pow.epoch, now)) return { ok: false, code: 'replay', detail: 'nonce already used', re, effort };
   return { ok: true, request, member, re, effort };

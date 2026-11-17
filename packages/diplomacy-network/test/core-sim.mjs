@@ -21,10 +21,10 @@ import { b64u } from '../src/core/canon.js';
 import { ClaimRound, LockTable, buildClaim } from '../src/core/claims.js';
 import { ReplayMemory, buildRequest, buildResponse, verifyRequest, verifyResponse } from '../src/core/envelope.js';
 import { buildPing, endClaim, extendClaim, isActive, pingWindow, verifyPing } from '../src/core/lease.js';
-import { createInvite, inviteToken } from '../src/core/membership.js';
+import { createVoucher } from '../src/core/membership.js';
 import { Pool } from '../src/core/pool.js';
 import { EffortMeter, solve } from '../src/core/pow.js';
-import { memberRecord, offerRecord, pingShaped, shaped } from '../src/core/records.js';
+import { LIMITS, memberRecord, offerRecord, pingShaped, shaped } from '../src/core/records.js';
 import { POOL, T0, ident, prng } from './lib/core-fixtures.mjs';
 
 async function check(name, fn) {
@@ -85,6 +85,8 @@ class Host {
     this.joined = false;
     this.record = null;
     this.inviter = null;
+    this.seats = 0; // how many of its seats this host gave
+    this.depth = 0; // how many vouchers it is from the first host
     this.runs = new Map(); // taskId -> the round in progress
     this.wants = new Map(); // taskId -> attempts left
     this.gave = new Map(); // taskId -> how many times it gave its offer of it away
@@ -122,7 +124,7 @@ class Host {
     const { now } = this;
     const again = (record, build) => {
       const { sig: _, type: __, ...held } = record;
-      return build(this.id, { ...held, voucher: held.voucher?.invite, seq: held.seq + 1, at: now });
+      return build(this.id, { ...held, seq: held.seq + 1, at: now });
     };
     this.record = again(this.record, memberRecord);
     const offers = this.pool.records().filter((r) => r.type === 'offer' && r.host === this.pk && r.state === 'open');
@@ -193,22 +195,29 @@ class Host {
 
   found() {
     const { now } = this;
-    this.record = memberRecord(this.id, { pool: POOL, seq: 0, at: now, joinedAt: now, maxAcceptedH: this.accepts });
+    this.record = memberRecord(this.id, { pool: POOL, seq: 0, at: now, era: 0, maxAcceptedH: this.accepts });
     this.pool.merge(this.record, now);
     this.joined = true;
   }
 
+  // Joins under `inviter`, in the next of its seats unless this host was given one before.
   join(inviter, tries = 12) {
+    if (this.inviter !== inviter) {
+      this.seat = inviter.seats;
+      inviter.seats += 1;
+    }
     this.inviter = inviter;
     if (!this.up || this.joined) return;
     const { now } = this;
     if (!this.record) {
-      const voucher = inviteToken(createInvite(inviter.id, { pool: POOL, exp: now + 3600, nonce: this.world.rnd.bytes(16) }));
-      this.record = memberRecord(this.id, { pool: POOL, seq: 0, at: now, joinedAt: now, maxAcceptedH: this.accepts, voucher });
+      const voucher = createVoucher(inviter.id, { pool: POOL, era: 0, pk: this.pk, seat: this.seat, at: now });
+      this.record = memberRecord(this.id, { pool: POOL, seq: 0, at: now, era: 0, maxAcceptedH: this.accepts, voucher });
       this.pool.merge(this.record, now);
     }
     this.greet(inviter.pk, (ok) => {
-      if (ok) this.push([this.record]);
+      // It is in once it holds its inviter's record: until then it is alone where it looks.
+      this.joined = ok && this.pool.accepts(inviter.pk, this.now);
+      if (this.joined) this.push([this.record]);
       else if (tries > 1) this.later(2000 + this.world.rnd.int(6000), () => this.join(inviter, tries - 1));
     });
   }
@@ -218,7 +227,6 @@ class Host {
     this.send(pk, 'hello', { member: this.record }, (result) => {
       const index = result?.body?.index;
       if (!index) return done(false);
-      this.joined = true;
       const plan = this.pool.reconcile(index, this.now);
       assert.ok(plan, 'a hello was answered with a malformed index');
       if (plan.pull.length === 0) return done(true);
@@ -727,7 +735,10 @@ async function schedule(seed, tally) {
   world.gossip();
   hosts[0].found();
   for (let i = 1; i < n; i++) {
-    const inviter = hosts[r.int(i)];
+    // A host two vouchers from the first gives no seat.
+    const near = hosts.slice(0, i).filter((h) => h.depth < LIMITS.depth);
+    const inviter = near[r.int(near.length)];
+    hosts[i].depth = inviter.depth + 1;
     world.at(!calm && r.chance(0.2) ? 150000 + r.int(60000) : r.int(40000), () => hosts[i].join(inviter));
   }
   for (const task of tasks) {

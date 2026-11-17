@@ -72,7 +72,7 @@ export function createClaiming(host) {
       const { taskId } = task;
       if (rounds.size + waiting.size >= MAX_ROUNDS) break;
       if (rounds.has(taskId) || waiting.has(taskId) || host.runs.has(taskId) || later.has(taskId)) continue;
-      if (host.runs.shuns(taskId, task.createdAt)) continue;
+      if (host.runs.left(taskId, task.createdAt) !== 0) continue;
       const own = host.offers.atOnce(taskId);
       if (!own && taken() >= slots()) continue;
       const verdict = weighed(P, task);
@@ -252,7 +252,7 @@ export function createClaiming(host) {
     // The word on slots may have changed, or gone stale, while the round ran.
     if (!run.own && took() >= slots()) return drop('no slot left');
     // This host's own offer of the task, when it has one, is the claim's by its own word.
-    const mine = own ? host.offers.nextGen(taskId) : null;
+    const mine = own ? host.offers.nextGen(taskId, host.self) : null;
     if (mine === null && !grants.some((grant) => grant.offer)) return drop('no host gives it its offer');
     const claim = buildClaim(host.id, {
       pool: P.id, taskId, round: round.round, gen, grants, absent, now: host.now(),
