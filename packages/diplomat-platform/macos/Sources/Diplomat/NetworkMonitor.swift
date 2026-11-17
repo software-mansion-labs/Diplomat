@@ -68,10 +68,7 @@ extension Store {
                     let result = await Task.detached(priority: .userInitiated) {
                         DiplomacyNetwork.stopDaemon()
                     }.value
-                    AuditLog.log("panel", NetworkAudit.stop,
-                                 "Stopped the Diplomacy Network daemon "
-                                 + "(ok: \(!result.daemonRunning && result.error == nil))"
-                                 + (result.error.map { ": \($0)" } ?? ""))
+                    AuditLog.log("panel", NetworkAudit.stop, DiplomacyNetwork.stoppedLine(result))
                 }
             }
         }

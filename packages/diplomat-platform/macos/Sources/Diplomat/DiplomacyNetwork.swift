@@ -90,6 +90,19 @@ enum DiplomacyNetwork {
     static func restartDaemon() -> AllocatorInstall { run("--restart-daemon", deps: true) }
     static func stopDaemon() -> AllocatorInstall { run("--stop-daemon") }
 
+    /// The feed line for a stop: how it went, and how many offers and runs the installer
+    /// ended that the daemon had left in its store.
+    static func stoppedLine(_ result: AllocatorInstall) -> String {
+        let said = [("cancelling", result.endedOffers, "offer"), ("ending", result.endedRuns, "run")]
+            .filter { $0.1 > 0 }
+            .map { "\($0.0) \($0.1) \($0.2)\($0.1 == 1 ? "" : "s")" }
+        return "Stopped the Diplomacy Network daemon "
+            + "(ok: \(!result.daemonRunning && result.error == nil))"
+            + (said.isEmpty ? ""
+                : ", \(said.joined(separator: " and ")) the daemon had left in its store")
+            + (result.error.map { ": \($0)" } ?? "")
+    }
+
     // MARK: the retired mesh node
 
     /// The module the mesh node Diplomat once ran was started as (`python3 -m szpontnet`).

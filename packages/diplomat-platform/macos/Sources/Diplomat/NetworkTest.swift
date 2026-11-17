@@ -298,10 +298,15 @@ enum NetworkTest {
         let installer = Calls<String>()
         // The withdrawals the daemon had heard each time it was told to stop.
         let withdrawnAtStop = Calls<Int>()
+        // The offers and runs the next stop finds left in the store.
+        let leftInStore = Calls<(Int, Int)>()
         DiplomacyNetwork.installerForSelfTest = { verb in
             installer.add(verb)
-            if verb == "--stop-daemon" { withdrawnAtStop.add(script.count(NetworkRoute.withdraw)) }
             var result = AllocatorInstall()
+            if verb == "--stop-daemon" {
+                withdrawnAtStop.add(script.count(NetworkRoute.withdraw))
+                (result.endedOffers, result.endedRuns) = leftInStore.all.last ?? (0, 0)
+            }
             result.daemonRunning = verb != "--stop-daemon" && FileManager.default.fileExists(atPath: socket)
             return result
         }
@@ -1321,14 +1326,48 @@ enum NetworkTest {
         _ = AgentRegistry.forget(Set(AgentRegistry.load().map(\.runID)))
         bookByHand(90271, task: "task-deaf")
         stopDaemon()
+        leftInStore.add((2, 1))
         store.networkEnabled = false
         await store.networkLifecycle?.value
+        leftInStore.add((0, 0))
         check("with the daemon silent the run is retired all the same, and the daemon stopped",
               booked("task-deaf") == nil
                 && feedDetails(NetworkAudit.failed).last
                     == "Auto · Review-req · #90271 - withdrawn: the Diplomacy Network was switched off"
                 && installer.all.last == "--stop-daemon"
                 && installer.all.filter { $0 == "--stop-daemon" }.count == 2)
+        let leftNote = " the daemon had left in its store"
+        check("…and the feed says what the installer ended in the store",
+              feedDetails(NetworkAudit.stop).last
+                == "Stopped the Diplomacy Network daemon (ok: true), cancelling 2 offers and "
+                    + "ending 1 run" + leftNote)
+        func stopped(_ answer: String) -> String? {
+            (try? JSONDecoder().decode(AllocatorInstall.self, from: Data(answer.utf8)))
+                .map(DiplomacyNetwork.stoppedLine)
+        }
+        let stoppedOK = "Stopped the Diplomacy Network daemon (ok: true)"
+        let stopAnswers: [(String, String)] = [
+            (#"{"ok":true,"daemonRunning":false,"pid":null}"#, stoppedOK),
+            (#"{"ended":{"offers":0,"runs":0}}"#, stoppedOK),
+            (#"{"ended":{"offers":1,"runs":0}}"#, stoppedOK + ", cancelling 1 offer" + leftNote),
+            (#"{"ended":{"offers":2}}"#, stoppedOK + ", cancelling 2 offers" + leftNote),
+            (#"{"ended":{"offers":0,"runs":1}}"#, stoppedOK + ", ending 1 run" + leftNote),
+            (#"{"ended":{"runs":3}}"#, stoppedOK + ", ending 3 runs" + leftNote),
+            (#"{"ended":{"offers":2,"runs":1}}"#,
+             stoppedOK + ", cancelling 2 offers and ending 1 run" + leftNote),
+            (#"{"ended":"2"}"#, stoppedOK),
+            (#"{"ended":[2,1]}"#, stoppedOK),
+            (#"{"ended":{"offers":"2","runs":true}}"#, stoppedOK),
+            (#"{"ended":{"offers":-1,"runs":1.5}}"#, stoppedOK),
+            (#"{"ok":false,"ended":{"offers":0,"runs":2},"error":"a container is still there"}"#,
+             "Stopped the Diplomacy Network daemon (ok: false), ending 2 runs" + leftNote
+                + ": a container is still there"),
+            (#"{"daemonRunning":true,"ended":{"offers":1}}"#,
+             "Stopped the Diplomacy Network daemon (ok: false), cancelling 1 offer" + leftNote),
+        ]
+        for (answer, line) in stopAnswers {
+            check("a stop that answers \(answer) is said as \(line)", stopped(answer) == line)
+        }
 
         // 26. An ask is answered by work that ran, not by its offer. Offered, it stands
         //     marked and is not offered twice; its run finishing forgets it, and so does

@@ -356,7 +356,9 @@ panel's red line says when the daemon does not answer.
 Switching the network off withdraws this machine's open offers, stops the jobs it runs for the
 pool and frees their PRs and issues for agents in terminals again. The daemon removes its
 containers, mirrors and run records and exits; the machine's key, its pools and the image stay,
-so switched on again it is the member it was. Work that was asked for and
+so switched on again it is the member it was. With no daemon running to do it, the stop
+itself cancels the offers and ends the runs left in the daemon's store, and its line in the
+feed says how many. Work that was asked for and
 had not run is started in a terminal from the queue on the next poll. A monitor's own find
 counts its offer as an attempt, so it is started again on that monitor's retry schedule. A job
 started by hand whose offer the daemon had not answered is withdrawn if the daemon turns out to

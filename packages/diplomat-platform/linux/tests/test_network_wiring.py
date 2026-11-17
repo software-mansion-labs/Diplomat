@@ -678,6 +678,54 @@ def test_the_switch_starts_and_stops_the_daemon_off_the_gui_thread(store, daemon
     assert lines("network-stop") == ["Stopped the Diplomacy Network daemon (ok: true)"]
 
 
+LEFT = " the daemon had left in its store"
+
+
+@pytest.mark.parametrize("answer, note", [
+    (None, ""),
+    ({}, ""),
+    ({"ended": {"offers": 0, "runs": 0}}, ""),
+    ({"ended": {"offers": 1, "runs": 0}}, ", cancelling 1 offer" + LEFT),
+    ({"ended": {"offers": 2}}, ", cancelling 2 offers" + LEFT),
+    ({"ended": {"offers": 0, "runs": 1}}, ", ending 1 run" + LEFT),
+    ({"ended": {"runs": 3}}, ", ending 3 runs" + LEFT),
+    ({"ended": {"offers": 2, "runs": 1}}, ", cancelling 2 offers and ending 1 run" + LEFT),
+    ({"ended": "2"}, ""),
+    ({"ended": [2, 1]}, ""),
+    ({"ended": {"offers": "2", "runs": True}}, ""),
+    ({"ended": {"offers": -1, "runs": 1.5}}, ""),
+])
+def test_what_a_stop_ended_in_the_store_is_a_note_only_when_it_ended_something(answer, note):
+    assert dn.ended_note(answer) == note
+
+
+@pytest.mark.parametrize("answer, line", [
+    ({"ok": True, "daemonRunning": False, "pid": None, "ended": {"offers": 2, "runs": 1}},
+     "Stopped the Diplomacy Network daemon (ok: true), cancelling 2 offers and ending 1 run"
+     + LEFT),
+    ({"ok": False, "daemonRunning": False, "ended": {"offers": 0, "runs": 2},
+      "error": "a container is still there"},
+     "Stopped the Diplomacy Network daemon (ok: false), ending 2 runs" + LEFT
+     + ": a container is still there"),
+])
+def test_a_stop_with_no_daemon_answering_runs_the_installer_and_says_what_it_ended(
+        store, on, monkeypatch, answer, line):
+    ran = []
+    monkeypatch.setattr(da, "run_installer", lambda script, arg: ran.append(arg) or answer)
+    store.set_network_enabled(False)
+    assert store.wait_for_background() == []
+    assert ran == ["--stop-daemon"]
+    assert lines("network-stop") == [line]
+
+
+def test_a_start_says_nothing_of_a_store(store, on, monkeypatch):
+    monkeypatch.setattr(da, "run_installer", lambda script, arg: {
+        "daemonRunning": True, "ended": {"offers": 2, "runs": 1}})
+    store.start_network_async()
+    assert store.wait_for_background() == []
+    assert lines("network-start") == ["Started the Diplomacy Network daemon (ok: true)"]
+
+
 def test_a_start_fetches_no_dependency(store, on, installer, monkeypatch):
     fetched = []
     monkeypatch.setattr(da, "ensure_deps", lambda *a, **kw: fetched.append(a) or True)

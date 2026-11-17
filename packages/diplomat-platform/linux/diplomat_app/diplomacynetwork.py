@@ -112,6 +112,18 @@ def stop_daemon() -> dict | None:
     return da.run_installer(install_js(), "--stop-daemon")
 
 
+def ended_note(result: Mapping[str, Any] | None) -> str:
+    """What a stop's feed line adds when the installer ended offers or runs the daemon
+    had left in its store; empty for none."""
+    ended = (result or {}).get("ended")
+    said = []
+    for key, verb, noun in (("offers", "cancelling", "offer"), ("runs", "ending", "run")):
+        n = ended.get(key) if isinstance(ended, Mapping) else None
+        if type(n) is int and n > 0:
+            said.append(f"{verb} {n} {noun}{'' if n == 1 else 's'}")
+    return f", {' and '.join(said)} the daemon had left in its store" if said else ""
+
+
 # MARK: the socket
 
 #: Every route answers from memory; an offer also signs and stores a record.

@@ -5831,17 +5831,18 @@ class Store(QObject):
         result = diplomacynetwork.stop_daemon()
         self._log_network_daemon(
             autofix.SOURCE_PANEL, network.AUDIT_STOP, "Stopped", result,
-            ok=result is not None and not result.get("daemonRunning"))
+            ok=result is not None and not result.get("daemonRunning"),
+            note=diplomacynetwork.ended_note(result))
 
     def _log_network_daemon(self, source: str, action: str, did: str,
-                            result: dict | None, *, ok: bool) -> None:
+                            result: dict | None, *, ok: bool, note: str = "") -> None:
         """One feed line for an installer action, with what it really did."""
         error = (result.get("error") if result is not None
                  else "the installer could not be run")
         ok = ok and not error
         activity.log(source, action,
                      f"{did} the Diplomacy Network daemon (ok: {'true' if ok else 'false'})"
-                     + (f": {error}" if error else ""))
+                     + note + (f": {error}" if error else ""))
 
     def _start_network_daemon(self, source: str, *, restart: bool = False,
                               quietly: bool = False) -> None:
