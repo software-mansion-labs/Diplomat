@@ -286,12 +286,14 @@ try {
     // moment, and what it had spent by then is what the file goes on saying.
     const spending = await own(m, 'pr-2', 'model\nwait never');
     const spender = await waiting(m, spending, 'never');
-    const spent = await until('what it spent, on disk', () => { const at = jobsOf(m)[spender.runId]?.spent; return at?.bytes > 0 ? at : null; });
+    // The file is written for a job that comes: after this one's request, with all of it.
+    const beside = await waiting(m, await own(m, 'pr-3', 'wait never'), 'never');
+    const { spent } = jobsOf(m)[spender.runId];
+    assert.ok(spent.requests === 1 && spent.bytes > 0, JSON.stringify(spent));
     fs.writeFileSync(path.join(m.dockerDir, 'hold-exec-stop'), '');
     await m.ok('/stop-run', { runId: spender.runId });
-    // The file is written anew for the job that comes.
-    const next = await waiting(m, await own(m, 'pr-3', 'wait never'), 'never');
-    assert.deepEqual([Object.keys(jobsOf(m)).sort(), jobsOf(m)[spender.runId].spent], [[spender.runId, next.runId].sort(), spent]);
+    const next = await waiting(m, await own(m, 'pr-4', 'wait never'), 'never');
+    assert.deepEqual([Object.keys(jobsOf(m)).sort(), jobsOf(m)[spender.runId].spent], [[spender.runId, beside.runId, next.runId].sort(), spent]);
     fs.rmSync(path.join(m.dockerDir, 'hold-exec-stop'));
     await m.kill();
   });
