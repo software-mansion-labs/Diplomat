@@ -133,7 +133,6 @@ export function createOffers(host) {
   // An attempt failed: the run said so, or its claim lapsed. The task goes back to the
   // pool until it has failed too often.
   function fail(P, O, round, reason) {
-    if (O.failed.includes(round)) return;
     O.failed.push(round);
     O.reason = text(reason, MAX_REASON);
     // The key of a claim that holds the offer since is not this attempt's to take back.
@@ -289,7 +288,7 @@ export function createOffers(host) {
       const deny = (detail) => ({ error: 'denied', detail });
       return inTurn(taskId, async () => {
         const O = offers[taskId];
-        if (!O || !OPEN.includes(O.state)) return deny('not offered by this host');
+        if (!O) return deny('not offered by this host');
         let claim = standing(P, O, from, round);
         if (!claim) return deny('no claim of that executor and round holds the offer of this host');
         if (issued[taskId] && (issued[taskId].round !== round || issued[taskId].capability.executor !== from)) revoke(taskId);

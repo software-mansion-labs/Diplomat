@@ -9,7 +9,7 @@ import { buildClaim, buildGrant } from '../src/core/claims.js';
 import { KINDS, buildResponse, requestDigest } from '../src/core/envelope.js';
 import { sign, verify } from '../src/core/identity.js';
 import { buildPing, endClaim } from '../src/core/lease.js';
-import { buildCapability } from '../src/core/capability.js';
+import { buildCapability, specDigest, wireOutcome } from '../src/core/capability.js';
 import { createVoucher } from '../src/core/membership.js';
 import { backers, buildTaskId, memberRecord, offerRecord } from '../src/core/records.js';
 import { POW } from '../src/paths.js';
@@ -403,6 +403,46 @@ await check('a claim dated back to lapse as it lands, or whose executor never as
   assert.equal(await hoursTo(evil, 20), 16);
   await lapse();
   assert.equal(await hoursTo(evil, 40), 24);
+  // A run that says it failed is one attempt, however often it says so, and though its
+  // claim then holds the offer until it lapses.
+  await lapse();
+  const told = (body) => say(w, other, v, 'done', body, { effort: 4096 });
+  const report = async (round) => {
+    const { body } = await say(w, other, v, 'key', { taskId, round }, { effort: 4096 });
+    const done = { taskId, round, spec: specDigest(body.spec), outcome: wireOutcome({ ok: false, summary: 'it broke' }) };
+    assert.deepEqual([(await told(done)).said, row()], ['ok', ['pooled', 3]]);
+    assert.deepEqual([(await told(done)).body, row()], [{}, ['pooled', 3]]);
+  };
+  assert.equal(await grab(other, 0, report), 'held');
+  await w.run(3 * 3600);
+  assert.deepEqual([row(), w.offerRow(v, taskId).reason], [['pooled', 3], 'it broke']);
+  // What a run reports of an offer its host took back changes nothing of that offer.
+  let late = null;
+  assert.equal(await grab(other, 0, async (round) => {
+    const { body } = await say(w, other, v, 'key', { taskId, round }, { effort: 4096 });
+    late = { taskId, round, spec: specDigest(body.spec), outcome: wireOutcome({ ok: true, summary: 'done after all' }) };
+  }), 'held');
+  await v.node.withdraw({ taskId });
+  assert.deepEqual([(await told(late)).body, w.offerRow(v, taskId).state, w.offerRow(v, taskId).outcome.summary], [{}, 'cancelled', 'it broke']);
+  assert.equal(w.records(v).find((r) => r.type === 'offer' && r.taskId === taskId).state, 'cancelled');
+});
+
+await check('a host that gave a rival its lock on a task starts no round of its own on that task while the lock binds', async () => {
+  const w = createWorld({ seed: 94 });
+  const all = await w.pool(['req', 'v']);
+  const [req, v] = all;
+  const evil = await w.intruder('evil', req);
+  await w.net.until(() => all.every((h) => w.members(h).includes(evil.pk)), { what: 'the member known' });
+  const { taskId } = await req.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  const since = w.net.now();
+  assert.equal((await say(w, evil, v, 'lock', { taskId, round: ROUND, asOf: since, hash: w.view(v).hash })).body.grant.executor, evil.pk);
+  v.slots = 1;
+  v.node.admit({ slots: 1 });
+  await w.run(110 - (w.net.now() - since));
+  assert.deepEqual([w.net.count({ from: 'v', kind: 'lock', since }), v.executor.started.length], [0, 0]);
+  await w.net.until(() => v.executor.jobOf(taskId), { what: 'its own round once the lock ran out' });
+  assert.ok(w.net.now() - since >= 120, `${w.net.now() - since} s after the lock`);
 });
 
 await check('a lock binds for 120 s by the clock of the member that gave it, whatever time its claimant names', async () => {

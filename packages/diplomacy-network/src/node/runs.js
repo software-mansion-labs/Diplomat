@@ -287,7 +287,7 @@ export function createRuns(host) {
     const P = host.pools.get(run.pool);
     const claim = claimOf(run);
     if (!claim) return halt(run, 'the claim it ran under is gone', 'drop');
-    if (claim.state !== 'held' || !isActive(claim, now)) return halt(run, 'the lease ran out', 'drop', true);
+    if (!isActive(claim, now)) return halt(run, 'the lease ran out', 'drop', true);
     const K = held[run.taskId]?.runId === run.runId ? held[run.taskId] : null;
     // A job has the hours of the offer it was handed out for.
     const deadline = K ? claim.claimedAt + backing(claim, K.host).hours * 3600 : claim.deadline;

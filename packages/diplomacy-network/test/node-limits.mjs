@@ -324,6 +324,14 @@ await check('what a host served before it went down it does not serve after: the
   assert.equal((await w.request(b, a, 'sync', body(), { ts: first.request.ts })).code, 'busy', 'nor another request of that second');
   await w.run(2);
   assert.equal((await w.request(b, a, 'sync', body())).ok, true, 'a request made since is served');
+  // What is on disk is the latest date served, in whatever order the requests came.
+  await w.run(10);
+  const latest = w.net.now();
+  assert.equal((await w.request(b, a, 'sync', body(), { ts: latest })).ok, true);
+  assert.equal((await w.request(b, a, 'sync', body(), { ts: latest - 3 })).ok, true, 'one dated before it, served after it');
+  assert.ok(w.stored(a, 'heard').ts >= latest);
+  await w.restart(a);
+  assert.equal((await w.request(b, a, 'sync', body(), { ts: latest - 1 })).code, 'busy', 'nothing dated up to the latest is served by the next process');
   const { taskId } = await a.node.offer(offerArgs('pr-1'));
   await w.agreed([a, b]);
   assert.equal(w.view(a).members.find((m) => m.pk === b.pk).reachable, true);

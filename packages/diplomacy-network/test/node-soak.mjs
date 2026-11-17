@@ -3,7 +3,8 @@
 // hosts that leave the pool and come back, hosts switched off, machines that sleep
 // while another offers what they offer, a member that answers nobody, pushes records no
 // host may take, makes members of keys of its own in every way it can think of, offers
-// what the others offer and says a run of its own did their job, hosts off the network,
+// what the others offer and says a run of its own did their job, asks for locks dated
+// ahead and for places it sends no body to, a key nobody knows, hosts off the network,
 // cuts, lost and repeated requests, and hours passing. After
 // every step what must always hold is checked; at the end the network is mended and
 // everything offered must have ended, on every host alike.
@@ -15,6 +16,7 @@ import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, createWorld } from './lib/hosts.mjs';
 import { prng } from './lib/mem-net.mjs';
+import { b64u } from '../src/core/canon.js';
 import { specDigest } from '../src/core/capability.js';
 import { buildClaim } from '../src/core/claims.js';
 import { UNSERVED } from '../src/core/envelope.js';
@@ -46,6 +48,7 @@ async function soak(seed) {
   let evilSeq = 0;
   const evilRecord = (now) => memberRecord(evil.id, { pool: POOL, seq: evilSeq += 1, at: Math.max(now, voucher.at), era: 0, maxAcceptedH: 12, voucher });
   const puppets = []; // the keys it gave a seat of its own
+  const tickets = new WeakMap(); // a node -> when it gave the member with no node a place for a large body
   const trail = [];
   const broken = [];
   const atOnce = new Set(); // tasks offered to run at once, which take no slot
@@ -330,6 +333,47 @@ async function soak(seed) {
       if (respelled && answer.response && answer.response.error?.code !== 'bad-request') broken.push(`${h.name} served bytes that are no request`);
       tally.hostile += answer.ok ? 1 : 0;
       return `${h.name} ${answer.ok ? `refused it: ${answer.body.refused[0]?.code}` : answer.code ?? answer.response?.error?.code}`;
+    }],
+    [6, 'grasp', async () => {
+      // The member with no node asks a host for its lock on a task, as of a time up to
+      // 300 s ahead, and gives it back; takes a place for a large body and sends none;
+      // and a key nobody knows asks with no work done, of this pool and of one that is
+      // nobody's.
+      const h = pick(all);
+      const now = w.net.now();
+      const say = (from, kind, body, options) => w.request(from, h, kind, body, { effort: 128, ...options }).catch(() => ({ ok: false, code: 'no answer' }));
+      await say(evil, 'hello', { member: evilRecord(now) });
+      const said = [];
+      const one = pick(openOffers());
+      if (one && !w.view(h).left) {
+        const [round, asOf] = [b64u(Buffer.from(Array.from({ length: 8 }, () => dice.int(256)))), now + dice.int(301)];
+        const lock = await say(evil, 'lock', { taskId: one.o.taskId, round, asOf, hash: w.view(h).hash });
+        const grant = lock.ok ? lock.body.grant : null;
+        if (grant && grant.exp !== asOf + 120) broken.push(`${h.name} gave a grant good for ${grant.exp - asOf} s`);
+        if (grant) await say(evil, 'unlock', { taskId: one.o.taskId, round });
+        said.push(grant ? `a lock${grant.offer ? ' with the offer' : ''}` : `no lock: ${lock.code}`);
+      }
+      // A key that leaves its tickets unused gets fewer all the time, however often it
+      // asks: 7 in the first hour.
+      const { node } = h;
+      if (!tickets.has(node)) tickets.set(node, []);
+      for (let n = 0; n < 6 && h.node === node; n += 1) {
+        if ((await say(evil, 'reserve', { kind: 'push', bytes: 100000 })).ok) tickets.get(node).push(w.net.now());
+        await w.run(11);
+      }
+      const recent = tickets.get(node).filter((at) => at > w.net.now() - 3600).length;
+      if (recent > 8) broken.push(`${h.name} gave the member with no node ${recent} places in an hour, none of them used`);
+      said.push(`${recent} places this hour`);
+      // What a request that is not authenticated is told says nothing of the pools linked.
+      const nobody = w.stranger('nobody');
+      const asked = { asOf: now, hash: w.view(all[0]).hash };
+      const here = await say(nobody, 'sync', asked, { effort: 1 });
+      const nowhere = await say(nobody, 'sync', asked, { effort: 1, pool: 'github.com/nobody/nothing' });
+      const told = (answer) => JSON.stringify([answer.code, answer.detail, answer.effort]);
+      if (here.response && nowhere.response && (here.code !== 'effort' || told(here) !== told(nowhere))) {
+        broken.push(`${h.name} tells a key it does not know ${told(here)} of this pool and ${told(nowhere)} of one that is nobody's`);
+      }
+      return `${h.name}: ${said.join(', ')}`;
     }],
     [4, 'puppet', async () => {
       // The member with no node gives a seat of its own to a key of its making, and tries
