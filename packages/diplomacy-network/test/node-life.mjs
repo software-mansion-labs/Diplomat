@@ -293,6 +293,10 @@ await check('a host that is switched off cancels its offers, stops its runs and 
   await w.restart(a, { named: false });
   await w.net.until(() => a.executor.started.length === 2, { maxMs: 5 * 60 * 1000, what: 'the task taken again' });
   assert.equal(a.executor.started[1].task.taskId, theirs.taskId);
+  // At once, too: what it gave back at switch-off is not a task it gave up on.
+  await w.wait(a.node.switchOff());
+  await w.restart(a, { named: false });
+  await w.net.until(() => a.executor.started.length === 3, { maxMs: 100 * 1000, what: 'the task taken a third time' });
 
   // Cut off, and with a job that will not stop, it stops all the same when its wait is
   // over; the others hear what it ended once it is back.

@@ -486,6 +486,30 @@ await check('a machine that wakes with every member awake goes for its own task 
   }
 });
 
+await check('a machine that wakes to members that say nothing asks them again: it is up to date when the first of them answers, with no wait for its three minutes to be over', async () => {
+  const w = createWorld({ seed: 127 });
+  const all = await w.pool(['l', 'd', 'e']);
+  const [l, d] = all;
+  await l.node.offer(offerArgs('pr-1'));
+  await w.agreed(all);
+  for (const name of ['l', 'e']) w.net.sleep(name);
+  await w.run(HOUR);
+  // The one member awake holds what the machine does not, and is out of its reach.
+  await d.node.offer(offerArgs('pr-2'));
+  w.net.cut('l', 'd');
+  const upToDate = () => l.log.filter((line) => line.includes(' is up to date '));
+  const before = upToDate().length;
+  w.net.sleep('l', false);
+  const since = w.net.now();
+  await w.run(30);
+  assert.equal(upToDate().length, before, 'nobody answered yet');
+  w.net.heal();
+  await w.net.until(() => upToDate().length > before, { maxMs: HOUR * 1000, what: 'the machine up to date' });
+  const took = w.net.now() - since;
+  assert.ok(took < CATCH_UP_MS / 2000, `up to date after ${took} s`);
+  assert.deepEqual(failures(all), []);
+});
+
 await check('a machine that wakes asks the members it had given up on for a while, at once: it hears of the run and ends its offer', async () => {
   const w = createWorld({ seed: 117 });
   const all = await w.pool(['l', 'd', 'e']);
