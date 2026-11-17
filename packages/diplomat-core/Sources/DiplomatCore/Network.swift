@@ -104,12 +104,14 @@ public enum NetworkRoute {
     public static let stopRun = "stop-run"
 
     /// Why an offer is withdrawn: its PR merged, the operator forgot the run or stopped
-    /// a task no run here carries, its run could not be booked, or the switch went off.
+    /// a task no run here carries, its run could not be booked, the switch went off, or
+    /// the goal that asked for it stopped acting.
     public static let withdrawMerged = "merged"
     public static let withdrawForgotten = "forgotten"
     public static let withdrawStopped = "stopped"
     public static let withdrawNotBooked = "not booked"
     public static let withdrawSwitchedOff = "switched off"
+    public static let withdrawGoal = "its goal stopped"
 
     public static func withdrawBody(task: String, reason: String) -> [String: String] {
         ["taskId": task, "reason": reason]
@@ -306,36 +308,52 @@ public enum NetworkPools {
         return out
     }
 
-    /// What `POST /pools` is to say, or why nothing is said yet.
-    public enum Listing: Equatable {
-        case pools([Pool])
-        case held(String)
+    /// What `POST /pools` is to say, and a sentence for each thing that could not be
+    /// confirmed.
+    public struct Listing: Equatable {
+        public let pools: [Pool]
+        public let unconfirmed: [String]
     }
 
-    public static let heldRoot = "Pools are held back: a repo root cannot be read"
-    public static func held(unread path: String) -> String {
-        "Pools are held back: \(path) cannot be read"
+    public static func unconfirmed(unread path: String) -> String {
+        "\(path) cannot be read: its pool stays as the daemon last had it until the "
+            + "path can be read or is taken out of Settings"
     }
-    public static func held(account repo: String) -> String {
-        "Pools are held back: the account for \(repo) is not known yet"
+    public static func unconfirmed(account repo: String, host: String) -> String {
+        "The login for \(repo) on \(host) is not known yet: its pool stays as the "
+            + "daemon last had it until it is"
     }
 
     /// Every linked repository as a pool: the roots, then what the OTHER REPOS
-    /// checkouts name that no root does (`others`). A checkout that was read and names
-    /// no forge is no pool and is in neither list. A root or a checkout that could not
-    /// be read (`unread`, by path), or a repository whose forge login is unknown, holds
-    /// the whole list back: a list cut short makes the daemon leave the pools it omits.
-    public static func listing(roots: [PRRef.LocalRepo], rootsRead: Bool,
-                               others: [PRRef.LocalRepo], unread: [String],
-                               identities: [String: String]) -> Listing {
-        guard rootsRead else { return .held(heldRoot) }
-        if let path = unread.first { return .held(held(unread: path)) }
+    /// checkouts name that no root does (`others`). A root or a checkout that was read
+    /// and names no forge is no pool, and is in neither list. What could not be
+    /// confirmed is said as the daemon last had it (`known`, its snapshot's pools): the
+    /// pool at a path that could not be read (`unread`), and the pool of a repository
+    /// whose forge login is unknown. The daemon leaves a pool the list omits, so the
+    /// list is never cut short by what is unknown, and a repository taken out of
+    /// Settings leaves its pool whatever else cannot be read.
+    public static func listing(roots: [PRRef.LocalRepo], others: [PRRef.LocalRepo],
+                               unread: [String], identities: [String: String],
+                               known: [NetworkSnapshot.Pool]) -> Listing {
         let repos = roots + others
-        let nameless = repos.first {
-            (identities[$0.host] ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        var pools = linked(roots: repos, identities: identities)
+        var listed = Set(pools.map(\.id))
+        var nameless: [(id: String, repo: PRRef.LocalRepo)] = []
+        for repo in repos {
+            guard let id = NetworkOffer.pool(repoKey: repo.key), !listed.contains(id),
+                  !nameless.contains(where: { $0.id == id }) else { continue }
+            nameless.append((id, repo))
         }
-        if let nameless { return .held(held(account: nameless.slug)) }
-        return .pools(linked(roots: repos, identities: identities))
+        for pool in known where !listed.contains(pool.id)
+            && (unread.contains(pool.path) || nameless.contains { $0.id == pool.id }) {
+            listed.insert(pool.id)
+            pools.append(Pool(id: pool.id, path: pool.path,
+                              forge: pool.id.hasPrefix("\(PRRef.LocalRepo.github)/")
+                                ? "github" : "gitlab",
+                              identity: pool.identity))
+        }
+        return Listing(pools: pools, unconfirmed: unread.map { unconfirmed(unread: $0) }
+            + nameless.map { unconfirmed(account: $0.repo.slug, host: $0.repo.host) })
     }
 
     public static func body(_ pools: [Pool]) -> [String: [[String: String]]] {
@@ -598,6 +616,28 @@ public struct NetworkSnapshot: Equatable {
                              outcome: outcome, endedAt: number(o["endedAt"]))
             }
         }
+    }
+}
+
+/// What of the network does not work on this machine.
+public enum NetworkTrouble {
+    /// The states of a service that end what it is for until the operator acts. The
+    /// Network screen draws them red, and the panel says so (`line`).
+    public static let states: Set<String> = ["failed", "missing", "down"]
+
+    /// The panel's one line: a daemon that was asked and did not answer, else each of
+    /// the transport, docker and the model credential that is in one of `states`, with
+    /// the daemon's detail. "" while nothing is wrong, the daemon has not been asked, or
+    /// a service is still coming up.
+    public static func line(answered: Bool?, snapshot: NetworkSnapshot?) -> String {
+        if answered == false { return "Diplomacy Network: the daemon is not answering" }
+        guard let snapshot else { return "" }
+        let wrong = [("transport", snapshot.transport.state, snapshot.transport.detail),
+                     ("docker", snapshot.docker.state, snapshot.docker.detail),
+                     ("model", snapshot.model.state, snapshot.model.detail)]
+            .filter { states.contains($0.1) }
+            .map { "\($0.0) \($0.1)" + ($0.2.isEmpty ? "" : " (\($0.2))") }
+        return wrong.isEmpty ? "" : "Diplomacy Network: " + wrong.joined(separator: "; ")
     }
 }
 

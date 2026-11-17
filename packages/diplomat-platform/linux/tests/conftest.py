@@ -432,9 +432,18 @@ def isolated_diplomacy_network(tmp_path, monkeypatch):
     its package at one that is not there: a test that flips the switch otherwise asks
     the operator's daemon, and runs the installer that starts it (tor and docker
     with it). A test that wants an answer serves one on a socket in ``DN_BASE_DIR`` and
-    stubs ``deviceallocator.run_installer``."""
+    stubs ``deviceallocator.run_installer``. The retired mesh node's directory is an
+    empty one too, and its signal raises: a launch removes that directory, keys
+    included, and ends the node it names."""
+    from diplomat_app import diplomacynetwork
+
+    def no_signal(pid):
+        raise AssertionError(f"a test signalled pid {pid}")
+
     monkeypatch.setenv("DN_BASE_DIR", str(tmp_path / "network"))
     monkeypatch.setenv("DIPLOMAT_DIPLOMACY_NETWORK_DIR", str(tmp_path / "no-network-package"))
+    monkeypatch.setattr(diplomacynetwork, "legacy_dir", lambda: tmp_path / "mesh")
+    monkeypatch.setattr(diplomacynetwork, "_terminate", no_signal)
     yield
 
 

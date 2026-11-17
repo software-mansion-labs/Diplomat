@@ -407,6 +407,25 @@ class SectionHeader(ClickableFrame):
         self._chev.setText("▾" if expanded else "▸")
 
 
+class NoticeRow(ClickableFrame):
+    """One line that says something does not work, and opens the screen that shows
+    it. The text is painted as it is: part of it may be a daemon's."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(6)
+        row.addWidget(GlyphLabel("⚠", 14, "#FF3B30", font_px=11))
+        self.text = ElidedLabel(text, 10, "#FF3B30")
+        row.addWidget(self.text, 1)
+        chevron = QLabel("›")
+        chevron.setStyleSheet(muted(10))
+        row.addWidget(chevron)
+        self.setToolTip(plain_tooltip(text))
+
+
 class ActivityRow(QFrame):
     """One line in the activity feed: action glyph + detail + source badge + time."""
 
@@ -501,7 +520,7 @@ class QueuedTaskRow(QFrame):
     )
 
     def __init__(self, *, task_id: str, label: str, glyph: str, hex_color: str,
-                 paused: bool, cancellable: bool = False) -> None:
+                 paused: bool, cancellable: bool = False, refusal: str = "") -> None:
         super().__init__()
         self._task_id = task_id
         self._press: QPointF | None = None
@@ -529,6 +548,11 @@ class QueuedTaskRow(QFrame):
         )
         status.setStyleSheet(muted(9))
         col.addWidget(status)
+        if refusal:
+            # The daemon's own sentence: painted as it is, and shown whole on hover.
+            self.refusal = ElidedLabel(f"not offered: {refusal}", 9, "#FF9500")
+            self.refusal.setToolTip(plain_tooltip(refusal))
+            col.addWidget(self.refusal)
         row.addLayout(col, 1)
 
         if cancellable:

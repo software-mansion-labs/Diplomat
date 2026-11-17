@@ -182,16 +182,6 @@ enum AgentProbes {
         return .present(table)
     }
 
-    /// The pids whose command line mentions `word` anywhere. The table joins a process's
-    /// argv with spaces, so this finds candidates and proves nothing about an element.
-    static func pids(mentioning word: String, now: TimeInterval) -> [Int] {
-        guard let text = psDump(now: now).value else { return [] }
-        return text.split(separator: "\n").compactMap { line in
-            guard let cols = columns(String(line)), cols.args.contains(word) else { return nil }
-            return Int(cols.pid)
-        }
-    }
-
     /// Every tty a nudge may be typed into: for each agent process on the box, its own
     /// tty and every tty between it and the window it shows in.
     ///
@@ -271,7 +261,7 @@ enum AgentProbes {
     ///
     /// The pre-registry identity mechanism, kept for the two questions a pid cannot answer:
     /// agents this applet has no record of at all (`AgentState.synthesizeUntracked`), and
-    /// records whose agent has no pid to match — a spawn whose pid file has not landed.
+    /// records whose agent has no pid to match - a spawn whose pid file has not landed.
     ///
     /// It cannot tell two runs on one PR apart and it matches any session that merely
     /// mentions the number, which is why it decides nothing that a pid can decide.
@@ -436,8 +426,8 @@ enum AgentProbes {
     ///
     /// A terminal reports the tty it opened; `ps` reports the one the agent ended up on.
     /// For a run this applet spawned they are the same, because the spawn captures the
-    /// window's tty as it opens it. For a run it did not — one the operator opened by
-    /// hand — the only tty known is the agent's own, read out of
+    /// window's tty as it opens it. For a run it did not - one the operator opened by
+    /// hand - the only tty known is the agent's own, read out of
     /// the process table, and on a box whose shells wrap themselves in tmux that tty
     /// belongs to no window at all. Its screen is then unreadable for as long as the
     /// session lives, which resolves to RUNNING, and RUNNING holds a bay of the

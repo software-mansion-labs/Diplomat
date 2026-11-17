@@ -277,17 +277,20 @@ extension Store {
         return asks.isEmpty ? nil : (id, asks)
     }
 
-    /// Cancels the asks of `goal` not started yet, and has the goal forget them, so they
-    /// are asked for again should it go back to auto.
+    /// Takes back the asks of `goal` nothing has started - one waiting in the queue is
+    /// cancelled, one the Diplomacy Network carries that no machine has taken has its
+    /// offer withdrawn (`withdrawUnstarted`) - and has the goal forget them, so they are
+    /// asked for again should it go back to auto.
     func withdrawGoalAsks(_ goal: (task: String, asks: [String: String])?) async {
         guard let goal else { return }
         let waiting = goal.asks.filter { _, queueKey in
             queuedTasks.contains { $0.id == queueKey && $0.job.requested }
         }
-        guard !waiting.isEmpty else { return }
         waiting.values.forEach(cancelRequestedWork)
-        if let refusal = await editTask(.withdrawn(id: goal.task, work: waiting.keys.sorted())) {
-            AppLog.log("tasks", "goal \(goal.task): could not forget \(waiting.keys.sorted().joined(separator: " ")): \(refusal)")
+        let gone = Set(waiting.keys).union(await withdrawUnstarted(asks: goal.asks)).sorted()
+        guard !gone.isEmpty else { return }
+        if let refusal = await editTask(.withdrawn(id: goal.task, work: gone)) {
+            AppLog.log("tasks", "goal \(goal.task): could not forget \(gone.joined(separator: " ")): \(refusal)")
         }
     }
 
@@ -356,7 +359,8 @@ extension Store {
         case .spawned, .offered: break
         // On its way: recorded as dispatched by the pass that finds its run.
         case .offering: return nil
-        case .networkRefused(let why): return "the fix was not offered: \(why)"
+        case .networkRefused(let why), .networkDown(let why):
+            return "the fix was not offered: \(why)"
         case .banned: return "@\(node.author ?? "") is banned, so no fix was started"
         case .failed(let why): return "the fix agent did not start: \(why)"
         default: return "the fix agent did not start (\(outcome))"

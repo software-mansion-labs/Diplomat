@@ -19,7 +19,7 @@ enum RepoPaths {
 
     /// The checkout root. Env-overridable; falls back to the conventional clone path
     /// (a personal, single-checkout setup). Everything that lives beside the app in
-    /// this monorepo — the device-allocator package, the install scripts — hangs off
+    /// this monorepo - the device-allocator package, the install scripts - hangs off
     /// here, so a moved or renamed checkout relocates all of them together.
     static var root: URL {
         locate(env: ProcessInfo.processInfo.environment["DIPLOMAT_SELF_REPO"],
@@ -128,9 +128,16 @@ enum RepoPaths {
         let primaryResolved: Bool
         /// None of several paths resolved, the one root a guess (`RepoRoots.guessed`).
         let guessed: Bool
+        /// The roots a path's own remote names: none while no path resolved, the one
+        /// root then standing in for the configured repo.
+        let linked: [PRRef.LocalRepo]
+        /// The paths, `~` expanded, that could not be read: missing, or `git` failing
+        /// on one. A path that was read and has no GitHub or GitLab remote is not one.
+        let unread: [String]
 
         /// `gitlabHosts`: the hosts glab is configured for (`GLab.configuredHosts`).
-        init(paths: [String], remotes: [String: String], gitlabHosts: GitLabHosts = []) {
+        init(paths: [String], remotes: [String: String], unread: [String],
+             gitlabHosts: GitLabHosts = []) {
             roots = RepoRoots.resolve(paths: paths, remotes: remotes,
                                       configured: CoreAssets.repoCoordinates(),
                                       gitlabHosts: gitlabHosts)
@@ -138,6 +145,8 @@ enum RepoPaths {
             primaryResolved = RepoRoots.primaryResolves(paths: paths, remotes: remotes,
                                                         gitlabHosts: gitlabHosts)
             guessed = RepoRoots.guessed(paths: paths, remotes: remotes, gitlabHosts: gitlabHosts)
+            linked = (paths.count > 1 ? guessed : !complete) ? [] : roots
+            self.unread = unread
         }
     }
 
@@ -157,7 +166,8 @@ enum RepoPaths {
             if start {
                 Task.detached(priority: .utility) { _ = resolveRoots(paths, at: Date()) }
             }
-            return cached?.reading ?? RootsReading(paths: paths, remotes: [:])
+            return cached?.reading
+                ?? RootsReading(paths: paths, remotes: [:], unread: paths.map(RepoRoots.expand))
         }
         return resolveRoots(paths, at: now)
     }
@@ -175,10 +185,20 @@ enum RepoPaths {
 
     private static func resolveRoots(_ paths: [String], at: Date) -> RootsReading {
         var remotes: [String: String] = [:]
-        for path in paths.map(RepoRoots.expand) where isCheckout(path) {
-            remotes[path] = LocalRepos.remotes(of: path)
+        var unread: [String] = []
+        for path in paths.map(RepoRoots.expand) {
+            guard FileManager.default.fileExists(atPath: path) else {
+                unread.append(path)
+                continue
+            }
+            guard isCheckout(path) else { continue }
+            if let read = LocalRepos.readRemotes(of: path) {
+                remotes[path] = read
+            } else {
+                unread.append(path)
+            }
         }
-        let reading = RootsReading(paths: paths, remotes: remotes,
+        let reading = RootsReading(paths: paths, remotes: remotes, unread: unread,
                                    gitlabHosts: GLab.configuredHosts())
         rootsLock.lock()
         rootsCache = (paths, at, reading)

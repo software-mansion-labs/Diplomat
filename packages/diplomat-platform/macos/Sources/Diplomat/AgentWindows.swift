@@ -11,7 +11,7 @@ import DiplomatCore
 ///
 /// The handle is the exact way back to a session: a spawn walks away from a fully detached
 /// terminal, and these three ids are what the focus AppleScript addresses. A run with no
-/// handle — a live agent nobody dispatched — is reached the inexact way instead, by
+/// handle - a live agent nobody dispatched - is reached the inexact way instead, by
 /// walking its own process out to the window showing it (`TerminalFocus`).
 ///
 /// Whether a run is still going is not asked here and never was a window question: the

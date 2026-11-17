@@ -12,7 +12,7 @@ struct ContentView: View {
     enum PanelScreen { case main, devices, machines, network, comms, tasks, telemetry, settings }
 
     /// `showSettings` / `showTelemetry` / `showDevices` / `showMachines` / `showNetwork` /
-    /// `showComms` / `showTasks` seed the initial screen — used by the headless render to
+    /// `showComms` / `showTasks` seed the initial screen - used by the headless render to
     /// snapshot those screens in context.
     /// Defaults to the main view.
     /// `seedPendingUnban` seeds the inline un-ban confirmation for a login (render only).
@@ -552,6 +552,13 @@ struct ContentView: View {
                           expanded: $tasksExpanded,
                           icon: "antenna.radiowaves.left.and.right",
                           caption: caption.isEmpty ? nil : caption)
+            // Above the fold of the section: with the network on, every row below waits
+            // on what this line says does not work.
+            if let trouble = store.networkTrouble {
+                NetworkTroubleRow(text: trouble) {
+                    withAnimation(.easeInOut(duration: 0.15)) { screen = .network }
+                }
+            }
             if tasksExpanded {
                 // Split around the switch that governs the queue, which draws where the
                 // queue starts. `.queued` sorts last, so the two halves are the one
@@ -584,6 +591,7 @@ struct ContentView: View {
                 task: task,
                 tint: agentTaskTint(task.job.kind),
                 paused: store.isHeld(task),
+                refusal: store.networkJobRefusals[task.job.label],
                 onRun: { Task { await store.executeQueuedTask(task.id) } },
                 cancellable: task.job.requested,
                 onCancel: { store.cancelRequestedWork(task.id) },
@@ -601,7 +609,7 @@ struct ContentView: View {
     private func agentTaskTint(_ kind: String) -> Color { DiplomatUI.agentTaskTint(kind) }
 
     /// Click a row: focus its window. If focus fails the window is gone and the row is
-    /// dismissed by the store — nothing more to do here. A run the network carries has no
+    /// dismissed by the store - nothing more to do here. A run the network carries has no
     /// window on this machine, and opens the Network screen, where its task is.
     private func activate(_ row: Store.AgentRow) {
         guard row.record.runsHere else {
@@ -1021,6 +1029,31 @@ private struct AgentTaskStatusLabel: View {
     }
 }
 
+/// One line that says the Diplomacy Network does not work here, and opens its screen.
+/// The text is drawn as it is: part of it is the daemon's.
+private struct NetworkTroubleRow: View {
+    let text: String
+    let open: () -> Void
+
+    var body: some View {
+        Button(action: open) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9))
+                Text(verbatim: text)
+                    .font(.system(size: 10))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.right").font(.system(size: 8))
+            }
+            .foregroundStyle(.red)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .tooltip(text)
+    }
+}
+
 // MARK: - Queued agent-task row
 
 /// The switch above the queue: whether a free bay starts the next queued task.
@@ -1061,6 +1094,9 @@ private struct QueuedTaskRow: View {
     /// Its monitor is switched off, so nothing will start this by itself. Worth
     /// saying on the row: "queued" otherwise promises a start that is never coming.
     let paused: Bool
+    /// Why the Diplomacy Network refused this job, when it refused it for a reason of
+    /// the job's own.
+    let refusal: String?
     let onRun: () -> Void
     /// False for a monitor's row: dropping one would put it straight back on the next
     /// poll, so the button would do nothing anyone could see.
@@ -1116,6 +1152,10 @@ private struct QueuedTaskRow: View {
                         Text("· monitor off").font(.system(size: 9))
                             .foregroundStyle(.secondary)
                     }
+                }
+                if let refusal {
+                    Text(verbatim: "not offered: \(refusal)").font(.system(size: 9))
+                        .foregroundStyle(.orange).lineLimit(1).tooltip(refusal)
                 }
             }
             Spacer(minLength: 4)

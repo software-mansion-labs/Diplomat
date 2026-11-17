@@ -136,7 +136,7 @@ public enum AgentState {
     /// process table is one `ps` pass reused for several seconds, so it can predate the
     /// pid file naming what to look for. Past this the run is judged on the evidence
     /// there is: a known pid the table does not hold has ended, and a run with no pid
-    /// file at all never ran (`.failed`) — this applet staged that path itself, so
+    /// file at all never ran (`.failed`) - this applet staged that path itself, so
     /// nothing but the command writes it.
     ///
     /// The same window bounds `AgentSpawner.spawn`'s own wait for the file, measured
@@ -464,8 +464,13 @@ public enum AgentState {
         /// Whether the agent's own runner said its turn was over and went well: a CLI's
         /// `idle` turn report, or a session that went idle without failing. Every other
         /// ending (an exit, a gone pid, a backstop) is inferred, and says nothing about
-        /// whether the agent finished what it set out to do.
+        /// whether the agent finished what it set out to do. A run the network carried
+        /// is reported when its executor's outcome says it went well.
         public var reported: Bool = false
+        /// Whether the network gave this run's offer up with its attempts used: the
+        /// work was taken as often as an offer allows and never went well. Every other
+        /// failed network run never ran: withdrawn, refused, or unknown to the daemon.
+        public var spent: Bool = false
 
         public var occupying: Bool { AgentState.occupying.contains(state) && !lapsed }
     }
@@ -559,7 +564,7 @@ public enum AgentState {
     /// Split out of `resolve` because it is the one input that is a memory rather than
     /// an observation: absence is only measurable against a memory of presence, and
     /// this way `resolve` stays a function of its arguments alone. What is remembered is
-    /// a digest rather than the screen itself — the book is
+    /// a digest rather than the screen itself - the book is
     /// rewritten every tick and read by other processes, so storing every watched pane's
     /// contents in it would be both large and pointless.
     ///
@@ -691,7 +696,10 @@ public enum AgentState {
         if let task = record.network {
             let (state, detail) = networkVerdict(task: task, network: evidence.network,
                                                  age: now - record.dispatchedAt)
-            return done(state, detail)
+            var out = done(state, detail)
+            out.reported = state == .finished
+            out.spent = networkSpent(task: task, network: evidence.network)
+            return out
         }
         if let sentinels = evidence.sentinels.value, sentinels.contains(record.runID) {
             return done(.finished, "completion sentinel present")
@@ -772,6 +780,13 @@ public enum AgentState {
         case NetworkTask.cancelled: return (.failed, "withdrawn from the network\(why)")
         default: return (.unknown, "the network reports \(seen.state)")
         }
+    }
+
+    /// Whether the daemon ended the offer of `task` with its attempts used.
+    public static func networkSpent(task: String,
+                                    network: Observation<[String: NetworkTask]>) -> Bool {
+        guard let seen = network.value?[task] else { return false }
+        return seen.state == NetworkTask.failed || (seen.state == NetworkTask.done && !seen.ok)
     }
 
     /// How long this run has been going, once that is long enough to call it over — nil
@@ -889,12 +904,12 @@ public enum AgentState {
 
     /// A run this applet booked but has no pid for.
     ///
-    /// Two things produce one. A spawn whose shell has not written its pid file yet —
+    /// Two things produce one. A spawn whose shell has not written its pid file yet -
     /// the ordinary first seconds of a run. And a spawn whose terminal opened a window
     /// and never ran the command in it, so the file is not late but absent.
     ///
     /// The agent's own prompt in the process table is asked first. It cannot tell two
-    /// runs on one PR apart, which is exactly why it is a fallback and not the identity —
+    /// runs on one PR apart, which is exactly why it is a fallback and not the identity -
     /// but "an agent for this PR is up" is positive evidence that the command ran.
     private static func resolveWithoutPid(_ record: RunRecord, evidence: Evidence,
                                           now: TimeInterval, age: TimeInterval,
@@ -913,7 +928,7 @@ public enum AgentState {
         }
         // This applet opened the terminal and named the pid path itself, and the inner
         // shell writes it before the agent (`AgentSpawner.shellCommand`). So an absent
-        // file past the grace is the run's OWN report that its command never ran — not
+        // file past the grace is the run's OWN report that its command never ran - not
         // an inference from what the terminal looks like, which is why it survives a
         // terminal that changes how it fails.
         return done(.failed, "its terminal never ran the command "
@@ -1324,8 +1339,9 @@ public enum AgentState {
 
     /// The automatic runs whose own runner reported the turn over
     /// (`Resolution.reported`): their window is closed as they retire, their work being
-    /// on GitHub, on GitLab or in a report. A panel run is the operator's session, and an
-    /// untracked agent's `auto` is the cap's assumption, not a dispatch.
+    /// on GitHub, on GitLab or in a report. A panel run is the operator's session, an
+    /// untracked agent's `auto` is the cap's assumption, not a dispatch, and a run the
+    /// network carried has no window here.
     ///
     /// Unlike `reapable`, a close that reaches nothing withholds no retirement: the
     /// record a live agent is released to (`releaseEnded`) is the stillness backstop's.
@@ -1333,7 +1349,7 @@ public enum AgentState {
                                      states: [String: Resolution]) -> [RunRecord] {
         records.filter { r in
             guard !r.untracked, r.source == AgentDispatchGate.Source.auto.rawValue,
-                  let s = states[r.runID] else { return false }
+                  r.runsHere, let s = states[r.runID] else { return false }
             return s.reported
         }
     }
@@ -1362,6 +1378,16 @@ public enum AgentState {
         outstanding(record, evidence) ? record.network : nil
     }
 
+    /// The task to withdraw when what asked for this run stops wanting it started, or
+    /// `nil` when a machine has taken it or the network is finished with it. A task the
+    /// snapshot does not name, and an unread snapshot, count as not taken: the daemon
+    /// answers the withdrawal of a task it does not hold as done.
+    public static func withdrawUnstarted(_ record: RunRecord, evidence: Evidence) -> String? {
+        guard let task = record.network else { return nil }
+        guard let seen = evidence.network.value?[task] else { return task }
+        return seen.state == NetworkTask.pooled ? task : nil
+    }
+
     /// Bays of the cap with nothing in them. Clamped, because a lowered cap and
     /// untracked agents can both put more agents on the box than the cap allows.
     public static func freeSlots(limit: Int, occupied: Int) -> Int {
@@ -1373,7 +1399,7 @@ public enum AgentState {
     /// Everything one pass of evidence produced. What a caller reads instead of
     /// re-deriving any of it.
     public struct Tick {
-        /// The records as the pipeline left them — ttys adopted, stillness clocks
+        /// The records as the pipeline left them - ttys adopted, stillness clocks
         /// advanced, untracked agents synthesized, ended runs' live agents released. The
         /// caller persists these.
         public var records: [RunRecord]

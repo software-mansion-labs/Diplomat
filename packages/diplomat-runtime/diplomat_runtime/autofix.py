@@ -557,6 +557,9 @@ WINDOW_CREDITS = "orCredits"  # the OpenRouter account's credit balance
 #: from which ceiling was read and is carried so the feed can say which it meant.
 UNIT_PCT = "pct"
 UNIT_USD = "usd"
+#: All of a rate-limit window, in :data:`UNIT_PCT`: the most one task can be asked to
+#: fit inside.
+WHOLE_WINDOW_PCT = 100.0
 
 
 def clamp_budget_confidence(value: int) -> int:
@@ -652,6 +655,11 @@ def budget_decide(windows: list[tuple[str, float | None, float | None]],
     hand" — which is the whole of the answer on a machine whose ledger has not priced
     a task yet.
 
+    So does a rate limit whose task is priced above the whole window
+    (:data:`WHOLE_WINDOW_PCT`). No window could ever cover that, so held to it nothing
+    would start until the counts behind the price left the ledger's lookback, and one
+    count far beyond what a task can spend is all it takes to put the price there.
+
     A ceiling with **no reading at all** is skipped, and a call where none has one is
     affordable. That is deliberate: a usage probe can be switched off
     (``DIPLOMAT_QUOTA_PROBE=0``, ``DIPLOMAT_SPEND_PROBE=0``), logged out, or simply
@@ -667,6 +675,8 @@ def budget_decide(windows: list[tuple[str, float | None, float | None]],
     for window, left, cost in windows:
         if left is None:
             continue
+        if unit == UNIT_PCT and cost is not None and cost > WHOLE_WINDOW_PCT:
+            cost = None
         needed = floor if cost is None else cost
         if tightest is not None and left - needed >= tightest.left - tightest.needed:
             continue  # an earlier ceiling is the binding one

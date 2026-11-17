@@ -106,12 +106,14 @@ ROUTE_LEAVE = "leave"
 ROUTE_STOP_RUN = "stop-run"
 
 #: Why an offer is withdrawn: its PR merged, the operator forgot the run or stopped a
-#: task no run here carries, its run could not be booked, or the switch went off.
+#: task no run here carries, its run could not be booked, the switch went off, or the
+#: goal that asked for it stopped acting.
 WITHDRAW_MERGED = "merged"
 WITHDRAW_FORGOTTEN = "forgotten"
 WITHDRAW_STOPPED = "stopped"
 WITHDRAW_NOT_BOOKED = "not booked"
 WITHDRAW_SWITCHED_OFF = "switched off"
+WITHDRAW_GOAL = "its goal stopped"
 
 
 def withdraw_body(task: str, reason: str) -> dict:
@@ -267,36 +269,47 @@ def linked_pools(roots: Iterable[LocalRepo], identities: Mapping[str, str]) -> l
     return list(out.values())
 
 
-HELD_ROOT = "Pools are held back: a repo root cannot be read"
+def unconfirmed_unread(path: str) -> str:
+    return (f"{path} cannot be read: its pool stays as the daemon last had it until the "
+            "path can be read or is taken out of Settings")
 
 
-def held_unread(path: str) -> str:
-    return f"Pools are held back: {path} cannot be read"
+def unconfirmed_account(repo: str, host: str) -> str:
+    return (f"The login for {repo} on {host} is not known yet: its pool stays as the "
+            "daemon last had it until it is")
 
 
-def held_account(repo: str) -> str:
-    return f"Pools are held back: the account for {repo} is not known yet"
-
-
-def pools_listing(roots: Iterable[LocalRepo], roots_read: bool, others: Iterable[LocalRepo],
-                  unread: Iterable[str], identities: Mapping[str, str]
-                  ) -> tuple[list[dict] | None, str]:
-    """What ``POST /pools`` is to say, or ``None`` and why nothing is said yet.
+def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
+                  unread: Iterable[str], identities: Mapping[str, str],
+                  known: Iterable["Pool"]) -> tuple[list[dict], list[str]]:
+    """What ``POST /pools`` is to say, and a sentence for each thing that could not be
+    confirmed.
 
     Every linked repository is a pool: the roots, then what the Other repos checkouts
-    name that no root does (``others``). A checkout that was read and names no forge is
-    no pool and is in neither list. A root or a checkout that could not be read
-    (``unread``, by path), or a repository whose forge login is unknown, holds the whole
-    list back: a list cut short makes the daemon leave the pools it omits."""
-    if not roots_read:
-        return None, HELD_ROOT
-    for path in unread:
-        return None, held_unread(path)
+    name that no root does (``others``). A root or a checkout that was read and names no
+    forge is no pool, and is in neither list. What could not be confirmed is said as the
+    daemon last had it (``known``, its snapshot's pools): the pool at a path that could
+    not be read (``unread``), and the pool of a repository whose forge login is unknown.
+    The daemon leaves a pool the list omits, so the list is never cut short by what is
+    unknown, and a repository taken out of Settings leaves its pool whatever else
+    cannot be read."""
     repos = [*roots, *others]
+    pools = linked_pools(repos, identities)
+    listed = {pool["id"] for pool in pools}
+    nameless: dict[str, LocalRepo] = {}
     for repo in repos:
-        if not identities.get(repo.host, "").strip():
-            return None, held_account(repo.slug)
-    return linked_pools(repos, identities), ""
+        pool = pool_for(repo.key)
+        if pool is not None and pool not in listed:
+            nameless.setdefault(pool, repo)
+    unread = list(unread)
+    for pool in known:
+        if pool.id not in listed and (pool.path in unread or pool.id in nameless):
+            listed.add(pool.id)
+            pools.append({"id": pool.id, "path": pool.path,
+                          "forge": "github" if pool.id.startswith(f"{GITHUB}/") else "gitlab",
+                          "identity": pool.identity})
+    return pools, [*map(unconfirmed_unread, unread),
+                   *(unconfirmed_account(r.slug, r.host) for r in nameless.values())]
 
 
 def pools_body(pools: list[dict]) -> dict:
@@ -540,6 +553,28 @@ class Snapshot:
             offers=(tuple(_offer(o) for o in _rows(offers) if _text(o.get("taskId")))
                     if isinstance(offers, list) else None),
         )
+
+
+#: The states of a service that end what it is for until the operator acts. The
+#: Network screen draws them red, and the panel says so (:func:`trouble`).
+TROUBLE_STATES = frozenset({"failed", "missing", "down"})
+
+
+def trouble(answered: bool | None, snapshot: Snapshot | None) -> str:
+    """The panel's one line on what of the network does not work on this machine: a
+    daemon that was asked and did not answer, else each of the transport, docker and
+    the model credential that is in a :data:`TROUBLE_STATES` state, with the daemon's
+    detail. "" while nothing is wrong, the daemon has not been asked, or a service is
+    still coming up."""
+    if answered is False:
+        return "Diplomacy Network: the daemon is not answering"
+    if snapshot is None:
+        return ""
+    wrong = [f"{name} {service.state}" + (f" ({service.detail})" if service.detail else "")
+             for name, service in (("transport", snapshot.transport),
+                                   ("docker", snapshot.docker), ("model", snapshot.model))
+             if service.state in TROUBLE_STATES]
+    return "Diplomacy Network: " + "; ".join(wrong) if wrong else ""
 
 
 def _pool(p: dict) -> Pool:

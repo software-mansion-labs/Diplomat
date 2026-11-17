@@ -20,6 +20,8 @@ enum DiplomacyNetwork {
     static let foreignRunner = "network"
 
     static let notAnswering = "the Diplomacy Network daemon is not answering"
+    /// What a Stop says of a run the daemon no longer lists as going.
+    static let runEnded = "That job's run on this machine has already ended."
     static let switchedOff = "the Diplomacy Network is switched off"
 
     /// What the daemon said to one request.
@@ -93,6 +95,13 @@ enum DiplomacyNetwork {
     /// The module the mesh node Diplomat once ran was started as (`python3 -m szpontnet`).
     static let legacyModule = "szpontnet"
 
+    /// Where that node kept its state and its keys, and how long it is given to quit
+    /// before the directory is left for the next launch. A headless run has no such
+    /// directory of its own: a self-test names a scratch one.
+    static var legacyStateDir: URL? = Headless.active ? nil
+        : FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".diplomat/mesh")
+    static var legacyExitWait: TimeInterval = 5
+
     /// A process's argv, and the signal that ends it: the kernel's, behind a seam a
     /// self-test fills. A headless run signals nothing of its own accord.
     static var argumentsOf: @Sendable (Int) -> [String]? = {
@@ -108,13 +117,46 @@ enum DiplomacyNetwork {
         zip(argv, argv.dropFirst()).contains { $0 == "-m" && $1 == legacyModule }
     }
 
-    /// End every such node this user runs, and return the pids signalled. Another user's
-    /// process shows no argv, so it is never one. Blocking.
-    static func endLegacyMeshNodes(now: TimeInterval = Date().timeIntervalSince1970) -> [Int] {
-        let own = Int(getpid())
-        return AgentProbes.pids(mentioning: legacyModule, now: now).filter { pid in
-            pid != own && argumentsOf(pid).map(isLegacyMeshNode) == true && terminate(pid)
+    /// Another user's process shows no argv, so it is never one.
+    private static func legacyNodeRunning(_ pid: Int) -> Bool {
+        pid != Int(getpid()) && argumentsOf(pid).map(isLegacyMeshNode) == true
+    }
+
+    /// End that node and remove its directory, keys included. The node is the pid the
+    /// directory's `state.json` names, while that pid is a `-m szpontnet` of this user:
+    /// a node kept anywhere else is its operator's own program. One still running after
+    /// `legacyExitWait` keeps the directory. Returns the pid asked to quit and the
+    /// directory removed, each nil when there was none. Blocking.
+    static func retireLegacyMeshNode() -> (asked: Int?, removed: String?) {
+        var isDir: ObjCBool = false
+        guard let dir = legacyStateDir,
+              FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir),
+              isDir.boolValue else { return (nil, nil) }
+        let state = (try? Data(contentsOf: dir.appendingPathComponent("state.json")))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+        var asked: Int?
+        if let named = state?["pid"] as? NSNumber, CFGetTypeID(named) != CFBooleanGetTypeID(),
+           !CFNumberIsFloatType(named), case let pid = named.intValue, legacyNodeRunning(pid) {
+            if terminate(pid) { asked = pid }
+            let deadline = Date().addingTimeInterval(legacyExitWait)
+            while legacyNodeRunning(pid) {
+                if Date() >= deadline { return (asked, nil) }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
         }
+        try? FileManager.default.removeItem(at: dir)
+        return (asked, FileManager.default.fileExists(atPath: dir.path) ? nil : dir.path)
+    }
+
+    /// What the feed says of `retireLegacyMeshNode`; nil when it found nothing.
+    static func legacyRetiredLine(asked: Int?, removed: String?) -> String? {
+        if let removed {
+            let node = asked.map { "Ended the retired mesh node (pid \($0)) and removed" }
+            return "\(node ?? "Removed") \(removed), the retired mesh's state and keys"
+        }
+        guard let asked, let dir = legacyStateDir else { return nil }
+        return "Asked the retired mesh node (pid \(asked)) to quit: \(dir.path) is removed "
+            + "once it has"
     }
 }
 
@@ -153,13 +195,22 @@ enum NetworkText {
     static let requiredSummary = "Counted from when a machine takes it. Only machines that "
         + "take jobs this long run yours."
     static let acceptedTitle = "Longest job this machine takes"
+    /// What the two hours say together when a job of this machine's own may take longer
+    /// than the longest job it takes, or nil.
+    static func hoursNote(required: Int, accepted: Int) -> String? {
+        required > accepted
+            ? "This machine takes none of its own jobs: one may take \(hours(required)), and "
+                + "the longest job it takes is \(hours(accepted))."
+            : nil
+    }
     static let acceptedSummary = "A job that may take longer is left to the other machines "
         + "of its pool."
     static let devicesTitle = "Let jobs use this machine's devices"
     static let devicesSummary = "Off: jobs see no device. On: a job running here can use the "
         + "Android devices and emulators attached to this machine through adb - including a "
-        + "phone on USB - and an emulator can reach services on this machine. Switch it on "
-        + "only for pools whose machines you trust with that."
+        + "phone on USB - and an emulator can reach services on this machine. It is one "
+        + "switch for every pool this machine is in: switch it on only when you trust all "
+        + "their machines with that. Either way it applies to jobs started afterwards."
     static let noPools = "No pools yet. Each repository in Settings gets one once Diplomat "
         + "knows which account works on it."
     static let noMembers = "No members listed yet."

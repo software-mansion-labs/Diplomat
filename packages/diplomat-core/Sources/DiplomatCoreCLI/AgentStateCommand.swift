@@ -31,7 +31,7 @@ import Foundation
 /// it - `null` for none - and takes the place of `evidence.network`, so the snapshot
 /// decoder and the evidence built from it are diffed too.
 /// Output: the resolved rows in display order, every record's verdict whether drawn or
-/// not, every projection, and the records as the pipeline left them — so a stillness
+/// not, every projection, and the records as the pipeline left them - so a stillness
 /// clock written by the wrong step is a diff.
 enum AgentStateCommand {
     static func run(_ obj: [String: Any]) {
@@ -59,7 +59,8 @@ enum AgentStateCommand {
         }
         func verdict(_ s: AgentState.Resolution) -> [String: Any] {
             ["state": s.state.rawValue, "reason": s.reason, "wedged": s.wedged,
-             "expired": s.expired, "lapsed": s.lapsed, "reported": s.reported]
+             "expired": s.expired, "lapsed": s.lapsed, "reported": s.reported,
+             "spent": s.spent]
         }
         let out: [String: Any] = [
             "rows": t.rows.map { r, s in verdict(s).merging(["runId": r.runID]) { $1 } },
@@ -74,6 +75,9 @@ enum AgentStateCommand {
             "withdrawable": t.withdrawable.map(\.runID).sorted(),
             "withdrawOnForget": t.records.filter {
                 AgentState.withdrawOnForget($0, evidence: evidence) != nil
+            }.map(\.runID).sorted(),
+            "withdrawUnstarted": t.records.filter {
+                AgentState.withdrawUnstarted($0, evidence: evidence) != nil
             }.map(\.runID).sorted(),
             "network": network(evidence.network),
             "networkSnapshot": snapshot.map(dump) ?? NSNull(),

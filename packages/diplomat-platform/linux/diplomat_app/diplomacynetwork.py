@@ -9,8 +9,11 @@ config. What to send and how to read the answers is :mod:`diplomat_runtime.netwo
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import signal
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -51,8 +54,21 @@ def socket_path() -> Path:
 
 # MARK: settings
 
+#: The config the switch was last read from, and what it said.
+_switch_read: tuple[Path, bool] | None = None
+
+
 def enabled() -> bool:
-    return appconfig.get_bool(network.ENABLED_KEY, False)
+    """The switch, as the shared config has it. A config that is there and cannot be
+    read says nothing of it - one read can fall in the middle of a rewrite - so the
+    switch is as it was last read, and off when it never was."""
+    global _switch_read
+    where, config = appconfig.path(), appconfig.read_known()
+    if config is None:
+        return _switch_read is not None and _switch_read == (where, True)
+    on = config.get(network.ENABLED_KEY) is True
+    _switch_read = (where, on)
+    return on
 
 
 def set_enabled(on: bool) -> None:
@@ -108,6 +124,8 @@ _GETS = frozenset({network.ROUTE_HEALTH, network.ROUTE_STATE})
 
 #: Why nothing can be said of a network run, as the sentences that take it start.
 NOT_ANSWERING = "the Diplomacy Network daemon is not answering"
+#: What a Stop says of a run the daemon no longer lists as going.
+RUN_ENDED = "That job's run on this machine has already ended."
 SWITCHED_OFF = "the Diplomacy Network is switched off"
 
 
@@ -174,13 +192,18 @@ VERDICT_OFFERING = "network_offering"
 
 
 class Refused(str):
-    """:data:`VERDICT_REFUSED`, carrying the words that say why."""
+    """:data:`VERDICT_REFUSED`, carrying the words that say why. ``own`` says the
+    refusal is of this one job - the daemon's definite answer to its offer, or an offer
+    that could not be made of it - where a daemon that did not answer, or is stopping,
+    takes no job at all."""
 
     sentence: str
+    own: bool
 
-    def __new__(cls, sentence: str) -> "Refused":
+    def __new__(cls, sentence: str, own: bool = False) -> "Refused":
         self = super().__new__(cls, VERDICT_REFUSED)
         self.sentence = sentence
+        self.own = own
         return self
 
 
@@ -209,16 +232,63 @@ def _is_legacy_node(tokens: list[str]) -> bool:
                for flag, module in zip(tokens, tokens[1:]))
 
 
-def end_legacy_nodes() -> set[int]:
-    """Ask every ``python -m szpontnet`` of this user to quit, and return their pids."""
-    pids = procscan.scan_own_pids(
-        lambda pid: _is_legacy_node(procscan.cmdline_tokens(pid)))
-    for pid in pids:
+#: How long that node is given to quit before its directory is left for the next launch.
+LEGACY_EXIT_SECS = 5.0
+
+
+def legacy_dir() -> Path:
+    """Where the mesh node an earlier Diplomat ran kept its state and its keys."""
+    return Path.home() / ".diplomat" / "mesh"
+
+
+def _legacy_node_running(pid: int) -> bool:
+    return bool(procscan.scan_own_pids(
+        lambda found: found == pid and _is_legacy_node(procscan.cmdline_tokens(found))))
+
+
+def _terminate(pid: int) -> None:
+    os.kill(pid, signal.SIGTERM)
+
+
+def retire_legacy_node() -> tuple[int | None, Path | None]:
+    """End the mesh node an earlier Diplomat ran and remove its directory, keys
+    included. That node is the pid the directory's ``state.json`` names, while that
+    pid is a ``python -m szpontnet`` of this user: a node kept anywhere else is its
+    operator's own program. One still running after ``LEGACY_EXIT_SECS`` keeps the
+    directory. Returns the pid asked to quit and the directory removed, each None when
+    there was none. Blocking."""
+    where = legacy_dir()
+    if not where.is_dir():
+        return None, None
+    try:
+        pid = json.loads((where / "state.json").read_text()).get("pid")
+    except (OSError, ValueError, AttributeError):
+        pid = None
+    asked = None
+    if type(pid) is int and _legacy_node_running(pid):
         try:
-            os.kill(pid, signal.SIGTERM)
+            _terminate(pid)
+            asked = pid
         except OSError:
             pass
-    return pids
+        deadline = time.monotonic() + LEGACY_EXIT_SECS
+        while _legacy_node_running(pid):
+            if time.monotonic() >= deadline:
+                return asked, None
+            time.sleep(0.1)
+    shutil.rmtree(where, ignore_errors=True)
+    return asked, None if where.exists() else where
+
+
+def legacy_retired_line(asked: int | None, removed: Path | None, where: Path) -> str | None:
+    """What the feed says of :func:`retire_legacy_node`; None when it found nothing."""
+    if removed is not None:
+        node = f"Ended the retired mesh node (pid {asked}) and removed" if asked else "Removed"
+        return f"{node} {removed}, the retired mesh's state and keys"
+    if asked is not None:
+        return (f"Asked the retired mesh node (pid {asked}) to quit: {where} is removed "
+                "once it has")
+    return None
 
 
 # MARK: display

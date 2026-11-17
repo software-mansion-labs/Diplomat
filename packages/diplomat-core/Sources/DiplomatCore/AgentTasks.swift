@@ -101,7 +101,7 @@ public enum AgentTaskStatus: Int, Comparable, CaseIterable {
 /// each poll until each is dispatched.
 public enum AgentTaskQueue {
     /// A queued task's identity, stable across polls and applet restarts: the
-    /// monitor's verb plus the item it is about. Not the ledger key — that one is
+    /// monitor's verb plus the item it is about. Not the ledger key - that one is
     /// scoped to a head sha, so a push during the wait would read as a different task
     /// and lose the operator's place for it.
     ///

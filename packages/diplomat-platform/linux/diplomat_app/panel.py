@@ -29,7 +29,7 @@ from PySide6.QtCore import QUrl
 import html
 import time
 
-from diplomat_runtime import activity, agentstate, autofix, review
+from diplomat_runtime import activity, agentstate, autofix, network, review
 from diplomat_runtime.models import Fmt
 from diplomat_runtime.prref import root_label
 from . import deviceallocator, glyphs
@@ -48,6 +48,7 @@ from .widgets import (
     GlyphLabel,
     IconChip,
     NetworkTaskRow,
+    NoticeRow,
     QueueAutoRunRow,
     QueuedTaskRow,
     ResultRow,
@@ -362,6 +363,7 @@ class Panel(QWidget):
         store.devices_changed.connect(self._rebuild_devices)
         store.activity_changed.connect(self._rebuild_left_pane)
         store.tasks_changed.connect(self._rebuild_agent_tasks)
+        store.network_changed.connect(self._rebuild_agent_tasks)
 
         # Poll the device-allocator state file + the shared activity/ban files on a
         # light cadence (cheap file reads), and re-measure the running automatic
@@ -809,6 +811,13 @@ class Panel(QWidget):
                                expanded=self._tasks_expanded)
         header.clicked.connect(self._toggle_tasks)
         self.tasks_col.addWidget(header)
+        # Above the fold of the section: with the network on, every row below waits
+        # on what this line says does not work.
+        trouble = network.trouble(self.store.network_answered, self.store.network_state)
+        if trouble:
+            notice = NoticeRow(trouble)
+            notice.clicked.connect(self._open_network)
+            self.tasks_col.addWidget(notice)
         if not self._tasks_expanded:
             return
         # Ranked together, then drawn in that one order. `sorted` is stable, so a
@@ -870,6 +879,7 @@ class Panel(QWidget):
                 # GitHub is owed: dropping it would put it straight back on the next
                 # poll, so the button would do nothing anyone could see.
                 cancellable=task.job.requested,
+                refusal=self.store.network_job_refusals.get(task.job.label, ""),
             )
             row.run_requested.connect(
                 lambda tid=task.id: self.store.execute_queued_task_async(tid)

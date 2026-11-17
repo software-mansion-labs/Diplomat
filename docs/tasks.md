@@ -116,8 +116,10 @@ Any task with GitHub links, including your own, can switch between **Observe** a
 
 Only items in the watched repo are worked on; the others are shown. A pinned task does nothing.
 What was started is history (`dispatch:fix-issue`, `dispatch:review`). Leaving auto, pinning or
-archiving the task (or dismissing the goal) withdraws what is still waiting in the queue
-(`withdraw:…`), to be asked for again if it goes back to auto.
+archiving the task (or dismissing the goal) withdraws what nothing has started
+(`withdraw:…`), to be asked for again if it goes back to auto: what is still waiting in the
+queue and, with the [Diplomacy Network](network.md) on, an offer no machine has taken. A job a
+machine is already running is left to finish.
 
 ### The graph
 

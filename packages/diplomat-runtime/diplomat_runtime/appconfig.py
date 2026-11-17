@@ -28,6 +28,8 @@ on use, so a change lands on the next spawn. ``DIPLOMAT_CONFIG`` relocates the f
 
 from __future__ import annotations
 
+import errno
+import json
 import math
 import os
 from pathlib import Path
@@ -109,6 +111,41 @@ def read() -> dict:
     return read_object(path()) or {}
 
 
+def read_known() -> dict | None:
+    """The whole file: ``{}`` when there is none, ``None`` when one is there and cannot
+    be read as a JSON object. That one says nothing: a caller that must not take a
+    default for an answer keeps what it last read, and no setting is written over it
+    (:func:`_editable`)."""
+    try:
+        text = path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError):
+        return None
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def unreadable_note() -> str:
+    """The feed's line for a file :func:`read_known` cannot read."""
+    return (f"{path()} cannot be read as settings: nothing is saved over it, and the "
+            "Diplomacy Network switch stays as it was last read")
+
+
+def _editable() -> dict:
+    """The file's keys, for a read-modify-write. Raises ``OSError`` for a file that is
+    there and cannot be parsed: a write would drop every key it holds."""
+    data = read_known()
+    if data is None:
+        raise OSError(errno.EINVAL,
+                      "the settings file cannot be read, and is not written over",
+                      str(path()))
+    return data
+
+
 def get(key: str, default: str = "") -> str:
     value = read().get(key, default)
     return value if isinstance(value, str) else default
@@ -128,11 +165,10 @@ def get_int(key: str, default: int) -> int:
 
 def set_value(key: str, value: str) -> None:
     """Read-modify-write one key (empty value removes it), atomically, so a process
-    reading concurrently never sees a torn file. Keys the file already holds survive a
-    normal write; a file that failed to parse (see :func:`read`) is rewritten from
-    defaults, so a *corrupt* file loses the other keys — each then falls back to its
-    own default, which is the same degradation an absent file gets."""
-    data = read()
+    reading concurrently never sees a torn file. Keys the file already holds survive
+    the write. A file that is there and cannot be parsed is not written over: this
+    raises ``OSError``, as every setter here does (:func:`_editable`)."""
+    data = _editable()
     if value:
         data[key] = value
     else:
@@ -154,7 +190,7 @@ def get_dict(key: str) -> dict:
 
 def set_list(key: str, value: list) -> None:
     """:func:`set_value` for an array: empty removes the key."""
-    data = read()
+    data = _editable()
     if value:
         data[key] = list(value)
     else:
@@ -164,7 +200,7 @@ def set_list(key: str, value: list) -> None:
 
 def set_dict(key: str, value: dict) -> None:
     """:func:`set_value` for an object: empty removes the key."""
-    data = read()
+    data = _editable()
     if value:
         data[key] = dict(value)
     else:
@@ -188,7 +224,7 @@ def repo_roots() -> list[str]:
 def set_repo_roots(paths: list[str]) -> None:
     """Store the repo roots (none removes the key), dropping the legacy
     :data:`REPO_ROOT` in the same write so it can never shadow a later clear."""
-    data = read()
+    data = _editable()
     kept = [p.strip() for p in paths if p.strip()]
     if kept:
         data[REPO_ROOTS] = kept
@@ -209,14 +245,14 @@ def get_bool(key: str, default: bool) -> bool:
 def set_int(key: str, value: int) -> None:
     """Read-modify-write one integer key, atomically — :func:`set_value` for a
     number, which has no "empty means remove" spelling of its own."""
-    data = read()
+    data = _editable()
     data[key] = int(value)
     write_atomic(path(), data)
 
 
 def set_bool(key: str, value: bool) -> None:
     """:func:`set_int` for a flag."""
-    data = read()
+    data = _editable()
     data[key] = bool(value)
     write_atomic(path(), data)
 
@@ -224,7 +260,7 @@ def set_bool(key: str, value: bool) -> None:
 def set_float(key: str, value: float) -> None:
     """:func:`set_int` for a fractional number (the budget floor is a percentage
     the UI offers in half-steps)."""
-    data = read()
+    data = _editable()
     data[key] = float(value)
     write_atomic(path(), data)
 

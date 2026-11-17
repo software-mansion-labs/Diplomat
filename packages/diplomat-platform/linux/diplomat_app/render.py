@@ -8,8 +8,8 @@ a real display by grabbing the widget's own pixels:
 
 what ∈ {panel, lookup, wizard, issues, conflicts, audit, settings[-explain],
 devices, devices-screen[-remote[-away]|-off], machines-screen[-idle|-off],
-network-screen[-starting|-down|-off], telemetry, comms, comms-panel, comms-empty,
-tasks}.
+network-screen[-starting|-failed|-down|-unsaved|-off], network-panel, telemetry, comms, comms-panel,
+comms-empty, tasks}.
 With DIPLOMAT_RENDER_LIVE=1 it fetches real data first; otherwise it uses a small
 synthetic fixture.
 """
@@ -231,8 +231,10 @@ def _machines_history(now: float, until: float) -> dict:
 def _network_screen_fixture(store: Store, mode: str) -> None:
     """Plain: the daemon up, taking two more tasks, in two pools - one shared with a
     reachable and an unreachable machine and holding a task in each state, one of this
-    machine alone. ``-starting``: switched on, the daemon not asked yet. ``-down``:
-    asked, and not answering. ``-off``: switched off.
+    machine alone. ``-starting``: switched on, the daemon not asked yet. ``-failed``:
+    the daemon up with no tor and no docker to use. ``-down``: asked, and not
+    answering. ``-unsaved``: the plain screen over a change the config refused, the
+    hours set so that this machine takes none of its own jobs. ``-off``: switched off.
 
     The switch and the devices setting are the shared config's, which a render never
     writes, so they are set on the module that reads them. So is the daemon's answer:
@@ -244,7 +246,7 @@ def _network_screen_fixture(store: Store, mode: str) -> None:
     dn.enabled = lambda: not off
     dn.devices = lambda: mode == "network-screen"
     store.network_answered = (None if off or mode.endswith("-starting")
-                              else mode == "network-screen")
+                              else not mode.endswith("-down"))
     store.network_state = None
     dn.state = lambda: store.network_state
     store._note_network_state = lambda snapshot: None
@@ -259,9 +261,23 @@ def _network_screen_fixture(store: Store, mode: str) -> None:
         activity.AuditEntry("2026-11-09T09:00:00Z", "panel", "network-start",
                             "Started the Diplomacy Network daemon (ok: true)"),
     ] + store.audit_entries
-    if mode != "network-screen":
-        return
     now = MACHINES_NOW
+    if mode.endswith("-failed"):
+        store.network_state = network.Snapshot.from_json({
+            "updatedAt": now - 4, "daemon": {"pid": 4471, "startedAt": now - 120},
+            "identity": {"pk": "4be07d21c9aa", "onion": ""},
+            "transport": {"state": "failed",
+                          "detail": "tor not found: no other machine is reached without it"},
+            "docker": {"state": "missing", "image": "",
+                       "detail": "docker not found: every job runs in a container"},
+            "model": {"state": "ready", "detail": ""},
+            "devices": {"state": "off", "detail": ""},
+            "admit": {"slots": 0, "at": now - 9, "reason": ""}})
+    unsaved = mode.endswith("-unsaved")
+    if unsaved:
+        dn.required_minimum_h, dn.maximum_accepted_h = (lambda: 72), (lambda: 48)
+    if mode != "network-screen" and not unsaved:
+        return
     me, peer, away = "4be07d21c9aa", "9f3c1a7755e0", "c41d90ab3e12"
 
     def task(n, kind, title, state, **extra):
@@ -1193,6 +1209,10 @@ def run(what: str, out: str) -> int:
         store.activity_changed.emit()
         store.network_changed.emit()
         panel._toggle_network()
+        if what.endswith("-unsaved"):
+            def refused() -> None:
+                raise OSError(28, "No space left on device")
+            panel.network_view._save(refused)
     elif what == "devices":
         _device_fixture(store)
         panel._rebuild_devices()
@@ -1210,7 +1230,11 @@ def run(what: str, out: str) -> int:
         for i, view in enumerate(store.tracked_tasks):
             if given_tasks or i == 0 or view["task"].get("origin"):
                 panel.tasks_view._toggle_history(view["task"]["id"])
-    else:  # panel, and comms-panel: the same, its ✉ header button showing a count
+    else:  # panel; comms-panel: the same, its ✉ header button showing a count;
+        # network-panel: the same over what "network-screen-failed" seeds, the task
+        # list saying what of the network does not work
+        if what == "network-panel":
+            _network_screen_fixture(store, "network-screen-failed")
         _device_fixture(store)
         _left_pane_fixture(store)
         _queue_fixture(store)

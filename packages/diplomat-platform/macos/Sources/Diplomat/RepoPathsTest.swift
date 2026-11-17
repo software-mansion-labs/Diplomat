@@ -144,6 +144,48 @@ enum RepoPathsTest {
         let none = read(0, [gone, scratch.appendingPathComponent("gone2").path])
         check("…and none of several resolving leaves the one root a guess",
               !none.primary && none.guessed, "got \(none)")
+        final class Reading { var value: RepoPaths.RootsReading? }
+        func reading(_ paths: [String]) -> RepoPaths.RootsReading? {
+            let out = Reading()
+            let done = DispatchSemaphore(value: 0)
+            Thread {
+                out.value = RepoPaths.resolved(for: paths, now: t0)
+                done.signal()
+            }.start()
+            done.wait()
+            return out.value
+        }
+        let plain = scratch.appendingPathComponent("plain").path
+        try? FileManager.default.createDirectory(atPath: plain, withIntermediateDirectories: true)
+        let bucket = scratch.appendingPathComponent("bucket").path
+        git("init", "-q", bucket)
+        git("-C", bucket, "remote", "add", "origin", "https://bitbucket.org/acme/x.git")
+        let remoteless = scratch.appendingPathComponent("remoteless").path
+        git("init", "-q", remoteless)
+        let broken = scratch.appendingPathComponent("broken").path
+        git("init", "-q", broken)
+        try? "[remote \"origin\"\n".write(toFile: broken + "/.git/config", atomically: true,
+                                         encoding: .utf8)
+        let mixed = reading([early, gone, plain, bucket, remoteless, broken])
+        check("a path that is missing or that git fails on is unread; one that was read and "
+                + "names no forge is neither unread nor a root",
+              mixed?.unread == [gone, broken] && mixed?.linked.map(\.slug) == ["o/early"]
+                && mixed?.roots.map(\.slug) == ["o/early"],
+              "got \(String(describing: mixed))")
+        let lone = reading([bucket])
+        check("a lone path that names no forge links nothing: its root stands in for the "
+                + "configured repo",
+              lone?.linked.isEmpty == true && lone?.unread.isEmpty == true
+                && lone?.roots.count == 1, "got \(String(describing: lone))")
+        let guess = reading([gone, bucket])
+        check("…as does a guess among several, the missing one unread",
+              guess?.linked.isEmpty == true && guess?.unread == [gone] && guess?.guessed == true,
+              "got \(String(describing: guess))")
+        let unasked = [scratch.appendingPathComponent("unasked").path, bucket]
+        let waiting = RepoPaths.resolved(for: unasked)
+        check("on the main thread, before any reading of them, every path is unread",
+              Thread.isMainThread && waiting.unread == unasked && waiting.linked.isEmpty,
+              "got \(waiting)")
         let onGitLab = scratch.appendingPathComponent("gitlab").path
         git("init", "-q", onGitLab)
         git("-C", onGitLab, "remote", "add", "origin", "git@gl.example.org:g/sub/proj.git")

@@ -261,6 +261,11 @@ class _NetworkCycle:
     #: heard none of them.
     daemon: str = ""
     pools: list[dict] | None = None
+    #: The list the daemon refused, its sentence, and when: said again as it is only
+    #: as often as ``admit`` is.
+    pools_refused: list[dict] | None = None
+    pools_refusal: str = ""
+    pools_refused_at: float = 0.0
     admit: network.Admit | None = None
     admit_at: float = 0.0
     #: When a daemon that is not answering may next be started, and the wait before
@@ -409,7 +414,8 @@ class Store(QObject):
         # What the daemon refused the Network screen's last action with, by the pool
         # panel it was made in ("" for the one shown before any pool).
         self.network_refusals: dict[str, str] = {}
-        # Why the daemon is not told this machine's pools (network.pools_listing), or "".
+        # What of this machine's pools could not be confirmed (network.pools_listing),
+        # and the daemon's refusal of the list, a line each; "" for neither.
         self.network_pools_held = ""
         # The operator's jobs whose offer the daemon was sent and did not settle
         # (_settle_offering). Replaced under its lock, never mutated.
@@ -426,6 +432,12 @@ class Store(QObject):
         # Whether the feed has said the network is refusing automatic work, for the
         # current spell of it.
         self._network_unavailable_logged = False
+        # Whether the feed has said the shared config cannot be read, for the current
+        # spell of it.
+        self._config_unreadable_logged = False
+        # Why the network refused each queued job that it refused for a reason of the
+        # job's own, by the job's label: what its row says, and what the feed has said.
+        self.network_job_refusals: dict[str, str] = {}
         # The Devices screen's two remote-pool calls. Here, not on the screen: a
         # sign-in runs for up to ten minutes and must outlive the screen being closed.
         self.remote_sign_in = RemoteCall()
@@ -2005,20 +2017,51 @@ class Store(QObject):
         return (str(op["id"]), asks) if asks else None
 
     def _withdraw_goal_asks(self, goal: tuple[str, dict[str, str]] | None) -> None:
-        """Cancel the asks of ``goal`` not started yet, and have the goal forget them, so
-        they are asked for again should it go back to auto."""
+        """Take back the asks of ``goal`` nothing has started - one waiting in the queue
+        is cancelled, one the Diplomacy Network carries that no machine has taken has
+        its offer withdrawn (:meth:`_withdraw_unstarted`) - and have the goal forget
+        them, so they are asked for again should it go back to auto."""
         if goal is None:
             return
         task_id, asks = goal
-        waiting = {key: q for key, q in asks.items()
+        waiting = {key for key, q in asks.items()
                    if any(e.id == q and e.job.requested for e in self.queued_tasks)}
-        if not waiting:
+        for key in waiting:
+            self.cancel_requested_work(asks[key])
+        gone = sorted(waiting | self._withdraw_unstarted(asks))
+        if not gone:
             return
-        for queue_key in waiting.values():
-            self.cancel_requested_work(queue_key)
-        error = self._edit_tracked_task({"op": "withdrawn", "id": task_id, "work": sorted(waiting)})
+        error = self._edit_tracked_task({"op": "withdrawn", "id": task_id, "work": gone})
         if error:
-            activity.log("auto", "goal", f"could not forget {', '.join(sorted(waiting))}: {error}")
+            activity.log("auto", "goal", f"could not forget {', '.join(gone)}: {error}")
+
+    def _withdraw_unstarted(self, asks: dict[str, str]) -> set[str]:
+        """Drop each of ``asks`` (a goal's work, by queue key) the network carries and
+        no machine has taken (:func:`agentstate.withdraw_unstarted`), withdrawing its
+        offer and dropping its run, and return the goal's keys of those. One a machine
+        is running is left to finish. A run is dropped whatever the daemon answers, as
+        one the operator forgets is."""
+        carried = {ask.offered: key for key, q in asks.items()
+                   for ask in self.requested_work if ask.key == q and ask.offered}
+        booked = {r.network: r for r in agentregistry.load() if r.network in carried}
+        # Asked afresh, as for a run the operator forgets.
+        evidence = agentstate.Evidence(network=self._network_evidence(
+            diplomacynetwork.state() if booked and diplomacynetwork.enabled() else None))
+        gone: dict[str, str] = {}
+        for task, key in carried.items():
+            run = booked.get(task)
+            if run is not None and agentstate.withdraw_unstarted(run, evidence) is None:
+                continue
+            self._forget_offered(task)
+            gone[key] = run.run_id if run is not None else ""
+            if run is not None:
+                self._withdraw(task, network.WITHDRAW_GOAL, run.label or run.run_id,
+                               run.source)
+        runs = set(gone.values()) - {""}
+        if runs:
+            self._write_book(lambda: agentregistry.forget(runs))
+            self.tasks_changed.emit()
+        return set(gone)
 
     def _poll_review_requests(self, roots: list[LocalRepo], complete: bool = True) -> None:
         """Dispatch the reviews requested of me in every root. A concluded record is
@@ -2566,7 +2609,7 @@ class Store(QObject):
             source, forced, verdict=job.verdict, mark_ready=job.mark_ready,
             no_prs=not job.opens_prs, read_only=not job.opens_prs)
         if isinstance(offer, str):
-            return self._network_refused(job, source, attempt, offer)
+            return self._network_refused(job, source, attempt, offer, own=True)
         reply = diplomacynetwork.send(network.ROUTE_OFFER, offer.body)
         if (source != autofix.SOURCE_AUTO and reply != deviceallocator.UNREACHABLE
                 and not diplomacynetwork.definite(reply)):
@@ -2578,8 +2621,11 @@ class Store(QObject):
             return diplomacynetwork.VERDICT_OFFERING
         task, why = self._offer_answer(reply)
         if task is None:
-            return self._network_refused(job, source, attempt, why)
+            return self._network_refused(
+                job, source, attempt, why,
+                own=diplomacynetwork.definite(reply) and not reply.ok)
         self._network_unavailable_logged = False
+        self._forget_job_refusals(lambda label: label != job.label)
         # The daemon answers an offer still open with the task it already has: the
         # run booked for it is this job's.
         if any(r.network == task for r in agentregistry.load()):
@@ -2654,7 +2700,8 @@ class Store(QObject):
 
     def _withdraw_offering(self) -> None:
         """The switch went off over jobs whose offer was never settled: withdraw each
-        one the daemon turns out to hold, and keep none."""
+        one the daemon turns out to hold, say of every other that it was not offered,
+        and keep none."""
         with self._network_offering_lock:
             held, self.network_offering = self.network_offering, []
         if not held:
@@ -2664,16 +2711,28 @@ class Store(QObject):
             task = network.open_task(*h.key, snapshot)
             if task is not None:
                 self._withdraw(task, network.WITHDRAW_SWITCHED_OFF, h.row_label, h.source)
+            else:
+                activity.log(h.source, network.AUDIT_UNAVAILABLE,
+                             f"{h.job.label} was not offered: {diplomacynetwork.SWITCHED_OFF}")
+        self.refresh_activity()
         self.tasks_changed.emit()
 
     def _network_refused(self, job: autofix.AgentJob, source: str, attempt: int,
-                         why: str) -> diplomacynetwork.Refused:
-        """A job the network did not take. Automatic work waits in the queue, with one
-        feed line for the spell of it: until an offer goes through, or the switch
-        moves."""
+                         why: str, own: bool = False) -> diplomacynetwork.Refused:
+        """A job the network did not take. Automatic work waits in the queue. A
+        refusal of the job's ``own`` is said once for the job, in the feed and on its
+        row (:attr:`network_job_refusals`); one that holds every job has one feed line
+        for the spell of it: until an offer goes through, or the switch moves."""
         if source == autofix.SOURCE_AUTO:
             self._stage_queued(job, attempt)
-            if not self._network_unavailable_logged:
+            if own:
+                if self.network_job_refusals.get(job.label) != why:
+                    self.network_job_refusals = {**self.network_job_refusals, job.label: why}
+                    activity.log(source, network.AUDIT_UNAVAILABLE,
+                                 f"{job.label} was not offered: {why}")
+                    self.refresh_activity()
+                    self.tasks_changed.emit()
+            elif not self._network_unavailable_logged:
                 self._network_unavailable_logged = True
                 activity.log(source, network.AUDIT_UNAVAILABLE,
                              "Holding auto work - the Diplomacy Network did not take "
@@ -2683,7 +2742,12 @@ class Store(QObject):
             activity.log(source, network.AUDIT_UNAVAILABLE,
                          f"{job.label} was not offered: {why}")
             self.refresh_activity()
-        return diplomacynetwork.Refused(why)
+        return diplomacynetwork.Refused(why, own)
+
+    def _forget_job_refusals(self, keep) -> None:
+        """Drop the refusals of the jobs whose label ``keep`` does not hold."""
+        self.network_job_refusals = {
+            label: why for label, why in self.network_job_refusals.items() if keep(label)}
 
     def _auto_tasks_running(self) -> int:
         """How many bays of this device's cap are held right now — the number the cap
@@ -2893,6 +2957,8 @@ class Store(QObject):
         starting = {e.id for e in self.starting_tasks}
         before = self.queued_tasks
         self.queued_tasks = [by_id[k] for k in ordered if k not in starting]
+        waiting = {e.job.label for e in staged}
+        self._forget_job_refusals(waiting.__contains__)
         if self.queued_tasks != before:
             self.tasks_changed.emit()
 
@@ -3092,8 +3158,10 @@ class Store(QObject):
 
         An ask the Diplomacy Network carries (:attr:`autofix.RequestedWork.offered`) is
         left out for as long as the book holds the run of its offer. Once that run has
-        left the book without finishing - withdrawn, refused, the switch turned off -
-        the ask is as it was before the offer, and is offered again here.
+        left the book without having run - withdrawn, unknown to the daemon, the switch
+        turned off - the ask is as it was before the offer, and is offered again here.
+        One the network gave up with its attempts used ends the ask, as a run in a
+        terminal that came to nothing does.
 
         An ask whose prompt will not assemble is skipped rather than allowed to end
         the cycle. The press assembles every prompt before storing anything, but the
@@ -3313,8 +3381,10 @@ class Store(QObject):
             # refusals to no end. The same holds for a disk below its floor.
             if verdict in (autofix.VERDICT_UNAFFORDABLE, autofix.VERDICT_LOW_DISK):
                 return
-            # So would every other be refused by the network that refused this one.
-            if verdict == diplomacynetwork.VERDICT_REFUSED:
+            # A daemon that did not answer, or is stopping, takes none of the rest
+            # either. One that refused this job for a reason of the job's own is asked
+            # about the next.
+            if verdict == diplomacynetwork.VERDICT_REFUSED and not verdict.own:
                 return
 
     def _drop_queued_task(self, task_id: str) -> None:
@@ -3556,11 +3626,14 @@ class Store(QObject):
             return agentstate.Observation.unavailable(diplomacynetwork.SWITCHED_OFF)
         return network.tasks(snapshot)
 
-    def _tick_with(self, seen: agentstate.Observation) -> agentstate.Tick:
+    def _tick_with(self, seen: agentstate.Observation,
+                   records: list[agentstate.RunRecord] | None = None) -> agentstate.Tick:
         """:meth:`_agent_tick` against one reading of the network daemon, for a caller
-        that goes on to act on what that same reading said."""
+        that goes on to act on what that same reading said. ``records`` is the book as
+        that caller read it before it asked the daemon."""
         now = time.time()
-        records = agentregistry.adopt_pids(agentregistry.load())
+        if records is None:
+            records = agentregistry.adopt_pids(agentregistry.load())
         evidence = dataclasses.replace(
             probes.gather(records, now, merged=self._merged_prs, tokens=self._tokens_left),
             network=seen)
@@ -3585,18 +3658,32 @@ class Store(QObject):
             # One the switch's own turn did not reach: booked as it went off, or left
             # by a Diplomat that quit first.
             self._drop_switched_off_runs()
+        # The book is read first, so the snapshot is newer than every run judged by
+        # it: a run booked in between would be ended by a row from before its offer.
+        records = agentregistry.adopt_pids(agentregistry.load())
         snapshot = diplomacynetwork.state() if networked else None
-        t = self._tick_with(self._network_evidence(snapshot))
+        t = self._tick_with(self._network_evidence(snapshot), records)
         # A settle begun before the switch moved says nothing of the daemon as it is.
         if networked and diplomacynetwork.enabled():
             self._note_network_state(snapshot)
             self._note_network_claims(t)
         self._persist_run_changes(t)
         self._retire_finished(t, snapshot, self._withdraw_merged(t) if networked else set())
+        self._note_unreadable_config()
         self._note_silent_probes()
         self._note_comms_runs({r.label: s.reason for r, s in t.rows
-                               if s.state == agentstate.FAILED})
+                               if s.state == agentstate.FAILED and not s.spent},
+                              {r.label: s.reason for r, s in t.rows if s.spent})
         return t
+
+    def _note_unreadable_config(self) -> None:
+        """Say once per spell that the shared config cannot be read: every setting
+        reads as its default meanwhile, and the switch as it was last read."""
+        unreadable = appconfig.read_known() is None
+        if unreadable and not self._config_unreadable_logged:
+            activity.log("auto", "warn", appconfig.unreadable_note())
+            self.refresh_activity()
+        self._config_unreadable_logged = unreadable
 
     def _note_silent_probes(self) -> None:
         """Say out loud when a probe has stopped answering.
@@ -3919,7 +4006,9 @@ class Store(QObject):
         if not self._write_book(lambda: agentregistry.forget({r.run_id for r in gone})):
             return
         for r in gone:
-            if r.network and getattr(t.states.get(r.run_id), "state", None) == agentstate.FINISHED:
+            verdict = t.states.get(r.run_id)
+            if r.network and verdict is not None and (
+                    verdict.state == agentstate.FINISHED or verdict.spent):
                 self._forget_offered(r.network)
         concluded = autofix.concluded(gone, t.states)
         if concluded:
@@ -5095,7 +5184,8 @@ class Store(QObject):
             self.comms_changed.emit()
         return list(kept.values())
 
-    def _note_comms_runs(self, never_ran: dict[str, str] | None = None) -> None:
+    def _note_comms_runs(self, never_ran: dict[str, str] | None = None,
+                         spent: dict[str, str] | None = None) -> None:
         """Twin of ``noteCommsRuns``; runs on every settle, Comms on or off.
 
         A ping that took a monitor's queued work records `started` once an agent row is
@@ -5103,8 +5193,10 @@ class Store(QObject):
 
         A started run whose agent left the rows, and whose ask is not waiting again,
         records `finished` - or, when ``never_ran`` (label -> reason) says its command
-        never ran, :data:`comms.NEVER_STARTED`."""
+        never ran, :data:`comms.NEVER_STARTED`. One of ``spent`` (label -> reason), which
+        the network gave up with its attempts used, finishes saying so."""
         never_ran = never_ran or {}
+        spent = spent or {}
         waiting = {t.id for t in self.queued_tasks} | {t.id for t in self.starting_tasks}
 
         def monitors_find_out_of_the_queue(key: str) -> bool:
@@ -5143,6 +5235,9 @@ class Store(QObject):
                 continue
             if wearing(label, running) is not None:
                 continue
+            if (failed := wearing(label, spent)) is not None:
+                comms.append_event("action", str(item["message"]["id"]),
+                                   outcome=f"{comms.NETWORK_FAILED} ({spent[failed]})")
             comms.append_event("finished", str(item["message"]["id"]), label=label)
             wrote = True
         if wrote:
@@ -5695,6 +5790,7 @@ class Store(QObject):
             self.network_state = None
             self.network_answered = None
             self.network_refusals = {}
+            self.network_job_refusals = {}
             self.network_pools_held = ""
         self.network_changed.emit()
         self.tasks_changed.emit()
@@ -5777,15 +5873,15 @@ class Store(QObject):
         """The Network screen's Restart."""
         self.start_network_async(restart=True, source=autofix.SOURCE_PANEL)
 
-    def end_legacy_nodes_async(self) -> None:
-        """End the mesh node an earlier Diplomat left running, whatever the switch
-        says."""
+    def retire_legacy_node_async(self) -> None:
+        """End the mesh node an earlier Diplomat left running and remove its
+        directory, whatever the switch says."""
         def work() -> None:
-            pids = diplomacynetwork.end_legacy_nodes()
-            if pids:
-                activity.log(autofix.SOURCE_AUTO, network.AUDIT_STOP,
-                             "Ended the retired mesh node "
-                             f"(pid {', '.join(str(p) for p in sorted(pids))})")
+            asked, removed = diplomacynetwork.retire_legacy_node()
+            line = diplomacynetwork.legacy_retired_line(
+                asked, removed, diplomacynetwork.legacy_dir())
+            if line:
+                activity.log(autofix.SOURCE_AUTO, network.AUDIT_STOP, line)
                 self.refresh_activity()
         self.start_background(work, name="legacy-node")
 
@@ -5822,11 +5918,26 @@ class Store(QObject):
         memo = self._network_memo
         memo.start_after = memo.start_delay = 0.0
         memo.start_failure_logged = False
-        pools = self._network_pools(now)
-        if pools is not None and pools != memo.pools:
-            if diplomacynetwork.refusal(diplomacynetwork.send(
-                    network.ROUTE_POOLS, network.pools_body(pools))) is None:
-                memo.pools = pools
+        pools, unconfirmed = self._network_pools(now, snapshot)
+        if pools == memo.pools:
+            memo.pools_refused, memo.pools_refusal = None, ""
+        elif (pools != memo.pools_refused
+              or now - memo.pools_refused_at >= self.NETWORK_ADMIT_EVERY):
+            reply = diplomacynetwork.send(network.ROUTE_POOLS, network.pools_body(pools))
+            why = diplomacynetwork.refusal(reply)
+            if why is None:
+                memo.pools, memo.pools_refused, memo.pools_refusal = pools, None, ""
+                self._log_pools_left(snapshot, pools)
+            elif diplomacynetwork.definite(reply):
+                said = f"The daemon refused this machine's pools: {why}"
+                if (pools, said) != (memo.pools_refused, memo.pools_refusal):
+                    activity.log(autofix.SOURCE_AUTO, network.AUDIT_UNAVAILABLE, said)
+                    self.refresh_activity()
+                memo.pools_refused, memo.pools_refusal, memo.pools_refused_at = pools, said, now
+        held = "\n".join([*unconfirmed, *filter(None, [memo.pools_refusal])])
+        if held != self.network_pools_held:
+            self.network_pools_held = held
+            self.network_changed.emit()
         admit = self._network_admit(snapshot)
         if admit != memo.admit or now - memo.admit_at >= self.NETWORK_ADMIT_EVERY:
             if diplomacynetwork.refusal(diplomacynetwork.send(
@@ -5867,13 +5978,14 @@ class Store(QObject):
         except Exception:  # noqa: BLE001 - an unread login leaves the pools as they are
             return ""
 
-    def _network_pools(self, now: float) -> list[dict] | None:
-        """Every linked repository as a pool, with the login each is worked as, or None
-        while the list is held back (:func:`network.pools_listing`), which
-        :attr:`network_pools_held` then says why. The checkouts under Other repos are
-        read again here: one that could not be read may be back, and one may have
-        gained a remote."""
-        roots, complete = review.roots_reading()
+    def _network_pools(self, now: float,
+                       snapshot: network.Snapshot) -> tuple[list[dict], list[str]]:
+        """Every linked repository as a pool, with the login each is worked as, and
+        what could not be confirmed, which stays as ``snapshot`` has it
+        (:func:`network.pools_listing`). The checkouts under Other repos are read again
+        here: one that could not be read may be back, and one may have gained a
+        remote."""
+        roots, unread = review.roots_linking()
         checkouts = localrepos.resolve(self.other_repo_paths)
         if checkouts != self._local_checkouts:
             self._local_checkouts = checkouts
@@ -5883,12 +5995,22 @@ class Store(QObject):
         for repo in (*roots, *others):
             if repo.host not in identities:
                 identities[repo.host] = self._network_login(repo, now)
-        pools, held = network.pools_listing(
-            roots, complete, others, [c.path for c in checkouts if not c.read], identities)
-        if held != self.network_pools_held:
-            self.network_pools_held = held
-            self.network_changed.emit()
-        return pools
+        unread += [os.path.expanduser(c.path) for c in checkouts if not c.read]
+        return network.pools_listing(roots, others, unread, identities, snapshot.pools)
+
+    def _log_pools_left(self, snapshot: network.Snapshot, pools: list[dict]) -> None:
+        """Say in the feed which pools the daemon had that the list it just took
+        omits, each with what became of its path."""
+        said = {pool["id"] for pool in pools}
+        listed = {os.path.expanduser(p)
+                  for p in (*review.repo_root_paths(), *self.other_repo_paths)}
+        left = [pool for pool in snapshot.pools if pool.id not in said]
+        for pool in left:
+            activity.log(autofix.SOURCE_AUTO, network.AUDIT_LEAVE, f"Left {pool.id}: " + (
+                f"{pool.path} no longer names it" if pool.path in listed
+                else f"{pool.path} is no longer listed in Settings"))
+        if left:
+            self.refresh_activity()
 
     def _network_admit(self, snapshot: network.Snapshot) -> network.Admit:
         """How many more tasks this machine takes: what is left of the automatic cap
@@ -5972,20 +6094,28 @@ class Store(QObject):
 
     def stop_network_task_async(self, task: network.PoolTask, pool: str) -> None:
         """Stop one task of a pool: its run, when this machine is the one running it,
-        else the offer this machine made of it."""
+        else the offer this machine made of it. A run that is not there to stop is
+        said to be so in the pool's card, and nothing is withdrawn in its place: the
+        button said the job goes back to the pool."""
         def work() -> None:
             title = task.title or task.item
-            # Asked afresh: the snapshot kept may be a tick old, and a run that ended
-            # since is not there to stop.
-            fresh = diplomacynetwork.state() if task.executor_here else None
-            run = next((r for r in (fresh.runs if fresh else ())
-                        if r.task_id == task.task_id
-                        and r.state in network.LIVE_RUN_STATES), None)
-            if run is None:
+            if not task.executor_here:
                 reply = self._withdraw(task.task_id, network.WITHDRAW_STOPPED,
                                        title, autofix.SOURCE_PANEL)
                 if diplomacynetwork.refusal(reply) is None:
                     self._forget_offered(task.task_id)
+                self._note_network_reply(reply, pool)
+                self.refresh_auto_task_count()
+                return
+            # Asked afresh: the snapshot kept may be a tick old, and a run that ended
+            # since is not there to stop.
+            fresh = diplomacynetwork.state()
+            run = next((r for r in (fresh.runs if fresh else ())
+                        if r.task_id == task.task_id
+                        and r.state in network.LIVE_RUN_STATES), None)
+            if run is None:
+                self._set_network_refusal(pool, diplomacynetwork.NOT_ANSWERING
+                                          if fresh is None else diplomacynetwork.RUN_ENDED)
             else:
                 reply = diplomacynetwork.send(network.ROUTE_STOP_RUN,
                                               network.stop_run_body(run.run_id))
@@ -5994,7 +6124,7 @@ class Store(QObject):
                                  f"{title} - its run on this machine was stopped "
                                  "and the job is back in the pool")
                     self.refresh_activity()
-            self._note_network_reply(reply, pool)
+                self._note_network_reply(reply, pool)
             self.refresh_auto_task_count()
         self.start_background(work, name="network-stop")
 

@@ -97,11 +97,26 @@ enum AppConfig {
 
     /// The whole file, or `[:]` when it's absent, unreadable or corrupt — a truncated
     /// or hand-edited file must degrade to defaults, never break a spawn.
-    static func read() -> [String: Any] {
-        guard let data = try? Data(contentsOf: url),
-              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
-        else { return [:] }
-        return obj
+    static func read() -> [String: Any] { parsed() ?? [:] }
+
+    /// The whole file: `[:]` when there is none, nil when one is there and cannot be
+    /// read as a JSON object. That one says nothing: a caller that must not take a
+    /// default for an answer keeps what it last read (`unreadable`), and no setting is
+    /// written over it.
+    static func parsed() -> [String: Any]? {
+        let data: Data
+        do { data = try Data(contentsOf: url) } catch {
+            return (error as? CocoaError)?.code == .fileReadNoSuchFile ? [:] : nil
+        }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+    }
+
+    static var unreadable: Bool { parsed() == nil }
+
+    /// The feed's line for a file that is `unreadable`.
+    static var unreadableNote: String {
+        "\(url.path) cannot be read as settings: nothing is saved over it, and the "
+            + "Diplomacy Network switch stays as it was last read"
     }
 
     static func string(_ key: String) -> String { read()[key] as? String ?? "" }
@@ -119,20 +134,21 @@ enum AppConfig {
 
     /// Read-modify-write, atomically (Foundation writes to a temp file and renames), so a
     /// process reading concurrently never sees a torn file. Keys the file already holds
-    /// survive a normal write; a file that failed to parse (see `read`) is rewritten from
-    /// defaults, so a *corrupt* file loses the other keys — each then falls back to its
-    /// own default, the same degradation an absent file gets. Never throws into the UI:
-    /// an unwritable HOME is the `false` it returns, which a caller may ignore.
+    /// survive the write. A file that is there and cannot be parsed is not written
+    /// over, by this or any setter here: a write would drop every key it holds. Never
+    /// throws into the UI: that file, like an unwritable HOME, is the `false` it
+    /// returns.
     @discardableResult
     static func set(_ key: String, _ value: String) -> Bool {
-        var obj = read()
+        guard var obj = parsed() else { return false }
         if value.isEmpty { obj.removeValue(forKey: key) } else { obj[key] = value }
         return write(obj)
     }
 
     /// `set` for an edit that may touch any keys, such as `MachineExclusions.edits`.
     static func update(_ edit: ([String: Any]) -> [String: Any]) -> Bool {
-        write(edit(read()))
+        guard let obj = parsed() else { return false }
+        return write(edit(obj))
     }
 
     /// The stored repo roots, trimmed, blank entries dropped: `repoRoots` when it lists
@@ -152,7 +168,7 @@ enum AppConfig {
     /// can never disagree. An empty list removes both.
     @discardableResult
     static func setRepoRoots(_ paths: [String]) -> Bool {
-        var obj = read()
+        guard var obj = parsed() else { return false }
         obj.removeValue(forKey: repoRootKey)
         if paths.isEmpty { obj.removeValue(forKey: repoRootsKey) } else { obj[repoRootsKey] = paths }
         return write(obj)
@@ -179,7 +195,7 @@ enum AppConfig {
     /// `set` for a number, which has no "empty means remove" spelling of its own.
     @discardableResult
     static func setInt(_ key: String, _ value: Int) -> Bool {
-        var obj = read()
+        guard var obj = parsed() else { return false }
         obj[key] = value
         return write(obj)
     }
@@ -255,7 +271,7 @@ enum AppConfig {
     /// `set` for a flag.
     @discardableResult
     static func setBool(_ key: String, _ value: Bool) -> Bool {
-        var obj = read()
+        guard var obj = parsed() else { return false }
         obj[key] = value
         return write(obj)
     }
@@ -264,7 +280,7 @@ enum AppConfig {
     /// in half-steps).
     @discardableResult
     static func setDouble(_ key: String, _ value: Double) -> Bool {
-        var obj = read()
+        guard var obj = parsed() else { return false }
         obj[key] = value
         return write(obj)
     }

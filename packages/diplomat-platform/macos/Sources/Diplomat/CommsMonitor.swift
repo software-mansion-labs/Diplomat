@@ -817,13 +817,14 @@ extension Store {
     ///
     /// A started run whose label no agent row wears any more, and which is not waiting to
     /// run again, has finished: its pings record `finished`, once. One the tick calls
-    /// FAILED never ran instead.
-    func noteCommsRuns(neverRan: [String: String] = [:]) {
+    /// FAILED never ran instead, and one of `spent` (label to reason), which the network
+    /// gave up with its attempts used, finishes saying so.
+    func noteCommsRuns(neverRan: [String: String] = [:], spent: [String: String] = [:]) {
         if let reading = commsLogRead {
-            guard !neverRan.isEmpty else { return }
+            guard !neverRan.isEmpty || !spent.isEmpty else { return }
             Task { [weak self] in
                 await reading.value
-                self?.noteCommsRuns(neverRan: neverRan)
+                self?.noteCommsRuns(neverRan: neverRan, spent: spent)
             }
             return
         }
@@ -846,6 +847,11 @@ extension Store {
                                         outcome: Store.commsNeverStartedOutcome
                                             + " (\(Store.snippet(why, max: 120)))"))
             } else if !running.contains(label) {
+                if let why = spent[label] {
+                    lines.append(CommsEvent(kind: .action, id: item.message.id,
+                                            outcome: Store.commsNetworkFailedOutcome
+                                                + " (\(Store.snippet(why, max: 120)))"))
+                }
                 lines.append(CommsEvent(kind: .finished, id: item.message.id, label: item.label))
             }
         }
@@ -936,6 +942,7 @@ extension Store {
     }
 
     static let commsNeverStartedOutcome = "its agent never started, so nothing ran"
+    static let commsNetworkFailedOutcome = "its run on the Diplomacy Network failed"
 
     /// Its run failed to spawn (`commsSpawnFailed`): there is none to finish.
     static func commsNeverStarted(_ item: CommsItem) -> Bool {
