@@ -15,6 +15,17 @@ const num = (name, fallback) => {
   return n >= 0 && Number.isFinite(n) ? n : fallback;
 };
 
+/// The settings that asked for no bound where one always holds, as `NAME=value`.
+export const NOT_BOUNDS = [];
+// A bound on how long or how much something of this machine's may take, where what
+// holds it - node's timers, docker - reads zero as no bound at all: zero is not taken,
+// the default stands, and the daemon says so at its start.
+const bound = (name, fallback) => {
+  const n = num(name, fallback);
+  if (n === 0) NOT_BOUNDS.push(`${name}=${process.env[name]}`);
+  return n || fallback;
+};
+
 export const BASE_DIR = process.env.DN_BASE_DIR
   ? home(process.env.DN_BASE_DIR)
   : path.join(os.homedir(), '.diplomat', 'network');
@@ -163,7 +174,7 @@ export const ADMIT_TTL_MS = num('DN_ADMIT_TTL_MS', 120 * 1000);
 export const ADMIT_LAG_SECS = 10;
 // How long a host that is switched off waits for the members to hear what it ended.
 export const SWITCH_OFF_WAIT_MS = num('DN_SWITCH_OFF_WAIT_MS', 15 * 1000);
-// A container no job has used for this long is removed.
+// A container no job of this daemon was ever in is removed once it has been seen for this long.
 export const CONTAINER_IDLE_MS = num('DN_CONTAINER_IDLE_MS', 6 * 3600 * 1000);
 
 // Acting as the requester (PROTOCOL.md section 9). Where each forge host is reached:
@@ -187,14 +198,14 @@ export const PUSH_MAX_BYTES = num('DN_PUSH_MAX_BYTES', 32 * 2 ** 20);
 // its own bytes and as the object it builds. About what git holds in memory to index it.
 export const PUSH_UNPACKED_MAX_BYTES = num('DN_PUSH_UNPACKED_MAX_BYTES', 512 * 2 ** 20);
 // One git command of the push check, the fetch into the quarantine included.
-export const GIT_TIMEOUT_MS = num('DN_GIT_TIMEOUT_MS', 120 * 1000);
+export const GIT_TIMEOUT_MS = bound('DN_GIT_TIMEOUT_MS', 120 * 1000);
 
 // Executor side.
 export const SECURITY_BIN = process.env.DN_SECURITY || 'security';
 export const CLAUDE_BIN = process.env.DN_CLAUDE || 'claude';
 // How long `security` is given to answer for one Keychain item. On a machine with every
 // core taken it is slow to start at all.
-export const KEYCHAIN_TIMEOUT_MS = num('DN_KEYCHAIN_TIMEOUT_MS', 30 * 1000);
+export const KEYCHAIN_TIMEOUT_MS = bound('DN_KEYCHAIN_TIMEOUT_MS', 30 * 1000);
 // The model token the operator set aside for the network (`networkModelToken`): a
 // generic-password item under this service in the macOS login Keychain, a file elsewhere.
 export const MODEL_TOKEN_KEYCHAIN = process.env.DN_MODEL_TOKEN_KEYCHAIN || 'Diplomat-networkModelToken';
@@ -203,16 +214,16 @@ export const MODEL_TOKEN_PATH = process.env.DN_MODEL_TOKEN_PATH
   : path.join(os.homedir(), '.diplomat', 'network-model-token');
 // The image's repository name; its tag is the hash of image/.
 export const IMAGE_REPO = process.env.DN_IMAGE_REPO || 'diplomat-agent';
-export const IMAGE_BUILD_TIMEOUT_MS = num('DN_IMAGE_BUILD_TIMEOUT_MS', 30 * 60 * 1000);
+export const IMAGE_BUILD_TIMEOUT_MS = bound('DN_IMAGE_BUILD_TIMEOUT_MS', 30 * 60 * 1000);
 // What one container may use of this machine.
-export const CONTAINER_PIDS = num('DN_CONTAINER_PIDS', 4096);
+export const CONTAINER_PIDS = bound('DN_CONTAINER_PIDS', 4096);
 export const CONTAINER_MEMORY = process.env.DN_CONTAINER_MEMORY || '8g';
 export const CONTAINER_CPUS = process.env.DN_CONTAINER_CPUS || '4';
 // The most one container may hold of this machine's disk: its writable layer, its /work
 // volume and its run records together.
 export const CONTAINER_DISK_BYTES = num('DN_CONTAINER_DISK_BYTES', 20 * 2 ** 30);
 // How long one measurement of a container's disk use may take.
-export const CONTAINER_USAGE_TIMEOUT_MS = num('DN_CONTAINER_USAGE_TIMEOUT_MS', 5 * 60 * 1000);
+export const CONTAINER_USAGE_TIMEOUT_MS = bound('DN_CONTAINER_USAGE_TIMEOUT_MS', 5 * 60 * 1000);
 // Where the broker listens: empty picks the address a container's host.docker.internal
 // leads to (loopback under Docker Desktop, the bridge gateway on Linux).
 export const BROKER_BIND = process.env.DN_BROKER_BIND || '';
@@ -223,7 +234,7 @@ export const LOCAL_PORTS_PATH = process.env.DN_LOCAL_PORTS_PATH || '/proc/sys/ne
 export const FORGE_BODY_CAP = 48 * 2 ** 20;
 // How long a job's forge request waits for the requester's answer.
 export const FORGE_ANSWER_TIMEOUT_MS = num('DN_FORGE_ANSWER_TIMEOUT_MS', 5 * 60 * 1000);
-export const MIRROR_TIMEOUT_MS = num('DN_MIRROR_TIMEOUT_MS', 10 * 60 * 1000);
+export const MIRROR_TIMEOUT_MS = bound('DN_MIRROR_TIMEOUT_MS', 10 * 60 * 1000);
 // A job's `done` file is looked for this often, its process far less often.
 export const JOB_POLL_MS = num('DN_JOB_POLL_MS', 500);
 export const JOB_LIVENESS_MS = num('DN_JOB_LIVENESS_MS', 10 * 1000);
@@ -257,8 +268,10 @@ export const SOCKET_BODY_CHARS = 4 * 2 ** 20;
 export const EXECUTOR_CHECK_MS = num('DN_EXECUTOR_CHECK_MS', 30 * 1000);
 /// How often the jobs in this daemon's containers are held against the node's runs.
 export const RECONCILE_MS = num('DN_RECONCILE_MS', 15 * 1000);
-/// How often what is not kept for ever is looked at: idle containers, old CA
-/// generations, the directories of ended runs, the mirrors of pools no longer linked.
+/// How often what is not kept for ever is looked at: containers over their disk
+/// allowance, what is left under a container's name that no job is in, the images no job
+/// is started in, old CA generations, the directories of ended runs, the mirrors of
+/// pools no longer linked.
 export const SWEEP_MS = num('DN_SWEEP_MS', 10 * 60 * 1000);
 /// The pause before something that failed for want of docker is tried again: a stop that
 /// did not go through, the broker's listener.
@@ -302,7 +315,8 @@ export const TRANSPORT_RETRY_MS = num('DN_TRANSPORT_RETRY_MS', 5000);
 export const TRANSPORT_RETRY_MAX_MS = num('DN_TRANSPORT_RETRY_MAX_MS', 5 * 60 * 1000);
 /// How long the installer waits for a daemon it stopped to be gone. A daemon that is
 /// switched off waits SWITCH_OFF_WAIT_MS at most three times - for its pools to hear, for
-/// its jobs to be taken down, for the engine to remove what it made - and 10 s for tor.
+/// its jobs to be taken down, each with its container when it was the last in it, for the
+/// engine to remove what else it made - and 10 s for tor.
 export const STOP_WAIT_MS = num('DN_STOP_WAIT_MS', 3 * SWITCH_OFF_WAIT_MS + 15 * 1000);
 
 // How long a machine with no device to give holds back from a task on an Android
@@ -343,4 +357,4 @@ export const JOB_FORGE_REQUESTS = num('DN_JOB_FORGE_REQUESTS', 4);
 /// connection may carry nothing at all before the broker closes it.
 export const JOB_HEADER_MS = num('DN_JOB_HEADER_MS', 30 * 1000);
 export const JOB_BODY_MS = num('DN_JOB_BODY_MS', 5 * 60 * 1000);
-export const JOB_IDLE_MS = num('DN_JOB_IDLE_MS', 30 * 60 * 1000);
+export const JOB_IDLE_MS = bound('DN_JOB_IDLE_MS', 30 * 60 * 1000);

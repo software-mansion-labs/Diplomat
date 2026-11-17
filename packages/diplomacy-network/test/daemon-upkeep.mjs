@@ -365,6 +365,23 @@ try {
     await m.kill();
   });
 
+  await check('a container the engine does not measure, look after look, is held to no allowance: its job is stopped as a failed attempt that says so, and it goes', async () => {
+    const m = await bench.machine('um', { env: { DN_SWEEP_MS: '200', DN_CONTAINER_DISK_BYTES: String(2 ** 30) } }).start();
+    await m.linked();
+    const taskId = await own(m, 'pr-1', 'wait never\nsay never');
+    const run = await waiting(m, taskId, 'never');
+    await moreSweeps(m);
+    assert.equal(m.containers().includes(run.container), true, 'measured, it is left alone');
+    // The probe a container is measured by cannot be run.
+    fs.writeFileSync(path.join(m.dockerDir, 'fail-run-sh'), 'cannot start a stopped process\n'.repeat(3));
+    await until('the offer to say why', async () => (await offerOf(m, taskId)).reason === 'the container could not be measured against its disk allowance');
+    assert.equal((await offerOf(m, taskId)).attempt, 2, 'which cost the task an attempt');
+    await until('the container discarded', () => m.log().includes(`discarded ${run.container}`));
+    assert.match(m.log(), new RegExp(`\\] ${run.container} could not be measured against the ${2 ** 30} bytes of this machine's disk a container gets: stopping its 1 job\\(s\\) and removing it\n`));
+    assert.equal(count(m.log(), 'the disk use of'), 3, 'after three looks, not before');
+    await m.kill();
+  });
+
   await check('what a job says it took of the model stands no higher than the traffic this machine carried to the model for it: one that sent nothing took nothing, and one stopped after it named its figures is held to what was carried before its way out was closed', async () => {
     const m = await bench.machine('sw').start();
     await m.linked();

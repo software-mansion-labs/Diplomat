@@ -366,7 +366,8 @@ try {
     assert.deepEqual([done.outcome, done.executor, done.executorHere, state.runs[0].state, state.runs[0].exit], [
       { ok: true, summary: 'reviewed', usd: 0.42, tokens: 120, runner: 'claude', model: '' }, state.identity.pk, true, 'finished', 0,
     ]);
-    assert.equal(fs.existsSync(state.runs[0].log), true, 'a run\'s log is a file on this machine');
+    // What a job wrote is under its run id, and the snapshot leads nobody to it.
+    assert.deepEqual([state.runs[0].log, fs.existsSync(path.join(a.base, 'runs', state.runs[0].runId, 'log.jsonl'))], ['', true]);
 
     const file = path.join(a.base, 'state.json');
     const onDisk = await until('state.json to follow', () => {

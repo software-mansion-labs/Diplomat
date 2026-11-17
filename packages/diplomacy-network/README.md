@@ -108,9 +108,11 @@ hosts has to be canonical. A pool's document holds at most 256 members with at m
 KiB of records each (PROTOCOL.md section 5), and is rewritten when a record of it
 changes.
 
-A job's directory is kept for the day after its end because the snapshot's `log` names a
-file in it, which is what the operator opens to see what the job did; nothing else reads
-it once the outcome is reported. A machine that leaves the network has no further use
+A job's directory is kept for the day after its end for the operator to see what the job
+did: `runs/<run id>/log.jsonl` is the agent's stream. It is the job's own writing - a job
+can put a link, a pipe or a file of any size in its place - so the snapshot names no file
+of it, and a run's `log` there is empty; nothing else reads the directory once the outcome
+is reported. A machine that leaves the network has no further use
 for any of it: when the network is switched off, `runs/`, `mirrors/` and `ca/` are
 removed whole, once nothing is left in docker that could still write there. Its key, its
 pools, its links and what it offered stay - switched on again it is the member it was -
@@ -131,6 +133,17 @@ given of this machine's devices ("Devices" below). The daemon switches off and
 exits when `networkEnabled` is not `true`. A config that cannot be read says nothing
 until it has been unreadable five polls in a row - one read can fall in the middle of a
 rewrite - and then counts as switched off.
+
+A `DN_...` variable that sets a number is taken when it says a number of zero or more;
+unset, empty or anything else, the default stands. Zero is zero: a wait of 0 is no wait,
+an allowance of 0 nothing (`DN_JOB_MODEL_REQUESTS=0` gives a job no request to the
+model), an interval of 0 as often as the process can. Seven settings bound how long or
+how much something of this machine's may take, and what holds them - node's timers,
+docker - reads 0 as no bound at all: `DN_GIT_TIMEOUT_MS`, `DN_MIRROR_TIMEOUT_MS`,
+`DN_IMAGE_BUILD_TIMEOUT_MS`, `DN_CONTAINER_USAGE_TIMEOUT_MS`, `DN_KEYCHAIN_TIMEOUT_MS`,
+`DN_JOB_IDLE_MS` and `DN_CONTAINER_PIDS`. For these 0 is not taken: the default holds,
+and `daemon.log` says so at the start (`DN_CONTAINER_PIDS=0 would leave no bound where
+one always holds: the default is used`).
 
 The model credential a job's requests leave with is this machine's own, added by the
 broker on the host and never present in a container. The first of these that exists is
@@ -521,7 +534,8 @@ four things and starts the job:
   allowance` - whichever of them filled it would fill the next one too, and three
   attempts are all a task gets - and the container goes with its relay, its network,
   its volume and its run records. A name the engine could not measure on three looks
-  running is discarded the same way: one miss is a busy engine, and a container that
+  running is discarded the same way, its jobs ending with the reason `the container could
+  not be measured against its disk allowance`: one miss is a busy engine, and a container that
   can be made unmeasurable is not thereby made unbounded. A discard reports a name
   gone only when all of it is; what is left is measured and tried again.
 - **The relay.** On each container's network sits `dn-<pool part>-<peer part>-relay`:
@@ -618,10 +632,16 @@ for the agents it starts in terminals: a machine with no credential for it takes
 Its exit is the completion signal; its log holds the cost. The daemon reports the outcome
 to the requester with `done`.
 
-A job that cannot be started - the mirror cannot be made, the container cannot, the
-runner does not come up - never ran, and why not is this machine's own affair: its claim
-is given back, which costs the requester none of the task's three attempts, and this
-machine does not go for that task again. It then takes no job of that pool for a minute
+A job that cannot be started for a reason of this machine's own - the mirror cannot be
+made, the engine or the image is not there, the container cannot be made, another
+daemon's object stands under its name - never ran: its claim is given back, which costs
+the requester none of the task's three attempts, and this machine does not go for that
+task again. The executor's parts say which failures those are, as an `OwnFault`
+(`src/executor/own-fault.js`). A start that fails any other way - what earlier jobs left
+could not be removed, the container went from under its jobs, the runner did not come up
+in it - may be the doing of the requester's own jobs, so it is a failed attempt like a
+job that failed, `daemon.log` says why, and nothing is held against the pool. After an
+`OwnFault` the machine takes no job of that pool for a minute
 (`DN_POOL_RETRY_MS`), twice as long after each such failure in a row and ten minutes at
 most (`DN_POOL_RETRY_MAX_MS`); the pool's `notTaking` says why meanwhile. When the wait
 is over the mirror is tried, the one part of a start that needs no job: while it cannot
@@ -780,7 +800,10 @@ how much of it, `node-full.mjs` a pool at its caps, and `node-soak.mjs` seeded r
 everything at once (`DN_SOAK_SEEDS`, `DN_SOAK_STEPS` and `DN_SOAK_SEED` say how many,
 how long and from which seed). The `daemon-*.mjs` files start real daemon processes on
 scratch state directories (`test/lib/daemons.mjs`), with `test/lib/agent.mjs` standing
-in for the agent.
+in for the agent and `test/lib/fake-model.mjs` for the model provider: the agent sends it
+the traffic its token and cost figures could have been in, and
+`test/lib/to-fake-model.mjs`, loaded into each daemon ahead of it, leads the provider's
+name there.
 
 Three files reach for the real things, and print `SKIP` and pass without them:
 
