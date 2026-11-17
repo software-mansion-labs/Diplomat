@@ -9,7 +9,7 @@ packages import `src/*.js` by relative path.
 
 | | |
 |---|---|
-| [`src/serve.js`](src/serve.js) | the daemon side: a JSON-over-HTTP server on a unix socket, and taking that socket as the one daemon of its state dir (a stale socket is reclaimed under a lock, never from a live peer) |
+| [`src/serve.js`](src/serve.js) | the daemon side: a JSON-over-HTTP server on a unix socket, and taking that socket as the one daemon of its state dir (a stale socket is reclaimed under a lock, never from a live peer); and holding that socket with no daemon, for an installer that changes the state dir in a daemon's place |
 | [`src/ipc.js`](src/ipc.js) | the client side: call a daemon, check it is up, start one and wait for it to serve |
 | [`src/daemon-control.js`](src/daemon-control.js) | start, stop and replace a daemon from an installer, found by its socket or its daemon.json |
 | [`src/claude-install.js`](src/claude-install.js) | install into Claude Code at every layer an agent reads (MCP registration, rule, CLAUDE.md block, skill), and report drift from the checkout by content |

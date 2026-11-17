@@ -116,6 +116,44 @@ export function listenSingleton({ server, socketPath, log, onListening }) {
   server.listen(socketPath, onListening);
 }
 
+/// Takes the socket of a state dir no daemon serves, for something that changes the dir
+/// in a daemon's place: resolves to a function that gives the socket up again, or to null
+/// when a daemon serves it or is taking it. Held, it answers every request 503 and keeps
+/// the startup lock, so a daemon that starts finds nobody to defer to and nothing to
+/// take over, and exits.
+export async function holdSocket(socketPath) {
+  const lockPath = `${socketPath}.lock`;
+  const lock = acquireTakeoverLock(lockPath);
+  if (lock == null) return null;
+  const server = http.createServer((req, res) => {
+    res.writeHead(503, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'no daemon is running: its state is being changed' }));
+  });
+  const listen = () => new Promise((resolve) => {
+    server.once('error', (e) => resolve(e));
+    server.listen(socketPath, () => resolve(null));
+  });
+  let failed = await listen();
+  // A file nobody answers on is what a dead daemon left: removed under the lock, as a
+  // daemon's start removes it. A daemon that bound it since is deferred to.
+  if (failed?.code === 'EADDRINUSE' && !(await socketHealthy(socketPath))) {
+    try { fs.unlinkSync(socketPath); } catch {}
+    failed = await listen();
+  }
+  if (failed) {
+    releaseTakeoverLock(lockPath, lock);
+    if (failed.code === 'EADDRINUSE') return null;
+    throw failed;
+  }
+  return () => new Promise((resolve) => {
+    server.close(() => {
+      releaseTakeoverLock(lockPath, lock);
+      resolve();
+    });
+    server.closeAllConnections();
+  });
+}
+
 /// What a jsonServer handler returns for a route it does not serve.
 export const NO_ROUTE = Symbol('no route');
 

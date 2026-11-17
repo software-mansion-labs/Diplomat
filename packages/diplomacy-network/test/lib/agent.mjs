@@ -48,8 +48,8 @@ const git = (...args) => {
   }
 };
 
-// A GitLab pool's job is told its forge's host; a GitHub one asks api.github.com.
-const forgeHost = process.env.GITLAB_HOST || 'api.github.com';
+// A job is told its forge's host unless that is github.com, whose API is on api.github.com.
+const forgeHost = process.env.GITLAB_HOST || process.env.GH_HOST || 'api.github.com';
 const credential = process.env.GITLAB_HOST ? { 'private-token': process.env.GITLAB_TOKEN } : { authorization: `token ${process.env.GH_TOKEN}`, accept: 'application/vnd.github+json' };
 
 function api(method, route, body, host = forgeHost, headers = credential) {

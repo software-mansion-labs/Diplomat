@@ -134,7 +134,7 @@ try {
     assert.equal(m.containers().length > 0, true);
     await m.kill();
     m.setConfig({ networkEnabled: false });
-    assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null });
+    assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null, ended: { offers: 1, runs: 1 } });
     assert.deepEqual(m.containers(), []);
   });
 

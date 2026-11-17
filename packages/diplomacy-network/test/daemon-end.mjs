@@ -245,13 +245,13 @@ try {
 
     const from = Date.now();
     assert.deepEqual(await m.install('--stop-daemon'), {
-      ok: false, daemonRunning: false, pid: null, error: 'the daemon is gone, but what it made in docker is still there: the docker engine did not answer in time',
+      ok: false, daemonRunning: false, pid: null, error: 'the daemon is gone, but what it made in docker is still there: the docker engine did not answer in time', ended: { offers: 0, runs: 0 },
     });
     assert.ok(Date.now() - from < 30000, 'answered, and gone, with the engine still silent');
     assert.deepEqual(world(m), [2, 1, 1]);
 
     for (const hold of holds) fs.rmSync(hold);
-    assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null });
+    assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null, ended: { offers: 0, runs: 0 } });
     assert.deepEqual([world(m), kept(m)], [[0, 0, 0], ['identity.json', 'pools', 'links.json', 'offers.json']]);
   });
 
@@ -276,7 +276,7 @@ try {
     fs.writeFileSync(hold, '');
     fs.rmSync(down);
     const failed = await failing;
-    assert.deepEqual([failed.ok, failed.daemonRunning], [false, false]);
+    assert.deepEqual([failed.ok, failed.daemonRunning, failed.ended], [false, false, { offers: 0, runs: 0 }]);
     assert.match(failed.error, /^the daemon is gone, but what it made in docker is still there: (?!the docker engine did not answer).+/);
     assert.deepEqual(world(m), [2, 1, 1]);
 
@@ -288,7 +288,7 @@ try {
     const asked = m.install('--stop-daemon');
     await until('the installer to have asked the engine again', () => listings() >= from + 2);
     fs.rmSync(down);
-    assert.deepEqual(await asked, { ok: true, daemonRunning: false, pid: null });
+    assert.deepEqual(await asked, { ok: true, daemonRunning: false, pid: null, ended: { offers: 0, runs: 0 } });
     assert.deepEqual([world(m), kept(m)], [[0, 0, 0], ['identity.json', 'pools', 'links.json', 'offers.json']]);
   });
 
@@ -298,7 +298,7 @@ try {
     await until('its word on docker', async () => (await m.state()).docker.state === 'missing');
     m.setConfig({ networkEnabled: false });
     assert.deepEqual(await m.exit, { code: 0, signal: null });
-    assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null });
+    assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null, ended: { offers: 0, runs: 0 } });
   });
 
   const jobStarts = (m) => m.docker('exec').filter((call) => call.some((arg) => /run\.sh$/.test(arg)));
@@ -363,7 +363,7 @@ try {
     // The engine goes on with what it was asked.
     fs.rmSync(hold);
     await until('the container made after all', () => b.containers().length > 0);
-    assert.deepEqual(await b.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null });
+    assert.deepEqual(await b.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null, ended: { offers: 0, runs: 0 } });
     assert.deepEqual(world(b), [0, 0, 0]);
   });
 

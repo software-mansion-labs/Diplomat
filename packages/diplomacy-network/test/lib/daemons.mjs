@@ -13,7 +13,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { killDaemonsUnder, onInterrupt } from '../../../daemon-core/src/test-interrupt.js';
-import { GITLAB_HOST, git, startFakeForge } from './fake-forge.mjs';
+import { GHES_HOST, GHES_TOKEN, GITLAB_HOST, git, startFakeForge } from './fake-forge.mjs';
 import { startFakeModel } from './fake-model.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -31,6 +31,8 @@ export const REPO = 'acme/widgets';
 export const POOL = `github.com/${REPO}`;
 /// The pool of the same repository as the stand-in forge's GitLab serves it.
 export const GITLAB_POOL = `${GITLAB_HOST}/${REPO}`;
+/// And as its GitHub Enterprise Server does.
+export const GHES_POOL = `${GHES_HOST}/${REPO}`;
 
 /// A pause between two looks at something; never a wait for it.
 export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -168,14 +170,16 @@ export async function createBench() {
     fs.writeFileSync(gitconfig, [
       '[user]', `\tname = ${name} Operator`, `\temail = ${name}@example.com`, '[init]', '\tdefaultBranch = main',
       `[url "http://x-access-token:${token}@127.0.0.1:${forge.port}/h/github.com/"]`, '\tinsteadOf = https://github.com/',
-      `[url "http://oauth2:${gitlabToken}@127.0.0.1:${forge.port}/h/${GITLAB_HOST}/"]`, `\tinsteadOf = https://${GITLAB_HOST}/`, '',
+      `[url "http://oauth2:${gitlabToken}@127.0.0.1:${forge.port}/h/${GITLAB_HOST}/"]`, `\tinsteadOf = https://${GITLAB_HOST}/`,
+      `[url "http://x-access-token:${GHES_TOKEN}@127.0.0.1:${forge.port}/h/${GHES_HOST}/"]`, `\tinsteadOf = https://${GHES_HOST}/`, '',
     ].join('\n'));
     const env = {
       PATH: process.env.PATH, TMPDIR: os.tmpdir(), HOME: provider === 'real' ? os.homedir() : home, LANG: 'C',
       DN_SCRATCH: root, DN_BASE_DIR: base, DIPLOMAT_CONFIG: configPath,
       GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0',
       DN_FORGE_ORIGINS: forge.env.DN_FORGE_ORIGINS,
-      DN_GH: script('gh', `[ "$1 $2 $3 $4" = "auth token --hostname github.com" ] && echo "${token}" && exit 0\nexit 1`),
+      // The Enterprise Server takes one credential, whichever machine sends it.
+      DN_GH: script('gh', `[ "$1 $2 $3 $4" = "auth token --hostname github.com" ] && echo "${token}" && exit 0\n[ "$1 $2 $3 $4" = "auth token --hostname ${GHES_HOST}" ] && echo "${GHES_TOKEN}" && exit 0\nexit 1`),
       DN_GLAB: script('glab', `[ "$1 $2 $3 $4 $5" = "config get token --host ${GITLAB_HOST}" ] && echo "${gitlabToken}" && exit 0\nexit 1`),
       // No Keychain and no login of the operator's: the model credential is a key that
       // is no key.
@@ -230,6 +234,15 @@ export async function createBench() {
           git(at, 'remote', 'set-url', 'origin', `https://${GITLAB_HOST}/${REPO}.git`);
         }
         return { id: GITLAB_POOL, path: at, forge: 'gitlab', identity: name };
+      },
+      /// The link of the Enterprise Server's pool, the same way.
+      ghesLink() {
+        const at = path.join(home, 'we');
+        if (!fs.existsSync(at)) {
+          git(home, 'clone', '--quiet', path.join(forge.gitRoot, `${REPO}.git`), at);
+          git(at, 'remote', 'set-url', 'origin', `https://${GHES_HOST}/${REPO}.git`);
+        }
+        return { id: GHES_POOL, path: at, forge: 'github', identity: name };
       },
       get pid() { return child?.pid ?? null; },
       get exited() { return child === null || child.exitCode !== null || child.signalCode !== null; },
