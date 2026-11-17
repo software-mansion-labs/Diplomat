@@ -11,12 +11,12 @@ import { createVoucher } from '../src/core/membership.js';
 import { Pool } from '../src/core/pool.js';
 import { LIMITS, memberRecord, offerRecord } from '../src/core/records.js';
 import { poolFile } from '../src/node/store.js';
-import { MAX_BODY_BYTES, POW, STRANGER_BODY_BYTES } from '../src/paths.js';
+import { MAX_BODY_BYTES, POW, POW_HOURLY, STRANGER_BODY_BYTES } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const ROUND = 'AAAAAAAAAAA';
 const MOST = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
-const HOURLY = POW.memberBase * 2 ** 14;
+const { peer: HOURLY, all: HOURLY_ALL, floor: HOURLY_FLOOR } = POW_HOURLY;
 const failures = (hosts) => hosts.flatMap((h) => h.log.filter((line) => /failed|could not be served/.test(line)));
 const sum = (list) => list.reduce((total, n) => total + n, 0);
 const refused = (answer) => [answer.ok, answer.code, answer.detail];
@@ -95,6 +95,51 @@ await check('a host pays a peer no more than an honest target can ask, asks no m
   }
   assert.deepEqual(paid.map((n) => n <= HOURLY && n > HOURLY - MOST), [true, true, true], `paid ${paid} an hour, of ${HOURLY}`);
   assert.deepEqual(failures([a]), []);
+});
+
+await check('a host works for all its peers together no more in an hour than it says, however many ask for the most; a member it has known for an hour it asks all the same, and one that priced itself out it waits for no longer than for a silent one', async () => {
+  const w = createWorld({ seed: 75 });
+  const [a, b] = await w.pool(['a', 'b']);
+  await w.run(3700);
+  // Twelve keys in a's seats, each asking the most for every request.
+  const { all, records } = w.crowd(a, 12, 1);
+  for (const m of all) answering(m, () => ({ error: { code: 'effort', detail: '' }, effort: MOST }));
+  assert.deepEqual((await w.request(b, a, 'push', { records }, { effort: POW.memberBase * 4 })).body.refused, []);
+  await w.run(3600);
+  const paid = [];
+  for (let hour = 0; hour < 2; hour += 1) {
+    const from = a.solved.length;
+    const since = w.net.now();
+    await w.run(3600);
+    paid.push(sum(a.solved.slice(from)));
+    assert.ok(w.net.count({ from: 'a', to: 'b', kind: 'sync', since }) >= 30, 'the member it knows is asked through the hour');
+  }
+  assert.deepEqual(paid.map((n) => n <= HOURLY_ALL + HOURLY_FLOOR && n > HOURLY_ALL - MOST), [true, true], `paid ${paid} an hour, of ${HOURLY_ALL}`);
+  // Its own round does not wait on the keys it cannot pay: they are absent, and b is asked.
+  const since = w.net.now();
+  const { taskId } = await a.node.offer({ ...offerArgs('pr-1'), now: true });
+  await w.net.until(() => a.executor.jobOf(taskId), { what: 'its own task claimed' });
+  const claim = w.claim(a, taskId);
+  assert.deepEqual([w.net.now() - since < 40, claim.grants.map((g) => g.by), claim.absent.length], [true, [b.pk], 12]);
+  assert.deepEqual(failures([a]), []);
+});
+
+await check('a member that asks for more work whatever it is paid stops a round like one that does not grant, until this host has done for it what it does for one peer in an hour: then the round goes on without it', async () => {
+  const w = createWorld({ seed: 76 });
+  const [a, b] = await w.pool(['a', 'b']);
+  const { all, records } = w.crowd(a, 2, 1);
+  // They ask for a little more than they were paid, each time: members that are there, and do not grant.
+  let most = false;
+  for (const m of all) answering(m, (request) => ({ error: { code: 'effort', detail: '' }, effort: most ? MOST : request.pow.effort + POW.memberBase }));
+  assert.deepEqual((await w.request(b, a, 'push', { records }, { effort: POW.memberBase * 4 })).body.refused, []);
+  const { taskId } = await a.node.offer({ ...offerArgs('pr-1'), now: true });
+  await w.run(100);
+  assert.equal(Boolean(a.executor.jobOf(taskId)), false, 'the round waits on a member that answers');
+  most = true;
+  const since = w.net.now();
+  await w.net.until(() => a.executor.jobOf(taskId), { what: 'its own task claimed' });
+  const claim = w.claim(a, taskId);
+  assert.deepEqual([w.net.now() - since < 200, claim.grants.map((g) => g.by), claim.absent], [true, [b.pk], all.map((m) => m.pk).sort()], `claimed after ${w.net.now() - since} s`);
 });
 
 await check('a pool holds 241 members, 15 under each of the first 16: the next has no seat, no invite is made, and a host among 240 that never answer still claims', async () => {

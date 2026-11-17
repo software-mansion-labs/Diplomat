@@ -205,10 +205,23 @@ that minute - is quoted the stranger's price, pays too little again, and after t
 time leaves that request; a minute later its price has fallen.
 
 For one peer a host does at most 16384 << 14 = 268 435 456 hashes of work in any hour:
-four requests at the highest price, or 16384 at a member's base. Once that is spent it
-sends that peer nothing until the hour has moved on. So the most one member can make
-another host work is that much an hour - about four minutes of one core at a million
-hashes a second - however it prices itself.
+four requests at the highest price, or 16384 at a member's base. For all its peers
+together it does at most four times that, 16384 << 16 = 1 073 741 824: 18 minutes of one
+core at a million hashes a second. Past either it sends nothing it would have to pay for
+until the hour has moved on - except to a peer it has known for an hour, which it goes
+on paying up to 16384 << 8 = 4 194 304 hashes an hour, 256 requests at a member's base
+price, whatever the others took. So the members that ask for the most make a host work
+1 073 741 824 hashes an hour between them, however many keys they have seated, and
+cannot keep it from asking the members it knew before them. The floors of 240 peers add
+at most 1 006 632 960 hashes to such an hour, 17 minutes of a core, and that only when
+every one of them is asked for its whole. A host knows a peer from the first request to
+it or from it since the host started. A request a host does not pay for was not
+answered: a claim round goes on without that member as without one that is silent
+(section 7).
+
+A host works on 2 proofs at a time, each on a thread of its own, the cheapest of those
+waiting first: a proof at the highest price, about a minute of a core, keeps a cheap
+one waiting no longer than the proofs already begun.
 
 ## 4. Response envelope
 

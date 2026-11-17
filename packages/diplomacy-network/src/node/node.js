@@ -8,9 +8,9 @@
 
 import { b64u } from '../core/canon.js';
 import { identityFromSeed } from '../core/identity.js';
-import { solveAsync } from '../core/pow.js';
+import { solverPool } from '../core/pow.js';
 import { validPool } from '../core/records.js';
-import { SWITCH_OFF_WAIT_MS, TICK_MS, WAKE_GAP_MS } from '../paths.js';
+import { POW_WORKERS, SWITCH_OFF_WAIT_MS, TICK_MS, WAKE_GAP_MS } from '../paths.js';
 import { createClaiming } from './claiming.js';
 import { claimKey, createGossip } from './gossip.js';
 import { createInbound } from './inbound.js';
@@ -50,9 +50,10 @@ function fenced(clock, log) {
 /// `local: true` - no job ran, for a fault of this machine's own - whose claim is given
 /// back at no attempt lost;
 /// `settings()` answers `{ requiredMinimumH, maximumAcceptedH }`;
-/// `solve(challenge, effort)` finds a proof of work, by default on a worker thread.
+/// `solve(challenge, effort)` finds a proof of work, by default on one of POW_WORKERS
+/// threads.
 export function createNode({
-  store, transport, clock: timers, random, log = () => {}, requester, executor, settings, solve = solveAsync,
+  store, transport, clock: timers, random, log = () => {}, requester, executor, settings, solve = solverPool(POW_WORKERS),
 }) {
   const clock = fenced(timers, log);
   let id = identityFromSeed(store.read('identity')?.seed ?? '');

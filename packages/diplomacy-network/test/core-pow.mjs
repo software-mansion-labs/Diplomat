@@ -4,8 +4,8 @@
 
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { POW } from '../src/paths.js';
-import { EffortMeter, MAX_EFFORT, challenge, check as solves, epochAcceptable, epochOf, seed, solve, solveAsync, validEffort } from '../src/core/pow.js';
+import { POW, POW_HOURLY } from '../src/paths.js';
+import { EffortMeter, MAX_EFFORT, challenge, check as solves, epochAcceptable, epochOf, seed, solve, Spending, solveAsync, solverPool, validEffort } from '../src/core/pow.js';
 
 async function check(name, fn) {
   await fn();
@@ -111,6 +111,46 @@ await check('an aborted search rejects with the reason and leaves no worker behi
   await assert.rejects(solveAsync(c, 1, { signal: abort.signal }), /enough/);
 });
 
+await check('a host pays one peer so much in an hour and all of them together so much; past that it pays only a peer it has known for an hour, and that one a little', () => {
+  const s = new Spending({ peer: 100, all: 250, floor: 10, floorAfter: 3600 });
+  const T = 50000;
+  const pay = (pk, effort, at, since = T) => s.pay(pk, since, effort, at);
+  assert.deepEqual([pay('a', 60, T), pay('a', 41, T + 1), pay('a', 40, T + 2)], [true, false, true]);
+  assert.deepEqual([pay('b', 100, T + 3), pay('c', 51, T + 4), pay('c', 50, T + 4), pay('d', 1, T + 5)], [true, false, true, false]);
+  // All of it is spent: a peer known for an hour is paid 10 beyond it, a second less no peer.
+  assert.deepEqual([pay('young', 1, T + 6, T - 3593), pay('old', 11, T + 6, T - 3594), pay('old', 10, T + 6, T - 3594), pay('old', 1, T + 7, T - 3594)],
+    [false, false, true, false]);
+  // What was paid counts for an hour to the second, for the peer as for all.
+  assert.deepEqual([pay('a', 1, T + 3599), pay('d', 51, T + 3600), pay('d', 50, T + 3600), pay('a', 1, T + 3600)], [false, false, true, false]);
+  assert.deepEqual([pay('a', 41, T + 3602), pay('a', 40, T + 3602)], [false, true]);
+});
+
+await check('proofs are worked on by so many threads at a time and no more, the cheapest waiting first; one that fails holds no thread', async () => {
+  const going = new Map();
+  const order = [];
+  let most = 0;
+  const run = (c, effort) => new Promise((resolve, reject) => {
+    order.push(effort);
+    going.set(effort, effort === 13 ? () => reject(new Error('no proof')) : () => resolve(effort));
+    most = Math.max(most, going.size);
+  });
+  const finish = async (effort) => {
+    going.get(effort)();
+    going.delete(effort);
+    await new Promise((resolve) => { setImmediate(resolve); });
+  };
+  const solve = solverPool(2, run);
+  const asked = [50, 13, 40, 9, 30].map((effort) => solve(Buffer.alloc(0), effort).catch((err) => err.message));
+  assert.deepEqual([order, most], [[50, 13], 2], 'two begin at once, the others wait');
+  await finish(13);
+  await finish(50);
+  assert.deepEqual(order, [50, 13, 9, 30], 'then the cheapest of those waiting');
+  await finish(9);
+  await finish(30);
+  await finish(40);
+  assert.deepEqual([await Promise.all(asked), most], [[50, 'no proof', 40, 9, 30], 2]);
+});
+
 await check('a target accepts its own epoch and the ones beside it, and none two away', () => {
   const now = 498333 * 3600 + 1800;
   assert.deepEqual([-2, -1, 0, 1, 2].map((d) => epochAcceptable(498333 + d, now)), [false, true, true, true, false]);
@@ -188,4 +228,5 @@ await check('the defaults are the protocol table', () => {
   assert.equal(meter.required('alice', true, 0), 16384 * 2 ** 12);
   for (let i = 0; i < 2000; i++) meter.count('eve', false, 0);
   assert.equal(meter.required('eve', false, 0), 262144 * 2 ** 8);
+  assert.deepEqual(POW_HOURLY, { peer: 268435456, all: 1073741824, floor: 4194304, floorAfter: 3600 });
 });

@@ -53,6 +53,13 @@ export const POW = {
   windowSecs: 60,
   epochSecs: 3600,
 };
+// The work a host does for its peers in an hour, in hashes expected. For one peer: 16384
+// requests at a member's base price, or four at the most any target may ask. For all of
+// them together four times that. And what it does all the same for a peer it has known
+// for `floorAfter` seconds, whatever the others took: 256 requests at the base price.
+// The keys a member seats are new to every host, so they take from the whole and leave
+// the floors to the peers a host knew before them.
+export const POW_HOURLY = { peer: POW.memberBase * 2 ** 14, all: POW.memberBase * 2 ** 16, floor: POW.memberBase * 2 ** 8, floorAfter: 3600 };
 export const CLOCK_SKEW_SECS = 300;
 // The largest request body, and the larger one an `act` request may carry. A sender that
 // is not a member of the request's pool gets the stranger's cap.
@@ -124,6 +131,8 @@ export const RETAKE_WAIT_MS = num('DN_RETAKE_WAIT_MS', 60 * 1000);
 // the same offer, up to the most.
 export const KEYLESS_WAIT_MS = num('DN_KEYLESS_WAIT_MS', 2 * 3600 * 1000);
 export const KEYLESS_WAIT_MAX_MS = num('DN_KEYLESS_WAIT_MAX_MS', 24 * 3600 * 1000);
+// How many proofs of work a host works on at a time, each on a thread of its own.
+export const POW_WORKERS = num('DN_POW_WORKERS', 2);
 // How often a host looks at everything it holds for something that came due.
 export const TICK_MS = num('DN_TICK_MS', 10 * 1000);
 // A host whose clock moved this far between two looks was not running meanwhile - the
