@@ -11,6 +11,8 @@ import path from 'node:path';
 import tls from 'node:tls';
 import { execFileSync } from 'node:child_process';
 
+// What is private here is made so by name, whatever mask the daemon was started under.
+process.umask(0o022);
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-ca-'));
 process.env.DN_BASE_DIR = path.join(scratch, 'base');
 const { createCA, certHost } = await import('../src/executor/ca.js');
@@ -19,6 +21,14 @@ const { OPENSSL_BIN } = await import('../src/paths.js');
 let checks = 0;
 const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };
 const x509 = (pem) => new crypto.X509Certificate(pem);
+const mode = (...parts) => fs.statSync(path.join(...parts)).mode & 0o777;
+async function until(fn, what) {
+  const end = Date.now() + 60000;
+  while (!fn()) {
+    if (Date.now() > end) throw new Error(`never: ${what}`);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
 
 // A TLS handshake against `leaf`, by a client that trusts only `caPem`.
 function handshake(leaf, caPem, servername) {
@@ -50,8 +60,7 @@ try {
 
   await check('the CA is made once, private to this user, and is a CA that can sign leaves only', () => {
     assert.equal(ca.state().state, 'ready');
-    assert.equal(fs.statSync(dir).mode & 0o777, 0o700);
-    assert.equal(fs.statSync(path.join(dir, first.id, 'ca.key')).mode & 0o777, 0o600);
+    assert.deepEqual([mode(dir), mode(dir, first.id), mode(dir, first.id, 'ca.key')], [0o700, 0o700, 0o600]);
     const cert = x509(fs.readFileSync(first.certPath));
     assert.equal(cert.ca, true);
     assert.match(cert.subject, /CN=Diplomacy Network broker [0-9a-f]{12}/);
@@ -61,6 +70,14 @@ try {
     assert.match(text, /CA:TRUE, pathlen:0/);
     assert.match(text, /Certificate Sign/);
     assert.doesNotMatch(text, /Digital Signature|Key Encipherment/);
+  });
+
+  await check('a directory that was there before, open to this machine\'s other users, is closed to them when a CA is made in it', async () => {
+    const wide = path.join(scratch, 'ca-wide');
+    fs.mkdirSync(wide, { mode: 0o755 });
+    assert.equal(mode(wide), 0o755);
+    await createCA({ dir: wide }).authority(['github.com']);
+    assert.equal(mode(wide), 0o700);
   });
 
   await check('asking again for the same hosts, in any order or spelling, returns the same CA, across a restart too', async () => {
@@ -75,7 +92,9 @@ try {
     const cert = x509(leaf.cert);
     assert.equal(cert.subjectAltName, 'DNS:api.github.com');
     assert.equal(cert.ca, false);
+    assert.deepEqual(cert.keyUsage, ['1.3.6.1.5.5.7.3.1'], 'good for a server and nothing else');
     assert.equal(cert.checkIssued(x509(fs.readFileSync(first.certPath))), true);
+    assert.deepEqual([mode(dir, first.id, 'leaves'), mode(dir, first.id, 'leaves', 'api.github.com.key')], [0o700, 0o600], 'its key is this user\'s alone');
     const caPem = fs.readFileSync(first.certPath);
     assert.equal(await handshake(leaf, caPem, 'api.github.com'), 'ok');
     assert.match(await handshake(leaf, caPem, 'github.com'), /^ERR_TLS_CERT_ALTNAME_INVALID/);
@@ -147,14 +166,20 @@ try {
     const key = path.join(scratch, 'evil.key');
     const cnf = path.join(scratch, 'evil.cnf');
     fs.writeFileSync(key, crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' }).privateKey.export({ type: 'sec1', format: 'pem' }));
-    for (const [name, san] of [['evil.example', 'DNS:evil.example'], ['an address', 'IP:93.184.216.34']]) {
-      fs.writeFileSync(cnf, `[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=evil.example\n[ext]\nsubjectAltName=${san}\n`);
+    // The two with an address are named for a host the CA is good for: nothing but the
+    // address is at fault in them.
+    for (const [cn, san, why] of [
+      ['evil.example', 'DNS:evil.example', /permitted subtree violation/],
+      ['github.com', 'IP:93.184.216.34', /excluded subtree violation/],
+      ['github.com', 'IP:2606:2800:220:1:248:1893:25c8:1946', /excluded subtree violation/],
+    ]) {
+      fs.writeFileSync(cnf, `[req]\ndistinguished_name=dn\nprompt=no\n[dn]\nCN=${cn}\n[ext]\nsubjectAltName=${san}\n`);
       execFileSync(OPENSSL_BIN, ['req', '-new', '-key', key, '-config', cnf, '-out', path.join(scratch, 'evil.csr')]);
       execFileSync(OPENSSL_BIN, ['x509', '-req', '-in', path.join(scratch, 'evil.csr'), '-CA', first.certPath, '-CAkey', path.join(dir, first.id, 'ca.key'),
         '-set_serial', '0x66', '-days', '30', '-sha256', '-extfile', cnf, '-extensions', 'ext', '-out', path.join(scratch, 'evil.crt')], { stdio: 'ignore' });
       const forged = { key: fs.readFileSync(key), cert: fs.readFileSync(path.join(scratch, 'evil.crt')) };
       const outcome = await handshake(forged, fs.readFileSync(first.certPath), san.startsWith('IP') ? '' : 'evil.example');
-      assert.match(outcome, /permitted subtree violation|excluded subtree violation/, `${name}: ${outcome}`);
+      assert.match(outcome, why, `${san}: ${outcome}`);
     }
   });
 
@@ -215,6 +240,26 @@ try {
     assert.deepEqual(sets(), ['api.anthropic.com api.github.com github.com', 'api.anthropic.com gitlab.corp-internal.example', 'github.com'], 'and every set keeps one');
     assert.equal(fresh.kept(first.id), null);
     assert.equal((await fresh.authority(HOSTS)).id, renewed.id);
+  });
+
+  await check('pruning leaves alone the generation that is being made at that moment, and removes what a process that is gone left half made', async () => {
+    const home = path.join(scratch, 'ca-minting');
+    const go = path.join(scratch, 'go');
+    // An openssl that waits to be let go, for as long as this test's files are there.
+    const slow = path.join(scratch, 'slow-openssl');
+    fs.writeFileSync(slow, `#!/bin/sh\nwhile [ ! -e '${go}' ] && [ -e "$0" ]; do sleep 0.05; done\nexec '${OPENSSL_BIN}' "$@"\n`, { mode: 0o755 });
+    const minting = createCA({ dir: home, openssl: slow });
+    const made = minting.authority(['github.com']);
+    await until(() => fs.existsSync(home) && fs.readdirSync(home).length === 1, 'the generation to be begun');
+    const [half] = fs.readdirSync(home);
+    assert.match(half, new RegExp(`^\\.[0-9a-f]{12}\\.tmp\\.${process.pid}$`));
+    fs.mkdirSync(path.join(home, '.0123456789ab.tmp.1'));
+    minting.prune();
+    assert.deepEqual(fs.readdirSync(home), [half]);
+    fs.writeFileSync(go, '');
+    const authority = await made;
+    assert.deepEqual(fs.readdirSync(home), [authority.id]);
+    assert.equal(await handshake(await authority.leaf('github.com'), fs.readFileSync(authority.certPath), 'github.com'), 'ok');
   });
 
   await check('what is not a DNS name gets no certificate', async () => {

@@ -98,7 +98,7 @@ try {
   });
 
   let up;
-  await check('the sweep and the prune fire on their timer: an idle container goes, an old certificate authority goes once no job runs, and state.json is written no more often than its interval under a burst of changes', async () => {
+  await check('the sweep and the prune fire on their timer: a container goes with its last job, an old certificate authority goes once no job runs, and state.json is written no more often than its interval under a burst of changes', async () => {
     up = await bench.machine('up', { env: { DN_SWEEP_MS: '200', DN_CONTAINER_IDLE_MS: '1500', DN_STATE_WRITE_MS: String(STATE_WRITE_MS) } }).start();
     await up.linked();
     const taskId = await own(up, 'pr-1', 'wait held\nsay swept');
@@ -126,9 +126,8 @@ try {
     up.release('held');
     await done(up, taskId);
     await until('the old authority pruned', () => !exists(ca, '0123456789ab'));
-    await until('the idle container removed', () => up.containers().length === 0);
+    await until('the container removed with its last job', () => up.containers().length === 0 && up.log().includes(`removed ${run.container} with its last job`));
     assert.deepEqual(names(ca), [current], 'the one a next job of these hosts is given stays');
-    assert.match(up.log(), new RegExp(`removing ${run.container}: idle`));
 
     // Every change moves the snapshot; the file follows one interval behind at most, and
     // is not written more often than that. Four writes begin three intervals apart; the
@@ -320,7 +319,8 @@ try {
     m.setConfig({ networkEnabled: false });
     assert.deepEqual(await gone(m), { code: 0, signal: null });
     assert.deepEqual([world(m), alive(agentPid)], [[0, 0, 0], false]);
-    assert.match(m.log(), /removed 2 container\(s\), 1 network\(s\) and 1 volume\(s\)/);
+    // The stopped job's release took them; the daemon's end found nothing more.
+    assert.match(m.log(), new RegExp(`removed ${run.container} with its last job[\\s\\S]*removed 0 container\\(s\\), 0 network\\(s\\) and 0 volume\\(s\\)`));
     assert.equal(exists(m.dockerDir, 'images', encodeURIComponent(m.docker('build')[0][m.docker('build')[0].indexOf('-t') + 1])), true, 'the image is kept');
 
     // A daemon that died with a job going. Stopped while the network is on, nothing is

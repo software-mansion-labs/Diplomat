@@ -94,6 +94,7 @@ const llm = createLLM();
 const broker = createBroker({ ca: createCA(), llm, mirrors, onForge });
 const PEER_A = 'pkAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const PEER_B = 'pkBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
+const PEER_C = 'pkCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC';
 
 // A service of this machine that no job may reach.
 const hostSeen = [];
@@ -187,6 +188,21 @@ async function launch(runId, peer, { script = null, env = {}, prompt = 'Do nothi
   return { run: job, container, proxy, dir: started.dir, group: started.pid, outcome, out, steps };
 }
 const unreached = (out) => out.split('\n').filter((l) => !/: no \(/.test(l));
+// A place in a pair's container, as a job that is still running has: the container stays
+// to be looked at when the jobs beside it are over. Resolves to what gives the place up.
+async function hold(peer, runId) {
+  const { name } = await containers.acquire({ pool, peer, runId });
+  return () => containers.release({ name, runId });
+}
+// What the engine holds under a container's name, by kind.
+async function under(name) {
+  const listed = async (...args) => (await sh(...args, ...mine, '--format', args[0] === 'ps' ? '{{.Names}}' : '{{.Name}}')).split('\n').filter(Boolean).sort();
+  return [
+    ...(await listed('ps', '-a')).filter((n) => n.startsWith(name)),
+    ...(await listed('network', 'ls')).filter((n) => n === name).map((n) => `network ${n}`),
+    ...(await listed('volume', 'ls')).filter((n) => n === name.replace('dn-', 'dn-work-')).map((n) => `volume ${n}`),
+  ];
+}
 const groupAlive = async (job) => (await docker(['exec', job.container.name, 'sh', '-c', `kill -s 0 -- -${job.group}`])).code === 0;
 
 let tag = '';
@@ -226,9 +242,11 @@ try {
   git(checkout, 'push', '--quiet', mirrors.path(pool), 'HEAD:refs/heads/main');
 
   let tools;
+  let leaveA;
   await check('a job in a real container finishes, and its clone came from the mirror without a word to the requester', async () => {
     console.log(`INFO the broker listens on ${at.host}:${at.port}`);
     if (!process.env.DN_TEST_SKIP_CLAUDE) await llm.load();
+    leaveA = await hold(PEER_A, 'held-a');
     tools = await launch('tools', PEER_A, { env: llm.env(), script: `
 step tunnel "curl -sS -o /dev/null -w '%{http_code}' https://example.com"
 step nodefetch "node -e \\"fetch('https://example.com').then((r) => console.log(r.status))\\""
@@ -377,6 +395,7 @@ exit 0
   });
 
   await check('another peer on the same repository works in another container and sees none of the first one\'s runs', async () => {
+    const leaveB = await hold(PEER_B, 'held-b');
     const other = await launch('other-peer', PEER_B, { script: 'step runs "ls /dn/runs"\nstep work "ls /work/jobs"\nexit 0\n' });
     assert.equal((await other.outcome).ok, true);
     assert.notEqual(other.container.name, tools.container.name);
@@ -399,6 +418,7 @@ exit 0
       assert.match(await sh('inspect', c.name, '--format', held), new RegExp(`^(volume:${volume}:/work bind:\\S+/\\.containers/${c.name}:/dn/runs|bind:\\S+/\\.containers/${c.name}:/dn/runs volume:${volume}:/work) \\| null "" "(private|shareable)" "" "" false$`));
       assert.match(await sh('inspect', `${c.name}-relay`, '--format', held), /^\| null "" "(private|shareable)" "" "" false$/, 'a relay holds no volume and no directory');
     }
+    await leaveB();
   });
 
   await check('one peer\'s container cannot reach another\'s, and a forward opened for one job is of no use to a job in another container', async () => {
@@ -481,8 +501,76 @@ exit 0
     await goes.outcome;
     fs.writeFileSync(path.join(stays.dir, 'go'), '');
     assert.equal((await stays.outcome).ok, true);
-    assert.equal(await sleeping(2), 0, 'with its last job over the container is restarted, and the stray is gone');
-    assert.equal(await sh('exec', stays.container.name, 'sh', '-c', 'ls /work/cache.git/HEAD'), '/work/cache.git/HEAD', 'its volume is as it was');
+    assert.equal(await sleeping(2), 1, 'what left its group and its environment is there for as long as the container is');
+  });
+
+  await check('a container goes with its last job - relay, network and volume too - and the pair\'s next job starts in a new one from the image, with nothing the jobs before it installed, wrote or left running', async () => {
+    const name = tools.container.name;
+    const volume = name.replace('dn-', 'dn-work-');
+    assert.deepEqual(await under(name), [name, `${name}-relay`, `network ${name}`, `volume ${volume}`]);
+    // What the jobs so far left in it: two programs installed, files in the volume, a process no job owns.
+    assert.equal(await sh('exec', name, 'sh', '-c', 'ls /usr/games/cowsay /usr/local/bin/cowsay && echo left > /work/left-by-a-job && pgrep -c -f "sleep 60[2]"'), '/usr/games/cowsay\n/usr/local/bin/cowsay\n1');
+    const leaving = Date.now();
+    await leaveA();
+    const left = Date.now();
+    assert.deepEqual(await under(name), [], 'nothing of the pair is on the engine between its jobs');
+    assert.deepEqual(containers.list().filter((c) => c.name === name), []);
+    const stay = await hold(PEER_A, 'held-fresh');
+    const made = Date.now();
+    const fresh = await launch('fresh', PEER_A, { script: `
+step programs "ls /usr/games/cowsay /usr/local/bin/cowsay"
+step work "ls -A /work /work/jobs"
+step strays "pgrep -c -f 'sleep 60[2]'"
+exit 0
+` });
+    assert.equal((await fresh.outcome).ok, true);
+    console.log(`INFO the container of a pair between two jobs on this engine: removed in ${left - leaving} ms, made anew in ${made - left} ms`);
+    assert.equal(fresh.container.name, name, 'the same name');
+    assert.match(fresh.out('programs'), /cowsay.*No such file.*\n.*cowsay.*No such file/);
+    assert.equal(fresh.out('work'), '/work:\njobs\n\n/work/jobs:\nfresh');
+    assert.equal(fresh.out('strays'), '0');
+    await stay();
+    assert.deepEqual(await under(name), []);
+  });
+
+  await check('what a job put first on the container\'s PATH, into git\'s system settings and templates and under /work runs neither for the host\'s start, questions and stop nor in the runner of the job beside it', async () => {
+    // Every planted program says who ran it: a job by its run id, the host by having none.
+    const plants = await launch('plants', PEER_C, { script: `
+trap '' TERM
+ran=/dn/runs/plants/ran.txt
+for t in sh setsid tr grep sleep rm; do
+  cat > /usr/local/bin/$t <<EOF
+#!/bin/dash
+echo "$t \\\${DN_RUN_ID:-host}" >> $ran
+exec /usr/bin/$t "\\$@"
+EOF
+  chmod +x /usr/local/bin/$t
+done
+mkdir -p /dn/runs/plants/hooks /usr/share/git-core/templates/hooks
+for at in /dn/runs/plants/hooks/post-checkout /usr/share/git-core/templates/hooks/post-checkout /dn/runs/plants/uploadpack; do
+  cat > $at <<EOF
+#!/bin/dash
+echo "$at \\\${DN_RUN_ID:-host}" >> $ran
+EOF
+  chmod +x $at
+done
+git config --file /etc/gitconfig core.hooksPath /dn/runs/plants/hooks
+git init --quiet --bare /work/cache.git
+git -C /work/cache.git config remote.origin.url /dn/runs/plants/elsewhere
+git -C /work/cache.git config remote.origin.uploadpack /dn/runs/plants/uploadpack
+echo planted > "$out/out-planted.txt"
+while [ ! -f "$out/go" ]; do /usr/bin/sleep 0.2; done
+exit 0
+` });
+    await until('the first job has planted', () => fs.existsSync(path.join(plants.dir, 'out-planted.txt')));
+    const beside = await launch('beside', PEER_C, { script: 'exit 0\n' });
+    assert.equal(beside.container.name, plants.container.name);
+    assert.equal((await beside.outcome).ok, true);
+    // The first job ignores TERM, so its stop waits out the grace and kills.
+    assert.equal((await stopJob(plants.run, containers)).state, 'stopped');
+    await plants.outcome;
+    const ran = [...new Set(fs.readFileSync(path.join(plants.dir, 'ran.txt'), 'utf8').trim().split('\n'))];
+    assert.deepEqual(ran, ['sh beside'], 'only the second job\'s own agent went through what was planted, by looking sh up on PATH');
   });
 
   if (process.env.DN_TEST_SKIP_CLAUDE) {
@@ -490,6 +578,7 @@ exit 0
   } else {
     await check('a real agent answers through the broker on this machine\'s credential, with only a placeholder inside the container', async () => {
       assert.equal(llm.state().state, 'ready', llm.state().detail);
+      const leave = await hold(PEER_A, 'held-agent');
       const job = await launch('agent', PEER_A, { env: llm.env(), prompt: 'Reply with exactly: pong' });
       // While it runs: what every process in the container holds in its environment.
       await until('the agent is up', () => fs.existsSync(path.join(job.dir, 'log.jsonl')), 120000);
@@ -513,12 +602,14 @@ exit 0
       const files = await sh('exec', job.container.name, 'sh', '-c', 'grep -rIl -e "sk-an[t]-" /root /work /dn /tmp /etc /home /run /var 2>/dev/null; true');
       assert.equal(files, '', 'no file in the container holds a credential');
       assert.doesNotMatch(fs.readFileSync(path.join(job.dir, 'log.jsonl'), 'utf8'), /sk-ant-/);
+      await leave();
     });
   }
 
-  await check('what a container holds of the disk is measured: its layer, its volume and its run records, a directory it gave to another user and every empty file included', async () => {
+  await check('what a container holds of the disk is measured: its layer, its volume and its run records, a directory it gave to another user and every empty file included; and its run records still, once it is gone', async () => {
     const name = tools.container.name;
     const MiB = 2 ** 20;
+    const leave = await hold(PEER_A, 'held-measured');
     const before = await containers.usage(name);
     await sh('exec', name, 'sh', '-c', [
       'dd if=/dev/urandom of=/root/layer.bin bs=1M count=10 2>/dev/null',
@@ -536,15 +627,36 @@ exit 0
     assert.equal(await sh('ps', '-a', '-q', ...mine, '--filter', 'label=dn.probe'), '', 'what measured it is gone');
     assert.equal(await containers.usage('dn-no-such-container'), null);
     assert.deepEqual(await containers.overQuota(), [], 'under the 20 GiB a container may hold, none is named');
+    await leave();
+    const kept = await containers.usage(name);
+    console.log(`INFO disk use under ${name} with the container gone: ${kept} bytes of run records`);
+    assert.ok(kept >= 2 * MiB + 4096 && kept < before + 2 * MiB + 4096 && kept < after - 25 * MiB, `${kept} of ${before} and ${after}`);
+    assert.equal(await sh('ps', '-a', '-q', ...mine, '--filter', 'label=dn.probe'), '');
   });
 
-  await check('an idle container is removed with its volume, and nothing of this run is left in docker', async () => {
+  await check('with its jobs over nothing of this run is left on the engine; a container no job of this daemon is in goes at a sweep once it has been seen for the idle time, and so does an image this daemon built that no job is started in', async () => {
+    const left = async () => [await sh('ps', '-a', '-q', ...mine), await sh('volume', 'ls', '-q', ...mine), await sh('network', 'ls', '-q', ...mine)];
+    assert.deepEqual(await left(), ['', '', '']);
+    assert.deepEqual(containers.list(), []);
+    // One an earlier daemon made, and an image of this state directory that is not the one jobs are started in.
+    const stray = await createContainers({ broker: () => broker.address() }).acquire({ pool, peer: PEER_C, runId: 'left-behind' });
+    const older = path.join(scratch, 'older');
+    fs.mkdirSync(older);
+    fs.writeFileSync(path.join(older, 'Dockerfile'), `FROM ${tag}\nLABEL dn.test=older\n`);
+    await sh('build', '-q', '--label', `dn.base=${BASE}`, '-t', 'dn-test-agent:older', older);
+    await sh('build', '-q', '--label', `dn.base=${BASE}`, '-t', 'dn-test-agent-derived:older', older);
+    const images = async () => (await sh('image', 'ls', ...mine, '--format', '{{.Repository}}:{{.Tag}}')).split('\n').filter(Boolean).sort();
+    // The image of this run carries the label when this run built it.
+    const others = async () => (await images()).filter((i) => i !== tag);
+    assert.deepEqual(await others(), ['dn-test-agent-derived:older', 'dn-test-agent:older']);
+    await containers.sweep();
+    assert.deepEqual(await under(stray.name), [stray.name, `${stray.name}-relay`, `network ${stray.name}`, `volume ${stray.name.replace('dn-', 'dn-work-')}`], 'it is given the idle time');
+    assert.deepEqual(await others(), ['dn-test-agent-derived:older'], 'the image under this daemon\'s name went, the one built on top of it under another did not');
+    assert.equal(await sh('image', 'inspect', '--format', '{{.Id}}', tag) !== '', true, 'and the image jobs are started in is there');
     clock.skew = 7 * 3600 * 1000;
     await containers.sweep();
-    assert.equal(await sh('ps', '-a', '-q', ...mine), '');
-    assert.equal(await sh('volume', 'ls', '-q', ...mine), '');
-    assert.equal(await sh('network', 'ls', '-q', ...mine), '');
-    assert.deepEqual(containers.list(), []);
+    assert.deepEqual(await left(), ['', '', '']);
+    await sh('image', 'rm', 'dn-test-agent-derived:older');
   });
 
   console.log(`\nall ${checks} checks passed`);
@@ -554,6 +666,7 @@ exit 0
   for (const id of (await docker(['ps', '-a', '-q', ...mine])).stdout.split('\n').filter(Boolean)) await docker(['rm', '-f', id]);
   for (const v of (await docker(['volume', 'ls', '-q', ...mine])).stdout.split('\n').filter(Boolean)) await docker(['volume', 'rm', '-f', v]);
   for (const n of (await docker(['network', 'ls', '-q', ...mine])).stdout.split('\n').filter(Boolean)) await docker(['network', 'rm', n]);
+  for (const i of (await docker(['image', 'ls', ...mine, '--format', '{{.Repository}}:{{.Tag}}'])).stdout.split('\n').filter((i) => i && i !== tag)) await docker(['image', 'rm', i]);
   if (tag && !process.env.DN_TEST_KEEP_IMAGE) await docker(['image', 'rm', tag]);
   fs.rmSync(scratch, { recursive: true, force: true });
 }

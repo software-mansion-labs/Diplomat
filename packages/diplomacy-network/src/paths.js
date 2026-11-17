@@ -7,7 +7,13 @@ import os from 'node:os';
 import path from 'node:path';
 
 const home = (p) => p.replace(/^~(?=$|\/)/, os.homedir());
-const num = (name, fallback) => Number(process.env[name]) || fallback;
+// A tunable is what its variable says when that is a number of zero or more, and its
+// default otherwise: unset, empty, or no such number.
+const num = (name, fallback) => {
+  const said = process.env[name] ?? '';
+  const n = said.trim() === '' ? NaN : Number(said);
+  return n >= 0 && Number.isFinite(n) ? n : fallback;
+};
 
 export const BASE_DIR = process.env.DN_BASE_DIR
   ? home(process.env.DN_BASE_DIR)
