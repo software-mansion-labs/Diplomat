@@ -171,8 +171,8 @@ await check('a lookup the forge does not answer is never read as permission: ass
   await refused(hubRules('review', 'pr-578'), ghql(GH.addThread), hubCtx(), /the forge did not say what PRR_mine is/);
   off();
   // A forge that cannot be reached at all is a refusal too, with its reason.
-  const dead = createForge().context({ forge: 'github', host: 'github.example.com', repo: 'o/r', state: {} });
-  await refused(everyPull, open, dead, /is not a host of github/);
+  const dead = createForge().context({ forge: 'github', host: 'corp.ghe.com', repo: 'o/r', state: {} });
+  await refused(everyPull, open, dead, /is not a GitHub host this can ask/);
 });
 
 await check('a branch is the task\'s own once the forge accepted its creation, and not before', async () => {

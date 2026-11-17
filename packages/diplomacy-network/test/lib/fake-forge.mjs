@@ -18,7 +18,11 @@ export const GITHUB_TOKEN = 'ghs_fakeforgetoken0123456789';
 export const GITLAB_TOKEN = 'glpat-fakeforgetoken0123';
 /// The host the GitLab side answers as.
 export const GITLAB_HOST = 'gitlab.example.com';
-const HOSTS = ['api.github.com', 'github.com', GITLAB_HOST];
+/// A GitHub Enterprise Server: the GitHub side again, its REST under /api/v3, its GraphQL
+/// at /api/graphql and git on the one host, behind a credential of its own.
+export const GHES_HOST = 'ghes.example.com';
+export const GHES_TOKEN = 'ghs_fakeenterprisetoken0123';
+const HOSTS = ['api.github.com', 'github.com', GITLAB_HOST, GHES_HOST];
 
 const GIT_ENV = {
   PATH: process.env.PATH,
@@ -59,7 +63,7 @@ export function fakeTools(dir) {
     return file;
   };
   return {
-    DN_GH: script('gh', `[ "$1 $2 $3" = "auth token --hostname" ] && [ "$4" = "github.com" ] && echo "${GITHUB_TOKEN}" && exit 0\nexit 1`),
+    DN_GH: script('gh', `[ "$1 $2 $3" = "auth token --hostname" ] || exit 1\n[ "$4" = "github.com" ] && echo "${GITHUB_TOKEN}" && exit 0\n[ "$4" = "${GHES_HOST}" ] && echo "${GHES_TOKEN}" && exit 0\nexit 1`),
     DN_GLAB: script('glab', `[ "$1 $2 $3 $4" = "config get token --host" ] && [ "$5" = "${GITLAB_HOST}" ] && echo "${GITLAB_TOKEN}" && exit 0\nexit 1`),
   };
 }
@@ -355,7 +359,15 @@ export async function startFakeForge() {
   const expected = (host, url) => {
     if (host === 'api.github.com') return [...tokens].map((t) => `Bearer ${t}`);
     if (host === 'github.com') return [...tokens].map((t) => `Basic ${Buffer.from(`x-access-token:${t}`).toString('base64')}`);
+    if (host === GHES_HOST) return [url.startsWith('/api/') ? `Bearer ${GHES_TOKEN}` : `Basic ${Buffer.from(`x-access-token:${GHES_TOKEN}`).toString('base64')}`];
     return [...gitlabTokens].map((t) => (url.startsWith('/api/') ? `Bearer ${t}` : `Basic ${Buffer.from(`oauth2:${t}`).toString('base64')}`));
+  };
+
+  // A GitHub Enterprise Server's API. It says which version it is, among other things.
+  const enterprise = (method, url, body) => {
+    if (url === '/api/graphql') return graphql(body);
+    if (url === '/api/v3/meta') return { status: 200, json: { verifiable_password_authentication: false, installed_version: '3.15.2', domains: { actions: ['actions.ghes.example.com'] } } };
+    return url.startsWith('/api/v3/') ? githubRest(method, url.slice('/api/v3'.length)) : { status: 404, json: { message: 'Not Found' } };
   };
 
   const server = http.createServer((req, res) => {
@@ -374,9 +386,10 @@ export async function startFakeForge() {
       const custom = routes.find((r) => r.host === host && r.method === req.method && r.pattern.test(url));
       if (custom) { await custom.fn(req, res, body, url); return; }
       let answer;
-      if (host === 'github.com' || (host === GITLAB_HOST && !url.startsWith('/api/'))) { smartHttp(req, res, url, body); return; }
+      if (host === 'github.com' || (host !== 'api.github.com' && !url.startsWith('/api/'))) { smartHttp(req, res, url, body); return; }
       try {
-        if (url === '/graphql' || url === '/api/graphql') answer = graphql(body);
+        if (host === GHES_HOST) answer = enterprise(req.method, url, body);
+        else if (url === '/graphql' || url === '/api/graphql') answer = graphql(body);
         else answer = host === 'api.github.com' ? githubRest(req.method, url) : gitlabRest(req.method, url);
       } catch (err) {
         answer = { status: 500, json: { message: String(err.message) } };

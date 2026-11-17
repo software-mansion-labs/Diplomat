@@ -20,6 +20,16 @@ const github = (kind, options = {}, item = ITEM[kind]) => rulesFor({ forge: 'git
 const GITLAB_POOL = { id: 'gitlab.example.com/group/sub/proj', projectId: 99 };
 const gitlab = (kind, options = {}, item = ITEM[kind].replace('578', '5').replace('579', '5')) => rulesFor({ forge: 'gitlab', kind, options, pool: GITLAB_POOL, item, identity: 'me' });
 
+// A GitHub Enterprise Server, and a github.com request as gh 2.101.0 sends it to one: REST
+// under /api/v3, GraphQL at /api/graphql, git on the same host.
+const GHES = 'ghes.example.com';
+const ghes = (kind, options = {}, item = ITEM[kind]) => rulesFor({ forge: 'github', kind, options, pool: `${GHES}/o/r`, item, identity: 'Me' });
+const enterprise = (request) => {
+  if (request.host === 'github.com') return { ...request, host: GHES };
+  if (request.host !== 'api.github.com') return request;
+  return { ...request, host: GHES, path: request.path === '/graphql' ? '/api/graphql' : `/api/v3${request.path}` };
+};
+
 const label = (r) => `${r.method} ${r.host}${r.path.slice(0, 120)}`;
 async function allowed(rules, request, ctx = world()) {
   const verdict = await authorize(rules, request, ctx);
@@ -131,8 +141,9 @@ await check('a forge, kind, item or identity without an entry gets no rules at a
   assert.ok(rulesFor(base));
   for (const bad of [{ forge: 'gitea' }, { forge: undefined }, { kind: 'merge' }, { kind: 'Review' }, { kind: '__proto__' }, { kind: undefined }, { item: 'issue-421' }, { item: 'pr-0' }, { item: 'pr-5x' },
     { item: 'pr--1' }, { item: 'pr-1/../2' }, { item: 'job-' }, { item: 'job-a b' }, { item: undefined }, { item: 578 }, { identity: '' }, { identity: 'a/b' }, { identity: undefined }, { identity: '*' },
-    { pool: 'github.com/o' }, { pool: 'github.com/o/r/x' }, { pool: 'github.com/O/r' }, { pool: 'gitlab.com/o/r' }, { pool: 'github.com/o/..' }, { pool: 'github.com/*/r' }, { pool: 'github.com/o/r?x' },
-    { pool: 'github.example.com/o/r' }, { pool: undefined }, { options: null }, { kind: 'issues', item: 'pr-578' }, { kind: 'conflicts', item: 'issue-421' }, { kind: 'review-own', item: 'issue-421' },
+    { pool: 'github.com/o' }, { pool: 'github.com/o/r/x' }, { pool: 'github.com/O/r' }, { pool: 'github.com/o/..' }, { pool: 'github.com/*/r' }, { pool: 'github.com/o/r?x' },
+    { pool: 'ghes.example.com/o' }, { pool: 'ghes.example.com/o/r/x' }, { pool: 'corp.ghe.com/o/r' }, { pool: 'ghe.com/o/r' }, { pool: 'corp.ghe.com:443/o/r' }, { pool: 'api.github.com/o/r' },
+    { pool: 'www.github.com/o/r' }, { pool: 'github.com:443/o/r' }, { pool: 'github.localhost/o/r' }, { pool: 'api.github.localhost/o/r' }, { pool: undefined }, { options: null }, { kind: 'issues', item: 'pr-578' }, { kind: 'conflicts', item: 'issue-421' }, { kind: 'review-own', item: 'issue-421' },
     { item: 'job-x', options: { author: 'a b' } }]) {
     assert.equal(rulesFor({ ...base, ...bad }), null, JSON.stringify(bad));
   }
@@ -815,6 +826,102 @@ await check('the routes a task is refused or given with pinned parameters cannot
     '/repository/branches/Compare', '/repository/tags/v1.0.json', '/repository/commits/v1.0.json', '/merge_requests/5.json', '/repository/tree?path=src%2Flib&ref=main']) {
     for (const project of [P, '/api/v4/projects/99']) assert.equal((await allowed(gitlab('investigate'), glab('GET', `${project}${tail}`), glWorld())).request.path, `${project}${tail}`);
   }
+});
+
+await check('a GitHub Enterprise Server has github.com\'s rules on its one host: REST under /api/v3, GraphQL at /api/graphql, git beside them, and its version for gh', async () => {
+  // A github.com rule as it stands there: its API paths two segments further in.
+  const deeper = (rule) => {
+    if (rule.host === 'github.com') return { ...rule, host: GHES };
+    const moved = { ...rule, host: GHES, path: rule.path === '/graphql' ? '/api/graphql' : `/api/v3${rule.path}` };
+    if (rule.fold) moved.fold = rule.fold.map((i) => i + 2);
+    for (const lookup of ['pull', 'comment', 'run']) {
+      if (!rule[lookup]) continue;
+      moved[lookup] = { ...rule[lookup], segment: rule[lookup].segment + 2 };
+      if (rule[lookup].pullSegment !== undefined) moved[lookup].pullSegment = rule[lookup].pullSegment + 2;
+    }
+    return moved;
+  };
+  // gh asks the server which version it is before `pr view`, `issue view`, `pr create` and a search.
+  const META = { host: GHES, method: 'GET', path: '/api/v3/meta', pick: ['installed_version'] };
+  const seen = new Set();
+  for (const kind of KINDS) {
+    for (const options of [{}, { verdict: true, markReady: true }, { noPRs: true, readOnly: true }, { assign: false, comment: false }, { author: 'them' }]) {
+      for (const item of ['pr-578', 'issue-421', 'job-all']) {
+        const here = github(kind, options, item);
+        const there = ghes(kind, options, item);
+        if (here === null) {
+          assert.equal(there, null, `${kind} ${item}`);
+          continue;
+        }
+        seen.add(kind);
+        assert.deepEqual(there.filter((rule) => rule.path !== META.path), here.map(deeper), `${kind} ${item} ${JSON.stringify(options)}`);
+        assert.deepEqual(there.filter((rule) => rule.path === META.path), [META]);
+        assert.ok(here.every((rule) => !rule.path.endsWith('/meta')), 'github.com is not asked for a version');
+        assert.ok(there.length <= 128 && there.every((rule) => rule.host === GHES));
+        canon(there);
+      }
+    }
+  }
+  assert.deepEqual([...seen], KINDS);
+  // A host is a server of its own unless gh would look for its API on another name.
+  for (const host of ['ghes.example.com:8443', 'notgithub.com', 'myghe.com', 'git.corp.example']) {
+    const rules = rulesFor({ forge: 'github', kind: 'investigate', pool: `${host}/o/r`, item: 'job-x', identity: 'me' });
+    assert.ok(rules.length > 0 && rules.every((rule) => rule.host === host), host);
+  }
+
+  // Request by request, the verdicts of github.com.
+  const pushed = () => world({ branches: ['refs/heads/fix-421'] });
+  for (const kind of KINDS) {
+    const rules = ghes(kind);
+    for (const request of READS) await allowed(rules, enterprise(request));
+    for (const request of [...NEVER, ...UNREAD]) await refused(rules, enterprise(request), pushed());
+    // github.com's own hosts are not this pool's, and its paths are not github.com's.
+    for (const request of [...READS, gitPush('github.com', '/o/r.git')]) await refused(rules, request, pushed(), /no rule of this task/);
+    for (const request of [...READS, gitPush('github.com', '/o/r.git')]) await refused(github(kind), enterprise(request), pushed(), /no rule of this task/);
+  }
+  assert.deepEqual((await allowed(ghes('investigate'), enterprise(gh('GET', '/meta')))).request.pick, ['installed_version']);
+  assert.deepEqual((await allowed(ghes('investigate'), enterprise(gh('GET', '/user')))).request.pick, ['login', 'id', 'node_id', 'type', 'name', 'html_url']);
+  await refused(github('investigate'), gh('GET', '/meta'), world(), /no rule of this task/);
+  // Nothing else of the server: its other API roots, its pages, another forge's routes on it.
+  const at = (method, path, body) => ({ ...gh(method, path, body), host: GHES });
+  for (const request of [at('GET', '/api/v3'), at('GET', '/api/v3/meta/x'), at('POST', '/api/v3/meta', {}), at('POST', '/api/v3/graphql', { query: '{ viewer { login } }' }),
+    at('POST', '/graphql', { query: '{ viewer { login } }' }), at('GET', '/api/graphql'), at('GET', '/api/v3/enterprise/settings/license'), at('GET', '/api/v3/admin/users'),
+    at('GET', '/api/v3/user/repos'), at('GET', '/api/v3/repos/o%2Fr'), at('GET', '/api/v3/repos/o/r/contents/a%2Fb'), at('GET', '/api/v4/projects/o%2Fr'), at('GET', '/api/v4/user'),
+    at('POST', '/api/uploads/repos/o/r/releases/1/assets?name=x', {}), at('GET', '/api/v3/repos/o/other'), at('GET', '/login'), at('GET', '/o/r/settings'), at('GET', '/setup/api/settings'),
+    at('GET', '/repos/o/r'), at('GET', '/user'), at('GET', '/api/repos/o/r'), at('GET', '/api/v3/api/v3/repos/o/r')]) {
+    for (const kind of KINDS) await refused(ghes(kind, { verdict: true, markReady: true }), request, pushed());
+  }
+
+  // What a rule asks the forge is asked about the right part of the longer path.
+  const all = ghes('review', {}, 'job-all');
+  for (const request of [...pullInFull(578), ...issueInFull(578)]) await allowed(all, enterprise(request));
+  await refused(all, enterprise(gh('GET', '/repos/o/r/pulls/579/files')), world(), /#579 was opened by me/);
+  await refused(all, enterprise(gh('GET', '/repos/o/r/issues/421/events')), world(), /#421 is not a pull request the forge would show/);
+  await allowed(all, enterprise(gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc123' })));
+  await refused(all, enterprise(gh('POST', '/repos/o/r/pulls/579/reviews', { commit_id: 'abc123' })), world(), /#579 was opened by me/);
+  const review = ghes('review');
+  for (const request of [gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { body: 'x', event: 'COMMENT' }), gh('DELETE', '/repos/o/r/pulls/578/reviews/9'), gh('DELETE', '/repos/o/r/pulls/comments/11'),
+    ghql(GH.addThread), ghql(GH.addReply), gh('GET', '/repos/o/r/actions/runs/7/logs'), gh('GET', '/repos/o/r/actions/jobs/77/logs')]) await allowed(review, enterprise(request));
+  await refused(review, enterprise(gh('DELETE', '/repos/o/r/pulls/comments/14')), world(), /comment 14 is not part of a pending review/);
+  await refused(review, enterprise(gh('DELETE', '/repos/o/r/pulls/comments/16')), world(), /comment 16 is not in the pool's repository/);
+  await refused(review, enterprise(gh('GET', '/repos/o/r/actions/runs/8/logs')), world(), /ran for a branch this task does not work on/);
+  await refused(review, enterprise(gh('POST', '/repos/o/r/pulls/578/reviews', { event: 'APPROVE' })));
+  await refused(review, enterprise(gitPush('github.com', '/o/r.git')), world(), /no rule of this task/);
+  const own = ghes('review-own', {}, 'job-mine');
+  await allowed(own, enterprise(gh('POST', '/repos/o/r/pulls/579/comments/13/replies', { body: 'Fixed in abc123' })));
+  await refused(own, enterprise(gh('POST', '/repos/o/r/pulls/578/comments/12/replies', { body: 'x' })));
+  await refused(own, enterprise(gh('POST', '/repos/o/r/pulls/579/comments/12/replies', { body: 'x' })));
+  await allowed(ghes('review-own'), enterprise(gitPush('github.com', '/o/r.git')));
+  await allowed(ghes('review-own'), enterprise(gitPush('github.com', '/O/R')));
+  await allowed(ghes('conflicts', {}, 'pr-581'), enterprise(gitPush('github.com', '/ME/r')));
+  await refused(ghes('conflicts', {}, 'pr-581'), enterprise(gitPush('github.com', '/me/mine.git')), world(), /^me\/mine is not this account's own fork of the pool's repository$/);
+  await refused(ghes('conflicts', {}, 'pr-581'), enterprise(gitPush('github.com', '/api/v3.git')), world(), /no rule of this task/);
+  const issues = ghes('issues');
+  await allowed(issues, enterprise(gh('POST', '/repos/o/r/issues/421/comments', { body: 'x' })));
+  await allowed(issues, enterprise(gh('POST', '/repos/O/R/issues/421/assignees', { assignees: ['Me'] })));
+  await refused(issues, enterprise(gh('POST', '/repos/o/r/issues/422/comments', { body: 'x' })));
+  await allowed(issues, enterprise(gh('GET', '/repos/o/r/actions/runs/13')), pushed());
+  await refused(issues, enterprise(gh('GET', '/repos/o/r/actions/runs/13')), world(), /ran for a branch this task does not work on/);
 });
 
 await check('a mutation the document check does not know never reaches a rule list', async () => {

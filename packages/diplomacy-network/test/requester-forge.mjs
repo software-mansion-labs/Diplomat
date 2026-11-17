@@ -12,7 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GH, gh, ghql, glab } from './lib/captured.mjs';
-import { GITHUB_TOKEN, GITLAB_HOST, GITLAB_TOKEN, git, startFakeForge } from './lib/fake-forge.mjs';
+import { GHES_HOST, GHES_TOKEN, GITHUB_TOKEN, GITLAB_HOST, GITLAB_TOKEN, git, startFakeForge } from './lib/fake-forge.mjs';
 
 async function check(name, fn) {
   await fn();
@@ -244,7 +244,8 @@ await check('a refused request never reaches the forge, and perform sends nothin
   assert.deepEqual(seen(before), [], 'the forge heard nothing');
   // An allowed request is still bound to the forge its credential is for.
   await failing(client.perform(ok.request, GITLAB), /api\.github\.com is not a host of gitlab/);
-  await failing(client.perform(ok.request, { forge: 'github', host: 'github.example.com' }), /is not a host of github/);
+  await failing(client.perform(ok.request, { forge: 'github', host: GHES_HOST }), /api\.github\.com is not a host of github ghes\.example\.com/);
+  await failing(client.perform(ok.request, { forge: 'github', host: 'corp.ghe.com' }), /is not a host of github corp\.ghe\.com/);
   assert.deepEqual(seen(before), []);
 });
 
@@ -507,7 +508,7 @@ await check('the quarantine\'s fetch asks one repository for commits by id or fo
     { repo: 'o/r x', wants: [A] }, { repo: 'o/r?x=', wants: [A] }, { repo: 'o/r#', wants: [A] }, { repo: '', into: 'refs/dn/0' }, { repo: 'o/r\n', into: 'refs/dn/0' }]) {
     assert.equal(await client.fetchInto(GITHUB, { repo: 'o/r', env, ...what }), false, JSON.stringify(what));
   }
-  assert.equal(await client.fetchInto({ forge: 'github', host: 'github.example.com' }, { repo: 'o/r', env, wants: [A] }), false);
+  assert.equal(await client.fetchInto({ forge: 'github', host: 'corp.ghe.com' }, { repo: 'o/r', env, wants: [A] }), false);
   assert.deepEqual(seen(before), [], 'the forge heard nothing');
   assert.equal(logLines.length, lines, 'git was not started');
   assert.equal(await client.fetchInto(GITHUB, { repo: 'o/r', env, wants: [A] }), true);
@@ -531,7 +532,7 @@ await check('the quarantine\'s fetch asks one repository for commits by id or fo
 
 // A git client's side of the tunnel: every smart-HTTP request becomes `authorize`, then
 // `perform`. A refusal is answered 403 with the reason.
-function relay(ruleList, ctx, host = 'github.com') {
+function relay(ruleList, ctx, host = 'github.com', target = GITHUB) {
   const refusals = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
@@ -544,7 +545,7 @@ function relay(ruleList, ctx, host = 'github.com') {
         res.writeHead(403, { 'content-type': 'text/plain' }).end(verdict.reason);
         return;
       }
-      const answer = await client.perform(verdict.request, GITHUB);
+      const answer = await client.perform(verdict.request, target);
       res.writeHead(answer.status, answer.headers).end(Buffer.from(answer.body, 'base64'));
     });
   });
@@ -726,6 +727,63 @@ await check('a real git push to the account\'s own fork: its pull request\'s hea
   assert.deepEqual(state, { branches: ['me/r:refs/heads/fix-9'], reserved: [], sent: {}, pulls: ['me/r:fix-9'], asked: [] });
   assert.match((await authorize(ruleList, open('me:fix-9'), ctx)).reason, /this task has opened its pull request from me\/r:fix-9/);
   await issue.close();
+});
+
+await check('a GitHub Enterprise Server is asked on its one host, with the credential gh holds for it: REST under /api/v3, GraphQL at /api/graphql, git beside them', async () => {
+  const GHES = { forge: 'github', host: GHES_HOST };
+  const ghesRules = (kind, item) => rulesFor({ forge: 'github', kind, pool: `${GHES_HOST}/o/r`, item, identity: 'me' });
+  const ctx = client.context({ ...GHES, repo: 'o/r', checkout, state: {} });
+  const there = (request) => ({ ...request, host: GHES_HOST, path: request.path === '/graphql' ? '/api/graphql' : `/api/v3${request.path}` });
+  const heard = (from) => seen(from).map((r) => `${r.host} ${r.method} ${r.path.split('?')[0]} ${r.headers.authorization}`);
+  const api = (method, path) => `${GHES_HOST} ${method} ${path} Bearer ${GHES_TOKEN}`;
+
+  // What the deep checks ask is answered as github.com answers it, from the server's own API.
+  let before = forge.log.length;
+  assert.deepEqual(await client.self(GHES), await client.self(GITHUB));
+  assert.deepEqual(await client.resolveNode(GHES, 'PRRT_579'), await client.resolveNode(GITHUB, 'PRRT_579'));
+  assert.deepEqual(await client.pull(GHES, 'o/r', 579), await client.pull(GITHUB, 'o/r', 579));
+  assert.deepEqual(await client.repository(GHES, 'o/r'), await client.repository(GITHUB, 'o/r'));
+  assert.deepEqual(await client.ciRun(GHES, 'o/r', 'run', 7), await client.ciRun(GITHUB, 'o/r', 'run', 7));
+  assert.deepEqual(await ctx.pull(578), await ctxFor().pull(578));
+  assert.deepEqual(heard(before).filter((line) => line.startsWith(GHES_HOST)), [
+    api('POST', '/api/graphql'), api('POST', '/api/graphql'), api('GET', '/api/v3/repos/o/r/pulls/579'), api('GET', '/api/v3/repos/o/r'),
+    api('GET', '/api/v3/repos/o/r/actions/runs/7'), api('GET', '/api/v3/repos/o/r/pulls/578'),
+  ]);
+  assert.equal(heard(before).length, 12, 'and github.com was asked the same six on its own hosts');
+
+  // A task's requests go to that API, the server's answer about itself cut to its version.
+  before = forge.log.length;
+  const ruleList = ghesRules('investigate', 'job-x');
+  assert.equal(JSON.parse((await perform(ruleList, there(gh('GET', '/repos/o/r/pulls/578')), ctx, GHES)).bytes).number, 578);
+  assert.deepEqual(JSON.parse((await perform(ruleList, there(gh('GET', '/meta')), ctx, GHES)).bytes), { installed_version: '3.15.2' });
+  assert.equal(JSON.parse((await perform(ruleList, there(ghql(GH.prViewAuthor)), ctx, GHES)).bytes).data.repository.pullRequest.number, 578);
+  assert.deepEqual(heard(before), [api('GET', '/api/v3/repos/o/r/pulls/578'), api('GET', '/api/v3/meta'), api('POST', '/api/graphql')]);
+  // Its request is not one for github.com's credential.
+  const verdict = await authorize(ruleList, there(gh('GET', '/repos/o/r/pulls/578')), ctx);
+  await failing(client.perform(verdict.request, GITHUB), /ghes\.example\.com is not a host of github github\.com/);
+  assert.deepEqual(heard(before).length, 3);
+
+  // A push: checked against what the server's own git holds, and sent there with the basic credential.
+  before = forge.log.length;
+  const tunnel = await relay(ghesRules('review-own', 'pr-579'), ctx, GHES_HOST, GHES);
+  git(work, 'checkout', '--quiet', '--detach', remote('refs/heads/feature'));
+  const tip = commit('on the enterprise server', { 'src/a.js': 'enterprise\n' });
+  const pushed = await gitPush(`${tunnel.url}/o/r.git`, `${tip}:refs/heads/feature`);
+  assert.equal(pushed.ok, true, pushed.stderr + tunnel.refusals.join('; '));
+  assert.equal(remote('refs/heads/feature'), tip);
+  const refusedPush = await gitPush(`${tunnel.url}/o/r.git`, `${tip}:refs/heads/main`);
+  assert.equal(refusedPush.ok, false);
+  await tunnel.close();
+  const basic = `Basic ${Buffer.from(`x-access-token:${GHES_TOKEN}`).toString('base64')}`;
+  const overGit = seen(before).filter((r) => !r.path.startsWith('/api/'));
+  assert.ok(overGit.some((r) => r.method === 'POST' && r.path === '/o/r.git/git-receive-pack') && overGit.some((r) => r.path.includes('git-upload-pack')), 'the push and the quarantine\'s fetch');
+  assert.ok(overGit.every((r) => r.headers.authorization === basic));
+  assert.ok(seen(before).every((r) => r.host === GHES_HOST && (r.path.startsWith('/o/r.git/') || r.path.startsWith('/api/v3/repos/o/r') || r.path === '/api/graphql')), heard(before).join('\n'));
+
+  // A GitHub whose API stands on another name again is not asked anything.
+  before = forge.log.length;
+  await failing(client.self({ forge: 'github', host: 'corp.ghe.com' }), /^forge: corp\.ghe\.com is not a GitHub host this can ask$/);
+  assert.deepEqual(seen(before), []);
 });
 
 if (process.env.DN_TEST_GITHUB === '1') {
