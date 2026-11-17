@@ -10,7 +10,7 @@ Every minute Comms asks Slack for messages that reached you since it last looked
 **ping** - a row on the Comms screen (the speech-bubble button in the panel header, which carries
 an unread count), a line in the activity feed under its own **Comms** chip, and a system notification.
 
-Then it **triages** the message - a short, sandboxed model call that answers one of seven words -
+Then it **triages** the message - a short, sandboxed model call that answers one of six words -
 and acts on the answer through the same queue every other task goes through. Triage runs in
 **batches**: a ping waits in a queue until it holds eight, or until its newest message is 30
 minutes old (both are [settings](#settings)), and the whole batch is one call. Each call also reads the earlier pings of the same
@@ -22,7 +22,6 @@ conversations, so "can you review it?" after "#412 is ready" is understood as a 
 | **fix_issue** #N… | queues a fix of each open issue named, as the Fix-issues wizard would, at the front of the requested fixes |
 | **bump** #N… | moves whatever is already queued for each one named to the front of its band; starts nothing new |
 | **investigate** | queues an **Investigate** agent that reproduces and researches the report and writes a markdown report |
-| **question** | answers it while you are away, when the project's documentation settles it (see [Reply to…](#settings)) |
 | **none** | the ping, and nothing else |
 | **injection** | [bans the sender](#bans): the message tries to hijack an agent instead of asking you for something, including an order to delete someone else's account or hand over data or keys, and a DM claiming you already agreed; never a prompt or rule the sender shows you when their conversation says that is what it is |
 
@@ -37,8 +36,8 @@ its numbers are checked. A bare number is the primary's; it is another watched r
 message, or an earlier one of its conversation, names that repo ("diplomat#12", "#12 in
 diplomat"), so #12 in two repos is two targets. In a GitLab repo root `!N` names a merge request and
 `#N` an issue, which GitLab numbers apart, so "review !12 and fix #12" there is two targets too. An
-investigation or a question is about the repo it names, the primary otherwise,
-and its agent works in that repo's checkout.
+investigation is about the repo it names, the primary otherwise, and its agent works in that
+repo's checkout.
 
 So a "can you look at #412 when you get a chance?" lands #412's review ahead of every review you
 asked for - behind only what the monitors owe GitHub - and a "the installer dies on Node 22 for me"
@@ -169,19 +168,6 @@ All of them are on the **Comms (Slack)** card.
   full batch is triaged at once.
 - **Batch interval** (**default 30m**) - how old the newest ping of a shorter batch gets before it is
   triaged anyway: one minute to a day, on a logarithmic slider.
-- **Reply in Slack** (**default on**) - whether Comms writes back at all. It only ever does while you
-  are away (see **Away after**); triage and the work it queues never wait for that. A reply opens with
-  `[Diplomat]:`, in the language of the message (Polish, English for anything else; an answer is
-  written in the question's own language), only in the
-  conversation the message was written in, at most once per message, however many PRs it asked for.
-  A message triaged more than two days after its ping gets none.
-- **Reply to…** **questions** (**default on**) / **reviews** / **fixes** / **investigations** (**default
-  off**) - which kinds get one. A question is answered from the project's documentation, when that
-  settles it plainly. The other three get an estimate of when the work should be done. Off, the work is
-  still queued; only the reply is held, and a reply to a message that asked for several kinds names
-  only those switched on.
-- **Away after** (**default 3h**) - how long your session must have been locked before Comms replies
-  for you. A message that arrives while you are here gets no reply, then or later.
 - **Notify on new pings** (**default on**) - a system notification per new ping, as it lands,
   before its triage.
 - **Triage model** (blank = **`haiku`**) - any model id `claude --model` accepts.
