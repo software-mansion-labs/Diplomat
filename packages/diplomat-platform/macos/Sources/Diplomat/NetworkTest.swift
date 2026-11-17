@@ -139,42 +139,102 @@ enum NetworkTest {
 
         // MARK: the launch sweep
 
-        // 1. Only a process started as `-m szpontnet`, each a whole argv element, is
-        //    ended: not a path or a module that contains the word, not one whose single
-        //    argument spells it, not another user's (no argv to read), not this process.
+        // 1. The node the mesh directory's state.json names is ended while its argv is
+        //    `-m szpontnet`, each a whole element, and the directory goes once it has
+        //    quit. No other process is signalled, whatever its argv.
         let own = Int(getpid())
         let argvs: [Int: [String]] = [
+            1: ["python3", "-m", "szpontnet"],
             4001: ["/usr/bin/python3", "-m", "szpontnet", "--daemon"],
             4002: ["/opt/szpontnet/bin/python3", "-m", "http.server"],
             4003: ["python3", "-m", "szpontnet.bench"],
             4004: ["python3", "-c", "run('-m szpontnet')"],
+            4005: ["python3", "-m", "szpontnet"],
             4006: ["/bin/zsh", "-c", "python3 -m szpontnet"],
             own: ["python3", "-m", "szpontnet"],
         ]
-        AgentProbes.pinDump(.present("""
-             4001 ??       01:00 /usr/bin/python3 -m szpontnet --daemon
-             4002 ??       01:00 /opt/szpontnet/bin/python3 -m http.server
-             4003 ??       01:00 python3 -m szpontnet.bench
-             4004 ??       01:00 python3 -c run('-m szpontnet')
-             4005 ??       01:00 python3 -m szpontnet
-             4006 ??       01:00 /bin/zsh -c python3 -m szpontnet
-             4007 ??       01:00 /Applications/Diplomat.app/Contents/MacOS/Diplomat
-             \(own) ??       01:00 python3 -m szpontnet
-            """))
         let ended = Calls<Int>()
         let (realArguments, realTerminate) = (DiplomacyNetwork.argumentsOf, DiplomacyNetwork.terminate)
-        DiplomacyNetwork.argumentsOf = { argvs[$0] }
+        let realExitWait = DiplomacyNetwork.legacyExitWait
+        check("a headless run has no mesh directory of its own",
+              DiplomacyNetwork.legacyStateDir == nil)
+        let meshDir = scratch.appendingPathComponent("mesh")
+        func meshNames(_ state: String?) {
+            try? FileManager.default.createDirectory(at: meshDir, withIntermediateDirectories: true)
+            try? Data("secret".utf8).write(to: meshDir.appendingPathComponent("device.key"))
+            let file = meshDir.appendingPathComponent("state.json")
+            if let state {
+                try? Data(state.utf8).write(to: file)
+            } else {
+                try? FileManager.default.removeItem(at: file)
+            }
+        }
+        func meshThere() -> Bool { FileManager.default.fileExists(atPath: meshDir.path) }
+        let quits: @Sendable (Int) -> [String]? = { ended.all.contains($0) ? nil : argvs[$0] }
+        DiplomacyNetwork.argumentsOf = quits
         DiplomacyNetwork.terminate = { ended.add($0); return true }
+        DiplomacyNetwork.legacyExitWait = 0.3
         let store = Store()
-        await store.endLegacyMeshNodes()
-        check("the launch sweep ends the process started as -m szpontnet and no other",
-              ended.all == [4001])
-        check("…and says so once", feedDetails(NetworkAudit.stop).count == 1
-                && feedDetails(NetworkAudit.stop).first?.contains("4001") == true)
-        AgentProbes.pinDump(.present(""))
-        await store.endLegacyMeshNodes()
-        check("a launch that finds none says nothing",
-              ended.all == [4001] && feedDetails(NetworkAudit.stop).count == 1)
+        meshNames("{\"pid\": 4001}")
+        await store.retireLegacyMeshNode()
+        check("with no directory named, a launch signals nothing, removes nothing and is silent",
+              ended.all.isEmpty && meshThere() && feedDetails(NetworkAudit.stop).isEmpty)
+        try? FileManager.default.removeItem(at: meshDir)
+        DiplomacyNetwork.legacyStateDir = meshDir
+        await store.retireLegacyMeshNode()
+        check("…and so does one whose directory is not there",
+              ended.all.isEmpty && feedDetails(NetworkAudit.stop).isEmpty)
+        let noNode: [String?] = [
+            "{\"pid\": 4002}", "{\"pid\": 4003}", "{\"pid\": 4004}", "{\"pid\": 4006}",
+            "{\"pid\": \(own)}", "{\"pid\": 4999}", "{\"pid\": \"4001\"}", "{\"pid\": 4001.0}",
+            "{\"pid\": true}", "[4001]", "{ not json", nil,
+        ]
+        for state in noNode {
+            meshNames(state)
+            let before = feedDetails(NetworkAudit.stop).count
+            await store.retireLegacyMeshNode()
+            check("a directory that names no running node (\(state ?? "no state.json")) is "
+                    + "removed, and nothing is signalled",
+                  ended.all.isEmpty && !meshThere()
+                    && Array(feedDetails(NetworkAudit.stop).dropFirst(before))
+                        == ["Removed \(meshDir.path), the retired mesh's state and keys"])
+        }
+        meshNames("{\"pid\": 4001}")
+        var stopsSaid = feedDetails(NetworkAudit.stop).count
+        await store.retireLegacyMeshNode()
+        check("the node the directory names is ended, no other, and the directory goes "
+                + "with its keys",
+              ended.all == [4001] && !meshThere()
+                && Array(feedDetails(NetworkAudit.stop).dropFirst(stopsSaid))
+                    == ["Ended the retired mesh node (pid 4001) and removed \(meshDir.path), "
+                        + "the retired mesh's state and keys"])
+        stopsSaid = feedDetails(NetworkAudit.stop).count
+        await store.retireLegacyMeshNode()
+        check("…and the launch after that finds nothing",
+              ended.all == [4001] && feedDetails(NetworkAudit.stop).count == stopsSaid)
+        DiplomacyNetwork.argumentsOf = { argvs[$0] }
+        meshNames("{\"pid\": 4005}")
+        let waited = Date()
+        await store.retireLegacyMeshNode()
+        let waitedFor = Date().timeIntervalSince(waited)
+        check("a node that does not quit keeps its directory for the next launch, and the "
+                + "feed says so",
+              ended.all == [4001, 4005] && meshThere() && waitedFor >= 0.3 && waitedFor < 3
+                && feedDetails(NetworkAudit.stop).last
+                    == "Asked the retired mesh node (pid 4005) to quit: \(meshDir.path) is "
+                        + "removed once it has")
+        stopsSaid = feedDetails(NetworkAudit.stop).count
+        DiplomacyNetwork.terminate = { _ in false }
+        await store.retireLegacyMeshNode()
+        check("a signal that fails is no node asked, and the directory stays",
+              meshThere() && feedDetails(NetworkAudit.stop).count == stopsSaid)
+        DiplomacyNetwork.argumentsOf = quits
+        await store.retireLegacyMeshNode()
+        check("once it has quit, the directory goes",
+              !meshThere() && feedDetails(NetworkAudit.stop).last
+                == "Removed \(meshDir.path), the retired mesh's state and keys")
+        DiplomacyNetwork.legacyStateDir = nil
+        DiplomacyNetwork.legacyExitWait = realExitWait
         DiplomacyNetwork.argumentsOf = realArguments
         DiplomacyNetwork.terminate = realTerminate
 
@@ -672,7 +732,9 @@ enum NetworkTest {
               ledger("done", key: ledgerKey(90220)).first?["runner"] as? String == "claude")
         check("a third job is offered", isOffered(await store.dispatchAgent(job(90221), source: .auto)))
         script.set(snapshot(offers: [offerRow("task-3", "failed", executor: away,
-                                              reason: "the container exited 137")]))
+                                              reason: "the container exited 137", outcome: [
+            "ok": false, "summary": "", "usd": 0, "tokens": 0, "runner": "claude", "model": "m",
+        ])]))
         await store.settleAgents()
         check("an offer the network gave up on is logged as network-failed",
               booked("task-3") == nil && feedDetails(NetworkAudit.failed).count == 1
@@ -1304,8 +1366,9 @@ enum NetworkTest {
                 && NetworkText.devicesSummary == "Off: jobs see no device. On: a job running "
                     + "here can use the Android devices and emulators attached to this machine "
                     + "through adb - including a phone on USB - and an emulator can reach "
-                    + "services on this machine. Switch it on only for pools whose machines "
-                    + "you trust with that. Either way it applies to jobs started afterwards.")
+                    + "services on this machine. It is one switch for every pool this "
+                    + "machine is in: switch it on only when you trust all their machines with "
+                    + "that. Either way it applies to jobs started afterwards.")
 
         // 29. What the screen's buttons say they do.
         check("a restart is said to leave the jobs running",
@@ -1648,6 +1711,43 @@ enum NetworkTest {
         store.networkEnabled = false
         await store.networkLifecycle?.value
         check("…and switched off again, nothing is", store.networkTrouble == nil)
+
+        // 41. A restart asked for while the daemon is being started or stopped is dropped.
+        store.networkEnabled = true
+        await store.networkLifecycle?.value
+        let installsBefore = installer.all.count
+        store.networkBusy = true
+        await store.startNetworkDaemon(restart: true)
+        store.networkBusy = false
+        check("a restart asked for while another daemon action runs is dropped",
+              installer.all.count == installsBefore)
+        await store.startNetworkDaemon(restart: true)
+        check("…and one asked for after it runs",
+              installer.all.count == installsBefore + 1)
+
+        // 42. A socket nothing listens on was not reached, which an offer may rely on:
+        //     no answer from a daemon that was reached leaves the offer in doubt.
+        stopDaemon()
+        let unheard = await Task.detached {
+            DiplomacyNetwork.package.send(NetworkRoute.offer, timeoutSecs: 2)
+        }.value
+        startDaemon()
+        var notReached = false
+        if case .unreachable = unheard { notReached = true }
+        check("a request to a socket nothing listens on was not delivered", notReached)
+
+        // 43. A pass begun before the switch went off says nothing of the daemon as it is.
+        script.set(snapshot(offers: [offerRow("task-stale", "claimed", executor: away)]))
+        bookByHand(90430, task: "task-stale")
+        let claimedBefore = feedDetails(NetworkAudit.claimed).count
+        let stalePass = await store.agentTick()
+        store.networkEnabled = false
+        await store.networkLifecycle?.value
+        store.publishNetwork(stalePass)
+        check("a pass begun before the switch went off publishes nothing of the daemon",
+              stalePass.networkAsked && stalePass.network != nil
+                && store.networkState == nil && store.networkAnswered == nil
+                && feedDetails(NetworkAudit.claimed).count == claimedBefore)
 
         // 39. The hours say when they leave this machine none of its own jobs.
         check("hours that leave this machine none of its own jobs say so",

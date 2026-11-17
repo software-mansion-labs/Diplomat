@@ -112,15 +112,15 @@ extension Store {
         await runNetworkCycleOnce()
     }
 
-    /// End the mesh node an earlier Diplomat left running, whatever the switch says.
-    func endLegacyMeshNodes() async {
-        let ended = await Task.detached(priority: .utility) {
-            DiplomacyNetwork.endLegacyMeshNodes()
+    /// End the mesh node an earlier Diplomat left running and remove its directory,
+    /// whatever the switch says.
+    func retireLegacyMeshNode() async {
+        let line = await Task.detached(priority: .utility) {
+            let (asked, removed) = DiplomacyNetwork.retireLegacyMeshNode()
+            return DiplomacyNetwork.legacyRetiredLine(asked: asked, removed: removed)
         }.value
-        guard !ended.isEmpty else { return }
-        AuditLog.log("auto", NetworkAudit.stop,
-                     "Ended the retired mesh node (pid "
-                     + ended.map(String.init).joined(separator: ", ") + ")")
+        guard let line else { return }
+        AuditLog.log("auto", NetworkAudit.stop, line)
         refreshAudit()
     }
 

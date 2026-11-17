@@ -9,8 +9,11 @@ config. What to send and how to read the answers is :mod:`diplomat_runtime.netwo
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import signal
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -229,16 +232,64 @@ def _is_legacy_node(tokens: list[str]) -> bool:
                for flag, module in zip(tokens, tokens[1:]))
 
 
-def end_legacy_nodes() -> set[int]:
-    """Ask every ``python -m szpontnet`` of this user to quit, and return their pids."""
-    pids = procscan.scan_own_pids(
-        lambda pid: _is_legacy_node(procscan.cmdline_tokens(pid)))
-    for pid in pids:
+#: How long that node is given to quit before its directory is left for the next launch.
+LEGACY_EXIT_SECS = 5.0
+
+
+def legacy_dir() -> Path:
+    """Where the mesh node an earlier Diplomat ran kept its state and its keys."""
+    return Path.home() / ".diplomat" / "mesh"
+
+
+def _legacy_node_running(pid: int) -> bool:
+    return bool(procscan.scan_own_pids(
+        lambda found: found == pid and _is_legacy_node(procscan.cmdline_tokens(found))))
+
+
+def _terminate(pid: int) -> None:
+    os.kill(pid, signal.SIGTERM)
+
+
+def retire_legacy_node() -> tuple[int | None, Path | None]:
+    """End the mesh node an earlier Diplomat ran and remove its directory, keys
+    included. That node is the pid the directory's ``state.json`` names, while that
+    pid is a ``python -m szpontnet`` of this user: a node kept anywhere else is its
+    operator's own program. One still running after ``LEGACY_EXIT_SECS`` keeps the
+    directory.
+    Returns the pid asked to quit and the directory removed, each None when there was
+    none. Blocking."""
+    where = legacy_dir()
+    if not where.is_dir():
+        return None, None
+    try:
+        pid = json.loads((where / "state.json").read_text()).get("pid")
+    except (OSError, ValueError, AttributeError):
+        pid = None
+    asked = None
+    if type(pid) is int and _legacy_node_running(pid):
         try:
-            os.kill(pid, signal.SIGTERM)
+            _terminate(pid)
+            asked = pid
         except OSError:
             pass
-    return pids
+        deadline = time.monotonic() + LEGACY_EXIT_SECS
+        while _legacy_node_running(pid):
+            if time.monotonic() >= deadline:
+                return asked, None
+            time.sleep(0.1)
+    shutil.rmtree(where, ignore_errors=True)
+    return asked, None if where.exists() else where
+
+
+def legacy_retired_line(asked: int | None, removed: Path | None, where: Path) -> str | None:
+    """What the feed says of :func:`retire_legacy_node`; None when it found nothing."""
+    if removed is not None:
+        node = f"Ended the retired mesh node (pid {asked}) and removed" if asked else "Removed"
+        return f"{node} {removed}, the retired mesh's state and keys"
+    if asked is not None:
+        return (f"Asked the retired mesh node (pid {asked}) to quit: {where} is removed "
+                "once it has")
+    return None
 
 
 # MARK: display

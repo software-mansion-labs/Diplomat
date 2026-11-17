@@ -67,12 +67,15 @@ def hours_note(required: int, accepted: int) -> str:
         return ""
     return (f"This machine takes none of its own jobs: one may take {required} h, and "
             f"the longest job it takes is {accepted} h.")
+
+
 DEVICES_TITLE = "Let jobs use this machine's devices"
 DEVICES_SUMMARY = ("Off: jobs see no device. On: a job running here can use the Android "
                    "devices and emulators attached to this machine through adb - including "
                    "a phone on USB - and an emulator can reach services on this machine. "
-                   "Switch it on only for pools whose machines you trust with that. Either "
-                   "way it applies to jobs started afterwards.")
+                   "It is one switch for every pool this machine is in: switch it on only "
+                   "when you trust all their machines with that. Either way it applies to "
+                   "jobs started afterwards.")
 NO_POOLS = ("No pools yet. Each repository in Settings gets one once Diplomat knows "
             "which account works on it.")
 NO_MEMBERS = "No members listed yet."

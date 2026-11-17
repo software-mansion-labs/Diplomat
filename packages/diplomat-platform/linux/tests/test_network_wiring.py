@@ -10,7 +10,6 @@ import dataclasses
 import json
 import os
 import shutil
-import signal
 import socketserver
 import subprocess
 import tempfile
@@ -1562,6 +1561,23 @@ def test_a_run_is_forgotten_whatever_the_daemon_answers(store, on):
         "Auto · Review · #9 - not withdrawn: the Diplomacy Network daemon is not answering"]
 
 
+def test_a_switch_read_from_one_config_says_nothing_of_another(tmp_path, monkeypatch):
+    first, second = tmp_path / "a.json", tmp_path / "b.json"
+    first.write_text('{"networkEnabled": true}')
+    second.write_text("{ not json")
+    monkeypatch.setenv("DIPLOMAT_CONFIG", str(first))
+    assert dn.enabled() is True
+    monkeypatch.setenv("DIPLOMAT_CONFIG", str(second))
+    assert dn.enabled() is False
+    monkeypatch.setenv("DIPLOMAT_CONFIG", str(first))
+    first.write_text("{ not json")
+    assert dn.enabled() is True
+    first.write_text('{"networkEnabled": "true"}')
+    assert dn.enabled() is False
+    first.write_text("{ not json")
+    assert dn.enabled() is False
+
+
 def unreadable_notes() -> list[str]:
     return [line for line in lines("warn") if line == appconfig.unreadable_note()]
 
@@ -1684,6 +1700,52 @@ def test_forget_leaves_a_local_run_alone(store, on, daemon):
     store.forget_network_run_async(local.run_id)
     assert store.wait_for_background() == []
     assert [m for m, _, _ in d.got] == [] and len(agentregistry.load()) == 1
+
+
+def test_forgetting_a_run_with_the_switch_off_asks_the_daemon_for_no_state(store, daemon):
+    d = daemon(state=snapshot(offers=[offer("t1", "pooled")]))
+    run = book_network_run()
+    store.forget_network_run_async(run.run_id)
+    assert store.wait_for_background() == []
+    assert [path for _, path, _ in d.got if path == "/state"] == []
+
+
+def test_a_held_offer_the_switch_emptied_while_it_was_sent_is_not_booked(store, on, daemon,
+                                                                         monkeypatch):
+    d = daemon({"/offer": (500, {})})
+    store.dispatch_agent(job(ledger_key="review:o/r#9"), autofix.SOURCE_PANEL)
+    assert len(store.network_offering) == 1
+    d.routes.update(takes_offers())
+    send = dn.send
+
+    def as_the_switch_goes_off(route, body=None, **kw):
+        reply = send(route, body, **kw)
+        if route == network.ROUTE_OFFER:
+            store.network_offering = []
+        return reply
+
+    monkeypatch.setattr(dn, "send", as_the_switch_goes_off)
+    store._network_cycle()
+    assert len(d.sent("offer")) == 2
+    assert agentregistry.load() == [] and store.network_offering == []
+    assert lines("network-offer") == []
+
+
+def test_a_task_that_runs_again_after_the_switch_went_off_is_said_again(store, on, daemon,
+                                                                        monkeypatch):
+    daemon(state=snapshot(offers=[offer("t1", "claimed", executor=PEER)]))
+    monkeypatch.setattr(da, "run_installer",
+                        lambda script, arg: {"daemonRunning": arg != "--stop-daemon"})
+    for said in (1, 2):
+        book_network_run("t1", 9)
+        store._network_cycle()
+        store._network_cycle()
+        assert len(lines("network-claimed")) == said
+        store.set_network_enabled(False)
+        assert store.wait_for_background() == []
+        assert agentregistry.load() == []
+        store.set_network_enabled(True)
+        assert store.wait_for_background() == []
 
 
 # MARK: - the switch going off
@@ -2074,25 +2136,108 @@ def test_only_the_exact_module_is_the_legacy_node(argv, legacy):
     assert dn._is_legacy_node(argv) is legacy
 
 
-def test_the_launch_sweep_ends_the_legacy_node_alone_and_says_so_once(store, monkeypatch):
-    table = {11: ["python3", "-m", "szpontnet"],
-             12: ["node", "/src/szpontnet/daemon.js"],
-             13: ["python3", "-m", "diplomat_app"]}
+@pytest.fixture
+def mesh(monkeypatch):
+    """The retired node's directory, a process table and the signals sent: a pid that
+    is signalled leaves the table unless it is in ``deaf``."""
+    world = SimpleNamespace(
+        dir=dn.legacy_dir(), deaf=set(), killed=[],
+        table={11: ["python3", "-m", "szpontnet"],
+               12: ["python3", "-m", "szpontnet", "--port", "7"],
+               13: ["python3", "-m", "diplomat_app"]})
+
+    def kill(pid):
+        world.killed.append(pid)
+        if pid not in world.deaf:
+            del world.table[pid]
+
+    def names(pid):
+        world.dir.mkdir(parents=True, exist_ok=True)
+        (world.dir / "device.key").write_text("secret")
+        (world.dir / "state.json").write_text(json.dumps({"pid": pid}))
+
+    world.names = names
     monkeypatch.setattr(procscan, "scan_own_pids",
-                        lambda match: {pid for pid in table if match(pid)})
-    monkeypatch.setattr(procscan, "cmdline_tokens", lambda pid: table[pid])
-    killed = []
-    monkeypatch.setattr(dn.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+                        lambda match: {pid for pid in world.table if match(pid)})
+    monkeypatch.setattr(procscan, "cmdline_tokens", lambda pid: world.table[pid])
+    monkeypatch.setattr(dn, "_terminate", kill)
+    monkeypatch.setattr(dn, "LEGACY_EXIT_SECS", 0.3)
+    return world
 
-    store.end_legacy_nodes_async()
-    assert store.wait_for_background() == []
-    assert killed == [(11, signal.SIGTERM)]
-    assert lines("network-stop") == ["Ended the retired mesh node (pid 11)"]
 
-    del table[11]
-    store.end_legacy_nodes_async()
+def test_the_launch_ends_the_node_its_directory_names_and_removes_the_directory(store, mesh):
+    mesh.names(11)
+
+    store.retire_legacy_node_async()
     assert store.wait_for_background() == []
-    assert len(killed) == 1 and len(lines("network-stop")) == 1
+    assert mesh.killed == [11], "another -m szpontnet, kept elsewhere, is its operator's own"
+    assert not mesh.dir.exists()
+    assert lines("network-stop") == [
+        f"Ended the retired mesh node (pid 11) and removed {mesh.dir}, the retired "
+        "mesh's state and keys"]
+
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert mesh.killed == [11] and len(lines("network-stop")) == 1
+
+
+@pytest.mark.parametrize("state", [
+    '{"pid": 13}', '{"pid": 99}', '{"pid": "11"}', '{"pid": true}', '{"pid": 11.0}',
+    "[11]", "{ not json", None])
+def test_a_directory_that_names_no_running_node_is_removed_and_nothing_is_signalled(
+        store, mesh, state):
+    mesh.names(11)
+    if state is None:
+        (mesh.dir / "state.json").unlink()
+    else:
+        (mesh.dir / "state.json").write_text(state)
+    mesh.table[True] = mesh.table[11]
+
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert mesh.killed == [] and not mesh.dir.exists()
+    assert lines("network-stop") == [
+        f"Removed {mesh.dir}, the retired mesh's state and keys"]
+
+
+def test_a_node_that_does_not_quit_keeps_its_directory_for_the_next_launch(store, mesh):
+    mesh.names(11)
+    mesh.deaf.add(11)
+
+    began = time.monotonic()
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert 0.3 <= time.monotonic() - began < 3
+    assert mesh.killed == [11] and (mesh.dir / "device.key").exists()
+    assert lines("network-stop") == [
+        f"Asked the retired mesh node (pid 11) to quit: {mesh.dir} is removed once it has"]
+
+    mesh.deaf.clear()
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert mesh.killed == [11, 11] and not mesh.dir.exists()
+
+
+def test_no_directory_is_no_node_whatever_runs(store, mesh):
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert mesh.killed == [] and lines("network-stop") == []
+
+
+def test_a_signal_that_fails_is_no_node_asked(mesh, monkeypatch):
+    mesh.names(11)
+
+    def gone(pid):
+        del mesh.table[pid]
+        raise ProcessLookupError(pid)
+
+    monkeypatch.setattr(dn, "_terminate", gone)
+    assert dn.retire_legacy_node() == (None, mesh.dir)
+
+
+def test_the_suite_reaches_no_real_mesh_directory_and_signals_nothing(tmp_path):
+    assert dn.legacy_dir() == tmp_path / "mesh"
+    assert dn._terminate.__name__ == "no_signal"
 
 
 # MARK: - containers in the process table
@@ -2136,7 +2281,7 @@ def test_an_agent_in_a_container_is_no_agent_of_this_machine(monkeypatch, tmp_pa
 # MARK: - launch, and the agent dump
 
 @pytest.mark.parametrize("switch", [True, False])
-def test_launch_sweeps_the_legacy_node_always_and_starts_the_daemon_only_when_on(
+def test_launch_retires_the_legacy_node_always_and_starts_the_daemon_only_when_on(
         monkeypatch, switch):
     from diplomat_app import app as app_module
 
@@ -2180,7 +2325,7 @@ def test_launch_sweeps_the_legacy_node_always_and_starts_the_daemon_only_when_on
 
     app = app_module.DiplomatApp()
 
-    assert called.count("end_legacy_nodes_async") == 1
+    assert called.count("retire_legacy_node_async") == 1
     assert called.count("start_network_async") == (1 if switch else 0)
     assert app.network_timer.interval == 30_000
     del called[:]

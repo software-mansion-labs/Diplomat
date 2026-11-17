@@ -462,7 +462,7 @@ final class Store: ObservableObject {
         }
     }
 
-    /// The spending budget's four knobs — same file as the cap above.
+    /// The spending budget's four knobs - same file as the cap above.
     ///
     /// Each normalises in memory as well as on disk, so the gate here and the file
     /// never hold different numbers. Changing any of
@@ -1002,7 +1002,7 @@ final class Store: ObservableObject {
     /// Queued work whose dispatch is under way: it has left the queue and its spawn
     /// has not answered yet.
     ///
-    /// That span is seconds long — a `ps` scan, an AppleScript terminal — and for
+    /// That span is seconds long - a `ps` scan, an AppleScript terminal - and for
     /// all of it the task is neither queued nor yet a session. It
     /// is held here so that it is a ROW throughout, saying what the click just did to
     /// it, rather than a gap where the operator's task used to be.
@@ -1338,7 +1338,7 @@ final class Store: ObservableObject {
             // afterwards; publishes the status either way, so it stands in for the
             // plain `refreshAllocatorInstall()` this used to do here.
             Task { await ensureAllocatorInstalled() }
-            Task { await endLegacyMeshNodes() }
+            Task { await retireLegacyMeshNode() }
         }
     }
 
@@ -2187,7 +2187,7 @@ final class Store: ObservableObject {
 
     /// The network's half of a published pass: the snapshot the Network screen draws, and
     /// one feed line the first time an offer is seen claimed.
-    private func publishNetwork(_ pass: AgentPass) {
+    func publishNetwork(_ pass: AgentPass) {
         // A pass begun before the switch moved says nothing of the daemon as it is.
         guard pass.networkAsked, networkEnabled else { return }
         noteNetworkState(pass.network)
@@ -4121,7 +4121,7 @@ final class Store: ObservableObject {
     /// `queuedTasks` runs before the first suspension, so the panel shows the click
     /// landing and a second click finds nothing to start; the move out of
     /// `startingTasks` runs only once the row that replaces it is already published
-    /// (`dispatchAgent` books the run — `spawnTracked` — and awaits
+    /// (`dispatchAgent` books the run - `spawnTracked` - and awaits
     /// `settleAgents` before it returns, and `endStarting` resumes on that continuation
     /// without suspending again). Between them the task is a row the whole way: never
     /// drawn twice, and never missing.
@@ -4189,7 +4189,7 @@ final class Store: ObservableObject {
     /// The queued row's "execute now": start this task immediately, past the two holds
     /// that are the machine's own judgement.
     ///
-    /// It stays AUTO work — same `Auto · ` label, same auto-handled counter, and once
+    /// It stays AUTO work - same `Auto · ` label, same auto-handled counter, and once
     /// running it occupies a slot like any other automatic agent, so the rest of the
     /// queue waits behind it. Of the six
     /// asymmetries the gate draws between a click and a monitor tick (focus, capacity,
@@ -4202,7 +4202,7 @@ final class Store: ObservableObject {
     /// band before it suspends, so it reads as starting from the frame after the
     /// press, through the seconds the terminal spawn takes.
     /// The FEED line is written from the outcome instead, never ahead of it: the PR
-    /// can have gained an agent since the list was built, and the spawn can fail —
+    /// can have gained an agent since the list was built, and the spawn can fail -
     /// announcing "started" before asking would report a launch that never happened
     /// in both.
     func executeQueuedTask(_ id: String) async {
@@ -4282,7 +4282,7 @@ final class Store: ObservableObject {
 
     /// One agent job, whoever triggers it. The trigger supplies WHAT to run (config
     /// → prompt, labels, PR identity); the pipeline owns everything that HAPPENS —
-    /// the ban check, in-flight dedup, spawn, tracking, counters — so
+    /// the ban check, in-flight dedup, spawn, tracking, counters - so
     /// a button click and a monitor tick cannot behave differently by accident.
     struct AgentJob: Equatable {
         var kind: String            // agent-row tint: "review" | "issues" | "conflicts" | "audit"
@@ -4974,8 +4974,8 @@ final class Store: ObservableObject {
         case .spawned, .offered, .offering, .banned, .atCapacity, .unaffordable, .lowDisk,
              .notAllowed:
             // `.atCapacity`, `.unaffordable` and `.lowDisk` are answers only a monitor
-            // gets — none of the automatic-task cap, the spending budget and the disk
-            // floor applies to a click — and `.notAllowed` speaks for the review
+            // gets - none of the automatic-task cap, the spending budget and the disk
+            // floor applies to a click - and `.notAllowed` speaks for the review
             // monitor's finds, never a conflict.
             break
         }

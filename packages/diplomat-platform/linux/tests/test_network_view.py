@@ -397,6 +397,22 @@ def test_the_recent_card_lists_the_feeds_last_six_network_lines(screen):
 
 # MARK: - the actions
 
+def test_a_join_being_sent_is_not_sent_again(screen, monkeypatch):
+    from diplomat_app.store import Store
+
+    asked = []
+    monkeypatch.setattr(Store, "network_join_async", lambda self, *args: asked.append(args))
+    view = screen(RICH)
+    panel = view.panels[1]
+    panel.actions["Join…"].click()
+    join = panel.join_row
+    join.field.setText("dn1-abc")
+    join.field.returnPressed.emit()
+    join.field.returnPressed.emit()
+    assert asked == [("dn1-abc", BENCH)]
+    assert not join.button.isEnabled()
+
+
 def test_the_pool_actions_reach_the_store_with_their_pool(screen, monkeypatch):
     from diplomat_app import networkview as nv
     from diplomat_app.store import Store
@@ -664,9 +680,9 @@ def test_the_devices_switch_is_off_until_set_and_writes_its_config_key(
     assert nv.DEVICES_SUMMARY == (
         "Off: jobs see no device. On: a job running here can use the Android devices and "
         "emulators attached to this machine through adb - including a phone on USB - and "
-        "an emulator can reach services on this machine. Switch it on only for pools "
-        "whose machines you trust with that. Either way it applies to jobs started "
-        "afterwards.")
+        "an emulator can reach services on this machine. It is one switch for every pool "
+        "this machine is in: switch it on only when you trust all their machines with "
+        "that. Either way it applies to jobs started afterwards.")
     saved = dn.devices
     view = screen(STARTING)
     monkeypatch.setattr(dn, "devices", saved)  # the render's fixture answers for it

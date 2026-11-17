@@ -5873,15 +5873,15 @@ class Store(QObject):
         """The Network screen's Restart."""
         self.start_network_async(restart=True, source=autofix.SOURCE_PANEL)
 
-    def end_legacy_nodes_async(self) -> None:
-        """End the mesh node an earlier Diplomat left running, whatever the switch
-        says."""
+    def retire_legacy_node_async(self) -> None:
+        """End the mesh node an earlier Diplomat left running and remove its
+        directory, whatever the switch says."""
         def work() -> None:
-            pids = diplomacynetwork.end_legacy_nodes()
-            if pids:
-                activity.log(autofix.SOURCE_AUTO, network.AUDIT_STOP,
-                             "Ended the retired mesh node "
-                             f"(pid {', '.join(str(p) for p in sorted(pids))})")
+            asked, removed = diplomacynetwork.retire_legacy_node()
+            line = diplomacynetwork.legacy_retired_line(
+                asked, removed, diplomacynetwork.legacy_dir())
+            if line:
+                activity.log(autofix.SOURCE_AUTO, network.AUDIT_STOP, line)
                 self.refresh_activity()
         self.start_background(work, name="legacy-node")
 
