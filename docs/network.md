@@ -31,7 +31,7 @@ a `python -m szpontnet` - and removes `~/.diplomat/mesh` with the keys in it. Th
 It needs `tor` and `docker` on the machine, and `gh` or `glab` signed in for the forge each
 repository is on. The daemon looks for them on its `PATH` and in the usual install directories;
 `DN_TOR`, `DN_DOCKER`, `DN_GH` and `DN_GLAB` in the environment the daemon starts with name a
-binary anywhere else. Without docker a machine still offers its jobs and acts for them, and
+binary anywhere else, and `DN_TOOL_DIRS` names other directories to look in. Without docker a machine still offers its jobs and acts for them, and
 takes none. Without Tor it reaches no other machine. The Network screen shows what the daemon
 says is missing, and while tor, docker or the model credential is missing or failed, or the
 daemon does not answer, a red line above the task list says so and opens that screen.
@@ -123,7 +123,7 @@ brought, and an older engine takes no job.
   disk per container; per job, 256 connections through the broker, 256 requests on them at a
   time, 32 connections out for the requests the broker carries itself, and 48 MiB of request
   bodies held at a time. A container found holding more disk than that is removed, and the jobs in it
-  end as failed attempts.
+  end as failed attempts; so is one the engine could not measure three looks running.
 - **Devices stay on the host, and jobs see none of them** until **Let jobs use this machine's
   devices** is switched on (the Network screen's settings; off by default). With it on, a job
   running here can use the Android devices and emulators attached to this machine through adb -
@@ -136,7 +136,10 @@ brought, and an older engine takes no job.
   refused. It applies to jobs started afterwards.
 - **A fuse.** One job gets 5000 model requests or 8 GiB of model traffic on this machine's
   credential, then is refused. The count is the job's own, and a restart of the daemon does not
-  start it again.
+  start it again. What a job says it used of the model counts toward the budget gate no higher
+  than the traffic this machine carried to the model for it.
+- **What a job did** is in `~/.diplomat/network/runs/<run id>/log.jsonl` for a day after it
+  ended, written by the job itself.
 
 ## Acting in your name
 
@@ -263,7 +266,12 @@ is refused. A refused request comes back to the agent with the reason.
 A job is leased two hours at a time. Before each lease ends the machine that offered it asks the
 executor whether it is still working; an answer extends the lease, silence returns the job to
 the pool ten minutes later. A job gets three attempts, on whichever machines take it - the same
-one three times in a pool of one - and after the third the offer ends as failed.
+one three times in a pool of one - and after the third the offer ends as failed. A start that
+fails inside a container that was made is a failed attempt. A job a machine cannot start for a
+reason of its own - it cannot fetch the repository, has no engine or image, or cannot make the
+container - never ran: it goes back to the pool at no cost to its three attempts, and the
+machine takes no job of that repository for a minute, twice as long after each such failure in
+a row, ten minutes at most.
 
 - **Hours a job of yours may take** - the limit from start to finish. Sent with every job.
 - **Longest job this machine takes** - jobs allowed longer are left to other machines. Announced
@@ -331,7 +339,9 @@ then stops as it does when switched off; Diplomat still starts no agent in a ter
 panel's red line says when the daemon does not answer.
 
 Switching the network off withdraws this machine's open offers, stops the jobs it runs for the
-pool and frees their PRs and issues for agents in terminals again. Work that was asked for and
+pool and frees their PRs and issues for agents in terminals again. The daemon removes its
+containers, mirrors and run records and exits; the machine's key, its pools and the image stay,
+so switched on again it is the member it was. Work that was asked for and
 had not run is started in a terminal from the queue on the next poll. A monitor's own find
 counts its offer as an attempt, so it is started again on that monitor's retry schedule. A job
 started by hand whose offer the daemon had not answered is withdrawn if the daemon turns out to
