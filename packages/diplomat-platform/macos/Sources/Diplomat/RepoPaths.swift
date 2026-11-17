@@ -19,7 +19,7 @@ enum RepoPaths {
 
     /// The checkout root. Env-overridable; falls back to the conventional clone path
     /// (a personal, single-checkout setup). Everything that lives beside the app in
-    /// this monorepo — the device-allocator package, the install scripts — hangs off
+    /// this monorepo - the device-allocator package, the install scripts - hangs off
     /// here, so a moved or renamed checkout relocates all of them together.
     static var root: URL {
         locate(env: ProcessInfo.processInfo.environment["DIPLOMAT_SELF_REPO"],

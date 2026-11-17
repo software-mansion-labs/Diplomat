@@ -25,7 +25,7 @@ public struct PRSnapshot: Equatable {
     /// Unaddressed Reviews" signal. Drives the offline-review reconcile so we don't
     /// dispatch a fix agent for a PR where the ball is with the reviewer. `threadsUnresolved` (raw count) still drives the edge-trigger.
     public let threadsIOwe: Int
-    /// Head commit sha (`headRefOid`) — the "which push" part of the ledger key
+    /// Head commit sha (`headRefOid`) - the "which push" part of the ledger key
     /// (`AutofixWork.ledgerKey`).
     public let headSha: String
 
@@ -517,7 +517,7 @@ public enum AutofixWork {
 
     /// The telemetry ledger's identity for one unit of work:
     /// `<kind>:<host>/<owner>/<repo>#<n>@<sha>`, derived from the PR's own URL (the
-    /// Python twin must produce identical strings — see the parity tests). "" when the
+    /// Python twin must produce identical strings - see the parity tests). "" when the
     /// URL is not a PR's.
     ///
     /// The same shape WITHOUT `@sha` while the head sha is unknown: the work still

@@ -981,7 +981,7 @@ enum Render {
                 prNumber: number, prURL: number.map { "https://github.com/x/pull/\($0)" } ?? "",
                 kind: kind, label: label, source: source.rawValue)
             record.untracked = untracked
-            // Every agent can be clicked — by the handle its spawn kept, or, for one
+            // Every agent can be clicked - by the handle its spawn kept, or, for one
             // nobody dispatched, by walking its own process out to the window showing it.
             record.tty = "ttys0\(number ?? 0)"
             let window = untracked ? nil
@@ -1030,7 +1030,7 @@ enum Render {
         // Pinned like the rows above, and for the same reason: the cap comes from the
         // shared config file, so an operator who raised theirs would change how many
         // empty bays this picture has. Two are held — the untracked agent and the one
-        // nothing is known about, both automatic — which leaves two free beside the one
+        // nothing is known about, both automatic - which leaves two free beside the one
         // the starting task has taken.
         store.autoTaskLimit = 5
         store.pinAutoTasksMeasured(2)

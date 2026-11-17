@@ -12,7 +12,7 @@ struct ContentView: View {
     enum PanelScreen { case main, devices, machines, network, comms, tasks, telemetry, settings }
 
     /// `showSettings` / `showTelemetry` / `showDevices` / `showMachines` / `showNetwork` /
-    /// `showComms` / `showTasks` seed the initial screen — used by the headless render to
+    /// `showComms` / `showTasks` seed the initial screen - used by the headless render to
     /// snapshot those screens in context.
     /// Defaults to the main view.
     /// `seedPendingUnban` seeds the inline un-ban confirmation for a login (render only).
@@ -609,7 +609,7 @@ struct ContentView: View {
     private func agentTaskTint(_ kind: String) -> Color { DiplomatUI.agentTaskTint(kind) }
 
     /// Click a row: focus its window. If focus fails the window is gone and the row is
-    /// dismissed by the store — nothing more to do here. A run the network carries has no
+    /// dismissed by the store - nothing more to do here. A run the network carries has no
     /// window on this machine, and opens the Network screen, where its task is.
     private func activate(_ row: Store.AgentRow) {
         guard row.record.runsHere else {

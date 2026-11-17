@@ -1674,7 +1674,7 @@ check(AgentDispatchGate.decide(source: .panel, banned: false, agentOnPR: false,
 check(AgentDispatchGate.decide(source: .auto, banned: false, agentOnPR: false,
                                atCapacity: true, unaffordable: true,
                                lowDisk: true) == .lowDisk,
-      "the disk outranks capacity and the budget — a freed bay frees no space")
+      "the disk outranks capacity and the budget - a freed bay frees no space")
 check(AgentDispatchGate.decide(source: .auto, banned: false, agentOnPR: true,
                                atCapacity: false,
                                lowDisk: true) == .inFlight,
@@ -2213,7 +2213,7 @@ do {
         mergedPRs: .present([]), liveAgents: .present([:])),
         roots: [], now: now, limit: 2)
     check(t.capLoad == ["auto"],
-      "the cap counts automatic agents — not a click")
+      "the cap counts automatic agents - not a click")
     check(t.freeSlots == 1, "one of two bays filled")
     check(t.inFlight(item: "o/r#337"), "and the PR they are both on reads in-flight")
     check(!t.inFlight(item: "o/other#337"), "…while #337 in another repo does not")

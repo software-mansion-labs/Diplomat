@@ -252,7 +252,7 @@ struct IssueWizardView: View {
             queueSweep(cfg)
             return
         }
-        // The SAME pipeline the auto-monitor rides — ban check, tracking — only the
+        // The SAME pipeline the auto-monitor rides - ban check, tracking - only the
         // trigger (this click) and its policies (foreground, none of the automatic-work
         // gates) differ. An issue run is not PR-scoped, so there is no dedup key; what keeps
         // two agents off one issue is the assign-to-me claim, which every machine can

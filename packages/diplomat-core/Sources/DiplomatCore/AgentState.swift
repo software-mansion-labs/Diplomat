@@ -136,7 +136,7 @@ public enum AgentState {
     /// process table is one `ps` pass reused for several seconds, so it can predate the
     /// pid file naming what to look for. Past this the run is judged on the evidence
     /// there is: a known pid the table does not hold has ended, and a run with no pid
-    /// file at all never ran (`.failed`) — this applet staged that path itself, so
+    /// file at all never ran (`.failed`) - this applet staged that path itself, so
     /// nothing but the command writes it.
     ///
     /// The same window bounds `AgentSpawner.spawn`'s own wait for the file, measured
@@ -564,7 +564,7 @@ public enum AgentState {
     /// Split out of `resolve` because it is the one input that is a memory rather than
     /// an observation: absence is only measurable against a memory of presence, and
     /// this way `resolve` stays a function of its arguments alone. What is remembered is
-    /// a digest rather than the screen itself — the book is
+    /// a digest rather than the screen itself - the book is
     /// rewritten every tick and read by other processes, so storing every watched pane's
     /// contents in it would be both large and pointless.
     ///
@@ -904,12 +904,12 @@ public enum AgentState {
 
     /// A run this applet booked but has no pid for.
     ///
-    /// Two things produce one. A spawn whose shell has not written its pid file yet —
+    /// Two things produce one. A spawn whose shell has not written its pid file yet -
     /// the ordinary first seconds of a run. And a spawn whose terminal opened a window
     /// and never ran the command in it, so the file is not late but absent.
     ///
     /// The agent's own prompt in the process table is asked first. It cannot tell two
-    /// runs on one PR apart, which is exactly why it is a fallback and not the identity —
+    /// runs on one PR apart, which is exactly why it is a fallback and not the identity -
     /// but "an agent for this PR is up" is positive evidence that the command ran.
     private static func resolveWithoutPid(_ record: RunRecord, evidence: Evidence,
                                           now: TimeInterval, age: TimeInterval,
@@ -928,7 +928,7 @@ public enum AgentState {
         }
         // This applet opened the terminal and named the pid path itself, and the inner
         // shell writes it before the agent (`AgentSpawner.shellCommand`). So an absent
-        // file past the grace is the run's OWN report that its command never ran — not
+        // file past the grace is the run's OWN report that its command never ran - not
         // an inference from what the terminal looks like, which is why it survives a
         // terminal that changes how it fails.
         return done(.failed, "its terminal never ran the command "
@@ -1399,7 +1399,7 @@ public enum AgentState {
     /// Everything one pass of evidence produced. What a caller reads instead of
     /// re-deriving any of it.
     public struct Tick {
-        /// The records as the pipeline left them — ttys adopted, stillness clocks
+        /// The records as the pipeline left them - ttys adopted, stillness clocks
         /// advanced, untracked agents synthesized, ended runs' live agents released. The
         /// caller persists these.
         public var records: [RunRecord]

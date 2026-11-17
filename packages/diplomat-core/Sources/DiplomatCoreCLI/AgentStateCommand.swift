@@ -31,7 +31,7 @@ import Foundation
 /// it - `null` for none - and takes the place of `evidence.network`, so the snapshot
 /// decoder and the evidence built from it are diffed too.
 /// Output: the resolved rows in display order, every record's verdict whether drawn or
-/// not, every projection, and the records as the pipeline left them — so a stillness
+/// not, every projection, and the records as the pipeline left them - so a stillness
 /// clock written by the wrong step is a diff.
 enum AgentStateCommand {
     static func run(_ obj: [String: Any]) {
