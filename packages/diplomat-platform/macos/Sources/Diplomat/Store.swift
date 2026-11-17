@@ -759,23 +759,6 @@ final class Store: ObservableObject {
     @Published var commsActInvestigations: Bool {
         didSet { persist(commsActInvestigations, forKey: Keys.commsActInvestigations) }
     }
-    /// `CommsToggles.replies`: whether Comms writes back in Slack.
-    @Published var commsReplies: Bool {
-        didSet { persist(commsReplies, forKey: Keys.commsReplies) }
-    }
-    /// What Comms replies to (`CommsToggles.repliesTo`), under `commsReplies`.
-    @Published var commsReplyToReviews: Bool {
-        didSet { persist(commsReplyToReviews, forKey: Keys.commsReplyToReviews) }
-    }
-    @Published var commsReplyToFixes: Bool {
-        didSet { persist(commsReplyToFixes, forKey: Keys.commsReplyToFixes) }
-    }
-    @Published var commsReplyToInvestigations: Bool {
-        didSet { persist(commsReplyToInvestigations, forKey: Keys.commsReplyToInvestigations) }
-    }
-    @Published var commsReplyToQuestions: Bool {
-        didSet { persist(commsReplyToQuestions, forKey: Keys.commsReplyToQuestions) }
-    }
     /// How many pings one triage call reads (`CommsSettings.batchSize`).
     @Published var commsBatchSize: Int {
         didSet { persist(commsBatchSize, forKey: Keys.commsBatchSize) }
@@ -783,10 +766,6 @@ final class Store: ObservableObject {
     /// How old a shorter queue's newest ping gets before it is triaged anyway.
     @Published var commsFlushAfterSecs: Int {
         didSet { persist(commsFlushAfterSecs, forKey: Keys.commsFlushAfterSecs) }
-    }
-    /// How long the session must have been locked to count as away (`CommsAway`).
-    @Published var commsAwayAfterSecs: Int {
-        didSet { persist(commsAwayAfterSecs, forKey: Keys.commsAwayAfterSecs) }
     }
     @Published var commsNotify: Bool {
         didSet {
@@ -801,14 +780,6 @@ final class Store: ObservableObject {
     /// Pings after this are unread.
     @Published var commsSeenAt: Date {
         didSet { persist(commsSeenAt, forKey: Keys.commsSeenAt) }
-    }
-    /// When the session lock that is still on began (`refreshCommsLock`); kept across a
-    /// relaunch so a long lock is not restarted by one.
-    var commsLockedSince: Date? {
-        didSet {
-            guard commsLockedSince != oldValue else { return }
-            persist(commsLockedSince, forKey: Keys.commsLockedSince)
-        }
     }
 
     // MARK: Comms state the screen draws
@@ -831,9 +802,6 @@ final class Store: ObservableObject {
     var commsMonitorTask: Task<Void, Never>?
     var commsPollInFlight = false
     var commsWakeObserver: NSObjectProtocol?
-    var commsLockObservers: [NSObjectProtocol] = []
-    /// The replies of every apply so far, chained so no two run at once.
-    var commsReplying: Task<Void, Never>?
 
     // MARK: Tasks (the long-running task tracker) state the screen draws
 
@@ -990,15 +958,8 @@ final class Store: ObservableObject {
         static let commsActRequests = "commsActRequests"
         static let commsActBumps = "commsActBumps"
         static let commsActInvestigations = "commsActInvestigations"
-        static let commsReplies = "commsReplies"
-        static let commsReplyToReviews = "commsReplyToReviews"
-        static let commsReplyToFixes = "commsReplyToFixes"
-        static let commsReplyToInvestigations = "commsReplyToInvestigations"
-        static let commsReplyToQuestions = "commsReplyToQuestions"
         static let commsBatchSize = "commsBatchSize"
         static let commsFlushAfterSecs = "commsFlushAfterSecs"
-        static let commsAwayAfterSecs = "commsAwayAfterSecs"
-        static let commsLockedSince = "commsLockedSince"
         static let commsNotify = "commsNotify"
         static let commsModel = "commsModel"
         static let commsSeenAt = "commsSeenAt"
@@ -1207,23 +1168,10 @@ final class Store: ObservableObject {
         commsActRequests = defaults.object(forKey: Keys.commsActRequests) as? Bool ?? true
         commsActBumps = defaults.object(forKey: Keys.commsActBumps) as? Bool ?? true
         commsActInvestigations = defaults.object(forKey: Keys.commsActInvestigations) as? Bool ?? true
-        commsReplies = defaults.object(forKey: Keys.commsReplies) as? Bool ?? true
-        let commsReplyDefaults = CommsToggles()
-        commsReplyToReviews = defaults.object(forKey: Keys.commsReplyToReviews) as? Bool
-            ?? commsReplyDefaults.replyToReviews
-        commsReplyToFixes = defaults.object(forKey: Keys.commsReplyToFixes) as? Bool
-            ?? commsReplyDefaults.replyToFixes
-        commsReplyToInvestigations = defaults.object(forKey: Keys.commsReplyToInvestigations) as? Bool
-            ?? commsReplyDefaults.replyToInvestigations
-        commsReplyToQuestions = defaults.object(forKey: Keys.commsReplyToQuestions) as? Bool
-            ?? commsReplyDefaults.replyToQuestions
         commsBatchSize = defaults.object(forKey: Keys.commsBatchSize) as? Int
             ?? (try? CoreAssets.comms())?.batchSize ?? 8
         commsFlushAfterSecs = defaults.object(forKey: Keys.commsFlushAfterSecs) as? Int
             ?? (try? CoreAssets.comms())?.flushAfterSecs ?? 1800
-        commsAwayAfterSecs = defaults.object(forKey: Keys.commsAwayAfterSecs) as? Int
-            ?? (try? CoreAssets.comms())?.replies.awayAfterSecs ?? 10800
-        commsLockedSince = defaults.object(forKey: Keys.commsLockedSince) as? Date
         commsNotify = defaults.object(forKey: Keys.commsNotify) as? Bool ?? true
         commsModel = defaults.string(forKey: Keys.commsModel) ?? ""
         // Absent, everything already logged reads as seen: an upgrade must not open on a
