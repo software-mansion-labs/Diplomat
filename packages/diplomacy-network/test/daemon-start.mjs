@@ -184,6 +184,29 @@ try {
     }
   });
 
+  await check('a start asked for with the network switched off is answered at once that it is, and so is a restart, which stops the daemon first: no daemon is started; a config that cannot be read is not the network off', async () => {
+    const m = bench.machine('offstart', { env: { DN_CONFIG_POLL_MS: '3600000' } });
+    const off = { ok: false, daemonRunning: false, pid: null, error: 'the network is switched off in Diplomat\'s settings: no daemon was started' };
+    const good = fs.readFileSync(m.configPath, 'utf8');
+    m.setConfig({ networkEnabled: false });
+    const from = Date.now();
+    assert.deepEqual([await m.install('--start-daemon'), await m.install('--restart-daemon'), fs.existsSync(m.base)], [off, off, false]);
+    assert.ok(Date.now() - from < 45000, `answered after ${Date.now() - from} ms`);
+
+    // Half a file, as a start finds it in the middle of a rewrite: that says nothing.
+    fs.writeFileSync(m.configPath, good.slice(0, 20));
+    const started = await m.install('--start-daemon');
+    try {
+      assert.deepEqual([started.ok, started.daemonRunning, started.error], [true, true, undefined]);
+      // The daemon reads the setting as it starts and not again: the restart finds it off.
+      fs.writeFileSync(m.configPath, good);
+      m.setConfig({ networkEnabled: 0 });
+      assert.deepEqual(await m.install('--restart-daemon'), off);
+    } finally {
+      if (started.pid) { try { process.kill(started.pid, 'SIGKILL'); } catch {} }
+    }
+  });
+
   await check('a links.json that holds no list of pools is one Diplomat has yet to post: the daemon starts with no pool linked', async () => {
     const m = bench.machine('nolist');
     fs.mkdirSync(m.base, { recursive: true });
@@ -195,28 +218,41 @@ try {
     await m.kill();
   });
 
-  await check('a daemon says at its start which of a test\'s settings it was given, which tools were named to it by hand, and which setting asked for no bound where one always holds, and shows a loop transport as one; given none, it says nothing', async () => {
-    const m = bench.machine('knobs', { env: { DN_CONTAINER_PIDS: '0', DN_JOB_IDLE_MS: '0' } });
+  await check('a daemon says at its start, and lists in its snapshot, what it was given that only a test sets - a figure of the protocol off its default among them, and no setting of the machine\'s own; it says which tools were named to it by hand and which setting asked for no bound where one always holds, and shows a loop transport as one; given none, it says nothing', async () => {
+    const m = bench.machine('knobs', { env: {
+      DN_CONTAINER_PIDS: '0', DN_JOB_IDLE_MS: '0', DN_CONTAINER_MEMORY: '0', DN_CONTAINER_CPUS: '0',
+      // Figures the protocol fixes: two off their defaults, one at its default, one that is no number.
+      DN_LEASE_SECS: '60', DN_ADMIT_TTL_MS: '99999999999', DN_GRANT_TTL_SECS: '120', DN_LEASE_GRACE_SECS: 'none',
+    } });
     m.env.DN_TEST_FAULTS = path.join(m.home, 'faults');
     await m.start();
     const unbounded = (text) => text.split('\n').filter((line) => line.includes('would leave no bound')).map((line) => line.replace(/^\[[^\]]+\] /, ''));
-    assert.deepEqual(unbounded(m.log()), ['DN_CONTAINER_PIDS', 'DN_JOB_IDLE_MS'].map((name) => `${name}=0 would leave no bound where one always holds: the default is used`));
+    assert.deepEqual(unbounded(m.log()).sort(), ['DN_CONTAINER_CPUS', 'DN_CONTAINER_MEMORY', 'DN_CONTAINER_PIDS', 'DN_JOB_IDLE_MS'].map((name) => `${name}=0 would leave no bound where one always holds: the default is used`));
     const said = (text) => text.split('\n').filter((line) => line.includes('which only a test does')).map((line) => line.replace(/^\[[^\]]+\] /, ''));
     const knob = (name) => `${name}=${m.env[name]} is set, which only a test does: this daemon is not one to run on the network`;
-    assert.deepEqual(said(m.log()), ['DN_FORGE_ORIGINS', 'DN_POW_MEMBER_BASE', 'DN_POW_STRANGER_BASE', 'DN_TEST_FAULTS', 'DN_TRANSPORT'].map(knob));
-    const tools = m.log().split('\n').filter((line) => /\] (docker|gh|glab|git) is /.test(line)).map((line) => line.replace(/^\[[^\]]+\] /, '').replace(/^git is \S+$/, 'git is found'));
-    assert.deepEqual(tools, ['docker', 'git', 'gh', 'glab'].map((tool) => (tool === 'git' ? 'git is found' : `${tool} is ${m.env[`DN_${tool.toUpperCase()}`]}, which DN_${tool.toUpperCase()} names`)));
-    const { transport } = await until('its transport', async () => { const now = await m.state(); return now.transport.state === 'ready' ? now : null; });
+    // What the bench gives every machine to be quick, and what this one was given: of the
+    // settings of this machine's own (DN_CONFIG_POLL_MS, DN_RECONCILE_MS, ...) none.
+    const tests = [
+      'DN_ADMIT_TTL_MS', 'DN_FORGE_ORIGINS', 'DN_LEASE_SECS', 'DN_PEER_BACKOFF_MAX_MS', 'DN_PEER_BACKOFF_MS', 'DN_POW_MEMBER_BASE', 'DN_POW_STRANGER_BASE',
+      'DN_PROBE_TIMEOUT_MS', 'DN_RANK_DELAY_MS', 'DN_REQUEST_TIMEOUT_MS', 'DN_RETRY_MS', 'DN_ROUND_TIMEOUT_MS', 'DN_SWITCH_OFF_WAIT_MS', 'DN_SYNC_INTERVAL_MS',
+      'DN_TEST_FAULTS', 'DN_TICK_MS', 'DN_TRANSPORT',
+    ];
+    assert.deepEqual(said(m.log()), tests.map(knob));
+    const named = ['docker', 'git', 'gh', 'glab', ...(process.platform === 'darwin' ? ['security'] : [])];
+    const tools = m.log().split('\n').filter((line) => /\] (docker|gh|glab|git|security) is /.test(line)).map((line) => line.replace(/^\[[^\]]+\] /, '').replace(/^git is \S+$/, 'git is found'));
+    assert.deepEqual(tools, named.map((tool) => (tool === 'git' ? 'git is found' : `${tool} is ${m.env[`DN_${tool.toUpperCase()}`]}, which DN_${tool.toUpperCase()} names`)));
+    const { transport, daemon } = await until('its transport', async () => { const now = await m.state(); return now.transport.state === 'ready' ? now : null; });
     assert.match(transport.detail, /^loop \(test transport\): 127\.0\.0\.1:\d+$/);
+    assert.deepEqual(daemon.testSettings, tests.map((name) => `${name}=${m.env[name]}`));
     await m.kill();
 
     // As Diplomat starts it: over Tor, with the forge and the proof of work as they are.
     const plain = bench.machine('plain', { transport: 'tor', timing: 'default' });
     delete plain.env.DN_FORGE_ORIGINS;
     await plain.start();
-    const { transport: tor } = await until('its transport', async () => { const now = await plain.state(); return now.transport.state === 'ready' ? now : null; });
+    const { transport: tor, daemon: asRun } = await until('its transport', async () => { const now = await plain.state(); return now.transport.state === 'ready' ? now : null; });
     assert.doesNotMatch(tor.detail, /test/);
-    assert.deepEqual([said(plain.log()), unbounded(plain.log())], [[], []]);
+    assert.deepEqual([said(plain.log()), unbounded(plain.log()), asRun.testSettings], [[], [], []]);
     await plain.kill();
   });
 

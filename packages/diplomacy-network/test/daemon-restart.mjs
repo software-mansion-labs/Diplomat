@@ -223,6 +223,116 @@ try {
     await Promise.all([a.kill(), b.kill()]);
   });
 
+  const jobsOf = (m) => { try { return JSON.parse(fs.readFileSync(path.join(m.base, 'jobs.json'), 'utf8')).jobs; } catch { return {}; } };
+  const own = async (m, item, prompt) => (await m.ok('/offer', { pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt, now: true })).taskId;
+  const asks = (m, runId) => m.agent(runId).steps.filter((step) => ['model', 'api'].includes(step.verb)).map((step) => [step.verb, step.status]);
+
+  await check('a job left running is taken up while the image the next jobs are started in is still being built: the model and the forge answer it, and what it spends goes on being kept', async () => {
+    const m = await bench.machine('img', { env: { DN_JOBS_WRITE_MS: '100' } }).start();
+    await m.linked();
+    const taskId = await own(m, 'pr-1', 'wait go\nmodel\napi GET /repos/acme/widgets/pulls/1\nwait end\nsay built meanwhile');
+    const run = await waiting(m, taskId, 'go');
+    const pid = m.agent(run.runId).pid;
+    assert.deepEqual(await m.stop(), { code: 0, signal: null });
+    assert.equal(jobsOf(m)[run.runId].spent.bytes, 0);
+
+    // As after an update that changed image/: the image is another, and is built first.
+    m.env.DN_IMAGE_REPO = 'dn-test-agent-next';
+    fs.writeFileSync(path.join(m.dockerDir, 'hold-build'), '');
+    await m.start();
+    await until('the image being built', async () => (await m.state()).docker.state === 'building');
+    await until('the job taken up', () => m.log().includes(`${run.runId} taken up in ${run.container}`), 60000);
+    m.release('go');
+    await waiting(m, taskId, 'end');
+    assert.deepEqual(asks(m, run.runId), [['model', 200], ['api', 200]]);
+    await until('what it spent, on disk', () => jobsOf(m)[run.runId]?.spent?.bytes > 0);
+    const { docker, pools } = await m.state();
+    assert.deepEqual([docker.state, pools[0].notTaking], ['building', 'docker is building: starting'], 'all of it with the build still under way');
+    fs.rmSync(path.join(m.dockerDir, 'hold-build'));
+    m.release('end');
+    await done(m, taskId);
+    assert.deepEqual([m.agent(run.runId).pid, (await offerOf(m, taskId)).outcome.summary], [pid, 'built meanwhile']);
+    await m.kill();
+  });
+
+  await check('a job whose run was ended while no daemon ran is stopped by the next daemon with nothing of the model or the forge given back to it; a job being stopped keeps on disk what it had spent', async () => {
+    // No look at the runs but the one a daemon takes as it starts.
+    const m = await bench.machine('ended', { env: { DN_RECONCILE_MS: '600000', DN_INSTALLER_ANSWER_MS: '2000', DN_JOBS_WRITE_MS: '100' } }).start();
+    await m.linked();
+    const taskId = await own(m, 'pr-1', 'wait go\nmodel\nwait never');
+    const run = await waiting(m, taskId, 'go');
+    const pid = m.agent(run.runId).pid;
+    await m.kill();
+    // Switched off with the engine down: the run is ended in the store, its job is not.
+    m.setConfig({ networkEnabled: false });
+    fs.writeFileSync(path.join(m.dockerDir, 'down'), '');
+    const off = await m.install('--stop-daemon');
+    assert.deepEqual([off.ok, off.ended, alive(pid), Object.keys(jobsOf(m))], [false, { offers: 1, runs: 1 }, true, [run.runId]]);
+    fs.rmSync(path.join(m.dockerDir, 'down'));
+    m.setConfig({ networkEnabled: true });
+    // The engine is slow to stop it: what the job asks meanwhile is answered as it stands.
+    fs.writeFileSync(path.join(m.dockerDir, 'hold-exec-stop'), '');
+    await m.start();
+    const stopping = `stopping ${run.runId}: no run of this host stands behind it`;
+    await until('the job looked at', () => m.log().includes(stopping) || m.log().includes(`${run.runId} taken up`));
+    m.release('go');
+    await until('the job to ask the model', () => asks(m, run.runId).length > 0);
+    assert.deepEqual([m.log().includes(stopping), m.log().includes(`${run.runId} taken up`), asks(m, run.runId)], [true, false, [['model', 0]]]);
+    fs.rmSync(path.join(m.dockerDir, 'hold-exec-stop'));
+    await until('the job gone', () => !alive(pid));
+    await until('the job off the list', () => Object.keys(jobsOf(m)).length === 0);
+
+    // A stop the engine is slow at: the job is closed to the model from its first
+    // moment, and what it had spent by then is what the file goes on saying.
+    const spending = await own(m, 'pr-2', 'model\nwait never');
+    const spender = await waiting(m, spending, 'never');
+    const spent = await until('what it spent, on disk', () => { const at = jobsOf(m)[spender.runId]?.spent; return at?.bytes > 0 ? at : null; });
+    fs.writeFileSync(path.join(m.dockerDir, 'hold-exec-stop'), '');
+    await m.ok('/stop-run', { runId: spender.runId });
+    // The file is written anew for the job that comes.
+    const next = await waiting(m, await own(m, 'pr-3', 'wait never'), 'never');
+    assert.deepEqual([Object.keys(jobsOf(m)).sort(), jobsOf(m)[spender.runId].spent], [[spender.runId, next.runId].sort(), spent]);
+    fs.rmSync(path.join(m.dockerDir, 'hold-exec-stop'));
+    await m.kill();
+  });
+
+  await check('an engine that does not answer the daemon that starts: the job left there is taken up once it does, and after the wait for it the job is given back at no attempt and stopped when the engine is back', async () => {
+    const m = await bench.machine('eng').start();
+    await m.linked();
+    const taskId = await own(m, 'pr-1', 'wait go\nsay waited for');
+    const run = await waiting(m, taskId, 'go');
+    const pid = m.agent(run.runId).pid;
+    assert.deepEqual(await m.stop(), { code: 0, signal: null });
+    const looks = m.docker('version').length;
+    fs.writeFileSync(path.join(m.dockerDir, 'down'), '');
+    await m.start();
+    await until('the engine asked, twice', () => m.docker('version').length >= looks + 2);
+    assert.deepEqual([(await runOf(m, taskId)).state, m.log().includes(`${run.runId} taken up`), alive(pid)], ['running', false, true]);
+    fs.rmSync(path.join(m.dockerDir, 'down'));
+    await until('the job taken up', () => m.log().includes(`${run.runId} taken up in ${run.container}`));
+    m.release('go');
+    await done(m, taskId);
+    assert.deepEqual([m.agent(run.runId).pid, (await offerOf(m, taskId)).outcome.summary], [pid, 'waited for']);
+
+    const second = await own(m, 'pr-2', 'wait never');
+    const left = await waiting(m, second, 'never');
+    const leftPid = m.agent(left.runId).pid;
+    assert.deepEqual(await m.stop(), { code: 0, signal: null });
+    const group = jobsOf(m)[left.runId].pid;
+    fs.writeFileSync(path.join(m.dockerDir, 'down'), '');
+    m.env.DN_ENGINE_WAIT_MS = '1000';
+    await m.start();
+    const why = 'the docker engine did not answer for 1 s after this daemon started, and nothing can be said of the job in it';
+    await until('the job given back', () => m.log().includes(`giving ${left.runId} back: ${why}`), 60000);
+    const offer = await until('its task back in the pool', async () => { const at = await offerOf(m, second); return at.state === 'pooled' ? at : null; });
+    assert.deepEqual([(await runOf(m, second)).state, offer.attempt, alive(leftPid), Object.keys(jobsOf(m))], ['stopped', 1, true, []]);
+    fs.rmSync(path.join(m.dockerDir, 'down'));
+    await until('the job found in its container and stopped', () => m.log().includes(`stopping ${left.runId} in ${left.container}: this daemon holds no record of the job`));
+    if (PROC) await until('everything of the job gone', () => !alive(leftPid));
+    else end(group);
+    await m.kill();
+  });
+
   console.log(`\nall ${passed()} checks passed`);
 } finally {
   await bench.close();
