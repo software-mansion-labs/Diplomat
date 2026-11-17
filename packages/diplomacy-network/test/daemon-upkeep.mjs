@@ -178,6 +178,24 @@ try {
     age(mirror, 25);
     await until('the mirror removed', () => !exists(mirror));
     assert.deepEqual(kept(going), [true, true, true], 'a run that ended a moment ago is kept');
+
+    // A directory this user cannot remove, as root's files in a job's records are on an
+    // engine that runs containers as root: the engine is asked to, and while it stands
+    // the run is not forgotten.
+    const locked = path.join(parts(going)[1], 'locked');
+    fs.mkdirSync(locked);
+    fs.writeFileSync(path.join(locked, 'file'), '');
+    fs.chmodSync(locked, 0o500);
+    const asked = () => up.docker('run').filter((call) => call.includes('find') && call.includes(`/r/${going.runId}`) && call.includes('-delete')).length;
+    for (const part of [parts(going)[0], parts(going)[2]]) age(part, 25);
+    try {
+      await until('the engine asked to remove it, twice', () => asked() >= 2);
+      assert.deepEqual(kept(going), [true, true, true], 'met again at the next look');
+    } finally {
+      // Whatever came of it, the bench can remove its own directory.
+      fs.chmodSync(locked, 0o700);
+    }
+    await until('the run forgotten', () => kept(going).every((there) => !there));
     await up.kill();
   });
 

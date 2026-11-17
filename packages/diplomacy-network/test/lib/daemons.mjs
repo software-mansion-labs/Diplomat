@@ -141,8 +141,9 @@ export async function createBench() {
 
   /// A machine, not yet started. `docker` is 'fake', 'none' (no docker binary) or 'real';
   /// `transport` is 'loop', 'tor' (the stand-in tor) or 'real-tor'; `model` is 'fake' (a
-  /// key that is no key, and the stand-in provider in place of the real one) or 'real'
-  /// (this machine's own Claude login, for which the daemon keeps the real home); `timing` is 'fast' or 'default' (the network's own
+  /// key that is no key and, under the stand-in docker, the stand-in provider in place of
+  /// the real one) or 'real' (this machine's own Claude login, for which the daemon keeps
+  /// the real home); `timing` is 'fast' or 'default' (the network's own
   /// constants); `env` is put over everything else the daemon is given.
   function machine(name, { docker = 'fake', transport = 'loop', model: provider = 'fake', timing = 'fast', env: extra = {} } = {}) {
     const home = path.join(root, name);
@@ -180,8 +181,10 @@ export async function createBench() {
       // is no key.
       ...(provider === 'real' ? { DN_MODEL_TOKEN_PATH: path.join(home, 'model-token') } : {
         DN_SECURITY: script('security', 'exit 44'), DN_CLAUDE: script('claude-cli', 'exit 1'), ANTHROPIC_API_KEY: 'sk-ant-api03-stand-in',
-        ...model.env,
       }),
+      // The stand-in agent's requests to the model provider go to the stand-in one; the
+      // real agent's, in a real container, go where they always do.
+      ...(provider === 'real' || docker === 'real' ? {} : model.env),
       DN_TRANSPORT: transport === 'loop' ? 'loop' : 'tor', DN_LOOP_DIR: loopDir,
       ...(transport === 'tor' ? { DN_TOR: FAKE_TOR, FAKE_TOR_NET: torNet } : {}),
       // The real docker CLI finds its plugins and its engine through its own config

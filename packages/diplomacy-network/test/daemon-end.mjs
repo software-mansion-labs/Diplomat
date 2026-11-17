@@ -282,6 +282,8 @@ try {
     assert.deepEqual(await a.exit, { code: 0, signal: null });
     assert.deepEqual([a.docker('run'), a.agent(early.runId), world(a)], [[], null, [0, 0, 0]]);
     assert.ok(!a.log().includes('] taking no job of '), 'a machine that is going holds nothing against the pool');
+    const stopping = (runId) => `] giving ${runId} back: this machine could not start it: this machine is stopping\n`;
+    assert.ok(a.log().includes(stopping(early.runId)), 'and the start is no attempt of the job\'s');
 
     // Its start waits for the engine to make its container.
     const b = await bench.machine('mid2', { env: { DN_SWITCH_OFF_WAIT_MS: '60000' } }).start();
@@ -296,6 +298,7 @@ try {
     fs.rmSync(hold);
     assert.deepEqual(await b.exit, { code: 0, signal: null });
     assert.deepEqual([jobStarts(b), b.agent(late.runId), world(b)], [[], null, [0, 0, 0]]);
+    assert.ok(b.log().includes(stopping(late.runId)));
   });
 
   await check('a start that outlasts the switch-off is said to be left, with a failure: a container the engine makes after the daemon went is removed by the installer', async () => {
