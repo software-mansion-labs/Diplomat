@@ -34,8 +34,9 @@ export function identityFromSeed(seed) {
   return { pk: b64u(pk), seed: b64u(bytes) };
 }
 
-// The points of small order, as bytes with the sign bit cleared: a signature with R the
-// identity and S zero verifies under such a key for messages nobody signed.
+// The points of small order, as bytes with the sign bit cleared. Where the crypto library
+// takes one for a key, a signature with R the identity and S zero verifies under it for
+// messages nobody signed.
 const SMALL_ORDER = [
   '00'.repeat(32),
   `01${'00'.repeat(31)}`,
