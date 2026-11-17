@@ -48,7 +48,8 @@ export async function switchOffStored({ store, log = () => {}, outcomeOf = () =>
   }
   if (reported > 0) {
     for (const step of due.splice(0)) step();
-    // What the step began is told within this host, which takes no timer and no socket.
+    // What the step began is told within this host over promises alone: a turn of the
+    // loop sees it through, however many of them the switch-off itself waits for.
     await new Promise(setImmediate);
   }
   await node.switchOff();

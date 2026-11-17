@@ -90,7 +90,7 @@ function every(ms, fn) {
 
 const TOOLS = {
   tor: TOR_BIN, docker: DOCKER_BIN, git: GIT_BIN, gh: GH_BIN, glab: GLAB_BIN, openssl: OPENSSL_BIN, claude: CLAUDE_BIN,
-  // The Keychain is asked for the model credential, where there is one.
+  // The Keychain, which holds the model credential.
   ...(process.platform === 'darwin' ? { security: SECURITY_BIN } : {}),
 };
 const located = new Map(); // a tool -> where it was last found, or null

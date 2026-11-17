@@ -162,6 +162,8 @@ try {
     assert.deepEqual(await m.install('--stop-daemon'), { ...gone, ended: { offers: 1, runs: 2 } });
     assert.match(m.log(), /\] the network is switched off and no daemon runs: 1 offer\(s\) cancelled, 1 run\(s\) stopped and given back, 1 run\(s\) ended as the job that had finished left it\n$/);
     assert.equal(alive(m.agent(going.runId).pid), false);
+    // All of it is on disk by then: the run that was told owes nothing more.
+    assert.equal(JSON.parse(fs.readFileSync(path.join(m.base, 'runs.json'), 'utf8')).runs[run.runId].end, 'over');
     m.setConfig({ networkEnabled: true });
     await m.start();
     const back = await m.state();
