@@ -611,10 +611,10 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
   // Otherwise, and where this user may not (root's files in a bind mount on Linux),
   // through the probe, where a link leads nowhere but into the probe's read-only root.
   // The probe mounts the records' directory, which no job can replace, never a path in it.
-  async function wipe(name, runId, alone) {
+  async function wipe(name, runId, alone, image = state.image) {
     const target = path.join(runsDirOf(name), runId);
     const own = () => fs.promises.rm(target, { recursive: true, force: true });
-    const engine = () => probe(name, state.image, ['--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '-v', `${runsDirOf(name)}:/r`],
+    const engine = () => probe(name, image, ['--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '-v', `${runsDirOf(name)}:/r`],
       ['find', path.posix.join('/r', runId), ...(runId ? [] : ['-mindepth', '1']), '-delete']);
     await (alone ? own().catch(async () => { await engine(); await own(); }) : engine())
       .catch((e) => log('docker', `the run records ${target} could not be removed: ${e.message}`));
@@ -683,6 +683,17 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     return gone;
   }
 
+  /// Removes the run records under every container's name, for a daemon that is
+  /// switched off, once `removeAll` left no container: what this user may not remove
+  /// goes through the probe, on the image jobs are started in or, with none, on any
+  /// this daemon built. What could not be removed is still there afterwards.
+  async function eraseAll() {
+    const names = jobContainers(await fs.promises.readdir(path.join(RUNS_DIR, '.containers')).catch(() => []));
+    const built = async () => lines((await docker(['image', 'ls', ...OWN, '--format', '{{.Repository}}:{{.Tag}}'])).stdout).find((i) => i.startsWith(`${IMAGE_REPO}:`)) ?? '';
+    const image = state.state === 'ready' ? state.image : await built();
+    await Promise.all(names.map((name) => serial(name, () => wipe(name, '', true, image))));
+  }
+
   return {
     dockerState: () => state,
     ensureImage,
@@ -696,6 +707,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     erase,
     discard,
     removeAll,
+    eraseAll,
     list: () => [...known.values()].map((e) => ({ name: e.name, image: e.image, jobs: [...e.jobs] })),
   };
 }
