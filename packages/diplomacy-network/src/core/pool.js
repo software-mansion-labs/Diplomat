@@ -262,6 +262,12 @@ export class Pool {
     return this.#at(now).accepted.get(pk);
   }
 
+  /// The member whose seats `pk` sits among at `now`: the one that seated it, for a key
+  /// two vouchers from the first member, and `pk` itself for any other.
+  branch(pk, now) {
+    return this.depth(pk, now) === LIMITS.depth ? this.get(memberKey(pk)).voucher.by : pk;
+  }
+
   /// Does this host take requests from `pk` at `now`: a key with a seat whose member
   /// record does not say it left?
   accepts(pk, now) {

@@ -225,7 +225,7 @@ await check('a run that never gets its key gives its claim back before its first
   await w.run(LEASE_SECS - 120);
   assert.deepEqual([w.claim(req, taskId).state, w.runOf(exe, taskId).state], ['held', 'preparing']);
   assert.ok(w.net.count({ from: 'exe', to: 'req', kind: 'key', since: claimedAt }) > 200, 'asked every half minute, whatever the last answer was');
-  assert.ok(w.net.count({ from: 'req', to: 'exe', kind: 'ping', since: claimedAt }) >= 1, 'pinged, and not extended: no job is going');
+  assert.equal(w.net.count({ from: 'req', to: 'exe', kind: 'ping', since: claimedAt }), 0, 'asked for no lease: it has no key of this host\'s');
   await w.run(130);
   const claim = w.claim(req, taskId);
   assert.deepEqual([claim.state, claim.seq, claim.leaseUntil - claimedAt], ['released', 1, LEASE_SECS], 'given back, never extended');

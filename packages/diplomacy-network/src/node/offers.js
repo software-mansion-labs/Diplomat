@@ -10,7 +10,8 @@ import { SeqTracker, buildCapability, capabilityExp, checkAct, checkDone, specDi
 import { buildPing, heldUntil, isActive, pingDue } from '../core/lease.js';
 import { LIMITS, backers, backing, buildTaskId, isBytes, isObject, offerRecord, parseTaskId, shaped } from '../core/records.js';
 import {
-  CLOCK_SKEW_SECS, OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETAKE_WAIT_MS, RETRY_MS,
+  CLOCK_SKEW_SECS, KEYLESS_WAIT_MAX_MS, KEYLESS_WAIT_MS, LEASE_SECS, OFFER_ATTEMPTS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, RETAKE_WAIT_MS,
+  RETRY_MS,
 } from '../paths.js';
 import { claimKey, hoursOf, offerKey } from './gossip.js';
 
@@ -224,11 +225,22 @@ export function createOffers(host) {
     O.rests = { ...O.rests, [watched.executor]: now + RETAKE_WAIT_MS / 1000 };
   }
 
+  // A claim lapsed that held the offer for less than a lease - dated back, or joined by
+  // this host's grant late in its lease - or that ended with its first lease and never
+  // had this host's key: no run was given its time, and the offer lost no attempt. The wait is on
+  // every key that sits where the executor does, and doubles each time: a member with
+  // keys of its own in its seats takes no more turns than one key.
+  function sat(P, O, executor, now) {
+    const branch = P.pool.branch(executor, now);
+    const times = (O.sat?.[branch]?.times ?? 0) + 1;
+    O.sat = { ...O.sat, [branch]: { times, until: now + Math.min(KEYLESS_WAIT_MAX_MS, KEYLESS_WAIT_MS * 2 ** (times - 1)) / 1000 } };
+  }
+
   /// This host gives its open offer of `taskId` to a claim of `executor`: how many times
   /// it has given that offer away with this one, the number that orders the claims it
   /// backs. Null when it has no such offer open, or will not give it: what it holds of
-  /// the pool is not up to date, the job was done elsewhere, or a claim of that executor
-  /// let go of the offer a moment ago. The count is on disk before anyone sees it.
+  /// the pool is not up to date, the job was done elsewhere, a claim of that executor let
+  /// go of the offer a moment ago, or one from among its seats sat on the offer unkeyed. The count is on disk before anyone sees it.
   function nextGen(taskId, executor) {
     const O = offers[taskId];
     if (!O || !OPEN.includes(O.state)) return null;
@@ -238,7 +250,7 @@ export function createOffers(host) {
     const now = host.now();
     // The claim may have let go since this host last looked at its offers.
     rest(O, holder(P, O), now);
-    if (now < O.rests?.[executor]) return null;
+    if (now < O.rests?.[executor] || now < O.sat?.[P.pool.branch(executor, now)]?.until) return null;
     O.gen += 1;
     save();
     return O.gen;
@@ -405,14 +417,25 @@ export function createOffers(host) {
       const same = held?.round === watched.round;
       // The hold ran out with no word of how the run ended: the lease lapsed, or the run
       // outlived the hours this host gave it.
-      if (!O.reported.includes(watched.round)) {
+      if (O.reported.includes(watched.round)) {
+        // The run said how it ended.
+      } else if (watched.lapses - watched.since < LEASE_SECS || !(watched.extended || watched.keyed)) {
+        sat(P, O, watched.executor, now);
+      } else {
         const going = same && isActive(held, now);
         fail(P, O, watched.round, going ? 'not finished in the hours this machine gives it' : 'the machine running it stopped answering');
         if (!OPEN.includes(O.state)) return undefined;
       }
     }
     if (claim) {
-      O.watch = { round: claim.round, executor: claim.executor, lapses: heldUntil(claim, backing(claim, host.self)) };
+      // `since` is when this host first saw the claim hold its offer; a claim past its
+      // first lease was `extended` for a host that backs it; `keyed` is whether it has
+      // this host's key, noted here because a later claim's may replace the key before
+      // this host looks again.
+      O.watch = {
+        round: claim.round, executor: claim.executor, since: watched?.round === claim.round ? watched.since : now,
+        extended: claim.seq > 0, keyed: issued[taskId]?.round === claim.round, lapses: heldUntil(claim, backing(claim, host.self)),
+      };
       O.ran = claim.executor;
     }
     // A claim whose run said how it ended holds the offer until its executor ends it,
@@ -428,7 +451,8 @@ export function createOffers(host) {
     const K = issued[taskId];
     if (K && claim?.round === K.round && claim.executor === K.capability.executor) refresh(K, claim);
     else revoke(taskId);
-    if (claim && pingDue(claim, backing(claim, host.self), now) && O.pinged + RETRY_MS / 1000 <= now) {
+    // This host asks for the next lease of a run that has its key, and of no other.
+    if (claim && issued[taskId]?.round === claim.round && pingDue(claim, backing(claim, host.self), now) && O.pinged + RETRY_MS / 1000 <= now) {
       O.pinged = now;
       ping(P, O, claim).catch((err) => host.log(`a ping failed: ${err?.stack ?? err}`));
     }

@@ -516,7 +516,7 @@ member alone after a request that went unanswered, none to a member that has not
 answered the host for 3 minutes, and what is still not acknowledged after the third is
 left to the `sync`. A host that leaves a pool signs its member record
 `left`, ends its claims, cancels its offers, and pushes all of it once. The locks it
-granted bind it through their `exp` all the same, should it join again before. It
+granted bind it for their 120 s all the same, should it join again before. It
 keeps the `left` record, and the keys of the members it left, for as long as it is not a
 member again: one of those keys that asks it about the pool has not heard, and is pushed
 that record, at most once in 10 minutes. Nobody else is sent anything. A host dials,
@@ -551,9 +551,20 @@ done by the report of a run the host gave it to; done by the record of a run of 
 job that sent it no report; or cancelled because its host was away for longer than an
 offer lasts (section 7 for the last two). An offer that a claim stops holding without a
 report is free again. That counts as a failed attempt when the hold ran out - the lease
-lapsed, or the claim outlived the offer's hours (section 8) - and counts for nothing
-when the executor ended its claim before that: its run did another host's job, was
-stopped on its machine, or never began for a fault of that machine's own.
+lapsed, or the claim outlived the offer's hours (section 8) - on a claim that had held
+the offer for 2 hours at the least since the host first saw it do so, and that either
+had the host's key or was past its first lease. It counts for nothing when the executor
+ended its claim before that: its run did another host's job, was stopped on its machine,
+or never began for a fault of that machine's own.
+
+A hold that ran out in any other way was no attempt at the job: the claim was dated
+back so as to lapse as it landed, or its executor never asked for the key and nobody
+extended its lease. The offer loses nothing by it. Its host then gives it to no claim of
+that executor for 2 hours, twice as long each time under the same offer, up to 24 hours;
+nor to a claim of any key that sits where that executor does - for a key two vouchers
+from the first member, the member that seated it and every key in that member's seats;
+for a member one voucher from the first, itself and the keys in its own seats (section
+5). So the keys one member seats take no more turns at this than one key.
 
 Giving a claim back is no way to keep an offer. For 60 s after a claim let go of an
 offer before its hold ran out, the offer's host gives that offer to no claim of the same
@@ -673,8 +684,8 @@ A member answers a lock with:
   of the task (`unavailable`), or when it has already granted or is itself claiming the
   task for another executor (`locked`, with that executor as `holder`);
 - `{ grant }` otherwise: `{ pool, taskId, executor, round, hash, by, exp, offer?, sig }`,
-  signed, with `exp = asOf + 120`. A granted lock binds the member through `exp` by its
-  own clock, or until an `unlock`, or until it holds the claim of that round with its
+  signed, with `exp = asOf + 120`. A granted lock binds the member for 120 s from its
+  answer, by its own clock, or until an `unlock`, or until it holds the claim of that round with its
   grant in it. A host's own round binds it the same way, from its start until it
   commits, stands down or times out.
 
@@ -990,10 +1001,19 @@ Nothing in a record hides any of this.
   machine with no device to give from one that has one. Any private preference shows
   in who takes what.
 - **A member can take an offer and sit on it.** A claim made by the rules holds the
-  offers it was given for one lease and its grace, 2 h 10 min, and for as long after as
-  its executor answers the pings, up to each offer's hours; a job's own executor answers
-  only for a job that is going, and nothing shows another host whether it is. Each lapse
-  is a failed attempt of the offer, and the third cancels it. A member that gives its
+  offers it was given for one lease and its grace, 2 h 10 min. With the key of an
+  offer's host - or with a second host of its own that offers the same job, backs the
+  claim and extends its lease - it holds that offer for as long after as its executor
+  answers the pings,
+  up to the offer's hours; a job's own executor answers only for a job that is going,
+  and nothing shows another host whether it is. Each such lapse is a failed attempt of
+  the offer, and the third ends it `failed`: none comes sooner than 2 hours after the
+  host saw the claim, so three take 6 hours at the least. Without the key, or dated back
+  to lapse sooner, a claim costs the offer no attempt, and the host keeps the offer from
+  that member and the keys seated with it for 2 hours, then 4, up to 24: the offer is
+  held for 2 h 10 min at the most and is then free for 2 hours at the least. Each member
+  one voucher from the first has such a turn of its own, and the first member one for
+  itself and for each key it seats. A member that gives its
   claim back before the lapse costs the offer no attempt and is given the offer again
   60 s later (section 6): where no other member goes for the task in that minute, or
   where a second member takes it then and does the same, the offer is kept from being
@@ -1002,10 +1022,11 @@ Nothing in a record hides any of this.
 - **A member that answers and does not grant** stops every round it is asked in: a round
   needs the grant of every present member, and stands down after 180 s without one.
 - **A lock costs one request.** A member can ask every member for a lock on a task and
-  commit nothing. Each lock binds for 120 s, and while it does that member grants no
+  commit nothing. Each lock binds for 120 s of its giver's clock, and while it does that member grants no
   other executor one. Asking again keeps the task locked, at the price of the requests
   (section 3).
-- **A grant is good for 120 s.** A claim signed inside that time and shown later is
+- **A grant is good for 120 s of its claimant's clock**, which the giver takes from the
+  claimant within 300 s of its own. A claim signed inside that time and shown later is
   taken in when it surfaces. It holds an offer only when no claim its host gave that
   offer to since is on record, and no longer than its lease, which began when it was
   signed.
@@ -1054,7 +1075,8 @@ Nothing in a record hides any of this.
   than `min(leaseUntil, claimedAt + h * 3600) + 600`, `h` the hours of that offer: with
   its lease and 10 minutes of grace, and never past the offer's own hours.
 - From 10 minutes before `leaseUntil` to 10 minutes after it, a host whose offer the
-  claim holds sends the executor a `ping`, again every 30 s until it is answered:
+  claim holds, and that gave the executor its key for that claim, sends the executor a
+  `ping`, again every 30 s until it is answered:
   `{ pool, taskId, executor, round, n, by, ts, sig }` with `n` the `seq` it asks for, one
   more than the claim's. A host sends none once `leaseUntil` has reached
   `claimedAt + h * 3600` for its own offer: that offer has no lease left to give. The

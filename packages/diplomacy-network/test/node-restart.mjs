@@ -28,7 +28,7 @@ await check('a host that granted a lock still holds it after a restart: nobody e
   assert.equal(req.node.snapshot().offers[0].taskId, taskId, 'its offers are its own again');
   assert.deepEqual((await lock(b, 'BBBBBBBBBBA')).body, { challenge: { reason: 'locked', holder: a.pk } });
   assert.deepEqual((await lock(a, 'AAAAAAAAAAA')).body, granted.body, 'asked again, the holder gets the very same grant');
-  await w.run(GRANT_TTL_SECS + 2 - (w.net.now() - asOf));
+  await w.run(GRANT_TTL_SECS + 2);
   const later = w.net.now();
   const free = await w.request(b, req, 'lock', { taskId, round: 'BBBBBBBBBBA', asOf: later, hash: w.view(b).hash });
   assert.equal(free.body.grant.executor, b.pk, 'once the grant has run out the task can be granted again');
