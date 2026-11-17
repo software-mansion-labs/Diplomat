@@ -139,6 +139,8 @@ NOT_ANSWERING = "the Diplomacy Network daemon is not answering"
 #: What a Stop says of a run the daemon no longer lists as going.
 RUN_ENDED = "That job's run on this machine has already ended."
 SWITCHED_OFF = "the Diplomacy Network is switched off"
+#: What a join by invite waits for, as the feed's line and the pool's card end.
+SEATED_LATER = "the machine that made the invite seats this one once it is reached"
 
 
 def send(route: str, body: dict | None = None, *,

@@ -60,9 +60,10 @@ away its offers are cancelled. A machine with jobs out has to stay awake.
   an **invite**: **Copy invite** on the pool's card, sent to the other operator by any means,
   pasted into **Join...** there. An invite is good for a day, and the machine that made it has
   to be reachable when it is used: it is the one that seats the newcomer. Until it has, the
-  feed says *Joining ...* and the pool's card shows this machine alone in it. A machine can seat
-  15 others, and so can each of those the first machine seated, which makes 241 machines the
-  most a pool holds.
+  pool's card says *Joining* and shows this machine alone in it. An invite that let this
+  machine in nowhere - its maker refused it, or it ran out before the maker answered - is said
+  on the card with the reason, until another is pasted. A machine can seat 15 others, and so
+  can each of those the first machine seated, which makes 241 machines the most a pool holds.
 - **Leaving.** **Leave** stops this machine taking the pool's jobs and offering to it. It stays
   left until **Rejoin**. After a month away the pool no longer knows the machine, and it needs
   an invite again.

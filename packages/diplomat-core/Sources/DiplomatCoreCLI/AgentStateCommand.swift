@@ -138,7 +138,8 @@ enum AgentStateCommand {
                       "reason": s.admit.reason],
             "pools": s.pools.map { p -> [String: Any] in
                 ["id": p.id, "path": p.path, "identity": p.identity, "hash": p.hash,
-                 "left": p.left, "notTaking": p.notTaking,
+                 "left": p.left, "joining": p.joining, "joinFailed": p.joinFailed,
+                 "notTaking": p.notTaking,
                  "members": p.members.map { m -> [String: Any] in
                      ["pk": m.pk, "self": m.isSelf, "maxAcceptedH": opt(m.maxAcceptedH),
                       "lastSeen": opt(m.lastSeen), "reachable": m.reachable]

@@ -531,6 +531,36 @@ def test_what_holds_this_machine_back_is_said_on_the_pools_card_and_the_jobs_row
     assert nv.pool_held(pool) == "" and nv.task_held("t405", pool, None) == ""
 
 
+def test_a_join_under_way_and_an_invite_that_came_to_nothing_are_said_on_the_pools_card(
+        screen):
+    from PySide6.QtWidgets import QLabel
+
+    from diplomat_app import networkview as nv
+
+    joining = "Joining: the machine that made the invite seats this one once it is reached"
+    ran_out = ("The last invite came to nothing: the invite ran out before the machine that "
+               "made it answered")
+    first, second = (texts(p) for p in screen(RICH).panels)
+    assert second.index(joining) == second.index("Members") - 2, "above what holds it back"
+    assert joining not in first
+    assert not [line for line in first + second if "came to nothing" in line]
+
+    first, second = (texts(p) for p in screen(UNSAVED).panels)
+    assert second.index(ran_out) == second.index("Members") - 2 and ran_out not in first
+    assert not [line for line in first + second if line.startswith("Joining:")]
+
+    view = screen(RICH)
+    pool = view.store.network_state.pools[0]
+    assert nv.pool_joining(pool) == "" and nv.pool_join_failed(pool) == ""
+    _with(view, pools=(dataclasses.replace(pool, joining=True, join_failed="no-seat"),))
+    refused = "The last invite came to nothing: no-seat"
+    shown = texts(view.panels[0])
+    assert shown[shown.index("Members") - 2:shown.index("Members")] == [joining, refused]
+    tints = {lb.text(): lb.styleSheet() for lb in view.panels[0].findChildren(QLabel)}
+    assert nv._ORANGE in tints[refused] and nv._ORANGE not in tints[joining], (
+        "a quiet line while it waits, a warning once it failed")
+
+
 def test_a_title_or_pool_id_from_elsewhere_is_drawn_as_it_is_and_takes_no_width(screen):
     from diplomat_app.widgets import ElidedLabel
 

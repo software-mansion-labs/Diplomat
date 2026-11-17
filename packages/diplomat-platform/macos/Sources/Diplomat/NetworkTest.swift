@@ -1037,6 +1037,15 @@ enum NetworkTest {
                 && takes.flatMap { NetworkText.taskHeld("t-taken", pool: $0, in: heldSnap) } == nil
                 && takes.flatMap { NetworkText.taskHeld("t-free", pool: $0, in: heldSnap) } == nil
                 && takes.flatMap { NetworkText.taskHeld("t-long", pool: $0, in: nil) } == nil)
+        let joinCards = NetworkSnapshot.parse(Data(json(snapshot(
+            more: [["id": "github.com/o/waits", "joining": true],
+                   ["id": "github.com/o/refused", "joinFailed": "no-seat"]])).utf8))?.pools ?? []
+        let waits = "Joining: the machine that made the invite seats this one once it is reached"
+        check("a pool whose invite waits for its maker says so on its card, and no other does",
+              joinCards.map(NetworkText.poolJoining) == [nil, waits, nil])
+        check("a pool whose last invite came to nothing says why on its card, and no other does",
+              joinCards.map(NetworkText.poolJoinFailed)
+                == [nil, nil, "The last invite came to nothing: no-seat"])
 
         // 21. The hours are kept inside the daemon's range.
         store.networkRequiredMinimumH = 5

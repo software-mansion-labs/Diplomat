@@ -389,6 +389,8 @@ struct NetworkPoolPanel: View {
                 note(NetworkText.leftNote)
                 leftActions
             } else {
+                if let joining = NetworkText.poolJoining(pool) { note(joining) }
+                if let failed = NetworkText.poolJoinFailed(pool) { note(failed, tint: .orange) }
                 if let held = NetworkText.poolHeld(pool) { note(held, tint: .orange) }
                 section("Members") {
                     if pool.members.isEmpty { note(NetworkText.noMembers) }

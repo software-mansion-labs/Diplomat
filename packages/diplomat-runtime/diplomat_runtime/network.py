@@ -457,6 +457,12 @@ class Pool:
     tasks: tuple[PoolTask, ...] = ()
     #: Whether this machine left the pool: it takes and offers nothing there.
     left: bool = False
+    #: Whether an invite pasted here waits for the machine that made it: this machine
+    #: is the pool's only member meanwhile.
+    joining: bool = False
+    #: Why the last invite let this machine in nowhere, in the daemon's words; "" for
+    #: none.
+    join_failed: str = ""
     #: Why this machine takes none of the pool's jobs, in the daemon's sentence; ""
     #: while it takes them.
     not_taking: str = ""
@@ -640,6 +646,7 @@ def _pool(p: dict) -> Pool:
     return Pool(
         id=p["id"], path=_text(p.get("path")), identity=_text(p.get("identity")),
         hash=_text(p.get("hash")), left=_flag(p.get("left")),
+        joining=_flag(p.get("joining")), join_failed=_text(p.get("joinFailed")),
         not_taking=local_times(_text(p.get("notTaking"))),
         members=tuple(
             Member(pk=m["pk"], is_self=_flag(m.get("self")),

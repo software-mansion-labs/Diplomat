@@ -1,17 +1,17 @@
 {
  "joining": {
-  "updatedAt": 1794910852,
+  "updatedAt": 1794914050,
   "daemon": {
-   "pid": 59711,
-   "startedAt": 1794910852
+   "pid": 64669,
+   "startedAt": 1794914050
   },
   "identity": {
-   "pk": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
-   "onion": "tbdi4jsamoetafblatviukzrd6gyiollozukgeslyzfhm7wk6pvz63qd.onion"
+   "pk": "ncnoXndKNGsyZU9DZSVSxy5ENEJET0sZuU7nN7YtK3Q",
+   "onion": "txe6qxtxji2gwmtfj5bwkjksy4xeinccirhuwgnzj3ttpnrnfn2pk3ad.onion"
   },
   "transport": {
    "state": "ready",
-   "detail": "loop (test transport): 127.0.0.1:61386"
+   "detail": "loop (test transport): 127.0.0.1:62973"
   },
   "docker": {
    "state": "down",
@@ -34,16 +34,18 @@
   "pools": [
    {
     "id": "github.com/acme/widgets",
-    "path": "/scratch/rb/w",
-    "identity": "rb",
-    "hash": "4HFSzixhWJ40cHHM_JNqXz4FIgn6tVgu0cyB9Ub_iCg",
+    "path": "/scratch/pb/w",
+    "identity": "pb",
+    "hash": "J-f6AlSYkJ2iipJ6MwEiufVSV7h_pX327IgNWf3Ty8k",
     "left": false,
+    "joining": true,
+    "joinFailed": "",
     "members": [
      {
-      "pk": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
+      "pk": "ncnoXndKNGsyZU9DZSVSxy5ENEJET0sZuU7nN7YtK3Q",
       "self": true,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910852,
+      "lastSeen": 1794914050,
       "reachable": true,
       "skew": false
      }
@@ -55,24 +57,82 @@
   "runs": [],
   "offers": []
  },
- "requester-pooled": {
-  "updatedAt": 1794910852,
+ "join-failed": {
+  "updatedAt": 1794914050,
   "daemon": {
-   "pid": 59710,
-   "startedAt": 1794910852
+   "pid": 64750,
+   "startedAt": 1794914050
   },
   "identity": {
-   "pk": "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI",
-   "onion": "ynkrkmwt2rottlz5jrdu6343ks73ez42ax7mgpofdikmcsgifmbjyeid.onion"
+   "pk": "Y-MS-O_LenIgRtaxijKKI9hxCEEqMpskECqnIxg5sqs",
+   "onion": "mprrf6hpzn5heicg22yyumukepmhcccbfizjwjaqfktsggbzwkvzusyd.onion"
   },
   "transport": {
    "state": "ready",
-   "detail": "loop (test transport): 127.0.0.1:61388"
+   "detail": "loop (test transport): 127.0.0.1:62977"
   },
   "docker": {
-   "state": "down",
-   "image": "",
-   "detail": "not checked yet"
+   "state": "ready",
+   "image": "dn-test-agent:2291c64f304e",
+   "detail": ""
+  },
+  "model": {
+   "state": "missing",
+   "detail": "not read yet"
+  },
+  "devices": {
+   "state": "off",
+   "detail": ""
+  },
+  "admit": {
+   "slots": 0,
+   "at": 0,
+   "reason": ""
+  },
+  "pools": [
+   {
+    "id": "github.com/acme/widgets",
+    "path": "/scratch/fb/w",
+    "identity": "fb",
+    "hash": "8CH2eBonPB39xw-VOSmb9B2vSK4ApC77kKrj56xkwr4",
+    "left": false,
+    "joining": false,
+    "joinFailed": "that invite is no longer good",
+    "members": [
+     {
+      "pk": "Y-MS-O_LenIgRtaxijKKI9hxCEEqMpskECqnIxg5sqs",
+      "self": true,
+      "maxAcceptedH": 12,
+      "lastSeen": 1794914050,
+      "reachable": true,
+      "skew": false
+     }
+    ],
+    "tasks": [],
+    "notTaking": "no credential for the model: not read yet"
+   }
+  ],
+  "runs": [],
+  "offers": []
+ },
+ "requester-pooled": {
+  "updatedAt": 1794914047,
+  "daemon": {
+   "pid": 64284,
+   "startedAt": 1794914047
+  },
+  "identity": {
+   "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
+   "onion": "i7in6hkeemdscthk6gy2buxnrpcsdsa5zwzle64ldxj5cd77lpsuafad.onion"
+  },
+  "transport": {
+   "state": "ready",
+   "detail": "loop (test transport): 127.0.0.1:62960"
+  },
+  "docker": {
+   "state": "ready",
+   "image": "dn-test-agent:2291c64f304e",
+   "detail": ""
   },
   "model": {
    "state": "missing",
@@ -92,23 +152,25 @@
     "id": "github.com/acme/widgets",
     "path": "/scratch/ra/w",
     "identity": "ra",
-    "hash": "aPwmfpEbl3Vk9TwwKB7BX71f5l5Hf0M34MRtOI1zVKY",
+    "hash": "Hr5yYrGFUnt5Z6rtjFFtDXtU4OXdUl8E-6CxGh6C11w",
     "left": false,
+    "joining": false,
+    "joinFailed": "",
     "members": [
      {
-      "pk": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
-      "self": false,
+      "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
+      "self": true,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910852,
-      "reachable": false,
+      "lastSeen": 1794914047,
+      "reachable": true,
       "skew": false
      },
      {
-      "pk": "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI",
-      "self": true,
+      "pk": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
+      "self": false,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910852,
-      "reachable": true,
+      "lastSeen": 1794914047,
+      "reachable": false,
       "skew": false
      }
     ],
@@ -123,7 +185,7 @@
       "state": "available",
       "blocked": "",
       "offeredBy": [
-       "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI"
+       "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U"
       ],
       "offeredHere": true,
       "executor": "",
@@ -133,7 +195,7 @@
       "deadline": 0
      }
     ],
-    "notTaking": "docker is down: not checked yet"
+    "notTaking": "no credential for the model: not read yet"
    }
   ],
   "runs": [],
@@ -153,28 +215,28 @@
     "refused": 0,
     "outcome": null,
     "reason": "",
-    "offeredAt": 1794910852,
+    "offeredAt": 1794914047,
     "endedAt": 0,
     "leftUntil": 0,
     "leftForGood": false,
     "tooLong": false,
-    "notTaking": "docker is down: not checked yet"
+    "notTaking": "no credential for the model: not read yet"
    }
   ]
  },
  "requester-claimed": {
-  "updatedAt": 1794910854,
+  "updatedAt": 1794914049,
   "daemon": {
-   "pid": 59710,
-   "startedAt": 1794910852
+   "pid": 64284,
+   "startedAt": 1794914047
   },
   "identity": {
-   "pk": "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI",
-   "onion": "ynkrkmwt2rottlz5jrdu6343ks73ez42ax7mgpofdikmcsgifmbjyeid.onion"
+   "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
+   "onion": "i7in6hkeemdscthk6gy2buxnrpcsdsa5zwzle64ldxj5cd77lpsuafad.onion"
   },
   "transport": {
    "state": "ready",
-   "detail": "loop (test transport): 127.0.0.1:61388"
+   "detail": "loop (test transport): 127.0.0.1:62960"
   },
   "docker": {
    "state": "ready",
@@ -199,22 +261,24 @@
     "id": "github.com/acme/widgets",
     "path": "/scratch/ra/w",
     "identity": "ra",
-    "hash": "FycLyfqwYlOrk8YN5G34bQ5jg-NkvLZCM1eQKUJ7hHM",
+    "hash": "QQjbj7ZUINYhJzIKXe87g8NSmUjNhgMsZ5M3EGTjeIk",
     "left": false,
+    "joining": false,
+    "joinFailed": "",
     "members": [
      {
-      "pk": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
-      "self": false,
+      "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
+      "self": true,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910853,
+      "lastSeen": 1794914049,
       "reachable": true,
       "skew": false
      },
      {
-      "pk": "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI",
-      "self": true,
+      "pk": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
+      "self": false,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910854,
+      "lastSeen": 1794914049,
       "reachable": true,
       "skew": false
      }
@@ -230,14 +294,14 @@
       "state": "claimed",
       "blocked": "",
       "offeredBy": [
-       "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI"
+       "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U"
       ],
       "offeredHere": true,
-      "executor": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
+      "executor": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
       "executorHere": false,
-      "claimedAt": 1794910853,
-      "leaseUntil": 1794918053,
-      "deadline": 1794954053
+      "claimedAt": 1794914048,
+      "leaseUntil": 1794921248,
+      "deadline": 1794957248
      }
     ],
     "notTaking": ""
@@ -252,7 +316,7 @@
     "item": "pr-1",
     "title": "pr-1",
     "state": "claimed",
-    "executor": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
+    "executor": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
     "executorHere": false,
     "backedBy": [],
     "attempt": 1,
@@ -260,7 +324,7 @@
     "refused": 0,
     "outcome": null,
     "reason": "",
-    "offeredAt": 1794910852,
+    "offeredAt": 1794914047,
     "endedAt": 0,
     "leftUntil": 0,
     "leftForGood": false,
@@ -270,18 +334,18 @@
   ]
  },
  "executor-running": {
-  "updatedAt": 1794910854,
+  "updatedAt": 1794914049,
   "daemon": {
-   "pid": 59711,
-   "startedAt": 1794910852
+   "pid": 64285,
+   "startedAt": 1794914047
   },
   "identity": {
-   "pk": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
-   "onion": "tbdi4jsamoetafblatviukzrd6gyiollozukgeslyzfhm7wk6pvz63qd.onion"
+   "pk": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
+   "onion": "shh7zdxcu7m4t7ejwxbvj2tooqhsi2vlkwujaefjq6dr5bul4lhhkmqd.onion"
   },
   "transport": {
    "state": "ready",
-   "detail": "loop (test transport): 127.0.0.1:61386"
+   "detail": "loop (test transport): 127.0.0.1:62958"
   },
   "docker": {
    "state": "ready",
@@ -298,7 +362,7 @@
   },
   "admit": {
    "slots": 0,
-   "at": 1794910853,
+   "at": 1794914048,
    "reason": "test"
   },
   "pools": [
@@ -306,22 +370,24 @@
     "id": "github.com/acme/widgets",
     "path": "/scratch/rb/w",
     "identity": "rb",
-    "hash": "FycLyfqwYlOrk8YN5G34bQ5jg-NkvLZCM1eQKUJ7hHM",
+    "hash": "QQjbj7ZUINYhJzIKXe87g8NSmUjNhgMsZ5M3EGTjeIk",
     "left": false,
+    "joining": false,
+    "joinFailed": "",
     "members": [
      {
-      "pk": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
-      "self": true,
+      "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
+      "self": false,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910854,
+      "lastSeen": 1794914049,
       "reachable": true,
       "skew": false
      },
      {
-      "pk": "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI",
-      "self": false,
+      "pk": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
+      "self": true,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910853,
+      "lastSeen": 1794914049,
       "reachable": true,
       "skew": false
      }
@@ -337,14 +403,14 @@
       "state": "claimed",
       "blocked": "",
       "offeredBy": [
-       "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI"
+       "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U"
       ],
       "offeredHere": false,
-      "executor": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
+      "executor": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
       "executorHere": true,
-      "claimedAt": 1794910853,
-      "leaseUntil": 1794918053,
-      "deadline": 1794954053
+      "claimedAt": 1794914048,
+      "leaseUntil": 1794921248,
+      "deadline": 1794957248
      }
     ],
     "notTaking": ""
@@ -352,13 +418,13 @@
   ],
   "runs": [
    {
-    "runId": "run-2938dcf2a13a",
+    "runId": "run-b221dcba69c3",
     "taskId": "github.com/acme/widgets#review:pr-1@ra",
     "pool": "github.com/acme/widgets",
-    "peer": "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI",
-    "container": "dn-ekf45t4cbr7t2amtodf8rubsg-cjnu1c3w59yt4zvqrsu17vtq3",
+    "peer": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
+    "container": "dn-ekf45t4cbr7t2amtodf8rubsg-e2sdw2dxapngbetaji3838tzi",
     "state": "running",
-    "startedAt": 1794910853,
+    "startedAt": 1794914048,
     "endedAt": 0,
     "exit": 0
    }
@@ -366,18 +432,18 @@
   "offers": []
  },
  "requester-done": {
-  "updatedAt": 1794910855,
+  "updatedAt": 1794914050,
   "daemon": {
-   "pid": 59710,
-   "startedAt": 1794910852
+   "pid": 64284,
+   "startedAt": 1794914047
   },
   "identity": {
-   "pk": "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI",
-   "onion": "ynkrkmwt2rottlz5jrdu6343ks73ez42ax7mgpofdikmcsgifmbjyeid.onion"
+   "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
+   "onion": "i7in6hkeemdscthk6gy2buxnrpcsdsa5zwzle64ldxj5cd77lpsuafad.onion"
   },
   "transport": {
    "state": "ready",
-   "detail": "loop (test transport): 127.0.0.1:61388"
+   "detail": "loop (test transport): 127.0.0.1:62960"
   },
   "docker": {
    "state": "ready",
@@ -402,22 +468,24 @@
     "id": "github.com/acme/widgets",
     "path": "/scratch/ra/w",
     "identity": "ra",
-    "hash": "LVBGqiiqnMYrMwRaKm3EPGcp28MrhGyL1a69m7fX96I",
+    "hash": "YDedy0KI9CglSSXPAEvZJKorQQTJl1fhzs7175nJsgw",
     "left": false,
+    "joining": false,
+    "joinFailed": "",
     "members": [
      {
-      "pk": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
-      "self": false,
+      "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
+      "self": true,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910855,
+      "lastSeen": 1794914050,
       "reachable": true,
       "skew": false
      },
      {
-      "pk": "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI",
-      "self": true,
+      "pk": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
+      "self": false,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910855,
+      "lastSeen": 1794914049,
       "reachable": true,
       "skew": false
      }
@@ -453,7 +521,7 @@
     "item": "pr-1",
     "title": "pr-1",
     "state": "done",
-    "executor": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
+    "executor": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
     "executorHere": false,
     "backedBy": [],
     "attempt": 1,
@@ -468,8 +536,8 @@
      "model": ""
     },
     "reason": "",
-    "offeredAt": 1794910852,
-    "endedAt": 1794910855,
+    "offeredAt": 1794914047,
+    "endedAt": 1794914049,
     "leftUntil": 0,
     "leftForGood": false,
     "tooLong": false,
@@ -478,18 +546,18 @@
   ]
  },
  "executor-finished": {
-  "updatedAt": 1794910855,
+  "updatedAt": 1794914050,
   "daemon": {
-   "pid": 59711,
-   "startedAt": 1794910852
+   "pid": 64285,
+   "startedAt": 1794914047
   },
   "identity": {
-   "pk": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
-   "onion": "tbdi4jsamoetafblatviukzrd6gyiollozukgeslyzfhm7wk6pvz63qd.onion"
+   "pk": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
+   "onion": "shh7zdxcu7m4t7ejwxbvj2tooqhsi2vlkwujaefjq6dr5bul4lhhkmqd.onion"
   },
   "transport": {
    "state": "ready",
-   "detail": "loop (test transport): 127.0.0.1:61386"
+   "detail": "loop (test transport): 127.0.0.1:62958"
   },
   "docker": {
    "state": "ready",
@@ -506,7 +574,7 @@
   },
   "admit": {
    "slots": 0,
-   "at": 1794910855,
+   "at": 1794914049,
    "reason": "test"
   },
   "pools": [
@@ -514,22 +582,24 @@
     "id": "github.com/acme/widgets",
     "path": "/scratch/rb/w",
     "identity": "rb",
-    "hash": "rUiccHq95IY8gCZJPRnwtpEsDwUdOcAIz-6WMQheTQE",
+    "hash": "wq0qqPK2-UigbQ9R2Bj-ve1J71Ma0oVuf0wzpklG8cY",
     "left": false,
+    "joining": false,
+    "joinFailed": "",
     "members": [
      {
-      "pk": "mEaOJkBjiTAUKwTqiisxH42EOWt2aKMSS8ZKdn7K8-s",
-      "self": true,
+      "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
+      "self": false,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910855,
+      "lastSeen": 1794914050,
       "reachable": true,
       "skew": false
      },
      {
-      "pk": "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI",
-      "self": false,
+      "pk": "kc_8juKn2cn8ibXDVOpudA8kaqtVqJAQqYeHHoaL4s4",
+      "self": true,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910855,
+      "lastSeen": 1794914050,
       "reachable": true,
       "skew": false
      }
@@ -558,32 +628,32 @@
   ],
   "runs": [
    {
-    "runId": "run-2938dcf2a13a",
+    "runId": "run-b221dcba69c3",
     "taskId": "github.com/acme/widgets#review:pr-1@ra",
     "pool": "github.com/acme/widgets",
-    "peer": "w1UVMtPUXTmvPUxHT2-bVL-yZ5oF_sM9xRoUwUjIKwI",
-    "container": "dn-ekf45t4cbr7t2amtodf8rubsg-cjnu1c3w59yt4zvqrsu17vtq3",
+    "peer": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
+    "container": "dn-ekf45t4cbr7t2amtodf8rubsg-e2sdw2dxapngbetaji3838tzi",
     "state": "finished",
-    "startedAt": 1794910853,
-    "endedAt": 1794910855,
+    "startedAt": 1794914048,
+    "endedAt": 1794914049,
     "exit": 0
    }
   ],
   "offers": []
  },
  "too-long": {
-  "updatedAt": 1794910855,
+  "updatedAt": 1794914051,
   "daemon": {
-   "pid": 60081,
-   "startedAt": 1794910855
+   "pid": 64808,
+   "startedAt": 1794914050
   },
   "identity": {
-   "pk": "vs1fWkTGMk9c_a5pj2DXOmrtNSDjRv-OHIdKf8H-B3U",
-   "onion": "x3gv6wseyyze6xh5vzuy6ygxhjvo2nja4ndp7dq4q5fh7qp6a527ysad.onion"
+   "pk": "WKqtoPXfNWN4IvANwJ8kGqTKiLn5gHqvs2veGi-Sjp0",
+   "onion": "lcvk3ihv342wg6bc6ag4bhzedksmvcfz7gahvl5tnppbul4sr2oq4oqd.onion"
   },
   "transport": {
    "state": "ready",
-   "detail": "loop (test transport): 127.0.0.1:61400"
+   "detail": "loop (test transport): 127.0.0.1:62980"
   },
   "docker": {
    "state": "ready",
@@ -600,7 +670,7 @@
   },
   "admit": {
    "slots": 1,
-   "at": 1794910855,
+   "at": 1794914051,
    "reason": "test"
   },
   "pools": [
@@ -608,14 +678,16 @@
     "id": "github.com/acme/widgets",
     "path": "/scratch/rs/w",
     "identity": "rs",
-    "hash": "zKhapG4OmGU51090qjKbJxTiIe5TI5ILiAfAgiGFWmE",
+    "hash": "E778jH1rsv4P97lCFB_KKYjJkDKWqmYMAsIZEGFuwOc",
     "left": false,
+    "joining": false,
+    "joinFailed": "",
     "members": [
      {
-      "pk": "vs1fWkTGMk9c_a5pj2DXOmrtNSDjRv-OHIdKf8H-B3U",
+      "pk": "WKqtoPXfNWN4IvANwJ8kGqTKiLn5gHqvs2veGi-Sjp0",
       "self": true,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910855,
+      "lastSeen": 1794914051,
       "reachable": true,
       "skew": false
      }
@@ -631,7 +703,7 @@
       "state": "available",
       "blocked": "",
       "offeredBy": [
-       "vs1fWkTGMk9c_a5pj2DXOmrtNSDjRv-OHIdKf8H-B3U"
+       "WKqtoPXfNWN4IvANwJ8kGqTKiLn5gHqvs2veGi-Sjp0"
       ],
       "offeredHere": true,
       "executor": "",
@@ -661,7 +733,7 @@
     "refused": 0,
     "outcome": null,
     "reason": "",
-    "offeredAt": 1794910855,
+    "offeredAt": 1794914050,
     "endedAt": 0,
     "leftUntil": 0,
     "leftForGood": false,
@@ -671,18 +743,18 @@
   ]
  },
  "left-until": {
-  "updatedAt": 1794910858,
+  "updatedAt": 1794914054,
   "daemon": {
-   "pid": 60148,
-   "startedAt": 1794910855
+   "pid": 64876,
+   "startedAt": 1794914051
   },
   "identity": {
-   "pk": "WNWbqgWdeXgoPiBAiuD_skHoS3v-j37KON0G0vM-hw0",
-   "onion": "ldkzxkqftv4xqkb6ebaivyh7wja6qs3372hx5sry3udnf4z6q4gqxbad.onion"
+   "pk": "XgQXBp5LoAqicIfvDHDFKb7gOHlBYkXsg07zfZ7ohic",
+   "onion": "lycbobu6joqavitqq7xqy4gffg7oaodzifrel3edj3zx3hxiqytsluid.onion"
   },
   "transport": {
    "state": "ready",
-   "detail": "loop (test transport): 127.0.0.1:61402"
+   "detail": "loop (test transport): 127.0.0.1:62983"
   },
   "docker": {
    "state": "ready",
@@ -699,7 +771,7 @@
   },
   "admit": {
    "slots": 1,
-   "at": 1794910857,
+   "at": 1794914054,
    "reason": "test"
   },
   "pools": [
@@ -707,14 +779,16 @@
     "id": "github.com/acme/widgets",
     "path": "/scratch/rl/w",
     "identity": "rl",
-    "hash": "tWQusx5WkUOz9t3zoenHGVUNtDsfawGSoQqRzCBMv6I",
+    "hash": "1u2mU67WDXKDSXkjpr9STQhmExp1PZ5WrZUtMFJH_1c",
     "left": false,
+    "joining": false,
+    "joinFailed": "",
     "members": [
      {
-      "pk": "WNWbqgWdeXgoPiBAiuD_skHoS3v-j37KON0G0vM-hw0",
+      "pk": "XgQXBp5LoAqicIfvDHDFKb7gOHlBYkXsg07zfZ7ohic",
       "self": true,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910858,
+      "lastSeen": 1794914054,
       "reachable": true,
       "skew": false
      }
@@ -730,7 +804,7 @@
       "state": "available",
       "blocked": "",
       "offeredBy": [
-       "WNWbqgWdeXgoPiBAiuD_skHoS3v-j37KON0G0vM-hw0"
+       "XgQXBp5LoAqicIfvDHDFKb7gOHlBYkXsg07zfZ7ohic"
       ],
       "offeredHere": true,
       "executor": "",
@@ -745,14 +819,14 @@
   ],
   "runs": [
    {
-    "runId": "run-c8ee12893094",
+    "runId": "run-3e7328bba4a2",
     "taskId": "github.com/acme/widgets#review:pr-1@rl",
     "pool": "github.com/acme/widgets",
-    "peer": "WNWbqgWdeXgoPiBAiuD_skHoS3v-j37KON0G0vM-hw0",
+    "peer": "XgQXBp5LoAqicIfvDHDFKb7gOHlBYkXsg07zfZ7ohic",
     "container": "",
     "state": "stopped",
-    "startedAt": 1794910856,
-    "endedAt": 1794910856,
+    "startedAt": 1794914052,
+    "endedAt": 1794914052,
     "exit": 0
    }
   ],
@@ -772,28 +846,28 @@
     "refused": 0,
     "outcome": null,
     "reason": "",
-    "offeredAt": 1794910855,
+    "offeredAt": 1794914051,
     "endedAt": 0,
-    "leftUntil": 1794911456,
+    "leftUntil": 1794914652,
     "leftForGood": false,
     "tooLong": false,
-    "notTaking": "this machine failed at it or gave it back, and leaves it to the others until 2026-11-17T10:30:56.000Z"
+    "notTaking": "this machine failed at it or gave it back, and leaves it to the others until 2026-11-17T11:24:12.000Z"
    }
   ]
  },
  "capped": {
-  "updatedAt": 1794910859,
+  "updatedAt": 1794914057,
   "daemon": {
-   "pid": 60390,
-   "startedAt": 1794910858
+   "pid": 65157,
+   "startedAt": 1794914054
   },
   "identity": {
-   "pk": "W-d6yd5MR7tjePhDsd75kz9P4Ot_2WGbcFhPwVJJNZI",
-   "onion": "lptxvso6jrd3wy3y7bb3dxxzsm7u7yhlp7mwdg3qlbh4cusjgwjecxqd.onion"
+   "pk": "izYWAwJJAlBiL4tqskhlm3yDndLHF0Y3Ceeqen1rxvQ",
+   "onion": "rm3bmaycjebfayrprnvlesdftn6ihhosy4lumnyj46vhu7lly32frsyd.onion"
   },
   "transport": {
    "state": "ready",
-   "detail": "loop (test transport): 127.0.0.1:61407"
+   "detail": "loop (test transport): 127.0.0.1:62992"
   },
   "docker": {
    "state": "ready",
@@ -818,14 +892,16 @@
     "id": "github.com/acme/widgets",
     "path": "/scratch/rc/w",
     "identity": "rc",
-    "hash": "YAKnFQ2qyF-at2qqZJlU3h7OwMoeMSXJL-Xis2kXdHA",
+    "hash": "rplKbbM7OYuwSnuOWt8BT2iDWv9bQnreCgWvLgiTfm0",
     "left": false,
+    "joining": false,
+    "joinFailed": "",
     "members": [
      {
-      "pk": "W-d6yd5MR7tjePhDsd75kz9P4Ot_2WGbcFhPwVJJNZI",
+      "pk": "izYWAwJJAlBiL4tqskhlm3yDndLHF0Y3Ceeqen1rxvQ",
       "self": true,
       "maxAcceptedH": 12,
-      "lastSeen": 1794910859,
+      "lastSeen": 1794914057,
       "reachable": true,
       "skew": false
      }
@@ -854,14 +930,14 @@
   ],
   "runs": [
    {
-    "runId": "run-ce6c1b17fd52",
+    "runId": "run-9612dfd021c9",
     "taskId": "github.com/acme/widgets#review:pr-1@rc",
     "pool": "github.com/acme/widgets",
-    "peer": "W-d6yd5MR7tjePhDsd75kz9P4Ot_2WGbcFhPwVJJNZI",
-    "container": "dn-ekf45t4cbr7t2amtodf8rubsg-2tfuj8dey0mv1acn7qmyvc3os",
+    "peer": "izYWAwJJAlBiL4tqskhlm3yDndLHF0Y3Ceeqen1rxvQ",
+    "container": "dn-ekf45t4cbr7t2amtodf8rubsg-cxn34dll0g78setgb203trpnu",
     "state": "finished",
-    "startedAt": 1794910858,
-    "endedAt": 1794910859,
+    "startedAt": 1794914055,
+    "endedAt": 1794914057,
     "exit": 0
    }
   ],
@@ -873,7 +949,7 @@
     "item": "pr-1",
     "title": "pr-1",
     "state": "done",
-    "executor": "W-d6yd5MR7tjePhDsd75kz9P4Ot_2WGbcFhPwVJJNZI",
+    "executor": "izYWAwJJAlBiL4tqskhlm3yDndLHF0Y3Ceeqen1rxvQ",
     "executorHere": true,
     "backedBy": [],
     "attempt": 1,
@@ -889,8 +965,8 @@
      "capped": true
     },
     "reason": "",
-    "offeredAt": 1794910858,
-    "endedAt": 1794910859,
+    "offeredAt": 1794914054,
+    "endedAt": 1794914057,
     "leftUntil": 0,
     "leftForGood": false,
     "tooLong": false,

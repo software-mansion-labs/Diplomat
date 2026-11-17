@@ -248,6 +248,8 @@ enum NetworkText {
     /// The feed's words for a run retired because the switch went off.
     static let switchedOffRun = "withdrawn: the Diplomacy Network was switched off"
     static let leftNote = "left - this machine takes and offers nothing here"
+    /// What a join by invite waits for, as the feed's line and the pool's card end.
+    static let seatedLater = "the machine that made the invite seats this one once it is reached"
 
     static var packageProblem: String? {
         let pkg = DiplomacyNetwork.package
@@ -319,6 +321,16 @@ enum NetworkText {
     static func rowDetail(_ reason: String, offeredAt: TimeInterval, now: Date) -> String {
         let age = Fmt.duration(now.timeIntervalSince1970 - offeredAt)
         return age == "just now" ? reason : "\(reason) · offered \(age) ago"
+    }
+
+    /// A pool card's line while an invite pasted here waits for its maker, or nil.
+    static func poolJoining(_ pool: NetworkSnapshot.Pool) -> String? {
+        pool.joining ? "Joining: \(seatedLater)" : nil
+    }
+
+    /// A pool card's line on why the last invite let this machine in nowhere, or nil.
+    static func poolJoinFailed(_ pool: NetworkSnapshot.Pool) -> String? {
+        pool.joinFailed.isEmpty ? nil : "The last invite came to nothing: \(pool.joinFailed)"
     }
 
     /// A pool card's line on why this machine takes none of its jobs, or nil.

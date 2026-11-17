@@ -315,6 +315,9 @@ def _network_screen_fixture(store: Store, mode: str) -> None:
                  task(390, "review", "Review-req · #390 (@olek)", "cancelled")]},
             {"id": "github.com/latekvo/prompt-bench", "path": "/src/prompt-bench",
              "identity": "latekvo", "hash": "b2",
+             "joining": not unsaved,
+             "joinFailed": "the invite ran out before the machine that made it answered"
+                           if unsaved else "",
              "notTaking": "this machine could not start a job of this pool: "
                           "its repository could not be fetched",
              "members": [{"pk": me, "self": True, "maxAcceptedH": 12,

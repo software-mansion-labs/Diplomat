@@ -612,6 +612,17 @@ def test_a_pool_is_left_only_on_the_daemons_word():
     assert [p.left for p in left.pools] == [True, False, False]
 
 
+def test_a_join_under_way_and_why_the_last_invite_failed_are_read_of_a_pool():
+    seen = N.Snapshot.from_json({"pools": [
+        {"id": "a", "joining": True}, {"id": "b", "joinFailed": "no-seat"}, {"id": "c"},
+        {"id": "d", "joining": 1, "joinFailed": 5},
+        {"id": "e", "joining": "true", "joinFailed": ["no-seat"]},
+        {"id": "f", "joining": True, "joinFailed": "its voucher does not hold"}]}).pools
+    assert [p.joining for p in seen] == [True, False, False, False, False, True]
+    assert [p.join_failed for p in seen] == [
+        "", "no-seat", "", "", "", "its voucher does not hold"]
+
+
 def test_what_an_offer_row_carries_and_no_word_on_where_it_runs_is_not_a_no():
     offered = N.Snapshot.parse(FULL_SNAPSHOT).offers
     assert (offered[0].pool, offered[0].kind, offered[0].item, offered[0].title,
