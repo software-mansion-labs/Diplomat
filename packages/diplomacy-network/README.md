@@ -338,7 +338,7 @@ and "What remains".
 A request is checked before it is sent (`requester/authorize.js`). Where the check
 depends on the forge - where a branch is, which branch is the default, whether it is
 protected, who opened a pull request, who is assigned, whose a repository is and what it
-is a fork of - the forge is asked, and an answer
+is a fork of, which branch a CI run ran for - the forge is asked, and an answer
 that does not settle the question refuses the request: a rate limit or an error is not
 "no such branch". A push goes to the pool's repository or to the fork of it held by the
 account the pool is linked with (its `identity`), where the head branch of a pull
@@ -358,9 +358,42 @@ forge's answer says it was opened. A creation whose answer never came stays coun
 the forge is asked what became of it, before the task's next push or pull request is
 checked (PROTOCOL.md, section 10).
 
+What a task reads is listed by its kind as what it writes is (`requester/rules.js`).
+Every kind reads the repository's code - files, refs, commits, a compare, and the
+statuses and check results recorded on a commit - and, as context, every pull request and
+issue with the comments and reviews on it. The rest of an item - a pull request's files,
+commits, requested reviewers and merge state, an issue's events, labels and reactions -
+is read by the task whose item it is: the three pull request kinds for their pull
+request, `issues` for its issue. A CI run, its jobs and their logs are read by id, after
+the forge has said which branch the run was for: a branch the task created, the head
+branch of the pull request a pull request kind works on, or - `audit` and `investigate` -
+the default branch. No kind has a rule for a list of runs, artifacts, releases,
+deployments, environments, events, traffic, contributors, statistics, source archives,
+the repository's labels and milestones, or the accounts that can be assigned or
+mentioned; no query `gh` or `glab` makes by default needs one. A GraphQL document is held
+to the same at the repository's root: it goes on from there to pull requests, issues and
+code, and not to labels, milestones, releases, runs or people. Below the root it is
+checked by field name, so what REST gives for one item it gives for every pull request
+and issue of the repository.
+
+A pool's rules stand on the hosts its forge serves the repository on. github.com has its
+API on `api.github.com` and git on `github.com`. A GitHub Enterprise Server has both on
+the pool's host, REST under `/api/v3` and GraphQL at `/api/graphql`: its tasks get
+github.com's rules there, with the credential `gh` holds for that host, and one rule
+more - `GET /api/v3/meta`, cut to the server's version, which `gh` asks for before
+`pr view`, `issue view`, `pr create` and a search. A GitHub pool on a subdomain of
+github.com or of ghe.com (GitHub Enterprise Cloud with data residency) gets no rules, so
+no task of it is offered: `gh` reaches that API on `api.<host>`, a name nothing here
+speaks to.
+
 A request reaches a rule in one spelling: a path that escapes a character needing no
 escape is refused, and so is one that a forge's router could read as the route of a rule
-standing earlier - by a letter's case or an added extension. What the forge says about
+standing earlier - by a letter's case or an added extension. A name GitLab takes as one
+segment keeps its encoded slashes and dots: the project's path in any request, and in a
+GET a file's path, a branch's or a tag's name (`repository/branches/feature%2Flogin`).
+Such a path is refused when a proxy that decodes the slash would turn it into a route no
+rule knows, or one decided by another rule that does more than match the path - refuses,
+pins a parameter, cuts the answer, asks the forge. What the forge says about
 the repository itself is cut to the same list on both surfaces, by `pick` on the REST
 answer and by a list of readable fields in a GraphQL document (`requester/graphql.js`;
 it adds GitHub's `viewerPermission`, which `gh` reads before it opens a pull request).

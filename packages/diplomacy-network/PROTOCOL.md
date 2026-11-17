@@ -972,17 +972,39 @@ A rule allows one shape of forge request:
 { "host": "api.github.com", "method": "POST", "path": "/repos/o/r/pulls/578/reviews", "fold": [1, 2] }
 ```
 
+The host is one the pool's forge serves the repository on. For github.com that is
+`api.github.com` for the API and `github.com` for git. A GitHub Enterprise Server and a
+GitLab serve both on the pool's host: the server's REST under `/api/v3` and its GraphQL
+at `/api/graphql`, so the rule above reads `"host": "ghes.example.com", "path":
+"/api/v3/repos/o/r/pulls/578/reviews", "fold": [3, 4]` there; GitLab's REST under
+`/api/v4`. A GitHub pool whose host is a subdomain of github.com or of ghe.com has no
+rules, its API being on a third name.
+
 A request is first brought to one spelling and refused when it has more than one reading:
 the method is one of GET, POST, PUT, PATCH, DELETE; the host is a plain lowercase name; the
 path is absolute, with no empty or dot segment, no fragment, no `;`, no encoded slash,
-dot, backslash, percent sign, semicolon or control character (GitLab's URL-encoded project
-path, the segment after `/api/v4/projects/`, is the one place an encoded slash may stand),
-and no escape of a character that needs none - a letter, a digit, `-`, `_` or `~` - so a
-route's name is spelled one way; a header is given once; the body is base64. Then the
-first rule whose host, method and path match decides, alone. A request no rule matches is
-refused. So is one that a different rule would be the first to match under the widest
-reading a forge's router could give its path - no literal's case counting, a segment free
-to carry an extension (`compare.json`): the forge may take it for that rule's route.
+dot, backslash, percent sign, semicolon or control character, and no escape of a character
+that needs none - a letter, a digit, `-`, `_` or `~` - so a route's name is spelled one
+way; a header is given once; the body is base64. Then the first rule whose host, method
+and path match decides, alone. A request no rule matches is refused. So is one that a
+different rule would be the first to match under the widest reading a forge's router could
+give its path - no literal's case counting, a segment free to carry an extension
+(`compare.json`): the forge may take it for that rule's route.
+
+An encoded slash and an encoded dot stand where GitLab defines them, in a name it takes as
+one segment: the project's path, the segment after `/api/v4/projects/`, in any request;
+and in a GET, any segment after that one - a file's path
+(`repository/files/src%2Fmain.js`), a branch's or a tag's name
+(`repository/branches/feature%2Flogin`). `glab` encodes such a name's dots as well
+(`README%2Emd`). The name's parts between its slashes are held to the path's own rule: none
+is empty, `.` or `..`. An encoded dot is read as the dot it is, the one before an extension
+included. An encoded slash is part of its segment, which only a rule's `*` or `**` can
+match - GitLab's router matches a route before it decodes a name, so the slash separates
+nothing there - and the request is refused all the same when the path with each such slash
+read as a separator would be decided by no rule, or by another rule that carries more
+than a host, a method, a path and `fold`: that is the request a proxy that decodes before
+it forwards would hand the forge, and such a rule's check is one this request is not put
+through.
 
 - `path` is matched segment by segment: a literal, `*` for exactly one segment, or a
   trailing `**` for any remainder. `fold` lists the segments, counted from 0, that are
@@ -1020,7 +1042,16 @@ to carry an extension (`compare.json`): the forge may take it for that rule's ro
   has the forge asked what the project named in that path segment is: the request is
   allowed only when it is the fork of `repo` that the account `owner` holds itself (see
   `fork` below), and a `created` branch of that rule is one this task created in that
-  fork. `pick` lists the members of the forge's JSON answer an executor
+  fork. `"run": { "segment": 5, "what": "run", "repo": "o/r" }` has the forge asked which
+  branch the CI run (GitLab: the pipeline) whose id stands in that segment ran for - with
+  `"what": "job"`, the run of the job whose id it is. The request is allowed when that is
+  a branch this task created; with `"base": true`, when it is the default branch of
+  `repo`; with `"head": { "number": 578 }` (`{ "author": "me" }`, `{ "notAuthor": "me" }`:
+  any open pull request so opened), when it is the head branch of that pull request, in
+  the repository the forge places that branch in. A run the forge does not show, and on
+  GitLab a pipeline for a tag, is refused. A GitLab pipeline for a merge request counts
+  for that merge request's source branch, and under `head` for that merge request alone.
+  `pick` lists the members of the forge's JSON answer an executor
   gets back - of each entry, when the answer is a list. An answer that is neither an
   object nor a list of objects is not passed on.
 - `{ "graphql": { "forge": "github", "repo": "o/r", "roots": [...], "mutations": [...],
@@ -1028,7 +1059,11 @@ to carry an extension (`compare.json`): the forge may take it for that rule's ro
   confines the document, which must be exactly one query or mutation. A query may select
   only the listed root fields: `repository` (GitLab: `project`) pinned to the pool's own,
   the viewer's public scalars, a `search` confined as above, and `node(id:)` once the id
-  has been resolved to an object of the pool's repository. Below a root, a field with a
+  has been resolved to an object of the pool's repository. From the repository itself a
+  selection goes on to its pull requests, issues, refs and git objects, to the files GitHub
+  reads out of it (code owners, templates, contact links), to its owner and to what it is
+  a fork of (GitLab: merge requests, issues, the git repository, the group and the
+  namespace), and to nothing else it holds. Below a root, a field with a
   selection set must be one the reader knows the reach of, so a selection cannot walk from
   the repository to its owner's other repositories; on an account, or on an object that
   may live in another repository, such a field takes no argument, which would look
@@ -1082,7 +1117,8 @@ A rule carrying `graphql` or `git` never allows a request by its host, method an
 alone: its own check must pass too.
 
 Where a check asks the forge - who opened a pull request, where a branch is, which branch
-is the default, who is assigned, whose a repository is and what it is a fork of - only
+is the default, who is assigned, whose a repository is and what it is a fork of, which
+branch a CI run ran for - only
 an answer that settles the question is used. A
 forge that says there is no such thing has answered; a rate limit, an error or anything
 else has not, and the request is refused.
@@ -1109,4 +1145,5 @@ the request that waits on it.
 
 The rules a task receives come from the daemon's catalogue (`src/requester/rules.js`),
 keyed by forge and kind and pinned to the task's own item. A kind without an entry can be
-offered by nobody.
+offered by nobody; nor can a `pr-<n>` or `issue-<n>` whose number is past 2147483647, the
+largest a forge's API takes.

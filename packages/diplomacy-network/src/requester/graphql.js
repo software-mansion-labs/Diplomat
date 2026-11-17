@@ -334,9 +334,10 @@ function table(groups) {
 const WRAPPERS = { nodes: 'same', edges: 'same', node: 'same', pageInfo: 'plain' };
 const SCHEMA_FIELDS = table({ schema: 'fields inputFields enumValues args type ofType possibleTypes interfaces' });
 
-// A forge's tables. A field with a selection set leads from one context to the next (`in`,
-// `actor`, `foreign`, `event`, by the context it is selected in); `repo` is the pool's
-// repository itself, whose fields lead on as `in` says. A scalar is read from an
+// A forge's tables. A field with a selection set leads from one context to the next (`repo`,
+// `in`, `actor`, `foreign`, `event`, by the context it is selected in); `repo` is the pool's
+// repository itself, from which a document goes on to its code, its pull requests and its
+// issues, the twins of the reads rules.js gives every kind. A scalar is read from an
 // allow-list on an account, a foreign object and a branch's protection, and freely on what
 // is in the pool's repository, but for `repoLeaves` and `own`:
 //   repoLeaves  the scalars read of the repository itself: what the REST answer about it
@@ -363,23 +364,28 @@ const FORGES = {
     // `gh` reads which comments the account wrote.
     own: /viewer(?!DidAuthor$)/i,
     args: set(`after before first last orderBy orderByState direction states labels query filterBy number since until skip
-      limit size baseRefName headRefName refName refPrefix qualifiedName tagName name path expression oid author
-      loginNames capabilities content itemTypes archivedStates includeArchived includeClosedPrs
+      limit size baseRefName headRefName refName refPrefix qualifiedName name path expression oid author
+      content itemTypes archivedStates includeArchived includeClosedPrs
       includeStack enableDuplicate excludeUserLinked userLinkedOnly mergeType pullRequestNumber writersOnly
       includeDeprecated`),
     ids: set('pullRequestId'),
+    repo: table({
+      in: `pullRequest pullRequests issue issues issueOrPullRequest ref refs defaultBranchRef object codeowners
+        issueTemplates pullRequestTemplates contactLinks`,
+      actor: 'owner',
+      foreign: 'parent',
+    }),
     in: table({
       in: `pullRequest pullRequests issue issues issueOrPullRequest ref refs defaultBranchRef baseRef target object
         tree entries blame ranges commit commits history parents file files comments reviews latestReviews
         latestOpinionatedReviews viewerLatestReview reviewThreads replyTo pullRequestReview originalCommit mergeCommit
-        potentialMergeCommit statusCheckRollup contexts checkSuite checkSuites checkRuns workflowRun workflow runs status
-        steps annotations location start end labels label milestone milestones reactionGroups reactions userContentEdits
-        autoMergeRequest reviewRequests suggestedReviewers subIssuesSummary release
-        releases releaseAssets languages signature mergeQueueEntry
+        potentialMergeCommit statusCheckRollup contexts checkSuite checkSuites checkRuns workflowRun workflow status
+        steps annotations location start end labels label milestone reactionGroups reactions userContentEdits
+        autoMergeRequest reviewRequests suggestedReviewers subIssuesSummary signature mergeQueueEntry
         checkRunCountsByState statusContextCountsByState issueTemplates pullRequestTemplates codeowners contactLinks
         thread comment commentEdge subject assignable`,
       actor: `author editor owner mergedBy actor assignees assignedActors participants users reactors user creator committer
-        authors pusher tagger requestedReviewer reviewer assignableUsers mentionableUsers suggestedActors enabledBy
+        authors pusher tagger requestedReviewer reviewer enabledBy
         resolvedBy signer headRepositoryOwner onBehalfOf app`,
       // A pull request's head branch is a branch of the repository it comes from.
       foreign: `repository headRepository baseRepository headRef parent subIssues blockedBy blocking closingIssuesReferences
@@ -414,24 +420,25 @@ const FORGES = {
     // What the account may do with a blob, a job or a pipeline, whether it is subscribed,
     // and the address its replies to an issue go to.
     own: /^can[A-Z]|^(createNoteEmail|subscribed|troubleshootJobWithAi)$/,
-    args: set(`after before first last limit offset sort order state scope status statuses types kind jobKind source sources
-      iid iids pipelineIid sha ref refType path paths blobPath recursive full format firstParent name title search in
-      searchIn searchPattern searchTerm fuzzySearch query filter not or customField labelName labels milestoneTitle
-      milestoneWildcardId releaseTag releaseTagWildcardId tagName author authorUsername username assigneeUsername
+    args: set(`after before first last limit offset sort order state status statuses types jobKind
+      iid iids ref refType path paths blobPath recursive full format firstParent search in
+      searchPattern query filter not or customField labelName labels milestoneTitle
+      milestoneWildcardId releaseTag releaseTagWildcardId author authorUsername assigneeUsername
       assigneeUsernames assigneeWildcardId reviewerUsername reviewerWildcardId ignoredReviewerUsername reviewState
-      reviewStates approvedBy approver mergedBy myReactionEmoji subscribed confidential draft archived retried
-      withArtifacts whenExecuted securityReportTypes environmentName sourceBranches targetBranches weight
+      reviewStates approvedBy approver mergedBy myReactionEmoji subscribed confidential draft retried
+      whenExecuted securityReportTypes environmentName sourceBranches targetBranches weight
       weightWildcardId healthStatus healthStatusFilter epicWildcardId includeSubepics iterationTitle iterationWildcardId
       createdAfter createdBefore updatedAfter updatedBefore closedAfter closedBefore mergedAfter mergedBefore
       deployedAfter deployedBefore committedAfter committedBefore dueAfter dueBefore`),
     ids: set(''),
+    repo: table({ in: 'mergeRequest mergeRequests issue issues repository', foreign: 'group namespace' }),
     in: table({
-      in: `mergeRequest mergeRequests issue issues discussions discussion notes position diffRefs diffStats diffStatsSummary
-        commits commitsWithoutMergeCommits pipelines headPipeline pipeline jobs stages detailedStatus labels
-        repository tree trees blobs lastCommit taskCompletionStatus approvalState rules release releases`,
+      in: `mergeRequest discussions discussion notes position diffRefs diffStats diffStatsSummary
+        commits commitsWithoutMergeCommits headPipeline jobs stages detailedStatus labels
+        tree trees blobs lastCommit taskCompletionStatus approvalState rules`,
       actor: `author assignees reviewers user resolvedBy approvedBy mergeUser participants commenters updatedBy lastEditedBy
         eligibleApprovers`,
-      foreign: 'project sourceProject targetProject group namespace relatedMergeRequests closingMergeRequests',
+      foreign: 'project sourceProject targetProject relatedMergeRequests closingMergeRequests',
       // A milestone may be a group's, with the releases of the group's other projects under it.
       plain: 'milestone',
     }),
@@ -553,7 +560,7 @@ function walker(doc, forge, op, vars, lookups) {
       let next = wrapper === 'same' ? context : wrapper;
       if (context === 'schema') next = SCHEMA_FIELDS.get(sel.name);
       else if (context === 'plain') next = undefined;
-      else if (next === undefined) next = tables[context === 'repo' ? 'in' : context]?.get(sel.name);
+      else if (next === undefined) next = tables[context]?.get(sel.name);
       if (next === undefined) refuse(`graphql: "${sel.name}" is not a field this task may select into here`);
       // An argument on a field of an account or of a foreign object is a lookup from it:
       // `organization(login:)` on a user reaches any organisation the token can see.

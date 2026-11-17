@@ -1,7 +1,8 @@
 // What the real tools send, captured by running them: gh 2.101.0 with GH_DEBUG=api against
 // the public cli/cli repository for the reads, and gh and glab 1.128.0 against a local
-// stand-in for the writes. The documents are verbatim; only the repository and the
-// numbers were changed to the tests' own (`o/r`, pull request 578, issue 421).
+// stand-in for the writes and for `gh repo view`. The documents are verbatim; only the
+// repository and the numbers were changed to the tests' own (`o/r`, pull request 578,
+// issue 421).
 
 const repoVars = { owner: 'o', repo: 'r' };
 
@@ -298,6 +299,11 @@ export const GH = {
   resolveThread: {
     query: 'mutation($t:ID!){resolveReviewThread(input:{threadId:$t}){thread{id isResolved}}}',
     variables: { t: 'PRRT_578' },
+  },
+  // gh repo view o/r, which then reads GET /repos/o/r/readme
+  repoView: {
+    query: 'query RepositoryInfo($owner: String!, $name: String!) {\n\t\trepository(owner: $owner, name: $name) {name,owner{id,login},description}\n\t}',
+    variables: { name: 'r', owner: 'o' },
   },
   // gh pr review --comment, gh pr comment, gh pr merge: shortcuts no kind is given.
   prReviewShortcut: {

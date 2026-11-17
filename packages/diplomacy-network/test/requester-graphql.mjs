@@ -35,7 +35,7 @@ const IN = (inner, vars = '') => `query${vars} { repository(owner: "o", name: "r
 
 await check('every query the gh CLI sends for a task on o/r is allowed', async () => {
   const reads = ['prViewAuthor', 'prViewDefault', 'prProjectItems', 'prViewReviews', 'prViewMergeable', 'typeFields', 'prChecks', 'prList',
-    'prSearch', 'prStatus', 'issueView', 'issueList', 'issueForEdit', 'userCurrent', 'repositoryInfo', 'prForBranch', 'prForReady'];
+    'prSearch', 'prStatus', 'issueView', 'issueList', 'issueForEdit', 'userCurrent', 'repositoryInfo', 'prForBranch', 'prForReady', 'repoView'];
   for (const name of reads) {
     const verdict = await ask(spec(), GH[name].query, GH[name].variables);
     assert.equal(verdict.ok, true, `${name}: ${verdict.reason}`);
@@ -424,7 +424,7 @@ const specs = { github: spec(), gitlab };
 await check('no field is told by argument which repository or object to read from', async () => {
   // An issue's type is the owner's, and lists the issues of whichever repository it is given.
   const elsewhere = 'issues(repositoryId: "R_other", first: 100) { nodes { title body comments(first: 50) { nodes { body } } } }';
-  await refused(spec(), IN(`issueType(name: "Bug") { ${elsewhere} }`), undefined, /"issues" is not a field this task may select into here/);
+  await refused(spec(), IN(`issueType(name: "Bug") { ${elsewhere} }`), undefined, /"issueType" is not a field this task may select into here/);
   await refused(spec(), IN(`issue(number: 1) { issueType { ${elsewhere} } }`), undefined, /"issues" is not a field this task may select into here/);
   await refused(spec(), IN('issue(number: 1) { issueType { issues(first: 5) { nodes { title } } } }'), undefined, /"issues" is not a field this task may select into here/);
   await allowed(spec(), IN('issue(number: 1) { issueType { id name description color } }'));
@@ -458,10 +458,10 @@ await check('no field is told by argument which repository or object to read fro
   await allowed(spec(), GH.prChecks.query, GH.prChecks.variables, ctx);
   assert.deepEqual(ctx.asked, ['PR_578']);
 
-  await refused(gitlab, LAB('pipeline(id: "gid://gitlab/Ci::Pipeline/314") { status }'), undefined, /"pipeline" may not be given "id"/);
-  await refused(gitlab, LAB('pipelines(ids: ["gid://gitlab/Ci::Pipeline/314"]) { nodes { status } }'), undefined, /may not be given "ids"/);
-  await refused(gitlab, LAB('labels(includeAncestorGroups: true) { nodes { title } }'), undefined, /may not be given "includeAncestorGroups"/);
-  await allowed(gitlab, LAB('pipeline(iid: "5") { status } pipelines(sha: "abc", first: 3) { nodes { status } } labels(searchTerm: "bug") { nodes { title } }'));
+  await refused(gitlab, LAB('issue(id: "gid://gitlab/Issue/314") { title }'), undefined, /"issue" may not be given "id"/);
+  await refused(gitlab, LAB('issues(ids: ["gid://gitlab/Issue/314"]) { nodes { title } }'), undefined, /may not be given "ids"/);
+  await refused(gitlab, LAB('issue(iid: "5") { labels(includeAncestorGroups: true) { nodes { title } } }'), undefined, /may not be given "includeAncestorGroups"/);
+  await allowed(gitlab, LAB('issues(iids: ["5"], first: 3) { nodes { title labels(first: 3) { nodes { title } } } }'));
 
   // Every argument the schemas give a reachable field: one that names an object by id,
   // or a repository, an owner or a group, is refused or resolved; the rest filter and page.
@@ -477,7 +477,7 @@ await check('no field is told by argument which repository or object to read fro
       if (verdict.ok) kept[forge]++;
     }
   }
-  assert.deepEqual(kept, { github: 61, gitlab: 105 });
+  assert.deepEqual(kept, { github: 53, gitlab: 87 });
 });
 
 // The member of the forge's REST answer about the repository that holds what a GraphQL
@@ -589,5 +589,46 @@ await check('what an object points at outside the repository is named and not re
   // A GitLab milestone may be a group's.
   await allowed(gitlab, LAB('issue(iid: "421") { milestone { title dueDate state } }'));
   await refused(gitlab, LAB('mergeRequest(iid: "5") { milestone { title releases { nodes { name descriptionHtml } } } }'), undefined, /"releases" is not a field this task may select into here/);
-  await allowed(gitlab, LAB('releases(first: 2) { nodes { name } }'));
+});
+
+await check('what no kind reads through REST is not read through GraphQL: other people, releases, the runs of other branches', async () => {
+  const no = /is not a field this task may select into here/;
+  // From the repository itself a document goes on to its code, its pull requests and its
+  // issues, to whose it is and to what it is a fork of: of every field the schemas give
+  // it, these and no other.
+  const onward = {
+    github: ['codeowners', 'contactLinks', 'defaultBranchRef', 'issue', 'issueOrPullRequest', 'issueTemplates', 'issues', 'object', 'owner', 'parent', 'pullRequest',
+      'pullRequestTemplates', 'pullRequests', 'ref', 'refs'],
+    gitlab: ['group', 'issue', 'issues', 'mergeRequest', 'mergeRequests', 'namespace', 'repository'],
+  };
+  const root = { github: IN, gitlab: LAB };
+  for (const forge of ['github', 'gitlab']) {
+    const went = [];
+    for (const field of SCHEMA[forge].repositoryObjects) {
+      const verdict = await ask(specs[forge], root[forge](`${field} { __typename }`));
+      if (verdict.ok) went.push(field);
+      else assert.match(verdict.reason, no, `${forge}: ${field}`);
+    }
+    assert.deepEqual(went, onward[forge]);
+  }
+  // The repository reached by its node id is held to the same.
+  await refused(spec(), '{ node(id: "R_1") { ... on Repository { labels(first: 5) { nodes { name } } } } }', undefined, no);
+  // A label or a milestone is read where it hangs on an item, a job where it is a pipeline's.
+  await allowed(spec(), IN('issue(number: 421) { labels(first: 5) { nodes { name } } milestone { title } }'));
+  await allowed(gitlab, LAB('mergeRequest(iid: "5") { labels { nodes { title } } }'));
+  for (const field of ['assignableUsers(first: 5) { nodes { login } }', 'mentionableUsers(first: 5) { nodes { login } }', 'collaborators(first: 5) { nodes { login } }',
+    'issue(number: 421) { suggestedActors(capabilities: [CAN_BE_ASSIGNED], first: 5) { nodes { ... on User { login } } } }', 'releases(first: 2) { nodes { name } }',
+    'release(tagName: "v1") { name releaseAssets(first: 2) { nodes { downloadUrl } } }', 'latestRelease { name }', 'deployments(first: 2) { nodes { state } }',
+    'environments(first: 2) { nodes { name } }', 'languages(first: 3) { nodes { name } }',
+    'object(expression: "main") { ... on Commit { checkSuites(first: 1) { nodes { workflowRun { workflow { runs(first: 5) { nodes { databaseId } } } } } } } }']) {
+    await refused(spec(), IN(field), undefined, no);
+  }
+  for (const field of ['pipelines(first: 3) { nodes { status } }', 'pipeline(iid: "5") { status }', 'releases(first: 2) { nodes { name } }',
+    'release(tagName: "v1") { name }', 'environments { nodes { name } }', 'projectMembers { nodes { user { username } } }',
+    'mergeRequest(iid: "5") { headPipeline { stages { nodes { jobs { nodes { trace { htmlSummary } } } } } } }', 'mergeRequest(iid: "5") { pipelines { nodes { status } } }']) {
+    await refused(gitlab, LAB(field), undefined, no);
+  }
+  // The state of the checks on a commit is part of the commit, as on REST.
+  await allowed(spec(), IN('pullRequest(number: 579) { commits(last: 1) { nodes { commit { statusCheckRollup { state } checkSuites(first: 1) { nodes { conclusion workflowRun { databaseId workflow { name } } } } } } } }'));
+  await allowed(gitlab, LAB('mergeRequest(iid: "5") { headPipeline { status detailedStatus { text } stages { nodes { name status jobs { nodes { name status } } } } } }'));
 });
