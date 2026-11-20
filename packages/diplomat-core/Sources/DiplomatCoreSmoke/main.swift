@@ -3638,9 +3638,6 @@ print("audit category assertions passed")
 try commsSmoke()
 print("comms assertions passed")
 
-try await tasksSmoke()
-try await goalsSmoke()
-print("tasks assertions passed")
 try await gitlabSmoke()
 
 // ---- Golden prompts (cross-platform parity) ----

@@ -561,8 +561,8 @@ struct SettingsView: View {
     /// happens until a review runs. The author list outlives it: a switched-off
     /// monitor still polls and still lists what it finds, and the list is what decides
     /// which requests those are — hidden while it is off, it would be filtering rows
-    /// the operator has no way to reach. The depth rows outlive it too: a goal's
-    /// reviews run at them whatever the switch says.
+    /// the operator has no way to reach. The depth rows outlive it too: the reviews it
+    /// queues while off run at them on "execute now".
     private var reviewPolicyBlock: some View {
         NestedSettings(tint: .orange) {
             SettingRow(title: "Only these authors",
