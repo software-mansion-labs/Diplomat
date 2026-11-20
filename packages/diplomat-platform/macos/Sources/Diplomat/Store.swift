@@ -814,6 +814,8 @@ final class Store: ObservableObject {
     /// The last sync's result, or `PipelineLog.last` until the first one here lands.
     @Published var pipelineResult: PipelineTickResult?
     @Published var pipelineSyncing = false
+    /// Why syncs are held, nil while they run (`runPipelineSyncOnce`).
+    @Published var pipelineError: String?
     /// What the screen asked for (Rate now, Fracture) that no sync has taken yet.
     @Published var pipelineForce = PipelineSettings.Force()
     /// Driven from `PipelineMonitor.swift`, hence not private.

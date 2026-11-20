@@ -429,7 +429,7 @@ enum AgentSpawner {
         return url
     }
 
-    /// `cd '<repo>' 2>/dev/null; unset DIPLOMAT_SLACK_TOKEN; "$SHELL" -i -c 'printf %s $$ > <pid>; unset DIPLOMAT_SLACK_TOKEN; <agent>'; { printf %s $? > '<done>'; } 2>/dev/null || :`
+    /// `cd '<repo>' 2>/dev/null; unset DIPLOMAT_SLACK_TOKEN DIPLOMAT_LINEAR_TOKEN; "$SHELL" -i -c 'printf %s $$ > <pid>; unset DIPLOMAT_SLACK_TOKEN DIPLOMAT_LINEAR_TOKEN; <agent>'; { printf %s $? > '<done>'; } 2>/dev/null || :`
     ///
     /// `<agent>` is `AgentRunner.agentCommand` — `claude "$(cat '<promptfile>')"` or the
     /// OpenCode spelling of the same thing. Everything around it is identical for both,

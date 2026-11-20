@@ -1083,15 +1083,14 @@ struct SettingsView: View {
             }
             SettingRow(title: "Open fix PRs",
                        summary: "Queues an agent that fixes each low-risk, low-complexity issue",
-                       detail: "Only an issue unassigned or assigned to you, that no open PR fixes. "
-                             + "A Linear issue is fixed in the root its team names below.") {
+                       detail: "Only an issue unassigned or assigned to you that no open PR fixes, "
+                             + "in its repo root; a Linear issue is fixed in the root its team "
+                             + "names below.") {
                 switchControl("Open fix PRs", $store.pipelineFix)
             }
             SettingRow(title: "Fast-track my PRs",
                        summary: "Labels each of your low/low PRs diplomat:fast-track and reviews it until clean",
-                       detail: "Only your own PRs from the repo itself into its default branch. "
-                             + "At a clean head the PR is rated again: still low/low, it is "
-                             + "labelled diplomat:cleared; else it leaves the fast track.") {
+                       detail: SettingsView.pipelineFastTrackDetail) {
                 switchControl("Fast-track my PRs", $store.pipelineFastTrack)
             }
             SettingRow(title: "Merge cleared PRs",
@@ -1102,20 +1101,10 @@ struct SettingsView: View {
             }
             SettingRow(title: "Split big issues",
                        summary: "One medium- or high-complexity issue a sync becomes low-complexity child issues",
-                       detail: "Only an issue Diplomat may write to, not rated high risk, with no "
-                             + "children and no open PR fixing it. Each child is a real sub-issue "
-                             + "and comes back unrated. Fracture on the Pipeline screen splits one "
-                             + "whatever its rating.") {
+                       detail: SettingsView.pipelineFractureDetail) {
                 switchControl("Split big issues", $store.pipelineFracture)
             }
-            SettingRow(title: "Linear teams",
-                       summary: SettingsView.linearTeamsSummary(store.pipelineLinearTeamsRaw),
-                       detail: "Each team key and the repo root its issues are fixed in, commas "
-                             + "or new lines between them.",
-                       stacked: true) {
-                commsField("ENG=owner/repo, OPS=owner/other", $store.pipelineLinearTeamsRaw,
-                           symbol: "l.square")
-            }
+            linearTeamsRow
             SettingRow(title: "Linear API key",
                        summary: SettingsView.linearKeySummary,
                        detail: SettingsView.linearKeyDetail) {
@@ -1124,13 +1113,35 @@ struct SettingsView: View {
         }
     }
 
-    private static func linearTeamsSummary(_ raw: String) -> String {
-        let teams = Store.pipelineTeams(raw)
-        if teams.isEmpty { return "None: GitHub only" }
-        return teams.map { "\($0.key) → \($0.repo)" }.joined(separator: " · ")
+    /// The parsed teams, or in red the entries that are not `KEY=owner/repo`.
+    private var linearTeamsRow: some View {
+        let parsed = PipelineSettings.LinearTeam.parse(store.pipelineLinearTeamsRaw)
+        return SettingRow(title: "Linear teams",
+                          detail: "Each Linear team key and the GitHub repo root its issues are "
+                                + "fixed in, commas, semicolons or new lines between them. A key "
+                                + "is read in capitals, as Linear spells it.",
+                          stacked: true) {
+            VStack(alignment: .leading, spacing: 5) {
+                commsField("ENG=owner/repo, OPS=owner/other", $store.pipelineLinearTeamsRaw,
+                           symbol: "l.square")
+                Text(SettingsView.linearTeamsSummary(parsed))
+                    .font(.system(size: 10))
+                    .foregroundStyle(parsed.bad.isEmpty ? Color.secondary : Color.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    static func linearTeamsSummary(_ parsed: (teams: [PipelineSettings.LinearTeam], bad: [String])) -> String {
+        if !parsed.bad.isEmpty { return "Not KEY=owner/repo, so not tracked: " + parsed.bad.joined(separator: ", ") }
+        if parsed.teams.isEmpty { return "None: GitHub only" }
+        return parsed.teams.map { "\($0.key) → \($0.repo)" }.joined(separator: " · ")
     }
 
     private static var linearKeySummary: String {
+        if ProcessInfo.processInfo.environment[LinearAPI.envVar]?.isEmpty == false {
+            return "$\(LinearAPI.envVar), which wins over the Keychain item"
+        }
         let item = AppConfig.linearKeychainItem
         return item.isEmpty
             ? "No Keychain item: \(AppConfig.linearKeychainItemKey) in ~/.diplomat/config.json names it"
@@ -1138,35 +1149,50 @@ struct SettingsView: View {
     }
 
     private static let pipelineDetail = """
-        Reads every open issue and PR, rates them, sends the low-risk, low-complexity ones \
-        down the fast track and draws them on the Pipeline screen. Diplomat writes labels, \
-        opens child issues or merges only on an issue unassigned or assigned to you, or \
-        your own PR from the repo into its default branch; everything else is read and \
-        shown. GitLab roots are not read. The agent work it asks for waits in the queue \
-        like any other, for a bay, the ban list and the spending budget, and never starts \
-        while this is off.
+        Reads every open issue and PR and draws them on the Pipeline screen by stage; what \
+        it may do about them is the switches under this one, and with all of them off it \
+        only reads. Its state is the trackers' labels: risk:, complexity: and diplomat:. \
+        Diplomat writes labels, opens child issues or merges only on an issue unassigned or \
+        assigned to you, or your own PR from the repo itself into its default branch; \
+        everything else is read and shown. GitLab roots are not read. The agent work it \
+        asks for waits in the queue like any other, for the task cap, the ban list and the \
+        spending budget; while this is off it reads nothing and that work waits.
         """
 
     private static let pipelineRateDetail = """
-        One claude call per item, with read-only tools in the repo's checkout and the \
-        item's text as data; a few items a sync. A rating is never lower than the labels a \
-        person put on, nor than what a PR's diff shows (a denied path, a deleted file, no \
-        test). An item Diplomat may not write to keeps its rating on this Mac.
+        A few unrated items a sync, each rated low, medium or high for risk and complexity \
+        by one claude call with read-only tools in its repo's checkout and the item's text \
+        as data. A rating is labelled where Diplomat may write; any other issue's rating is \
+        kept on this machine only, and someone else's PR is not rated. A rating already on \
+        the tracker is the rating; a PR's diff can only raise one.
+        """
+
+    private static let pipelineFastTrackDetail = """
+        Only your own PRs from the repo itself into its default branch. Reviews of it are \
+        queued until one finds nothing at its head; at that clean head it is rated again: \
+        still low/low, it is labelled diplomat:cleared, else it leaves the fast track.
         """
 
     private static let pipelineMergeDetail = """
-        A cleared PR is merged once nothing holds it: no person but you reviewed or \
+        A cleared PR is merged once nothing holds it: no one but you or a bot reviewed or \
         commented, no changes requested, no unresolved thread, no conflict, CI passed for \
         its head, and its diff is low-risk, low-complexity by its own floor. Admin rights \
         skip branch protection's approval requirement, so leave this off where a second \
         pair of eyes is required.
         """
 
+    private static let pipelineFractureDetail = """
+        Only an issue Diplomat may write to, not rated high risk, with no children and no \
+        open PR fixing it. Each child is a real sub-issue and comes back unrated; the parent \
+        is labelled diplomat:fractured. Fracture on the Pipeline screen splits one whatever \
+        its rating.
+        """
+
     private static let linearKeyDetail = """
-        Read on each sync with security find-generic-password and kept in memory only: \
-        never written to disk, never handed to an agent or a child process's environment. \
-        DIPLOMAT_LINEAR_TOKEN overrides it. Without a key, the teams set here are skipped \
-        with a notice and GitHub still syncs.
+        Read on each sync from the login Keychain with security find-generic-password and \
+        kept in memory only, never handed to an agent: a fix gets the issue's text as \
+        Diplomat read it. $DIPLOMAT_LINEAR_TOKEN wins over it. Without a key, the teams set \
+        here are skipped with a notice and GitHub still syncs.
         """
 
     // MARK: Tool visibility
