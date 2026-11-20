@@ -530,3 +530,92 @@ def test_minimizing_the_panel_on_settings_keeps_it(panel):
 def test_the_username_override_says_a_gitlab_root_is_not_its_to_scope(view):
     """In a GitLab root "me" is glab's user, whatever the override says."""
     assert "GitLab repo root “me” is `glab`'s user" in view._identity_row._detail.text()
+
+
+def _pipeline_view(make_view, monkeypatch, **settings):
+    synced: list[bool] = []
+    monkeypatch.setattr(Store, "run_pipeline_sync_async",
+                        lambda self: synced.append(self.pipeline_enabled))
+    monkeypatch.setattr(Store, "run_autofix_poll_async", lambda self: None)
+    return make_view(**settings), synced
+
+
+def test_the_pipeline_options_are_drawn_only_while_it_runs(make_view, monkeypatch):
+    view, synced = _pipeline_view(make_view, monkeypatch)
+    nested = [view._sw_pipeline_rate, view._sw_pipeline_fix, view._sw_pipeline_fast,
+              view._sw_pipeline_merge, view._sw_pipeline_fracture, view._pipeline_teams]
+    assert view._pipeline_row.isVisibleTo(view)
+    assert not any(w.isVisibleTo(view) for w in nested)
+    assert view._pipeline_pill.text() == "off"
+
+    view._sw_pipeline.setChecked(True)
+    assert view.store.pipeline_enabled
+    assert all(w.isVisibleTo(view) for w in nested)
+    assert synced == [True]
+    view._sw_pipeline.setChecked(False)
+    assert not view.store.pipeline_enabled
+    assert not any(w.isVisibleTo(view) for w in nested)
+    assert synced == [True]
+
+
+@pytest.mark.parametrize("switch, setting", [
+    ("_sw_pipeline_rate", "pipeline_rate"),
+    ("_sw_pipeline_fix", "pipeline_fix"),
+    ("_sw_pipeline_fast", "pipeline_fast_track"),
+    ("_sw_pipeline_merge", "pipeline_merge"),
+    ("_sw_pipeline_fracture", "pipeline_fracture"),
+])
+def test_a_pipeline_switch_writes_through_and_syncs_when_turned_on(make_view, monkeypatch,
+                                                                   switch, setting):
+    view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    getattr(view, switch).setChecked(True)
+    assert getattr(Store(), setting) is True
+    assert synced == [True]
+    getattr(view, switch).setChecked(False)
+    assert getattr(Store(), setting) is False
+    assert synced == [True]
+
+
+def test_the_merge_row_says_it_merges_past_the_review_requirement(view):
+    row = _row_of(view._sw_pipeline_merge)
+    assert row._control.accessibleName() == "Merge past required reviews (admin)"
+    assert row._detail.text().startswith(
+        "Merges with your admin rights, past the review requirement:")
+
+
+def test_the_linear_teams_line_reports_what_it_cannot_read(make_view, monkeypatch):
+    from diplomat_runtime import appconfig, pipeline
+
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row = _row_of(view._pipeline_teams)
+    view._pipeline_teams.setText("ENG=o/r, ops, X=y")
+    assert view.store.pipeline_linear_teams_raw == "ENG=o/r, ops, X=y"
+    assert row.summary() == "Not KEY=owner/repo, so not tracked: ops, X=y"
+    view._pipeline_teams.setText("ENG=o/r")
+    assert row.summary() == ("No Linear key: name its file as linearTokenFile in "
+                             "~/.diplomat/config.json")
+    appconfig.set_value(appconfig.LINEAR_TOKEN_FILE, "~/.diplomat/linear")
+    view._refresh_pipeline_ui()
+    assert row.summary() == "Key read from ~/.diplomat/linear"
+    monkeypatch.setenv(pipeline.TOKEN_ENV, "lin_api_x")
+    view._refresh_pipeline_ui()
+    assert row.summary() == ("Key from $DIPLOMAT_LINEAR_TOKEN, which wins over "
+                             "linearTokenFile")
+    view._pipeline_teams.setText("")
+    assert row.summary() == ""
+
+
+def test_the_pipeline_pill_follows_its_sync(make_view, monkeypatch):
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    st = view.store
+    st.pipeline_syncing = True
+    st.pipeline_changed.emit()
+    assert view._pipeline_pill.text() == "syncing"
+    st.pipeline_syncing = False
+    st.pipeline_result = {"items": [{"id": "a"}, {"id": "b"}]}
+    st.pipeline_changed.emit()
+    assert view._pipeline_pill.text() == "2 items"
+    st.pipeline_error = "gh: rate limited"
+    st.pipeline_changed.emit()
+    assert view._pipeline_pill.text() == "gh: rate limited"
+    assert view._pipeline_row.summary() == "gh: rate limited"

@@ -133,7 +133,7 @@ def tick(settings: dict) -> dict:
 
 
 def last() -> dict:
-    """``pipeline-last``: the last sync's result, or an empty one before the first."""
+    """``pipeline-last``: the last sync's result, as its ``last.json`` holds it."""
     result = _result(json.loads(promptcore.cli(["pipeline-last"])))
     if result is None:
         raise ValueError("diplomat-core pipeline-last answered something that is not a sync")

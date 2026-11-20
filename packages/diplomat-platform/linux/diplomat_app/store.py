@@ -4293,10 +4293,18 @@ class Store(QObject):
             return next((a for a in rows if a.item == item
                          and a.kind == autofix.QUEUE_REVIEW_ACTION), None)
         if verb == autofix.QUEUE_ISSUES_ACTION:
-            named = f"Issues · {item_label(item, len(review.repo_roots()))} · "
-            return next((a for a in rows if a.kind == autofix.QUEUE_ISSUES_ACTION
-                         and (a.item == item if a.item else named in a.label)), None)
+            return Store._fix_of(rows, item, item_label(item, len(review.repo_roots())))
         return None
+
+    @staticmethod
+    def _fix_of(rows: list[autofix.RunningAgent], item: str | None,
+                named: str) -> autofix.RunningAgent | None:
+        """The one of ``rows`` fixing that issue: by its run's link, else (a run
+        recorded with none, as a Linear issue's fix always is) by its label naming it
+        ``named`` (:meth:`autofix.RequestedWork.label_among`)."""
+        return next((a for a in rows if a.kind == autofix.QUEUE_ISSUES_ACTION
+                     and (a.item == item if a.item else f"Issues · {named} · " in a.label)),
+                    None)
 
     @staticmethod
     def _comms_dispatched(row: autofix.RunningAgent) -> datetime | None:
@@ -4552,6 +4560,8 @@ class Store(QObject):
         if review.roots_guessed():
             return {"error": "no repo root in Settings resolves to a GitHub or GitLab "
                              "checkout", "forced": {}}
+        if not self.effective_me:
+            self.fetch_me()
         settings = self.pipeline_settings_payload()
         if settings["roots"] and not self.effective_me:
             return {"error": GITHUB_LOGIN_UNKNOWN, "forced": {}}
@@ -4597,9 +4607,12 @@ class Store(QObject):
         off.
 
         A record is kept while its effect is owed and for the backoff ceiling after, so
-        an effect a failed read left out is not taken for a new one when it is back."""
+        an effect a failed read left out is not taken for a new one when it is back. An
+        ask that could not be queued is an attempt too, retried on the same ladder."""
         items = {str(i.get("id") or ""): i for i in result.get("items") or []}
         attempts = self._load_attempts(PIPELINE_ATTEMPTS)
+        banned = bans.read()
+        roots = len(review.repo_roots())
         owed: set[str] = set()
         for effect in result.get("effects") or []:
             kind = effect.get("kind")
@@ -4614,21 +4627,22 @@ class Store(QObject):
             if not key or work is None:
                 continue
             owed.add(key)
-            banned = bool(work.author) and bans.is_banned(work.author, bans.read())
-            action, value = autofix.decide(attempts.get(key), stamp,
-                                           self._pipeline_in_flight(work), banned, now)
+            action, value = autofix.decide(
+                attempts.get(key), stamp, self._pipeline_in_flight(work),
+                bool(work.author) and bans.is_banned(work.author, banned), now)
             if action != "dispatch":
                 continue
+            attempts[key] = autofix.ReviewAttempt(stamp, now, int(value))
             verb = "pipeline-review" if kind == "review" else "pipeline-fix"
             try:
                 fresh = self.request_one(work)
             except Exception as exc:  # noqa: BLE001 — a missing/wedged core binary
-                activity.log("auto", verb, f"{work.label} could not be queued: {exc}")
+                activity.log("auto", verb, f"{work.label_among(roots)} could not be "
+                                           f"queued: {exc}")
                 continue
-            attempts[key] = autofix.ReviewAttempt(stamp, now, int(value))
             if fresh:
-                activity.log("auto", verb, f"{work.label_among(len(review.repo_roots()))}"
-                                           f" queued for the fast track")
+                activity.log("auto", verb, f"{work.label_among(roots)} queued for the "
+                                           f"fast track")
         self._save_attempts(PIPELINE_ATTEMPTS, {
             k: a for k, a in attempts.items()
             if k in owed or now - a.last_dispatched_at < autofix.RETRY_MAX_BACKOFF})
@@ -4674,16 +4688,6 @@ class Store(QObject):
         return autofix.RequestedWork(number=number, url=url, author="" if mine else author,
                                      config=cfg.prompt_payload(), repo=root.key)
 
-    @staticmethod
-    def _fix_doing(rows: list[autofix.RunningAgent], item: str | None,
-                   named: str) -> bool:
-        """Whether one of ``rows`` fixes that issue: by its run's link, else (a run
-        recorded with none, as a Linear issue's fix always is) by its label naming
-        ``named`` (:meth:`autofix.RequestedWork.label_among`)."""
-        return any(a.kind == autofix.QUEUE_ISSUES_ACTION
-                   and (a.item == item if a.item else f"Issues · {named} · " in a.label)
-                   for a in rows)
-
     def _pipeline_in_flight(self, work: autofix.RequestedWork) -> bool:
         """Whether that work is queued or starting, or has an agent on it: any agent on
         a review's PR (:meth:`_in_flight`), a fix of a fix's issue."""
@@ -4693,8 +4697,8 @@ class Store(QObject):
             return True
         if work.action == autofix.QUEUE_REVIEW_ACTION:
             return self._in_flight(work.url)
-        return self._fix_doing(self.running_tasks, work.item, work.linear
-                               or item_label(work.item or "", len(review.repo_roots())))
+        named = work.linear or item_label(work.item or "", len(review.repo_roots()))
+        return self._fix_of(self.running_tasks, work.item, named) is not None
 
     def pipeline_badges(self) -> dict[str, str]:
         """``agent`` or ``queued`` by item id, for the items something is on now: an
@@ -4709,14 +4713,14 @@ class Store(QObject):
             item_id = str(it.get("id") or "")
             if it.get("source") == "linear":
                 identifier = str(it.get("label") or "")
-                agent = self._fix_doing(rows, None, identifier)
+                agent = self._fix_of(rows, None, identifier) is not None
                 queued = autofix.queue_key(autofix.QUEUE_ISSUES_ACTION, identifier) in waiting
             else:
                 item = item_key_from_url(item_id)
                 if item is None:
                     continue
                 agent = (any(a.item == item for a in rows)
-                         or self._fix_doing(rows, item, item_label(item, roots)))
+                         or self._fix_of(rows, item, item_label(item, roots)) is not None)
                 queued = item in waiting_items
             if agent or item_id in self.pipeline_fixes_starting:
                 badges[item_id] = "agent"

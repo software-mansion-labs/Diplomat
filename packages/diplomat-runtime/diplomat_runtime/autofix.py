@@ -763,13 +763,16 @@ def queue_key(audit_action: str, item: str) -> str:
     (a conflict *and* an unaddressed review); they are two tasks, and the one that
     dispatches first makes the other read as in-flight rather than overwriting it. It
     is also what keeps the two numbering spaces apart: issue #421 and PR #421 are
-    unrelated pieces of work, and only the verb says which one a key names."""
+    unrelated pieces of work, and only the verb says which one a key names.
+
+    An ask about no item is keyed by what names it instead
+    (:attr:`RequestedWork.key`)."""
     return f"{audit_action}:{item}"
 
 
 def item_of_key(key: str) -> str | None:
     """The item key a queue key (:func:`queue_key`) is about, or ``None`` for one about
-    no item: an investigation's, numbered by a Slack ts."""
+    no item: an investigation's, numbered by a Slack ts, or a Linear issue's fix."""
     _, _, rest = key.partition(":")
     return rest if split_item_key(rest) is not None else None
 
