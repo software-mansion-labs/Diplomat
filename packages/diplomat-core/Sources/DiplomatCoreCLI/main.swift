@@ -16,13 +16,16 @@ import Foundation
 //   diplomat-core comms-auth                         # who Claude Code's Slack login is
 //   diplomat-core comms-feed        [--limit N]      # the Comms screen's rows
 //   diplomat-core comms-effect      < request.json   # what a triaged ping makes a front-end do
+//   diplomat-core pipeline-tick     < settings.json  # one pipeline sync (see PipelineCommand)
+//   diplomat-core pipeline-last                      # the last pipeline sync's result
 //   diplomat-core opencode-session-model             # what an unpinned 2.x spawn names
 //
 // build-prompt: the JSON config's "kind" field ("review" | "conflicts" | "audit" |
 // "issues" | "investigate") selects the builder; remaining fields mirror the Swift
 // *Config structs (defaults applied when a field is absent), "investigate" as
-// `comms-effect` writes it. "comms-classifier" (CommsSettings fields) prints the Comms
-// triage instructions.
+// `comms-effect` writes it; "issues" takes `linear` ({"identifier", "url", "text"}) and
+// `pipeline`, "review" `fastTrack`. "comms-classifier" (CommsSettings fields) prints the
+// Comms triage instructions.
 //
 // tool-data: runs `ToolData.items` over a fixture of PRs/issues and prints one row
 // list per tool. The Linux front-end does NOT use this at runtime — it has its own
@@ -77,16 +80,21 @@ func specificAuthor(_ s: String?) -> SpecificAuthor {
 let args = CommandLine.arguments
 guard args.count >= 2,
       ["build-prompt", "tool-data", "telemetry", "agent-state", "agent-registry",
-       "comms-tick", "comms-auth", "comms-feed", "comms-effect",
+       "comms-tick", "comms-auth", "comms-feed", "comms-effect", "pipeline-tick", "pipeline-last",
        "opencode-session-model"].contains(args[1]) else {
     die("usage: diplomat-core (build-prompt | tool-data | telemetry | agent-state"
-        + " | agent-registry | comms-tick | comms-effect)  (JSON on stdin)"
+        + " | agent-registry | comms-tick | comms-effect | pipeline-tick)  (JSON on stdin)"
         + "\n       diplomat-core comms-feed [--limit N]"
         + "\n       diplomat-core comms-auth"
+        + "\n       diplomat-core pipeline-last"
         + "\n       diplomat-core opencode-session-model", 1)
 }
 
 // These read no stdin, so a caller leaving it attached to a terminal must not hang them.
+if args[1] == "pipeline-last" {
+    PipelineCommand.last()
+    exit(0)
+}
 if args[1] == "comms-feed" {
     CommsCommand.feed(Array(args.dropFirst(2)))
     exit(0)
@@ -112,6 +120,11 @@ if args[1] == "comms-tick" {
 
 if args[1] == "comms-effect" {
     CommsCommand.effect(input)
+    exit(0)
+}
+
+if args[1] == "pipeline-tick" {
+    PipelineCommand.tick(input)
     exit(0)
 }
 
@@ -168,7 +181,8 @@ case "review":
         specificPR: str("specificPR"),
         finalPass: flag("finalPass", false),
         softApprove: flag("softApprove", true),
-        specificAuthor: specificAuthor(obj["specificAuthor"] as? String)
+        specificAuthor: specificAuthor(obj["specificAuthor"] as? String),
+        fastTrack: flag("fastTrack", false)
     )
     cfg.automaticVerdict = flag("automaticVerdict", false)
     cfg.localRepos = localRepos
@@ -199,7 +213,13 @@ case "issues":
         assignToMe: flag("assignToMe", true),
         openPRs: flag("openPRs", true),
         commentOnIssue: flag("commentOnIssue", true),
-        includeFeatures: flag("includeFeatures", false)
+        includeFeatures: flag("includeFeatures", false),
+        linear: (obj["linear"] as? [String: Any]).flatMap { l in
+            (l["identifier"] as? String).map {
+                LinearIssue(identifier: $0, url: l["url"] as? String ?? "", text: l["text"] as? String ?? "")
+            }
+        },
+        pipeline: flag("pipeline", false)
     )
     cfg.localRepos = localRepos
     cfg.home = homeRepo

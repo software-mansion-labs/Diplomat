@@ -1,0 +1,48 @@
+# Every Linear operation the pipeline sends, each by its `operationName`. Checked against
+# Linear's published SDK schema (packages/sdk/src/schema.graphql).
+
+# The operator, and one page of the tracked teams' issues not completed or canceled,
+# newest-updated first.
+query Issues($teams: [String!], $after: String) {
+  viewer { id name }
+  issues(first: 100, after: $after, orderBy: updatedAt,
+         filter: { team: { key: { in: $teams } }, state: { type: { nin: ["completed", "canceled"] } } }) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id identifier title description url updatedAt
+      assignee { id name }
+      creator { name }
+      labels { nodes { id name } }
+      parent { url }
+      children { nodes { url } }
+      attachments { nodes { url } }
+      team { id key }
+    }
+  }
+}
+
+# The labels named `names`, with the team each belongs to (none for a workspace label).
+query Labels($names: [String!]) {
+  issueLabels(first: 50, filter: { name: { in: $names } }) {
+    nodes { id name team { id } }
+  }
+}
+
+# A workspace label.
+mutation LabelCreate($name: String!, $color: String) {
+  issueLabelCreate(input: { name: $name, color: $color }) { success issueLabel { id name } }
+}
+
+mutation AddLabel($id: String!, $labelId: String!) {
+  issueAddLabel(id: $id, labelId: $labelId) { success }
+}
+
+mutation RemoveLabel($id: String!, $labelId: String!) {
+  issueRemoveLabel(id: $id, labelId: $labelId) { success }
+}
+
+mutation IssueCreate($teamId: String!, $title: String!, $description: String, $parentId: String) {
+  issueCreate(input: { teamId: $teamId, title: $title, description: $description, parentId: $parentId }) {
+    success issue { id identifier url }
+  }
+}

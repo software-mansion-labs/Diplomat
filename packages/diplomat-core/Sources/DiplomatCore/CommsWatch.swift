@@ -217,23 +217,26 @@ public enum CommsClassifier {
         case exited(Int32, Data, Data)
     }
 
-    /// Every child the watcher starts (`claude`, its login-shell lookup, curl) gets this;
-    /// curl is handed the token on stdin instead.
+    /// Every child Comms and the pipeline start (`claude`, its login-shell lookup, curl,
+    /// `gh`) gets this; curl is handed a token on stdin instead.
     static var childEnvironment: [String: String] {
         var env = ProcessInfo.processInfo.environment
-        env["DIPLOMAT_SLACK_TOKEN"] = nil
+        env[SlackToken.envVar] = nil
+        env[LinearAPI.envVar] = nil
         return env
     }
 
     /// Run `exe` for at most `timeout`, then stop it as `GH.run` does. All three streams
     /// are files, since a pipe the child fills blocks it; the wait is a semaphore the
     /// termination handler signals, since corelibs' `waitUntilExit` lasts until every
-    /// holder of the launch socketpair has gone.
+    /// holder of the launch socketpair has gone. It runs in `cwd`, else the temp dir, with
+    /// `environment`, else `childEnvironment`.
     ///
-    /// The files hold the Slack token (curl's config) and DM text, and off macOS the temp
+    /// The files hold a token (curl's config) and DM or issue text, and off macOS the temp
     /// dir is usually the shared /tmp: a fresh 0700 directory, each file 0600 from creation.
     static func execute(_ exe: String, _ args: [String], input: Data,
-                        timeout: TimeInterval) -> Outcome {
+                        timeout: TimeInterval, cwd: String? = nil,
+                        environment: [String: String]? = nil) -> Outcome {
         let fm = FileManager.default
         var template = Array(fm.temporaryDirectory
             .appendingPathComponent("diplomat-comms-XXXXXX").path.utf8CString)
@@ -256,8 +259,9 @@ public enum CommsClassifier {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: exe)
         proc.arguments = args
-        proc.environment = childEnvironment
-        proc.currentDirectoryURL = fm.temporaryDirectory
+        proc.environment = environment ?? childEnvironment
+        proc.currentDirectoryURL = cwd.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? fm.temporaryDirectory
         proc.standardInput = stdin
         proc.standardOutput = stdout
         proc.standardError = stderr

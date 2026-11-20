@@ -389,6 +389,13 @@ packages/
                                    `claude -p` classifier
         CommsLog.swift             ~/.diplomat/comms/events.jsonl, both applets' log, folded for the screen
         LoginShell.swift           locating a CLI through the operator's login shell, past any alias
+        Pipeline.swift             the Pipeline's model: items, stages, lanes, the graph, effects, settings
+        PipelineTick.swift         one pipeline sync: read, rate, fast-track, split, merge, the effects owed
+        PipelineRead.swift         a sync's GitHub and Linear reads, and the edges between what they read
+        PipelineGate.swift         the floor a PR's diff puts under its rating, and the merge holds
+        PipelineRater.swift        the sandboxed `claude -p` rating and split calls (assets/pipeline.json)
+        PipelineLayout.swift       the graph's grid layout
+        PipelineLog.swift          ~/.diplomat/pipeline: the log, the last sync, its state and cached ratings
         Telemetry.swift            folds the telemetry ledger + every figure on the Telemetry screen: window
                                    calibration, the distribution + its confidence interval, the quota readings,
                                    the pending series
@@ -397,7 +404,8 @@ packages/
                                  so the Linux front-end shells out for Review/Issues/Conflicts/Audit prompts
                                  instead of reimplementing them; `tool-data` and `telemetry` expose the two
                                  engines the Linux side reimplements, so the parity tests can diff them;
-                                 `comms-tick`, `comms-auth`, `comms-feed` and `comms-effect` run Comms for the Linux applet
+                                 `comms-tick`, `comms-auth`, `comms-feed` and `comms-effect` run Comms for the Linux applet,
+                                 and `pipeline-tick` and `pipeline-last` the Pipeline
 
   diplomat-runtime/            ← the platform-neutral Python half: the twin of diplomat-core plus
                                  everything below the UI that has no Swift counterpart

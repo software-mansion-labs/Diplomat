@@ -277,6 +277,94 @@ public enum CoreAssets {
         }
     }
 
+    /// The Pipeline model, `pipeline.json`.
+    public struct PipelineModel: Decodable {
+        /// One text per level.
+        public struct PerLevel: Decodable {
+            public let low: String
+            public let medium: String
+            public let high: String
+
+            public subscript(_ level: PipelineLevel) -> String {
+                switch level {
+                case .low: return low
+                case .medium: return medium
+                case .high: return high
+                }
+            }
+        }
+        /// The tracker labels: a rating label per level of each dimension, and the three
+        /// stage labels.
+        public struct Labels: Decodable {
+            public let risk: PerLevel
+            public let complexity: PerLevel
+            public let fastTrack: String
+            public let cleared: String
+            public let fractured: String
+            /// The colour a label Diplomat creates is given, as hex digits.
+            public let color: String
+        }
+        /// Each level's definition.
+        public struct Levels: Decodable {
+            public let complexity: PerLevel
+            public let risk: PerLevel
+        }
+        public struct Floor: Decodable {
+            public let maxFiles: Int
+            public let maxSourceFiles: Int
+            public let maxSourceLines: Int
+            public let maxTestLines: Int
+            public let deniedDirs: [String]
+            public let deniedFiles: [String]
+            public let testDirs: [String]
+            public let testFiles: [String]
+        }
+        public struct Rater: Decodable {
+            public let model: String
+            public let prModel: String
+            public let timeoutSecs: Double
+            public let perSync: Int
+            public let bodyChars: Int
+            public let diffChars: Int
+            public let instructions: [String]
+        }
+        public struct Fracture: Decodable {
+            public let maxChildren: Int
+            public let instructions: [String]
+        }
+        public let syncSecs: Int
+        public let minSyncSecs: Int
+        public let maxItems: Int
+        public let maxEvents: Int
+        public let maxLogBytes: Int
+        public let httpTimeoutSecs: Double
+        public let linearAPI: String
+        public let linearMaxIssues: Int
+        public let labels: Labels
+        public let levels: Levels
+        public let floor: Floor
+        public let rater: Rater
+        public let fracture: Fracture
+        public let blocks: [String: String]
+        public let cleanMarker: String
+        /// `rater.schema` and `fracture.schema` serialized with sorted keys, the exact
+        /// `--json-schema` arguments. Not decoded: they are free-form JSON.
+        public internal(set) var raterSchema: String = ""
+        public internal(set) var fractureSchema: String = ""
+
+        private enum CodingKeys: String, CodingKey {
+            case syncSecs, minSyncSecs, maxItems, maxEvents, maxLogBytes, httpTimeoutSecs,
+                 linearAPI, linearMaxIssues, labels, levels, floor, rater, fracture, blocks,
+                 cleanMarker
+        }
+
+        /// The labels that put an item on the pipeline's graph once it is merged or closed.
+        public var all: Set<String> {
+            Set(PipelineLevel.allCases.flatMap { [labels.risk[$0], labels.complexity[$0]] })
+                .union([labels.fastTrack, labels.cleared, labels.fractured])
+        }
+    }
+
     // MARK: - Directory resolution
 
     /// Candidate locations for `assets/`, in priority order: an explicit override,
@@ -354,6 +442,22 @@ public enum CoreAssets {
     private static let _models = try? loadJSON("models.json", as: Models.self)
     private static let _telemetry = try? loadJSON("telemetry.json", as: TelemetryModel.self)
     private static let _comms = try? loadComms()
+    private static let _pipeline = try? loadPipeline()
+
+    private static func loadPipeline() throws -> PipelineModel {
+        var model = try loadJSON("pipeline.json", as: PipelineModel.self)
+        let url = try assetsDir().appendingPathComponent("pipeline.json")
+        let root = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any]
+        func schema(_ section: String) throws -> String {
+            guard let schema = (root?[section] as? [String: Any])?["schema"],
+                  let data = try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys])
+            else { throw CoreError(message: "pipeline.json has no \(section).schema object") }
+            return String(decoding: data, as: UTF8.self)
+        }
+        model.raterSchema = try schema("rater")
+        model.fractureSchema = try schema("fracture")
+        return model
+    }
 
     private static func loadComms() throws -> CommsModel {
         var model = try loadJSON("comms.json", as: CommsModel.self)
@@ -433,6 +537,11 @@ public enum CoreAssets {
     public static func comms() throws -> CommsModel {
         guard let c = _comms else { return try loadComms() }
         return c
+    }
+
+    public static func pipeline() throws -> PipelineModel {
+        guard let p = _pipeline else { return try loadPipeline() }
+        return p
     }
 
     public static func graphql(_ name: String) throws -> String {
