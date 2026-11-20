@@ -87,15 +87,16 @@ public struct PipelineIO {
 }
 
 public enum PipelineTick {
-    /// One sync. Reads every root's open issues and PRs and every tracked Linear team's
-    /// open issues; with `rate` (or forced) rates up to `rater.perSync` unrated ones,
-    /// forced first, then clean PRs awaiting their second rating, the operator's unrated
-    /// PRs, writable issues, other issues, newest first; writes each rating as labels
-    /// where Diplomat may, never lower than the labels or the diff's floor, and caches the
-    /// rest; with `fastTrack` labels a low/low PR of the operator's `fastTrack` once,
-    /// takes `cleared` off one whose head moved past its clean marker, and asks for a
-    /// review of each fast-track head no marker names; with `merge` merges a cleared PR
-    /// no merge hold stops; with `fracture` (or forced) splits one writable
+    /// One sync. Reads every root's open issues and PRs, its recently merged or closed PRs
+    /// that carry a pipeline label and the closed issues they close, and every tracked
+    /// Linear team's open issues; with `rate` (or forced) rates up to `rater.perSync`
+    /// unrated ones, forced first, then clean PRs awaiting their second rating, the
+    /// operator's unrated PRs, writable issues, other open issues, newest first; writes
+    /// each rating as labels where Diplomat may, never lower than the labels or the diff's
+    /// floor, and caches the rest; with `fastTrack` labels a low/low PR of the operator's
+    /// `fastTrack` once, takes `cleared` off one whose head moved past its clean marker,
+    /// and asks for a review of each fast-track head no marker names; with `merge` merges
+    /// a cleared PR no merge hold stops; with `fracture` (or forced) splits one writable
     /// medium/high-complexity issue that is not high risk into children; with `fix` asks
     /// for a fix PR for each candidate issue. Every step it takes, and each hold, notice
     /// and request the first time it is seen, is logged to `dir`; the result is saved as
@@ -503,6 +504,8 @@ final class PipelineSync {
             let e = entries[i]
             if e.item.kind == .pr && !(own(e) && open(e)) {
                 notice("\(e.item.label) was not rated: only my own open PRs are")
+            } else if !open(e) {
+                notice("\(e.item.label) was not rated: it is \(e.item.state)")
             } else if e.root == nil {
                 notice("\(e.item.label) was not rated: Linear team \(e.item.repo) has no root to read its code in")
             } else if !forced.contains(i) {
@@ -522,7 +525,7 @@ final class PipelineSync {
                 },
                 idx.filter {
                     let e = entries[$0]
-                    return e.item.kind == .issue && !e.item.writable && e.item.rating == nil
+                    return e.item.kind == .issue && open(e) && !e.item.writable && e.item.rating == nil
                         && e.root != nil && !settled(e)
                 },
             ].map { $0.sorted(by: newer) }

@@ -76,6 +76,8 @@ private final class Trackers {
                          (path: "tests/aTests.swift", add: 10, del: 0, type: "MODIFIED")]
 
     var issues: [Issue] = []
+    /// Issues a merged PR closes that the open issues' read does not list, by number.
+    var others: [Int: (title: String, state: String, repo: String)] = [:]
     var prs: [PR] = []
     /// Labels the repository has, on an item or not.
     var repoLabels: Set<String> = []
@@ -262,7 +264,11 @@ private final class Trackers {
             n["baseRefName"] = p.base
             n["author"] = ["login": p.author]
             n["labels"] = labels(p.labels)
-            n["closingIssuesReferences"] = ["nodes": p.closes.map { ["url": issueURL($0)] }]
+            n["closingIssuesReferences"] = ["nodes": p.closes.map { c -> [String: Any] in
+                let open = issues.first { $0.number == c }, other = others[c]
+                return ["number": c, "url": other.map { "https://github.com/\($0.repo)/issues/\(c)" } ?? issueURL(c),
+                        "title": open?.title ?? other?.title ?? "", "state": open == nil ? other?.state ?? "CLOSED" : "OPEN"]
+            }]
             return n
         }
         return ["defaultBranchRef": ["name": "main"], "squashMergeAllowed": true, "mergeCommitAllowed": true,
@@ -416,13 +422,20 @@ private func fixture() -> Trackers {
               fork: true, headRef: "patch-1", head: sha("b8")),
         .init(number: 19, title: "Stacked on avatars", labels: ["risk:low", "complexity:low"], updated: at("10:40"),
               base: "feat-a", headRef: "feat-b", head: sha("c9")),
+        // Closing a closed issue here, one in another repository, one open too old to be
+        // read, and the open #1.
         .init(number: 10, title: "Old fast fix",
               labels: ["risk:low", "complexity:low", "diplomat:fast-track", "diplomat:cleared"], updated: at("08:00"),
-              state: "MERGED", headRef: "old", head: sha("10")),
+              state: "MERGED", headRef: "old", head: sha("10"), closes: [20, 23, 22, 1]),
         .init(number: 9, title: "Abandoned", updated: at("07:00"), state: "CLOSED", headRef: "gone", head: sha("09")),
+        // Pipeline labels in another case are pipeline labels.
+        .init(number: 21, title: "Fix the shouting", labels: ["RISK:LOW", "Diplomat:Fast-Track"], updated: at("07:30"),
+              state: "MERGED", headRef: "shout", head: sha("21")),
         .init(number: 8, title: "Dropped idea", labels: ["risk:low"], updated: at("06:00"), state: "CLOSED",
               headRef: "drop", head: sha("08")),
     ]
+    t.others = [20: ("Logout keeps the cache", "CLOSED", "acme/app"), 23: ("Lib cache", "CLOSED", "acme/lib"),
+                22: ("Ancient open issue", "OPEN", "acme/app")]
     t.repoLabels = Set(t.issues.flatMap(\.labels) + t.prs.flatMap(\.labels) + ["diplomat:fractured"])
     t.labelBook = [("lab-rl", "risk:low", "T1"), ("lab-cl", "complexity:low", nil)]
     t.tickets = [
@@ -708,7 +721,8 @@ func pipelineSmoke() throws {
         (prURL(14), "cleared/fast (CI still running)"), (prURL(15), "fast-track/fast"), (prURL(16), "unrated/unrated"),
         (prURL(17), "human/human"), (prURL(18), "human/human (off the fast track: comes from a fork)"),
         (prURL(19), "human/human (off the fast track: targets feat-a, not the default branch)"),
-        (prURL(10), "merged/done"), (prURL(8), "closed/done"), (prURL(9), "absent"),
+        (prURL(10), "merged/done"), (prURL(8), "closed/done"), (prURL(9), "absent"), (prURL(21), "merged/done"),
+        (issueURL(20), "closed/done"), (issueURL(22), "absent"), ("https://github.com/acme/lib/issues/23", "absent"),
         (linearURL("ENG-1"), "unrated/unrated"), (linearURL("ENG-3"), "fixing/fast"),
     ]
     for (id, want) in stages1 { check(stage(s1.result, id) == want, "sync 1 \(id): \(stage(s1.result, id))") }
@@ -721,16 +735,21 @@ func pipelineSmoke() throws {
           "writable: \(writable)")
     let edges1 = Set(s1.result.graph.edges.map { "\($0.from) \($0.kind.rawValue) \($0.to)" })
     check(edges1 == ["\(issueURL(4)) fixes \(prURL(11))", "\(linearURL("ENG-3")) fixes \(prURL(11))",
-                     "\(prURL(17)) stacked \(prURL(19))"], "sync 1 edges: \(edges1)")
+                     "\(prURL(17)) stacked \(prURL(19))", "\(issueURL(20)) fixes \(prURL(10))",
+                     "\(issueURL(1)) fixes \(prURL(10))"], "sync 1 edges: \(edges1)")
+    check(item(s1.result, issueURL(20)).map { "\($0.label) \($0.title) \($0.state) \($0.writable)" }
+          == "#20 Logout keeps the cache closed false", "a closed issue a merged PR closed")
+    check(item(s1.result, issueURL(1))?.state == "open", "an issue read open keeps its open entry")
     check(s1.result.graph.nodes.count == s1.result.items.count)
     check(PipelineLog.last(in: dir) == s1.result, "last.json holds the sync's result")
 
     // Sync 2: forced ratings first and outside the budget; then the writable issues.
     every.force = PipelineSettings.Force(rate: [issueURL(2), linearURL("ENG-2"), issueURL(101), issueURL(102),
-                                                prURL(16)])
+                                                prURL(16), issueURL(20)])
     let s2 = sync(t, every, dir, t0.addingTimeInterval(300))
     every.force = nil
-    check(s2.result.notices == ["#16 was not rated: only my own open PRs are"], "sync 2 notices: \(s2.result.notices)")
+    check(s2.result.notices == ["#16 was not rated: only my own open PRs are", "#20 was not rated: it is closed"],
+          "sync 2 notices: \(s2.result.notices)")
     check(s2.claude == ["sonnet Upload crashes on big files", "sonnet Payment flow redesign",
                         "sonnet Extract the storage protocol", "sonnet Move SQLite behind it",
                         "sonnet Wrong color in the header", "sonnet Typo on the login button",
