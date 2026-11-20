@@ -322,6 +322,9 @@ enum TasksTest {
         let requestRoot = PRRef.LocalRepo(owner: owner, repo: repo, path: RepoPaths.agentRepo)
         check("a review request runs at the default depth when no row names its author",
               store.reviewRequestConfig(request, root: requestRoot, verdict: false).depth == "quick")
+        let allowed = store.reviewRequestConfig(request, root: requestRoot, verdict: true)
+        check("…and a verdict it may submit is the automatic one, not the final E2E pass",
+              allowed.automaticVerdict == true && !allowed.finalPass)
         store.autoReviewOverrides = AutoReviewDepth.seed + [AutoReviewOverride(login: "@contributor-x", depth: "deep")]
         check("…and at the depth of the row that does",
               store.reviewRequestConfig(request, root: requestRoot, verdict: false).depth == "deep")

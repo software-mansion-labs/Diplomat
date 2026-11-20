@@ -342,7 +342,7 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Whether to auto-dispatch a full-E2E review when someone requests my review on a
+    /// Whether to auto-dispatch a review when someone requests my review on a
     /// PR (someone else's PR → review-only, leave comments). Persisted; kicks a poll on
     /// enable. Independent of `prAutofixEnabled`.
     @Published var reviewRequestsEnabled: Bool {
@@ -4388,8 +4388,9 @@ final class Store: ObservableObject {
         var cfg = ReviewConfig(depth: autoReviewDepth(of: r.author, me: me),
                                target: .specific, me: me, markReady: false,
                                leaveReviews: true, replyToReviews: false,
-                               specificPR: String(r.number), finalPass: verdict,
+                               specificPR: String(r.number),
                                softApprove: softApproveEnabled, specificAuthor: .theirs)
+        cfg.automaticVerdict = verdict
         cfg.home = root
         return cfg
     }

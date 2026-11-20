@@ -937,7 +937,7 @@ class Store(QObject):
 
     @property
     def review_requests_enabled(self) -> bool:
-        """Full-E2E review PRs that request my review (read-only, never touches their
+        """Review PRs that request my review (read-only, never touches their
         branch), retrying an unaddressed review until it lands. On by default;
         switched off it queues rather than starts, like the toggle above."""
         return self._settings.value("reviewRequestsEnabled", True, bool)
@@ -2482,7 +2482,7 @@ class Store(QObject):
             leave_reviews=True,
             reply_to_reviews=False,
             specific_pr=str(number),
-            final_pass=verdict,
+            automatic_verdict=verdict,
             soft_approve=self.soft_approve_enabled,
             specific_author=review.SpecificAuthor.THEIRS,
             home=home,

@@ -200,6 +200,20 @@ def test_final_pass_never_applies_to_my_own_prs():
     ).build_prompt()
 
 
+def test_automatic_verdict_reaches_the_focused_review_prompt():
+    config = review.ReviewConfig(
+        depth="standard", target=PRTarget.SPECIFIC, specific_pr="337",
+        specific_author=review.SpecificAuthor.THEIRS, automatic_verdict=True,
+    )
+    prompt = config.build_prompt()
+    assert "Submit the verdict in the same formal review" in prompt
+    assert "one focused pass" in prompt
+    assert "FULL E2E pass" not in prompt
+
+    config.automatic_verdict = False
+    assert "Do NOT submit an APPROVE" in config.build_prompt()
+
+
 def test_soft_approve_leaves_a_thank_you_but_no_verdict():
     # Soft-approve is ON by default: a review-only PR that comes back clean gets a
     # thank-you COMMENT review, but never an APPROVE action. It never applies to my

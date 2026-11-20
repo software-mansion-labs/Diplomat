@@ -28,10 +28,12 @@ root its PR or issue belongs to.
   level-triggered now (the edge event is a deliberate no-op) and retry on the
   plain 3-minute tick; the backoff ladder is the review path's.
 - **Review requests** - polls PRs requesting *my* review and dispatches a review at
-  the Settings **Review depth** (**default standard**) - or the depth a *Per-author
-  depth* row gives the PR's author, the first row naming them winning - with formal
-  per-line comments, hands strictly off the branch. "Owed" comes from GitHub's own
-  timestamps (request newer than my last review), so a genuine re-request
+  the Settings **Review depth** (**default standard**, one focused review of the change
+  and affected callers) - or the depth a *Per-author depth* row gives the PR's author,
+  the first row naming them winning - with formal per-line comments, hands strictly
+  off the branch. Re-requests check intervening PR changes and open findings.
+  GitHub's timestamps determine when a review is owed (request newer than my last
+  review), so a genuine re-request
   re-qualifies, and a review left unaddressed (agent died, window closed) is
   retried on the same 5m→3h backoff until the review actually lands. Force-push
   dedup: a push re-stamps the review request, which would double-spawn - a new
@@ -206,19 +208,19 @@ auto-review's review is a neutral `COMMENT` one and the final call stays with me
 opted in, three independent suppressors (each default ON) still withhold the
 verdict for a PR that touches a SKILL, touches the installer/CLI, or comes from a
 community author (outside `trustedAssociations` in `assets/filters.json`) - those
-classes stay comments-only even with approvals enabled.
+classes stay comments-only even with approvals enabled. A review that may submit a
+verdict runs at the same depth as one that may not.
 
 ### Soft-approvals (default ON)
 
 A separate toggle governs what a *comments-only* review does when it finds a PR
-perfectly clean - **default ON**. Instead of staying silent, the agent submits a
-`COMMENT` review with no inline comments whose body is a single friendly note
-(*"Ran the full sweep: ... Returned clean. Thank you for contributing!"*, naming what
-the review actually ran).
+free of behavioral findings - **default ON**. The agent submits a
+`COMMENT` review with no inline comments whose body describes what it actually
+checked, thanks the contributor, and may include one optional coverage suggestion.
 A soft-approval is that review alone - it **never** carries an `APPROVE` action;
 it's just an acknowledgement. It's independent of the verdict toggle above and is
 moot on any PR that gets a real verdict (that takes precedence). Turn it off to
-make clean reviews fully silent again.
+skip the thank-you review when there is nothing to report.
 
 ### One review per PR, submitted
 

@@ -937,9 +937,9 @@ enum Dump {
                 + "\(sampleVerdict ? "→ VERDICT" : "→ NO verdict")) -----")
             var requested = ReviewConfig(depth: AutoReviewDepth.defaultDepth, target: .specific, me: me,
                                          markReady: false, leaveReviews: true, replyToReviews: false,
-                                         specificPR: String(sample), finalPass: sampleVerdict,
-                                         specificAuthor: .theirs)
+                                         specificPR: String(sample), specificAuthor: .theirs)
             requested.home = root
+            requested.automaticVerdict = sampleVerdict
             print(requested.buildPrompt())
 
             // New community issues: the scan the monitor runs, against a mark a week back

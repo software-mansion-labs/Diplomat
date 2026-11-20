@@ -628,6 +628,7 @@ class SettingsView(QWidget):
         body.addWidget(self._track(SettingRow(
             "Auto-queue reviews that request me", review_control,
             detail="Inline comments — read-only, never their branch. "
+                   "Re-reviews check new commits and open findings. "
                    "A review that never lands (agent died, window closed) is retried. "
                    "Off, the requests still list under Agent tasks, queued for "
                    "“execute now” only.",
