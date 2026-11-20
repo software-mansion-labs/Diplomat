@@ -467,8 +467,7 @@ class Store(QObject):
         self.pipeline_syncing = False
         # Over the flags and the force sets below, never over a CLI call.
         self._pipeline_lock = threading.Lock()
-        # A sync asked for while one runs: it follows that one, which may have been
-        # handed the force sets before the ask that added to them.
+        # A sync asked for while one runs (:meth:`run_pipeline_sync_async`).
         self._pipeline_again = False
         # Item ids the screen asked to rate or fracture ahead of every limit, until a
         # sync that was handed them answers.
