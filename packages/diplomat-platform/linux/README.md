@@ -236,7 +236,7 @@ beside the cap, which live in the shared `~/.diplomat/config.json` ([`appconfig.
   polling and keeps listing what it finds under [Agent tasks](#agent-tasks); what
   stops is the automatic start — which is why the allowlist stays editable while it
   is off, since it is what decides which requests get listed, and so do the depth
-  rows, since a goal's reviews run at them either way.
+  rows, since *execute now* runs the reviews it queues at them.
 - **Fix new community issues** — the [new-community-issue
   monitor](../../../docs/automation.md#autonomous-monitors) (default **ON**). Unlike the two
   toggles above, switched off it queues nothing, and issues filed while it is off
