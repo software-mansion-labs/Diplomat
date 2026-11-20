@@ -357,7 +357,6 @@ class AutoReviewOverride:
         return cls(login, depth)
 
 
-#: The table until the operator edits it.
 AUTO_REVIEW_SEED = (AutoReviewOverride(None, "max"),)
 
 

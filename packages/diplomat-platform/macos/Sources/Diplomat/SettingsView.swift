@@ -619,9 +619,8 @@ struct SettingsView: View {
         }
     }
 
-    /// Each binding finds its row by `id` on every read and write: by index, a field
-    /// still being edited when a row above it is removed would write into the row that
-    /// slid into its place.
+    /// Bindings find the row by `id`: by index, a field still being edited when a row
+    /// above it goes would write into the row that slid into its place.
     private func autoReviewOverrideRow(_ row: AutoReviewOverride) -> some View {
         let index = { store.autoReviewOverrides.firstIndex { $0.id == row.id } }
         let login = Binding<String>(

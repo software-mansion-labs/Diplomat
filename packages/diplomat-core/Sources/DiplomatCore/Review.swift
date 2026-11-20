@@ -556,9 +556,8 @@ public enum AuthorAllowlist {
 
 /// One row of the auto-review depth table: PRs by `login` are reviewed at `depth`.
 /// A `nil` login is me, whoever that is in the repo under review; `""` is a row
-/// whose login is not typed yet, and names nobody. `id` tells rows apart while the
-/// process runs, for an editor whose rows can name one login twice; it is not stored
-/// and not compared.
+/// whose login is not typed yet, and names nobody. `id` tells rows apart in an editor;
+/// it is neither stored nor compared.
 public struct AutoReviewOverride: Codable, Equatable, Identifiable {
     public let id = UUID()
     public var login: String?
@@ -581,7 +580,6 @@ public struct AutoReviewOverride: Codable, Equatable, Identifiable {
 /// Python twin: `AutoReviewOverride` / `auto_review_depth` in `autofix.py`.
 public enum AutoReviewDepth {
     public static let defaultDepth = "standard"
-    /// The table until the operator edits it.
     public static let seed = [AutoReviewOverride(login: nil, depth: "max")]
 
     public static func resolve(author: String, me: String, overrides: [AutoReviewOverride],
