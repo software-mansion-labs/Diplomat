@@ -238,7 +238,7 @@ class ReviewConfig(PRSweepConfig):
             "includeReady": self.include_ready,
             "specificPR": self.specific_pr,
             "finalPass": self.final_pass,
-            **({"automaticVerdict": True} if self.automatic_verdict else {}),
+            "automaticVerdict": self.automatic_verdict,
             "softApprove": self.soft_approve,
             "specificAuthor": self.disposition.value,
             **listed_payload(self.local_repos, self.home),

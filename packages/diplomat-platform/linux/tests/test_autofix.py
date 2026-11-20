@@ -619,7 +619,7 @@ def test_review_request_verdict_gating(store, monkeypatch):
                         lambda *a, **k: skill_reqs)
     store._poll_review_requests([ROOT])
     assert len(calls) == 1  # dispatched (comments-only)
-    assert configs[1]["depth"] == "standard" and not configs[1].get("automaticVerdict")
+    assert configs[1]["depth"] == "standard" and configs[1]["automaticVerdict"] is False
     assert not configs[1]["finalPass"]
 
 

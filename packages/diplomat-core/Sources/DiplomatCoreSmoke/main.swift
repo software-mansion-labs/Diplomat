@@ -3159,6 +3159,7 @@ check(kt.contains("it is yours — opened earlier in this run, or left by an ear
 check(kt.contains("right before it, list the pending review's comments again: one that does not open with the attribution tag is mine, added from the browser, so leave the review unsubmitted"),
       "a comment of mine added mid-run keeps the review from being submitted")
 check(kt.contains("Post your findings in that review"), "leave-reviews posts the findings in it")
+check(kt.contains("Leave the choice of fix to the author"), "review findings leave implementation to the author")
 check(!kt.contains("Do NOT post your findings on the PR"), "…and is not told to keep them")
 check(kt.contains("If one of them does not open with the `\\[[Diplomat](` attribution tag (whatever model name follows it), that review is my own draft from the browser: stop right there"),
       "my draft is looked for before any review work, and stops the run")
