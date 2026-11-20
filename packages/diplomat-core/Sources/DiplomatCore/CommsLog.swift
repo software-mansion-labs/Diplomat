@@ -10,9 +10,6 @@ import Foundation
 /// - `action`   + `outcome`, `queueKey`?, `label`?  — the front-end, once it has acted
 /// - `started`  + `label`                           — the front-end, when the ask's agent spawned
 /// - `finished` + `label`                           — the front-end, when that run left the agent list
-/// - `reply`    + `outcome`, `detail`?              — `CommsReplier`: `sending` with the text before it
-///                                                    posts, then `sent` or `failed: …`; `skipped: …`
-///                                                    for an away question it would not answer
 /// - `error`    + `detail`                          — the tick, on going from a good tick to a failing
 ///                                                    one, and for messages it skipped unread
 ///
@@ -20,7 +17,7 @@ import Foundation
 /// appended to a 0600 file while holding `CommsLog.lockURL`.
 public struct CommsEvent: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
-        case ping, decision, action, started, finished, error, reply
+        case ping, decision, action, started, finished, error
     }
 
     public var at: Date
@@ -57,10 +54,6 @@ public struct CommsItem: Codable, Equatable, Sendable {
     public var label: String?
     public var startedAt: Date?
     public var finishedAt: Date?
-    /// The text Comms wrote back in Slack, and the last `reply` line's outcome; `reply`
-    /// is nil for a skipped one.
-    public var reply: String?
-    public var replyOutcome: String?
     /// When the ping was recorded.
     public var at: Date
 
@@ -104,15 +97,14 @@ public enum CommsLog {
         PrivateFiles.prepare(reportsDir(in: dir))
     }
 
-    /// Under the lock (`PrivateFiles.append`); false when the line is not all on disk.
-    @discardableResult
-    public static func append(_ event: CommsEvent, in dir: URL = dir) -> Bool {
-        guard var line = try? encoder.encode(event) else { return false }
+    /// Under the lock (`PrivateFiles.append`).
+    public static func append(_ event: CommsEvent, in dir: URL = dir) {
+        guard var line = try? encoder.encode(event) else { return }
         line.append(UInt8(ascii: "\n"))
         prepare(dir)
-        return PrivateFiles.locked(lockURL(in: dir)) {
+        _ = PrivateFiles.locked(lockURL(in: dir)) {
             PrivateFiles.append(line, to: eventsURL(in: dir), maxBytes: maxBytes)
-        } ?? false
+        }
     }
 
     /// Oldest first; a torn or foreign line costs only that line.
@@ -153,9 +145,6 @@ public enum CommsLog {
                 if let l = e.label { items[e.id]?.item.label = l }
             case .finished:
                 items[e.id]?.item.finishedAt = e.at
-            case .reply:
-                items[e.id]?.item.replyOutcome = e.outcome
-                if let d = e.detail { items[e.id]?.item.reply = d }
             case .error:
                 break
             }

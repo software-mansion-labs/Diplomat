@@ -55,10 +55,10 @@ public enum CommsClassifier {
         let primary = many ? PRRef.splitSlug(settings.repos[0]) ?? ("", "")
             : (settings.owner, settings.repo)
         let base = ["owner": primary.0, "repo": primary.1,
-                    "list": CommsText.list(settings.repos, and: "and"),
+                    "list": CommsText.list(settings.repos),
                     "example": names.dropFirst().first ?? "",
                     "host": settings.gitlabHost("") ?? "",
-                    "hosted": CommsText.list(hosted, and: "and")]
+                    "hosted": CommsText.list(hosted)]
         var wording = many ? c.repos.many : c.repos.one
         if settings.repos.contains(where: { settings.gitlabHost($0) != nil }) {
             wording.merge(many ? c.repos.gitlab.many : c.repos.gitlab.one) { $1 }
@@ -790,8 +790,7 @@ public enum CommsWatch {
             guard decision.reason.hasPrefix(bannedPrefix) else { return decision }
             return CommsDecision(action: decision.action, targets: decision.targets,
                                  summary: decision.summary, reason: "triage: " + decision.reason,
-                                 evidence: decision.evidence, language: decision.language,
-                                 settings: settings)
+                                 evidence: decision.evidence, settings: settings)
         }
     }
 

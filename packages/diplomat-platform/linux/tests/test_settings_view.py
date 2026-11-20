@@ -313,61 +313,12 @@ def _row_of(control):
     return row
 
 
-def test_the_reply_switch_sits_with_the_comms_switches_and_writes_through(make_view):
-    from diplomat_app.store import app_settings
-
-    view = make_view()
-    sw = view._sw_comms_replies
-    assert sw.isChecked() is True
-    assert sw.accessibleName() == "Reply in Slack"
-    assert _row_of(sw).parent() is _row_of(view._sw_comms_bumps).parent()
-    assert _row_of(sw)._detail.text().startswith("Only while you are away")
-    sw.setChecked(False)
-    assert app_settings().value("commsReplies") is False
-    assert view.store.comms_toggles()["replies"] is False
-    assert make_view()._sw_comms_replies.isChecked() is False
-
-
-def test_the_reply_kinds_show_only_while_replies_are_on(make_view):
-    view = make_view()
-    assert view._comms_reply_kinds.isHidden() is False
-    view._sw_comms_replies.setChecked(False)
-    assert view._comms_reply_kinds.isHidden() is True
-    assert make_view()._comms_reply_kinds.isHidden() is True
-    view._sw_comms_replies.setChecked(True)
-    assert view._comms_reply_kinds.isHidden() is False
-
-
-def test_only_questions_get_a_reply_until_the_operator_says_otherwise(make_view):
-    from diplomat_app.store import app_settings
-
-    view = make_view()
-    assert view._sw_comms_reply_questions.isChecked() is True
-    switches = {"replyToReviews": view._sw_comms_reply_reviews,
-                "replyToFixes": view._sw_comms_reply_fixes,
-                "replyToInvestigations": view._sw_comms_reply_investigations}
-    toggles = view.store.comms_toggles()
-    assert toggles["replyToQuestions"] is True
-    for key, sw in switches.items():
-        assert sw.isChecked() is False and toggles[key] is False
-        assert _row_of(sw).parent() is view._comms_reply_kinds
-    view._sw_comms_reply_fixes.setChecked(True)
-    view._sw_comms_reply_questions.setChecked(False)
-    assert app_settings().value("commsReplyToFixes") is True
-    toggles = view.store.comms_toggles()
-    assert (toggles["replyToFixes"], toggles["replyToQuestions"],
-            toggles["replyToReviews"]) == (True, False, False)
-    again = make_view()
-    assert again._sw_comms_reply_fixes.isChecked() is True
-    assert again._sw_comms_reply_questions.isChecked() is False
-
-
 def test_the_batch_size_slider_stops_at_powers_of_two_and_writes_through(make_view):
     from diplomat_app.store import app_settings
 
     view = make_view()
     slider = view._comms_batch
-    assert _row_of(slider).parent() is _row_of(view._sw_comms_replies).parent()
+    assert _row_of(slider).parent() is _row_of(view._sw_comms_bumps).parent()
     assert slider._slider.accessibleName() == "Batch size"
     assert (slider.minimum(), slider.maximum(), slider.badge()) == (0, 6, "8")
     seen = []
@@ -404,22 +355,6 @@ def test_a_hand_written_setting_finds_the_nearest_stop_and_stays_until_moved(mak
     view = make_view()
     assert view._comms_batch.badge() == "4"
     assert view.store.comms_batch_size == 5
-
-
-def test_the_away_slider_steps_in_quarter_hours_and_writes_through(make_view):
-    from diplomat_app.store import app_settings
-
-    view = make_view()
-    slider = view._comms_away
-    assert _row_of(slider).parent() is _row_of(view._sw_comms_replies).parent()
-    assert slider._slider.accessibleName() == "Away after"
-    assert (slider.minimum(), slider.maximum(), slider.value()) == (900, 43200, 10800)
-    assert slider.badge() == "3h"
-    slider._slider.setValue(4400)
-    assert slider.value() == 4500 and slider.badge() == "1h 15m"
-    assert app_settings().value("commsAwayAfterSecs") == 4500
-    assert view.store.comms_away_after_secs == 4500
-    assert make_view()._comms_away.value() == 4500
 
 
 def test_the_keywords_hint_names_the_wildcard(view):

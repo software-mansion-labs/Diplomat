@@ -19,15 +19,11 @@ public struct CommsIdentity: Codable, Equatable, Sendable {
     /// The workspace as `SlackProfile.workspace` names it, not a Slack team id.
     public var teamID: String
     public var handle: String
-    /// The first word of the profile's real name, else its display name: how a reply
-    /// names the operator. Nil for an identity recorded before it was read.
-    public var name: String?
 
-    public init(userID: String, teamID: String, handle: String, name: String? = nil) {
+    public init(userID: String, teamID: String, handle: String) {
         self.userID = userID
         self.teamID = teamID
         self.handle = handle
-        self.name = name
     }
 }
 
@@ -46,15 +42,10 @@ public struct CommsMessage: Codable, Equatable, Sendable {
     public var permalink: String
     public var reasons: [CommsReason]
     public var keyword: String?
-    /// From the sender's profile: what a reply's answer is written for (`CommsAnswerer`)
-    /// and the zone its times are given in. Nil when not read.
-    public var senderTitle: String?
-    public var senderTimezone: String?
 
     public init(id: String, channelID: String, channelName: String, isDM: Bool,
                 userID: String, userName: String, teamID: String, text: String, ts: String,
-                permalink: String, reasons: [CommsReason], keyword: String? = nil,
-                senderTitle: String? = nil, senderTimezone: String? = nil) {
+                permalink: String, reasons: [CommsReason], keyword: String? = nil) {
         self.id = id
         self.channelID = channelID
         self.channelName = channelName
@@ -67,8 +58,6 @@ public struct CommsMessage: Codable, Equatable, Sendable {
         self.permalink = permalink
         self.reasons = reasons
         self.keyword = keyword
-        self.senderTitle = senderTitle
-        self.senderTimezone = senderTimezone
     }
 
     public var sender: String { userName.isEmpty ? userID : userName }
@@ -81,8 +70,6 @@ public struct CommsMessage: Codable, Equatable, Sendable {
     public static let targetSeparator: Character = "#"
 
     /// The Slack message's own id, whichever of its targets' rows this is.
-    public var messageID: String { Self.messageID(of: id) }
-
     public static func messageID(of id: String) -> String {
         String(id.prefix { $0 != targetSeparator })
     }
@@ -96,16 +83,13 @@ public enum CommsAction: String, Codable, CaseIterable, Sendable {
     case none, bump, review
     case fixIssue = "fix_issue"
     case investigate
-    /// A question the project's documentation could answer: answered in Slack while the
-    /// operator is away (`CommsReplier`), a ping otherwise.
-    case question
     /// A hijack attempt: the sender is banned (`CommsBan`).
     case injection
 
     public var needsNumber: Bool {
         switch self {
-        case .bump, .review, .fixIssue:                     return true
-        case .none, .investigate, .question, .injection:    return false
+        case .bump, .review, .fixIssue:          return true
+        case .none, .investigate, .injection:    return false
         }
     }
 }
@@ -158,18 +142,12 @@ public struct CommsDecision: Codable, Equatable, Sendable {
     public let reason: String
     /// The injected words, quoted from the message; "" unless `action` is `injection`.
     public let evidence: String
-    /// What the message is written in: a key of `replies.languages`, or anything else for
-    /// English. Only ever looks up fixed words, so a message steering it steers nothing.
-    public let language: String
-    /// For an `investigate` or a `question`, the message's repository as in `CommsAsk.repo`;
-    /// "" otherwise.
+    /// For an `investigate`, the message's repository as in `CommsAsk.repo`; "" otherwise.
     public let repo: String
 
     /// The first target's number; 0 for none.
     public var number: Int { targets.first?.number ?? 0 }
     public var numbers: [Int] { targets.map(\.number) }
-
-    public static let defaultLanguage = "en"
 
     /// Classifier prose is clipped to this; it is shown on one row.
     static let maxText = 240
@@ -179,8 +157,8 @@ public struct CommsDecision: Codable, Equatable, Sendable {
     /// naming the item an earlier target names (`sameItem`, on `settings`' repositories).
     public init(action: CommsAction, number: Int = 0, numbers: [Int] = [],
                 targets: [CommsAsk] = [], summary: String,
-                reason: String, evidence: String = "", language: String = defaultLanguage,
-                repo: String = "", settings: CommsSettings? = nil) {
+                reason: String, evidence: String = "", repo: String = "",
+                settings: CommsSettings? = nil) {
         let reason = Self.clip(reason)
         let evidence = action == .injection ? Self.unquoted(evidence) : ""
         let asked = !targets.isEmpty ? targets
@@ -191,8 +169,7 @@ public struct CommsDecision: Codable, Equatable, Sendable {
             kept.append(t)
         }
         self.summary = Self.clip(summary)
-        self.language = language
-        self.repo = [.investigate, .question].contains(action) ? repo : ""
+        self.repo = action == .investigate ? repo : ""
         if action.needsNumber && kept.isEmpty {
             self.action = .none
             self.targets = []
@@ -240,7 +217,7 @@ public struct CommsDecision: Codable, Equatable, Sendable {
             let about = settings.canonical(repo) ?? ""
             return about == repo ? self
                 : CommsDecision(action: action, summary: summary, reason: reason,
-                                evidence: evidence, language: language, repo: about)
+                                evidence: evidence, repo: about)
         }
         let sent = ([message] + earlier).map(\.text)
         var texts: [String: [String]] = [:]
@@ -268,14 +245,14 @@ public struct CommsDecision: Codable, Equatable, Sendable {
         guard kept != targets else { return self }
         guard !dropped.isEmpty else {
             return CommsDecision(action: action, targets: kept, summary: summary, reason: reason,
-                                 language: language, settings: settings)
+                                 settings: settings)
         }
         let noun = dropped.count == 1 ? "a number" : "numbers"
         let place = settings.repos.count == 1 ? "in this repository" : "in that watched repository"
         let why = "answered \(Self.describe(dropped, tagged: true)), \(noun) neither the message "
             + "nor its conversation names \(place); \(reason)"
         return CommsDecision(action: kept.isEmpty ? .none : action, targets: kept,
-                             summary: summary, reason: why, language: language, settings: settings)
+                             summary: summary, reason: why, settings: settings)
     }
 
     /// Same number and repository, and on GitLab, which numbers merge requests and issues
@@ -287,7 +264,7 @@ public struct CommsDecision: Codable, Equatable, Sendable {
 
     func targeting(_ t: CommsAsk) -> CommsDecision {
         CommsDecision(action: t.action, targets: [t], summary: summary, reason: reason,
-                      evidence: evidence, language: language)
+                      evidence: evidence)
     }
 
     /// Tagged, `review #1, #2, fix_issue argent#3`: an action before the first of each run
@@ -389,7 +366,7 @@ public struct CommsDecision: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case action, number, numbers, targets, summary, reason, evidence, language, repo
+        case action, number, numbers, targets, summary, reason, evidence, repo
     }
 
     /// A target as written, each field kept only when it has the right type.
@@ -429,7 +406,6 @@ public struct CommsDecision: Codable, Equatable, Sendable {
                   numbers: (try? c.decode([Int].self, forKey: .numbers)) ?? [],
                   targets: targets, summary: summary, reason: reason,
                   evidence: (try? c.decode(String.self, forKey: .evidence)) ?? "",
-                  language: (try? c.decode(String.self, forKey: .language)) ?? Self.defaultLanguage,
                   repo: (try? c.decode(String.self, forKey: .repo)) ?? "",
                   settings: decoder.userInfo[Self.settingsKey] as? CommsSettings)
     }
@@ -445,7 +421,6 @@ public struct CommsDecision: Codable, Equatable, Sendable {
         try c.encode(summary, forKey: .summary)
         try c.encode(reason, forKey: .reason)
         try c.encode(evidence, forKey: .evidence)
-        try c.encode(language, forKey: .language)
         if !repo.isEmpty { try c.encode(repo, forKey: .repo) }
     }
 
@@ -547,7 +522,7 @@ public struct CommsDecision: Codable, Equatable, Sendable {
         guard d.reason.hasPrefix(CommsClassifier.failurePrefix) else { return d }
         return CommsDecision(action: d.action, targets: d.targets, summary: d.summary,
                              reason: "triage: " + d.reason, evidence: d.evidence,
-                             language: d.language, repo: d.repo, settings: settings)
+                             repo: d.repo, settings: settings)
     }
 
     /// A model answering in prose sometimes wraps it in a Markdown code fence.
@@ -719,62 +694,26 @@ public struct CommsSettings: Codable, Equatable, Sendable {
 }
 
 /// Per-kind switches (`requests` covers reviews and issue fixes); off turns that kind
-/// into a ping alone. `replies` is whether Comms writes back in Slack (`CommsReplier`) at
-/// all, and the `replyTo…` switches about what: its answers to questions, and only those,
-/// until the operator says otherwise.
+/// into a ping alone.
 public struct CommsToggles: Codable, Equatable, Sendable {
     public var requests: Bool
     public var bumps: Bool
     public var investigations: Bool
-    public var replies: Bool
-    public var replyToReviews: Bool
-    public var replyToFixes: Bool
-    public var replyToInvestigations: Bool
-    public var replyToQuestions: Bool
 
-    public init(requests: Bool = true, bumps: Bool = true, investigations: Bool = true,
-                replies: Bool = true, replyToReviews: Bool = false, replyToFixes: Bool = false,
-                replyToInvestigations: Bool = false, replyToQuestions: Bool = true) {
+    public init(requests: Bool = true, bumps: Bool = true, investigations: Bool = true) {
         self.requests = requests
         self.bumps = bumps
         self.investigations = investigations
-        self.replies = replies
-        self.replyToReviews = replyToReviews
-        self.replyToFixes = replyToFixes
-        self.replyToInvestigations = replyToInvestigations
-        self.replyToQuestions = replyToQuestions
     }
 
-    public func repliesTo(_ action: CommsAction) -> Bool {
-        switch action {
-        case .review:                        return replyToReviews
-        case .fixIssue:                      return replyToFixes
-        case .investigate:                   return replyToInvestigations
-        case .question:                      return replyToQuestions
-        case .none, .bump, .injection:       return false
-        }
-    }
+    private enum CodingKeys: String, CodingKey { case requests, bumps, investigations }
 
-    private enum CodingKeys: String, CodingKey {
-        case requests, bumps, investigations, replies, replyToReviews, replyToFixes,
-             replyToInvestigations, replyToQuestions
-    }
-
-    /// A missing switch reads as its default.
+    /// A missing switch reads as on.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        let d = CommsToggles()
-        func read(_ key: CodingKeys, _ fallback: Bool) throws -> Bool {
-            try c.decodeIfPresent(Bool.self, forKey: key) ?? fallback
-        }
-        self.init(requests: try read(.requests, d.requests),
-                  bumps: try read(.bumps, d.bumps),
-                  investigations: try read(.investigations, d.investigations),
-                  replies: try read(.replies, d.replies),
-                  replyToReviews: try read(.replyToReviews, d.replyToReviews),
-                  replyToFixes: try read(.replyToFixes, d.replyToFixes),
-                  replyToInvestigations: try read(.replyToInvestigations, d.replyToInvestigations),
-                  replyToQuestions: try read(.replyToQuestions, d.replyToQuestions))
+        self.init(requests: try c.decodeIfPresent(Bool.self, forKey: .requests) ?? true,
+                  bumps: try c.decodeIfPresent(Bool.self, forKey: .bumps) ?? true,
+                  investigations: try c.decodeIfPresent(Bool.self, forKey: .investigations) ?? true)
     }
 }
 
@@ -863,15 +802,15 @@ public enum CommsPlan {
                               reportDir: URL) -> CommsEffect {
         let repo = decision.targets.first?.repo ?? ""
         switch decision.action {
-        case .none, .question: return .none
-        case .review:          return toggles.requests ? .review(decision.number, repo: repo) : .none
-        case .fixIssue:        return toggles.requests ? .fixIssue(decision.number, repo: repo) : .none
-        case .bump:            return toggles.bumps ? .bump(decision.number, repo: repo) : .none
+        case .none:        return .none
+        case .review:      return toggles.requests ? .review(decision.number, repo: repo) : .none
+        case .fixIssue:    return toggles.requests ? .fixIssue(decision.number, repo: repo) : .none
+        case .bump:        return toggles.bumps ? .bump(decision.number, repo: repo) : .none
         case .investigate:
             guard toggles.investigations else { return .none }
             return .investigate(InvestigateConfig(message: message, decision: decision,
                                                   settings: settings, reportDir: reportDir))
-        case .injection:       return .ban(CommsBan(message: message, decision: decision))
+        case .injection:   return .ban(CommsBan(message: message, decision: decision))
         }
     }
 }
@@ -1139,10 +1078,10 @@ public enum CommsText {
             .joined(separator: "\n")
     }
 
-    /// `a`, `a and b`, `a, b and c`, with `and` the language's word.
-    public static func list(_ items: [String], and: String) -> String {
+    /// `a`, `a and b`, `a, b and c`.
+    public static func list(_ items: [String]) -> String {
         items.count < 2 ? items.joined()
-            : items.dropLast().joined(separator: ", ") + " \(and) " + (items.last ?? "")
+            : items.dropLast().joined(separator: ", ") + " and " + (items.last ?? "")
     }
 
     /// For a value set outside a fence.

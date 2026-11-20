@@ -51,11 +51,6 @@ extension Store {
     /// The Comms self-test's stand-in for `gh pr|issue view`; consulted only headless.
     static var commsGHOverride: (@MainActor ([String]) async throws -> Data)?
 
-    /// The Comms self-test's Slack and away answerer for replies; consulted only
-    /// headless, where a reply without the Slack one is never sent.
-    static var commsSlackOverride: SlackAPI?
-    static var commsAnswerOverride: ((CommsAnswerer.Question) -> CommsAnswer)?
-
     /// The most of `events.jsonl` a refresh reads on the main actor; more is read and
     /// folded off it.
     static let commsInlineReadBytes: UInt64 = 64 << 10
@@ -82,10 +77,7 @@ extension Store {
 
     var commsToggles: CommsToggles {
         CommsToggles(requests: commsActRequests, bumps: commsActBumps,
-                     investigations: commsActInvestigations, replies: commsReplies,
-                     replyToReviews: commsReplyToReviews, replyToFixes: commsReplyToFixes,
-                     replyToInvestigations: commsReplyToInvestigations,
-                     replyToQuestions: commsReplyToQuestions)
+                     investigations: commsActInvestigations)
     }
 
     /// Where a Slack ban's message was (`#channel`, `DM`): the ban's own `place`, else the
@@ -192,50 +184,6 @@ extension Store {
                 Task { await self?.runCommsPollOnce() }
             }
         }
-        startCommsLockWatch()
-    }
-
-    // MARK: away
-
-    /// The session lock alone, as `CommsAway` says.
-    private func startCommsLockWatch() {
-        guard commsLockObservers.isEmpty, !Headless.active else { return }
-        refreshCommsLock()
-        let center = DistributedNotificationCenter.default()
-        for (name, locked) in [("com.apple.screenIsLocked", true),
-                               ("com.apple.screenIsUnlocked", false)] {
-            commsLockObservers.append(center.addObserver(
-                forName: Notification.Name(name), object: nil, queue: .main
-            ) { [weak self] _ in
-                Task { @MainActor in self?.noteCommsLock(locked) }
-            })
-        }
-    }
-
-    func noteCommsLock(_ locked: Bool, at now: Date = Date()) {
-        if !locked {
-            commsLockedSince = nil
-        } else if commsLockedSince == nil {
-            commsLockedSince = now
-        }
-    }
-
-    /// A lock found with no start recorded (one that began before this launch) starts
-    /// now: later than it did, never earlier.
-    func refreshCommsLock() {
-        guard !Headless.active, let locked = Store.sessionLocked() else { return }
-        noteCommsLock(locked)
-    }
-
-    /// Nil when there is no login session to ask about.
-    nonisolated static func sessionLocked() -> Bool? {
-        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return nil }
-        return (session["CGSSessionScreenIsLocked"] as? Bool) ?? false
-    }
-
-    var commsAway: Bool {
-        refreshCommsLock()
-        return CommsAway.isAway(lockedSince: commsLockedSince, afterSecs: commsAwayAfterSecs)
     }
 
     /// Overlap-guarded: the timer, a wake and the enable switch can each kick a tick while
@@ -319,8 +267,6 @@ extension Store {
         let reports = CommsLog.reportsDir()
         let fresh = Set(result.items.map(\.message.id))
         var bannedNow = Set(settings.bannedSenders)
-        let away = commsAway
-        var replies: [CommsReplyRequest] = []
         if let reading = refreshComms() { await reading.value }
         // Nothing logged is replayed while the tick is held (`commsHeldTick`): its "" repo
         // would be the next root's.
@@ -363,77 +309,13 @@ extension Store {
             if let line = act.feedLine, act.verb != "comms-ping" || !item.message.isExtraTarget {
                 AuditLog.log("auto", act.verb, line)
             }
-            guard commsEnabled, !bannedNow.contains(item.message.userID) else { continue }
-            if let work = commsQueuedWork(effect, act) {
-                replies.append(CommsReplyRequest(message: item.message, decision: item.decision,
-                                                 queued: work, away: away, toggles: toggles,
-                                                 settings: settings))
-            } else if item.decision.action == .question {
-                replies.append(CommsReplyRequest(message: item.message, decision: item.decision,
-                                                 away: away, toggles: toggles, settings: settings))
-            }
         }
-        // A later ping of this tick can get an earlier one's sender banned.
-        let due = CommsReplyRequest.merged(replies.filter { !bannedNow.contains($0.message.userID) })
-        if !due.isEmpty { replyInSlack(due) }
         for m in result.pings where commsNotify && commsEnabled && !bannedNow.contains(m.userID) {
             Notifier.post(m)
         }
         if !result.items.isEmpty || !stranded.isEmpty { refreshAudit() }
         refreshComms()
     }
-
-    /// Work the ping put in the queue, or found there or running; nil for anything else.
-    private func commsQueuedWork(_ effect: CommsEffect, _ act: CommsActResult) -> CommsQueuedWork? {
-        guard let key = act.queueKey else { return nil }
-        let kind: String
-        let number: Int
-        var repo = ""
-        switch effect {
-        case .review(let n, let r):   (kind, number, repo) = ("review", n, r)
-        case .fixIssue(let n, let r): (kind, number, repo) = ("fix_issue", n, r)
-        case .investigate(let cfg):   (kind, number) = ("investigate", cfg.number)
-        case .none, .bump, .ban:      return nil
-        }
-        return CommsQueuedWork(kind: kind, number: number, repo: repo,
-                               ahead: queuedTasks.firstIndex { $0.id == key } ?? 0,
-                               bays: autoTaskLimit,
-                               startedAt: act.running.map { Date(timeIntervalSince1970: $0.dispatchedAt) })
-    }
-
-    /// Off the main actor, after every earlier apply's replies: one may wait minutes on
-    /// `claude`, and two at once could each find the other's message unanswered.
-    private func replyInSlack(_ requests: [CommsReplyRequest]) {
-        let api = Headless.active ? Store.commsSlackOverride : nil
-        let answer = Headless.active ? Store.commsAnswerOverride : nil
-        if Headless.active, api == nil { return }
-        let prior = commsReplying
-        commsReplying = Task { [weak self] in
-            await prior?.value
-            let results = await Task.detached(priority: .utility) {
-                requests.map { ($0.message, CommsReplier.reply($0, api: api, answer: answer)) }
-            }.value
-            guard let self else { return }
-            var logged = false
-            for (m, result) in results {
-                guard let outcome = result.outcome else { continue }
-                let to = "\(m.sender) in \(m.place)"
-                if outcome == "sent" {
-                    AuditLog.log("auto", Store.commsReplyVerb,
-                                 "Replied to \(to): \(Store.snippet(result.text ?? "", max: 160))")
-                } else if outcome.hasPrefix("failed:") {
-                    AuditLog.log("auto", Store.commsReplyVerb, "Reply to \(to) \(outcome)")
-                } else {
-                    continue
-                }
-                logged = true
-            }
-            if logged { self.refreshAudit() }
-            self.refreshComms()
-        }
-    }
-
-    static let commsReplyVerb = "comms-reply"
 
     struct CommsActResult {
         var verb: String
@@ -655,7 +537,7 @@ extension Store {
         case .review, .fixIssue: return "review and fix asks are switched off, so ping only"
         case .bump:              return "bumps are switched off, so ping only"
         case .investigate:       return "investigations are switched off, so ping only"
-        case .none, .question, .injection: return nil
+        case .none, .injection:  return nil
         }
     }
 

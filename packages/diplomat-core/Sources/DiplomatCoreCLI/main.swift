@@ -16,8 +16,6 @@ import Foundation
 //   diplomat-core comms-auth                         # who Claude Code's Slack login is
 //   diplomat-core comms-feed        [--limit N]      # the Comms screen's rows
 //   diplomat-core comms-effect      < request.json   # what a triaged ping makes a front-end do
-//   diplomat-core comms-reply       < request.json   # Comms' reply in Slack, if one is due
-//   diplomat-core comms-reply-merge < requests.json  # those requests, one per Slack message
 //   diplomat-core opencode-session-model             # what an unpinned 2.x spawn names
 //   diplomat-core tasks-list        [--archived]     # the Tasks screen's rows (see TasksCommand)
 //   diplomat-core tasks-sync                         # one GitHub + Comms sync of every task
@@ -83,10 +81,10 @@ func specificAuthor(_ s: String?) -> SpecificAuthor {
 let args = CommandLine.arguments
 guard args.count >= 2,
       ["build-prompt", "tool-data", "telemetry", "agent-state", "agent-registry",
-       "comms-tick", "comms-auth", "comms-feed", "comms-effect", "comms-reply", "comms-reply-merge",
+       "comms-tick", "comms-auth", "comms-feed", "comms-effect",
        "opencode-session-model", "tasks-list", "tasks-sync", "tasks-edit", "tasks-group"].contains(args[1]) else {
     die("usage: diplomat-core (build-prompt | tool-data | telemetry | agent-state"
-        + " | agent-registry | comms-tick | comms-effect | comms-reply | comms-reply-merge"
+        + " | agent-registry | comms-tick | comms-effect"
         + " | tasks-edit)  (JSON on stdin)"
         + "\n       diplomat-core comms-feed [--limit N]"
         + "\n       diplomat-core comms-auth"
@@ -139,16 +137,6 @@ if args[1] == "comms-tick" {
 
 if args[1] == "comms-effect" {
     CommsCommand.effect(input)
-    exit(0)
-}
-
-if args[1] == "comms-reply-merge" {
-    CommsCommand.replyMerge(input)
-    exit(0)
-}
-
-if args[1] == "comms-reply" {
-    CommsCommand.reply(input)
     exit(0)
 }
 

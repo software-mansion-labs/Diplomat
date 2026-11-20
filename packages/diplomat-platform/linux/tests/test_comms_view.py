@@ -201,8 +201,7 @@ def _one_line(widget) -> bool:
 
 
 def test_a_ping_is_one_line_until_a_click_opens_the_rest(store):
-    item = _item(1, "2026-10-27T10:10:00Z", reply="[Diplomat]: Queued a review of #1",
-                 replyOutcome="sent")
+    item = _item(1, "2026-10-27T10:10:00Z")
     item["message"]["text"] = "first line\nsecond line\n" + "x " * 400
     item["decision"]["reason"] = "a direct ask"
     store.comms_items = [item]
@@ -211,15 +210,13 @@ def test_a_ping_is_one_line_until_a_click_opens_the_rest(store):
     [row] = _rows(view, PingRow)
     assert _one_line(row)
     assert row.details is None
-    assert _texts(row) == ["●", "u1", "DM", "REVIEW #1", "", "REPLIED",
-                           _clock("2026-10-27T10:10:00Z")]
+    assert _texts(row) == ["●", "u1", "DM", "REVIEW #1", "", _clock("2026-10-27T10:10:00Z")]
     assert row.text._full == "first line second line " + " ".join(["x"] * 400)
 
     _click(row)
     assert row.expanded
     shown = _texts(row.details)
-    assert shown == ["DM", item["message"]["text"], "sum 1 — a direct ask", "→ outcome 1",
-                     "↩ [Diplomat]: Queued a review of #1"]
+    assert shown == ["DM", item["message"]["text"], "sum 1 — a direct ask", "→ outcome 1"]
     assert _buttons(row) == ["Open in Slack"]
 
     # Every store signal rebuilds the list; an opened row stays open.
@@ -266,30 +263,9 @@ def test_nothing_read_draws_no_earlier(store):
     assert "Nothing new." not in _texts(view)
 
 
-@pytest.mark.parametrize(("extra", "chip", "detail"), [
-    ({"replyOutcome": "sent", "reply": "[Diplomat]: hi"}, "REPLIED", "↩ [Diplomat]: hi"),
-    ({"replyOutcome": "sending", "reply": "[Diplomat]: hi"}, "REPLYING", "↩ reply sending"),
-    ({"replyOutcome": "failed: channel_not_found", "reply": "[Diplomat]: hi"},
-     "REPLY FAILED", "↩ reply failed: channel_not_found"),
-    ({"replyOutcome": "skipped: the docs are silent"}, "NOT ANSWERED",
-     "↩ reply skipped: the docs are silent"),
-])
-def test_a_reply_is_a_pill_on_the_line_and_its_words_in_the_details(store, extra, chip,
-                                                                     detail):
-    item = _item(1, "2026-10-27T10:10:00Z", **extra)
-    item["decision"] = {"action": "question", "number": 0, "summary": "asks"}
-    store.comms_items = [item]
-    view = CommsView(store)
-    [row] = _rows(view, PingRow)
-    assert [t for t in _texts(row) if t.isupper()] == ["DM", "QUESTION", chip]
-    _click(row)
-    assert _texts(row.details)[-1] == detail
-
-
-def test_a_question_has_its_own_word_and_tint():
+def test_the_triage_pill_names_the_action_and_its_target():
     from diplomat_app.commsview import action_chip
 
-    assert action_chip({"action": "question", "number": 0}) == ("QUESTION", "#AF52DE")
     assert action_chip({"action": "review", "number": 4})[0] == "REVIEW #4"
     assert action_chip({"action": "review", "number": 4, "targets": [
         {"action": "review", "number": 4, "repo": "acme/widget"}]})[0] == "REVIEW WIDGET#4"

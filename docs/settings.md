@@ -134,10 +134,9 @@ Telemetry button and ⏻) swaps the panel to a settings screen:
   to its host, and "me" there is glab's user on that host, not the GitHub username
   above, read again whenever that host's entry in glab's `config.yml` changes (`glab auth
   login` as another account rewrites it); its agents are told to use `glab`. GitHub-only whatever the roots: Tasks
-  mirroring, the review audit, goal grouping, the username override,
+  mirroring, the review audit, goal grouping, the username override and
   [the narrow agent token](#a-narrow-github-token-for-agents) (an agent on a GitLab root
-  runs on your full `glab` login) and [Comms](comms.md)' answers to questions (the
-  documentation is read through `gh`, and only github.com links survive in them). A GitLab root
+  runs on your full `glab` login). A GitLab root
   is never the configured repo, so its work stays off the mesh. A reading older than a
   minute is taken again when next asked, so a checkout that appears later is picked up by
   the next poll. A row warns when the path isn't absolute, has no `.git`, or has no
@@ -250,7 +249,7 @@ Telemetry button and ⏻) swaps the panel to a settings screen:
 - **Comms (Slack)** - the [Slack watcher](comms.md) (**default off**): the switch,
   keywords, a sender allowlist, one switch per thing it may do (queue reviews and
   fixes, bump queued work, investigate bug reports), the batch size and interval,
-  replies and which kinds get one, notifications, the triage model, where the token
+  notifications, the triage model, where the token
   is read from, and **Test**. Every one is described in
   [Comms → Settings](comms.md#settings).
 - **Update** - pull the checkout, rebuild, and relaunch in place. Shows how many
