@@ -31,7 +31,8 @@ root its PR or issue belongs to.
   the Settings **Review depth** (**default standard**, one focused review of the change
   and affected callers) - or the depth a *Per-author depth* row gives the PR's author,
   the first row naming them winning - with formal per-line comments, hands strictly
-  off the branch. Re-requests check intervening PR changes and open findings.
+  off the branch. Re-requests check the premise, intervening PR changes and open
+  findings.
   GitHub's timestamps determine when a review is owed (request newer than my last
   review), so a genuine re-request
   re-qualifies, and a review left unaddressed (agent died, window closed) is

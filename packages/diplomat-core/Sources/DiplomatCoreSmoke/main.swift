@@ -3158,9 +3158,32 @@ print("review moves + absence pass assertions passed")
 // ---- Whether the PR is the right change at all ----
 // Every review prompt asks it once, ahead of the depth's instructions, whoever the author.
 section("premise check")
-let premiseParts = ["Identify the behavior this PR sets out to change",
+let premiseParts = ["JUDGE THE PREMISE, NOT ONLY THE DIFF",
+                    "trace the reported symptom down to where it originates",
+                    "only stop the symptom from showing",
+                    "Judge the PR as a whole, even when the technical review covers only part of it or only its outstanding threads",
+                    "A PR whose premise fails is NOT clean",
+                    "A wrong diagnosis or a false assumption (unless the change removes the real cause anyway)",
+                    "is an in-scope behavioral finding like any other",
+                    "at least MEDIUM, never a LOW or a nitpick, and Blocking on someone else's PR",
+                    "or the PR or a reply gives a sound reason to defer the root fix, never a reason you supply yourself",
+                    "or its root fix is deferred for such a stated reason",
+                    "otherwise its thread closes only once the cause is gone",
+                    "Neither its demonstrating case passing nor a deferral whose reason does not hold closes it",
+                    "when a claimed fix to any finding, or a deferral, leaves the premise failing, or a premise thread was resolved while it still fails",
+                    "also needs the real cause shown to survive the change",
+                    "A pass that runs nothing demonstrates it by reading",
+                    "unless the last Diplomat reply there already answers it",
+                    "rather than leaving it alone or opening a second thread",
+                    "a missing note there is a LOW in-scope behavioral finding, Non-blocking on someone else's PR, never a failed premise",
+                    "such as the other platform's, is an adjacent defect",
+                    "Such an unrepairable failure is still posted wherever findings are posted, but it keeps no swarm loop or run going",
+                    "one that also removes the cause and gets no case wrong, is a preference: drop it on sight",
+                    "one line per PR: what it is for and whether its premise held",
+                    "Beyond the findings the premise check names, a finding must show",
                     "reachable regression against the merge base",
                     "fails a behavior the change explicitly promises",
+                    "when it removes the cause for the cases it covers",
                     "Open a follow-up issue only when the operator explicitly asks"]
 for d in ReviewCatalog.depths() {
     let shapes: [(String, String)] = [
