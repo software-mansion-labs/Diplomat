@@ -634,9 +634,9 @@ func pipelineSmoke() throws {
     check(try CommsLog.decoder.decode(PipelineEvent.self, from: Data(proofJSON.utf8)) == proof)
     let oldLine = #"{"at":"2026-11-20T11:00:00Z","detail":"d","item":"x","kind":"rated"}"#
     let old = try CommsLog.decoder.decode(PipelineEvent.self, from: Data(oldLine.utf8))
-    check(old.head == nil && old.rating == nil
-          && String(decoding: try CommsLog.encoder.encode(old), as: UTF8.self) == oldLine,
-          "an event logged without a head or rating reads and writes as it was")
+    let oldAgain = String(decoding: try CommsLog.encoder.encode(old), as: UTF8.self)
+    check(old.head == nil && old.rating == nil && oldAgain == oldLine,
+          "an event logged without a head or rating reads and writes as it was: \(oldAgain)")
     let bare = try CommsLog.decoder.decode(PipelineSettings.self, from: Data(
         #"{"roots":[{"owner":"acme","repo":"app","path":"/w","me":"op"}]}"#.utf8))
     check(bare == PipelineSettings(roots: [.init(owner: "acme", repo: "app", path: "/w", me: "op")]),
