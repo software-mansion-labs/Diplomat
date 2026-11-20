@@ -56,13 +56,14 @@ whole PR: what it sets out to solve, whether its diagnosis and assumptions hold 
 the code, and whether the change removes the cause or only hides the symptom. A proven
 wrong diagnosis or false assumption (unless the change removes the real cause anyway),
 or a workaround for a cause the repo could fix at its origin, is a finding of at least
-MEDIUM, and a blocker on someone else's PR. A reason that holds, in the PR or a reply
-(the premise was sound, or the root fix is rightly deferred), settles it; otherwise its
-thread ends only once the cause is gone, and until then the PR is never marked ready or
-approved. Where reviews are posted on someone else's PR, a claimed fix or deferral that
-leaves the premise failing, or a resolved thread whose premise still fails, gets a reply
-saying what still fails. A workaround is right only for a cause out of the repo's reach
-or a rightly deferred root fix, and one without a note saying so is a LOW.
+MEDIUM, and a blocker on someone else's PR. It is settled when the premise proves sound
+after all, or when the PR or a reply gives a sound reason to defer the root fix (never a
+reason the reviewer supplies itself); otherwise its thread ends only once the cause is
+gone, and until then the PR is never marked ready or approved. Where reviews are posted
+on someone else's PR, a claimed fix or deferral that leaves the premise failing, or a
+resolved thread whose premise still fails, gets one reply saying what still fails. A
+workaround is right only for a cause out of the repo's reach or a root fix deferred for
+such a stated reason, and one without a note saying so is a LOW.
 
 Other inline findings identify behavior the PR makes worse than its target branch’s merge
 base, or a supported case where the submitted change fails its stated purpose.
