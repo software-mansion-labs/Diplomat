@@ -51,10 +51,17 @@ prompt:
   even if Diplomat already reviewed this commit. A verified blocker warrants a
   change request. Non-blocking findings and optional coverage advice allow approval.
 
-Inline findings identify behavior the PR makes worse than its target branch’s merge
+Whatever the depth, every review judges the PR's **premise** before its diff: what it
+sets out to solve, whether its diagnosis and assumptions hold against the code, and
+whether the change removes the cause or only hides the symptom. A proven workaround for
+a cause the repo could fix at its origin is a finding of at least MEDIUM, and a blocker
+on someone else's PR.
+
+Other inline findings identify behavior the PR makes worse than its target branch’s merge
 base, or a supported case where the submitted change fails its stated purpose.
 Each thread gives the trigger, expected and observed behavior, and impact. A partial
-fix can pass review. Incidental existing defects stay in the operator’s summary.
+fix can pass review if it removes the cause for what it covers. Incidental existing
+defects stay in the operator’s summary.
 Filing a follow-up issue requires an explicit request.
 
 With Final E2E off, a re-review of someone else’s PR covers changes since the last
