@@ -579,22 +579,6 @@ def test_without_a_github_login_a_gitlab_root_is_polled_and_a_github_one_held(la
     assert lab_only.autofix_poll_error == store_mod.GITHUB_LOGIN_UNKNOWN
 
 
-def test_the_goal_pass_waits_for_the_github_login(lab_only, monkeypatch):
-    """Without it a review of my own PR would be asked for as someone else's."""
-    monkeypatch.setattr(review, "repo_roots", lambda: [HUB, LAB])
-    asked: list = []
-    monkeypatch.setattr(lab_only, "_request", asked.extend)
-    monkeypatch.setattr(lab_only, "_edit_tracked_task", lambda op: None)
-    work = [("t1", {"kind": "review", "number": 5, "url": "https://github.com/o/r/pull/5",
-                    "author": "alice", "key": "k5"})]
-    lab_only.me = ""
-    lab_only._request_goal_work(work)
-    assert asked == []
-    lab_only.me = "alice"
-    lab_only._request_goal_work(work)
-    assert [w.author for w in asked] == [""], "my own PR, once the login is known"
-
-
 def test_the_review_wizard_asks_who_i_am_in_a_gitlab_checkout_it_never_read(lab_only,
                                                                            monkeypatch):
     """A merge request of a root not on the panel: its author is compared with glab's
@@ -1165,9 +1149,9 @@ def test_an_issue_fix_is_its_own_roots_on_two_roots_of_one_slug(lab_only, monkey
 
 
 def test_an_issue_fix_with_no_link_is_known_to_comms_by_its_label(monkeypatch):
-    """A run recorded with no link (an older build's) is known by its label, as
-    :func:`goal_overlay` knows it; one with a link by that link alone, so a GitLab twin's
-    #5 is never the GitHub one's though both wear one label."""
+    """A run recorded with no link (an older build's) is known by its label; one with a
+    link by that link alone, so a GitLab twin's #5 is never the GitHub one's though both
+    wear one label."""
     from diplomat_app.store import Store
 
     monkeypatch.setattr(review, "repo_roots", lambda: [TWIN_HUB, TWIN_LAB])
