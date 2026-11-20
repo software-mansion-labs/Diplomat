@@ -53,9 +53,11 @@ prompt:
 
 Whatever the depth, every review judges the PR's **premise** before its diff: what it
 sets out to solve, whether its diagnosis and assumptions hold against the code, and
-whether the change removes the cause or only hides the symptom. A proven workaround for
-a cause the repo could fix at its origin is a finding of at least MEDIUM, and a blocker
-on someone else's PR.
+whether the change removes the cause or only hides the symptom. A proven wrong
+diagnosis, false assumption, or workaround for a cause the repo could fix at its origin
+is a finding of at least MEDIUM, and a blocker on someone else's PR. Its thread ends
+only once the cause is gone or the premise is shown to hold, and until then the PR is
+never marked ready or approved.
 
 Other inline findings identify behavior the PR makes worse than its target branch’s merge
 base, or a supported case where the submitted change fails its stated purpose.
@@ -66,7 +68,7 @@ Filing a follow-up issue requires an explicit request.
 
 With Final E2E off, a re-review of someone else’s PR covers changes since the last
 submitted Diplomat review and outstanding findings. If the previous head can’t be
-compared reliably, the reviewer uses the full PR diff. A thread ends when its
+compared reliably, the reviewer uses the full PR diff. Any other thread ends when its
 original reproduction passes. If reverting the central behavior leaves tests
 green, the reviewer may put one optional coverage suggestion in the review body.
 
