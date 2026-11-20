@@ -806,7 +806,6 @@ def test_an_untracked_agent_on_a_merge_request_is_booked_once_under_its_link():
     evidence = A.Evidence(processes=A.Observation.present({}),
                           sentinels=A.Observation.present(set()),
                           tails=A.Observation.present({}),
-                          claims=A.Observation.present(set()),
                           merged_prs=A.Observation.present(set()), live_agents=live,
                           activity=A.Observation.present({}),
                           sessions=A.Observation.present({}))
