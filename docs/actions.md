@@ -51,17 +51,18 @@ prompt:
   even if Diplomat already reviewed this commit. A verified blocker warrants a
   change request. Non-blocking findings and optional coverage advice allow approval.
 
-Whatever the depth, every review judges the PR's **premise** before its diff: what it
-sets out to solve, whether its diagnosis and assumptions hold against the code, and
-whether the change removes the cause or only hides the symptom. A proven wrong
-diagnosis or false assumption (unless the change removes the real cause anyway), or a
-workaround for a cause the repo could fix at its origin, is a finding of at least
-MEDIUM, and a blocker on someone else's PR. Its thread ends only once the cause is gone
-or a reply gives a reason that holds (the premise was sound, or the root fix is rightly
-deferred), and until then the PR is never marked ready or approved. On someone else's
-PR, a claimed fix or deferral that leaves the premise failing, or a resolved thread
-whose premise still fails, gets a reply saying what still fails. A workaround is right
-only for a cause out of the repo's reach, and one without a note saying so is a LOW.
+Whatever the depth, every review judges the PR's **premise** before its diff, on the
+whole PR: what it sets out to solve, whether its diagnosis and assumptions hold against
+the code, and whether the change removes the cause or only hides the symptom. A proven
+wrong diagnosis or false assumption (unless the change removes the real cause anyway),
+or a workaround for a cause the repo could fix at its origin, is a finding of at least
+MEDIUM, and a blocker on someone else's PR. A reason that holds, in the PR or a reply
+(the premise was sound, or the root fix is rightly deferred), settles it; otherwise its
+thread ends only once the cause is gone, and until then the PR is never marked ready or
+approved. Where reviews are posted on someone else's PR, a claimed fix or deferral that
+leaves the premise failing, or a resolved thread whose premise still fails, gets a reply
+saying what still fails. A workaround is right only for a cause out of the repo's reach
+or a rightly deferred root fix, and one without a note saying so is a LOW.
 
 Other inline findings identify behavior the PR makes worse than its target branch’s merge
 base, or a supported case where the submitted change fails its stated purpose.
@@ -70,9 +71,9 @@ fix can pass review if it removes the cause for what it covers. Incidental exist
 defects stay in the operator’s summary.
 Filing a follow-up issue requires an explicit request.
 
-With Final E2E off, a re-review of someone else’s PR covers changes since the last
-submitted Diplomat review and outstanding findings. If the previous head can’t be
-compared reliably, the reviewer uses the full PR diff. Any other thread ends when its
+With Final E2E off, a re-review of someone else’s PR covers the premise, changes since
+the last submitted Diplomat review, and outstanding findings. If the previous head can’t
+be compared reliably, the reviewer uses the full PR diff. Any other thread ends when its
 original reproduction passes. If reverting the central behavior leaves tests
 green, the reviewer may put one optional coverage suggestion in the review body.
 
