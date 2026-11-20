@@ -56,8 +56,9 @@ sets out to solve, whether its diagnosis and assumptions hold against the code, 
 whether the change removes the cause or only hides the symptom. A proven wrong
 diagnosis, false assumption, or workaround for a cause the repo could fix at its origin
 is a finding of at least MEDIUM, and a blocker on someone else's PR. Its thread ends
-only once the cause is gone or the premise is shown to hold, and until then the PR is
-never marked ready or approved.
+only once the cause is gone or a reply gives a reason that holds (the premise was sound,
+or the root fix is rightly deferred), and until then the PR is never marked ready or
+approved. A premise thread resolved while the premise still fails gets one reply.
 
 Other inline findings identify behavior the PR makes worse than its target branch’s merge
 base, or a supported case where the submitted change fails its stated purpose.
