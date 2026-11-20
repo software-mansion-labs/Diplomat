@@ -377,6 +377,39 @@ def test_author_allowed_is_a_narrowing_not_a_requirement():
     assert autofix.author_allowed("", ["bob"]) is False
 
 
+# MARK: - Auto-review depth table (PARITY: the "auto-review depth" smoke section)
+
+
+def test_auto_review_depth_resolves_like_the_swift_core():
+    assert autofix.AUTO_REVIEW_DEFAULT_DEPTH == "standard"
+    assert autofix.AUTO_REVIEW_SEED == (autofix.AutoReviewOverride(None, "max"),)
+    table = [autofix.AutoReviewOverride(None, "max"),
+             autofix.AutoReviewOverride(" @HubGan ", "max"),
+             autofix.AutoReviewOverride("", "quick"),
+             autofix.AutoReviewOverride("hubgan", "quick"),
+             autofix.AutoReviewOverride("latekvo", "deep")]
+
+    def depth(author: str, me: str = "Me-User") -> str:
+        return autofix.auto_review_depth(author, me, table, "standard")
+
+    assert depth("someone") == "standard"
+    assert depth("ME-USER") == "max"
+    assert depth("HUBGAN") == "max"  # @ and padding off, case-insensitive, first row wins
+    assert depth("latekvo") == "deep"
+    assert depth("me-user", me="") == "standard"
+    assert depth("") == "standard"
+    assert autofix.auto_review_depth("x", "", [], "deep") == "deep"
+
+
+def test_auto_review_override_json_is_the_swift_codable_shape():
+    assert [r.to_json() for r in autofix.AUTO_REVIEW_SEED] == [{"depth": "max"}]
+    rows = [{"depth": "max"}, {"login": "bob", "depth": "deep"}]
+    assert [autofix.AutoReviewOverride.from_json(r) for r in rows] == [
+        autofix.AutoReviewOverride(None, "max"), autofix.AutoReviewOverride("bob", "deep")]
+    for bad in ({"login": "bob"}, {"login": 3, "depth": "max"}, "bob"):
+        assert autofix.AutoReviewOverride.from_json(bad) is None
+
+
 # MARK: - Store orchestration
 
 
@@ -621,6 +654,43 @@ def test_review_request_verdict_gating(store, monkeypatch):
     assert len(calls) == 1  # dispatched (comments-only)
     assert configs[1]["depth"] == "standard" and configs[1]["automaticVerdict"] is False
     assert not configs[1]["finalPass"]
+
+
+def test_auto_review_depth_settings_start_at_standard_with_me_at_max(store):
+    assert store.auto_review_default_depth == "standard"
+    assert store.auto_review_overrides == [autofix.AutoReviewOverride(None, "max")]
+
+
+def test_the_auto_review_table_round_trips_and_an_unreadable_one_is_the_seed(store):
+    rows = [autofix.AutoReviewOverride("bob", "deep"), autofix.AutoReviewOverride(None, "quick")]
+    store.auto_review_overrides = rows
+    assert store.auto_review_overrides == rows
+    store.auto_review_overrides = []
+    assert store.auto_review_overrides == []  # emptied by the operator, not re-seeded
+    for raw in ("not json", "{}", '""', '{"depth": "max"}', '[{"login": "bob"}]', "5"):
+        store._settings.setValue("autoReviewOverrides", raw)
+        assert store.auto_review_overrides == list(autofix.AUTO_REVIEW_SEED), raw
+
+
+def test_a_review_request_runs_at_the_default_depth_unless_its_author_has_a_row(
+        store, monkeypatch):
+    store.pr_autofix_enabled = False
+    store.review_requests_enabled = True
+    monkeypatch.setattr("diplomat_app.bans.read", lambda: [])
+    monkeypatch.setattr("diplomat_runtime.promptcore.build_prompt",
+                        lambda cfg: f"PROMPT:{cfg.get('specificPR')}:{cfg.get('depth')}")
+    calls = _spawn_recorder(monkeypatch, finish=True)
+    reqs = [_req(number=7, requested_at="2026-01-02", author="bob")]
+    monkeypatch.setattr("diplomat_app.autofixmonitor.fetch_review_requests", lambda *a, **k: reqs)
+
+    store._poll_review_requests([ROOT])
+    assert [c["prompt"] for c in calls] == ["PROMPT:7:standard"]
+
+    calls.clear()
+    store.auto_review_overrides = [autofix.AutoReviewOverride("@Bob", "max")]
+    reqs[:] = [_req(number=8, requested_at="2026-01-02", author="bob")]
+    store._poll_review_requests([ROOT])
+    assert [c["prompt"] for c in calls] == ["PROMPT:8:max"]
 
 
 def test_unaddressed_count_and_ban_skip(store, monkeypatch):

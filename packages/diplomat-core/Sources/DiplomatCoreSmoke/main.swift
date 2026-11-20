@@ -3134,7 +3134,7 @@ check(gated[gatedA..<gatedB].contains(fixLows) && !gated[gatedB...].contains(fix
 check(gated[gatedB...].contains("retry the original trigger"))
 print("known-mine review prompt assertions passed")
 
-// ---- known-theirs comprehensive review (review-request monitor) ----
+// ---- known-theirs review (the review-request monitor's shape, at max) ----
 // Default: soft-approve ON, no hard verdict → a perfectly-clean PR gets a thank-you
 // COMMENT review, but still NO APPROVE action.
 section("known-theirs review prompt (default → soft-approve)")
@@ -3530,6 +3530,36 @@ check(!AuthorAllowlist.allows("carol", in: ["bob"]), "a list is a limit")
 // is outside it rather than waved through.
 check(!AuthorAllowlist.allows("", in: ["bob"]), "an author GitHub cannot name is outside a list")
 print("author allowlist assertions passed")
+
+// ---- The auto-review depth table ----
+section("auto-review depth")
+// PARITY: the Python twin (autofix.auto_review_depth / AutoReviewOverride) asserts
+// these exact shapes.
+check(AutoReviewDepth.defaultDepth == "standard", "everyone is reviewed at standard by default")
+check(AutoReviewDepth.seed == [AutoReviewOverride(login: nil, depth: "max")], "the table starts as me at max")
+let depthTable = [AutoReviewOverride(login: nil, depth: "max"),
+                  AutoReviewOverride(login: " @HubGan ", depth: "max"),
+                  AutoReviewOverride(login: "", depth: "quick"),
+                  AutoReviewOverride(login: "hubgan", depth: "quick"),
+                  AutoReviewOverride(login: "latekvo", depth: "deep")]
+func autoDepth(_ author: String, me: String = "Me-User") -> String {
+    AutoReviewDepth.resolve(author: author, me: me, overrides: depthTable, otherwise: "standard")
+}
+check(autoDepth("someone") == "standard", "an author no row names gets the default")
+check(autoDepth("ME-USER") == "max", "the me row is whoever I am, case-insensitively")
+check(autoDepth("HUBGAN") == "max", "a login matches with its @ and padding off, case-insensitively; the first row wins")
+check(autoDepth("latekvo") == "deep", "any row can name its author")
+check(autoDepth("me-user", me: "") == "standard", "the me row names nobody while I am unknown")
+check(autoDepth("") == "standard", "an author GitHub cannot name matches no row, blank ones included")
+check(AutoReviewDepth.resolve(author: "x", me: "", overrides: [], otherwise: "deep") == "deep",
+      "an empty table is the default for everyone")
+let seedJSON = String(data: try! JSONEncoder().encode(AutoReviewDepth.seed), encoding: .utf8)!
+check(seedJSON == #"[{"depth":"max"}]"#, "the me row is stored without a login: \(seedJSON)")
+let readBack = try? JSONDecoder().decode([AutoReviewOverride].self,
+                                          from: Data(#"[{"depth":"max"},{"login":"bob","depth":"deep"}]"#.utf8))
+check(readBack == [AutoReviewOverride(login: nil, depth: "max"), AutoReviewOverride(login: "bob", depth: "deep")],
+      "a stored table reads back row for row")
+print("auto-review depth assertions passed")
 
 // ---- Review reconciler (retry unaddressed reviews) ----
 section("review reconcile")

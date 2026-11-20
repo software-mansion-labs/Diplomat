@@ -13,6 +13,7 @@ a problem, a test result, an update in progress - so it is never boilerplate.
 
 from __future__ import annotations
 
+import dataclasses
 import os
 import shutil
 import time
@@ -21,6 +22,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QColorDialog,
+    QComboBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -244,6 +246,7 @@ class SettingsView(QWidget):
         def on_text(text: str) -> None:
             self.store.username_override = text
             refresh()
+            self._refresh_override_me()
             self.store.changed.emit()
 
         field.textChanged.connect(on_text)
@@ -624,20 +627,23 @@ class SettingsView(QWidget):
         review_row.addWidget(self._sw_review_req)
         body.addWidget(self._track(SettingRow(
             "Auto-queue reviews that request me", review_control,
-            detail="One focused pass over changed behavior. Re-reviews check new commits and open findings. "
+            detail="Inline comments — read-only, never their branch. "
+                   "Re-reviews check new commits and open findings. "
                    "A review that never lands (agent died, window closed) is retried. "
                    "Off, the requests still list under Agent tasks, queued for "
                    "“execute now” only.",
         )))
 
-        # Who an auto-review may run for, and what it may submit. Only the verdict
-        # rows follow the switch above, because nothing they govern happens until a
-        # review runs. The author list outlives it: a switched-off monitor still polls
+        # Who an auto-review may run for, how deep it goes, and what it may submit.
+        # Only the verdict rows follow the switch above, because nothing they govern
+        # happens until a review runs. The author list outlives it: a switched-off monitor still polls
         # and still lists what it finds, and the list is what decides which requests
         # those are — hidden while it is off, it would be filtering rows the operator
         # has no way to reach.
         approve_nest, approve = nested_settings(_ORANGE)
         approve.addWidget(self._allowlist_row())
+        approve.addWidget(self._auto_review_depth_row())
+        approve.addWidget(self._auto_review_overrides_row())
 
         self._verdict_rows = QWidget()
         verdict_rows = QVBoxLayout(self._verdict_rows)
@@ -678,6 +684,120 @@ class SettingsView(QWidget):
                    "nothing is queued, and issues filed meanwhile are left for a sweep.",
         )))
         return card
+
+    @staticmethod
+    def _depth_detail(depth_id: str) -> str:
+        depth = review.depth_by_id(depth_id)
+        return f"{depth['title']} — {depth['blurb']}"
+
+    @staticmethod
+    def _depth_options() -> list[tuple[str, str]]:
+        return [(d["id"].capitalize(), d["id"]) for d in review.depths()]
+
+    def _auto_review_depth_row(self) -> SettingRow:
+        picker = self._auto_review_depth = SegmentedControl(self._depth_options(), tint=_ORANGE)
+        picker.set_value(self.store.auto_review_default_depth)
+        row = self._depth_setting_row = self._track(SettingRow(
+            "Review depth", picker, stacked=True,
+            detail=self._depth_detail(self.store.auto_review_default_depth),
+        ))
+
+        def on_changed(depth_id: object) -> None:
+            self.store.auto_review_default_depth = str(depth_id)
+            row.set_detail(self._depth_detail(str(depth_id)))
+
+        picker.changed.connect(on_changed)
+        return row
+
+    def _auto_review_overrides_row(self) -> SettingRow:
+        holder = QWidget()
+        col = QVBoxLayout(holder)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(6)
+        table = QWidget()
+        self._overrides_layout = QVBoxLayout(table)
+        self._overrides_layout.setContentsMargins(0, 0, 0, 0)
+        self._overrides_layout.setSpacing(6)
+        col.addWidget(table)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(12)
+        self._override_add = QPushButton("+  Add author")
+        self._override_add.clicked.connect(lambda: self._add_override(""))
+        self._override_add_me = QPushButton("+  Add me")
+        self._override_add_me.clicked.connect(lambda: self._add_override(None))
+        for button in (self._override_add, self._override_add_me):
+            button.setFlat(True)
+            buttons.addWidget(button)
+        buttons.addStretch(1)
+        col.addLayout(buttons)
+        self._override_me_label: QLabel | None = None
+        self._rebuild_override_rows()
+        return self._track(SettingRow(
+            "Per-author depth", holder, stacked=True,
+            detail="Overrides the depth above for these authors' PRs; the first row "
+                   "naming one wins.",
+        ))
+
+    def _set_override(self, i: int, **change: str) -> None:
+        rows = self.store.auto_review_overrides
+        rows[i] = dataclasses.replace(rows[i], **change)
+        self.store.auto_review_overrides = rows
+
+    def _add_override(self, login: str | None) -> None:
+        self.store.auto_review_overrides = [*self.store.auto_review_overrides,
+                                            autofix.AutoReviewOverride(login, "max")]
+        self._rebuild_override_rows()
+
+    def _remove_override(self, i: int) -> None:
+        rows = self.store.auto_review_overrides
+        del rows[i]
+        self.store.auto_review_overrides = rows
+        self._rebuild_override_rows()
+
+    def _rebuild_override_rows(self) -> None:
+        """One line per table row, all rebuilt on an add or a remove: rows are addressed
+        by index, as nothing else tells two rows naming one login apart."""
+        while (item := self._overrides_layout.takeAt(0)) is not None:
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        self._override_me_label = None
+        rows = self.store.auto_review_overrides
+        self._override_add_me.setVisible(all(row.login is not None for row in rows))
+        for i, row in enumerate(rows):
+            line = QWidget()
+            h = QHBoxLayout(line)
+            h.setContentsMargins(0, 0, 0, 0)
+            h.setSpacing(6)
+            if row.login is None:
+                self._override_me_label = QLabel(self._me_label_text())
+                h.addWidget(self._override_me_label, 1)
+            else:
+                field = QLineEdit(row.login)
+                field.setPlaceholderText("login")
+                field.textChanged.connect(lambda text, i=i: self._set_override(i, login=text))
+                h.addWidget(field, 1)
+            depth = QComboBox()
+            depth.setAccessibleName("Depth for this author")
+            for label, depth_id in self._depth_options():
+                depth.addItem(label, depth_id)
+            depth.setCurrentIndex(depth.findData(row.depth))
+            depth.currentIndexChanged.connect(
+                lambda _, i=i, box=depth: self._set_override(i, depth=box.currentData()))
+            h.addWidget(depth)
+            remove = QPushButton("✕")
+            remove.setFlat(True)
+            remove.setToolTip("Remove this row")
+            remove.clicked.connect(lambda _=False, i=i: self._remove_override(i))
+            h.addWidget(remove)
+            self._overrides_layout.addWidget(line)
+
+    def _me_label_text(self) -> str:
+        me = self.store.effective_me
+        return f"me (@{me})" if me else "me"
+
+    def _refresh_override_me(self) -> None:
+        if self._override_me_label is not None:
+            self._override_me_label.setText(self._me_label_text())
 
     def _allowlist_row(self) -> QWidget:
         """Which authors the review monitor may act on at all.
@@ -897,7 +1017,9 @@ class SettingsView(QWidget):
     def _refresh_autofix_ui(self) -> None:
         """The monitors' own health on the card's pill, so it is answered before any
         row is read. A failing poll used to be invisible: the switches said "on", the
-        counts froze stale, and nothing dispatched."""
+        counts froze stale, and nothing dispatched. Also the depth table's me row, whose
+        login a poll may be the first to resolve."""
+        self._refresh_override_me()
         autofix_on = self.store.pr_autofix_enabled
         review_on = self.store.review_requests_enabled
         err = self.store.autofix_poll_error

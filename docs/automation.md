@@ -27,9 +27,11 @@ root its PR or issue belongs to.
   (5m → 10m → … → 3h) that survives applet restarts. Conflicts are *only*
   level-triggered now (the edge event is a deliberate no-op) and retry on the
   plain 3-minute tick; the backoff ladder is the review path's.
-- **Review requests** - polls PRs requesting *my* review and dispatches one focused
-  review of the change and affected callers. Re-requests check intervening PR changes
-  and open findings. The review can include targeted runtime checks and inline comments.
+- **Review requests** - polls PRs requesting *my* review and dispatches a review at
+  the Settings **Review depth** (**default standard**, one focused review of the change
+  and affected callers) - or the depth a *Per-author depth* row gives the PR's author,
+  the first row naming them winning - with formal per-line comments, hands strictly
+  off the branch. Re-requests check intervening PR changes and open findings.
   GitHub's timestamps determine when a review is owed (request newer than my last
   review), so a genuine re-request
   re-qualifies, and a review left unaddressed (agent died, window closed) is
@@ -206,8 +208,8 @@ auto-review's review is a neutral `COMMENT` one and the final call stays with me
 opted in, three independent suppressors (each default ON) still withhold the
 verdict for a PR that touches a SKILL, touches the installer/CLI, or comes from a
 community author (outside `trustedAssociations` in `assets/filters.json`) - those
-classes stay comments-only even with approvals enabled. The focused review depth also
-applies when automatic verdicts are enabled.
+classes stay comments-only even with approvals enabled. A review that may submit a
+verdict runs at the same depth as one that may not.
 
 ### Soft-approvals (default ON)
 
