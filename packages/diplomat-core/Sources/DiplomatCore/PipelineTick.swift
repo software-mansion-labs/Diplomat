@@ -87,15 +87,16 @@ public struct PipelineIO {
 }
 
 public enum PipelineTick {
-    /// One sync. Reads every root's open issues and PRs and every tracked Linear team's
-    /// open issues; with `rate` (or forced) rates up to `rater.perSync` unrated ones,
-    /// forced first, then clean PRs awaiting their second rating, the operator's unrated
-    /// PRs, writable issues, other issues, newest first; writes each rating as labels
-    /// where Diplomat may, never lower than the labels or the diff's floor, and caches the
-    /// rest; with `fastTrack` labels a low/low PR of the operator's `fastTrack` once,
-    /// takes `cleared` off one whose head moved past its clean marker, and asks for a
-    /// review of each fast-track head no marker names; with `merge` merges a cleared PR
-    /// no merge hold stops; with `fracture` (or forced) splits one writable
+    /// One sync. Reads every root's open issues and PRs, its recently merged or closed PRs
+    /// that carry a pipeline label and the closed issues they close, and every tracked
+    /// Linear team's open issues; with `rate` (or forced) rates up to `rater.perSync`
+    /// unrated ones, forced first, then clean PRs awaiting their second rating, the
+    /// operator's unrated PRs, writable issues, other open issues, newest first; writes
+    /// each rating as labels where Diplomat may, never lower than the labels or the diff's
+    /// floor, and caches the rest; with `fastTrack` labels a low/low PR of the operator's
+    /// `fastTrack` once, takes `cleared` off one whose head moved past its clean marker,
+    /// and asks for a review of each fast-track head no marker names; with `merge` merges
+    /// a cleared PR no merge hold stops; with `fracture` (or forced) splits one writable
     /// medium/high-complexity issue that is not high risk into children; with `fix` asks
     /// for a fix PR for each candidate issue. Every step it takes, and each hold, notice
     /// and request the first time it is seen, is logged to `dir`; the result is saved as
@@ -145,6 +146,9 @@ final class PipelineSync {
     /// Linear labels by lowercased name, each with its team (nil for a workspace label).
     var linearLabels: [String: [(id: String, team: String?)]] = [:]
     var floorWhy: [String: [String]] = [:]
+    /// `"<item> <head>"` of each PR this Diplomat rated low/low again at that head: its
+    /// log's `rerated` events, and this sync's.
+    var reratedLow: Set<String> = []
 
     init(settings: PipelineSettings, now: Date, dir: URL, io: PipelineIO) {
         self.settings = settings
@@ -160,6 +164,7 @@ final class PipelineSync {
             return PipelineTickResult(at: now, notices: ["assets/pipeline.json could not be read"])
         }
         self.model = model
+        for e in PipelineLog.read(in: dir) { noteRerate(e) }
         readGitHub()
         readLinear()
         var unique: [PipelineEntry] = []
@@ -468,10 +473,20 @@ final class PipelineSync {
         has(e, model.labels.fractured) || !e.children.isEmpty || !fixers(e).isEmpty
     }
 
-    /// A fast-track PR with a clean marker at its head and no `cleared` yet.
+    /// A fast-track PR with a clean marker at its head that this Diplomat has not cleared
+    /// there yet, whatever labels it wears.
     func awaitingRerate(_ e: PipelineEntry) -> Bool {
         own(e) && open(e) && e.item.writable && has(e, model.labels.fastTrack)
-            && !has(e, model.labels.cleared) && e.item.cleanAt != nil && e.item.cleanAt == e.item.headSha
+            && !clearedByMe(e) && e.item.cleanAt != nil && e.item.cleanAt == e.item.headSha
+    }
+
+    /// `cleared`, with a clean marker at its head, at which this Diplomat rated it low/low
+    /// again. The label alone is no proof of that re-rate: anyone with triage rights can
+    /// add it.
+    func clearedByMe(_ e: PipelineEntry) -> Bool {
+        guard has(e, model.labels.cleared), let head = e.item.headSha, !head.isEmpty,
+              e.item.cleanAt == head else { return false }
+        return reratedLow.contains("\(e.id) \(head)")
     }
 
     func newer(_ a: Int, _ b: Int) -> Bool {
@@ -489,6 +504,8 @@ final class PipelineSync {
             let e = entries[i]
             if e.item.kind == .pr && !(own(e) && open(e)) {
                 notice("\(e.item.label) was not rated: only my own open PRs are")
+            } else if !open(e) {
+                notice("\(e.item.label) was not rated: it is \(e.item.state)")
             } else if e.root == nil {
                 notice("\(e.item.label) was not rated: Linear team \(e.item.repo) has no root to read its code in")
             } else if !forced.contains(i) {
@@ -508,7 +525,7 @@ final class PipelineSync {
                 },
                 idx.filter {
                     let e = entries[$0]
-                    return e.item.kind == .issue && !e.item.writable && e.item.rating == nil
+                    return e.item.kind == .issue && open(e) && !e.item.writable && e.item.rating == nil
                         && e.root != nil && !settled(e)
                 },
             ].map { $0.sorted(by: newer) }
@@ -553,7 +570,8 @@ final class PipelineSync {
             detail = describe(rating) + ", floored by its diff ("
                 + (floorWhy[e.id] ?? []).joined(separator: "; ") + ")" + (why.isEmpty ? "" : ": " + why)
         }
-        log(e.id, again ? .rerated : .rated, detail)
+        log(e.id, again ? .rerated : .rated, detail, head: e.item.kind == .pr ? e.item.headSha : nil,
+            rating: rating)
         cache[e.id] = PipelineCachedRating(rating: rating, why: why, updatedAt: e.item.updatedAt)
         entries[i].item.why = why
         guard e.item.writable else {
@@ -568,9 +586,16 @@ final class PipelineSync {
         let head = String((e.item.headSha ?? "").prefix(7))
         if rating.isFastTrack {
             if add(i, model.labels.cleared) { log(e.id, .cleared, "cleared at \(head)") }
-        } else if remove(i, model.labels.fastTrack) {
-            log(e.id, .labelled, "-\(model.labels.fastTrack): rated \(describe(rating)) at \(head), for a human")
-            if !state.decided.contains(e.id) { state.decided.append(e.id) }
+        } else {
+            // A `cleared` a person put on it comes off too.
+            var off: [String] = []
+            for name in [model.labels.fastTrack, model.labels.cleared] where has(entries[i], name) && remove(i, name) {
+                off.append(name)
+            }
+            guard !off.isEmpty else { return }
+            log(e.id, .labelled, off.map { "-" + $0 }.joined(separator: " ")
+                + ": rated \(describe(rating)) at \(head), for a human")
+            if off.contains(model.labels.fastTrack), !state.decided.contains(e.id) { state.decided.append(e.id) }
         }
     }
 
@@ -742,7 +767,7 @@ final class PipelineSync {
             let stage: PipelineStage
             if !own(e) {
                 stage = e.item.rating == nil ? .unrated : .human
-            } else if has(e, model.labels.cleared) && atHead {
+            } else if clearedByMe(e) {
                 stage = .cleared
                 let code: String?
                 if partial.contains(e.item.repo) {
@@ -892,8 +917,17 @@ final class PipelineSync {
 
     // MARK: - Log
 
-    func log(_ item: String, _ kind: PipelineEvent.Kind, _ detail: String) {
-        events.append(PipelineEvent(at: now, item: item, kind: kind, detail: detail))
+    func log(_ item: String, _ kind: PipelineEvent.Kind, _ detail: String, head: String? = nil,
+             rating: PipelineRating? = nil) {
+        let event = PipelineEvent(at: now, item: item, kind: kind, detail: detail, head: head, rating: rating)
+        events.append(event)
+        noteRerate(event)
+    }
+
+    func noteRerate(_ e: PipelineEvent) {
+        if e.kind == .rerated, e.rating?.isFastTrack == true, let head = e.head, !head.isEmpty {
+            reratedLow.insert("\(e.item) \(head)")
+        }
     }
 
     func notice(_ text: String) {

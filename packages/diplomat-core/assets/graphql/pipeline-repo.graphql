@@ -1,9 +1,10 @@
 # Everything one pipeline sync reads of one repository, in one request: its default
 # branch and merge methods, its open issues and PRs newest-updated first, and its
 # recently merged or closed PRs (`PipelineRead.github` keeps the ones carrying a pipeline
-# label). `files` needs to see more than `floor.maxFiles` only to know a PR exceeds it,
-# which `changedFiles` says; a `totalCount` past what a connection lists reads as an
-# unresolved thread, or a reviewer nobody saw, to the merge gate.
+# label, and the closed issues of this repository they close). `files` needs to see more
+# than `floor.maxFiles` only to know a PR exceeds it, which `changedFiles` says; a
+# `totalCount` past what a connection lists reads as an unresolved thread, or a reviewer
+# nobody saw, to the merge gate.
 query($owner: String!, $name: String!) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef { name }
@@ -37,7 +38,7 @@ query($owner: String!, $name: String!) {
         number title url updatedAt state isCrossRepository headRefName baseRefName
         author { login }
         labels(first: 30) { nodes { name } }
-        closingIssuesReferences(first: 10) { nodes { url } }
+        closingIssuesReferences(first: 10) { nodes { number title url state } }
       }
     }
   }

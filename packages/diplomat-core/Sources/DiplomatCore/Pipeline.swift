@@ -44,7 +44,9 @@ public enum PipelineKind: String, Codable, Sendable { case issue, pr }
 /// Where an item stands. An issue: `unrated`, then `human` or `candidate` (low/low), or
 /// `fractured` into children; `fixing` once an open PR fixes it; `closed`. A PR:
 /// `unrated`, then `human` or `fast-track`; `clean` once a Diplomat clean marker names its
-/// head; `cleared` once rated low/low again at that head; `merged` or `closed`.
+/// head; `cleared` once this Diplomat rated it low/low again at that head (its log says so:
+/// the `cleared` label alone, which anyone with triage rights can add, does not); `merged`
+/// or `closed`.
 public enum PipelineStage: String, Codable, CaseIterable, Sendable {
     case unrated, human, candidate, fractured, fixing
     case fastTrack = "fast-track"
@@ -179,12 +181,19 @@ public struct PipelineEvent: Codable, Equatable, Sendable {
     public var item: String
     public var kind: Kind
     public var detail: String
+    /// A PR's `rated` or `rerated`: the head it was rated at.
+    public var head: String?
+    /// A `rated` or `rerated`: the rating given, never below the labels or the diff's floor.
+    public var rating: PipelineRating?
 
-    public init(at: Date, item: String, kind: Kind, detail: String) {
+    public init(at: Date, item: String, kind: Kind, detail: String, head: String? = nil,
+                rating: PipelineRating? = nil) {
         self.at = at
         self.item = item
         self.kind = kind
         self.detail = detail
+        self.head = head
+        self.rating = rating
     }
 }
 

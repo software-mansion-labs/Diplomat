@@ -64,6 +64,15 @@ enum PipelineRead {
 
     static func date(_ value: Any?) -> Date? { (value as? String).flatMap(CommsLog.parseISO) }
 
+    /// Whether two GitHub issue or PR links are of one repository: the same
+    /// `https://host/owner/repo/` before their last two components.
+    static func sameRepo(_ a: String, _ b: String) -> Bool {
+        func base(_ url: String) -> String? {
+            URL(string: url)?.deletingLastPathComponent().deletingLastPathComponent().absoluteString.lowercased()
+        }
+        return base(a) != nil && base(a) == base(b)
+    }
+
     /// Whether `body` names, right after `marker`, `oid` or a prefix of it at least seven
     /// characters long: a marker counts only on the commit it was submitted at.
     static func names(_ body: String, marker: String, oid: String) -> Bool {
@@ -172,11 +181,11 @@ enum PipelineRead {
             out.append(e)
         }
 
-        let pipelineLabels = model.all
+        let pipelineLabels = Set(model.all.map { $0.lowercased() })
         for n in nodes(repo, "done") {
             guard let number = n["number"] as? Int, let url = n["url"] as? String else { continue }
             let labels = nodes(n, "labels").compactMap { $0["name"] as? String }
-            guard labels.contains(where: pipelineLabels.contains) else { continue }
+            guard labels.contains(where: { pipelineLabels.contains($0.lowercased()) }) else { continue }
             let merged = n["state"] as? String == "MERGED"
             var e = PipelineEntry(
                 item: PipelineItem(id: url, source: .github, kind: .pr, label: label(number),
@@ -192,6 +201,19 @@ enum PipelineRead {
             e.isCrossRepository = bool(n["isCrossRepository"], true)
             e.unwritable = merged ? "merged" : "closed"
             out.append(e)
+            // The closed issues of this repository it closes, so its group reads issue ->
+            // PR. An open one is left to the open issues' read.
+            for c in nodes(n, "closingIssuesReferences") {
+                guard c["state"] as? String == "CLOSED", let fixed = c["number"] as? Int,
+                      let issue = c["url"] as? String, sameRepo(issue, url) else { continue }
+                var closed = PipelineEntry(
+                    item: PipelineItem(id: issue, source: .github, kind: .issue, label: label(fixed),
+                                       title: c["title"] as? String ?? "", repo: root.slug, state: "closed",
+                                       writable: false, stage: .closed, lane: .done),
+                    labels: [], body: "", root: root, number: fixed)
+                closed.unwritable = "closed"
+                out.append(closed)
+            }
         }
         return (PipelineRepo(defaultBranch: defaultBranch, mergeFlag: mergeFlag), out)
     }
