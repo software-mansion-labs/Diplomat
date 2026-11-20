@@ -324,16 +324,12 @@ func gitlabSmoke() async throws {
           && CommsSettings.ref(3, repo: "group/sub/proj") == "proj#3",
           "Comms watches a nested slug, its owner everything before the last slash: \(comms.repos)")
 
-    check(AutofixMesh.workKey(kind: "review", prURL: mr, headSha: "abc")
-              == "review:gitlab.example.com/group/sub/proj#12@abc"
-          && AutofixMesh.ledgerKey(kind: "review", prURL: mr, headSha: "")
+    check(AutofixWork.ledgerKey(kind: "review", prURL: mr, headSha: "")
               == "review:gitlab.example.com/group/sub/proj#12"
-          && AutofixMesh.workKey(kind: "review", prURL: "https://github.com/o/r/pull/5", headSha: "abc")
-              == "review:github.com/o/r#5@abc"
-          && AutofixMesh.ledgerKey(kind: "review",
+          && AutofixWork.ledgerKey(kind: "review",
                                    prURL: "https://gitlab.example.com/group/sub/proj/-/issues/12",
                                    headSha: "abc") == "",
-          "a merge request's work and ledger keys carry its host and namespace")
+          "a merge request's ledger key carries its host and namespace")
 
     section("gitlab: keys (shared parity fixture)")
     // keys: roots -> key + #5's item key; urls -> item key; split -> [root key, n]; prompts -> the

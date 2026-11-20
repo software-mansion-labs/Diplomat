@@ -514,7 +514,6 @@ def lab_only(store, monkeypatch):  # noqa: F811 — the shared Store fixture
     """One GitLab root, the monitors off so a poll queues what it finds."""
     monkeypatch.setattr(review, "repo_roots", lambda: [LAB])
     monkeypatch.setattr(review, "roots_complete", lambda: True)
-    monkeypatch.setattr(review, "mesh_checkout", lambda: None)
     monkeypatch.setattr("diplomat_app.bans.read", lambda: [])
     store.pr_autofix_enabled = False
     store.review_requests_enabled = False
@@ -807,7 +806,6 @@ def test_an_untracked_agent_on_a_merge_request_is_booked_once_under_its_link():
     evidence = A.Evidence(processes=A.Observation.present({}),
                           sentinels=A.Observation.present(set()),
                           tails=A.Observation.present({}),
-                          claims=A.Observation.present(set()),
                           merged_prs=A.Observation.present(set()), live_agents=live,
                           activity=A.Observation.present({}),
                           sessions=A.Observation.present({}))
@@ -825,12 +823,12 @@ def test_a_nested_namespace_is_labelled_by_its_last_segment():
     assert prref.item_label(f"{KEY}#5", 2) == "proj#5"
 
 
-def test_a_merge_requests_work_key_keeps_the_whole_namespace():
+def test_a_merge_requests_ledger_key_keeps_the_whole_namespace():
     url = f"https://{HOST}/group/sub/proj/-/merge_requests/12"
-    assert autofix.work_key("conflicts", url, "abc") == f"conflicts:{HOST}/group/sub/proj#12@abc"
+    assert autofix.ledger_key("conflicts", url, "abc") == f"conflicts:{HOST}/group/sub/proj#12@abc"
     assert autofix.ledger_key("conflicts", url, "") == f"conflicts:{HOST}/group/sub/proj#12"
-    assert autofix.work_key("conflicts", f"https://{HOST}/proj/-/merge_requests/1", "a") == ""
-    assert autofix.work_key("conflicts", f"https://{HOST}/g/p/-/issues/1", "a") == ""
+    assert autofix.ledger_key("conflicts", f"https://{HOST}/proj/-/merge_requests/1", "a") == ""
+    assert autofix.ledger_key("conflicts", f"https://{HOST}/g/p/-/issues/1", "a") == ""
 
 
 GLAB_CONFIG = """\
@@ -995,17 +993,6 @@ def test_the_wizards_keep_a_listed_checkouts_repo_on_each_host(lab_only):
                                     LocalRepo("e", "f", "/x"))
 
 
-def test_a_gitlab_root_is_never_the_meshs_checkout(monkeypatch):
-    monkeypatch.setattr(review, "roots_guessed", lambda: False)
-    monkeypatch.setattr(core, "config", lambda: {"owner": "o", "repo": "r"})
-    monkeypatch.setattr(review, "repo_roots", lambda: [
-        LocalRepo("o", "r", "/src/lab", "gitlab.com"), HUB])
-    assert review.mesh_checkout() == "/src/r"
-    monkeypatch.setattr(review, "repo_roots", lambda: [
-        LocalRepo("o", "r", "/src/lab", "gitlab.com")])
-    assert review.mesh_checkout() is None
-
-
 # ---- one slug on GitHub and on GitLab ----------------------------------------------
 
 GOLDEN = FIXTURES.parents[2] / "assets/golden-prompts"
@@ -1070,7 +1057,7 @@ def test_one_slug_on_github_and_on_gitlab_is_two_roots_with_two_of_everything(
         assert (job.pr_url, job.checkout) == (root.link("pull", 5), root.path)
         assert lab_only._root_named(autofix.item_of_key(key)) is root
         record = A.RunRecord(run_id=key, dispatched_at=0.0, pr_number=5, pr_url=job.pr_url,
-                             source=A.SOURCE_AUTO, placement=A.PLACEMENT_LOCAL)
+                             source=A.SOURCE_AUTO)
         assert record.item == key.partition(":")[2]
     assert {t.key for t in telemetry.load().tasks if t.key.startswith("conflicts:")} == {
         f"conflicts:github.com/Acme/Widget#5@{'ab' * 20}",
