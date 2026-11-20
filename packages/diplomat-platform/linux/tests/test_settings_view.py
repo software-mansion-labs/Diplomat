@@ -447,10 +447,19 @@ def test_a_healthy_screen_draws_no_line_under_any_row(make_view, monkeypatch, tm
     monkeypatch.setattr(settingsview.shutil, "which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(deviceallocator, "package_available", lambda: True)
     monkeypatch.setattr(deviceallocator, "resolve_node", lambda: "/usr/bin/node")
+    monkeypatch.delenv("DIPLOMAT_PIPELINE_SECS", raising=False)
     view = make_view(update_state={"phase": "idle", "commit": "abc1234", "branch": "main",
                                    "upstream": "origin/main", "ahead": 0, "behind": 0})
+    # But the PIPELINE card's, whose one-liners read as its macOS twin's do.
+    pipeline_rows = {view._pipeline_row, view._pipeline_teams_row, view._pipeline_key_row,
+                     *(_row_of(w) for w in (view._sw_pipeline_rate, view._sw_pipeline_fix,
+                                            view._sw_pipeline_fast, view._sw_pipeline_merge,
+                                            view._sw_pipeline_fracture))}
     assert [(r._control.accessibleName(), r.summary()) for r in view._rows
-            if r.summary()] == []
+            if r.summary() and r not in pipeline_rows] == []
+    assert [view._pipeline_teams_row.summary(), view._pipeline_key_row.summary()] == [
+        "None: GitHub only", "No key file: linearTokenFile in ~/.diplomat/config.json names it"]
+    assert "palette(mid)" in view._pipeline_key_row._summary.styleSheet()
     assert str(tmp_path) in view._repo_row._detail.text()
     assert "Devices screen" in view._alloc_row._detail.text()
 
@@ -543,7 +552,8 @@ def _pipeline_view(make_view, monkeypatch, **settings):
 def test_the_pipeline_options_are_drawn_only_while_it_runs(make_view, monkeypatch):
     view, synced = _pipeline_view(make_view, monkeypatch)
     nested = [view._sw_pipeline_rate, view._sw_pipeline_fix, view._sw_pipeline_fast,
-              view._sw_pipeline_merge, view._sw_pipeline_fracture, view._pipeline_teams]
+              view._sw_pipeline_merge, view._sw_pipeline_fracture, view._pipeline_teams,
+              view._pipeline_key_row]
     assert view._pipeline_row.isVisibleTo(view)
     assert not any(w.isVisibleTo(view) for w in nested)
     assert view._pipeline_pill.text() == "off"
@@ -576,33 +586,63 @@ def test_a_pipeline_switch_writes_through_and_syncs_when_turned_on(make_view, mo
     assert synced == [True]
 
 
-def test_the_merge_row_says_it_merges_past_the_review_requirement(view):
-    row = _row_of(view._sw_pipeline_merge)
-    assert row._control.accessibleName() == "Merge past required reviews (admin)"
-    assert row._detail.text().startswith(
-        "Merges with your admin rights, past the review requirement:")
+def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
+    """The titles and lines of SettingsView.swift's PIPELINE card, word for word."""
+    monkeypatch.delenv("DIPLOMAT_PIPELINE_SECS", raising=False)
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    rows = [_row_of(w) for w in (view._sw_pipeline_rate, view._sw_pipeline_fix,
+                                 view._sw_pipeline_fast, view._sw_pipeline_merge,
+                                 view._sw_pipeline_fracture)]
+    assert [(r._control.accessibleName(), r.summary()) for r in rows] == [
+        ("Rate issues and PRs",
+         "Risk and complexity, by claude, as labels where Diplomat may write"),
+        ("Open fix PRs", "Queues an agent that fixes each low-risk, low-complexity issue"),
+        ("Fast-track my PRs",
+         "Labels each of your low/low PRs diplomat:fast-track and reviews it until clean"),
+        ("Merge cleared PRs",
+         "Merges past the review requirement with admin rights (gh pr merge --admin): "
+         "no person approves the PR first"),
+        ("Split big issues",
+         "One medium- or high-complexity issue a sync becomes low-complexity child issues"),
+    ]
+    assert rows[3]._detail.text().startswith(
+        "A cleared PR is merged once nothing holds it: no one but you or a bot reviewed "
+        "or commented,")
+    assert view._pipeline_row.summary() == (
+        "Every 5m, the open issues and PRs of the GitHub repo roots and the Linear teams "
+        "below")
+    assert [view._pipeline_teams_row._control.accessibleName(),
+            view._pipeline_key_row._control.accessibleName()] == ["Linear teams",
+                                                                  "Linear API key"]
 
 
 def test_the_linear_teams_line_reports_what_it_cannot_read(make_view, monkeypatch):
-    from diplomat_runtime import appconfig, pipeline
-
     view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
     row = _row_of(view._pipeline_teams)
-    view._pipeline_teams.setText("ENG=o/r, ops, X=y")
-    assert view.store.pipeline_linear_teams_raw == "ENG=o/r, ops, X=y"
+    view._pipeline_teams.setText("ENG=o/r, ops; X=y")
+    assert view.store.pipeline_linear_teams_raw == "ENG=o/r, ops; X=y"
     assert row.summary() == "Not KEY=owner/repo, so not tracked: ops, X=y"
+    view._pipeline_teams.setText("eng=o/r\nOPS=o/other")
+    assert row.summary() == "ENG → o/r · OPS → o/other"
+    view._pipeline_teams.setText("")
+    assert row.summary() == "None: GitHub only"
+
+
+def test_the_linear_key_row_says_where_the_key_is_read(make_view, monkeypatch):
+    from diplomat_runtime import appconfig, pipeline
+
+    monkeypatch.delenv(pipeline.TOKEN_ENV, raising=False)
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row = view._pipeline_key_row
     view._pipeline_teams.setText("ENG=o/r")
-    assert row.summary() == ("No Linear key: name its file as linearTokenFile in "
-                             "~/.diplomat/config.json")
+    assert row.summary() == "No key file: linearTokenFile in ~/.diplomat/config.json names it"
+    assert "#FF3B30" in row._summary.styleSheet()
     appconfig.set_value(appconfig.LINEAR_TOKEN_FILE, "~/.diplomat/linear")
     view._refresh_pipeline_ui()
-    assert row.summary() == "Key read from ~/.diplomat/linear"
+    assert row.summary() == "Read from ~/.diplomat/linear"
     monkeypatch.setenv(pipeline.TOKEN_ENV, "lin_api_x")
     view._refresh_pipeline_ui()
-    assert row.summary() == ("Key from $DIPLOMAT_LINEAR_TOKEN, which wins over "
-                             "linearTokenFile")
-    view._pipeline_teams.setText("")
-    assert row.summary() == ""
+    assert row.summary() == "$DIPLOMAT_LINEAR_TOKEN, which wins over linearTokenFile"
 
 
 def test_the_pipeline_pill_follows_its_sync(make_view, monkeypatch):

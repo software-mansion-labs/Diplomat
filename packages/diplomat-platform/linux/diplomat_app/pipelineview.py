@@ -637,9 +637,16 @@ _RATED_BY = {"label": "Read off its labels.",
              "local": "Diplomat's own, kept on this machine: it may not label this item."}
 
 
+def can_start_fix(item: dict) -> bool:
+    """A candidate issue: low/low, writable, no open PR fixing it. Twin of
+    ``PipelineView.canStartFix``."""
+    return (item.get("kind") == "issue" and item.get("stage") == "candidate"
+            and bool(item.get("writable")))
+
+
 def can_fracture(item: dict, edges: list[dict]) -> bool:
     """A writable open issue that is not split yet: not ``fractured``, with no child,
-    and no PR fixing it (``fixing``)."""
+    and no PR fixing it (``fixing``). Twin of ``PipelineView.canFracture``."""
     item_id = str(item.get("id") or "")
     return (item.get("kind") == "issue" and bool(item.get("writable"))
             and item.get("stage") in ("unrated", "human", "candidate")
@@ -657,10 +664,11 @@ class PipelineView(QWidget):
         #: lane with nothing selected.
         self.lane = "all"
         self.selected: str | None = None
-        #: What came of each item's last "Start fix": (whether it started, the words).
-        self._fix_answers: dict[str, tuple[bool, str]] = {}
-        #: The detail's action buttons (``open``, ``rate``, ``fracture``, ``fix``), the
-        #: last "Start fix" answer under them, and its traversal's rows, newest first.
+        #: Why each item's last "Start fix" was not queued.
+        self._fix_answers: dict[str, str] = {}
+        #: The detail's action buttons (``open``, ``rate``, ``fracture``, ``fix``), why
+        #: the last "Start fix" was not queued under them, and its traversal's rows,
+        #: newest first.
         self.buttons: dict[str, QPushButton] = {}
         self.fix_answer: QLabel | None = None
         self.event_rows: list[EventRow] = []
@@ -709,7 +717,6 @@ class PipelineView(QWidget):
 
         store.pipeline_changed.connect(self.rebuild)
         store.tasks_changed.connect(self.rebuild)
-        store.pipeline_fix_answered.connect(self._fix_answered)
         self.rebuild()
 
     def _build_header(self) -> QHBoxLayout:
@@ -777,14 +784,14 @@ class PipelineView(QWidget):
         self.selected = item_id or None
         self.rebuild()
 
-    def _fix_answered(self, item_id: str, error: object) -> None:
-        self._fix_answers[item_id] = (error is None,
-                                      "The fix started." if error is None else str(error))
+    def _start_fix(self, item: dict) -> None:
+        item_id = str(item.get("id") or "")
+        error = self.store.pipeline_start_fix(item)
+        if error is None:
+            self._fix_answers.pop(item_id, None)
+        else:
+            self._fix_answers[item_id] = error
         self.rebuild()
-
-    def _start_fix(self, item_id: str) -> None:
-        self._fix_answers.pop(item_id, None)
-        self.store.pipeline_start_fix_async(item_id)
 
     # MARK: rebuild
 
@@ -951,7 +958,8 @@ class PipelineView(QWidget):
     def _build_actions(self, item: dict, badge: str | None, edges: list[dict]) -> None:
         """Open always; the rest only while the Pipeline is on, which off acts on
         nothing. Rate now for an item still open, Fracture for an issue
-        :func:`can_fracture` allows, Start fix for a candidate issue."""
+        :func:`can_fracture` allows, Start fix for a candidate issue
+        (:func:`can_start_fix`) whose fix is known, with nothing on it."""
         st = self.store
         item_id = str(item.get("id") or "")
         on = st.pipeline_enabled
@@ -971,12 +979,13 @@ class PipelineView(QWidget):
                            "now")
             btn.setEnabled(on and not asked)
             self.buttons["fracture"] = btn
-        if item.get("kind") == "issue" and item.get("stage") == "candidate":
-            btn = _small_button("Starting…" if item_id in st.pipeline_fixes_starting
-                                else "Start fix", lambda: self._start_fix(item_id))
-            btn.setToolTip("Start its fix agent now, outside the task cap")
-            # Off while an agent is on it, this button's own dispatch included.
-            btn.setEnabled(on and badge != "agent")
+        if can_start_fix(item):
+            known = st.pipeline_fix_effect(item) is not None
+            btn = _small_button("Start fix", lambda: self._start_fix(item))
+            btn.setToolTip("Queue its fix now, past its retry backoff" if known
+                           else "Diplomat has this Linear issue's text only while Open "
+                                "fix PRs is on")
+            btn.setEnabled(on and known and badge is None)
             self.buttons["fix"] = btn
         row = QHBoxLayout()
         row.setSpacing(4)
@@ -987,6 +996,4 @@ class PipelineView(QWidget):
         self.detail_col.addLayout(row)
         answer = self._fix_answers.get(item_id)
         if answer is not None:
-            started, words = answer
-            self.fix_answer = self._line(words, f"color: {_GREEN if started else _RED};"
-                                                " font-size: 10px;")
+            self.fix_answer = self._line(answer, f"color: {_RED}; font-size: 10px;")

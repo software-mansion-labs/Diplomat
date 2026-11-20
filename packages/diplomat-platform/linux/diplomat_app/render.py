@@ -979,11 +979,17 @@ def _pipeline_fixture(store: Store) -> str:
             "diplomat-core pipeline-last did not answer" if store.pipeline_result is None
             else "diplomat-core pipeline-last answered other than the last.json it was handed")
     home = f"https://github.com/{slug}"
-    store.pipeline_fixes_starting = frozenset({f"{home}/issues/1821"})
-    store.queued_tasks = [autofix.QueuedTask(
-        autofix.queue_key(autofix.QUEUE_REVIEW_ACTION, item_key(cfg["owner"], cfg["repo"], 1826)),
-        autofix.AgentJob(kind="review", audit_action="review", label="Review · #1826 · deep",
-                         prompt=""), 1)]
+    store.queued_tasks = [
+        autofix.QueuedTask(
+            autofix.queue_key(autofix.QUEUE_ISSUES_ACTION,
+                              item_key(cfg["owner"], cfg["repo"], 1821)),
+            autofix.AgentJob(kind="issues", audit_action="issues",
+                             label="Issues · #1821 · quick", prompt=""), 1),
+        autofix.QueuedTask(
+            autofix.queue_key(autofix.QUEUE_REVIEW_ACTION,
+                              item_key(cfg["owner"], cfg["repo"], 1826)),
+            autofix.AgentJob(kind="review", audit_action="review", label="Review · #1826 · max",
+                             prompt=""), 1)]
     return f"{home}/pull/1810"
 
 
