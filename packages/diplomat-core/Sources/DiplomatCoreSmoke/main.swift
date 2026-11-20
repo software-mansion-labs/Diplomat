@@ -3608,6 +3608,13 @@ for verb in ["comms-ping", "comms-review", "comms-fix", "comms-bump", "comms-inv
              "comms-error", "comms-recovered", "comms-notice"] {
     check(AuditCategory.of(action: verb) == .comms, "\(verb) is a Comms row")
 }
+check(AuditCategory.of(action: "pipeline-fix") == .issues, "a pipeline fix ask is an Issues row")
+check(AuditCategory.of(action: "pipeline-review") == .review, "a fast-track review ask is a Reviews row")
+check(AuditCategory.of(action: "pipeline-merge") == .merge, "a pipeline merge is a Merges row")
+check(AuditCategory.of(action: "pipeline-fracture") == .issues, "a split issue is an Issues row")
+for verb in ["pipeline-notice", "pipeline-error", "pipeline-recovered"] {
+    check(AuditCategory.of(action: verb) == .system, "\(verb) is a System row")
+}
 check(AuditCategory.displayOrder.firstIndex(of: .comms) == AuditCategory.displayOrder.firstIndex(of: .bans)! + 1
       && AuditCategory.comms.title == "Comms"
       && AuditCategory.comms.symbol == "bubble.left.and.bubble.right.fill",
@@ -3640,6 +3647,21 @@ print("comms assertions passed")
 
 try pipelineSmoke()
 print("pipeline assertions passed")
+
+// The Settings line both front-ends parse (Linux through `diplomat-core pipeline-teams`).
+section("pipeline linear teams")
+do {
+    let parsed = PipelineSettings.LinearTeam.parse(
+        " eng=o/r ,\r\nOPS = o/other.js;ENG=o/elsewhere; nope ,= o/r, A=b,\tB-2=o/r,C=o/r/x, D=ö/r")
+    check(parsed.teams == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r"),
+                           PipelineSettings.LinearTeam(key: "OPS", repo: "o/other.js")],
+          "teams in capitals, the first repo of a key named twice: \(parsed.teams)")
+    check(parsed.bad == ["nope", "= o/r", "A=b", "B-2=o/r", "C=o/r/x", "D=ö/r"],
+          "every entry not KEY=owner/repo, as typed: \(parsed.bad)")
+    check(PipelineSettings.LinearTeam.parse("").teams.isEmpty && PipelineSettings.LinearTeam.parse(" ,; \n").bad.isEmpty,
+          "blank entries are no entries")
+}
+print("pipeline linear teams assertions passed")
 
 try await gitlabSmoke()
 

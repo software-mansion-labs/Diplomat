@@ -405,3 +405,54 @@ public struct LinearIssue: Codable, Equatable, Sendable {
         self.text = text
     }
 }
+
+extension PipelineSettings.LinearTeam {
+    /// The Settings line `ENG=owner/repo, OPS=owner/other` (commas, semicolons or new
+    /// lines between entries) as teams, and the entries that are not `KEY=owner/repo`, as
+    /// typed. A key is ASCII letters and digits, read in capitals as Linear spells it; an
+    /// owner and a repo are ASCII letters, digits, `_`, `.` and `-`. A team named twice
+    /// keeps its first repo. Twin of `pipeline.parse_linear_teams`, which
+    /// `diplomat-core pipeline-teams` pins it to.
+    public static func parse(_ raw: String) -> (teams: [Self], bad: [String]) {
+        // Spaces, tabs and the carriage return of a pasted CRLF line, never Unicode
+        // spacing: Python's `strip()` and Foundation's whitespace sets disagree on it.
+        let space = CharacterSet(charactersIn: " \t\r\u{0B}\u{0C}")
+        let alnum: [ClosedRange<Unicode.Scalar>] = ["a"..."z", "A"..."Z", "0"..."9"]
+        func ascii(_ s: String, also extra: String) -> Bool {
+            !s.isEmpty && s.unicodeScalars.allSatisfy { c in
+                alnum.contains { $0.contains(c) } || extra.unicodeScalars.contains(c)
+            }
+        }
+        // By scalar: a `\r\n` is one Character, which would hide its `\n`.
+        var entries: [String] = []
+        var piece = String.UnicodeScalarView()
+        for c in raw.unicodeScalars {
+            if c == "," || c == ";" || c == "\n" {
+                entries.append(String(piece))
+                piece = String.UnicodeScalarView()
+            } else {
+                piece.append(c)
+            }
+        }
+        entries.append(String(piece))
+        var teams: [Self] = []
+        var bad: [String] = []
+        for entry in entries.map({ $0.trimmingCharacters(in: space) }) where !entry.isEmpty {
+            let scalars = entry.unicodeScalars
+            guard let eq = scalars.firstIndex(of: "=") else {
+                bad.append(entry)
+                continue
+            }
+            let key = String(scalars[..<eq]).trimmingCharacters(in: space)
+            let repo = String(scalars[scalars.index(after: eq)...]).trimmingCharacters(in: space)
+            let parts = repo.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard ascii(key, also: ""), parts.count == 2, parts.allSatisfy({ ascii($0, also: "_.-") }) else {
+                bad.append(entry)
+                continue
+            }
+            let upper = key.uppercased()
+            if !teams.contains(where: { $0.key == upper }) { teams.append(Self(key: upper, repo: repo)) }
+        }
+        return (teams, bad)
+    }
+}

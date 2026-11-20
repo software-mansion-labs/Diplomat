@@ -9,6 +9,9 @@ import Foundation
 ///                  stdin is not settings or stdout cannot be written.
 ///   pipeline-last  no stdin. stdout = the last sync's PipelineTickResult, or an empty one
 ///                  dated 1970-01-01 before the first.
+///   pipeline-teams stdin = `{"raw": <the Linear teams setting>}`. stdout = `{"teams":
+///                  [{"key", "repo"}], "bad": [entry]}` (`PipelineSettings.LinearTeam.parse`),
+///                  so the Linux twin of the parse is tested against this one.
 ///
 /// Dates are ISO 8601 and keys sorted, as `CommsLog.encoder` writes them. Both read and
 /// write `$DIPLOMAT_PIPELINE_DIR` (default `~/.diplomat/pipeline`); `DIPLOMAT_GH`,
@@ -25,6 +28,15 @@ enum PipelineCommand {
         // error, not a signal.
         signal(SIGPIPE, SIG_IGN)
         emitJSON(result)
+    }
+
+    static func teams(_ obj: [String: Any]) {
+        struct Answer: Encodable {
+            let teams: [PipelineSettings.LinearTeam]
+            let bad: [String]
+        }
+        let parsed = PipelineSettings.LinearTeam.parse(obj["raw"] as? String ?? "")
+        emitJSON(Answer(teams: parsed.teams, bad: parsed.bad))
     }
 
     static func last() {

@@ -81,9 +81,9 @@ let args = CommandLine.arguments
 guard args.count >= 2,
       ["build-prompt", "tool-data", "telemetry", "agent-state", "agent-registry",
        "comms-tick", "comms-auth", "comms-feed", "comms-effect", "pipeline-tick", "pipeline-last",
-       "opencode-session-model"].contains(args[1]) else {
+       "pipeline-teams", "opencode-session-model"].contains(args[1]) else {
     die("usage: diplomat-core (build-prompt | tool-data | telemetry | agent-state"
-        + " | agent-registry | comms-tick | comms-effect | pipeline-tick)  (JSON on stdin)"
+        + " | agent-registry | comms-tick | comms-effect | pipeline-tick | pipeline-teams)  (JSON on stdin)"
         + "\n       diplomat-core comms-feed [--limit N]"
         + "\n       diplomat-core comms-auth"
         + "\n       diplomat-core pipeline-last"
@@ -125,6 +125,11 @@ if args[1] == "comms-effect" {
 
 if args[1] == "pipeline-tick" {
     PipelineCommand.tick(input)
+    exit(0)
+}
+
+if args[1] == "pipeline-teams" {
+    PipelineCommand.teams(obj)
     exit(0)
 }
 
