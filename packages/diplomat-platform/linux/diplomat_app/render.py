@@ -8,7 +8,7 @@ a real display by grabbing the widget's own pixels:
 
 what ∈ {panel, lookup, wizard, issues, conflicts, audit, settings[-explain],
 devices, devices-screen[-remote[-away]|-off], machines-screen[-idle|-off],
-telemetry, comms, comms-panel, comms-empty}.
+telemetry, comms, comms-panel, comms-empty, pipeline}.
 With DIPLOMAT_RENDER_LIVE=1 it fetches real data first; otherwise it uses a small
 synthetic fixture.
 """
@@ -649,6 +649,17 @@ def _telemetry_ledger_fixture() -> None:
     telemetry._reset_cache()
 
 
+def _scratch_settings(store: Store, scratch) -> None:
+    """Re-point the store at settings in ``scratch``, for a fixture that writes them."""
+    from PySide6.QtCore import QSettings
+
+    from .store import app_settings
+
+    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
+    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(scratch))
+    store._settings = app_settings()
+
+
 def _comms_fixture(store: Store, *, signed_in: bool) -> None:
     """A synthetic Comms log, written into a scratch ``DIPLOMAT_COMMS_DIR`` and folded by
     the real ``diplomat-core comms-feed``: the screen draws that fold, so seeding the
@@ -661,19 +672,12 @@ def _comms_fixture(store: Store, *, signed_in: bool) -> None:
 
     from diplomat_runtime import comms
 
-    from PySide6.QtCore import QSettings
-
-    from .store import app_settings
-
     scratch = Path(tempfile.mkdtemp(prefix="diplomat-render-comms-"))
     os.environ["DIPLOMAT_COMMS_DIR"] = str(scratch / "comms")
     # The panel reads the ban list as it is built, and the screen draws its Slack half.
     os.environ["DA_BAN_DIR"] = str(scratch / "pr-monitor")
-    # The fixture switches Comms on and moves `commsSeenAt`, so the store is first
-    # re-pointed at scratch settings.
-    QSettings.setDefaultFormat(QSettings.Format.IniFormat)
-    QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, str(scratch))
-    store._settings = app_settings()
+    # The fixture switches Comms on and moves `commsSeenAt`.
+    _scratch_settings(store, scratch)
     os.environ.pop(comms.TOKEN_ENV, None)
     os.environ["DIPLOMAT_CLAUDE_DIR"] = str(scratch / "claude")
     if not signed_in:
@@ -782,6 +786,216 @@ def _comms_fixture(store: Store, *, signed_in: bool) -> None:
     store.refresh_comms_feed()
 
 
+def _pipeline_item(url: str, label: str, title: str, *, kind: str, stage: str, lane: str,
+                   writable: bool, updated: datetime, repo: str, source: str = "github",
+                   state: str = "open", author: str | None = None, assignees: tuple = (),
+                   rating: tuple | None = None, rated_by: str | None = None,
+                   why: str | None = None, floor: tuple | None = None, hold: str | None = None,
+                   head: str | None = None, clean: str | None = None) -> dict:
+    """A ``PipelineItem`` as the Swift encoder writes it: an optional that is nil is no
+    key. ``rating`` and ``floor`` are ``(risk, complexity)``."""
+    from diplomat_runtime import comms
+
+    item = {"id": url, "source": source, "kind": kind, "label": label, "title": title,
+            "repo": repo, "state": state, "assignees": list(assignees), "writable": writable,
+            "stage": stage, "lane": lane, "updatedAt": comms.iso(updated)}
+    for key, value in (("rating", rating), ("floor", floor)):
+        if value is not None:
+            item[key] = {"risk": value[0], "complexity": value[1]}
+    for key, value in (("author", author), ("ratedBy", rated_by), ("why", why),
+                       ("hold", hold), ("headSha", head), ("cleanAt", clean)):
+        if value is not None:
+            item[key] = value
+    return item
+
+
+def pipeline_fixture_result(slug: str, now: datetime) -> dict:
+    """A ``PipelineTickResult`` over the root ``slug``, as the Swift encoder writes one:
+    every stage, lane, edge kind (a ``fixes`` one reaching past the next column) and
+    event kind, two holds, a notice, GitHub and Linear items, writable and not, ratings
+    off labels and Diplomat's own (one with the rater's why and its diff's floor), and
+    the effects a sync owes for them."""
+    from diplomat_runtime import comms
+
+    home = f"https://github.com/{slug}"
+    issue, pr = f"{home}/issues/{{}}".format, f"{home}/pull/{{}}".format
+    linear = "https://linear.app/acme/issue/{}".format
+    other = "latekvo/tor-transport"
+    onion = f"https://github.com/{other}/issues/31"
+
+    def ago(minutes: float) -> datetime:
+        return now - timedelta(minutes=minutes)
+
+    low = ("low", "low")
+    cleared_head, clean_head, track_head = "3f9c2e1a7b", "9b41d07c22", "c0ffee1d00"
+    gh = {"repo": slug}
+    items = [
+        _pipeline_item(issue(1801), "#1801", "Screenshot hangs forever on the Pixel 9 emulator",
+                       kind="issue", stage="fixing", lane="fast", writable=True,
+                       updated=ago(50), author="ola", rating=low, rated_by="label", **gh),
+        _pipeline_item(pr(1810), "#1810", "Time out the screenshot call after 20s", kind="pr",
+                       stage="cleared", lane="fast", writable=True, updated=ago(6),
+                       author="latekvo", rating=low, rated_by="label", floor=low,
+                       why="One timeout around one call, with a test that hangs the stub; "
+                           "nothing else moves.",
+                       hold=f"CI is pending on {cleared_head[:7]}", head=cleared_head,
+                       clean=cleared_head, **gh),
+        _pipeline_item(pr(1811), "#1811", "Retry the screenshot once after a timeout",
+                       kind="pr", stage="clean", lane="fast", writable=True, updated=ago(9),
+                       author="latekvo", rating=low, rated_by="label", floor=low,
+                       head=clean_head, clean=clean_head, **gh),
+        _pipeline_item(issue(1820), "#1820", "Support the iPhone Duo's folding screen",
+                       kind="issue", stage="fractured", lane="fractured", writable=True,
+                       updated=ago(170), author="kacper", rating=("medium", "high"),
+                       rated_by="label", **gh),
+        _pipeline_item(issue(1821), "#1821", "Duo: report the hinge angle in the device info",
+                       kind="issue", stage="candidate", lane="fast", writable=True,
+                       updated=ago(160), author="latekvo", rating=low, rated_by="label",
+                       why="One new field, read from a call the runner already makes.", **gh),
+        _pipeline_item(issue(1822), "#1822", "Duo: cut screenshots at the fold", kind="issue",
+                       stage="fixing", lane="fast", writable=True, updated=ago(25),
+                       author="latekvo", rating=low, rated_by="label", **gh),
+        _pipeline_item(pr(1826), "#1826", "Cut Duo screenshots at the fold", kind="pr",
+                       stage="fast-track", lane="fast", writable=True, updated=ago(20),
+                       author="latekvo", rating=low, rated_by="label", floor=low,
+                       head=track_head, **gh),
+        _pipeline_item(issue(1829), "#1829",
+                       "The device list flickers while a simulator reboots", kind="issue",
+                       stage="fixing", lane="human", writable=False, updated=ago(120),
+                       author="t0tl", assignees=("kacper",), rating=("medium", "medium"),
+                       rated_by="local",
+                       why="The list's diffing and the allocator's event order both play a "
+                           "part, and which of them owns the fix is a judgement call.", **gh),
+        _pipeline_item(pr(1830), "#1830", "Debounce the device list", kind="pr",
+                       stage="human", lane="human", writable=False, updated=ago(90),
+                       author="hubert", rating=("medium", "low"), rated_by="label",
+                       head="5e6f7a8b9c", **gh),
+        _pipeline_item(linear("ENG-40"), "ENG-40", "Billing export times out for large teams",
+                       kind="issue", source="linear", repo="ENG", stage="human",
+                       lane="human", writable=False, updated=ago(300), author="Jan Nowak",
+                       assignees=("Marta Kowalska",), rating=("high", "high"),
+                       rated_by="local",
+                       why="Spans the export job, its queue and the billing API's paging; "
+                           "a mistake loses rows."),
+        _pipeline_item(linear("ENG-42"), "ENG-42", "Page the billing export 500 rows at a time",
+                       kind="issue", source="linear", repo="ENG", stage="candidate",
+                       lane="fast", writable=True, updated=ago(30), author="Marta Kowalska",
+                       rating=low, rated_by="label",
+                       hold="ENG is fixed in acme/billing, which is not a repo root"),
+        _pipeline_item(onion, f"{other}#31", "Onion circuits drop after an hour idle",
+                       kind="issue", repo=other, stage="unrated", lane="unrated",
+                       writable=True, updated=ago(5), author="latekvo"),
+        _pipeline_item(issue(1790), "#1790", "Crash on boot when no simulator is installed",
+                       kind="issue", stage="closed", lane="done", state="closed",
+                       writable=True, updated=ago(1500), author="t0tl", rating=low,
+                       rated_by="label", **gh),
+        _pipeline_item(pr(1795), "#1795", "Guard the boot path against an empty simulator list",
+                       kind="pr", stage="merged", lane="done", state="merged", writable=True,
+                       updated=ago(1440), author="latekvo", rating=low, rated_by="label",
+                       floor=low, head="a1b2c3d4e5", clean="a1b2c3d4e5", **gh),
+    ]
+    at = [(issue(1801), 0, 0), (pr(1810), 1, 0), (pr(1811), 2, 0),
+          (issue(1820), 0, 1), (issue(1821), 1, 1), (issue(1822), 1, 2), (pr(1826), 2, 2),
+          (issue(1829), 0, 3), (pr(1830), 1, 3),
+          (linear("ENG-40"), 0, 4), (linear("ENG-42"), 1, 4),
+          (onion, 0, 5),
+          (issue(1790), 0, 6), (pr(1795), 1, 6)]
+    edges = [(issue(1801), pr(1810), "fixes"), (issue(1801), pr(1811), "fixes"),
+             (pr(1810), pr(1811), "stacked"),
+             (issue(1820), issue(1821), "child"), (issue(1820), issue(1822), "child"),
+             (issue(1822), pr(1826), "fixes"), (issue(1829), pr(1830), "fixes"),
+             (linear("ENG-40"), linear("ENG-42"), "child"), (issue(1790), pr(1795), "fixes")]
+    events = [
+        (1440, pr(1795), "merged", "squash-merged at a1b2c3d"),
+        (300, linear("ENG-40"), "rated",
+         "high risk, high complexity; kept locally: assigned to Marta Kowalska"),
+        (180, issue(1820), "rated", "medium risk, high complexity"),
+        (180, issue(1820), "labelled", "risk:medium, complexity:high"),
+        (175, issue(1820), "fractured", "split into 2 child issues"),
+        (175, issue(1820), "child", "#1821 Duo: report the hinge angle in the device info"),
+        (175, issue(1820), "child", "#1822 Duo: cut screenshots at the fold"),
+        (165, issue(1821), "rated", "low risk, low complexity"),
+        (120, issue(1829), "rated",
+         "medium risk, medium complexity; kept locally: assigned to @kacper"),
+        (55, issue(1801), "rated", "low risk, low complexity"),
+        (55, issue(1801), "labelled", "risk:low, complexity:low"),
+        (40, pr(1810), "rated", "low risk, low complexity"),
+        (40, pr(1810), "fast-track", "labelled diplomat:fast-track"),
+        (30, linear("ENG-42"), "held", "ENG is fixed in acme/billing, which is not a repo root"),
+        (20, pr(1826), "rated", "low risk, low complexity"),
+        (20, pr(1826), "fast-track", "labelled diplomat:fast-track"),
+        (15, pr(1810), "clean", f"clean marker at {cleared_head[:7]}"),
+        (12, pr(1810), "rerated", f"low risk, low complexity at {cleared_head[:7]}"),
+        (12, pr(1810), "cleared", "labelled diplomat:cleared"),
+        (6, pr(1810), "held", f"CI is pending on {cleared_head[:7]}"),
+        (5, onion, "asked", "rate now"),
+        (2, onion, "error", "claude did not answer within 300s"),
+    ]
+    return {
+        "at": comms.iso(ago(2)),
+        "items": items,
+        "graph": {"nodes": [{"id": i, "column": c, "row": r} for i, c, r in at],
+                  "edges": [{"from": a, "to": b, "kind": k} for a, b, k in edges]},
+        "effects": [
+            {"kind": "fixIssue", "repo": slug, "number": 1821, "url": issue(1821),
+             "key": f"pipeline-fix:{issue(1821)}", "stamp": "fix"},
+            {"kind": "review", "repo": slug, "number": 1826, "url": pr(1826),
+             "headSha": track_head, "key": f"pipeline-review:{pr(1826)}", "stamp": track_head},
+        ],
+        "events": [{"at": comms.iso(ago(m)), "item": i, "kind": k, "detail": d}
+                   for m, i, k, d in events],
+        "notices": [f"Rating {other}#31 failed: claude did not answer within 300s; "
+                    "retried next sync"],
+    }
+
+
+def _pipeline_fixture(store: Store) -> str:
+    """:func:`pipeline_fixture_result`, written as ``last.json`` into a scratch
+    ``DIPLOMAT_PIPELINE_DIR`` and read back through the real ``diplomat-core
+    pipeline-last``, which has to hand back exactly what it was given: the fixture is
+    the Swift encoding, so this render is the front-end's half of that contract. One
+    candidate's fix is being dispatched and one fast-track PR's review waits in the
+    queue, so both badges draw. Returns the id of the card to select."""
+    import json
+    import tempfile
+    from pathlib import Path
+
+    from diplomat_runtime import core
+    from diplomat_runtime.prref import item_key
+
+    scratch = Path(tempfile.mkdtemp(prefix="diplomat-render-pipeline-"))
+    os.environ["DIPLOMAT_PIPELINE_DIR"] = str(scratch / "pipeline")
+    # The fixture switches the Pipeline on.
+    _scratch_settings(store, scratch)
+    store.pipeline_enabled = True
+    cfg = core.config()
+    slug = f"{cfg['owner']}/{cfg['repo']}"
+    result = pipeline_fixture_result(slug, datetime.now(timezone.utc))
+    (scratch / "pipeline").mkdir()
+    (scratch / "pipeline" / "last.json").write_text(json.dumps(result, sort_keys=True))
+    store.refresh_pipeline_last()
+    if store.pipeline_result != result:
+        raise RuntimeError(
+            "diplomat-core pipeline-last did not answer" if store.pipeline_result is None
+            else "diplomat-core pipeline-last answered other than the last.json it was handed")
+    home = f"https://github.com/{slug}"
+    store.pipeline_fixes_starting = frozenset({f"{home}/issues/1821"})
+    store.queued_tasks = [autofix.QueuedTask(
+        autofix.queue_key(autofix.QUEUE_REVIEW_ACTION, item_key(cfg["owner"], cfg["repo"], 1826)),
+        autofix.AgentJob(kind="review", audit_action="review", label="Review · #1826 · deep",
+                         prompt=""), 1)]
+    return f"{home}/pull/1810"
+
+
+def _show_whole(app, panel: Panel, scroll) -> None:
+    """Grow the window until ``scroll`` scrolls nothing, so the shot holds all of it."""
+    panel.show()
+    app.processEvents()
+    want, has = scroll.widget().minimumSize(), scroll.viewport().size()
+    panel.resize(panel.width() + max(0, want.width() - has.width()),
+                 panel.height() + max(0, want.height() - has.height()))
+
+
 def run(what: str, out: str) -> int:
     app = QApplication.instance() or QApplication([])
     store = Store()
@@ -809,6 +1023,9 @@ def run(what: str, out: str) -> int:
     # Also before Panel(): the header's ✉ count is read as it is built.
     if what.startswith("comms"):
         _comms_fixture(store, signed_in=what != "comms-empty")
+
+    if what == "pipeline":
+        selected = _pipeline_fixture(store)
 
     panel = Panel(store)
     if what == "lookup":
@@ -842,6 +1059,10 @@ def run(what: str, out: str) -> int:
         panel._toggle_telemetry()
     elif what in ("comms", "comms-empty"):
         panel._toggle_comms()
+    elif what == "pipeline":
+        panel._toggle_pipeline()
+        panel.pipeline_view.select(selected)
+        _show_whole(app, panel, panel.pipeline_view.graph_scroll)
     else:  # panel, and comms-panel: the same, its ✉ header button showing a count
         _device_fixture(store)
         _left_pane_fixture(store)
