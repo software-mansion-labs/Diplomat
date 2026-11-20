@@ -4492,9 +4492,10 @@ class Store(QObject):
 
     def pipeline_settings_payload(self) -> dict:
         """The ``PipelineSettings`` JSON a sync is handed. Its roots are the GitHub ones:
-        the Pipeline skips GitLab."""
+        the Pipeline skips GitLab. The key file's ``~`` is expanded here, by ``$HOME``:
+        the core's own expansion reads the account's home from the password database."""
         teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
-        token_file = appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip()
+        token_file = os.path.expanduser(appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip())
         with self._pipeline_lock:
             force = {kind: sorted(ids) for kind, ids in self._pipeline_force.items()}
         return {

@@ -111,13 +111,14 @@ def test_a_sync_is_handed_the_github_roots_the_teams_and_the_switches(pipe, monk
     monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: None)
     pipe.pipeline_linear_teams_raw = "eng = o/r; OPS=o/other, nonsense"
     appconfig.set_value(appconfig.LINEAR_TOKEN_FILE, " ~/.diplomat/linear ")
+    monkeypatch.setenv("HOME", "/home/elsewhere")
     pipe.pipeline_force_now("rate", ISSUE)
     pipe.pipeline_force_now("rate", PR)
     pipe.pipeline_force_now("fracture", ISSUE)
     assert pipe.pipeline_settings_payload() == {
         "roots": [{"owner": "o", "repo": "r", "path": "/src/r", "me": "alice"}],
         "linearTeams": [{"key": "ENG", "repo": "o/r"}, {"key": "OPS", "repo": "o/other"}],
-        "linearTokenFile": "~/.diplomat/linear",
+        "linearTokenFile": "/home/elsewhere/.diplomat/linear",
         "rate": False, "fix": True, "fastTrack": True, "merge": False, "fracture": False,
         "force": {"rate": [ISSUE, PR], "fracture": [ISSUE]},
     }
