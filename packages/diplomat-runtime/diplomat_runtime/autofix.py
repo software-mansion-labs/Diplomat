@@ -328,6 +328,53 @@ def author_allowed(login: str, allowed: list[str]) -> bool:
     return any(a.lower() == low for a in allowed)
 
 
+# MARK: - Auto-review depth table (mirrors AutoReviewDepth in Review.swift)
+
+AUTO_REVIEW_DEFAULT_DEPTH = "standard"
+
+
+@dataclass(frozen=True)
+class AutoReviewOverride:
+    """One row of the auto-review depth table: PRs by ``login`` are reviewed at
+    ``depth``. A ``None`` login is me, whoever that is in the repo under review; ``""``
+    is a row whose login is not typed yet, and names nobody. ``to_json`` is the shape
+    Swift's ``Codable`` writes, which leaves a ``nil`` login out."""
+
+    login: str | None
+    depth: str
+
+    def to_json(self) -> dict:
+        return {"depth": self.depth} if self.login is None else {
+            "login": self.login, "depth": self.depth}
+
+    @classmethod
+    def from_json(cls, d: object) -> AutoReviewOverride | None:
+        if not isinstance(d, dict):
+            return None
+        login, depth = d.get("login"), d.get("depth")
+        if not isinstance(depth, str) or not isinstance(login, (str, type(None))):
+            return None
+        return cls(login, depth)
+
+
+#: The table until the operator edits it.
+AUTO_REVIEW_SEED = (AutoReviewOverride(None, "max"),)
+
+
+def auto_review_depth(author: str, me: str, overrides, otherwise: str) -> str:
+    """The depth an auto-review runs at: that of the first table row naming the PR's
+    author, else the operator's default. Logins compare case-insensitively, a leading
+    ``@`` off."""
+    who = (author or "").lower()
+    if not who:
+        return otherwise
+    for row in overrides:
+        login = me if row.login is None else row.login.strip().lstrip("@")
+        if (login or "").lower() == who:
+            return row.depth
+    return otherwise
+
+
 # MARK: - Mesh coordination for the auto-monitors (mirrors AutofixMesh in Autofix.swift)
 #
 # Two machines running this monitor poll the same GitHub state as the same user, so

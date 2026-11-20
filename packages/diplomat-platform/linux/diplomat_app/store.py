@@ -1166,6 +1166,41 @@ class Store(QObject):
         self._settings.setValue("softApproveEnabled", bool(value))
 
     @property
+    def auto_review_default_depth(self) -> str:
+        """The review depth id an auto-review runs at - a review request's, and a goal
+        PR's on a new commit - unless :attr:`auto_review_overrides` names its author."""
+        return self._settings.value("autoReviewDefaultDepth",
+                                    autofix.AUTO_REVIEW_DEFAULT_DEPTH, str)
+
+    @auto_review_default_depth.setter
+    def auto_review_default_depth(self, value: str) -> None:
+        self._settings.setValue("autoReviewDefaultDepth", str(value))
+
+    @property
+    def auto_review_overrides(self) -> list[autofix.AutoReviewOverride]:
+        """The per-author depth table: the seed until edited, and again whenever what is
+        stored does not read back whole, as a macOS decode would."""
+        raw = self._settings.value("autoReviewOverrides", "", str)
+        try:
+            stored = json.loads(raw)
+        except ValueError:
+            stored = None
+        rows = ([autofix.AutoReviewOverride.from_json(r) for r in stored]
+                if isinstance(stored, list) else [None])
+        return list(autofix.AUTO_REVIEW_SEED) if None in rows else rows
+
+    @auto_review_overrides.setter
+    def auto_review_overrides(self, value: list[autofix.AutoReviewOverride]) -> None:
+        self._settings.setValue("autoReviewOverrides",
+                                json.dumps([r.to_json() for r in value]))
+
+    def auto_review_depth(self, author: str, me: str) -> str:
+        """The depth an auto-review of ``author``'s PR runs at, ``me`` being who I am in
+        its repo."""
+        return autofix.auto_review_depth(author, me, self.auto_review_overrides,
+                                         self.auto_review_default_depth)
+
+    @property
     def verdict_withhold_skill(self) -> bool:
         return self._settings.value("verdictWithholdSkill", True, bool)
 
@@ -1896,7 +1931,8 @@ class Store(QObject):
             if w["kind"] == "fix-issue":
                 config = self._goal_fix_config(number, root)
             else:
-                config = self._review_request_config(number, verdict=False, home=root)
+                config = self._review_request_config(number, author=author, verdict=False,
+                                                     home=root)
                 me = self.known_me(root)
                 if me and author.lower() == me.lower():
                     config.specific_author = review.SpecificAuthor.MINE
@@ -2418,7 +2454,8 @@ class Store(QObject):
             kind="review",
             audit_action=REVIEW_REQ_ACTION,
             label=f"Review-req · {self._item_label(r.url, r.number)} (@{r.author}){tag}",
-            prompt=self._review_request_config(r.number, verdict=verdict, home=root).build_prompt(),
+            prompt=self._review_request_config(r.number, author=r.author, verdict=verdict,
+                                               home=root).build_prompt(),
             pr_url=r.url,
             pr_number=r.number,
             author_login=r.author,
@@ -2431,15 +2468,16 @@ class Store(QObject):
         )
         return self.dispatch_agent(job, autofix.SOURCE_AUTO, attempt) in ("spawned", autofix.VERDICT_STAND_DOWN)
 
-    def _review_request_config(self, number: int, *, verdict: bool,
+    def _review_request_config(self, number: int, *, author: str, verdict: bool,
                                home: LocalRepo) -> review.ReviewConfig:
-        """The review-request monitor's review of someone's PR ``number`` in ``home``: the deepest,
-        left on the PR; ``verdict`` lets a clean one approve, and without it a clean
-        one soft-approves unless that is switched off."""
+        """The review-request monitor's review of ``author``'s PR ``number`` in ``home``, at
+        :meth:`auto_review_depth` and left on the PR; ``verdict`` lets a clean one
+        approve, and without it a clean one soft-approves unless that is switched off."""
+        me = self.known_me(home)
         return review.ReviewConfig(
-            depth="max",
+            depth=self.auto_review_depth(author, me),
             target=PRTarget.SPECIFIC,
-            me=self.known_me(home),
+            me=me,
             mark_ready=False,
             leave_reviews=True,
             reply_to_reviews=False,

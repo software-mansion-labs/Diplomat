@@ -1151,8 +1151,9 @@ enum Render {
         ]
     }
 
-    /// Seed the review-requests settings so the owed-reviews pill renders and the
-    /// nested author allowlist + verdict policy are open (DIPLOMAT_RENDER=settings).
+    /// Seed the review-requests settings so the owed-reviews pill renders, the
+    /// per-author depth table has a typed row beside the me one, and the nested author
+    /// allowlist + verdict policy are open (DIPLOMAT_RENDER=settings).
     @MainActor
     private static func seedSettings(_ store: Store, explain: Bool) {
         store.reviewRequestsEnabled = true
@@ -1160,6 +1161,7 @@ enum Render {
         store.reviewRequestsHandled = 7
         store.unaddressedReviews = 2
         store.autoApproveEnabled = true   // show the master toggle ON + its nested suppressors
+        store.autoReviewOverrides = AutoReviewDepth.seed + [AutoReviewOverride(login: "t0tl", depth: "deep")]
         store.communityIssuesEnabled = true
         store.settingsExplain = explain
     }

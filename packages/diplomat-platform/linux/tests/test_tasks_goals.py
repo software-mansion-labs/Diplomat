@@ -491,9 +491,11 @@ def test_an_auto_goal_queues_its_fixes_and_reviews_and_fixes_my_findings(
     review = asks[f"review:{_key(1810)}"]
     assert (review.author, review.config["depth"], review.config["specificPR"],
             review.config["leaveReviews"], review.config["specificAuthor"]) == (
-        "hubert", "max", "1810", True, "theirs")
-    # My own PR is reviewed as mine, and no author is banned-checked for it.
-    assert (asks[f"review:{_key(1812)}"].author, asks[f"review:{_key(1812)}"].config["specificAuthor"]) == ("", "mine")
+        "hubert", "standard", "1810", True, "theirs")
+    # My own PR is reviewed as mine, at the depth the table's me row gives it, and no
+    # author is banned-checked for it.
+    mine = asks[f"review:{_key(1812)}"]
+    assert (mine.author, mine.config["specificAuthor"], mine.config["depth"]) == ("", "mine", "max")
     # My PR's threads: the my-review path, though the PR auto-fix toggle is off.
     assert [c["prompt"] for c in no_agents] == ["PROMPT:review:1812"]
     assert [r.label for r in agentregistry.load()] == ["Auto · Review · #1812"]

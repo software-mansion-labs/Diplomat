@@ -27,9 +27,10 @@ root its PR or issue belongs to.
   (5m → 10m → … → 3h) that survives applet restarts. Conflicts are *only*
   level-triggered now (the edge event is a deliberate no-op) and retry on the
   plain 3-minute tick; the backoff ladder is the review path's.
-- **Review requests** - polls PRs requesting *my* review and dispatches the most
-  thorough review the wizard can express: Full E2E · max depth, formal per-line
-  comments, hands strictly off the branch. "Owed" comes from GitHub's own
+- **Review requests** - polls PRs requesting *my* review and dispatches a review at
+  the Settings **Review depth** (**default standard**) - or the depth a *Per-author
+  depth* row gives the PR's author, the first row naming them winning - with formal
+  per-line comments, hands strictly off the branch. "Owed" comes from GitHub's own
   timestamps (request newer than my last review), so a genuine re-request
   re-qualifies, and a review left unaddressed (agent died, window closed) is
   retried on the same 5m→3h backoff until the review actually lands. Force-push
@@ -212,7 +213,8 @@ classes stay comments-only even with approvals enabled.
 A separate toggle governs what a *comments-only* review does when it finds a PR
 perfectly clean - **default ON**. Instead of staying silent, the agent submits a
 `COMMENT` review with no inline comments whose body is a single friendly note
-(*"Ran full E2E sweep... Returned perfectly clean. Thank you for contributing!"*).
+(*"Ran the full sweep: ... Returned clean. Thank you for contributing!"*, naming what
+the review actually ran).
 A soft-approval is that review alone - it **never** carries an `APPROVE` action;
 it's just an acknowledgement. It's independent of the verdict toggle above and is
 moot on any PR that gets a real verdict (that takes precedence). Turn it off to

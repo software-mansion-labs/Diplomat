@@ -219,6 +219,8 @@ enum TasksTest {
         store.usernameOverride = ""
         store.me = me
         store.prAutofixEnabled = false
+        store.autoReviewDefaultDepth = "quick"
+        store.autoReviewOverrides = AutoReviewDepth.seed
         let fixture: GoalFixture
         do {
             fixture = try writeGoalFixture(in: goalsDir, now: Date(), me: me)
@@ -311,8 +313,19 @@ enum TasksTest {
         }
         check("the reviews are the review-request monitor's, mine reviewed as mine",
               reviews.map { "\($0.0.depth) \($0.0.specificPR) \($0.0.specificAuthor) @\($0.1)" }
-                == ["max 1821 theirs @contributor-x", "max 1822 mine @"],
+                == ["quick 1821 theirs @contributor-x", "max 1822 mine @"],
               "\(reviews.map { "\($0.0.depth) \($0.0.specificPR) \($0.0.specificAuthor) @\($0.1)" })")
+        let request = AutofixMonitor.ReviewRequest(
+            number: 1830, title: "", url: "https://github.com/\(owner)/\(repo)/pull/1830",
+            author: "Contributor-X", authorAssociation: "NONE", files: [], requestedAt: nil,
+            myLastReviewAt: nil, headSha: "", myLastCommentAt: nil)
+        let requestRoot = PRRef.LocalRepo(owner: owner, repo: repo, path: RepoPaths.agentRepo)
+        check("a review request runs at the default depth when no row names its author",
+              store.reviewRequestConfig(request, root: requestRoot, verdict: false).depth == "quick")
+        store.autoReviewOverrides = AutoReviewDepth.seed + [AutoReviewOverride(login: "@contributor-x", depth: "deep")]
+        check("…and at the depth of the row that does",
+              store.reviewRequestConfig(request, root: requestRoot, verdict: false).depth == "deep")
+        store.autoReviewOverrides = AutoReviewDepth.seed
         let recorded = view(fixture.auto)?.task.dispatched.keys.sorted() ?? []
         check("and records them dispatched", recorded == ["fix:\(ref(1820))", "review:\(ref(1821))@a1b2c3d4",
                                                            "review:\(ref(1822))@e5f6a7b8"], "\(recorded)")

@@ -291,15 +291,18 @@ extension Store {
         }
     }
 
-    /// A goal PR's review at the review-request monitor's settings (the most thorough
-    /// depth), comments only: no request's files are at hand to weigh a verdict against.
+    /// A goal PR's review at the review-request monitor's settings, comments only: no
+    /// request's files are at hand to weigh a verdict against.
     func goalReviewAsk(_ item: GoalWork) -> RequestedWork {
-        let mine = !effectiveMe.isEmpty && item.author?.lowercased() == effectiveMe.lowercased()
-        var cfg = ReviewConfig(depth: "max", target: .specific, me: effectiveMe, markReady: false,
+        let home = root(ofItem: PRRef.itemKey(url: item.url))
+        let me = knownMe(for: home)
+        let mine = !me.isEmpty && item.author?.lowercased() == me.lowercased()
+        var cfg = ReviewConfig(depth: autoReviewDepth(of: item.author ?? "", me: me),
+                               target: .specific, me: me, markReady: false,
                                leaveReviews: true, replyToReviews: false, specificPR: String(item.number),
                                finalPass: false, softApprove: softApproveEnabled,
                                specificAuthor: mine ? .mine : .theirs)
-        cfg.home = root(ofItem: PRRef.itemKey(url: item.url))
+        cfg.home = home
         return RequestedWork(number: item.number, url: item.url, author: mine ? "" : item.author ?? "",
                              config: .review(cfg))
     }

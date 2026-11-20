@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 from PySide6.QtWidgets import QApplication
 
-from diplomat_runtime import agentregistry, agentstate
+from diplomat_runtime import agentregistry, agentstate, autofix
 from diplomat_runtime.models import Fmt, OpenIssue, OpenPR
 from . import probes, szpont
 from .panel import Panel
@@ -55,7 +55,8 @@ def _fixture(store: Store) -> None:
 def _settings_fixture(store: Store, *, explain: bool) -> None:
     """Open Settings on the states its quiet rows never reach: an outstanding
     review count (so the owed-reviews pill draws), a set author allowlist (so the
-    field draws a line rather than the blank placeholder) and auto-approvals on (so
+    field draws a line rather than the blank placeholder), a typed per-author depth
+    row (so the table draws a login field beside the me row) and auto-approvals on (so
     the nested verdict policy is unfolded). ``explain`` turns on the header switch,
     the only state that draws the long-form paragraph under each row.
 
@@ -65,6 +66,8 @@ def _settings_fixture(store: Store, *, explain: bool) -> None:
     store.review_requests_enabled = True
     store.review_allowlist_raw = "latekvo, @t0tl"
     store.auto_approve_enabled = True
+    store.auto_review_overrides = [*autofix.AUTO_REVIEW_SEED,
+                                   autofix.AutoReviewOverride("t0tl", "deep")]
     store.community_issues_enabled = True
     store.review_requests_handled = 7
     store.unaddressed_reviews = 2
@@ -1030,7 +1033,7 @@ def _goals_fixture(store: Store, home: str, answers: dict, stub_dir, scratch) ->
     ``claude``: Duo support, then approved for automatic action with review on new
     commits, a fix running for one of its issues and one queued, and a review running
     on one of its PRs; and a cold-start goal still proposed."""
-    from diplomat_runtime import autofix, core, tasks
+    from diplomat_runtime import core, tasks
 
     cfg = core.config()
     issue, pr = f"{home}/issues/{{}}".format, f"{home}/pull/{{}}".format

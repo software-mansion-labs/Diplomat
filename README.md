@@ -116,6 +116,7 @@ Everything here can be changed in Settings (⚙︎).
 |---|---|
 | Fix my PRs: conflicts and review threads | **on** |
 | Review PRs that request me | **on**, from any author (an allowlist narrows it) |
+| Depth of those reviews, and of a goal's | **standard**; my own PRs **max** (a per-author table sets others) |
 | Submit approve / request-changes verdicts | **off**, a neutral `COMMENT` review |
 | Thank-you review (body only) on a perfectly clean PR | **on** |
 | Reproduce and fix new community issues | **on**, issues filed from then on |

@@ -171,9 +171,14 @@ Telemetry button and ⏻) swaps the panel to a settings screen:
   polling and keeps listing what it finds under [Agent tasks](panel.md#agent-tasks); what
   stops is the automatic start. Nested under the **review-requests** toggle: the
   **author allowlist** (*Only these authors*, blank = anyone), which stays editable
-  while the toggle is off because it is what decides which requests get listed, and -
-  visible only while it's on - **May approve / request changes** (the verdict switch)
-  with its three withhold-the-verdict suppressors (SKILL / installer / community), and
+  while the toggle is off because it is what decides which requests get listed;
+  **Review depth** (what a review request's and a goal's review run at, **default
+  standard**) and **Per-author depth** (rows of login → depth that override it, the
+  first row naming the PR's author winning; it starts as one *me* row at max, *me*
+  being whoever I am in the PR's repo), both shown while the toggle is off too, since a
+  goal's reviews use them either way; and - visible only while it's on - **May approve
+  / request changes** (the verdict switch) with its three withhold-the-verdict
+  suppressors (SKILL / installer / community), and
   **Soft-approve clean PRs** (a thank-you COMMENT review, never an APPROVE; independent
   of the verdict switch).
 - **Fix new community issues** - the [new-community-issue
