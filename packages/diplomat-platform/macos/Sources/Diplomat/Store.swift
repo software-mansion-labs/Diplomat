@@ -342,7 +342,7 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Whether to auto-dispatch a full-E2E review when someone requests my review on a
+    /// Whether to auto-dispatch a focused review when someone requests my review on a
     /// PR (someone else's PR → review-only, leave comments). Persisted; kicks a poll on
     /// enable. Independent of `prAutofixEnabled`.
     @Published var reviewRequestsEnabled: Bool {
@@ -2821,7 +2821,7 @@ final class Store: ObservableObject {
         if !scan.fresh.isEmpty { refreshAudit() }
     }
 
-    /// PRs that request MY review: dispatch the most-comprehensive review whenever I OWE
+    /// PRs that request MY review: dispatch a focused review whenever I OWE
     /// one — i.e. the latest "review requested from me" is newer than my last review of
     /// that PR. Robust to re-requests (a fresh request re-qualifies even after I reviewed
     /// once) and does NOT depend on observing a "request removed" transition, which a
@@ -4320,7 +4320,7 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Review a PR someone asked me to review (most-comprehensive depth, formal
+    /// Review a PR someone asked me to review (focused depth, formal
     /// per-line comments; verdict only under the auto-approve policy) — the
     /// review-request monitor's job builder. `attemptNumber` ≥2 means a retry of a
     /// review a previous agent left unaddressed.
@@ -4343,10 +4343,11 @@ final class Store: ObservableObject {
         }
         let key = item(url: r.url, number: r.number)
         guard let root = root(ofItem: key) else { return false }
-        var cfg = ReviewConfig(depth: "max", target: .specific, me: knownMe(for: root),
+        var cfg = ReviewConfig(depth: "standard", target: .specific, me: knownMe(for: root),
                                markReady: false, leaveReviews: true, replyToReviews: false,
-                               specificPR: String(r.number), finalPass: verdict,
+                               specificPR: String(r.number),
                                softApprove: soft, specificAuthor: .theirs)
+        cfg.automaticVerdict = verdict
         cfg.home = root
         let job = AgentJob(kind: "review", auditAction: "review-req",
                            label: "Review-req · \(itemLabel(key)) (@\(r.author))\(tag)",

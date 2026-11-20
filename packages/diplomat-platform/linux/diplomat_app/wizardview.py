@@ -150,7 +150,7 @@ class WizardView(SpawnWizard):
 
         self.final_pass = widgets.wizard_escalation(
             glyphs.G_FINAL, "Final E2E pass + verdict",
-            "One last full-E2E pass with big swarms: approve clean PRs, "
+            "Run the affected workflows end to end. Approve clean PRs, "
             "request changes on real blockers.",
         )
         root.addWidget(self.final_pass)

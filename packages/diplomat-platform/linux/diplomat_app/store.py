@@ -937,7 +937,7 @@ class Store(QObject):
 
     @property
     def review_requests_enabled(self) -> bool:
-        """Full-E2E review PRs that request my review (read-only, never touches their
+        """Review PRs that request my review (read-only, never touches their
         branch), retrying an unaddressed review until it lands. On by default;
         switched off it queues rather than starts, like the toggle above."""
         return self._settings.value("reviewRequestsEnabled", True, bool)
@@ -1899,6 +1899,7 @@ class Store(QObject):
                 config = self._review_request_config(number, verdict=False, home=root)
                 me = self.known_me(root)
                 if me and author.lower() == me.lower():
+                    config.depth = "max"
                     config.specific_author = review.SpecificAuthor.MINE
                     author = ""
             try:
@@ -2433,18 +2434,18 @@ class Store(QObject):
 
     def _review_request_config(self, number: int, *, verdict: bool,
                                home: LocalRepo) -> review.ReviewConfig:
-        """The review-request monitor's review of someone's PR ``number`` in ``home``: the deepest,
+        """The review-request monitor's review of someone's PR ``number`` in ``home``: one focused pass,
         left on the PR; ``verdict`` lets a clean one approve, and without it a clean
         one soft-approves unless that is switched off."""
         return review.ReviewConfig(
-            depth="max",
+            depth="standard",
             target=PRTarget.SPECIFIC,
             me=self.known_me(home),
             mark_ready=False,
             leave_reviews=True,
             reply_to_reviews=False,
             specific_pr=str(number),
-            final_pass=verdict,
+            automatic_verdict=verdict,
             soft_approve=self.soft_approve_enabled,
             specific_author=review.SpecificAuthor.THEIRS,
             home=home,

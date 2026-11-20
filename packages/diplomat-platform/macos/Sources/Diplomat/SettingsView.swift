@@ -537,7 +537,7 @@ struct SettingsView: View {
         """
 
     private static let reviewRequestsDetail = """
-        Full E2E · max, inline comments — read-only, never their branch. \
+        One focused pass over changed behavior. Re-reviews check new commits and open findings. \
         A review that never lands (agent died, window closed) is retried. Off, the \
         requests still list under Agent tasks, queued for “execute now” only.
         """

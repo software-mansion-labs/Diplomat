@@ -1068,7 +1068,7 @@ struct ReviewWizardView: View {
             isOn: $finalPass,
             systemImage: "sparkles",
             title: "Final E2E pass + verdict",
-            help: "One last full-E2E pass with big swarms: approve clean PRs, request changes on real blockers.",
+            help: "Run the affected workflows end to end. Approve clean PRs, request changes on real blockers.",
             fill: .yellow)
     }
 

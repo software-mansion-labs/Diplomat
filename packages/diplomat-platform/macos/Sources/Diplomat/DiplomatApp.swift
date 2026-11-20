@@ -933,14 +933,14 @@ enum Dump {
             let sampleVerdict = sampleReq.map {
                 policy.allowsVerdict(files: $0.files, authorAssociation: $0.authorAssociation)
             } ?? false
-            print("\n----- COMPREHENSIVE REVIEW prompt (review-requested #\(sample), max · leave comments · "
+            print("\n----- FOCUSED REVIEW prompt (review-requested #\(sample), focused · leave comments · "
                 + "\(sampleVerdict ? "→ VERDICT" : "→ NO verdict")) -----")
-            var comprehensive = ReviewConfig(depth: "max", target: .specific, me: me,
-                                             markReady: false, leaveReviews: true, replyToReviews: false,
-                                             specificPR: String(sample), finalPass: sampleVerdict,
-                                             specificAuthor: .theirs)
-            comprehensive.home = root
-            print(comprehensive.buildPrompt())
+            var requestedReview = ReviewConfig(depth: "standard", target: .specific, me: me,
+                                               markReady: false, leaveReviews: true, replyToReviews: false,
+                                               specificPR: String(sample), specificAuthor: .theirs)
+            requestedReview.home = root
+            requestedReview.automaticVerdict = sampleVerdict
+            print(requestedReview.buildPrompt())
 
             // New community issues: the scan the monitor runs, against a mark a week back
             // (a live mark is the newest issue, which would show nothing).
