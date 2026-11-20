@@ -60,8 +60,9 @@ MEDIUM, and a blocker on someone else's PR. It is settled when the premise prove
 after all, or when the PR or a reply gives a sound reason to defer the root fix (never a
 reason the reviewer supplies itself); otherwise its thread ends only once the cause is
 gone, and until then the PR is never marked ready or approved. Where reviews are posted
-on someone else's PR, a claimed fix or deferral that leaves the premise failing, or a
-resolved thread whose premise still fails, gets one reply saying what still fails. A
+on someone else's PR, a claimed fix to any finding or a deferral that leaves the premise
+failing, or a resolved premise thread whose premise still fails, gets one reply on that
+thread saying what still fails. A
 workaround is right only for a cause out of the repo's reach or a root fix deferred for
 such a stated reason, and one without a note saying so is a LOW.
 
