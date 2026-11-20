@@ -608,6 +608,7 @@ def test_the_linear_teams_line_reports_what_it_cannot_read(make_view, monkeypatc
 def test_the_pipeline_pill_follows_its_sync(make_view, monkeypatch):
     view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
     st = view.store
+    assert view._pipeline_pill.text() == "no sync yet"
     st.pipeline_syncing = True
     st.pipeline_changed.emit()
     assert view._pipeline_pill.text() == "syncing"

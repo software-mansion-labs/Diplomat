@@ -56,8 +56,10 @@ def _settings_fixture(store: Store, *, explain: bool) -> None:
     """Open Settings on the states its quiet rows never reach: an outstanding
     review count (so the owed-reviews pill draws), a set author allowlist (so the
     field draws a line rather than the blank placeholder), a typed per-author depth
-    row (so the table draws a login field beside the me row) and auto-approvals on (so
-    the nested verdict policy is unfolded). ``explain`` turns on the header switch,
+    row (so the table draws a login field beside the me row), auto-approvals on (so
+    the nested verdict policy is unfolded) and the Pipeline on with a Linear team (so
+    its switches unfold and the teams line says where the key comes from). ``explain``
+    turns on the header switch,
     the only state that draws the long-form paragraph under each row.
 
     Mirrors ``Render.seedSettings`` on macOS. Writes through the real properties,
@@ -71,6 +73,8 @@ def _settings_fixture(store: Store, *, explain: bool) -> None:
     store.community_issues_enabled = True
     store.review_requests_handled = 7
     store.unaddressed_reviews = 2
+    store.pipeline_enabled = True
+    store.pipeline_linear_teams_raw = "ENG=latekvo/Diplomat"
     store.settings_explain = explain
 
 

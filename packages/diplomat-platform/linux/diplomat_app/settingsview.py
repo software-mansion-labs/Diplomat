@@ -1453,8 +1453,10 @@ class SettingsView(QWidget):
             self._pipeline_pill.set_state(st.comms_snippet(st.pipeline_error, 48), _RED)
         elif st.pipeline_syncing:
             self._pipeline_pill.set_state("syncing", _INDIGO)
+        elif st.pipeline_result is None:
+            self._pipeline_pill.set_state("no sync yet", _GREY)
         else:
-            n = len((st.pipeline_result or {}).get("items") or [])
+            n = len(st.pipeline_result.get("items") or [])
             self._pipeline_pill.set_state(f"{n} item{'' if n == 1 else 's'}", _GREEN)
         self._pipeline_row.set_summary(
             st.pipeline_error if st.pipeline_enabled and st.pipeline_error else "",
