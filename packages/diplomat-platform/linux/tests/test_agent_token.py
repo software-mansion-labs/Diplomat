@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from diplomat_runtime import appconfig, comms, review, runner
+from diplomat_runtime import appconfig, comms, pipeline, review, runner
 
 DUMMY = "github_pat_DUMMY0123456789abcdefNOTREAL"
 
@@ -131,7 +131,8 @@ def test_no_configured_token_leaves_the_spawn_exactly_as_it_was(monkeypatch):
     assert review.token_export("linux") == ""
     assert review.token_export("darwin") == ""
     assert review.shell_command("/tmp/p.txt", done_path="/tmp/d") == (
-        "cd /repo 2>/dev/null; unset DIPLOMAT_SLACK_TOKEN; claude \"$(cat /tmp/p.txt)\"; "
+        "cd /repo 2>/dev/null; unset DIPLOMAT_SLACK_TOKEN DIPLOMAT_LINEAR_TOKEN; "
+        "claude \"$(cat /tmp/p.txt)\"; "
         "{ printf %s $? > /tmp/d; } 2>/dev/null || :; exec \"$SHELL\" -i"
     )
 
@@ -172,10 +173,11 @@ def test_a_home_relative_file_is_expanded_by_the_applet(monkeypatch, tmp_path):
 def test_the_whole_spawn_runs_behind_the_gate(tmp_path, monkeypatch, token_file):
     cmd, _ = _spawn(tmp_path, monkeypatch, "/bin/zsh")
     gate = _token_export("linux")
-    inner = (f"printf %s $$ > {tmp_path / 'pid'}; unset DIPLOMAT_SLACK_TOKEN; "
-             "printenv GH_TOKEN > out")
+    inner = (f"printf %s $$ > {tmp_path / 'pid'}; "
+             "unset DIPLOMAT_SLACK_TOKEN DIPLOMAT_LINEAR_TOKEN; printenv GH_TOKEN > out")
     assert cmd == (
-        f"cd {tmp_path} 2>/dev/null; unset DIPLOMAT_SLACK_TOKEN; {gate} && {{ /bin/zsh -i -c "
+        f"cd {tmp_path} 2>/dev/null; unset DIPLOMAT_SLACK_TOKEN DIPLOMAT_LINEAR_TOKEN; "
+        f"{gate} && {{ /bin/zsh -i -c "
         f"{shlex.quote(inner)}"
         f"; {{ printf %s $? > {tmp_path / 'done'}; }} 2>/dev/null || :; }}; "
         'exec "$SHELL" -i'
@@ -208,36 +210,44 @@ def test_the_agent_gets_the_token(shell, pid, tmp_path, monkeypatch, token_file)
     assert (tmp_path / "done").read_text() == "0"
 
 
+#: The applet's secrets: the Slack token and the Pipeline's Linear key.
+_SECRETS = pytest.mark.parametrize("secret", [comms.TOKEN_ENV, pipeline.TOKEN_ENV],
+                                   ids=["slack", "linear"])
+
+
+@_SECRETS
 @pytest.mark.parametrize("pid", [True, False], ids=["pid", "no-pid"])
 @pytest.mark.parametrize("shell", _SHELLS)
-def test_the_agent_never_holds_the_slack_token(shell, pid, tmp_path, monkeypatch,
-                                               token_file):
-    """The token's env-var override is inherited from the applet by the terminal and any
-    tmux server it starts; an agent reading untrusted Slack must not hold it."""
-    agent = f"printenv {comms.TOKEN_ENV} > slack; printenv GH_TOKEN > out"
+def test_the_agent_never_holds_a_secret(shell, pid, secret, tmp_path, monkeypatch,
+                                        token_file):
+    """The secret's env-var override is inherited from the applet by the terminal and
+    any tmux server it starts; an agent reading untrusted Slack or Linear text must not
+    hold it."""
+    agent = f"printenv {secret} > secret; printenv GH_TOKEN > out"
     _, cmd = _spawn(tmp_path, monkeypatch, shell, agent=agent, pid=pid)
-    env = {**_clean_env(tmp_path), comms.TOKEN_ENV: "xoxp-the-operators-own"}
+    env = {**_clean_env(tmp_path), secret: "the-operators-own"}
     subprocess.run([shell, "-c", cmd], cwd=tmp_path, env=env, capture_output=True,
                    timeout=30)
     assert (tmp_path / "out").read_text().strip() == DUMMY, "the agent ran"
-    assert (tmp_path / "slack").read_text() == ""
+    assert (tmp_path / "secret").read_text() == ""
 
 
+@_SECRETS
 @pytest.mark.parametrize("variant", ["pid", "opencode-session", "no-pid"])
 @pytest.mark.parametrize("shell", [sh for sh in ("/bin/zsh", "/bin/bash")
                                    if os.access(sh, os.X_OK)])
-def test_an_rc_exported_slack_token_never_reaches_the_agent(shell, variant, tmp_path,
-                                                            monkeypatch):
+def test_an_rc_exported_secret_never_reaches_the_agent(shell, variant, secret, tmp_path,
+                                                       monkeypatch):
     """The documented override is usually exported from the rc, which every
     interactive shell of the spawn sources again."""
     home = tmp_path / "home"
     home.mkdir()
     for rc in (".zshrc", ".bashrc"):
-        (home / rc).write_text(f"export {comms.TOKEN_ENV}=xoxp-from-rc\n")
+        (home / rc).write_text(f"export {secret}=from-rc\n")
     monkeypatch.setattr(review, "repo_path", lambda: str(tmp_path))
     monkeypatch.setattr(review, "user_shell", lambda: shell)
     monkeypatch.setattr(runner, "agent_command",
-                        lambda *a, **k: f"printenv {comms.TOKEN_ENV}; : > ran")
+                        lambda *a, **k: f"printenv {secret}; : > ran")
     cmd = review.shell_command(
         "/tmp/p.txt", pid_path=str(tmp_path / "pid") if variant == "pid" else None,
         opencode_session="ses_x" if variant == "opencode-session" else None)
@@ -246,15 +256,16 @@ def test_an_rc_exported_slack_token_never_reaches_the_agent(shell, variant, tmp_
     out = subprocess.run(["/bin/sh", "-c", head], cwd=tmp_path, capture_output=True,
                          text=True, timeout=30, stdin=subprocess.DEVNULL,
                          env={"HOME": str(home), "PATH": "/usr/bin:/bin", "SHELL": shell,
-                              comms.TOKEN_ENV: "xoxp-from-env"})
+                              secret: "from-env"})
     assert (tmp_path / "ran").exists(), out
     assert out.stdout == ""
 
 
-def test_the_launcher_never_hands_on_the_slack_token(monkeypatch):
+@_SECRETS
+def test_the_launcher_never_hands_on_a_secret(secret, monkeypatch):
     """So a tmux server the spawn starts does not keep it for every later pane."""
-    monkeypatch.setenv(comms.TOKEN_ENV, "xoxp-the-operators-own")
-    assert comms.TOKEN_ENV not in review.spawn_env()
+    monkeypatch.setenv(secret, "the-operators-own")
+    assert secret not in review.spawn_env()
 
 
 @pytest.mark.parametrize("source", ["file", "keychain"])

@@ -114,6 +114,14 @@ def comms() -> dict:
 
 
 @functools.lru_cache(maxsize=1)
+def pipeline() -> dict:
+    """The Pipeline's tunables. The front-end reads ``syncSecs``, ``minSyncSecs`` and
+    ``rater`` (:mod:`pipeline`); the labels, levels, floor and prompts only the core
+    (``diplomat-core pipeline-*``)."""
+    return _read_json("pipeline.json")
+
+
+@functools.lru_cache(maxsize=1)
 def audit_categories() -> dict:
     """The shared audit/activity taxonomy (categories + action→category map).
 

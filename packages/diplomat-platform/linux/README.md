@@ -292,6 +292,9 @@ DIPLOMAT_RENDER=panel DIPLOMAT_RENDER_OUT=/tmp/p.png \
                                                        #   screen: no pool, signing in, away, daemon off)
                                                        #   machines-screen[-idle|-off] (the Machines
                                                        #   screen: daemon running, idle, not installed)
+                                                       #   pipeline (the Pipeline screen over a synthetic
+                                                       #   last.json in a scratch dir, read back through
+                                                       #   diplomat-core pipeline-last)
 DIPLOMAT_REFRESH_SECS=30 ./diplomat            # faster auto-refresh, for tuning
 ```
 
@@ -374,6 +377,7 @@ diplomat_app/
   glyphs.py       monochrome tool glyphs, size-normalised and tinted
   deviceallocator.py  bridge to the allocator daemon's state.json + Node installer
   telemetryview.py  the Telemetry screen: the bell curves, the rate-limit windows, the backlog series, the token split
+  pipelineview.py the Pipeline screen: every open issue and PR as a graph, lane filter, an item's detail and asks
   widgets.py      cards, chips, rows
   panel.py        the main window (header, search, grid, results, agent tasks, devices)
   settingsview.py two-pane settings screen
