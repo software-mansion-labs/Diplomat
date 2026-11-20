@@ -58,7 +58,9 @@ diagnosis, false assumption, or workaround for a cause the repo could fix at its
 is a finding of at least MEDIUM, and a blocker on someone else's PR. Its thread ends
 only once the cause is gone or a reply gives a reason that holds (the premise was sound,
 or the root fix is rightly deferred), and until then the PR is never marked ready or
-approved. A premise thread resolved while the premise still fails gets one reply.
+approved. On someone else's PR, a premise thread resolved while the premise still fails
+gets one reply. A workaround is right only for a cause out of the repo's reach, and one
+without a note saying so is a LOW.
 
 Other inline findings identify behavior the PR makes worse than its target branch’s merge
 base, or a supported case where the submitted change fails its stated purpose.
