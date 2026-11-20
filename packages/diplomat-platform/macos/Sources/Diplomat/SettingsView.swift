@@ -41,6 +41,7 @@ struct SettingsView: View {
                     terminalSection
                     apiWatchSection
                     commsSection
+                    pipelineSection
                     allocatorSection
                     updateSection
                 }
@@ -1053,6 +1054,119 @@ struct SettingsView: View {
         in Claude Code and authenticate the Slack server. An expired login is refreshed \
         through Claude Code (claude mcp list), at most once every \
         \(((try? CoreAssets.comms())?.loginRefreshSecs ?? 600) / 60) minutes.
+        """
+
+    // MARK: Pipeline
+
+    private var pipelineSection: some View {
+        let pill = store.pipelineEnabled
+            ? StatusPill(text: "on", tint: .green, symbol: "bolt.fill")
+            : StatusPill(text: "off", tint: .secondary, symbol: "bolt.slash.fill")
+        return SettingsCard(symbol: PipelineView.symbol, title: "PIPELINE", tint: .green, pill: pill) {
+            SettingRow(title: "Run the pipeline",
+                       summary: "Every \(Fmt.duration(Store.pipelineSyncInterval)), the open issues "
+                           + "and PRs of the GitHub repo roots and the Linear teams below",
+                       detail: SettingsView.pipelineDetail) {
+                switchControl("Run the pipeline", $store.pipelineEnabled)
+            }
+            // Off, nothing is read, so nothing below acts.
+            if store.pipelineEnabled { pipelineOptions }
+        }
+    }
+
+    private var pipelineOptions: some View {
+        NestedSettings(tint: .green) {
+            SettingRow(title: "Rate issues and PRs",
+                       summary: "Risk and complexity, by claude, as labels where Diplomat may write",
+                       detail: SettingsView.pipelineRateDetail) {
+                switchControl("Rate issues and PRs", $store.pipelineRate)
+            }
+            SettingRow(title: "Open fix PRs",
+                       summary: "Queues an agent that fixes each low-risk, low-complexity issue",
+                       detail: "Only an issue unassigned or assigned to you, that no open PR fixes. "
+                             + "A Linear issue is fixed in the root its team names below.") {
+                switchControl("Open fix PRs", $store.pipelineFix)
+            }
+            SettingRow(title: "Fast-track my PRs",
+                       summary: "Labels each of your low/low PRs diplomat:fast-track and reviews it until clean",
+                       detail: "Only your own PRs from the repo itself into its default branch. "
+                             + "At a clean head the PR is rated again: still low/low, it is "
+                             + "labelled diplomat:cleared; else it leaves the fast track.") {
+                switchControl("Fast-track my PRs", $store.pipelineFastTrack)
+            }
+            SettingRow(title: "Merge cleared PRs",
+                       summary: "Merges past the review requirement with admin rights "
+                           + "(gh pr merge --admin): no person approves the PR first",
+                       detail: SettingsView.pipelineMergeDetail) {
+                switchControl("Merge cleared PRs", $store.pipelineMerge)
+            }
+            SettingRow(title: "Split big issues",
+                       summary: "One medium- or high-complexity issue a sync becomes low-complexity child issues",
+                       detail: "Only an issue Diplomat may write to, not rated high risk, with no "
+                             + "children and no open PR fixing it. Each child is a real sub-issue "
+                             + "and comes back unrated. Fracture on the Pipeline screen splits one "
+                             + "whatever its rating.") {
+                switchControl("Split big issues", $store.pipelineFracture)
+            }
+            SettingRow(title: "Linear teams",
+                       summary: SettingsView.linearTeamsSummary(store.pipelineLinearTeamsRaw),
+                       detail: "Each team key and the repo root its issues are fixed in, commas "
+                             + "or new lines between them.",
+                       stacked: true) {
+                commsField("ENG=owner/repo, OPS=owner/other", $store.pipelineLinearTeamsRaw,
+                           symbol: "l.square")
+            }
+            SettingRow(title: "Linear API key",
+                       summary: SettingsView.linearKeySummary,
+                       detail: SettingsView.linearKeyDetail) {
+                EmptyView()
+            }
+        }
+    }
+
+    private static func linearTeamsSummary(_ raw: String) -> String {
+        let teams = Store.pipelineTeams(raw)
+        if teams.isEmpty { return "None: GitHub only" }
+        return teams.map { "\($0.key) → \($0.repo)" }.joined(separator: " · ")
+    }
+
+    private static var linearKeySummary: String {
+        let item = AppConfig.linearKeychainItem
+        return item.isEmpty
+            ? "No Keychain item: \(AppConfig.linearKeychainItemKey) in ~/.diplomat/config.json names it"
+            : "The login Keychain's \"\(item)\" item"
+    }
+
+    private static let pipelineDetail = """
+        Reads every open issue and PR, rates them, sends the low-risk, low-complexity ones \
+        down the fast track and draws them on the Pipeline screen. Diplomat writes labels, \
+        opens child issues or merges only on an issue unassigned or assigned to you, or \
+        your own PR from the repo into its default branch; everything else is read and \
+        shown. GitLab roots are not read. The agent work it asks for waits in the queue \
+        like any other, for a bay, the ban list and the spending budget, and never starts \
+        while this is off.
+        """
+
+    private static let pipelineRateDetail = """
+        One claude call per item, with read-only tools in the repo's checkout and the \
+        item's text as data; a few items a sync. A rating is never lower than the labels a \
+        person put on, nor than what a PR's diff shows (a denied path, a deleted file, no \
+        test). An item Diplomat may not write to keeps its rating on this Mac.
+        """
+
+    private static let pipelineMergeDetail = """
+        A cleared PR is merged once nothing holds it: no person but you reviewed or \
+        commented, no changes requested, no unresolved thread, no conflict, CI passed for \
+        its head, and its diff is low-risk, low-complexity by its own floor. Admin rights \
+        skip branch protection's approval requirement, so leave this off where a second \
+        pair of eyes is required.
+        """
+
+    private static let linearKeyDetail = """
+        Read on each sync with security find-generic-password and kept in memory only: \
+        never written to disk, never handed to an agent or a child process's environment. \
+        DIPLOMAT_LINEAR_TOKEN overrides it. Without a key, the teams set here are skipped \
+        with a notice and GitHub still syncs.
         """
 
     // MARK: Tool visibility

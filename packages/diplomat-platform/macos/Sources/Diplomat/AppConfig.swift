@@ -6,9 +6,10 @@ import DiplomatCore
 /// Almost every setting belongs in this app's UserDefaults, and stays there. A few
 /// can't: the repo root every spawn `cd`s into, the cap on how many automatic agents
 /// may run here at once, the three knobs of the rate-limit budget those agents are
-/// started against, which agent CLI a spawn runs (with the model it is pinned to), and
-/// where that agent's GitHub token is read from.
-/// The Linux front-end keeps each under the same key, and the runner and its model are
+/// started against, which agent CLI a spawn runs (with the model it is pinned to),
+/// where that agent's GitHub token is read from, and where the pipeline's Linear key is.
+/// The Linux front-end keeps each under the same key (the Linear key's in a file there,
+/// `linearTokenFile`), and the runner and its model are
 /// read by the shared core as well (`AgentModel`), which that front-end reaches only as
 /// a separate process.
 ///
@@ -56,6 +57,9 @@ enum AppConfig {
     /// name — never the token. See `AgentSpawner.tokenExport`. Same key in
     /// `appconfig.py`.
     static let agentTokenKeychainItemKey = "agentTokenKeychainItem"
+    /// The login-Keychain item the pipeline reads its Linear API key from, by service
+    /// name, never the key (`PipelineSettings.linearKeychainItem`).
+    static let linearKeychainItemKey = "linearKeychainItem"
     /// The terminal this app's spawns resolve to, published for the device-allocator
     /// daemon to open its repair agents in (`device-allocator/src/terminal.js`).
     /// Written, never read here: the choice itself stays in UserDefaults.
@@ -84,6 +88,11 @@ enum AppConfig {
     /// whatever `gh auth login` stored.
     static var agentTokenKeychainItem: String {
         string(agentTokenKeychainItemKey).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The Keychain item the pipeline takes its Linear API key from, or "" for none.
+    static var linearKeychainItem: String {
+        string(linearKeychainItemKey).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// Overridable so a self-test can point at a scratch file instead of the real one.
