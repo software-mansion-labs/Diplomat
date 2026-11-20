@@ -109,6 +109,13 @@ def store(app, monkeypatch):
     return st
 
 
+def _fixing(monkeypatch, n: int) -> None:
+    """An agent fixing issue ``n``."""
+    row = autofix.RunningAgent(pr_number=0, label=f"Auto · Issues · #{n} · quick",
+                               kind="issues", tracked=True, item=f"o/r#{n}")
+    monkeypatch.setattr(Store, "running_tasks", property(lambda self: [row]))
+
+
 def _labels(widget) -> list[str]:
     return [label.text() for label in widget.findChildren(QLabel) if label.parent() is not None]
 
@@ -280,10 +287,10 @@ def test_the_painted_cards_show_the_dimming_and_the_lock(store):
     assert lock(I6) != mid
 
 
-def test_badges_follow_the_queue(store):
+def test_badges_follow_the_queue(store, monkeypatch):
     view = PipelineView(store)
     assert {i: f.badge for i, f in view.canvas.faces.items() if f.badge} == {}
-    store.pipeline_fixes_starting = frozenset({I5})
+    _fixing(monkeypatch, 5)
     store.queued_tasks = [autofix.QueuedTask(
         autofix.queue_key(autofix.QUEUE_REVIEW_ACTION, "o/r#2"),
         autofix.AgentJob(kind="review", audit_action="review", label="Review · #2",
@@ -293,8 +300,8 @@ def test_badges_follow_the_queue(store):
         I5: "agent", P2: "queued"}
 
 
-def test_a_badge_leaves_the_source_glyph_as_it_is_without_one(store):
-    store.pipeline_fixes_starting = frozenset({I5})
+def test_a_badge_leaves_the_source_glyph_as_it_is_without_one(store, monkeypatch):
+    _fixing(monkeypatch, 5)
     view = PipelineView(store)
     canvas = view.canvas
     canvas.resize(canvas.minimumSize())
@@ -413,8 +420,8 @@ def _recorder(store, monkeypatch) -> list:
     calls = []
     monkeypatch.setattr(store, "pipeline_force_now",
                         lambda kind, item_id: calls.append((kind, item_id)))
-    monkeypatch.setattr(store, "pipeline_start_fix_async",
-                        lambda item_id: calls.append(("fix", item_id)))
+    monkeypatch.setattr(store, "pipeline_start_fix",
+                        lambda item: calls.append(("fix", item["id"])))
     return calls
 
 
@@ -475,27 +482,60 @@ def test_an_ask_waiting_for_its_sync_shows_asked(store, monkeypatch):
         "Fracture asked", False)
 
 
-def test_start_fix_is_off_while_an_agent_is_on_it(store):
-    store.pipeline_fixes_starting = frozenset({I5})
+def test_start_fix_is_off_while_anything_is_on_it(store, monkeypatch):
     view = PipelineView(store)
     view.select(I5)
-    assert (view.buttons["fix"].text(), view.buttons["fix"].isEnabled()) == ("Starting…", False)
+    fix = view.buttons["fix"]
+    assert (fix.text(), fix.isEnabled(), fix.toolTip()) == (
+        "Start fix", True, "Queue its fix now, past its retry backoff")
+    store.queued_tasks = [autofix.QueuedTask(
+        autofix.queue_key(autofix.QUEUE_ISSUES_ACTION, "o/r#5"),
+        autofix.AgentJob(kind="issues", audit_action="issues", label="Issues · #5",
+                         prompt=""), 1)]
+    store.tasks_changed.emit()
+    assert not view.buttons["fix"].isEnabled()
+    store.queued_tasks = []
+    _fixing(monkeypatch, 5)
+    store.tasks_changed.emit()
+    assert not view.buttons["fix"].isEnabled()
 
 
-def test_the_answer_to_start_fix_shows_under_the_buttons(store):
+def test_start_fix_is_for_a_writable_candidate_whose_fix_is_known(store):
+    linear = "https://linear.app/acme/issue/ENG-5/a-thing"
+    result = _result()
+    result["items"][4] = {**result["items"][4], "writable": False}
+    result["items"].append({**result["items"][4], "id": linear, "source": "linear",
+                            "label": "ENG-5", "writable": True})
+    store.pipeline_result = result
+    view = PipelineView(store)
+    view.select(I5)
+    assert list(view.buttons) == ["open", "rate"]
+    view.select(linear)
+    fix = view.buttons["fix"]
+    assert (fix.isEnabled(), fix.toolTip()) == (
+        False, "Diplomat has this Linear issue's text only while Open fix PRs is on")
+    store.pipeline_result = {**result, "effects": [{
+        "kind": "fixLinear", "repo": "o/r", "identifier": "ENG-5", "url": linear,
+        "text": "t", "key": f"pipeline-fix:{linear}", "stamp": "fix"}]}
+    store.pipeline_changed.emit()
+    assert view.buttons["fix"].isEnabled()
+
+
+def test_why_start_fix_queued_nothing_shows_under_the_buttons(store, monkeypatch):
+    answers = ["An agent is already fixing it", None]
+    monkeypatch.setattr(store, "pipeline_start_fix", lambda item: answers.pop(0))
     view = PipelineView(store)
     view.select(I5)
     assert view.fix_answer is None
-    store.pipeline_fix_answered.emit(I5, "a fix of it is already starting or running")
-    assert view.fix_answer.text() == "a fix of it is already starting or running"
-    store.pipeline_fix_answered.emit(I5, None)
-    assert view.fix_answer.text() == "The fix started."
+    view.buttons["fix"].click()
+    assert view.fix_answer.text() == "An agent is already fixing it"
     # Another item's answer is its own.
     view.select(I6)
     assert view.fix_answer is None
-    store.pipeline_fix_answered.emit(P2, "not this one")
     view.select(I5)
-    assert view.fix_answer.text() == "The fix started."
+    assert view.fix_answer.text() == "An agent is already fixing it"
+    view.buttons["fix"].click()
+    assert view.fix_answer is None
 
 
 def test_off_the_asks_are_disabled_and_open_is_not(store):

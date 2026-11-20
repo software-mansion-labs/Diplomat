@@ -1338,12 +1338,16 @@ class SettingsView(QWidget):
         self._sw_pipeline.toggled.connect(self._on_pipeline_toggled)
         self._pipeline_row = self._track(SettingRow(
             "Run the pipeline", self._sw_pipeline,
-            detail="Every few minutes, reads the open issues and PRs of the GitHub repo "
-                   "roots and the Linear teams below, and draws them on the Pipeline "
-                   "screen by stage. What it may do about them is the switches under "
-                   "this one; with all of them off it only reads. Off, it reads nothing "
-                   "and the work it queued waits. Its state is the trackers' labels: "
-                   "risk:, complexity: and diplomat:. GitLab roots are skipped.",
+            detail="Reads every open issue and PR and draws them on the Pipeline screen "
+                   "by stage; what it may do about them is the switches under this one, "
+                   "and with all of them off it only reads. Its state is the trackers' "
+                   "labels: risk:, complexity: and diplomat:. Diplomat writes labels, "
+                   "opens child issues or merges only on an issue unassigned or assigned "
+                   "to you, or your own PR from the repo itself into its default branch; "
+                   "everything else is read and shown. GitLab roots are not read. The "
+                   "agent work it asks for waits in the queue like any other, for the "
+                   "task cap, the ban list and the spending budget; while this is off it "
+                   "reads nothing and that work waits.",
         ))
         body.addWidget(self._pipeline_row)
 
@@ -1356,34 +1360,41 @@ class SettingsView(QWidget):
         nest, inner = nested_settings(_INDIGO)
         self._sw_pipeline_rate = self._pipeline_switch(
             inner, "Rate issues and PRs", st.pipeline_rate, "pipeline_rate",
+            "Risk and complexity, by claude, as labels where Diplomat may write",
             "A few unrated items a sync, each rated low, medium or high for risk and "
-            "complexity by one claude call with read-only tools in its repo's checkout, "
-            "and labelled where Diplomat may write: an issue unassigned or assigned to "
-            "you, your own PR. Any other issue's rating is kept on this machine only; "
-            "someone else's PR is not rated. A rating already on the tracker is the "
-            "rating; a PR's diff can only raise one.")
+            "complexity by one claude call with read-only tools in its repo's checkout "
+            "and the item's text as data. A rating is labelled where Diplomat may write; "
+            "any other issue's rating is kept on this machine only, and someone else's "
+            "PR is not rated. A rating already on the tracker is the rating; a PR's diff "
+            "can only raise one.")
         self._sw_pipeline_fix = self._pipeline_switch(
-            inner, "Open fix PRs for low/low issues", st.pipeline_fix, "pipeline_fix",
-            "Each low-risk, low-complexity issue Diplomat may write and no open PR fixes "
-            "queues a Fix-issues run for it, in its repo root (a Linear team's, below).")
+            inner, "Open fix PRs", st.pipeline_fix, "pipeline_fix",
+            "Queues an agent that fixes each low-risk, low-complexity issue",
+            "Only an issue unassigned or assigned to you that no open PR fixes, in its "
+            "repo root; a Linear issue is fixed in the root its team names below.")
         self._sw_pipeline_fast = self._pipeline_switch(
-            inner, "Fast-track my low/low PRs", st.pipeline_fast_track,
-            "pipeline_fast_track",
-            "Your own PR rated low/low is labelled diplomat:fast-track and queues "
-            "reviews of it until one finds nothing at its head; then it is rated again "
-            "at that head.")
+            inner, "Fast-track my PRs", st.pipeline_fast_track, "pipeline_fast_track",
+            "Labels each of your low/low PRs diplomat:fast-track and reviews it until clean",
+            "Only your own PRs from the repo itself into its default branch. Reviews of "
+            "it are queued until one finds nothing at its head; at that clean head it is "
+            "rated again: still low/low, it is labelled diplomat:cleared, else it leaves "
+            "the fast track.")
         self._sw_pipeline_merge = self._pipeline_switch(
-            inner, "Merge past required reviews (admin)", st.pipeline_merge,
-            "pipeline_merge",
-            "Merges with your admin rights, past the review requirement: a fast-track "
-            "PR rated low/low again at its clean head, with CI green for that head, no "
-            "conflict, no unresolved thread, and no one but you or a bot reviewing or "
-            "commenting, is merged with gh pr merge --admin.")
+            inner, "Merge cleared PRs", st.pipeline_merge, "pipeline_merge",
+            "Merges past the review requirement with admin rights (gh pr merge --admin): "
+            "no person approves the PR first",
+            "A cleared PR is merged once nothing holds it: no one but you or a bot "
+            "reviewed or commented, no changes requested, no unresolved thread, no "
+            "conflict, CI passed for its head, and its diff is low-risk, low-complexity "
+            "by its own floor. Admin rights skip branch protection's approval "
+            "requirement, so leave this off where a second pair of eyes is required.")
         self._sw_pipeline_fracture = self._pipeline_switch(
             inner, "Split big issues", st.pipeline_fracture, "pipeline_fracture",
-            "An issue Diplomat may write, of medium or high complexity and not high risk, "
-            "is split into low-complexity sub-issues that enter the pipeline unrated; "
-            "the parent is labelled diplomat:fractured. One a sync.")
+            "One medium- or high-complexity issue a sync becomes low-complexity child issues",
+            "Only an issue Diplomat may write to, not rated high risk, with no children "
+            "and no open PR fixing it. Each child is a real sub-issue and comes back "
+            "unrated; the parent is labelled diplomat:fractured. Fracture on the Pipeline "
+            "screen splits one whatever its rating.")
         options.addWidget(nest)
 
         self._pipeline_teams = QLineEdit(st.pipeline_linear_teams_raw)
@@ -1393,20 +1404,26 @@ class SettingsView(QWidget):
         self._pipeline_teams_row = self._track(SettingRow(
             "Linear teams", self._pipeline_teams, stacked=True,
             detail="Each Linear team key and the GitHub repo root its issues are fixed "
-                   "in. The API key is read from the file linearTokenFile names in "
-                   f"~/.diplomat/config.json; ${pipeline.TOKEN_ENV} wins over it. Neither "
-                   "ever reaches an agent: a fix gets the issue's text as Diplomat read "
-                   "it."))
+                   "in, commas, semicolons or new lines between them. A key is read in "
+                   "capitals, as Linear spells it."))
         options.addWidget(self._pipeline_teams_row)
+        self._pipeline_key_row = self._track(SettingRow(
+            "Linear API key", QWidget(),
+            detail="Read on each sync from the file linearTokenFile names in "
+                   "~/.diplomat/config.json and kept in memory only, never handed to an "
+                   "agent: a fix gets the issue's text as Diplomat read it. "
+                   f"${pipeline.TOKEN_ENV} wins over it. Without a key, the teams set "
+                   "here are skipped with a notice and GitHub still syncs."))
+        options.addWidget(self._pipeline_key_row)
         self._refresh_pipeline_ui()
         return card
 
-    def _pipeline_switch(self, layout, title: str, on: bool, attr: str,
+    def _pipeline_switch(self, layout, title: str, on: bool, attr: str, summary: str,
                          detail: str) -> SwitchToggle:
         sw = SwitchToggle(_INDIGO)
         sw.setChecked(on)
         sw.toggled.connect(lambda v: self._on_pipeline_option(attr, v))
-        layout.addWidget(self._track(SettingRow(title, sw, detail=detail)))
+        layout.addWidget(self._track(SettingRow(title, sw, summary=summary, detail=detail)))
         return sw
 
     def _on_pipeline_toggled(self, on: bool) -> None:
@@ -1427,6 +1444,7 @@ class SettingsView(QWidget):
     def _on_pipeline_teams_changed(self, text: str) -> None:
         self.store.pipeline_linear_teams_raw = text
         self._refresh_pipeline_teams_summary()
+        self._refresh_pipeline_key_summary()
 
     def _refresh_pipeline_teams_summary(self) -> None:
         teams, bad = pipeline.parse_linear_teams(self.store.pipeline_linear_teams_raw)
@@ -1434,16 +1452,23 @@ class SettingsView(QWidget):
             self._pipeline_teams_row.set_summary(
                 f"Not KEY=owner/repo, so not tracked: {', '.join(bad)}", color=_RED)
         elif not teams:
-            self._pipeline_teams_row.set_summary("")
-        elif os.environ.get(pipeline.TOKEN_ENV):
-            self._pipeline_teams_row.set_summary(
-                f"Key from ${pipeline.TOKEN_ENV}, which wins over linearTokenFile")
-        elif path := appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip():
-            self._pipeline_teams_row.set_summary(f"Key read from {path}")
+            self._pipeline_teams_row.set_summary("None: GitHub only")
         else:
             self._pipeline_teams_row.set_summary(
-                "No Linear key: name its file as linearTokenFile in "
-                "~/.diplomat/config.json", color=_RED)
+                " · ".join(f"{t['key']} → {t['repo']}" for t in teams))
+
+    def _refresh_pipeline_key_summary(self) -> None:
+        if os.environ.get(pipeline.TOKEN_ENV):
+            self._pipeline_key_row.set_summary(
+                f"${pipeline.TOKEN_ENV}, which wins over linearTokenFile")
+        elif path := appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip():
+            self._pipeline_key_row.set_summary(f"Read from {path}")
+        else:
+            # A problem only once a team needs it.
+            teams, _ = pipeline.parse_linear_teams(self.store.pipeline_linear_teams_raw)
+            self._pipeline_key_row.set_summary(
+                f"No key file: {appconfig.LINEAR_TOKEN_FILE} in ~/.diplomat/config.json "
+                "names it", color=_RED if teams else None)
 
     def _refresh_pipeline_ui(self) -> None:
         st = self.store
@@ -1458,11 +1483,15 @@ class SettingsView(QWidget):
         else:
             n = len(st.pipeline_result.get("items") or [])
             self._pipeline_pill.set_state(f"{n} item{'' if n == 1 else 's'}", _GREEN)
-        self._pipeline_row.set_summary(
-            st.pipeline_error if st.pipeline_enabled and st.pipeline_error else "",
-            color=_RED)
+        if st.pipeline_enabled and st.pipeline_error:
+            self._pipeline_row.set_summary(st.pipeline_error, color=_RED)
+        else:
+            self._pipeline_row.set_summary(
+                f"Every {Fmt.duration(pipeline.sync_secs())}, the open issues and PRs of "
+                "the GitHub repo roots and the Linear teams below")
         self._pipeline_options.setVisible(st.pipeline_enabled)
         self._refresh_pipeline_teams_summary()
+        self._refresh_pipeline_key_summary()
 
     # MARK: tool colour & visibility
 

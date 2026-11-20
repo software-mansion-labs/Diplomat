@@ -11,7 +11,7 @@ import json
 import time
 
 import pytest
-from test_autofix import store  # noqa: F401 — fixture
+from test_autofix import _spawn_recorder, fake_probes, store  # noqa: F401 — fixture
 
 from diplomat_app import bans
 from diplomat_app.store import PIPELINE_ATTEMPTS, Store, app_settings
@@ -147,8 +147,8 @@ def test_my_own_issue_has_no_author_to_ban(pipe):
 
 def test_a_linear_fix_carries_the_issue_and_never_a_github_key(pipe):
     work = pipe.pipeline_work(_linear())
-    assert work.key == "issues:ENG-12"
-    assert work.item is None
+    assert work.key == "issues:linear:ENG-12"
+    assert (work.item, work.number) == (None, 0)
     assert work.config["linear"] == {"identifier": "ENG-12", "url": LINEAR,
                                      "text": "A thing\n\nIt breaks."}
     assert work.config["specificIssue"] == ""
@@ -160,10 +160,27 @@ def test_a_fast_track_effect_is_a_review_of_my_pr(pipe):
     work = pipe.pipeline_work(_review())
     assert work.key == "review:o/r#7"
     assert {k: work.config[k] for k in ("kind", "target", "specificPR", "specificAuthor",
-                                        "fastTrack")
+                                        "fastTrack", "depth")
             } == {"kind": "review", "target": "specific", "specificPR": "7",
-                  "specificAuthor": "mine", "fastTrack": True}
+                  "specificAuthor": "mine", "fastTrack": True, "depth": "max"}
     assert work.pipeline
+
+
+def test_a_linear_fix_is_the_pipelines_work_whatever_its_flags(pipe):
+    """The master switch pauses it (``Store.is_paused``), as ``isPipeline`` does on
+    macOS for any fix carrying a Linear issue."""
+    cfg = {"kind": "issues", "linear": {"identifier": "ENG-12", "url": LINEAR, "text": ""}}
+    work = autofix.RequestedWork(number=0, url=LINEAR, author="", config=cfg, repo="o/r")
+    assert work.pipeline
+    assert not autofix.RequestedWork(number=0, url=LINEAR, author="",
+                                     config={"kind": "issues"}, repo="o/r").pipeline
+
+
+def test_a_linear_fixs_queued_task_carries_the_issues_link(pipe):
+    pipe._apply_pipeline_effects(_result(_linear()), time.time())
+    [task] = pipe.queued_tasks
+    assert (task.id, task.job.pr_url, task.job.pr_number, task.job.counter) == (
+        "issues:linear:ENG-12", LINEAR, None, "pipeline")
 
 
 @pytest.mark.parametrize("repo", ["x/y", "group/sub/r"])
@@ -174,8 +191,8 @@ def test_an_effect_in_no_github_root_is_no_ask(pipe, monkeypatch, repo):
 
 def test_a_linear_fix_and_the_github_issue_of_its_number_are_two_asks(pipe):
     pipe._apply_pipeline_effects(_result(_fix(12), _linear()), time.time())
-    assert _keys(pipe) == ["issues:o/r#12", "issues:ENG-12"]
-    assert {t.id for t in pipe.queued_tasks} == {"issues:o/r#12", "issues:ENG-12"}
+    assert _keys(pipe) == ["issues:o/r#12", "issues:linear:ENG-12"]
+    assert {t.id for t in pipe.queued_tasks} == {"issues:o/r#12", "issues:linear:ENG-12"}
 
 
 # MARK: - Once per attempt
@@ -198,6 +215,8 @@ def test_an_effect_is_asked_for_once_per_attempt(pipe):
     pipe._apply_pipeline_effects(_result(_fix()), now + autofix.retry_delay(1))
     assert _keys(pipe) == ["issues:o/r#12"]
     assert pipe._load_attempts(PIPELINE_ATTEMPTS)[f"pipeline-fix:{ISSUE}"].attempts == 2
+    label = pipe.pipeline_work(_fix()).label_among(1)
+    assert _feed("pipeline-fix") == [f"{label} queued", f"{label} queued (attempt 2)"]
 
 
 def test_a_new_head_waits_out_the_re_request_cooldown(pipe):
@@ -210,6 +229,8 @@ def test_a_new_head_waits_out_the_re_request_cooldown(pipe):
     pipe._apply_pipeline_effects(_result(_review("def")),
                                  now + autofix.RE_REQUEST_COOLDOWN)
     assert _keys(pipe) == ["review:o/r#7"]
+    label = pipe.pipeline_work(_review()).label_among(1)
+    assert _feed("pipeline-review") == [f"{label} queued"] * 2
 
 
 def test_work_already_queued_is_not_asked_for_again(pipe):
@@ -238,7 +259,7 @@ def test_a_banned_authors_issue_is_not_asked_for(pipe):
 
 @pytest.mark.parametrize("off, asked", [
     ("pipeline_fix", ["review:o/r#7"]),
-    ("pipeline_fast_track", ["issues:o/r#12", "issues:ENG-12"]),
+    ("pipeline_fast_track", ["issues:o/r#12", "issues:linear:ENG-12"]),
 ])
 def test_a_switch_off_by_the_time_its_sync_lands_asks_for_nothing(pipe, off, asked):
     setattr(pipe, off, False)
@@ -269,6 +290,24 @@ def test_records_are_kept_while_owed_and_age_out_after(pipe):
     pipe._apply_pipeline_effects(_result(_fix()), now)
     assert pipe._load_attempts(PIPELINE_ATTEMPTS) == {
         f"pipeline-fix:{ISSUE}": owed, "pipeline-fix:https://github.com/o/r/issues/98": fresh}
+
+
+def test_a_record_is_kept_while_its_effect_is_owed_whatever_the_switches(pipe):
+    """Owed is what the sync emitted: a fix the switch holds back, or one in a root
+    gone, keeps its record, so turning the switch back on does not ask again at once."""
+    now = time.time()
+    old = now - autofix.RETRY_MAX_BACKOFF - 1
+    held = autofix.ReviewAttempt("fix", old, 3)
+    gone = autofix.ReviewAttempt("fix", old, 2)
+    pipe._save_attempts(PIPELINE_ATTEMPTS, {f"pipeline-fix:{ISSUE}": held,
+                                            "pipeline-fix:https://github.com/x/y/issues/1": gone})
+    pipe.pipeline_fix = False
+    pipe._apply_pipeline_effects(_result(_fix(), {**_fix(1), "repo": "x/y",
+                                                  "url": "https://github.com/x/y/issues/1",
+                                                  "key": "pipeline-fix:https://github.com/x/y/issues/1"}),
+                                 now)
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS) == {
+        f"pipeline-fix:{ISSUE}": held, "pipeline-fix:https://github.com/x/y/issues/1": gone}
 
 
 def test_an_ask_that_cannot_be_queued_is_an_attempt(pipe, monkeypatch):
@@ -360,6 +399,61 @@ def test_a_failed_sync_keeps_the_last_result_and_the_forced_items(pipe, monkeypa
     assert _keys(pipe) == ["issues:o/r#12"]
 
 
+def test_a_notice_is_logged_when_it_first_appears(pipe):
+    first = {**_result(), "notices": ["Linear was not read: no API key"]}
+    pipe._apply_pipeline_sync({"result": first, "forced": {}})
+    pipe._apply_pipeline_sync({"result": dict(first), "forced": {}})
+    pipe._apply_pipeline_sync({"result": {**first, "notices": [
+        "Linear was not read: no API key", "o/r could not be read: gh: rate limited"]},
+        "forced": {}})
+    assert _feed("pipeline-notice") == ["Linear was not read: no API key",
+                                        "o/r could not be read: gh: rate limited"]
+
+
+def _event(at: str, item: str, kind: str, detail: str) -> dict:
+    return {"at": at, "item": item, "kind": kind, "detail": detail}
+
+
+def test_each_merge_and_split_is_logged_once(pipe):
+    """Whatever the switches: the core made them. The log the core keeps repeats an
+    event in every result after it, so only those past the previous result are new."""
+    pipe.pipeline_fix = pipe.pipeline_fast_track = False
+    old = _event("2026-11-20T09:00:00Z", PR, "merged", "merged 0000000 with --admin --squash")
+    merged = _event("2026-11-20T10:00:00Z", PR, "merged", "merged abc1234 with --admin --squash")
+    split = _event("2026-11-20T10:00:00Z", ISSUE, "fractured", "split into 2 parts")
+    rated = _event("2026-11-20T10:00:00Z", ISSUE, "rated", "low risk, low complexity")
+    items = (_item(), _item(PR, kind="pr", label="#7"))
+    pipe.pipeline_result = {**_result(items=items), "events": [old]}
+    first = {**_result(items=items), "events": [old, rated, merged, split]}
+    pipe._apply_pipeline_sync({"result": first, "forced": {}})
+    pipe._apply_pipeline_sync({"result": dict(first), "forced": {}})
+    later = _event("2026-11-20T10:00:00Z", "https://github.com/o/r/pull/8", "merged", "merged")
+    pipe._apply_pipeline_sync({"result": {**first, "events": [old, rated, merged, split, later]},
+                               "forced": {}})
+    assert _feed("pipeline-merge") == ["#7: merged abc1234 with --admin --squash",
+                                       "https://github.com/o/r/pull/8: merged"]
+    assert _feed("pipeline-fracture") == ["#12: split into 2 parts"]
+    # One older than anything the previous result showed is not new, though that
+    # result left it out.
+    older = _event("2026-11-20T09:30:00Z", PR, "merged", "merged 1111111")
+    pipe._apply_pipeline_sync({"result": {**first, "events": [older]}, "forced": {}})
+    assert len(_feed("pipeline-merge")) == 2
+
+
+def test_the_first_sync_is_told_apart_from_the_last_one_before_launch(pipe, monkeypatch):
+    """A relaunch logs no merge the last launch saw: ``last.json`` is read before the
+    first sync replaces it."""
+    merged = _event("2026-11-20T10:00:00Z", PR, "merged", "merged abc1234")
+    before = {**_result(), "events": [merged]}
+    read = []
+    monkeypatch.setattr(pipeline, "last", lambda: read.append(1) or before)
+    monkeypatch.setattr(pipeline, "tick", lambda settings: dict(before))
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert read == [1]
+    assert _feed("pipeline-merge") == []
+
+
 def test_a_sync_asked_for_while_one_runs_follows_it(pipe, monkeypatch):
     import threading
 
@@ -398,65 +492,140 @@ def test_badges_name_the_items_something_is_on(pipe, monkeypatch):
             autofix.RunningAgent(pr_number=0, label="Auto · Issues · #14 · quick",
                                  kind="issues", tracked=True)]
     monkeypatch.setattr(Store, "running_tasks", property(lambda self: rows))
-    pipe.pipeline_fixes_starting = frozenset({other["id"]})
     assert pipe.pipeline_badges() == {ISSUE: "queued", LINEAR: "queued",
-                                      other["id"]: "agent", running["id"]: "agent",
-                                      PR: "agent"}
+                                      running["id"]: "agent", PR: "agent"}
 
 
-def test_start_fix_runs_the_candidates_fix_now(pipe, monkeypatch):
-    """With the fix switch off the sync owes no effect: the item alone names the fix."""
+def _start(pipe, item: dict) -> str | None:
+    pipe.pipeline_result = pipe.pipeline_result or _result(items=(item,))
+    return pipe.pipeline_start_fix(item)
+
+
+def test_start_fix_queues_the_candidates_fix_past_its_record(pipe):
+    """With the fix switch off the sync owes no effect: the item alone names the fix.
+    A record that is cooling down, or concluded, does not stop it."""
     pipe.pipeline_fix = False
-    pipe.pipeline_result = _result(items=(_item(author="carol"),))
-    started, answers = [], []
-
-    def dispatch(self, job, source):
-        started.append((job, source, self.pipeline_badges()))
-        return "spawned"
-
-    monkeypatch.setattr(Store, "dispatch_agent", dispatch)
-    pipe.pipeline_fix_answered.connect(lambda item, error: answers.append((item, error)))
-    pipe.pipeline_start_fix_async(ISSUE)
-    assert pipe.wait_for_background() == []
-    [(job, source, badges)] = started
-    assert badges == {ISSUE: "agent"}
-    assert (job.kind, job.prompt, job.counter, job.author_login, source) == (
-        "issues", "PROMPT:issues:12", "pipeline", "carol", autofix.SOURCE_PANEL)
-    # Answered from the worker, so delivered by the event loop.
-    (QApplication.instance() or QApplication([])).processEvents()
-    assert answers == [(ISSUE, None)]
-    assert pipe.pipeline_fixes_starting == frozenset()
+    now = time.time()
+    pipe._save_attempts(PIPELINE_ATTEMPTS, {f"pipeline-fix:{ISSUE}": autofix.ReviewAttempt(
+        "fix", now - 60, 2, concluded_at=now - 30)})
+    item = _item(author="carol")
+    assert _start(pipe, item) is None
+    [task] = pipe.queued_tasks
+    assert (task.id, task.job.kind, task.job.prompt, task.job.counter,
+            task.job.author_login) == ("issues:o/r#12", "issues", "PROMPT:issues:12",
+                                       "pipeline", "carol")
+    record = pipe._load_attempts(PIPELINE_ATTEMPTS)[f"pipeline-fix:{ISSUE}"]
+    assert (record.requested_at, record.attempts, record.concluded_at) == ("fix", 3, None)
+    assert record.last_dispatched_at >= now
+    label = pipe.pipeline_work(_fix()).label_among(1)
+    assert _feed("pipeline-fix") == [f"{label} queued from the Pipeline screen"]
+    assert pipe.pipeline_badges() == {ISSUE: "queued"}
+    assert _start(pipe, item) == "Its fix is already queued"
 
 
-def test_start_fix_of_a_linear_issue_needs_its_synced_text(pipe, monkeypatch):
-    pipe.pipeline_result = _result(items=(_item(LINEAR, source="linear", label="ENG-12"),))
-    monkeypatch.setattr(Store, "dispatch_agent",
-                        lambda self, job, source: pytest.fail("started without its text"))
-    answers = []
-    pipe.pipeline_fix_answered.connect(lambda item, error: answers.append((item, error)))
-    pipe.pipeline_start_fix_async(LINEAR)
-    assert answers == [(LINEAR, "Diplomat has this Linear issue's text only while Open "
-                                "fix PRs is on")]
+def test_start_fix_says_why_it_queued_nothing(pipe, monkeypatch):
+    linear = _item(LINEAR, source="linear", label="ENG-12")
+    pipe.pipeline_result = _result(items=(_item(), linear))
+    pipe.pipeline_enabled = False
+    assert pipe.pipeline_start_fix(_item()) == "The pipeline is off"
+    pipe.pipeline_enabled = True
+    assert pipe.pipeline_start_fix(_item(writable=False)) == "It is assigned to someone else"
+    assert pipe.pipeline_start_fix(linear) == ("Diplomat has this Linear issue's text only "
+                                               "while Open fix PRs is on")
+    assert pipe.pipeline_start_fix(_item("https://github.com/x/y/issues/12", repo="x/y")) == (
+        "x/y is no GitHub repo root here, so there is nowhere to fix it")
+    row = autofix.RunningAgent(pr_number=0, label="Auto · Issues · #12 · quick",
+                               kind="issues", tracked=True)
+    monkeypatch.setattr(Store, "running_tasks", property(lambda self: [row]))
+    assert pipe.pipeline_start_fix(_item()) == "An agent is already fixing it"
+    assert pipe.queued_tasks == []
+    assert _feed("pipeline-fix") == []
 
 
-def test_start_fix_of_a_queued_fix_executes_that_row(pipe, monkeypatch):
+def test_start_fix_of_a_linear_issue_queues_its_synced_text(pipe):
+    linear = _item(LINEAR, source="linear", label="ENG-12")
+    pipe.pipeline_result = _result(_linear(), items=(linear,))
+    assert pipe.pipeline_start_fix(linear) is None
+    assert [t.id for t in pipe.queued_tasks] == ["issues:linear:ENG-12"]
+    assert pipe.pipeline_badges() == {LINEAR: "queued"}
+
+
+def test_a_pipeline_run_dates_its_record_when_it_spawns_and_concludes_it_when_it_reports(
+        pipe, monkeypatch):
+    """Twin of ``pipelineSpawned`` and ``pipelineConcluded``: the backoff runs from the
+    spawn, not the wait in the queue; a run whose agent said its turn was over answered
+    the effect, so no later sync asks again, past the whole backoff ladder."""
+    from diplomat_runtime import agentregistry
+
+    calls = _spawn_recorder(monkeypatch)
+    asked = time.time() - 600
+    pipe._apply_pipeline_effects(_result(_fix()), asked)
+    [task] = pipe.queued_tasks
+    pipe._execute_queued_task(task)
+    assert len(calls) == 1
+    record = pipe._load_attempts(PIPELINE_ATTEMPTS)[f"pipeline-fix:{ISSUE}"]
+    assert record.last_dispatched_at > asked + 500
+
+    (run,) = agentregistry.load()
+    assert (run.kind, run.pr_url) == ("issues", ISSUE)
+    fake_probes(monkeypatch, activity={run.run_id: ("idle", time.time() - 5)})
+    pipe._settle_agents()
+    assert agentregistry.load() == [], "the run must retire, or this pins nothing"
+    record = pipe._load_attempts(PIPELINE_ATTEMPTS)[f"pipeline-fix:{ISSUE}"]
+    assert record.concluded_at is not None
+
+    pipe.requested_work = []
+    pipe.queued_tasks = []
+    pipe._apply_pipeline_effects(_result(_fix()), time.time() + 4 * 3600)
+    assert _keys(pipe) == []
+
+
+def test_a_run_that_did_not_report_leaves_its_record_open(pipe, monkeypatch):
+    from diplomat_runtime import agentregistry
+
+    calls = _spawn_recorder(monkeypatch)
     pipe._apply_pipeline_effects(_result(_fix()), time.time())
-    pipe.pipeline_result = _result(_fix(), items=(_item(),))
-    executed = []
-    monkeypatch.setattr(Store, "execute_queued_task_async",
-                        lambda self, key: executed.append(key))
-    pipe.pipeline_start_fix_async(ISSUE)
-    assert executed == ["issues:o/r#12"]
+    pipe._execute_queued_task(pipe.queued_tasks[0])
+    with open(calls[0]["done"], "w") as fh:
+        fh.write("0")
+    fake_probes(monkeypatch)
+    pipe._settle_agents()
+    assert agentregistry.load() == []
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS)[f"pipeline-fix:{ISSUE}"].concluded_at is None
+
+
+def test_a_pipeline_identity_names_an_item_across_its_links():
+    assert [pipeline.identity(u) for u in (
+        ISSUE, "https://github.com/O/R/issues/12#issuecomment-1", LINEAR,
+        "https://linear.app/acme/issue/ENG-12", "https://linear.app/acme/project/x",
+        "not a link")] == [
+        "o/r#12", "o/r#12", "linear:ENG-12", "linear:ENG-12",
+        "https://linear.app/acme/project/x", "not a link"]
 
 
 # MARK: - The core's answer
 
 
 def test_sync_secs_is_held_between_the_floor_and_a_day(monkeypatch):
+    monkeypatch.delenv(pipeline.SECS_ENV, raising=False)
     for asked, held in [(300, 300), (5, 60), (float("inf"), 300), (10**9, 86400)]:
         monkeypatch.setattr(pipeline, "tunables",
                             lambda asked=asked: {"syncSecs": asked, "minSyncSecs": 60})
         assert pipeline.sync_secs() == held
+
+
+@pytest.mark.parametrize("env, held", [
+    ("120", 120.0), ("90.5", 90.5), ("1e3", 1000.0), ("5", 60.0), ("999999", 86400.0),
+    # Not a finite decimal number: the asset's period.
+    ("inf", 300.0), ("nan", 300.0), ("1e999", 300.0), (" 120", 300.0), ("1_000", 300.0),
+    ("", 300.0), ("soon", 300.0),
+])
+def test_the_sync_period_follows_its_environment_override(monkeypatch, env, held):
+    """Twin of ``Store.pipelineSyncInterval``: ``Double(_:)`` takes neither spaces nor
+    underscores, which ``float`` would."""
+    monkeypatch.setattr(pipeline, "tunables", lambda: {"syncSecs": 300, "minSyncSecs": 60})
+    monkeypatch.setenv(pipeline.SECS_ENV, env)
+    assert pipeline.sync_secs() == held
 
 
 def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
@@ -476,6 +645,13 @@ def test_the_linear_teams_line_is_read_entry_by_entry():
         [{"key": "ENG", "repo": "o/r"}, {"key": "OPS", "repo": "o/other.js"}],
         ["nope", "= o/r", "A=b"])
     assert pipeline.parse_linear_teams("") == ([], [])
+
+
+def test_a_linear_team_is_ascii_and_trimmed_of_ascii_space_only():
+    """``PipelineSettings.LinearTeam.parse``'s rule; test_pipeline_teams_parity.py pins
+    the two against each other."""
+    assert pipeline.parse_linear_teams("\u00a0ENG=o/r, x=o/\u00f1, \u00c4=o/r, ok=o/r\r") == (
+        [{"key": "OK", "repo": "o/r"}], ["\u00a0ENG=o/r", "x=o/\u00f1", "\u00c4=o/r"])
 
 
 def _fake_core(tmp_path, monkeypatch, answer: str, status: int = 0):
