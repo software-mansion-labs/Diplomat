@@ -68,6 +68,9 @@ REVIEW_REQ_ACTION = "review-req"
 PIPELINE_COUNTER = "pipeline"
 #: The Pipeline's attempt records, by ``PipelineEffect.key``.
 PIPELINE_ATTEMPTS = "pipelineAttempts"
+#: The only review a PR gets before the pipeline may merge it. Twin of
+#: ``Store.pipelineReviewDepth``.
+PIPELINE_REVIEW_DEPTH = "max"
 GITHUB_LOGIN_UNKNOWN = "GitHub login unknown — is `gh` installed and authenticated?"
 
 
@@ -237,9 +240,6 @@ class Store(QObject):
     pipeline_changed = Signal()
     # A Pipeline sync's answer, handed to the Qt thread, where the queue is changed.
     _pipeline_synced = Signal(object)
-    # The answer to the Pipeline screen's "Start fix": (item id, why it did not start or
-    # None).
-    pipeline_fix_answered = Signal(str, object)
     # Emitted when the repo roots or the other checkouts listed in Settings change, so
     # the wizards re-judge a link they are already holding and the header re-lists.
     local_repos_changed = Signal()
@@ -473,8 +473,6 @@ class Store(QObject):
         # sync that was handed them answers.
         self._pipeline_force: dict[str, frozenset[str]] = {"rate": frozenset(),
                                                            "fracture": frozenset()}
-        # Item ids whose "Start fix" is being dispatched.
-        self.pipeline_fixes_starting: frozenset[str] = frozenset()
         self._pipeline_synced.connect(self._apply_pipeline_sync)
 
         # Pruned on every start — a Store outlives thousands of polls.
@@ -2611,10 +2609,12 @@ class Store(QObject):
         # every machine sees, keeps two agents off one issue.
         is_pr = entry.action == autofix.QUEUE_REVIEW_ACTION
         # Built from the ask's root key, not its url (which may be empty), so the run
-        # stays that root's even once the root is gone.
+        # stays that root's even once the root is gone. A Linear issue's fix carries
+        # that issue's link, which its attempt record is found by.
         link = entry.url if is_pr else (
             (self._root_named(entry.repo) or repo_of_key(entry.repo)).link(
-                "issues", entry.number) if entry.item else None)
+                "issues", entry.number) if entry.item
+            else entry.url or None if entry.linear else None)
         where = (entry.config.get("home") or {}).get("path") or entry.config.get("checkout")
         task = autofix.QueuedTask(
             id=entry.key,
@@ -2968,7 +2968,16 @@ class Store(QObject):
     def _record_queued_attempt(self, entry: autofix.QueuedTask) -> None:
         """Write the retry-backoff record for a task the queue dispatched, into the
         same per-monitor ledger that monitor writes itself: ``AgentJob.counter`` names
-        the ledger, ``attempt_stamp`` is the stamp that monitor compares against."""
+        the ledger, ``attempt_stamp`` is the stamp that monitor compares against. The
+        Pipeline's records are its effects', written when asked for: the one this run
+        is the attempt of is dated now (:func:`pipeline.spawned`)."""
+        if entry.job.counter == PIPELINE_COUNTER:
+            attempts = self._load_attempts(PIPELINE_ATTEMPTS)
+            dated = pipeline.spawned(attempts, entry.job.kind, entry.job.pr_url or "",
+                                     time.time())
+            if dated != attempts:
+                self._save_attempts(PIPELINE_ATTEMPTS, dated)
+            return
         key = {
             "review_requests": "reviewReqAttempts",
             "my_reviews": "myReviewAttempts",
@@ -3328,6 +3337,14 @@ class Store(QObject):
         if concluded:
             key = "reviewReqAttempts"
             self._save_attempts(key, autofix.conclude(self._load_attempts(key), concluded, now))
+        # A run whose agent said its turn was over answered its Pipeline effect, whatever
+        # it left; one that died or failed leaves that attempt on the retry ladder.
+        reported = [r for r in gone if getattr(t.states.get(r.run_id), "reported", False)]
+        if reported:
+            attempts = self._load_attempts(PIPELINE_ATTEMPTS)
+            answered = pipeline.concluded(attempts, reported, now)
+            if answered != attempts:
+                self._save_attempts(PIPELINE_ATTEMPTS, answered)
         # Logged with the evidence that ended it, because forgetting deletes every trace
         # a run leaves: the record, the directory and the prompt all go, and a retirement
         # that turns out to be wrong is then a row that was simply not there any more.
@@ -4475,9 +4492,10 @@ class Store(QObject):
 
     def pipeline_settings_payload(self) -> dict:
         """The ``PipelineSettings`` JSON a sync is handed. Its roots are the GitHub ones:
-        the Pipeline skips GitLab."""
+        the Pipeline skips GitLab. The key file's ``~`` is ``$HOME``'s, expanded here:
+        the core's own expansion reads the password database."""
         teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
-        token_file = appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip()
+        token_file = os.path.expanduser(appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip())
         with self._pipeline_lock:
             force = {kind: sorted(ids) for kind, ids in self._pipeline_force.items()}
         return {
@@ -4564,6 +4582,10 @@ class Store(QObject):
         settings = self.pipeline_settings_payload()
         if settings["roots"] and not self.effective_me:
             return {"error": GITHUB_LOGIN_UNKNOWN, "forced": {}}
+        # What this launch's first sync is told apart from (:meth:`_apply_pipeline_sync`),
+        # read before the sync replaces it.
+        if self.pipeline_result is None:
+            self.refresh_pipeline_last()
         out = pipeline.tick(settings)
         if "items" not in out:
             return {"error": out.get("error") or "the sync did not answer",
@@ -4573,11 +4595,24 @@ class Store(QObject):
     def _apply_pipeline_sync(self, plan: dict) -> None:
         """The Qt-thread half of a sync: publish its result, retire the force sets it
         was handed, and ask for the agent work it owes. A failed sync leaves the last
-        result and every force standing."""
+        result and every force standing.
+
+        A notice is logged when it first appears, and each merge and split the core
+        made since the previous result once (:func:`pipeline.fresh_events`), whatever
+        the switches."""
         self._settle_pipeline_error(plan.get("error"))
         result = plan.get("result")
         if result is not None:
             handed = plan.get("forced") or {}
+            previous = self.pipeline_result
+            seen = set((previous or {}).get("notices") or [])
+            fresh = [n for n in result.get("notices") or [] if n not in seen]
+            for notice in fresh:
+                activity.log("auto", "pipeline-notice", notice)
+            done = pipeline.fresh_events(result, previous)
+            for event in done:
+                activity.log("auto", "pipeline-merge" if event.get("kind") == "merged"
+                             else "pipeline-fracture", pipeline.event_line(event, result))
             with self._pipeline_lock:
                 self.pipeline_result = result
                 self._pipeline_force = {
@@ -4612,7 +4647,7 @@ class Store(QObject):
         attempts = self._load_attempts(PIPELINE_ATTEMPTS)
         banned = bans.read()
         roots = len(review.repo_roots())
-        owed: set[str] = set()
+        owed = {str(e.get("key") or "") for e in result.get("effects") or []}
         for effect in result.get("effects") or []:
             kind = effect.get("kind")
             if not {"fixIssue": self.pipeline_fix, "fixLinear": self.pipeline_fix,
@@ -4625,13 +4660,13 @@ class Store(QObject):
                 work = None
             if not key or work is None:
                 continue
-            owed.add(key)
             action, value = autofix.decide(
                 attempts.get(key), stamp, self._pipeline_in_flight(work),
                 bool(work.author) and bans.is_banned(work.author, banned), now)
             if action != "dispatch":
                 continue
-            attempts[key] = autofix.ReviewAttempt(stamp, now, int(value))
+            attempt = int(value)
+            attempts[key] = autofix.ReviewAttempt(stamp, now, attempt)
             verb = "pipeline-review" if kind == "review" else "pipeline-fix"
             try:
                 fresh = self.request_one(work)
@@ -4640,8 +4675,8 @@ class Store(QObject):
                                            f"queued: {exc}")
                 continue
             if fresh:
-                activity.log("auto", verb, f"{work.label_among(roots)} queued for the "
-                                           f"fast track")
+                activity.log("auto", verb, f"{work.label_among(roots)} queued"
+                             + (f" (attempt {attempt})" if attempt > 1 else ""))
         self._save_attempts(PIPELINE_ATTEMPTS, {
             k: a for k, a in attempts.items()
             if k in owed or now - a.last_dispatched_at < autofix.RETRY_MAX_BACKOFF})
@@ -4661,7 +4696,8 @@ class Store(QObject):
         kind = effect.get("kind")
         if kind == "review":
             number = int(effect["number"])
-            cfg = review.ReviewConfig(target=PRTarget.SPECIFIC, specific_pr=str(number), me=me,
+            cfg = review.ReviewConfig(depth=PIPELINE_REVIEW_DEPTH, target=PRTarget.SPECIFIC,
+                                      specific_pr=str(number), me=me,
                                       specific_author=review.SpecificAuthor.MINE, home=root,
                                       fast_track=True)
             return autofix.RequestedWork(number=number, url=url, author="",
@@ -4673,8 +4709,7 @@ class Store(QObject):
             author = str((item or {}).get("author") or "")
         elif kind == "fixLinear":
             identifier = str(effect["identifier"])
-            digits = identifier.rpartition("-")[2]
-            number = int(digits) if digits.isdigit() else 0
+            number = 0
             cfg = issues.IssueConfig(target=issues.Target.SPECIFIC, me=me, home=root,
                                      pipeline=True,
                                      linear={"identifier": identifier, "url": url,
@@ -4702,7 +4737,7 @@ class Store(QObject):
     def pipeline_badges(self) -> dict[str, str]:
         """``agent`` or ``queued`` by item id, for the items something is on now: an
         agent on the PR, or fixing the issue; work about it waiting in the queue or
-        starting; its "Start fix" being dispatched."""
+        starting."""
         rows = self.running_tasks
         waiting = {e.id for e in self.queued_tasks + self.starting_tasks}
         waiting_items = {autofix.item_of_key(k) for k in waiting}
@@ -4713,7 +4748,8 @@ class Store(QObject):
             if it.get("source") == "linear":
                 identifier = str(it.get("label") or "")
                 agent = self._fix_of(rows, None, identifier) is not None
-                queued = autofix.queue_key(autofix.QUEUE_ISSUES_ACTION, identifier) in waiting
+                queued = autofix.queue_key(autofix.QUEUE_ISSUES_ACTION,
+                                           autofix.linear_item(identifier)) in waiting
             else:
                 item = item_key_from_url(item_id)
                 if item is None:
@@ -4721,63 +4757,68 @@ class Store(QObject):
                 agent = (any(a.item == item for a in rows)
                          or self._fix_of(rows, item, item_label(item, roots)) is not None)
                 queued = item in waiting_items
-            if agent or item_id in self.pipeline_fixes_starting:
+            if agent:
                 badges[item_id] = "agent"
             elif queued:
                 badges[item_id] = "queued"
         return badges
 
-    def pipeline_start_fix_async(self, item_id: str) -> None:
-        """The screen's "Start fix" for a candidate issue: its fix now, outside the cap,
-        as the Fix-issues wizard's press for one issue starts it; or, queued already,
-        that task's "execute now". A Linear issue's needs the text its sync's
-        ``fixLinear`` effect carried. Why it did not start comes back on
-        :attr:`pipeline_fix_answered`."""
-        result = self.pipeline_result or {}
-        item = next((i for i in result.get("items") or [] if i.get("id") == item_id), None)
-        if item is None:
-            return
-        effect = next((e for e in result.get("effects") or [] if e.get("url") == item_id
-                       and e.get("kind") in ("fixIssue", "fixLinear")), None)
+    def pipeline_fix_effect(self, item: dict) -> dict | None:
+        """The fix effect an issue Diplomat may act on would be asked for by: a GitHub
+        issue's from its link, a Linear one's only as the last sync emitted it, the text
+        being Diplomat's read. None for an issue assigned to someone else, which a fix
+        would claim. Twin of ``Store.pipelineFixEffect``."""
+        if item.get("kind") != "issue" or not item.get("writable"):
+            return None
+        item_id = str(item.get("id") or "")
+        if item.get("source") == "linear":
+            return next((e for e in (self.pipeline_result or {}).get("effects") or []
+                         if e.get("kind") == "fixLinear"
+                         and pipeline.identity(str(e.get("url") or ""))
+                         == pipeline.identity(item_id)), None)
         split = split_item_key(item_key_from_url(item_id) or "")
-        if effect is None and item.get("source") == "github" and split is not None:
-            effect = {"kind": "fixIssue", "repo": item.get("repo"), "number": split[1],
-                      "url": item_id}
-        work = None if effect is None else self.pipeline_work(effect, item)
+        if split is None:
+            return None
+        return {"kind": "fixIssue", "repo": item.get("repo"), "number": split[1],
+                "url": item_id, "key": f"pipeline-fix:{item_id}", "stamp": "fix"}
+
+    def pipeline_start_fix(self, item: dict) -> str | None:
+        """The screen's "Start fix" for a candidate issue, as the screen drew it: its fix
+        queued now, past its attempt record (one cooling down or concluded included),
+        which then records it; it waits for a bay like every ask. Returns why it was
+        not, or None. Twin of ``Store.startPipelineFix``."""
+        if not self.pipeline_enabled:
+            return "The pipeline is off"
+        if not item.get("writable"):
+            return "It is assigned to someone else"
+        effect = self.pipeline_fix_effect(item)
+        if effect is None or self.pipeline_result is None:
+            return "Diplomat has this Linear issue's text only while Open fix PRs is on"
+        work = self.pipeline_work(effect, item)
         if work is None:
-            self.pipeline_fix_answered.emit(item_id, (
-                "Diplomat has this Linear issue's text only while Open fix PRs is on"
-                if item.get("source") == "linear" and effect is None
-                else f"{item.get('repo')} is not a GitHub repo root"))
-            return
-        if any(e.id == work.key for e in self.queued_tasks):
-            self.execute_queued_task_async(work.key)
-            self.pipeline_fix_answered.emit(item_id, None)
-            return
-        if self._pipeline_in_flight(work):
-            self.pipeline_fix_answered.emit(item_id, "a fix of it is already starting or "
-                                                     "running")
-            return
-        with self._pipeline_lock:
-            if item_id in self.pipeline_fixes_starting:
-                return
-            self.pipeline_fixes_starting = self.pipeline_fixes_starting | {item_id}
+            return (f"{effect.get('repo')} is no GitHub repo root here, so there is "
+                    f"nowhere to fix it")
+        named = work.linear or item_label(work.item or "", len(review.repo_roots()))
+        if self._fix_of(self.running_tasks, work.item, named) is not None:
+            return "An agent is already fixing it"
+        try:
+            fresh = self.request_one(work)
+        except Exception as exc:  # noqa: BLE001 — a missing/wedged core binary
+            return f"Its fix could not be queued: {exc}"
+        if not fresh:
+            return "Its fix is already queued"
+        key = str(effect["key"])
+        attempts = self._load_attempts(PIPELINE_ATTEMPTS)
+        prior = attempts.get(key)
+        attempts[key] = autofix.ReviewAttempt(str(effect["stamp"]), time.time(),
+                                              (prior.attempts if prior else 0) + 1)
+        self._save_attempts(PIPELINE_ATTEMPTS, attempts)
+        activity.log("panel", "pipeline-fix",
+                     f"{work.label_among(len(review.repo_roots()))} queued from the "
+                     f"Pipeline screen")
+        self.tasks_changed.emit()
         self.pipeline_changed.emit()
-
-        def start() -> None:
-            try:
-                verdict = self.dispatch_agent(self._requested_task(work).job,
-                                              autofix.SOURCE_PANEL)
-            except Exception as exc:  # noqa: BLE001 — a core that cannot build the prompt
-                verdict = str(exc)
-            finally:
-                with self._pipeline_lock:
-                    self.pipeline_fixes_starting = self.pipeline_fixes_starting - {item_id}
-            self.pipeline_fix_answered.emit(
-                item_id, None if verdict == "spawned" else f"The fix did not start: {verdict}")
-            self.pipeline_changed.emit()
-
-        self.start_background(start, name="pipeline-fix")
+        return None
 
     # MARK: device allocator
 

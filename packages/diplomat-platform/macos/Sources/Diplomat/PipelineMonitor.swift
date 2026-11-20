@@ -24,14 +24,19 @@ extension Store {
 
     /// The self-test's stand-in for `PipelineTick.run`; consulted only headless.
     static var pipelineTickOverride: (@MainActor (PipelineSettings) -> PipelineTickResult)?
+    /// Lets a headless sync run the real `PipelineTick.run`: the self-test's live pass,
+    /// whose `gh`, `claude` and Linear are the stubs its environment names.
+    static var pipelineTickLive = false
 
     /// The only review a PR gets before the pipeline may merge it.
     static let pipelineReviewDepth = "max"
 
     /// What a sync is run with: the GitHub roots (GitLab ones are not read yet), the Linear
-    /// teams, the switches, and whatever the screen forced that no sync has taken.
+    /// teams, the switches, and whatever the screen forced that no sync has taken, sorted
+    /// as the Linux store hands its forces on.
     var pipelineSettings: PipelineSettings {
-        let force = pipelineForce
+        let force = PipelineSettings.Force(rate: pipelineForce.rate.sorted(),
+                                           fracture: pipelineForce.fracture.sorted())
         let item = AppConfig.linearKeychainItem
         return PipelineSettings(
             roots: roots.filter { !$0.isGitLab }.map {
@@ -44,17 +49,9 @@ extension Store {
             force: force.rate.isEmpty && force.fracture.isEmpty ? nil : force)
     }
 
-    /// `ENG=owner/repo, OPS=owner/other`, commas or new lines between: each Linear team key
-    /// and the root its issues are fixed in. An entry missing either is skipped.
+    /// The teams the Settings line names (`PipelineSettings.LinearTeam.parse`).
     nonisolated static func pipelineTeams(_ raw: String) -> [PipelineSettings.LinearTeam] {
-        raw.split(whereSeparator: { $0 == "," || $0.isNewline }).compactMap { entry in
-            let parts = entry.split(separator: "=", maxSplits: 1)
-                .map { $0.trimmingCharacters(in: .whitespaces) }
-            guard parts.count == 2, !parts[0].isEmpty,
-                  let slug = PRRef.splitSlug(parts[1]), !slug.owner.isEmpty, !slug.repo.isEmpty
-            else { return nil }
-            return PipelineSettings.LinearTeam(key: parts[0], repo: parts[1])
-        }
+        PipelineSettings.LinearTeam.parse(raw).teams
     }
 
     // MARK: the loop
@@ -79,18 +76,33 @@ extension Store {
     }
 
     /// One sync. The timer, Sync now, a switch and the screen's forces can each ask while
-    /// one runs; any number of those asks is answered by one more sync after it.
+    /// one runs; any number of those asks is answered by one more sync after it. Held, as
+    /// `pipelineError`, while no root resolves (a guessed root may check out another
+    /// repo) and while the GitHub login is unknown, which would make none of the
+    /// operator's PRs theirs; the forces then wait.
     func runPipelineSyncOnce() async {
-        guard pipelineEnabled, !Headless.active || Store.pipelineTickOverride != nil else { return }
+        guard pipelineEnabled,
+              !Headless.active || Store.pipelineTickOverride != nil || Store.pipelineTickLive else { return }
         guard !pipelineSyncing else {
             pipelineSyncAgain = true
             return
         }
         pipelineSyncing = true
         defer { pipelineSyncing = false }
+        // What the first sync's merges and splits are told apart from (`applyPipeline`).
+        await loadPipelineLast()
         repeat {
             pipelineSyncAgain = false
             await refreshRoots()
+            var hold: String?
+            if rootsGuessed {
+                hold = "no repo root in Settings resolves to a GitHub or GitLab checkout"
+            } else {
+                if effectiveMe.isEmpty { await fetchMe() }
+                if roots.contains(where: { !$0.isGitLab }) && effectiveMe.isEmpty { hold = Store.githubLoginUnknown }
+            }
+            notePipelineHealth(hold)
+            if hold != nil { return }
             let settings = pipelineSettings
             let result: PipelineTickResult
             if let stub = Store.pipelineTickOverride {
@@ -110,7 +122,23 @@ extension Store {
         } while pipelineSyncAgain && pipelineEnabled
     }
 
-    /// The core's `last.json`, for a screen opened before this launch's first sync.
+    /// Logs only transitions: a hold lasts every sync until it lifts.
+    func notePipelineHealth(_ error: String?) {
+        if let error {
+            if pipelineError == nil {
+                AuditLog.log("auto", "pipeline-error", error)
+                refreshAudit()
+            }
+            if pipelineError != error { pipelineError = error }
+        } else if pipelineError != nil {
+            AuditLog.log("auto", "pipeline-recovered", "Pipeline syncing again")
+            refreshAudit()
+            pipelineError = nil
+        }
+    }
+
+    /// The core's `last.json`, for a screen opened before this launch's first sync and
+    /// for that sync to be told apart from.
     func loadPipelineLast() async {
         guard pipelineResult == nil, !Headless.active else { return }
         let last = await Task.detached(priority: .utility) { PipelineLog.last() }.value
@@ -120,38 +148,81 @@ extension Store {
     // MARK: acting on a sync
 
     /// Queues each owed effect not already waiting, running, cooling down after an attempt
-    /// or concluded by one (`ReviewReconcile.decide`, over `pipelineAttempts`). Not
-    /// private: the self-test hands it composed results.
+    /// or concluded by one (`ReviewReconcile.decide`, over `pipelineAttempts`): a fix only
+    /// while the fix switch is on, a review only while the fast-track one is, since the
+    /// sync may have been handed them before either went off. A dispatch is an attempt
+    /// whether or not the queue takes the ask. Not private: the self-test hands it
+    /// composed results.
     ///
     /// A result that lands after the master switch went off queues nothing. A notice is
-    /// logged when it first appears, not on every sync that repeats it.
+    /// logged when it first appears, and each merge and split the core made since the
+    /// previous result once (`Store.pipelineFreshEvents`), whatever the switches.
     func applyPipeline(_ result: PipelineTickResult, now: Date = Date()) async {
-        let seen = Set(pipelineResult?.notices ?? [])
+        let previous = pipelineResult
+        let seen = Set(previous?.notices ?? [])
         let fresh = result.notices.filter { !seen.contains($0) }
         for notice in fresh { AuditLog.log("auto", "pipeline-notice", notice) }
+        let done = Store.pipelineFreshEvents(result, after: previous)
+        for event in done {
+            AuditLog.log("auto", event.kind == .merged ? "pipeline-merge" : "pipeline-fracture",
+                         Store.pipelineEventLine(event, in: result))
+        }
         pipelineResult = result
-        var queued: [String: ReviewAttempt] = [:]
+        var queued = false
         if pipelineEnabled {
             let banned = BanList.read()
             let prior = loadPipelineAttempts()
+            var dispatched: [String: ReviewAttempt] = [:]
             for effect in result.effects {
+                switch effect {
+                case .fixIssue, .fixLinear: guard pipelineFix else { continue }
+                case .review: guard pipelineFastTrack else { continue }
+                }
                 guard let ask = pipelineAsk(effect, in: result) else { continue }
                 let decision = ReviewReconcile.decide(
                     prior: prior[effect.key], stamp: effect.stamp,
                     inFlight: await pipelineInFlight(effect, ask: ask),
                     banned: BanList.isBanned(ask.author, in: banned), now: now)
-                guard case .dispatch(let attempt) = decision, requestOne(ask) else { continue }
-                queued[effect.key] = ReviewAttempt(requestedAt: effect.stamp, lastDispatchedAt: now,
-                                                   attempts: attempt)
-                AuditLog.log("auto", "pipeline-queue", "\(ask.label(roots: roots.count)) queued"
-                             + (attempt > 1 ? " (attempt \(attempt))" : ""))
+                guard case .dispatch(let attempt) = decision else { continue }
+                dispatched[effect.key] = ReviewAttempt(requestedAt: effect.stamp, lastDispatchedAt: now,
+                                                       attempts: attempt)
+                if requestOne(ask) {
+                    queued = true
+                    AuditLog.log("auto", Store.pipelineVerb(effect), "\(ask.label(roots: roots.count)) queued"
+                                 + (attempt > 1 ? " (attempt \(attempt))" : ""))
+                }
             }
             // Onto the records as they stand now: a retirement may have concluded one, or
             // Start fix written one, while this pass awaited.
             savePipelineAttempts(Store.retainedPipelineAttempts(
-                loadPipelineAttempts().merging(queued) { _, new in new }, after: result, now: now))
+                loadPipelineAttempts().merging(dispatched) { _, new in new }, after: result, now: now))
         }
-        if !fresh.isEmpty || !queued.isEmpty { refreshAudit() }
+        if !fresh.isEmpty || !done.isEmpty || queued { refreshAudit() }
+    }
+
+    /// `pipeline-fix` for a fix, `pipeline-review` for a fast-track review.
+    nonisolated static func pipelineVerb(_ effect: PipelineEffect) -> String {
+        if case .review = effect { return "pipeline-review" }
+        return "pipeline-fix"
+    }
+
+    /// The `merged` and `fractured` events of `result` newer than anything `previous`
+    /// showed: none older than its newest event, nor one it held (events are stamped to
+    /// the second, so two syncs can share one). Every one when there is no previous result.
+    nonisolated static func pipelineFreshEvents(_ result: PipelineTickResult,
+                                                after previous: PipelineTickResult?) -> [PipelineEvent] {
+        let shown = previous?.events ?? []
+        let newest = shown.map(\.at).max()
+        return result.events.filter { event in
+            [.merged, .fractured].contains(event.kind) && newest.map { event.at >= $0 } != false
+                && !shown.contains(event)
+        }
+    }
+
+    /// `#12: merged abc1234 with --admin --squash`: the item's label, else its link.
+    nonisolated static func pipelineEventLine(_ event: PipelineEvent, in result: PipelineTickResult) -> String {
+        let label = result.items.first { $0.id == event.item }?.label ?? event.item
+        return "\(label): \(event.detail)"
     }
 
     /// The ask an effect stands for, in the root its repo names; nil once that is no root.
@@ -162,13 +233,15 @@ extension Store {
         switch effect {
         case .fixIssue(let repo, let number, let url):
             guard let root = root(repo) else { return nil }
-            var cfg = IssueConfig(target: .specific, me: knownMe(for: root), specificIssue: String(number))
+            let me = knownMe(for: root)
+            var cfg = IssueConfig(target: .specific, me: me, specificIssue: String(number))
             cfg.home = root
             cfg.pipeline = true
-            // The ban dimension, as a Slack-asked fix's is.
+            // The ban dimension, which the operator's own issue has none of.
             let author = result.items.first { $0.id == url }?.author ?? ""
-            return RequestedWork(number: number, url: url, author: author, config: .issues(cfg),
-                                 repo: root.key)
+            let mine = !me.isEmpty && author.lowercased() == me.lowercased()
+            return RequestedWork(number: number, url: url, author: mine ? "" : author,
+                                 config: .issues(cfg), repo: root.key)
         case .fixLinear(let repo, let identifier, let url, let text):
             guard let root = root(repo) else { return nil }
             var cfg = IssueConfig(target: .specific, me: knownMe(for: root))
@@ -212,19 +285,15 @@ extension Store {
         !row.record.released && AgentState.blocking.contains(row.state)
     }
 
-    /// The records a sync keeps (`ReviewReconcile.retained`, `owed` being its effects).
-    /// After a sync with a notice, a source may have gone unread, so the record of every
-    /// item it did not list is kept too: dropping a concluded one asks for its work again.
+    /// The records a sync keeps: each while the sync owes its effect, so its retry ladder
+    /// and its conclusion stand, and for the backoff ceiling after its last dispatch, so
+    /// an effect a failed read left out is not taken for a new one when it is back.
     nonisolated static func retainedPipelineAttempts(_ attempts: [String: ReviewAttempt],
                                                      after result: PipelineTickResult,
                                                      now: Date) -> [String: ReviewAttempt] {
-        let owed = Dictionary(result.effects.map { ($0.key, $0.stamp) }, uniquingKeysWith: { first, _ in first })
-        let kept = ReviewReconcile.retained(attempts, owed: owed, now: now)
-        guard !result.notices.isEmpty else { return kept }
-        let listed = Set(result.items.map(\.id))
-        return attempts.filter { key, _ in
-            // `pipeline-fix:<url>`, `pipeline-review:<url>`.
-            kept[key] != nil || !listed.contains(String(key.drop { $0 != ":" }.dropFirst()))
+        let owed = Set(result.effects.map(\.key))
+        return attempts.filter { key, rec in
+            owed.contains(key) || now.timeIntervalSince(rec.lastDispatchedAt) < ReviewReconcile.retryMaxBackoff
         }
     }
 
@@ -335,15 +404,17 @@ extension Store {
     }
 
     /// Start fix: the issue's fix queued now, past its attempt record (one cooling down or
-    /// concluded included), which then records it. Returns why it was not, or nil.
+    /// concluded included), which then records it; it waits for a bay like every ask.
+    /// Returns why it was not, or nil.
     @discardableResult
     func startPipelineFix(_ item: PipelineItem) -> String? {
+        guard pipelineEnabled else { return "The pipeline is off" }
         guard item.writable else { return "It is assigned to someone else" }
         guard let effect = pipelineFixEffect(for: item), let result = pipelineResult else {
-            return "Diplomat has not read this issue's text: it is read for a fix while Open fix PRs is on"
+            return "Diplomat has this Linear issue's text only while Open fix PRs is on"
         }
         guard let ask = pipelineAsk(effect, in: result) else {
-            return "\(item.repo) is no repo root here, so there is nowhere to fix it"
+            return "\(Store.pipelineRepo(effect)) is no GitHub repo root here, so there is nowhere to fix it"
         }
         if pipelineFixRunning(effect.url) { return "An agent is already fixing it" }
         guard requestOne(ask) else { return "Its fix is already queued" }
@@ -351,9 +422,16 @@ extension Store {
         attempts[effect.key] = ReviewAttempt(requestedAt: effect.stamp, lastDispatchedAt: Date(),
                                              attempts: (attempts[effect.key]?.attempts ?? 0) + 1)
         savePipelineAttempts(attempts)
-        AuditLog.log("panel", "pipeline-queue", "\(ask.label(roots: roots.count)) queued from the Pipeline screen")
+        AuditLog.log("panel", Store.pipelineVerb(effect),
+                     "\(ask.label(roots: roots.count)) queued from the Pipeline screen")
         refreshAudit()
         return nil
+    }
+
+    nonisolated static func pipelineRepo(_ effect: PipelineEffect) -> String {
+        switch effect {
+        case .fixIssue(let repo, _, _), .fixLinear(let repo, _, _, _), .review(let repo, _, _, _): return repo
+        }
     }
 
     // MARK: what the queue holds, per item

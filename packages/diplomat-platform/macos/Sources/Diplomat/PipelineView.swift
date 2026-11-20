@@ -34,8 +34,11 @@ struct PipelineView: View {
         return VStack(alignment: .leading, spacing: 8) {
             header(result)
             statusLine(result)
+            if store.pipelineEnabled, let error = store.pipelineError {
+                banner(error, tint: .red)
+            }
             ForEach(result?.notices ?? [], id: \.self) { notice in
-                banner(notice)
+                banner(notice, tint: .orange)
             }
             if let result, !result.items.isEmpty {
                 HStack(spacing: 5) {
@@ -97,6 +100,7 @@ struct PipelineView: View {
 
     private func statusLine(_ result: PipelineTickResult?) -> some View {
         let tint: Color = !store.pipelineEnabled ? .secondary
+            : store.pipelineError != nil ? .red
             : (result?.notices.isEmpty == false ? .orange : .green)
         return HStack(spacing: 6) {
             Circle().fill(tint).frame(width: 7, height: 7)
@@ -120,16 +124,16 @@ struct PipelineView: View {
         return "\(read) · \(last) · every \(Fmt.duration(Store.pipelineSyncInterval))\(doing)"
     }
 
-    private func banner(_ message: String) -> some View {
+    private func banner(_ message: String, tint: Color) -> some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 10)).foregroundStyle(.orange)
+                .font(.system(size: 10)).foregroundStyle(tint)
             Text(message).font(.system(size: 11))
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
             Spacer(minLength: 0)
         }
-        .cardChrome(fill: Color.orange.opacity(0.14))
+        .cardChrome(fill: tint.opacity(0.14))
     }
 
     // MARK: - Lanes
@@ -152,6 +156,18 @@ struct PipelineView: View {
     /// In the order the chips read: where work is moving, where it waits on a person, then
     /// what is not sorted yet, what was split, and what is over.
     static let lanes: [PipelineLane] = [.fast, .human, .unrated, .fractured, .done]
+
+    /// A writable open issue not split yet: not `fractured`, with no child, and no PR
+    /// fixing it (`fixing`). Twin of `pipelineview.can_fracture`.
+    static func canFracture(_ item: PipelineItem, edges: [PipelineGraph.Edge]) -> Bool {
+        item.kind == .issue && item.writable && [.unrated, .human, .candidate].contains(item.stage)
+            && !edges.contains { $0.kind == .child && $0.from == item.id }
+    }
+
+    /// A candidate issue: low/low, writable, no open PR fixing it.
+    static func canStartFix(_ item: PipelineItem) -> Bool {
+        item.kind == .issue && item.stage == .candidate && item.writable
+    }
 
     private var legend: some View {
         HStack(spacing: 10) {
@@ -223,6 +239,7 @@ struct PipelineView: View {
                            enabled: store.pipelineEnabled,
                            forcedRate: store.pipelineForce.rate.contains(id),
                            forcedFracture: store.pipelineForce.fracture.contains(id),
+                           canFracture: PipelineView.canFracture(item, edges: result.graph.edges),
                            canStartFix: store.pipelineFixEffect(for: item) != nil,
                            error: actionError,
                            rate: { store.forcePipeline(rate: id) },
@@ -519,6 +536,8 @@ private struct PipelineDetail: View {
     let enabled: Bool
     let forcedRate: Bool
     let forcedFracture: Bool
+    let canFracture: Bool
+    /// The fix effect is known: a Linear issue's text comes only with a sync's.
     let canStartFix: Bool
     let error: String?
     let rate: () -> Void
@@ -624,22 +643,24 @@ private struct PipelineDetail: View {
             FlowLayout(spacing: 4) {
                 PipelineActionChip(symbol: "arrow.up.right.square", text: "Open", tint: .accentColor,
                                    action: open)
-                PipelineActionChip(symbol: "gauge.with.needle",
-                                   text: forcedRate ? "Rating next sync" : "Rate now",
-                                   tint: .accentColor, enabled: enabled && !forcedRate, action: rate)
-                    .tooltip(enabled ? "Rate it on the next sync, ahead of every limit"
-                             : "The pipeline is off")
-                if item.kind == .issue && item.writable {
-                    PipelineActionChip(symbol: "square.split.2x2",
-                                       text: forcedFracture ? "Splitting next sync" : "Fracture",
-                                       tint: .purple, enabled: enabled && !forcedFracture, action: fracture)
-                        .tooltip("Split it into low-complexity child issues on the next sync")
+                if item.lane != .done {
+                    PipelineActionChip(symbol: "gauge.with.needle",
+                                       text: forcedRate ? "Rate asked" : "Rate now",
+                                       tint: .accentColor, enabled: enabled && !forcedRate, action: rate)
+                        .tooltip("Rate it in a sync started now, ahead of every limit")
                 }
-                if item.stage == .candidate && item.writable {
+                if canFracture {
+                    PipelineActionChip(symbol: "square.split.2x2",
+                                       text: forcedFracture ? "Fracture asked" : "Fracture",
+                                       tint: .purple, enabled: enabled && !forcedFracture, action: fracture)
+                        .tooltip("Split it into low-complexity child issues in a sync started now")
+                }
+                if PipelineView.canStartFix(item) {
                     PipelineActionChip(symbol: "wrench.and.screwdriver", text: "Start fix",
-                                       tint: .green, enabled: canStartFix && badge == nil, action: startFix)
-                        .tooltip(canStartFix ? "Queue a fix PR for it now"
-                                 : "Its text is read for a fix only while Open fix PRs is on")
+                                       tint: .green, enabled: enabled && canStartFix && badge == nil,
+                                       action: startFix)
+                        .tooltip(canStartFix ? "Queue its fix now, past its retry backoff"
+                                 : "Diplomat has this Linear issue's text only while Open fix PRs is on")
                 }
             }
             if let error {

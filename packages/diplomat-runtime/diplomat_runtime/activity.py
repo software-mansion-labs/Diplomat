@@ -106,6 +106,9 @@ _ACTION_GLYPH: dict[str, str] = {
     "comms-ping": "✉", "comms-review": "☑", "comms-fix": "⊙", "comms-bump": "↑",
     "comms-investigate": "⌕", "comms-error": "△", "comms-recovered": "✓",
     "comms-notice": "△",
+    "pipeline-fix": "⊙", "pipeline-review": "☑", "pipeline-merge": "✓",
+    "pipeline-fracture": "⊶", "pipeline-error": "△", "pipeline-recovered": "✓",
+    "pipeline-notice": "△",
 }
 
 

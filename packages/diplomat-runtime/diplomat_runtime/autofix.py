@@ -770,6 +770,13 @@ def queue_key(audit_action: str, item: str) -> str:
     return f"{audit_action}:{item}"
 
 
+def linear_item(identifier: str) -> str:
+    """A Linear issue's item (``linear:ENG-12``): a space of its own, so its fix's queue
+    key (``issues:linear:ENG-12``) is no GitHub item's, whatever the numbers. Twin of
+    ``Store.linearItem``."""
+    return "linear:" + identifier
+
+
 def item_of_key(key: str) -> str | None:
     """The item key a queue key (:func:`queue_key`) is about, or ``None`` for one about
     no item: an investigation's, numbered by a Slack ts, or a Linear issue's fix."""
@@ -1008,8 +1015,8 @@ class RequestedWork:
     """
 
     #: The PR number, or the issue number — two numbering spaces, told apart by the
-    #: verb in :attr:`key` and nowhere else. A Linear issue's is its identifier's, which
-    #: :attr:`key` does not use.
+    #: verb in :attr:`key` and nowhere else. 0 for a Linear issue's fix, which
+    #: :attr:`key` names by its identifier.
     number: int
     url: str
     #: Whose PR / issue — the pipeline's ban dimension. Empty where the sweep names
@@ -1030,9 +1037,11 @@ class RequestedWork:
 
     @property
     def pipeline(self) -> bool:
-        """Asked for by the Pipeline: a fix of a fast-track candidate or a fast-track
-        review, which its master switch pauses (``Store.is_paused``)."""
-        return bool(self.config.get("pipeline") or self.config.get("fastTrack"))
+        """Asked for by the Pipeline: a fix of a fast-track candidate or of a Linear
+        issue, or a fast-track review, which its master switch pauses
+        (``Store.is_paused``). Twin of ``RequestedConfig.isPipeline``."""
+        return bool(self.config.get("pipeline") or self.config.get("fastTrack")
+                    or self.linear)
 
     @property
     def item(self) -> str | None:
@@ -1055,9 +1064,10 @@ class RequestedWork:
         """This ask's identity everywhere it has one: the queued task's id, the row the
         panel draws it as, and what ``_forget_requested`` drops it by. An
         investigation keeps its Slack ts, being about no repo; a Linear issue's fix its
-        identifier, which no item key or ts can be, so it never names the GitHub issue
-        of the same number in its repo."""
-        return queue_key(self.action, self.item or self.linear or str(self.number))
+        :func:`linear_item`, which no item key or ts can be, so it never names the
+        GitHub issue of the same number in its repo."""
+        return queue_key(self.action, self.item
+                         or (linear_item(self.linear) if self.linear else str(self.number)))
 
     @property
     def label(self) -> str:

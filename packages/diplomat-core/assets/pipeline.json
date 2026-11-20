@@ -34,7 +34,7 @@
     "maxSourceFiles": 2,
     "maxSourceLines": 30,
     "maxTestLines": 300,
-    "_pathsComment": "A PR's diff floors its rating: a limit broken makes complexity at least medium, a denied path makes risk high, no test change or a file added outside tests, deleted, renamed or copied makes risk at least medium. Paths are matched one component at a time: `deniedDirs` / `testDirs` name a directory anywhere in the path, case-insensitively; `deniedFiles` / `testFiles` are globs over the file name, where `*` is any run of characters and nothing else is special. Denied files match case-insensitively and test files case-sensitively, so each errs toward the stricter reading.",
+    "_pathsComment": "A PR's diff floors its rating: a limit broken, or a changed file the read did not list, makes complexity at least medium; a denied path makes risk high; no test change, a file with no changed lines (binary, or its mode only), or a file whose change is anything but MODIFIED (ADDED outside tests, DELETED, RENAMED, COPIED, CHANGED) makes risk at least medium. Paths are matched one component at a time: `deniedDirs` / `testDirs` name a directory anywhere in the path, case-insensitively; `deniedFiles` / `testFiles` are globs over the file name, where `*` is any run of characters and nothing else is special. Denied files match case-insensitively and test files case-sensitively, so each errs toward the stricter reading.",
     "deniedDirs": [
       ".github", ".gitlab", ".circleci", ".buildkite", ".husky", ".devcontainer",
       ".claude", ".cursor", ".codex", ".vscode", ".idea",

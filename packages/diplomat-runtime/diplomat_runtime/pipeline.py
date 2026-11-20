@@ -4,8 +4,9 @@ Everything the pipeline decides - reading the trackers, rating, labelling, mergi
 fracturing, the graph and the effects - is ``DiplomatCore``, reached through the
 ``diplomat-core`` CLI (``pipeline-tick``, ``pipeline-last``), which reads and writes
 ``$DIPLOMAT_PIPELINE_DIR`` (default ``~/.diplomat/pipeline``). What lives here is calling
-it, the sync period of ``assets/pipeline.json``, and the parse of the Linear teams
-setting into ``PipelineSettings.linearTeams``.
+it, the sync period, the parse of the Linear teams setting into
+``PipelineSettings.linearTeams``, and the rules the store reads a result and its attempt
+records by, each the twin of the macOS one its docstring names.
 
 Stdlib-only, like the rest of the runtime.
 """
@@ -14,9 +15,14 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+from dataclasses import replace
+from urllib.parse import urlsplit
 
 from . import core, promptcore
+from .autofix import QUEUE_ISSUES_ACTION, QUEUE_REVIEW_ACTION, linear_item
+from .prref import item_key_from_url
 
 #: Raised by :func:`last`: the CLI's own reason, or why it could not run.
 Failure = (RuntimeError, promptcore.CoreBinaryMissing, ValueError)
@@ -36,10 +42,20 @@ def tunables() -> dict:
 MAX_SYNC_SECS = 86400.0
 
 
+#: The sync period's override, in seconds. Twin of ``Store.pipelineSyncInterval``.
+SECS_ENV = "DIPLOMAT_PIPELINE_SECS"
+_DECIMAL = re.compile(r"[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?", re.ASCII)
+
+
 def sync_secs() -> float:
-    """``syncSecs``, held between ``minSyncSecs`` and a day."""
+    """``$DIPLOMAT_PIPELINE_SECS`` (a decimal number, ignored unless finite), else
+    ``syncSecs``. Never under ``minSyncSecs`` (a sync reads every root and team, and may
+    spend ``claude`` calls), nor over a day."""
     t = tunables()
-    secs = float(t.get("syncSecs", 300))
+    raw = os.environ.get(SECS_ENV, "")
+    secs = float(raw) if _DECIMAL.fullmatch(raw) else math.nan
+    if not math.isfinite(secs):
+        secs = float(t.get("syncSecs", 300))
     if not math.isfinite(secs):
         secs = 300.0
     return min(MAX_SYNC_SECS, max(float(t.get("minSyncSecs", 60)), secs))
@@ -76,20 +92,25 @@ def tick_timeout(settings: dict) -> float:
             + _LOOKUP_SECS + _MARGIN_SECS)
 
 
-_TEAM = re.compile(r"^([A-Za-z0-9]+)\s*=\s*([\w.-]+/[\w.-]+)$")
+#: Spaces, tabs and a pasted CRLF line's carriage return, never Unicode spacing.
+_SPACE = " \t\r\v\f"
+_TEAM = re.compile(r"([A-Za-z0-9]+)[ \t\r\v\f]*=[ \t\r\v\f]*([\w.-]+/[\w.-]+)", re.ASCII)
 
 
 def parse_linear_teams(raw: str) -> tuple[list[dict], list[str]]:
     """``PipelineSettings.linearTeams`` from the Settings text ``ENG=owner/repo,
     OPS=owner/other`` (commas, semicolons or new lines between entries), and the
-    entries that are not ``KEY=owner/repo``. Linear spells a team key in capitals; a
-    team named twice keeps its first repo."""
+    entries that are not ``KEY=owner/repo``, as typed. A key is ASCII letters and
+    digits, read in capitals as Linear spells it; an owner and a repo are ASCII letters,
+    digits, ``_``, ``.`` and ``-``. A team named twice keeps its first repo. Twin of
+    ``PipelineSettings.LinearTeam.parse``, which ``diplomat-core pipeline-teams``
+    answers with."""
     teams: list[dict] = []
     bad: list[str] = []
-    for entry in (e.strip() for e in re.split(r"[,;\n]", raw or "")):
+    for entry in (e.strip(_SPACE) for e in re.split(r"[,;\n]", raw or "")):
         if not entry:
             continue
-        m = _TEAM.match(entry)
+        m = _TEAM.fullmatch(entry)
         if m is None:
             bad.append(entry)
             continue
@@ -138,3 +159,87 @@ def last() -> dict:
     if result is None:
         raise ValueError("diplomat-core pipeline-last answered something that is not a sync")
     return result
+
+
+# MARK: - reading a result
+
+
+def fresh_events(result: dict, previous: dict | None) -> list[dict]:
+    """The ``merged`` and ``fractured`` events of ``result`` newer than anything
+    ``previous`` showed: none older than its newest event, nor one it held (events are
+    stamped to the second, so two syncs can share one). Every one when there is no
+    previous result. Twin of ``Store.pipelineFreshEvents``."""
+    shown = (previous or {}).get("events") or []
+    newest = max((str(e.get("at") or "") for e in shown), default=None)
+    return [e for e in result.get("events") or []
+            if e.get("kind") in ("merged", "fractured")
+            and (newest is None or str(e.get("at") or "") >= newest)
+            and e not in shown]
+
+
+def event_line(event: dict, result: dict) -> str:
+    """``#12: merged abc1234 with --admin --squash``: the item's label, else its link.
+    Twin of ``Store.pipelineEventLine``."""
+    item = str(event.get("item") or "")
+    label = next((str(i.get("label") or "") for i in result.get("items") or []
+                  if i.get("id") == item), "") or item
+    return f"{label}: {event.get('detail') or ''}"
+
+
+# MARK: - the attempt records of runs
+
+
+def identity(url: str) -> str:
+    """What a pipeline item is known by across the links that name it: a GitHub item
+    key, a Linear issue's :func:`autofix.linear_item` (its URL's last segment follows
+    the title), else the link itself. Twin of ``Store.pipelineIdentity``."""
+    key = item_key_from_url(url)
+    if key is not None:
+        return key
+    parts = urlsplit(url)
+    host = parts.netloc.rpartition("@")[2].partition(":")[0]
+    if parts.scheme and host.endswith("linear.app"):
+        segments = [p for p in parts.path.split("/") if p]
+        if "issue" in segments:
+            i = segments.index("issue")
+            if i + 1 < len(segments):
+                return linear_item(segments[i + 1])
+    return url
+
+
+#: The attempt record keys of a fast-track review's and a fix's effect, before its link.
+_REVIEW_PREFIX = "pipeline-review:"
+_FIX_PREFIX = "pipeline-fix:"
+
+
+def _open_keys(attempts: dict, kind: str, url: str) -> list[str]:
+    """The open records a run of ``kind`` on ``url`` is the attempt of: a review's of
+    its PR, a fix's of its issue. Twin of ``Store.pipelineOpenKeys``."""
+    prefix = {QUEUE_REVIEW_ACTION: _REVIEW_PREFIX, QUEUE_ISSUES_ACTION: _FIX_PREFIX}.get(kind)
+    if prefix is None:
+        return []
+    item = identity(url)
+    return [k for k, a in attempts.items()
+            if a.concluded_at is None and k.startswith(prefix)
+            and identity(k[len(prefix):]) == item]
+
+
+def concluded(attempts: dict, runs, now_ts: float) -> dict:
+    """``attempts`` with the record of each of ``runs`` (``kind``, ``pr_url``) stamped
+    concluded: its agent said its turn was over, so what it left, a PR, a clean marker
+    or nothing, is its answer. Twin of ``Store.pipelineConcluded``."""
+    out = dict(attempts)
+    for run in runs:
+        for k in _open_keys(attempts, run.kind, run.pr_url or ""):
+            out[k] = replace(out[k], concluded_at=now_ts)
+    return out
+
+
+def spawned(attempts: dict, kind: str, url: str, now_ts: float) -> dict:
+    """``attempts`` with the record of the queued job (``kind`` on ``url``) that just
+    spawned dated then, so its retry backoff runs from the run rather than from the
+    wait in the queue. Twin of ``Store.pipelineSpawned``."""
+    out = dict(attempts)
+    for k in _open_keys(attempts, kind, url):
+        out[k] = replace(out[k], last_dispatched_at=now_ts)
+    return out

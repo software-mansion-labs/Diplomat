@@ -44,7 +44,9 @@ public enum PipelineKind: String, Codable, Sendable { case issue, pr }
 /// Where an item stands. An issue: `unrated`, then `human` or `candidate` (low/low), or
 /// `fractured` into children; `fixing` once an open PR fixes it; `closed`. A PR:
 /// `unrated`, then `human` or `fast-track`; `clean` once a Diplomat clean marker names its
-/// head; `cleared` once rated low/low again at that head; `merged` or `closed`.
+/// head; `cleared` once this Diplomat rated it low/low again at that head (its log says so:
+/// the `cleared` label alone, which anyone with triage rights can add, does not); `merged`
+/// or `closed`.
 public enum PipelineStage: String, Codable, CaseIterable, Sendable {
     case unrated, human, candidate, fractured, fixing
     case fastTrack = "fast-track"
@@ -179,12 +181,19 @@ public struct PipelineEvent: Codable, Equatable, Sendable {
     public var item: String
     public var kind: Kind
     public var detail: String
+    /// A PR's `rated` or `rerated`: the head it was rated at.
+    public var head: String?
+    /// A `rated` or `rerated`: the rating given, never below the labels or the diff's floor.
+    public var rating: PipelineRating?
 
-    public init(at: Date, item: String, kind: Kind, detail: String) {
+    public init(at: Date, item: String, kind: Kind, detail: String, head: String? = nil,
+                rating: PipelineRating? = nil) {
         self.at = at
         self.item = item
         self.kind = kind
         self.detail = detail
+        self.head = head
+        self.rating = rating
     }
 }
 
@@ -403,5 +412,56 @@ public struct LinearIssue: Codable, Equatable, Sendable {
         self.identifier = identifier
         self.url = url
         self.text = text
+    }
+}
+
+extension PipelineSettings.LinearTeam {
+    /// The Settings line `ENG=owner/repo, OPS=owner/other` (commas, semicolons or new
+    /// lines between entries) as teams, and the entries that are not `KEY=owner/repo`, as
+    /// typed. A key is ASCII letters and digits, read in capitals as Linear spells it; an
+    /// owner and a repo are ASCII letters, digits, `_`, `.` and `-`. A team named twice
+    /// keeps its first repo. Twin of `pipeline.parse_linear_teams`, which
+    /// `diplomat-core pipeline-teams` pins it to.
+    public static func parse(_ raw: String) -> (teams: [Self], bad: [String]) {
+        // Spaces, tabs and the carriage return of a pasted CRLF line, never Unicode
+        // spacing: Python's `strip()` and Foundation's whitespace sets disagree on it.
+        let space = CharacterSet(charactersIn: " \t\r\u{0B}\u{0C}")
+        let alnum: [ClosedRange<Unicode.Scalar>] = ["a"..."z", "A"..."Z", "0"..."9"]
+        func ascii(_ s: String, also extra: String) -> Bool {
+            !s.isEmpty && s.unicodeScalars.allSatisfy { c in
+                alnum.contains { $0.contains(c) } || extra.unicodeScalars.contains(c)
+            }
+        }
+        // By scalar: a `\r\n` is one Character, which would hide its `\n`.
+        var entries: [String] = []
+        var piece = String.UnicodeScalarView()
+        for c in raw.unicodeScalars {
+            if c == "," || c == ";" || c == "\n" {
+                entries.append(String(piece))
+                piece = String.UnicodeScalarView()
+            } else {
+                piece.append(c)
+            }
+        }
+        entries.append(String(piece))
+        var teams: [Self] = []
+        var bad: [String] = []
+        for entry in entries.map({ $0.trimmingCharacters(in: space) }) where !entry.isEmpty {
+            let scalars = entry.unicodeScalars
+            guard let eq = scalars.firstIndex(of: "=") else {
+                bad.append(entry)
+                continue
+            }
+            let key = String(scalars[..<eq]).trimmingCharacters(in: space)
+            let repo = String(scalars[scalars.index(after: eq)...]).trimmingCharacters(in: space)
+            let parts = repo.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard ascii(key, also: ""), parts.count == 2, parts.allSatisfy({ ascii($0, also: "_.-") }) else {
+                bad.append(entry)
+                continue
+            }
+            let upper = key.uppercased()
+            if !teams.contains(where: { $0.key == upper }) { teams.append(Self(key: upper, repo: repo)) }
+        }
+        return (teams, bad)
     }
 }

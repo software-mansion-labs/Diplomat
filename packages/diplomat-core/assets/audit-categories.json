@@ -36,7 +36,14 @@
     "comms-error": "comms",
     "comms-recovered": "comms",
     "comms-notice": "comms",
-    "comms-ban": "bans"
+    "comms-ban": "bans",
+    "pipeline-fix": "issues",
+    "pipeline-review": "review",
+    "pipeline-merge": "merge",
+    "pipeline-fracture": "issues",
+    "pipeline-notice": "system",
+    "pipeline-error": "system",
+    "pipeline-recovered": "system"
   },
   "fallback": "system"
 }

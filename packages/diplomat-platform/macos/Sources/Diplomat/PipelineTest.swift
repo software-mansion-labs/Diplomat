@@ -6,7 +6,8 @@ import DiplomatCore
 /// attempt records that keep the next sync from queueing it again, the switch that holds
 /// the queued work, and the settings and forces a sync is run with. Composed results go
 /// straight to `applyPipeline`, and `Store.pipelineTickOverride` stands in for the core's
-/// tick, so no `gh`, `claude` or Linear.
+/// tick, so no `gh`, `claude` or Linear; only `DIPLOMAT_PIPELINE_E2E` adds real syncs,
+/// against stubs (`live`).
 ///
 /// Starts no agent: the queue is drained only by the poll a headless Store never starts.
 /// The feed, the ban list, the run book and the shared config point at scratch.
@@ -47,7 +48,7 @@ enum PipelineTest {
         store.pipelineEnabled = true
         store.pipelineRate = true
         store.pipelineFix = true
-        store.pipelineFastTrack = false
+        store.pipelineFastTrack = true
         store.pipelineMerge = true
         store.pipelineFracture = false
         store.pipelineLinearTeamsRaw = "ENG=o/r"
@@ -58,13 +59,22 @@ enum PipelineTest {
         check("GitHub roots only, with the operator's login",
               settings.roots == [PipelineSettings.Root(owner: "o", repo: "r", path: scratch.path, me: "latekvo")])
         check("each switch as it stands",
-              settings.rate && settings.fix && !settings.fastTrack && settings.merge && !settings.fracture)
+              settings.rate && settings.fix && settings.fastTrack && settings.merge && !settings.fracture)
         check("the Linear teams", settings.linearTeams == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r")])
         check("no forces while none is asked for", settings.force == nil)
-        check("Linear teams: commas or new lines, entries missing a part skipped",
-              Store.pipelineTeams("ENG=o/r, OPS = o/other\nBAD, =o/x, X=nope, Y=o/, Z=/r")
+        check("Linear teams: the core's parse, keys in capitals, entries missing a part skipped",
+              Store.pipelineTeams("eng=o/r; OPS = o/other\nBAD, =o/x, X=nope, Y=o/, Z=/r, ENG=o/second")
                   == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r"),
                       PipelineSettings.LinearTeam(key: "OPS", repo: "o/other")])
+        check("…and the Settings line names the entries it skipped",
+              SettingsView.linearTeamsSummary(PipelineSettings.LinearTeam.parse("ENG=o/r, BAD"))
+                  == "Not KEY=owner/repo, so not tracked: BAD"
+                  && SettingsView.linearTeamsSummary(PipelineSettings.LinearTeam.parse(" ")) == "None: GitHub only"
+                  && SettingsView.linearTeamsSummary(PipelineSettings.LinearTeam.parse("eng=o/r,ops=o/x"))
+                      == "ENG → o/r · OPS → o/x")
+        func feed(_ action: String) -> [String] {
+            AuditLog.read().filter { $0.action == action }.map { "\($0.source) \($0.detail)" }.reversed()
+        }
 
         let issue = "https://github.com/o/r/issues/90010"
         let pr = "https://github.com/o/r/pull/90011"
@@ -132,6 +142,13 @@ enum PipelineTest {
         }
         check("…on its PR, held by the pipeline's switch",
               job(reviewKey).map { $0.prNumber == 90011 && $0.prURL == pr && $0.counter == .pipeline } == true)
+        func line(_ key: String) -> String { ask(key)?.label(roots: store.roots.count) ?? key }
+        let fixLine = line(fixKey)
+        check("the feed: a pipeline-fix line per fix, a pipeline-review line per review",
+              feed("pipeline-fix") == ["auto \(fixLine) queued", "auto \(line(linearKey)) queued"]
+                  && feed("pipeline-review") == ["auto \(line(reviewKey)) queued"]
+                  && feed("pipeline-queue").isEmpty)
+        print("  (\(fixLine), \(line(linearKey)), \(line(reviewKey)))")
         let records = store.loadPipelineAttempts()
         check("an attempt recorded per queued effect, at its stamp",
               records.keys.sorted() == [fix.key, fixLinear.key, review.key].sorted()
@@ -160,7 +177,31 @@ enum PipelineTest {
         await store.applyPipeline(result([fix]), now: t0.addingTimeInterval(2 * 3600))
         check("a fix whose run died is retried once its backoff is over, as attempt 2",
               ids() == [fixKey] && store.loadPipelineAttempts()[fix.key]?.attempts == 2)
+        check("…said so in the feed", feed("pipeline-fix").last == "auto \(fixLine) queued (attempt 2)")
         clearQueue()
+
+        print("\npipeline: each kind waits on its own switch")
+        let saved = store.loadPipelineAttempts()
+        store.savePipelineAttempts([:])
+        store.pipelineFastTrack = false
+        await store.applyPipeline(result([fix, review]), now: t0)
+        check("fast track off: its review is not queued, nor recorded",
+              ids() == [fixKey] && store.loadPipelineAttempts().keys.sorted() == [fix.key])
+        clearQueue()
+        store.savePipelineAttempts([:])
+        store.pipelineFastTrack = true
+        store.pipelineFix = false
+        await store.applyPipeline(result([fix, fixLinear, review]), now: t0)
+        check("fixes off: neither fix is queued", ids() == [reviewKey])
+        store.pipelineFix = true
+        clearQueue()
+        store.savePipelineAttempts([:])
+        var mine = items
+        mine[0].author = "LateKvo"
+        await store.applyPipeline(PipelineTickResult(at: Date(), items: mine, effects: [fix]), now: t0)
+        check("the operator's own issue: no author to ban", ask(fixKey).map { $0.author.isEmpty } == true)
+        clearQueue()
+        store.savePipelineAttempts(saved)
 
         print("\npipeline: a run that answered")
         let t1 = t0.addingTimeInterval(2 * 3600)
@@ -210,14 +251,54 @@ enum PipelineTest {
         print("\npipeline: records a sync keeps")
         let old = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1)
         let gone = "pipeline-fix:https://github.com/o/r/issues/90077"
-        let later = t0.addingTimeInterval(4 * 3600)
-        check("past the ceiling, a record no sync owes is dropped",
-              Store.retainedPipelineAttempts([gone: old], after: result([]), now: later).isEmpty)
-        check("…unless the sync had a notice and did not list its item",
+        let later = t0.addingTimeInterval(3 * 3600)
+        check("at the backoff ceiling, a record no sync owes is dropped, a notice or not",
               Store.retainedPipelineAttempts([gone: old], after: result([], notices: ["Linear: no key"]),
-                                             now: later)[gone] == old)
-        check("…a listed item's record goes even then",
-              Store.retainedPipelineAttempts([fix.key: old], after: result([], notices: ["x"]), now: later).isEmpty)
+                                             now: later).isEmpty)
+        check("…kept inside it, so a read that failed does not make it new",
+              Store.retainedPipelineAttempts([gone: old], after: result([]),
+                                             now: later.addingTimeInterval(-1))[gone] == old)
+        check("…and kept while owed, however old",
+              Store.retainedPipelineAttempts([fix.key: old], after: result([fix]),
+                                             now: t0.addingTimeInterval(30 * 86400))[fix.key] == old)
+
+        print("\npipeline: what the feed is told once")
+        func event(_ secs: Double, _ id: String, _ kind: PipelineEvent.Kind, _ detail: String) -> PipelineEvent {
+            PipelineEvent(at: t0.addingTimeInterval(secs), item: id, kind: kind, detail: detail)
+        }
+        var labelled = items
+        labelled[1].label = "#90011"
+        let merged = event(10, pr, .merged, "merged aaa111a with --admin --squash")
+        let unlisted = "https://github.com/o/r/issues/90050"
+        let split = event(10, unlisted, .fractured, "split into 2 parts")
+        let first = PipelineTickResult(at: t0, items: labelled,
+                                       events: [event(5, pr, .rated, "low/low"), merged, split],
+                                       notices: ["Linear was not read"])
+        let repeated = PipelineTickResult(at: t0, items: labelled,
+                                          events: first.events + [event(10, pr, .held, "x")],
+                                          notices: ["Linear was not read"])
+        check("no previous result: every merge and split is fresh",
+              Store.pipelineFreshEvents(first, after: nil) == [merged, split])
+        check("…else none the previous result showed, nor one older than its newest",
+              Store.pipelineFreshEvents(repeated, after: first).isEmpty
+                  && Store.pipelineFreshEvents(PipelineTickResult(at: t0, events: [event(4, pr, .merged, "old")]),
+                                               after: first).isEmpty)
+        let again = event(10, pr, .merged, "merged bbb222b with --admin --squash")
+        check("…but one in the same second as its newest, not among its events",
+              Store.pipelineFreshEvents(PipelineTickResult(at: t0, events: first.events + [again]), after: first)
+                  == [again])
+        store.pipelineResult = nil
+        let before = (feed("pipeline-merge").count, feed("pipeline-fracture").count, feed("pipeline-notice").count)
+        await store.applyPipeline(first, now: t0)
+        await store.applyPipeline(repeated, now: t0)
+        check("a merge, a split and a notice are each logged once over two syncs",
+              feed("pipeline-merge").count == before.0 + 1 && feed("pipeline-fracture").count == before.1 + 1
+                  && feed("pipeline-notice").count == before.2 + 1)
+        check("…under the item's label, else its link",
+              feed("pipeline-merge").last == "auto #90011: merged aaa111a with --admin --squash"
+                  && feed("pipeline-fracture").last == "auto \(unlisted): split into 2 parts"
+                  && feed("pipeline-notice").last == "auto Linear was not read")
+        clearQueue()
 
         print("\npipeline: what is already running")
         store.savePipelineAttempts([:])
@@ -278,6 +359,10 @@ enum PipelineTest {
         store.forcePipeline(rate: pr, fracture: issue)
         check("Rate now and Fracture are kept once each",
               store.pipelineForce == PipelineSettings.Force(rate: [pr], fracture: [issue]))
+        store.pipelineForce.rate.insert(linear, at: 0)
+        check("…and handed on sorted, as the Linux store does",
+              store.pipelineSettings.force == PipelineSettings.Force(rate: [pr, linear], fracture: [issue]))
+        store.pipelineForce.rate.removeFirst()
         store.pipelineEnabled = true
         Store.pipelineTickOverride = { settings in
             ticks.append(settings)
@@ -291,6 +376,30 @@ enum PipelineTest {
               store.pipelineForce == PipelineSettings.Force(rate: [linear], fracture: []))
         check("…and the master switch's settings", ticks.first.map { $0.rate && $0.fix && $0.roots.count == 1 } == true)
 
+        print("\npipeline: syncs held")
+        ticks = []
+        Store.pipelineTickOverride = { settings in
+            ticks.append(settings)
+            return result([])
+        }
+        let errors = feed("pipeline-error").count, recoveries = feed("pipeline-recovered").count
+        let pinned = store.roots
+        let guessedWhy = "no repo root in Settings resolves to a GitHub or GitLab checkout"
+        store.pinRoots(pinned, guessed: true)
+        await store.runPipelineSyncOnce()
+        await store.runPipelineSyncOnce()
+        check("no root resolved: no sync runs, and the forces wait",
+              ticks.isEmpty && store.pipelineForce.rate == [linear])
+        check("…held with its reason, logged once",
+              store.pipelineError == guessedWhy && feed("pipeline-error").count == errors + 1
+                  && feed("pipeline-error").last == "auto \(guessedWhy)")
+        store.pinRoots(pinned)
+        await store.runPipelineSyncOnce()
+        check("…resolved again: it syncs, and says so once",
+              ticks.count == 1 && store.pipelineError == nil
+                  && feed("pipeline-recovered").count == recoveries + 1
+                  && feed("pipeline-recovered").last == "auto Pipeline syncing again")
+
         print("\npipeline: Start fix")
         store.pipelineForce = PipelineSettings.Force()
         Store.pipelineTickOverride = nil
@@ -298,19 +407,55 @@ enum PipelineTest {
         store.savePipelineAttempts([fix.key: ReviewAttempt(requestedAt: "fix", lastDispatchedAt: now,
                                                            attempts: 1, concludedAt: now)])
         store.pipelineResult = result([fixLinear])
+        store.pipelineEnabled = false
+        check("off: nothing is queued", store.startPipelineFix(items[0]) == "The pipeline is off" && ids().isEmpty)
+        store.pipelineEnabled = true
+        let screenLines = feed("pipeline-fix").count
         check("a GitHub candidate is queued past its concluded record",
               store.startPipelineFix(items[0]) == nil && ids() == [fixKey]
                   && store.loadPipelineAttempts()[fix.key]?.attempts == 2)
+        check("…logged as the screen's",
+              feed("pipeline-fix").count == screenLines + 1
+                  && feed("pipeline-fix").last == "panel \(fixLine) queued from the Pipeline screen")
         check("…once", store.startPipelineFix(items[0]) == "Its fix is already queued" && ids() == [fixKey])
         check("a Linear candidate, from the effect its text came with",
               store.startPipelineFix(items[2]) == nil && ids().sorted() == [fixKey, linearKey].sorted())
         store.pipelineResult = result([])
         clearQueue()
-        check("…and not without it", store.startPipelineFix(items[2]) != nil && ids().isEmpty)
+        check("…and not without it",
+              store.startPipelineFix(items[2]) == "Diplomat has this Linear issue's text only while Open fix PRs is on"
+                  && ids().isEmpty)
         var theirs = items[0]
         theirs.writable = false
         check("nor an issue assigned to someone else, which the fix would claim",
-              store.startPipelineFix(theirs) != nil && ids().isEmpty)
+              store.startPipelineFix(theirs) == "It is assigned to someone else" && ids().isEmpty)
+        var elsewhere = items[0]
+        elsewhere.id = "https://github.com/x/gone/issues/90012"
+        elsewhere.repo = "x/gone"
+        check("nor one in a repo that is no root here",
+              store.startPipelineFix(elsewhere) == "x/gone is no GitHub repo root here, so there is nowhere to fix it")
+        store.pinAgentRows([agent(issue)])
+        check("nor one an agent is fixing", store.startPipelineFix(items[0]) == "An agent is already fixing it")
+        store.pinAgentRows([])
+
+        print("\npipeline: the screen's actions")
+        func at(_ stage: PipelineStage, _ kind: PipelineKind = .issue, writable: Bool = true) -> PipelineItem {
+            var i = item(issue, kind, author: "bob")
+            i.stage = stage
+            i.writable = writable
+            return i
+        }
+        check("Fracture: a writable open issue not split yet",
+              [PipelineStage.unrated, .human, .candidate].allSatisfy { PipelineView.canFracture(at($0), edges: []) }
+                  && !PipelineView.canFracture(at(.fixing), edges: [])
+                  && !PipelineView.canFracture(at(.human, writable: false), edges: [])
+                  && !PipelineView.canFracture(at(.human, .pr), edges: [])
+                  && !PipelineView.canFracture(at(.human),
+                                               edges: [PipelineGraph.Edge(from: issue, to: "c", kind: .child)]))
+        check("Start fix: a writable candidate issue only",
+              PipelineView.canStartFix(at(.candidate)) && !PipelineView.canStartFix(at(.human))
+                  && !PipelineView.canStartFix(at(.candidate, writable: false))
+                  && !PipelineView.canStartFix(at(.candidate, .pr)))
 
         print("\npipeline: identity")
         check("a Linear link by its identifier, a GitHub one by its item key, anything else as it is",
@@ -318,7 +463,131 @@ enum PipelineTest {
                   && Store.pipelineIdentity(issue) == "o/r#90010"
                   && Store.pipelineIdentity("https://example.com/x") == "https://example.com/x")
 
+        if let harness = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_E2E"], !harness.isEmpty {
+            await live(store, harness: URL(fileURLWithPath: harness), check: check)
+        }
+
         print(pass ? "\nPIPELINE TEST: PASS" : "\nPIPELINE TEST: FAIL")
         return pass
+    }
+
+    /// `DIPLOMAT_PIPELINE_E2E=<dir>`: real syncs (`PipelineTick.run`) of `acme/app`, checked
+    /// out at `<dir>/checkout`, through the stubs DIPLOMAT_GH, DIPLOMAT_CLAUDE and
+    /// DIPLOMAT_LINEAR_API name, which log to `<dir>/gh.log`, `claude.log` and `linear.log`
+    /// (the harness in the build notes: an operator `op`, issues #1 and #5, PR #2 fixing
+    /// #1, PR #3 labelled cleared by hand at a clean head, someone else's PR #4, and
+    /// Linear's ENG-1, every rating low/low).
+    @MainActor
+    private static func live(_ store: Store, harness: URL, check: (String, Bool) -> Void) async {
+        print("\npipeline: real syncs against the stubs in \(harness.path)")
+        func log(_ name: String) -> [Any] {
+            let text = (try? String(contentsOf: harness.appendingPathComponent(name), encoding: .utf8)) ?? ""
+            return text.split(separator: "\n").compactMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) }
+        }
+        func ghWrites() -> [String] {
+            log("gh.log").compactMap { $0 as? [String] }
+                .filter { !$0.starts(with: ["api", "graphql"]) && !$0.starts(with: ["pr", "diff"]) }
+                .map { $0.joined(separator: " ") }
+        }
+        func linearWrites() -> [String] {
+            log("linear.log").compactMap { ($0 as? [String: Any])?["op"] as? String }
+                .filter { $0 != "Issues" && $0 != "Labels" }
+        }
+        func truncate() {
+            for name in ["gh.log", "linear.log", "claude.log"] {
+                try? Data().write(to: harness.appendingPathComponent(name))
+            }
+        }
+        func feed() -> [String] {
+            AuditLog.read().filter { $0.action.hasPrefix("pipeline-") }
+                .map { "\($0.source) \($0.action) \($0.detail)" }.reversed()
+        }
+        func ids() -> [String] { store.queuedTasks.map(\.id).sorted() }
+        func prompt(_ key: String) -> String { store.queuedTasks.first { $0.id == key }?.job.prompt ?? "" }
+
+        Store.pipelineTickOverride = nil
+        Store.pipelineTickLive = true
+        defer { Store.pipelineTickLive = false }
+        store.usernameOverride = "op"
+        store.pinRoots([PRRef.LocalRepo(owner: "acme", repo: "app",
+                                        path: harness.appendingPathComponent("checkout").path)])
+        store.pipelineEnabled = true
+        store.pipelineRate = true
+        store.pipelineFix = true
+        store.pipelineFastTrack = true
+        store.pipelineMerge = true
+        store.pipelineFracture = false
+        store.pipelineLinearTeamsRaw = "ENG=acme/app"
+        store.pipelineForce = PipelineSettings.Force()
+        store.pipelineResult = nil
+        store.requestedWork = []
+        store.queuedTasks = []
+        store.savePipelineAttempts([:])
+        store.pinAgentRows([])
+        let feedBefore = feed().count
+
+        truncate()
+        await store.runPipelineSyncOnce()
+        let writes = ghWrites()
+        print("  sync 1 gh writes:\n" + writes.map { "    gh \($0)" }.joined(separator: "\n"))
+        print("  sync 1 Linear writes: \(linearWrites())")
+        check("sync 1: gh labels #2 and #5 low/low, fast-tracks #2, and merges #3 at its head, nothing else",
+              writes == [
+                  "api -X POST repos/acme/app/issues/2/labels -f labels[]=risk:low",
+                  "api -X POST repos/acme/app/issues/2/labels -f labels[]=complexity:low",
+                  "api -X POST repos/acme/app/issues/5/labels -f labels[]=risk:low",
+                  "api -X POST repos/acme/app/issues/5/labels -f labels[]=complexity:low",
+                  "api -X POST repos/acme/app/issues/2/labels -f labels[]=diplomat:fast-track",
+                  "pr merge 3 -R acme/app --admin --squash --match-head-commit " + String(repeating: "e5", count: 20),
+              ])
+        check("…the hand-cleared #3 re-rated first, by claude", log("claude.log").count == 4
+              && ((log("claude.log").first as? [String: Any])?["stdin"] as? [String])?.last == "| Guard nil avatar")
+        check("…and Linear labels ENG-1 low/low", linearWrites() == ["AddLabel", "AddLabel"])
+        let reviewKey = "review:acme/app#2", fixKey = "issues:acme/app#5", linearKey = "issues:linear:ENG-1"
+        check("its three effects are queued asks", ids() == [fixKey, linearKey, reviewKey].sorted())
+        for (key, marker) in [(reviewKey, "FAST TRACK"), (linearKey, "Take Linear issue"), (linearKey, "FAST TRACK"),
+                              (fixKey, "FAST TRACK")] {
+            let hit = prompt(key).split(separator: "\n").first { $0.contains(marker) } ?? "(none)"
+            print("  \(key) prompt: \(hit.prefix(150))…")
+        }
+        check("…the review's prompt carries the fast-track block",
+              prompt(reviewKey).contains("THIS PR IS ON THE FAST TRACK"))
+        check("…the Linear fix's the Linear scope and the pipeline's fix block",
+              prompt(linearKey).contains("Take Linear issue ENG-1 (https://linear.app/acme/issue/ENG-1), fix it in acme/app")
+                  && prompt(linearKey).contains("Header is blue, should be purple.")
+                  && prompt(linearKey).contains("THIS ISSUE IS ON DIPLOMAT'S FAST TRACK"))
+        check("…the GitHub fix's the pipeline's fix block, no Linear scope",
+              prompt(fixKey).contains("THIS ISSUE IS ON DIPLOMAT'S FAST TRACK") && !prompt(fixKey).contains("Linear issue"))
+        let lines = Array(feed().dropFirst(feedBefore))
+        print("  sync 1 feed:\n" + lines.map { "    \($0)" }.joined(separator: "\n"))
+        check("…and the feed has each ask and the merge once",
+              lines.filter { $0.hasPrefix("auto pipeline-fix ") }.count == 2
+                  && lines.filter { $0.hasPrefix("auto pipeline-review ") }.count == 1
+                  && lines.filter { $0.hasPrefix("auto pipeline-merge ") }
+                      == ["auto pipeline-merge #3: merged e5e5e5e with --admin --squash"]
+                  && lines.count == 4)
+
+        // Events are stamped to the second; a sync in a later one tells them apart.
+        try? await Task.sleep(nanoseconds: 1_100_000_000)
+        truncate()
+        let queued = ids(), attempts = store.loadPipelineAttempts()
+        await store.runPipelineSyncOnce()
+        check("sync 2, nothing changed: gh, Linear and claude are only read",
+              ghWrites().isEmpty && linearWrites().isEmpty && log("claude.log").isEmpty
+                  && !log("gh.log").isEmpty)
+        check("…nothing more is queued or attempted, and the feed is told nothing",
+              ids() == queued && store.loadPipelineAttempts() == attempts && feed().count == feedBefore + 4)
+
+        store.pipelineEnabled = false
+        check("master off: none of the queued asks may start",
+              store.queuedTasks.count == 3 && store.drainableTasks.isEmpty)
+        store.requestedWork = []
+        store.queuedTasks = []
+        store.savePipelineAttempts([:])
+        truncate()
+        await store.runPipelineSyncOnce()
+        if let last = store.pipelineResult { await store.applyPipeline(last) }
+        check("…and nothing syncs or is queued", log("gh.log").isEmpty && ids().isEmpty
+              && store.loadPipelineAttempts().isEmpty && feed().count == feedBefore + 4)
     }
 }
