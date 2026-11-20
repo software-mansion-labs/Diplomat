@@ -325,7 +325,7 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Whether to auto-dispatch a focused review when someone requests my review on a
+    /// Whether to auto-dispatch a review when someone requests my review on a
     /// PR (someone else's PR → review-only, leave comments). Persisted; kicks a poll on
     /// enable. Independent of `prAutofixEnabled`.
     @Published var reviewRequestsEnabled: Bool {
@@ -640,6 +640,22 @@ final class Store: ObservableObject {
         didSet { persist(softApproveEnabled, forKey: Keys.softApproveEnabled) }
     }
 
+    /// The `ReviewCatalog` depth id an auto-review runs at — a review request's, and a
+    /// goal PR's on a new commit — unless `autoReviewOverrides` names its author.
+    @Published var autoReviewDefaultDepth: String {
+        didSet { persist(autoReviewDefaultDepth, forKey: Keys.autoReviewDefaultDepth) }
+    }
+
+    @Published var autoReviewOverrides: [AutoReviewOverride] {
+        didSet { persistJSON(autoReviewOverrides, forKey: Keys.autoReviewOverrides) }
+    }
+
+    /// The depth an auto-review of `author`'s PR runs at, `me` being who I am in its repo.
+    func autoReviewDepth(of author: String, me: String) -> String {
+        AutoReviewDepth.resolve(author: author, me: me, overrides: autoReviewOverrides,
+                                otherwise: autoReviewDefaultDepth)
+    }
+
     /// Auto-review verdict policy: each flag independently withholds the "final pass +
     /// verdict" escalation for one class of review-requested PR (SKILL / installer /
     /// community). All default ON. Persisted; no poll kick needed (only affects the next
@@ -879,6 +895,8 @@ final class Store: ObservableObject {
         static let reviewRequestsHandled = "reviewRequestsHandled"
         static let autoApproveEnabled = "autoApproveEnabled"
         static let softApproveEnabled = "softApproveEnabled"
+        static let autoReviewDefaultDepth = "autoReviewDefaultDepth"
+        static let autoReviewOverrides = "autoReviewOverrides"
         static let verdictWithholdSkill = "verdictWithholdSkill"
         static let verdictWithholdInstaller = "verdictWithholdInstaller"
         static let verdictWithholdCommunity = "verdictWithholdCommunity"
@@ -1089,6 +1107,11 @@ final class Store: ObservableObject {
         // Soft-approvals ON by default (absent key ⇒ true): a clean comments-only review
         // still submits a thank-you COMMENT review — never an APPROVE on my behalf.
         softApproveEnabled = defaults.object(forKey: Keys.softApproveEnabled) as? Bool ?? true
+        autoReviewDefaultDepth = defaults.string(forKey: Keys.autoReviewDefaultDepth)
+            ?? AutoReviewDepth.defaultDepth
+        autoReviewOverrides = defaults.data(forKey: Keys.autoReviewOverrides)
+            .flatMap { try? JSONDecoder().decode([AutoReviewOverride].self, from: $0) }
+            ?? AutoReviewDepth.seed
         verdictWithholdSkill = defaults.object(forKey: Keys.verdictWithholdSkill) as? Bool ?? true
         verdictWithholdInstaller = defaults.object(forKey: Keys.verdictWithholdInstaller) as? Bool ?? true
         verdictWithholdCommunity = defaults.object(forKey: Keys.verdictWithholdCommunity) as? Bool ?? true
@@ -2693,7 +2716,7 @@ final class Store: ObservableObject {
         if !scan.fresh.isEmpty { refreshAudit() }
     }
 
-    /// PRs that request MY review: dispatch a focused review whenever I OWE
+    /// PRs that request MY review: dispatch a review whenever I OWE
     /// one — i.e. the latest "review requested from me" is newer than my last review of
     /// that PR. Robust to re-requests (a fresh request re-qualifies even after I reviewed
     /// once) and does NOT depend on observing a "request removed" transition, which a
@@ -4036,10 +4059,9 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Review a PR someone asked me to review (focused depth, formal
-    /// per-line comments; verdict only under the auto-approve policy) — the
-    /// review-request monitor's job builder. `attemptNumber` ≥2 means a retry of a
-    /// review a previous agent left unaddressed.
+    /// Review a PR someone asked me to review (`reviewRequestConfig`) — the review-request
+    /// monitor's job builder. `attemptNumber` ≥2 means a retry of a review a previous
+    /// agent left unaddressed.
     @discardableResult
     private func dispatchReviewRequest(_ r: AutofixMonitor.ReviewRequest, attemptNumber: Int = 1) async -> Bool {
         // Auto-approvals must be enabled AND no configured suppressor may match (SKILL /
@@ -4059,12 +4081,7 @@ final class Store: ObservableObject {
         }
         let key = item(url: r.url, number: r.number)
         guard let root = root(ofItem: key) else { return false }
-        var cfg = ReviewConfig(depth: "standard", target: .specific, me: knownMe(for: root),
-                               markReady: false, leaveReviews: true, replyToReviews: false,
-                               specificPR: String(r.number),
-                               softApprove: soft, specificAuthor: .theirs)
-        cfg.automaticVerdict = verdict
-        cfg.home = root
+        let cfg = reviewRequestConfig(r, root: root, verdict: verdict)
         let job = AgentJob(kind: "review", auditAction: "review-req",
                            label: "Review-req · \(itemLabel(key)) (@\(r.author))\(tag)",
                            prompt: cfg.buildPrompt(), prURL: r.url, prNumber: r.number,
@@ -4074,6 +4091,22 @@ final class Store: ObservableObject {
                            counter: .reviewRequests, attemptStamp: AttemptStamp.reviewRequest(r),
                            directory: root.path)
         return await dispatchAgent(job, source: .auto, attemptNumber: attemptNumber).didSpawn
+    }
+
+    /// The review-request monitor's review of `r` in `root`, at `autoReviewDepth(of:me:)`
+    /// and left on the PR; `verdict` lets a clean one approve, and without it a clean
+    /// one soft-approves unless that is switched off.
+    func reviewRequestConfig(_ r: AutofixMonitor.ReviewRequest, root: PRRef.LocalRepo,
+                             verdict: Bool) -> ReviewConfig {
+        let me = knownMe(for: root)
+        var cfg = ReviewConfig(depth: autoReviewDepth(of: r.author, me: me),
+                               target: .specific, me: me, markReady: false,
+                               leaveReviews: true, replyToReviews: false,
+                               specificPR: String(r.number),
+                               softApprove: softApproveEnabled, specificAuthor: .theirs)
+        cfg.automaticVerdict = verdict
+        cfg.home = root
+        return cfg
     }
 
     var reviewRequestsHandled: Int {

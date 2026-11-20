@@ -227,13 +227,16 @@ beside the cap, which live in the shared `~/.diplomat/config.json` ([`appconfig.
 - **Auto-queue fixes for my PRs / Auto-queue reviews that request me** — the two
   monitor toggles with live
   status, and under the review-requests one the **author allowlist** (*Only these
-  authors*, blank = anyone), the **auto-approve** master toggle
+  authors*, blank = anyone), the **review depth** (default standard) with its
+  **per-author depth** table (login → depth, the first row naming the PR's author
+  winning; it starts as *me* at max), the **auto-approve** master toggle
   plus its three withhold-the-verdict suppressors (SKILL / installer / community),
   and the **soft-approve** toggle (default ON — a clean comments-only review is
   submitted as a COMMENT review with a friendly thank-you body, never an APPROVE). A monitor switched off keeps
   polling and keeps listing what it finds under [Agent tasks](#agent-tasks); what
   stops is the automatic start — which is why the allowlist stays editable while it
-  is off, alone in that nest, since it is what decides which requests get listed.
+  is off, since it is what decides which requests get listed, and so do the depth
+  rows, since a goal's reviews run at them either way.
 - **Fix new community issues** — the [new-community-issue
   monitor](../../../docs/automation.md#autonomous-monitors) (default **ON**). Unlike the two
   toggles above, switched off it queues nothing, and issues filed while it is off

@@ -535,7 +535,8 @@ struct SettingsView: View {
         """
 
     private static let reviewRequestsDetail = """
-        One focused pass over changed behavior. Re-reviews check new commits and open findings. \
+        Inline comments — read-only, never their branch. \
+        Re-reviews check new commits and open findings. \
         A review that never lands (agent died, window closed) is retried. Off, the \
         requests still list under Agent tasks, queued for “execute now” only.
         """
@@ -554,13 +555,14 @@ struct SettingsView: View {
         }
     }
 
-    /// Who an auto-review may run for, and what it is allowed to submit.
+    /// Who an auto-review may run for, how deep it goes, and what it is allowed to submit.
     ///
     /// Only the verdict rows follow the switch above, because nothing they govern
     /// happens until a review runs. The author list outlives it: a switched-off
     /// monitor still polls and still lists what it finds, and the list is what decides
     /// which requests those are — hidden while it is off, it would be filtering rows
-    /// the operator has no way to reach.
+    /// the operator has no way to reach. The depth rows outlive it too: a goal's
+    /// reviews run at them whatever the switch says.
     private var reviewPolicyBlock: some View {
         NestedSettings(tint: .orange) {
             SettingRow(title: "Only these authors",
@@ -568,8 +570,85 @@ struct SettingsView: View {
                        stacked: true) {
                 reviewAllowlistField
             }
+            autoReviewDepthRow
+            autoReviewOverridesRow
             if store.reviewRequestsEnabled { reviewVerdictRows }
         }
+    }
+
+    private var autoReviewDepthRow: some View {
+        let depth = ReviewCatalog.depth(id: store.autoReviewDefaultDepth)
+        return SettingRow(title: "Review depth", detail: "\(depth.title) — \(depth.blurb)",
+                          stacked: true) {
+            depthPicker("Review depth", $store.autoReviewDefaultDepth)
+                .pickerStyle(.segmented).controlSize(.small)
+        }
+    }
+
+    private func depthPicker(_ title: String, _ selection: Binding<String>) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(ReviewCatalog.depths()) { Text($0.id.capitalized).tag($0.id) }
+        }
+        .labelsHidden()
+    }
+
+    private var autoReviewOverridesRow: some View {
+        SettingRow(title: "Per-author depth",
+                   detail: "Overrides the depth above for these authors' PRs; the first row "
+                         + "naming one wins.",
+                   stacked: true) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(store.autoReviewOverrides) { autoReviewOverrideRow($0) }
+                HStack(spacing: 12) {
+                    Button {
+                        store.autoReviewOverrides.append(AutoReviewOverride(login: "", depth: "max"))
+                    } label: {
+                        Label("Add author", systemImage: "plus.circle")
+                    }
+                    if !store.autoReviewOverrides.contains(where: { $0.login == nil }) {
+                        Button {
+                            store.autoReviewOverrides.append(AutoReviewOverride(login: nil, depth: "max"))
+                        } label: {
+                            Label("Add me", systemImage: "plus.circle")
+                        }
+                    }
+                }
+                .buttonStyle(.borderless).font(.callout)
+            }
+        }
+    }
+
+    /// Bindings find the row by `id`: by index, a field still being edited when a row
+    /// above it goes would write into the row that slid into its place.
+    private func autoReviewOverrideRow(_ row: AutoReviewOverride) -> some View {
+        let index = { store.autoReviewOverrides.firstIndex { $0.id == row.id } }
+        let login = Binding<String>(
+            get: { index().map { store.autoReviewOverrides[$0].login ?? "" } ?? "" },
+            set: { if let i = index() { store.autoReviewOverrides[i].login = $0 } })
+        let depth = Binding<String>(
+            get: { index().map { store.autoReviewOverrides[$0].depth } ?? "" },
+            set: { if let i = index() { store.autoReviewOverrides[i].depth = $0 } })
+        let me = store.effectiveMe
+        return HStack(spacing: 6) {
+            Image(systemName: "person.fill").font(.caption).foregroundStyle(.secondary)
+            if row.login == nil {
+                Text(me.isEmpty ? "me" : "me (@\(me))").font(.callout)
+            } else {
+                TextField("login", text: login).textFieldStyle(.plain).font(.callout)
+            }
+            Spacer(minLength: 4)
+            depthPicker("Depth for this author", depth)
+                .pickerStyle(.menu).controlSize(.small).fixedSize()
+            Button {
+                if let i = index() { store.autoReviewOverrides.remove(at: i) }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.borderless).foregroundStyle(.secondary)
+            .tooltip("Remove this row")
+        }
+        .padding(7)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.12)))
     }
 
     @ViewBuilder

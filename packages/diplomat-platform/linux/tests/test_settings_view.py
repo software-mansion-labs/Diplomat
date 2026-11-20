@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from diplomat_runtime import autofix
+from diplomat_runtime import autofix, review
 from diplomat_app.settingsview import SettingsView
 from diplomat_app.store import Store
 
@@ -201,6 +201,74 @@ def test_the_author_allowlist_stays_editable_while_the_monitor_is_off(make_view)
     view._sw_review_req.setChecked(True)
     assert view._allowlist_setting_row.isVisibleTo(view)
     assert view._verdict_rows.isVisibleTo(view)
+
+
+def test_the_review_depth_picker_opens_on_standard_and_writes_through(view):
+    picker = view._auto_review_depth
+    assert picker.value() == "standard"
+    picker._group.button(review.depth_ids().index("max")).click()
+    assert view.store.auto_review_default_depth == "max"
+    assert view._depth_setting_row._detail.text().startswith(review.depth_by_id("max")["title"])
+
+
+def test_the_depth_rows_stay_editable_while_the_monitor_is_off(make_view):
+    """A goal's reviews run at them whatever the review-request switch says."""
+    view = make_view(review_requests_enabled=False)
+    assert view._depth_setting_row.isVisibleTo(view)
+    assert view._overrides_layout.parentWidget().isVisibleTo(view)
+    assert not view._verdict_rows.isVisibleTo(view)
+
+
+def test_a_removed_me_row_can_be_added_back(view):
+    from PySide6.QtWidgets import QLabel, QPushButton
+
+    lines = view._overrides_layout
+    assert not view._override_add_me.isVisibleTo(view)
+    lines.itemAt(0).widget().findChild(QPushButton).click()
+    assert view.store.auto_review_overrides == []
+    assert view._override_add_me.isVisibleTo(view)
+
+    view._override_add_me.click()
+    assert view.store.auto_review_overrides == [autofix.AutoReviewOverride(None, "max")]
+    assert lines.itemAt(0).widget().findChild(QLabel).text().startswith("me")
+    assert not view._override_add_me.isVisibleTo(view)
+
+
+def test_the_me_row_shows_a_login_a_poll_resolves(view):
+    from PySide6.QtWidgets import QLabel
+
+    label = view._overrides_layout.itemAt(0).widget().findChild(QLabel)
+    view.store.me = "resolved"
+    view.store.autofix_changed.emit()
+    assert label.text() == "me (@resolved)"
+
+
+def test_the_depth_table_opens_on_me_at_max_and_writes_every_edit_through(make_view):
+    from PySide6.QtWidgets import QComboBox, QLabel, QLineEdit, QPushButton
+
+    Row = autofix.AutoReviewOverride
+    view = make_view(username_override="octo")
+    lines = view._overrides_layout
+    assert lines.count() == 1
+    me_line = lines.itemAt(0).widget()
+    assert me_line.findChild(QLabel).text() == "me (@octo)"
+    assert me_line.findChild(QComboBox).currentData() == "max"
+    view._identity_row._control.setText("other")
+    assert me_line.findChild(QLabel).text() == "me (@other)"
+
+    view._override_add.click()
+    assert view.store.auto_review_overrides == [Row(None, "max"), Row("", "max")]
+    added = lines.itemAt(1).widget()
+    added.findChild(QLineEdit).setText("@HubGan")
+    box = added.findChild(QComboBox)
+    box.setCurrentIndex(box.findData("deep"))
+    assert view.store.auto_review_overrides == [Row(None, "max"), Row("@HubGan", "deep")]
+    assert view.store.auto_review_depth("hubgan", "other") == "deep"
+
+    me_line.findChild(QPushButton).click()
+    assert view.store.auto_review_overrides == [Row("@HubGan", "deep")]
+    assert lines.count() == 1
+    assert lines.itemAt(0).widget().findChild(QLineEdit).text() == "@HubGan"
 
 
 def test_every_row_names_its_control_for_a_screen_reader(view):

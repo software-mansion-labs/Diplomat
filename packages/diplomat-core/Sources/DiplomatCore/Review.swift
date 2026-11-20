@@ -565,3 +565,45 @@ public enum AuthorAllowlist {
         return list.contains { $0.lowercased() == l }
     }
 }
+
+/// One row of the auto-review depth table: PRs by `login` are reviewed at `depth`.
+/// A `nil` login is me, whoever that is in the repo under review; `""` is a row
+/// whose login is not typed yet, and names nobody. `id` tells rows apart in an editor;
+/// it is neither stored nor compared.
+public struct AutoReviewOverride: Codable, Equatable, Identifiable {
+    public let id = UUID()
+    public var login: String?
+    public var depth: String
+
+    public init(login: String?, depth: String) {
+        self.login = login
+        self.depth = depth
+    }
+
+    private enum CodingKeys: String, CodingKey { case login, depth }
+
+    public static func == (a: Self, b: Self) -> Bool { a.login == b.login && a.depth == b.depth }
+}
+
+/// The depth an auto-review runs at: that of the first table row naming the PR's
+/// author, else the operator's default. Logins compare case-insensitively, a
+/// leading `@` off.
+///
+/// Python twin: `AutoReviewOverride` / `auto_review_depth` in `autofix.py`.
+public enum AutoReviewDepth {
+    public static let defaultDepth = "standard"
+    public static let seed = [AutoReviewOverride(login: nil, depth: "max")]
+
+    public static func resolve(author: String, me: String, overrides: [AutoReviewOverride],
+                               otherwise: String) -> String {
+        let who = author.lowercased()
+        guard !who.isEmpty else { return otherwise }
+        let row = overrides.first { row in
+            let login = row.login.map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).drop(while: { $0 == "@" })
+            }
+            return (login.map(String.init) ?? me).lowercased() == who
+        }
+        return row?.depth ?? otherwise
+    }
+}

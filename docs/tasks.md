@@ -109,8 +109,8 @@ Any task with GitHub links, including your own, can switch between **Observe** a
   fix, feature requests included (a goal's issues often are), in the issue-fix band of the queue,
   under the task cap like any queued work. As a sweep's fix, it leaves the issue alone if it is
   closed or assigned by the time its turn comes. It is asked for once; `+` asks again
-- with **Review on new commits** on, each open PR is reviewed once per head commit, at max depth with
-  per-line comments and no verdict (your own PR as yours)
+- with **Review on new commits** on, each open PR is reviewed once per head commit, at the review-request
+  monitor's [depth for its author](settings.md#settings) with per-line comments and no verdict (your own PR as yours)
 - your own open PRs get their unresolved review threads fixed, through the PR auto-fix path and its
   backoff, even with that monitor switched off
 
