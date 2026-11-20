@@ -91,6 +91,8 @@ private final class Trackers {
     var linearChildren: [[String: Any]] = []
     /// Every argument and stdin handed to `gh` and `claude`.
     var handed: [String] = []
+    /// `claude`, or a `gh` call's first two arguments, for each call in order.
+    var sequence: [String] = []
     var authorizations: Set<String> = []
     /// What a `claude` call broke of the sandbox it is owed, if anything.
     var claudeFaults: [String] = []
@@ -112,6 +114,7 @@ private final class Trackers {
     func gh(_ args: [String]) -> PipelineIO.Exit {
         ghCalls.append(args)
         handed += args
+        sequence.append(args.prefix(2).joined(separator: " "))
         if let hook = onGH {
             onGH = nil
             hook()
@@ -272,6 +275,7 @@ private final class Trackers {
     func claude(_ args: [String], _ input: Data, _ cwd: String, _ timeout: TimeInterval) -> PipelineIO.Exit {
         let stdin = String(decoding: input, as: UTF8.self)
         handed += args + [stdin]
+        sequence.append("claude")
         let model = args.firstIndex(of: "--model").map { args[$0 + 1] } ?? "?"
         let schema = args.firstIndex(of: "--json-schema").map { args[$0 + 1] } ?? ""
         let fracture = schema.contains("\"parts\"")
@@ -457,17 +461,28 @@ private func fixture() -> Trackers {
     return t
 }
 
+private typealias Synced = (result: PipelineTickResult, writes: [String], claude: [String], events: [PipelineEvent])
+
 /// One sync, and what it did: the writes and `claude` calls it made, and the events it
 /// logged (each sync is run at its own `now`).
 private func sync(_ t: Trackers, _ settings: PipelineSettings, _ dir: URL, _ now: Date,
-                  key: String? = smokeKey) -> (result: PipelineTickResult, writes: [String], claude: [String],
-                                               events: [PipelineEvent]) {
+                  key: String? = smokeKey) -> Synced {
     let w = t.writes.count, c = t.claudeCalls.count
     let r = PipelineTick.run(settings: settings, now: now, dir: dir, io: t.io(key: key))
     return (r, Array(t.writes[w...]), Array(t.claudeCalls[c...]), r.events.filter { $0.at == now })
 }
 
 private func item(_ r: PipelineTickResult, _ id: String) -> PipelineItem? { r.items.first { $0.id == id } }
+
+/// An earlier sync's `rerated` low/low of PR `n` at `head`, as this Diplomat's log holds
+/// it: what makes a `cleared` at that head Diplomat's own.
+private func seedRerate(_ dir: URL, _ n: Int, _ head: String, at when: Date) throws {
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    var line = try CommsLog.encoder.encode(PipelineEvent(at: when, item: prURL(n), kind: .rerated,
+                                                         detail: "low risk, low complexity", head: head, rating: low))
+    line.append(UInt8(ascii: "\n"))
+    try line.write(to: dir.appendingPathComponent("log.jsonl"))
+}
 
 /// `[label kind]` for each event, the shape the sequences below are asserted in.
 private func trail(_ events: [PipelineEvent], _ r: PipelineTickResult) -> [String] {
@@ -611,6 +626,17 @@ func pipelineSmoke() throws {
     }
     check((try? CommsLog.decoder.decode(PipelineEffect.self, from: Data(#"{"kind":"merge","repo":"a/b","url":"u"}"#.utf8))) == nil,
           "an unknown effect kind does not decode")
+    let proof = PipelineEvent(at: CommsLog.parseISO("2026-11-20T11:00:00Z")!, item: prURL(13), kind: .rerated,
+                              detail: "d", head: sha("c3"), rating: low)
+    let proofJSON = String(decoding: try CommsLog.encoder.encode(proof), as: UTF8.self)
+    check(proofJSON == #"{"at":"2026-11-20T11:00:00Z","detail":"d","head":"\#(sha("c3"))","item":"\#(prURL(13))","#
+          + #""kind":"rerated","rating":{"complexity":"low","risk":"low"}}"#, "a re-rate's event JSON: \(proofJSON)")
+    check(try CommsLog.decoder.decode(PipelineEvent.self, from: Data(proofJSON.utf8)) == proof)
+    let oldLine = #"{"at":"2026-11-20T11:00:00Z","detail":"d","item":"x","kind":"rated"}"#
+    let old = try CommsLog.decoder.decode(PipelineEvent.self, from: Data(oldLine.utf8))
+    check(old.head == nil && old.rating == nil
+          && String(decoding: try CommsLog.encoder.encode(old), as: UTF8.self) == oldLine,
+          "an event logged without a head or rating reads and writes as it was")
     let bare = try CommsLog.decoder.decode(PipelineSettings.self, from: Data(
         #"{"roots":[{"owner":"acme","repo":"app","path":"/w","me":"op"}]}"#.utf8))
     check(bare == PipelineSettings(roots: [.init(owner: "acme", repo: "app", path: "/w", me: "op")]),
@@ -633,6 +659,8 @@ func pipelineSmoke() throws {
     let t0 = CommsLog.parseISO("2026-11-20T12:00:00Z")!
     let dir = base.appendingPathComponent("main")
     let t = fixture()
+    // #13's `cleared` is this Diplomat's: an earlier sync rated it low/low again at c3.
+    try seedRerate(dir, 13, sha("c3"), at: t0.addingTimeInterval(-3600))
 
     // Sync 1: four ratings (the budget), clean PRs re-rated first.
     let s1 = sync(t, every, dir, t0)
@@ -663,6 +691,10 @@ func pipelineSmoke() throws {
     check(s1.events.contains { $0.kind == .rated && $0.detail.hasPrefix("high risk, low complexity, floored by its diff (touches package.json") },
           "a floored rating says why")
     check(s1.events.contains { $0.kind == .held && $0.detail == "CI still running" })
+    check(s1.events.first { $0.kind == .rerated && $0.item == prURL(14) }.map { "\($0.head ?? "") \($0.rating == low)" }
+          == "\(sha("d4")) true", "a re-rate logs its head and rating")
+    check(s1.events.first { $0.kind == .rated && $0.item == prURL(12) }?.rating == rating(.high, .low),
+          "a rating logs what was written, floored")
     check(t.claudeFaults.isEmpty, "claude sandbox: \(t.claudeFaults)")
     check(t.prs.first { $0.number == 13 }?.state == "MERGED")
     func stage(_ r: PipelineTickResult, _ id: String) -> String {
@@ -798,13 +830,43 @@ func pipelineSmoke() throws {
     check(stdin1.components(separatedBy: "\n").filter { $0.contains("END UNTRUSTED TRACKER TEXT") }.count == 1,
           "an item's text cannot close its fence")
 
+    // A `cleared` a person added at a clean head is no clearance without this Diplomat's own
+    // re-rate there: the PR is rated again before anything may merge it.
+    func handCleared(_ answer: [String: Any], _ name: String) -> (Trackers, Synced) {
+        let h = fixture()
+        h.issues = []
+        h.prs = h.prs.filter { $0.number == 13 }
+        h.ratings = ["Clear the cache on logout": answer]
+        return (h, sync(h, PipelineSettings(roots: [root], rate: true, fastTrack: true, merge: true),
+                        base.appendingPathComponent(name), t0))
+    }
+    let (hm, medium) = handCleared(["risk": "medium", "complexity": "low", "why": "cache eviction"], "hand-medium")
+    check(medium.claude == ["opus Clear the cache on logout"], "a hand-added cleared is re-rated: \(medium.claude)")
+    check(!hm.ghCalls.contains { $0.starts(with: ["pr", "merge"]) }, "…and not merged on the label alone")
+    check(medium.writes == ["label risk:medium exists", "+risk:medium #13", "-risk:low #13",
+                            "-diplomat:fast-track #13", "-diplomat:cleared #13"],
+          "rated medium, both fast-track labels come off: \(medium.writes)")
+    check(trail(medium.events, medium.result) == ["#13 rerated", "#13 labelled", "#13 labelled"],
+          "hand-cleared, medium: \(trail(medium.events, medium.result))")
+    check(stage(medium.result, prURL(13)) == "human/human", "hand-cleared, medium: \(stage(medium.result, prURL(13)))")
+    let (hl, lowAgain) = handCleared(["risk": "low", "complexity": "low", "why": "one line"], "hand-low")
+    let rated = hl.sequence.firstIndex(of: "claude"), merged = hl.sequence.firstIndex(of: "pr merge")
+    check(lowAgain.claude == ["opus Clear the cache on logout"] && rated != nil && merged != nil && rated! < merged!,
+          "rated again before the merge: \(hl.sequence)")
+    check(lowAgain.writes == ["ready #13", "merge #13 --squash \(sha("c3"))"], "hand-cleared, low: \(lowAgain.writes)")
+    check(trail(lowAgain.events, lowAgain.result) == ["#13 rerated", "#13 cleared", "#13 clean", "#13 merged"],
+          "hand-cleared, low: \(trail(lowAgain.events, lowAgain.result))")
+    check(lowAgain.events.first { $0.kind == .rerated }.map { "\($0.head ?? "") \($0.rating == low)" }
+          == "\(sha("c3")) true", "the re-rate that cleared it names its head and rating")
+
     // Everything defaults off: a sync reads and stages, and changes nothing.
     let quiet = fixture()
     let off = sync(quiet, PipelineSettings(roots: [root], linearTeams: [team]), base.appendingPathComponent("off"), t0)
     check(off.writes.isEmpty && off.claude.isEmpty && off.result.effects.isEmpty,
           "off: \(off.writes) \(off.claude) \(off.result.effects)")
     check(quiet.ghCalls.count == 1 && quiet.linearOps == ["Issues", "Issues"], "off reads only: \(quiet.ghCalls.count)")
-    for (id, want) in [(prURL(13), "cleared/fast"), (prURL(14), "clean/fast"), (prURL(15), "fast-track/fast"),
+    // No re-rate of this Diplomat's is behind #13's `cleared` here, so it is only clean.
+    for (id, want) in [(prURL(13), "clean/fast"), (prURL(14), "clean/fast"), (prURL(15), "fast-track/fast"),
                        (prURL(17), "clean/fast"), (prURL(11), "unrated/unrated"), (issueURL(3), "human/human")] {
         check(stage(off.result, id) == want, "off \(id): \(stage(off.result, id))")
     }
@@ -812,7 +874,9 @@ func pipelineSmoke() throws {
     // A read with errors merges nothing: a field it lost could be a person's review.
     let lossy = fixture()
     lossy.ghPartial = true
-    let part = sync(lossy, PipelineSettings(roots: [root], merge: true), base.appendingPathComponent("partial"), t0)
+    let partDir = base.appendingPathComponent("partial")
+    try seedRerate(partDir, 13, sha("c3"), at: t0.addingTimeInterval(-3600))
+    let part = sync(lossy, PipelineSettings(roots: [root], merge: true), partDir, t0)
     check(part.result.notices == ["acme/app was read in part: Timeout on reviews"], "partial: \(part.result.notices)")
     check(part.writes.isEmpty && stage(part.result, prURL(13)) == "cleared/fast (acme/app was read only in part)",
           "partial: \(part.writes) \(stage(part.result, prURL(13)))")
