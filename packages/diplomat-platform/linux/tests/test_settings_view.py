@@ -212,7 +212,8 @@ def test_the_review_depth_picker_opens_on_standard_and_writes_through(view):
 
 
 def test_the_depth_rows_stay_editable_while_the_monitor_is_off(make_view):
-    """A goal's reviews run at them whatever the review-request switch says."""
+    """A switched-off monitor still queues its reviews, and "execute now" runs them at
+    these depths."""
     view = make_view(review_requests_enabled=False)
     assert view._depth_setting_row.isVisibleTo(view)
     assert view._overrides_layout.parentWidget().isVisibleTo(view)
