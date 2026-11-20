@@ -11,28 +11,15 @@ import DiplomatCore
 // (`AutoCounter.pipeline`).
 
 extension Store {
-    /// `pipeline.json`'s sync period.
-    private struct PipelineTiming: Decodable {
-        var syncSecs: Int?
-        var minSyncSecs: Int?
-    }
-
-    private static let pipelineTiming: PipelineTiming = {
-        guard let url = try? CoreAssets.assetsDir().appendingPathComponent("pipeline.json"),
-              let data = try? Data(contentsOf: url),
-              let timing = try? JSONDecoder().decode(PipelineTiming.self, from: data)
-        else { return PipelineTiming() }
-        return timing
-    }()
-
     /// `DIPLOMAT_PIPELINE_SECS` (ignored unless finite), else `pipeline.json`'s `syncSecs`.
     /// Never under its `minSyncSecs` (a sync reads every root and team, and may spend
     /// `claude` calls), nor over a day (a huge value would overflow the nanosecond sleep).
     static var pipelineSyncInterval: TimeInterval {
-        let floor = Double(pipelineTiming.minSyncSecs ?? 60)
+        let model = try? CoreAssets.pipeline()
+        let floor = Double(model?.minSyncSecs ?? 60)
         let secs = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_SECS"]
             .flatMap(Double.init).flatMap { $0.isFinite ? $0 : nil }
-        return min(max(floor, secs ?? Double(pipelineTiming.syncSecs ?? 300)), 86_400)
+        return min(max(floor, secs ?? Double(model?.syncSecs ?? 300)), 86_400)
     }
 
     /// The self-test's stand-in for `PipelineTick.run`; consulted only headless.

@@ -1208,7 +1208,7 @@ enum CommsTest {
         let seenSlack = spawnDir.appendingPathComponent("slack")
         let agentRan = spawnDir.appendingPathComponent("ran")
         let fakeClaude = spawnBin.appendingPathComponent("claude")
-        try? ("#!/bin/sh\nprintenv \(SlackToken.envVar) > '\(seenSlack.path)'\n"
+        try? ("#!/bin/sh\nprintenv \(SlackToken.envVar) \(LinearAPI.envVar) > '\(seenSlack.path)'\n"
               + ": > '\(agentRan.path)'\n")
             .write(to: fakeClaude, atomically: true, encoding: .utf8)
         try? FileManager.default.setAttributes([.posixPermissions: 0o755],
@@ -1219,7 +1219,7 @@ enum CommsTest {
             pidPath: spawnDir.appendingPathComponent("pid").path, runner: .claude, port: 0)
         // Or the operator's rc exports it, which every interactive shell sources again.
         for rc in [".zshrc", ".bashrc"] {
-            try? "export \(SlackToken.envVar)=slack-login-from-rc\n"
+            try? "export \(SlackToken.envVar)=slack-login-from-rc \(LinearAPI.envVar)=linear-key-from-rc\n"
                 .write(to: spawnDir.appendingPathComponent(rc), atomically: true, encoding: .utf8)
         }
         for shell in ["/bin/sh", "/bin/zsh", "/bin/bash"] {
@@ -1230,14 +1230,15 @@ enum CommsTest {
             sh.arguments = ["-c", AgentSpawner.shellCommand(plan)]
             sh.environment = ["PATH": "\(spawnBin.path):/usr/bin:/bin", "SHELL": shell,
                               "HOME": spawnDir.path, "ENV": "",
-                              SlackToken.envVar: "the-operators-slack-login"]
+                              SlackToken.envVar: "the-operators-slack-login",
+                              LinearAPI.envVar: "the-operators-linear-key"]
             sh.standardInput = FileHandle.nullDevice
             sh.standardOutput = Pipe()
             sh.standardError = Pipe()
             try? sh.run()
             sh.waitUntilExit()
             let seen = (try? String(contentsOf: seenSlack, encoding: .utf8)) ?? "nil"
-            check("an agent never holds the Slack login override, from its terminal or the rc "
+            check("an agent never holds the Slack or Linear override, from its terminal or the rc "
                   + "(SHELL=\(shell); seen \(seen.debugDescription))",
                   FileManager.default.fileExists(atPath: agentRan.path) && seen == "")
         }

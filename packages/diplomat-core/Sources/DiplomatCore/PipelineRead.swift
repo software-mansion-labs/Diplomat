@@ -300,9 +300,9 @@ enum PipelineRead {
 /// Linear's GraphQL API, reached with the operator's API key: read on each sync, never
 /// cached or written, and never handed to a child process or an agent. The transport is
 /// `SlackAPI.curl`'s, so the key travels in a config on curl's stdin.
-struct LinearAPI {
+public struct LinearAPI {
     /// Overrides the Keychain item and the file. Never reaches a child process.
-    static let envVar = "DIPLOMAT_LINEAR_TOKEN"
+    public static let envVar = "DIPLOMAT_LINEAR_TOKEN"
 
     let key: String
     let url: URL
