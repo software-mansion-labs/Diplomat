@@ -92,7 +92,7 @@ public enum AuditCategory: String, CaseIterable, Sendable {
         case "ban", "unban", "comms-ban":
             return .bans
         case "comms-ping", "comms-review", "comms-fix", "comms-bump", "comms-investigate",
-             "comms-error", "comms-recovered", "comms-notice", "comms-reply":
+             "comms-error", "comms-recovered", "comms-notice":
             return .comms
         default:
             return .system

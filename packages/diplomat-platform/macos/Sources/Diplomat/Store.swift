@@ -136,7 +136,7 @@ final class Store: ObservableObject {
     /// job runs across all of them, while the panel's right column works on one
     /// (`selectedRoot`).
     @Published private(set) var roots: [PRRef.LocalRepo]
-    /// Whether every root path had a GitHub remote when `roots` was read
+    /// Whether every root path had a GitHub or GitLab remote when `roots` was read
     /// (`RepoRoots.allResolve`). Never for the stand-in `RepoPaths.roots` answers on the
     /// main thread before the first resolution, which knows only the primary path. While
     /// it is false, a repo missing from `roots` may be one that failed to resolve.
@@ -179,7 +179,7 @@ final class Store: ObservableObject {
         showSelectedRepo()
     }
 
-    /// The root the panel's right column works on, as its lowercased slug. One that is
+    /// The root the panel's right column works on, as its `LocalRepo.key`. One that is
     /// not among the roots reads as the primary (`selectedRoot`).
     @Published var selectedRepo: String {
         didSet {
@@ -189,13 +189,12 @@ final class Store: ObservableObject {
     }
 
     var selectedRoot: PRRef.LocalRepo {
-        roots.first { $0.slug.lowercased() == selectedRepo } ?? roots[0]
+        roots.first { $0.key == selectedRepo } ?? roots[0]
     }
 
-    /// Whether repo `slug` was taken out of the roots: every root resolved, and none is
-    /// that repo.
-    private func rootGone(_ slug: String) -> Bool {
-        rootsResolved && !roots.contains { $0.slug.lowercased() == slug.lowercased() }
+    /// Whether root `key` was taken out of the roots: every root resolved, and none is it.
+    private func rootGone(_ key: String) -> Bool {
+        rootsResolved && !roots.contains { $0.key == key.lowercased() }
     }
 
     /// `rootGone` for an ask's repo; an ask naming none runs in the primary root.
@@ -206,16 +205,16 @@ final class Store: ObservableObject {
     /// `rootGone` for the task queued as `key`: its item's repo, or for an investigation
     /// the repo it was asked in.
     func queuedRootGone(_ key: String) -> Bool {
-        if let slug = AgentTaskQueue.item(ofKey: key).flatMap(PRRef.splitItemKey)?.slug {
-            return rootGone(slug)
+        if let root = AgentTaskQueue.item(ofKey: key).flatMap(PRRef.splitItemKey)?.root {
+            return rootGone(root)
         }
         return requestedWork.first { $0.key == key }.map(askRootGone) ?? false
     }
 
     /// The root an item key names, or nil for a repo no root is a checkout of.
     func root(ofItem item: String?) -> PRRef.LocalRepo? {
-        guard let slug = item.flatMap(PRRef.splitItemKey)?.slug else { return nil }
-        return roots.first { $0.slug.lowercased() == slug }
+        guard let key = item.flatMap(PRRef.splitItemKey)?.root else { return nil }
+        return roots.first { $0.key == key }
     }
 
     /// Whether `path` is a root's checkout rather than an OTHER REPOS one.
@@ -224,11 +223,12 @@ final class Store: ObservableObject {
         return roots.contains { $0.path == path }
     }
 
-    /// The label for a wizard's single item in `owner/repo`: an OTHER REPOS item spells
-    /// out its whole slug.
-    func itemLabel(owner: String, repo: String, number: Int) -> String {
-        let key = PRRef.itemKey(owner: owner, repo: repo, number: number)
-        return root(ofItem: key) == nil ? "\(owner)/\(repo)#\(number)" : itemLabel(key)
+    /// The label for a wizard's single item in `target`: an OTHER REPOS item spells out
+    /// its whole slug.
+    func itemLabel(_ target: PRRef.LocalRepo, number: Int) -> String {
+        let key = PRRef.itemKey(owner: target.owner, repo: target.repo, number: number,
+                                host: target.host)
+        return root(ofItem: key) == nil ? "\(target.slug)#\(number)" : itemLabel(key)
     }
 
     func itemLabel(_ item: String) -> String {
@@ -239,15 +239,16 @@ final class Store: ObservableObject {
     /// they refresh.
     private struct PanelLists { var prs: [OpenPR]; var issues: [OpenIssue]; var at: Date }
     private var panelLists: [String: PanelLists] = [:]
-    /// The slug `prs` and `issues` belong to.
-    private(set) var listedSlug = ""
+    /// The key of the root `prs` and `issues` belong to.
+    private(set) var listedKey = ""
+    var listedMe: String { knownMe(for: roots.first { $0.key == listedKey }) }
 
     /// Put the selected root's lists on the panel, from its cache, and fetch them afresh.
     private func showSelectedRepo() {
-        let slug = selectedRoot.slug.lowercased()
-        guard slug != listedSlug else { return }
-        listedSlug = slug
-        let cached = panelLists[slug]
+        let key = selectedRoot.key
+        guard key != listedKey else { return }
+        listedKey = key
+        let cached = panelLists[key]
         prs = cached?.prs ?? []
         issues = cached?.issues ?? []
         lastUpdated = cached?.at
@@ -256,10 +257,10 @@ final class Store: ObservableObject {
     }
 
     /// Seed one root's panel lists, for headless self-tests only.
-    func seedPanelLists(slug: String, prs: [OpenPR], issues: [OpenIssue]) {
+    func seedPanelLists(key: String, prs: [OpenPR], issues: [OpenIssue]) {
         guard Headless.active else { return }
-        panelLists[slug] = PanelLists(prs: prs, issues: issues, at: Date())
-        if slug == listedSlug {
+        panelLists[key] = PanelLists(prs: prs, issues: issues, at: Date())
+        if key == listedKey {
             self.prs = prs
             self.issues = issues
             hasLoaded = true
@@ -274,14 +275,14 @@ final class Store: ObservableObject {
             refreshLocalRepos()
         }
     }
-    /// `localRepoPaths` read for their GitHub remotes, in list order.
+    /// `localRepoPaths` read for their GitHub and GitLab remotes, in list order.
     @Published var localRepoCheckouts: [LocalRepos.Checkout] = []
     var localRepos: [PRRef.LocalRepo] { localRepoCheckouts.flatMap(\.repos) }
     /// What a wizard parses a pasted link against: every root, then the other repos no
     /// root already names.
     var wizardRepos: [PRRef.LocalRepo] {
-        let rootSlugs = Set(roots.map { $0.slug.lowercased() })
-        return roots + localRepos.filter { !rootSlugs.contains($0.slug.lowercased()) }
+        let rootKeys = Set(roots.map(\.key))
+        return roots + localRepos.filter { !rootKeys.contains($0.key) }
     }
 
     /// Re-read every listed checkout's remotes, off the main actor.
@@ -324,7 +325,7 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Whether to auto-dispatch a full-E2E review when someone requests my review on a
+    /// Whether to auto-dispatch a focused review when someone requests my review on a
     /// PR (someone else's PR → review-only, leave comments). Persisted; kicks a poll on
     /// enable. Independent of `prAutofixEnabled`.
     @Published var reviewRequestsEnabled: Bool {
@@ -347,7 +348,7 @@ final class Store: ObservableObject {
     }
 
     /// Where each root's next community-issue scan starts (`Filters.newCommunityIssues`),
-    /// by lowercased slug. A root with no mark starts from its first scan, so adding a
+    /// by root key. A root with no mark starts from its first scan, so adding a
     /// root never queues the issues it already had. A mark is dropped only for a root
     /// that is gone while every root path resolved (`rootsResolved`), so re-adding a
     /// removed root does not queue its backlog either, and a root whose path failed to
@@ -701,23 +702,6 @@ final class Store: ObservableObject {
     @Published var commsActInvestigations: Bool {
         didSet { persist(commsActInvestigations, forKey: Keys.commsActInvestigations) }
     }
-    /// `CommsToggles.replies`: whether Comms writes back in Slack.
-    @Published var commsReplies: Bool {
-        didSet { persist(commsReplies, forKey: Keys.commsReplies) }
-    }
-    /// What Comms replies to (`CommsToggles.repliesTo`), under `commsReplies`.
-    @Published var commsReplyToReviews: Bool {
-        didSet { persist(commsReplyToReviews, forKey: Keys.commsReplyToReviews) }
-    }
-    @Published var commsReplyToFixes: Bool {
-        didSet { persist(commsReplyToFixes, forKey: Keys.commsReplyToFixes) }
-    }
-    @Published var commsReplyToInvestigations: Bool {
-        didSet { persist(commsReplyToInvestigations, forKey: Keys.commsReplyToInvestigations) }
-    }
-    @Published var commsReplyToQuestions: Bool {
-        didSet { persist(commsReplyToQuestions, forKey: Keys.commsReplyToQuestions) }
-    }
     /// How many pings one triage call reads (`CommsSettings.batchSize`).
     @Published var commsBatchSize: Int {
         didSet { persist(commsBatchSize, forKey: Keys.commsBatchSize) }
@@ -725,10 +709,6 @@ final class Store: ObservableObject {
     /// How old a shorter queue's newest ping gets before it is triaged anyway.
     @Published var commsFlushAfterSecs: Int {
         didSet { persist(commsFlushAfterSecs, forKey: Keys.commsFlushAfterSecs) }
-    }
-    /// How long the session must have been locked to count as away (`CommsAway`).
-    @Published var commsAwayAfterSecs: Int {
-        didSet { persist(commsAwayAfterSecs, forKey: Keys.commsAwayAfterSecs) }
     }
     @Published var commsNotify: Bool {
         didSet {
@@ -743,14 +723,6 @@ final class Store: ObservableObject {
     /// Pings after this are unread.
     @Published var commsSeenAt: Date {
         didSet { persist(commsSeenAt, forKey: Keys.commsSeenAt) }
-    }
-    /// When the session lock that is still on began (`refreshCommsLock`); kept across a
-    /// relaunch so a long lock is not restarted by one.
-    var commsLockedSince: Date? {
-        didSet {
-            guard commsLockedSince != oldValue else { return }
-            persist(commsLockedSince, forKey: Keys.commsLockedSince)
-        }
     }
 
     // MARK: Comms state the screen draws
@@ -773,9 +745,6 @@ final class Store: ObservableObject {
     var commsMonitorTask: Task<Void, Never>?
     var commsPollInFlight = false
     var commsWakeObserver: NSObjectProtocol?
-    var commsLockObservers: [NSObjectProtocol] = []
-    /// The replies of every apply so far, chained so no two run at once.
-    var commsReplying: Task<Void, Never>?
 
     // MARK: Tasks (the long-running task tracker) state the screen draws
 
@@ -927,15 +896,8 @@ final class Store: ObservableObject {
         static let commsActRequests = "commsActRequests"
         static let commsActBumps = "commsActBumps"
         static let commsActInvestigations = "commsActInvestigations"
-        static let commsReplies = "commsReplies"
-        static let commsReplyToReviews = "commsReplyToReviews"
-        static let commsReplyToFixes = "commsReplyToFixes"
-        static let commsReplyToInvestigations = "commsReplyToInvestigations"
-        static let commsReplyToQuestions = "commsReplyToQuestions"
         static let commsBatchSize = "commsBatchSize"
         static let commsFlushAfterSecs = "commsFlushAfterSecs"
-        static let commsAwayAfterSecs = "commsAwayAfterSecs"
-        static let commsLockedSince = "commsLockedSince"
         static let commsNotify = "commsNotify"
         static let commsModel = "commsModel"
         static let commsSeenAt = "commsSeenAt"
@@ -956,6 +918,44 @@ final class Store: ObservableObject {
     var effectiveMe: String {
         let o = usernameOverride.trimmingCharacters(in: .whitespaces)
         return o.isEmpty ? me : o
+    }
+
+    static let githubLoginUnknown = "GitHub login unknown — is `gh` installed and authenticated?"
+
+    private let gitlabMe = GitLabLogins()
+
+    /// Who "me" is in `root`. Throws while unknown, failing the root's read for the cycle
+    /// like any other failed read.
+    func me(for root: PRRef.LocalRepo) async throws -> String {
+        guard root.isGitLab else {
+            guard !effectiveMe.isEmpty else {
+                throw GHError.unanswered(Store.githubLoginUnknown)
+            }
+            return effectiveMe
+        }
+        return try await gitlabMe.login(host: root.host)
+    }
+
+    /// `me(for:)` as last read, without asking: "" for a GitLab host not read yet.
+    func knownMe(for root: PRRef.LocalRepo?) -> String {
+        guard let root, root.isGitLab else { return effectiveMe }
+        return gitlabMe.known(host: root.host)
+    }
+
+    /// `cfg` as a wizard runs it. "me" follows `targetLocal`, not the selected root: a
+    /// pasted link can name another root or checkout.
+    func wizardRun<C: WizardRunConfig>(_ cfg: C) -> C {
+        var cfg = cfg
+        cfg.home = selectedRoot
+        cfg.localRepos = wizardRepos
+        cfg.me = knownMe(for: cfg.targetLocal)
+        return cfg
+    }
+
+    /// Seed a GitLab host's user, for headless self-tests only.
+    func pinGitLabMe(_ login: String, host: String) {
+        guard Headless.active else { return }
+        gitlabMe.pin(login, host: host)
     }
 
     /// A tool's tint: the user's override if set & valid, else its catalog default.
@@ -1058,7 +1058,7 @@ final class Store: ObservableObject {
             ?? AgentSpawner.resolved(.ghostty).rawValue
         repoRootPaths = AppConfig.editableRepoRoots
         let launchRoots = RepoPaths.roots
-        let primary = launchRoots[0].slug.lowercased()
+        let primary = launchRoots[0].key
         roots = launchRoots
         selectedRepo = defaults.string(forKey: Keys.selectedRepo) ?? ""
         localRepoPaths = defaults.stringArray(forKey: Keys.localRepoPaths) ?? []
@@ -1100,23 +1100,10 @@ final class Store: ObservableObject {
         commsActRequests = defaults.object(forKey: Keys.commsActRequests) as? Bool ?? true
         commsActBumps = defaults.object(forKey: Keys.commsActBumps) as? Bool ?? true
         commsActInvestigations = defaults.object(forKey: Keys.commsActInvestigations) as? Bool ?? true
-        commsReplies = defaults.object(forKey: Keys.commsReplies) as? Bool ?? true
-        let commsReplyDefaults = CommsToggles()
-        commsReplyToReviews = defaults.object(forKey: Keys.commsReplyToReviews) as? Bool
-            ?? commsReplyDefaults.replyToReviews
-        commsReplyToFixes = defaults.object(forKey: Keys.commsReplyToFixes) as? Bool
-            ?? commsReplyDefaults.replyToFixes
-        commsReplyToInvestigations = defaults.object(forKey: Keys.commsReplyToInvestigations) as? Bool
-            ?? commsReplyDefaults.replyToInvestigations
-        commsReplyToQuestions = defaults.object(forKey: Keys.commsReplyToQuestions) as? Bool
-            ?? commsReplyDefaults.replyToQuestions
         commsBatchSize = defaults.object(forKey: Keys.commsBatchSize) as? Int
             ?? (try? CoreAssets.comms())?.batchSize ?? 8
         commsFlushAfterSecs = defaults.object(forKey: Keys.commsFlushAfterSecs) as? Int
             ?? (try? CoreAssets.comms())?.flushAfterSecs ?? 1800
-        commsAwayAfterSecs = defaults.object(forKey: Keys.commsAwayAfterSecs) as? Int
-            ?? (try? CoreAssets.comms())?.replies.awayAfterSecs ?? 10800
-        commsLockedSince = defaults.object(forKey: Keys.commsLockedSince) as? Date
         commsNotify = defaults.object(forKey: Keys.commsNotify) as? Bool ?? true
         commsModel = defaults.string(forKey: Keys.commsModel) ?? ""
         // Absent, everything already logged reads as seen: an upgrade must not open on a
@@ -1127,7 +1114,7 @@ final class Store: ObservableObject {
         let configured = CoreAssets.repoCoordinates()
         requestedWork = Store.decodeRequestedWork(defaults.data(forKey: Keys.requestedWork),
                                                   configured: "\(configured.owner)/\(configured.repo)")
-        listedSlug = selectedRoot.slug.lowercased()
+        listedKey = selectedRoot.key
         refreshLocalRepos()
         if hiddenTools.contains(selected.rawValue),
            let first = ToolKind.allCases.first(where: { !hiddenTools.contains($0.rawValue) }) {
@@ -1504,17 +1491,22 @@ final class Store: ObservableObject {
         // The panel's lists are the selected root's alone. Comms reads them before gh
         // (`commsLookup`); no other automatic job does.
         let root = selectedRoot
-        let slug = root.slug.lowercased()
+        let key = root.key
         do {
-            async let m = API.fetchViewerLogin()
-            async let p = API.fetchOpenPRs(owner: root.owner, repo: root.repo)
-            async let i = API.fetchOpenIssues(owner: root.owner, repo: root.repo)
-            let (mm, pp, ii) = try await (m, p, i)
-            me = mm
+            async let p = API.fetchOpenPRs(root)
+            async let i = API.fetchOpenIssues(root)
+            if root.isGitLab {
+                // Only glab's user can fail these lists; the GitHub login is not needed.
+                _ = try await me(for: root)
+                await fetchMe()
+            } else {
+                me = try await API.fetchViewerLogin()
+            }
+            let (pp, ii) = try await (p, i)
             let at = Date()
-            panelLists[slug] = PanelLists(prs: pp, issues: ii, at: at)
+            panelLists[key] = PanelLists(prs: pp, issues: ii, at: at)
             // The operator may have switched roots while this one was fetching.
-            if slug == listedSlug {
+            if key == listedKey {
                 prs = pp
                 issues = ii
                 lastUpdated = at
@@ -1531,10 +1523,10 @@ final class Store: ObservableObject {
         await refreshTokenBudget()
     }
 
-    /// Ask GitHub which of the tracked PRs have landed — the one terminal outcome that
+    /// Ask GitHub or GitLab which of the tracked PRs have landed — the one terminal outcome that
     /// outranks whatever a process is doing.
     ///
-    /// On the slow refresh, not the 8-second tick: it costs a `gh` call per PR. The answer
+    /// On the slow refresh, not the 8-second tick: it costs a `gh` or `glab` call per PR. The answer
     /// is carried forward by the fast ticks in between.
     ///
     /// Only the runs this applet dispatched: the resolver ends no untracked run on a
@@ -1542,7 +1534,7 @@ final class Store: ObservableObject {
     /// the scan that made it.
     func refreshMergedStatuses() async {
         mergedPRs = await AgentProbes.mergedPRs(
-            Set(AgentRegistry.load().filter { !$0.untracked }.compactMap(\.item)))
+            Set(AgentRegistry.load().filter { !$0.untracked }.compactMap(\.item)), roots: roots)
     }
 
     /// Ask whether the account still has room to spend — the precondition on the
@@ -1732,17 +1724,18 @@ final class Store: ObservableObject {
     /// off the main actor.
     func agentTick() async -> AgentPass {
         let limit = autoTaskLimit
-        let slugs = Set(roots.map { $0.slug.lowercased() })
+        let roots = roots
+        let keys = Set(roots.map(\.key))
         let (merged, tokens, deadline) = (mergedPRs, tokensLeft, AppConfig.runDeadline)
         let directory = AgentSpawner.repoPath
         return await Task.detached(priority: .userInitiated) {
             let now = Date().timeIntervalSince1970
             let records = AgentRegistry.adoptPids(AgentRegistry.load())
-            let gathered = AgentProbes.gather(records: records, now: now, slugs: slugs,
+            let gathered = AgentProbes.gather(records: records, now: now, keys: keys,
                                               directory: directory,
                                               merged: merged, tokens: tokens)
             let tick = AgentState.tick(records: records, evidence: gathered.evidence,
-                                       now: now, limit: limit, deadline: deadline)
+                                       roots: roots, now: now, limit: limit, deadline: deadline)
             var windows: [String: AgentWindows.Handle] = [:]
             for r in tick.records where !r.untracked {
                 windows[r.runID] = AgentWindows.handle(r.runID)
@@ -1944,8 +1937,7 @@ final class Store: ObservableObject {
             for run in runs {
                 var found: [String]
                 do {
-                    found = me.isEmpty ? ["could not check its review: the gh login is not known yet"]
-                        : try await ReviewAudit.audit(prURL: run.url, me: me, since: run.since)
+                    found = try await ReviewAudit.audit(prURL: run.url, me: me, since: run.since)
                 } catch {
                     found = ["could not check its review: \(error.localizedDescription)"]
                 }
@@ -2214,7 +2206,7 @@ final class Store: ObservableObject {
     private var markerWarned = false
     private var quotaWarned = false
 
-    /// Which of the tracked PRs GitHub calls MERGED, carried forward by the fast ticks
+    /// Which of the tracked PRs GitHub or GitLab calls MERGED, carried forward by the fast ticks
     /// between the slow refreshes that probe it. `.unavailable` until the first, which
     /// reads as "nothing is known about any PR" rather than as "none of them landed".
     private var mergedPRs: Observation<Set<String>> = .unavailable("have not been probed yet")
@@ -2355,15 +2347,16 @@ final class Store: ObservableObject {
         if terminalUnpublished { publishSpawnTerminal() }
         if me.isEmpty { await fetchMe() }
         await refreshRoots()
-        if effectiveMe.isEmpty {
+        if effectiveMe.isEmpty, !roots.contains(where: \.isGitLab) {
             // The most common total-breakage mode (gh missing/unauthenticated) used to
             // bail before the failure surfacing — the toggles said "on" and nothing
-            // ever polled, silently.
-            pollErrorThisCycle = "GitHub login unknown — is `gh` installed and authenticated?"
+            // ever polled, silently. With a GitLab root, only the GitHub roots' reads fail
+            // (`me(for:)`).
+            pollErrorThisCycle = Store.githubLoginUnknown
         } else if rootsGuessed {
             // Its one root would be the configured repo at the first path, which may
             // check out another.
-            pollErrorThisCycle = "no repo root in Settings resolves to a GitHub checkout"
+            pollErrorThisCycle = "no repo root in Settings resolves to a GitHub or GitLab checkout"
         } else {
             // Every root is polled, and everything below reads the roots' finds as ONE
             // list: one drain, one fingerprint diff, one ledger observation per kind (a
@@ -2438,7 +2431,7 @@ final class Store: ObservableObject {
 
     /// This cycle's read of my open PRs and of the PRs that left the open state, and the
     /// roots both were read in. A root either read fails in is left out and held
-    /// (`heldSlugs`): its queued tasks, fingerprints and attempt records stand untouched
+    /// (`heldKeys`): its queued tasks, fingerprints and attempt records stand untouched
     /// rather than be read as done. Only when every root's read fails is it a poll
     /// failure: both reads are `nil`, which stands their consumers down, and every root
     /// is returned, so the reads after this one fail on their own.
@@ -2450,11 +2443,9 @@ final class Store: ObservableObject {
         var failed: [(root: PRRef.LocalRepo, error: Error)] = []
         for root in polled {
             do {
-                let found = try await AutofixMonitor.fetchSnapshots(owner: root.owner,
-                                                                    repo: root.repo,
-                                                                    me: effectiveMe)
-                let gone = try await AutofixMonitor.fetchClosedPRs(owner: root.owner,
-                                                                   repo: root.repo)
+                let found = try await AutofixMonitor.fetchSnapshots(root: root,
+                                                                    me: try await me(for: root))
+                let gone = try await AutofixMonitor.fetchClosedPRs(root: root)
                 snaps += found
                 closed.formUnion(gone)
                 read.append(root)
@@ -2462,7 +2453,7 @@ final class Store: ObservableObject {
                 failed.append((root, error))
             }
         }
-        heldSlugs = Set(failed.map { $0.root.slug.lowercased() })
+        heldKeys = Set(failed.map { $0.root.key })
         if read.isEmpty, let first = failed.first {
             notePollFailure(first.error)
             return (nil, nil, polled)
@@ -2471,11 +2462,11 @@ final class Store: ObservableObject {
         return (snaps, closed, read)
     }
 
-    /// Slugs of the roots this cycle's read of my PRs or of review requests failed in.
-    private var heldSlugs: Set<String> = []
+    /// Keys of the roots this cycle's read of my PRs or of review requests failed in.
+    private var heldKeys: Set<String> = []
 
     private func inUnreadRoot(_ item: String) -> Bool {
-        PRRef.splitItemKey(item).map { heldSlugs.contains($0.slug) } ?? false
+        PRRef.splitItemKey(item).map { heldKeys.contains($0.root) } ?? false
     }
 
     /// Log `what` of a root unreadable once per run of failed reads, and readable again
@@ -2483,27 +2474,27 @@ final class Store: ObservableObject {
     /// of Settings loses its markers, so re-added it logs its next failed read.
     private func noteRootsRead(_ what: String, read: [PRRef.LocalRepo],
                                failed: [(root: PRRef.LocalRepo, error: Error)]) {
-        let configured = Set(roots.map { $0.slug.lowercased() })
+        let configured = Set(roots.map(\.key))
         rootsUnread = rootsUnread.filter { key in
             key.firstIndex(of: ":").map { configured.contains(String(key[key.index(after: $0)...])) }
                 ?? false
         }
         var logged = false
         for (root, error) in failed
-        where rootsUnread.insert("\(what):\(root.slug.lowercased())").inserted {
+        where rootsUnread.insert("\(what):\(root.key)").inserted {
             let why = (error as? LocalizedError)?.errorDescription ?? "\(error)"
             AuditLog.log("auto", "root-read-failed",
                          "\(what) of \(root.slug) unreadable, its work waits: \(why.prefix(120))")
             logged = true
         }
-        for root in read where rootsUnread.remove("\(what):\(root.slug.lowercased())") != nil {
+        for root in read where rootsUnread.remove("\(what):\(root.key)") != nil {
             AuditLog.log("auto", "root-read-recovered", "\(what) of \(root.slug) readable again")
             logged = true
         }
         if logged { refreshAudit() }
     }
 
-    /// `"<what>:<slug>"` of each root read that failed last time (`noteRootsRead`).
+    /// `"<what>:<root key>"` of each root read that failed last time (`noteRootsRead`).
     private var rootsUnread: Set<String> = []
 
     /// The `what` the review-request pass's reads are logged and marked under.
@@ -2587,9 +2578,19 @@ final class Store: ObservableObject {
     /// conflict that already existed when the monitor first saw the PR (which the
     /// edge-trigger baselines) still gets an agent. The record is pruned once the PR is
     /// known mergeable again.
-    private func reconcileMyConflicts(snaps: [PRSnapshot], now: Date) async {
+    ///
+    /// An unchecked GitLab merge request (`AgentTaskQueue.conflicting`) is re-offered only
+    /// while its fix is queued, since the commit drops what a cycle does not offer: it
+    /// keeps a fix, never starts one.
+    ///
+    /// Not private: the queue self-test drives it.
+    func reconcileMyConflicts(snaps: [PRSnapshot], now: Date) async {
         var attempts = loadMyConflictAttempts()
-        let conflicted = snaps.filter { $0.mergeable == "CONFLICTING" }
+        let queued = Set(queuedTasks.filter { $0.job.auditAction == "conflicts" }.compactMap(\.job.item))
+        let owed = AgentTaskQueue.conflicting(snaps, roots: roots)
+        let conflicted = snaps.filter { s in
+            s.mergeable == "CONFLICTING" || s.item.map { owed.contains($0) && queued.contains($0) } == true
+        }
         for s in conflicted {
             let key = item(url: s.url, number: s.number)
             let inFlight = await self.inFlight(key)
@@ -2619,7 +2620,7 @@ final class Store: ObservableObject {
         guard let data = storedJSON(forKey: Keys.myConflictAttempts),
               let decoded = try? JSONDecoder().decode([String: ReviewAttempt].self, from: data)
         else { return [:] }
-        return Store.migrated(decoded, primary: primarySlug)
+        return Store.migrated(decoded, primary: primaryKey)
     }
     private func saveMyConflictAttempts(_ map: [String: ReviewAttempt]) {
         persistJSON(map, forKey: Keys.myConflictAttempts)
@@ -2628,27 +2629,32 @@ final class Store: ObservableObject {
     /// Each root on its own mark, so one root's failed fetch holds back that root alone.
     /// A failed read keeps its root's mark and is logged (`noteRootsRead`), never failed
     /// as a poll, even in every root: nothing owed is read from it, so the other roots'
-    /// drain and commit go on (a repo gh cannot see would hold them forever).
-    private func pollCommunityIssues(_ polled: [PRRef.LocalRepo]) async {
+    /// drain and commit go on (a repo gh cannot see would hold them forever). A root whose
+    /// "me" cannot be read is held the same way: its fixes would run as nobody.
+    ///
+    /// Not private: the queue self-test drives it.
+    func pollCommunityIssues(_ polled: [PRRef.LocalRepo]) async {
         guard communityIssuesEnabled else { return }
         var read: [PRRef.LocalRepo] = []
         var failed: [(root: PRRef.LocalRepo, error: Error)] = []
         for root in polled {
             let found: [OpenIssue]
+            let me: String
             do {
-                found = try await API.fetchOpenIssues(owner: root.owner, repo: root.repo)
+                found = try await API.fetchOpenIssues(root)
+                me = try await self.me(for: root)
             } catch {
                 failed.append((root, error))
                 continue
             }
             read.append(root)
-            queueCommunityIssues(found, root: root)
+            queueCommunityIssues(found, root: root, me: me)
         }
         noteRootsRead("Issues", read: read, failed: failed)
     }
 
     /// Queue one fix for each issue the community filed since the last scan of
-    /// `found`, `root`'s open issues.
+    /// `found`, `root`'s open issues, each fix run as `me` (`me(for:)` of the root).
     ///
     /// Queued as an ask, the same row a Fix-issues sweep of the community leaves,
     /// because nothing on GitHub would re-offer it: the mark moves past each issue once
@@ -2656,38 +2662,38 @@ final class Store: ObservableObject {
     /// cancelled, and re-reads its issue when its turn comes.
     ///
     /// Not private: the queue self-test drives it with a fixture fetch.
-    func queueCommunityIssues(_ found: [OpenIssue], root: PRRef.LocalRepo) {
-        let slug = root.slug.lowercased()
-        let scan = Filters.newCommunityIssues(found, since: communityIssuesSince[slug], now: Date())
+    func queueCommunityIssues(_ found: [OpenIssue], root: PRRef.LocalRepo, me: String) {
+        let key = root.key
+        let scan = Filters.newCommunityIssues(found, since: communityIssuesSince[key], now: Date())
         let banned = BanList.read()
         for issue in scan.fresh {
             let label = itemLabel(PRRef.itemKey(owner: root.owner, repo: root.repo,
-                                                number: issue.number))
+                                                number: issue.number, host: root.host))
             let who = "Issue \(label) by @\(issue.author)"
             if BanList.isBanned(issue.author, in: banned) {
                 AuditLog.log("auto", "ban-skip", "\(who) — author is banned, not queued")
                 continue
             }
-            var cfg = IssueConfig(target: .contributors, me: effectiveMe)
+            var cfg = IssueConfig(target: .contributors, me: me)
             cfg.home = root
             if requestOne(RequestedWork(number: issue.number, url: issue.url,
                                         author: issue.author,
                                         config: .issues(cfg.forIssue(issue.number)),
-                                        repo: slug)) {
+                                        repo: key)) {
                 AuditLog.log("auto", "community-issue", "\(who) — fix queued")
             }
         }
         var marks = communityIssuesSince
         if rootsResolved {
-            let current = Set(roots.map { $0.slug.lowercased() })
+            let current = Set(roots.map(\.key))
             marks = marks.filter { current.contains($0.key) }
         }
-        marks[slug] = scan.since
+        marks[key] = scan.since
         communityIssuesSince = marks
         if !scan.fresh.isEmpty { refreshAudit() }
     }
 
-    /// PRs that request MY review: dispatch the most-comprehensive review whenever I OWE
+    /// PRs that request MY review: dispatch a focused review whenever I OWE
     /// one — i.e. the latest "review requested from me" is newer than my last review of
     /// that PR. Robust to re-requests (a fresh request re-qualifies even after I reviewed
     /// once) and does NOT depend on observing a "request removed" transition, which a
@@ -2714,7 +2720,7 @@ final class Store: ObservableObject {
                 // auto-approvals are on; they're only used to gate the verdict, which is
                 // off by default.
                 reqs += try await AutofixMonitor.fetchReviewRequests(
-                    owner: root.owner, repo: root.repo, me: effectiveMe,
+                    root: root, me: try await me(for: root),
                     includeFiles: autoApproveEnabled)
                 read.append(root)
             } catch {
@@ -2726,7 +2732,7 @@ final class Store: ObservableObject {
             return
         }
         noteRootsRead(Store.reviewRequestsRead, read: read, failed: failed)
-        heldSlugs.formUnion(failed.map { $0.root.slug.lowercased() })
+        heldKeys.formUnion(failed.map { $0.root.key })
         let banned = BanList.read()
         let now = Date()
         let prior = loadReviewReqAttempts()
@@ -2805,9 +2811,9 @@ final class Store: ObservableObject {
     ) -> [String: ReviewAttempt] {
         let kept = ReviewReconcile.retained(attempts, owed: owed, now: now)
         guard !complete else { return kept }
-        let read = Set(polled.map { $0.slug.lowercased() })
+        let read = Set(polled.map(\.key))
         return attempts.filter { key, _ in
-            kept[key] != nil || PRRef.splitItemKey(key).map { !read.contains($0.slug) } == true
+            kept[key] != nil || PRRef.splitItemKey(key).map { !read.contains($0.root) } == true
         }
     }
 
@@ -3120,15 +3126,15 @@ final class Store: ObservableObject {
     /// state that whole test sets up — exercises it without a spawn.
     func drainQueuedTasks(snaps: [PRSnapshot], closed: Set<String>,
                           read: [PRRef.LocalRepo]? = nil) async {
-        let polled = Set((read ?? roots).map { $0.slug.lowercased() })
+        let polled = Set((read ?? roots).map(\.key))
         func outside(_ entry: QueuedAgentTask) -> Bool {
-            guard let slug = AgentTaskQueue.item(ofKey: entry.id).flatMap(PRRef.splitItemKey)?
-                .slug.lowercased() else { return queuedRootGone(entry.id) }
-            return !polled.contains(slug)
+            guard let key = AgentTaskQueue.item(ofKey: entry.id).flatMap(PRRef.splitItemKey)?
+                .root.lowercased() else { return queuedRootGone(entry.id) }
+            return !polled.contains(key)
                 || (entry.job.auditAction == "review-req"
-                    && rootsUnread.contains("\(Store.reviewRequestsRead):\(slug)"))
+                    && rootsUnread.contains("\(Store.reviewRequestsRead):\(key)"))
         }
-        let conflicting = Set(snaps.filter { $0.mergeable == "CONFLICTING" }.compactMap(\.item))
+        let conflicting = AgentTaskQueue.conflicting(snaps, roots: roots)
         let owingReply = Set(snaps.filter { $0.threadsIOwe > 0 }.compactMap(\.item))
         // Dropped here rather than left for this cycle's commit to omit: the commit is
         // the far side of two monitor runs, and a row already known to be answered
@@ -3262,8 +3268,8 @@ final class Store: ObservableObject {
         /// names nobody (my own PRs, an association scope).
         let author: String
         let config: RequestedConfig
-        /// The lowercased slug of the repo the PR or issue is in, or an investigation is
-        /// about, whose root the ask runs in; "" for an investigation stored before asks
+        /// The key (`LocalRepo.key`) of the repo the PR or issue is in, or an investigation
+        /// is about, whose root the ask runs in; "" for an investigation stored before asks
         /// named one, which runs in the primary root.
         var repo: String
 
@@ -3274,7 +3280,7 @@ final class Store: ObservableObject {
         /// The item this ask is about, or an investigation's Slack ts.
         var item: String {
             config.action == AgentTaskQueue.investigateAction ? String(number)
-                : Store.item(url: url, number: number, slug: repo)
+                : Store.item(url: url, number: number, root: repo)
         }
 
         /// The row this task wears in the panel and the activity feed, `roots` being how
@@ -3289,6 +3295,12 @@ final class Store: ObservableObject {
 
         var label: String { label(roots: 1) }
 
+        /// The issue's link a fix records on its run; built from `repo`'s key once its root
+        /// is gone, so the run stays that repo's.
+        func issueLink(in roots: [PRRef.LocalRepo]) -> String {
+            (roots.first { $0.key == repo } ?? PRRef.repo(ofKey: repo)).webURL(.issues, number: number)
+        }
+
         private enum CodingKeys: String, CodingKey { case number, url, author, action, config, repo }
 
         /// `repo` nil reads it off `url`.
@@ -3299,7 +3311,7 @@ final class Store: ObservableObject {
             self.author = author
             self.config = config
             let named = config.action == AgentTaskQueue.investigateAction ? nil
-                : PRRef.itemKey(url: url).flatMap(PRRef.splitItemKey)?.slug
+                : PRRef.itemKey(url: url).flatMap(PRRef.splitItemKey)?.root
             self.repo = repo ?? named ?? ""
         }
 
@@ -3362,7 +3374,7 @@ final class Store: ObservableObject {
             guard ask.repo.isEmpty, ask.config.action != AgentTaskQueue.investigateAction
             else { return ask }
             var legacy = ask
-            legacy.repo = PRRef.itemKey(url: ask.url).flatMap(PRRef.splitItemKey)?.slug
+            legacy.repo = PRRef.itemKey(url: ask.url).flatMap(PRRef.splitItemKey)?.root
                 ?? configured.lowercased()
             return legacy
         }
@@ -3446,7 +3458,7 @@ final class Store: ObservableObject {
     private func requestedTask(_ entry: RequestedWork) -> QueuedAgentTask? {
         let action = entry.config.action
         var config = entry.config
-        let root = roots.first { $0.slug.lowercased() == entry.repo }
+        let root = roots.first { $0.key == entry.repo }
         switch config {
         case .review(var cfg):
             if let root { cfg.home = root } else if cfg.home != nil { return nil }
@@ -3457,17 +3469,17 @@ final class Store: ObservableObject {
         case .investigate:
             break
         }
-        // A fix is deliberately NOT PR-scoped. The dispatch pipeline's dedup is
-        // PR-shaped throughout — the in-flight check matches a `/pull/<n>` URL and
-        // keys on a PR number — so handing it an issue number would collide with the
-        // PR that happens to share it. What keeps two agents off one issue instead is
-        // the assignee claim, which every machine can see rather than just this one.
+        // A fix is deliberately NOT PR-scoped (an issue link, no PR number): the dispatch
+        // dedup keys on a PR number, so an issue number would collide with the PR sharing
+        // it. The assignee claim, visible to every machine, keeps two agents off one issue.
         let isPR = action == AgentTaskQueue.reviewAction
+        let link: String? = isPR ? entry.url
+            : action == AgentTaskQueue.issuesAction ? entry.issueLink(in: roots) : nil
         return QueuedAgentTask(
             id: entry.key,
             job: AgentJob(kind: action, auditAction: action,
                           label: entry.label(roots: roots.count), prompt: config.buildPrompt(),
-                          prURL: isPR ? entry.url : nil,
+                          prURL: link,
                           prNumber: isPR ? entry.number : nil,
                           authorLogin: entry.author.isEmpty ? nil : entry.author,
                           counter: nil,
@@ -3787,7 +3799,9 @@ final class Store: ObservableObject {
         var auditAction: String     // activity-feed verb
         var label: String           // label core (source prefix / retry suffix added by the gate)
         var prompt: String
-        var prURL: String?          // nil = not PR-scoped (sweeps, audits) → no PR dedup possible
+        /// The PR's or issue's link, which its run records; nil for neither (sweeps,
+        /// audits). Deduped as PR-scoped only with `prNumber`.
+        var prURL: String?
         var prNumber: Int?
         var authorLogin: String?    // whose PR we'd be reviewing — the ban dimension (nil = none)
         /// Telemetry ledger identity ("" = not tracked).
@@ -4022,7 +4036,7 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Review a PR someone asked me to review (most-comprehensive depth, formal
+    /// Review a PR someone asked me to review (focused depth, formal
     /// per-line comments; verdict only under the auto-approve policy) — the
     /// review-request monitor's job builder. `attemptNumber` ≥2 means a retry of a
     /// review a previous agent left unaddressed.
@@ -4045,10 +4059,11 @@ final class Store: ObservableObject {
         }
         let key = item(url: r.url, number: r.number)
         guard let root = root(ofItem: key) else { return false }
-        var cfg = ReviewConfig(depth: "max", target: .specific, me: effectiveMe,
+        var cfg = ReviewConfig(depth: "standard", target: .specific, me: knownMe(for: root),
                                markReady: false, leaveReviews: true, replyToReviews: false,
-                               specificPR: String(r.number), finalPass: verdict,
+                               specificPR: String(r.number),
                                softApprove: soft, specificAuthor: .theirs)
+        cfg.automaticVerdict = verdict
         cfg.home = root
         let job = AgentJob(kind: "review", auditAction: "review-req",
                            label: "Review-req · \(itemLabel(key)) (@\(r.author))\(tag)",
@@ -4071,7 +4086,7 @@ final class Store: ObservableObject {
         guard let data = storedJSON(forKey: Keys.reviewReqAttempts),
               let decoded = try? JSONDecoder().decode([String: ReviewAttempt].self, from: data)
         else { return [:] }
-        return Store.migrated(decoded, primary: primarySlug)
+        return Store.migrated(decoded, primary: primaryKey)
     }
     private func saveReviewReqAttempts(_ map: [String: ReviewAttempt]) {
         persistJSON(map, forKey: Keys.reviewReqAttempts)
@@ -4103,7 +4118,7 @@ final class Store: ObservableObject {
         let key = item(url: url, number: number)
         // An item in no root is skipped: that number in the primary is another PR.
         guard let root = root(ofItem: key) else { return .failed("\(key) is in no repo root") }
-        var cfg = ConflictConfig(target: .specific, me: effectiveMe, specificPR: String(number))
+        var cfg = ConflictConfig(target: .specific, me: knownMe(for: root), specificPR: String(number))
         cfg.home = root
         let job = AgentJob(kind: "conflicts", auditAction: "conflicts",
                            label: "Resolve · \(itemLabel(key))",
@@ -4123,7 +4138,7 @@ final class Store: ObservableObject {
     private func dispatchMyReview(_ s: PRSnapshot, attemptNumber: Int = 1) async -> Bool {
         let key = item(url: s.url, number: s.number)
         guard let root = root(ofItem: key) else { return false }
-        var cfg = ReviewConfig(depth: "deep", target: .specific, me: effectiveMe,
+        var cfg = ReviewConfig(depth: "deep", target: .specific, me: knownMe(for: root),
                                markReady: false, leaveReviews: false, replyToReviews: true,
                                specificPR: String(s.number), specificAuthor: .mine)
         cfg.home = root
@@ -4144,20 +4159,20 @@ final class Store: ObservableObject {
         guard let data = storedJSON(forKey: Keys.myReviewAttempts),
               let decoded = try? JSONDecoder().decode([String: ReviewAttempt].self, from: data)
         else { return [:] }
-        return Store.migrated(decoded, primary: primarySlug)
+        return Store.migrated(decoded, primary: primaryKey)
     }
     private func saveMyReviewAttempts(_ map: [String: ReviewAttempt]) {
         persistJSON(map, forKey: Keys.myReviewAttempts)
     }
 
-    /// The primary root's slug, which owns the bare-number keys a single-repo build stored.
-    private var primarySlug: String { roots[0].slug.lowercased() }
-    /// The item a fetched PR's URL names, else `number` in `slug`.
-    nonisolated static func item(url: String, number: Int, slug: String) -> String {
-        PRRef.itemKey(url: url) ?? PRRef.migrateItemKey(String(number), primary: slug)
+    /// The primary root's key, which owns the bare-number keys a single-repo build stored.
+    private var primaryKey: String { roots[0].key }
+    /// The item a fetched PR's URL names, else `number` in the root of key `root`.
+    nonisolated static func item(url: String, number: Int, root: String) -> String {
+        PRRef.itemKey(url: url) ?? PRRef.migrateItemKey(String(number), primary: root)
     }
     private func item(url: String, number: Int) -> String {
-        Store.item(url: url, number: number, slug: primarySlug)
+        Store.item(url: url, number: number, root: primaryKey)
     }
     /// A persisted per-item map with its legacy bare-number keys read as `primary`'s
     /// items. A key already migrated wins over a legacy twin.
@@ -4184,13 +4199,21 @@ final class Store: ObservableObject {
     /// success so the PR drops off the Approved list; surfaces any error (e.g. checks
     /// still pending).
     func mergePR(_ pr: OpenPR) async {
-        let key = Store.item(url: pr.url, number: pr.number, slug: selectedRoot.slug.lowercased())
-        guard !mergingPRs.contains(key), let repo = PRRef.splitItemKey(key)?.slug else { return }
+        let root = selectedRoot
+        let key = Store.item(url: pr.url, number: pr.number, root: root.key)
+        guard !mergingPRs.contains(key) else { return }
         let label = itemLabel(key)
         mergingPRs.insert(key)
         defer { mergingPRs.remove(key) }
         do {
-            _ = try await GH.run(["pr", "merge", "\(pr.number)", "--repo", repo, "--squash"])
+            if root.isGitLab {
+                // Merge now or fail, like `gh pr merge`, not once a running pipeline passes.
+                _ = try await GLab.run(["mr", "merge", "\(pr.number)", "--squash", "--yes",
+                                        "--auto-merge=false"]
+                                       + GLab.repoFlag(host: root.host, slug: root.slug))
+            } else {
+                _ = try await GH.run(["pr", "merge", "\(pr.number)", "--repo", root.slug, "--squash"])
+            }
             AuditLog.log("panel", "merge", "Merged \(label)")
             refreshAudit()
             await refresh()
@@ -4234,7 +4257,7 @@ final class Store: ObservableObject {
         guard let data = storedJSON(forKey: Keys.autofixFingerprints),
               let decoded = try? JSONDecoder().decode([String: PRFingerprint].self, from: data)
         else { return [:] }
-        return Store.migrated(decoded, primary: primarySlug)
+        return Store.migrated(decoded, primary: primaryKey)
     }
     private func saveAutofixFingerprints(_ fps: [String: PRFingerprint]) {
         persistJSON(fps, forKey: Keys.autofixFingerprints)
@@ -4519,13 +4542,13 @@ final class Store: ObservableObject {
     // MARK: tool data (delegated to the shared core engine)
 
     func count(for kind: ToolKind) -> Int {
-        ToolData.count(for: kind, prs: prs, issues: issues, me: effectiveMe)
+        ToolData.count(for: kind, prs: prs, issues: issues, me: listedMe)
     }
     func items(for kind: ToolKind) -> [DisplayItem] {
-        ToolData.items(for: kind, prs: prs, issues: issues, me: effectiveMe)
+        ToolData.items(for: kind, prs: prs, issues: issues, me: listedMe)
     }
     func lookup(_ number: Int) -> LookupResult {
-        ToolData.lookup(number, prs: prs, issues: issues, me: effectiveMe, visible: visibleTools)
+        ToolData.lookup(number, prs: prs, issues: issues, me: listedMe, visible: visibleTools)
     }
 }
 
@@ -4546,3 +4569,15 @@ enum AppUpdateState: Equatable {
         }
     }
 }
+
+/// A wizard's run config, as `Store.wizardRun` fills it in.
+protocol WizardRunConfig {
+    var me: String { get set }
+    var home: PRRef.LocalRepo? { get set }
+    var localRepos: [PRRef.LocalRepo]? { get set }
+    var targetLocal: PRRef.LocalRepo? { get }
+}
+
+extension ReviewConfig: WizardRunConfig {}
+extension IssueConfig: WizardRunConfig {}
+extension ConflictConfig: WizardRunConfig {}

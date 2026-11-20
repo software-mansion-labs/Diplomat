@@ -91,6 +91,10 @@ public struct ReviewConfig: Codable, Equatable {
     /// The "final pass" escalation: a culminating full-E2E verdict pass. Off by default.
     public var finalPass: Bool
 
+    /// The review-request monitor may submit a verdict at its selected depth.
+    /// Optional so previously queued manual reviews retain their final E2E pass.
+    public var automaticVerdict: Bool?
+
     /// Soft-approve: when a review-only PR comes back perfectly clean, submit a COMMENT
     /// review whose body is a friendly "ran the sweep, all clean, thanks for contributing"
     /// — but NEVER an APPROVE action. On by default. Independent of `finalPass`; when `finalPass` submits a real
@@ -159,9 +163,10 @@ public struct ReviewConfig: Codable, Equatable {
     public var effLeaveReviews: Bool { leaveReviews && canLeaveReviews }
     public var effReplyToReviews: Bool { replyToReviews && canReplyToReviews }
     public var effFinalPass: Bool { finalPass && canFinalPass }
+    private var effVerdict: Bool { (finalPass || automaticVerdict == true) && canFinalPass }
     // A real verdict (finalPass) outranks a soft approval — when we're submitting APPROVE /
     // request-changes there's no separate soft-approve review.
-    public var effSoftApprove: Bool { softApprove && canSoftApprove && !effFinalPass }
+    public var effSoftApprove: Bool { softApprove && canSoftApprove && !effVerdict }
 
     /// Review exactly one PR by number/URL instead of a whose-PRs sweep.
     public var isSinglePR: Bool { target == .specific }
@@ -184,11 +189,15 @@ public struct ReviewConfig: Codable, Equatable {
     /// `targetRepo` came from, else the home's, or nil.
     public var checkout: String? { (isSinglePR ? prRef.repo?.path : nil) ?? home?.path }
 
+    /// The repo `targetRepo` names, nil for `assets/config.json`'s.
+    public var targetLocal: PRRef.LocalRepo? { (isSinglePR ? prRef.repo : nil) ?? home }
+
     /// The single-PR field parsed as a number / URL / `owner/repo#n` shorthand,
     /// checked against the home repo, then `localRepos`.
     public var prRef: PRRef {
         let (owner, repo) = PRRef.LocalRepo.coordinates(home: home)
-        return PRRef.parse(specificPR, owner: owner, repo: repo, also: localRepos ?? [])
+        return PRRef.parse(specificPR, owner: owner, repo: repo,
+                           host: PRRef.LocalRepo.host(home: home), also: localRepos ?? [])
     }
 
     public var isValid: Bool {
@@ -234,18 +243,32 @@ public struct ReviewConfig: Codable, Equatable {
         blocks["diplomatTag"].map { AgentModel.fillTag($0, model: AgentModel.detected()) }
     }
 
+    private func reviewOnlyInstructions(_ blocks: [String: String]) -> String {
+        let range = effFinalPass ? "finalVerification" : "incrementalReviewRange"
+        return [blocks["reviewOnly"], blocks[range]].compactMap { $0 }.joined(separator: " ")
+    }
+
     /// How a review on someone else's PR is built, whenever this run may submit one, and
     /// whether its findings go in it — they do under the verdict pass, which posts them
     /// with its verdict. Nothing on my own PRs, which get no review.
     private func reviewBlocks(_ blocks: [String: String]) -> [String] {
         guard canLeaveReviews else { return [] }
         var out: [String] = []
-        if effLeaveReviews || effSoftApprove || effFinalPass, let b = blocks["reviewLifecycle"] {
+        if effLeaveReviews || effSoftApprove || effVerdict, let b = blocks["reviewLifecycle"] {
             out.append(b)
         }
-        if let b = blocks[effLeaveReviews || effFinalPass ? "leaveReviews" : "noReviews"] {
+        if let b = blocks[effLeaveReviews || effVerdict ? "leaveReviews" : "noReviews"] {
             out.append(b)
         }
+        return out
+    }
+
+    private func ownReviewClose(_ blocks: [String: String], depth: PromptDepth) -> [String] {
+        var out: [String] = []
+        if ["deep", "max"].contains(depth.id), let trailer = blocks["trailer"] {
+            out.append(trailer)
+        }
+        if let lows = blocks["lowsMine"] { out.append(lows) }
         return out
     }
 
@@ -288,10 +311,12 @@ public struct ReviewConfig: Codable, Equatable {
             .replacingOccurrences(of: "{scope}", with: scopeText)
             .replacingOccurrences(of: "{owner}", with: owner)
             .replacingOccurrences(of: "{repo}", with: repo))
+        if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
 
         // For someone else's PRs, frame the whole task as look-don't-touch up front.
-        if isReviewOnly, let b = blocks["reviewOnly"] { out.append(b) }
+        if isReviewOnly { out.append(reviewOnlyInstructions(blocks)) }
         let chosen = ReviewCatalog.depth(id: depth)
+        if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
         // The depth's on-branch fix step only when we may actually commit — never
         // for someone else's branch, which we don't touch.
@@ -300,12 +325,11 @@ public struct ReviewConfig: Codable, Equatable {
         if effMarkReady, let b = blocks["markReady"] { out.append(b) }
         out += reviewBlocks(blocks)
         if effReplyToReviews, let b = blocks["reply"] { out.append(b) }
-        if let trailer = blocks["trailer"] { out.append(trailer) }
-        if let b = blocks[isReviewOnly ? "lowsTheirs" : "lowsMine"] { out.append(b) }
+        if !isReviewOnly { out += ownReviewClose(blocks, depth: chosen) }
         // Commit-authoring guidance only when we might actually commit — never
         // for someone else's branch, which we don't touch.
         if !isReviewOnly, let b = blocks["noAttribution"] { out.append(b) }
-        if effFinalPass, let b = blocks["finalPass"] {
+        if effVerdict, let b = blocks["finalPass"] {
             out.append(b)
         } else if effSoftApprove, let b = blocks["softApprove"] {
             out.append(b)
@@ -333,17 +357,18 @@ public struct ReviewConfig: Codable, Equatable {
         }
         var out: [String] = []
         out.append(fill(scope["single"] ?? ""))
+        if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
         out.append(fill(specific["mineOnly"] ?? ""))
         // First and foremost: screen + verify + fix/dismiss + respond to every reviewer
         // finding already on the PR, BEFORE the agent's own review.
         out.append(fill(specific["reviewerFindingsFirst"] ?? ""))
+        if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
         if let bar = blocks["bar"] { out.append(bar) }
         if let ob = chosen.onBranch, !ob.isEmpty { out.append(ob) }
         if effMarkReady, let b = blocks["markReady"] { out.append(b) }
         if let b = blocks["noAttribution"] { out.append(b) }
-        if let trailer = blocks["trailer"] { out.append(trailer) }
-        if let b = blocks["lowsMine"] { out.append(b) }
+        out += ownReviewClose(blocks, depth: chosen)
         // No final verdict for my own PR — I don't approve my own work. The reviewer-
         // findings block above already covers replying to threads (so the separate reply
         // block is redundant here).
@@ -370,25 +395,24 @@ public struct ReviewConfig: Codable, Equatable {
         }
         var out: [String] = []
         out.append(fill(scope["single"] ?? ""))
+        if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
         out.append(fill(specific["theirsOnly"] ?? ""))
+        out.append(reviewOnlyInstructions(blocks))
+        if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
         if let bar = blocks["bar"] { out.append(bar) }
-        if let b = blocks["reviewOnly"] { out.append(b) }
         out += reviewBlocks(blocks)
         out.append(fill(specific["otherNoMarkReady"] ?? ""))
         // Closing disposition, in precedence order: a real approve/changes-requested
-        // verdict only under the Final-E2E toggle (manual review or a trusted-author auto
-        // run); else a soft approval (thank-you COMMENT review, no APPROVE) when that
+        // verdict under the manual final-pass toggle or the automatic verdict policy; else a soft approval (thank-you COMMENT review, no APPROVE) when that
         // toggle is on (the default); else stay fully silent and leave the call to me.
-        if effFinalPass, let b = blocks["finalPass"] {
+        if effVerdict, let b = blocks["finalPass"] {
             out.append(b)
         } else if effSoftApprove, let b = blocks["softApprove"] {
             out.append(b)
         } else if let b = blocks["noVerdict"] {
             out.append(fill(b))
         }
-        if let trailer = blocks["trailer"] { out.append(trailer) }
-        if let b = blocks["lowsTheirs"] { out.append(b) }
         // Every review/comment this run posts carries the Diplomat attribution tag.
         if let b = diplomatTag(blocks) { out.append(b) }
         return out.filter { !$0.isEmpty }.joined(separator: "\n\n")
@@ -416,13 +440,14 @@ public struct ReviewConfig: Codable, Equatable {
 
         var out: [String] = []
         out.append(fill(scope["single"] ?? ""))
+        if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
         out.append(fill(specific["determineAuthor"] ?? ""))
         // The review work itself is the same regardless of author; only the
         // disposition differs, so everything both cases share comes before the split
         // and CASE B is the last section: whatever follows its header is CASE B's alone.
+        if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
         if let bar = blocks["bar"] { out.append(bar) }
-        if let trailer = blocks["trailer"] { out.append(trailer) }
         if let b = diplomatTag(blocks) { out.append(b) }
 
         // CASE A — it's mine: fix it on the branch.
@@ -430,16 +455,15 @@ public struct ReviewConfig: Codable, Equatable {
         if let ob = chosen.onBranch, !ob.isEmpty { out.append(ob) }
         if effMarkReady, let b = blocks["markReady"] { out.append(b) }
         if effReplyToReviews, let b = blocks["reply"] { out.append(b) }
-        if let b = blocks["lowsMine"] { out.append(b) }
+        out += ownReviewClose(blocks, depth: chosen)
         if let b = blocks["noAttribution"] { out.append(b) }
 
         // CASE B — it's someone else's: review only, hands off the branch.
         out.append(fill(specific["otherHeader"] ?? ""))
-        if let b = blocks["reviewOnly"] { out.append(b) }
+        out.append(reviewOnlyInstructions(blocks))
         out += reviewBlocks(blocks)
         out.append(fill(specific["otherNoMarkReady"] ?? ""))
-        if let b = blocks["lowsTheirs"] { out.append(b) }
-        if effFinalPass, let b = blocks["finalPass"] {
+        if effVerdict, let b = blocks["finalPass"] {
             out.append(b)
         } else if effSoftApprove, let b = blocks["softApprove"] {
             out.append(b)

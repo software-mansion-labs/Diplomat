@@ -27,14 +27,18 @@ root its PR or issue belongs to.
   (5m → 10m → … → 3h) that survives applet restarts. Conflicts are *only*
   level-triggered now (the edge event is a deliberate no-op) and retry on the
   plain 3-minute tick; the backoff ladder is the review path's.
-- **Review requests** - polls PRs requesting *my* review and dispatches the most
-  thorough review the wizard can express: Full E2E · max depth, formal per-line
-  comments, hands strictly off the branch. "Owed" comes from GitHub's own
-  timestamps (request newer than my last review), so a genuine re-request
+- **Review requests** - polls PRs requesting *my* review and dispatches one focused
+  review of the change and affected callers. Re-requests check intervening PR changes
+  and open findings. The review can include targeted runtime checks and inline comments.
+  GitHub's timestamps determine when a review is owed (request newer than my last
+  review), so a genuine re-request
   re-qualifies, and a review left unaddressed (agent died, window closed) is
   retried on the same 5m→3h backoff until the review actually lands. Force-push
   dedup: a push re-stamps the review request, which would double-spawn - a new
-  request within 1h of a dispatch is treated as churn and suppressed. Banned
+  request within 1h of a dispatch is treated as churn and suppressed. GitLab keeps a
+  request only as a note: one older than the merge request's last 100 activity notes is
+  answered when GitLab's review state says I reviewed, approved or requested changes,
+  and otherwise reads as made at the oldest of those notes. Banned
   authors are never auto-reviewed, and Settings carries an **author allowlist**
   (*Only these authors*) that narrows the monitor further: blank means anyone who
   requests me, a list means only those logins and everyone else is left to me. It
@@ -45,7 +49,10 @@ root its PR or issue belongs to.
   queues a [Fix-issues](actions.md#fix-issues) fix (default depth, bugs only, a draft PR
   and a comment on the issue thanking the reporter) for each one filed from outside the org (author
   association other than `MEMBER` / `OWNER`) that nobody is assigned to and nobody on the
-  team (`MEMBER` / `OWNER` / `COLLABORATOR`) has commented on. The fix claims the issue, reproduces it, and fixes it only if it
+  team (`MEMBER` / `OWNER` / `COLLABORATOR`) has commented on. GitLab has no author
+  association: there a project member (direct, inherited from its groups, or through a
+  group shared with the project or one of its groups) reads as `MEMBER`, anyone else as an
+  outsider. The fix claims the issue, reproduces it, and fixes it only if it
   reproduces. Only issues filed after the monitor's first scan of that repo count: the mark is the
   newest `createdAt` it has seen there, kept per repo, so switching it on or adding a
   root never queues a backlog, and each
@@ -183,18 +190,19 @@ auto-review's review is a neutral `COMMENT` one and the final call stays with me
 opted in, three independent suppressors (each default ON) still withhold the
 verdict for a PR that touches a SKILL, touches the installer/CLI, or comes from a
 community author (outside `trustedAssociations` in `assets/filters.json`) - those
-classes stay comments-only even with approvals enabled.
+classes stay comments-only even with approvals enabled. The focused review depth also
+applies when automatic verdicts are enabled.
 
 ### Soft-approvals (default ON)
 
 A separate toggle governs what a *comments-only* review does when it finds a PR
-perfectly clean - **default ON**. Instead of staying silent, the agent submits a
-`COMMENT` review with no inline comments whose body is a single friendly note
-(*"Ran full E2E sweep... Returned perfectly clean. Thank you for contributing!"*).
+free of behavioral findings - **default ON**. The agent submits a
+`COMMENT` review with no inline comments whose body describes what it actually
+checked, thanks the contributor, and may include one optional coverage suggestion.
 A soft-approval is that review alone - it **never** carries an `APPROVE` action;
 it's just an acknowledgement. It's independent of the verdict toggle above and is
 moot on any PR that gets a real verdict (that takes precedence). Turn it off to
-make clean reviews fully silent again.
+skip the thank-you review when there is nothing to report.
 
 ### One review per PR, submitted
 
@@ -309,7 +317,9 @@ task drops out the moment the work is taken by an agent, resolved, or its author
 banned or outside the auto-review list. Every poll also re-checks the rows it is about to run against the fetches it
 has just made - a conflict fix on a PR GitHub no longer calls conflicting, or a
 reply on threads that have been answered, leaves the list instead of opening an
-agent on work somebody already did. **A PR that has merged or closed retires every
+agent on work somebody already did. GitLab rechecks a merge request's merge status only
+when asked, so each of mine it reads as undecided is asked once more per poll, and one
+still undecided keeps its conflict fix. **A PR that has merged or closed retires every
 kind of row that names it**, whoever queued it: waiting for a bay can take a day at
 two at a time, and a review of a landed diff is one nobody will read. (A queued fix
 is numbered in the ISSUE space and no PR speaks for it, so that pass steps over it:

@@ -39,14 +39,7 @@ struct ConflictWizardView: View {
     @State private var status: String?
 
     private var config: ConflictConfig {
-        var cfg = ConflictConfig(
-            target: target,
-            username: username,
-            me: store.effectiveMe,
-            specificPR: specificPR)
-        cfg.home = store.selectedRoot
-        cfg.localRepos = store.wizardRepos
-        return cfg
+        store.wizardRun(ConflictConfig(target: target, username: username, specificPR: specificPR))
     }
 
     var body: some View {
@@ -72,7 +65,7 @@ struct ConflictWizardView: View {
     }
 
     private var targetRow: some View {
-        WizardTargetPicker(target: $target, me: store.effectiveMe)
+        WizardTargetPicker(target: $target, me: store.knownMe(for: store.selectedRoot))
     }
 
     /// The someone-else's handle field or the single-PR number field — only the
@@ -132,7 +125,8 @@ struct ConflictWizardView: View {
     private var trackingPRURL: String? {
         guard let n = linkedNumber else { return nil }
         let (owner, repo) = config.targetRepo
-        return "https://github.com/\(owner)/\(repo)/pull/\(n)"
+        return (config.targetLocal ?? PRRef.LocalRepo(owner: owner, repo: repo, path: ""))
+            .webURL(.pull, number: n)
     }
 
     /// The single PR's number (single-PR mode only); with `trackingPRURL`, the
@@ -143,7 +137,8 @@ struct ConflictWizardView: View {
 
     private var itemLabel: String? {
         let (owner, repo) = config.targetRepo
-        return linkedNumber.map { store.itemLabel(owner: owner, repo: repo, number: $0) }
+        return linkedNumber.map { store.itemLabel(config.targetLocal ?? PRRef.LocalRepo(owner: owner, repo: repo, path: ""),
+                                                     number: $0) }
     }
 
     /// The single PR's number whichever repo it is in — the tracking link.

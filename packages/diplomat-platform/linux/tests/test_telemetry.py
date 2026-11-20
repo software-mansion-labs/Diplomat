@@ -674,6 +674,55 @@ def test_a_resumed_session_is_not_re_read_from_zero(scanner):
     assert usagescan.totals().repo == 14
 
 
+def _block(cwd: str, tokens: int, message_id: str) -> dict:
+    """One content block of an assistant message: Claude Code writes each block as a
+    record of its own, carrying the whole message's usage."""
+    rec = _turn(cwd, tokens)
+    rec["message"]["id"] = message_id
+    return rec
+
+
+def test_a_message_written_as_several_blocks_is_counted_once(scanner):
+    repo, projects = scanner
+    usagescan.totals()
+    _transcript(projects / "s" / "a.jsonl", [
+        _block(str(repo), 300, "msg_1"), _block(str(repo), 300, "msg_1"),
+        _block(str(repo), 300, "msg_1"),
+        # An early block can carry a partial count; the last one carries it all.
+        _block(str(repo), 8, "msg_2"), _block(str(repo), 385, "msg_2"),
+        _block(str(repo), 50, "msg_3"),
+    ])
+    assert usagescan.totals().repo == 735
+
+
+def test_a_message_split_across_scans_is_counted_once(scanner):
+    """A poll can land between two blocks of one message, and the file can sit
+    unchanged at that point for a scan or two."""
+    repo, projects = scanner
+    path = projects / "s" / "a.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("")
+    usagescan.totals()
+    _transcript(path, [_block(str(repo), 300, "msg_1")])
+    assert usagescan.totals().repo == 300
+    assert usagescan.totals().repo == 300
+    _transcript(path, [_block(str(repo), 300, "msg_1"), _block(str(repo), 40, "msg_2")])
+    assert usagescan.totals().repo == 340
+
+
+def test_a_truncated_transcript_forgets_the_message_it_ended_on(scanner):
+    repo, projects = scanner
+    path = projects / "s" / "a.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("")
+    usagescan.totals()
+    _transcript(path, [_block(str(repo), 5000, "msg_1")])
+    usagescan.totals()
+    path.write_text("")
+    _transcript(path, [_block(str(repo), 42, "msg_1")])
+    assert usagescan.totals().repo == 5042
+
+
 def test_a_deleted_transcript_drops_its_cursor(scanner):
     repo, projects = scanner
     path = projects / "s" / "a.jsonl"
@@ -703,6 +752,23 @@ def test_a_task_is_costed_from_its_own_transcript(scanner):
     _session(projects / "s" / "other.jsonl", "a different job entirely", str(repo),
              [9_000_000])
     assert usagescan.task_run("review PR #41 please", started, time.time()).tokens == 1500
+
+
+def test_a_task_is_costed_with_its_subagents(scanner):
+    """A review's swarm writes most of its spend into the transcripts of the
+    subagents it starts, which Claude Code keeps beside the session's own."""
+    repo, projects = scanner
+    started = time.time() - 300
+    main = projects / "s" / "mine.jsonl"
+    _transcript(main, [{"type": "user", "message": {"content": "review PR #41 please"}},
+                       _block(str(repo), 1000, "msg_1"), _block(str(repo), 1000, "msg_1")])
+    _transcript(projects / "s" / "mine" / "subagents" / "agent-a1.jsonl",
+                [_block(str(repo), 4000, "msg_2"), _block(str(repo), 4000, "msg_2")])
+    _transcript(projects / "s" / "mine" / "subagents" / "workflows" / "wf_1"
+                / "agent-a2.jsonl", [_block(str(repo), 20_000, "msg_3")])
+    _transcript(projects / "s" / "other" / "subagents" / "agent-a3.jsonl",
+                [_block(str(repo), 9_000_000, "msg_4")])
+    assert usagescan.task_run("review PR #41 please", started, time.time()).tokens == 25_000
 
 
 def test_a_prompt_written_as_content_blocks_still_matches(scanner):

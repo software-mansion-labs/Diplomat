@@ -2,7 +2,7 @@
 ReviewReconcile.swift and the VerdictPolicy / AuthorAllowlist in Review.swift.
 
 Kept deterministic and side-effect-free so it's testable in isolation: the
-GitHub reads live in :mod:`autofixmonitor`, and the spawn/track/persistence in
+GitHub and GitLab reads live in :mod:`autofixmonitor`, and the spawn/track/persistence in
 the Store. This module only decides *what* should happen given snapshots and
 prior state.
 """
@@ -13,7 +13,7 @@ import math
 import re
 from dataclasses import dataclass, replace
 
-from .prref import item_key, item_key_from_url, item_label, split_item_key
+from .prref import item_key_from_url, item_label, split_item_key
 
 # MARK: - Snapshot + fingerprint
 
@@ -335,7 +335,8 @@ WORK_CONFLICTS = "conflicts"  # conflict fixes on MY PRs → duty "conflicts"
 
 
 def _pr_ref(pr_url: str) -> str | None:
-    """``<host>/<owner>/<repo>#<n>`` for a PR URL, or None when it isn't one."""
+    """``<host>/<owner>/<repo>#<n>`` for a PR URL (a GitLab merge request's owner is its
+    whole namespace), or None when it isn't one."""
     from urllib.parse import urlparse
 
     try:
@@ -344,9 +345,13 @@ def _pr_ref(pr_url: str) -> str | None:
         return None
     host = (u.hostname or "").lower()
     parts = [p for p in (u.path or "").split("/") if p]
-    if not host or len(parts) != 4 or parts[2] != "pull" or not parts[3].isdigit():
+    if not host or not parts or not parts[-1].isdigit():
         return None
-    return f"{host}/{parts[0]}/{parts[1]}#{parts[3]}"
+    if len(parts) == 4 and parts[2] == "pull":
+        return f"{host}/{parts[0]}/{parts[1]}#{parts[3]}"
+    if len(parts) >= 5 and parts[-3:-1] == ["-", "merge_requests"]:
+        return f"{host}/{'/'.join(parts[:-3])}#{parts[-1]}"
+    return None
 
 
 def ledger_key(kind: str, pr_url: str, head_sha: str) -> str:
@@ -895,7 +900,8 @@ class AgentJob:
     audit_action: str  # activity-feed verb
     label: str  # label core (source prefix / retry suffix added by dispatch_label)
     prompt: str
-    pr_url: str | None = None  # the PR's link, for the sessions list; None = not PR-scoped
+    # The PR or issue link its run records; None for neither.
+    pr_url: str | None = None
     # Set for a PR-scoped job only, never an issue's, and None for a PR in another
     # listed checkout; with ``pr_url`` it makes :attr:`item`, the dedup key.
     pr_number: int | None = None
@@ -962,7 +968,7 @@ class RequestedWork:
     #: The wizard config's ``prompt_payload`` for this one item. Its ``kind`` is also
     #: the queue verb the ask waits under, so the payload carries its own discriminator.
     config: dict
-    #: The repo the item is in, as a slug; "" in a row single-repo builds stored.
+    #: The item's root, as its ``LocalRepo.key``; "" in a row single-repo builds stored.
     repo: str = ""
 
     @property
@@ -971,8 +977,7 @@ class RequestedWork:
         no repo: an investigation, or a legacy row not yet given one."""
         if self.action == QUEUE_INVESTIGATE_ACTION or not self.repo:
             return None
-        owner, _, repo = self.repo.partition("/")
-        return item_key(owner, repo, self.number)
+        return f"{self.repo.lower()}#{self.number}"
 
     @property
     def action(self) -> str:
@@ -1077,7 +1082,7 @@ class RunningAgent:
     # guesswork this whole mechanism replaced.
     state: str = "running"
     reason: str = ""
-    # The run's `owner/repo#n` (`agentstate.RunRecord.item`); None for a run about no PR.
+    # The run's PR or issue item key, read off its link; None for neither.
     item: str | None = None
 
     @property
@@ -1089,20 +1094,37 @@ class RunningAgent:
         return self.state == "awaiting_input"
 
 
-_LIVE_AGENT_RE = re.compile(r"PR #([0-9]+) in ([\w.-]+)/([\w.-]+)")
+_LIVE_AGENT_RE = re.compile(r"PR #([0-9]+) in ([\w.-]+(?:/[\w.-]+)+)")
+#: The opening of ``assets/gitlab.json``'s ``promptNote``, which a prompt on a GitLab
+#: repo carries.
+_GITLAB_NOTE_RE = re.compile(
+    r"hosted on GitLab at ([A-Za-z0-9.-]+) \(project ([\w.-]+(?:/[\w.-]+)+)\)")
 
 
-def prompt_items(text: str, slugs: set[str]):
+def prompt_items(text: str, keys: set[str]):
     """Yield the item key of every ``PR #<n> in <owner>/<repo>`` in a prompt whose repo
-    is one of ``slugs``. Every single-PR prompt the applet dispatches opens that way.
+    root's key is one of ``keys`` (``LocalRepo.key``), the owner a namespace of any
+    depth. Every single-PR prompt the applet dispatches opens that way. The repo is
+    GitLab's when the prompt's GitLab note names that project, else GitHub's.
 
+    The longest leading run of path segments in ``keys`` is the repo.
     The prompt goes on ``. Use the `gh` CLI``, and ``.`` is a repo-name character, so
-    a name read with a trailing dot is taken without it when only that is in ``slugs``.
+    the whole path read with a trailing dot is taken without it when only that is in
+    ``keys``.
     """
-    wanted = {s.lower() for s in slugs}
+    wanted = {k.lower() for k in keys}
+    note = _GITLAB_NOTE_RE.search(text)
+    host, project = (note[1].lower(), note[2].lower()) if note else ("", "")
+
+    def key(slug: str) -> str:
+        return f"{host}/{slug}" if slug == project else slug
+
     for m in _LIVE_AGENT_RE.finditer(text):
-        owner, repo = m.group(2).lower(), m.group(3).lower()
-        if f"{owner}/{repo}" not in wanted:
-            repo = repo.rstrip(".")
-        if f"{owner}/{repo}" in wanted:
-            yield item_key(owner, repo, int(m.group(1)))
+        segments = m.group(2).lower().split("/")
+        for end in range(len(segments), 1, -1):
+            slug = "/".join(segments[:end])
+            if end == len(segments) and key(slug) not in wanted:
+                slug = slug.rstrip(".")
+            if key(slug) in wanted:
+                yield f"{key(slug)}#{int(m.group(1))}"
+                break

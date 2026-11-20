@@ -256,9 +256,10 @@ for url in ["git@github.com:software-mansion/radon.git", "https://github.com/sof
             "https://github.com/software-mansion/radon.git/", "ssh://git@github.com/software-mansion/radon.git",
             "https://user@github.com/software-mansion/radon.git",
             "ssh://git@github.com:22/software-mansion/radon.git"] {
-    check(PRRef.LocalRepo.coordinates(remoteURL: url) ?? ("", "") == ("software-mansion", "radon"), url)
+    check(PRRef.LocalRepo.coordinates(remoteURL: url) ?? ("", "", "")
+          == ("github.com", "software-mansion", "radon"), url)
 }
-check(PRRef.LocalRepo.coordinates(remoteURL: "git@gitlab.com:software-mansion/radon.git") == nil)
+check(PRRef.LocalRepo.coordinates(remoteURL: "git@bitbucket.org:software-mansion/radon.git") == nil)
 check(PRRef.LocalRepo.coordinates(remoteURL: "https://github.com.evil.io/a/b") == nil)
 check(PRRef.LocalRepo.coordinates(remoteURL: "/srv/git/radon.git") == nil)
 let remotes = """
@@ -269,7 +270,9 @@ remote.upstream.url https://github.com/software-mansion/radon.git
 remote.dup.url https://github.com/Software-Mansion/Radon
 """
 check(PRRef.LocalRepo.entries(path: "/r", remotes: remotes).map(\.slug)
-      == ["software-mansion/radon", "me/radon", "me/thing"])
+      == ["software-mansion/radon", "me/radon", "me/thing", "x/y"]
+      && PRRef.LocalRepo.entries(path: "/r", remotes: remotes).map(\.host)
+      == ["github.com", "github.com", "github.com", "gitlab.com"])
 check(PRRef.LocalRepo.entries(path: "/r", remotes: "").isEmpty)
 // A queued config stored before the field existed still decodes.
 var stored = try JSONSerialization.jsonObject(with: JSONEncoder().encode(single("337"))) as! [String: Any]
@@ -293,9 +296,9 @@ for url in ["https://gitlab.com/o/r/pull/1", "https://github.com.evil.io/o/r/pul
             "https://github.com/o/r/pull/0", "u1", ""] {
     check(PRRef.itemKey(url: url) == nil, "\(url) names no item")
 }
-check(PRRef.splitItemKey("o/r.js#12").map { [$0.slug, String($0.number)] } == ["o/r.js", "12"],
-      "an item key splits into its slug and number")
-for bad in ["o/r#x", "or#1", "o/r/x#1", "/r#1", "o/#1", "#1", "o/r#", "o/r#+1", "12"] {
+check(PRRef.splitItemKey("o/r.js#12").map { [$0.root, String($0.number)] } == ["o/r.js", "12"],
+      "an item key splits into its root key and number")
+for bad in ["o/r#x", "or#1", "o//x#1", "o/r/#1", "/r#1", "o/#1", "#1", "o/r#", "o/r#+1", "12"] {
     check(PRRef.splitItemKey(bad) == nil, "\(bad) is not an item key")
 }
 check(PRRef.migrateItemKey("12", primary: "O/R") == "o/r#12"
@@ -327,14 +330,17 @@ do {
     let home = ProcessInfo.processInfo.environment["HOME"] ?? NSHomeDirectory()
     let remotes = ["/w/fork": fork, "/w/radon": radonRemotes, "/w/plain": "",
                    "/w/gitlab": "remote.origin.url git@gitlab.com:x/y.git",
+                   "/w/bitbucket": "remote.origin.url git@bitbucket.org:x/y.git",
                    "\(home)/dev/radon2": radonRemotes]
-    let resolved = RepoRoots.resolve(paths: ["/w/fork", "/w/missing", "/w/radon", "/w/gitlab"],
+    let resolved = RepoRoots.resolve(paths: ["/w/fork", "/w/missing", "/w/radon", "/w/bitbucket",
+                                             "/w/gitlab"],
                                      remotes: remotes, configured: cfgSlug)
     check(resolved == [PRRef.LocalRepo(owner: "software-mansion", repo: "argent", path: "/w/fork"),
-                       PRRef.LocalRepo(owner: "software-mansion", repo: "radon", path: "/w/radon")],
+                       PRRef.LocalRepo(owner: "software-mansion", repo: "radon", path: "/w/radon"),
+                       PRRef.LocalRepo(owner: "x", repo: "y", path: "/w/gitlab", host: "gitlab.com")],
           "a fork clone (origin me/argent) is the configured repo, named as configured, not by "
-          + "its sibling remote; a path that is no checkout or has no GitHub remote is "
-          + "skipped: \(resolved)")
+          + "its sibling remote; a gitlab.com remote resolves to itself; a path that is no "
+          + "checkout or has neither a GitHub nor a GitLab remote is skipped: \(resolved)")
     let siblings = ["/radon": "remote.origin.url https://github.com/o/radon\n"
                         + "remote.argent.url https://github.com/\(cfgSlug.owner)/\(cfgSlug.repo)\n"
                         + "remote.fork.url https://github.com/me/argent",
@@ -381,19 +387,27 @@ do {
     check(RepoRoots.allResolve(paths: ["/w/radon", "~/dev/radon2"], remotes: remotes)
           && !RepoRoots.allResolve(paths: ["/w/radon", "/w/missing"], remotes: remotes)
           && !RepoRoots.allResolve(paths: ["/w/radon", "/w/plain"], remotes: remotes)
-          && !RepoRoots.allResolve(paths: ["/w/gitlab"], remotes: remotes),
-          "every path resolves only while each has a GitHub remote")
+          && !RepoRoots.allResolve(paths: ["/w/bitbucket"], remotes: remotes)
+          && RepoRoots.allResolve(paths: ["/w/gitlab"], remotes: remotes),
+          "every path resolves only while each has a GitHub or GitLab remote")
     let pair = ["/src/r", "/src/other"]
     let both = ["/src/r": "remote.origin.url https://github.com/o/r",
                 "/src/other": "remote.origin.url https://github.com/o/other"]
+    let otherFirst = ["/src/r": "remote.origin.url https://bitbucket.org/o/r",
+                      "/src/other": "remote.origin.url https://github.com/o/other"]
     let gitlabFirst = ["/src/r": "remote.origin.url https://gitlab.com/o/r",
                        "/src/other": "remote.origin.url https://github.com/o/other"]
     check(RepoRoots.primaryResolves(paths: pair, remotes: both)
           && !RepoRoots.guessed(paths: pair, remotes: both),
           "both paths resolving: the first root is the first path's, and not a guess")
-    check(!RepoRoots.primaryResolves(paths: pair, remotes: gitlabFirst)
-          && !RepoRoots.guessed(paths: pair, remotes: gitlabFirst),
-          "a first path with only a GitLab remote is no primary, the second still resolving")
+    check(!RepoRoots.primaryResolves(paths: pair, remotes: otherFirst)
+          && !RepoRoots.guessed(paths: pair, remotes: otherFirst),
+          "a first path with only a Bitbucket remote is no primary, the second still resolving")
+    check(RepoRoots.primaryResolves(paths: pair, remotes: gitlabFirst)
+          && !RepoRoots.guessed(paths: pair, remotes: [
+              "/src/r": gitlabFirst["/src/r"]!,
+              "/src/other": "remote.origin.url https://gitlab.example.com/g/sub/other"]),
+          "a first path with a GitLab remote is the primary, and two GitLab paths no guess")
     check(!RepoRoots.primaryResolves(paths: pair, remotes: [:])
           && RepoRoots.guessed(paths: pair, remotes: [:]),
           "none of several resolving: no primary, and the one root a guess")
@@ -2187,7 +2201,7 @@ do {
                                                                   isAgent: true)]) { a, _ in a }),
         sentinels: .present([]), tails: .present(["pts/3": working, "pts/9": working]),
         mergedPRs: .present([]), liveAgents: .present([:])),
-        now: now, limit: 2)
+        roots: [], now: now, limit: 2)
     check(t.capLoad == ["auto"],
       "the cap counts automatic agents — not a click")
     check(t.freeSlots == 1, "one of two bays filled")
@@ -2215,18 +2229,35 @@ do {
           "…and a PR number with no URL to place it names none either")
 
     let scan: Observation<[String: String]> = .present(["o/a#5": "pts/1", "o/b#5": "pts/2"])
-    let synth = AgentState.synthesizeUntracked([], liveAgents: scan, now: now)
+    let synth = AgentState.synthesizeUntracked([], liveAgents: scan, roots: [], now: now)
     check(synth.map(\.runID) == ["untracked:o/a#5", "untracked:o/b#5"]
           && synth.map(\.prURL) == ["https://github.com/o/a/pull/5",
                                     "https://github.com/o/b/pull/5"]
           && synth.allSatisfy { $0.prNumber == 5 && $0.untracked },
           "two live agents on #5 in two repos are two untracked runs: \(synth.map(\.runID))")
     let booked = AgentState.synthesizeUntracked([run("a", "o/a", tty: "pts/1")],
-                                                liveAgents: scan, now: now)
+                                                liveAgents: scan, roots: [], now: now)
     check(booked.map(\.runID) == ["a", "untracked:o/b#5"],
           "a record on o/a#5 covers only o/a's agent: \(booked.map(\.runID))")
-    check(AgentState.synthesizeUntracked(synth, liveAgents: scan, now: now).count == 2,
+    check(AgentState.synthesizeUntracked(synth, liveAgents: scan, roots: [], now: now).count == 2,
           "and the next tick makes no third")
+
+    let lab = PRRef.LocalRepo(owner: "Group/Sub", repo: "Proj", path: "/w/proj",
+                              host: "gitlab.example.com")
+    let labScan: Observation<[String: String]> = .present(["gitlab.example.com/group/sub/proj#337": "pts/4"])
+    let hub = PRRef.LocalRepo(owner: "O", repo: "A", path: "/w/a")
+    let hubRun = AgentState.synthesizeUntracked([], liveAgents: .present(["o/a#5": "pts/5"]),
+                                                roots: [hub], now: now)
+    check(hubRun.map(\.prURL) == ["https://github.com/O/A/pull/5"] && hubRun.map(\.item) == ["o/a#5"],
+          "a GitHub root's untracked run links to its root's PR on github.com, its item the scan's")
+    let labRun = AgentState.synthesizeUntracked([], liveAgents: labScan, roots: [lab], now: now)
+    let labAgain = AgentState.synthesizeUntracked(labRun, liveAgents: labScan, roots: [lab],
+                                                  now: now + 8)
+    check(labRun.map(\.prURL) == ["https://gitlab.example.com/Group/Sub/Proj/-/merge_requests/337"]
+          && labRun.map(\.item) == ["gitlab.example.com/group/sub/proj#337"]
+          && labAgain.map(\.runID) == ["untracked:gitlab.example.com/group/sub/proj#337"],
+          "an agent on a nested GitLab merge request is one untracked run, linked to the merge "
+          + "request, on the scan's item, tick after tick: \(labAgain.map(\.prURL))")
 
     let adopted = AgentState.adoptTTYs([run("a", "o/a")], processes: .present([:]),
                                        liveAgents: .present(["o/b#5": "pts/2"]))
@@ -2254,20 +2285,26 @@ do {
                                 tails: .present(["pts/1": "esc to interrupt"]),
                                 mergedPRs: .present([]),
                                 liveAgents: .present([:])),
-                            now: now, limit: 2)
+                            roots: [], now: now, limit: 2)
     check(t.inFlight(item: "o/a#5") && !t.inFlight(item: "o/b#5"),
           "an agent on o/a#5 blocks a second there and nothing on o/b#5")
 
     let roots: Set<String> = ["software-mansion/argent", "o/r.js"]
     check(AgentState.promptItems("Review PR #12 in software-mansion/argent. Use the `gh` CLI",
-                                 slugs: roots) == ["software-mansion/argent#12"],
+                                 keys: roots) == ["software-mansion/argent#12"],
           "the prompt's closing period is not part of the repo")
-    check(AgentState.promptItems("PR #3 in o/r.js. and PR #4 in O/R.JS now", slugs: roots)
+    check(AgentState.promptItems("PR #3 in o/r.js. and PR #4 in O/R.JS now", keys: roots)
           == ["o/r.js#3", "o/r.js#4"],
           "a repo whose name has a dot keeps it, and the slug is matched case-insensitively")
     check(AgentState.promptItems("PR #9 in other/repo. PR #10 in o/r. PR #11 in o/r.jsx",
-                                 slugs: roots).isEmpty,
+                                 keys: roots).isEmpty,
           "a repo outside the roots, or one that only starts like a root, is no sighting")
+    let nested: Set<String> = ["group/sub/proj", "group/sub", "o/r.js"]
+    check(AgentState.promptItems("Review PR #337 in group/sub/proj. Then PR #8 in Group/Sub/Proj",
+                                 keys: nested) == ["group/sub/proj#337", "group/sub/proj#8"]
+          && AgentState.promptItems("PR #3 in o/r.js.", keys: nested) == ["o/r.js#3"]
+          && AgentState.promptItems("PR #4 in group/sub./proj", keys: nested).isEmpty,
+          "a nested GitLab namespace is read too, the longest slug counting, its period the sentence's")
     print("cross-repo agent state assertions passed")
 }
 
@@ -2820,7 +2857,7 @@ check(!km.contains("mark it ready for review"), "markReady=false omits the block
 let gated = ReviewConfig(depth: "deep", target: .specific, me: "latekvo", specificPR: "440").buildPrompt()
 check(gated.contains("WHO AUTHORED IT") && gated.contains("CASE A") && gated.contains("CASE B"))
 // The verdict and the soft approval are CASE B's alone. CASE B is the last section, so
-// the blocks both cases share (the swarm loop, the attribution tag) precede CASE A, and
+// the shared attribution tag precedes CASE A, and
 // the verdict follows CASE B's header with nothing shared after it.
 for (label, cfg) in [("soft-approve", ReviewConfig(depth: "deep", target: .specific, me: "latekvo",
                                                    specificPR: "440")),
@@ -2828,35 +2865,22 @@ for (label, cfg) in [("soft-approve", ReviewConfig(depth: "deep", target: .speci
                                               specificPR: "440", finalPass: true))] {
     let p = cfg.buildPrompt()
     let caseA = p.range(of: "▸ CASE A")!.lowerBound, caseB = p.range(of: "▸ CASE B")!.lowerBound
-    let verdict = p.range(of: label == "verdict" ? "and if so, APPROVE it" : "thanking them for contributing")!
+    let verdict = p.range(of: label == "verdict" ? "Submit the verdict in the same formal review" : "Thank you for contributing")!
     check(verdict.lowerBound > caseB, "\(label): the verdict sits inside CASE B")
-    check(p.range(of: "Keep dispatching swarms until")!.lowerBound < caseA,
-          "\(label): the shared swarm loop precedes the split, not CASE B")
+    check(p[caseA..<caseB].contains("Keep dispatching swarms until") && !p[caseB...].contains("Keep dispatching swarms until"),
+          "\(label): only an own-branch repair iterates")
     check(p.range(of: "Diplomat attribution tag")!.lowerBound < caseA,
           "\(label): the shared attribution tag precedes the split, not CASE B")
     check(!p[caseA..<caseB].contains("APPROVE it") && !p[caseA..<caseB].contains("thanking them"),
           "\(label): CASE A carries no verdict")
 }
-// A clean pass's LOW findings are fixed on my own PR and posted on someone else's. Each
-// prompt carries its own disposition's block only, and the gated one puts each in its case.
-let lowsMine = "it is FIXED on the branch", lowsTheirs = "the LOW findings of that clean pass are posted"
-for (label, p) in [("known-mine", km),
-                   ("mine sweep", ReviewConfig(depth: "max", target: .mine, me: "latekvo").buildPrompt())] {
-    check(p.contains(lowsMine) && p.contains("ZERO pending findings") && !p.contains(lowsTheirs),
-          "\(label): LOW findings must be fixed, not posted")
-    check(!p.contains("post the LOW"), "\(label): the swarm loop still says to post LOW findings")
-}
-for (label, p) in [("known-theirs", ReviewConfig(depth: "max", target: .specific, me: "latekvo",
-                                                 specificPR: "500", specificAuthor: .theirs).buildPrompt()),
-                   ("theirs sweep", ReviewConfig(depth: "max", target: .someone, username: "other",
-                                                 me: "latekvo").buildPrompt())] {
-    check(p.contains(lowsTheirs) && !p.contains(lowsMine), "\(label): LOW findings must be posted")
-}
+// Own branches retain the fix disposition. External reviews stop after verification.
+let fixLows = "it is FIXED on the branch"
+check(km.contains(fixLows) && km.contains("ZERO pending findings"))
+check(!other.buildPrompt().contains(fixLows))
 let gatedA = gated.range(of: "▸ CASE A")!.lowerBound, gatedB = gated.range(of: "▸ CASE B")!.lowerBound
-check(gated.range(of: lowsMine).map { gatedA < $0.lowerBound && $0.lowerBound < gatedB } == true,
-      "gated: the fix-every-LOW block belongs to CASE A")
-check(gated.range(of: lowsTheirs).map { $0.lowerBound > gatedB } == true,
-      "gated: the post-the-LOWs block belongs to CASE B")
+check(gated[gatedA..<gatedB].contains(fixLows) && !gated[gatedB...].contains(fixLows))
+check(gated[gatedB...].contains("retry the original trigger"))
 print("known-mine review prompt assertions passed")
 
 // ---- known-theirs comprehensive review (review-request monitor) ----
@@ -2872,10 +2896,10 @@ check(kt.contains("SOMEONE ELSE'S"), "review-only framing")
 check(kt.contains("ABSOLUTELY DO NOT touch their branch"), "reviewOnly block present")
 check(kt.contains("Anything you post on someone else's PR goes in ONE formal GitHub review"), "leaveReviews block present")
 // A reply on an existing thread reacts to what the author said there, never a bare repeat.
-check(kt.contains("A reply that disputes the finding without explaining why"), "an unexplained dispute gets a question")
-check(kt.contains("judge the explanation, not the finding. If it holds, post nothing more"), "an explanation that holds ends the thread")
-check(kt.contains("re-running the same reproduction is not new evidence"), "a repeated repro is not a reply")
-check(!km.contains("judge the explanation"), "a no-reviews prompt carries no thread-reply rules")
+check(kt.contains("Once that trigger passes, the finding is fixed"))
+check(kt.contains("Never extend its acceptance criteria with a different input or mutant"))
+check(kt.contains("one short Optional coverage note in the review body"))
+check(!km.contains("retry the original trigger"), "own PRs use the fix-on-branch thread rules")
 // The lifecycle, step by step: opened PENDING, filled inside, submitted once.
 check(kt.contains("with NO `event` field leaves the review PENDING"), "the review is opened pending")
 check(kt.contains("one pending review per person per PR"), "a leftover pending review is handled")
@@ -2884,6 +2908,7 @@ check(kt.contains("it is yours — opened earlier in this run, or left by an ear
 check(kt.contains("right before it, list the pending review's comments again: one that does not open with the attribution tag is mine, added from the browser, so leave the review unsubmitted"),
       "a comment of mine added mid-run keeps the review from being submitted")
 check(kt.contains("Post your findings in that review"), "leave-reviews posts the findings in it")
+check(kt.contains("Leave the choice of fix to the author"), "review findings leave implementation to the author")
 check(!kt.contains("Do NOT post your findings on the PR"), "…and is not told to keep them")
 check(kt.contains("If one of them does not open with the `\\[[Diplomat](` attribution tag (whatever model name follows it), that review is my own draft from the browser: stop right there"),
       "my draft is looked for before any review work, and stops the run")
@@ -2904,7 +2929,7 @@ check(kt.contains("Never end your turn with the review still PENDING"), "never l
 check(kt.contains("nor through the standalone `pulls/<number>/comments` endpoint"),
       "single-comment posting is ruled out")
 check(kt.contains("Do NOT mark this PR ready"), "otherNoMarkReady present")
-check(kt.contains("that single clean pass ends the loop"), "max-depth fragment present")
+check(kt.contains("run it END-TO-END"), "max-depth fragment present")
 // Soft-approve: no hard verdict, but a thank-you COMMENT review — never an APPROVE action.
 check(kt.contains("Do NOT submit an APPROVE"), "soft-approve still withholds the APPROVE verdict")
 check(kt.contains("Thank you for contributing"), "soft-approve clean thank-you present")
@@ -2929,24 +2954,24 @@ check(!kts.contains("Thank you for contributing"), "soft-approve off ⇒ no than
 check(!kts.contains("still APPROVE"), "no finalPass block")
 print("known-theirs (silent) review prompt assertions passed")
 
-// ---- known-theirs WITH verdict (trusted author: member/maintainer/contributor) ----
-// The review-request monitor sets finalPass=true when the PR author is trusted, so the
-// auto-review closes with an APPROVE/changes-requested verdict instead of comments only.
-// A real verdict outranks the (default-on) soft-approve, so no thank-you review either.
-section("known-theirs review prompt (trusted author → verdict)")
+// A manual final pass covers the full PR even after a focused review of the same head.
+section("known-theirs review prompt (manual final E2E + verdict)")
 let ktv = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
                        markReady: false, leaveReviews: true, replyToReviews: false,
                        specificPR: "500", finalPass: true, specificAuthor: .theirs).buildPrompt()
 check(ktv.contains("SOMEONE ELSE'S"), "review-only framing still present with verdict")
-check(ktv.contains("still APPROVE"), "trusted author ⇒ finalPass APPROVE-verdict block present")
-check(ktv.contains("gets a reply on that thread, under the reply rules above") && !ktv.contains("(\"Still present as of <commit_hash>\"), never a fresh comment"), "finalPass defers to the thread-reply rules")
-check(!ktv.contains("Do NOT submit an APPROVE"), "trusted author ⇒ no no-verdict block")
+check(ktv.contains("Use the full merge-base-to-head diff, even when this head was reviewed before"))
+check(ktv.contains("FULL E2E pass on the built binaries for the workflows affected by that diff"))
+check(!ktv.contains("On the same head check outstanding threads only"))
+check(ktv.contains("still APPROVE"), "final pass includes a verdict")
+check(ktv.contains("Follow the same posting and thread rules for all verdicts"))
+check(!ktv.contains("Do NOT submit an APPROVE"), "final pass permits a verdict")
 check(!ktv.contains("Thank you for contributing"), "hard verdict outranks soft-approve")
 check(ktv.contains("COMMENT unless a verdict instruction below explicitly tells you to APPROVE"),
       "the lifecycle's COMMENT default yields to the verdict block")
 check(ktv.contains("such a verdict is this same submission's event, never a second review"),
       "the verdict is the one review's event")
-print("known-theirs (trusted author) review prompt assertions passed")
+print("known-theirs (manual final E2E) review prompt assertions passed")
 
 // The lifecycle belongs to a formal review of someone else's PR, and to nothing else.
 let ktNoReview = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
@@ -3072,6 +3097,14 @@ do {
     for (flag, value) in [("-f", "owner=acme"), ("-f", "name=widgets"), ("-f", "me=alice"), ("-F", "number=7")] {
         check(zip(asked, asked.dropFirst()).contains { $0 == (flag, value) }, "audit passes \(flag) \(value)")
     }
+    var unknownLogin = ""
+    do { _ = try await ReviewAudit.audit(prURL: "https://github.com/acme/widgets/pull/7", me: "", since: since) }
+    catch { unknownLogin = error.localizedDescription }
+    let gitlabRun = try? await ReviewAudit.audit(
+        prURL: "https://gitlab.example.com/g/sub/p/-/merge_requests/7", me: "", since: since)
+    check(unknownLogin == "the gh login is not known yet" && gitlabRun == [],
+          "no gh login fails a GitHub PR's check, and says nothing of a merge request's: "
+          + "\(unknownLogin) \(String(describing: gitlabRun))")
 }
 print("ReviewAudit assertions passed")
 
@@ -3080,14 +3113,13 @@ print("ReviewAudit assertions passed")
 // meaning at all: a depth that stopped naming a single move would regenerate green. These
 // name the method itself.
 //
-// On the `.mine` prompt: softApprove quotes the move names in its example comment, so on a
-// `.theirs` prompt a move deleted from the fragment is still found there.
 section("review moves + absence pass")
-let moves = ["claims vs code", "nearest twin", "non-happy paths",
-             "inputs, reachability both ways", "what outlives the call"]
+// Named AND defined: the prompt is the agent's only copy of what a move means.
+let moves = ["claims vs code (", "nearest twin (", "non-happy paths (", "inputs (",
+             "reachability both ways (", "what outlives the call ("]
 let absencePass = ["a sibling that has it", "prose that promises it", "symmetry",
-                   "and the mutation"]
-for swarmDepth in ["standard", "deep", "max"] {
+                   "a targeted mutation that reverts that behavior"]
+for swarmDepth in ["deep", "max"] {
     let p = ReviewConfig(depth: swarmDepth, me: "latekvo").buildPrompt()
     for move in moves {
         check(p.contains(move), "\(swarmDepth) depth names the '\(move)' move")
@@ -3096,12 +3128,80 @@ for swarmDepth in ["standard", "deep", "max"] {
         check(p.contains(part), "\(swarmDepth) depth carries the absence pass — '\(part)'")
     }
 }
+var requestedVerdict = ReviewConfig(depth: "standard", target: .specific, specificPR: "500", specificAuthor: .theirs)
+requestedVerdict.automaticVerdict = true
+let focusedVerdict = requestedVerdict.buildPrompt()
+check(focusedVerdict.contains("one focused pass") && focusedVerdict.contains("still APPROVE"))
+check(!focusedVerdict.contains("FULL E2E pass") && !focusedVerdict.contains("Keep dispatching swarms"))
+check(focusedVerdict.contains("On the same head check outstanding threads only"))
+check(focusedVerdict.contains("history was rewritten") && focusedVerdict.contains("use the full current PR diff"))
+check(!focusedVerdict.contains("Thank you for contributing"))
 // `quick` dispatches no swarm — and without this negative the loop above would pass just
 // as well on a move list appended to every depth.
 let quickPrompt = ReviewConfig(depth: "quick", me: "latekvo").buildPrompt()
 check(!quickPrompt.contains("nearest twin"), "quick depth runs no swarm and names no moves")
 check(!quickPrompt.contains("a sibling that has it"), "quick depth carries no absence pass")
+for swarmDepth in ["deep", "max"] {
+    let p = IssueConfig(depth: swarmDepth, me: "latekvo").forIssue(7).buildPrompt()
+    for move in moves {
+        check(p.contains(move), "issues \(swarmDepth) depth names and defines the '\(move)' move")
+    }
+}
+// The prompt runs on machines that have none of the operator's files.
+for name in ["review", "issues", "audit", "conflicts"] {
+    let text = try! String(contentsOf: CoreAssets.assetsDir().appendingPathComponent("\(name).json"),
+                           encoding: .utf8)
+    check(!text.contains("CLAUDE.md"), "\(name).json defers to no CLAUDE.md the agent may not have")
+}
 print("review moves + absence pass assertions passed")
+
+// ---- Whether the PR is the right change at all ----
+// Every review prompt asks it once, ahead of the depth's instructions, whoever the author.
+section("premise check")
+let premiseParts = ["Identify the behavior this PR sets out to change",
+                    "reachable regression against the merge base",
+                    "fails a behavior the change explicitly promises",
+                    "Open a follow-up issue only when the operator explicitly asks"]
+for d in ReviewCatalog.depths() {
+    let shapes: [(String, String)] = [
+        ("mine sweep", ReviewConfig(depth: d.id, me: "latekvo").buildPrompt()),
+        ("someone's sweep", ReviewConfig(depth: d.id, target: .someone, username: "someuser",
+                                         me: "latekvo").buildPrompt()),
+        ("known mine", ReviewConfig(depth: d.id, target: .specific, me: "latekvo",
+                                    specificPR: "500", specificAuthor: .mine).buildPrompt()),
+        ("known theirs", ReviewConfig(depth: d.id, target: .specific, me: "latekvo",
+                                      specificPR: "500", specificAuthor: .theirs).buildPrompt()),
+        ("unknown author", ReviewConfig(depth: d.id, target: .specific, me: "latekvo",
+                                        specificPR: "500").buildPrompt()),
+    ]
+    for (shape, p) in shapes {
+        for part in premiseParts {
+            check(p.contains(part), "\(d.id) / \(shape) carries the premise check - '\(part)'")
+        }
+        check(p.components(separatedBy: premiseParts[0]).count == 2,
+              "\(d.id) / \(shape) asks the premise once")
+        if let premise = p.range(of: premiseParts[0]), let technical = p.range(of: d.fragment) {
+            check(premise.lowerBound < technical.lowerBound,
+                  "\(d.id) / \(shape) asks the premise ahead of the technical review")
+        } else {
+            check(false, "\(d.id) / \(shape) carries both the premise and the depth fragment")
+        }
+    }
+    // Both cases of an unknown-author PR share it, so it sits above the split.
+    let unknown = shapes[4].1
+    if let premise = unknown.range(of: premiseParts[0]), let caseA = unknown.range(of: "▸ CASE A") {
+        check(premise.lowerBound < caseA.lowerBound, "\(d.id) / the premise sits above the CASE split")
+    } else {
+        check(false, "\(d.id) / an unknown-author prompt carries the premise and the CASE split")
+    }
+}
+// Without these the loop above would pass on text appended to every prompt kind.
+check(!ConflictConfig(me: "latekvo").buildPrompt().contains(premiseParts[0]),
+      "a conflict resolution judges no premise")
+check(!IssueConfig(me: "latekvo").forIssue(302).buildPrompt().contains(premiseParts[0]),
+      "an issue fix judges no premise")
+check(!AuditConfig().buildPrompt().contains(premiseParts[0]), "an audit judges no premise")
+print("premise check assertions passed")
 
 // ---- Where a swarm's spilled summaries may be read from ----
 // A runner that spills a subagent's full output writes it to one machine-wide cache under a
@@ -3475,7 +3575,7 @@ check(AuditCategory.of(action: "merge-failed") == .merge)
 check(AuditCategory.of(action: "ban") == .bans, "bans are their own category")
 check(AuditCategory.of(action: "unban") == .bans)
 for verb in ["comms-ping", "comms-review", "comms-fix", "comms-bump", "comms-investigate",
-             "comms-error", "comms-recovered", "comms-notice", "comms-reply"] {
+             "comms-error", "comms-recovered", "comms-notice"] {
     check(AuditCategory.of(action: verb) == .comms, "\(verb) is a Comms row")
 }
 check(AuditCategory.displayOrder.firstIndex(of: .comms) == AuditCategory.displayOrder.firstIndex(of: .bans)! + 1
@@ -3511,6 +3611,7 @@ print("comms assertions passed")
 try await tasksSmoke()
 try await goalsSmoke()
 print("tasks assertions passed")
+try await gitlabSmoke()
 
 // ---- Golden prompts (cross-platform parity) ----
 // Every prompt mode both front-ends can assemble is compared byte-for-byte against a
@@ -3520,6 +3621,9 @@ print("tasks assertions passed")
 // DiplomatCoreSmoke.
 section("golden prompts")
 let goldenMe = "testuser"
+// A GitLab home: the one input the GitLab goldens add to their GitHub twins.
+let goldenGitLab = PRRef.LocalRepo(owner: "group/sub", repo: "proj", path: "/w/proj",
+                                   host: "gitlab.example.com")
 let goldenModes: [(String, String)] = [
     ("review-mine-max", ReviewConfig(depth: "max", me: goldenMe).buildPrompt()),
     ("review-user-max", ReviewConfig(depth: "max", target: .someone, username: "someuser",
@@ -3553,6 +3657,13 @@ let goldenModes: [(String, String)] = [
         owner: "software-mansion", repo: "argent", login: goldenMe))),
     ("comms-classifier-multi", CommsClassifier.prompt(settings: CommsSettings(
         repos: ["software-mansion/argent", "latekvo/diplomat"], login: goldenMe))),
+    ("review-single-gitlab", { var c = ReviewConfig(depth: "max", target: .specific, me: goldenMe,
+                                                    specificPR: "337")
+                               c.home = goldenGitLab
+                               return c.buildPrompt() }()),
+    ("issues-single-gitlab", { var c = IssueConfig(target: .specific, me: goldenMe, specificIssue: "421")
+                               c.home = goldenGitLab
+                               return c.buildPrompt() }()),
 ]
 let goldenDir = try CoreAssets.assetsDir().appendingPathComponent("golden-prompts")
 if ProcessInfo.processInfo.environment["DIPLOMAT_GOLDEN_WRITE"] == "1" {
@@ -3591,6 +3702,52 @@ do {
     check(outcome == "timeout 1", "a stalled gh is reported as a timeout, got: \(outcome)")
     check(Date().timeIntervalSince(started) < 10, "the deadline is what ends the wait, not the stub")
     unsetenv("DIPLOMAT_GH")
+}
+
+// ---- API: the panel's open PRs are read a page at a time (mirrors test_open_prs.py) ----
+// The stub answers the page `<owner>-<after>.json` names (`-.json` for the first) and
+// logs each call's cursor; a page it has no file for fails the call.
+do {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("smoke-prs-\(getpid())")
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let gh = dir.appendingPathComponent("gh"), log = dir.appendingPathComponent("log")
+    try """
+    #!/bin/sh
+    owner=; after=
+    for a in "$@"; do case "$a" in owner=*) owner="${a#owner=}";; after=*) after="${a#after=}";; esac; done
+    echo "$owner-$after" >> '\(log.path)'
+    exec cat "\(dir.path)/$owner-$after.json"
+    """.write(to: gh, atomically: true, encoding: .utf8)
+    chmod(gh.path, 0o755)
+    func page(_ owner: String, _ after: String, _ number: Int, next: String?) throws {
+        let pr = #"{"number":\#(number),"title":"t","url":"u","isDraft":false,"createdAt":"2026-01-01T00:00:00Z","#
+            + #""reviewDecision":null,"mergeable":"MERGEABLE","author":{"login":"a"},"files":{"nodes":[]},"#
+            + #""timelineItems":{"nodes":[]},"reviewThreads":{"nodes":[]}}"#
+        let info = next.map { #"{"hasNextPage":true,"endCursor":"\#($0)"}"# } ?? #"{"hasNextPage":false,"endCursor":"end"}"#
+        try #"{"data":{"repository":{"pullRequests":{"pageInfo":\#(info),"nodes":[\#(pr)]}}}}"#
+            .write(to: dir.appendingPathComponent("\(owner)-\(after).json"), atomically: true, encoding: .utf8)
+    }
+    for i in 1...5 { try page("many", i == 1 ? "" : "c\(i - 1)", i, next: "c\(i)") }
+    try page("two", "", 1, next: "c1")
+    try page("two", "c1", 2, next: nil)
+    setenv("DIPLOMAT_GH", gh.path, 1)
+    defer { unsetenv("DIPLOMAT_GH") }
+    func calls() -> [String] {
+        defer { try? FileManager.default.removeItem(at: log) }
+        return ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+    }
+
+    let many = try await API.fetchOpenPRs(PRRef.LocalRepo(owner: "many", repo: "r", path: "")).map(\.number)
+    check(many == [1, 2, 3, 4], "four pages, in order, and no fifth, got: \(many)")
+    let manyCalls = calls()
+    check(manyCalls == ["many-", "many-c1", "many-c2", "many-c3"],
+          "each page asks after the one before, got: \(manyCalls)")
+    let two = try await API.fetchOpenPRs(PRRef.LocalRepo(owner: "two", repo: "r", path: "")).map(\.number)
+    let twoCalls = calls()
+    check(two == [1, 2] && twoCalls == ["two-", "two-c1"],
+          "the last page ends the reading, got: \(two) after \(twoCalls)")
+    print("open PRs paged ok")
 }
 
 // ---- GH: the login shell's answer is read without waiting on what it left behind ----
@@ -3905,8 +4062,9 @@ do {
 if ProcessInfo.processInfo.environment["DIPLOMAT_DUMP"] == "1" {
     section("live gh dump (cross-check vs Python)")
     let viewer = try await API.fetchViewerLogin()
-    let realPRs = try await API.fetchOpenPRs(owner: cfg.owner, repo: cfg.repo)
-    let realIssues = try await API.fetchOpenIssues(owner: cfg.owner, repo: cfg.repo)
+    let configured = PRRef.LocalRepo(owner: cfg.owner, repo: cfg.repo, path: "")
+    let realPRs = try await API.fetchOpenPRs(configured)
+    let realIssues = try await API.fetchOpenIssues(configured)
     print("viewer @\(viewer) · PRs \(realPRs.count) · issues \(realIssues.count)")
     for kind in ToolKind.allCases {
         let c = ToolData.count(for: kind, prs: realPRs, issues: realIssues, me: viewer)

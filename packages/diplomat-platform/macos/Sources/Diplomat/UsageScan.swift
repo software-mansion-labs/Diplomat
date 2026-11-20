@@ -15,7 +15,10 @@ import DiplomatCore
 /// * **how much of this machine's spend went on the monitored repos** — sum every
 ///   turn, split by whether its `cwd` is inside a repo root the agents work in;
 /// * **what one auto-task cost** — find the transcript whose opening user message
-///   *is* the prompt staged for that agent, and sum that file alone.
+///   *is* the prompt staged for that agent, and sum it with its subagents' transcripts.
+///
+/// A message is counted once: Claude Code writes one record per content block, back to
+/// back, each carrying the whole message's `usage`.
 ///
 /// Two rules keep this cheap enough to run on a poll:
 ///
@@ -95,12 +98,25 @@ enum UsageScan {
         return rec["usage"] as? [String: Any]
     }
 
+    private static func messageID(_ rec: [String: Any]) -> String? {
+        guard let id = (rec["message"] as? [String: Any])?["id"] as? String,
+              !id.isEmpty else { return nil }
+        return id
+    }
+
+    /// The message the last usage record belonged to, and what it has been counted for.
+    struct Last: Equatable { var id: String; var cost: Double }
+
     /// Sum the tokens in a chunk of transcript, split repo vs other. `consumed` is
     /// the number of bytes forming COMPLETE lines: a poll can land mid-write, so the
     /// trailing partial line is left for the next scan rather than parsed and lost.
-    static func scanChunk(_ data: Data, roots: [String]) -> (repo: Double, other: Double,
-                                                             consumed: Int) {
+    ///
+    /// A record of the message `last` names adds only its excess over what that message
+    /// was already counted for; `last` carries that across one file's chunks.
+    static func scanChunk(_ data: Data, roots: [String], last: Last? = nil)
+        -> (repo: Double, other: Double, consumed: Int, last: Last?) {
         var repo = 0.0, other = 0.0, consumed = 0
+        var last = last
         var start = data.startIndex
         while let nl = data[start...].firstIndex(of: UInt8(ascii: "\n")) {
             let line = data[start..<nl]
@@ -109,12 +125,17 @@ enum UsageScan {
             guard !line.isEmpty,
                   let rec = (try? JSONSerialization.jsonObject(with: Data(line))) as? [String: Any],
                   let usage = usageBlock(rec) else { continue }
-            let cost = tokenCost(usage)
+            var cost = tokenCost(usage)
+            if let id = messageID(rec) {
+                let counted = last.flatMap { $0.id == id ? $0.cost : nil } ?? 0
+                last = Last(id: id, cost: cost)
+                cost -= counted
+            }
             guard cost > 0 else { continue }
             if isRepoCwd(rec["cwd"] as? String ?? "", roots: roots) { repo += cost }
             else { other += cost }
         }
-        return (repo, other, consumed)
+        return (repo, other, consumed, last)
     }
 
     // MARK: - Cumulative totals
@@ -163,21 +184,22 @@ enum UsageScan {
                     }
                     offset = 0
                 }
+                var last = storedLast(files[path]?["last"])
                 // Truncated or replaced: our offset points past the end, so every
                 // byte in it is unread. Start over rather than skip it.
-                if size < offset { offset = 0 }
+                if size < offset { offset = 0; last = nil }
                 if size == offset {
-                    files[path] = ["offset": offset, "mtime": mtime]
+                    files[path] = cursor(offset, mtime, last)
                     continue
                 }
                 guard let handle = try? FileHandle(forReadingFrom: url) else { continue }
                 try? handle.seek(toOffset: UInt64(offset))
                 let data = (try? handle.readToEnd()) ?? Data()
                 try? handle.close()
-                let chunk = scanChunk(data, roots: roots)
+                let chunk = scanChunk(data, roots: roots, last: last)
                 repo += chunk.repo
                 other += chunk.other
-                files[path] = ["offset": offset + chunk.consumed, "mtime": mtime]
+                files[path] = cursor(offset + chunk.consumed, mtime, chunk.last)
             }
         }
 
@@ -196,6 +218,18 @@ enum UsageScan {
             try? data.write(to: cursorURL, options: .atomic)
         }
         return Totals(repo: repo, other: other)
+    }
+
+    private static func cursor(_ offset: Int, _ mtime: TimeInterval, _ last: Last?) -> [String: Any] {
+        var entry: [String: Any] = ["offset": offset, "mtime": mtime]
+        if let last { entry["last"] = [last.id, last.cost] }
+        return entry
+    }
+
+    private static func storedLast(_ raw: Any?) -> Last? {
+        guard let pair = raw as? [Any], pair.count == 2, let id = pair[0] as? String,
+              let cost = (pair[1] as? NSNumber)?.doubleValue else { return nil }
+        return Last(id: id, cost: cost)
     }
 
     // MARK: - Per-task attribution
@@ -224,11 +258,23 @@ enum UsageScan {
         let wanted = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !wanted.isEmpty else { return nil }
         let roots = repoRoots()
+        func fileTokens(_ data: Data) -> Double {
+            let chunk = scanChunk(data, roots: roots)
+            return chunk.repo + chunk.other
+        }
         for url in candidates(startedAt: startedAt, endedAt: endedAt) {
             guard openingPrompt(url) == wanted else { continue }
             guard let data = try? Data(contentsOf: url) else { return 0 }
-            let chunk = scanChunk(data, roots: roots)
-            return chunk.repo + chunk.other
+            var tokens = fileTokens(data)
+            // Its subagents' transcripts, which Claude Code keeps under <session>/.
+            let walker = FileManager.default.enumerator(at: url.deletingPathExtension(),
+                                                        includingPropertiesForKeys: nil)
+            while let sub = walker?.nextObject() as? URL {
+                if sub.pathExtension == "jsonl", let data = try? Data(contentsOf: sub) {
+                    tokens += fileTokens(data)
+                }
+            }
+            return tokens
         }
         return nil
     }

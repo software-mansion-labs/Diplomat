@@ -58,7 +58,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from . import apiwatch, completion
-from .prref import item_key_from_url, split_item_key
+from .prref import LocalRepo, item_key_from_url, repo_of_key, split_item_key
 
 # MARK: - Observations: evidence, or a named reason there is none
 
@@ -392,6 +392,7 @@ class RunRecord:
     run_id: str
     dispatched_at: float
     pr_number: int | None = None
+    #: The run's PR or issue link; "" for neither.
     pr_url: str = ""
     kind: str = ""
     label: str = ""
@@ -482,7 +483,7 @@ class Evidence:
     #: tty → that session's visible buffer.
     tails: Observation = field(
         default_factory=lambda: Observation.unavailable("not probed"))
-    #: Item keys of the PRs GitHub reports as MERGED.
+    #: Item keys of the PRs GitHub or GitLab reports as MERGED.
     merged_prs: Observation = field(
         default_factory=lambda: Observation.unavailable("not probed"))
     #: Item key → the tty of an agent found by its prompt text in the process table.
@@ -1122,7 +1123,7 @@ def adopt_ttys(records: list[RunRecord], processes: Observation,
 
 
 def synthesize_untracked(records: list[RunRecord], live_agents: Observation,
-                         now: float) -> list[RunRecord]:
+                         now: float, roots: tuple[LocalRepo, ...] = ()) -> list[RunRecord]:
     """Records for live agents nobody dispatched, so they are deduped against and
     drawn rather than merely subtracted from a slot count.
 
@@ -1166,14 +1167,15 @@ def synthesize_untracked(records: list[RunRecord], live_agents: Observation,
             r = replace(r, tty=tty, quiet_digest="", quiet_since=None)
         out.append(r)
     known = {r.item for r in out if r.item is not None}
+    by_key = {r.key: r for r in roots}
     for item in sorted(set(live) - known):
         split = split_item_key(item)
         if split is None:
             continue
-        slug, number = split
+        key, number = split
+        root = by_key.get(key) or repo_of_key(key)
         out.append(RunRecord(run_id=f"untracked:{item}", dispatched_at=now,
-                             pr_number=number,
-                             pr_url=f"https://github.com/{slug}/pull/{number}",
+                             pr_number=number, pr_url=root.link("pull", number),
                              source=SOURCE_AUTO, tty=live[item], untracked=True))
     return out
 
@@ -1374,7 +1376,7 @@ class Tick:
 
 
 def tick(records: list[RunRecord], evidence: Evidence, now: float, limit: int,
-         deadline: float | None = None) -> Tick:
+         deadline: float | None = None, roots: tuple[LocalRepo, ...] = ()) -> Tick:
     """Fold one pass of evidence into every answer, in the one order that is correct.
 
     The order is the reason this is a function rather than a convention each caller
@@ -1385,11 +1387,12 @@ def tick(records: list[RunRecord], evidence: Evidence, now: float, limit: int,
     scan found it on rather than having one adopted for a pid it does not have. Released
     records are made LAST, from the verdicts, so the caller persists each before it
     forgets the run that ended. Both front-ends and the parity CLI go through here, so
-    neither can get the sequence subtly different from the other.
+    neither can get the sequence subtly different from the other. ``roots`` link
+    untracked agents' records.
     """
     records = adopt_ttys(records, evidence.processes, evidence.live_agents)
     records = observe_quiescence(records, evidence.tails, now)
-    records = synthesize_untracked(records, evidence.live_agents, now)
+    records = synthesize_untracked(records, evidence.live_agents, now, roots)
     states = resolve(records, evidence, now, deadline)
     for heir, verdict in release_ended(records, states, evidence, now, deadline):
         records = records + [heir]

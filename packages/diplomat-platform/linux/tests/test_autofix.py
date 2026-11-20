@@ -590,12 +590,22 @@ def test_review_request_verdict_gating(store, monkeypatch):
     store.review_requests_enabled = True
     store.auto_approve_enabled = True
     calls = _spawn_recorder(monkeypatch, finish=True)
-    # A clean PR by a trusted author → verdict allowed (final_pass=true in prompt).
+    # Capture the inputs actually dispatched on each path.
+    configs = []
+
+    def capture(config):
+        configs.append(config)
+        return "review"
+
+    monkeypatch.setattr("diplomat_runtime.promptcore.build_prompt", capture)
+    # A trusted author's review may submit a verdict at the focused depth.
     reqs = [_req(requested_at="2026-01-02", author_association="MEMBER", files=["a.py"])]
     monkeypatch.setattr("diplomat_app.autofixmonitor.fetch_review_requests", lambda *a, **k: reqs)
     store._poll_review_requests([ROOT])
     assert len(calls) == 1 and "review" in calls[0]["prompt"]
     assert store.review_requests_handled == 1
+    assert configs[0]["depth"] == "standard" and configs[0]["automaticVerdict"]
+    assert not configs[0]["finalPass"]
 
     # A different SKILL PR → verdict withheld: still dispatched (comments-only).
     calls.clear()
@@ -605,6 +615,8 @@ def test_review_request_verdict_gating(store, monkeypatch):
                         lambda *a, **k: skill_reqs)
     store._poll_review_requests([ROOT])
     assert len(calls) == 1  # dispatched (comments-only)
+    assert configs[1]["depth"] == "standard" and configs[1]["automaticVerdict"] is False
+    assert not configs[1]["finalPass"]
 
 
 def test_unaddressed_count_and_ban_skip(store, monkeypatch):
@@ -1480,7 +1492,7 @@ def test_the_polls_settle_tells_the_panel_what_it_retired(store, monkeypatch):
                  label="Auto · #512")
     fake_probes(monkeypatch, processes={})
     monkeypatch.setattr("diplomat_app.probes.merged_prs",
-                        lambda prs: A.Observation.present(set()))
+                        lambda prs, roots=(): A.Observation.present(set()))
     monkeypatch.setattr(type(store), "effective_me", property(lambda self: ""))
     told: list[str] = []
     store.tasks_changed.connect(lambda: told.append("tasks"))
@@ -1721,7 +1733,8 @@ def test_the_poll_takes_the_merged_reading_the_top_rung_needs(store, monkeypatch
 
     taken = []
     monkeypatch.setattr("diplomat_app.probes.merged_prs",
-                        lambda prs: taken.append(prs) or A.Observation.present({item(7)}))
+                        lambda prs, roots=(): taken.append(prs)
+                        or A.Observation.present({item(7)}))
     monkeypatch.setattr("diplomat_app.bans.read", lambda: [])
     fake_probes(monkeypatch)
     monkeypatch.setattr(type(store), "effective_me", property(lambda self: ""))
@@ -1740,7 +1753,8 @@ def test_the_poll_reads_which_prs_landed_before_it_settles_the_agents(store, mon
 
     order: list[str] = []
     monkeypatch.setattr("diplomat_app.probes.merged_prs",
-                        lambda prs: order.append("merged") or A.Observation.present(set()))
+                        lambda prs, roots=(): order.append("merged")
+                        or A.Observation.present(set()))
     monkeypatch.setattr(type(store), "_settle_agents",
                         lambda self: order.append("settle"))
     monkeypatch.setattr("diplomat_app.bans.read", lambda: [])
@@ -2393,7 +2407,7 @@ def test_the_closed_pr_read_asks_for_closed_prs(nothing_closed, monkeypatch):
 
     monkeypatch.setattr("diplomat_runtime.gh.run", fake_run)
 
-    assert fetch_closed_prs("o", "r") == {item(41), item(42)}
+    assert fetch_closed_prs(ROOT) == {item(41), item(42)}
     assert "q=repo:o/r is:pr is:closed sort:updated-desc" in seen["args"]
 
 
@@ -3447,7 +3461,7 @@ def test_the_merged_probe_is_never_asked_about_an_untracked_runs_pr(store, monke
 
     asked = []
 
-    def record_and_answer(prs):
+    def record_and_answer(prs, roots=()):
         asked.append(prs)
         return A.Observation.present(set())
 

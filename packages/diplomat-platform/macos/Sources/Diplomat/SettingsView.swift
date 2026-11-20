@@ -117,7 +117,9 @@ struct SettingsView: View {
 
     private static let identityDetail = """
         Blank = whoever `gh` is authenticated as. Scopes the “My …” tools and the \
-        Review wizard: which PRs count as mine, and whose reviews the monitors owe.
+        Review wizard: which PRs count as mine, and whose reviews the monitors owe. \
+        In a GitLab repo root “me” is `glab`'s user on its host, which this does not \
+        change.
         """
 
     private var identityField: some View {
@@ -243,9 +245,12 @@ struct SettingsView: View {
     private var repoRootsDetail: String {
         "The first is the primary: an agent whose job names no repo starts there. Every "
             + "automatic job runs across all of them, and the header picks the one the "
-            + "lists, search and wizards work on. Each is known by one GitHub repo from its "
-            + "remotes: \(repoSlug) if its upstream or origin names it or a repo of that "
-            + "name under another owner (a fork or a move), else upstream, else origin. "
+            + "lists, search and wizards work on. Each is known by one GitHub or GitLab repo from "
+            + "its remotes: \(repoSlug) if its GitHub upstream or origin names it or a GitHub "
+            + "repo of that name under another owner (a fork or a move), else its first GitHub "
+            + "remote (upstream, then origin, then the rest). Only a checkout with no GitHub "
+            + "remote is known by a GitLab one, in the same order, read through glab signed in "
+            + "to its host. "
             + "None listed = "
             + "\(RepoPaths.defaultAgentRepo). DIPLOMAT_REPO in this app's environment "
             + "outranks the list."
@@ -331,9 +336,10 @@ struct SettingsView: View {
         }
         let path = RepoRoots.expand(trimmed)
         guard !guessed, let root = roots.first(where: { $0.path == path }) else {
-            return ("No GitHub remote, or a repo an earlier root already names - skipped", true)
+            return ("No GitHub or GitLab remote, or a repo an earlier root already names - skipped", true)
         }
-        return (i == 0 ? "\(root.slug) - primary" : root.slug, false)
+        let name = PRRef.rootLabel(root, roots: roots)
+        return (i == 0 ? "\(name) - primary" : name, false)
     }
 
     private func chooseRepoRoots() {
@@ -394,7 +400,8 @@ struct SettingsView: View {
 
     private static let otherReposDetail = """
         Paste a PR or issue link to one of these and its agent starts in that \
-        checkout. Each is known by its GitHub remotes, `upstream` first.
+        checkout. Each is known by its GitHub or GitLab remotes \
+        and named by the first, a GitHub one before GitLab and `upstream` first.
         """
 
     private func otherRepoRow(_ path: String, checkout: LocalRepos.Checkout?,
@@ -403,7 +410,7 @@ struct SettingsView: View {
         return HStack(spacing: 6) {
             Image(systemName: "folder").font(.caption).foregroundStyle(.secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(slug ?? (checkout == nil ? "…" : "no GitHub remote here"))
+                Text(slug ?? (checkout == nil ? "…" : "no GitHub or GitLab remote here"))
                     .font(.callout)
                     .foregroundStyle(slug == nil && checkout != nil ? .orange : .primary)
                 Text(path).font(.caption2).foregroundStyle(.secondary)
@@ -528,7 +535,7 @@ struct SettingsView: View {
         """
 
     private static let reviewRequestsDetail = """
-        Full E2E · max, inline comments — read-only, never their branch. \
+        One focused pass over changed behavior. Re-reviews check new commits and open findings. \
         A review that never lands (agent died, window closed) is retried. Off, the \
         requests still list under Agent tasks, queued for “execute now” only.
         """
@@ -843,11 +850,6 @@ struct SettingsView: View {
             }
             commsActionsBlock
             commsBatchRows
-            SettingRow(title: "Reply in Slack", detail: SettingsView.commsRepliesDetail) {
-                switchControl("Reply in Slack", $store.commsReplies)
-            }
-            if store.commsReplies { commsRepliesBlock }
-            commsAwayRow
             SettingRow(title: "Notify on new pings") {
                 switchControl("Notify on new pings", $store.commsNotify)
             }
@@ -874,23 +876,6 @@ struct SettingsView: View {
                            help: "Move what is already queued for that number to the front of its band")
                 ToggleChip(label: "investigations", isOn: $store.commsActInvestigations, tint: .blue,
                            help: "Queue an agent that reproduces a reported problem and writes a report")
-            }
-        }
-    }
-
-    private var commsRepliesBlock: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("REPLY TO…")
-                .font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary).kerning(0.5)
-            HStack(spacing: 5) {
-                ToggleChip(label: "questions", isOn: $store.commsReplyToQuestions, tint: .blue,
-                           help: "Answer a question the project's documentation settles")
-                ToggleChip(label: "reviews", isOn: $store.commsReplyToReviews, tint: .blue,
-                           help: "Say when a review a message asked for should be done")
-                ToggleChip(label: "fixes", isOn: $store.commsReplyToFixes, tint: .blue,
-                           help: "Say when a fix a message asked for should be done")
-                ToggleChip(label: "investigations", isOn: $store.commsReplyToInvestigations, tint: .blue,
-                           help: "Say when an investigation a message started should be done")
             }
         }
     }
@@ -982,39 +967,6 @@ struct SettingsView: View {
         writes a report and never pushes, comments or posts. Everything still waits for \
         a bay and answers to the ban list and the spending budget.
         """
-
-    private static let commsRepliesDetail = """
-        Only while you are away; work is queued either way. Replies start with [Diplomat]:, \
-        in the message's language (Polish or English), and go only to the conversation the \
-        message was written in, in its thread, once per message. A question about the \
-        project is answered from its documentation when that settles it plainly, and left \
-        alone otherwise. A review, fix or investigation a ping queued (or found queued or \
-        running) can get an estimate of when it should be done.
-        """
-
-    private static let commsAwayDetail =
-        "How long your Mac must have been locked before Comms replies for you."
-    private static let commsAwayStep = (try? CoreAssets.comms())?.replies.awayAfterStepSecs ?? 900
-    private static let commsAwayMax = (try? CoreAssets.comms())?.replies.awayAfterMaxSecs ?? 43200
-
-    private var commsAwayRow: some View {
-        let lo = SettingsView.commsAwayStep, hi = SettingsView.commsAwayMax
-        return SettingRow(title: "Away after",
-                          detail: SettingsView.commsAwayDetail,
-                          stacked: true) {
-            SliderSetting(label: "Away after",
-                          value: Binding(
-                              get: { Double(store.commsAwayAfterSecs) },
-                              set: { store.commsAwayAfterSecs = Int($0.rounded()) }
-                          ),
-                          range: Double(lo)...Double(hi),
-                          step: Double(lo),
-                          badge: Fmt.duration(TimeInterval(store.commsAwayAfterSecs)),
-                          minLabel: Fmt.duration(TimeInterval(lo)),
-                          maxLabel: Fmt.duration(TimeInterval(hi)),
-                          tint: .blue)
-        }
-    }
 
     private static let commsLoginDetail = """
         Comms borrows the login Claude Code holds for Slack's MCP server, read on each \

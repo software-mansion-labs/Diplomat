@@ -133,6 +133,28 @@ def no_github_reads():
     gh.run = refuse
 
 
+@pytest.fixture(scope="session", autouse=True)
+def no_gitlab_reads():
+    """:func:`no_github_reads` for ``glab``: every GitLab read funnels through
+    :func:`glab.run`."""
+    from diplomat_runtime import glab
+
+    def refuse(args, timeout=60.0):
+        raise AssertionError(f"a test reached the real `glab` ({' '.join(args[:4])}…)")
+
+    glab.run = refuse
+
+
+@pytest.fixture(autouse=True)
+def isolated_glab_config(tmp_path, monkeypatch):
+    """An empty glab config, so which hosts count as GitLab never depends on the hosts
+    the operator's glab is signed in to (:func:`localrepos.gitlab_hosts`)."""
+    (tmp_path / "glab").mkdir()
+    (tmp_path / "glab" / "config.yml").write_text("")
+    monkeypatch.setenv("GLAB_CONFIG_DIR", str(tmp_path / "glab"))
+    yield
+
+
 @pytest.fixture(autouse=True)
 def nothing_closed(monkeypatch):
     """Answer the poll's closed-PR read with "nothing has closed", and yield the real
@@ -350,31 +372,6 @@ def isolated_tasks_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("DIPLOMAT_TASKS_DIR", str(tmp_path / "tasks"))
     monkeypatch.setenv("DIPLOMAT_GH", str(tmp_path / "no-gh"))
     yield
-
-
-@pytest.fixture(autouse=True)
-def no_comms_replies(monkeypatch):
-    """Answer every ``comms-reply`` with "no reply due", and yield the real function.
-
-    A tick that queues work hands its ping to the reply worker, which would otherwise run
-    the real core on a background thread and append ``reply`` lines to the log a test is
-    reading."""
-    from diplomat_runtime import comms
-
-    real = comms.reply
-    monkeypatch.setattr(comms, "reply", lambda request: {"outcome": None, "text": None})
-    yield real
-
-
-@pytest.fixture(autouse=True)
-def no_session_probe(monkeypatch):
-    """Read the session lock as unknown, and yield the real probe: the host's logind
-    must not decide whether a test is away."""
-    from diplomat_runtime import comms
-
-    real = comms.session_locked
-    monkeypatch.setattr(comms, "session_locked", lambda: None)
-    yield real
 
 
 @pytest.fixture(autouse=True)

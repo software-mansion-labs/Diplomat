@@ -117,7 +117,7 @@ def test_an_investigation_round_trips_into_the_queue_and_its_prompt():
     prompt = out.stdout
     assert "BEGIN UNTRUSTED SLACK MESSAGE\n| Triage summary: login page crashes\n| Text:\n" \
            "| the login screen crashes on Android 14\nEND UNTRUSTED SLACK MESSAGE" in prompt
-    assert "you make no GitHub writes of any kind" in prompt
+    assert "you write nothing to any code host or issue tracker" in prompt
     assert "Never post, reply or react in Slack" in prompt
     assert f"Write the report to {config['reportPath']}" in prompt
     assert "Diplomat attribution tag" not in prompt
@@ -257,7 +257,7 @@ def _search(args: dict) -> dict:
 class _Slack(BaseHTTPRequestHandler):
     """Slack's MCP server as the core speaks to it: JSON-RPC over POST, ``initialize``
     opening a session every later request must name in ``Mcp-Session-Id``, and the tools
-    the watcher and the replier call answering in the server's own text."""
+    the watcher calls answering in the server's own text."""
 
     messages: list = []
     #: ``(method, params)`` of each request let through.
@@ -299,9 +299,6 @@ class _Slack(BaseHTTPRequestHandler):
         elif (method == "tools/call" and name == "slack_search_public_and_private"
               and args.get("filters", "") in ("", "is:dm")):
             result = {"content": [{"type": "text", "text": json.dumps(_search(args))}]}
-        elif method == "tools/call" and name == "slack_send_message":
-            result = {"content": [{"type": "text", "text": json.dumps(
-                {"ok": True, "ts": "1508284999.000001"})}]}
         else:
             result = {"isError": True, "content": [{
                 "type": "text", "text": "execution_failed: parameter_validation_failed"}]}
@@ -392,7 +389,7 @@ def _first_tick(settings: dict) -> int:
     first = _core("comms-tick", stdin=settings)
     assert first.returncode == 0, first.stderr
     assert json.loads(first.stdout) == {
-        "me": {"userID": "UME", "teamID": "Ours", "handle": "operator", "name": "The"},
+        "me": {"userID": "UME", "teamID": "Ours", "handle": "operator"},
         "pings": [], "items": [], "error": None, "notices": []}
     path = _comms_dir() / "state.json"
     state = json.loads(path.read_text())
@@ -435,8 +432,7 @@ def test_comms_tick_runs_end_to_end_through_the_binary(tmp_path, slack, monkeypa
         f"https://ours.slack.test/archives/D1/p{secs + 5}000100")
     assert result["items"][0]["decision"] == {
         "action": "review", "number": 12, "targets": [{"action": "review", "number": 12}],
-        "language": "en", "summary": "Review PR 12", "reason": "a direct ask",
-        "evidence": ""}
+        "summary": "Review PR 12", "reason": "a direct ask", "evidence": ""}
     searches = _tools("slack_search_public_and_private")
     assert [(s.get("filters"), s.get("keywords"), s["after"]) for s in searches] == [
         ("is:dm", None, str(secs)), (None, ["<@UME>"], str(secs)),
@@ -488,6 +484,49 @@ def test_a_ping_is_triaged_in_a_later_tick_once_its_queue_is_stale(tmp_path, sla
     assert row["decision"]["number"] == 12
 
 
+def test_a_triage_call_that_fails_is_made_again(tmp_path, slack, monkeypatch):
+    """A ``claude`` out of quota answers an error result: its ping keeps no decision and
+    waits in ``state.json``'s ``retries``, and the tick past its ``nextAt`` calls again
+    and hands the answer over."""
+    answer = json.dumps([{"type": "result", "is_error": True, "result": "Usage limit reached"}])
+    limited = tmp_path / "bin" / "limited"
+    limited.parent.mkdir(exist_ok=True)
+    limited.write_text(f"#!/bin/sh\ncat > /dev/null\nprintf '%s' '{answer}'\n")
+    limited.chmod(0o755)
+    monkeypatch.setenv("DIPLOMAT_CLAUDE", str(limited))
+    settings = {"flushAfterSecs": 0}
+    secs = _first_tick(settings)
+    _Slack.messages = [_message(f"{secs + 5}.000100", "UALICE", "can you review PR 12?")]
+    why = "classifier failed: claude reported an error: Usage limit reached"
+
+    failed = json.loads(_core("comms-tick", stdin=settings).stdout)
+    assert [m["text"] for m in failed["pings"]] == ["can you review PR 12?"]
+    assert (failed["items"], failed["error"]) == ([], why)
+    [row] = json.loads(_core("comms-feed").stdout)
+    assert "decision" not in row
+    path = _comms_dir() / "state.json"
+    state = json.loads(path.read_text())
+    [retry] = state["retries"]
+    assert (retry["messages"], retry["failures"], retry["reason"]) == (failed["pings"], 1, why)
+    assert retry["nextAt"] - retry["since"] == pytest.approx(60)
+
+    monkeypatch.setenv("DIPLOMAT_CLAUDE", str(_stub_claude(tmp_path)))
+    early = json.loads(_core("comms-tick", stdin=settings).stdout)
+    assert (early["items"], early["error"]) == ([], why)
+    assert _triage_calls(tmp_path) == 0, "not called again before it is due"
+
+    state["retries"][0]["nextAt"] = retry["since"]
+    path.write_text(json.dumps(state))
+    again = json.loads(_core("comms-tick", stdin=settings).stdout)
+    assert (again["pings"], again["error"]) == ([], None)
+    assert [(i["message"], i["decision"]["action"]) for i in again["items"]] == [
+        (failed["pings"][0], "review")]
+    assert _triage_calls(tmp_path) == 1
+    assert json.loads(path.read_text())["retries"] == []
+    [row] = json.loads(_core("comms-feed").stdout)
+    assert row["decision"]["number"] == 12
+
+
 def test_one_message_asking_for_two_kinds_is_a_row_and_an_effect_for_each(tmp_path, slack,
                                                                           monkeypatch):
     """"review #12 and fix issue #34": the review and the fix are each their own item, kind
@@ -495,8 +534,7 @@ def test_one_message_asking_for_two_kinds_is_a_row_and_an_effect_for_each(tmp_pa
     monkeypatch.setenv("DIPLOMAT_CLAUDE", str(_stub_claude(tmp_path, {
         "action": "review", "targets": [{"action": "review", "number": 12},
                                         {"action": "fix_issue", "number": 34}],
-        "language": "en", "summary": "Review 12, fix 34", "reason": "two asks",
-        "evidence": ""})))
+        "summary": "Review 12, fix 34", "reason": "two asks", "evidence": ""})))
     settings = {"flushAfterSecs": 0}
     secs = _first_tick(settings)
     _Slack.messages = [_message(f"{secs + 5}.000100", "UALICE",

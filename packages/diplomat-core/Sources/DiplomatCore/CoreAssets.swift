@@ -94,6 +94,12 @@ public enum CoreAssets {
         public let blocks: [String: String]
     }
 
+    /// `gitlab.json`: what a prompt about a GitLab repository adds.
+    public struct GitLabModel: Decodable {
+        /// The paragraph after the opening task line; `{host}`, `{owner}`, `{repo}`.
+        public let promptNote: String
+    }
+
     /// The exception lists `AgentModel.displayName` consults when it turns a model id
     /// into the name the attribution tag wears. The rules themselves are in
     /// `AgentModel`; these are the parts no rule can derive.
@@ -196,10 +202,20 @@ public enum CoreAssets {
         }
         public struct Classifier: Decodable {
             /// The instructions' repository wording: `one` for a single watched
-            /// repository, `many` for several, each value filled into `instructions`.
+            /// repository, `many` for several, each value filled into `instructions`;
+            /// `gitlab`'s replace some of them once a watched repository is on GitLab.
             public struct Repos: Decodable {
+                /// Overrides of `one` for a GitLab project and of `many` when any watched
+                /// repository is; `hostedGitHub`/`hostedGitLab` say where each of several is.
+                public struct GitLab: Decodable {
+                    public let one: [String: String]
+                    public let many: [String: String]
+                    public let hostedGitHub: String
+                    public let hostedGitLab: String
+                }
                 public let one: [String: String]
                 public let many: [String: String]
+                public let gitlab: GitLab
             }
             public let instructions: String
             public let input: String
@@ -238,68 +254,17 @@ public enum CoreAssets {
         public let model: String
         public let classifierTimeoutSecs: Double
         public let classifierSecsPerMessage: Double
+        public let classifierRetrySecs: Double
+        public let classifierRetryMaxSecs: Double
+        public let classifierGiveUpSecs: Double
         public let maxLogBytes: Int
         public let labelSummaryMax: Int
-        public struct Replies: Decodable {
-            public let prefix: String
-            public let awayAfterSecs: Int
-            public let awayAfterStepSecs: Int
-            public let awayAfterMaxSecs: Int
-            public let roundMins: Int
-            /// Keyed by `CommsQueuedWork.kind`.
-            public let runSecs: [String: Int]
-            /// Keyed by `CommsDecision.language`.
-            public let languages: [String: Language]
-
-            public struct Language: Decodable {
-                public let locale: String
-                public let `operator`: String
-                public let and: String
-                public let today: String
-                public let tomorrow: String
-                public let what: [String: String]
-                public let whatMany: [String: String]
-                public let queuedAway: String
-                public let runningAway: String
-                public let answeredAway: String
-            }
-
-            /// `code`'s words, else English's: a language the replies do not hold still
-            /// gets a reply.
-            public func language(_ code: String) -> Language? {
-                languages[code] ?? languages[CommsDecision.defaultLanguage]
-            }
-        }
-        public struct Answer: Decodable {
-            public struct Knowledge: Decodable {
-                public let paths: [String]
-                public let exclude: [String]
-                public let maxFiles: Int
-                public let maxBytes: Int
-                public let refreshHours: Double
-                public let fetchSecs: Double
-            }
-            public let model: String
-            public let timeoutSecs: Double
-            public let maxChars: Int
-            public let linkPrefixes: [String]
-            public let knowledge: Knowledge
-            public let instructions: String
-            public let documentation: String
-            public let input: String
-            public let questionLabel: String
-            public let contextLabel: String
-        }
         public let queries: Queries
         public let classifier: Classifier
         public let investigate: Investigate
-        public let replies: Replies
-        public let answer: Answer
         /// `classifier.schema` serialized with sorted keys, the exact `--json-schema`
         /// argument. Not decoded: it is free-form JSON.
         public internal(set) var schema: String = ""
-        /// `answer.schema`, the same way.
-        public internal(set) var answerSchema: String = ""
 
         private enum CodingKeys: String, CodingKey {
             case pollSecs, minPollSecs, maxPerTick, batchSize, batchSizes, flushAfterSecs,
@@ -307,7 +272,8 @@ public enum CoreAssets {
                  indexLagSecs, seenLimit, searchCount,
                  maxSearchPages, catchUpHours, httpTimeoutSecs, loginRefreshSecs,
                  loginRefreshTimeoutSecs, slackBudgetSecs, maxProfileReads, model, classifierTimeoutSecs,
-                 classifierSecsPerMessage, maxLogBytes, labelSummaryMax, queries, classifier, investigate, replies, answer
+                 classifierSecsPerMessage, classifierRetrySecs, classifierRetryMaxSecs,
+                 classifierGiveUpSecs, maxLogBytes, labelSummaryMax, queries, classifier, investigate
         }
     }
 
@@ -417,6 +383,7 @@ public enum CoreAssets {
     private static let _review = try? loadJSON("review.json", as: Review.self)
     private static let _conflicts = try? loadJSON("conflicts.json", as: Conflicts.self)
     private static let _audit = try? loadJSON("audit.json", as: Audit.self)
+    private static let _gitlab = try? loadJSON("gitlab.json", as: GitLabModel.self)
     private static let _issues = try? loadJSON("issues.json", as: Issues.self)
     private static let _models = try? loadJSON("models.json", as: Models.self)
     private static let _telemetry = try? loadJSON("telemetry.json", as: TelemetryModel.self)
@@ -444,11 +411,6 @@ public enum CoreAssets {
                                                      options: [.sortedKeys])
         else { throw CoreError(message: "comms.json has no classifier.schema object") }
         model.schema = String(decoding: data, as: UTF8.self)
-        guard let answer = (root["answer"] as? [String: Any])?["schema"],
-              let answerData = try? JSONSerialization.data(withJSONObject: answer,
-                                                           options: [.sortedKeys])
-        else { throw CoreError(message: "comms.json has no answer.schema object") }
-        model.answerSchema = String(decoding: answerData, as: UTF8.self)
         return model
     }
 
@@ -488,6 +450,11 @@ public enum CoreAssets {
     public static func audit() throws -> Audit {
         guard let a = _audit else { return try loadJSON("audit.json", as: Audit.self) }
         return a
+    }
+
+    public static func gitlab() throws -> GitLabModel {
+        guard let g = _gitlab else { return try loadJSON("gitlab.json", as: GitLabModel.self) }
+        return g
     }
 
     public static func issues() throws -> Issues {

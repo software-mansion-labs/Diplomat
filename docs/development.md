@@ -291,7 +291,7 @@ and drives the real app there through the VM's own VNC server: an attended launc
 opens the window and takes focus, ⌘, opens Settings, ⌘W leaves the app running, a
 second launch or ⌘0 brings the window back, ⌘Q asks first, an
 unattended start (the login agent, the watchdog) opens no window and leaves the
-frontmost app in front.
+frontmost app in front, and the 06:00 relaunch keeps the app on its kept-in-Dock tile.
 Its exit code is the verdict, and it keeps a screenshot per step:
 
 ```bash
@@ -420,7 +420,7 @@ packages/
         ConflictWizard.swift / AuditWizard.swift   the Resolve-conflicts and Full-E2E-test wizards
         SettingsView.swift         settings (username, repo roots, monitors + auto-approve + task cap + rate-limit budget, watcher, tools, terminal, allocator)
         Store.swift                ObservableObject; settings + the monitor/watcher loops; logic in ToolData
-        AutofixMonitor.swift       the monitors' GitHub reads (monitor-prs / review-requests queries)
+        AutofixMonitor.swift       the monitors' GitHub and GitLab reads (monitor-prs / review-requests queries)
         AutofixStatus.swift        the monitor heartbeat behind the status pill
         ApiErrorWatcher.swift      iTerm/Terminal/tmux screen reader + continue-nudge sender
         AgentProbes.swift          the outside world, typed: `ps`, screens, sentinels -> Evidence

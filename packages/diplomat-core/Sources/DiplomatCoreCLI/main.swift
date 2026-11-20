@@ -16,8 +16,6 @@ import Foundation
 //   diplomat-core comms-auth                         # who Claude Code's Slack login is
 //   diplomat-core comms-feed        [--limit N]      # the Comms screen's rows
 //   diplomat-core comms-effect      < request.json   # what a triaged ping makes a front-end do
-//   diplomat-core comms-reply       < request.json   # Comms' reply in Slack, if one is due
-//   diplomat-core comms-reply-merge < requests.json  # those requests, one per Slack message
 //   diplomat-core opencode-session-model             # what an unpinned 2.x spawn names
 //   diplomat-core tasks-list        [--archived]     # the Tasks screen's rows (see TasksCommand)
 //   diplomat-core tasks-sync                         # one GitHub + Comms sync of every task
@@ -83,10 +81,10 @@ func specificAuthor(_ s: String?) -> SpecificAuthor {
 let args = CommandLine.arguments
 guard args.count >= 2,
       ["build-prompt", "tool-data", "telemetry", "agent-state", "agent-registry",
-       "comms-tick", "comms-auth", "comms-feed", "comms-effect", "comms-reply", "comms-reply-merge",
+       "comms-tick", "comms-auth", "comms-feed", "comms-effect",
        "opencode-session-model", "tasks-list", "tasks-sync", "tasks-edit", "tasks-group"].contains(args[1]) else {
     die("usage: diplomat-core (build-prompt | tool-data | telemetry | agent-state"
-        + " | agent-registry | comms-tick | comms-effect | comms-reply | comms-reply-merge"
+        + " | agent-registry | comms-tick | comms-effect"
         + " | tasks-edit)  (JSON on stdin)"
         + "\n       diplomat-core comms-feed [--limit N]"
         + "\n       diplomat-core comms-auth"
@@ -142,16 +140,6 @@ if args[1] == "comms-effect" {
     exit(0)
 }
 
-if args[1] == "comms-reply-merge" {
-    CommsCommand.replyMerge(input)
-    exit(0)
-}
-
-if args[1] == "comms-reply" {
-    CommsCommand.reply(input)
-    exit(0)
-}
-
 if args[1] == "tool-data" {
     ToolDataCommand.run(obj)
     exit(0)
@@ -175,11 +163,12 @@ if args[1] == "agent-registry" {
 func str(_ key: String, _ def: String = "") -> String { obj[key] as? String ?? def }
 func flag(_ key: String, _ def: Bool) -> Bool { JSONInput.flag(obj[key], def) }
 
-/// One `{"owner", "repo", "path"}` object, or nil when it is not one.
+/// One `{"owner", "repo", "path"}` object, with `"host"` for a GitLab repo, or nil when it
+/// is not one.
 func localRepo(_ raw: Any?) -> PRRef.LocalRepo? {
     guard let d = raw as? [String: Any], let o = d["owner"] as? String,
           let r = d["repo"] as? String, let p = d["path"] as? String else { return nil }
-    return PRRef.LocalRepo(owner: o, repo: r, path: p)
+    return PRRef.LocalRepo(owner: o, repo: r, path: p, host: d["host"] as? String ?? PRRef.LocalRepo.github)
 }
 
 let localRepos: [PRRef.LocalRepo] = (obj["localRepos"] as? [Any] ?? []).compactMap(localRepo)
@@ -206,6 +195,7 @@ case "review":
         softApprove: flag("softApprove", true),
         specificAuthor: specificAuthor(obj["specificAuthor"] as? String)
     )
+    cfg.automaticVerdict = flag("automaticVerdict", false)
     cfg.localRepos = localRepos
     cfg.home = homeRepo
     prompt = cfg.buildPrompt()
