@@ -106,6 +106,10 @@ public struct ReviewConfig: Codable, Equatable {
     /// always know). Ignored unless single-PR.
     public var specificAuthor: SpecificAuthor
 
+    /// One own PR on the pipeline's fast track. Optional so a queued config stored
+    /// without it decodes.
+    public var fastTrack: Bool?
+
     public init(depth: String = "", target: Target = .mine, username: String = "",
                 me: String = "", markReady: Bool = true, leaveReviews: Bool = true,
                 replyToReviews: Bool = true, includeDrafts: Bool = true,

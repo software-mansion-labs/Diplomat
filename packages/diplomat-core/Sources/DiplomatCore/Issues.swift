@@ -65,6 +65,11 @@ public struct IssueConfig: Codable, Equatable {
     public var commentOnIssue: Bool
     /// The one escalation: also take on feature requests, not just bug reports.
     public var includeFeatures: Bool
+    /// A Linear issue to work instead of `specificIssue`. Optional so a queued config
+    /// stored without it decodes.
+    public var linear: LinearIssue?
+    /// A pipeline fast-track candidate. Optional for the same reason.
+    public var pipeline: Bool?
 
     public init(depth: String = "", target: IssueTarget = .all, username: String = "",
                 me: String = "", specificIssue: String = "", unassignedOnly: Bool = true,

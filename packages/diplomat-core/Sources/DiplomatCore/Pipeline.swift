@@ -315,3 +315,39 @@ public struct PipelineTickResult: Codable, Equatable, Sendable {
         self.notices = notices
     }
 }
+
+/// A Linear issue as Diplomat read it, for a fix run that cannot read Linear itself.
+public struct LinearIssue: Codable, Equatable, Sendable {
+    public var identifier: String
+    public var url: String
+    public var text: String
+
+    public init(identifier: String, url: String, text: String) {
+        self.identifier = identifier
+        self.url = url
+        self.text = text
+    }
+}
+
+/// `dir` holds `log.jsonl` (every `PipelineEvent`), `last.json` (the last sync's result),
+/// `ratings.json` and `state.json`: directories 0700, files 0600.
+public enum PipelineLog {
+    public static var dir: URL {
+        if let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"], !env.isEmpty {
+            return URL(fileURLWithPath: env, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".diplomat/pipeline", isDirectory: true)
+    }
+
+    // STUB: the core implementation replaces this.
+    public static func last(in dir: URL = dir) -> PipelineTickResult? { nil }
+}
+
+public enum PipelineTick {
+    // STUB: the core implementation replaces this; front-ends call exactly this signature.
+    public static func run(settings: PipelineSettings, now: Date = Date(),
+                           dir: URL = PipelineLog.dir) -> PipelineTickResult {
+        PipelineTickResult(at: now)
+    }
+}
