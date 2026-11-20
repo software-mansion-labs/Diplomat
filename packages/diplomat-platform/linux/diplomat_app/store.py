@@ -37,6 +37,7 @@ from diplomat_runtime import (
     diskfloor,
     localrepos,
     opencodeapi,
+    pipeline,
     promptcore,
     review,
     reviewaudit,
@@ -63,6 +64,10 @@ from . import (
 
 #: The review-request monitor's verb.
 REVIEW_REQ_ACTION = "review-req"
+#: The ``AgentJob.counter`` of the Pipeline's asks, which its master switch pauses.
+PIPELINE_COUNTER = "pipeline"
+#: The Pipeline's attempt records, by ``PipelineEffect.key``.
+PIPELINE_ATTEMPTS = "pipelineAttempts"
 GITHUB_LOGIN_UNKNOWN = "GitHub login unknown — is `gh` installed and authenticated?"
 
 
@@ -228,6 +233,13 @@ class Store(QObject):
     ban_noticed = Signal(str, str)
     # A tick's findings, handed to the Qt thread, where the queue is changed.
     _comms_ticked = Signal(object)
+    # Emitted when anything the Pipeline screen draws changes.
+    pipeline_changed = Signal()
+    # A Pipeline sync's answer, handed to the Qt thread, where the queue is changed.
+    _pipeline_synced = Signal(object)
+    # The answer to the Pipeline screen's "Start fix": (item id, why it did not start or
+    # None).
+    pipeline_fix_answered = Signal(str, object)
     # Emitted when the repo roots or the other checkouts listed in Settings change, so
     # the wizards re-judge a link they are already holding and the header re-lists.
     local_repos_changed = Signal()
@@ -446,6 +458,25 @@ class Store(QObject):
         # (:meth:`_comms_kept_adopted`).
         self._comms_adopted: dict[str, autofix.QueuedTask] = {}
         self._comms_ticked.connect(self._apply_comms_tick)
+
+        # The Pipeline. `pipeline_result` is the last `PipelineTickResult` (a sync's, or
+        # `pipeline-last`'s before the first); replaced, never mutated.
+        self.pipeline_result: dict | None = None
+        # Why the last sync could not run; None once one did.
+        self.pipeline_error: str | None = None
+        self.pipeline_syncing = False
+        # Over the flags and the force sets below, never over a CLI call.
+        self._pipeline_lock = threading.Lock()
+        # A sync asked for while one runs: it follows that one, which may have been
+        # handed the force sets before the ask that added to them.
+        self._pipeline_again = False
+        # Item ids the screen asked to rate or fracture ahead of every limit, until a
+        # sync that was handed them answers.
+        self._pipeline_force: dict[str, frozenset[str]] = {"rate": frozenset(),
+                                                           "fracture": frozenset()}
+        # Item ids whose "Start fix" is being dispatched.
+        self.pipeline_fixes_starting: frozenset[str] = frozenset()
+        self._pipeline_synced.connect(self._apply_pipeline_sync)
 
         # Pruned on every start — a Store outlives thousands of polls.
         self._workers: list[threading.Thread] = []
@@ -1176,6 +1207,72 @@ class Store(QObject):
     @comms_seen_at.setter
     def comms_seen_at(self, value: str) -> None:
         self._settings.setValue("commsSeenAt", str(value))
+
+    # The Pipeline (the pipeline* keys of Store.swift, same strings). Off, nothing reads
+    # the trackers and its queued work waits.
+
+    @property
+    def pipeline_enabled(self) -> bool:
+        return self._settings.value("pipelineEnabled", False, bool)
+
+    @pipeline_enabled.setter
+    def pipeline_enabled(self, value: bool) -> None:
+        self._settings.setValue("pipelineEnabled", bool(value))
+
+    @property
+    def pipeline_rate(self) -> bool:
+        """Rate unrated items, labelling the ones Diplomat may write."""
+        return self._settings.value("pipelineRate", False, bool)
+
+    @pipeline_rate.setter
+    def pipeline_rate(self, value: bool) -> None:
+        self._settings.setValue("pipelineRate", bool(value))
+
+    @property
+    def pipeline_fix(self) -> bool:
+        """Queue a fix PR for each low/low issue."""
+        return self._settings.value("pipelineFix", False, bool)
+
+    @pipeline_fix.setter
+    def pipeline_fix(self, value: bool) -> None:
+        self._settings.setValue("pipelineFix", bool(value))
+
+    @property
+    def pipeline_fast_track(self) -> bool:
+        """Label my low/low PRs fast-track and queue their reviews until clean."""
+        return self._settings.value("pipelineFastTrack", False, bool)
+
+    @pipeline_fast_track.setter
+    def pipeline_fast_track(self, value: bool) -> None:
+        self._settings.setValue("pipelineFastTrack", bool(value))
+
+    @property
+    def pipeline_merge(self) -> bool:
+        """Merge cleared PRs with admin rights, past the review requirement."""
+        return self._settings.value("pipelineMerge", False, bool)
+
+    @pipeline_merge.setter
+    def pipeline_merge(self, value: bool) -> None:
+        self._settings.setValue("pipelineMerge", bool(value))
+
+    @property
+    def pipeline_fracture(self) -> bool:
+        """Split writable medium/high-complexity issues into low-complexity children."""
+        return self._settings.value("pipelineFracture", False, bool)
+
+    @pipeline_fracture.setter
+    def pipeline_fracture(self, value: bool) -> None:
+        self._settings.setValue("pipelineFracture", bool(value))
+
+    @property
+    def pipeline_linear_teams_raw(self) -> str:
+        """The Linear teams tracked and the root each is fixed in, as typed:
+        ``ENG=owner/repo, OPS=owner/other`` (:func:`pipeline.parse_linear_teams`)."""
+        return str(self._settings.value("pipelineLinearTeams", "", str) or "")
+
+    @pipeline_linear_teams_raw.setter
+    def pipeline_linear_teams_raw(self, value: str) -> None:
+        self._settings.setValue("pipelineLinearTeams", str(value))
 
     # MARK: derived settings
 
@@ -2498,9 +2595,11 @@ class Store(QObject):
         and a memo that matched on the key alone would hand the second ask the first
         one's prompt. And by its label and checkout, which follow the repo roots.
 
-        Carries no ``counter`` and no ``ledger_key``: no monitor owns it (so no toggle
-        pauses it and no auto-handled counter counts it), and the telemetry ledger
-        measures the monitors, not the operator."""
+        Carries no ``ledger_key``: the telemetry ledger measures the monitors, not the
+        asks. Nor a ``counter``, but for the Pipeline's asks
+        (:attr:`autofix.RequestedWork.pipeline`), which its master switch pauses: no
+        monitor owns any other, so no toggle pauses it and no auto-handled counter
+        counts it."""
         roots = review.repo_roots()
         label = entry.label_among(len(roots))
         checkout = self._root_of(entry.repo).path if entry.repo else None
@@ -2528,6 +2627,7 @@ class Store(QObject):
                 pr_url=link,
                 pr_number=entry.number if is_pr else None,
                 author_login=entry.author or None,
+                counter=PIPELINE_COUNTER if entry.pipeline else None,
                 # A root's checkout is wherever that root is now, not where it was asked.
                 checkout=checkout or where,
             ),
@@ -2771,6 +2871,8 @@ class Store(QObject):
             return not self.review_requests_enabled
         if counter in ("my_reviews", "conflicts"):
             return not self.pr_autofix_enabled
+        if counter == PIPELINE_COUNTER:
+            return not self.pipeline_enabled
         # A review the operator asked for: no monitor owns it, so neither toggle
         # speaks for it. Switching the monitors off says what this machine may go
         # looking for, not that it should stop doing what it was told — for an ask,
@@ -4356,6 +4458,323 @@ class Store(QObject):
         if wrote:
             self.refresh_comms_feed()
             self.comms_changed.emit()
+
+    # MARK: The Pipeline
+    #
+    # A sync - reading the trackers, rating, labelling, merging, fracturing, the graph and
+    # the agent work owed - is the core's (:mod:`pipeline`). Here that work becomes asks on
+    # the queue every other ask waits in, so the ban list, the task cap and the budget
+    # all still apply, each asked for once per attempt; and the screen's own actions run.
+
+    def pipeline_settings_payload(self) -> dict:
+        """The ``PipelineSettings`` JSON a sync is handed. Its roots are the GitHub ones:
+        the Pipeline skips GitLab."""
+        teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
+        token_file = appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip()
+        with self._pipeline_lock:
+            force = {kind: sorted(ids) for kind, ids in self._pipeline_force.items()}
+        return {
+            "roots": [{"owner": r.owner, "repo": r.repo, "path": r.path,
+                       "me": self.known_me(r)}
+                      for r in review.repo_roots() if not r.is_gitlab],
+            "linearTeams": teams,
+            **({"linearTokenFile": token_file} if token_file else {}),
+            "rate": self.pipeline_rate,
+            "fix": self.pipeline_fix,
+            "fastTrack": self.pipeline_fast_track,
+            "merge": self.pipeline_merge,
+            "fracture": self.pipeline_fracture,
+            "force": force,
+        }
+
+    def pipeline_forced(self, kind: str) -> frozenset[str]:
+        """The item ids the screen asked to ``rate`` or ``fracture`` that no sync has
+        answered for yet."""
+        with self._pipeline_lock:
+            return self._pipeline_force[kind]
+
+    def pipeline_force_now(self, kind: str, item_id: str) -> None:
+        """The screen's "Rate now" (``kind`` ``rate``) or "Fracture" (``fracture``): the
+        item goes ahead of every limit in a sync started now."""
+        with self._pipeline_lock:
+            self._pipeline_force = {**self._pipeline_force,
+                                    kind: self._pipeline_force[kind] | {item_id}}
+        self.pipeline_changed.emit()
+        self.run_pipeline_sync_async()
+
+    def refresh_pipeline_last(self) -> None:
+        """``pipeline-last``, so the screen opens on the last sync's result before this
+        run's first. A core that cannot answer leaves it empty; the first sync says
+        why."""
+        try:
+            last = pipeline.last()
+        except pipeline.Failure:
+            return
+        with self._pipeline_lock:
+            if self.pipeline_result is None:
+                self.pipeline_result = last
+        self.pipeline_changed.emit()
+
+    def run_pipeline_sync_async(self) -> None:
+        """One sync on a worker, while the Pipeline is on. One asked for while another
+        runs follows it: the running one may have been handed the force sets before
+        the ask that added to them. The queue is changed back on the Qt thread
+        (:meth:`_apply_pipeline_sync`)."""
+        if not self.pipeline_enabled:
+            return
+        with self._pipeline_lock:
+            if self.pipeline_syncing:
+                self._pipeline_again = True
+                return
+            self.pipeline_syncing = True
+        self.pipeline_changed.emit()
+
+        def work() -> None:
+            again = True
+            while again:
+                try:
+                    plan = self._pipeline_sync_once()
+                except Exception as exc:  # noqa: BLE001 — a sync must never wedge the flag
+                    plan = {"error": str(exc), "forced": {}}
+                with self._pipeline_lock:
+                    again = self._pipeline_again and self.pipeline_enabled
+                    self._pipeline_again = False
+                    if not again:
+                        self.pipeline_syncing = False
+                self._pipeline_synced.emit(plan)
+
+        self.start_background(work, name="pipeline-sync")
+
+    def _pipeline_sync_once(self) -> dict:
+        """The slow half of a sync, off the Qt thread: ``{"result"}`` or ``{"error"}``,
+        with the force sets it was handed. Held while no root resolves, and while the
+        GitHub login is unknown, which would make none of the operator's PRs theirs."""
+        if review.roots_guessed():
+            return {"error": "no repo root in Settings resolves to a GitHub or GitLab "
+                             "checkout", "forced": {}}
+        settings = self.pipeline_settings_payload()
+        if settings["roots"] and not self.effective_me:
+            return {"error": GITHUB_LOGIN_UNKNOWN, "forced": {}}
+        out = pipeline.tick(settings)
+        if "items" not in out:
+            return {"error": out.get("error") or "the sync did not answer",
+                    "forced": settings["force"]}
+        return {"result": out, "forced": settings["force"]}
+
+    def _apply_pipeline_sync(self, plan: dict) -> None:
+        """The Qt-thread half of a sync: publish its result, retire the force sets it
+        was handed, and ask for the agent work it owes. A failed sync leaves the last
+        result and every force standing."""
+        self._settle_pipeline_error(plan.get("error"))
+        result = plan.get("result")
+        if result is not None:
+            handed = plan.get("forced") or {}
+            with self._pipeline_lock:
+                self.pipeline_result = result
+                self._pipeline_force = {
+                    kind: ids - frozenset(handed.get(kind) or ())
+                    for kind, ids in self._pipeline_force.items()}
+            # A sync landing after the switch went off asks for nothing.
+            if self.pipeline_enabled:
+                self._apply_pipeline_effects(result, time.time())
+        self.pipeline_changed.emit()
+
+    def _settle_pipeline_error(self, error: str | None) -> None:
+        """Audited only on the way into failing and back."""
+        before = self.pipeline_error
+        self.pipeline_error = error or None
+        if self.pipeline_error and not before:
+            activity.log("auto", "pipeline-error", self.pipeline_error)
+        elif before and not self.pipeline_error:
+            activity.log("auto", "pipeline-recovered", "Pipeline syncing again")
+
+    def _apply_pipeline_effects(self, result: dict, now: float) -> None:
+        """Ask for the agent work a sync owes, each effect once per attempt: every sync
+        emits it for as long as it is owed, and :func:`autofix.decide` over
+        ``pipelineAttempts``, by the effect's ``key`` and ``stamp``, says whether this
+        sync's is a new attempt. A fix only while the fix switch is on, a review only
+        while the fast-track one is: the sync may have been handed them before it went
+        off.
+
+        A record is kept while its effect is owed and for the backoff ceiling after, so
+        an effect a failed read left out is not taken for a new one when it is back."""
+        items = {str(i.get("id") or ""): i for i in result.get("items") or []}
+        attempts = self._load_attempts(PIPELINE_ATTEMPTS)
+        owed: set[str] = set()
+        for effect in result.get("effects") or []:
+            kind = effect.get("kind")
+            if not {"fixIssue": self.pipeline_fix, "fixLinear": self.pipeline_fix,
+                    "review": self.pipeline_fast_track}.get(kind, False):
+                continue
+            key, stamp = str(effect.get("key") or ""), str(effect.get("stamp") or "")
+            try:
+                work = self.pipeline_work(effect, items.get(str(effect.get("url") or "")))
+            except (KeyError, TypeError, ValueError):
+                work = None
+            if not key or work is None:
+                continue
+            owed.add(key)
+            banned = bool(work.author) and bans.is_banned(work.author, bans.read())
+            action, value = autofix.decide(attempts.get(key), stamp,
+                                           self._pipeline_in_flight(work), banned, now)
+            if action != "dispatch":
+                continue
+            verb = "pipeline-review" if kind == "review" else "pipeline-fix"
+            try:
+                fresh = self.request_one(work)
+            except Exception as exc:  # noqa: BLE001 — a missing/wedged core binary
+                activity.log("auto", verb, f"{work.label} could not be queued: {exc}")
+                continue
+            attempts[key] = autofix.ReviewAttempt(stamp, now, int(value))
+            if fresh:
+                activity.log("auto", verb, f"{work.label_among(len(review.repo_roots()))}"
+                                           f" queued for the fast track")
+        self._save_attempts(PIPELINE_ATTEMPTS, {
+            k: a for k, a in attempts.items()
+            if k in owed or now - a.last_dispatched_at < autofix.RETRY_MAX_BACKOFF})
+
+    def pipeline_work(self, effect: dict,
+                      item: dict | None = None) -> autofix.RequestedWork | None:
+        """The ask a ``PipelineEffect`` stands for, in its root's checkout; None when its
+        repo is no GitHub root any more. ``item`` is its ``PipelineItem``: a GitHub
+        issue's author is its fix's ban dimension, as a Comms fix's is, the issue's text
+        being what the fixer reads."""
+        roots = [r for r in review.repo_roots() if not r.is_gitlab]
+        root = root_named(str(effect.get("repo") or ""), roots)
+        if root is None:
+            return None
+        me = self.known_me(root)
+        url = str(effect.get("url") or "")
+        kind = effect.get("kind")
+        if kind == "review":
+            number = int(effect["number"])
+            cfg = review.ReviewConfig(target=PRTarget.SPECIFIC, specific_pr=str(number), me=me,
+                                      specific_author=review.SpecificAuthor.MINE, home=root,
+                                      fast_track=True)
+            return autofix.RequestedWork(number=number, url=url, author="",
+                                         config=cfg.prompt_payload(), repo=root.key)
+        if kind == "fixIssue":
+            number = int(effect["number"])
+            cfg = issues.IssueConfig(target=issues.Target.SPECIFIC, specific_issue=str(number),
+                                     me=me, home=root, pipeline=True)
+            author = str((item or {}).get("author") or "")
+        elif kind == "fixLinear":
+            identifier = str(effect["identifier"])
+            digits = identifier.rpartition("-")[2]
+            number = int(digits) if digits.isdigit() else 0
+            cfg = issues.IssueConfig(target=issues.Target.SPECIFIC, me=me, home=root,
+                                     pipeline=True,
+                                     linear={"identifier": identifier, "url": url,
+                                             "text": str(effect.get("text") or "")})
+            # A Linear creator is no GitHub login the ban list could name.
+            author = ""
+        else:
+            return None
+        mine = bool(me) and author.lower() == me.lower()
+        return autofix.RequestedWork(number=number, url=url, author="" if mine else author,
+                                     config=cfg.prompt_payload(), repo=root.key)
+
+    @staticmethod
+    def _fix_doing(rows: list[autofix.RunningAgent], item: str | None,
+                   named: str) -> bool:
+        """Whether one of ``rows`` fixes that issue: by its run's link, else (a run
+        recorded with none, as a Linear issue's fix always is) by its label naming
+        ``named`` (:meth:`autofix.RequestedWork.label_among`)."""
+        return any(a.kind == autofix.QUEUE_ISSUES_ACTION
+                   and (a.item == item if a.item else f"Issues · {named} · " in a.label)
+                   for a in rows)
+
+    def _pipeline_in_flight(self, work: autofix.RequestedWork) -> bool:
+        """Whether that work is queued or starting, or has an agent on it: any agent on
+        a review's PR (:meth:`_in_flight`), a fix of a fix's issue."""
+        waiting = ({e.id for e in self.queued_tasks + self.starting_tasks}
+                   | {w.key for w in self.requested_work})
+        if work.key in waiting:
+            return True
+        if work.action == autofix.QUEUE_REVIEW_ACTION:
+            return self._in_flight(work.url)
+        return self._fix_doing(self.running_tasks, work.item, work.linear
+                               or item_label(work.item or "", len(review.repo_roots())))
+
+    def pipeline_badges(self) -> dict[str, str]:
+        """``agent`` or ``queued`` by item id, for the items something is on now: an
+        agent on the PR, or fixing the issue; work about it waiting in the queue or
+        starting; its "Start fix" being dispatched."""
+        rows = self.running_tasks
+        waiting = {e.id for e in self.queued_tasks + self.starting_tasks}
+        waiting_items = {autofix.item_of_key(k) for k in waiting}
+        roots = len(review.repo_roots())
+        badges: dict[str, str] = {}
+        for it in (self.pipeline_result or {}).get("items") or []:
+            item_id = str(it.get("id") or "")
+            if it.get("source") == "linear":
+                identifier = str(it.get("label") or "")
+                agent = self._fix_doing(rows, None, identifier)
+                queued = autofix.queue_key(autofix.QUEUE_ISSUES_ACTION, identifier) in waiting
+            else:
+                item = item_key_from_url(item_id)
+                if item is None:
+                    continue
+                agent = (any(a.item == item for a in rows)
+                         or self._fix_doing(rows, item, item_label(item, roots)))
+                queued = item in waiting_items
+            if agent or item_id in self.pipeline_fixes_starting:
+                badges[item_id] = "agent"
+            elif queued:
+                badges[item_id] = "queued"
+        return badges
+
+    def pipeline_start_fix_async(self, item_id: str) -> None:
+        """The screen's "Start fix" for a candidate issue: its fix now, outside the cap,
+        as the Fix-issues wizard's press for one issue starts it; or, queued already,
+        that task's "execute now". A Linear issue's needs the text its sync's
+        ``fixLinear`` effect carried. Why it did not start comes back on
+        :attr:`pipeline_fix_answered`."""
+        result = self.pipeline_result or {}
+        item = next((i for i in result.get("items") or [] if i.get("id") == item_id), None)
+        if item is None:
+            return
+        effect = next((e for e in result.get("effects") or [] if e.get("url") == item_id
+                       and e.get("kind") in ("fixIssue", "fixLinear")), None)
+        split = split_item_key(item_key_from_url(item_id) or "")
+        if effect is None and item.get("source") == "github" and split is not None:
+            effect = {"kind": "fixIssue", "repo": item.get("repo"), "number": split[1],
+                      "url": item_id}
+        work = None if effect is None else self.pipeline_work(effect, item)
+        if work is None:
+            self.pipeline_fix_answered.emit(item_id, (
+                "Diplomat has this Linear issue's text only while Open fix PRs is on"
+                if item.get("source") == "linear" and effect is None
+                else f"{item.get('repo')} is not a GitHub repo root"))
+            return
+        if any(e.id == work.key for e in self.queued_tasks):
+            self.execute_queued_task_async(work.key)
+            self.pipeline_fix_answered.emit(item_id, None)
+            return
+        if self._pipeline_in_flight(work):
+            self.pipeline_fix_answered.emit(item_id, "a fix of it is already starting or "
+                                                     "running")
+            return
+        with self._pipeline_lock:
+            if item_id in self.pipeline_fixes_starting:
+                return
+            self.pipeline_fixes_starting = self.pipeline_fixes_starting | {item_id}
+        self.pipeline_changed.emit()
+
+        def start() -> None:
+            try:
+                verdict = self.dispatch_agent(self._requested_task(work).job,
+                                              autofix.SOURCE_PANEL)
+            except Exception as exc:  # noqa: BLE001 — a core that cannot build the prompt
+                verdict = str(exc)
+            finally:
+                with self._pipeline_lock:
+                    self.pipeline_fixes_starting = self.pipeline_fixes_starting - {item_id}
+            self.pipeline_fix_answered.emit(
+                item_id, None if verdict == "spawned" else f"The fix did not start: {verdict}")
+            self.pipeline_changed.emit()
+
+        self.start_background(start, name="pipeline-fix")
 
     # MARK: device allocator
 

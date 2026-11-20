@@ -1005,7 +1005,8 @@ class RequestedWork:
     """
 
     #: The PR number, or the issue number — two numbering spaces, told apart by the
-    #: verb in :attr:`key` and nowhere else.
+    #: verb in :attr:`key` and nowhere else. A Linear issue's is its identifier's, which
+    #: :attr:`key` does not use.
     number: int
     url: str
     #: Whose PR / issue — the pipeline's ban dimension. Empty where the sweep names
@@ -1018,10 +1019,24 @@ class RequestedWork:
     repo: str = ""
 
     @property
+    def linear(self) -> str:
+        """The identifier (``ENG-12``) of the Linear issue a fix works in place of a
+        GitHub one (``IssueConfig.linear``), or ""."""
+        issue = self.config.get("linear")
+        return str(issue.get("identifier") or "") if isinstance(issue, dict) else ""
+
+    @property
+    def pipeline(self) -> bool:
+        """Asked for by the Pipeline: a fix of a fast-track candidate or a fast-track
+        review, which its master switch pauses (``Store.is_paused``)."""
+        return bool(self.config.get("pipeline") or self.config.get("fastTrack"))
+
+    @property
     def item(self) -> str | None:
         """The item key of the PR or issue asked about, or ``None`` for a row that names
-        no repo: an investigation, or a legacy row not yet given one."""
-        if self.action == QUEUE_INVESTIGATE_ACTION or not self.repo:
+        no GitHub or GitLab item: an investigation, a Linear issue's fix, or a legacy row
+        not yet given a repo."""
+        if self.action == QUEUE_INVESTIGATE_ACTION or not self.repo or self.linear:
             return None
         return f"{self.repo.lower()}#{self.number}"
 
@@ -1036,8 +1051,10 @@ class RequestedWork:
     def key(self) -> str:
         """This ask's identity everywhere it has one: the queued task's id, the row the
         panel draws it as, and what ``_forget_requested`` drops it by. An
-        investigation keeps its Slack ts, being about no repo."""
-        return queue_key(self.action, self.item or str(self.number))
+        investigation keeps its Slack ts, being about no repo; a Linear issue's fix its
+        identifier, which no item key or ts can be, so it never names the GitHub issue
+        of the same number in its repo."""
+        return queue_key(self.action, self.item or self.linear or str(self.number))
 
     @property
     def label(self) -> str:
@@ -1056,7 +1073,8 @@ class RequestedWork:
         if self.action == QUEUE_INVESTIGATE_ACTION:
             return str(self.config.get("label", ""))
         noun = "Issues" if self.action == QUEUE_ISSUES_ACTION else "Review"
-        named = item_label(self.item, roots) if self.item else f"#{self.number}"
+        named = (item_label(self.item, roots) if self.item
+                 else self.linear or f"#{self.number}")
         return f"{noun} · {named} · {self.config.get('depth', '')}"
 
     def to_json(self) -> dict:

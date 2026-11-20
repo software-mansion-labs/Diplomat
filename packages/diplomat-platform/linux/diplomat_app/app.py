@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
     QSystemTrayIcon,
 )
 
-from diplomat_runtime import comms
+from diplomat_runtime import comms, pipeline
 
 from . import glyphs, selfupdate
 from .panel import Panel
@@ -154,6 +154,15 @@ class DiplomatApp:
         self.comms_timer.start()
         self.store.start_background(self._load_comms, name="comms-feed")
         QTimer.singleShot(10000, self.store.run_comms_poll_async)
+
+        # The Pipeline: a sync no-ops while it is off. The last sync's result loads up
+        # front, so its screen opens on it.
+        self.pipeline_timer = QTimer()
+        self.pipeline_timer.setInterval(int(pipeline.sync_secs() * 1000))
+        self.pipeline_timer.timeout.connect(self.store.run_pipeline_sync_async)
+        self.pipeline_timer.start()
+        self.store.start_background(self.store.refresh_pipeline_last, name="pipeline-last")
+        QTimer.singleShot(15000, self.store.run_pipeline_sync_async)
 
         # Resolve identity + first fetch eagerly.
         self.store.start_background(self.store.fetch_me)
