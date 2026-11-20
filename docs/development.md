@@ -211,6 +211,9 @@ DIPLOMAT_RENDER=panel    ./Diplomat.app/Contents/MacOS/Diplomat  # snapshot a sc
                                                      #   scratch dir); comms-panel; comms-badge (the main panel with
                                                      #   unread pings); comms-empty (no Slack login yet);
                                                      #   settings-comms-error (the Comms card's failing pill)
+                                                     #   pipeline (the Pipeline screen over a fixture sync, a held
+                                                     #   PR selected); pipeline-issue (the fast lane, an issue
+                                                     #   selected); pipeline-panel; pipeline-empty (switched off)
                                                      #   settings-unsaved (a change config.json refused)
                                                      #   app (the REAL window root at the width that shows
                                                      #   the whole panel, incl. the legacy scroller lane;
@@ -242,6 +245,9 @@ DIPLOMAT_COMMS_POLL=1    ...                     # one real Slack poll with real
                                                      #   would queue, queues nothing (docs/comms.md)
 DIPLOMAT_COMMS_TEST=1    ...                     # self-test: what each triage answer does to the queue, the switches,
                                                      #   the ban, started/finished. Spawns nothing, reaches no Slack
+DIPLOMAT_PIPELINE_TEST=1 ...                     # self-test: what each pipeline effect queues, the attempt
+                                                     #   records that keep it from queueing twice, the master
+                                                     #   switch, the forces. Spawns nothing, runs no gh/claude/Linear
 DIPLOMAT_APIWATCH_TEST=1 ...                     # self-test: who a scan may type into (an agent's session,
                                                      #   including one a terminal only shows through tmux;
                                                      #   never a plain shell). Reads no terminal, sends nothing
@@ -435,6 +441,9 @@ packages/
         CommsMonitor.swift         the Slack watcher: the poll loop, applying each triage answer to the queue
         CommsView.swift            the Comms screen: pings, the jobs they queued, the watcher's status
         CommsTest.swift            self-test of what each triage answer does to the queue (DIPLOMAT_COMMS_TEST)
+        PipelineMonitor.swift      the pipeline's sync loop, applying each effect to the queue, its attempt records
+        PipelineView.swift         the Pipeline screen: the graph of issues and PRs, lanes, the selected card
+        PipelineTest.swift         self-test of what each effect does to the queue (DIPLOMAT_PIPELINE_TEST)
         TelemetryView.swift        the Telemetry screen: the bell curve, the rate-limit windows, the backlog and finished-work series, the token split
         TelemetryLog.swift         writes/reads ~/.diplomat/pr-monitor/telemetry.jsonl (append-only, rotated)
         UsageScan.swift            Claude Code transcript scanner: repo-vs-other tokens, per-task attribution
