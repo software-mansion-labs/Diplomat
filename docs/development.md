@@ -299,8 +299,11 @@ Cadences and paths are overridable too, for tuning: `DIPLOMAT_AUTOFIX_SECS`,
 `DIPLOMAT_APIWATCH_SECS`, `DIPLOMAT_PROC_POLL_SECS` (min 2s),
 `DIPLOMAT_CORE` (where the shared `assets/` live), `DIPLOMAT_DEVICE_ALLOCATOR_DIR`,
 `DIPLOMAT_NODE` (the `node` to use),
-`DIPLOMAT_REPO` (a single repo root for the agents - outranks Settings ▸ *Repo roots*) and
-`DIPLOMAT_CONFIG` (where that shared `config.json` lives).
+`DIPLOMAT_REPO` (a single repo root for the agents - outranks Settings ▸ *Repo roots*),
+`DIPLOMAT_CONFIG` (where that shared `config.json` lives), and for the
+[Pipeline](pipeline.md) `DIPLOMAT_PIPELINE_SECS` (its sync, 60 seconds to a day),
+`DIPLOMAT_PIPELINE_DIR` (its `~/.diplomat/pipeline`), `DIPLOMAT_LINEAR_API` (Linear's GraphQL
+endpoint) and `DIPLOMAT_LINEAR_TOKEN` (a Linear API key, over the Keychain item).
 
 ## Architecture
 
