@@ -190,6 +190,10 @@ public struct PipelineEvent: Codable, Equatable, Sendable {
 
 /// Agent work a sync asks the front-end to queue. The front-end dedupes it by `key` and
 /// `stamp` through its attempt records, as it does a review request.
+///
+/// JSON, flat: `{"kind": "fixIssue", "repo", "number", "url"}`, `{"kind": "fixLinear",
+/// "repo", "identifier", "url", "text"}`, `{"kind": "review", "repo", "number", "url",
+/// "headSha"}`, each with its `key` and `stamp` beside (written, never read back).
 public enum PipelineEffect: Codable, Equatable, Sendable {
     /// A Fix-issues run for one GitHub issue of the root `repo`.
     case fixIssue(repo: String, number: Int, url: String)
@@ -216,6 +220,53 @@ public enum PipelineEffect: Codable, Equatable, Sendable {
     public var stamp: String {
         if case .review(_, _, _, let sha) = self { return sha }
         return "fix"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind, repo, number, url, identifier, text, headSha, key, stamp
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try c.decode(String.self, forKey: .kind)
+        let repo = try c.decode(String.self, forKey: .repo)
+        let url = try c.decode(String.self, forKey: .url)
+        switch kind {
+        case "fixIssue":
+            self = .fixIssue(repo: repo, number: try c.decode(Int.self, forKey: .number), url: url)
+        case "fixLinear":
+            self = .fixLinear(repo: repo, identifier: try c.decode(String.self, forKey: .identifier),
+                              url: url, text: try c.decode(String.self, forKey: .text))
+        case "review":
+            self = .review(repo: repo, number: try c.decode(Int.self, forKey: .number), url: url,
+                           headSha: try c.decode(String.self, forKey: .headSha))
+        default:
+            throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
+                                                   debugDescription: "unknown effect \(kind)")
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case .fixIssue(let repo, let number, _):
+            try c.encode("fixIssue", forKey: .kind)
+            try c.encode(repo, forKey: .repo)
+            try c.encode(number, forKey: .number)
+        case .fixLinear(let repo, let identifier, _, let text):
+            try c.encode("fixLinear", forKey: .kind)
+            try c.encode(repo, forKey: .repo)
+            try c.encode(identifier, forKey: .identifier)
+            try c.encode(text, forKey: .text)
+        case .review(let repo, let number, _, let headSha):
+            try c.encode("review", forKey: .kind)
+            try c.encode(repo, forKey: .repo)
+            try c.encode(number, forKey: .number)
+            try c.encode(headSha, forKey: .headSha)
+        }
+        try c.encode(url, forKey: .url)
+        try c.encode(key, forKey: .key)
+        try c.encode(stamp, forKey: .stamp)
     }
 }
 
@@ -257,6 +308,14 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
             self.rate = rate
             self.fracture = fracture
         }
+
+        private enum CodingKeys: String, CodingKey { case rate, fracture }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(rate: try c.decodeIfPresent([String].self, forKey: .rate) ?? [],
+                      fracture: try c.decodeIfPresent([String].self, forKey: .fracture) ?? [])
+        }
     }
 
     public var roots: [Root]
@@ -292,6 +351,24 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
         self.fracture = fracture
         self.force = force
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case roots, linearTeams, linearKeychainItem, linearTokenFile, rate, fix, fastTrack,
+             merge, fracture, force
+    }
+
+    /// A missing field reads as empty, and a missing switch as off.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        func on(_ key: CodingKeys) throws -> Bool { try c.decodeIfPresent(Bool.self, forKey: key) ?? false }
+        self.init(roots: try c.decodeIfPresent([Root].self, forKey: .roots) ?? [],
+                  linearTeams: try c.decodeIfPresent([LinearTeam].self, forKey: .linearTeams) ?? [],
+                  linearKeychainItem: try c.decodeIfPresent(String.self, forKey: .linearKeychainItem),
+                  linearTokenFile: try c.decodeIfPresent(String.self, forKey: .linearTokenFile),
+                  rate: try on(.rate), fix: try on(.fix), fastTrack: try on(.fastTrack),
+                  merge: try on(.merge), fracture: try on(.fracture),
+                  force: try c.decodeIfPresent(Force.self, forKey: .force))
+    }
 }
 
 public struct PipelineTickResult: Codable, Equatable, Sendable {
@@ -326,28 +403,5 @@ public struct LinearIssue: Codable, Equatable, Sendable {
         self.identifier = identifier
         self.url = url
         self.text = text
-    }
-}
-
-/// `dir` holds `log.jsonl` (every `PipelineEvent`), `last.json` (the last sync's result),
-/// `ratings.json` and `state.json`: directories 0700, files 0600.
-public enum PipelineLog {
-    public static var dir: URL {
-        if let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"], !env.isEmpty {
-            return URL(fileURLWithPath: env, isDirectory: true)
-        }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".diplomat/pipeline", isDirectory: true)
-    }
-
-    // STUB: the core implementation replaces this.
-    public static func last(in dir: URL = dir) -> PipelineTickResult? { nil }
-}
-
-public enum PipelineTick {
-    // STUB: the core implementation replaces this; front-ends call exactly this signature.
-    public static func run(settings: PipelineSettings, now: Date = Date(),
-                           dir: URL = PipelineLog.dir) -> PipelineTickResult {
-        PipelineTickResult(at: now)
     }
 }

@@ -1,0 +1,44 @@
+# Everything one pipeline sync reads of one repository, in one request: its default
+# branch and merge methods, its open issues and PRs newest-updated first, and its
+# recently merged or closed PRs (`PipelineRead.github` keeps the ones carrying a pipeline
+# label). `files` needs to see more than `floor.maxFiles` only to know a PR exceeds it,
+# which `changedFiles` says; a `totalCount` past what a connection lists reads as an
+# unresolved thread, or a reviewer nobody saw, to the merge gate.
+query($owner: String!, $name: String!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
+    issues(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number id title body url updatedAt
+        author { login }
+        assignees(first: 10) { nodes { login } }
+        labels(first: 30) { nodes { name } }
+        parent { url }
+        subIssues(first: 50) { nodes { url } }
+      }
+    }
+    pullRequests(states: OPEN, first: 100, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number title body url updatedAt isDraft isCrossRepository mergeable reviewDecision
+        headRefName headRefOid baseRefName changedFiles
+        author { login }
+        labels(first: 30) { nodes { name } }
+        closingIssuesReferences(first: 10) { nodes { url } }
+        files(first: 20) { nodes { path additions deletions changeType } }
+        commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+        reviewThreads(first: 50) { totalCount nodes { isResolved } }
+        reviews(last: 40) { totalCount nodes { author { __typename login } body commit { oid } } }
+        comments(last: 40) { totalCount nodes { author { __typename login } } }
+      }
+    }
+    done: pullRequests(states: [MERGED, CLOSED], first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number title url updatedAt state isCrossRepository headRefName baseRefName
+        author { login }
+        labels(first: 30) { nodes { name } }
+        closingIssuesReferences(first: 10) { nodes { url } }
+      }
+    }
+  }
+}

@@ -12,12 +12,12 @@ enum PrivateFiles {
     }
 
     /// `body`'s answer, run while holding `lock` (a 0600 file, made if missing); nil when
-    /// the lock cannot be taken.
-    static func locked<T>(_ lock: URL, _ body: () throws -> T) rethrows -> T? {
+    /// the lock cannot be taken, or with `wait` false, when another holder has it.
+    static func locked<T>(_ lock: URL, wait: Bool = true, _ body: () throws -> T) rethrows -> T? {
         let fd = open(lock.path, O_RDWR | O_CREAT, 0o600)
         guard fd >= 0 else { return nil }
         defer { close(fd) }
-        guard flock(fd, LOCK_EX) == 0 else { return nil }
+        guard flock(fd, wait ? LOCK_EX : LOCK_EX | LOCK_NB) == 0 else { return nil }
         return try body()
     }
 
