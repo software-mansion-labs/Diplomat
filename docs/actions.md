@@ -47,8 +47,9 @@ prompt:
   APPROVE. It posts even with *Leave reviews* off.
 - **✨ Final E2E pass + verdict** - *(highlighted, off by default; others' and
   unknown-author PRs only - never my own, there is no self-approval)* appends a
-  final E2E check of the affected workflows. A verified blocker warrants a change
-  request. Non-blocking findings and optional coverage advice allow approval.
+  final E2E check of workflows affected by the full merge-base-to-head diff,
+  even if Diplomat already reviewed this commit. A verified blocker warrants a
+  change request. Non-blocking findings and optional coverage advice allow approval.
 
 Inline findings identify behavior the PR makes worse than its target branch’s merge
 base, or a supported case where the submitted change fails its stated purpose.
@@ -56,11 +57,11 @@ Each thread gives the trigger, expected and observed behavior, and impact. A par
 fix can pass review. Incidental existing defects stay in the operator’s summary.
 Filing a follow-up issue requires an explicit request.
 
-On someone else’s PR, a re-review covers changes since the last submitted Diplomat
-review and outstanding findings. If the previous head can’t be compared reliably,
-the reviewer uses the full PR diff. A thread ends when its original reproduction
-passes. If reverting the central behavior leaves tests green, the reviewer may put
-one optional coverage suggestion in the review body.
+With Final E2E off, a re-review of someone else’s PR covers changes since the last
+submitted Diplomat review and outstanding findings. If the previous head can’t be
+compared reliably, the reviewer uses the full PR diff. A thread ends when its
+original reproduction passes. If reverting the central behavior leaves tests
+green, the reviewer may put one optional coverage suggestion in the review body.
 
 Contextual controls (the action checkboxes, the someone-else's handle field, and the
 single-PR field) **appear only where they apply** - for a specific PR the wizard

@@ -243,6 +243,11 @@ public struct ReviewConfig: Codable, Equatable {
         blocks["diplomatTag"].map { AgentModel.fillTag($0, model: AgentModel.detected()) }
     }
 
+    private func reviewOnlyInstructions(_ blocks: [String: String]) -> String {
+        let range = effFinalPass ? "finalVerification" : "incrementalReviewRange"
+        return [blocks["reviewOnly"], blocks[range]].compactMap { $0 }.joined(separator: " ")
+    }
+
     /// How a review on someone else's PR is built, whenever this run may submit one, and
     /// whether its findings go in it — they do under the verdict pass, which posts them
     /// with its verdict. Nothing on my own PRs, which get no review.
@@ -254,9 +259,6 @@ public struct ReviewConfig: Codable, Equatable {
         }
         if let b = blocks[effLeaveReviews || effVerdict ? "leaveReviews" : "noReviews"] {
             out.append(b)
-        }
-        if effFinalPass, let verification = blocks["finalVerification"] {
-            out.append(verification)
         }
         return out
     }
@@ -312,7 +314,7 @@ public struct ReviewConfig: Codable, Equatable {
         if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
 
         // For someone else's PRs, frame the whole task as look-don't-touch up front.
-        if isReviewOnly, let b = blocks["reviewOnly"] { out.append(b) }
+        if isReviewOnly { out.append(reviewOnlyInstructions(blocks)) }
         let chosen = ReviewCatalog.depth(id: depth)
         if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
@@ -395,7 +397,7 @@ public struct ReviewConfig: Codable, Equatable {
         out.append(fill(scope["single"] ?? ""))
         if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
         out.append(fill(specific["theirsOnly"] ?? ""))
-        if let b = blocks["reviewOnly"] { out.append(b) }
+        out.append(reviewOnlyInstructions(blocks))
         if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
         if let bar = blocks["bar"] { out.append(bar) }
@@ -458,7 +460,7 @@ public struct ReviewConfig: Codable, Equatable {
 
         // CASE B — it's someone else's: review only, hands off the branch.
         out.append(fill(specific["otherHeader"] ?? ""))
-        if let b = blocks["reviewOnly"] { out.append(b) }
+        out.append(reviewOnlyInstructions(blocks))
         out += reviewBlocks(blocks)
         out.append(fill(specific["otherNoMarkReady"] ?? ""))
         if effVerdict, let b = blocks["finalPass"] {

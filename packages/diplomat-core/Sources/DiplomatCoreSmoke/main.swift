@@ -3204,24 +3204,24 @@ check(!kts.contains("Thank you for contributing"), "soft-approve off ⇒ no than
 check(!kts.contains("still APPROVE"), "no finalPass block")
 print("known-theirs (silent) review prompt assertions passed")
 
-// ---- known-theirs WITH verdict (trusted author: member/maintainer/contributor) ----
-// The review-request monitor sets finalPass=true when the PR author is trusted, so the
-// auto-review closes with an APPROVE/changes-requested verdict instead of comments only.
-// A real verdict outranks the (default-on) soft-approve, so no thank-you review either.
-section("known-theirs review prompt (trusted author → verdict)")
+// A manual final pass covers the full PR even after a focused review of the same head.
+section("known-theirs review prompt (manual final E2E + verdict)")
 let ktv = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
                        markReady: false, leaveReviews: true, replyToReviews: false,
                        specificPR: "500", finalPass: true, specificAuthor: .theirs).buildPrompt()
 check(ktv.contains("SOMEONE ELSE'S"), "review-only framing still present with verdict")
-check(ktv.contains("still APPROVE"), "trusted author ⇒ finalPass APPROVE-verdict block present")
+check(ktv.contains("Use the full merge-base-to-head diff, even when this head was reviewed before"))
+check(ktv.contains("FULL E2E pass on the built binaries for the workflows affected by that diff"))
+check(!ktv.contains("On the same head check outstanding threads only"))
+check(ktv.contains("still APPROVE"), "final pass includes a verdict")
 check(ktv.contains("Follow the same posting and thread rules for all verdicts"))
-check(!ktv.contains("Do NOT submit an APPROVE"), "trusted author ⇒ no no-verdict block")
+check(!ktv.contains("Do NOT submit an APPROVE"), "final pass permits a verdict")
 check(!ktv.contains("Thank you for contributing"), "hard verdict outranks soft-approve")
 check(ktv.contains("COMMENT unless a verdict instruction below explicitly tells you to APPROVE"),
       "the lifecycle's COMMENT default yields to the verdict block")
 check(ktv.contains("such a verdict is this same submission's event, never a second review"),
       "the verdict is the one review's event")
-print("known-theirs (trusted author) review prompt assertions passed")
+print("known-theirs (manual final E2E) review prompt assertions passed")
 
 // The lifecycle belongs to a formal review of someone else's PR, and to nothing else.
 let ktNoReview = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
