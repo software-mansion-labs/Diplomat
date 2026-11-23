@@ -72,6 +72,17 @@ enum PipelineTest {
                   && SettingsView.linearTeamsSummary(PipelineSettings.LinearTeam.parse(" ")) == "None: GitHub only"
                   && SettingsView.linearTeamsSummary(PipelineSettings.LinearTeam.parse("eng=o/r,ops=o/x"))
                       == "ENG → o/r · OPS → o/x")
+        check("Fast-track my PRs names only a PR closing a candidate issue",
+              SettingsView.pipelineFastTrackSummary
+                  == "Labels diplomat:fast-track each low/low PR of yours that closes a candidate issue, "
+                  + "and reviews it until clean"
+                  && SettingsView.pipelineFastTrackDetail.hasPrefix(
+                      "Only your own PRs from the repo itself into its default branch that close a "
+                          + "candidate issue: the fixes the pipeline asks for."))
+        check("Merge cleared PRs points at every hold rather than listing some",
+              SettingsView.pipelineMergeDetail.hasPrefix(
+                  "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
+                      + "to it, checked again right before the merge."))
         func feed(_ action: String) -> [String] {
             AuditLog.read().filter { $0.action == action }.map { "\($0.source) \($0.detail)" }.reversed()
         }
@@ -668,6 +679,21 @@ enum PipelineTest {
         check("…and Start fix asks for it as that author's",
               store.startPipelineFix(partItem) == nil
                   && job("issues:o/r#90030").map { $0.authorLogin == "mallory" } == true)
+        clearQueue()
+        // A part the sync held for the ban, emitting no fix for it.
+        var heldPart = partItem
+        heldPart.splitFrom = "mallory"
+        heldPart.hold = "split from an issue of @mallory, who is on the prompt-injection ban list"
+        store.pipelineResult = PipelineTickResult(at: Date(), items: items + [heldPart])
+        check("a held part has no Start fix, and pressing it says the hold",
+              store.pipelineFixEffect(for: heldPart) == nil
+                  && store.startPipelineFix(heldPart) == heldPart.hold && ids().isEmpty)
+        var unheld = heldPart
+        unheld.hold = nil
+        store.pipelineResult = PipelineTickResult(at: Date(), items: items + [unheld])
+        check("a part with no emitted fix is asked for as the author its text came from",
+              store.startPipelineFix(unheld) == nil
+                  && job("issues:o/r#90030").map { $0.authorLogin == "mallory" } == true)
         try? FileManager.default.removeItem(at: banDir.appendingPathComponent("banned.json"))
         clearQueue()
         store.savePipelineAttempts([:])
@@ -780,10 +806,15 @@ enum PipelineTest {
         check("…and who it is by and assigned to",
               PipelineTint.people(heldBy) == "By @carol · assigned to @dave, @erin"
                   && PipelineTint.people(items[2]) == "By Bob · unassigned")
+        heldBy.hold = "@carol is on the prompt-injection ban list"
+        check("a hold is said as one",
+              PipelineTint.hover(heldBy).components(separatedBy: "\n")
+                  .contains("Held: @carol is on the prompt-injection ban list"))
         check("a sync that read nothing says so",
               PipelineView.emptyText(enabled: true, synced: true) == "The last sync found no open issue or PR."
                   && PipelineView.emptyText(enabled: true, synced: false).hasPrefix("Nothing read yet")
-                  && PipelineView.emptyText(enabled: false, synced: true).hasPrefix("The pipeline is off"))
+                  && PipelineView.emptyText(enabled: false, synced: true).hasPrefix(
+                      "The pipeline is off. Switched on in Settings, it rates every open issue and your own PRs,"))
         let cal = Calendar.current
         let synced = cal.date(from: DateComponents(year: 2026, month: 11, day: 20, hour: 12, minute: 5))!
         check("the last sync: its time today, its date too on any other day",

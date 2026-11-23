@@ -467,19 +467,19 @@ extension Store {
     }
 
     /// The fix effect an issue Diplomat may act on would be asked for by: the one the last
-    /// sync emitted for it; failing that, a GitHub issue's from its link, by the item's
-    /// author. A Linear issue's text is Diplomat's read, so its fix is only the emitted
-    /// one. None for an issue assigned to someone else, which a fix would claim. Twin of
-    /// `Store.pipeline_fix_effect`.
+    /// sync emitted for it; failing that, a GitHub issue's from its link, by whose text it
+    /// carries (`splitFrom`, else its author). A Linear issue's text is Diplomat's read, so
+    /// its fix is only the emitted one. None for an issue assigned to someone else, which a
+    /// fix would claim, or one a hold stops. Twin of `Store.pipeline_fix_effect`.
     func pipelineFixEffect(for item: PipelineItem) -> PipelineEffect? {
-        guard item.kind == .issue, item.writable else { return nil }
+        guard item.kind == .issue, item.writable, item.hold == nil else { return nil }
         let emitted = pipelineResult?.effects.first {
             if case .review = $0 { return false }
             return Store.pipelineIdentity($0.url) == Store.pipelineIdentity(item.id)
         }
         if emitted != nil || item.source == .linear { return emitted }
         guard let number = PRRef.itemKey(url: item.id).flatMap(PRRef.splitItemKey)?.number else { return nil }
-        return .fixIssue(repo: item.repo, number: number, url: item.id, author: item.author ?? "")
+        return .fixIssue(repo: item.repo, number: number, url: item.id, author: item.splitFrom ?? item.author ?? "")
     }
 
     /// Why an issue has no `pipelineFixEffect`, said to the operator.

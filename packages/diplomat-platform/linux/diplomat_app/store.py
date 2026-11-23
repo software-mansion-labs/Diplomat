@@ -4836,11 +4836,12 @@ class Store(QObject):
 
     def pipeline_fix_effect(self, item: dict) -> dict | None:
         """The fix effect an issue Diplomat may act on would be asked for by: the one the
-        last sync emitted for it; failing that, a GitHub issue's from its link, by the
-        item's author. A Linear issue's text is Diplomat's read, so its fix is only the
-        emitted one. None for an issue assigned to someone else, which a fix would
-        claim. Twin of ``Store.pipelineFixEffect``."""
-        if item.get("kind") != "issue" or not item.get("writable"):
+        last sync emitted for it; failing that, a GitHub issue's from its link, by whose
+        text it carries (``splitFrom``, else its author). A Linear issue's text is
+        Diplomat's read, so its fix is only the emitted one. None for an issue assigned to
+        someone else, which a fix would claim, or one a hold stops. Twin of
+        ``Store.pipelineFixEffect``."""
+        if item.get("kind") != "issue" or not item.get("writable") or item.get("hold"):
             return None
         item_id = str(item.get("id") or "")
         emitted = next((e for e in (self.pipeline_result or {}).get("effects") or []
@@ -4853,7 +4854,7 @@ class Store(QObject):
         if split is None:
             return None
         return {"kind": "fixIssue", "repo": item.get("repo"), "number": split[1],
-                "url": item_id, "author": str(item.get("author") or ""),
+                "url": item_id, "author": str(item.get("splitFrom") or item.get("author") or ""),
                 "key": f"pipeline-fix:{item_id}", "stamp": "fix"}
 
     def pipeline_fix_unknown(self, item: dict) -> str:

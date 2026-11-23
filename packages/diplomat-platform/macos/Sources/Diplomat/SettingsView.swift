@@ -1089,7 +1089,7 @@ struct SettingsView: View {
                 switchControl("Open fix PRs", $store.pipelineFix)
             }
             SettingRow(title: "Fast-track my PRs",
-                       summary: "Labels each of your low/low PRs diplomat:fast-track and reviews it until clean",
+                       summary: SettingsView.pipelineFastTrackSummary,
                        detail: SettingsView.pipelineFastTrackDetail) {
                 switchControl("Fast-track my PRs", $store.pipelineFastTrack)
             }
@@ -1167,18 +1167,20 @@ struct SettingsView: View {
         the tracker is the rating; a PR's diff can only raise one.
         """
 
-    private static let pipelineFastTrackDetail = """
-        Only your own PRs from the repo itself into its default branch. Reviews of it are \
-        queued until one finds nothing at its head; at that clean head it is rated again: \
-        still low/low, it is labelled diplomat:cleared, else it leaves the fast track.
+    static let pipelineFastTrackSummary = "Labels diplomat:fast-track each low/low PR of yours that closes "
+        + "a candidate issue, and reviews it until clean"
+
+    static let pipelineFastTrackDetail = """
+        Only your own PRs from the repo itself into its default branch that close a candidate \
+        issue: the fixes the pipeline asks for. Reviews of it are queued until one finds \
+        nothing at its head; at that clean head it is rated again: still low/low, it is \
+        labelled diplomat:cleared, else it leaves the fast track.
         """
 
-    private static let pipelineMergeDetail = """
-        A cleared PR is merged once nothing holds it: no one but you or a bot reviewed or \
-        commented, no changes requested, no unresolved thread, no conflict, CI passed for \
-        its head, and its diff is low-risk, low-complexity by its own floor. Admin rights \
-        skip branch protection's approval requirement, so leave this off where a second \
-        pair of eyes is required.
+    static let pipelineMergeDetail = """
+        A cleared PR is merged only when none of the holds in docs/pipeline.md applies to \
+        it, checked again right before the merge. Admin rights skip branch protection's \
+        approval requirement, so leave this off where a second pair of eyes is required.
         """
 
     private static let pipelineFractureDetail = """

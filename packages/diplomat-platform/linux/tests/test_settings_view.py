@@ -598,16 +598,20 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
          "Risk and complexity, by claude, as labels where Diplomat may write"),
         ("Open fix PRs", "Queues an agent that fixes each low-risk, low-complexity issue"),
         ("Fast-track my PRs",
-         "Labels each of your low/low PRs diplomat:fast-track and reviews it until clean"),
+         "Labels diplomat:fast-track each low/low PR of yours that closes a candidate issue, "
+         "and reviews it until clean"),
         ("Merge cleared PRs",
          "Merges past the review requirement with admin rights (gh pr merge --admin): "
          "no person approves the PR first"),
         ("Split big issues",
          "One medium- or high-complexity issue a sync becomes low-complexity child issues"),
     ]
+    assert rows[2]._detail.text().startswith(
+        "Only your own PRs from the repo itself into its default branch that close a "
+        "candidate issue: the fixes the pipeline asks for.")
     assert rows[3]._detail.text().startswith(
-        "A cleared PR is merged once nothing holds it: no one but you or a bot reviewed "
-        "or commented,")
+        "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
+        "to it, checked again right before the merge.")
     assert view._pipeline_row.summary() == (
         "Every 5m, the open issues and PRs of the GitHub repo roots and the Linear teams "
         "below")

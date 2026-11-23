@@ -1374,20 +1374,20 @@ class SettingsView(QWidget):
             "repo root; a Linear issue is fixed in the root its team names below.")
         self._sw_pipeline_fast = self._pipeline_switch(
             inner, "Fast-track my PRs", st.pipeline_fast_track, "pipeline_fast_track",
-            "Labels each of your low/low PRs diplomat:fast-track and reviews it until clean",
-            "Only your own PRs from the repo itself into its default branch. Reviews of "
-            "it are queued until one finds nothing at its head; at that clean head it is "
-            "rated again: still low/low, it is labelled diplomat:cleared, else it leaves "
-            "the fast track.")
+            "Labels diplomat:fast-track each low/low PR of yours that closes a candidate "
+            "issue, and reviews it until clean",
+            "Only your own PRs from the repo itself into its default branch that close a "
+            "candidate issue: the fixes the pipeline asks for. Reviews of it are queued "
+            "until one finds nothing at its head; at that clean head it is rated again: "
+            "still low/low, it is labelled diplomat:cleared, else it leaves the fast track.")
         self._sw_pipeline_merge = self._pipeline_switch(
             inner, "Merge cleared PRs", st.pipeline_merge, "pipeline_merge",
             "Merges past the review requirement with admin rights (gh pr merge --admin): "
             "no person approves the PR first",
-            "A cleared PR is merged once nothing holds it: no one but you or a bot "
-            "reviewed or commented, no changes requested, no unresolved thread, no "
-            "conflict, CI passed for its head, and its diff is low-risk, low-complexity "
-            "by its own floor. Admin rights skip branch protection's approval "
-            "requirement, so leave this off where a second pair of eyes is required.")
+            "A cleared PR is merged only when none of the holds in docs/pipeline.md "
+            "applies to it, checked again right before the merge. Admin rights skip "
+            "branch protection's approval requirement, so leave this off where a second "
+            "pair of eyes is required.")
         self._sw_pipeline_fracture = self._pipeline_switch(
             inner, "Split big issues", st.pipeline_fracture, "pipeline_fracture",
             "One medium- or high-complexity issue a sync becomes low-complexity child issues",

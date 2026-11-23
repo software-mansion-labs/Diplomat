@@ -590,6 +590,21 @@ def test_start_fix_asks_under_the_author_the_sync_named(pipe):
     assert [w.author for w in pipe.requested_work] == ["mallory"]
 
 
+def test_start_fix_refuses_a_held_part_and_asks_one_it_emitted_nothing_for_as_its_roots(pipe):
+    """A part split off mallory's issue, filed by the operator: held, Start fix says the
+    hold; unheld with no emitted fix, the fix built from its link is mallory's."""
+    held = _item(author="alice", splitFrom="mallory",
+                 hold="split from an issue of @mallory, who is on the prompt-injection ban list")
+    pipe.pipeline_result = _result(items=(held,))
+    assert pipe.pipeline_fix_effect(held) is None
+    assert pipe.pipeline_start_fix(held) == held["hold"]
+    assert pipe.queued_tasks == []
+    unheld = {**held, "hold": None}
+    pipe.pipeline_result = _result(items=(unheld,))
+    assert pipe.pipeline_start_fix(unheld) is None
+    assert [w.author for w in pipe.requested_work] == ["mallory"]
+
+
 def test_start_fix_of_a_linear_issue_queues_its_synced_text(pipe):
     linear = _item(LINEAR, source="linear", label="ENG-12")
     pipe.pipeline_result = _result(_linear(), items=(linear,))
