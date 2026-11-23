@@ -195,7 +195,7 @@ await check('node is handed one request at a time: a connection stopped or close
     }
     res.end();
   };
-  const closedAfter = new Promise((r) => { c.near.on('close', r); });
+  const closedAfter = once(c.near, 'close', 'the connection to be closed after the answer that was its last');
   c.near.write(flood);
   await closedAfter;
   await settle();
@@ -205,7 +205,7 @@ await check('node is handed one request at a time: a connection stopped or close
   // Closed.
   seen.length = 0;
   c = await open();
-  const closed = new Promise((r) => { c.near.on('close', r); });
+  const closed = once(c.near, 'close', 'the connection to be closed with its feed');
   onRequest = (req) => { if (req.url === '/2') req.socket.destroy(); };
   c.near.write(flood);
   await closed;
@@ -386,7 +386,7 @@ await check('a connection is handed one request head a turn, so one that node an
   engine.emit('connection', out);
   let answered = '';
   near.on('data', (d) => { answered += d; });
-  const closed = new Promise((r) => { near.on('close', r); });
+  const closed = once(near, 'close', 'the connection to be closed after node\'s answer');
   near.write('GET / HTTP/1.1\r\n\r\n'.repeat(3000));
   await closed;
   ticking = false;
