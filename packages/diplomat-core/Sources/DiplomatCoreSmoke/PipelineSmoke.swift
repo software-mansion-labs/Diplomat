@@ -103,8 +103,9 @@ private final class Trackers {
         var readyEvents = 0
         /// Review-thread comments.
         var threadNotes: [(login: String, body: String)] = []
-        /// Every label ever added to it, in any way, and the label events past what one read lists.
+        /// Every label ever added to it, in any way.
         var history: [String] = []
+        /// Its label events past what one read lists.
         var moreHistory = 0
     }
     struct Ticket {
