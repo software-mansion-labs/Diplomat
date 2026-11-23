@@ -316,6 +316,51 @@ enum PipelineTest {
               store.loadPipelineAttempts()[gone] == closedNow && store.loadPipelineAttempts()[review.key] != nil)
         clearQueue()
 
+        print("\npipeline: a cancelled ask")
+        store.savePipelineAttempts([:])
+        let t2 = Date()
+        await store.applyPipeline(result([fix, review]), now: t2)
+        let cancelLines = [fixKey, reviewKey].map { "panel \(job($0)?.label ?? $0) — cancelled, not run" }
+        store.cancelRequestedWork(fixKey)
+        store.cancelRequestedWork(reviewKey)
+        let cancelled = store.loadPipelineAttempts()
+        check("Cancel drops a sync's fix and review, each record concluded at its stamp",
+              ids().isEmpty && store.requestedWork.isEmpty
+                  && Array(feed("queue-cancel").suffix(2)) == cancelLines
+                  && cancelled[fix.key].map { $0.requestedAt == "fix" && $0.concludedAt != nil } == true
+                  && cancelled[review.key].map { $0.requestedAt == "aaa111" && $0.concludedAt != nil } == true)
+        let t3 = t2.addingTimeInterval(ReviewReconcile.retryMaxBackoff)
+        await store.applyPipeline(result([fix, review]), now: t3)
+        await store.applyPipeline(result([fix, review]), now: t3.addingTimeInterval(60))
+        check("…so no sync asks for either again, past every backoff", ids().isEmpty)
+        let headMoved = PipelineEffect.review(repo: "o/r", number: 90011, url: pr, headSha: "ccc333",
+                                              author: "latekvo")
+        await store.applyPipeline(result([fix, headMoved]), now: t3)
+        check("…but a new head's review is, a first attempt at it",
+              ids() == [reviewKey] && store.loadPipelineAttempts()[review.key]
+                  .map { $0.requestedAt == "ccc333" && $0.attempts == 1 && $0.concludedAt == nil } == true)
+        store.pipelineResult = result([fix, headMoved])
+        check("…and the fix by Start fix", store.startPipelineFix(items[0]) == nil
+              && ids().sorted() == [fixKey, reviewKey].sorted())
+        store.cancelRequestedWork(fixKey)
+        await store.applyPipeline(result([fix, headMoved]), now: t3.addingTimeInterval(ReviewReconcile.retryMaxBackoff))
+        check("…which a Cancel concludes too", ids() == [reviewKey])
+        clearQueue()
+        store.savePipelineAttempts([:])
+        // Each runs while the pass awaits the review's in-flight probe.
+        Task { @MainActor in store.cancelRequestedWork(fixKey) }
+        await store.applyPipeline(result([fix, review]), now: t2)
+        await store.applyPipeline(result([fix, review]), now: t3)
+        check("…a Cancel of an ask its sync's pass queued, while that pass awaits", ids() == [reviewKey])
+        clearQueue()
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix]), now: t2)
+        Task { @MainActor in store.cancelRequestedWork(fixKey) }
+        await store.applyPipeline(result([review, fix]), now: t3)
+        check("…or of one queued before, while a later pass awaits", ids() == [reviewKey])
+        clearQueue()
+        store.savePipelineAttempts([:])
+
         print("\npipeline: what the feed is told once")
         func event(_ secs: Double, _ id: String, _ kind: PipelineEvent.Kind, _ detail: String) -> PipelineEvent {
             PipelineEvent(at: t0.addingTimeInterval(secs), item: id, kind: kind, detail: detail)
@@ -1083,7 +1128,8 @@ enum PipelineTest {
     /// `<dir>/flip-merge` and waits for control.json to say merge is off. While the state's
     /// `readErrors` is set, the `Repo` read answers with that error beside its data. The
     /// state's `later` holds low/low #7 and op's draft PR #3 fixing it, likewise clean, and
-    /// its `more` low/low #8 and #9, its `extra` low/low #10 and #11. While its `holdReads` is
+    /// its `more` low/low #8 and #9, its `extra` low/low #10 and #11, its `review` low/low #13
+    /// and op's PR #12 fixing it, fast-tracked with no clean marker. While its `holdReads` is
     /// above 0, a `Repo` read writes its ordinal to `<dir>/held` and waits for `<dir>/go` to
     /// say the same. `acme/web`, checked out at `<dir>/checkout-web`, is empty.
     /// `<dir>/linear-state.json`'s `later` adds Linear's low/low ENG-2, its `extra` ENG-3; its
@@ -1110,7 +1156,8 @@ enum PipelineTest {
             }
         }
         func feed() -> [String] {
-            AuditLog.read().filter { $0.action.hasPrefix("pipeline-") || $0.action == "queue-drop" }
+            AuditLog.read()
+                .filter { $0.action.hasPrefix("pipeline-") || ["queue-drop", "queue-cancel"].contains($0.action) }
                 .map { "\($0.source) \($0.action) \($0.detail)" }.reversed()
         }
         func ids() -> [String] { store.queuedTasks.map(\.id).sorted() }
@@ -1435,9 +1482,62 @@ enum PipelineTest {
               ids() == left && ask(eng3Key)?.repo == "acme/web" && prompt(eng3Key).contains(edited)
                   && feed().last == "auto pipeline-fix Issues · ENG-3 · deep queued again: its repo or text changed")
 
+        patch { github in
+            let review = github["review"] as? [String: Any] ?? [:]
+            for key in ["issues", "prs"] {
+                github[key] = (github[key] as? [Any] ?? []) + (review[key] as? [Any] ?? [])
+            }
+        }
+        await sync()
+        let twelveKey = "review:acme/app#12", twelve = "https://github.com/acme/app/pull/12"
+        let owedReview = "pipeline-review:\(twelve)", elevenFix = "pipeline-fix:https://github.com/acme/app/issues/11"
+        func owes() -> [String] {
+            store.pipelineResult?.effects.map(\.key).filter { [owedReview, elevenFix].contains($0) }.sorted() ?? []
+        }
+        check("sync 21, op's PR #12 fixing #13, fast-tracked and not clean at its head: its review is queued",
+              ids() == (left + [twelveKey]).sorted() && owes() == [elevenFix, owedReview])
+        let called = feed().count
+        let cancelLines = [elevenKey, twelveKey].map { key in
+            "panel queue-cancel \(store.queuedTasks.first { $0.id == key }?.job.label ?? key) — cancelled, not run"
+        }
+        store.cancelRequestedWork(elevenKey)
+        store.cancelRequestedWork(twelveKey)
+        print("  cancelled: \(Array(feed().dropFirst(called)))")
+        check("…Cancel on #11's queued fix and #12's queued review takes both off the queue",
+              ids() == [fixKey, eng3Key].sorted() && Array(feed().dropFirst(called)) == cancelLines)
+        // As if the hours past every retry backoff had gone by.
+        var aged = store.loadPipelineAttempts()
+        for key in [elevenFix, owedReview] {
+            aged[key]?.lastDispatchedAt.addTimeInterval(-ReviewReconcile.retryMaxBackoff)
+        }
+        store.savePipelineAttempts(aged)
+        await sync()
+        await sync()
+        let records = [elevenFix, owedReview].map { key in
+            store.loadPipelineAttempts()[key].map { "\($0.requestedAt) \($0.attempts) concluded \($0.concludedAt != nil)" }
+        }
+        print("  syncs 22, 23 records: \(records)")
+        check("syncs 22 and 23, past every backoff, still owing both: neither is queued again",
+              ids() == [fixKey, eng3Key].sorted() && owes() == [elevenFix, owedReview]
+                  && Array(feed().dropFirst(called)) == cancelLines)
+        let pushedHead = String(repeating: "c3", count: 20)
+        patch { github in
+            var prs = github["prs"] as? [[String: Any]] ?? []
+            for i in prs.indices where prs[i]["number"] as? Int == 12 { prs[i]["head"] = pushedHead }
+            github["prs"] = prs
+        }
+        await sync()
+        let pushedLines = Array(feed().dropFirst(called + cancelLines.count))
+        print("  sync 24 feed: \(pushedLines)")
+        check("sync 24, a new head pushed to #12: its review is asked for again, at that head",
+              ids() == [fixKey, eng3Key, twelveKey].sorted()
+                  && store.loadPipelineAttempts()[owedReview].map { $0.requestedAt == pushedHead && $0.attempts == 1 } == true
+                  && pushedLines.filter { $0.hasPrefix("auto pipeline-review ") }.count == 1)
+        let remaining = ids()
+
         store.pipelineEnabled = false
         check("master off: none of the queued asks may start",
-              ids() == left && store.drainableTasks.isEmpty)
+              ids() == remaining && store.drainableTasks.isEmpty)
         store.requestedWork = []
         store.queuedTasks = []
         store.savePipelineAttempts([:])

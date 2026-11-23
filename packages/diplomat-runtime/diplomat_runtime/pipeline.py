@@ -372,3 +372,13 @@ def spawned(attempts: dict, kind: str, url: str, now_ts: float) -> dict:
     for k in _open_keys(attempts, kind, url):
         out[k] = replace(out[k], last_dispatched_at=now_ts)
     return out
+
+
+def cancelled(attempts: dict, kind: str, url: str, now_ts: float) -> dict:
+    """``attempts`` with the record of the queued ask (``kind`` on ``url``) the operator
+    cancelled stamped concluded, so no sync asks for it again at that stamp. Twin of
+    ``Store.pipelineCancelled``."""
+    out = dict(attempts)
+    for k in _open_keys(attempts, kind, url):
+        out[k] = replace(out[k], concluded_at=now_ts)
+    return out

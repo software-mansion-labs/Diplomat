@@ -2787,10 +2787,15 @@ class Store(QObject):
         is no longer owed, while an ask on a PR that is still open stands until it
         runs — and a fix stands whatever happens to its issue, the poll reading PRs
         alone. Without a way back out, a mis-aimed sweep is a day of agents nobody can
-        call off."""
+        call off. A pipeline ask's attempt record is concluded (:func:`pipeline.cancelled`),
+        or its next sync would queue it again."""
         entry = next((e for e in self.queued_tasks if e.id == task_id), None)
         if entry is None or not entry.job.requested:
             return
+        if entry.job.counter == PIPELINE_COUNTER:
+            self._save_attempts(PIPELINE_ATTEMPTS, pipeline.cancelled(
+                self._load_attempts(PIPELINE_ATTEMPTS), entry.job.kind, entry.job.pr_url or "",
+                time.time()))
         self._forget_requested(entry.id)
         self._drop_queued_task(task_id)
         activity.log("panel", "queue-cancel", f"{entry.job.label} — cancelled, not run")
@@ -4758,8 +4763,6 @@ class Store(QObject):
         The records kept are :func:`pipeline.retained`'s after a ``judged`` sync
         (:meth:`_apply_pipeline_sync`), every one after any other. An ask that could not
         be queued is an attempt too, retried on the same ladder."""
-        attempts = self._load_attempts(PIPELINE_ATTEMPTS)
-        dispatched: dict[str, autofix.ReviewAttempt] = {}
         banned = bans.read()
         roots = len(review.repo_roots())
         starting = {e.id for e in self.starting_tasks}
@@ -4791,13 +4794,18 @@ class Store(QObject):
                 activity.log("auto", "pipeline-fix", f"{work.label_among(roots)} queued "
                                                      f"again: its repo or text changed")
                 continue
+            in_flight = self._pipeline_in_flight(work)
+            # Read per effect: a worker thread's retirement may have concluded one while an
+            # earlier ask's prompt was built.
+            attempts = self._load_attempts(PIPELINE_ATTEMPTS)
             action, value = autofix.decide(
-                attempts.get(key), stamp, self._pipeline_in_flight(work),
+                attempts.get(key), stamp, in_flight,
                 bool(work.author) and bans.is_banned(work.author, banned), now)
             if action != "dispatch":
                 continue
             attempt = int(value)
-            dispatched[key] = autofix.ReviewAttempt(stamp, now, attempt)
+            attempts[key] = autofix.ReviewAttempt(stamp, now, attempt)
+            self._save_attempts(PIPELINE_ATTEMPTS, attempts)
             verb = "pipeline-review" if kind == "review" else "pipeline-fix"
             try:
                 fresh = self.request_one(work)
@@ -4808,13 +4816,10 @@ class Store(QObject):
             if fresh:
                 activity.log("auto", verb, f"{work.label_among(roots)} queued"
                              + (f" (attempt {attempt})" if attempt > 1 else ""))
-        # Onto the records as they stand now: a worker thread's retirement may have
-        # concluded one while an ask's prompt was built.
-        records = {**self._load_attempts(PIPELINE_ATTEMPTS), **dispatched}
         if judged:
             teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
-            records = pipeline.retained(records, result, now, teams)
-        self._save_attempts(PIPELINE_ATTEMPTS, records)
+            self._save_attempts(PIPELINE_ATTEMPTS, pipeline.retained(
+                self._load_attempts(PIPELINE_ATTEMPTS), result, now, teams))
 
     def pipeline_work(self, effect: dict) -> autofix.RequestedWork | None:
         """The ask a ``PipelineEffect`` stands for, in its root's checkout; None when its
