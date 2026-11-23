@@ -469,15 +469,16 @@ enum PipelineTest {
         func gh(_ n: Int) -> String { "https://github.com/o/r/issues/\(n)" }
         func name(_ id: String) -> String { String(id.split(separator: "/").last ?? "") }
         let eng10 = "https://linear.app/o/issue/ENG-10"
-        // Two stacked PRs both fixing one issue, the lower PR placed on the issue's row.
+        // One row, as the core lays them out when #11 is newer than #12.
         let stack = graph([(eng10, 0, 0), (gh(11), 1, 0), (gh(12), 2, 0)],
                           [(eng10, gh(11), .fixes), (eng10, gh(12), .fixes), (gh(11), gh(12), .stacked)])
-        // A PR closing both a parent and its child.
         let closes = graph([(gh(30), 0, 0), (gh(31), 1, 0), (gh(34), 2, 0)],
                            [(gh(30), gh(31), .child), (gh(31), gh(34), .fixes), (gh(30), gh(34), .fixes)])
         let children = (101...106).map(gh)
         let fan = graph([(gh(100), 0, 0)] + children.enumerated().map { ($1, 1, $0) },
                         children.map { (gh(100), $0, .child) })
+        let cycle = graph([(gh(60), 0, 0), (gh(61), 1, 0)],
+                          [(gh(60), gh(61), .stacked), (gh(61), gh(60), .stacked)])
         func samples(_ link: PipelineLayout.Link) -> [CGPoint] {
             func at(_ polygon: [CGPoint], _ t: CGFloat) -> CGPoint {
                 polygon.count == 1 ? polygon[0] : at(zip(polygon, polygon.dropFirst()).map {
@@ -499,8 +500,9 @@ enum PipelineTest {
             }
             return points
         }
-        /// Each connector inside a card other than its two (1pt clear of it), or inside one of
-        /// its own past the side it meets; each into the next column out of the gutter between.
+        /// Each connector inside a card other than its two (1pt clear of it), inside one of its
+        /// own past the side it meets, or off the canvas; each into the next column out of the
+        /// gutter between.
         func astray(_ layout: PipelineLayout) -> [String] {
             let frames = Dictionary(uniqueKeysWithValues: layout.cards.map { ($0.item.id, $0.frame) })
             return layout.links.flatMap { link -> [String] in
@@ -510,6 +512,9 @@ enum PipelineTest {
                     let own = card.item.id == link.edge.from || card.item.id == link.edge.to
                     let box = card.frame.insetBy(dx: own ? 0.5 : -1, dy: own ? 0.5 : -1)
                     return points.contains { box.contains($0) } ? "\(what) under \(name(card.item.id))" : nil
+                }
+                if !points.allSatisfy({ CGRect(origin: .zero, size: layout.size).contains($0) }) {
+                    bad.append("\(what) off the canvas")
                 }
                 if abs(b.minX - a.maxX - PipelineLayout.columnGap) < 0.5,
                    !points.allSatisfy({ $0.x >= a.maxX - 0.01 && $0.x <= b.minX + 0.01 }) {
@@ -523,9 +528,10 @@ enum PipelineTest {
             check(name, layout.links.count == edges && bad.isEmpty)
             if !bad.isEmpty { print("  " + bad.joined(separator: "; ")) }
         }
-        clear("ENG-10 fixed by #11 and by #12 stacked on it, one row: no connector under a card", stack, edges: 3)
-        clear("#34 closing #30 and its child #31, one row: no connector under a card", closes, edges: 3)
-        clear("#100's six children: every connector inside its gutter, none under a card", fan, edges: 6)
+        clear("ENG-10 fixed by #11 and by #12 stacked on it, one row: through gutters and gaps only", stack, edges: 3)
+        clear("#34 closing #30 and its child #31, one row: through gutters and gaps only", closes, edges: 3)
+        clear("#100's six children: through their gutter only", fan, edges: 6)
+        clear("#60 and #61 stacked on each other: the edge back round through the outer gutters", cycle, edges: 2)
         func port(_ layout: PipelineLayout, _ from: String, _ to: String, end: Bool) -> CGFloat {
             layout.links.first { $0.edge.from == from && $0.edge.to == to }
                 .flatMap { end ? samples($0).last?.y : samples($0).first?.y } ?? .nan

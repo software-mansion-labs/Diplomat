@@ -291,8 +291,8 @@ struct PipelineLayout {
     static let rowGap: CGFloat = 14
     static let groupGap: CGFloat = 12
     static let inset: CGFloat = 6
-    /// Round the cards: a gutter left of column 0 and right of the last, and a gap above
-    /// the first row and below the last, for connectors to run in.
+    /// Round the cards, so a connector in the gutter or gap beside an outer column or row
+    /// stays on the canvas.
     static let margin = CGSize(width: columnGap / 2 + inset, height: rowGap / 2 + inset)
     static let arrowLength: CGFloat = 7
     static let arrowHalfWidth: CGFloat = 3.5
@@ -348,12 +348,12 @@ struct PipelineLayout {
         return out
     }
 
-    /// Each edge from its source's right side to its target's left side. Into the next
-    /// column it is one curve through the gutter between them; anything else goes out into
-    /// the source's gutter, along the middle of the gap between card rows (above the
+    /// Each edge from its source's right side to its target's left side, never across a
+    /// card: into the next column one curve through the gutter between; anything else out
+    /// into the source's gutter, along the middle of the gap between card rows (above the
     /// source's row toward a target above it, else below), and in through the target's
-    /// gutter, none of which holds a card. Connectors sharing a side spread along it in the
-    /// order they head off to or come in from, so neither lines nor arrowheads overlap.
+    /// gutter. Connectors sharing a side spread along it in the order they head off to or
+    /// come in from.
     private static func links(_ edges: [PipelineGraph.Edge], _ frames: [String: CGRect]) -> [Link] {
         let src = edges.map { frames[$0.from]! }, dst = edges.map { frames[$0.to]! }
         func next(_ i: Int) -> Bool { abs(dst[i].minX - src[i].maxX - columnGap) < 0.5 }
