@@ -258,6 +258,13 @@ enum PipelineTest {
                   .filter { $0.value.lastDispatchedAt == started }.keys.sorted() == [review.key]
                   && Store.pipelineSpawned(concluded, job: spawned(AgentTaskQueue.issuesAction, issue),
                                            at: started)[fix.key] == concluded[fix.key])
+        let asked = Date().addingTimeInterval(-600)
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix]), now: asked)
+        if let task = store.queuedTasks.first(where: { $0.id == fixKey }) { store.recordQueuedAttempt(task) }
+        check("…which the queue's spawn writes",
+              store.loadPipelineAttempts()[fix.key].map { $0.lastDispatchedAt.timeIntervalSince(asked) > 500 } == true)
+        clearQueue()
         store.savePipelineAttempts(concluded)
         await store.applyPipeline(result([fix]), now: t1.addingTimeInterval(5 * 3600))
         check("a concluded fix is not asked for again, hours later", ids().isEmpty)
@@ -277,6 +284,16 @@ enum PipelineTest {
         check("…and kept while owed, however old",
               Store.retainedPipelineAttempts([fix.key: old], after: result([fix]),
                                              now: t0.addingTimeInterval(30 * 86400))[fix.key] == old)
+        store.savePipelineAttempts([gone: old])
+        await store.applyPipeline(result([]), now: later)
+        check("…as a sync saves them", store.loadPipelineAttempts().isEmpty)
+        let closedNow = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1, concludedAt: later)
+        // Runs while the pass awaits the review's in-flight probe.
+        Task { @MainActor in store.savePipelineAttempts([gone: closedNow]) }
+        await store.applyPipeline(result([review]), now: later)
+        check("…onto the records a run concluded while its pass awaited",
+              store.loadPipelineAttempts()[gone] == closedNow && store.loadPipelineAttempts()[review.key] != nil)
+        clearQueue()
 
         print("\npipeline: what the feed is told once")
         func event(_ secs: Double, _ id: String, _ kind: PipelineEvent.Kind, _ detail: String) -> PipelineEvent {
@@ -727,6 +744,15 @@ enum PipelineTest {
                                              fix: true, fastTrack: false) == [reviewKey]
                   && Store.pipelineWithdrawn(fromScreen, by: nil, fix: false, fastTrack: false) == [reviewKey]
                   && Store.pipelineWithdrawn(asks, by: nil, fix: true, fastTrack: true).isEmpty)
+        clearQueue()
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix]))
+        if let task = store.queuedTasks.first(where: { $0.id == fixKey }) { store.beginStarting(task) }
+        await store.applyPipeline(result([]))
+        check("…but one starting is left to its dispatch", store.requestedWork.map(\.key) == [fixKey])
+        store.endStarting(fixKey)
+        clearQueue()
+        store.savePipelineAttempts([:])
 
         print("\npipeline: concluded records")
         let closedOut = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1, concludedAt: t0)
@@ -852,8 +878,10 @@ enum PipelineTest {
         eng.repo = "ENG"
         var ops = items[2]
         ops.repo = "OPS"
+        store.pipelineLinearTeamsRaw = "ENG=o/r, OPS=g/third"
         check("a Linear issue's code can be read when its team names a GitHub root; a GitHub item's always",
               store.pipelineRooted(eng) && !store.pipelineRooted(ops) && store.pipelineRooted(items[0]))
+        store.pipelineLinearTeamsRaw = "ENG=o/r"
         var theirPR = item(pr, .pr, author: "carol")
         theirPR.writable = false
         var closedIssue = item(issue, .issue, author: "bob")

@@ -3790,8 +3790,9 @@ final class Store: ObservableObject {
 
     /// Write the retry-backoff record for a task the queue dispatched, into the same
     /// per-monitor ledger that monitor writes itself: `AgentJob.counter` names the
-    /// ledger, `attemptStamp` is the stamp that monitor compares against.
-    private func recordQueuedAttempt(_ entry: QueuedAgentTask) {
+    /// ledger, `attemptStamp` is the stamp that monitor compares against. Not private:
+    /// the pipeline self-test, which spawns nothing, drives it.
+    func recordQueuedAttempt(_ entry: QueuedAgentTask) {
         guard let counter = entry.job.counter else { return }
         let record = ReviewAttempt(requestedAt: entry.job.attemptStamp,
                                    lastDispatchedAt: Date(), attempts: entry.attemptNumber)
