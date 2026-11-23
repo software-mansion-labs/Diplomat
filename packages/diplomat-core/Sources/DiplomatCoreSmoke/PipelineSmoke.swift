@@ -2408,6 +2408,11 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
     let fe = sync(feature, splitTriaged, dir("split-triaged"), t0)
     check(fe.claude.isEmpty && fe.writes.isEmpty && fe.result.notices == ["#3 was not split: triaged as enhancement"],
           "a triaged issue split: \(fe.claude) \(fe.writes) \(fe.result.notices)")
+    let retyped = only([3])
+    retyped.onItem = { n in if n == 3 { retyped.issues[0].type = "Feature" } }
+    let rt = sync(retyped, split, dir("split-retyped"), t0)
+    check(rt.claude.isEmpty && rt.writes.isEmpty && rt.result.notices == ["#3 was not split: triaged as Feature"],
+          "an issue retyped before its split: \(rt.claude) \(rt.writes) \(rt.result.notices)")
     // A split another pipeline claimed meanwhile is left to it.
     let raced = only([3])
     raced.onItem = { n in
