@@ -237,6 +237,10 @@ enum PipelineTest {
               Store.pipelineConcluded(records.filter { [review.key, fix.key].contains($0.key) },
                                       runs: [reviewRun], at: t1)
                   .mapValues { $0.concludedAt != nil } == [review.key: true, fix.key: false])
+        var replyRun = reviewRun
+        replyRun.ledgerKey = "review-reply:\(pr)@aaa111"
+        check("…nor does a monitor's run on that PR",
+              Store.pipelineConcluded(records, runs: [replyRun], at: t1) == records)
         func spawned(_ kind: String, _ url: String) -> Store.AgentJob {
             Store.AgentJob(kind: kind, auditAction: kind, label: "", prompt: "", prURL: url,
                            prNumber: nil, authorLogin: nil, counter: .pipeline)
@@ -339,6 +343,11 @@ enum PipelineTest {
         store.pinAgentRows([])
         clearQueue()
         store.savePipelineAttempts([:])
+        _ = AgentRegistry.save([AgentState.RunRecord(runID: "r-review", dispatchedAt: Date().timeIntervalSince1970,
+                                                     prNumber: 90011, prURL: pr, kind: AgentTaskQueue.reviewAction)])
+        await store.applyPipeline(result([review]), now: now)
+        check("an agent on the PR holds its fast-track review", ids().isEmpty && store.loadPipelineAttempts().isEmpty)
+        _ = AgentRegistry.save([])
 
         print("\npipeline: the master switch")
         let sweep = Store.RequestedWork(number: 90020, url: "https://github.com/o/r/pull/90020", author: "",
@@ -371,6 +380,9 @@ enum PipelineTest {
         print("\npipeline: forces")
         store.forcePipeline(rate: pr)
         store.forcePipeline(rate: pr, fracture: issue)
+        // The sync each starts, turned away while the switch is off rather than run with
+        // whatever stub a later check sets.
+        await Task.yield()
         check("Rate now and Fracture are kept once each",
               store.pipelineForce == PipelineSettings.Force(rate: [pr], fracture: [issue]))
         store.pipelineForce.rate.insert(linear, at: 0)
@@ -432,6 +444,10 @@ enum PipelineTest {
               feed("pipeline-fix").count == screenLines + 1
                   && feed("pipeline-fix").last == "panel \(fixLine) queued from the Pipeline screen")
         check("…once", store.startPipelineFix(items[0]) == "Its fix is already queued" && ids() == [fixKey])
+        check("…as the operator's, through a restart",
+              ask(fixKey)?.byHand == true
+                  && Store.decodeRequestedWork(try? JSONEncoder().encode(store.requestedWork), configured: "o/r")
+                      .first { $0.key == fixKey }?.byHand == true)
         check("a Linear candidate, from the effect its text came with",
               store.startPipelineFix(items[2]) == nil && ids().sorted() == [fixKey, linearKey].sorted())
         store.pipelineResult = result([])
@@ -624,6 +640,31 @@ enum PipelineTest {
               store.pipelineForce.rate.isEmpty && ids().isEmpty && store.requestedWork.isEmpty)
         check("…which the feed says",
               feed("queue-drop").last == "panel \(reviewLine) - the pipeline no longer owes it, not run")
+        if let asked = store.pipelineAsk(review) { store.requestOne(asked) }
+        Store.pipelineTickOverride = { _ in
+            store.pipelineEnabled = false
+            return result([])
+        }
+        await store.runPipelineSyncOnce()
+        store.pipelineEnabled = true
+        check("a sync switched off midway, which emits nothing, withdraws nothing", ids() == [reviewKey])
+        clearQueue()
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix, fixLinear, review]), now: now)
+        store.pipelineFix = false
+        Store.pipelineTickOverride = { _ in result([review]) }
+        await store.runPipelineSyncOnce()
+        check("Open fix PRs off: the fixes the sync queued are withdrawn", ids() == [reviewKey])
+        clearQueue()
+        store.pipelineResult = result([])
+        check("…but not one started from the screen",
+              store.startPipelineFix(items[0]) == nil && ids() == [fixKey])
+        Store.pipelineTickOverride = { _ in result([]) }
+        await store.runPipelineSyncOnce()
+        check("…while its issue is a writable candidate", ids() == [fixKey])
+        store.pipelineFix = true
+        clearQueue()
+        store.savePipelineAttempts([:])
         check("a result dated in the second its sync began is that sync's",
               Store.pipelineRan(PipelineTickResult(at: Date(timeIntervalSince1970: 100)),
                                 started: Date(timeIntervalSince1970: 100.7))
@@ -632,8 +673,10 @@ enum PipelineTest {
 
         print("\npipeline: asks a sync no longer owes")
         let asks = [fix, fixLinear, review].compactMap { store.pipelineAsk($0) } + [sweep]
-        func withdrawn(_ seen: [PipelineItem], _ effects: [PipelineEffect]) -> [String] {
-            Store.pipelineWithdrawn(asks, by: PipelineTickResult(at: Date(), items: seen, effects: effects)).sorted()
+        func withdrawn(_ seen: [PipelineItem], _ effects: [PipelineEffect], unread: [String] = [],
+                       of asks: [Store.RequestedWork] = asks) -> [String] {
+            Store.pipelineWithdrawn(asks, by: PipelineTickResult(at: Date(), items: seen, effects: effects,
+                                                                 unread: unread)).sorted()
         }
         var assigned = items
         assigned[0].writable = false
@@ -645,8 +688,18 @@ enum PipelineTest {
               asks.count == 4 && withdrawn(assigned, [fixLinear, review]) == [fixKey]
                   && withdrawn(fixing, [fixLinear, review]) == [fixKey])
         check("…a review owed no more goes", withdrawn(items, [fix, fixLinear]) == [reviewKey])
-        check("…a candidate's fix the sync did not emit stays (its switch off, a hold)",
-              withdrawn(heldItems, []) == [reviewKey])
+        check("…a candidate's fix the sync did not emit goes (its switch off, a hold)",
+              withdrawn(heldItems, []) == [fixKey, linearKey, reviewKey].sorted())
+        let fromScreen = asks.map { ask -> Store.RequestedWork in
+            var fix = ask
+            if case .issues = fix.config { fix.byHand = true }
+            return fix
+        }
+        check("…but a Start fix stays until its issue is no writable candidate",
+              withdrawn(heldItems, [], of: fromScreen) == [reviewKey]
+                  && withdrawn(assigned, [], of: fromScreen) == [fixKey, reviewKey].sorted())
+        check("…and nothing goes in a root the sync could not judge in full",
+              withdrawn(assigned, [], unread: ["O/R"]).isEmpty)
         check("…as does anything about an item it did not read, and an ask not the pipeline's",
               withdrawn([], []).isEmpty)
 
@@ -797,6 +850,13 @@ enum PipelineTest {
         var mergedPR = myPR
         mergedPR.writable = false
         mergedPR.state = "merged"
+        var humanPR = myPR
+        humanPR.stage = .human
+        humanPR.lane = .human
+        check("writable: the same words for any item, promising no step its stage may not take",
+              [humanPR, items[0]].allSatisfy {
+                  PipelineTint.access($0) == "Writable: Diplomat may label it and act on it."
+              })
         check("read only: said of every item Diplomat may not write, whatever kept it so",
               [mergedPR, theirPR, closedIssue].allSatisfy {
                   PipelineTint.access($0) == "Read only: Diplomat shows it and writes nothing to it."
