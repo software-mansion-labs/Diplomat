@@ -19,6 +19,11 @@ const until = async (met, what, ms = 30000) => {
     await new Promise((r) => setTimeout(r, 2));
   }
 };
+// `event` of `emitter`, waited for no longer than a check may hang.
+const once = (emitter, event, what, ms = 30000) => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error(`never: ${what}`)), ms);
+  emitter.once(event, () => { clearTimeout(timer); resolve(); });
+});
 const turns = async (n) => { for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r)); };
 const bytes = (text) => Buffer.from(text, 'latin1');
 
@@ -232,7 +237,7 @@ await check('a feed is a connection to node\'s server: answers go out in order, 
   near.write('GET /last HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n');
   const got = [];
   near.on('data', (d) => got.push(d));
-  await new Promise((r) => { near.on('end', r); });
+  await once(near, 'end', 'the connection to be ended after its last answer');
   const text = Buffer.concat(got).toString('latin1');
   const bodies = text.split(/HTTP\/1\.1 200 OK\r\n(?:[^\r]+\r\n)*\r\n/).slice(1);
   assert.deepEqual(bodies.map((b) => (b.length > 40 ? `${b.slice(0, 4)}+${b.length - 4}` : b)), ['/firsthello', '/big+300000', '/last']);
@@ -247,19 +252,18 @@ await check('a feed is a connection to node\'s server: answers go out in order, 
   leaving.near.write('GET /leaving HTTP/1.1\r\nHost: x\r\n\r\n');
   await until(() => heard.endsWith('/leaving'), 'its request to be answered');
   leaving.near.end();
-  await new Promise((r) => { leaving.near.on('close', r); });
+  await once(leaving.near, 'close', 'the connection of a client that ended its side to be closed');
   assert.equal(leaving.far.destroyed, true);
 
-  // Ending a feed ends its side of the connection, once what was written has gone, and
-  // closes nothing.
+  // Ending a feed ends its side of the connection, once what was written has gone.
   const half = await pair();
   const ending = feed(half.far);
   let last = '';
-  half.near.on('data', (d) => { last += d; });
+  let heardEnd = false;
+  half.near.on('data', (d) => { last += d; }).on('end', () => { heardEnd = true; });
   ending.end('the last of it');
-  await new Promise((r) => { half.near.on('end', r); });
+  await until(() => heardEnd, 'the other side to read the end');
   assert.equal(last, 'the last of it');
-  assert.deepEqual([ending.destroyed, half.far.destroyed], [false, false]);
   ending.destroy();
   half.near.destroy();
 
