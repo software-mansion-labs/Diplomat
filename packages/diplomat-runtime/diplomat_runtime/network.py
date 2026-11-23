@@ -462,6 +462,11 @@ class Pool:
     #: Why the last invite let this machine in nowhere, in the daemon's words; "" for
     #: none.
     join_failed: str = ""
+    #: Whether this machine, back in the pool after leaving it, waits for a machine it
+    #: left to let it back in.
+    returning: bool = False
+    #: Whether every machine this one asked refused it a seat: it needs an invite.
+    unseated: bool = False
     #: Why this machine takes none of the pool's jobs, in the daemon's sentence; ""
     #: while it takes them.
     not_taking: str = ""
@@ -678,6 +683,7 @@ def _pool(p: dict) -> Pool:
         id=p["id"], path=_text(p.get("path")), identity=_text(p.get("identity")),
         hash=_text(p.get("hash")), left=_flag(p.get("left")),
         joining=_flag(p.get("joining")), join_failed=_text(p.get("joinFailed")),
+        returning=_flag(p.get("returning")), unseated=_flag(p.get("unseated")),
         not_taking=local_times(_text(p.get("notTaking"))),
         members=tuple(
             Member(pk=m["pk"], is_self=_flag(m.get("self")),

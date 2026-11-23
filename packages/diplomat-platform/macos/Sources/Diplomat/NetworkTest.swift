@@ -1103,6 +1103,30 @@ enum NetworkTest {
         check("a pool whose last invite came to nothing says why on its card, and no other does",
               joinCards.map(NetworkText.poolJoinFailed)
                 == [nil, nil, "The last invite came to nothing: no-seat"])
+        let seatCards = NetworkSnapshot.parse(Data(json(snapshot(
+            more: [["id": "github.com/o/back", "returning": true],
+                   ["id": "github.com/o/refused-back", "returning": true, "unseated": true],
+                   ["id": "github.com/o/seatless", "unseated": true]])).utf8))?.pools ?? []
+        let backIn = "Returning: waiting for a machine this one left to let it back in"
+        let noSeat = "No seat here: every machine this one asked refused it, and it needs an "
+            + "invite again"
+        check("a pool this machine waits to be let back into says so on its card, until refused",
+              seatCards.map(NetworkText.poolReturning) == [nil, backIn, nil, nil])
+        check("a pool with no seat for this machine says so on its card, and no other does",
+              seatCards.map(NetworkText.poolUnseated) == [nil, nil, noSeat, noSeat])
+        let busy = NetworkSnapshot.parse(Data(json(snapshot(more: [[
+            "id": "github.com/o/busy", "joining": true, "returning": true,
+            "joinFailed": "no-seat", "notTaking": "docker is down"]])).utf8))?.pools.last
+        let busyNotes = busy.map(NetworkText.poolNotes) ?? []
+        check("a pool card says its lines in order, warning of those that hold this machine back",
+              busyNotes.map(\.text) == [waits, backIn, "The last invite came to nothing: no-seat",
+                                         "This machine takes none of this pool's jobs: docker is down"]
+                && busyNotes.map(\.warns) == [false, false, true, true])
+        check("…and a pool with no seat for this machine warns of it, and no longer waits",
+              seatCards.map { NetworkText.poolNotes($0).map(\.text) }
+                == [[], [backIn], [noSeat], [noSeat]]
+                && seatCards.count == 4
+                && NetworkText.poolNotes(seatCards[2]).map(\.warns) == [true])
 
         // 21. The hours are kept inside the daemon's range.
         store.networkRequiredMinimumH = 5

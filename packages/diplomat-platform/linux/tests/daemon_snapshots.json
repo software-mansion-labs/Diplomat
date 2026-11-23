@@ -40,6 +40,8 @@
     "left": false,
     "joining": true,
     "joinFailed": "",
+    "unseated": false,
+    "returning": false,
     "members": [
      {
       "pk": "ncnoXndKNGsyZU9DZSVSxy5ENEJET0sZuU7nN7YtK3Q",
@@ -98,6 +100,8 @@
     "left": false,
     "joining": false,
     "joinFailed": "that invite is no longer good",
+    "unseated": false,
+    "returning": false,
     "members": [
      {
       "pk": "Y-MS-O_LenIgRtaxijKKI9hxCEEqMpskECqnIxg5sqs",
@@ -156,6 +160,8 @@
     "left": false,
     "joining": false,
     "joinFailed": "",
+    "unseated": false,
+    "returning": false,
     "members": [
      {
       "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
@@ -265,6 +271,8 @@
     "left": false,
     "joining": false,
     "joinFailed": "",
+    "unseated": false,
+    "returning": false,
     "members": [
      {
       "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
@@ -374,6 +382,8 @@
     "left": false,
     "joining": false,
     "joinFailed": "",
+    "unseated": false,
+    "returning": false,
     "members": [
      {
       "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
@@ -472,6 +482,8 @@
     "left": false,
     "joining": false,
     "joinFailed": "",
+    "unseated": false,
+    "returning": false,
     "members": [
      {
       "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
@@ -586,6 +598,8 @@
     "left": false,
     "joining": false,
     "joinFailed": "",
+    "unseated": false,
+    "returning": false,
     "members": [
      {
       "pk": "R9DfHUQjByFM6vGxoNLti8UhyB3NsrJ7ix3T0Q__W-U",
@@ -682,6 +696,8 @@
     "left": false,
     "joining": false,
     "joinFailed": "",
+    "unseated": false,
+    "returning": false,
     "members": [
      {
       "pk": "WKqtoPXfNWN4IvANwJ8kGqTKiLn5gHqvs2veGi-Sjp0",
@@ -783,6 +799,8 @@
     "left": false,
     "joining": false,
     "joinFailed": "",
+    "unseated": false,
+    "returning": false,
     "members": [
      {
       "pk": "XgQXBp5LoAqicIfvDHDFKb7gOHlBYkXsg07zfZ7ohic",
@@ -896,6 +914,8 @@
     "left": false,
     "joining": false,
     "joinFailed": "",
+    "unseated": false,
+    "returning": false,
     "members": [
      {
       "pk": "izYWAwJJAlBiL4tqskhlm3yDndLHF0Y3Ceeqen1rxvQ",
