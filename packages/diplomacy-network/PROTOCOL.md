@@ -309,8 +309,11 @@ time, a `seq`, an `era` or a `gen` is at most 2^40.
 
 So a member's records never take more than 256 KiB of a pool, and a pool's never more
 than 61 MiB, which takes every seat filled to its quota. A host keeps a pool as one
-document and writes it whole when a record changes; a pool of ten members with 64 offers
-each is half a megabyte. A claim carries the grant of every member that gave one, about
+document, and after it a log of what changed: the records a request brought are one line
+of the log, on disk before the request is answered, and the document is written whole
+again once the log is as long as it, and no shorter than 64 KiB. So what a request costs
+a host's disk is the length of the records it brought, about three times over; a pool of
+ten members with 64 offers each is half a megabyte. A claim carries the grant of every member that gave one, about
 0.5 KiB plus 0.4 KiB per grant, and an executor's claims of the last day share its 256
 KiB: in a pool of ten members an executor makes about fifty claims a day, in a pool of
 fifty about ten, in a full one two.
@@ -1089,7 +1092,14 @@ Nothing in a record hides any of this.
 - **A lock costs one request.** A member can ask every member for a lock on a task and
   commit nothing. Each lock binds for 120 s of its giver's clock, and while it does that member grants no
   other executor one. Asking again keeps the task locked, at the price of the requests
-  (section 3).
+  (section 3). A host keeps the locks it granted in one document, about 150 bytes a lock,
+  and writes it whole for each lock it grants or lets go of: a member one voucher from
+  the first that keeps a lock on each of the thousand tasks its keys may offer has each
+  host it asks write about 140 KiB a request, some 65 MiB a minute at the free rate of
+  its 16 keys.
+- **A record taken in is written at once.** Each request that brings a host a record it
+  takes has one line added to the pool's log and the log synced to disk before the
+  answer leaves, a sync per request for as long as a member pays for requests.
 - **A grant is good for 120 s of its claimant's clock**, which the giver takes from the
   claimant within 300 s of its own. A claim signed inside that time and shown later is
   taken in when it surfaces. It holds an offer only when no claim its host gave that

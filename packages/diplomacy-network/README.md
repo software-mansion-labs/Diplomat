@@ -91,6 +91,7 @@ closed at every start.
 | `peers.json` (0600) | the machines this host has asked in vain for more than 3 minutes, and since when: after a start a claim round waits 15 s for each of them, not the 90 s and more it gives a machine it has yet to reach |
 | `links.json` (0600) | the linked repositories, as Diplomat last posted them |
 | `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left |
+| `pools/<pool hash>.log` (0600) | what changed in that pool since its document was written: the hash of the document it follows, then a line for each change - the records taken in and the keys of the records dropped. Once it is as long as the document, and no shorter than 64 KiB, the document is written whole and the log removed |
 | `locks.json` (0600) | the claim locks this host granted |
 | `keys.json` (0600) | live capabilities this host issued or holds |
 | `offers.json` (0600) | the tasks this host asked for: prompt, counters, outcome, what each has used of its rules' allowances, and which members gave it back a moment ago |

@@ -12,7 +12,7 @@ import { createVoucher } from '../../src/core/membership.js';
 import { solve } from '../../src/core/pow.js';
 import { LIMITS, memberRecord } from '../../src/core/records.js';
 import { createNode } from '../../src/node/node.js';
-import { createStore, memoryDisk } from '../../src/node/store.js';
+import { createStore, memoryDisk, readPool } from '../../src/node/store.js';
 import { fakeExecutor, fakeRequester } from './fakes.mjs';
 import { createNet } from './mem-net.mjs';
 
@@ -30,8 +30,32 @@ export async function check(name, fn) {
   }
 }
 
-/// A world of hosts. `seed` draws every delay, every key and every random byte.
-export function createWorld({ seed = 1 } = {}) {
+// A store that checks, after every flush that added a line to a pool's log, that the
+// document and its log hold what the host holds.
+function audited(store, h) {
+  const lined = new Map(); // name -> the value a line was written for
+  return {
+    ...store,
+    write(name, value, given) {
+      if (given?.line) lined.set(name, value);
+      else lined.delete(name);
+      store.write(name, value, given);
+    },
+    flush() {
+      store.flush();
+      const sorted = (doc) => ({ ...doc, records: doc.records.map((record) => canon(record)).sort() });
+      for (const value of h.transport.host.dead ? [] : lined.values()) {
+        const held = JSON.parse(JSON.stringify(value));
+        assert.deepEqual(sorted(readPool(createStore({ disk: h.disk }), held.id)), sorted(held), `the store of ${h.name} holds the pool as the host does`);
+      }
+      lined.clear();
+    },
+  };
+}
+
+/// A world of hosts. `seed` draws every delay, every key and every random byte. With
+/// `audit`, every line a host adds to a pool's log is checked against what it holds.
+export function createWorld({ seed = 1, audit = false } = {}) {
   const net = createNet({ seed });
   const hosts = new Map();
 
@@ -54,9 +78,12 @@ export function createWorld({ seed = 1 } = {}) {
         }
       },
       remove: (name) => life.dead || h.disk.remove(name),
+      append: (name, added) => life.dead || h.disk.append(name, added),
+      cut: (name) => life.dead || h.disk.cut(name),
     };
+    const store = createStore({ disk, log: (line) => h.log.push(line) });
     h.node = createNode({
-      store: createStore({ disk, log: (line) => h.log.push(line) }),
+      store: audit ? audited(store, h) : store,
       transport: h.transport, clock: h.clock, random: (n) => net.rnd.bytes(n), log: (line) => h.log.push(line),
       requester: h.requester, executor: h.executor, settings: () => h.settings,
       // `solved` lists the effort of every proof of work the host paid; a price no test
@@ -216,8 +243,9 @@ export function createWorld({ seed = 1 } = {}) {
     offerRow: (h, taskId) => h.node.snapshot().offers.find((o) => o.taskId === taskId) ?? null,
     runOf: (h, taskId) => h.node.snapshot().runs.filter((r) => r.taskId === taskId).at(-1) ?? null,
     name: (pk) => [...hosts.values()].find((h) => h.pk === pk)?.name ?? pk,
-    /// The records a host's store holds for the pool.
-    records: (h) => JSON.parse(h.disk.read([...h.disk.files.keys()].find((name) => name.startsWith('pools/')))).records,
+    /// The pool's document as a host's store holds it, and the records in it.
+    doc: (h) => readPool(createStore({ disk: h.disk }), POOL),
+    records: (h) => world.doc(h).records,
     /// The claim record a host's store holds for a task - the one `by` made, when a host
     /// is named - or undefined.
     claim: (h, taskId, by) => world.records(h).find((r) => r.type === 'claim' && r.taskId === taskId && (!by || r.executor === by.pk)),

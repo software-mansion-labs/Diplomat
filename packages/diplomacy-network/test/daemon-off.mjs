@@ -10,6 +10,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { holdSocket } from '../../daemon-core/src/serve.js';
+import { createStore, readPool } from '../src/node/store.js';
 import { DAEMON, POOL, check, createBench, passed, until } from './lib/daemons.mjs';
 
 const bench = await createBench();
@@ -44,7 +45,7 @@ try {
     await until('B knows the claim', async () => (await taskOf(b, own))?.executor === (await a.state()).identity.pk);
     await a.kill();
     assert.equal(alive(agentPid), true, 'the job outlives its daemon');
-    const claims = () => JSON.parse(fs.readFileSync(path.join(a.base, 'pools', fs.readdirSync(path.join(a.base, 'pools'))[0]), 'utf8')).records
+    const claims = () => readPool(createStore({ dir: a.base }), POOL).records
       .filter((r) => r.type === 'claim').map((r) => [r.taskId, r.state]);
     assert.deepEqual(claims(), [[own, 'held']]);
 

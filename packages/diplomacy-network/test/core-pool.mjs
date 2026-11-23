@@ -373,6 +373,37 @@ check('every version of an offer is dropped a day after it was signed, for every
   assert.deepEqual(codes(a.pool.merge(waiting, T0 + 70 + DAY + 300)), ['expired']);
 });
 
+check('a pool says what changed since it was last asked: the records taken in that it holds, and the keys of the ones it dropped', () => {
+  const [a, b] = club(2);
+  const keys = (records) => records.map(recordKey).sort();
+  const said = () => {
+    const { put, drop } = a.pool.delta();
+    return [put.map(recordKey), drop];
+  };
+  a.pool.delta();
+  assert.deepEqual(said(), [[], []], 'nothing, asked twice');
+  const open = offer(a.id);
+  const done = offer(a.id, { seq: 1, at: T0 + 50, state: 'done' });
+  const other = offer(b.id, { item: 'pr-9', at: T0 + 60, createdAt: T0 + 60 });
+  a.pool.merge([open, other], T0 + 60);
+  assert.deepEqual(codes(a.pool.merge([done, open, { type: 'offer' }], T0 + 60)), ['older', 'bad-record']);
+  assert.deepEqual(a.pool.delta().put, a.pool.records(keys([done, other])), 'the version held of each record taken in, in key order');
+  a.pool.prune(T0 + 60 + 2 * DAY);
+  assert.deepEqual(said(), [[], keys([done, other])], 'the records that ran out');
+  // Taken in and dropped since: gone. Dropped and taken in again since: held.
+  const late = offer(b.id, { item: 'pr-7', at: T0 + 60, createdAt: T0 + 60 });
+  const [mine, again] = [resign(a.id, member(a.id), { seq: 1, at: T0 + 3 * DAY }), resign(b.id, member(b.id), { seq: 1, at: T0 + 3 * DAY })];
+  a.pool.merge([mine, again], T0 + 3 * DAY);
+  a.pool.delta();
+  a.pool.merge(late, T0 + 61);
+  a.pool.prune(T0 + 60 + 2 * DAY);
+  a.pool.merge(resign(b.id, late, { seq: 1, at: T0 + 3 * DAY }), T0 + 3 * DAY);
+  assert.deepEqual(said(), [keys([late]), []]);
+  a.pool.merge(resign(b.id, other, { seq: 1, at: T0 + 3 * DAY }), T0 + 3 * DAY);
+  a.pool.prune(T0 + 5 * DAY);
+  assert.deepEqual(said(), [[], keys([late, other])]);
+});
+
 check('an offer signed again inside its retention stays, and keeps the day it was created', () => {
   const [a, b] = club(2);
   let now = T0;

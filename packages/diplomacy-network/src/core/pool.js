@@ -118,6 +118,7 @@ export class Pool {
   #entries = new Map(); // key -> { key, type, record, digest, size, precedence }
   #settled = null;
   #tasks = null; // { settled, now, rows }: the tasks last worked out
+  #moved = { put: new Set(), drop: new Set() }; // the keys taken in and dropped since `delta` was asked
 
   constructor({ id, self }) {
     this.id = id;
@@ -184,6 +185,12 @@ export class Pool {
         else tentative.delete(key);
       }
     }
+    const { put, drop } = this.#moved;
+    for (const key of this.#entries.keys()) if (!settled.live.has(key)) drop.add(key);
+    for (const key of fresh) {
+      put.add(key);
+      drop.delete(key);
+    }
     this.#entries = settled.live;
     this.#settled = null;
     const accepted = new Set();
@@ -214,6 +221,14 @@ export class Pool {
   /// Drops the records that stopped being live.
   prune(now) {
     this.merge([], now);
+  }
+
+  /// What changed since this was last asked, `{ put, drop }`: the records taken in that
+  /// are still held, in key order, and the keys of the records dropped.
+  delta() {
+    const { put, drop } = this.#moved;
+    this.#moved = { put: new Set(), drop: new Set() };
+    return { put: this.records([...put]), drop: [...drop].sort() };
   }
 
   /// The record held under `key`, or null.

@@ -85,7 +85,7 @@ await check('a host that left a pool stays out of it, whatever its list of pools
   await w.net.until(() => [a, b, c].every((h) => w.members(h).length === 3), { maxMs: 10000, what: 'c back at once, with no invite' });
   await w.agreed([a, b, c]);
   assert.equal(w.view(c).left, false);
-  assert.equal(w.stored(c, [...c.disk.files.keys()].find((name) => name.startsWith('pools/'))).left, undefined, 'a member keeps no farewell');
+  assert.equal(w.doc(c).left, undefined, 'a member keeps no farewell');
   assert.deepEqual(w.records(c).find((r) => r.type === 'member' && r.pk === c.pk).voucher, w.records(a).find((r) => r.pk === c.pk).voucher);
   assert.equal(w.records(a).find((r) => r.pk === c.pk).voucher.by, a.pk);
   // It leaves once more, and this time comes back by an invite.
@@ -463,7 +463,7 @@ await check('a store of member records without vouchers is a pool of the host\'s
   for (const h of all) w.net.kill(h.name);
   const file = [...a.disk.files.keys()].find((name) => name.startsWith('pools/'));
   for (const h of all) {
-    const { joining, invites, ...doc } = JSON.parse(h.disk.read(file));
+    const { joining, invites, ...doc } = w.doc(h);
     const now = w.net.now();
     const records = doc.records.map((r) => (r.type === 'member' ? formerly(all.find((g) => g.pk === r.pk), { seq: r.seq + 1, at: now, invite: r.voucher && 'an invite' }) : r));
     h.disk.write(file, JSON.stringify({ ...doc, records, inviter: a.pk }));

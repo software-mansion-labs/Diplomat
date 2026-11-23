@@ -32,7 +32,7 @@ const FIRST = Number(process.env.DN_SOAK_SEED ?? 1);
 const ENDED = ['done', 'failed', 'cancelled'];
 
 async function soak(seed) {
-  const w = createWorld({ seed });
+  const w = createWorld({ seed, audit: true });
   const dice = prng(seed * 7919 + 13);
   const pick = (list) => list[dice.int(list.length)];
   const names = Array.from({ length: 5 + dice.int(3) }, (_, i) => `h${i + 1}`);

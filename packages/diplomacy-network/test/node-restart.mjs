@@ -246,7 +246,7 @@ await check('a host started with its clock an hour behind keeps its place in the
   const all = await w.pool(['a', 'b', 'c']);
   const [a, b] = all;
   await w.run(600);
-  const doc = () => w.stored(b, [...b.disk.files.keys()].find((name) => name.startsWith('pools/')));
+  const doc = () => w.doc(b);
   const { records } = doc();
   b.skew = -3600;
   await w.restart(b);
@@ -302,7 +302,7 @@ await check('what a member answers after a pool was closed is not taken into it'
   await w.restart(a);
   await w.net.until(() => pulling, { what: 'a pull by a' });
   await w.run(120);
-  const doc = w.stored(a, [...a.disk.files.keys()].find((name) => name.startsWith('pools/')));
+  const doc = w.doc(a);
   assert.deepEqual([doc.linked, doc.records], [false, undefined]);
 });
 

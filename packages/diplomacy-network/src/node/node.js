@@ -66,7 +66,7 @@ export function createNode({
   const host = {
     id, self: id.pk, store, transport, clock, random, log, requester, executor, settings, solve, keys,
     now: () => clock.now(),
-    pools: new Map(), // pool id -> { id, link, pool, locks, seq, joining, invites, farewell, stale, epoch, catching }
+    pools: new Map(), // pool id -> { id, link, pool, locks, seq, joining, invites, farewell, stale, epoch, catching, head }
     away: new Map(), // pool id -> the link of a pool that is linked and that this host left
     // pool id -> the locks of a pool this host is not in now: one read from the store and
     // not linked yet, or one it left.
@@ -75,12 +75,23 @@ export function createNode({
     saveLocks: () => store.write('locks', {
       toJSON: () => ({ ...host.heldLocks, ...Object.fromEntries([...host.pools.values()].map((P) => [P.id, P.locks.entries()])) }),
     }),
-    save: (P) => store.write(poolFile(P.id), {
-      toJSON: () => ({
-        id: P.id, linked: true, seq: P.seq, joining: P.joining, joinFailed: P.joinFailed, invites: P.invites, ...P.farewell,
-        records: P.pool.records(),
-      }),
-    }),
+    /// What a pool's document holds beside its records and this host's sequence number.
+    head: (P) => JSON.stringify([P.joining, P.joinFailed, P.invites, P.farewell]),
+    /// Has what a pool's document holds written: the records that changed since it was
+    /// last asked, as a line, while nothing else in the document did.
+    save: (P) => {
+      const head = host.head(P);
+      const { put, drop } = P.pool.delta();
+      const same = head === P.head;
+      if (same && put.length + drop.length === 0) return;
+      P.head = head;
+      store.write(poolFile(P.id), {
+        toJSON: () => ({
+          id: P.id, linked: true, seq: P.seq, joining: P.joining, joinFailed: P.joinFailed, invites: P.invites, ...P.farewell,
+          records: P.pool.records(),
+        }),
+      }, { line: same ? { seq: P.seq, put, drop } : undefined });
+    },
   };
   const watchers = [];
   let started = false;
@@ -117,14 +128,15 @@ export function createNode({
     P.seq = Math.max(P.seq, P.pool.get(`member/${host.self}`)?.seq ?? -1);
     // A lock was granted for a claim to carry the grant; once the claim held does, it
     // has done its work.
+    let released = false;
     for (const [taskId, lock] of P.locks.entries()) {
       const claim = P.pool.get(claimKey(taskId, lock.executor));
       if (claim?.round === lock.round && claim.grants.some((grant) => grant.by === host.self)) {
-        P.locks.release(taskId, lock.executor, lock.round);
+        released = P.locks.release(taskId, lock.executor, lock.round) || released;
       }
     }
     host.save(P);
-    host.saveLocks();
+    if (released) host.saveLocks();
     host.claiming.moved(P);
     host.poke();
     host.touch();

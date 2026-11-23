@@ -10,7 +10,7 @@ import { buildResponse, requestDigest } from '../src/core/envelope.js';
 import { createVoucher } from '../src/core/membership.js';
 import { Pool } from '../src/core/pool.js';
 import { LIMITS, memberRecord, offerRecord } from '../src/core/records.js';
-import { poolFile } from '../src/node/store.js';
+import { memoryDisk, poolFile } from '../src/node/store.js';
 import { MAX_BODY_BYTES, POW, POW_HOURLY, STRANGER_BODY_BYTES } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
@@ -194,7 +194,7 @@ await check('one member has 64 offers live in a pool, the same ones on every hos
   await w.agreed(all);
   const again = await w.request(evil, a, 'push', { records: [offers[150]] });
   assert.deepEqual(again.body.refused.map((r) => r.code), ['quota']);
-  assert.ok(a.disk.read(poolFile(POOL)).length < 128 * 2 ** 10, 'what the store holds of the pool stays small');
+  assert.ok(a.disk.read(poolFile(POOL)).length + (a.disk.appended(poolFile(POOL)) ?? '').length < 128 * 2 ** 10, 'what the store holds of the pool stays small');
 
   for (let i = 0; i < LIMITS.offers; i += 1) await a.node.offer(offerArgs(`pr-a${i}`));
   await assert.rejects(a.node.offer(offerArgs('pr-one-more')), /as many offers and claims in the pool .* as one member may/);
@@ -204,6 +204,70 @@ await check('one member has 64 offers live in a pool, the same ones on every hos
   await a.node.withdraw({ taskId: w.offerRow(a, a.node.snapshot().offers[0].taskId).taskId, reason: 'done with' });
   await w.run(1);
   assert.deepEqual(failures(all), []);
+});
+
+await check("a member's push costs a host's disk the length of what it brought: the pool's document is written whole once its log is as long as it, a request that changes nothing writes nothing of the pool, and a host that starts again holds every record", async () => {
+  const w = createWorld({ seed: 75, audit: true });
+  const real = memoryDisk();
+  const did = { whole: 0, wholeBytes: 0, lines: 0, lineBytes: 0, others: new Set() };
+  const disk = {
+    ...real,
+    write(name, text) {
+      if (name === poolFile(POOL)) Object.assign(did, { whole: did.whole + 1, wholeBytes: did.wholeBytes + text.length });
+      else did.others.add(name);
+      real.write(name, text);
+    },
+    append(name, text) {
+      Object.assign(did, { lines: did.lines + 1, lineBytes: did.lineBytes + text.length });
+      real.append(name, text);
+    },
+  };
+  const a = w.add('a');
+  const h = w.add('h', { disk });
+  for (const host of [a, h]) await w.start(host);
+  await h.node.join(a.node.invite({ pool: POOL }));
+  await w.net.until(() => w.members(a).length === 2 && w.members(h).length === 2, { what: 'two members' });
+  const evil = await w.intruder('evil', a);
+  await w.net.until(() => w.members(h).length === 3, { what: 'the intruder a member for the host' });
+  const now = w.net.now();
+  const push = async (records) => {
+    const answer = await w.request(evil, h, 'push', { records }, { effort: MOST });
+    assert.deepEqual([answer.ok, answer.body?.refused], [true, []]);
+  };
+  await push(Array.from({ length: 60 }, (_, i) => offerRecord(evil.id, {
+    pool: POOL, kind: 'review', item: `pr-${i}`, identity: 'octocat', seq: 0, at: now, title: 'x'.repeat(300), minRequiredH: 12, createdAt: now,
+  })));
+  // It signs its member record again and again: each version is one short line.
+  Object.assign(did, { whole: 0, wholeBytes: 0, lines: 0, lineBytes: 0, others: new Set() });
+  const versions = 400;
+  for (let seq = 1; seq <= versions; seq += 1) await push([memberRecord(evil.id, { ...evil.member, seq, at: now })]);
+  assert.equal(did.lines + did.whole, versions, 'each push is on disk when it is answered');
+  assert.ok(did.lineBytes < versions * 700, `${did.lineBytes} bytes of lines`);
+  const length = real.read(poolFile(POOL)).length;
+  assert.ok(length > 2 ** 15 && length < 2 ** 16, `a document of ${length} bytes`);
+  assert.ok(did.whole >= 2 && did.whole <= did.lineBytes / 2 ** 16 + 1, `whole ${did.whole} times for ${did.lineBytes} bytes of lines: once for every 64 KiB of them`);
+  assert.deepEqual([...did.others].filter((name) => name !== 'heard'), [], 'and no other document of the host is written for it');
+
+  // A hello that brings nothing the host does not hold writes nothing of the pool.
+  const before = did.lines + did.whole;
+  const hello = await w.request(evil, h, 'hello', { member: memberRecord(evil.id, { ...evil.member, seq: versions, at: now }) }, { effort: MOST });
+  assert.deepEqual([hello.ok, did.lines + did.whole], [true, before]);
+
+  // Killed the moment the last push was answered, it starts with nobody to ask.
+  const held = w.view(h);
+  w.net.kill('a');
+  w.net.kill('h');
+  const written = did.lines + did.whole;
+  await w.restart(h);
+  assert.deepEqual([w.view(h).hash, w.view(h).tasks.length, w.members(h)], [held.hash, 60, held.members.map((m) => m.pk).sort()]);
+  assert.equal(w.records(h).find((r) => r.type === 'member' && r.pk === evil.pk).seq, versions);
+  assert.equal(did.lines + did.whole, written, 'and writes nothing of a pool it holds as its store does');
+  // A day on, what the store holds has run out: its first change writes the document without it.
+  w.net.kill('h');
+  await w.run(25 * 3600);
+  await w.restart(h);
+  await w.run(5);
+  assert.deepEqual([w.view(h).tasks.length, w.records(h).filter((r) => r.type === 'offer').length], [0, 0]);
 });
 
 await check('a host with 64 claims of its own in a pool goes for no more there', async () => {

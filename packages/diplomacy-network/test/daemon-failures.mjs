@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 import { createCA } from '../src/executor/ca.js';
+import { createStore, readPool } from '../src/node/store.js';
 import { loopFaults } from '../src/transport/loop.js';
 import { POOL, check, createBench, passed, until } from './lib/daemons.mjs';
 
@@ -65,7 +66,7 @@ try {
     await c.admit(1);
     const second = await waiting(c, taskId, 'go');
     assert.deepEqual([(await offerOf(a, taskId)).state, (await offerOf(a, taskId)).executor], ['claimed', c.pk]);
-    const claims = JSON.parse(fs.readFileSync(path.join(c.base, 'pools', fs.readdirSync(path.join(c.base, 'pools'))[0]), 'utf8')).records.filter((r) => r.type === 'claim' && r.taskId === taskId);
+    const claims = readPool(createStore({ dir: c.base }), POOL).records.filter((r) => r.type === 'claim' && r.taskId === taskId);
     const given = claims.map((r) => [r.executor, r.grants.find((g) => g.by === a.pk).offer.gen]).sort((x, y) => x[1] - y[1]);
     assert.deepEqual(given, [[b.pk, 1], [c.pk, 2]], 'the offer is held by the claim its host gave it to last');
     c.release('go');

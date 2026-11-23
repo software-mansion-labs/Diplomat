@@ -173,10 +173,10 @@ export class LockTable {
   }
 
   /// Drops the lock on a task when `executor` holds it for `round`: the executor unlocked,
-  /// or its claim of that round was committed.
+  /// or its claim of that round was committed. Answers whether a lock was dropped.
   release(taskId, executor, round) {
     const lock = this.#locks.get(taskId);
-    if (lock && lock.executor === executor && lock.round === round) this.#locks.delete(taskId);
+    return lock?.executor === executor && lock.round === round && this.#locks.delete(taskId);
   }
 
   /// A member's answer to a `lock` request from `from`: `{ body }` holding `{ grant }`,

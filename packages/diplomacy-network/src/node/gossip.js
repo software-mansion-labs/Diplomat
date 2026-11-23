@@ -11,7 +11,7 @@ import {
   CATCH_UP_MS, HOURS_CEILING, HOURS_FLOOR, INVITE_TTL_SECS, PEER_BACKOFF_MAX_MS, PEER_BACKOFF_MS, PRUNE_INTERVAL_MS, PUSH_REPEAT_MS,
   RESIGN_INTERVAL_MS, STRANGER_BODY_BYTES, SYNC_INTERVAL_MS,
 } from '../paths.js';
-import { poolFile } from './store.js';
+import { poolFile, readPool } from './store.js';
 
 // Keys per `pull`, and the bytes of records in one `push` or one answer to a `pull`:
 // under the body any sender may send, so gossip never waits its turn at a large one.
@@ -110,6 +110,9 @@ export function createGossip(host) {
       if (isObject(doc.joining)) P.joining = doc.joining;
       if (typeof doc.joinFailed === 'string') P.joinFailed = doc.joinFailed;
       if (Array.isArray(doc.invites)) P.invites = doc.invites;
+      // The store holds all of this: nothing is written until something changes.
+      P.pool.delta();
+      P.head = host.head(P);
     }
     return P;
   }
@@ -118,7 +121,7 @@ export function createGossip(host) {
   /// of it at once, alone until it joins or invites someone. A pool this host left stays
   /// left.
   function link(info) {
-    const doc = host.store.read(poolFile(info.id)) ?? {};
+    const doc = readPool(host.store, info.id) ?? {};
     if (doc.away === true) {
       host.away.set(info.id, info);
       return;
