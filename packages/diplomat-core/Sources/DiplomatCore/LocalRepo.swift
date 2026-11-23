@@ -5,21 +5,25 @@ extension PRRef.LocalRepo {
     /// (`git@github.com:o/r`) or a URL (`https`/`http`/`ssh`/`git`, any user and port), with
     /// or without `.git`; nil off github.com and GitLab (`GitLabHosts.host(of:)`). A GitLab
     /// owner is the whole namespace. Same patterns as `localrepos.py`.
-    ///
-    /// Nil too for an `https` remote on a port but 443 and an `http` one on a port but 80:
-    /// the forge's API is reached on 443 and its host names no port, so that server is not
-    /// it. An ssh port is only how git reaches the forge.
     public static func coordinates(remoteURL: String, gitlabHosts: GitLabHosts = [])
         -> (host: String, owner: String, repo: String)? {
         let s = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        if let web = groups(s, #"^(https?)://(?:[^@/]+@)?[^/:@]+:([0-9]+)/"#),
-           Int(web[1]) != (web[0].lowercased() == "https" ? 443 : 80) { return nil }
         let github = #"^(?:(?:https?|ssh|git)://(?:[^@/]+@)?github\.com(?::[0-9]+)?/|[^@/:]+@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$"#
         if let g = groups(s, github) { return (PRRef.LocalRepo.github, g[0], g[1]) }
         let gitlab = #"^(?:(?:https?|ssh|git)://(?:[^@/]+@)?([A-Za-z0-9.-]+)(?::[0-9]+)?/|[^@/:]+@([A-Za-z0-9.-]+):)((?:[\w.-]+/)*[\w.-]+)/([\w.-]+?)(?:\.git)?/?$"#
         guard let g = groups(s, gitlab) else { return nil }
         guard let host = gitlabHosts.host(of: g[0].isEmpty ? g[1] : g[0]) else { return nil }
         return (host, g[2], g[3])
+    }
+
+    /// The port an `https` remote names other than 443, or an `http` one other than 80;
+    /// nil for any other remote. Python twin: `localrepos.web_port`.
+    public static func webPort(remoteURL: String) -> Int? {
+        let s = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let web = groups(s, #"^(https?)://(?:[^@/]+@)?[^/:@]+:([0-9]+)/"#),
+              let port = Int(web[1]), port != (web[0].lowercased() == "https" ? 443 : 80)
+        else { return nil }
+        return port
     }
 
     /// Capture groups 1...n, "" for one that did not take part; case-insensitive.
@@ -49,7 +53,8 @@ extension PRRef.LocalRepo {
             let remote = String(parts[0].dropFirst("remote.".count).dropLast(".url".count))
             if !only.isEmpty, !only.contains(remote) { continue }
             named.append((remote, PRRef.LocalRepo(owner: c.owner, repo: c.repo, path: path,
-                                                  host: c.host)))
+                                                  host: c.host,
+                                                  webPort: webPort(remoteURL: parts[1]))))
         }
         let rank = { (e: (offset: Int, element: (remote: String, repo: PRRef.LocalRepo))) in
             (e.element.repo.isGitLab ? 1 : 0, ["upstream", "origin"].firstIndex(of: e.element.remote) ?? 2,

@@ -287,7 +287,8 @@ def linked_pools(roots: Iterable[LocalRepo], identities: Mapping[str, str]) -> l
     for root in roots:
         identity = identities.get(root.host, "").strip().lower()
         pool = pool_for(root.key)
-        if not identity or pool is None or pool in out or not has_rules(root.host):
+        if (not identity or pool is None or pool in out or root.web_port is not None
+                or not has_rules(root.host)):
             continue
         out[pool] = {"id": pool, "path": root.path,
                      "forge": "gitlab" if root.is_gitlab else "github",
@@ -305,7 +306,10 @@ def unconfirmed_account(repo: str, host: str) -> str:
             "daemon last had it until it is")
 
 
-def unsupported(repo: str, host: str) -> str:
+def unsupported(repo: str, host: str, port: int | None = None) -> str:
+    if port is not None:
+        return (f"{repo} is reached on port {port} of {host}, and the Diplomacy Network "
+                "reaches a forge on 443 only: it has no pool and none of its jobs is offered")
     return (f"{repo} is on {host}, which the Diplomacy Network has no rules for: it has "
             "no pool and none of its jobs is offered")
 
@@ -320,7 +324,8 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
     Every linked repository is a pool: the roots, then what the Other repos checkouts
     name that no root does (``others``). A root or a checkout that was read and names no
     forge is no pool, and is in neither list; a repository on a host without rules
-    (:func:`has_rules`) is no pool either, and is named. What could not be confirmed is
+    (:func:`has_rules`) is no pool either, and is named, and so is one named by a remote
+    on another port than the forge's API (:attr:`LocalRepo.web_port`). What could not be confirmed is
     said as the daemon last had it (``known``, its snapshot's pools): the pool at a path that could
     not be read (``unread``), and the pool of a repository whose forge login is unknown.
     The daemon leaves a pool the list omits, so the list is never cut short by what is
@@ -334,7 +339,8 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
     for repo in repos:
         pool = pool_for(repo.key)
         if pool is not None and pool not in listed:
-            (nameless if has_rules(repo.host) else unruled).setdefault(pool, repo)
+            (nameless if repo.web_port is None and has_rules(repo.host)
+             else unruled).setdefault(pool, repo)
     unread = list(unread)
     for pool in known:
         if pool.id not in listed and (pool.path in unread or pool.id in nameless):
@@ -344,7 +350,7 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
                           "identity": pool.identity})
     return pools, [*map(unconfirmed_unread, unread),
                    *(unconfirmed_account(r.slug, r.host) for r in nameless.values()),
-                   *(unsupported(r.slug, r.host) for r in unruled.values())]
+                   *(unsupported(r.slug, r.host, r.web_port) for r in unruled.values())]
 
 
 def pools_body(pools: list[dict]) -> dict:

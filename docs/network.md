@@ -324,9 +324,11 @@ owner/repo on host is not known yet*. Every other pool follows Settings on the n
 that lasts: a repository linked since gains its pool, one taken out leaves its own, and the
 feed names each pool left and why. A root or a folder that was read and has no GitHub or GitLab
 remote is no pool and holds nothing back; a self-hosted GitLab is recognised by a host name
-starting with `gitlab.` or by `glab` being signed in to it. A remote over https on a port other
-than 443 (or over http on one other than 80) is no GitHub or GitLab remote, since the network
-reaches a forge on 443 only; one over ssh on another port is the forge's own. A list the daemon refuses is shown
+starting with `gitlab.` or by `glab` being signed in to it. A repository whose remote is https on
+a port other than 443 (or http on one other than 80) has no pool, since the network reaches a
+forge on 443 only, and the screen says so; the rest of Diplomat works with it as with any other,
+`glab` reaching it by the `--api-host` it was logged in with. A remote over ssh on another port
+is the forge's own, and keeps its pool. A list the daemon refuses is shown
 with the daemon's own sentence and sent again once a minute, or as soon as it changes.
 
 A pool's card says why this machine takes none of that pool's jobs while it takes none - docker

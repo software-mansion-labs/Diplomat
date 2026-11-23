@@ -231,6 +231,7 @@ TWIN = {"owner": "O", "repo": "R", "path": "/src/r-again", "host": "github.com"}
 GROUPED = {"owner": "group/sub", "repo": "r", "path": "/src/g", "host": "gitlab.com"}
 GHE = {"owner": "o", "repo": "r", "path": "/src/ghe", "host": "acme.ghe.com"}
 SUB = {"owner": "g/sub", "repo": "p", "path": "/src/sub", "host": "gitlab.github.com"}
+PORTED = {**API, "path": "/src/api-8443", "web_port": 8443}
 BOTH = {"github.com": "octocat", "gitlab.acme.example": "ilatka", "gitlab.com": "ila",
         "acme.ghe.com": "octocat"}
 
@@ -248,6 +249,8 @@ LISTING = [
         ([ROOT, API], [TOOL], ["/mnt/tool"], {}),
         ([API], [ROOT], [], {"gitlab.acme.example": "ilatka"}),
         ([ROOT, GHE], [SUB, GHE, API], [], BOTH),
+        ([ROOT, PORTED], [], [], BOTH),
+        ([PORTED], [API], [], BOTH),
         ([GHE], [SUB], ["/src/ghe"], {}),
     )]
 
@@ -265,7 +268,7 @@ def _python() -> dict:
 
     def pool(url: str, hosts: dict[str, str] = {}) -> str | None:
         at = localrepos.parse_remote(url, hosts)
-        if at is None:
+        if at is None or localrepos.web_port(url) is not None:
             return None
         return N.pool_for(LocalRepo(owner=at[1], repo=at[2], path="", host=at[0]).key)
 
@@ -367,6 +370,13 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
         "", tested + "DN_LEASE_SECS=60, DN_TRANSPORT=loop", tested + "DN_TRANSPORT=loop"}
     assert any(row["unconfirmed"] for row in python["listing"])
     assert any(len(row["pools"]) >= 3 for row in python["listing"])
+    ported = [row for row, asked in zip(python["listing"], LISTING) if PORTED in asked["roots"]]
+    assert len(ported) == 6 and all(
+        any("is reached on port 8443 of gitlab.acme.example" in line
+            for line in row["unconfirmed"]) == (API not in asked["others"])
+        for row, asked in zip(ported, [a for a in LISTING if PORTED in a["roots"]]))
+    assert all(LAB not in [p["id"] for p in row["pools"]] for row in ported[0::2]), (
+        "not the pool the daemon had either")
     assert python["rules"].count(False) >= 10 and python["rules"].count(True) >= 15
     assert sum("has no rules for" in " ".join(row["unconfirmed"])
                for row in python["listing"]) == 6

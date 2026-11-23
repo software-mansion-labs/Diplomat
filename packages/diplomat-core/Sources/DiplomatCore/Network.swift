@@ -336,7 +336,7 @@ public enum NetworkPools {
         for root in roots {
             let identity = (identities[root.host] ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            guard !identity.isEmpty, hasRules(host: root.host),
+            guard !identity.isEmpty, root.webPort == nil, hasRules(host: root.host),
                   let id = NetworkOffer.pool(repoKey: root.key),
                   seen.insert(id).inserted else { continue }
             out.append(Pool(id: id, path: root.path,
@@ -365,11 +365,16 @@ public enum NetworkPools {
         "\(repo) is on \(host), which the Diplomacy Network has no rules for: it has "
             + "no pool and none of its jobs is offered"
     }
+    public static func unsupported(_ repo: String, host: String, port: Int) -> String {
+        "\(repo) is reached on port \(port) of \(host), and the Diplomacy Network reaches "
+            + "a forge on 443 only: it has no pool and none of its jobs is offered"
+    }
 
     /// Every linked repository as a pool: the roots, then what the OTHER REPOS
     /// checkouts name that no root does (`others`). A root or a checkout that was read
     /// and names no forge is no pool, and is in neither list; a repository on a host
-    /// without rules (`hasRules`) is no pool either, and is named. What could not be
+    /// without rules (`hasRules`) is no pool either, and is named, and so is one named by
+    /// a remote on another port than the forge's API (`LocalRepo.webPort`). What could not be
     /// confirmed is said as the daemon last had it (`known`, its snapshot's pools): the
     /// pool at a path that could not be read (`unread`), and the pool of a repository
     /// whose forge login is unknown. The daemon leaves a pool the list omits, so the
@@ -386,10 +391,10 @@ public enum NetworkPools {
         for repo in repos {
             guard let id = NetworkOffer.pool(repoKey: repo.key), !listed.contains(id),
                   !(nameless + unruled).contains(where: { $0.id == id }) else { continue }
-            if hasRules(host: repo.host) {
-                nameless.append((id, repo))
-            } else {
+            if repo.webPort != nil || !hasRules(host: repo.host) {
                 unruled.append((id, repo))
+            } else {
+                nameless.append((id, repo))
             }
         }
         for pool in known where !listed.contains(pool.id)
@@ -402,7 +407,11 @@ public enum NetworkPools {
         }
         return Listing(pools: pools, unconfirmed: unread.map { unconfirmed(unread: $0) }
             + nameless.map { unconfirmed(account: $0.repo.slug, host: $0.repo.host) }
-            + unruled.map { unsupported($0.repo.slug, host: $0.repo.host) })
+            + unruled.map { unruled in
+                unruled.repo.webPort.map {
+                    unsupported(unruled.repo.slug, host: unruled.repo.host, port: $0)
+                } ?? unsupported(unruled.repo.slug, host: unruled.repo.host)
+            })
     }
 
     public static func body(_ pools: [Pool]) -> [String: [[String: String]]] {

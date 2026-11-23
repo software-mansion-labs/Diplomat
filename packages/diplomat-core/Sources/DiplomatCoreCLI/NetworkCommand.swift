@@ -35,17 +35,20 @@ enum NetworkCommand {
             (row["snapshot"] as? Int).map { snapshots[$0] }
         }
         func repos(_ raw: Any?) -> [PRRef.LocalRepo] {
-            (raw as? [[String: String]] ?? []).map {
-                PRRef.LocalRepo(owner: $0["owner"] ?? "", repo: $0["repo"] ?? "",
-                                path: $0["path"] ?? "",
-                                host: $0["host"] ?? PRRef.LocalRepo.github)
+            (raw as? [[String: Any]] ?? []).map {
+                PRRef.LocalRepo(owner: $0["owner"] as? String ?? "",
+                                repo: $0["repo"] as? String ?? "",
+                                path: $0["path"] as? String ?? "",
+                                host: $0["host"] as? String ?? PRRef.LocalRepo.github,
+                                webPort: $0["web_port"] as? Int)
             }
         }
 
         var out: [String: Any] = [:]
         out["hours"] = (obj["hours"] as? [Any] ?? []).map { NetworkSettings.hours(json: $0) }
         func pool(_ url: String, _ hosts: GitLabHosts) -> Any {
-            guard let at = PRRef.LocalRepo.coordinates(remoteURL: url, gitlabHosts: hosts) else {
+            guard PRRef.LocalRepo.webPort(remoteURL: url) == nil,
+                  let at = PRRef.LocalRepo.coordinates(remoteURL: url, gitlabHosts: hosts) else {
                 return NSNull()
             }
             let repo = PRRef.LocalRepo(owner: at.owner, repo: at.repo, path: "", host: at.host)

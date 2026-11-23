@@ -49,7 +49,7 @@ _HOSTED_REMOTE = re.compile(
     r"([\w.-]+(?:/[\w.-]+)*)/([\w.-]+?)(?:\.git)?/?$",
     re.IGNORECASE,
 )
-#: An ``https`` or ``http`` remote's scheme and port, where it names one.
+#: An ``https`` or ``http`` remote's scheme and port, where it names one (:func:`web_port`).
 _WEB_PORT = re.compile(r"^(https?)://(?:[^@/]+@)?[^/:@]+:([0-9]+)/", re.IGNORECASE)
 #: A host key of glab's ``hosts:`` map; its port is dropped, as a remote's is.
 _GLAB_HOST = re.compile(r"^\s+([A-Za-z0-9.-]+)(?::[0-9]+)?:\s*$")
@@ -184,15 +184,8 @@ def parse_remote(url: str, hosts: Mapping[str, str] = GITLAB_HOSTS
                  ) -> tuple[str, str, str] | None:
     """``(host, owner, repo)`` of a GitHub remote, or of a GitLab one (``owner`` its
     whole namespace) on a host :func:`is_gitlab_host` takes, the host lowercased and
-    read through ``hosts`` (an ``ssh_host`` names its API host).
-
-    ``None`` for an ``https`` remote on a port but 443 and an ``http`` one on a port but
-    80: the forge's API is reached on 443 and its host names no port, so that server is
-    not it. An ssh port is only how git reaches the forge."""
+    read through ``hosts`` (an ``ssh_host`` names its API host)."""
     url = url.strip()
-    web = _WEB_PORT.match(url)
-    if web and int(web.group(2)) != (443 if web.group(1).lower() == "https" else 80):
-        return None
     m = _GITHUB_REMOTE.match(url)
     if m:
         return GITHUB, m.group(1), m.group(2)
@@ -202,6 +195,16 @@ def parse_remote(url: str, hosts: Mapping[str, str] = GITLAB_HOSTS
     host = (m.group(1) or m.group(2)).lower()
     return (hosts.get(host, host), m.group(3), m.group(4)) if is_gitlab_host(host, hosts) \
         else None
+
+
+def web_port(url: str) -> int | None:
+    """The port an ``https`` remote names other than 443, or an ``http`` one other than
+    80; ``None`` for any other remote. Twin of ``LocalRepo.webPort(remoteURL:)``."""
+    web = _WEB_PORT.match(url.strip())
+    if web is None:
+        return None
+    port = int(web.group(2))
+    return port if port != (443 if web.group(1).lower() == "https" else 80) else None
 
 
 def remote_config(path: str) -> str | None:
@@ -260,7 +263,7 @@ def entries(path: str, remotes: str, only: tuple[str, ...] = (),
         if only and key[len("remote."):-len(".url")] not in only:
             continue
         named.append((key[len("remote."):-len(".url")],
-                      LocalRepo(coords[1], coords[2], path, coords[0])))
+                      LocalRepo(coords[1], coords[2], path, coords[0], web_port(url))))
     ranked = sorted(range(len(named)),
                     key=lambda i: (named[i][1].is_gitlab, named[i][0] != "upstream",
                                    named[i][0] != "origin", i))
