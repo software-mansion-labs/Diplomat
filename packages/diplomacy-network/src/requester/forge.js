@@ -21,6 +21,11 @@ const RESPONSE_HEADERS = new Set([
 ]);
 const USER_AGENT = 'diplomacy-network';
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const blanked = (value, names) => {
+  if (Array.isArray(value)) return value.map((v) => blanked(v, names));
+  if (!isObject(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, names.has(k) ? null : blanked(v, names)]));
+};
 
 const NODE_QUERY = `query($id: ID!) { node(id: $id) { __typename
   ... on Repository { nameWithOwner }
@@ -162,18 +167,19 @@ export function createForge({ log = () => {} } = {}) {
       if (RESPONSE_HEADERS.has(name) || name.startsWith('x-ratelimit-')) headers[name] = value;
     }
     let { status, body } = res;
-    if (request.pick && status >= 200 && status < 300) {
-      // The rule lets only some members of this answer out, or of each entry of a list.
-      let whole = null;
+    if ((request.pick || request.blank) && status >= 200 && status < 300) {
+      // The rule lets only some members of this answer out, or of each entry of a list
+      // (`pick`), and the members named in `blank` out as null wherever they stand.
+      let whole;
       try { whole = JSON.parse(body.toString('utf8')); } catch {}
       const cut = (object) => Object.fromEntries(request.pick.filter((k) => Object.hasOwn(object, k)).map((k) => [k, object[k]]));
-      if (isObject(whole)) {
-        body = Buffer.from(JSON.stringify(cut(whole)));
-      } else if (Array.isArray(whole) && whole.every(isObject)) {
-        body = Buffer.from(JSON.stringify(whole.map(cut)));
-      } else {
+      if (request.pick) whole = isObject(whole) ? cut(whole) : Array.isArray(whole) && whole.every(isObject) ? whole.map(cut) : undefined;
+      if (request.blank && whole !== undefined) whole = blanked(whole, new Set(request.blank));
+      if (whole === undefined) {
         status = 502;
         body = Buffer.from('{"message":"the forge\'s answer could not be reduced"}');
+      } else {
+        body = Buffer.from(JSON.stringify(whole));
       }
     }
     return { status, headers, body: body.toString('base64') };

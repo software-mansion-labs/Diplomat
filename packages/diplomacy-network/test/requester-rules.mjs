@@ -785,6 +785,29 @@ function everyRuleList() {
   return lists.filter(([rules]) => rules !== null);
 }
 
+await check('an address of a person is let out as null wherever the answer holds it: GitHub\'s auto-merge author, GitLab\'s Service Desk reporter', async () => {
+  const blankOf = async (rules, request, ctx = world()) => (await allowed(rules, request, ctx)).request.blank;
+  // gh pr view reads the auto-merge author's address with the rest of a pull request.
+  for (const kind of KINDS) assert.deepEqual(await blankOf(github(kind), ghql(GH.prViewDefault)), ['authorEmail']);
+  const hub = (query) => ghql({ query, variables: {} });
+  // A member is named as the answer names it: by its alias.
+  assert.deepEqual((await blankOf(github('investigate'), hub(`{ repository(owner: "o", name: "r") { pullRequests(first: 5) { nodes { a: autoMergeRequest { mail: authorEmail mergeMethod } ...f } } } }
+    fragment f on PullRequest { autoMergeRequest { authorEmail } }`))).sort(), ['authorEmail', 'mail']);
+  assert.equal(await blankOf(github('investigate'), hub('{ repository(owner: "o", name: "r") { pullRequests(first: 5) { nodes { authorEmail: title } } } }')), undefined);
+  // A mutation's answer is read like a query's.
+  assert.deepEqual(await blankOf(github('issues'), hub('mutation { addComment(input: { subjectId: "I_421", body: "x" }) { subject { ... on Issue { timelineItems(first: 1) { totalCount } } } commentEdge { node { issue { number } } } clientMutationId } }'), world()), undefined);
+  const lab = (query) => glab('POST', '/api/graphql', { query });
+  assert.deepEqual((await blankOf(gitlab('investigate'), lab('{ project(fullPath: "group/sub/proj") { issues { nodes { externalAuthor notes { nodes { who: externalAuthor body } } } } } }'), glWorld())).sort(),
+    ['externalAuthor', 'who']);
+  for (const project of [P, '/api/v4/projects/99']) {
+    for (const tail of ['/issues', '/issues/421', '/issues?state=opened']) {
+      for (const kind of KINDS) assert.deepEqual(await blankOf(gitlab(kind), glab('GET', `${project}${tail}`), glWorld()), ['service_desk_reply_to'], `${kind} ${tail}`);
+    }
+    assert.equal(await blankOf(gitlab('investigate'), glab('GET', `${project}/merge_requests/5`), glWorld()), undefined);
+  }
+  assert.equal(await blankOf(github('investigate'), gh('GET', '/repos/o/r/issues/421')), undefined);
+});
+
 await check('no second spelling of any rule\'s path is decided by another rule, on either forge', async () => {
   let asked = 0;
   for (const [rules, ctxFor] of everyRuleList()) {
@@ -808,7 +831,8 @@ await check('no second spelling of any rule\'s path is decided by another rule, 
 });
 
 await check('no rule that refuses, pins or cuts is reached by its own path with a "/" of it encoded', async () => {
-  const plain = (rule) => Object.keys(rule).every((key) => ['host', 'method', 'path', 'fold'].includes(key));
+  // `blank` nulls members of whatever answer comes back, from whichever route.
+  const plain = (rule) => Object.keys(rule).every((key) => ['host', 'method', 'path', 'fold', 'blank'].includes(key));
   let [asked, passed] = [0, 0];
   for (const [rules, ctxFor] of everyRuleList()) {
     const ctx = ctxFor();

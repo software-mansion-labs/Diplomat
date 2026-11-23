@@ -230,6 +230,32 @@ await check('a write carries its checked body, and a pinned answer is cut to its
   git(labBare, 'update-ref', '-d', 'refs/heads/shown');
 });
 
+await check('an address of a person comes back as null wherever the answer holds it, and an answer that cannot be read is not passed on', async () => {
+  const answering = async (host, method, pattern, text, ruleList, request, target) => {
+    const remove = forge.route(host, method, pattern, (req, res) => res.writeHead(200, { 'content-type': 'application/json' }).end(text));
+    try { return await perform(ruleList, request, {}, target); } finally { remove(); }
+  };
+  const glRules = rulesFor({ forge: 'gitlab', kind: 'investigate', pool: `${GITLAB_HOST}/group/sub/proj`, item: 'job-x', identity: 'me' });
+  const issue = { iid: 421, title: 'help', service_desk_reply_to: 'reporter@example.com', author: { username: 'support-bot' } };
+  const one = await answering(GITLAB_HOST, 'GET', /\/issues\/421$/, JSON.stringify(issue), glRules, glab('GET', '/api/v4/projects/group%2Fsub%2Fproj/issues/421'), GITLAB);
+  assert.equal(one.status, 200);
+  assert.deepEqual(JSON.parse(one.bytes), { ...issue, service_desk_reply_to: null });
+  const list = await answering(GITLAB_HOST, 'GET', /\/issues$/, JSON.stringify([issue, { iid: 7, nested: { service_desk_reply_to: 'x@example.com' } }]), glRules, glab('GET', '/api/v4/projects/group%2Fsub%2Fproj/issues'), GITLAB);
+  assert.deepEqual(JSON.parse(list.bytes), [{ ...issue, service_desk_reply_to: null }, { iid: 7, nested: { service_desk_reply_to: null } }]);
+  for (const odd of ['reporter@example.com', '{"service_desk_reply_to":"reporter@example.com"']) {
+    const res = await answering(GITLAB_HOST, 'GET', /\/issues\/421$/, odd, glRules, glab('GET', '/api/v4/projects/group%2Fsub%2Fproj/issues/421'), GITLAB);
+    assert.equal(res.status, 502, odd);
+    assert.ok(!res.bytes.toString().includes('reporter@example.com'), odd);
+  }
+  // GraphQL: by the name the query gave the member, wherever it stands.
+  const graph = { data: { repository: { pullRequest: { title: 'authorEmail', autoMergeRequest: { authorEmail: 'private@example.com', mergeMethod: 'SQUASH' } } } } };
+  const hub = await answering('api.github.com', 'POST', /^\/graphql$/, JSON.stringify(graph), rules('review', 'pr-578'), ghql(GH.prViewDefault), GITHUB);
+  assert.deepEqual(JSON.parse(hub.bytes), { data: { repository: { pullRequest: { title: 'authorEmail', autoMergeRequest: { authorEmail: null, mergeMethod: 'SQUASH' } } } } });
+  // An answer with nothing to blank comes back as the forge sent it, byte for byte.
+  const plain = await answering(GITLAB_HOST, 'GET', /\/merge_requests\/5$/, '{"iid":5,  "title":"x"}', glRules, glab('GET', '/api/v4/projects/group%2Fsub%2Fproj/merge_requests/5'), GITLAB);
+  assert.equal(plain.bytes.toString(), '{"iid":5,  "title":"x"}');
+});
+
 await check('a refused request never reaches the forge, and perform sends nothing authorize did not return', async () => {
   const before = forge.log.length;
   const ruleList = rules('review', 'pr-578');

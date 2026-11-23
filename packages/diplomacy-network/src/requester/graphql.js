@@ -344,6 +344,7 @@ const SCHEMA_FIELDS = table({ schema: 'fields inputFields enumValues args type o
 //               holds (the repository `pick` of rules.js), under the names GraphQL has
 //   own         the names not read inside the repository: they tell of the account asking -
 //               what it may do there, its addresses, what it watches
+//   blank       the names read and answered as null: a person's address
 //   args        the arguments a field may take: paging, ordering and filters over what
 //               the object it is selected on holds
 //   members     the members an object given as an argument may hold, at any depth
@@ -367,6 +368,8 @@ const FORGES = {
       diskUsage viewerPermission mergeCommitAllowed rebaseMergeAllowed squashMergeAllowed`),
     // `gh` reads which comments the account wrote.
     own: /viewer(?!DidAuthor$)/i,
+    // The address of whoever enabled a pull request's auto-merge, which `gh pr view` reads.
+    blank: set('authorEmail'),
     args: set(`after before first last orderBy orderByState direction states labels query filterBy number since until skip
       limit size baseRefName headRefName refName refPrefix qualifiedName name path expression oid author
       content itemTypes archivedStates includeArchived includeClosedPrs
@@ -430,6 +433,8 @@ const FORGES = {
     // What the account may do with a blob, a job or a pipeline, whether it is subscribed,
     // and the address its replies to an issue go to.
     own: /^can[A-Z]|^(createNoteEmail|subscribed|troubleshootJobWithAi)$/,
+    // The address of the person who wrote an issue or a note in through the Service Desk.
+    blank: set('externalAuthor'),
     args: set(`after before first last limit offset sort order state status statuses types jobKind
       iid iids ref refType path paths blobPath recursive full format firstParent search in
       searchPattern query filter not or customField labelName labels milestoneTitle
@@ -535,6 +540,7 @@ const UNLISTED = 'which could name something outside the pool\'s repository or t
 function walker(doc, forge, op, vars, lookups) {
   const tables = FORGES[forge];
   const done = new Set(); // "fragment name/context": a fragment is read once per context
+  const blanks = new Set(); // the answer's names for the `blank` fields selected
   let fields = 0;
 
   // A variable stands for what is sent for it, else for its default.
@@ -593,6 +599,7 @@ function walker(doc, forge, op, vars, lookups) {
         if (context === 'protection' && !tables.protectionLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read of a branch's protection`);
         if (context === 'repo' && !tables.repoLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" is not among what a task is told of the repository itself`);
         if ((context === 'in' || context === 'event' || context === 'plain') && tables.own.test(sel.name)) refuse(`graphql: "${sel.name}" tells of the account asking, not of the repository`);
+        if (tables.blank.has(sel.name)) blanks.add(sel.alias ?? sel.name);
         checkArguments(sel);
         continue;
       }
@@ -627,14 +634,15 @@ function walker(doc, forge, op, vars, lookups) {
     return out;
   }
 
-  return { walk, flatten };
+  return { walk, flatten, blanks };
 }
 
 const SEARCH_TYPES = new Set(['ISSUE', 'ISSUE_ADVANCED']);
 const sameRepo = (a, b) => typeof a === 'string' && typeof b === 'string' && a.toLowerCase() === b.toLowerCase();
 
+// Returns the answer's names for the `blank` fields the query selects.
 function checkQuery(doc, op, vars, spec, lookups) {
-  const { walk, flatten } = walker(doc, spec.forge, op, vars, lookups);
+  const { walk, flatten, blanks } = walker(doc, spec.forge, op, vars, lookups);
   const roots = new Set(spec.roots || []);
   const [owner, repoName] = spec.forge === 'github' ? spec.repo.split('/') : [];
   for (const field of flatten(op.selections, [], new Set(), 1)) {
@@ -694,6 +702,7 @@ function checkQuery(doc, op, vars, spec, lookups) {
         refuse(`graphql: root field "${field.name}" cannot be confined to the pool's repository`);
     }
   }
+  return blanks;
 }
 
 // ---------------------------------------------------------------------- mutations
@@ -779,7 +788,7 @@ export function knownMutations(forge) {
 }
 
 function checkMutation(doc, op, vars, spec, lookups, effects) {
-  const { walk, flatten } = walker(doc, spec.forge, op, vars, lookups);
+  const { walk, flatten, blanks } = walker(doc, spec.forge, op, vars, lookups);
   const fields = flatten(op.selections, [], new Set(), 1);
   if (fields.length !== 1) refuse('graphql: a mutation must be exactly one field');
   const [field] = fields;
@@ -816,6 +825,7 @@ function checkMutation(doc, op, vars, spec, lookups, effects) {
   }
   // The payload is a read like any other: it starts on the object the mutation touched.
   if (field.selections) walk(field.selections, 'in', 2, new Set());
+  return blanks;
 }
 
 /// Whether a resolved node belongs to the task's item: `item` is `{ type: 'pr'|'issue',
@@ -873,8 +883,9 @@ async function settle(lookups, spec, ctx) {
 
 /// Checks one GraphQL request body against a rule's `graphql` member: `spec` is `{ forge,
 /// repo, roots, mutations, item, identity }` and `payload` the parsed JSON body. Resolves
-/// to `{ ok: true, effects }` - `effects` lists what the request would use up, such as a
-/// pull request opened from a pushed branch - or `{ ok: false, reason }`. Node ids are
+/// to `{ ok: true, effects, blank? }` - `effects` lists what the request would use up, such
+/// as a pull request opened from a pushed branch, and `blank` the names of the answer's
+/// members to hand back as null - or `{ ok: false, reason }`. Node ids are
 /// resolved through `ctx.resolveNode(id)` before the answer is given.
 export async function checkGraphql(spec, payload, ctx = {}) {
   try {
@@ -891,11 +902,10 @@ export async function checkGraphql(spec, payload, ctx = {}) {
     const [op] = doc.operations;
     const lookups = [];
     const effects = [];
-    if (op.type === 'query') checkQuery(doc, op, vars, spec, lookups);
-    else if (op.type === 'mutation') checkMutation(doc, op, vars, spec, lookups, effects);
-    else refuse('graphql: subscriptions are not allowed');
+    if (op.type === 'subscription') refuse('graphql: subscriptions are not allowed');
+    const blanks = op.type === 'query' ? checkQuery(doc, op, vars, spec, lookups) : checkMutation(doc, op, vars, spec, lookups, effects);
     await settle(lookups, spec, ctx);
-    return { ok: true, effects };
+    return { ok: true, effects, ...(blanks.size > 0 ? { blank: [...blanks] } : {}) };
   } catch (err) {
     if (err instanceof Refused) return { ok: false, reason: err.message };
     throw err;

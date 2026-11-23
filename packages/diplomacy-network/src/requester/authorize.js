@@ -559,6 +559,7 @@ export async function authorize(rules, request, given = {}) {
 
     const effects = [];
     let body = req.body;
+    let blank = rule.blank;
     if (rule.pull) await checkPull(rule.pull, req, ctx);
     if (rule.comment) await checkComment(rule.comment, req, ctx);
     if (rule.run) await checkRun(rule.run, req, ctx);
@@ -579,6 +580,7 @@ export async function authorize(rules, request, given = {}) {
       const verdict = await checkGraphql(rule.graphql, payload, ctx);
       if (!verdict.ok) refuse(verdict.reason);
       effects.push(...verdict.effects);
+      blank = verdict.blank;
       body = Buffer.from(JSON.stringify(payload));
     } else if (rule.body) {
       body = await checkBodyPins(rule.body, req, ctx, effects, named, fork);
@@ -596,6 +598,7 @@ export async function authorize(rules, request, given = {}) {
       body: body.toString('base64'),
     };
     if (rule.pick) out.pick = rule.pick;
+    if (blank) out.blank = blank;
     approved.add(out);
     if (held) pending.set(out, held);
     return { ok: true, rule, request: out };

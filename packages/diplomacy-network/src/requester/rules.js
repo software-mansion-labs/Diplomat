@@ -189,6 +189,9 @@ const GITLAB_PROJECT_PICK = [
   'remove_source_branch_after_merge', 'only_allow_merge_if_pipeline_succeeds', 'only_allow_merge_if_all_discussions_are_resolved',
   'license', 'license_url',
 ];
+// An issue as GitLab answers it carries the address of whoever wrote it in through the
+// Service Desk: that member is let out as null (`blank`).
+const GITLAB_BLANK = { issues: ['service_desk_reply_to'], 'issues/*': ['service_desk_reply_to'] };
 // A GitLab branch without who may push to it or merge into it, the requester included.
 const GITLAB_BRANCH_PICK = ['name', 'commit', 'merged', 'protected', 'default', 'web_url'];
 const GITHUB_ROOTS = ['repository', 'viewer', 'rateLimit', '__type', 'search', 'node'];
@@ -440,7 +443,7 @@ function gitlab({ kind, options, target, item, me }) {
   // A compare takes two refs of this project; `from_project_id` would make one another project's.
   each('GET', '/repository/compare', { query: { from: 'free', to: 'free', straight: 'free', unidiff: 'free' } });
   each('GET', '/repository/branches/**', { pick: GITLAB_BRANCH_PICK });
-  for (const tree of [...GITLAB_CONTEXT, ...GITLAB_CODE]) each('GET', `/${tree}`);
+  for (const tree of [...GITLAB_CONTEXT, ...GITLAB_CODE]) each('GET', `/${tree}`, Object.hasOwn(GITLAB_BLANK, tree) ? { blank: GITLAB_BLANK[tree] } : {});
   if (scope) for (const part of GITLAB_PULL) each('GET', `${mr}/${part}`, asked);
   if (item.type === 'issue') for (const part of GITLAB_ISSUE) each('GET', `/issues/${item.number}/${part}`);
   const runs = runScope(kind, options, who);
