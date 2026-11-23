@@ -44,21 +44,13 @@ enum Render {
 
         var content = AnyView(chrome(view(for: what, store: store), store: store)
             .environment(\.isImageRendering, true))
-        // `ImageRenderer` follows no `NSApp.appearance`: the theme reaches it as SwiftUI's
-        // colour scheme and AppKit's drawing appearance.
-        let themed = NSApp.appearance
-        if let themed {
+        // `ImageRenderer` follows no `NSApp.appearance`: the theme reaches it as the colour scheme.
+        if let themed = NSApp.appearance {
             content = AnyView(content.environment(\.colorScheme, themed.name == .aqua ? .light : .dark))
         }
         let renderer = ImageRenderer(content: content)
         renderer.scale = 2
-        var image: CGImage?
-        if let themed {
-            themed.performAsCurrentDrawingAppearance { image = renderer.cgImage }
-        } else {
-            image = renderer.cgImage
-        }
-        guard let cg = image else { print("RENDER ERROR: nil cgImage"); return true }
+        guard let cg = renderer.cgImage else { print("RENDER ERROR: nil cgImage"); return true }
         let rep = NSBitmapImageRep(cgImage: cg)
         guard let data = rep.representation(using: .png, properties: [:]) else {
             print("RENDER ERROR: PNG encode failed"); return true

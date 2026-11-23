@@ -81,11 +81,9 @@ extension Store {
         let tmp = dir.appendingPathComponent("control.json.tmp-\(getpid())-\(UUID().uuidString)")
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true,
                                 attributes: [.posixPermissions: 0o700])
-        guard fm.createFile(atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600]),
-              rename(tmp.path, dir.appendingPathComponent("control.json").path) == 0
-        else {
+        if !fm.createFile(atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600])
+            || rename(tmp.path, dir.appendingPathComponent("control.json").path) != 0 {
             try? fm.removeItem(at: tmp)
-            return
         }
     }
 
@@ -316,8 +314,6 @@ extension Store {
     }
 
     /// The ask an effect stands for, in the root its repo names; nil once that is no root.
-    /// The effect's `author` is its ban dimension, as a Comms fix's is: the issue's text is
-    /// what the fixer reads.
     func pipelineAsk(_ effect: PipelineEffect) -> RequestedWork? {
         func root(_ slug: String) -> PRRef.LocalRepo? {
             PRRef.root(named: slug, in: roots).flatMap { $0.isGitLab ? nil : $0 }

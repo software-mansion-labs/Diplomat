@@ -948,7 +948,8 @@ enum PipelineTint {
             : "Diplomat labels it and may fix or split it."
     }
 
-    /// `By @bob · assigned to @carol`, a Linear name as it is. Twin of the Linux WHO line.
+    /// `By @bob · assigned to @carol`, a Linear name as it is. Twin of `pipelineview`'s WHO
+    /// people line.
     static func people(_ item: PipelineItem) -> String {
         func who(_ name: String) -> String { item.source == .linear ? name : "@\(name)" }
         var parts = item.author.flatMap { $0.isEmpty ? nil : ["by \(who($0))"] } ?? []
