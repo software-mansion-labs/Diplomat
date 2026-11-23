@@ -69,7 +69,7 @@ A PR:
 An issue labelled `wontfix`, `won't fix`, `duplicate`, `invalid`, `question`, `enhancement`,
 `feature`, `feature request`, `improvement`, `discussion`, `proposal` or `rfc` in any case
 (`pipeline.json` `triageLabels`, on Linear too), or of a GitHub issue type other than Bug, is
-**triaged**: never a `candidate` nor split, its hold `triaged as <that label or type>`.
+**triaged**: never a `candidate` nor split, and once rated its hold is `triaged as <that label or type>`.
 
 ### The fast track
 
