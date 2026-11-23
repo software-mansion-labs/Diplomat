@@ -803,7 +803,10 @@ def test_the_render_fixture_covers_every_stage_lane_edge_and_event_kind():
     assert any(i.get("hold") for i in items) and result["notices"]
     ids = [i["id"] for i in items]
     assert sorted(n["id"] for n in result["graph"]["nodes"]) == sorted(ids)
-    assert {e["item"] for e in result["events"]} <= set(ids)
+    # As the core logs them: a notice is an error of no item; every other event is an item's.
+    assert {e["item"] for e in result["events"] if e["kind"] != "error"} <= set(ids)
+    assert {(e["item"], e["detail"]) for e in result["events"] if e["kind"] == "error"} \
+        <= {("", n) for n in result["notices"]}
     # Newest last, as the core hands them over.
     assert [e["at"] for e in result["events"]] == sorted(e["at"] for e in result["events"])
 
