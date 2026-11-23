@@ -920,6 +920,7 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
         (175, issue(1820), "fractured", "split into 2 parts"),
         (165, issue(1821), "rated",
          "low risk, low complexity: One new field, read from a call the runner already makes."),
+        (165, issue(1821), "asked", "asked for a fix PR"),
         (120, issue(1829), "rated",
          "medium risk, medium complexity: The list's diffing and the allocator's event order "
          "both play a part, and which of them owns the fix is a judgement call."),
@@ -931,6 +932,7 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
         (30, linear("ENG-42"), "rated", "low risk, low complexity"),
         (20, pr(1826), "rated", "low risk, low complexity"),
         (20, pr(1826), "fast-track", fast_track),
+        (20, pr(1826), "asked", f"asked for a fast-track review at {track_head[:7]}"),
         (15, pr(1810), "clean", f"clean marker at {cleared_head[:7]}"),
         (12, pr(1810), "rerated", "low risk, low complexity"),
         (12, pr(1810), "cleared", f"cleared at {cleared_head[:7]}"),
