@@ -140,10 +140,11 @@ rewrite - and then counts as switched off.
 A `DN_...` variable that sets a number is taken when it says a number of zero or more;
 unset, empty or anything else, the default stands. Zero is zero: a wait of 0 is no wait,
 an allowance of 0 nothing (`DN_JOB_MODEL_REQUESTS=0` gives a job no request to the
-model), an interval of 0 as often as the process can. Nine settings bound how long or
+model), an interval of 0 as often as the process can. Ten settings bound how long or
 how much something of this machine's may take, and what holds them - node's timers,
 docker - reads 0 as no bound at all: `DN_GIT_TIMEOUT_MS`, `DN_MIRROR_TIMEOUT_MS`,
-`DN_IMAGE_BUILD_TIMEOUT_MS`, `DN_CONTAINER_USAGE_TIMEOUT_MS`, `DN_KEYCHAIN_TIMEOUT_MS`,
+`DN_IMAGE_BUILD_TIMEOUT_MS`, `DN_CONTAINER_USAGE_TIMEOUT_MS`,
+`DN_CONTAINER_HELD_TIMEOUT_MS`, `DN_KEYCHAIN_TIMEOUT_MS`,
 `DN_JOB_IDLE_MS`, `DN_CONTAINER_PIDS`, `DN_CONTAINER_MEMORY` and `DN_CONTAINER_CPUS`.
 For these 0 is not taken: the default holds, and `daemon.log` says so at the start
 (`DN_CONTAINER_PIDS=0 would leave no bound where one always holds: the default is
@@ -648,8 +649,9 @@ four things and starts the job:
   its full length, holes included. A file a process unlinked and keeps open is in no
   directory to be counted that way, and its blocks stay taken: while the container
   runs, a second probe in its pid namespace (`src/executor/held.cjs`) adds the blocks
-  of every such file that a descriptor or a running program of the container names,
-  on any file system but memory. A job can end that probe, which leaves its container
+  of every such file that a descriptor of any thread or a running program of the
+  container names, on any file system but memory. A job can end that probe, or stop it
+  past the `DN_CONTAINER_HELD_TIMEOUT_MS` (30 s) it is given, which leaves its container
   unmeasured for that look; so does a probe that writes more than the 65536 characters
   it is heard out for. An engine whose first answer is that a probe may not read
   another container's processes - SELinux keeps containers apart that way - is asked
@@ -689,7 +691,9 @@ four things and starts the job:
     job's `gh` or `glab` is pointed at (`GH_HOST`, `GITLAB_HOST`). They are read on
     port 443 and refused on every other port and over plain http, as are the hosts the
     forge serves git over ssh on (`ssh.github.com`, `altssh.gitlab.com`). A name in
-    capitals or with a trailing dot is the same name. A forge on another port has no
+    capitals or with one trailing dot is the same name; one with an empty label, a label
+    over 63 characters or a character other than a letter, a digit, a hyphen or an
+    underscore is no name, and is answered 400. A forge on another port has no
     pool, since a pool's id names a host and no port; and a GitHub pool on a subdomain
     of github.com, on ghe.com or on a subdomain of it has no rules, so no task of it
     is offered and no job of it comes here;
@@ -721,11 +725,13 @@ four things and starts the job:
     software works as usual. An address inside a network any interface of this machine
     is on, IPv4 or IPv6, is refused, and so is every range that is not publicly routed;
     the interfaces are read at each connection. A name is resolved once for each
-    connection, which goes to the address that passed, and by DNS alone: this
-    machine's hosts file, mDNS and search domains are not asked. A name of one label,
-    and one under `localhost`, `local`, `internal`, `intranet`, `private`, `corp`,
-    `home`, `lan` or `home.arpa`, is refused without being asked of anybody: no public
-    name server answers for those. What this machine reaches by a route
+    connection, which goes to the address that passed, and by DNS alone: of the name
+    servers this machine is set to ask, with no search domain. A local one of those -
+    systemd-resolved's stub - may still answer from the hosts file, and asks mDNS and
+    LLMNR for the names below. So a name of one label, and one under `localhost`,
+    `local`, `internal`, `intranet`, `private`, `corp`, `home`, `lan` or `home.arpa`, is
+    refused without being asked of anybody: no public name server answers for those.
+    A refusal names no address a name resolved to. What this machine reaches by a route
     alone the broker does not know of: a publicly addressed range behind a VPN, or on
     another subnet of the operator's site, is tunnelled to like the rest of the
     internet. The hosts github.com hands downloads
@@ -746,15 +752,18 @@ four things and starts the job:
 
   A connection is the job's whose token its first request carries, and the broker reads
   that first request's head before anything else does. One that names no job running
-  here is answered 407 once and read no further, whatever follows it; one that is no
+  here is answered 407 once, and what follows is read as no request and dropped - bytes
+  left unread wait in this machine's network memory - up to 64 KiB, past which the
+  connection is reset; one that is no
   HTTP request, or whose head is over 16 KiB, is closed unanswered. A tunnel is asked
   for by the first request of its connection. A later request on a job's connection
   that does not carry that job's token is answered 407 and is the connection's last.
   The broker keeps 1024 connections that are no job's - those that have not yet said
   whose they are, and those just refused - and closes the one that has waited longest
   for the next. The requests of the jobs' connections are read one at a time: a
-  connection is read one request head in a turn of the daemon's loop, and all of them
-  together for 4 ms of a turn, so what a container sends, with a token or without, in
+  connection is read one request head in a turn of the daemon's loop, in pieces of at
+  most 4 KiB, a body only while its request is being read, and all of them together
+  for 4 ms of a turn, so what a container sends, with a token or without, in
   whatever number of requests and connections, takes a bounded part of the daemon's
   time and memory.
 
@@ -763,8 +772,8 @@ four things and starts the job:
   - 256 requests at a time, those being answered and those waiting their turn
     together, on however few connections it sends them. A job at that share is read
     no further until one of them ends, by its answer or by its time running out: what
-    it sends meanwhile stays in its container, and a connection it closes meanwhile is
-    not seen to close. What a tunnel carries is no request, and is read on;
+    it sends meanwhile stays in its container, past what this machine's network buffers
+    hold of each connection, and a connection it closes meanwhile is not seen to close. What a tunnel carries is no request, and is read on;
   - 8 names being resolved at a time, each given 5 s to resolve. The rest wait in the
     order they came, as many of them as the job may have connections, and wait for
     nothing of another job's;
@@ -899,8 +908,11 @@ The job's proxy token is taken out of the broker first, so from that moment it r
 nothing - no forge, no model, no forward - however long the rest takes. Then its
 process group gets TERM, 5 s, and KILL, and so does every process outside the group
 that still carries the job's run id in its environment. The job counts as stopped only
-when the container itself says nothing of it is left. One that is still there 60 s
-(`DN_JOB_STOP_BOUND_MS`) after the first try - or a container in which nothing can be
+when the container itself says nothing of it is left. An engine that does not answer
+`docker version` is asked nothing else meanwhile: it is looked at every 5 s, once for
+all the jobs being stopped, and the stop goes on when it answers. One that is still
+there 60 s (`DN_JOB_STOP_BOUND_MS`) after the first try the engine answered - or a
+container in which nothing can be
 run any more - ends with its container, which is restarted in its turn among whatever
 else is being done to that container; the other jobs in it, all
 the same requester's on the same repository, end as failed attempts with the reason

@@ -129,7 +129,7 @@ async function tunnel(target, auth) {
 }
 
 try {
-  await check('a connection that names no admitted job is answered 407 once and read no further, however much it sends', async () => {
+  await check('a connection that names no admitted job is answered 407 once and nothing more of it is read as requests: what follows is dropped, and past 64 KiB the connection is reset', async () => {
     await withBroker({}, async (b, traced) => {
       const gone = await b.addJob({ runId: 'gone', pool });
       b.removeJob('gone');
@@ -139,15 +139,24 @@ try {
       for (const [what, auth] of Object.entries(cases)) {
         traced.length = 0;
         const c = await open();
+        const reset = new Promise((resolve) => c.socket.once('error', (e) => resolve(e.code)));
         c.socket.write(get(auth, 'first'));
-        for (let i = 0; i < 512; i++) c.socket.write(block);
-        await until(() => c.ended(), `${what}: the broker to say its last`);
-        await sleep(200);
-        assert.equal(c.said(), DENY, what);
+        for (let i = 0; i < 64; i++) c.socket.write(block);
+        assert.match(await within(reset, `${what}: the connection to be reset`, 5000), /^(ECONNRESET|EPIPE)$/, what);
+        // The reset can overtake the answer: one that sends on unasked is not waited for.
+        assert.ok(['', DENY].includes(c.said()), what);
         assert.deepEqual(traced, ['407 GET http://plain.test/first'], what);
-        assert.ok(c.socket.writableLength > 0, `${what}: what it sent after its first request is left with it, unread`);
         c.socket.destroy();
       }
+      // One that sends a little more and then waits is answered, and not reset.
+      const polite = await open();
+      let failed = null;
+      polite.socket.once('error', (e) => { failed = e.code; });
+      polite.socket.write(get('', 'quiet') + 'x'.repeat(60000));
+      await until(() => polite.ended(), 'the refusal');
+      await sleep(300);
+      assert.deepEqual([polite.said(), failed, polite.socket.destroyed], [DENY, null, false]);
+      polite.socket.destroy();
       // A CONNECT is named by its target.
       traced.length = 0;
       assert.equal(await raw(`CONNECT tunnel.test:443 HTTP/1.1\r\nHost: tunnel.test:443\r\n\r\n${'x'.repeat(100000)}`), DENY);
@@ -308,6 +317,13 @@ try {
         assert.deepEqual([t.status, t.body], [403, why(host)], asked);
         const said = await raw(`GET http://${asked}/x HTTP/1.1\r\nHost: ${asked}\r\nConnection: close\r\n${auth}\r\n`);
         assert.deepEqual([statuses(said), said.slice(said.indexOf('\r\n\r\n') + 4)], [[403], why(host)], asked);
+      }
+      // A second trailing dot does not make a name of the public internet of one: it is no name.
+      for (const asked of ['printer.local..', 'registry..', '_gateway..', 'printer.local...']) {
+        const t = await tunnel(`${asked}:443`, auth);
+        assert.deepEqual([t.status, t.body], [400, `not a host and port: ${asked}:443\n`], asked);
+        const said = await raw(`GET http://${asked}/x HTTP/1.1\r\nHost: ${asked}\r\nConnection: close\r\n${auth}\r\n`);
+        assert.deepEqual([statuses(said), JSON.parse(said.slice(said.indexOf('\r\n\r\n') + 4))], [[400], { message: `not a host: ${asked}` }], asked);
       }
       assert.deepEqual([lookups, dials], [[], []]);
       names.delete('printer.local');

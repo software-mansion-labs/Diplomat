@@ -271,6 +271,17 @@ function groupOf(value) {
   return Number.isSafeInteger(n) && n > 1 ? n : 0;
 }
 
+// Whether the engine answers, asked once at a time for all the jobs being stopped. An
+// answer that it does not comes DOWN_MS after the look, to every stop that waited on it.
+const DOWN_MS = 10 * JOB_POLL_MS;
+let looking = null;
+function engineAnswers() {
+  looking ??= docker(['version', '--format', '{{.Server.Version}}'], { timeout: 20000 })
+    .then(async (r) => r.code === 0 || (await sleep(DOWN_MS), false))
+    .finally(() => { looking = null; });
+  return looking;
+}
+
 // stop.sh in the job's container, by one of its verbs.
 const ask = (job, verb, more, timeout) => docker(['exec', job.container, '/bin/sh', '-c', STOP, 'sh', verb, job.runId, String(job.pid), ...more], { timeout, maxBuffer: HEARD });
 
@@ -364,8 +375,10 @@ export function watch(run) {
 }
 
 /// Kills that run's processes, and only that run's, and marks it stopped; resolves to
-/// its outcome once they are gone, however long the engine takes to say so. A job that
-/// is not gone JOB_STOP_BOUND_MS after it was first asked ends with its container, which
+/// its outcome once they are gone, however long the engine takes to say so: an engine
+/// that does not answer `docker version` is asked nothing else, and is looked at again
+/// every 10 polls. A job that is not gone JOB_STOP_BOUND_MS after the engine first
+/// answered for it ends with its container, which
 /// is restarted by `containers.restart`, the container module's: every other job in it
 /// then ends as failed, with `CUT` for its summary.
 export async function stopJob(run, containers) {
@@ -376,8 +389,10 @@ export async function stopJob(run, containers) {
   // Stopped is what the container says is left of the job, not what was asked of it. One
   // that says nothing - no process left to give for the asking - or in which the job
   // outlives the kill has no other end than its own. An engine that does not answer
-  // restarts nothing either, and is asked until it does.
-  for (const from = Date.now(); ;) {
+  // restarts nothing either, and is looked at until it does.
+  for (let from = null; ;) {
+    if (!(await engineAnswers())) continue;
+    from ??= Date.now();
     await ask(job, 'stop', [grace], JOB_STOP_GRACE_MS + 30000);
     if ((await alive(job, 'left')) === false) break;
     if (Date.now() - from >= JOB_STOP_BOUND_MS && await cut(job, containers.restart)) break;

@@ -4,7 +4,8 @@
 // a run that will not go - and what the host puts there, and takes for a start, a run
 // or an end. The docker here answers `exec` and nothing else: a start with a process
 // group, a question after a job with what the test wrote for that run, and either with
-// what a script the test wrote for it does (<run id>.start, <run id>.sh).
+// what a script the test wrote for it does (<run id>.start, <run id>.sh); and `version`.
+// With a file `down` it answers nothing at all.
 // Run: node test/executor-job-files.mjs
 
 import assert from 'node:assert/strict';
@@ -12,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-jobf-'));
 const R = `jf-${process.pid}`;
@@ -21,6 +23,8 @@ fs.mkdirSync(stateDir);
 // `exec <container> <shell> -c <script> <name> <arguments>`: stop.sh's arguments begin
 // with a verb and a run id; anything else is the start of a job.
 fs.writeFileSync(dockerBin, `#!/bin/sh
+if [ -e "$JOBF_STATE/down" ]; then echo "down $1" >> "$JOBF_STATE/calls"; echo 'Cannot connect to the Docker daemon' >&2; exit 1; fi
+if [ "$1" = version ]; then echo version >> "$JOBF_STATE/calls"; echo 27.0.0; exit 0; fi
 verb=''; run=''; prev=''
 for a in "$@"; do
   case "$prev" in up|left|stop) if [ -z "$verb" ] && [ -e "$JOBF_STATE/$a" ]; then verb="$prev"; run="$a"; fi ;; esac
@@ -459,6 +463,24 @@ try {
     assert.deepEqual([outcome.exit, outcome.summary, asked(justEnded)], [3, 'own', 1]);
   });
 
+  await check('a stop asks an engine that does not answer nothing but whether it answers, once every 10 polls for all the jobs being stopped, and goes through once it does', async () => {
+    const calls = () => fs.readFileSync(path.join(stateDir, 'calls'), 'utf8').split('\n').filter(Boolean);
+    const runs = [runDir(), runDir(), runDir(), runDir()];
+    for (const runId of runs) assert.equal(attachJob({ runId, container, pid: 4242 }), true);
+    fs.writeFileSync(path.join(stateDir, 'down'), '');
+    const from = calls().length;
+    const began = Date.now();
+    const stops = runs.map((runId) => stopJob({ runId }, { restart: () => assert.fail('nothing is restarted') }));
+    await sleep(1000);
+    const meanwhile = calls().slice(from);
+    const looks = (Date.now() - began) / (10 * 20);
+    assert.ok(meanwhile.every((line) => line === 'down version'), meanwhile.join(', '));
+    assert.ok(meanwhile.length >= 2 && meanwhile.length <= looks + 1, `${meanwhile.length} docker calls in ${Date.now() - began} ms`);
+    for (const runId of runs) says(runId, 'gone');
+    fs.unlinkSync(path.join(stateDir, 'down'));
+    for (const outcome of await soon(Promise.all(stops), 'the stops, once the engine answers')) assert.equal(outcome.state, 'stopped');
+  });
+
   await check('a run is forgotten when nothing is left of it: its directory first, and one that will not go keeps its link and its outcome, is not said to be gone, and is met again', async () => {
     const [plain, fresh, held, outcomeOnly] = [runDir({ done: '0\n' }), runDir({ done: '0\n' }), runDir(), `${R}-outcome-only`];
     for (const runId of [plain, fresh]) await ended(runId);
@@ -550,6 +572,27 @@ try {
       assert.deepEqual(left(runId), [true, true, false]);
       says(runId, 'gone');
       await stopJob({ runId }, {});
+    });
+  }
+
+  // stop.sh run as a container's sh runs it, on this host's /proc.
+  if (!fs.existsSync('/proc/self/environ')) console.log('INFO stop.sh is not run here: no /proc on this machine');
+  else {
+    await check('stop.sh finds a job\'s processes by its run id whole: a run whose id begins another\'s is not the other', async () => {
+      const STOP_SH = fileURLToPath(new URL('../src/executor/stop.sh', import.meta.url));
+      const id = `${R}-stop-1`;
+      const runs = [id, `${id}0`].map((runId) => spawn('sleep', ['60'], { env: { ...process.env, DN_RUN_ID: runId }, stdio: 'ignore' }));
+      try {
+        const stop = (verb, runId) => spawnSync('sh', [STOP_SH, verb, runId, '0', '0'], { env: { ...process.env, DN_ROOT: scratch }, encoding: 'utf8', timeout: 30000 }).stdout.trim();
+        await until('both to run', () => runs.every((p) => fs.existsSync(`/proc/${p.pid}/environ`)));
+        assert.equal(stop('left', id), 'up');
+        stop('stop', id);
+        await until('the run to be stopped', () => runs[0].exitCode !== null || runs[0].signalCode !== null);
+        assert.equal(stop('left', id), 'gone');
+        assert.deepEqual([runs[1].exitCode, runs[1].signalCode, stop('left', `${id}0`)], [null, null, 'up'], 'the run whose id begins with it runs on');
+      } finally {
+        for (const p of runs) p.kill('SIGKILL');
+      }
     });
   }
 

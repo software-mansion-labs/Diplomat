@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import net from 'node:net';
 import { Duplex, PassThrough } from 'node:stream';
-import { createFeeder, edgeAfter, headEnd, FEED_TURN_MS } from '../src/executor/feed.js';
+import { createFeeder, edgeAfter, headEnd, FEED_PIECE_BYTES, FEED_TURN_MS } from '../src/executor/feed.js';
 
 let checks = 0;
 const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };
@@ -276,6 +276,7 @@ await check('a feed is a connection to node\'s server: answers go out in order, 
   await until(() => unread.readableLength > 0, 'a piece to be handed on');
   await new Promise((r) => setTimeout(r, 300));
   assert.ok(full.far.bytesRead <= 2 ** 20, `${full.far.bytesRead} bytes were read off a connection nobody reads`);
+  assert.ok(unread.readableLength <= FEED_PIECE_BYTES, `${unread.readableLength} bytes were handed on to a reader that asked for one piece`);
   unread.destroy();
   full.near.destroy();
 
@@ -326,6 +327,22 @@ await check('the feeds of one feeder hand over what fits a slice of a turn, and 
   const most = Math.max(...perTurn.filter((n) => n !== undefined));
   assert.ok(most <= 10, `${most} pieces were handed over in one turn of a feeder whose slice is ten looks at the clock`);
   assert.ok(perTurn.filter((n) => n !== undefined).length >= 15, 'so 150 pieces took fifteen turns or more');
+  // Bytes in which no head ends are handed over in pieces of FEED_PIECE_BYTES, as many as
+  // fit the slice. A piece is what the parser is given in one call: 4 KiB, however it is
+  // set, is the most this check takes.
+  assert.equal(FEED_PIECE_BYTES, 4096);
+  await until(() => turn >= 200, 'the turns to be counted out');
+  perTurn.length = 0;
+  turn = 0;
+  setImmediate(tick);
+  const sizes = [];
+  for (const out of outs) out.on('data', (piece) => sizes.push(piece.length));
+  for (const source of sources) source.write(Buffer.alloc(40 * FEED_PIECE_BYTES, 'z'));
+  await until(() => sizes.reduce((a, b) => a + b, 0) === 3 * 40 * FEED_PIECE_BYTES, 'every byte to be handed on');
+  assert.deepEqual([Math.max(...sizes), sizes.length], [FEED_PIECE_BYTES, 120]);
+  const busiest = Math.max(...perTurn.filter((n) => n !== undefined));
+  assert.ok(busiest <= 10, `${busiest} pieces were handed over in one turn of a feeder whose slice is ten looks at the clock`);
+  for (const g of got) g.length = 50;
   // A feed that is closed while it waits for its turn is not handed anything.
   const late = new PassThrough();
   const never = feed(late);
@@ -392,6 +409,28 @@ await check('a connection is handed one request head a turn, so one that node an
   ticking = false;
   assert.deepEqual(handed, ['GET / HTTP/1.1\r\n\r\n']);
   assert.deepEqual([...answered.matchAll(/HTTP\/1\.1 (\d{3})/g)].map((m) => m[1]), ['400']);
+});
+
+await check('the body of a request named to the feed is handed on only while the request is read: one of one-byte chunks nobody reads holds none of them, and comes in whole once it is read', async () => {
+  const feed = createFeeder();
+  let asked = null;
+  const engine = http.createServer((req) => {
+    req.socket.bodyOf(req);
+    asked = req;
+  });
+  const { near, far } = await pair();
+  engine.emit('connection', feed(far));
+  const chunks = 20000;
+  near.write(`POST /x HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n${'1\r\nx\r\n'.repeat(chunks)}0\r\n\r\n`);
+  await until(() => asked !== null, 'the request to be read');
+  await new Promise((r) => setTimeout(r, 200));
+  await turns(5);
+  assert.equal(asked.readableLength, 0, 'chunks were handed to a request nobody reads');
+  let had = 0;
+  asked.on('data', (d) => { had += d.length; });
+  await once(asked, 'end', 'the body, once it is read');
+  assert.equal(had, chunks);
+  near.destroy();
 });
 
 console.log(`\nall ${checks} checks passed`);

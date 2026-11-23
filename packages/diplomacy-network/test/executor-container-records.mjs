@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-records-'));
@@ -22,7 +22,7 @@ fs.writeFileSync(path.join(imageDir, 'Dockerfile'), 'FROM scratch\n');
 fs.writeFileSync(path.join(outside, 'kept.bin'), Buffer.alloc(2 ** 20, 1));
 const BASE = path.join(scratch, 'base');
 const MiB = 2 ** 20;
-Object.assign(process.env, { DN_BASE_DIR: BASE, DN_DOCKER: FAKE, FAKE_DOCKER_DIR: fakeDir, DN_IMAGE_REPO: 'dn-test-agent', DN_CONTAINER_DISK_BYTES: String(4 * MiB) });
+Object.assign(process.env, { DN_BASE_DIR: BASE, DN_DOCKER: FAKE, FAKE_DOCKER_DIR: fakeDir, DN_IMAGE_REPO: 'dn-test-agent', DN_CONTAINER_DISK_BYTES: String(4 * MiB), DN_CONTAINER_HELD_TIMEOUT_MS: '1500' });
 const { createContainers, containerName, docker, UNMEASURED_PASSES } = await import('../src/executor/container.js');
 const { RUNS_DIR } = await import('../src/paths.js');
 const HELD_CJS = fileURLToPath(new URL('../src/executor/held.cjs', import.meta.url));
@@ -428,6 +428,16 @@ try {
       assert.deepEqual(logged.slice(said), [`docker what the processes of ${name} hold open could not be counted: ${why}`]);
     }
     assert.deepEqual([await containers.overQuota(), await containers.overQuota(), await containers.overQuota()], [[], [], [{ name, bytes: null, jobs: ['run-16'] }]]);
+    // One the job stopped is waited for CONTAINER_HELD_TIMEOUT_MS, not as long as a measurement of the disk.
+    stage(`held-${name}`, `held ${MiB}\n`);
+    stage('hold-run-node');
+    const began = Date.now();
+    const said = logged.length;
+    assert.equal(await containers.usage(name), null);
+    assert.ok(Date.now() - began < 10000, `${Date.now() - began} ms`);
+    assert.deepEqual(logged.slice(said), [`docker what the processes of ${name} hold open could not be counted: no answer`]);
+    unstage('hold-run-node');
+    assert.equal(await containers.usage(name), named + MiB);
     // A container that stopped has no process to hold a file, and no pid namespace to look into.
     const record = path.join(fakeDir, 'containers', `${name}.json`);
     fs.writeFileSync(record, JSON.stringify({ ...JSON.parse(fs.readFileSync(record, 'utf8')), running: false }));
@@ -526,30 +536,44 @@ try {
     nothingLeft();
   });
 
-  await check('held.cjs counts the blocks of every file a process holds open that has no name left, once however many descriptors are on it, and no file that has a name or is held in memory; where it may not read a process it says that it is blind', async () => {
+  await check('held.cjs counts the blocks of every file a process holds open or runs that has no name left, once however many descriptors are on it, of a process whose first thread ended as well, and no file that has a name or is held in memory, nor the size of one past its blocks; where it may not read a process it says that it is blind', async () => {
     const MEMORY = [0x01021994, 0x858458f6, 0x958458f6];
     const disk = ['/var/tmp', os.tmpdir()].find((dir) => fs.existsSync(dir) && !MEMORY.includes(fs.statfsSync(dir).type));
     const inNamespace = (...command) => execFileSync('unshare', ['-U', '-r', '-p', '-f', '--mount-proc', ...command], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 60000 });
-    let can = process.platform === 'linux' && !!disk && fs.existsSync('/dev/shm');
+    const python = spawnSync('python3', ['-c', 'import ctypes; ctypes.CDLL(None).pthread_exit']).status === 0;
+    let can = process.platform === 'linux' && !!disk && fs.existsSync('/dev/shm') && python;
     try { if (can) inNamespace('setpriv', '--bounding-set=-all', 'true'); } catch { can = false; }
-    if (!can) return console.log('INFO held.cjs is not run here: it takes Linux, a pid namespace this user may make and a directory on a disk');
+    if (!can) return console.log('INFO held.cjs is not run here: it takes Linux, a pid namespace this user may make, a directory on a disk and python3');
     const dir = fs.mkdtempSync(path.join(disk, 'dn-held-'));
     try {
       // The shell is the first process of the namespace, holding: 3 MiB on disk with no
-      // name, twice; 2 MiB with a name; 4 MiB in memory with no name.
+      // name, twice; 2 MiB with a name; 4 MiB in memory with no name; a file of 64 MiB
+      // with no blocks and no name. Beside it run a program with no name, of 2 MiB and
+      // more, and a process whose first thread ended, holding 5 MiB with no name.
       const said = inNamespace('sh', '-c', `
         dd if=/dev/zero of="$1/gone" bs=1M count=3 2>/dev/null
         dd if=/dev/zero of="$1/named" bs=1M count=2 2>/dev/null
         dd if=/dev/zero of="/dev/shm/$3" bs=1M count=4 2>/dev/null
-        exec 3< "$1/gone" 4< "$1/named" 5< "$1/gone" 6< "/dev/shm/$3"
-        rm "$1/gone" "/dev/shm/$3"
+        truncate -s 64M "$1/sparse"
+        exec 3< "$1/gone" 4< "$1/named" 5< "$1/gone" 6< "/dev/shm/$3" 7< "$1/sparse"
+        rm "$1/gone" "/dev/shm/$3" "$1/sparse"
+        cat "$(command -v sleep)" > "$1/prog"
+        dd if=/dev/zero bs=1M count=2 >> "$1/prog" 2>/dev/null
+        chmod +x "$1/prog"
+        echo "prog $(($(stat -c %b "$1/prog") * 512))"
+        "$1/prog" 60 & rm "$1/prog"
+        dd if=/dev/zero of="$1/leader" bs=1M count=5 2>/dev/null
+        python3 -c 'import ctypes, os, sys, threading, time; f = open(sys.argv[1], "rb"); os.unlink(sys.argv[1]); threading.Thread(target=time.sleep, args=(60,)).start(); ctypes.CDLL(None).pthread_exit(None)' "$1/leader" &
+        while ! grep -q "^State:.*Z" "/proc/$!/status" 2>/dev/null || [ -e "$1/leader" ]; do sleep 0.05; done
         node "$2"
         setpriv --bounding-set=-all node "$2"
         setpriv --bounding-set=-all,+dac_read_search node "$2"
         setpriv --bounding-set=-all,+sys_ptrace node "$2"`, 'sh', dir, HELD_CJS, path.basename(dir)).trim().split('\n');
-      const [, bytes] = /^held (\d+)$/.exec(said[0]) ?? [];
-      between(Number(bytes), 3 * MiB);
-      assert.deepEqual(said.slice(1), ['blind', 'blind', said[0]], 'with no capability, with the one that reads any file, with the one that reads any process');
+      const [, prog] = /^prog (\d+)$/.exec(said[0]) ?? [];
+      assert.ok(Number(prog) >= 2 * MiB, said[0]);
+      const [, bytes] = /^held (\d+)$/.exec(said[1]) ?? [];
+      between(Number(bytes), 3 * MiB + 5 * MiB + Number(prog));
+      assert.deepEqual(said.slice(2), ['blind', 'blind', said[1]], 'with no capability, with the one that reads any file, with the one that reads any process');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

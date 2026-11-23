@@ -1,19 +1,25 @@
 // What node's http parser is given of a connection. The parser reads every request of
 // what it is handed before anything can stop it, and makes a request and a response
 // object for each, on the thread it is called on: 64 KiB of the shortest requests is
-// 3640 of them in one call. So a connection's bytes reach it through a feed, in pieces
-// that end where a request head does. The next piece is handed over only when whoever
-// reads the connection asks for it, so a connection that was paused or closed over one
-// request has no other read. A connection is handed one request head in a turn of the
-// event loop, so one whose answer closes it has had no second request read by then; and
-// all the feeds together hand over no more in one turn than fits a slice of time, however
-// many connections have bytes waiting.
+// 3640 of them in one call. It makes an object of every chunk of a body as well, and a
+// chunk of the chunked coding can be one byte in six. So a connection's bytes reach it
+// through a feed, in pieces of at most FEED_PIECE_BYTES that end where a request head
+// does. The next piece is handed over only when whoever reads the connection asks for
+// it, so a connection that was paused or closed over one request has no other read; and
+// a piece of a body only while its request is read, so a request nobody reads holds no
+// chunks. A connection is handed one request head in a turn of the event loop, so one
+// whose answer closes it has had no second request read by then; and all the feeds
+// together hand over no more in one turn than fits a slice of time, however many
+// connections have bytes waiting.
 
 import { Duplex } from 'node:stream';
 
 /// The time the feeds of one feeder hand bytes over for in one turn of the event loop
 /// before they leave the rest to the next turn.
 export const FEED_TURN_MS = 4;
+
+/// The most bytes a feed hands over at once: what one call of the parser is given.
+export const FEED_PIECE_BYTES = 4096;
 
 const LF = 10;
 const CR = 13;
@@ -76,9 +82,13 @@ export function createFeeder({ turnMs = FEED_TURN_MS, now = () => performance.no
     let ended = false;
     let last = false;
     let headIn = -1; // the turn it last handed the end of a request head over in
+    let body = null; // the request whose body comes next
+
+    const unread = () => body !== null && !body.complete && body.readableFlowing !== true;
 
     function pump() {
       while (wanted && !last && !out.destroyed) {
+        // One chunk is read ahead of a body nobody reads yet: a source that ends is seen to.
         if (!held) {
           if (ended) {
             wanted = false;
@@ -86,11 +96,13 @@ export function createFeeder({ turnMs = FEED_TURN_MS, now = () => performance.no
           } else source.resume();
           return;
         }
+        if (unread()) return;
         if (usedUp()) {
           waiting.add(pump);
           return;
         }
-        const end = headEnd(held, edge);
+        const next = held.length > FEED_PIECE_BYTES ? held.subarray(0, FEED_PIECE_BYTES) : held;
+        const end = headEnd(next, edge);
         if (end !== -1) {
           if (headIn === turn) {
             waiting.add(pump);
@@ -98,8 +110,8 @@ export function createFeeder({ turnMs = FEED_TURN_MS, now = () => performance.no
           }
           headIn = turn;
         }
-        const piece = end === -1 ? held : held.subarray(0, end);
-        held = piece.length < held.length ? held.subarray(end) : null;
+        const piece = end === -1 ? next : next.subarray(0, end);
+        held = piece.length < held.length ? held.subarray(piece.length) : null;
         edge = edgeAfter(piece, edge);
         wanted = false;
         out.push(piece);
@@ -161,6 +173,12 @@ export function createFeeder({ turnMs = FEED_TURN_MS, now = () => performance.no
     };
     /// Hands nothing more on, ever: the request it handed on last is its connection's last.
     out.last = () => { last = true; };
+    /// Says that `req`, the request whose head it handed on last, is what its next bytes
+    /// are the body of: none of them is handed on while `req` is not read.
+    out.bodyOf = (req) => {
+      body = req;
+      req.on('resume', pump);
+    };
     // The time a connection may stay silent is kept by the socket that carries it.
     out.setTimeout = (ms, fn) => {
       if (fn) out.once('timeout', fn);

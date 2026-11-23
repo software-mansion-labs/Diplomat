@@ -277,6 +277,9 @@ export const CONTAINER_IDLE_MS = num('DN_CONTAINER_IDLE_MS', 6 * 3600 * 1000);
 export const CONTAINER_DISK_BYTES = num('DN_CONTAINER_DISK_BYTES', 20 * 2 ** 30);
 // How long one measurement of a container's disk use may take.
 export const CONTAINER_USAGE_TIMEOUT_MS = bound('DN_CONTAINER_USAGE_TIMEOUT_MS', 5 * 60 * 1000);
+// How long the count of what a running container's processes hold open may take: it reads
+// a few files of each process, in a pid namespace the job can stop it in.
+export const CONTAINER_HELD_TIMEOUT_MS = bound('DN_CONTAINER_HELD_TIMEOUT_MS', 30 * 1000);
 // Where the broker listens: empty picks the address a container's host.docker.internal
 // leads to (loopback under Docker Desktop, the bridge gateway on Linux).
 export const BROKER_BIND = process.env.DN_BROKER_BIND || '';

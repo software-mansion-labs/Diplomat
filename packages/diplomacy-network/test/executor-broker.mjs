@@ -436,9 +436,12 @@ try {
     assert.equal(dials.at(-1), '93.184.216.34:443');
     t.socket.destroy();
     broker.removeJob('run-gitlab');
-    // What is no host and port is said to be none, and nothing is asked about it.
+    // What is no host and port is said to be none, and nothing is asked about it: a name
+    // with a second trailing dot or an empty label is no name, nor is one too long for DNS.
     const asked = lookups.length;
-    for (const target of ['.:443', 'github.com:0', 'github.com:65536', 'github.com:99999', 'github.com', 'a:b:1', 'github.com:443:443', '[::1:443', 'github.com:']) {
+    for (const target of ['.:443', 'github.com:0', 'github.com:65536', 'github.com:99999', 'github.com', 'a:b:1', 'github.com:443:443', '[::1:443', 'github.com:',
+      'github.com..:22', 'api.github.com..:443', 'ssh.github.com..:443', 'printer.local..:443', '_gateway..:443', 'a..b.example:443', '.example.com:443', 'git_hub.com\\:443',
+      `${'a'.repeat(64)}.example:443`, `${'a.'.repeat(125)}example:443`, '[github.com]:443']) {
       const r = await tunnel(target, basic('dn', job.token));
       assert.equal(r.status, 400, target);
       assert.equal(r.body, `not a host and port: ${target}\n`);
@@ -509,8 +512,11 @@ try {
       const d = dials.length;
       const shut = await tunnel('neighbour.test:443', basic('dn', job.token));
       assert.equal(shut.status, 403, 'the same address once this machine has joined its network');
-      assert.match(shut.body, /^the broker does not connect to neighbour\.test: 2001:db8:77:1::9 is not a public internet address\. /);
-      assert.equal((await tunnel('[2001:db8:77:1::9]:443', basic('dn', job.token))).status, 403);
+      // What the name resolved to is the network's, and the job is not told it.
+      assert.match(shut.body, /^the broker does not connect to neighbour\.test: what it resolves to is not a public internet address\. /);
+      const bare = await tunnel('[2001:db8:77:1::9]:443', basic('dn', job.token));
+      assert.equal(bare.status, 403);
+      assert.match(bare.body, /^the broker does not connect to 2001:db8:77:1::9: that is not a public internet address\. /);
       assert.equal(dials.length, d);
     } finally { os.networkInterfaces = real; }
     names.delete('neighbour.test');
@@ -635,6 +641,29 @@ try {
     assert.equal(seen.headers['user-agent'], 'apt');
     assert.equal(seen.headers['proxy-authorization'], undefined);
     assert.equal(seen.headers['proxy-connection'], undefined);
+  });
+
+  await check('a plain request\'s body goes upstream as the upstream reads it: one that reads nothing leaves the rest unread', async () => {
+    const slow = net.createServer((s) => { s.on('error', () => {}); s.pause(); });
+    publish('slow.test', '93.184.216.78', 80, await listen(slow));
+    const total = 128 * 2 ** 20;
+    const c = net.connect(port, '127.0.0.1');
+    c.on('error', () => {});
+    await new Promise((resolve) => c.once('connect', resolve));
+    c.write(`POST http://slow.test/x HTTP/1.1\r\nHost: slow.test\r\n${basic('dn', job.token)}Content-Length: ${total}\r\n\r\n`);
+    const piece = Buffer.alloc(2 ** 20, 'b');
+    let written = 0;
+    const deadline = Date.now() + 3000;
+    while (written < total && Date.now() < deadline) {
+      written += piece.length;
+      if (!c.write(piece)) await Promise.race([new Promise((r) => c.once('drain', r)), new Promise((r) => setTimeout(r, deadline - Date.now()))]);
+    }
+    await new Promise((r) => setTimeout(r, Math.max(0, deadline - Date.now())));
+    const out = c.bytesWritten - c.writableLength;
+    assert.ok(out < 48 * 2 ** 20, `${out} bytes of a body went out to an upstream that reads none of it`);
+    c.destroy();
+    slow.close();
+    routes.delete('93.184.216.78:80');
   });
 
   await check('a forge request reaches the requester as host, method, path, headers and base64 body, and its answer comes back as sent', async () => {
@@ -838,6 +867,11 @@ try {
       assert.equal(res.headers['content-type'], 'application/x-git-upload-pack-result');
       assert.match(res.body.toString(), new RegExp(`${git(big.bare, 'rev-parse', 'refs/heads/main')} refs/heads/main`), String(encoding));
     }
+    // A length past 15 digits, which the parser takes, is refused for a body git reads as it comes.
+    const s = await secure(bigJob, 'github.com');
+    const long = await exchange(s, `POST /dn-test/big.git/git-upload-pack HTTP/1.1\r\nHost: github.com\r\nContent-Type: application/x-git-upload-pack-request\r\nGit-Protocol: version=2\r\nContent-Length: 12345678901234567\r\n\r\n${lsRefs.toString('latin1')}`);
+    assert.deepEqual([long.status, JSON.parse(long.body).message], [400, 'the broker carries a request body by its Content-Length or as Transfer-Encoding: chunked, one of the two and nothing else']);
+    s.destroy();
     // A header that is not a protocol list never becomes an environment variable.
     const odd = await request(bigJob, 'github.com', { path: '/dn-test/big.git/info/refs?service=git-upload-pack', headers: { 'git-protocol': 'version=2 $(reboot)' } });
     assert.match(odd.body.toString(), /^001e# service=git-upload-pack\n0000/, 'answered as the oldest protocol');
@@ -1442,6 +1476,8 @@ try {
     const mine = [
       ['a coding before chunked', req('Transfer-Encoding: gzip, chunked\r\n', '2\r\nxx\r\n0\r\n\r\n')],
       ['another coding before chunked', req('Transfer-Encoding: identity, chunked\r\n', '2\r\nxx\r\n0\r\n\r\n')],
+      // The parser takes up to 20 digits; past 15 a length is no longer the number it reads as.
+      ['a length of 17 digits', req('Content-Length: 12345678901234567\r\n', 'hello')],
     ];
     const parsers = [
       ['a length and a coding', req('Transfer-Encoding: chunked\r\nContent-Length: 4\r\n', '0\r\n\r\n')],
@@ -2084,10 +2120,10 @@ try {
       const other = await b.addJob({ runId: 'quiet', pool: alpha.pool });
       const said = logged.length;
       const mine = (runId) => logged.slice(said).filter((line) => line.startsWith(`broker ${runId} `));
-      const long = `${'a'.repeat(6000)}.docker.internal`;
+      const long = `${`${'a'.repeat(63)}.`.repeat(3)}docker.internal`;
       for (let i = 0; i < 40; i++) assert.equal((await tunnel(`${long}:443`, basic('dn', j.token))).status, 403);
       assert.equal(mine('loud').length, 1);
-      assert.match(mine('loud')[0], /^broker loud refused a{292}\.\.\. \(\d+ characters\)$/);
+      assert.match(mine('loud')[0], /^broker loud refused (a{63}\.){3}docker\.internal:443: the broker does not connect to a+\.\.\. \(\d+ characters\)$/);
       assert.ok(mine('loud')[0].length < 400);
       // A request that fails is a kind of its own, and another job's lines are its own.
       forgeAnswer = async () => { throw new Error(`no\n${'b'.repeat(5000)}`); };
