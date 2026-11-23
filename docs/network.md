@@ -33,7 +33,9 @@ left as it is, and the feed says that instead.
 It needs `tor` and `docker` on the machine, and `gh` or `glab` signed in for the forge each
 repository is on. The daemon looks for them on its `PATH` and in the usual install directories;
 `DN_TOR`, `DN_DOCKER`, `DN_GH` and `DN_GLAB` in the environment the daemon starts with name a
-binary anywhere else, and `DN_TOOL_DIRS` names other directories to look in. Without docker a machine still offers its jobs and acts for them, and
+binary anywhere else, and `DN_TOOL_DIRS` names other directories to look in. It also needs `openssl`: without one the
+machine takes no job and the Network screen says so; `DN_OPENSSL`, `DN_GIT`, `DN_CLAUDE` and, on
+macOS, `DN_SECURITY` name those binaries the same way. Without docker a machine still offers its jobs and acts for them, and
 takes none. Without Tor it reaches no other machine. The Network screen shows what the daemon
 says is missing, and while tor, docker or the model credential is missing or failed, or the
 daemon does not answer, a red line above the task list says so and opens that screen. While the
@@ -317,7 +319,10 @@ state, where it runs, lease end). A job row offers **Stop** for a run on this ma
 goes back to the pool - or **Withdraw** for one this machine offered that runs elsewhere or
 nowhere yet. **Stop** asks the daemon what runs here first: a run that ended since the screen
 drew it is neither stopped nor withdrawn, and the card says so. **Restart daemon** leaves the
-jobs in this machine's containers running; the daemon that starts takes them up.
+jobs in this machine's containers running; the daemon that starts takes them up at once, before
+it has built its image or read the model credential, and a job whose run ended meanwhile is
+stopped. If docker does not answer for a minute, the jobs go back to the pool at no cost to
+their attempts.
 
 The daemon leaves a pool that is missing from the list Diplomat gives it, so what Diplomat
 cannot confirm is never dropped from that list. A repo root or a checkout under Other repos
@@ -389,14 +394,16 @@ Switching the network off withdraws this machine's open offers, stops the jobs i
 pool and frees their PRs and issues for agents in terminals again. The daemon removes its
 containers, mirrors and run records and exits; the machine's key, its pools and the image stay,
 so switched on again it is the member it was. With no daemon running to do it, the stop
-itself cancels the offers and ends the runs left in the daemon's store, and its line in the
-feed says how many. A stop that could not remove one of those directories says which in the
+itself cancels the offers and ends the runs left in the daemon's store - a job that had
+finished meanwhile ends as it finished and is not run again - and its line in the feed says
+how many. A stop that could not remove one of those directories says which in the
 same line, reads *ok: false* with no daemon left running, and the next switch-off tries
 again. Work that was asked for and
 had not run is started in a terminal from the queue on the next poll. A monitor's own find
 counts its offer as an attempt, so it is started again on that monitor's retry schedule. A job
 started by hand whose offer the daemon had not answered is withdrawn if the daemon turns out to
-hold it; of any other the feed says that it was not offered, and it is started nowhere.
+hold it; of any other the feed says that it was not offered, and it is started nowhere. Started with
+the network off, the daemon does not start and says so.
 
 ## What it does not protect against
 
