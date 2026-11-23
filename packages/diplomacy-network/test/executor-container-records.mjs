@@ -1,6 +1,8 @@
 // What is held of the disk under a container's name against the stand-in docker, the run
 // records above all, which outlive the container: counted with or without one, removed
-// run by run and whole, and never reported gone while they are there.
+// run by run and whole, and never reported gone while they are there. And what a
+// container's processes hold open under no name, counted by the real held.cjs where
+// this machine gives a pid namespace to run it in.
 // Run: node test/executor-container-records.mjs
 
 import assert from 'node:assert/strict';
@@ -23,6 +25,8 @@ const MiB = 2 ** 20;
 Object.assign(process.env, { DN_BASE_DIR: BASE, DN_DOCKER: FAKE, FAKE_DOCKER_DIR: fakeDir, DN_IMAGE_REPO: 'dn-test-agent', DN_CONTAINER_DISK_BYTES: String(4 * MiB) });
 const { createContainers, containerName, docker, UNMEASURED_PASSES } = await import('../src/executor/container.js');
 const { RUNS_DIR } = await import('../src/paths.js');
+const HELD_CJS = fileURLToPath(new URL('../src/executor/held.cjs', import.meta.url));
+const HELD = fs.readFileSync(HELD_CJS, 'utf8');
 
 let checks = 0;
 const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };
@@ -80,7 +84,7 @@ try {
     const { name, image } = await ended(1, 'run-1a', MiB);
     const other = await ended(11, 'run-1b');
     between(await containers.usage(name), MiB + 3 * 4096);
-    assert.deepEqual(calls('run').at(-1), [...probeOf(name), '--cap-add=DAC_READ_SEARCH', '-v', `${records(name)}:/r:ro`, image, 'sh', '-c', 'du -sxB1 /r; du -sx --inodes /r']);
+    assert.deepEqual(calls('run').at(-1), [...probeOf(name), '--cap-add=DAC_READ_SEARCH', '-v', `${records(name)}:/r:ro`, image, 'sh', '-c', 'du -sxB1 /r 2>/dev/null; du -sx --inodes /r 2>/dev/null']);
     assert.deepEqual(await containers.overQuota(), [], 'under its allowance nothing is named');
     fs.writeFileSync(path.join(records(name), 'run-1a', 'more.bin'), Buffer.alloc(4 * MiB, 1));
     const over = await containers.overQuota();
@@ -206,14 +210,19 @@ try {
     const name = containerName(pool(13).id, PEER);
     execFileSync(FAKE, ['run', '-d', '--name', name, '--label', `dn.pool=${pool(13).id}`, '--label', `dn.peer=${PEER}`, '--label', `dn.base=${BASE}`, containers.dockerState().image, 'sleep', 'infinity']);
     // With no volume and no records it holds its writable layer, which the engine says
-    // without a probe, and it is named past its allowance like any other.
+    // itself, and it is named past its allowance like any other: the one probe beside it
+    // looks at its processes, and mounts nothing.
     fs.writeFileSync(path.join(fakeDir, 'roots', name, 'layer.bin'), Buffer.alloc(5 * MiB, 1));
-    const probes = calls('run').length;
+    const mounting = () => calls('run').filter((c) => c.includes('-v')).length;
+    const probes = mounting();
     between(await containers.usage(name), 5 * MiB);
     assert.deepEqual((await containers.overQuota()).map((o) => [o.name, o.jobs]), [[name, []]]);
+    stage(`held-${name}`, `held ${MiB}\n`);
+    between(await containers.usage(name), 6 * MiB);
+    unstage(`held-${name}`);
     fs.mkdirSync(path.join(records(name), 'left-by-a-job'), { recursive: true });
     assert.equal(await denied(records(name), () => containers.sweep()), 0);
-    assert.deepEqual([fs.readdirSync(records(name)), calls('run').length], [['left-by-a-job'], probes]);
+    assert.deepEqual([fs.readdirSync(records(name)), mounting()], [['left-by-a-job'], probes]);
     await containers.discard(name);
     nothingLeft();
   });
@@ -290,10 +299,11 @@ try {
   });
 
   await check('the measuring and the clearing of one name take their turns: a clearing asked for while a measurement runs is started after it, not on top of it', async () => {
-    const { name } = await ended(10, 'run-10a');
-    await containers.acquire({ pool: pool(10), peer: PEER, runId: 'run-10b' });
+    const { name } = await containers.acquire({ pool: pool(10), peer: PEER, runId: 'run-10b' });
+    run(name, 'run-10a');
     stage('hold-run-sh');
-    const probes = calls('run').length;
+    // After the probe that looks at the container's processes.
+    const probes = calls('run').length + 1;
     const measuring = containers.usage(name);
     await until('the measurement is with the engine', () => calls('run').length > probes);
     const erasing = containers.erase(name, 'run-10a');
@@ -303,7 +313,7 @@ try {
     unstage('hold-run-sh');
     assert.ok(await measuring > 0);
     assert.equal(await erasing, true);
-    assert.deepEqual(calls('run').slice(probes).map((c) => c.at(-1)), ['du -sxB1 /v /r; du -sx --inodes /v /r', '-delete']);
+    assert.deepEqual(calls('run').slice(probes).map((c) => c.at(-1)), ['du -sxB1 /v /r 2>/dev/null; du -sx --inodes /v /r 2>/dev/null', '-delete']);
     assert.deepEqual(calls('rm').filter((c) => c.includes(`${name}-probe`)), [], 'and no probe was taken for one left behind');
     await containers.release({ name, runId: 'run-10b' });
     await containers.discard(name);
@@ -336,6 +346,213 @@ try {
     assert.deepEqual(kept(), [true, ['.containers', 'run-12']]);
     await containers.discard(name);
     nothingLeft();
+  });
+
+  await check('a pair\'s next container is shown none of what its earlier one left among the run records: they are moved aside whole, where the run\'s link still leads, counted under the name, erased run by run, and gone with their last kept run', async () => {
+    const { name, image } = await ended(15, 'run-15a', MiB);
+    fs.writeFileSync(path.join(records(name), 'planted-by-job-1.sh'), '#!/bin/sh\n');
+    await containers.sweep();
+    // The run ended an hour ago, and a daemon that went while it led a link elsewhere left its start.
+    const ended15a = new Date(Date.now() - 3600 * 1000);
+    fs.lutimesSync(path.join(RUNS_DIR, 'run-15a'), ended15a, ended15a);
+    fs.symlinkSync('nowhere', path.join(RUNS_DIR, 'run-15a.aside'));
+    const next = await containers.acquire({ pool: pool(15), peer: PEER, runId: 'run-15b' });
+    const made = calls('run').at(-1);
+    assert.deepEqual([next.runsDir, made.includes(`${records(name)}:/dn/runs`)], [records(name), true], 'the directory its jobs are given is the one it is shown');
+    assert.deepEqual(fs.readdirSync(records(name)), [], 'and nothing is in it');
+    const aside = `${name}.1`;
+    assert.deepEqual(fs.readdirSync(records(aside)).sort(), ['planted-by-job-1.sh', 'run-15a']);
+    assert.deepEqual([fs.readlinkSync(path.join(RUNS_DIR, 'run-15a')), fs.readFileSync(path.join(RUNS_DIR, 'run-15a', 'log.jsonl')).length], [path.join('.containers', aside, 'run-15a'), MiB]);
+    assert.deepEqual([Math.round(fs.lstatSync(path.join(RUNS_DIR, 'run-15a')).mtimeMs), fs.readdirSync(RUNS_DIR).sort()], [ended15a.getTime(), ['.containers', 'run-15a']], 'the link is as old as it was, which is what its run is kept by');
+    assert.ok(calls().every((c) => !c.includes(aside) && !c.includes(`${aside}-probe`)), 'no container, network, volume or probe is of that name');
+    run(name, 'run-15b', MiB);
+    between(await containers.usage(name), 2 * MiB + 7 * 4096);
+    assert.deepEqual(calls('run').at(-1), [...probeOf(name), '--cap-add=DAC_READ_SEARCH', '-v', `${volumeOf(name)}:/v:ro`, '-v', `${records(name)}:/r:ro`, '-v', `${records(aside)}:/r1:ro`,
+      image, 'sh', '-c', 'du -sxB1 /v /r /r1 2>/dev/null; du -sx --inodes /v /r /r1 2>/dev/null']);
+    // A second container after it, and a third: each earlier one's records in a directory of their own.
+    await containers.release({ name, runId: 'run-15b' });
+    // As a daemon left them that ended between leading the link and moving the directory.
+    fs.unlinkSync(path.join(RUNS_DIR, 'run-15b'));
+    fs.symlinkSync(path.join('.containers', `${name}.2`, 'run-15b'), path.join(RUNS_DIR, 'run-15b'));
+    await containers.acquire({ pool: pool(15), peer: PEER, runId: 'run-15c' });
+    assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.containers')).sort(), [name, aside, `${name}.2`]);
+    assert.equal(fs.readFileSync(path.join(RUNS_DIR, 'run-15b', 'log.jsonl')).length, MiB, 'the directory went where the link led');
+    assert.deepEqual([fs.readdirSync(records(name)), fs.readdirSync(records(`${name}.2`))], [[], ['run-15b']]);
+    fs.writeFileSync(path.join(records(aside), 'run-15a', 'more.bin'), Buffer.alloc(3 * MiB, 1));
+    const over = await containers.overQuota();
+    assert.deepEqual(over.map((o) => [o.name, o.jobs]), [[name, ['run-15c']]], 'what was moved aside counts under the one name, with the container that stands');
+    between(over[0].bytes, 5 * MiB + 9 * 4096);
+    // As the keeper of the runs erases one: by the directory its link leads into.
+    const from = calls().length;
+    assert.equal(await containers.erase(aside, 'run-15a'), true);
+    assert.deepEqual(calls().slice(from), [], 'no container shows that directory to a job: nothing is asked of the engine');
+    fs.unlinkSync(path.join(RUNS_DIR, 'run-15a'));
+    await containers.sweep();
+    assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.containers')).sort(), [name, `${name}.2`], 'with no run kept in it the directory goes, with what else a job left there');
+    // Records this user may not delete go through the engine, under the pair's own probe.
+    fs.unlinkSync(path.join(RUNS_DIR, 'run-15b'));
+    const probes = calls('run').length;
+    await denied(records(`${name}.2`), () => containers.sweep());
+    assert.deepEqual(calls('run').slice(probes), [[...probeOf(name), '--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '-v', `${records(`${name}.2`)}:/r`, image, 'find', '/r', '-mindepth', '1', '-delete']]);
+    // And all of a name's records go with the name.
+    await containers.release({ name, runId: 'run-15c' });
+    run(name, 'run-15d');
+    await (await containers.acquire({ pool: pool(15), peer: PEER, runId: 'run-15e' }), containers.release({ name, runId: 'run-15e' }));
+    assert.deepEqual(fs.readdirSync(RUNS_DIR).sort(), ['.containers', 'run-15d']);
+    assert.equal(fs.readlinkSync(path.join(RUNS_DIR, 'run-15d')).split(path.sep)[1], `${name}.3`);
+    // With no container and no directory of the name's own, what was moved aside is still its.
+    await containers.sweep();
+    assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.containers')), [`${name}.3`]);
+    fs.writeFileSync(path.join(records(`${name}.3`), 'run-15d', 'more.bin'), Buffer.alloc(4 * MiB, 1));
+    assert.deepEqual((await containers.overQuota()).map((o) => [o.name, o.jobs]), [[name, []]]);
+    await containers.discard(name);
+    nothingLeft();
+  });
+
+  await check('a file a process of the container keeps open under no name counts under the name for as long as the container runs: one past its allowance by that alone is named, and a count the job ended leaves it unmeasured', async () => {
+    const { name, image } = await containers.acquire({ pool: pool(16), peer: PEER, runId: 'run-16' });
+    run(name, 'run-16');
+    const named = await containers.usage(name);
+    // The stand-in's word for 5 MiB written, kept open and unlinked: no file is left to count.
+    stage(`held-${name}`, `held ${5 * MiB}\n`);
+    const from = calls('run').length;
+    assert.equal(await containers.usage(name), named + 5 * MiB);
+    assert.deepEqual(calls('run')[from], [...probeOf(name), '--pid', `container:${name}`, '--cap-add=DAC_READ_SEARCH', '--cap-add=SYS_PTRACE', image, 'node', '-e', HELD]);
+    assert.deepEqual(await containers.overQuota(), [{ name, bytes: named + 5 * MiB, jobs: ['run-16'] }]);
+    // Killed before it printed, and saying that it could not look: neither is a count.
+    // So is one that writes on past what a probe has to say: it is heard no further.
+    for (const [answer, why] of [['', 'no answer'], ['blind\n', 'blind'], ['held 1\n'.repeat(20000), 'no answer']]) {
+      stage(`held-${name}`, answer);
+      const said = logged.length;
+      assert.equal(await containers.usage(name), null);
+      assert.deepEqual(logged.slice(said), [`docker what the processes of ${name} hold open could not be counted: ${why}`]);
+    }
+    assert.deepEqual([await containers.overQuota(), await containers.overQuota(), await containers.overQuota()], [[], [], [{ name, bytes: null, jobs: ['run-16'] }]]);
+    // A container that stopped has no process to hold a file, and no pid namespace to look into.
+    const record = path.join(fakeDir, 'containers', `${name}.json`);
+    fs.writeFileSync(record, JSON.stringify({ ...JSON.parse(fs.readFileSync(record, 'utf8')), running: false }));
+    const stopped = calls('run').length;
+    assert.equal(await containers.usage(name), named);
+    assert.deepEqual(calls('run').slice(stopped).map((c) => c.includes('--pid')), [false]);
+    // With the container gone its processes are, and nothing is asked after them.
+    await containers.release({ name, runId: 'run-16' });
+    const asked = calls('run').length;
+    between(await containers.usage(name), 16 + 3 * 4096);
+    assert.deepEqual(calls('run').slice(asked).map((c) => c.includes('--pid')), [false]);
+    unstage(`held-${name}`);
+    await containers.discard(name);
+    nothingLeft();
+  });
+
+  await check('an engine whose first word is that a probe may not read a container\'s processes is asked once, and its containers are measured by their files', async () => {
+    const { name } = await containers.acquire({ pool: pool(17), peer: PEER, runId: 'run-17' });
+    const beside = () => calls('run').filter((c) => c.includes('--pid')).length;
+    const said = [];
+    const fresh = createContainers({ log: (...a) => said.push(a.join(' ')), imageDir });
+    stage(`held-${name}`, 'blind\n');
+    const from = beside();
+    const named = await fresh.usage(name);
+    assert.ok(named > 0);
+    assert.deepEqual(said, ['docker this engine does not show a probe what a container\'s processes hold open: a file with no name left is not counted against a container\'s disk allowance']);
+    stage(`held-${name}`, `held ${MiB}\n`);
+    assert.deepEqual([await fresh.usage(name), beside(), said.length], [named, from + 1, 1], 'and not again');
+    unstage(`held-${name}`);
+    await containers.release({ name, runId: 'run-17' });
+    await containers.discard(name);
+    nothingLeft();
+  });
+
+  await check('a daemon that is switched off erases the run records under every name, those of its earlier containers among them and nothing else: what this user may not delete goes through a probe, on the image jobs are started in or, in a daemon that has none, on one this daemon built', async () => {
+    const one = await ended(40, 'run-40a');
+    await containers.acquire({ pool: pool(40), peer: PEER, runId: 'run-40b' });
+    run(one.name, 'run-40b');
+    await containers.release({ name: one.name, runId: 'run-40b' });
+    const other = await ended(41, 'run-41');
+    const aside = `${one.name}.1`;
+    fs.mkdirSync(records('somebody-elses'));
+    assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.containers')).sort(), [one.name, aside, other.name, 'somebody-elses'].sort());
+    // `from.eraseAll()` with `dir` refused this user once, as a directory with root's files
+    // in it is, and with this user's first removal held until `go`. Resolves to what this
+    // user was asked to remove, in order.
+    const erasing = async (from, dir, go = Promise.resolve(), first = () => {}) => {
+      const real = fs.promises.rm;
+      const asked = [];
+      fs.promises.rm = async (target, options) => {
+        asked.push(target);
+        if (asked.length === 1) await go;
+        if (target === dir && asked.filter((t) => t === dir).length === 1) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        return real(target, options);
+      };
+      try {
+        const before = first(asked);
+        await from.eraseAll();
+        await before;
+      } finally { fs.promises.rm = real; }
+      return asked;
+    };
+    const emptied = (name, dir, image) => [...probeOf(name), '--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '-v', `${records(dir)}:/r`, image, 'find', '/r', '-mindepth', '1', '-delete'];
+    const [ran, listed] = [calls('run').length, calls('image').length];
+    // One run under the name is being erased meanwhile: everything under that name waits its turn behind it.
+    let go;
+    const held = new Promise((resolve) => { go = resolve; });
+    const asked = await erasing(containers, records(aside), held, (seen) => {
+      const single = containers.erase(aside, 'run-40a');
+      (async () => {
+        await until('the records of the other name to be asked for', () => seen.includes(records(other.name)));
+        await settle();
+        assert.deepEqual(seen, [path.join(records(aside), 'run-40a'), records(other.name)], 'nothing under the name is touched while one of its runs is being erased');
+        go();
+      })();
+      return single;
+    });
+    assert.deepEqual(asked.filter((t) => t === records(aside)).length, 2, 'refused once, and asked again after the engine');
+    assert.deepEqual(calls('run').slice(ran), [emptied(one.name, aside, one.image)], 'under the name of the container whose records they were');
+    assert.equal(calls('image').length, listed, 'the image jobs are started in is known');
+    assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.containers')), ['somebody-elses']);
+    fs.rmdirSync(records('somebody-elses'));
+    for (const runId of ['run-40a', 'run-40b', 'run-41']) fs.unlinkSync(path.join(RUNS_DIR, runId));
+
+    // A daemon that never had an image to start jobs in: its engine was down, or its image did not build.
+    const left = await ended(42, 'run-42');
+    const off = createContainers({ log: (...a) => logged.push(a.join(' ')), imageDir, broker: () => ({ port: 4321 }) });
+    assert.equal(off.dockerState().image, '');
+    // An image somebody built on top of this daemon's carries its label, and is not it.
+    stage(path.join('images', encodeURIComponent('aaa-built-on-top:1')), JSON.stringify([`dn.base=${BASE}`]));
+    const from = calls('run').length;
+    assert.equal((await erasing(off, records(left.name))).length, 2);
+    assert.deepEqual(calls('run').slice(from), [emptied(left.name, left.name, left.image)]);
+    unstage(path.join('images', encodeURIComponent('aaa-built-on-top:1')));
+    fs.unlinkSync(path.join(RUNS_DIR, 'run-42'));
+    nothingLeft();
+  });
+
+  await check('held.cjs counts the blocks of every file a process holds open that has no name left, once however many descriptors are on it, and no file that has a name or is held in memory; where it may not read a process it says that it is blind', async () => {
+    const MEMORY = [0x01021994, 0x858458f6, 0x958458f6];
+    const disk = ['/var/tmp', os.tmpdir()].find((dir) => fs.existsSync(dir) && !MEMORY.includes(fs.statfsSync(dir).type));
+    const inNamespace = (...command) => execFileSync('unshare', ['-U', '-r', '-p', '-f', '--mount-proc', ...command], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 60000 });
+    let can = process.platform === 'linux' && !!disk && fs.existsSync('/dev/shm');
+    try { if (can) inNamespace('setpriv', '--bounding-set=-all', 'true'); } catch { can = false; }
+    if (!can) return console.log('INFO held.cjs is not run here: it takes Linux, a pid namespace this user may make and a directory on a disk');
+    const dir = fs.mkdtempSync(path.join(disk, 'dn-held-'));
+    try {
+      // The shell is the first process of the namespace, holding: 3 MiB on disk with no
+      // name, twice; 2 MiB with a name; 4 MiB in memory with no name.
+      const said = inNamespace('sh', '-c', `
+        dd if=/dev/zero of="$1/gone" bs=1M count=3 2>/dev/null
+        dd if=/dev/zero of="$1/named" bs=1M count=2 2>/dev/null
+        dd if=/dev/zero of="/dev/shm/$3" bs=1M count=4 2>/dev/null
+        exec 3< "$1/gone" 4< "$1/named" 5< "$1/gone" 6< "/dev/shm/$3"
+        rm "$1/gone" "/dev/shm/$3"
+        node "$2"
+        setpriv --bounding-set=-all node "$2"
+        setpriv --bounding-set=-all,+dac_read_search node "$2"
+        setpriv --bounding-set=-all,+sys_ptrace node "$2"`, 'sh', dir, HELD_CJS, path.basename(dir)).trim().split('\n');
+      const [, bytes] = /^held (\d+)$/.exec(said[0]) ?? [];
+      between(Number(bytes), 3 * MiB);
+      assert.deepEqual(said.slice(1), ['blind', 'blind', said[0]], 'with no capability, with the one that reads any file, with the one that reads any process');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   console.log(`\nall ${checks} checks passed`);

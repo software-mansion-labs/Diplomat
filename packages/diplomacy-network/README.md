@@ -50,6 +50,7 @@ src/
     forge.js       performs an allowed request with this machine's credentials
   executor/
     broker.js      the proxy every container talks through
+    feed.js        what the broker's http parser is handed of a connection: a request at a time
     ca.js          the broker's certificate authority and leaf certificates
     llm.js         the model credential the broker adds
     mirror.js      the bare mirror a container clones from
@@ -100,7 +101,7 @@ closed at every start.
 | `tor/` | tor's data directory |
 | `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it. A leaf is good for 90 days, is replaced from two weeks before its end, under a running job too, and is removed once past it |
 | `mirrors/<pool part>.git` | bare mirrors, each named by the 128 bits its pool has in a container's name. One is removed a day after its pool was last linked and not left, never from under a job that reads it, and all of them when the network is switched off; one named by sixteen hex digits is an earlier version's, is not read, and goes a day after it was last touched |
-| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended - the directory first, and the link only once the directory is gone, so one that will not go is met again at the next look - and `runs/.containers/<container>/`, with whatever else a job left in it, once the container is gone and no run in it is kept |
+| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. When that requester's next container for the repository is made, the directory moves whole to `runs/.containers/<container>.<n>/`, which no container is shown, and the links to its runs follow it: the new container starts with an empty one. A job's directory and its link are removed a day after the job ended - the directory first, and the link only once the directory is gone, so one that will not go is met again at the next look - and a directory of either name, with whatever else a job left in it, once no container is shown it and no run in it is kept |
 | `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed once its directory is gone |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
@@ -582,7 +583,9 @@ four things and starts the job:
   leaves it is removed with its relay, its network and its `/work` volume, and that
   peer's next job on that repository gets a new one from the image, so nothing a job
   wrote, installed or left running is there for a job that starts after every earlier
-  one has ended. Jobs of one peer on one repository that run at the same time run in
+  one has ended: not in the container, not in `/work`, and not among the run records
+  it is shown, which start empty - what earlier jobs left there is moved out of its
+  sight when it is made. Jobs of one peer on one repository that run at the same time run in
   that one container, each as root, and nothing in it keeps them apart: each can read
   the other's run directory, its proxy token included, and replace any program the
   other runs. What a job starts from is the host's and the image's all the same: its
@@ -615,9 +618,22 @@ four things and starts the job:
   `/work` volume and the run records, and `overQuota()` names the containers past it.
   In the volume and the records a file counts for the blocks it holds plus 4096 bytes,
   no link is followed and no file is opened; in the writable layer a file counts for
-  its full length, holes included. The run records outlive the container by the day
-  they are kept, so they are measured under its name for as long as any are there,
-  container or not. The daemon asks every
+  its full length, holes included. A file a process unlinked and keeps open is in no
+  directory to be counted that way, and its blocks stay taken: while the container
+  runs, a second probe in its pid namespace (`src/executor/held.cjs`) adds the blocks
+  of every such file that a descriptor or a running program of the container names,
+  on any file system but memory. A job can end that probe, which leaves its container
+  unmeasured for that look; so does a probe that writes more than the 65536 characters
+  it is heard out for. An engine whose first answer is that a probe may not read
+  another container's processes - SELinux keeps containers apart that way - is asked
+  no more, says so once in `daemon.log`, and counts no such file. What only a memory
+  mapping holds, or a descriptor on its way through a unix socket, is counted nowhere:
+  the measure names the container that fills the disk in the ordinary way, and a job
+  that sets out to hide what it holds is bounded only where the engine itself sizes
+  what it writes - the layer on storage that takes `--storage-opt size=`, and `/work`,
+  a volume, on none the daemon asks for. The run records outlive the container by the
+  day they are kept, so they are measured under its name for as long as any are there,
+  container or not, those of its earlier containers among them. The daemon asks every
   10 minutes (`DN_SWEEP_MS`). A name past its allowance is discarded: its jobs are
   stopped and end as failed attempts with the reason `the container outgrew its disk
   allowance` - whichever of them filled it would fill the next one too, and three
@@ -629,8 +645,11 @@ four things and starts the job:
   gone only when all of it is; what is left is measured and tried again.
 - **The relay.** On each container's network sits `dn-<pool part>-<peer part>-relay`:
   the same image running `image/relay.mjs`, which carries TCP from that network to the
-  broker's port on this machine and to nothing else, 1024 connections at a time. It is
-  the container's only way out. It is not a job container and not a second container
+  broker's port on this machine and to nothing else, 1024 connections at a time. Of new
+  connections it carries 256 at once and 64 a second from then on, the rest waiting
+  their turn in the order they came: each one it carries takes a port of this machine,
+  and it is the one place that knows a connection for its container's before anything
+  of it is read. It is the container's only way out. It is not a job container and not a second container
   for the peer: no job runs in it and nothing of a job is in it; it has no capability,
   no writable file system and no credential, shares no namespace and no volume with the
   job container, and it is made and removed with the container it serves.
@@ -663,14 +682,23 @@ four things and starts the job:
     forge. A mirror that cannot be made fails the start with git's reason;
   - the model provider's API is forwarded with this machine's own credential added,
     until the job has had its share: past `DN_JOB_MODEL_REQUESTS` requests or
-    `DN_JOB_MODEL_BYTES` bytes it is answered 429. Of the provider's answer the job
+    `DN_JOB_MODEL_BYTES` bytes it is answered 429. The share is counted in every
+    request sent with the credential and every byte carried for one, either way and
+    whatever the provider said to it. The provider is whoever holds a certificate for
+    its name that the daemon's trust roots vouch for; anybody else at its address
+    is sent nothing. Of the provider's answer the job
     gets the body and the headers a client needs (`content-type`, `content-encoding`,
     `content-length`, `cache-control`, `request-id`, `retry-after`, `x-should-retry`);
     the ones that tell of the account behind the credential stay here;
   - everything else is tunnelled untouched, to the public internet only, so installing
     software works as usual. An address inside a network any interface of this machine
     is on, IPv4 or IPv6, is refused, and so is every range that is not publicly routed;
-    the interfaces are read at each connection. What this machine reaches by a route
+    the interfaces are read at each connection. A name is resolved once for each
+    connection, which goes to the address that passed, and by DNS alone: this
+    machine's hosts file, mDNS and search domains are not asked. A name of one label,
+    and one under `localhost`, `local`, `internal`, `intranet`, `private`, `corp`,
+    `home`, `lan` or `home.arpa`, is refused without being asked of anybody: no public
+    name server answers for those. What this machine reaches by a route
     alone the broker does not know of: a publicly addressed range behind a VPN, or on
     another subnet of the operator's site, is tunnelled to like the rest of the
     internet. The hosts github.com hands downloads
@@ -689,14 +717,30 @@ four things and starts the job:
   apart from every other job's: a plain http request goes down a connection of its own,
   closed with it, and the model provider's are kept for the same job's next request.
 
+  A connection is the job's whose token its first request carries, and the broker reads
+  that first request's head before anything else does. One that names no job running
+  here is answered 407 once and read no further, whatever follows it; one that is no
+  HTTP request, or whose head is over 16 KiB, is closed unanswered. A tunnel is asked
+  for by the first request of its connection. A later request on a job's connection
+  that does not carry that job's token is answered 407 and is the connection's last.
+  The broker keeps 1024 connections that are no job's - those that have not yet said
+  whose they are, and those just refused - and closes the one that has waited longest
+  for the next. The requests of the jobs' connections are read one at a time: a
+  connection is read one request head in a turn of the daemon's loop, and all of them
+  together for 4 ms of a turn, so what a container sends, with a token or without, in
+  whatever number of requests and connections, takes a bounded part of the daemon's
+  time and memory.
+
   One job holds so much of the broker and no more:
   - `DN_JOB_CONNECTIONS` (256) connections from its container;
   - 256 requests at a time, those being answered and those waiting their turn
     together, on however few connections it sends them. A job at that share is read
     no further until one of them ends, by its answer or by its time running out: what
     it sends meanwhile stays in its container, and a connection it closes meanwhile is
-    not seen to close. A request that had arrived by then closes the connection it
-    came on. What a tunnel carries is no request, and is read on;
+    not seen to close. What a tunnel carries is no request, and is read on;
+  - 8 names being resolved at a time, each given 5 s to resolve. The rest wait in the
+    order they came, as many of them as the job may have connections, and wait for
+    nothing of another job's;
   - 32 requests at a time that the broker carries upstream itself, plain http ones
     and the model's together, whatever number of hosts they name, each down one
     connection out. A connection to the model provider that is kept for the job's
@@ -746,15 +790,24 @@ Everything in a job's directory is the job's to write, so the daemon reads `done
 the three logs in the directory that stands where it put it, never through a link,
 without waiting for a writer, off its own thread, and by their last bytes only: 32 of
 `done`, 4 MiB of `log.jsonl`, 2000 of `stderr.log` and `setup.log`. A pipe, a socket, a
-device or a directory in a file's place reads as nothing. Of the result line only
-positive numbers count, and the summary is cut at 4000 characters.
+device or a directory in a file's place reads as nothing. The log is read and made out
+on a thread of its own, which hands the daemon's a result of five small members and
+nothing else of the log. A result line with 100000 commas and opening brackets outside
+its strings, or more, is no result. Of a result line only positive numbers count, the
+models it names count when they are named in an object, the summary is cut at 4000
+characters and a model's name at 100. What a command the daemon runs in a job's
+container writes back - the job's process group at its start, the word on whether it
+still runs - is heard out for 65536 characters and no further.
 
 The tokens and the cost are the job's own word, and this machine's budget is counted
 from them. They stand no higher than what the broker carried to the model for the job:
 one token for each byte of its model requests and their answers, and USD 80 for a
 million of those bytes - the dearest a token is sold at, the output of the top model in
-its fast mode as priced in November 2026. A job that sent the model nothing reports no
-tokens and no cost. An outcome of which a figure was lowered carries `capped: true`.
+its fast mode as priced in November 2026. The requests that count are the inference
+requests the provider answered with a success, under this machine's credential: one it
+refused, one that never reached it and a count of tokens bought nothing, and raise no
+figure. A job that sent the model nothing reports no tokens and no cost. An outcome of
+which a figure was lowered carries `capped: true`.
 
 A machine takes work only while its docker engine answers, the image is there and a
 model credential is; both are looked at again every 30 s, and the snapshot says which is

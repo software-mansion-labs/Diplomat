@@ -1,8 +1,10 @@
 // What a job can make of its run directory, and what the host then does with it: a
 // pipe, a socket, a directory or a link where a file is expected, a file of any size or
 // one that grows, a result line of any shape, a figure of any size - and the remains of
-// a run that will not go. The docker here answers `exec` and nothing else: a start with
-// a process group, a question after a job with what the test wrote for that run.
+// a run that will not go - and what the host puts there, and takes for a start, a run
+// or an end. The docker here answers `exec` and nothing else: a start with a process
+// group, a question after a job with what the test wrote for that run, and either with
+// what a script the test wrote for it does (<run id>.start, <run id>.sh).
 // Run: node test/executor-job-files.mjs
 
 import assert from 'node:assert/strict';
@@ -24,9 +26,15 @@ for a in "$@"; do
   case "$prev" in up|left|stop) if [ -z "$verb" ] && [ -e "$JOBF_STATE/$a" ]; then verb="$prev"; run="$a"; fi ;; esac
   prev="$a"
 done
-if [ -z "$verb" ]; then echo "start $prev" >> "$JOBF_STATE/calls"; echo 4242; exit 0; fi
+if [ -z "$verb" ]; then
+  echo "start $prev" >> "$JOBF_STATE/calls"
+  if [ -e "$JOBF_STATE/$prev.start" ]; then . "$JOBF_STATE/$prev.start"; fi
+  echo 4242; exit 0
+fi
 echo "$verb $run" >> "$JOBF_STATE/calls"
-[ "$verb" = stop ] || cat "$JOBF_STATE/$run"
+[ "$verb" = stop ] && exit 0
+if [ -e "$JOBF_STATE/$run.sh" ]; then . "$JOBF_STATE/$run.sh"; fi
+cat "$JOBF_STATE/$run"
 `, { mode: 0o755 });
 
 const BASE = path.join(scratch, 'base');
@@ -253,14 +261,16 @@ try {
     assert.ok(path.relative(container.runsDir, path.join(RUNS_DIR, `${runId}.outcome.json`)).startsWith('..'));
   });
 
-  await check('a result line of any shape gives an outcome: a member that is no object counts for nothing, a figure that is no positive number is none, and words are cut at 4000', async () => {
+  await check('a result line of any shape gives an outcome: a member that is no object counts for nothing, a figure that is no positive number is none, words are cut at 4000 and a model\'s name at 100, and a line of 100000 values is no result', async () => {
     const big = { inputTokens: 10, outputTokens: 20, cacheReadInputTokens: 300, cacheCreationInputTokens: 4000, costUSD: 0.2 };
     const SHAPES = [
       [{ modelUsage: { m: null } }, { tokens: 0, model: 'm' }],
       [{ modelUsage: { a: 5, b: 'x', c: [1], d: true, big }, total_cost_usd: 0.25 }, { tokens: 4330, model: 'big', usd: 0.25 }],
       [{ modelUsage: [], usage: { input_tokens: 3, output_tokens: 4 } }, { tokens: 7 }],
       [{ modelUsage: null, usage: null }, {}],
-      [{ modelUsage: 'abc', usage: { input_tokens: 3 } }, { model: '0' }],
+      [{ modelUsage: 'abc', usage: { input_tokens: 3 } }, { tokens: 3 }],
+      [{ modelUsage: [big], usage: { input_tokens: 3 } }, { tokens: 3 }],
+      [{ modelUsage: { ['n'.repeat(101)]: big } }, { tokens: 4330, model: 'n'.repeat(100) }],
       [{ usage: 'abc' }, {}],
       [{ usage: { input_tokens: '7', output_tokens: -4, cache_read_input_tokens: null, cache_creation_input_tokens: 2 } }, { tokens: 2 }],
       [{ modelUsage: { m: { inputTokens: -1, outputTokens: '9', cacheReadInputTokens: {}, cacheCreationInputTokens: 6, costUSD: 'dear' } } }, { tokens: 6, model: 'm' }],
@@ -277,11 +287,22 @@ try {
       const runId = runDir({ done: '0\n', 'log.jsonl': RESULT(fields) });
       assert.deepEqual(await ended(runId), { ok: true, summary: 'own', usd: 0, tokens: 0, model: '', runner: 'claude', exit: 0, state: 'finished', ...expected }, JSON.stringify(fields).slice(0, 200));
     }
-    // What JSON itself reads as no number, and a line that only looks like a result.
+    const exited3 = runDir({ done: '3\n', 'log.jsonl': RESULT({}) });
+    assert.deepEqual(await ended(exited3), { ok: false, summary: 'own', usd: 0, tokens: 0, model: '', runner: 'claude', exit: 3, state: 'failed' }, 'a result beside an exit code that is not 0');
+    // What JSON itself reads as no number, a line that only looks like a result, and a
+    // line by how many commas and opening brackets it has outside its strings: 99999 of
+    // them is the most a result has.
+    const zeros = (n) => Array(n).fill(0).join(',');
+    const marks = ',[{"\\'.repeat(80000);
     const RAW = [
+      [`{"type":"result","result":"own","x":[${zeros(99996)}]}`, {}],
+      [`${RESULT({ result: 'the line before' }).trim()}\n{"type":"result","result":"own","x":[${zeros(99997)}]}`, { summary: 'the line before' }],
+      [`{"type":"result","result":${JSON.stringify(marks)}}`, { summary: marks.slice(0, 4000) }],
+      [`{"type":"result","result":"\\\\","pad":"${','.repeat(100000)}"}`, { summary: '\\' }],
       ['{"type":"result","result":"own","total_cost_usd":1e400,"usage":{"input_tokens":1e400,"output_tokens":5}}', { tokens: 5 }],
       ['{"type":"result","result":"own","modelUsage":{"m":{"inputTokens":-1e400,"outputTokens":1}}}', { tokens: 1, model: 'm' }],
       [`${RESULT({ result: 'the line before' }).trim()}\n{"nested":{"type":"result"},"result":"not a result"}\nnull "type":"result"`, { summary: 'the line before' }],
+      [`${RESULT({ result: 'the line before' }).trim()}\n{ "type" : "result", "result" : "not written as the agent writes" }`, { summary: 'the line before' }],
     ];
     for (const [log, expected] of RAW) {
       const runId = runDir({ done: '0\n', 'log.jsonl': `${log}\n` });
@@ -352,6 +373,90 @@ try {
     assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.staging')), []);
     await assert.rejects(watch({ runId: kept }), /is not running/);
     unstick(kept);
+  });
+
+  await check('what the host puts in a run directory is its own user\'s alone to read - the environment holds the job\'s proxy token - and a start leaves no outcome of an earlier run of the id', async () => {
+    const runId = runDir({ done: '0\n' });
+    await ended(runId);
+    assert.equal(readOutcome(runId).exit, 0);
+    says(runId, 'up');
+    await start(runId);
+    assert.equal(readOutcome(runId), null, 'the run that is on has no outcome');
+    const mode = (name) => fs.statSync(path.join(dirOf(runId), name)).mode & 0o777;
+    assert.equal(mode('.'), 0o700);
+    for (const name of ['prompt.txt', 'ca.crt', 'run.sh', 'forward.mjs', 'env.sh']) assert.equal(mode(name), 0o600, name);
+    assert.match(fs.readFileSync(path.join(dirOf(runId), 'env.sh'), 'utf8'), /^export DN_PROXY='http:\/\/dn:token@127\.0\.0\.1:1'$/m);
+    says(runId, 'gone');
+    await stopJob({ runId }, {});
+  });
+
+  await check('a job is started under the process group its start names and no other: 1 and below, what is no whole number and what a failed start said are none, and a start that says more than 64 KiB is cut off there; no run is taken up by a name or a group that is none, or with neither a group nor a directory that can be found', async () => {
+    const starts = async (said) => {
+      const runId = runDir();
+      fs.writeFileSync(path.join(stateDir, `${runId}.start`), said);
+      const outcome = await start(runId).then(({ pid }) => pid, (e) => e.message);
+      if (typeof outcome === 'number') {
+        says(runId, 'gone');
+        await stopJob({ runId }, {});
+      } else await assert.rejects(watch({ runId }), /is not running/, 'a run that did not start is not held');
+      return outcome;
+    };
+    const NONE = 'the job could not be started in dn-job-files: its process group was not said';
+    assert.equal(await starts('echo 77; exit 0'), 77);
+    assert.equal(await starts('echo " 2 "; exit 0'), 2);
+    for (const said of ['echo 1', 'echo 0', 'echo -7', 'echo 1.5', 'echo 9007199254740993', 'echo group', 'echo 77 78', 'true']) assert.equal(await starts(`${said}; exit 0`), NONE, said);
+    assert.equal(await starts('echo 77; exit 1'), NONE, 'a start that failed');
+    assert.equal(await starts('echo "exec failed" >&2; echo "no such file" >&2; exit 126'), 'the job could not be started in dn-job-files: no such file');
+    const long = path.join(scratch, 'long');
+    fs.writeFileSync(long, `${'x'.repeat(100 * 1024)}\n`);
+    assert.equal(await starts(`cat ${long} >&2; exit 1`), `the job could not be started in dn-job-files: ${'x'.repeat(300)}... (65536 characters)`);
+    fs.writeFileSync(long, '\n'.repeat(100 * 1024));
+    assert.equal(await starts(`cat ${long}; echo 77; exit 0`), NONE, 'a group is not looked for past what is heard');
+
+    for (const runId of ['../x', 'a/b', '', 'a'.repeat(65)]) assert.equal(attachJob({ runId, container, pid: 4242 }), false, runId);
+    for (const pid of [1, 0, -3, 1.5, 'group', '']) {
+      const runId = runDir();
+      assert.equal(attachJob({ runId, container, pid }), false, `${pid}`);
+      await assert.rejects(watch({ runId }), /is not running/);
+    }
+    assert.equal(attachJob({ runId: `${R}-never-made`, container }), false, 'no directory, no group');
+    if (root) return;
+    // As root in a container can leave the directory that holds its runs.
+    const closed = runDir();
+    fs.chmodSync(container.runsDir, 0o000);
+    try {
+      assert.equal(attachJob({ runId: closed, container }), false, 'a run that cannot be looked for, and has no group');
+    } finally { fs.chmodSync(container.runsDir, 0o755); }
+  });
+
+  await check('the engine\'s word that the container is gone ends a run at the first look, an engine that says nothing is asked three times running, and a runner that ended as it was asked after has ended', async () => {
+    const asked = (runId) => fs.readFileSync(path.join(stateDir, 'calls'), 'utf8').split('\n').filter((line) => line === `up ${runId}`).length;
+    const answers = (script, files = {}) => {
+      const runId = runDir(files);
+      fs.writeFileSync(path.join(stateDir, `${runId}.sh`), script);
+      return runId;
+    };
+    for (const said of ['Error response from daemon: No such container: dn-job-files', 'Error response from daemon: container 0123abcd is not running', 'Error: no container with name or ID "dn-job-files" found: no such container']) {
+      const runId = answers(`echo '${said}' >&2; exit 1`);
+      assert.match((await ended(runId)).summary, VANISHED, said);
+      assert.equal(asked(runId), 1, said);
+    }
+    const silent = answers('exit 1');
+    assert.match((await ended(silent)).summary, VANISHED);
+    assert.equal(asked(silent), 3);
+    const spoke = answers('echo up; exit 1');
+    assert.match((await ended(spoke)).summary, VANISHED);
+    assert.equal(asked(spoke), 3, 'what a failed asking said is no answer');
+
+    // Silent twice, up, silent twice, and at the sixth asking up again, with the run ended.
+    const count = path.join(scratch, 'count');
+    const patient = answers(`n=$(($(cat ${count} 2>/dev/null || echo 0) + 1)); echo "$n" > ${count}
+      case "$n" in 3) echo up; exit 0 ;; 6) echo 0 > ${path.join(container.runsDir, '$run', 'done')}; echo up; exit 0 ;; esac; exit 1`, { 'log.jsonl': RESULT({}) });
+    assert.deepEqual([(await ended(patient)).state, asked(patient)], ['finished', 6], 'an answer between two silences starts the count again');
+
+    const justEnded = answers(`echo 3 > ${path.join(container.runsDir, '$run', 'done')}; echo gone; exit 0`, { 'log.jsonl': RESULT({}) });
+    const outcome = await ended(justEnded);
+    assert.deepEqual([outcome.exit, outcome.summary, asked(justEnded)], [3, 'own', 1]);
   });
 
   await check('a run is forgotten when nothing is left of it: its directory first, and one that will not go keeps its link and its outcome, is not said to be gone, and is met again', async () => {

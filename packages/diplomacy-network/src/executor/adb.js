@@ -26,7 +26,9 @@ const NOT_THE_DEVICES = /^(?:host[-:]|reverse:)/;
 // server, to start one of its own in its place.
 const KILL_WHY = ' (adb asks for this when its version is not the server\'s: this machine\'s adb server is not replaced, so use an adb of the server\'s version)';
 
-const frame = (text) => `${Buffer.byteLength(text, 'latin1').toString(16).padStart(4, '0')}${text}`;
+// A request or an answer in adb's framing, as the bytes that go on the wire. `text`
+// holds one byte a character, as a request read off a connection does.
+const frame = (text) => Buffer.from(`${text.length.toString(16).padStart(4, '0')}${text}`, 'latin1');
 
 /// What a connection's first request is to the filter: `query` (answered by the server,
 /// and the connection's last), `device` (a switch to one device, after which one more
@@ -86,7 +88,7 @@ function serve(client, target, sparing) {
     const what = service === false ? 'a request that is not in adb\'s framing' : service.slice(0, 60).replace(/[^\x20-\x7e]/g, '?');
     sparing('refused', 'adb', `refused a job: ${what}`);
     client.off('data', read);
-    client.end(`FAIL${frame(`not offered to a task on this machine: ${what}${service === 'host:kill' && stage === 'first' ? KILL_WHY : ''}`)}`);
+    client.end(Buffer.concat([Buffer.from('FAIL'), frame(`not offered to a task on this machine: ${what}${service === 'host:kill' && stage === 'first' ? KILL_WHY : ''}`)]));
     // A client that never closes its side is not waited for.
     client.setTimeout(5000, () => client.destroy());
     server?.destroy();
