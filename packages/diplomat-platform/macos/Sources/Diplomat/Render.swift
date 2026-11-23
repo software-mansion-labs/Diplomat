@@ -665,10 +665,10 @@ enum Render {
         ]
         store.pipelineResult = PipelineTickResult(
             at: now.addingTimeInterval(-90), items: items, graph: graph,
-            effects: [.review(repo: root.slug, number: 1834, url: p1834, headSha: "e17b3f9c40"),
-                      .fixIssue(repo: root.slug, number: 1801, url: i1801),
+            effects: [.review(repo: root.slug, number: 1834, url: p1834, headSha: "e17b3f9c40", author: ""),
+                      .fixIssue(repo: root.slug, number: 1801, url: i1801, author: ""),
                       .fixLinear(repo: root.slug, identifier: "ENG-52", url: eng52,
-                                 text: "Device list flickers on refresh")],
+                                 text: "Device list flickers on refresh", author: "")],
             events: events,
             notices: ["#1840: the rating call failed (claude exited 1); it is retried next sync"])
         // The review the last sync asked for, waiting for a bay; an agent on the Linear fix.

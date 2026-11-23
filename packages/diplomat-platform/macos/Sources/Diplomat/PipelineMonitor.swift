@@ -10,19 +10,6 @@ import DiplomatCore
 // task cap, the spending budget, the disk floor and the master switch itself
 // (`AutoCounter.pipeline`).
 
-// TEMPORARY SHIM, for the integrator to delete: DiplomatCore's `PipelineEffect` gains
-// `author` (an associated value of every case), which this stands in for until then. Once
-// it has it, delete `PipelineEffectAuthorShim` and this extension, build the effects in
-// `pipelineFixEffect` and in PipelineTest.swift with `author:`, and drop their
-// `PipelineEffectAuthorShim.byKey` lines.
-enum PipelineEffectAuthorShim {
-    static var byKey: [String: String] = [:]
-}
-
-extension PipelineEffect {
-    var author: String { PipelineEffectAuthorShim.byKey[key] ?? "" }
-}
-
 extension Store {
     /// `DIPLOMAT_PIPELINE_SECS` (ignored unless finite), else `pipeline.json`'s `syncSecs`.
     /// Never under its `minSyncSecs` (a sync reads every root and team, and may spend
@@ -324,19 +311,19 @@ extension Store {
         let mine = !me.isEmpty && effect.author.lowercased() == me.lowercased()
         let author = mine ? "" : effect.author
         switch effect {
-        case .fixIssue(_, let number, let url):
+        case .fixIssue(_, let number, let url, _):
             var cfg = IssueConfig(target: .specific, me: me, specificIssue: String(number))
             cfg.home = root
             cfg.pipeline = true
             return RequestedWork(number: number, url: url, author: author,
                                  config: .issues(cfg), repo: root.key)
-        case .fixLinear(_, let identifier, let url, let text):
+        case .fixLinear(_, let identifier, let url, let text, _):
             var cfg = IssueConfig(target: .specific, me: me)
             cfg.home = root
             cfg.linear = LinearIssue(identifier: identifier, url: url, text: text)
             cfg.pipeline = true
             return RequestedWork(number: 0, url: url, author: author, config: .issues(cfg), repo: root.key)
-        case .review(_, let number, let url, _):
+        case .review(_, let number, let url, _, _):
             var cfg = ReviewConfig(depth: Store.pipelineReviewDepth, target: .specific,
                                    me: me, specificPR: String(number), specificAuthor: .mine)
             cfg.home = root
@@ -423,8 +410,8 @@ extension Store {
         if next != attempts { savePipelineAttempts(next) }
     }
 
-    nonisolated private static let pipelineReviewKey = PipelineEffect.review(repo: "", number: 0, url: "", headSha: "").key
-    nonisolated private static let pipelineFixKey = PipelineEffect.fixIssue(repo: "", number: 0, url: "").key
+    nonisolated private static let pipelineReviewKey = PipelineEffect.review(repo: "", number: 0, url: "", headSha: "", author: "").key
+    nonisolated private static let pipelineFixKey = PipelineEffect.fixIssue(repo: "", number: 0, url: "", author: "").key
 
     /// The open records a run of `kind` on `url` is the attempt of: a review's of its PR,
     /// a fix's of its issue.
@@ -492,9 +479,7 @@ extension Store {
         }
         if emitted != nil || item.source == .linear { return emitted }
         guard let number = PRRef.itemKey(url: item.id).flatMap(PRRef.splitItemKey)?.number else { return nil }
-        let effect = PipelineEffect.fixIssue(repo: item.repo, number: number, url: item.id)
-        PipelineEffectAuthorShim.byKey[effect.key] = item.author ?? ""  // SHIM: `author:` above
-        return effect
+        return .fixIssue(repo: item.repo, number: number, url: item.id, author: item.author ?? "")
     }
 
     /// Why an issue has no `pipelineFixEffect`, said to the operator.
@@ -541,7 +526,7 @@ extension Store {
 
     nonisolated static func pipelineRepo(_ effect: PipelineEffect) -> String {
         switch effect {
-        case .fixIssue(let repo, _, _), .fixLinear(let repo, _, _, _), .review(let repo, _, _, _): return repo
+        case .fixIssue(let repo, _, _, _), .fixLinear(let repo, _, _, _, _), .review(let repo, _, _, _, _): return repo
         }
     }
 

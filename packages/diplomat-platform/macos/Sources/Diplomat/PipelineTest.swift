@@ -79,12 +79,11 @@ enum PipelineTest {
         let issue = "https://github.com/o/r/issues/90010"
         let pr = "https://github.com/o/r/pull/90011"
         let linear = "https://linear.app/swm/issue/ENG-90010/the-same-digits"
-        let fix = PipelineEffect.fixIssue(repo: "o/r", number: 90010, url: issue)
+        let fix = PipelineEffect.fixIssue(repo: "o/r", number: 90010, url: issue, author: "bob")
         let fixLinear = PipelineEffect.fixLinear(repo: "o/r", identifier: "ENG-90010", url: linear,
-                                                 text: "Title\n\nBody")
-        let review = PipelineEffect.review(repo: "o/r", number: 90011, url: pr, headSha: "aaa111")
-        // SHIM: each becomes its effect's own `author:` once DiplomatCore's PipelineEffect has it.
-        PipelineEffectAuthorShim.byKey = [fix.key: "bob", fixLinear.key: "Bob", review.key: "latekvo"]
+                                                 text: "Title\n\nBody", author: "Bob")
+        let review = PipelineEffect.review(repo: "o/r", number: 90011, url: pr, headSha: "aaa111",
+                                           author: "latekvo")
         func item(_ id: String, _ kind: PipelineKind, source: PipelineSource = .github,
                   author: String) -> PipelineItem {
             PipelineItem(id: id, source: source, kind: kind, label: "", title: "", repo: "o/r",
@@ -97,8 +96,8 @@ enum PipelineTest {
         }
         let all = result([fix, fixLinear, review,
                           // A root that is not loaded here, and a GitLab one: nowhere to run.
-                          .fixIssue(repo: "x/gone", number: 90012, url: "https://github.com/x/gone/issues/90012"),
-                          .fixIssue(repo: "g/third", number: 90013, url: "https://gitlab.com/g/third/-/issues/90013")])
+                          .fixIssue(repo: "x/gone", number: 90012, url: "https://github.com/x/gone/issues/90012", author: ""),
+                          .fixIssue(repo: "g/third", number: 90013, url: "https://gitlab.com/g/third/-/issues/90013", author: "")])
         func ids() -> [String] { store.queuedTasks.map(\.id) }
         func ask(_ key: String) -> Store.RequestedWork? { store.requestedWork.first { $0.key == key } }
         func job(_ key: String) -> Store.AgentJob? { store.queuedTasks.first { $0.id == key }?.job }
@@ -168,7 +167,7 @@ enum PipelineTest {
         check("…and the records stand", store.loadPipelineAttempts() == records)
         await store.applyPipeline(result([review]), now: t0.addingTimeInterval(120))
         check("…nor a review of the same head", ids().isEmpty)
-        let pushed = PipelineEffect.review(repo: "o/r", number: 90011, url: pr, headSha: "bbb222")
+        let pushed = PipelineEffect.review(repo: "o/r", number: 90011, url: pr, headSha: "bbb222", author: "latekvo")
         await store.applyPipeline(result([pushed]), now: t0.addingTimeInterval(600))
         check("a new head inside the re-request cooldown waits", ids().isEmpty)
         await store.applyPipeline(result([pushed]), now: t0.addingTimeInterval(2 * 3600))
@@ -198,10 +197,9 @@ enum PipelineTest {
         store.pipelineFix = true
         clearQueue()
         store.savePipelineAttempts([:])
-        PipelineEffectAuthorShim.byKey[fix.key] = "LateKvo"  // SHIM: `author: "LateKvo"`
-        await store.applyPipeline(result([fix]), now: t0)
+        await store.applyPipeline(result([.fixIssue(repo: "o/r", number: 90010, url: issue,
+                                                    author: "LateKvo")]), now: t0)
         check("the operator's own issue: no author to ban", ask(fixKey).map { $0.author.isEmpty } == true)
-        PipelineEffectAuthorShim.byKey[fix.key] = "bob"
         clearQueue()
         store.savePipelineAttempts(saved)
 
@@ -659,8 +657,7 @@ enum PipelineTest {
         store.savePipelineAttempts([:])
         // A split's part: filed by the operator, its fix by the author of the issue it was split from.
         let part = "https://github.com/o/r/issues/90030"
-        let partFix = PipelineEffect.fixIssue(repo: "o/r", number: 90030, url: part)
-        PipelineEffectAuthorShim.byKey[partFix.key] = "mallory"  // SHIM: `author: "mallory"`
+        let partFix = PipelineEffect.fixIssue(repo: "o/r", number: 90030, url: part, author: "mallory")
         var partItem = item(part, .issue, author: "latekvo")
         partItem.label = "#90030"
         let parted = PipelineTickResult(at: Date(), items: items + [partItem], effects: [partFix])
