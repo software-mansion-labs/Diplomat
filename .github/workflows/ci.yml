@@ -24,6 +24,31 @@ jobs:
   # PR-reference parsing, conflict prompts).
   # Xcode 16.0 is Swift 6.0, the oldest compiler a hosted macOS image still ships: one
   # older cannot read the image's SDK, so nothing here builds the app with Swift 5.x.
+  diag-relaunch:
+    name: DIAG relaunch ${{ matrix.order }} ${{ matrix.n }}
+    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        order: [probe-first, selftest-first]
+        n: [1, 2]
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo xcode-select -s /Applications/Xcode_16.app
+      - run: swiftc -O .github/diag/probe.swift -o "$RUNNER_TEMP/probe" && mkdir -p "$RUNNER_TEMP/pb"
+      - name: Build the macOS app
+        working-directory: packages/diplomat-platform/macos
+        run: swift build
+      - name: cold
+        working-directory: packages/diplomat-platform/macos
+        run: |
+          if [ "${{ matrix.order }}" = probe-first ]; then "$RUNNER_TEMP/probe" "$RUNNER_TEMP/pb"; else DIPLOMAT_RELAUNCH_TEST=1 swift run Diplomat || echo "::warning::cold selftest failed"; fi
+      - name: warm
+        working-directory: packages/diplomat-platform/macos
+        run: |
+          "$RUNNER_TEMP/probe" "$RUNNER_TEMP/pb"
+          DIPLOMAT_RELAUNCH_TEST=1 swift run Diplomat || echo "::warning::warm selftest failed"
+
   swift-macos:
     name: Swift (macOS) · build + core smoke
     runs-on: macos-15
@@ -37,19 +62,6 @@ jobs:
       - name: Build the macOS app
         working-directory: packages/diplomat-platform/macos
         run: swift build
-      - name: DIAG relaunch probe (fresh runner)
-        run: |
-          swiftc -O .github/diag/probe.swift -o "$RUNNER_TEMP/probe"
-          mkdir -p "$RUNNER_TEMP/pb"
-          "$RUNNER_TEMP/probe" "$RUNNER_TEMP/pb"
-          "$RUNNER_TEMP/probe" "$RUNNER_TEMP/pb"
-          spctl --status || true
-          sw_vers; uname -a
-      - name: DIAG relaunch self-test x3
-        working-directory: packages/diplomat-platform/macos
-        run: |
-          for i in 1 2 3; do DIPLOMAT_RELAUNCH_TEST=1 swift run Diplomat || echo "::warning::relaunch run $i failed"; done
-          "$RUNNER_TEMP/probe" "$RUNNER_TEMP/pb"
       - name: Run shared-core smoke test
         working-directory: packages/diplomat-core
         run: swift run DiplomatCoreSmoke

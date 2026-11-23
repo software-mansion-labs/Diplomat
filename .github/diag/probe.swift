@@ -33,23 +33,39 @@ p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
 p.arguments = ["-n", app.path]
 try! p.run(); p.waitUntilExit()
 print("open exit \(p.terminationStatus) after \(Date().timeIntervalSince(t0))")
-var seen = Set<pid_t>()
-while Date().timeIntervalSince(t0) < 8 {
-    let apps = NSRunningApplication.runningApplications(withBundleIdentifier: id)
-    for a in apps {
-        let pid = a.processIdentifier
-        let s = started(pid)
-        let k = kill(pid, 0)
-        if !seen.contains(pid) || Int(Date().timeIntervalSince(t0)*10) % 10 == 0 {
-            print(String(format: "t=%.2f pid=%d term=%d fin=%d k=%d status=%@ ppid=%@ comm=%@ startDelta=%@", Date().timeIntervalSince(t0), pid, a.isTerminated ? 1:0, a.isFinishedLaunching ? 1:0, k, s.map{"\($0.1)"} ?? "nil", s.map{"\($0.2)"} ?? "nil", s?.3 ?? "nil", s.map{"\($0.0.timeIntervalSince(t0))"} ?? "nil"))
-        }
-        if !seen.contains(pid) {
-            seen.insert(pid)
-            let ps = Process(); ps.executableURL = URL(fileURLWithPath: "/bin/ps"); ps.arguments = ["-o", "pid,ppid,stat,lstart,command", "-p", "\(pid)"]; try? ps.run(); ps.waitUntilExit()
-        }
-    }
-    usleep(100_000)
+func sh(_ cmd: String) {
+    let q = Process(); q.executableURL = URL(fileURLWithPath: "/bin/sh"); q.arguments = ["-c", cmd]
+    try? q.run(); q.waitUntilExit()
 }
-print("seen \(seen.sorted())")
-for pid in seen { let ps = Process(); ps.executableURL = URL(fileURLWithPath: "/bin/ps"); ps.arguments = ["-o", "pid,ppid,stat,lstart,command", "-p", "\(pid)"]; try? ps.run(); ps.waitUntilExit() }
+var found: pid_t? = nil
+var foundAt = 0.0
+while Date().timeIntervalSince(t0) < 15, found == nil {
+    if let a = NSRunningApplication.runningApplications(withBundleIdentifier: id).first { found = a.processIdentifier; foundAt = Date().timeIntervalSince(t0) }
+    usleep(20_000)
+}
+guard let pid = found else { print("never listed"); exit(0) }
+let s0 = started(pid)
+print(String(format: "listed pid %d at t=%.3f started t=%.3f comm=%@", pid, foundAt, s0.map { $0.0.timeIntervalSince(t0) } ?? -1, s0?.3 ?? "nil"))
+var diagDone = false
+var lastListed = true
+while Date().timeIntervalSince(t0) < 60 {
+    let t = Date().timeIntervalSince(t0)
+    let alive = kill(pid, 0) == 0
+    let listed = NSRunningApplication.runningApplications(withBundleIdentifier: id).contains { $0.processIdentifier == pid }
+    if listed != lastListed { print(String(format: "t=%.3f listed=%d alive=%d", t, listed ? 1:0, alive ? 1:0)); lastListed = listed }
+    if !alive { print(String(format: "t=%.3f pid %d gone (alive for %.3fs after listed)", t, pid, t - foundAt)); break }
+    if !diagDone, t - foundAt > 0.4 {
+        diagDone = true
+        print(String(format: "t=%.3f still alive, collecting", t))
+        var ti = proc_taskinfo()
+        let r = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &ti, Int32(MemoryLayout<proc_taskinfo>.size))
+        print("taskinfo r=\(r) threads=\(ti.pti_threadnum) running=\(ti.pti_numrunning) user=\(ti.pti_total_user) sys=\(ti.pti_total_system) syscalls_unix=\(ti.pti_syscalls_unix) mach=\(ti.pti_syscalls_mach) faults=\(ti.pti_faults)")
+        sh("ps -o pid,ppid,stat,wchan,etime,time,command -p \(pid)")
+        sh("sudo -n /usr/sbin/spindump \(pid) 1 100 -stdout 2>&1 | sed -n '1,/^Binary Images/p' | grep -v '^ *$' | head -90")
+        let r2 = proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &ti, Int32(MemoryLayout<proc_taskinfo>.size))
+        print("taskinfo r=\(r2) threads=\(ti.pti_threadnum) user=\(ti.pti_total_user) syscalls_unix=\(ti.pti_syscalls_unix)")
+    }
+    usleep(20_000)
+}
+sh("sudo -n log show --last 1m --style compact --info --predicate 'process IN {\"syspolicyd\",\"XprotectService\",\"XProtect\",\"amfid\",\"launchservicesd\",\"runningboardd\",\"kernel\"} AND (eventMessage CONTAINS[c] \"\(name)\" OR eventMessage CONTAINS \"\(pid)\")' 2>&1 | tail -80")
 try? fm.removeItem(at: app)
