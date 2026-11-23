@@ -1063,8 +1063,8 @@ def test_a_follow_up_sync_stops_once_the_pipeline_is_off(pipe, monkeypatch):
 
 
 def test_a_sync_that_found_the_lock_held_retires_nothing(pipe, monkeypatch):
-    """The core answers the last result again when another sync holds tick.lock: it
-    read nothing, so the forces it was handed stand, and so do the queued asks."""
+    """The core answers the last result again when tick.lock is held or cannot be
+    opened: it read nothing, so the forces it was handed stand, and so do the queued asks."""
     monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: None)
     pipe.pipeline_force_now("rate", ISSUE)
     pipe._request([pipe.pipeline_work(_fix())])

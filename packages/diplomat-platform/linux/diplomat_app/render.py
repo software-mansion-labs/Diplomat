@@ -838,7 +838,7 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
                        author="latekvo", rating=low, rated_by="label", floor=low,
                        why="One timeout around one call, with a test that hangs the stub; "
                            "nothing else moves.",
-                       hold=f"CI is pending on {cleared_head[:7]}", head=cleared_head,
+                       hold="CI still running", head=cleared_head,
                        clean=cleared_head, **gh),
         _pipeline_item(pr(1811), "#1811", "Retry the screenshot once after a timeout",
                        kind="pr", stage="clean", lane="fast", writable=True, updated=ago(9),
@@ -880,8 +880,7 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
         _pipeline_item(linear("ENG-42"), "ENG-42", "Page the billing export 500 rows at a time",
                        kind="issue", source="linear", repo="ENG", stage="candidate",
                        lane="fast", writable=True, updated=ago(30), author="Marta Kowalska",
-                       rating=low, rated_by="label",
-                       hold="ENG is fixed in acme/billing, which is not a repo root"),
+                       rating=low, rated_by="local", hold="its rating labels could not be written"),
         _pipeline_item(onion, f"{other}#31", "Onion circuits drop after an hour idle",
                        kind="issue", repo=other, stage="unrated", lane="unrated",
                        writable=True, updated=ago(5), author="latekvo"),
@@ -905,31 +904,40 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
              (issue(1820), issue(1821), "child"), (issue(1820), issue(1822), "child"),
              (issue(1822), pr(1826), "fixes"), (issue(1829), pr(1830), "fixes"),
              (linear("ENG-40"), linear("ENG-42"), "child"), (issue(1790), pr(1795), "fixes")]
+    notice = (f"{other}#31 was not rated: claude exited -1 with no answer: "
+              "claude did not answer within 300s")
+    fast_track = "+diplomat:fast-track: rated low risk, low complexity"
     events = [
-        (1440, pr(1795), "merged", "squash-merged at a1b2c3d"),
+        (1440, pr(1795), "merged", "merged a1b2c3d with --admin --squash"),
         (300, linear("ENG-40"), "rated",
-         "high risk, high complexity; kept locally: assigned to Marta Kowalska"),
+         "high risk, high complexity: Spans the export job, its queue and the billing API's "
+         "paging; a mistake loses rows."),
         (180, issue(1820), "rated", "medium risk, high complexity"),
-        (180, issue(1820), "labelled", "risk:medium, complexity:high"),
-        (175, issue(1820), "fractured", "split into 2 child issues"),
-        (175, issue(1820), "child", "#1821 Duo: report the hinge angle in the device info"),
-        (175, issue(1820), "child", "#1822 Duo: cut screenshots at the fold"),
-        (165, issue(1821), "rated", "low risk, low complexity"),
+        (180, issue(1820), "labelled", "+risk:medium +complexity:high"),
+        (175, issue(1820), "child",
+         f"{issue(1821)}: Duo: report the hinge angle in the device info"),
+        (175, issue(1820), "child", f"{issue(1822)}: Duo: cut screenshots at the fold"),
+        (175, issue(1820), "fractured", "split into 2 parts"),
+        (165, issue(1821), "rated",
+         "low risk, low complexity: One new field, read from a call the runner already makes."),
+        (165, issue(1821), "asked", "asked for a fix PR"),
         (120, issue(1829), "rated",
-         "medium risk, medium complexity; kept locally: assigned to @kacper"),
+         "medium risk, medium complexity: The list's diffing and the allocator's event order "
+         "both play a part, and which of them owns the fix is a judgement call."),
         (55, issue(1801), "rated", "low risk, low complexity"),
-        (55, issue(1801), "labelled", "risk:low, complexity:low"),
-        (40, pr(1810), "rated", "low risk, low complexity"),
-        (40, pr(1810), "fast-track", "labelled diplomat:fast-track"),
-        (30, linear("ENG-42"), "held", "ENG is fixed in acme/billing, which is not a repo root"),
+        (55, issue(1801), "labelled", "+risk:low +complexity:low"),
+        (40, pr(1810), "rated", "low risk, low complexity: One timeout around one call, with a "
+                                "test that hangs the stub; nothing else moves."),
+        (40, pr(1810), "fast-track", fast_track),
+        (30, linear("ENG-42"), "rated", "low risk, low complexity"),
         (20, pr(1826), "rated", "low risk, low complexity"),
-        (20, pr(1826), "fast-track", "labelled diplomat:fast-track"),
+        (20, pr(1826), "fast-track", fast_track),
+        (20, pr(1826), "asked", f"asked for a fast-track review at {track_head[:7]}"),
         (15, pr(1810), "clean", f"clean marker at {cleared_head[:7]}"),
-        (12, pr(1810), "rerated", f"low risk, low complexity at {cleared_head[:7]}"),
-        (12, pr(1810), "cleared", "labelled diplomat:cleared"),
-        (6, pr(1810), "held", f"CI is pending on {cleared_head[:7]}"),
-        (5, onion, "asked", "rate now"),
-        (2, onion, "error", "claude did not answer within 300s"),
+        (12, pr(1810), "rerated", "low risk, low complexity"),
+        (12, pr(1810), "cleared", f"cleared at {cleared_head[:7]}"),
+        (6, pr(1810), "held", "CI still running"),
+        (2, "", "error", notice),
     ]
     return {
         "at": comms.iso(ago(2)),
@@ -945,8 +953,7 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
         ],
         "events": [{"at": comms.iso(ago(m)), "item": i, "kind": k, "detail": d}
                    for m, i, k, d in events],
-        "notices": [f"Rating {other}#31 failed: claude did not answer within 300s; "
-                    "retried next sync"],
+        "notices": [notice],
         "unread": [],
     }
 

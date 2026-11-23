@@ -598,7 +598,7 @@ enum Render {
                  .fixing, .fast, rating: (low, low)),
             item(p1825, .pr, "#1825", "Fix the missing-Xcode launch error wording", .cleared, .fast,
                  rating: (low, low), why: "A string change and its snapshot.", floor: (low, low),
-                 hold: "CI is pending for the head", head: "4a7d1c02be", clean: "4a7d1c02be"),
+                 hold: "CI still running", head: "4a7d1c02be", clean: "4a7d1c02be"),
             item(i1790, .issue, "#1790", "Rework device allocation for remote pools", .fractured,
                  .fractured, rating: (medium, high),
                  why: "Touches the allocator, its protocol and both front-ends."),
@@ -643,25 +643,29 @@ enum Render {
                    _ detail: String) -> PipelineEvent {
             PipelineEvent(at: now.addingTimeInterval(-minutesAgo * 60), item: id, kind: kind, detail: detail)
         }
+        let notice = "#1840 was not rated: claude exited 1 with no answer"
         let events = [   // newest last, as the core keeps them
             event(2900, i1824, .rated, "low risk, low complexity"),
-            event(2900, i1824, .labelled, "diplomat:risk-low, diplomat:complexity-low"),
-            event(2880, i1824, .asked, "fix PR queued"),
-            event(1440, p1825, .rated, "low risk, low complexity at 4a7d1c0"),
-            event(1440, p1825, .fastTrack, "labelled diplomat:fast-track"),
-            event(1435, p1825, .asked, "fast-track review queued at 4a7d1c0"),
-            event(1300, i1790, .rated, "medium risk, high complexity"),
-            event(1290, i1790, .fractured, "split into #1801, #1802"),
-            event(1290, i1801, .child, "split from #1790"),
-            event(1290, i1802, .child, "split from #1790"),
+            event(2900, i1824, .labelled, "+risk:low +complexity:low"),
+            event(2880, i1824, .asked, "asked for a fix PR"),
+            event(1440, p1825, .rated, "low risk, low complexity: A string change and its snapshot."),
+            event(1440, p1825, .labelled, "+risk:low +complexity:low"),
+            event(1440, p1825, .fastTrack, "+diplomat:fast-track: rated low risk, low complexity"),
+            event(1435, p1825, .asked, "asked for a fast-track review at 4a7d1c0"),
+            event(1300, i1790, .rated,
+                  "medium risk, high complexity: Touches the allocator, its protocol and both front-ends."),
+            event(1290, i1790, .child, "\(i1801): Report a remote lease's attach time in the device list"),
+            event(1290, i1790, .child, "\(i1802): Retry a remote lease that never attaches"),
+            event(1290, i1790, .fractured, "split into 2 parts"),
             event(1200, i1801, .rated, "low risk, low complexity"),
+            event(1200, i1801, .asked, "asked for a fix PR"),
             event(180, p1825, .clean, "clean marker at 4a7d1c0"),
-            event(170, p1825, .rerated, "low risk, low complexity at the clean head"),
-            event(170, p1825, .cleared, "labelled diplomat:cleared"),
-            event(160, p1825, .held, "CI is pending for the head"),
-            event(45, eng52, .asked, "fix PR queued in software-mansion/argent"),
-            event(12, p1834, .asked, "fast-track review queued at e17b3f9"),
-            event(3, i1840, .error, "rating failed: claude exited 1"),
+            event(170, p1825, .rerated, "low risk, low complexity: A string change and its snapshot."),
+            event(170, p1825, .cleared, "cleared at 4a7d1c0"),
+            event(160, p1825, .held, "CI still running"),
+            event(45, eng52, .asked, "asked for a fix PR"),
+            event(12, p1834, .asked, "asked for a fast-track review at e17b3f9"),
+            event(3, "", .error, notice),
         ]
         store.pipelineResult = PipelineTickResult(
             at: now.addingTimeInterval(-90), items: items, graph: graph,
@@ -670,7 +674,7 @@ enum Render {
                       .fixLinear(repo: root.slug, identifier: "ENG-52", url: eng52,
                                  text: "Device list flickers on refresh", author: "")],
             events: events,
-            notices: ["#1840: the rating call failed (claude exited 1); it is retried next sync"])
+            notices: [notice])
         // The review the last sync asked for, waiting for a bay; an agent on the Linear fix.
         store.queuedTasks = [Store.QueuedAgentTask(
             id: AgentTaskQueue.key(auditAction: AgentTaskQueue.reviewAction, item: "\(root.key)#1834"),

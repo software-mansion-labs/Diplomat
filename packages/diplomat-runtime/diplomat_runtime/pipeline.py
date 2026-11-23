@@ -210,8 +210,8 @@ def _epoch(iso: str) -> float | None:
 
 def ran_since(result: dict, started: float) -> bool:
     """Whether ``result`` is a sync begun at or after ``started`` (epoch seconds), not
-    the last one answered again because another sync held the lock. A result is dated,
-    to the second, when its sync began. Twin of ``Store.pipelineRan``."""
+    the last one answered again because ``tick.lock`` was held or could not be opened. A
+    result is dated, to the second, when its sync began. Twin of ``Store.pipelineRan``."""
     at = _epoch(str(result.get("at") or ""))
     return at is not None and at >= math.floor(started)
 

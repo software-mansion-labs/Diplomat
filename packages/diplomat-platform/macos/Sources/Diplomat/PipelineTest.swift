@@ -72,13 +72,14 @@ enum PipelineTest {
                   && SettingsView.linearTeamsSummary(PipelineSettings.LinearTeam.parse(" ")) == "None: GitHub only"
                   && SettingsView.linearTeamsSummary(PipelineSettings.LinearTeam.parse("eng=o/r,ops=o/x"))
                       == "ENG → o/r · OPS → o/x")
-        check("Fast-track my PRs names only a PR closing a candidate issue",
+        check("Fast-track my PRs names only a PR closing only candidate issues, rated while it is on",
               SettingsView.pipelineFastTrackSummary
                   == "Labels diplomat:fast-track each low/low PR of yours that closes a candidate issue, "
                   + "and reviews it until clean"
                   && SettingsView.pipelineFastTrackDetail.hasPrefix(
-                      "Only your own PRs from the repo itself into its default branch that close a "
-                          + "candidate issue: the fixes the pipeline asks for."))
+                      "Only your own PRs from the repo itself into its default branch that close only "
+                          + "candidate issues: the fixes the pipeline asks for.")
+                  && SettingsView.pipelineFastTrackDetail.hasSuffix(" A PR rated while this is off stays a person's."))
         check("Merge cleared PRs points at every hold rather than listing some",
               SettingsView.pipelineMergeDetail.hasPrefix(
                   "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
@@ -897,7 +898,9 @@ enum PipelineTest {
     /// and clean at its head; unrated #5, and #6 by mallory, whom the gh stub bans once the
     /// first sync has read the ban list; someone else's PR #4; and Linear's ENG-1, claude
     /// rating each low/low. Reading #2 again before merging it, the stub writes
-    /// `<dir>/flip-merge` and waits for control.json to say merge is off.
+    /// `<dir>/flip-merge` and waits for control.json to say merge is off. While the state's
+    /// `readErrors` is set, the `Repo` read answers with that error beside its data. The
+    /// state's `later` holds low/low #7 and op's draft PR #3 fixing it, likewise clean.
     @MainActor
     private static func live(_ store: Store, harness: URL, check: (String, Bool) -> Void) async {
         print("\npipeline: real syncs against the stubs in \(harness.path)")
@@ -912,7 +915,7 @@ enum PipelineTest {
         }
         func linearWrites() -> [String] {
             log("linear.log").compactMap { ($0 as? [String: Any])?["op"] as? String }
-                .filter { $0 != "Issues" && $0 != "Labels" }
+                .filter { !["Issues", "Labels", "Attached"].contains($0) }
         }
         func truncate() {
             for name in ["gh.log", "linear.log", "claude.log"] {
@@ -925,8 +928,29 @@ enum PipelineTest {
         }
         func ids() -> [String] { store.queuedTasks.map(\.id).sorted() }
         func prompt(_ key: String) -> String { store.queuedTasks.first { $0.id == key }?.job.prompt ?? "" }
-        func item(_ number: Int) -> PipelineItem? {
-            store.pipelineResult?.items.first { $0.id == "https://github.com/acme/app/issues/\(number)" }
+        func ask(_ key: String) -> Store.RequestedWork? { store.requestedWork.first { $0.key == key } }
+        func item(_ number: Int, _ kind: String = "issues") -> PipelineItem? {
+            store.pipelineResult?.items.first { $0.id == "https://github.com/acme/app/\(kind)/\(number)" }
+        }
+        func patch(_ change: (inout [String: Any]) -> Void) {
+            let state = harness.appendingPathComponent("gh-state.json")
+            guard var github = (try? Data(contentsOf: state))
+                .flatMap({ try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] else { return }
+            change(&github)
+            try? JSONSerialization.data(withJSONObject: github).write(to: state)
+        }
+        func assign(_ number: Int, _ who: [String]) {
+            patch { github in
+                var issues = github["issues"] as? [[String: Any]] ?? []
+                for i in issues.indices where issues[i]["number"] as? Int == number { issues[i]["assignees"] = who }
+                github["issues"] = issues
+            }
+        }
+        func sync() async {
+            // Events are stamped to the second; a sync in a later one tells them apart.
+            try? await Task.sleep(nanoseconds: 1_100_000_000)
+            truncate()
+            await store.runPipelineSyncOnce()
         }
         let banned = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DA_BAN_DIR"] ?? "")
             .appendingPathComponent("banned.json")
@@ -973,13 +997,13 @@ enum PipelineTest {
               (flipped?["control"] as? [String: Any])?["merge"] as? Bool == false
                   && !store.pipelineMerge && !writes.contains { $0.hasPrefix("pr merge") }
                   && store.pipelineResult?.notices == ["Merge is switched off, so this sync took no merge step past that"])
-        check("…while gh labels #2 cleared and #5, #6 low/low",
+        check("…while gh labels #6, #5 low/low and #2 cleared",
               writes.filter { $0.contains("/issues/") } == [
-                  "api -X POST repos/acme/app/issues/2/labels -f labels[]=diplomat:cleared",
                   "api -X POST repos/acme/app/issues/6/labels -f labels[]=risk:low",
                   "api -X POST repos/acme/app/issues/6/labels -f labels[]=complexity:low",
                   "api -X POST repos/acme/app/issues/5/labels -f labels[]=risk:low",
                   "api -X POST repos/acme/app/issues/5/labels -f labels[]=complexity:low",
+                  "api -X POST repos/acme/app/issues/2/labels -f labels[]=diplomat:cleared",
               ])
         check("…claude rates four, and Linear labels ENG-1 low/low",
               log("claude.log").count == 4 && linearWrites() == ["AddLabel", "AddLabel"])
@@ -1001,11 +1025,8 @@ enum PipelineTest {
               lines.count == 3 && lines.filter { $0.hasPrefix("auto pipeline-fix ") }.count == 2
                   && lines.contains("auto pipeline-notice Merge is switched off, so this sync took no merge step past that"))
 
-        // Events are stamped to the second; a sync in a later one tells them apart.
-        try? await Task.sleep(nanoseconds: 1_100_000_000)
-        truncate()
         let queued = ids(), attempts = store.loadPipelineAttempts(), fed = feed().count
-        await store.runPipelineSyncOnce()
+        await sync()
         check("sync 2, nothing changed: gh, Linear and claude are only read",
               ghWrites().isEmpty && linearWrites().isEmpty && log("claude.log").isEmpty
                   && !log("gh.log").isEmpty)
@@ -1019,37 +1040,78 @@ enum PipelineTest {
                   && six.map { store.pipelineFixEffect(for: $0) == nil && store.startPipelineFix($0) == $0.hold } == true
                   && ids() == queued)
 
-        try? await Task.sleep(nanoseconds: 1_100_000_000)
-        let state = harness.appendingPathComponent("gh-state.json")
-        if var github = (try? Data(contentsOf: state)).flatMap({ try? JSONSerialization.jsonObject(with: $0) })
-            as? [String: Any], var issues = github["issues"] as? [[String: Any]],
-            let five = issues.firstIndex(where: { $0["number"] as? Int == 5 }) {
-            issues[five]["assignees"] = ["carol"]
-            github["issues"] = issues
-            try? JSONSerialization.data(withJSONObject: github).write(to: state)
-        }
-        truncate()
-        await store.runPipelineSyncOnce()
-        let dropped = Array(feed().dropFirst(fed))
-        print("  sync 3 feed: \(dropped)")
-        check("sync 3, #5 assigned to carol: its queued fix is withdrawn, ENG-1's kept",
-              ghWrites().isEmpty && ids() == [linearKey] && dropped.count == 1
-                  && dropped.first?.hasPrefix("panel queue-drop ") == true
-                  && dropped.first?.contains("#5") == true
-                  && dropped.first?.hasSuffix(" - the pipeline no longer owes it, not run") == true)
+        let error = "Something went wrong while executing your query."
+        assign(5, ["carol"])
+        patch { $0["readErrors"] = error }
+        await sync()
+        print("  sync 3 notices: \(store.pipelineResult?.notices ?? []), unread: \(store.pipelineResult?.unread ?? [])")
+        print("  #2 as shown: \(item(2, "pull").map(PipelineTint.hover) ?? "(not read)")")
+        check("sync 3, acme/app read with an error and #5 assigned to carol: the root is unread, no ask is withdrawn",
+              store.pipelineResult?.unread == ["acme/app"] && item(5)?.writable == false
+                  && ids() == queued && ghWrites().isEmpty
+                  && Array(feed().dropFirst(fed)) == ["auto pipeline-notice acme/app was read in part: \(error)"])
+        check("…and #2 says why it waits", item(2, "pull")?.hold == "acme/app was read only in part"
+              && item(2, "pull").map(PipelineTint.hover)?.contains("\nHeld: acme/app was read only in part\n") == true)
 
-        try? await Task.sleep(nanoseconds: 1_100_000_000)
-        truncate()
+        patch { $0["readErrors"] = nil }
+        let read = feed().count
+        await sync()
+        let dropped = Array(feed().dropFirst(read))
+        print("  sync 4 feed: \(dropped)")
+        check("sync 4, read whole again: #5's queued fix is withdrawn, ENG-1's kept",
+              ghWrites().isEmpty && store.pipelineResult?.unread == [] && ids() == [linearKey]
+                  && dropped == ["panel queue-drop Issues · #5 · deep - the pipeline no longer owes it, not run"])
+
+        assign(5, [])
+        await sync()
+        let five = item(5)
+        check("sync 5, #5 unassigned: its fix is owed again, and not queued while its attempt cools down",
+              store.pipelineResult?.effects.contains { $0.url == "https://github.com/acme/app/issues/5" } == true
+                  && ids() == [linearKey])
+        check("…Start fix queues it by hand",
+              five.map { store.startPipelineFix($0) } == .some(nil) && ask(fixKey)?.byHand == true
+                  && ids() == [fixKey, linearKey].sorted())
+        store.pipelineFix = false
+        let off = feed().count
+        await sync()
+        let withdrawn = Array(feed().dropFirst(off))
+        print("  sync 6 feed: \(withdrawn)")
+        check("sync 6, Open fix PRs off: the fix the sync queued is withdrawn, the one Start fix queued kept",
+              store.pipelineResult?.effects.isEmpty == true && ids() == [fixKey]
+                  && withdrawn == ["panel queue-drop Issues · ENG-1 · deep - the pipeline no longer owes it, not run"])
+
         store.pipelineMerge = true
-        await store.runPipelineSyncOnce()
-        print("  sync 4 gh writes: \(ghWrites())")
-        check("sync 4, merge switched back on: #2 is merged at the head it was cleared at",
+        await sync()
+        print("  sync 7 gh writes: \(ghWrites())")
+        check("sync 7, merge switched back on: #2 is merged at the head it was cleared at",
               ghWrites() == ["pr merge 2 -R acme/app --admin --squash --match-head-commit " + String(repeating: "a2", count: 20)]
                   && feed().last == "auto pipeline-merge #2: merged a2a2a2a with --admin --squash")
 
+        patch { github in
+            let later = github["later"] as? [String: Any] ?? [:]
+            for key in ["issues", "prs"] {
+                github[key] = (github[key] as? [Any] ?? []) + (later[key] as? [Any] ?? [])
+            }
+        }
+        await sync()
+        let three = item(3, "pull")
+        print("  sync 8 gh writes: \(ghWrites())")
+        print("  #3 as shown: \(three.map(PipelineTint.hover) ?? "(not read)")")
+        check("sync 8, op's draft #3 fixing #7: re-rated, cleared and marked ready, not merged",
+              log("claude.log").count == 1
+                  && ghWrites() == ["api -X POST repos/acme/app/issues/3/labels -f labels[]=diplomat:cleared",
+                                    "pr ready 3 -R acme/app"]
+                  && three?.state == "open" && three?.hold == "marked ready for review; merged at a later sync"
+                  && three.map(PipelineTint.hover)?.contains("\nHeld: marked ready for review; merged at a later sync\n") == true)
+        await sync()
+        print("  sync 9 gh writes: \(ghWrites())")
+        check("sync 9: #3 is merged at the head it was marked ready at",
+              ghWrites() == ["pr merge 3 -R acme/app --admin --squash --match-head-commit " + String(repeating: "a3", count: 20)]
+                  && feed().last == "auto pipeline-merge #3: merged a3a3a3a with --admin --squash")
+
         store.pipelineEnabled = false
         check("master off: none of the queued asks may start",
-              store.queuedTasks.count == 1 && store.drainableTasks.isEmpty)
+              ids() == [fixKey] && store.drainableTasks.isEmpty)
         store.requestedWork = []
         store.queuedTasks = []
         store.savePipelineAttempts([:])
