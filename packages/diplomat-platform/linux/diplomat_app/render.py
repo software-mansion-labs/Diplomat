@@ -938,14 +938,16 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
                   "edges": [{"from": a, "to": b, "kind": k} for a, b, k in edges]},
         "effects": [
             {"kind": "fixIssue", "repo": slug, "number": 1821, "url": issue(1821),
-             "key": f"pipeline-fix:{issue(1821)}", "stamp": "fix"},
+             "author": "", "key": f"pipeline-fix:{issue(1821)}", "stamp": "fix"},
             {"kind": "review", "repo": slug, "number": 1826, "url": pr(1826),
-             "headSha": track_head, "key": f"pipeline-review:{pr(1826)}", "stamp": track_head},
+             "author": "", "headSha": track_head, "key": f"pipeline-review:{pr(1826)}",
+             "stamp": track_head},
         ],
         "events": [{"at": comms.iso(ago(m)), "item": i, "kind": k, "detail": d}
                    for m, i, k, d in events],
         "notices": [f"Rating {other}#31 failed: claude did not answer within 300s; "
                     "retried next sync"],
+        "unread": [],
     }
 
 

@@ -15,7 +15,7 @@ import math
 from dataclasses import dataclass
 from datetime import datetime
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QUrl, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QDesktopServices,
@@ -30,12 +30,14 @@ from PySide6.QtGui import (
     QTextOption,
 )
 from PySide6.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
+    QSizePolicy,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -609,6 +611,30 @@ class _Link(ElidedLabel):
         super().mouseReleaseEvent(event)
 
 
+class _Head(ElidedLabel):
+    """The item's label, cut to fit beside its kind: a root's ``owner/repo#N`` may be
+    wider than the pane, which does not scroll sideways."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text, 11,
+                         QApplication.palette().color(QPalette.ColorRole.WindowText).name())
+        font = self.font()
+        font.setBold(True)
+        self.setFont(font)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setText(text)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        self.setToolTip(plain_tooltip(text))
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        # Not QFontMetrics': its rounded-down advance is narrower than the text elides at.
+        width = QFontMetricsF(self.font()).horizontalAdvance(self._full)
+        return QSize(math.ceil(width), self.height())
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, self.height())
+
+
 class EventRow(QWidget):
     """One step of a traversal: when, what kind, and what Diplomat said of it."""
 
@@ -895,9 +921,7 @@ class PipelineView(QWidget):
         head = QHBoxLayout()
         head.setSpacing(6)
         head.addWidget(GlyphLabel(source_glyph(item), 14, TINT, font_px=12))
-        label = _plain(str(item.get("label") or ""))
-        label.setStyleSheet("font-weight: 700; font-size: 11px;")
-        head.addWidget(label)
+        head.addWidget(_Head(str(item.get("label") or "")))
         kind = _plain(_KIND_WORD.get((item.get("source"), item.get("kind")), ""))
         kind.setStyleSheet(muted(9))
         head.addWidget(kind)
