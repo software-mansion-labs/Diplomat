@@ -233,8 +233,6 @@ function pullScope(kind, item, me, options) {
 }
 
 const PULL_KINDS = ['review', 'review-own', 'conflicts'];
-// Text the task writes in the requester's name holds no line a forge or a bot on it would
-// run as a command (`isProse`): it may only say things.
 const PROSE = { prose: true };
 
 // Whose CI runs a kind reads beside those of the branches the task itself made: the ones

@@ -530,7 +530,8 @@ function asking(ctx) {
 /// carries what the deep checks ask the forge and the machine: `resolveNode(id)`,
 /// `pull(number)`, `pullsByHead(ref, owner, ever)`, `comment(id)`, `assignees(number)`, `self()`,
 /// `repository(repo)`, `branch(ref, repo)`, `protects(ref, repo)`, `fetch`, `checkout`
-/// and the task's mutable `state` (`forge.context()` builds one). A lookup that throws refuses the request.
+/// and the task's mutable `state` (`forge.context()` builds one). A lookup that throws
+/// refuses the request.
 /// Resolves to `{ ok: true, rule, request }` - `request` is the one to perform, in the
 /// single spelling that was checked - or `{ ok: false, reason }`. What an allowed request
 /// would use up is counted in `state` at once; `conclude` settles it with the forge's answer.
