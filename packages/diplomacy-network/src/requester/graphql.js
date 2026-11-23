@@ -338,21 +338,25 @@ const SCHEMA_FIELDS = table({ schema: 'fields inputFields enumValues args type o
 // `in`, `actor`, `foreign`, `event`, by the context it is selected in); `repo` is the pool's
 // repository itself, from which a document goes on to its code, its pull requests and its
 // issues, the twins of the reads rules.js gives every kind. A scalar is read from an
-// allow-list on an account, a foreign object and a branch's protection, and freely on what
-// is in the pool's repository, but for `repoLeaves` and `own`:
+// allow-list on an account, a commit's author line, a foreign object and a branch's
+// protection, and freely on what is in the pool's repository, but for `repoLeaves` and `own`:
 //   repoLeaves  the scalars read of the repository itself: what the REST answer about it
 //               holds (the repository `pick` of rules.js), under the names GraphQL has
 //   own         the names not read inside the repository: they tell of the account asking -
 //               what it may do there, its addresses, what it watches
 //   args        the arguments a field may take: paging, ordering and filters over what
 //               the object it is selected on holds
+//   members     the members an object given as an argument may hold, at any depth
 //   ids         the arguments that name an object by its node id, which must turn out to
 //               be in the pool's repository
-// An argument in neither list could name another repository, or an object by an id
-// nothing here can place.
+// An argument or a member in no list could name another repository, or an object by an id
+// nothing here can place, or filter by what the account asking watches or reacted to.
 const FORGES = {
   github: {
-    actorLeaves: set('__typename id databaseId login name url avatarUrl resourcePath email date slug isViewer totalCount'),
+    actorLeaves: set('__typename id databaseId login name url avatarUrl resourcePath date slug isViewer totalCount'),
+    // The name, address and date a commit or a tag was written with: `gh pr view --json
+    // commits` reads them.
+    gitLeaves: set('name email date avatarUrl totalCount'),
     foreignLeaves: set(`__typename id databaseId number title url state stateReason name nameWithOwner isPrivate isFork isArchived
       isDraft closed optionId oid abbreviatedOid totalCount sshUrl description hasIssuesEnabled hasWikiEnabled viewerPermission`),
     // `viewerPermission` has no REST counterpart: `gh pr create` reads the account's
@@ -368,6 +372,9 @@ const FORGES = {
       content itemTypes archivedStates includeArchived includeClosedPrs
       includeStack enableDuplicate excludeUserLinked userLinkedOnly mergeType pullRequestNumber writersOnly
       includeDeprecated`),
+    members: set(`field direction assignee createdBy mentioned labels milestone milestoneNumber since states type
+      issueFieldValues fieldName dateValue numberValue textValue singleSelectOptionValue multiSelectOptionValues
+      appId checkName checkType conclusions status statuses emails`),
     ids: set('pullRequestId'),
     repo: table({
       in: `pullRequest pullRequests issue issues issueOrPullRequest ref refs defaultBranchRef object codeowners
@@ -384,9 +391,11 @@ const FORGES = {
         autoMergeRequest reviewRequests suggestedReviewers subIssuesSummary signature mergeQueueEntry
         checkRunCountsByState statusContextCountsByState issueTemplates pullRequestTemplates codeowners contactLinks
         thread comment commentEdge subject assignable`,
-      actor: `author editor owner mergedBy actor assignees assignedActors participants users reactors user creator committer
-        authors pusher tagger requestedReviewer reviewer enabledBy
+      actor: `author editor owner mergedBy actor assignees assignedActors participants users reactors user creator
+        pusher requestedReviewer reviewer enabledBy
         resolvedBy signer headRepositoryOwner onBehalfOf app`,
+      // `author` is an account wherever else it is selected, so a commit's is read as one.
+      git: 'authors committer tagger',
       // A pull request's head branch is a branch of the repository it comes from.
       foreign: `repository headRepository baseRepository headRef parent subIssues blockedBy blocking closingIssuesReferences
         closedByPullRequestsReferences associatedPullRequests projectItems projectCards trackedIssues trackedInIssues`,
@@ -400,6 +409,7 @@ const FORGES = {
     // merge; the rest of a branch's protection is a setting no task has a use for.
     protectionLeaves: set('__typename requiresStrictStatusChecks'),
     actor: table({ actor: 'user organization' }),
+    git: table({ actor: 'user' }),
     foreign: table({ actor: 'owner', foreign: 'repository project column fieldValueByName defaultBranchRef parent' }),
     // The one field with a selection set that takes an argument outside `in`: a project
     // item's own value of a named field.
@@ -425,11 +435,15 @@ const FORGES = {
       searchPattern query filter not or customField labelName labels milestoneTitle
       milestoneWildcardId releaseTag releaseTagWildcardId author authorUsername assigneeUsername
       assigneeUsernames assigneeWildcardId reviewerUsername reviewerWildcardId ignoredReviewerUsername reviewState
-      reviewStates approvedBy approver mergedBy myReactionEmoji subscribed confidential draft retried
+      reviewStates approvedBy approver mergedBy confidential draft retried
       whenExecuted securityReportTypes environmentName sourceBranches targetBranches weight
       weightWildcardId healthStatus healthStatusFilter epicWildcardId includeSubepics iterationTitle iterationWildcardId
       createdAfter createdBefore updatedAfter updatedBefore closedAfter closedBefore mergedAfter mergedBefore
       deployedAfter deployedBefore committedAfter committedBefore dueAfter dueBefore`),
+    members: set(`approvedBy assigneeUsernames authorUsername authorUsernames labelName labelNames labels milestoneTitle
+      milestoneWildcardId releaseTag reviewStates reviewerUsername reviewerWildcard onlyReviewer onlyReviewerUsername
+      sourceBranches targetBranches iids types weight iterationWildcardId healthStatusFilter customField
+      customFieldName selectedOptionValues name`),
     ids: set(''),
     repo: table({ in: 'mergeRequest mergeRequests issue issues repository', foreign: 'group namespace' }),
     in: table({
@@ -458,7 +472,8 @@ const OWNER_QUALIFIER = /^-?(repo|org|user|owner|enterprise):/i;
 const SEARCH_TERM = /\s*(?:(\(*)(-?(?:[\w.-]+:)?)"([^"\\]*)"(\)*)|([^\s"]+))(?=\s|$)/y;
 
 /// Whether a forge search string can only return things in `repo` ("owner/name"): it must
-/// carry `repo:owner/name` as a plain term of its own, and nothing that widens it - no
+/// carry `repo:owner/name` as a plain term of its own, the qualifier in lower case and the
+/// name in any, and nothing that widens it - no
 /// other repository, organisation or user qualifier, no top-level OR, no negation of the
 /// term. A quote may only wrap a whole term or a qualifier's whole value, and what it
 /// wraps holds no qualifier: where a quote opens mid-word, this reader and the forge's
@@ -498,6 +513,8 @@ export function searchConfined(q, repo) {
       if (OWNER_QUALIFIER.test(term)) {
         const negated = previous.toUpperCase() === 'NOT';
         if (term.toLowerCase() !== want || depth !== 0 || negated) return 'the search query names something other than the pool\'s repository';
+        // In another case the forge may read it as the qualifier or as a word; `gh` writes this one.
+        if (!term.startsWith('repo:')) return 'the search query does not write the qualifier of the pool\'s repository as "repo:"';
         pinned++;
       }
       previous = term;
@@ -512,16 +529,38 @@ export function searchConfined(q, repo) {
 
 // ------------------------------------------------------------------------ queries
 
+const UNLISTED = 'which could name something outside the pool\'s repository or tell of the account asking';
+
 // `lookups` takes the node ids the document's arguments name, for the caller to resolve.
 function walker(doc, forge, op, vars, lookups) {
   const tables = FORGES[forge];
   const done = new Set(); // "fragment name/context": a fragment is read once per context
   let fields = 0;
 
+  // A variable stands for what is sent for it, else for its default.
+  function checkMembers(sel, arg, value) {
+    const listed = (name) => { if (!tables.members.has(name)) refuse(`graphql: "${sel.name}" may not be given "${name}" inside "${arg}", ${UNLISTED}`); };
+    const sent = (json) => {
+      if (Array.isArray(json)) json.forEach(sent);
+      else if (json !== null && typeof json === 'object') for (const [name, inner] of Object.entries(json)) { listed(name); sent(inner); }
+    };
+    const written = (v) => {
+      if (v.k === 'list') v.items.forEach(written);
+      else if (v.k === 'obj') for (const f of v.fields) { listed(f.name); written(f.value); }
+      else if (v.k === 'var') {
+        if (!op.variables.has(v.name)) refuse(`graphql: variable "$${v.name}" is not defined`);
+        if (Object.hasOwn(vars, v.name)) sent(vars[v.name]);
+        else if (op.variables.get(v.name).fallback) written(op.variables.get(v.name).fallback);
+      }
+    };
+    written(value);
+  }
+
   function checkArguments(sel) {
-    for (const { name } of sel.args) {
+    for (const { name, value } of sel.args) {
       if (!tables.ids.has(name)) {
-        if (!tables.args.has(name)) refuse(`graphql: "${sel.name}" may not be given "${name}", which could name something outside the pool's repository`);
+        if (!tables.args.has(name)) refuse(`graphql: "${sel.name}" may not be given "${name}", ${UNLISTED}`);
+        checkMembers(sel, name, value);
         continue;
       }
       const id = argument(sel, name, op, vars);
@@ -549,6 +588,7 @@ function walker(doc, forge, op, vars, lookups) {
       if (sel.selections === null) {
         if (sel.name === '__typename') continue;
         if (context === 'actor' && !tables.actorLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read on a user or organisation`);
+        if (context === 'git' && !tables.gitLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read of a commit's author line`);
         if (context === 'foreign' && !tables.foreignLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read on an object outside the pool's repository`);
         if (context === 'protection' && !tables.protectionLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" may not be read of a branch's protection`);
         if (context === 'repo' && !tables.repoLeaves.has(sel.name)) refuse(`graphql: "${sel.name}" is not among what a task is told of the repository itself`);

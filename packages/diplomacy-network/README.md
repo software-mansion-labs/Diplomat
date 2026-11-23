@@ -484,10 +484,12 @@ checked (PROTOCOL.md, section 10).
 What a task reads is listed by its kind as what it writes is (`requester/rules.js`).
 Every kind reads the repository's code - files, refs, commits, a compare, and the
 statuses and check results recorded on a commit - and, as context, every pull request and
-issue with the comments and reviews on it. The rest of an item - a pull request's files,
-commits, requested reviewers and merge state, an issue's events, labels and reactions -
-is read by the task whose item it is: the three pull request kinds for their pull
-request, `issues` for its issue. A CI run, its jobs and their logs are read by id, after
+issue with the comments and reviews on it. The lists the forge keeps of an item - a pull
+request's files, commits, requested reviewers and merge state, an issue's events, labels
+and reactions - are read by the task whose item it is: the three pull request kinds for
+their pull request, `issues` for its issue. A pull request's diff is no such list: it is
+repository code, which every kind reads as a compare and, on GitHub, as the pull request
+itself in diff or patch form (`gh pr diff`). A CI run, its jobs and their logs are read by id, after
 the forge has said which branch the run was for: a branch the task created, the head
 branch of the pull request a pull request kind works on, or - `audit` and `investigate` -
 the default branch. No kind has a rule for a list of runs, artifacts, releases,
@@ -521,7 +523,8 @@ the repository itself is cut to the same list on both surfaces, by `pick` on the
 answer and by a list of readable fields in a GraphQL document (`requester/graphql.js`;
 it adds GitHub's `viewerPermission`, which `gh` reads before it opens a pull request).
 A document is refused whole when it asks for more, takes an argument that could name
-another repository, or reads what tells of the linked account and not of the repository.
+another repository, or reads what tells of the linked account and not of the repository -
+as a field, or as a filter over a list (the issues it is subscribed to).
 
 **Where the time goes.** What happened between an offer and its job is in `daemon.log`,
 in seconds and counts and nothing any machine said: one line a claim round -

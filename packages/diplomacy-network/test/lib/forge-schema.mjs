@@ -15,6 +15,11 @@ const words = (text) => text.split(/\s+/).filter(Boolean);
 ///   arguments         every argument of every field the tables accept on a reachable
 ///                     type, with each type it is declared with and one field that takes
 ///                     it: "name:Type@Type.field"
+///   accountArguments  the ones of them described as being about the viewer or the current user
+///   inputs            every member of the input objects those arguments take, and of the
+///                     input objects inside them: "Type.member:Type"
+///   accountInputs     the ones of them named for the viewer, or described as being about
+///                     the viewer or the current user: "Type.member"
 export const SCHEMA = {
   github: {
     source: 'https://docs.github.com/public/fpt/schema.docs.graphql of 2026-11-16, sha256 d928ebbb2d08cba348c0c5713ab3c8756a39e838324089ff66fcddf1bab2c496',
@@ -83,6 +88,28 @@ export const SCHEMA = {
       states:TrackedIssueStates@Issue.trackedIssuesCount until:GitTimestamp@Commit.history
       userLinkedOnly:Boolean@Issue.closedByPullRequestsReferences
       writersOnly:Boolean@PullRequest.latestOpinionatedReviews`),
+    accountArguments: words(''),
+    inputs: words(`
+      CheckRunFilter.appId:Int CheckRunFilter.checkName:String CheckRunFilter.checkType:CheckRunType
+      CheckRunFilter.conclusions:CheckConclusionState CheckRunFilter.status:CheckStatusState
+      CheckRunFilter.statuses:CheckStatusState CheckSuiteFilter.appId:Int CheckSuiteFilter.checkName:String
+      CommitAuthor.emails:String CommitAuthor.id:ID IssueCommentOrder.direction:OrderDirection
+      IssueCommentOrder.field:IssueCommentOrderField IssueDependencyOrder.direction:OrderDirection
+      IssueDependencyOrder.field:IssueDependencyOrderField IssueFieldValueFilter.dateValue:String
+      IssueFieldValueFilter.fieldId:ID IssueFieldValueFilter.fieldName:String
+      IssueFieldValueFilter.multiSelectOptionIds:ID IssueFieldValueFilter.multiSelectOptionValues:String
+      IssueFieldValueFilter.numberValue:Float IssueFieldValueFilter.singleSelectOptionId:ID
+      IssueFieldValueFilter.singleSelectOptionValue:String IssueFieldValueFilter.textValue:String
+      IssueFilters.assignee:String IssueFilters.createdBy:String
+      IssueFilters.issueFieldValues:IssueFieldValueFilter IssueFilters.labels:String
+      IssueFilters.mentioned:String IssueFilters.milestone:String IssueFilters.milestoneNumber:String
+      IssueFilters.since:DateTime IssueFilters.states:IssueState IssueFilters.type:String
+      IssueFilters.viewerSubscribed:Boolean IssueOrder.direction:OrderDirection
+      IssueOrder.field:IssueOrderField LabelOrder.direction:OrderDirection LabelOrder.field:LabelOrderField
+      PullRequestOrder.direction:OrderDirection PullRequestOrder.field:PullRequestOrderField
+      ReactionOrder.direction:OrderDirection ReactionOrder.field:ReactionOrderField
+      RefOrder.direction:OrderDirection RefOrder.field:RefOrderField`),
+    accountInputs: words('IssueFilters.viewerSubscribed'),
   },
   gitlab: {
     source: 'https://gitlab.com/-/graphql/introspection_result.json of 2026-11-16, sha256 e21c0306e95ff467e606d7cfb1652534900269ab7ec4f8fddace5d894bf718a6',
@@ -202,5 +229,40 @@ export const SCHEMA = {
       updatedAfter:Time@Project.issue updatedBefore:Time@Project.issue weight:String@Project.issue
       weightWildcardId:WeightWildcardId@Project.issue whenExecuted:String@Pipeline.jobs
       workItemTypeIds:WorkItemsTypeID@Project.issue`),
+    accountArguments: words('myReactionEmoji subscribed'),
+    inputs: words(`
+      MergeRequestsResolverNegatedParams.approvedBy:String
+      MergeRequestsResolverNegatedParams.assigneeUsernames:String
+      MergeRequestsResolverNegatedParams.authorUsername:String
+      MergeRequestsResolverNegatedParams.labelName:String MergeRequestsResolverNegatedParams.labels:String
+      MergeRequestsResolverNegatedParams.milestoneTitle:String
+      MergeRequestsResolverNegatedParams.myReactionEmoji:String
+      MergeRequestsResolverNegatedParams.onlyReviewer:Boolean
+      MergeRequestsResolverNegatedParams.releaseTag:String
+      MergeRequestsResolverNegatedParams.reviewStates:MergeRequestReviewState
+      MergeRequestsResolverNegatedParams.reviewerUsername:String
+      MergeRequestsResolverNegatedParams.sourceBranches:String
+      MergeRequestsResolverNegatedParams.targetBranches:String NegatedIssueFilterInput.assigneeId:String
+      NegatedIssueFilterInput.assigneeUsernames:String NegatedIssueFilterInput.authorUsername:String
+      NegatedIssueFilterInput.customField:WorkItemWidgetCustomFieldFilterInputType
+      NegatedIssueFilterInput.epicId:String NegatedIssueFilterInput.healthStatusFilter:HealthStatus
+      NegatedIssueFilterInput.iids:String NegatedIssueFilterInput.iterationId:ID
+      NegatedIssueFilterInput.iterationWildcardId:IterationWildcardId NegatedIssueFilterInput.labelName:String
+      NegatedIssueFilterInput.milestoneTitle:String
+      NegatedIssueFilterInput.milestoneWildcardId:NegatedMilestoneWildcardId
+      NegatedIssueFilterInput.myReactionEmoji:String NegatedIssueFilterInput.releaseTag:String
+      NegatedIssueFilterInput.types:IssueType NegatedIssueFilterInput.weight:String
+      UnionedIssueFilterInput.assigneeUsernames:String UnionedIssueFilterInput.authorUsernames:String
+      UnionedIssueFilterInput.customField:WorkItemWidgetCustomFieldFilterInputType
+      UnionedIssueFilterInput.labelNames:String UnionedMergeRequestFilterInput.assigneeUsernames:String
+      UnionedMergeRequestFilterInput.onlyReviewerUsername:String
+      UnionedMergeRequestFilterInput.reviewStates:MergeRequestReviewState
+      UnionedMergeRequestFilterInput.reviewerWildcard:ReviewerWildcardId
+      WorkItemWidgetCustomFieldFilterInputType.customFieldId:IssuablesCustomFieldID
+      WorkItemWidgetCustomFieldFilterInputType.customFieldName:String
+      WorkItemWidgetCustomFieldFilterInputType.selectedOptionIds:IssuablesCustomFieldSelectOptionID
+      WorkItemWidgetCustomFieldFilterInputType.selectedOptionValues:String
+      WorkItemWidgetStatusFilterInput.id:WorkItemsStatusesStatusID WorkItemWidgetStatusFilterInput.name:String`),
+    accountInputs: words('MergeRequestsResolverNegatedParams.myReactionEmoji NegatedIssueFilterInput.myReactionEmoji'),
   },
 };

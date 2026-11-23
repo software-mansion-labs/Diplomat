@@ -198,10 +198,10 @@ belongs to:
 
 | Read | By |
 |---|---|
-| The repository's code: files, branches, tags, commits, a comparison of two of them, and what is recorded on a commit - its comments, its statuses, the results of its checks | every job |
+| The repository's code: files, branches, tags, commits, a comparison of two of them - and so the diff of any PR, which on GitHub `gh pr diff` also reads from the PR itself - and what is recorded on a commit: its comments, its statuses, the results of its checks | every job |
 | Every PR and issue of the repository, as context: what it says, its state, the comments, reviews and review threads on it | every job |
-| The rest of one PR: its changed files, its commits, who was asked to review it, whether it is merged, its labels, events and reactions; on GitLab its versions, pipelines, approvals and draft notes as well | the review, answering-reviews and conflicts job of that PR |
-| The rest of one issue: its events, labels and reactions | the issue job of that issue |
+| What the forge lists of one PR: its changed files, its commits, who was asked to review it, whether it is merged, its labels, events and reactions; on GitLab its versions, changes, pipelines, approvals and draft notes as well | the review, answering-reviews and conflicts job of that PR |
+| What the forge lists of one issue: its events, labels and reactions | the issue job of that issue |
 | A CI run, its jobs and their logs | every job, for a branch it pushed itself; the three PR jobs, for their PR's branch; audit and investigate, for the default branch |
 
 No job reads a list of CI runs, build artifacts, releases, deployments or environments, the
@@ -212,8 +212,8 @@ job's behalf needs them. Whether a commit's checks passed is recorded on the com
 readable for each one - `gh pr list` and `gh pr status` show it for every PR - while a run and
 its log are tied to the run's branch as the table says; the machine asks the forge which branch
 a run was for before it hands anything of it over. A GraphQL request is checked by the names
-of the fields it asks for, so there the rest of a PR or an issue is readable for each one of
-the repository; what no job reads is refused there as well.
+of the fields it asks for, so there what the forge lists of a PR or an issue is readable for
+each one of the repository; what no job reads is refused there as well.
 
 Of what lies outside the repository and the repository
 points at - the fork a PR comes from, an issue elsewhere that mentions one here - a job is told
@@ -239,8 +239,9 @@ and the repository's protection settings are not readable.
 A GraphQL request is refused whole when it asks for anything off that list, or for anything
 else the forge would say about the account that offered the job rather than about the
 repository: what that account may do to an issue, a PR or a comment, whether it is subscribed
-to one or has read it, its e-mail addresses. Which comments the account wrote is told, because
-`gh` asks.
+to one or has read it - asked for outright, or by listing only the ones it is subscribed to or
+reacted to - its e-mail addresses. Which comments the account wrote is told, because `gh` asks,
+and so are the name and address a commit was written with, which are part of the commit.
 (GitHub serves the commits of a repository's forks through the repository to whoever knows
 their id; the rules do not narrow what the forge itself calls part of the repository.)
 
