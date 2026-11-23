@@ -475,10 +475,10 @@ check(!mine.buildPrompt().contains("Anything you post on someone else's PR goes 
 check(other.buildPrompt().contains("Anything you post on someone else's PR goes in ONE formal GitHub review"))
 // Someone else's PRs are review-only: a hard no-commit guard, and the
 // commit-authoring guidance is dropped (we never touch their branch).
-check(other.buildPrompt().contains("ABSOLUTELY DO NOT touch their branch"))
+check(other.buildPrompt().contains("UNDER NO CIRCUMSTANCES may you commit"))
 check(!other.buildPrompt().contains("No AI attribution"))
 // My PRs do commit, so no review-only guard and the attribution rule stays.
-check(!mine.buildPrompt().contains("ABSOLUTELY DO NOT touch their branch"))
+check(!mine.buildPrompt().contains("UNDER NO CIRCUMSTANCES may you commit"))
 check(single("337").buildPrompt().hasPrefix("Review PR #337 in \(cfg.owner)/\(cfg.repo)."))
 // A pasted URL for the target repo resolves to the same single-PR prompt.
 check(single("https://github.com/\(cfg.owner)/\(cfg.repo)/pull/337").isValid)
@@ -512,18 +512,18 @@ let singlePrompt = single("337").buildPrompt()
 check(singlePrompt.contains("WHO AUTHORED IT"))
 check(singlePrompt.contains("CASE A") && singlePrompt.contains("CASE B"))
 // CASE A keeps the fix-on-branch + mark-ready + attribution behaviour…
-check(singlePrompt.contains("on the PR's branch"))   // depth onBranch fix step
+check(singlePrompt.contains("it is FIXED on the branch"))
 check(singlePrompt.contains("mark it ready for review"))
 check(singlePrompt.contains("No AI attribution"))
 // …CASE B is the hard look-don't-touch guard, with an explicit do-not-advance line.
-check(singlePrompt.contains("ABSOLUTELY DO NOT touch their branch"))
-check(singlePrompt.contains("isn't yours to advance"))
+check(singlePrompt.contains("UNDER NO CIRCUMSTANCES may you commit"))
+check(singlePrompt.contains("Do NOT mark this PR ready"))
 // With mark-ready off, neither the mark-ready block nor (since target≠someone) the
 // generic sweep markReady survives — proving the toggle gates only CASE A.
 let singleNoReady = ReviewConfig(depth: "max", target: .specific, me: me,
                                  markReady: false, specificPR: "337").buildPrompt()
 check(!singleNoReady.contains("mark it ready for review"))
-check(singleNoReady.contains("isn't yours to advance"))
+check(singleNoReady.contains("Do NOT mark this PR ready"))
 print("prompt assembly assertions passed")
 
 section("conflict prompts")
@@ -1553,7 +1553,8 @@ check(!iFeatures.contains("ONLY A REAL BUG REPORT"), "and withdraws the skip rul
 check(sweptPrompt.contains("DONE MEANS OBSERVABLE PROOF"), "the bar is always present")
 check(sweptPrompt.contains("CANNOT REPRODUCE"), "an unreproducible issue is a reported result")
 check(sweptPrompt.contains("QUICK PASS"), "the quick level is a read-only pass")
-check(!sweptPrompt.contains("CONCRETE REPRODUCTION"), "the quick level promises no reproduction")
+check(!sweptPrompt.contains("CONCRETE REPRODUCTION") && !sweptPrompt.contains("reproduction that showed the bug"),
+      "the quick level promises no reproduction")
 let iDefault = IssueConfig(me: goldenMeSeed).forIssue(302).buildPrompt()
 check(iDefault.contains("CONCRETE REPRODUCTION"), "the default depth reproduces")
 check(IssueConfig(depth: "max", me: goldenMeSeed).forIssue(302).buildPrompt()
@@ -2860,14 +2861,14 @@ check(km.contains("FIRST AND FOREMOST, resolve every reviewer finding"))
 check(km.contains(#""Fixed in <commit_hash>""#))
 // The reviewer-findings step comes before the agent's own deep-review approach.
 check(km.range(of: "FIRST AND FOREMOST")!.lowerBound < km.range(of: "dispatch swarms of agents")!.lowerBound)
-check(km.contains("fix it directly on the PR's branch"))
+check(km.contains("Keep dispatching swarms until"), "deep's on-branch loop")
 check(km.contains("No AI attribution"))
 check(!km.contains("mark it ready for review"), "markReady=false omits the block")
 // The gated (author-unknown) path still branches, for the manual Specific-PR wizard.
 let gated = ReviewConfig(depth: "deep", target: .specific, me: "latekvo", specificPR: "440").buildPrompt()
 check(gated.contains("WHO AUTHORED IT") && gated.contains("CASE A") && gated.contains("CASE B"))
 // The verdict and the soft approval are CASE B's alone. CASE B is the last section, so
-// the blocks both cases share (the swarm loop, the attribution tag) precede CASE A, and
+// the shared attribution tag precedes CASE A, and
 // the verdict follows CASE B's header with nothing shared after it.
 for (label, cfg) in [("soft-approve", ReviewConfig(depth: "deep", target: .specific, me: "latekvo",
                                                    specificPR: "440")),
@@ -2875,38 +2876,25 @@ for (label, cfg) in [("soft-approve", ReviewConfig(depth: "deep", target: .speci
                                               specificPR: "440", finalPass: true))] {
     let p = cfg.buildPrompt()
     let caseA = p.range(of: "▸ CASE A")!.lowerBound, caseB = p.range(of: "▸ CASE B")!.lowerBound
-    let verdict = p.range(of: label == "verdict" ? "and if so, APPROVE it" : "thanking them for contributing")!
+    let verdict = p.range(of: label == "verdict" ? "still APPROVE" : "Thank you for contributing")!
     check(verdict.lowerBound > caseB, "\(label): the verdict sits inside CASE B")
-    check(p.range(of: "Keep dispatching swarms until")!.lowerBound < caseA,
-          "\(label): the shared swarm loop precedes the split, not CASE B")
+    check(p[caseA..<caseB].contains("Keep dispatching swarms until") && !p[caseB...].contains("Keep dispatching swarms until"),
+          "\(label): only an own-branch repair iterates")
     check(p.range(of: "Diplomat attribution tag")!.lowerBound < caseA,
           "\(label): the shared attribution tag precedes the split, not CASE B")
     check(!p[caseA..<caseB].contains("APPROVE it") && !p[caseA..<caseB].contains("thanking them"),
           "\(label): CASE A carries no verdict")
 }
-// A clean pass's LOW findings are fixed on my own PR and posted on someone else's. Each
-// prompt carries its own disposition's block only, and the gated one puts each in its case.
-let lowsMine = "it is FIXED on the branch", lowsTheirs = "the LOW findings of that clean pass are posted"
-for (label, p) in [("known-mine", km),
-                   ("mine sweep", ReviewConfig(depth: "max", target: .mine, me: "latekvo").buildPrompt())] {
-    check(p.contains(lowsMine) && p.contains("ZERO pending findings") && !p.contains(lowsTheirs),
-          "\(label): LOW findings must be fixed, not posted")
-    check(!p.contains("post the LOW"), "\(label): the swarm loop still says to post LOW findings")
-}
-for (label, p) in [("known-theirs", ReviewConfig(depth: "max", target: .specific, me: "latekvo",
-                                                 specificPR: "500", specificAuthor: .theirs).buildPrompt()),
-                   ("theirs sweep", ReviewConfig(depth: "max", target: .someone, username: "other",
-                                                 me: "latekvo").buildPrompt())] {
-    check(p.contains(lowsTheirs) && !p.contains(lowsMine), "\(label): LOW findings must be posted")
-}
+// Own branches retain the fix disposition. External reviews stop after verification.
+let fixLows = "it is FIXED on the branch"
+check(km.contains(fixLows))
+check(!other.buildPrompt().contains(fixLows) && !other.buildPrompt().contains("Keep dispatching swarms until"))
 let gatedA = gated.range(of: "▸ CASE A")!.lowerBound, gatedB = gated.range(of: "▸ CASE B")!.lowerBound
-check(gated.range(of: lowsMine).map { gatedA < $0.lowerBound && $0.lowerBound < gatedB } == true,
-      "gated: the fix-every-LOW block belongs to CASE A")
-check(gated.range(of: lowsTheirs).map { $0.lowerBound > gatedB } == true,
-      "gated: the post-the-LOWs block belongs to CASE B")
+check(gated[gatedA..<gatedB].contains(fixLows) && !gated[gatedB...].contains(fixLows))
+check(gated[gatedB...].contains("retry the original trigger"))
 print("known-mine review prompt assertions passed")
 
-// ---- known-theirs comprehensive review (review-request monitor) ----
+// ---- known-theirs review (the review-request monitor's shape, at max) ----
 // Default: soft-approve ON, no hard verdict → a perfectly-clean PR gets a thank-you
 // COMMENT review, but still NO APPROVE action.
 section("known-theirs review prompt (default → soft-approve)")
@@ -2916,13 +2904,13 @@ let kt = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
 check(!kt.contains("WHO AUTHORED IT"), "known-theirs skips the author poll")
 check(!kt.contains("CASE A") && !kt.contains("CASE B"), "no case branching")
 check(kt.contains("SOMEONE ELSE'S"), "review-only framing")
-check(kt.contains("ABSOLUTELY DO NOT touch their branch"), "reviewOnly block present")
+check(kt.contains("UNDER NO CIRCUMSTANCES may you commit"), "reviewOnly block present")
 check(kt.contains("Anything you post on someone else's PR goes in ONE formal GitHub review"), "leaveReviews block present")
 // A reply on an existing thread reacts to what the author said there, never a bare repeat.
-check(kt.contains("A reply that disputes the finding without explaining why"), "an unexplained dispute gets a question")
-check(kt.contains("judge the explanation, not the finding. If it holds, post nothing more"), "an explanation that holds ends the thread")
-check(kt.contains("re-running the same reproduction is not new evidence"), "a repeated repro is not a reply")
-check(!km.contains("judge the explanation"), "a no-reviews prompt carries no thread-reply rules")
+check(kt.contains("Once that trigger passes, the finding is fixed"))
+check(kt.contains("Never extend its acceptance criteria with a different input or mutant"))
+check(kt.contains("one short Optional coverage note in the review body"))
+check(!km.contains("retry the original trigger"), "own PRs use the fix-on-branch thread rules")
 // The lifecycle, step by step: opened PENDING, filled inside, submitted once.
 check(kt.contains("with NO `event` field leaves the review PENDING"), "the review is opened pending")
 check(kt.contains("one pending review per person per PR"), "a leftover pending review is handled")
@@ -2931,6 +2919,7 @@ check(kt.contains("it is yours — opened earlier in this run, or left by an ear
 check(kt.contains("right before it, list the pending review's comments again: one that does not open with the attribution tag is mine, added from the browser, so leave the review unsubmitted"),
       "a comment of mine added mid-run keeps the review from being submitted")
 check(kt.contains("Post your findings in that review"), "leave-reviews posts the findings in it")
+check(kt.contains("Leave the choice of fix to the author"), "review findings leave implementation to the author")
 check(!kt.contains("Do NOT post your findings on the PR"), "…and is not told to keep them")
 check(kt.contains("If one of them does not open with the `\\[[Diplomat](` attribution tag (whatever model name follows it), that review is my own draft from the browser: stop right there"),
       "my draft is looked for before any review work, and stops the run")
@@ -2951,16 +2940,16 @@ check(kt.contains("Never end your turn with the review still PENDING"), "never l
 check(kt.contains("nor through the standalone `pulls/<number>/comments` endpoint"),
       "single-comment posting is ruled out")
 check(kt.contains("Do NOT mark this PR ready"), "otherNoMarkReady present")
-check(kt.contains("that single clean pass ends the loop"), "max-depth fragment present")
+check(kt.contains("run it END-TO-END"), "max-depth fragment present")
 // Soft-approve: no hard verdict, but a thank-you COMMENT review — never an APPROVE action.
-check(kt.contains("Do NOT submit an APPROVE"), "soft-approve still withholds the APPROVE verdict")
+check(kt.contains("COMMENT unless a verdict instruction below explicitly tells you to APPROVE"),
+      "soft-approve keeps the lifecycle's COMMENT default")
 check(kt.contains("Thank you for contributing"), "soft-approve clean thank-you present")
-check(kt.contains("never as a top-level issue comment"), "the soft approval is a review, not an issue comment")
-check(kt.contains("a COMMENT review carrying that body ONLY"), "the soft approval is a body-only COMMENT review")
+check(kt.contains("submit a COMMENT review with a short body"), "the soft approval is a COMMENT review")
 check(!kt.contains("top-level comment (not an inline finding)"), "no standalone soft-approve comment")
 check(!kt.contains("PR #500 looks clean"), "soft-approve replaces the silent no-verdict close")
 check(!kt.contains("still APPROVE"), "the finalPass approve-verdict block is gone")
-check(!kt.contains("fix it directly on the PR's branch"), "never fixes someone else's branch")
+check(!kt.contains("Keep dispatching swarms until"), "never fixes someone else's branch")
 check(!kt.contains("No AI attribution"), "no commits ⇒ no attribution block")
 print("known-theirs (soft-approve) review prompt assertions passed")
 
@@ -2969,31 +2958,29 @@ section("known-theirs review prompt (soft-approve off → silent)")
 let kts = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
                        markReady: false, leaveReviews: true, replyToReviews: false,
                        specificPR: "500", softApprove: false, specificAuthor: .theirs).buildPrompt()
-check(kts.contains("Do NOT submit an APPROVE"), "no-verdict instruction present")
+check(kts.contains("COMMENT unless a verdict instruction below"), "no-verdict: the COMMENT default stands")
 check(kts.contains("PR #500 looks clean"), "no-verdict {pr} substituted")
-check(kts.contains("delete any pending review you opened"), "a clean silent review leaves nothing pending")
+check(kts.contains("delete it instead"), "a clean silent review leaves nothing pending")
 check(!kts.contains("Thank you for contributing"), "soft-approve off ⇒ no thank-you review")
 check(!kts.contains("still APPROVE"), "no finalPass block")
 print("known-theirs (silent) review prompt assertions passed")
 
-// ---- known-theirs WITH verdict (trusted author: member/maintainer/contributor) ----
-// The review-request monitor sets finalPass=true when the PR author is trusted, so the
-// auto-review closes with an APPROVE/changes-requested verdict instead of comments only.
-// A real verdict outranks the (default-on) soft-approve, so no thank-you review either.
-section("known-theirs review prompt (trusted author → verdict)")
+// A manual final pass covers the full PR even after a focused review of the same head.
+section("known-theirs review prompt (manual final E2E + verdict)")
 let ktv = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
                        markReady: false, leaveReviews: true, replyToReviews: false,
                        specificPR: "500", finalPass: true, specificAuthor: .theirs).buildPrompt()
 check(ktv.contains("SOMEONE ELSE'S"), "review-only framing still present with verdict")
-check(ktv.contains("still APPROVE"), "trusted author ⇒ finalPass APPROVE-verdict block present")
-check(ktv.contains("gets a reply on that thread, under the reply rules above") && !ktv.contains("(\"Still present as of <commit_hash>\"), never a fresh comment"), "finalPass defers to the thread-reply rules")
-check(!ktv.contains("Do NOT submit an APPROVE"), "trusted author ⇒ no no-verdict block")
+check(ktv.contains("Use the full merge-base-to-head diff, even when this head was reviewed before"))
+check(ktv.contains("FULL E2E pass on the built binaries for the workflows affected by that diff"))
+check(!ktv.contains("On the same head check outstanding threads only"))
+check(ktv.contains("still APPROVE"), "final pass includes a verdict")
 check(!ktv.contains("Thank you for contributing"), "hard verdict outranks soft-approve")
 check(ktv.contains("COMMENT unless a verdict instruction below explicitly tells you to APPROVE"),
       "the lifecycle's COMMENT default yields to the verdict block")
 check(ktv.contains("such a verdict is this same submission's event, never a second review"),
       "the verdict is the one review's event")
-print("known-theirs (trusted author) review prompt assertions passed")
+print("known-theirs (manual final E2E) review prompt assertions passed")
 
 // The lifecycle belongs to a formal review of someone else's PR, and to nothing else.
 let ktNoReview = ReviewConfig(depth: "max", target: .specific, me: "latekvo",
@@ -3004,8 +2991,8 @@ check(!ktNoReview.contains("addPullRequestReviewThread"), "no formal review ⇒ 
 check(!ktNoReview.lowercased().contains("every finding goes in as an inline comment")
       && !ktNoReview.lowercased().contains("post every finding"),
       "no formal review ⇒ the closing block asks for none")
-check(ktNoReview.contains("Any review you submit on this PR uses the neutral COMMENT event"),
-      "…while still ruling out a verdict")
+check(ktNoReview.contains("Only an instruction below that explicitly tells you to submit a review may post anything")
+      && !ktNoReview.contains("still APPROVE"), "…while still ruling out a verdict")
 check(ktNoReview.contains("Do NOT post your findings on the PR"), "no formal review ⇒ findings stay unposted")
 check(ktNoReview.contains("This outranks every other line here that puts findings in the review"),
       "…over the blocks that elsewhere put findings in the review")
@@ -3033,6 +3020,15 @@ check(ktVerdictOnly.contains("Post your findings in that review")
       && !ktVerdictOnly.contains("Do NOT post your findings on the PR"),
       "…and posts its findings in it, as the verdict pass requires")
 check(!km.contains("addPullRequestReviewThread"), "my own PR ⇒ no lifecycle")
+// Each rule is written in one block of the prompt that carries it.
+let mineSweep = mine.buildPrompt()
+for (name, p, rule) in [("mine sweep", mineSweep, "Fixed in <commit_hash>"),
+                        ("known mine", km, "Fixed in <commit_hash>"), ("known mine", km, "on the branch"),
+                        ("known theirs", kt, "SOMEONE ELSE'S"), ("known theirs", kt, "APPROVE"),
+                        ("known theirs", kt, "top-level"),
+                        ("swept issue", sweptPrompt, "change nothing, post nothing")] {
+    check(p.components(separatedBy: rule).count == 2, "\(name) says '\(rule)' once")
+}
 
 // ---- the after-run check of a review's lifecycle (mirrors test_reviewaudit.py) ----
 section("ReviewAudit")
@@ -3135,39 +3131,68 @@ print("ReviewAudit assertions passed")
 // meaning at all: a depth that stopped naming a single move would regenerate green. These
 // name the method itself.
 //
-// On the `.mine` prompt: softApprove quotes the move names in its example comment, so on a
-// `.theirs` prompt a move deleted from the fragment is still found there.
 section("review moves + absence pass")
-let moves = ["claims vs code", "nearest twin", "non-happy paths",
-             "inputs, reachability both ways", "what outlives the call"]
+// Named AND defined: the prompt is the agent's only copy of what a move means.
+let moves = ["claims vs code (", "nearest twin (", "non-happy paths (", "inputs (",
+             "reachability both ways (", "what outlives the call ("]
 let absencePass = ["a sibling that has it", "prose that promises it", "symmetry",
-                   "and the mutation"]
-for swarmDepth in ["standard", "deep", "max"] {
+                   "a targeted mutation that reverts that behavior"]
+for swarmDepth in ["deep", "max"] {
     let p = ReviewConfig(depth: swarmDepth, me: "latekvo").buildPrompt()
     for move in moves {
-        check(p.contains(move), "\(swarmDepth) depth names the '\(move)' move")
+        check(p.components(separatedBy: move).count == 2, "\(swarmDepth) depth names the '\(move)' move once")
     }
+    check(p.contains("Keep dispatching swarms until"), "\(swarmDepth) depth loops its own fixes")
     for part in absencePass {
         check(p.contains(part), "\(swarmDepth) depth carries the absence pass — '\(part)'")
     }
 }
+var requestedVerdict = ReviewConfig(depth: "standard", target: .specific, specificPR: "500", specificAuthor: .theirs)
+requestedVerdict.automaticVerdict = true
+let focusedVerdict = requestedVerdict.buildPrompt()
+check(focusedVerdict.contains("one focused pass") && focusedVerdict.contains("still APPROVE"))
+check(!focusedVerdict.contains("FULL E2E pass") && !focusedVerdict.contains("Keep dispatching swarms"))
+check(focusedVerdict.contains("On the same head check outstanding threads only"))
+check(focusedVerdict.contains("history was rewritten") && focusedVerdict.contains("use the full current PR diff"))
+check(!focusedVerdict.contains("Thank you for contributing"))
 // `quick` dispatches no swarm — and without this negative the loop above would pass just
 // as well on a move list appended to every depth.
 let quickPrompt = ReviewConfig(depth: "quick", me: "latekvo").buildPrompt()
 check(!quickPrompt.contains("nearest twin"), "quick depth runs no swarm and names no moves")
 check(!quickPrompt.contains("a sibling that has it"), "quick depth carries no absence pass")
+check(!ReviewConfig(depth: "standard", me: "latekvo").buildPrompt().contains("Keep dispatching swarms"),
+      "only the swarm depths loop")
+for swarmDepth in ["deep", "max"] {
+    let p = IssueConfig(depth: swarmDepth, me: "latekvo").forIssue(7).buildPrompt()
+    for move in moves {
+        check(p.components(separatedBy: move).count == 2,
+              "issues \(swarmDepth) depth names and defines the '\(move)' move once")
+    }
+}
+// The prompt runs on machines that have none of the operator's files.
+for name in ["review", "issues", "audit", "conflicts"] {
+    let text = try! String(contentsOf: CoreAssets.assetsDir().appendingPathComponent("\(name).json"),
+                           encoding: .utf8)
+    check(!text.contains("CLAUDE.md"), "\(name).json defers to no CLAUDE.md the agent may not have")
+    if name == "issues" {
+        check(text.components(separatedBy: "CONCRETE REPRODUCTION").count == 2,
+              "issues.json writes the reproduction step once, for every depth that extends it")
+    }
+    if name == "review" || name == "issues" {
+        check(text.components(separatedBy: "nearest twin (").count == 2,
+              "\(name).json writes the moves once, for every depth that extends it")
+    }
+}
 print("review moves + absence pass assertions passed")
 
 // ---- Whether the PR is the right change at all ----
 // Every review prompt asks it once, ahead of the depth's instructions, whoever the author.
 section("premise check")
-let premiseParts = ["JUDGE THE PREMISE, NOT ONLY THE DIFF",
-                    "trace the reported symptom down to where it originates",
-                    "only stop the symptom from showing",
-                    "A PR whose premise fails is NOT clean",
-                    "at least MEDIUM, never a LOW or a nitpick",
-                    "with no case it gets wrong, is a preference: drop it on sight",
-                    "one line per PR: what it is for and whether its premise held"]
+let premiseParts = ["Identify the behavior this PR sets out to change",
+                    "judge its premise: whether the diagnosis holds and the change removes the cause",
+                    "reachable regression against the merge base",
+                    "fails a behavior the change explicitly promises",
+                    "Open a follow-up issue only when the operator explicitly asks"]
 for d in ReviewCatalog.depths() {
     let shapes: [(String, String)] = [
         ("mine sweep", ReviewConfig(depth: d.id, me: "latekvo").buildPrompt()),
@@ -3202,11 +3227,11 @@ for d in ReviewCatalog.depths() {
     }
 }
 // Without these the loop above would pass on text appended to every prompt kind.
-check(!ConflictConfig(me: "latekvo").buildPrompt().contains("JUDGE THE PREMISE"),
+check(!ConflictConfig(me: "latekvo").buildPrompt().contains(premiseParts[0]),
       "a conflict resolution judges no premise")
-check(!IssueConfig(me: "latekvo").forIssue(302).buildPrompt().contains("JUDGE THE PREMISE"),
+check(!IssueConfig(me: "latekvo").forIssue(302).buildPrompt().contains(premiseParts[0]),
       "an issue fix judges no premise")
-check(!AuditConfig().buildPrompt().contains("JUDGE THE PREMISE"), "an audit judges no premise")
+check(!AuditConfig().buildPrompt().contains(premiseParts[0]), "an audit judges no premise")
 print("premise check assertions passed")
 
 // ---- Where a swarm's spilled summaries may be read from ----
@@ -3279,6 +3304,36 @@ check(!AuthorAllowlist.allows("carol", in: ["bob"]), "a list is a limit")
 // is outside it rather than waved through.
 check(!AuthorAllowlist.allows("", in: ["bob"]), "an author GitHub cannot name is outside a list")
 print("author allowlist assertions passed")
+
+// ---- The auto-review depth table ----
+section("auto-review depth")
+// PARITY: the Python twin (autofix.auto_review_depth / AutoReviewOverride) asserts
+// these exact shapes.
+check(AutoReviewDepth.defaultDepth == "standard", "everyone is reviewed at standard by default")
+check(AutoReviewDepth.seed == [AutoReviewOverride(login: nil, depth: "max")], "the table starts as me at max")
+let depthTable = [AutoReviewOverride(login: nil, depth: "max"),
+                  AutoReviewOverride(login: " @HubGan ", depth: "max"),
+                  AutoReviewOverride(login: "", depth: "quick"),
+                  AutoReviewOverride(login: "hubgan", depth: "quick"),
+                  AutoReviewOverride(login: "latekvo", depth: "deep")]
+func autoDepth(_ author: String, me: String = "Me-User") -> String {
+    AutoReviewDepth.resolve(author: author, me: me, overrides: depthTable, otherwise: "standard")
+}
+check(autoDepth("someone") == "standard", "an author no row names gets the default")
+check(autoDepth("ME-USER") == "max", "the me row is whoever I am, case-insensitively")
+check(autoDepth("HUBGAN") == "max", "a login matches with its @ and padding off, case-insensitively; the first row wins")
+check(autoDepth("latekvo") == "deep", "any row can name its author")
+check(autoDepth("me-user", me: "") == "standard", "the me row names nobody while I am unknown")
+check(autoDepth("") == "standard", "an author GitHub cannot name matches no row, blank ones included")
+check(AutoReviewDepth.resolve(author: "x", me: "", overrides: [], otherwise: "deep") == "deep",
+      "an empty table is the default for everyone")
+let seedJSON = String(data: try! JSONEncoder().encode(AutoReviewDepth.seed), encoding: .utf8)!
+check(seedJSON == #"[{"depth":"max"}]"#, "the me row is stored without a login: \(seedJSON)")
+let readBack = try? JSONDecoder().decode([AutoReviewOverride].self,
+                                          from: Data(#"[{"depth":"max"},{"login":"bob","depth":"deep"}]"#.utf8))
+check(readBack == [AutoReviewOverride(login: nil, depth: "max"), AutoReviewOverride(login: "bob", depth: "deep")],
+      "a stored table reads back row for row")
+print("auto-review depth assertions passed")
 
 // ---- Review reconciler (retry unaddressed reviews) ----
 section("review reconcile")
@@ -3581,7 +3636,7 @@ check(AuditCategory.of(action: "merge-failed") == .merge)
 check(AuditCategory.of(action: "ban") == .bans, "bans are their own category")
 check(AuditCategory.of(action: "unban") == .bans)
 for verb in ["comms-ping", "comms-review", "comms-fix", "comms-bump", "comms-investigate",
-             "comms-error", "comms-recovered", "comms-notice", "comms-reply"] {
+             "comms-error", "comms-recovered", "comms-notice"] {
     check(AuditCategory.of(action: verb) == .comms, "\(verb) is a Comms row")
 }
 check(AuditCategory.displayOrder.firstIndex(of: .comms) == AuditCategory.displayOrder.firstIndex(of: .bans)! + 1
@@ -3614,15 +3669,12 @@ print("audit category assertions passed")
 try commsSmoke()
 print("comms assertions passed")
 
-try await tasksSmoke()
-try await goalsSmoke()
-print("tasks assertions passed")
 try await gitlabSmoke()
 try networkSmoke()
 
 // ---- Golden prompts (cross-platform parity) ----
 // Every prompt mode both front-ends can assemble is compared byte-for-byte against a
-// committed golden file in assets/golden-prompts/. The Linux tests assert the SAME
+// committed golden file in Tests/fixtures/prompts/. The Linux tests assert the SAME
 // files, so Swift and Python can only drift from each other by failing one CI job.
 // Regenerate after an intentional core/*.json change: DIPLOMAT_GOLDEN_WRITE=1 swift run
 // DiplomatCoreSmoke.
@@ -3672,19 +3724,19 @@ let goldenModes: [(String, String)] = [
                                c.home = goldenGitLab
                                return c.buildPrompt() }()),
 ]
-let goldenDir = try CoreAssets.assetsDir().appendingPathComponent("golden-prompts")
+let goldenDir = try CoreAssets.assetsDir().deletingLastPathComponent().appendingPathComponent("Tests/fixtures/prompts")
 if ProcessInfo.processInfo.environment["DIPLOMAT_GOLDEN_WRITE"] == "1" {
     try FileManager.default.createDirectory(at: goldenDir, withIntermediateDirectories: true)
     for (name, prompt) in goldenModes {
-        try prompt.write(to: goldenDir.appendingPathComponent("\(name).txt"),
+        try prompt.write(to: goldenDir.appendingPathComponent("\(name).expected.txt"),
                          atomically: true, encoding: .utf8)
     }
     print("wrote \(goldenModes.count) golden prompts to \(goldenDir.path)")
 } else {
     for (name, prompt) in goldenModes {
-        let url = goldenDir.appendingPathComponent("\(name).txt")
+        let url = goldenDir.appendingPathComponent("\(name).expected.txt")
         let golden = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        check(!golden.isEmpty, "missing golden \(name).txt — run DIPLOMAT_GOLDEN_WRITE=1")
+        check(!golden.isEmpty, "missing golden \(name).expected.txt — run DIPLOMAT_GOLDEN_WRITE=1")
         check(prompt == golden, "prompt \(name) drifted from its golden file")
     }
     print("golden-prompt assertions passed (\(goldenModes.count) modes)")

@@ -91,6 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // No Dock icon for a one-shot.
             NSApp.setActivationPolicy(.accessory)
         } else {
+            // Only after terminateOthers: the LSUIElement bundle takes its Dock tile here,
+            // so it gets the kept-in-Dock one, not one beside it.
             NSApp.setActivationPolicy(.regular)
             NSApp.applicationIconImage = AppIcon.image()
             let store = Store()
@@ -196,11 +198,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // or gh. Exit code = pass/fail.
         if env["DIPLOMAT_COMMS_TEST"] == "1" {
             Task { @MainActor in let ok = await CommsTest.run(); exit(ok ? 0 : 1) }
-        }
-        // Tasks self-test: edits and syncs through the Store against a stand-in gh, on
-        // scratch tasks and Comms dirs. Exit code = pass/fail.
-        if env["DIPLOMAT_TASKS_TEST"] == "1" {
-            Task { @MainActor in exit(await TasksTest.run() ? 0 : 1) }
         }
         // Diplomacy Network self-test: the Store's cycle, gate and run handling against a
         // stand-in daemon on a scratch socket, with a stand-in installer and process
@@ -933,14 +930,14 @@ enum Dump {
             let sampleVerdict = sampleReq.map {
                 policy.allowsVerdict(files: $0.files, authorAssociation: $0.authorAssociation)
             } ?? false
-            print("\n----- COMPREHENSIVE REVIEW prompt (review-requested #\(sample), max · leave comments · "
+            print("\n----- REVIEW-REQUEST prompt (review-requested #\(sample), \(AutoReviewDepth.defaultDepth) · leave comments · "
                 + "\(sampleVerdict ? "→ VERDICT" : "→ NO verdict")) -----")
-            var comprehensive = ReviewConfig(depth: "max", target: .specific, me: me,
-                                             markReady: false, leaveReviews: true, replyToReviews: false,
-                                             specificPR: String(sample), finalPass: sampleVerdict,
-                                             specificAuthor: .theirs)
-            comprehensive.home = root
-            print(comprehensive.buildPrompt())
+            var requested = ReviewConfig(depth: AutoReviewDepth.defaultDepth, target: .specific, me: me,
+                                         markReady: false, leaveReviews: true, replyToReviews: false,
+                                         specificPR: String(sample), specificAuthor: .theirs)
+            requested.home = root
+            requested.automaticVerdict = sampleVerdict
+            print(requested.buildPrompt())
 
             // New community issues: the scan the monitor runs, against a mark a week back
             // (a live mark is the newest issue, which would show nothing).

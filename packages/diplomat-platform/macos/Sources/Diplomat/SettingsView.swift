@@ -537,7 +537,8 @@ struct SettingsView: View {
         """
 
     private static let reviewRequestsDetail = """
-        Full E2E · max, inline comments — read-only, never their branch. \
+        Inline comments — read-only, never their branch. \
+        Re-reviews check new commits and open findings. \
         A review that never lands (agent died, window closed) is retried. Off, the \
         requests still list under Agent tasks, queued for “execute now” only.
         """
@@ -556,13 +557,14 @@ struct SettingsView: View {
         }
     }
 
-    /// Who an auto-review may run for, and what it is allowed to submit.
+    /// Who an auto-review may run for, how deep it goes, and what it is allowed to submit.
     ///
     /// Only the verdict rows follow the switch above, because nothing they govern
     /// happens until a review runs. The author list outlives it: a switched-off
     /// monitor still polls and still lists what it finds, and the list is what decides
     /// which requests those are — hidden while it is off, it would be filtering rows
-    /// the operator has no way to reach.
+    /// the operator has no way to reach. The depth rows outlive it too: the reviews it
+    /// queues while off run at them on "execute now".
     private var reviewPolicyBlock: some View {
         NestedSettings(tint: .orange) {
             SettingRow(title: "Only these authors",
@@ -570,8 +572,85 @@ struct SettingsView: View {
                        stacked: true) {
                 reviewAllowlistField
             }
+            autoReviewDepthRow
+            autoReviewOverridesRow
             if store.reviewRequestsEnabled { reviewVerdictRows }
         }
+    }
+
+    private var autoReviewDepthRow: some View {
+        let depth = ReviewCatalog.depth(id: store.autoReviewDefaultDepth)
+        return SettingRow(title: "Review depth", detail: "\(depth.title) — \(depth.blurb)",
+                          stacked: true) {
+            depthPicker("Review depth", $store.autoReviewDefaultDepth)
+                .pickerStyle(.segmented).controlSize(.small)
+        }
+    }
+
+    private func depthPicker(_ title: String, _ selection: Binding<String>) -> some View {
+        Picker(title, selection: selection) {
+            ForEach(ReviewCatalog.depths()) { Text($0.id.capitalized).tag($0.id) }
+        }
+        .labelsHidden()
+    }
+
+    private var autoReviewOverridesRow: some View {
+        SettingRow(title: "Per-author depth",
+                   detail: "Overrides the depth above for these authors' PRs; the first row "
+                         + "naming one wins.",
+                   stacked: true) {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(store.autoReviewOverrides) { autoReviewOverrideRow($0) }
+                HStack(spacing: 12) {
+                    Button {
+                        store.autoReviewOverrides.append(AutoReviewOverride(login: "", depth: "max"))
+                    } label: {
+                        Label("Add author", systemImage: "plus.circle")
+                    }
+                    if !store.autoReviewOverrides.contains(where: { $0.login == nil }) {
+                        Button {
+                            store.autoReviewOverrides.append(AutoReviewOverride(login: nil, depth: "max"))
+                        } label: {
+                            Label("Add me", systemImage: "plus.circle")
+                        }
+                    }
+                }
+                .buttonStyle(.borderless).font(.callout)
+            }
+        }
+    }
+
+    /// Bindings find the row by `id`: by index, a field still being edited when a row
+    /// above it goes would write into the row that slid into its place.
+    private func autoReviewOverrideRow(_ row: AutoReviewOverride) -> some View {
+        let index = { store.autoReviewOverrides.firstIndex { $0.id == row.id } }
+        let login = Binding<String>(
+            get: { index().map { store.autoReviewOverrides[$0].login ?? "" } ?? "" },
+            set: { if let i = index() { store.autoReviewOverrides[i].login = $0 } })
+        let depth = Binding<String>(
+            get: { index().map { store.autoReviewOverrides[$0].depth } ?? "" },
+            set: { if let i = index() { store.autoReviewOverrides[i].depth = $0 } })
+        let me = store.effectiveMe
+        return HStack(spacing: 6) {
+            Image(systemName: "person.fill").font(.caption).foregroundStyle(.secondary)
+            if row.login == nil {
+                Text(me.isEmpty ? "me" : "me (@\(me))").font(.callout)
+            } else {
+                TextField("login", text: login).textFieldStyle(.plain).font(.callout)
+            }
+            Spacer(minLength: 4)
+            depthPicker("Depth for this author", depth)
+                .pickerStyle(.menu).controlSize(.small).fixedSize()
+            Button {
+                if let i = index() { store.autoReviewOverrides.remove(at: i) }
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+            }
+            .buttonStyle(.borderless).foregroundStyle(.secondary)
+            .tooltip("Remove this row")
+        }
+        .padding(7)
+        .background(RoundedRectangle(cornerRadius: 6).fill(Color.gray.opacity(0.12)))
     }
 
     @ViewBuilder
@@ -852,11 +931,6 @@ struct SettingsView: View {
             }
             commsActionsBlock
             commsBatchRows
-            SettingRow(title: "Reply in Slack", detail: SettingsView.commsRepliesDetail) {
-                switchControl("Reply in Slack", $store.commsReplies)
-            }
-            if store.commsReplies { commsRepliesBlock }
-            commsAwayRow
             SettingRow(title: "Notify on new pings") {
                 switchControl("Notify on new pings", $store.commsNotify)
             }
@@ -883,23 +957,6 @@ struct SettingsView: View {
                            help: "Move what is already queued for that number to the front of its band")
                 ToggleChip(label: "investigations", isOn: $store.commsActInvestigations, tint: .blue,
                            help: "Queue an agent that reproduces a reported problem and writes a report")
-            }
-        }
-    }
-
-    private var commsRepliesBlock: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text("REPLY TO…")
-                .font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary).kerning(0.5)
-            HStack(spacing: 5) {
-                ToggleChip(label: "questions", isOn: $store.commsReplyToQuestions, tint: .blue,
-                           help: "Answer a question the project's documentation settles")
-                ToggleChip(label: "reviews", isOn: $store.commsReplyToReviews, tint: .blue,
-                           help: "Say when a review a message asked for should be done")
-                ToggleChip(label: "fixes", isOn: $store.commsReplyToFixes, tint: .blue,
-                           help: "Say when a fix a message asked for should be done")
-                ToggleChip(label: "investigations", isOn: $store.commsReplyToInvestigations, tint: .blue,
-                           help: "Say when an investigation a message started should be done")
             }
         }
     }
@@ -991,39 +1048,6 @@ struct SettingsView: View {
         writes a report and never pushes, comments or posts. Everything still waits for \
         a bay and answers to the ban list and the spending budget.
         """
-
-    private static let commsRepliesDetail = """
-        Only while you are away; work is queued either way. Replies start with [Diplomat]:, \
-        in the message's language (Polish or English), and go only to the conversation the \
-        message was written in, in its thread, once per message. A question about the \
-        project is answered from its documentation when that settles it plainly, and left \
-        alone otherwise. A review, fix or investigation a ping queued (or found queued or \
-        running) can get an estimate of when it should be done.
-        """
-
-    private static let commsAwayDetail =
-        "How long your Mac must have been locked before Comms replies for you."
-    private static let commsAwayStep = (try? CoreAssets.comms())?.replies.awayAfterStepSecs ?? 900
-    private static let commsAwayMax = (try? CoreAssets.comms())?.replies.awayAfterMaxSecs ?? 43200
-
-    private var commsAwayRow: some View {
-        let lo = SettingsView.commsAwayStep, hi = SettingsView.commsAwayMax
-        return SettingRow(title: "Away after",
-                          detail: SettingsView.commsAwayDetail,
-                          stacked: true) {
-            SliderSetting(label: "Away after",
-                          value: Binding(
-                              get: { Double(store.commsAwayAfterSecs) },
-                              set: { store.commsAwayAfterSecs = Int($0.rounded()) }
-                          ),
-                          range: Double(lo)...Double(hi),
-                          step: Double(lo),
-                          badge: Fmt.duration(TimeInterval(store.commsAwayAfterSecs)),
-                          minLabel: Fmt.duration(TimeInterval(lo)),
-                          maxLabel: Fmt.duration(TimeInterval(hi)),
-                          tint: .blue)
-        }
-    }
 
     private static let commsLoginDetail = """
         Comms borrows the login Claude Code holds for Slack's MCP server, read on each \

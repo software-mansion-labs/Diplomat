@@ -33,9 +33,9 @@ dependencies = []
 szpont = "szpont_launcher:main"
 
 [project.urls]
-Homepage = "https://github.com/latekvo/Diplomat"
-Source = "https://github.com/latekvo/Diplomat/tree/main/packages/szpont"
-Issues = "https://github.com/latekvo/Diplomat/issues"
+Homepage = "https://github.com/software-mansion-labs/Diplomat"
+Source = "https://github.com/software-mansion-labs/Diplomat/tree/main/packages/szpont"
+Issues = "https://github.com/software-mansion-labs/Diplomat/issues"
 
 [tool.setuptools]
 py-modules = ["szpont_launcher"]

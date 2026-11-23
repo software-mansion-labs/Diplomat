@@ -7,9 +7,9 @@ public struct PromptDepth: Identifiable {
     public let title: String
     public let blurb: String
     public let fragment: String
-    /// The "fix it on the branch" disposition for this depth, appended only when
-    /// we may actually commit. `nil` for flag-only depths / never used review-only,
-    /// and on ladders with no such split (the issue one, whose delivery is a toggle).
+    /// What this depth adds on a branch we fix, appended only when we may actually
+    /// commit. `nil` where it adds nothing, and on ladders with no such split (the
+    /// issue one, whose delivery is a toggle).
     public let onBranch: String?
 
     public init(id: String, title: String, blurb: String, fragment: String, onBranch: String? = nil) {
@@ -28,13 +28,30 @@ public struct PromptDepth: Identifiable {
         if let def = all.first(where: { $0.id == defaultID }) { return def }
         return all.first ?? PromptDepth(id: "", title: "", blurb: "", fragment: "")
     }
+
+    /// A ladder's levels, each one that `extends` another carrying that level's text
+    /// ahead of its own.
+    static func ladder(_ entries: [CoreAssets.DepthEntry]) -> [PromptDepth] {
+        func join(_ parts: String?...) -> String? {
+            let text = parts.compactMap { $0 }
+            return text.isEmpty ? nil : text.joined(separator: " ")
+        }
+        var out: [PromptDepth] = []
+        for e in entries {
+            let base = out.first { $0.id == e.extends }
+            out.append(PromptDepth(id: e.id, title: e.title, blurb: e.blurb,
+                                   fragment: join(base?.fragment, e.fragment) ?? "",
+                                   onBranch: join(base?.onBranch, e.onBranch)))
+        }
+        return out
+    }
 }
 
 /// Read-only access to the review-prompt model in `assets/review.json`.
 public enum ReviewCatalog {
     public static func depths() -> [PromptDepth] {
         guard let r = try? CoreAssets.review() else { return [] }
-        return r.depths.map { PromptDepth(id: $0.id, title: $0.title, blurb: $0.blurb, fragment: $0.fragment, onBranch: $0.onBranch) }
+        return PromptDepth.ladder(r.depths)
     }
     public static func defaultDepthID() -> String {
         (try? CoreAssets.review())?.defaultDepth ?? depths().first?.id ?? ""
@@ -90,6 +107,10 @@ public struct ReviewConfig: Codable, Equatable {
 
     /// The "final pass" escalation: a culminating full-E2E verdict pass. Off by default.
     public var finalPass: Bool
+
+    /// The review-request monitor may submit a verdict at its selected depth.
+    /// Optional so previously queued manual reviews retain their final E2E pass.
+    public var automaticVerdict: Bool?
 
     /// Soft-approve: when a review-only PR comes back perfectly clean, submit a COMMENT
     /// review whose body is a friendly "ran the sweep, all clean, thanks for contributing"
@@ -159,9 +180,10 @@ public struct ReviewConfig: Codable, Equatable {
     public var effLeaveReviews: Bool { leaveReviews && canLeaveReviews }
     public var effReplyToReviews: Bool { replyToReviews && canReplyToReviews }
     public var effFinalPass: Bool { finalPass && canFinalPass }
+    public var effVerdict: Bool { (finalPass || automaticVerdict == true) && canFinalPass }
     // A real verdict (finalPass) outranks a soft approval — when we're submitting APPROVE /
     // request-changes there's no separate soft-approve review.
-    public var effSoftApprove: Bool { softApprove && canSoftApprove && !effFinalPass }
+    public var effSoftApprove: Bool { softApprove && canSoftApprove && !effVerdict }
 
     /// Review exactly one PR by number/URL instead of a whose-PRs sweep.
     public var isSinglePR: Bool { target == .specific }
@@ -238,19 +260,40 @@ public struct ReviewConfig: Codable, Equatable {
         blocks["diplomatTag"].map { AgentModel.fillTag($0, model: AgentModel.detected()) }
     }
 
+    private func reviewOnlyInstructions(_ blocks: [String: String]) -> String {
+        let range = effFinalPass ? "finalVerification" : "incrementalReviewRange"
+        return [blocks["reviewOnly"], blocks[range]].compactMap { $0 }.joined(separator: " ")
+    }
+
     /// How a review on someone else's PR is built, whenever this run may submit one, and
     /// whether its findings go in it — they do under the verdict pass, which posts them
     /// with its verdict. Nothing on my own PRs, which get no review.
     private func reviewBlocks(_ blocks: [String: String]) -> [String] {
         guard canLeaveReviews else { return [] }
         var out: [String] = []
-        if effLeaveReviews || effSoftApprove || effFinalPass, let b = blocks["reviewLifecycle"] {
+        if effLeaveReviews || effSoftApprove || effVerdict, let b = blocks["reviewLifecycle"] {
             out.append(b)
         }
-        if let b = blocks[effLeaveReviews || effFinalPass ? "leaveReviews" : "noReviews"] {
+        if let b = blocks[effLeaveReviews || effVerdict ? "leaveReviews" : "noReviews"] {
             out.append(b)
         }
         return out
+    }
+
+    /// How a review of someone else's PR closes: the verdict (manual final pass or
+    /// automatic policy), else the soft approval, else with `silent` the call left to me.
+    private func verdictClose(_ blocks: [String: String], silent: Bool = false) -> String? {
+        if effVerdict, let b = blocks["finalPass"] { return b }
+        return effSoftApprove ? blocks["softApprove"] : silent ? blocks["noVerdict"].map(fill) : nil
+    }
+
+    /// A single-PR block with its placeholders filled.
+    private func fill(_ s: String) -> String {
+        let (owner, repo) = targetRepo
+        return s.replacingOccurrences(of: "{pr}", with: prRef.numberString)
+            .replacingOccurrences(of: "{owner}", with: owner)
+            .replacingOccurrences(of: "{repo}", with: repo)
+            .replacingOccurrences(of: "{me}", with: me.isEmpty ? "me" : me)
     }
 
     private func prKind(_ scope: [String: String]) -> String {
@@ -274,11 +317,11 @@ public struct ReviewConfig: Codable, Equatable {
         if isSinglePR {
             switch specificAuthor {
             case .mine:
-                return buildKnownMinePrompt(review: review, scope: scope, blocks: blocks, owner: owner, repo: repo)
+                return buildKnownMinePrompt(review: review, scope: scope, blocks: blocks)
             case .theirs:
-                return buildKnownTheirsPrompt(review: review, scope: scope, blocks: blocks, owner: owner, repo: repo)
+                return buildKnownTheirsPrompt(review: review, scope: scope, blocks: blocks)
             case .unknown:
-                return buildSpecificPrompt(review: review, scope: scope, blocks: blocks, owner: owner, repo: repo)
+                return buildSpecificPrompt(review: review, scope: scope, blocks: blocks)
             }
         }
 
@@ -295,7 +338,7 @@ public struct ReviewConfig: Codable, Equatable {
         if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
 
         // For someone else's PRs, frame the whole task as look-don't-touch up front.
-        if isReviewOnly, let b = blocks["reviewOnly"] { out.append(b) }
+        if isReviewOnly { out.append(reviewOnlyInstructions(blocks)) }
         let chosen = ReviewCatalog.depth(id: depth)
         if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
@@ -306,16 +349,11 @@ public struct ReviewConfig: Codable, Equatable {
         if effMarkReady, let b = blocks["markReady"] { out.append(b) }
         out += reviewBlocks(blocks)
         if effReplyToReviews, let b = blocks["reply"] { out.append(b) }
-        if let trailer = blocks["trailer"] { out.append(trailer) }
-        if let b = blocks[isReviewOnly ? "lowsTheirs" : "lowsMine"] { out.append(b) }
+        if !isReviewOnly, let b = blocks["lowsMine"] { out.append(b) }
         // Commit-authoring guidance only when we might actually commit — never
         // for someone else's branch, which we don't touch.
         if !isReviewOnly, let b = blocks["noAttribution"] { out.append(b) }
-        if effFinalPass, let b = blocks["finalPass"] {
-            out.append(b)
-        } else if effSoftApprove, let b = blocks["softApprove"] {
-            out.append(b)
-        }
+        if let b = verdictClose(blocks) { out.append(b) }
         // Every comment/review this run posts carries the Diplomat attribution tag.
         if let b = diplomatTag(blocks) { out.append(b) }
 
@@ -326,23 +364,15 @@ public struct ReviewConfig: Codable, Equatable {
     /// CASE A/B — just the mine-only disposition (review approach + bar + fix-on-branch,
     /// with reply/mark-ready gated by their toggles). Used by the auto-fix monitor.
     private func buildKnownMinePrompt(review: CoreAssets.Review?, scope: [String: String],
-                                      blocks: [String: String], owner: String, repo: String) -> String {
+                                      blocks: [String: String]) -> String {
         let specific = review?.specific ?? [:]
         let chosen = ReviewCatalog.depth(id: depth)
-        let pr = prRef.numberString
-        let handle = me.isEmpty ? "me" : me
-        func fill(_ s: String) -> String {
-            s.replacingOccurrences(of: "{pr}", with: pr)
-                .replacingOccurrences(of: "{owner}", with: owner)
-                .replacingOccurrences(of: "{repo}", with: repo)
-                .replacingOccurrences(of: "{me}", with: handle)
-        }
         var out: [String] = []
         out.append(fill(scope["single"] ?? ""))
         if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
         out.append(fill(specific["mineOnly"] ?? ""))
-        // First and foremost: screen + verify + fix/dismiss + respond to every reviewer
-        // finding already on the PR, BEFORE the agent's own review.
+        // First and foremost: screen + verify + fix/dismiss every reviewer finding
+        // already on the PR, BEFORE the agent's own review.
         out.append(fill(specific["reviewerFindingsFirst"] ?? ""))
         if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
@@ -350,10 +380,9 @@ public struct ReviewConfig: Codable, Equatable {
         if let ob = chosen.onBranch, !ob.isEmpty { out.append(ob) }
         if effMarkReady, let b = blocks["markReady"] { out.append(b) }
         if let b = blocks["noAttribution"] { out.append(b) }
-        if let trailer = blocks["trailer"] { out.append(trailer) }
         if let b = blocks["lowsMine"] { out.append(b) }
         // No final verdict for my own PR — I don't approve my own work. The reviewer-
-        // findings block above already covers replying to threads (so the separate reply
+        // findings block above already covers others' threads (so the separate reply
         // block is redundant here).
         // Thread replies this run posts carry the Diplomat attribution tag.
         if let b = diplomatTag(blocks) { out.append(b) }
@@ -365,40 +394,19 @@ public struct ReviewConfig: Codable, Equatable {
     /// disposition directly (a formal review whenever one is to be posted, never touching
     /// the branch). Used by the review-request monitor.
     private func buildKnownTheirsPrompt(review: CoreAssets.Review?, scope: [String: String],
-                                        blocks: [String: String], owner: String, repo: String) -> String {
+                                        blocks: [String: String]) -> String {
         let specific = review?.specific ?? [:]
         let chosen = ReviewCatalog.depth(id: depth)
-        let pr = prRef.numberString
-        let handle = me.isEmpty ? "me" : me
-        func fill(_ s: String) -> String {
-            s.replacingOccurrences(of: "{pr}", with: pr)
-                .replacingOccurrences(of: "{owner}", with: owner)
-                .replacingOccurrences(of: "{repo}", with: repo)
-                .replacingOccurrences(of: "{me}", with: handle)
-        }
         var out: [String] = []
         out.append(fill(scope["single"] ?? ""))
         if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
-        out.append(fill(specific["theirsOnly"] ?? ""))
+        out.append(reviewOnlyInstructions(blocks))
         if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
         if let bar = blocks["bar"] { out.append(bar) }
-        if let b = blocks["reviewOnly"] { out.append(b) }
         out += reviewBlocks(blocks)
         out.append(fill(specific["otherNoMarkReady"] ?? ""))
-        // Closing disposition, in precedence order: a real approve/changes-requested
-        // verdict only under the Final-E2E toggle (manual review or a trusted-author auto
-        // run); else a soft approval (thank-you COMMENT review, no APPROVE) when that
-        // toggle is on (the default); else stay fully silent and leave the call to me.
-        if effFinalPass, let b = blocks["finalPass"] {
-            out.append(b)
-        } else if effSoftApprove, let b = blocks["softApprove"] {
-            out.append(b)
-        } else if let b = blocks["noVerdict"] {
-            out.append(fill(b))
-        }
-        if let trailer = blocks["trailer"] { out.append(trailer) }
-        if let b = blocks["lowsTheirs"] { out.append(b) }
+        if let b = verdictClose(blocks, silent: true) { out.append(b) }
         // Every review/comment this run posts carries the Diplomat attribution tag.
         if let b = diplomatTag(blocks) { out.append(b) }
         return out.filter { !$0.isEmpty }.joined(separator: "\n\n")
@@ -412,17 +420,9 @@ public struct ReviewConfig: Codable, Equatable {
     /// leave a formal review, and explicitly DO NOT mark it ready). The action
     /// sub-blocks are gated by the same toggles the wizard exposes.
     private func buildSpecificPrompt(review: CoreAssets.Review?, scope: [String: String],
-                                     blocks: [String: String], owner: String, repo: String) -> String {
+                                     blocks: [String: String]) -> String {
         let specific = review?.specific ?? [:]
         let chosen = ReviewCatalog.depth(id: depth)
-        let pr = prRef.numberString
-        let handle = me.isEmpty ? "me" : me
-        func fill(_ s: String) -> String {
-            s.replacingOccurrences(of: "{pr}", with: pr)
-                .replacingOccurrences(of: "{owner}", with: owner)
-                .replacingOccurrences(of: "{repo}", with: repo)
-                .replacingOccurrences(of: "{me}", with: handle)
-        }
 
         var out: [String] = []
         out.append(fill(scope["single"] ?? ""))
@@ -434,7 +434,6 @@ public struct ReviewConfig: Codable, Equatable {
         if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
         if let bar = blocks["bar"] { out.append(bar) }
-        if let trailer = blocks["trailer"] { out.append(trailer) }
         if let b = diplomatTag(blocks) { out.append(b) }
 
         // CASE A — it's mine: fix it on the branch.
@@ -447,15 +446,10 @@ public struct ReviewConfig: Codable, Equatable {
 
         // CASE B — it's someone else's: review only, hands off the branch.
         out.append(fill(specific["otherHeader"] ?? ""))
-        if let b = blocks["reviewOnly"] { out.append(b) }
+        out.append(reviewOnlyInstructions(blocks))
         out += reviewBlocks(blocks)
         out.append(fill(specific["otherNoMarkReady"] ?? ""))
-        if let b = blocks["lowsTheirs"] { out.append(b) }
-        if effFinalPass, let b = blocks["finalPass"] {
-            out.append(b)
-        } else if effSoftApprove, let b = blocks["softApprove"] {
-            out.append(b)
-        }
+        if let b = verdictClose(blocks) { out.append(b) }
 
         return out.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
@@ -551,5 +545,47 @@ public enum AuthorAllowlist {
         guard !list.isEmpty else { return true }
         let l = login.lowercased()
         return list.contains { $0.lowercased() == l }
+    }
+}
+
+/// One row of the auto-review depth table: PRs by `login` are reviewed at `depth`.
+/// A `nil` login is me, whoever that is in the repo under review; `""` is a row
+/// whose login is not typed yet, and names nobody. `id` tells rows apart in an editor;
+/// it is neither stored nor compared.
+public struct AutoReviewOverride: Codable, Equatable, Identifiable {
+    public let id = UUID()
+    public var login: String?
+    public var depth: String
+
+    public init(login: String?, depth: String) {
+        self.login = login
+        self.depth = depth
+    }
+
+    private enum CodingKeys: String, CodingKey { case login, depth }
+
+    public static func == (a: Self, b: Self) -> Bool { a.login == b.login && a.depth == b.depth }
+}
+
+/// The depth an auto-review runs at: that of the first table row naming the PR's
+/// author, else the operator's default. Logins compare case-insensitively, a
+/// leading `@` off.
+///
+/// Python twin: `AutoReviewOverride` / `auto_review_depth` in `autofix.py`.
+public enum AutoReviewDepth {
+    public static let defaultDepth = "standard"
+    public static let seed = [AutoReviewOverride(login: nil, depth: "max")]
+
+    public static func resolve(author: String, me: String, overrides: [AutoReviewOverride],
+                               otherwise: String) -> String {
+        let who = author.lowercased()
+        guard !who.isEmpty else { return otherwise }
+        let row = overrides.first { row in
+            let login = row.login.map {
+                $0.trimmingCharacters(in: .whitespacesAndNewlines).drop(while: { $0 == "@" })
+            }
+            return (login.map(String.init) ?? me).lowercased() == who
+        }
+        return row?.depth ?? otherwise
     }
 }

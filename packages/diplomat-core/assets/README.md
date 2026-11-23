@@ -21,7 +21,6 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
 | `graphql/my-reviews.graphql` | my reviews on one PR (`$owner`/`$name`/`$number`/`$me`), PENDING ones included: what the check a retiring review run gets reads |
 | `graphql/closed-prs.graphql` | the PRs that have recently merged or closed (`$q`) — numbers only, which is all the Agent-tasks queue needs to drop a row whose PR has landed. The cheapest query here (1 point) and the only one whose cap makes it "closed lately" rather than "closed ever" |
 | `graphql/gitlab-*.graphql` | the GitLab twins of `viewer`, `prs`, `issues`, `monitor-prs`, `closed-prs` and `review-requests`, plus `gitlab-mr` (one merge request's state and author), run through `glab api --hostname <host> graphql` with the project's full path as `$path`. `../Sources/DiplomatCore/GitLab.swift` and `diplomat_runtime/gitlab.py` turn each answer into its GitHub twin's shape, so the same parsers read both; `../Tests/fixtures/gitlab/` holds the input/expected pairs both assert |
-| `graphql/task-item.graphql` | the fragments of one GitHub item a Tasks link names (state, draft, review verdict, mergeability, head CI, closing references, newest comments and reviews). Not a query: `TaskSync.query` (`../Sources/DiplomatCore/TasksSync.swift`) assembles one batched query around them, an alias per item, which only the Swift core runs (the Linux front-end goes through `diplomat-core tasks-sync`) |
 | `catalog.json` | the six tools: id, title, subtitle, icon (`sfSymbol` for macOS, `emoji` for Linux), colour (`color` name for macOS, `colorHex` for Linux), in display order |
 | `filters.json` | filter constants: skill-file suffix, installer path prefixes, team/org/trusted associations, stale-ready day threshold, the `APPROVED` sentinel |
 | `review.json` | the Review-PRs prompt model: depth levels + scope/action text blocks the wizard assembles |
@@ -33,17 +32,13 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
 | `telemetry.json` | the Telemetry screen's model: where the ledger and the transcript-scan cursor live, how often a quota sample is taken and how much history is kept, the lookback ranges (7/14/30/60, default 14), the histogram/series resolution, the confidence level — and the ten metrics with their per-platform icon + tint. The arithmetic over the ledger is `../Sources/DiplomatCore/Telemetry.swift`, mirrored by `diplomat_runtime/telemetry.py` and diffed field-for-field by `diplomat-platform/linux/tests/test_telemetry_parity.py` |
 | `comms.json` | Comms, the Slack watcher (`../Sources/DiplomatCore/Comms.swift`, `CommsWatch.swift`, `SlackAPI.swift`): the poll period and its floor, how many messages one tick triages, how a failed triage call is tried again, how far the watermark trails Slack's search index, how far back a tick catches up, how much of one query it pages through, how it borrows and refreshes Claude Code's Slack MCP login, the time and profile reads one tick may spend on Slack, the search calls' keywords and filters (DMs, mentions, one per keyword), the sandboxed classifier's instructions + stdin block + JSON answer schema, and the investigate agent's prompt blocks. Linux reaches the rest through the `diplomat-core` CLI (`comms-tick`, `comms-auth`, `comms-feed`, `comms-effect`, `build-prompt` kind `investigate`) and reads only its own timings (`pollSecs`, `minPollSecs`, and the five that bound how long it lets `comms-tick` run: `maxPerTick`, `classifierTimeoutSecs`, `httpTimeoutSecs`, `slackBudgetSecs`, `loginRefreshTimeoutSecs`) from the file itself |
 | `gitlab.json` | `promptNote`, the paragraph every review, issue, conflict and audit prompt whose repo is a GitLab root carries right after its opening line (`{host}`, `{owner}`, `{repo}` filled in): read GitLab and `glab` wherever the prompt says GitHub and `gh`, with the `glab` equivalents |
-| `tasks.json` | Tasks, the long-running task tracker (`../Sources/DiplomatCore/Tasks.swift`, `TasksStore.swift`, `TasksSync.swift`): the front-ends' sync period and its floor, the batch size and per-item comment count of a sync's GitHub query, when a task goes stale, the history log's cap and how much of it `tasks-list` shows, the excerpt length, how long a Slack ping waits for Comms' triage, and a note's longest text. Linux reaches tasks only through the `diplomat-core` CLI (`tasks-list`, `tasks-sync`, `tasks-edit`) and reads only `syncSecs`, `minSyncSecs` and `chunk` from the file itself (the last to bound how long `tasks-sync` may take) |
-| `golden-prompts/` | canonical prompt outputs, one `.txt` per mode; regenerate with `DIPLOMAT_GOLDEN_WRITE=1 swift run DiplomatCoreSmoke`, asserted byte-for-byte by the Swift smoke test AND `diplomat-platform/linux/tests/test_golden_prompts.py` |
 
 ## Contract notes
 
 - **GraphQL variables, not interpolation.** The PR/issue queries declare
   `$owner`/`$name` and the monitor queries `$q` (+`$withFiles`); each front-end
   passes them via `gh api graphql -f …` so the query text stays repo-agnostic.
-  Both applets run the monitors, so both execute all seven. The Tasks sync's
-  batched query (`graphql/task-item.graphql`) types its per-item variables the
-  same way: owner and repo through `-f`, the numbers through `-F`.
+  Both applets run the monitors, so both execute all seven.
 - **Icons/colours are intentionally dual.** `sfSymbol`+`color` are the macOS
   (SF Symbols + SwiftUI semantic colours) assets; `emoji`+`colorHex` are the
   Linux assets. These are rendering choices, not logic — both are kept here so
@@ -63,11 +58,12 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
   Python, it shells out to the `diplomat-core` CLI
   (`diplomat-runtime/diplomat_runtime/promptcore.py` → `../Sources/DiplomatCoreCLI`), so the two
   front-ends are identical by construction rather than by convention. The
-  `golden-prompts/` assertions on both sides remain as the regression net over
-  that one builder (and over the Python→CLI bridge): a drift fails a CI job
-  before it ships. Build the binary with `packages/diplomat-platform/linux/install/build-core.sh`.
+  expected prompts in `../Tests/fixtures/prompts/` (regenerated with
+  `DIPLOMAT_GOLDEN_WRITE=1 swift run DiplomatCoreSmoke`) are asserted on both
+  sides as the regression net over that one builder (and over the Python→CLI
+  bridge): a drift fails a CI job before it ships. Build the binary with `packages/diplomat-platform/linux/install/build-core.sh`.
 - **The known-author single-PR tier** in `review.json`
-  (`specific.mineOnly` / `specific.theirsOnly` / `specific.reviewerFindingsFirst`
+  (`specific.mineOnly` / `specific.reviewerFindingsFirst`
   and `blocks.noVerdict`) exists because the monitors always know the PR's author,
   so they skip the author-poll CASE A/B prompt the wizards use. It has no golden
   files of its own.

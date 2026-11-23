@@ -70,7 +70,10 @@ Two gatherers fill in what GitHub doesn't know:
   ran in, which is enough for both token questions. The repo-vs-everything-else split
   is that `cwd` (the checkout **and** its `-worktrees` siblings); a single task's cost
   is the transcript whose *opening user message is that task's prompt verbatim* - an
-  exact identity that needs no new flag on the spawn path. Scanning is incremental
+  exact identity that needs no new flag on the spawn path - plus the transcripts of the
+  subagents it started, which Claude Code keeps under `<session>/` beside it. A message
+  is counted once, though Claude Code writes one record per content block, each
+  carrying the whole message's `usage`. Scanning is incremental
   (a byte offset per file), and the first scan seeds every existing transcript at EOF
   rather than reading gigabytes of history it could never attribute anyway.
   `DIPLOMAT_CLAUDE_DIR` moves where it reads from. A [foreign runner](settings.md#agent-runner)

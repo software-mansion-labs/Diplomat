@@ -39,7 +39,6 @@ def test_category_of_matches_swift_taxonomy() -> None:
         "comms-error": "comms",
         "comms-recovered": "comms",
         "comms-notice": "comms",
-        "comms-reply": "comms",
         # everything else falls through to system, so a row never vanishes
         "kill-device": "system",
         "repair-done": "system",
@@ -74,8 +73,8 @@ def test_glyph_falls_back_to_category_glyph() -> None:
     assert activity.glyph_for("ban") == "⊘"  # monochrome, never colour-emoji
     assert [activity.glyph_for(v) for v in (
         "comms-ping", "comms-review", "comms-fix", "comms-bump", "comms-investigate",
-        "comms-error", "comms-recovered", "comms-notice", "comms-reply")] == [
-            "✉", "☑", "⊙", "↑", "⌕", "△", "✓", "△", "↩"]
+        "comms-error", "comms-recovered", "comms-notice")] == [
+            "✉", "☑", "⊙", "↑", "⌕", "△", "✓", "△"]
     assert activity.color_for("comms-investigate") == "#007AFF"
     # The Machines screen's own glyph, as macOS marks them all with server.rack.
     assert {activity.glyph_for(v) for v in (

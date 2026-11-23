@@ -129,9 +129,9 @@ def test_review_prompt_blocks_by_target():
     # so no review-only guard and the commit-attribution rule stays in.
     mine = review.ReviewConfig(me="latekvo").build_prompt()
     assert "mark it ready for review" in mine
-    assert 'replying "Fixed in <commit_hash>"' in mine
+    assert '"Fixed in <commit_hash>"' in mine
     assert "Anything you post on someone else's PR goes in ONE formal GitHub review" not in mine
-    assert "ABSOLUTELY DO NOT touch their branch" not in mine
+    assert "UNDER NO CIRCUMSTANCES may you commit" not in mine
 
     # Someone else's PRs: formal-review block only, plus a hard no-commit guard.
     # We never touch their branch, so the commit-attribution rule is dropped.
@@ -140,7 +140,7 @@ def test_review_prompt_blocks_by_target():
     ).build_prompt()
     assert "Anything you post on someone else's PR goes in ONE formal GitHub review" in other
     assert "mark it ready for review" not in other
-    assert "ABSOLUTELY DO NOT touch their branch" in other
+    assert "UNDER NO CIRCUMSTANCES may you commit" in other
     assert "No AI attribution" not in other
 
     # Single-PR mode (Specific PR target): fetch one PR by number.
@@ -155,10 +155,10 @@ def test_review_prompt_blocks_by_target():
     # (theirs -> review only, never touch the branch, DO NOT mark ready).
     assert "WHO AUTHORED IT" in single_prompt
     assert "CASE A" in single_prompt and "CASE B" in single_prompt
-    assert "on the PR's branch" in single_prompt  # depth onBranch fix step
+    assert "it is FIXED on the branch" in single_prompt  # CASE A
     assert "mark it ready for review" in single_prompt  # CASE A
-    assert "ABSOLUTELY DO NOT touch their branch" in single_prompt  # CASE B guard
-    assert "isn't yours to advance" in single_prompt  # CASE B: don't mark ready
+    assert "UNDER NO CIRCUMSTANCES may you commit" in single_prompt  # CASE B guard
+    assert "Do NOT mark this PR ready" in single_prompt  # CASE B: don't mark ready
     assert "No AI attribution" in single_prompt  # CASE A commit guidance
 
     # Mark-ready off gates only CASE A: the mark-ready block drops, the
@@ -167,7 +167,7 @@ def test_review_prompt_blocks_by_target():
         target=PRTarget.SPECIFIC, specific_pr="337", me="latekvo", mark_ready=False
     ).build_prompt()
     assert "mark it ready for review" not in single_no_ready
-    assert "isn't yours to advance" in single_no_ready
+    assert "Do NOT mark this PR ready" in single_no_ready
 
     # A whose-PRs sweep with no PR-state box ticked is invalid (would review nothing).
     assert not review.ReviewConfig(
@@ -202,6 +202,20 @@ def test_final_pass_never_applies_to_my_own_prs():
     ).build_prompt()
 
 
+def test_automatic_verdict_reaches_the_focused_review_prompt():
+    config = review.ReviewConfig(
+        depth="standard", target=PRTarget.SPECIFIC, specific_pr="337",
+        specific_author=review.SpecificAuthor.THEIRS, automatic_verdict=True,
+    )
+    prompt = config.build_prompt()
+    assert "still APPROVE" in prompt
+    assert "one focused pass" in prompt
+    assert "FULL E2E pass" not in prompt
+
+    config.automatic_verdict = False
+    assert "still APPROVE" not in config.build_prompt()
+
+
 def test_soft_approve_leaves_a_thank_you_but_no_verdict():
     # Soft-approve is ON by default: a review-only PR that comes back clean gets a
     # thank-you COMMENT review, but never an APPROVE action. It never applies to my
@@ -215,8 +229,7 @@ def test_soft_approve_leaves_a_thank_you_but_no_verdict():
     assert other.can_soft_approve
     other_prompt = other.build_prompt()
     assert "Thank you for contributing" in other_prompt
-    assert "a COMMENT review carrying that body ONLY" in other_prompt
-    assert "never as a top-level issue comment" in other_prompt
+    assert "submit a COMMENT review with a short body" in other_prompt
     assert "FULL E2E pass" not in other_prompt  # soft, not a hard verdict
 
     # Turning it off -> fully silent (no thank-you), and still no verdict.
@@ -262,7 +275,7 @@ def test_specific_pr_disposition_drives_toggles_and_prompt():
             theirs.can_reply_to_reviews, theirs.can_final_pass) == (False, True, False, True)
     theirs_p = theirs.build_prompt()
     assert "someone else" in theirs_p.lower()
-    assert "ABSOLUTELY DO NOT touch their branch" in theirs_p
+    assert "UNDER NO CIRCUMSTANCES may you commit" in theirs_p
     assert "No AI attribution" not in theirs_p  # never touch their branch
 
     # UNKNOWN (author still pending / poll failed) -> every toggle offered, and the

@@ -17,8 +17,8 @@ The switch gates jobs: agents that work on a repository. Outside it are:
 - **The device allocator's repair agent.** A simulator or emulator reported broken gets `claude`
   in a terminal on this machine. It maintains the machine, works on no repository, and stays on
   the host.
-- **Model calls that use no tools**: the Comms classifier and its replies, the grouping of tasks
-  into goals, and the daemon's renewal of the Claude Code login.
+- **Model calls that use no tools**: the Comms classifier and the daemon's renewal of the Claude
+  Code login.
 - **The terminals that sign a provider in.**
 
 The daemon behind it is [`diplomacy-network`](../packages/diplomacy-network/README.md); the
@@ -340,14 +340,14 @@ attempt spent is in no figure. Where the executor lowered the tokens or the cost
 to what it measured, the job's last line in the task list and in the feed ends *its reported
 cost capped*.
 
-Work that was asked for - a sweep's PRs, a goal's fixes and reviews, a request from Slack - is
+Work that was asked for - a sweep's PRs, a request from Slack - is
 answered by a job that ran, not by its offer:
 
 - A job that **finished** answers it. So does one the network gave up on with its three attempts
   used (*refused by the network*, or *failed on* a machine): it ran and came to nothing, as an
   agent in a terminal can, and is not offered again.
 - Taking the offer back yourself ends it too: **Withdraw** on the Network screen, or the row's
-  ✕ in the task list. A goal that leaves auto takes back its own offers no machine has taken.
+  ✕ in the task list.
 - An offer that ends any other way without having run - its pool left or closed, the network
   switched off, a daemon that no longer holds it - leaves what was asked for standing, and it is
   offered again on the next poll.

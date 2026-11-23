@@ -736,16 +736,25 @@ enum QueueTest {
         let claude = feed.appendingPathComponent("claude")
         setenv("DIPLOMAT_CLAUDE_DIR", claude.path, 1)
         func transcript(_ name: String, _ records: [String]) {
-            let dir = claude.appendingPathComponent("projects/q")
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let file = claude.appendingPathComponent("projects/q/\(name)")
+            try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(),
+                                                     withIntermediateDirectories: true)
             try? (records.joined(separator: "\n") + "\n")
-                .write(to: dir.appendingPathComponent(name), atomically: true, encoding: .utf8)
+                .write(to: file, atomically: true, encoding: .utf8)
+        }
+        /// One content block of an assistant message, carrying the whole message's usage.
+        func block(_ id: String, _ tokens: Int) -> String {
+            #"{"type":"assistant","cwd":"/x","message":{"id":"\#(id)","usage":{"input_tokens":\#(tokens),"output_tokens":0,"cache_creation_input_tokens":0}}}"#
         }
         transcript("cut.jsonl", [#"{"type":"user","message":{"content":"price #31"}}"#,
                                  #"{"type":"user","message":{"content":"[Request interrupted by user]"}}"#])
         transcript("ran.jsonl", [#"{"type":"user","message":{"content":"price #32"}}"#,
                                  #"{"type":"assistant","cwd":"/x","message":{"usage":{"input_tokens":700,"output_tokens":0,"cache_creation_input_tokens":0}}}"#])
-        for n in [31, 32] {
+        transcript("swarm.jsonl", [#"{"type":"user","message":{"content":"price #33"}}"#,
+                                   block("m1", 700), block("m1", 700)])
+        transcript("swarm/subagents/agent-a.jsonl", [block("m2", 8), block("m2", 300)])
+        transcript("swarm/subagents/workflows/wf/agent-b.jsonl", [block("m3", 50)])
+        for n in [31, 32, 33] {
             AgentRegistry.createRun(
                 AgentState.RunRecord(
                     runID: AgentRegistry.newRunID(now: Date().timeIntervalSince1970),
@@ -761,6 +770,19 @@ enum QueueTest {
               AgentRegistry.load().isEmpty && settled["review:q#31@aa"] == nil)
         check("…while one that answered is, priced from its transcript",
               settled["review:q#32@aa"]?.tokens == 700)
+        check("…each message once, and its subagents' transcripts with it",
+              settled["review:q#33@aa"]?.tokens == 1050)
+        func spent() -> Double { let t = UsageScan.totals(); return t.repo + t.other }
+        let seeded = spent()
+        transcript("live.jsonl", [block("m4", 300)])
+        let oneBlock = spent(), unchanged = spent()
+        transcript("live.jsonl", [block("m4", 300), block("m4", 300), block("m5", 40)])
+        let moreBlocks = spent()
+        transcript("live.jsonl", [block("m5", 42)])
+        check("a message split across scans is counted once",
+              oneBlock - seeded == 300 && unchanged == oneBlock && moreBlocks - oneBlock == 40)
+        check("…and a truncated transcript forgets the message it ended on",
+              spent() - moreBlocks == 42)
         unsetenv("DIPLOMAT_CLAUDE_DIR")
 
         // 20. A freed bay, or an ask, brings the next poll forward: the queue drains only
@@ -1030,7 +1052,7 @@ enum QueueTest {
         store.requestedWork = []
         store.queuedTasks = []
 
-        // 24. "Me" in a GitLab root: glab's user on its host, cached only once read.
+        // 24a. "Me" in a GitLab root: glab's user on its host, cached only once read.
         let glabStub = feed.appendingPathComponent("glab")
         let glabCalls = feed.appendingPathComponent("glab-calls")
         // A merge-status recheck answers from glab-rest, logging its path; the rest from glab-out.
@@ -1083,7 +1105,7 @@ enum QueueTest {
         store.pinRoots(rootsBefore)
         store.usernameOverride = overrideBefore
 
-        // 24a. The monitors' GitLab reads, on the shared parity fixtures.
+        // 24a'. The monitors' GitLab reads, on the shared parity fixtures.
         let fixtures = (try? CoreAssets.assetsDir())?.deletingLastPathComponent()
             .appendingPathComponent("Tests/fixtures/gitlab")
         func fixture(_ name: String) -> String {
@@ -1180,8 +1202,8 @@ enum QueueTest {
                 && glabCallCount() == callsBefore
                 && ghAsked == ["pr view 7 --repo o/gone --json state"])
 
-        // 24a'. An unchecked GitLab merge request keeps its queued conflict fix (GitLab
-        //       has not looked yet); a GitHub PR's UNKNOWN drops it.
+        // 24a''. An unchecked GitLab merge request keeps its queued conflict fix (GitLab
+        //        has not looked yet); a GitHub PR's UNKNOWN drops it.
         store.pinRoots([rootA, onGitLab])
         store.requestedWork = []
         store.queuedTasks = []
@@ -1221,8 +1243,8 @@ enum QueueTest {
         emptyBook()
         store.queuedTasks = []
 
-        // 24a''. A GitLab root whose glab user is unknown is held, not run as nobody; its
-        //        mark waits for the next read.
+        // 24a'''. A GitLab root whose glab user is unknown is held, not run as nobody; its
+        //         mark waits for the next read.
         let signedOutRoot = PRRef.LocalRepo(owner: "g", repo: "lab", path: "/w/lab",
                                             host: "gitlab.signedout.example")
         store.pinRoots([signedOutRoot])

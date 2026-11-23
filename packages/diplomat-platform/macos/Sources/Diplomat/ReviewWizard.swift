@@ -1035,7 +1035,7 @@ struct ReviewWizardView: View {
             }
             if config.canLeaveReviews {
                 Toggle(isOn: $leaveReviews) {
-                    Text("Leave reviews (CLAUDE.md format)").font(.caption)
+                    Text("Leave per-line reviews").font(.caption)
                 }
                 .tooltip("Post per-line reviews on these PRs.")
                 .transition(rowTransition)
@@ -1065,7 +1065,7 @@ struct ReviewWizardView: View {
             isOn: $finalPass,
             systemImage: "sparkles",
             title: "Final E2E pass + verdict",
-            help: "One last full-E2E pass with big swarms: approve clean PRs, request changes on real blockers.",
+            help: "Run the affected workflows end to end. Approve clean PRs, request changes on real blockers.",
             fill: .yellow)
     }
 

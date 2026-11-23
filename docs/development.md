@@ -221,12 +221,6 @@ DIPLOMAT_RENDER=panel    ./Diplomat.app/Contents/MacOS/Diplomat  # snapshot a sc
                                                      #   scratch dir); comms-panel; comms-badge (the main panel with
                                                      #   unread pings); comms-empty (no Slack login yet);
                                                      #   settings-comms-error (the Comms card's failing pill)
-                                                     #   tasks (the Tasks screen over tasks the core writes into
-                                                     #   a scratch DIPLOMAT_TASKS_DIR, or the one you set, drawn
-                                                     #   as it is); tasks-panel; tasks-form (new task, a note
-                                                     #   being written, the sync error banner; window-tasks-form
-                                                     #   adds the read error's); tasks-edit-error (refused edits
-                                                     #   at their editors); tasks-archived; tasks-empty
                                                      #   settings-unsaved (a change config.json refused)
                                                      #   app (the REAL window root at the width that shows
                                                      #   the whole panel, incl. the legacy scroller lane;
@@ -258,8 +252,6 @@ DIPLOMAT_COMMS_POLL=1    ...                     # one real Slack poll with real
                                                      #   would queue, queues nothing (docs/comms.md)
 DIPLOMAT_COMMS_TEST=1    ...                     # self-test: what each triage answer does to the queue, the switches,
                                                      #   the ban, started/finished. Spawns nothing, reaches no Slack
-DIPLOMAT_TASKS_TEST=1    ...                     # self-test: Tasks edits and syncs through the Store against a
-                                                     #   stand-in gh, on scratch dirs; exit code = verdict
 DIPLOMAT_NETWORK_TEST=1  ...                     # self-test: the Diplomacy Network through the Store against a
                                                      #   stand-in daemon on a scratch socket (DN_BASE_DIR): what is
                                                      #   posted each cycle, a job offered and never spawned, a run
@@ -288,10 +280,9 @@ DIPLOMAT_APPLOG_TEST=1 ...                       # self-test: the diagnostic log
                                                      #   and close lines; scratch dir; exit code = verdict
 
 # The shared core itself is independently buildable & testable (also on Linux):
-swift build && swift run DiplomatCoreSmoke     # loads assets/, runs filter + prompt + golden-file assertions;
-                                               #   the Tasks checks drive the diplomat-core `swift build` makes
+swift run DiplomatCoreSmoke                    # loads assets/, runs filter + prompt + golden-file assertions
 DIPLOMAT_DUMP=1 swift run DiplomatCoreSmoke    # + live gh dump, cross-checks the Linux front-end
-DIPLOMAT_GOLDEN_WRITE=1 swift run DiplomatCoreSmoke  # regenerate assets/golden-prompts/ after an intentional change
+DIPLOMAT_GOLDEN_WRITE=1 swift run DiplomatCoreSmoke  # regenerate Tests/fixtures/prompts/ after an intentional change
 ```
 
 The `SETTINGS_DUMP` / `RENDER` checks read UserDefaults, so run them through the
@@ -306,7 +297,7 @@ and drives the real app there through the VM's own VNC server: an attended launc
 opens the window and takes focus, ⌘, opens Settings, ⌘W leaves the app running, a
 second launch or ⌘0 brings the window back, ⌘Q asks first, an
 unattended start (the login agent, the watchdog) opens no window and leaves the
-frontmost app in front.
+frontmost app in front, and the 06:00 relaunch keeps the app on its kept-in-Dock tile.
 Its exit code is the verdict, and it keeps a screenshot per step:
 
 ```bash
@@ -328,7 +319,7 @@ The triage logic is single-sourced in
 [`packages/diplomat-core/assets/`](../packages/diplomat-core/assets/README.md) -
 language-neutral GraphQL queries, the tool catalog, filter constants, and the
 prompt fragments for all four actions. Both front-ends load it and assert their
-assembled prompts byte-for-byte against `assets/golden-prompts/`, so they can only
+assembled prompts byte-for-byte against `Tests/fixtures/prompts/`, so they can only
 drift from each other by failing a CI job. Both also run the full monitor stack;
 what stays macOS-only is the per-row **Merge** button, the clickable *session* rows
 of the [Agent tasks](panel.md#agent-tasks) list (a Linux spawn is a detached `Popen` with no
@@ -389,7 +380,6 @@ packages/
   diplomat-core/               ← the shared triage brain: everything both front-ends agree on
     assets/                    ← the language-neutral source of truth (see its README): GraphQL queries,
                                  tool catalog, filter constants, prompt fragments
-      golden-prompts/            canonical prompt outputs, asserted byte-for-byte by BOTH platforms' tests
     Sources/
       DiplomatCore/            ← Foundation-only Swift; loads assets/. Builds on macOS AND Linux.
         CoreAssets.swift           resolves + decodes assets/ (config, catalog, filters, review, conflicts, audit, comms, graphql)
@@ -433,6 +423,8 @@ packages/
                                  instead of reimplementing them; `tool-data`, `telemetry` and `network` expose
                                  the engines the Linux side reimplements, so the parity tests can diff them;
                                  `comms-tick`, `comms-auth`, `comms-feed` and `comms-effect` run Comms for the Linux applet
+    Tests/fixtures/            ← test inputs and expected outputs, not shipped
+      prompts/                   expected prompt outputs (`<mode>.expected.txt`), asserted byte-for-byte by BOTH platforms' tests
 
   diplomat-runtime/            ← the platform-neutral Python half: the twin of diplomat-core plus
                                  everything below the UI that has no Swift counterpart
@@ -477,9 +469,6 @@ packages/
         CommsMonitor.swift         the Slack watcher: the poll loop, applying each triage answer to the queue
         CommsView.swift            the Comms screen: pings, the jobs they queued, the watcher's status
         CommsTest.swift            self-test of what each triage answer does to the queue (DIPLOMAT_COMMS_TEST)
-        TasksMonitor.swift         the Tasks sync loop, edits and reloads, all off the main actor
-        TasksView.swift            the Tasks screen: tasks, status and reasons, tags, links, history, edits
-        TasksTest.swift            self-test of edits and syncs through the Store (DIPLOMAT_TASKS_TEST)
         DiplomacyNetwork.swift     bridge to the Diplomacy Network daemon: its socket's routes, its installer's daemon verbs, the screen's words
         NetworkMonitor.swift       the daemon's lifecycle, the per-cycle pools and admit posts, the Network screen's actions
         NetworkScreen.swift        the Network screen: the daemon's status, the hour settings, one panel per pool

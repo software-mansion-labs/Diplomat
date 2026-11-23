@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from diplomat_runtime import autofix
+from diplomat_runtime import autofix, review
 from diplomat_app.settingsview import SettingsView
 from diplomat_app.store import Store
 
@@ -203,6 +203,75 @@ def test_the_author_allowlist_stays_editable_while_the_monitor_is_off(make_view)
     assert view._verdict_rows.isVisibleTo(view)
 
 
+def test_the_review_depth_picker_opens_on_standard_and_writes_through(view):
+    picker = view._auto_review_depth
+    assert picker.value() == "standard"
+    picker._group.button(review.depth_ids().index("max")).click()
+    assert view.store.auto_review_default_depth == "max"
+    assert view._depth_setting_row._detail.text().startswith(review.depth_by_id("max")["title"])
+
+
+def test_the_depth_rows_stay_editable_while_the_monitor_is_off(make_view):
+    """A switched-off monitor still queues its reviews, and "execute now" runs them at
+    these depths."""
+    view = make_view(review_requests_enabled=False)
+    assert view._depth_setting_row.isVisibleTo(view)
+    assert view._overrides_layout.parentWidget().isVisibleTo(view)
+    assert not view._verdict_rows.isVisibleTo(view)
+
+
+def test_a_removed_me_row_can_be_added_back(view):
+    from PySide6.QtWidgets import QLabel, QPushButton
+
+    lines = view._overrides_layout
+    assert not view._override_add_me.isVisibleTo(view)
+    lines.itemAt(0).widget().findChild(QPushButton).click()
+    assert view.store.auto_review_overrides == []
+    assert view._override_add_me.isVisibleTo(view)
+
+    view._override_add_me.click()
+    assert view.store.auto_review_overrides == [autofix.AutoReviewOverride(None, "max")]
+    assert lines.itemAt(0).widget().findChild(QLabel).text().startswith("me")
+    assert not view._override_add_me.isVisibleTo(view)
+
+
+def test_the_me_row_shows_a_login_a_poll_resolves(view):
+    from PySide6.QtWidgets import QLabel
+
+    label = view._overrides_layout.itemAt(0).widget().findChild(QLabel)
+    view.store.me = "resolved"
+    view.store.autofix_changed.emit()
+    assert label.text() == "me (@resolved)"
+
+
+def test_the_depth_table_opens_on_me_at_max_and_writes_every_edit_through(make_view):
+    from PySide6.QtWidgets import QComboBox, QLabel, QLineEdit, QPushButton
+
+    Row = autofix.AutoReviewOverride
+    view = make_view(username_override="octo")
+    lines = view._overrides_layout
+    assert lines.count() == 1
+    me_line = lines.itemAt(0).widget()
+    assert me_line.findChild(QLabel).text() == "me (@octo)"
+    assert me_line.findChild(QComboBox).currentData() == "max"
+    view._identity_row._control.setText("other")
+    assert me_line.findChild(QLabel).text() == "me (@other)"
+
+    view._override_add.click()
+    assert view.store.auto_review_overrides == [Row(None, "max"), Row("", "max")]
+    added = lines.itemAt(1).widget()
+    added.findChild(QLineEdit).setText("@HubGan")
+    box = added.findChild(QComboBox)
+    box.setCurrentIndex(box.findData("deep"))
+    assert view.store.auto_review_overrides == [Row(None, "max"), Row("@HubGan", "deep")]
+    assert view.store.auto_review_depth("hubgan", "other") == "deep"
+
+    me_line.findChild(QPushButton).click()
+    assert view.store.auto_review_overrides == [Row("@HubGan", "deep")]
+    assert lines.count() == 1
+    assert lines.itemAt(0).widget().findChild(QLineEdit).text() == "@HubGan"
+
+
 def test_every_row_names_its_control_for_a_screen_reader(view):
     """The row's name is a separate label, so an unnamed control reads as a bare
     switch. Every row is checked because the naming is one line in `SettingRow`:
@@ -312,61 +381,12 @@ def _row_of(control):
     return row
 
 
-def test_the_reply_switch_sits_with_the_comms_switches_and_writes_through(make_view):
-    from diplomat_app.store import app_settings
-
-    view = make_view()
-    sw = view._sw_comms_replies
-    assert sw.isChecked() is True
-    assert sw.accessibleName() == "Reply in Slack"
-    assert _row_of(sw).parent() is _row_of(view._sw_comms_bumps).parent()
-    assert _row_of(sw)._detail.text().startswith("Only while you are away")
-    sw.setChecked(False)
-    assert app_settings().value("commsReplies") is False
-    assert view.store.comms_toggles()["replies"] is False
-    assert make_view()._sw_comms_replies.isChecked() is False
-
-
-def test_the_reply_kinds_show_only_while_replies_are_on(make_view):
-    view = make_view()
-    assert view._comms_reply_kinds.isHidden() is False
-    view._sw_comms_replies.setChecked(False)
-    assert view._comms_reply_kinds.isHidden() is True
-    assert make_view()._comms_reply_kinds.isHidden() is True
-    view._sw_comms_replies.setChecked(True)
-    assert view._comms_reply_kinds.isHidden() is False
-
-
-def test_only_questions_get_a_reply_until_the_operator_says_otherwise(make_view):
-    from diplomat_app.store import app_settings
-
-    view = make_view()
-    assert view._sw_comms_reply_questions.isChecked() is True
-    switches = {"replyToReviews": view._sw_comms_reply_reviews,
-                "replyToFixes": view._sw_comms_reply_fixes,
-                "replyToInvestigations": view._sw_comms_reply_investigations}
-    toggles = view.store.comms_toggles()
-    assert toggles["replyToQuestions"] is True
-    for key, sw in switches.items():
-        assert sw.isChecked() is False and toggles[key] is False
-        assert _row_of(sw).parent() is view._comms_reply_kinds
-    view._sw_comms_reply_fixes.setChecked(True)
-    view._sw_comms_reply_questions.setChecked(False)
-    assert app_settings().value("commsReplyToFixes") is True
-    toggles = view.store.comms_toggles()
-    assert (toggles["replyToFixes"], toggles["replyToQuestions"],
-            toggles["replyToReviews"]) == (True, False, False)
-    again = make_view()
-    assert again._sw_comms_reply_fixes.isChecked() is True
-    assert again._sw_comms_reply_questions.isChecked() is False
-
-
 def test_the_batch_size_slider_stops_at_powers_of_two_and_writes_through(make_view):
     from diplomat_app.store import app_settings
 
     view = make_view()
     slider = view._comms_batch
-    assert _row_of(slider).parent() is _row_of(view._sw_comms_replies).parent()
+    assert _row_of(slider).parent() is _row_of(view._sw_comms_bumps).parent()
     assert slider._slider.accessibleName() == "Batch size"
     assert (slider.minimum(), slider.maximum(), slider.badge()) == (0, 6, "8")
     seen = []
@@ -403,22 +423,6 @@ def test_a_hand_written_setting_finds_the_nearest_stop_and_stays_until_moved(mak
     view = make_view()
     assert view._comms_batch.badge() == "4"
     assert view.store.comms_batch_size == 5
-
-
-def test_the_away_slider_steps_in_quarter_hours_and_writes_through(make_view):
-    from diplomat_app.store import app_settings
-
-    view = make_view()
-    slider = view._comms_away
-    assert _row_of(slider).parent() is _row_of(view._sw_comms_replies).parent()
-    assert slider._slider.accessibleName() == "Away after"
-    assert (slider.minimum(), slider.maximum(), slider.value()) == (900, 43200, 10800)
-    assert slider.badge() == "3h"
-    slider._slider.setValue(4400)
-    assert slider.value() == 4500 and slider.badge() == "1h 15m"
-    assert app_settings().value("commsAwayAfterSecs") == 4500
-    assert view.store.comms_away_after_secs == 4500
-    assert make_view()._comms_away.value() == 4500
 
 
 def test_the_keywords_hint_names_the_wildcard(view):

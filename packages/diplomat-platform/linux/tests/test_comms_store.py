@@ -251,6 +251,15 @@ def test_the_tick_is_handed_the_settings(comms_store, monkeypatch):
     assert comms_store.comms_last_poll is not None
 
 
+def test_a_plan_is_handed_the_three_act_switches(comms_store, monkeypatch):
+    comms_store.comms_act_bumps = False
+    handed = []
+    monkeypatch.setattr(comms, "effect", lambda decision, message, toggles, settings: (
+        handed.append(toggles) or {"kind": "none"}))
+    _tick(comms_store, monkeypatch, (_message(1), _decision("none")))
+    assert handed == [{"requests": True, "bumps": False, "investigations": True}]
+
+
 def test_a_ticks_notices_are_handed_on_and_default_to_none(fake_core):
     tick = {"me": None, "items": [], "error": None}
     fake_core({**tick, "notices": ["Comms caught up past 24 h", 7]})

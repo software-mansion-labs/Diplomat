@@ -1,10 +1,10 @@
 """Comms, the Slack watcher, as the Linux front-end reaches it.
 
 Everything Comms decides is ``DiplomatCore``, reached through the ``diplomat-core`` CLI
-(``comms-tick``, ``comms-auth``, ``comms-feed``, ``comms-effect``, ``comms-reply``), which
-reaches Slack under Claude Code's own Slack login. What lives here is what the CLI cannot
-do for this process: appending the front-end's own lines (``action``, ``started``,
-``finished``) to the log the CLI folds, and reading whether the session is locked.
+(``comms-tick``, ``comms-auth``, ``comms-feed``, ``comms-effect``), which reaches Slack
+under Claude Code's own Slack login. What lives here is what the CLI cannot do for this
+process: appending the front-end's own lines (``action``, ``started``, ``finished``) to
+the log the CLI folds.
 
 Stdlib-only, like the rest of the runtime.
 """
@@ -15,8 +15,6 @@ import fcntl
 import json
 import math
 import os
-import shutil
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -144,16 +142,6 @@ def tick_timeout(batch_size: int | None = None) -> float:
     return _sign_in_secs(t) + slack + triage + _MARGIN_SECS
 
 
-def reply_timeout() -> float:
-    """``comms-reply``'s own bounds: signing in, reading the docs and the away answer's
-    ``claude`` call, and the post under ``slackBudgetSecs``."""
-    t = tunables()
-    a = t.get("answer") or {}
-    answer = float(a.get("timeoutSecs", 180)) + float((a.get("knowledge") or {}).get("fetchSecs", 90))
-    slack = float(t.get("slackBudgetSecs", 120)) + _HTTP_GRACE_SECS
-    return _sign_in_secs(t) + _LOGIN_SHELL_SECS + answer + slack + _MARGIN_SECS
-
-
 def batch_defaults() -> tuple[int, list[int], int, list[int]]:
     """``batchSize``, its Settings stops, ``flushAfterSecs``, and its Settings stops."""
     t = tunables()
@@ -171,41 +159,6 @@ def slider_stop(value: int, stops: list[int]) -> int:
 def is_extra_target(message: dict) -> bool:
     """Twin of ``CommsMessage.isExtraTarget``."""
     return "#" in str(message.get("id", ""))
-
-
-def away_after_secs() -> tuple[int, int, int]:
-    """``replies.awayAfter*``: the default, the step it is set in, and its most."""
-    r = tunables().get("replies") or {}
-    return (int(r.get("awayAfterSecs", 10800)), int(r.get("awayAfterStepSecs", 900)),
-            int(r.get("awayAfterMaxSecs", 43200)))
-
-
-# MARK: - the session lock
-
-
-def session_locked() -> bool | None:
-    """logind's ``LockedHint`` for this user's graphical session (``Display``, else
-    ``$XDG_SESSION_ID``); ``None`` when logind cannot say. Never idle time, the
-    screensaver or display sleep, which a keep-awake holds off."""
-    exe = shutil.which("loginctl")
-    if exe is None:
-        return None
-
-    def ask(*args: str) -> str:
-        try:
-            proc = subprocess.run(  # noqa: S603 — argv is a literal list
-                [exe, *args], stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                timeout=5)
-        except (OSError, subprocess.TimeoutExpired):
-            return ""
-        return proc.stdout.strip() if proc.returncode == 0 else ""
-
-    session = (ask("show-user", str(os.getuid()), "-p", "Display", "--value")
-               or os.environ.get("XDG_SESSION_ID", ""))
-    if not session:
-        return None
-    return {"yes": True, "no": False}.get(
-        ask("show-session", session, "-p", "LockedHint", "--value"))
 
 
 # MARK: - the CLI
@@ -248,35 +201,6 @@ def effect(decision: dict, message: dict, toggles: dict, settings: dict) -> dict
         "decision": decision, "message": message, "toggles": toggles,
         "settings": settings}))
     return out if isinstance(out, dict) else {"kind": "none"}
-
-
-def reply(request: dict) -> dict:
-    """``comms-reply``: ``{"outcome": "sent" | "failed: …" | "skipped: …" | None,
-    "text"}``. Never raises: a CLI that could not answer is a ``failed`` outcome, though
-    the core may have posted before it went quiet."""
-    try:
-        out = json.loads(promptcore.cli(["comms-reply"], stdin=request, timeout=reply_timeout()))
-    except (RuntimeError, promptcore.CoreBinaryMissing, ValueError) as exc:
-        return {"outcome": f"failed: {exc}", "text": None}
-    if not isinstance(out, dict):
-        return {"outcome": "failed: diplomat-core comms-reply answered something that is "
-                           "not a reply", "text": None}
-    outcome, text = out.get("outcome"), out.get("text")
-    return {"outcome": outcome if isinstance(outcome, str) else None,
-            "text": text if isinstance(text, str) else None}
-
-
-def merge_replies(requests: list[dict]) -> list[dict]:
-    """``CommsReplyRequest.merged``: one request per Slack message, so a message asking
-    for several gets one reply naming every target acted on. A CLI that could not answer leaves the
-    requests as they are: the core still posts once per message, naming fewer."""
-    if not any(is_extra_target(r.get("message") or {}) for r in requests):
-        return requests
-    try:
-        out = json.loads(promptcore.cli(["comms-reply-merge"], stdin={"requests": requests}))
-    except (RuntimeError, promptcore.CoreBinaryMissing, ValueError):
-        return requests
-    return out if isinstance(out, list) else requests
 
 
 # MARK: - the front-end's lines of the log

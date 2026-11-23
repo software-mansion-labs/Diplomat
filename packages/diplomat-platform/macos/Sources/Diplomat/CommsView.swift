@@ -226,8 +226,8 @@ struct CommsView: View {
     }
 }
 
-/// One line: who, where, what triage made of it, the message, any reply, when. Tapped,
-/// it unfolds into the whole message, the decision, the outcome and the reply.
+/// One line: who, where, what triage made of it, the message, when. Tapped, it unfolds
+/// into the whole message, the decision and the outcome.
 private struct PingRow: View {
     let item: CommsItem
     let unread: Bool
@@ -250,7 +250,6 @@ private struct PingRow: View {
     private var line: some View {
         let m = item.message
         let flat = Store.snippet(readableText, max: 400)
-        let reply = replyPill
         return HStack(spacing: 5) {
             Circle().fill(unread ? Color.blue : Color.clear).frame(width: 6, height: 6)
             Text(m.sender).font(.system(size: 11, weight: .semibold)).lineLimit(1)
@@ -264,12 +263,6 @@ private struct PingRow: View {
             Text(flat).font(.system(size: 11)).lineLimit(1).truncationMode(.tail)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .layoutPriority(-1)
-            if let reply {
-                StatusPill(text: reply.word, tint: reply.tint,
-                           symbol: "arrowshape.turn.up.left.fill")
-                    .fixedSize()
-                    .tooltip(item.reply ?? reply.word)
-            }
             Text(Fmt.clock(item.at)).font(.system(size: 9).monospacedDigit())
                 .foregroundStyle(.secondary).fixedSize()
         }
@@ -281,7 +274,6 @@ private struct PingRow: View {
     private func details(_ m: CommsMessage) -> some View {
         let decision = decisionText
         let outcome = item.outcome ?? "not acted on yet"
-        let replyLine = replyDetail
         return VStack(alignment: .leading, spacing: 4) {
             Text(readableText).font(.system(size: 11))
                 .fixedSize(horizontal: false, vertical: true)
@@ -295,11 +287,6 @@ private struct PingRow: View {
             }
             Text(outcome).font(.system(size: 10)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            if let replyLine {
-                Text(replyLine).font(.system(size: 10))
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-            }
             if let url = URL(string: m.permalink), !m.permalink.isEmpty {
                 Button("Open in Slack") { NSWorkspace.shared.open(url) }
                     .buttonStyle(.link).font(.system(size: 10))
@@ -338,23 +325,6 @@ private struct PingRow: View {
         }
     }
 
-    /// Nil when no reply was due; a skipped one keeps its reason for `details`.
-    private var replyPill: (word: String, tint: Color)? {
-        guard let outcome = item.replyOutcome else { return nil }
-        if outcome == "sent" { return ("replied", .green) }
-        if outcome == "sending" { return ("replying", .orange) }
-        if outcome.hasPrefix("failed") { return ("reply failed", .red) }
-        if outcome.hasPrefix("skipped") { return ("not answered", .secondary) }
-        return nil
-    }
-
-    private var replyDetail: String? {
-        guard let outcome = item.replyOutcome else { return nil }
-        guard let text = item.reply, !text.isEmpty else { return "No reply: " + outcome }
-        let head = outcome == "sent" ? "Replied: " : "Reply (" + outcome + "): "
-        return head + text
-    }
-
     private var actionWord: String {
         guard let d = item.decision else { return "triaging" }
         if fromBannedSender { return "banned sender" }
@@ -365,7 +335,6 @@ private struct PingRow: View {
         case .review:      return "review \(ref)"
         case .fixIssue:    return "fix \(ref)"
         case .investigate: return "investigate"
-        case .question:    return "question"
         case .injection:   return "injection"
         }
     }
@@ -377,7 +346,6 @@ private struct PingRow: View {
         case .review?:      return .purple
         case .fixIssue?:    return .green
         case .investigate?: return .teal
-        case .question?:    return .indigo
         case .injection?:   return .red
         case .none?, nil:   return .secondary
         }

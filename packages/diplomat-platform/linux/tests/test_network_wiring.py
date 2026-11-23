@@ -1569,6 +1569,10 @@ def test_a_review_follows_the_prompt_builders_gates():
         "own_pr": False, "verdict": True, "mark_ready": False}
     assert dn.terms({**base, "specificAuthor": "unknown"}) == {
         "own_pr": False, "verdict": True, "mark_ready": True}
+    monitors = {"kind": "review", "automaticVerdict": True}
+    assert dn.terms({**monitors, "specificAuthor": "theirs"})["verdict"] is True
+    assert dn.terms({**monitors, "specificAuthor": "mine"})["verdict"] is False
+    assert dn.terms({"kind": "review", "specificAuthor": "theirs"})["verdict"] is False
     assert dn.terms({"kind": "conflicts"}) == {}
 
 
@@ -2061,98 +2065,6 @@ def test_an_offer_the_operator_takes_back_takes_its_ask_with_it(swept_store, on,
     swept_store.forget_network_run_async(run.run_id)
     assert swept_store.wait_for_background() == []
     assert asks(swept_store) == []
-
-
-def goal_of(store) -> tuple[str, dict[str, str]]:
-    """A goal whose dispatched work is every standing ask."""
-    return "t-goal", {f"review:o/r#{w.number}@abc": w.key for w in store.requested_work}
-
-
-def forgotten_by_goal(store, monkeypatch) -> list[dict]:
-    """The edits the goal's withdrawal makes of its task."""
-    ops: list[dict] = []
-    monkeypatch.setattr(store, "_edit_tracked_task", lambda op: ops.append(op))
-    store._withdraw_goal_asks(goal_of(store))
-    return ops
-
-
-def test_a_goal_that_stops_takes_back_its_offer_no_machine_has_taken(
-        swept_store, on, daemon, monkeypatch):
-    d = daemon(names_tasks())
-    _spawn_recorder(monkeypatch)
-    swept(swept_store, d, monkeypatch)
-    d.state = snapshot(offers=[offer("t-pr-1"), offer("t-pr-2", "claimed", executor=PEER)])
-    changed = []
-    swept_store.tasks_changed.connect(lambda: changed.append(1),
-                                      Qt.ConnectionType.DirectConnection)
-
-    ops = forgotten_by_goal(swept_store, monkeypatch)
-    assert [(b["taskId"], b["reason"]) for b in d.sent("withdraw")] == [
-        ("t-pr-1", "its goal stopped")]
-    assert lines("network-withdraw") == ["Review · #1 · deep - withdrawn (its goal stopped)"]
-    assert [r.network for r in agentregistry.load()] == ["t-pr-2"], "the run a machine has is left"
-    assert asks(swept_store) == [(2, "t-pr-2")]
-    assert ops == [{"op": "withdrawn", "id": "t-goal", "work": ["review:o/r#1@abc"]}]
-    assert changed
-
-
-def test_a_goal_that_stops_with_nothing_to_take_back_edits_nothing(
-        swept_store, on, daemon, monkeypatch):
-    d = daemon(names_tasks())
-    _spawn_recorder(monkeypatch)
-    swept(swept_store, d, monkeypatch)
-    d.state = snapshot(offers=[offer("t-pr-1", "claimed", executor=ME),
-                               offer("t-pr-2", "done", executor=PEER)])
-    assert forgotten_by_goal(swept_store, monkeypatch) == []
-    assert d.sent("withdraw") == [] and len(agentregistry.load()) == 2
-    assert asks(swept_store) == [(1, "t-pr-1"), (2, "t-pr-2")]
-
-
-@pytest.mark.parametrize("state", [None, snapshot()],
-                         ids=["daemon silent", "unnamed by the snapshot"])
-def test_a_goal_that_stops_takes_back_an_offer_it_cannot_see(swept_store, on, daemon,
-                                                             monkeypatch, state):
-    d = daemon(names_tasks())
-    _spawn_recorder(monkeypatch)
-    swept(swept_store, d, monkeypatch)
-    d.state = state
-    ops = forgotten_by_goal(swept_store, monkeypatch)
-    assert [b["taskId"] for b in d.sent("withdraw")] == ["t-pr-1", "t-pr-2"]
-    assert agentregistry.load() == [] and asks(swept_store) == []
-    assert [op["work"] for op in ops] == [["review:o/r#1@abc", "review:o/r#2@abc"]]
-
-
-def test_a_goal_that_stops_forgets_an_ask_whose_run_left_the_book(swept_store, on, daemon,
-                                                                  monkeypatch):
-    """The mark outlives the run until the next poll, which would offer the ask again."""
-    d = daemon(names_tasks())
-    _spawn_recorder(monkeypatch)
-    swept(swept_store, d, monkeypatch)
-    agentregistry.forget({r.run_id for r in agentregistry.load() if r.network == "t-pr-1"})
-    d.state = snapshot(offers=[offer("t-pr-2", "claimed", executor=PEER)])
-    ops = forgotten_by_goal(swept_store, monkeypatch)
-    assert d.sent("withdraw") == []
-    assert asks(swept_store) == [(2, "t-pr-2")]
-    assert [op["work"] for op in ops] == [["review:o/r#1@abc"]]
-
-
-def test_a_goal_that_stops_cancels_what_waits_and_withdraws_what_is_pooled(
-        swept_store, on, daemon, monkeypatch):
-    """One edit of the goal for both: the ask the queue holds and the one in the pool."""
-    d = daemon({"/offer": lambda body: (
-        (200, {"taskId": "t-pr-1"}) if body["item"] == "pr-1"
-        else (409, {"error": "That pool's rules name no review."}))})
-    _spawn_recorder(monkeypatch)
-    swept_store.request_review_sweep(_sweep(swept_store))
-    d.state = snapshot(offers=[offer("t-pr-1")])
-    _poll(swept_store, monkeypatch)
-    assert asks(swept_store) == [(1, "t-pr-1"), (2, "")]
-    assert [t.job.pr_number for t in swept_store.queued_tasks if t.job.requested] == [2]
-
-    ops = forgotten_by_goal(swept_store, monkeypatch)
-    assert asks(swept_store) == [] and agentregistry.load() == []
-    assert not [t for t in swept_store.queued_tasks if t.job.requested]
-    assert [op["work"] for op in ops] == [["review:o/r#1@abc", "review:o/r#2@abc"]]
 
 
 def test_a_withdraw_the_daemon_refused_keeps_the_ask(swept_store, on, daemon, monkeypatch):

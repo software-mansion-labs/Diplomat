@@ -68,8 +68,8 @@ check "the login agent marks its start unattended, so it opens no window" \
 check "…so the installer's own start, the operator's, opens the window once the app is up" \
   bash -c 'grep -A99 "bootstrap gui/[0-9]* .*/com.ignacy.diplomat.plist$" "$1" | grep -A99 "pgrep -xq Diplomat" | grep -qxF "open $2"' \
   _ "$SCRATCH/calls" "$PKG/Diplomat.app"
-check "the bundle is a regular app, with a Dock icon" \
-  bash -c '! grep -q LSUIElement "$1"' _ "$PKG/Diplomat.app/Contents/Info.plist"
+check "the bundle starts with no Dock tile, so a relaunch takes the kept-in-Dock one" \
+  test "$(plutil -extract LSUIElement raw "$PKG/Diplomat.app/Contents/Info.plist")" = true
 check "the auto-update agent runs that same bundle" \
   grep -qF "<string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.autoupdate.plist"
 check "…in self-update mode" \
