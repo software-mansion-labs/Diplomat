@@ -1483,6 +1483,14 @@ def test_a_review_run_concludes_its_prs_review_record():
         "pipeline-fix:https://github.com/o/r/issues/7": None}
 
 
+def test_a_run_concludes_its_items_record_keyed_by_another_link_to_it():
+    """The core keys a Linear issue by its link less the title's slug."""
+    key = "pipeline-fix:https://linear.app/acme/issue/ENG-12"
+    out = pipeline.concluded({key: _attempt()}, [_run(autofix.QUEUE_ISSUES_ACTION, LINEAR)],
+                             500.0)
+    assert out[key].concluded_at == 500.0
+
+
 def test_a_monitors_run_on_the_pr_concludes_no_record():
     attempts = {f"pipeline-review:{PR}": _attempt()}
     reply = _run(autofix.QUEUE_REVIEW_ACTION, PR, ledger_key=f"review-reply:{PR}@aaa111")
