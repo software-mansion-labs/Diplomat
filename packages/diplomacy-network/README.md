@@ -778,8 +778,8 @@ million of those bytes - the dearest a token is sold at, the output of the top m
 its fast mode as priced in November 2026. The requests that count are the inference
 requests the provider answered with a success, under this machine's credential: one it
 refused, one that never reached it and a count of tokens bought nothing, and raise no
-figure. A job that sent the model nothing reports no
-tokens and no cost. An outcome of which a figure was lowered carries `capped: true`.
+figure. A job that sent the model nothing reports no tokens and no cost. An outcome of
+which a figure was lowered carries `capped: true`.
 
 A machine takes work only while its docker engine answers, the image is there and a
 model credential is; both are looked at again every 30 s, and the snapshot says which is
