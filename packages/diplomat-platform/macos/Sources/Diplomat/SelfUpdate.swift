@@ -246,50 +246,6 @@ enum SelfUpdate {
                     + standing())
             }
         }
-        if name == "Exits.app" || ProcessInfo.processInfo.environment["DIAG_ALL"] != nil { relaunchDiag(launched, name: name, requested: requested, lister: { lister(app) }) }
-    }
-
-    // TEMP DIAG (issue #15)
-    static func relaunchDiag(_ pid: pid_t, name: String, requested: Date, lister: () -> [pid_t]) {
-        func err(_ s: String) { FileHandle.standardError.write(Data(("DIAG " + s + "\n").utf8)) }
-        func sh(_ cmd: String) {
-            let q = Process()
-            q.executableURL = URL(fileURLWithPath: "/bin/sh")
-            q.arguments = ["-c", cmd]
-            let pipe = Pipe(); q.standardOutput = pipe; q.standardError = pipe
-            try? q.run()
-            let d = pipe.fileHandleForReading.readDataToEndOfFile()
-            q.waitUntilExit()
-            err("$ \(cmd)\n" + String(decoding: d, as: UTF8.self))
-        }
-        var info = proc_bsdinfo()
-        let size = Int32(MemoryLayout<proc_bsdinfo>.size)
-        let r = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
-        let comm = withUnsafeBytes(of: info.pbi_comm) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
-        let st = Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec) + TimeInterval(info.pbi_start_tvusec) / 1e6)
-        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
-        var kp = kinfo_proc(); var ksz = MemoryLayout<kinfo_proc>.size
-        sysctl(&mib, 4, &kp, &ksz, nil, 0)
-        err("P_TRANSLATED=\(kp.kp_proc.p_flag & P_TRANSLATED != 0)")
-        err("relaunch \(name) accepted pid \(pid); pidinfo=\(r) status=\(info.pbi_status) flags=\(String(info.pbi_flags, radix: 16)) ppid=\(info.pbi_ppid) comm=\(comm) startedAfterRequest=\(st.timeIntervalSince(requested)) now-request=\(Date().timeIntervalSince(requested)) listed=\(lister())")
-        for a in NSRunningApplication.runningApplications(withBundleIdentifier: "com.ignacy.diplomat.relaunchtest.Exits") + NSWorkspace.shared.runningApplications.filter({ $0.processIdentifier == pid }) {
-            err("app pid=\(a.processIdentifier) term=\(a.isTerminated) fin=\(a.isFinishedLaunching) url=\(a.bundleURL?.path ?? "nil") exe=\(a.executableURL?.path ?? "nil") launchDate=\(a.launchDate.map { "\($0.timeIntervalSince(requested))" } ?? "nil")")
-        }
-        sh("ps -o pid,ppid,stat,wchan,lstart,etime,command -p \(pid)")
-        sh("ps -axo pid,ppid,stat,lstart,command | grep -i -e relaunch -e Exits -e Stays | grep -v grep")
-        sh("sudo -n /usr/bin/sample \(pid) 1 -mayDie 2>&1 | head -60")
-        sh("lsappinfo info -all \(pid) 2>&1 | head -40; lsappinfo list 2>&1 | grep -i -B2 -A12 relaunchtest | head -80")
-        let until = Date().addingTimeInterval(30)
-        var last = ""
-        while Date() < until {
-            var i = proc_bsdinfo()
-            let rr = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &i, size)
-            let now = "k=\(kill(pid, 0)) errno=\(errno) pidinfo=\(rr) status=\(i.pbi_status) ppid=\(i.pbi_ppid) listed=\(lister().contains(pid))"
-            if now != last { err(String(format: "t+%.2f ", Date().timeIntervalSince(requested)) + now); last = now }
-            if kill(pid, 0) != 0 && rr != size { break }
-            usleep(100_000)
-        }
-        sh("log show --last 2m --style compact --predicate 'eventMessage CONTAINS[c] \"relaunchtest\" OR eventMessage CONTAINS[c] \"Exits.app\" OR eventMessage CONTAINS \"\(pid)\"' 2>&1 | tail -120")
     }
 
     /// The pids of the bundle at `app` that LaunchServices lists, asked directly, by the
