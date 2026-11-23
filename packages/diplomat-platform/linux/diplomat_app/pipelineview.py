@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from datetime import datetime
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, QUrl, Signal
 from PySide6.QtGui import (
@@ -127,8 +128,12 @@ def open_url(url: str) -> None:
 
 
 def _clock(iso: str | None) -> str:
+    """The time today; with its date on any other day."""
     when = comms.parse_iso(iso or "")
-    return Fmt.clock(when) if when else "—"
+    if when is None:
+        return "—"
+    today = when.astimezone().date() == datetime.now().astimezone().date()
+    return Fmt.clock(when) if today else _when(iso)
 
 
 def _when(iso: str | None) -> str:
@@ -644,13 +649,24 @@ def can_start_fix(item: dict) -> bool:
             and bool(item.get("writable")))
 
 
-def can_fracture(item: dict, edges: list[dict]) -> bool:
+def can_fracture(item: dict, edges: list[dict], rooted: bool) -> bool:
     """A writable open issue that is not split yet: not ``fractured``, with no child,
-    and no PR fixing it (``fixing``). Twin of ``PipelineView.canFracture``."""
+    and no PR fixing it (``fixing``), whose code a sync can read (``rooted``,
+    ``Store.pipeline_rooted``). Twin of ``PipelineView.canFracture``."""
     item_id = str(item.get("id") or "")
-    return (item.get("kind") == "issue" and bool(item.get("writable"))
+    return (item.get("kind") == "issue" and bool(item.get("writable")) and rooted
             and item.get("stage") in ("unrated", "human", "candidate")
             and not any(e.get("kind") == "child" and _ends(e)[0] == item_id for e in edges))
+
+
+def can_rate(item: dict, me: str, rooted: bool) -> bool:
+    """An open item a sync rates when asked: a PR only when it is ``me``'s, an issue
+    only when its code can be read (``rooted``). Twin of ``PipelineView.canRate``."""
+    if item.get("state") not in ("open", "draft"):
+        return False
+    if item.get("kind") == "pr":
+        return bool(me) and str(item.get("author") or "").lower() == me.lower()
+    return rooted
 
 
 class PipelineView(QWidget):
@@ -744,7 +760,7 @@ class PipelineView(QWidget):
         banner = _plain("")
         banner.setWordWrap(True)
         banner.setStyleSheet(
-            f"background-color: {tint_bg(tint, 0.85)}; color: white; border-radius: 6px;"
+            f"background-color: {tint_bg(tint, 0.14)}; border-radius: 6px;"
             " padding: 6px; font-size: 10px;")
         return banner
 
@@ -818,8 +834,9 @@ class PipelineView(QWidget):
         by_id = {str(i.get("id")): i for i in items}
         self.status.setText(self._status_text())
         self.sync_btn.setEnabled(st.pipeline_enabled and not st.pipeline_syncing)
-        self.error_banner.setVisible(bool(st.pipeline_error))
-        self.error_banner.setText(f"⚠ {st.pipeline_error}" if st.pipeline_error else "")
+        error = st.pipeline_error if st.pipeline_enabled else None
+        self.error_banner.setVisible(bool(error))
+        self.error_banner.setText(f"⚠ {error}" if error else "")
         notices = result.get("notices") or []
         self.notices_banner.setVisible(bool(notices))
         self.notices_banner.setText("\n".join(f"⚠ {n}" for n in notices))
@@ -957,21 +974,22 @@ class PipelineView(QWidget):
 
     def _build_actions(self, item: dict, badge: str | None, edges: list[dict]) -> None:
         """Open always; the rest only while the Pipeline is on, which off acts on
-        nothing. Rate now for an item still open, Fracture for an issue
+        nothing. Rate now for an item :func:`can_rate` allows, Fracture for an issue
         :func:`can_fracture` allows, Start fix for a candidate issue
         (:func:`can_start_fix`) whose fix is known, with nothing on it."""
         st = self.store
         item_id = str(item.get("id") or "")
         on = st.pipeline_enabled
+        rooted = st.pipeline_rooted(item)
         self.buttons["open"] = _small_button("Open", lambda: open_url(item_id))
-        if item.get("lane") != "done":
+        if can_rate(item, st.effective_me, rooted):
             asked = item_id in st.pipeline_forced("rate")
             btn = _small_button("Rate asked" if asked else "Rate now",
                                 lambda: st.pipeline_force_now("rate", item_id))
             btn.setToolTip("Rate it in a sync started now, ahead of every limit")
             btn.setEnabled(on and not asked)
             self.buttons["rate"] = btn
-        if can_fracture(item, edges):
+        if can_fracture(item, edges, rooted):
             asked = item_id in st.pipeline_forced("fracture")
             btn = _small_button("Fracture asked" if asked else "Fracture",
                                 lambda: st.pipeline_force_now("fracture", item_id))
@@ -983,8 +1001,7 @@ class PipelineView(QWidget):
             known = st.pipeline_fix_effect(item) is not None
             btn = _small_button("Start fix", lambda: self._start_fix(item))
             btn.setToolTip("Queue its fix now, past its retry backoff" if known
-                           else "Diplomat has this Linear issue's text only while Open "
-                                "fix PRs is on")
+                           else st.pipeline_fix_unknown(item))
             btn.setEnabled(on and known and badge is None)
             self.buttons["fix"] = btn
         row = QHBoxLayout()

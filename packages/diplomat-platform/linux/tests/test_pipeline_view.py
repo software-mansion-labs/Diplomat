@@ -23,7 +23,7 @@ from diplomat_runtime.models import Fmt
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QFont, QPalette  # noqa: E402
+from PySide6.QtGui import QColor, QFont, QImage, QPalette  # noqa: E402
 from PySide6.QtWidgets import QLabel  # noqa: E402
 
 _PIPELINE_SWIFT = (Path(__file__).resolve().parents[3] / "diplomat-core" / "Sources"
@@ -445,6 +445,8 @@ def test_each_action_asks_the_store_about_the_selected_item(store, monkeypatch):
     # A fixing issue: a PR is on it, so it is neither split nor fixed again.
     (I1, ["open", "rate"]),
     (P2, ["open", "rate"]),
+    # Not mine: a sync rates only my own PRs.
+    (P3, ["open"]),
     (I4, ["open", "rate"]),
     # Unrated, writable, no child: it may be split.
     (I6, ["open", "rate", "fracture"]),
@@ -458,6 +460,27 @@ def test_actions_are_offered_where_they_can_act(store, item, shown):
     view = PipelineView(store)
     view.select(item)
     assert list(view.buttons) == shown
+
+
+def test_a_linear_issue_is_rated_and_split_only_in_a_team_with_a_root(store, monkeypatch):
+    from diplomat_runtime import review
+    from diplomat_runtime.prref import LocalRepo
+
+    linear = "https://linear.app/acme/issue/ENG-6"
+    result = _result()
+    result["items"].append({**result["items"][5], "id": linear, "source": "linear",
+                            "label": "ENG-6", "repo": "ENG"})
+    store.pipeline_result = result
+    monkeypatch.setattr(review, "repo_roots", lambda: [LocalRepo("o", "r", "/src/r")])
+    view = PipelineView(store)
+    view.select(linear)
+    assert list(view.buttons) == ["open"]
+    store.pipeline_linear_teams_raw = "ENG=o/elsewhere"
+    store.pipeline_changed.emit()
+    assert list(view.buttons) == ["open"]
+    store.pipeline_linear_teams_raw = "eng=O/R"
+    store.pipeline_changed.emit()
+    assert list(view.buttons) == ["open", "rate", "fracture"]
 
 
 def test_an_issue_with_children_is_not_split_again(store):
@@ -514,6 +537,10 @@ def test_start_fix_is_for_a_writable_candidate_whose_fix_is_known(store):
     fix = view.buttons["fix"]
     assert (fix.isEnabled(), fix.toolTip()) == (
         False, "Diplomat has this Linear issue's text only while Open fix PRs is on")
+    # Held, the hold is why.
+    store.pipeline_result["items"][-1]["hold"] = "Linear team ENG has no root to fix it in"
+    store.pipeline_changed.emit()
+    assert view.buttons["fix"].toolTip() == "Linear team ENG has no root to fix it in"
     store.pipeline_result = {**result, "effects": [{
         "kind": "fixLinear", "repo": "o/r", "identifier": "ENG-5", "url": linear,
         "text": "t", "key": f"pipeline-fix:{linear}", "stamp": "fix"}]}
@@ -554,9 +581,15 @@ def test_off_the_asks_are_disabled_and_open_is_not(store):
 
 
 def test_the_status_line_counts_and_says_when(store):
+    """The clock today; the date with it on any other day, so an old result does not
+    read as today's."""
     view = PipelineView(store)
-    at = Fmt.clock(comms.parse_iso("2026-11-20T10:06:00Z"))
+    at = comms.parse_iso("2026-11-20T10:06:00Z").astimezone().strftime("%b %d %H:%M")
     assert view.status.text() == f"9 items · 4 fast · last sync {at}"
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    store.pipeline_result = {**_result(), "at": now.strftime("%Y-%m-%dT%H:%M:%SZ")}
+    store.pipeline_changed.emit()
+    assert view.status.text() == f"9 items · 4 fast · last sync {Fmt.clock(now)}"
     assert view.sync_btn.isEnabled()
     store.pipeline_syncing = True
     store.pipeline_changed.emit()
@@ -584,12 +617,63 @@ def test_a_failed_sync_and_the_notices_are_banners(store):
     assert view.notices_banner.isHidden()
 
 
+def test_the_sync_error_shows_only_while_the_pipeline_is_on(store):
+    store.pipeline_error = "diplomat-core pipeline-tick failed: boom"
+    store.pipeline_enabled = False
+    view = PipelineView(store)
+    assert view.error_banner.isHidden()
+    store.pipeline_enabled = True
+    store.pipeline_changed.emit()
+    assert not view.error_banner.isHidden()
+
+
+def _luminance(c: QColor) -> float:
+    def lin(v: float) -> float:
+        return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+    return 0.2126 * lin(c.redF()) + 0.7152 * lin(c.greenF()) + 0.0722 * lin(c.blueF())
+
+
+@pytest.mark.parametrize("banner", ["error_banner", "notices_banner"])
+def test_a_banners_text_is_readable_on_it(store, banner):
+    """WCAG's 4.5:1 between the banner's ground and its darkest or lightest text."""
+    store.pipeline_error = "diplomat-core pipeline-tick failed: boom"
+    store.pipeline_result = {**_result(), "notices": ["Linear was not read: no API key"]}
+    view = PipelineView(store)
+    view.resize(900, 600)
+    label = getattr(view, banner)
+    # Over the window it sits on.
+    image = QImage(label.size(), QImage.Format.Format_ARGB32)
+    image.fill(label.palette().color(QPalette.ColorRole.Window))
+    label.render(image)
+    counts: dict[int, int] = {}
+    for y in range(image.height()):
+        for x in range(image.width()):
+            rgb = image.pixel(x, y)
+            counts[rgb] = counts.get(rgb, 0) + 1
+    ground = QColor(max(counts, key=counts.get))
+    lg = _luminance(ground)
+    best = max(counts, key=lambda rgb: abs(_luminance(QColor(rgb)) - lg))
+    lt = _luminance(QColor(best))
+    ratio = (max(lg, lt) + 0.05) / (min(lg, lt) + 0.05)
+    assert ratio >= 4.5, (ground.name(), QColor(best).name(), ratio)
+
+
 def test_sync_now_runs_a_sync(store, monkeypatch):
     runs = []
     monkeypatch.setattr(store, "run_pipeline_sync_async", lambda: runs.append(1))
     view = PipelineView(store)
     view.sync_btn.click()
     assert runs == [1]
+
+
+def test_sync_now_leaves_nothing_to_call_after_the_sync(store, monkeypatch):
+    """``clicked`` hands its ``checked`` to a slot's first optional positional
+    parameter, which ``then`` must not be."""
+    monkeypatch.setattr(Store, "_pipeline_sync_once", lambda self: {"error": "x", "forced": {}})
+    view = PipelineView(store)
+    view.sync_btn.click()
+    assert store._pipeline_then == []
+    assert store.wait_for_background() == []
 
 
 # MARK: the panel

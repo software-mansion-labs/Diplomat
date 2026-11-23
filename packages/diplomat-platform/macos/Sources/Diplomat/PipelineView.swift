@@ -53,7 +53,7 @@ struct PipelineView: View {
                         .frame(width: PipelineView.detailWidth, alignment: .topLeading)
                 }
             } else {
-                Text(emptyText)
+                Text(PipelineView.emptyText(enabled: store.pipelineEnabled, synced: result != nil))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .cardChrome(padding: 6)
@@ -65,12 +65,15 @@ struct PipelineView: View {
         .task { await store.loadPipelineLast() }
     }
 
-    private var emptyText: String {
-        store.pipelineEnabled
-            ? "Nothing read yet: the first sync lists every open issue and PR of the GitHub roots "
-                + "and the tracked Linear teams here."
-            : "The pipeline is off. Switched on in Settings, it rates every open issue and PR, "
+    /// What stands in for the graph while there is none to draw.
+    static func emptyText(enabled: Bool, synced: Bool) -> String {
+        if !enabled {
+            return "The pipeline is off. Switched on in Settings, it rates every open issue and PR, "
                 + "sends the low-risk, low-complexity ones down the fast track and shows them here."
+        }
+        return synced ? "The last sync found no open issue or PR."
+            : "Nothing read yet: the first sync lists every open issue and PR of the GitHub roots "
+                + "and the tracked Linear teams here."
     }
 
     // MARK: - Header and status
@@ -111,7 +114,7 @@ struct PipelineView: View {
     }
 
     private func statusText(_ result: PipelineTickResult?) -> String {
-        let last = result.map { "last sync \(Fmt.clock($0.at))" } ?? "not synced yet"
+        let last = result.map { "last sync \(PipelineTint.syncTime($0.at))" } ?? "not synced yet"
         guard store.pipelineEnabled else { return "Off: switch the pipeline on in Settings · \(last)" }
         let roots = store.roots.filter { !$0.isGitLab }.count
         let teams = Store.pipelineTeams(store.pipelineLinearTeamsRaw).map(\.key)
@@ -158,10 +161,19 @@ struct PipelineView: View {
     static let lanes: [PipelineLane] = [.fast, .human, .unrated, .fractured, .done]
 
     /// A writable open issue not split yet: not `fractured`, with no child, and no PR
-    /// fixing it (`fixing`). Twin of `pipelineview.can_fracture`.
-    static func canFracture(_ item: PipelineItem, edges: [PipelineGraph.Edge]) -> Bool {
-        item.kind == .issue && item.writable && [.unrated, .human, .candidate].contains(item.stage)
+    /// fixing it (`fixing`), whose code a sync can read (`rooted`, `Store.pipelineRooted`).
+    /// Twin of `pipelineview.can_fracture`.
+    static func canFracture(_ item: PipelineItem, edges: [PipelineGraph.Edge], rooted: Bool) -> Bool {
+        item.kind == .issue && item.writable && rooted && [.unrated, .human, .candidate].contains(item.stage)
             && !edges.contains { $0.kind == .child && $0.from == item.id }
+    }
+
+    /// An open item a sync rates when asked: a PR only when it is `me`'s, an issue only
+    /// when its code can be read (`rooted`). Twin of `pipelineview.can_rate`.
+    static func canRate(_ item: PipelineItem, me: String, rooted: Bool) -> Bool {
+        guard item.state == "open" || item.state == "draft" else { return false }
+        if item.kind == .pr { return !me.isEmpty && item.author?.lowercased() == me.lowercased() }
+        return rooted
     }
 
     /// A candidate issue: low/low, writable, no open PR fixing it.
@@ -233,14 +245,18 @@ struct PipelineView: View {
     @ViewBuilder
     private func detail(_ result: PipelineTickResult) -> some View {
         if let id = selected, let item = result.items.first(where: { $0.id == id }) {
+            let rooted = store.pipelineRooted(item)
             PipelineDetail(item: item,
                            events: result.events.filter { $0.item == id }.reversed(),
                            badge: store.pipelineBadges[Store.pipelineIdentity(item.id)],
                            enabled: store.pipelineEnabled,
                            forcedRate: store.pipelineForce.rate.contains(id),
                            forcedFracture: store.pipelineForce.fracture.contains(id),
-                           canFracture: PipelineView.canFracture(item, edges: result.graph.edges),
+                           canRate: PipelineView.canRate(item, me: store.effectiveMe, rooted: rooted),
+                           canFracture: PipelineView.canFracture(item, edges: result.graph.edges,
+                                                                 rooted: rooted),
                            canStartFix: store.pipelineFixEffect(for: item) != nil,
+                           fixUnknown: store.pipelineFixUnknown(item),
                            error: actionError,
                            rate: { store.forcePipeline(rate: id) },
                            fracture: { store.forcePipeline(fracture: id) },
@@ -267,19 +283,17 @@ struct PipelineView: View {
 /// are, its rows packed per connected group, groups one below another in the order of
 /// their first row. A lane filter keeps every group with a card in that lane, whole.
 struct PipelineLayout {
-    enum Side { case left, right, top, bottom }
-
     struct Card {
         let item: PipelineItem
         let frame: CGRect
     }
 
+    /// `path` runs from the source's right side to the base of `arrow`, whose tip touches
+    /// the target's left side.
     struct Link {
-        let kind: PipelineGraph.EdgeKind
-        let from: CGPoint
-        let fromSide: Side
-        let to: CGPoint
-        let toSide: Side
+        let edge: PipelineGraph.Edge
+        let path: Path
+        let arrow: Path
     }
 
     var cards: [Card] = []
@@ -293,8 +307,10 @@ struct PipelineLayout {
     static let rowGap: CGFloat = 14
     static let groupGap: CGFloat = 12
     static let inset: CGFloat = 6
-    /// Between the connectors meeting one side of a card.
-    static let fan: CGFloat = 12
+    static let arrowLength: CGFloat = 7
+    static let arrowHalfWidth: CGFloat = 3.5
+    /// The radius a connector turns at.
+    static let corner: CGFloat = 6
 
     static func make(_ result: PipelineTickResult, lane: PipelineLane?) -> PipelineLayout {
         let items = Dictionary(result.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -321,6 +337,9 @@ struct PipelineLayout {
         var out = PipelineLayout()
         var frames: [String: CGRect] = [:]
         let w = cardSize.width, h = cardSize.height
+        // Only a connector into column 0 has to come round through a gutter left of it.
+        let first = Set(groups.joined().filter { $0.column <= 0 }.map(\.id))
+        let left = edges.contains { first.contains($0.to) } ? inset + columnGap / 2 : inset
         var top = inset
         for group in groups {
             let rows = Array(Set(group.map(\.row))).sorted()
@@ -328,7 +347,7 @@ struct PipelineLayout {
             var band = CGRect.null
             for node in group.sorted(by: { ($0.row, $0.column) < ($1.row, $1.column) }) {
                 guard let item = items[node.id] else { continue }
-                let frame = CGRect(x: inset + CGFloat(max(0, node.column)) * (w + columnGap),
+                let frame = CGRect(x: left + CGFloat(max(0, node.column)) * (w + columnGap),
                                    y: top + CGFloat(index[node.row] ?? 0) * (h + rowGap),
                                    width: w, height: h)
                 frames[node.id] = frame
@@ -339,71 +358,86 @@ struct PipelineLayout {
             top = band.maxY + rowGap + groupGap
         }
         out.links = links(edges.filter { frames[$0.from] != nil && frames[$0.to] != nil }, frames)
-        let maxX = out.cards.map(\.frame.maxX).max() ?? 0
-        let maxY = out.cards.map(\.frame.maxY).max() ?? 0
+        let maxX = (out.cards.map(\.frame.maxX) + out.links.map(\.path.boundingRect.maxX)).max() ?? 0
+        let maxY = (out.cards.map(\.frame.maxY) + out.links.map(\.path.boundingRect.maxY)).max() ?? 0
         out.size = CGSize(width: maxX + inset, height: maxY + inset)
         return out
     }
 
-    /// Each edge from the side of its source facing its target to the side of the target
-    /// facing back: right to left when the target is in a later column, else bottom to top
-    /// (or top to bottom). The connectors sharing one side of a card fan out along it, in
-    /// the order of the cards at their other ends.
+    /// Each edge from its source's right side to its target's left side, never across a
+    /// card: into the next column one curve through the gutter between; anything else out
+    /// into the source's gutter, along the middle of the gap between card rows (above the
+    /// source's row toward a target above it, else below), and in through the target's
+    /// gutter. Connectors sharing a side spread along it in the order they head off to or
+    /// come in from.
     private static func links(_ edges: [PipelineGraph.Edge], _ frames: [String: CGRect]) -> [Link] {
-        struct Leg {
-            let edge: PipelineGraph.Edge
-            let fromSide: Side
-            let toSide: Side
+        let src = edges.map { frames[$0.from]! }, dst = edges.map { frames[$0.to]! }
+        func next(_ i: Int) -> Bool { abs(dst[i].minX - src[i].maxX - columnGap) < 0.5 }
+        func gap(_ i: Int) -> CGFloat {
+            dst[i].minY < src[i].minY ? src[i].minY - rowGap / 2 : src[i].maxY + rowGap / 2
         }
-        let legs = edges.map { edge -> Leg in
-            let a = frames[edge.from]!, b = frames[edge.to]!
-            if b.minX >= a.maxX { return Leg(edge: edge, fromSide: .right, toSide: .left) }
-            if b.maxX <= a.minX { return Leg(edge: edge, fromSide: .left, toSide: .right) }
-            return b.minY >= a.maxY ? Leg(edge: edge, fromSide: .bottom, toSide: .top)
-                : Leg(edge: edge, fromSide: .top, toSide: .bottom)
-        }
-        /// Where along its side the `i`th of `n` connectors meets the card.
-        func point(_ frame: CGRect, _ side: Side, _ i: Int, _ n: Int) -> CGPoint {
-            let shift = (CGFloat(i) - CGFloat(n - 1) / 2) * fan
-            switch side {
-            case .right: return CGPoint(x: frame.maxX, y: frame.midY + shift)
-            case .left: return CGPoint(x: frame.minX, y: frame.midY + shift)
-            case .bottom: return CGPoint(x: frame.midX + shift, y: frame.maxY)
-            case .top: return CGPoint(x: frame.midX + shift, y: frame.minY)
+        func ports(out: Bool) -> [CGFloat] {
+            var ys = [CGFloat](repeating: 0, count: edges.count)
+            let shares = Dictionary(grouping: edges.indices, by: { out ? edges[$0].from : edges[$0].to })
+            for share in shares.values {
+                func toward(_ i: Int) -> (CGFloat, CGFloat, Int) {
+                    let far = out ? dst[i] : src[i]
+                    return (next(i) ? far.midY : gap(i), far.minX, i)
+                }
+                for (n, i) in share.sorted(by: { toward($0) < toward($1) }).enumerated() {
+                    let card = out ? src[i] : dst[i]
+                    ys[i] = card.minY + card.height * CGFloat(n + 1) / CGFloat(share.count + 1)
+                }
             }
+            return ys
         }
-        /// Orders the far ends along the side: by y on a left or right side, by x on a top
-        /// or bottom one.
-        func along(_ side: Side, _ frame: CGRect) -> CGFloat {
-            side == .left || side == .right ? frame.midY : frame.midX
-        }
-        var starts: [Int: CGPoint] = [:], ends: [Int: CGPoint] = [:]
-        let indexed = Array(legs.enumerated())
-        for (_, out) in Dictionary(grouping: indexed, by: { "\($0.element.edge.from)|\($0.element.fromSide)" }) {
-            let sorted = out.sorted { along($0.element.fromSide, frames[$0.element.edge.to]!)
-                < along($1.element.fromSide, frames[$1.element.edge.to]!) }
-            for (i, leg) in sorted.enumerated() {
-                starts[leg.offset] = point(frames[leg.element.edge.from]!, leg.element.fromSide, i, sorted.count)
+        let y0 = ports(out: true), y1 = ports(out: false)
+        return edges.indices.map { i in
+            let start = CGPoint(x: src[i].maxX, y: y0[i]), tip = CGPoint(x: dst[i].minX, y: y1[i])
+            let end = CGPoint(x: tip.x - arrowLength, y: tip.y)
+            var path = Path()
+            if next(i) {
+                let mid = (start.x + end.x) / 2
+                path.move(to: start)
+                path.addCurve(to: end, control1: CGPoint(x: mid, y: start.y),
+                              control2: CGPoint(x: mid, y: end.y))
+            } else {
+                let run = gap(i), out = src[i].maxX + columnGap / 2, into = dst[i].minX - columnGap / 2
+                path = rounded([start, CGPoint(x: out, y: start.y), CGPoint(x: out, y: run),
+                                CGPoint(x: into, y: run), CGPoint(x: into, y: end.y), end])
             }
+            var arrow = Path()
+            arrow.move(to: tip)
+            arrow.addLine(to: CGPoint(x: end.x, y: tip.y - arrowHalfWidth))
+            arrow.addLine(to: CGPoint(x: end.x, y: tip.y + arrowHalfWidth))
+            arrow.closeSubpath()
+            return Link(edge: edges[i], path: path, arrow: arrow)
         }
-        for (_, into) in Dictionary(grouping: indexed, by: { "\($0.element.edge.to)|\($0.element.toSide)" }) {
-            let sorted = into.sorted { along($0.element.toSide, frames[$0.element.edge.from]!)
-                < along($1.element.toSide, frames[$1.element.edge.from]!) }
-            for (i, leg) in sorted.enumerated() {
-                ends[leg.offset] = point(frames[leg.element.edge.to]!, leg.element.toSide, i, sorted.count)
-            }
+    }
+
+    /// Straight runs through `points`, each corner rounded at `corner` or half the shorter
+    /// run beside it.
+    private static func rounded(_ points: [CGPoint]) -> Path {
+        func toward(_ at: CGPoint, _ other: CGPoint) -> CGPoint {
+            let length = hypot(other.x - at.x, other.y - at.y)
+            guard length > 0 else { return at }
+            let t = min(corner, length / 2) / length
+            return CGPoint(x: at.x + (other.x - at.x) * t, y: at.y + (other.y - at.y) * t)
         }
-        return indexed.map { i, leg in
-            Link(kind: leg.edge.kind, from: starts[i]!, fromSide: leg.fromSide,
-                 to: ends[i]!, toSide: leg.toSide)
+        var path = Path()
+        path.move(to: points[0])
+        for i in points.indices.dropFirst().dropLast() {
+            path.addLine(to: toward(points[i], points[i - 1]))
+            path.addQuadCurve(to: toward(points[i], points[i + 1]), control: points[i])
         }
+        path.addLine(to: points[points.count - 1])
+        return path
     }
 }
 
 // MARK: - Canvas
 
-/// The cards at their frames over the connectors, which a card's opaque face hides
-/// wherever one passes behind it.
+/// The cards at their frames over the connectors.
 private struct PipelineCanvas: View {
     let layout: PipelineLayout
     let badges: [String: Store.PipelineBadge]
@@ -431,38 +465,10 @@ private struct PipelineCanvas: View {
         .frame(width: layout.size.width, height: layout.size.height, alignment: .topLeading)
     }
 
-    static let arrowLength: CGFloat = 7
-    static let arrowHalfWidth: CGFloat = 3.5
-
-    /// A cubic leaving and entering square to its sides, ending at the base of an arrowhead
-    /// whose tip touches the target.
     static func draw(_ link: PipelineLayout.Link, in ctx: inout GraphicsContext) {
-        func unit(_ side: PipelineLayout.Side) -> CGVector {
-            switch side {
-            case .right: return CGVector(dx: 1, dy: 0)
-            case .left: return CGVector(dx: -1, dy: 0)
-            case .bottom: return CGVector(dx: 0, dy: 1)
-            case .top: return CGVector(dx: 0, dy: -1)
-            }
-        }
-        let out = unit(link.fromSide), into = unit(link.toSide)
-        // The tip points into the card, against the side's outward normal.
-        let base = CGPoint(x: link.to.x + into.dx * arrowLength, y: link.to.y + into.dy * arrowLength)
-        let reach = max(18, hypot(base.x - link.from.x, base.y - link.from.y) / 2.4)
-        var path = Path()
-        path.move(to: link.from)
-        path.addCurve(to: base,
-                      control1: CGPoint(x: link.from.x + out.dx * reach, y: link.from.y + out.dy * reach),
-                      control2: CGPoint(x: base.x + into.dx * reach, y: base.y + into.dy * reach))
-        let tint = PipelineTint.edge(link.kind)
-        ctx.stroke(path, with: .color(tint), style: PipelineTint.stroke(link.kind))
-        let normal = CGVector(dx: -into.dy, dy: into.dx)
-        var head = Path()
-        head.move(to: link.to)
-        head.addLine(to: CGPoint(x: base.x + normal.dx * arrowHalfWidth, y: base.y + normal.dy * arrowHalfWidth))
-        head.addLine(to: CGPoint(x: base.x - normal.dx * arrowHalfWidth, y: base.y - normal.dy * arrowHalfWidth))
-        head.closeSubpath()
-        ctx.fill(head, with: .color(tint))
+        let tint = PipelineTint.edge(link.edge.kind)
+        ctx.stroke(link.path, with: .color(tint), style: PipelineTint.stroke(link.edge.kind))
+        ctx.fill(link.arrow, with: .color(tint))
     }
 }
 
@@ -536,9 +542,12 @@ private struct PipelineDetail: View {
     let enabled: Bool
     let forcedRate: Bool
     let forcedFracture: Bool
+    let canRate: Bool
     let canFracture: Bool
     /// The fix effect is known: a Linear issue's text comes only with a sync's.
     let canStartFix: Bool
+    /// Why it is not (`Store.pipelineFixUnknown`).
+    let fixUnknown: String
     let error: String?
     let rate: () -> Void
     let fracture: () -> Void
@@ -580,6 +589,8 @@ private struct PipelineDetail: View {
             }
             section("WHO MAY ACT") {
                 Text(PipelineTint.access(item)).font(.system(size: 10.5))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(PipelineTint.people(item)).font(.system(size: 10)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let head = item.headSha {
                     Text(headLine(head)).font(.system(size: 10, design: .monospaced))
@@ -643,7 +654,7 @@ private struct PipelineDetail: View {
             FlowLayout(spacing: 4) {
                 PipelineActionChip(symbol: "arrow.up.right.square", text: "Open", tint: .accentColor,
                                    action: open)
-                if item.lane != .done {
+                if canRate {
                     PipelineActionChip(symbol: "gauge.with.needle",
                                        text: forcedRate ? "Rate asked" : "Rate now",
                                        tint: .accentColor, enabled: enabled && !forcedRate, action: rate)
@@ -659,8 +670,7 @@ private struct PipelineDetail: View {
                     PipelineActionChip(symbol: "wrench.and.screwdriver", text: "Start fix",
                                        tint: .green, enabled: enabled && canStartFix && badge == nil,
                                        action: startFix)
-                        .tooltip(canStartFix ? "Queue its fix now, past its retry backoff"
-                                 : "Diplomat has this Linear issue's text only while Open fix PRs is on")
+                        .tooltip(canStartFix ? "Queue its fix now, past its retry backoff" : fixUnknown)
                 }
             }
             if let error {
@@ -923,22 +933,35 @@ enum PipelineTint {
     }
 
     static func access(_ item: PipelineItem) -> String {
-        if item.writable {
-            return item.kind == .pr ? "Your PR: Diplomat labels it, reviews it and may merge it."
-                : "Diplomat labels it and may fix or split it."
-        }
-        if item.kind == .pr {
-            let by = item.author.map { " by @\($0)" } ?? ""
-            return "Read only: a PR\(by) that is not yours from this repo into its default branch."
-        }
-        let who = item.assignees.map { "@\($0)" }.joined(separator: ", ")
-        return "Read only: assigned to \(who.isEmpty ? "someone else" : who)."
+        guard item.writable else { return "Read only: Diplomat shows it and writes nothing to it." }
+        return item.kind == .pr ? "Your PR: Diplomat labels it, reviews it and may merge it."
+            : "Diplomat labels it and may fix or split it."
+    }
+
+    /// `By @bob · assigned to @carol`, a Linear name as it is. Twin of `pipelineview`'s WHO
+    /// people line.
+    static func people(_ item: PipelineItem) -> String {
+        func who(_ name: String) -> String { item.source == .linear ? name : "@\(name)" }
+        var parts = item.author.flatMap { $0.isEmpty ? nil : ["by \(who($0))"] } ?? []
+        parts.append(item.assignees.isEmpty ? "unassigned"
+                     : "assigned to " + item.assignees.map(who).joined(separator: ", "))
+        let text = parts.joined(separator: " · ")
+        return text.prefix(1).uppercased() + text.dropFirst()
     }
 
     static func hover(_ item: PipelineItem) -> String {
         let source = item.source == .linear ? "Linear issue" : (item.kind == .pr ? "GitHub PR" : "GitHub issue")
         return ([item.title, "\(source) · \(item.stage.rawValue) · \(word(item.lane).lowercased()) lane",
                  item.hold, item.id] as [String?]).compactMap { $0 }.joined(separator: "\n")
+    }
+
+    /// The time today; with its date on any other day.
+    static func syncTime(_ date: Date, now: Date = Date()) -> String {
+        guard !Calendar.current.isDate(date, inSameDayAs: now) else { return Fmt.clock(date) }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMM dd HH:mm"
+        return f.string(from: date)
     }
 
     /// `now`, `12m`, `5h`, `3d`.

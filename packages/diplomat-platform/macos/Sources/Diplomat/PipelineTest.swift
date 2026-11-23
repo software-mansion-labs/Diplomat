@@ -83,6 +83,8 @@ enum PipelineTest {
         let fixLinear = PipelineEffect.fixLinear(repo: "o/r", identifier: "ENG-90010", url: linear,
                                                  text: "Title\n\nBody")
         let review = PipelineEffect.review(repo: "o/r", number: 90011, url: pr, headSha: "aaa111")
+        // SHIM: each becomes its effect's own `author:` once DiplomatCore's PipelineEffect has it.
+        PipelineEffectAuthorShim.byKey = [fix.key: "bob", fixLinear.key: "Bob", review.key: "latekvo"]
         func item(_ id: String, _ kind: PipelineKind, source: PipelineSource = .github,
                   author: String) -> PipelineItem {
             PipelineItem(id: id, source: source, kind: kind, label: "", title: "", repo: "o/r",
@@ -196,10 +198,10 @@ enum PipelineTest {
         store.pipelineFix = true
         clearQueue()
         store.savePipelineAttempts([:])
-        var mine = items
-        mine[0].author = "LateKvo"
-        await store.applyPipeline(PipelineTickResult(at: Date(), items: mine, effects: [fix]), now: t0)
+        PipelineEffectAuthorShim.byKey[fix.key] = "LateKvo"  // SHIM: `author: "LateKvo"`
+        await store.applyPipeline(result([fix]), now: t0)
         check("the operator's own issue: no author to ban", ask(fixKey).map { $0.author.isEmpty } == true)
+        PipelineEffectAuthorShim.byKey[fix.key] = "bob"
         clearQueue()
         store.savePipelineAttempts(saved)
 
@@ -277,8 +279,11 @@ enum PipelineTest {
         let repeated = PipelineTickResult(at: t0, items: labelled,
                                           events: first.events + [event(10, pr, .held, "x")],
                                           notices: ["Linear was not read"])
-        check("no previous result: every merge and split is fresh",
+        check("no previous result: every merge and split of its own sync is fresh",
               Store.pipelineFreshEvents(first, after: nil) == [merged, split])
+        check("…and none the log holds from before it",
+              Store.pipelineFreshEvents(PipelineTickResult(at: t0, events: [event(-60, pr, .merged, "old"), merged]),
+                                        after: nil) == [merged])
         check("…else none the previous result showed, nor one older than its newest",
               Store.pipelineFreshEvents(repeated, after: first).isEmpty
                   && Store.pipelineFreshEvents(PipelineTickResult(at: t0, events: [event(4, pr, .merged, "old")]),
@@ -425,18 +430,35 @@ enum PipelineTest {
         check("…and not without it",
               store.startPipelineFix(items[2]) == "Diplomat has this Linear issue's text only while Open fix PRs is on"
                   && ids().isEmpty)
+        // The card is drawn from an earlier result than the one each press is checked against.
         var theirs = items[0]
         theirs.writable = false
-        check("nor an issue assigned to someone else, which the fix would claim",
-              store.startPipelineFix(theirs) == "It is assigned to someone else" && ids().isEmpty)
+        store.pipelineResult = PipelineTickResult(at: Date(), items: [theirs] + items.dropFirst())
+        check("nor an issue the last sync found assigned to someone else, which the fix would claim",
+              store.startPipelineFix(items[0]) == "It is assigned to someone else" && ids().isEmpty)
+        var fixed = items[0]
+        fixed.stage = .fixing
+        store.pipelineResult = PipelineTickResult(at: Date(), items: [fixed] + items.dropFirst())
+        check("nor one it found a PR fixing",
+              store.startPipelineFix(items[0]) == "The last sync found it no fix candidate" && ids().isEmpty)
+        store.pipelineResult = result([])
+        check("nor one it did not read",
+              store.startPipelineFix(item("https://github.com/o/r/issues/90031", .issue, author: "bob"))
+                  == "The last sync found it no fix candidate" && ids().isEmpty)
+        var heldLinear = items[2]
+        heldLinear.hold = "Linear team ENG has no root to fix it in"
+        store.pipelineResult = PipelineTickResult(at: Date(), items: [items[0], items[1], heldLinear])
+        check("a held Linear candidate: the hold says why", store.startPipelineFix(items[2]) == heldLinear.hold)
         var elsewhere = items[0]
         elsewhere.id = "https://github.com/x/gone/issues/90012"
         elsewhere.repo = "x/gone"
+        store.pipelineResult = PipelineTickResult(at: Date(), items: items + [elsewhere])
         check("nor one in a repo that is no root here",
               store.startPipelineFix(elsewhere) == "x/gone is no GitHub repo root here, so there is nowhere to fix it")
         store.pinAgentRows([agent(issue)])
         check("nor one an agent is fixing", store.startPipelineFix(items[0]) == "An agent is already fixing it")
         store.pinAgentRows([])
+        store.pipelineResult = result([])
 
         print("\npipeline: the screen's actions")
         func at(_ stage: PipelineStage, _ kind: PipelineKind = .issue, writable: Bool = true) -> PipelineItem {
@@ -445,23 +467,331 @@ enum PipelineTest {
             i.writable = writable
             return i
         }
-        check("Fracture: a writable open issue not split yet",
-              [PipelineStage.unrated, .human, .candidate].allSatisfy { PipelineView.canFracture(at($0), edges: []) }
-                  && !PipelineView.canFracture(at(.fixing), edges: [])
-                  && !PipelineView.canFracture(at(.human, writable: false), edges: [])
-                  && !PipelineView.canFracture(at(.human, .pr), edges: [])
+        check("Fracture: a writable open issue not split yet, whose code can be read",
+              [PipelineStage.unrated, .human, .candidate].allSatisfy {
+                  PipelineView.canFracture(at($0), edges: [], rooted: true)
+              }
+                  && !PipelineView.canFracture(at(.fixing), edges: [], rooted: true)
+                  && !PipelineView.canFracture(at(.human, writable: false), edges: [], rooted: true)
+                  && !PipelineView.canFracture(at(.human, .pr), edges: [], rooted: true)
                   && !PipelineView.canFracture(at(.human),
-                                               edges: [PipelineGraph.Edge(from: issue, to: "c", kind: .child)]))
+                                               edges: [PipelineGraph.Edge(from: issue, to: "c", kind: .child)],
+                                               rooted: true)
+                  && !PipelineView.canFracture(at(.human), edges: [], rooted: false))
         check("Start fix: a writable candidate issue only",
               PipelineView.canStartFix(at(.candidate)) && !PipelineView.canStartFix(at(.human))
                   && !PipelineView.canStartFix(at(.candidate, writable: false))
                   && !PipelineView.canStartFix(at(.candidate, .pr)))
+
+        print("\npipeline: connectors")
+        func graph(_ cells: [(String, Int, Int)], _ edges: [(String, String, PipelineGraph.EdgeKind)])
+            -> PipelineLayout {
+            PipelineLayout.make(PipelineTickResult(
+                at: Date(), items: cells.map { item($0.0, .issue, author: "bob") },
+                graph: PipelineGraph(nodes: cells.map { PipelineGraph.Node(id: $0.0, column: $0.1, row: $0.2) },
+                                     edges: edges.map { PipelineGraph.Edge(from: $0.0, to: $0.1, kind: $0.2) })),
+                lane: nil)
+        }
+        func gh(_ n: Int) -> String { "https://github.com/o/r/issues/\(n)" }
+        func name(_ id: String) -> String { String(id.split(separator: "/").last ?? "") }
+        let eng10 = "https://linear.app/o/issue/ENG-10"
+        // One row, as the core lays them out when #11 is newer than #12.
+        let stack = graph([(eng10, 0, 0), (gh(11), 1, 0), (gh(12), 2, 0)],
+                          [(eng10, gh(11), .fixes), (eng10, gh(12), .fixes), (gh(11), gh(12), .stacked)])
+        let closes = graph([(gh(30), 0, 0), (gh(31), 1, 0), (gh(34), 2, 0)],
+                           [(gh(30), gh(31), .child), (gh(31), gh(34), .fixes), (gh(30), gh(34), .fixes)])
+        let children = (101...106).map(gh)
+        let fan = graph([(gh(100), 0, 0)] + children.enumerated().map { ($1, 1, $0) },
+                        children.map { (gh(100), $0, .child) })
+        let cycle = graph([(gh(60), 0, 0), (gh(61), 1, 0)],
+                          [(gh(60), gh(61), .stacked), (gh(61), gh(60), .stacked)])
+        func samples(_ link: PipelineLayout.Link) -> [CGPoint] {
+            func at(_ polygon: [CGPoint], _ t: CGFloat) -> CGPoint {
+                polygon.count == 1 ? polygon[0] : at(zip(polygon, polygon.dropFirst()).map {
+                    CGPoint(x: $0.x + ($1.x - $0.x) * t, y: $0.y + ($1.y - $0.y) * t)
+                }, t)
+            }
+            var points: [CGPoint] = []
+            link.path.forEach { element in
+                let from = points.last ?? .zero
+                let polygon: [CGPoint]
+                switch element {
+                case .move(let p): points.append(p); return
+                case .line(let p): polygon = [from, p]
+                case .quadCurve(let p, let c): polygon = [from, c, p]
+                case .curve(let p, let c1, let c2): polygon = [from, c1, c2, p]
+                case .closeSubpath: return
+                }
+                points += (1...200).map { at(polygon, CGFloat($0) / 200) }
+            }
+            return points
+        }
+        /// Each connector inside a card other than its two (1pt clear of it), inside one of its
+        /// own past the side it meets, or off the canvas; each into the next column out of the
+        /// gutter between.
+        func astray(_ layout: PipelineLayout) -> [String] {
+            let frames = Dictionary(uniqueKeysWithValues: layout.cards.map { ($0.item.id, $0.frame) })
+            return layout.links.flatMap { link -> [String] in
+                let points = samples(link), a = frames[link.edge.from]!, b = frames[link.edge.to]!
+                let what = "\(name(link.edge.from)) → \(name(link.edge.to))"
+                var bad = layout.cards.compactMap { card -> String? in
+                    let own = card.item.id == link.edge.from || card.item.id == link.edge.to
+                    let box = card.frame.insetBy(dx: own ? 0.5 : -1, dy: own ? 0.5 : -1)
+                    return points.contains { box.contains($0) } ? "\(what) under \(name(card.item.id))" : nil
+                }
+                if !points.allSatisfy({ CGRect(origin: .zero, size: layout.size).contains($0) }) {
+                    bad.append("\(what) off the canvas")
+                }
+                if abs(b.minX - a.maxX - PipelineLayout.columnGap) < 0.5,
+                   !points.allSatisfy({ $0.x >= a.maxX - 0.01 && $0.x <= b.minX + 0.01 }) {
+                    bad.append("\(what) out of its gutter")
+                }
+                return bad
+            }
+        }
+        func clear(_ name: String, _ layout: PipelineLayout, edges: Int) {
+            let bad = astray(layout)
+            check(name, layout.links.count == edges && bad.isEmpty)
+            if !bad.isEmpty { print("  " + bad.joined(separator: "; ")) }
+        }
+        clear("ENG-10 fixed by #11 and by #12 stacked on it, one row: through gutters and gaps only", stack, edges: 3)
+        clear("#34 closing #30 and its child #31, one row: through gutters and gaps only", closes, edges: 3)
+        clear("#100's six children: through their gutter only", fan, edges: 6)
+        clear("#60 and #61 stacked on each other: the edge back round through the outer gutters", cycle, edges: 2)
+        let cards = fan.cards.map(\.frame).reduce(CGRect.null) { $0.union($1) }, pad = PipelineLayout.inset
+        check("no connector round the outer cards: the canvas is the cards and an inset round them",
+              CGRect(origin: .zero, size: fan.size) == cards.insetBy(dx: -pad, dy: -pad))
+        func port(_ layout: PipelineLayout, _ from: String, _ to: String, end: Bool) -> CGFloat {
+            layout.links.first { $0.edge.from == from && $0.edge.to == to }
+                .flatMap { end ? samples($0).last?.y : samples($0).first?.y } ?? .nan
+        }
+        let out100 = children.map { port(fan, gh(100), $0, end: false) }
+        check("connectors sharing a side meet it apart, in the order they head off to or come in from",
+              zip(out100, out100.dropFirst()).allSatisfy { $1 - $0 >= 10 }
+                  && port(stack, gh(11), gh(12), end: true) + 10 <= port(stack, eng10, gh(12), end: true))
 
         print("\npipeline: identity")
         check("a Linear link by its identifier, a GitHub one by its item key, anything else as it is",
               Store.pipelineIdentity(linear) == "linear:ENG-90010"
                   && Store.pipelineIdentity(issue) == "o/r#90010"
                   && Store.pipelineIdentity("https://example.com/x") == "https://example.com/x")
+
+        print("\npipeline: control.json")
+        let control = PipelineLog.dir.appendingPathComponent("control.json")
+        func switches() -> [String: Bool]? {
+            (try? Data(contentsOf: control)).flatMap { try? JSONDecoder().decode([String: Bool].self, from: $0) }
+        }
+        store.pipelineMerge = false
+        check("a switch writes every switch as it stands",
+              switches() == ["enabled": true, "rate": true, "fix": true, "fastTrack": true, "merge": false,
+                             "fracture": false])
+        let mode = (try? FileManager.default.attributesOfItem(atPath: control.path))?[.posixPermissions] as? Int
+        let beside = (try? FileManager.default.contentsOfDirectory(atPath: PipelineLog.dir.path)) ?? []
+        check("…owner-only, replaced whole", mode == 0o600 && !beside.contains { $0.hasPrefix("control.json.") })
+        try? FileManager.default.removeItem(at: control)
+        var handed: [String: Bool]?
+        Store.pipelineTickOverride = { _ in
+            handed = switches()
+            return result([])
+        }
+        await store.runPipelineSyncOnce()
+        check("…and a sync writes it before it runs", handed?["merge"] == false && handed?["enabled"] == true)
+        store.pipelineMerge = true
+
+        print("\npipeline: a sync's own result, and another's")
+        clearQueue()
+        store.savePipelineAttempts([:])
+        store.pipelineForce = PipelineSettings.Force(rate: [pr])
+        if let asked = store.pipelineAsk(review) { store.requestOne(asked) }
+        let reviewLine = line(reviewKey)
+        // Another sync held the lock: the core answers the last result, dated before this one began.
+        Store.pipelineTickOverride = { _ in PipelineTickResult(at: Date().addingTimeInterval(-60), items: items) }
+        await store.runPipelineSyncOnce()
+        check("a stale result retires no force and withdraws no ask",
+              store.pipelineForce.rate == [pr] && ids() == [reviewKey])
+        Store.pipelineTickOverride = { _ in result([]) }
+        await store.runPipelineSyncOnce()
+        check("…its own retires the forces it was handed and the asks it no longer owes",
+              store.pipelineForce.rate.isEmpty && ids().isEmpty && store.requestedWork.isEmpty)
+        check("…which the feed says",
+              feed("queue-drop").last == "panel \(reviewLine) - the pipeline no longer owes it, not run")
+        check("a result dated in the second its sync began is that sync's",
+              Store.pipelineRan(PipelineTickResult(at: Date(timeIntervalSince1970: 100)),
+                                started: Date(timeIntervalSince1970: 100.7))
+                  && !Store.pipelineRan(PipelineTickResult(at: Date(timeIntervalSince1970: 99)),
+                                        started: Date(timeIntervalSince1970: 100.2)))
+
+        print("\npipeline: asks a sync no longer owes")
+        let asks = [fix, fixLinear, review].compactMap { store.pipelineAsk($0) } + [sweep]
+        func withdrawn(_ seen: [PipelineItem], _ effects: [PipelineEffect]) -> [String] {
+            Store.pipelineWithdrawn(asks, by: PipelineTickResult(at: Date(), items: seen, effects: effects)).sorted()
+        }
+        var assigned = items
+        assigned[0].writable = false
+        var fixing = items
+        fixing[0].stage = .fixing
+        var heldItems = items
+        heldItems[2].hold = "Linear team ENG has no root to fix it in"
+        check("a fix of an issue now assigned to someone else, or with a PR fixing it, goes",
+              asks.count == 4 && withdrawn(assigned, [fixLinear, review]) == [fixKey]
+                  && withdrawn(fixing, [fixLinear, review]) == [fixKey])
+        check("…a review owed no more goes", withdrawn(items, [fix, fixLinear]) == [reviewKey])
+        check("…a candidate's fix the sync did not emit stays (its switch off, a hold)",
+              withdrawn(heldItems, []) == [reviewKey])
+        check("…as does anything about an item it did not read, and an ask not the pipeline's",
+              withdrawn([], []).isEmpty)
+
+        print("\npipeline: concluded records")
+        let closedOut = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1, concludedAt: t0)
+        check("a concluded record no sync owes is kept for 30 days after its run concluded",
+              Store.retainedPipelineAttempts([gone: closedOut], after: result([]),
+                                             now: t0.addingTimeInterval(29 * 86400))[gone] == closedOut)
+        check("…and dropped past them",
+              Store.retainedPipelineAttempts([gone: closedOut], after: result([]),
+                                             now: t0.addingTimeInterval(30 * 86400 + 1)).isEmpty)
+
+        print("\npipeline: whose work it is")
+        let banDir = scratch.appendingPathComponent("bans")
+        try? FileManager.default.createDirectory(at: banDir, withIntermediateDirectories: true)
+        try? Data(#"{"banned":[{"login":"mallory","reason":"prompt injection"}]}"#.utf8)
+            .write(to: banDir.appendingPathComponent("banned.json"))
+        clearQueue()
+        store.savePipelineAttempts([:])
+        // A split's part: filed by the operator, its fix by the author of the issue it was split from.
+        let part = "https://github.com/o/r/issues/90030"
+        let partFix = PipelineEffect.fixIssue(repo: "o/r", number: 90030, url: part)
+        PipelineEffectAuthorShim.byKey[partFix.key] = "mallory"  // SHIM: `author: "mallory"`
+        var partItem = item(part, .issue, author: "latekvo")
+        partItem.label = "#90030"
+        let parted = PipelineTickResult(at: Date(), items: items + [partItem], effects: [partFix])
+        await store.applyPipeline(parted, now: now)
+        check("a part split from a banned author's issue is not asked for, though the operator filed it",
+              ids().isEmpty && store.loadPipelineAttempts().isEmpty)
+        store.pipelineResult = parted
+        check("…and Start fix asks for it as that author's",
+              store.startPipelineFix(partItem) == nil
+                  && job("issues:o/r#90030").map { $0.authorLogin == "mallory" } == true)
+        try? FileManager.default.removeItem(at: banDir.appendingPathComponent("banned.json"))
+        clearQueue()
+        store.savePipelineAttempts([:])
+
+        print("\npipeline: guards")
+        ticks = []
+        Store.pipelineTickOverride = { settings in
+            ticks.append(settings)
+            if ticks.count == 1 { store.pipelineSyncAgain = true }
+            return result([])
+        }
+        await store.runPipelineSyncOnce()
+        check("a sync asked for during one follows it", ticks.count == 2)
+        ticks = []
+        Store.pipelineTickOverride = { settings in
+            ticks.append(settings)
+            if ticks.count == 1 {
+                store.pipelineSyncAgain = true
+                store.pipelineEnabled = false
+            }
+            return result([])
+        }
+        await store.runPipelineSyncOnce()
+        check("…unless the master switch went off meanwhile", ticks.count == 1)
+        store.pipelineEnabled = true
+        func finished(_ url: String, _ state: AgentState.RunState, released: Bool = false) -> Store.AgentRow {
+            Store.AgentRow(record: AgentState.RunRecord(runID: "r-\(state)-\(released)",
+                                                        dispatchedAt: now.timeIntervalSince1970 - 60, prURL: url,
+                                                        kind: AgentTaskQueue.issuesAction, released: released),
+                           state: state, reason: "", window: nil)
+        }
+        store.pinAgentRows([finished(issue, .finished), finished(issue, .running, released: true)])
+        await store.applyPipeline(result([fix]), now: now)
+        check("a run on the issue that ended, or gave its bay back, holds no fix", ids() == [fixKey])
+        store.pinAgentRows([])
+        clearQueue()
+        store.savePipelineAttempts([:])
+        check("the screen's badges: an agent on an item outranks its queued work",
+              Store.pipelineBadges(rows: [agent(issue)], waiting: [], asks: store.pipelineAsk(fix).map { [$0] } ?? [])
+                  == ["o/r#90010": .agent])
+        let periodEnv = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_SECS"]
+        setenv("DIPLOMAT_PIPELINE_SECS", "5", 1)
+        let floorSecs = Double((try? CoreAssets.pipeline())?.minSyncSecs ?? 60)
+        check("the sync period is never under its floor", floorSecs > 5 && Store.pipelineSyncInterval == floorSecs)
+        if let periodEnv { setenv("DIPLOMAT_PIPELINE_SECS", periodEnv, 1) } else { unsetenv("DIPLOMAT_PIPELINE_SECS") }
+        let ghEnv = ProcessInfo.processInfo.environment["DIPLOMAT_GH"]
+        setenv("DIPLOMAT_GH", "/usr/bin/false", 1)
+        store.usernameOverride = ""
+        store.me = ""
+        ticks = []
+        Store.pipelineTickOverride = { settings in
+            ticks.append(settings)
+            return result([])
+        }
+        await store.runPipelineSyncOnce()
+        check("with a GitHub root and no login known, no sync runs", ticks.isEmpty
+              && store.pipelineError == Store.githubLoginUnknown)
+        if let ghEnv { setenv("DIPLOMAT_GH", ghEnv, 1) } else { unsetenv("DIPLOMAT_GH") }
+        store.usernameOverride = "latekvo"
+        await store.runPipelineSyncOnce()
+        check("…and syncs once it is", ticks.count == 1 && store.pipelineError == nil)
+        Store.pipelineTickOverride = nil
+
+        print("\npipeline: what the screen shows")
+        let fastIssue = item(issue, .issue, author: "bob")
+        var donePR = item(pr, .pr, author: "latekvo")
+        donePR.lane = .done
+        donePR.stage = .merged
+        let lone = item("https://github.com/o/r/issues/90040", .issue, author: "bob")
+        let laneResult = PipelineTickResult(
+            at: Date(), items: [fastIssue, donePR, lone],
+            graph: PipelineGraph(nodes: [.init(id: issue, column: 0, row: 0), .init(id: pr, column: 1, row: 0),
+                                         .init(id: lone.id, column: 0, row: 1)],
+                                 edges: [.init(from: issue, to: pr, kind: .fixes)]))
+        check("a lane keeps each group with any member in it, whole",
+              Set(PipelineLayout.make(laneResult, lane: .done).cards.map(\.item.id)) == [issue, pr])
+        var eng = items[2]
+        eng.repo = "ENG"
+        var ops = items[2]
+        ops.repo = "OPS"
+        check("a Linear issue's code can be read when its team names a GitHub root; a GitHub item's always",
+              store.pipelineRooted(eng) && !store.pipelineRooted(ops) && store.pipelineRooted(items[0]))
+        var theirPR = item(pr, .pr, author: "carol")
+        theirPR.writable = false
+        var closedIssue = item(issue, .issue, author: "bob")
+        closedIssue.state = "closed"
+        closedIssue.writable = false
+        let myPR = item(pr, .pr, author: "LateKvo")
+        check("Rate now: an open issue whose code can be read, my own open PR",
+              PipelineView.canRate(items[0], me: "latekvo", rooted: true)
+                  && PipelineView.canRate(myPR, me: "latekvo", rooted: true)
+                  && !PipelineView.canRate(theirPR, me: "latekvo", rooted: true)
+                  && !PipelineView.canRate(myPR, me: "", rooted: true)
+                  && !PipelineView.canRate(ops, me: "latekvo", rooted: false)
+                  && !PipelineView.canRate(closedIssue, me: "latekvo", rooted: true))
+        check("why Start fix cannot: assigned, else the hold, else the switch",
+              store.pipelineFixUnknown(heldItems[2]) == "Linear team ENG has no root to fix it in"
+                  && store.pipelineFixUnknown(assigned[0]) == "It is assigned to someone else"
+                  && store.pipelineFixUnknown(items[2])
+                      == "Diplomat has this Linear issue's text only while Open fix PRs is on")
+        var mergedPR = myPR
+        mergedPR.writable = false
+        mergedPR.state = "merged"
+        check("read only: said of every item Diplomat may not write, whatever kept it so",
+              [mergedPR, theirPR, closedIssue].allSatisfy {
+                  PipelineTint.access($0) == "Read only: Diplomat shows it and writes nothing to it."
+              })
+        var heldBy = theirPR
+        heldBy.assignees = ["dave", "erin"]
+        check("…and who it is by and assigned to",
+              PipelineTint.people(heldBy) == "By @carol · assigned to @dave, @erin"
+                  && PipelineTint.people(items[2]) == "By Bob · unassigned")
+        check("a sync that read nothing says so",
+              PipelineView.emptyText(enabled: true, synced: true) == "The last sync found no open issue or PR."
+                  && PipelineView.emptyText(enabled: true, synced: false).hasPrefix("Nothing read yet")
+                  && PipelineView.emptyText(enabled: false, synced: true).hasPrefix("The pipeline is off"))
+        let cal = Calendar.current
+        let synced = cal.date(from: DateComponents(year: 2026, month: 11, day: 20, hour: 12, minute: 5))!
+        check("the last sync: its time today, its date too on any other day",
+              PipelineTint.syncTime(synced, now: synced.addingTimeInterval(3600)) == Fmt.clock(synced)
+                  && PipelineTint.syncTime(synced, now: synced.addingTimeInterval(3 * 86400)) == "Nov 20 12:05")
 
         if let harness = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_E2E"], !harness.isEmpty {
             await live(store, harness: URL(fileURLWithPath: harness), check: check)
@@ -473,10 +803,10 @@ enum PipelineTest {
 
     /// `DIPLOMAT_PIPELINE_E2E=<dir>`: real syncs (`PipelineTick.run`) of `acme/app`, checked
     /// out at `<dir>/checkout`, through the stubs DIPLOMAT_GH, DIPLOMAT_CLAUDE and
-    /// DIPLOMAT_LINEAR_API name, which log to `<dir>/gh.log`, `claude.log` and `linear.log`
-    /// (the harness in the build notes: an operator `op`, issues #1 and #5, PR #2 fixing
-    /// #1, PR #3 labelled cleared by hand at a clean head, someone else's PR #4, and
-    /// Linear's ENG-1, every rating low/low).
+    /// DIPLOMAT_LINEAR_API name, which log to `<dir>/gh.log`, `claude.log` and `linear.log`.
+    /// None of these is in the repo: whoever runs it supplies an operator `op`, issues #1
+    /// and #5, PR #2 fixing #1, PR #3 labelled cleared by hand at a clean head, someone
+    /// else's PR #4, and Linear's ENG-1, every rating low/low.
     @MainActor
     private static func live(_ store: Store, harness: URL, check: (String, Bool) -> Void) async {
         print("\npipeline: real syncs against the stubs in \(harness.path)")

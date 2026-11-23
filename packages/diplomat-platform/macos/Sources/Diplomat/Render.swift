@@ -42,8 +42,13 @@ enum Render {
             return false
         }
 
-        let renderer = ImageRenderer(content: chrome(view(for: what, store: store), store: store)
+        var content = AnyView(chrome(view(for: what, store: store), store: store)
             .environment(\.isImageRendering, true))
+        // `ImageRenderer` follows no `NSApp.appearance`: the theme reaches it as the colour scheme.
+        if let themed = NSApp.appearance {
+            content = AnyView(content.environment(\.colorScheme, themed.name == .aqua ? .light : .dark))
+        }
+        let renderer = ImageRenderer(content: content)
         renderer.scale = 2
         guard let cg = renderer.cgImage else { print("RENDER ERROR: nil cgImage"); return true }
         let rep = NSBitmapImageRep(cgImage: cg)
@@ -536,6 +541,8 @@ enum Render {
         store.pinRoots([root])
         // Pinned, because a headless Store still reads the real defaults; headless, a
         // switch persists nothing and syncs nothing.
+        store.usernameOverride = ""
+        store.me = "latekvo"
         store.pipelineEnabled = !empty
         store.pipelineRate = true
         store.pipelineFix = true
