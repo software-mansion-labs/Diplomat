@@ -24,6 +24,10 @@ struct PipelineEntry {
     var children: [String] = []
     /// A PR's closing references; a Linear issue's attachment URLs.
     var links: [String] = []
+    /// A Linear issue's attachments run past the read's page.
+    var linksPast = false
+    /// A GitHub issue's type, nil for none.
+    var issueType: String?
     /// A PR's: the Linear identifiers its title and body close (`PipelineRead.linearCloses`),
     /// and with `Gate` its commit messages too.
     var closesLinear: [String] = []
@@ -47,6 +51,8 @@ struct PipelineEntry {
     var isDraft = false
     var isCrossRepository = false
     var mergeable = ""
+    var mergeState = ""
+    var mergeQueue = false
     var reviewDecision = ""
     var changedFiles = 0
     var files: [PipelineGate.ChangedFile] = []
@@ -215,6 +221,7 @@ enum PipelineRead {
             nodeID: n["id"] as? String)
         e.parent = (n["parent"] as? [String: Any])?["url"] as? String
         e.children = nodes(n, "subIssues").compactMap { $0["url"] as? String }
+        e.issueType = (n["issueType"] as? [String: Any])?["name"] as? String
         e.unwritable = unwritable
         return e
     }
@@ -261,16 +268,19 @@ enum PipelineRead {
         default: state = draft ? "draft" : "open"
         }
         let labels = nodes(n, "labels").compactMap { $0["name"] as? String }
+        let assignees = nodes(n, "assignees").compactMap { $0["login"] as? String }
         let unwritable: String? = state == "merged" || state == "closed" ? state
             : author.lowercased() != me || me.isEmpty
             ? "authored by @\(author.isEmpty ? "ghost" : author), not me"
             : fork ? "comes from a fork"
             : base != defaultBranch || base.isEmpty ? "targets \(base), not the default branch"
             : labelsCut(n, labels)
+            ?? (assignees.allSatisfy { $0.lowercased() == me } ? nil
+                : "assigned to \(assignees.map { "@" + $0 }.joined(separator: ", "))")
         var e = PipelineEntry(
             item: PipelineItem(id: url, source: .github, kind: .pr, label: label(number),
                                title: n["title"] as? String ?? "", repo: root.slug,
-                               state: state, author: author,
+                               state: state, author: author, assignees: assignees,
                                writable: unwritable == nil, stage: .unrated, lane: .unrated,
                                headSha: head, updatedAt: date(n["updatedAt"])),
             labels: labels, body: n["body"] as? String ?? "", root: root, number: number)
@@ -291,6 +301,9 @@ enum PipelineRead {
         e.isDraft = draft
         e.isCrossRepository = fork
         e.mergeable = n["mergeable"] as? String ?? ""
+        e.mergeState = n["mergeStateStatus"] as? String ?? ""
+        // Unread, as if it had one.
+        e.mergeQueue = bool(n["isMergeQueueEnabled"], true)
         e.reviewDecision = n["reviewDecision"] as? String ?? ""
         // A count it cannot read is one past every limit.
         e.changedFiles = n["changedFiles"] as? Int ?? Int.max
@@ -431,6 +444,7 @@ enum PipelineRead {
         e.parent = ((n["parent"] as? [String: Any])?["url"] as? String).map(linearURL)
         e.children = nodes(n, "children").compactMap { ($0["url"] as? String).map(linearURL) }
         e.links = nodes(n, "attachments").compactMap { $0["url"] as? String }
+        e.linksPast = bool(((n["attachments"] as? [String: Any])?["pageInfo"] as? [String: Any])?["hasNextPage"], false)
         e.teamID = team?["id"] as? String
         for l in labels {
             if let name = l["name"] as? String, let id = l["id"] as? String { e.labelIDs[name] = id }

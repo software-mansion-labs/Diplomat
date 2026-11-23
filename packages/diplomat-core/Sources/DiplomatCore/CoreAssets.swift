@@ -342,6 +342,10 @@ public enum CoreAssets {
         public let linearMaxIssues: Int
         public let githubMaxItems: Int
         public let labels: Labels
+        /// A label of these (any case) keeps an issue off the fast track.
+        public let triageLabels: [String]
+        /// A label of these (any case) holds a PR's merge.
+        public let stopLabels: [String]
         public let levels: Levels
         public let floor: Floor
         public let rater: Rater
@@ -355,8 +359,8 @@ public enum CoreAssets {
 
         private enum CodingKeys: String, CodingKey {
             case syncSecs, minSyncSecs, maxItems, maxEvents, maxLogBytes, httpTimeoutSecs,
-                 linearAPI, linearMaxIssues, githubMaxItems, labels, levels, floor, rater, fracture,
-                 blocks, cleanMarker
+                 linearAPI, linearMaxIssues, githubMaxItems, labels, triageLabels, stopLabels, levels, floor,
+                 rater, fracture, blocks, cleanMarker
         }
 
         /// The labels that put an item on the pipeline's graph once it is merged or closed.
