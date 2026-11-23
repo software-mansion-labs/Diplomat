@@ -14,16 +14,20 @@ import { execFileSync } from 'node:child_process';
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-mirror-'));
 const GIT_LOG = path.join(scratch, 'git.log');
 const HANG = path.join(scratch, 'hang');
+const GIT_ENV = path.join(scratch, 'git.env');
 const forge = path.join(scratch, 'forge'); // forge/<owner>/<repo>.git stands in for https://github.com/<owner>/<repo>.git
 fs.mkdirSync(forge);
-// The real git, with every invocation recorded and one staged to hang.
+// The real git, with every invocation recorded, what it was told of asking a person
+// beside it, and one staged to hang.
 const wrapper = path.join(scratch, 'git');
-fs.writeFileSync(wrapper, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(GIT_LOG)}\ncase "$*" in *"remote update"*) [ -f ${JSON.stringify(HANG)} ] && exec sleep 30;; esac\nexec git "$@"\n`, { mode: 0o755 });
+fs.writeFileSync(wrapper, `#!/bin/sh\nprintf '%s\\n' "$*" >> ${JSON.stringify(GIT_LOG)}\nprintf '%s|%s\\n' "\${GIT_TERMINAL_PROMPT-unset}" "\${GIT_SSH_COMMAND-unset}" >> ${JSON.stringify(GIT_ENV)}\ncase "$*" in *"remote update"*) [ -f ${JSON.stringify(HANG)} ] && exec sleep 30;; esac\nexec git "$@"\n`, { mode: 0o755 });
 fs.writeFileSync(path.join(scratch, 'gitconfig'), `[user]\n\tname = T\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n[url "${forge}/"]\n\tinsteadOf = https://github.com/\n\tinsteadOf = git@github.com:\n\tinsteadOf = ssh://git@ssh.github.com:443/\n\tinsteadOf = git@altssh.gitlab.com:\n`);
 Object.assign(process.env, {
   DN_BASE_DIR: path.join(scratch, 'base'), DN_GIT: wrapper, DN_MIRROR_TIMEOUT_MS: '4000',
   GIT_CONFIG_GLOBAL: path.join(scratch, 'gitconfig'), GIT_CONFIG_NOSYSTEM: '1',
 });
+// Whatever the shell this runs from says of them.
+for (const name of ['GIT_SSH_COMMAND', 'GIT_TERMINAL_PROMPT']) delete process.env[name];
 const { createMirrors, fetchUrl, remoteSlug } = await import('../src/executor/mirror.js');
 const { OwnFault } = await import('../src/executor/own-fault.js');
 const { containerName } = await import('../src/executor/container.js');
@@ -250,6 +254,19 @@ try {
     git(c.checkout, 'remote', 'set-url', 'origin', 'https://github.com/someone/iota.git');
     assert.match((await mirrors.ensureMirror({ pool: other, checkout: c.checkout }).catch((e) => e)).message, /^git clone: fatal: [^\n]*$/);
     assert.doesNotMatch((await mirrors.ensureMirror({ pool: other, checkout: c.checkout }).catch((e) => e)).message, /asked for over https/);
+  });
+
+  await check('no git the mirrors run waits for a person: none may ask at a terminal, and ssh is the operator\'s own command or one that asks nothing', async () => {
+    const told = () => [...new Set(fs.readFileSync(GIT_ENV, 'utf8').split('\n').filter(Boolean))];
+    assert.ok(gitCalls().length > 20);
+    assert.deepEqual(told(), ['0|ssh -o BatchMode=yes']);
+    fs.writeFileSync(GIT_ENV, '');
+    Object.assign(process.env, { GIT_SSH_COMMAND: 'ssh -i /somewhere/key', GIT_TERMINAL_PROMPT: '1' });
+    try { await mirrors.ensureMirror({ pool: a.pool, checkout: a.checkout }); } finally {
+      delete process.env.GIT_SSH_COMMAND;
+      delete process.env.GIT_TERMINAL_PROMPT;
+    }
+    assert.deepEqual(told(), ['0|ssh -i /somewhere/key']);
   });
 
   await check('a mirror that cannot be made is this machine\'s own fault, and nothing half made is left; what is no checkout says so', async () => {

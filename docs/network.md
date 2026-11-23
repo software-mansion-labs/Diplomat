@@ -33,7 +33,9 @@ left as it is, and the feed says that instead.
 It needs `tor` and `docker` on the machine, and `gh` or `glab` signed in for the forge each
 repository is on. The daemon looks for them on its `PATH` and in the usual install directories;
 `DN_TOR`, `DN_DOCKER`, `DN_GH` and `DN_GLAB` in the environment the daemon starts with name a
-binary anywhere else, and `DN_TOOL_DIRS` names other directories to look in. Without docker a machine still offers its jobs and acts for them, and
+binary anywhere else, and `DN_TOOL_DIRS` names other directories to look in. It also needs `openssl`: without one the
+machine takes no job and the Network screen says so; `DN_OPENSSL`, `DN_GIT`, `DN_CLAUDE` and, on
+macOS, `DN_SECURITY` name those binaries the same way. Without docker a machine still offers its jobs and acts for them, and
 takes none. Without Tor it reaches no other machine. The Network screen shows what the daemon
 says is missing, and while tor, docker or the model credential is missing or failed, or the
 daemon does not answer, a red line above the task list says so and opens that screen. While the
@@ -118,7 +120,8 @@ brought, and an older engine takes no job.
 - **No credential is inside it.** Not the forge's, not the model's.
 - **It reaches nothing but the broker.** The container sits on an internal network with one
   other: its relay, a second small container that runs no job and carries connections to a proxy
-  on the host and nowhere else. Through it: the forge's API and `git push` go
+  on the host and nowhere else; it carries 256 new connections at once and 64 a second after
+  that, so a container cannot use up the host's ports. Through it: the forge's API and `git push` go
   to the machine that offered the job, on every host the forge takes a login or serves
   repositories on, over https on port 443 and no other way; `git clone` and `fetch` of the
   repository are answered from the host's own mirror, which the machine running the job fills
@@ -126,15 +129,19 @@ brought, and an older engine takes no job.
   its jobs; the model's API is forwarded with the
   host's credential added, and its answer comes back without the headers that describe the
   host's account; anything else is tunnelled to the public internet, so installing software
-  works. Addresses of the host, of every network one of the host's interfaces is on, of every
+  works. Names are resolved by public DNS alone; a name of one label, or one under `.local`,
+  `.internal`, `.lan` and the like, is refused. Addresses of the host, of every network one of the host's interfaces is on, of every
   private or otherwise not publicly routed range, IPv4 or IPv6, and of other containers are
   refused. A publicly addressed network the host reaches only by a route - behind a VPN, or
   another subnet of its site - is not known to the broker and is reached like the rest of the
   internet.
 - **It gets a bounded share of the host.** 8 GiB of memory, 4 CPUs, 4096 processes and 20 GiB of
   disk per container; per job, 256 connections through the broker, 256 requests on them at a
-  time, 32 connections out for the requests the broker carries itself, and 48 MiB of request
-  bodies held at a time. A container found holding more disk than that is removed, and the jobs in it
+  time, 32 connections out for the requests the broker carries itself, 48 MiB of request
+  bodies held at a time, and 8 names being resolved at a time; a connection that names no
+  running job is answered once and read no further. A container found holding more disk than
+  that is removed - the count includes files its processes keep open after deleting them, where
+  the engine lets them be counted - and the jobs in it
   end as failed attempts; so is one the engine could not measure three looks running.
 - **Devices stay on the host, and jobs see none of them** until **Let jobs use this machine's
   devices** is switched on (the Network screen's settings; off by default). With it on, a job
@@ -312,7 +319,11 @@ state, where it runs, lease end). A job row offers **Stop** for a run on this ma
 goes back to the pool - or **Withdraw** for one this machine offered that runs elsewhere or
 nowhere yet. **Stop** asks the daemon what runs here first: a run that ended since the screen
 drew it is neither stopped nor withdrawn, and the card says so. **Restart daemon** leaves the
-jobs in this machine's containers running; the daemon that starts takes them up.
+jobs in this machine's containers running; the daemon that starts takes them up at once, before
+it has built its image or read the model credential, and a job whose run ended meanwhile is
+stopped. If docker does not answer for a minute, the jobs go back to the pool at no cost to
+their attempts. So does a job whose container a reboot or a restart of Docker Desktop stopped
+before it finished; one that had finished by then ends as it finished.
 
 The daemon leaves a pool that is missing from the list Diplomat gives it, so what Diplomat
 cannot confirm is never dropped from that list. A repo root or a checkout under Other repos
@@ -352,7 +363,7 @@ prices a job from what the executor reports; work another machine ran counts aga
 this one. A job that took more than one attempt is priced from the last alone: what an earlier
 attempt spent is in no figure. Where the executor lowered the tokens or the cost a job reported
 to what it measured, the job's last line in the task list and in the feed ends *its reported
-cost capped*.
+cost capped*. Only requests the provider accepted count towards what a job may report.
 
 Work that was asked for - a sweep's PRs, a request from Slack - is
 answered by a job that ran, not by its offer:
@@ -391,14 +402,16 @@ Switching the network off withdraws this machine's open offers, stops the jobs i
 pool and frees their PRs and issues for agents in terminals again. The daemon removes its
 containers, mirrors and run records and exits; the machine's key, its pools and the image stay,
 so switched on again it is the member it was. With no daemon running to do it, the stop
-itself cancels the offers and ends the runs left in the daemon's store, and its line in the
-feed says how many. A stop that could not remove one of those directories says which in the
+itself cancels the offers and ends the runs left in the daemon's store - a job that had
+finished meanwhile ends as it finished and is not run again - and its line in the feed says
+how many. A stop that could not remove one of those directories says which in the
 same line, reads *ok: false* with no daemon left running, and the next switch-off tries
 again. Work that was asked for and
 had not run is started in a terminal from the queue on the next poll. A monitor's own find
 counts its offer as an attempt, so it is started again on that monitor's retry schedule. A job
 started by hand whose offer the daemon had not answered is withdrawn if the daemon turns out to
-hold it; of any other the feed says that it was not offered, and it is started nowhere.
+hold it; of any other the feed says that it was not offered, and it is started nowhere. Started with
+the network off, the daemon does not start and says so.
 
 ## What it does not protect against
 
@@ -413,7 +426,7 @@ hold it; of any other the feed says that it was not offered, and it is started n
   other's key for that requester while both run. A job that starts while another still runs
   joins that container, with whatever the jobs before it left there. A process a job leaves
   behind lives until the last of them ends. Then the container is removed with its files, and a
-  job that starts after that finds nothing of them.
+  job that starts after that finds nothing of them, the run records it is shown included.
 - **What is public on the forge is the internet.** The hosts a forge hands downloads out from,
   and any site by its bare address, are reached like any other site: a job can fetch another
   public repository's files there without the requester seeing it. Nothing private opens that

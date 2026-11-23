@@ -17,19 +17,21 @@ import fs from 'node:fs';
 import { execFile } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { atomicWrite, procIdentity, readJson, sweepDeadTmp } from '../../daemon-core/src/fsio.js';
-import { createLog } from '../../daemon-core/src/log.js';
 import { NO_ROUTE, jsonServer, listenSingleton, socketHealthy, startFailed } from '../../daemon-core/src/serve.js';
 import { b64u } from './core/canon.js';
 import { identityFromSeed } from './core/identity.js';
 import { adbDevices, createAdbFilter } from './executor/adb.js';
 import { createBroker } from './executor/broker.js';
 import { createCA } from './executor/ca.js';
-import { createContainers } from './executor/container.js';
+import { createContainers, docker } from './executor/container.js';
 import { attachJob, forgetRuns, readOutcome, startJob, stopJob, unended, watch } from './executor/job.js';
 import { createLLM } from './executor/llm.js';
 import { createMirrors } from './executor/mirror.js';
 import { OwnFault } from './executor/own-fault.js';
+import { clip } from './executor/sparing.js';
 import { createWeighing } from './executor/weigh.js';
+import { openLog } from './log.js';
+import { clearAway, finishedLeft, readConfig } from './off.js';
 import { createNode } from './node/node.js';
 import { createStore } from './node/store.js';
 import { authorize, conclude } from './requester/authorize.js';
@@ -38,9 +40,9 @@ import { rulesFor } from './requester/rules.js';
 import { createTransport } from './transport/index.js';
 import {
   ADB_SERVER, BASE_DIR, CLAUDE_BIN, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, CONTAINER_DISK_BYTES, DISCOVERY_PATH,
-  DOCKER_BIN, EXECUTOR_CHECK_MS, EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GH_BIN, GIT_BIN, GLAB_BIN, HOURS_FLOOR,
+  DOCKER_BIN, ENGINE_WAIT_MS, EXECUTOR_CHECK_MS, EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GH_BIN, GIT_BIN, GLAB_BIN, HOURS_FLOOR,
   JOBS_PATH, JOBS_WRITE_MS, LOG_PATH, MIRROR_KEEP_MS, NOT_BOUNDS, OPENSSL_BIN, POOL_RETRY_MAX_MS, POOL_RETRY_MS, RECONCILE_MS, RUN_KEEP_MS,
-  SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH, OFF_REMOVES, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS, TEST_FAULTS_PATH, TEST_KNOBS,
+  SECURITY_BIN, SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS, TEST_FAULTS_PATH, TEST_KNOBS,
   TOOL_PATH, TOR_BIN, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS, locate,
 } from './paths.js';
 
@@ -53,7 +55,7 @@ fs.mkdirSync(BASE_DIR, { recursive: true });
 fs.chmodSync(BASE_DIR, 0o700);
 try { fs.chmodSync(LOG_PATH, 0o600); } catch {}
 
-const log = createLog(LOG_PATH);
+const log = openLog(LOG_PATH);
 const startedAt = Math.floor(Date.now() / 1000);
 // Every tool is run by its name on this PATH, and inherits it for its own helpers.
 process.env.PATH = TOOL_PATH;
@@ -86,8 +88,13 @@ function every(ms, fn) {
 
 // ---- the tools
 
-const TOOLS = { tor: TOR_BIN, docker: DOCKER_BIN, git: GIT_BIN, gh: GH_BIN, glab: GLAB_BIN, openssl: OPENSSL_BIN, claude: CLAUDE_BIN };
+const TOOLS = {
+  tor: TOR_BIN, docker: DOCKER_BIN, git: GIT_BIN, gh: GH_BIN, glab: GLAB_BIN, openssl: OPENSSL_BIN, claude: CLAUDE_BIN,
+  // The Keychain, which holds the model credential.
+  ...(process.platform === 'darwin' ? { security: SECURITY_BIN } : {}),
+};
 const located = new Map(); // a tool -> where it was last found, or null
+const nowhere = (bin) => (bin.includes('/') ? `not at ${bin}` : `in none of ${TOOL_PATH}`);
 
 // Says where each tool is, and again when that changes: one installed while the daemon
 // runs is found by whatever runs it next.
@@ -98,7 +105,7 @@ function lookForTools() {
     located.set(tool, at);
     // One named by hand is said to be: a stand-in has whatever the daemon gives the tool.
     const named = bin === tool ? '' : `, which DN_${tool.toUpperCase()} names`;
-    log(at ? `${tool} is ${at}${named}` : `${tool} is ${bin.includes('/') ? `not at ${bin}` : `in none of ${TOOL_PATH}`}`);
+    log(at ? `${tool} is ${at}${named}` : `${tool} is ${nowhere(bin)}`);
   }
 }
 
@@ -108,12 +115,6 @@ let hours = { requiredMinimumH: HOURS_FLOOR, maximumAcceptedH: HOURS_FLOOR };
 // `networkDevices`: whether a job is given anything of this machine's devices.
 let devicesOn = false;
 let unreadable = 0;
-
-// Diplomat's config as an object, or null while it cannot be read as one.
-function readConfig() {
-  const config = readJson(CONFIG_PATH);
-  return config !== null && typeof config === 'object' && !Array.isArray(config) ? config : null;
-}
 
 function pollConfig() {
   const config = readConfig();
@@ -245,20 +246,21 @@ const jobs = new Map(); // run id -> { container, pool, peer, token, generation,
 // Until the jobs an earlier daemon left were looked at, a run this daemon holds no job
 // for may still be running: nothing can be said of it, and no job is started, since
 // what stands under a container's name is removed for the first job this daemon counts
-// in it.
+// in it. A start waits for the first look at the image and the model credential too.
 let takenUp = false;
 const lookedAt = Promise.withResolvers();
 let report = () => {};
 
 // jobs.json as it stands on disk. It is written when a job comes or goes, and every
 // JOBS_WRITE_MS while what a job has spent of the model moves: the daemon after this one
-// counts on from there, a few seconds short at most. A job leaves the file only after
-// the node's word on how its run ended is on disk: the store is flushed first, and while
-// that fails the file stays as it was, for the daemon after this one to ask after the job.
+// counts on from there, a few seconds short at most, for a job that is being stopped
+// too. A job leaves the file only after the node's word on how its run ended is on
+// disk: the store is flushed first, and while that fails the file stays as it was, for
+// the daemon after this one to ask after the job.
 let savedJobs = '';
 const saveJobs = () => {
   const kept = Object.fromEntries([...jobs].map(([runId, { container, pool, peer, token, generation, pid, forwards }]) => [
-    runId, { container, pool, peer, token, generation, pid, forwards, spent: broker.spent(runId) },
+    runId, { container, pool, peer, token, generation, pid, forwards, spent: spentOf(runId) },
   ]));
   const next = { port: broker.address()?.port ?? 0, jobs: kept };
   if (JSON.stringify(next) === savedJobs) return;
@@ -330,7 +332,8 @@ async function settle(runId, ended) {
   // A job this machine ended for a fault of its own making is a failed attempt, in the
   // machine's words.
   const outcome = job.verdict ? { ...ended, ok: false, state: 'failed', summary: job.verdict } : ended;
-  log(`${runId} ended: ${outcome.state ?? 'failed'}${outcome.ok ? '' : ` (${outcome.summary})`}`);
+  // The summary is the job's own words.
+  log(`${runId} ended: ${outcome.state ?? 'failed'}${outcome.ok ? '' : ` (${clip(outcome.summary)})`}`);
   job.ended = true;
   report(runId, outcome);
   broker.removeJob(runId);
@@ -470,6 +473,8 @@ function unable(id) {
   if (docker.state !== 'ready') return `docker is ${docker.state}: ${docker.detail}`;
   const model = llm.state();
   if (model.state !== 'ready') return `no credential for the model: ${model.detail}`;
+  // A job reaches the model and its forge through certificates made with it.
+  if (!located.get('openssl')) return `openssl is ${nowhere(OPENSSL_BIN)}: no certificate authority can be made for a job`;
   const why = stuck.get(id)?.why ?? '';
   return why === '' ? '' : `this machine could not start a job of this pool: ${why}`;
 }
@@ -489,6 +494,13 @@ const executor = {
 const OUTGREW = 'the container outgrew its disk allowance';
 const UNMEASURED = 'the container could not be measured against its disk allowance';
 
+const NO_RUN = 'no run of this host stands behind it';
+// A job that ends by itself writes its exit code in `done`, and its container stays up.
+// One whose container a daemon finds gone or stopped at its start with no exit code left
+// lost it while no daemon ran - the job cannot take its daemon down with it - as a
+// restart of the machine or of the engine does: the machine's doing, not the job's.
+const GONE = 'its container could not be taken up when this daemon started (gone or stopped, as a restart of the machine or of its docker engine leaves it), and the job had not finished';
+
 // A job this daemon can no longer serve is given back: the node stops it for that
 // reason and releases its claim, which costs its requester no attempt. One the node
 // holds no run for is stopped here.
@@ -497,12 +509,21 @@ function giveBack(runId, why) {
   node.stopRun({ runId, reason: why }).catch(() => stopRun(runId, why));
 }
 
-// Takes up the jobs the daemon before this one left running: each is admitted to the
-// broker under the token and CA it was started with and watched from here on. One that
-// ended meanwhile is reported; one that cannot be found is, to the node, not alive. A
-// run the node calls running whose job is on no list is asked after too: its outcome is
-// on disk if it ended under a daemon that did not live to tell the node.
-async function takeUp(kept) {
+const engineAnswers = async () => (await docker(['version', '--format', '{{.Server.Version}}'], { timeout: 20000 })).code === 0;
+
+const stands = (runId) => node.snapshot().runs.some((run) => run.runId === runId && run.endedAt === 0);
+
+// Takes up the jobs the daemon before this one left running: each is watched from here
+// on and, while its run stands, admitted to the broker under the token and CA it was
+// started with; one whose run was ended meanwhile is stopped and admitted to nothing.
+// One that ended meanwhile is reported, and so is one that finished by itself (`done`)
+// with nobody watching. Any other is given back when its container cannot be taken up
+// (GONE), or when the engine did not answer for ENGINE_WAIT_MS (`answers` false), and
+// nothing can be said of it: what is still there of it is stopped by `reconcile` once
+// the engine answers. A run the node calls running whose
+// job is on no list is asked after too: its outcome is on disk if it ended under a
+// daemon that did not live to tell the node.
+async function takeUp(kept, answers) {
   const moved = broker.address().port !== kept.port;
   for (const [runId, was] of Object.entries(kept.jobs ?? {})) {
     try {
@@ -511,8 +532,18 @@ async function takeUp(kept) {
         report(runId, ended);
         continue;
       }
-      const container = await containers.adopt({ pool: was.pool, peer: was.peer, runId });
-      if (!container) continue;
+      const container = answers ? await containers.adopt({ pool: was.pool, peer: was.peer, runId }) : null;
+      if (!container) {
+        const left = await finishedLeft(runId);
+        if (left && attachJob({ runId, container: left.container, pid: was.pid ?? null, spent: () => spentOf(runId) })) {
+          log(`${runId} finished while no daemon watched it: its outcome is read from what it left`);
+          jobs.set(runId, { ...was, container: left.container.name, release: mirrors.retain(was.pool), stopping: null, ended: false });
+          follow(runId);
+          continue;
+        }
+        giveBack(runId, answers ? GONE : `the docker engine did not answer for ${Math.round(ENGINE_WAIT_MS / 1000)} s after this daemon started, and nothing can be said of the job in it`);
+        continue;
+      }
       if (!was.pid) {
         // Its process group was never heard: nothing to watch it by, so it is ended.
         log(`${runId} was being started when the daemon before this one went: stopping what there is of it in ${container.name}`);
@@ -526,6 +557,10 @@ async function takeUp(kept) {
       }
       jobs.set(runId, { ...was, container: container.name, release: mirrors.retain(was.pool), stopping: null, ended: false });
       follow(runId);
+      if (!stands(runId)) {
+        stopRun(runId, NO_RUN);
+        continue;
+      }
       if (moved) {
         // The job's proxy address leads to a port this daemon could not have again.
         giveBack(runId, 'the broker could not listen where this job reaches it');
@@ -544,22 +579,31 @@ async function takeUp(kept) {
     if (ended) report(runId, ended);
   }
   takenUp = true;
-  lookedAt.resolve();
   saveJobs();
 }
 
 // A job the node holds no live run for is stopped: its run was stopped while a stop
 // could not go through, or the node's own record of it was lost. So is a job this
 // daemon holds no record of at all, which jobs.json lost leaves behind: it runs on in
-// its container with a proxy token nobody takes.
-function reconcile() {
-  if (!takenUp) return;
+// its container with a proxy token nobody takes. Its stop asks the engine until it
+// answers, so it is begun only once the engine has answered here.
+let reconciling = false;
+async function reconcile() {
+  if (!takenUp || reconciling) return;
   const going = new Set(node.snapshot().runs.filter((run) => run.endedAt === 0).map((run) => run.runId));
   for (const [runId, job] of jobs) {
     // One that ended is only being taken down.
-    if (!going.has(runId) && !job.ended) stopRun(runId, 'no run of this host stands behind it');
+    if (!going.has(runId) && !job.ended) stopRun(runId, NO_RUN);
   }
-  for (const { runId, container } of unended()) {
+  const strays = unended().filter(({ runId }) => !jobs.has(runId));
+  if (strays.length === 0) return;
+  reconciling = true;
+  try {
+    if (!(await engineAnswers())) return;
+  } finally {
+    reconciling = false;
+  }
+  for (const { runId, container } of strays) {
     if (jobs.has(runId) || !attachJob({ runId, container })) continue;
     log(`stopping ${runId} in ${container.name}: this daemon holds no record of the job`);
     stopJob({ runId }, containers).catch((err) => log(`${runId} could not be stopped: ${err?.message ?? err}`));
@@ -623,8 +667,10 @@ async function sweep() {
   }
 }
 
-// The broker, the image and the model credential, then the jobs left from before. On
-// Linux the broker listens on docker's bridge, so it waits for the engine like the rest.
+// The broker, then the jobs left from before, which wait for neither the image nor the
+// model credential: a build takes minutes and a login is renewed in its own time, and a
+// job that runs asks the broker meanwhile. On Linux the broker listens on docker's
+// bridge, so it waits for the engine.
 async function startExecutor() {
   const kept = readJson(JOBS_PATH) ?? {};
   const leftJobs = Object.keys(kept.jobs ?? {}).length > 0;
@@ -639,19 +685,24 @@ async function startExecutor() {
       else await delay(EXECUTOR_RETRY_MS);
     }
   }
-  await checkExecutor();
-  // An engine that does not answer says nothing about the jobs in it.
-  while (leftJobs && containers.dockerState().state === 'down' && !ending) {
-    await delay(EXECUTOR_RETRY_MS);
-    await checkExecutor();
+  // An engine that does not answer says nothing about the jobs in it: it is asked
+  // again, for ENGINE_WAIT_MS.
+  let checked = null;
+  let answers = true;
+  for (const from = Date.now(); !ending; await delay(EXECUTOR_RETRY_MS)) {
+    checked = checkExecutor();
+    answers = !leftJobs || await engineAnswers();
+    if (answers || Date.now() - from >= ENGINE_WAIT_MS) break;
   }
   if (ending) return;
-  await takeUp(kept);
+  await takeUp(kept, answers);
   every(EXECUTOR_CHECK_MS, checkExecutor);
   every(EXECUTOR_CHECK_MS, retryPools);
   every(RECONCILE_MS, reconcile);
   every(JOBS_WRITE_MS, saveJobs);
   every(SWEEP_MS, sweep);
+  await checked;
+  lookedAt.resolve();
 }
 
 // ---- the snapshot
@@ -659,6 +710,7 @@ async function startExecutor() {
 // The node's snapshot with the executor's side of it: the engine, the credential, the
 // devices, and `notTaking` - of a pool, why this machine takes none of its jobs; of a job
 // of this machine's own that waits in the pool, why this machine does not take it.
+// `daemon.testSettings` is what it was given that only a test sets, none on the network.
 function snapshot() {
   const { updatedAt, identity, transport, admit, pools, runs, offers } = node.snapshot();
   const down = transport.state === 'ready' ? '' : `the transport is ${transport.state}: ${transport.detail}`;
@@ -674,7 +726,7 @@ function snapshot() {
     return offer.leftUntil > 0 ? `this machine failed at it or gave it back, and leaves it to the others until ${new Date(offer.leftUntil * 1000).toISOString()}` : '';
   };
   return {
-    updatedAt, daemon: { pid: process.pid, startedAt }, identity, transport,
+    updatedAt, daemon: { pid: process.pid, startedAt, testSettings: TEST_KNOBS }, identity, transport,
     docker: containers.dockerState(), model: llm.state(), devices: devicesState(), admit, pools: rows, runs,
     offers: offers.map((offer) => ({ ...offer, notTaking: own(offer) })),
   };
@@ -861,7 +913,8 @@ async function clearDocker() {
 // stops what it runs and tells its pools, everything this daemon made in docker is
 // removed, and with that gone what the machine has no further use for (OFF_REMOVES);
 // otherwise the runs are left going for the next daemon. Either way the transport
-// stops, and with it tor. The exit is 1 for a switch-off that left something in docker.
+// stops, and with it tor. The exit is 1 for a switch-off that left something of that
+// behind, in docker or on disk.
 async function end({ off, why }) {
   if (ending) return;
   ending = true;
@@ -876,32 +929,26 @@ async function end({ off, why }) {
     log(`the node did not stop cleanly: ${err?.stack ?? err}`);
   }
   let left = null;
+  let kept = '';
+  // When the engine's time is up, for what it made and the run records it is asked to remove.
+  let by = 0;
   if (off) {
     // The jobs the node stopped, taken down before the broker goes, and the jobs being
     // started, which find the daemon ending and make nothing.
     const gone = (async () => { while (jobs.size > 0 || starting > 0) await delay(100); })();
     await Promise.race([gone, delay(SWITCH_OFF_WAIT_MS)]);
     // A job that outlived its stop goes with its container here.
+    by = Date.now() + SWITCH_OFF_WAIT_MS;
     left = await clearDocker();
   }
   await broker.stop().catch((err) => log(`the broker did not stop: ${err?.message ?? err}`));
   await adb.stop();
   if (left !== null) log(`switched off with what this daemon made in docker still there: ${left}`);
-  else if (off) clearAway();
+  else if (off) kept = await clearAway(containers, Math.max(0, by - Date.now()));
+  if (kept) log(kept);
   writeState();
   log('ended');
-  bye(left === null ? 0 : 1);
-}
-
-// What a machine that left the network keeps nothing of.
-function clearAway() {
-  for (const dir of OFF_REMOVES) {
-    try {
-      fs.rmSync(dir, { recursive: true, force: true });
-    } catch (err) {
-      log(`${dir} could not be removed: ${err?.message ?? err}`);
-    }
-  }
+  bye(left === null && kept === '' ? 0 : 1);
 }
 
 // An exception nobody caught, thrown by some event's handler or by a timer's work (`row`

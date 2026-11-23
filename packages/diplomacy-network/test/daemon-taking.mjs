@@ -8,6 +8,7 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import { POOL, check, createBench, heldGit, passed, until } from './lib/daemons.mjs';
 
 const bench = await createBench();
@@ -179,6 +180,19 @@ try {
     await until('the wait to be well over', async () => gone.exited || (await gone.state()).updatedAt >= from + 6);
     assert.deepEqual([gone.exited, /\] uncaught: /.test(gone.log()), turns(gone).length], [false, false, 1]);
 
+    // No openssl, no certificate authority: nothing is claimed, so nothing fails for it.
+    const none = bench.machine('no');
+    none.env.DN_OPENSSL = path.join(none.home, 'openssl');
+    await none.start();
+    const [unsigned, noneState] = await said(none, await own(none), /^openssl is /);
+    assert.deepEqual([unsigned.state, unsigned.attempt, unsigned.notTaking, noneState.pools[0].notTaking, noneState.runs],
+      ['pooled', 1, `openssl is not at ${none.env.DN_OPENSSL}: no certificate authority can be made for a job`, unsigned.notTaking, []]);
+    // Installed while the daemon runs, it is found by the next look: the job's first attempt.
+    fs.symlinkSync(process.env.PATH.split(':').map((dir) => path.join(dir, 'openssl')).find((file) => fs.existsSync(file)), none.env.DN_OPENSSL);
+    await until('the job done', async () => (await offerOf(none, unsigned.taskId)).state === 'done');
+    assert.deepEqual([(await offerOf(none, unsigned.taskId)).attempt, (await none.state()).pools[0].notTaking], [1, '']);
+    await none.kill();
+
     const bare = await bench.machine('nd', { docker: 'none' }).start();
     const [noDocker, bareState] = await said(bare, await own(bare), /^docker is missing/);
     assert.equal(noDocker.notTaking, `docker is missing: ${bareState.docker.detail}`);
@@ -226,6 +240,10 @@ try {
       return row.state === 'claimed' && fine.agent((await runsOf(fine, taken)).at(-1)?.runId)?.waiting === 'go';
     });
     assert.equal((await fine.state()).pools[0].notTaking, '');
+    // One whose run the operator stopped here is this machine's no more, and says so.
+    await fine.ok('/stop-run', { runId: (await runsOf(fine, taken)).at(-1).runId });
+    const [stopped] = await said(fine, taken, /^its run was stopped/);
+    assert.deepEqual([stopped.state, stopped.leftForGood, stopped.notTaking], ['pooled', true, 'its run was stopped on this machine, which does not take it again']);
 
     // A job this machine gave back it leaves to the others for a while, and says until
     // when. Alone in its pool it takes the job itself once that wait and the pool's are over.

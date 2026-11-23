@@ -334,7 +334,7 @@ try {
       refused: 'int', endedAt: 'int', leftUntil: 'int', leftForGood: 'boolean', tooLong: 'boolean', notTaking: 'string',
     };
     shaped({ ...state, offers: [] }, {
-      updatedAt: 'int', daemon: { pid: 'int', startedAt: 'int' }, identity: { pk: 'string', onion: 'string' },
+      updatedAt: 'int', daemon: { pid: 'int', startedAt: 'int', testSettings: ['string'] }, identity: { pk: 'string', onion: 'string' },
       transport: said, docker: { state: 'string', image: 'string', detail: 'string' }, model: said, devices: said,
       admit: { slots: 'int', at: 'int', reason: 'string' },
       pools: [{

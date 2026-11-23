@@ -97,12 +97,13 @@ const broker = createBroker({
 });
 
 // What the daemon does to start one job; `env` is what the engine's exec of its runner
-// carries besides: the stand-in's way to say what the container holds.
-async function start(runId, spec = {}, env = {}) {
+// carries besides: the stand-in's way to say what the container holds. `ca` stands in
+// for the certificate authority the broker gave the job.
+async function start(runId, spec = {}, env = {}, ca = null) {
   const run = { runId, pool };
   const container = await containers.acquire({ pool, peer: PEER, runId });
   await mirrors.ensureMirror({ pool, checkout });
-  const proxy = await broker.addJob({ ...run, peer: PEER });
+  const proxy = { ...await broker.addJob({ ...run, peer: PEER }), ...(ca ? { caCertPath: ca } : {}) };
   const before = { ...process.env };
   for (const [k, v] of Object.entries(env)) { if (v === null) delete process.env[k]; else process.env[k] = v; }
   let job;
@@ -200,6 +201,27 @@ cp -R '${plantedDir}/templates' "$DN_ROOT/usr/share/git-core/"
     assert.equal((await mine.outcome).ok, true);
     assert.deepEqual(agent(`${R}-mine`, 'git').split('\n'), [HEAD, 'First Requester', 'https://github.com/dn-test/alpha.git', ''], 'the first job\'s settings after the second set its own');
     for (const runId of [`${R}-mine`, `${R}-theirs`]) assert.equal(envOf(runId).GIT_CONFIG_GLOBAL, path.join(root, 'work', 'jobs', runId, 'gitconfig'));
+  });
+
+  await check('a job that brings another certificate authority than the one its container has installs it beside that one, under a name of its own: both are trusted while both jobs run', async () => {
+    const first = await launch(`${R}-ca-1`, { prompt: 'MODE=late' });
+    await started(`${R}-ca-1`);
+    const store = path.join(root, 'usr/local/share/ca-certificates');
+    const own = fs.readFileSync(first.proxy.caCertPath, 'utf8');
+    const sum = (text) => execFileSync('cksum', { input: text, encoding: 'utf8' }).split(' ')[0];
+    assert.deepEqual(fs.readdirSync(store), [`dn-broker-${sum(own)}.crt`]);
+    // The broker's own again, as a file of other bytes: git still trusts the broker by it.
+    const newer = path.join(scratch, 'newer-ca.crt');
+    fs.writeFileSync(newer, `${own}\n`);
+    const second = await launch(`${R}-ca-2`, {}, {}, newer);
+    assert.equal(second.container.name, first.container.name);
+    assert.equal((await second.outcome).ok, true, fs.readFileSync(path.join(second.dir, 'setup.log'), 'utf8'));
+    assert.deepEqual(fs.readdirSync(store).sort(), [`dn-broker-${sum(own)}.crt`, `dn-broker-${sum(`${own}\n`)}.crt`].sort());
+    assert.deepEqual([fs.readFileSync(path.join(store, `dn-broker-${sum(own)}.crt`), 'utf8'), fs.readFileSync(path.join(store, `dn-broker-${sum(`${own}\n`)}.crt`), 'utf8')], [own, `${own}\n`]);
+    const bundle = fs.readFileSync(path.join(root, 'etc/ssl/certs/ca-certificates.crt'), 'utf8');
+    assert.equal(bundle.split(own.trim()).length - 1, 2, 'the bundle every tool reads holds the two');
+    go(`${R}-ca-1`);
+    assert.equal((await first.outcome).ok, true);
   });
 
   await check('a runner carries its run\'s id from its first moment: a job nobody kept the process group of is ended runner first, before the runner can say how its agent ended', async () => {

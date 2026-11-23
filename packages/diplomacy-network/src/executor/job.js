@@ -14,9 +14,10 @@
 // The container can write all of it, and put anything else in its place. So the host
 // fills it in before the container can see it, writes nothing into it afterwards, runs
 // nothing from it once the job is up, and reads back only what is a plain file in the
-// directory that stands where the host put it: a bounded piece of it, and never on the
-// daemon's own thread. The outcome it makes of that is kept beside the run directories,
-// in RUNS_DIR/<run id>.outcome.json, where no container can write.
+// directory that stands where the host put it, as result.js reads: a bounded piece of
+// it, and of the log, the one large piece, only what a thread of its own made out. The
+// outcome made of that is kept beside the run directories, in
+// RUNS_DIR/<run id>.outcome.json, where no container can write.
 
 import fs from 'node:fs';
 import { execFile } from 'node:child_process';
@@ -25,6 +26,8 @@ import { fileURLToPath } from 'node:url';
 import { atomicWrite, readJson } from '../../../daemon-core/src/fsio.js';
 import { JOB_LIVENESS_MS, JOB_POLL_MS, JOB_STOP_BOUND_MS, JOB_STOP_GRACE_MS, RUNS_DIR } from '../paths.js';
 import { docker, IMAGE_DIR } from './container.js';
+import { figure, readOwn, readResult } from './result.js';
+import { clip } from './sparing.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 // What asks after a job's processes and ends them, as text for the container's sh.
@@ -41,12 +44,13 @@ const START = 's="${DN_ROOT:-}/bin/sh"; echo "$(DN_RUN_ID="$2" "${DN_ROOT:-}/usr
 export const CUT = 'the container was restarted to stop another job';
 // What a job that is given `adb` is told of it: executor/adb.js stands between.
 const ADB_SAID = ' `adb devices` lists what is attached to the host, and a device is named by its serial (`adb -s <serial>` or `ANDROID_SERIAL`). `adb connect`, `forward`, `reverse`, `pair` and `kill-server` are refused by the host: do not retry them.';
-const SUMMARY_CAP = 4000;
-const TAIL_BYTES = 4 * 2 ** 20;
 // The dearest a token is sold at: USD 80 a million, the output of the top model in its
 // fast mode as priced in November 2026.
 const USD_PER_BYTE = 80 / 1e6;
-const { O_RDONLY, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
+// How many characters of what a command run in a container writes are heard out: a
+// process group, or a word of stop.sh's, is a line, and what goes on past this is the
+// job's doing.
+const HEARD = 64 * 1024;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const quote = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
 
@@ -149,69 +153,26 @@ export function renderPrompt({ pool, spec, forwards = [] }) {
 
 const repoUrl = (pool) => `https://${pool.host}/${pool.owner}/${pool.repo}.git`;
 
-// The last `tail` bytes of a file the container wrote in the run's own directory, or
-// null. The directory is opened where the host put it, and only as a directory; the file
-// is named through that descriptor (by /proc on Linux, by the directory's own number on
-// a Mac), so a link put in the directory's place between the two leads nowhere. The open
-// does not wait for the writer a pipe in the file's place never has, and the read is at
-// a place and by a length, which a pipe, a device or a directory has not to give.
-async function readOwn(job, name, tail = TAIL_BYTES) {
-  let dir = null;
-  let file = null;
-  try {
-    dir = await fs.promises.open(job.realDir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
-    const held = await dir.stat();
-    const at = process.platform === 'linux' ? `/proc/self/fd/${dir.fd}` : `/.vol/${held.dev}/${held.ino}`;
-    file = await fs.promises.open(`${at}/${name}`, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
-    const { size } = await file.stat();
-    const length = Math.min(size, tail);
-    const { buffer } = await file.read(Buffer.alloc(length), 0, length, size - length);
-    return buffer.toString('utf8');
-  } catch { return null; } finally {
-    await file?.close();
-    await dir?.close();
-  }
-}
-
-// A count or a sum: anything but a positive number is none.
-const figure = (v) => (Number.isFinite(v) && v > 0 ? v : 0);
-
 async function parseOutcome(job, exit) {
-  const lines = (await readOwn(job, 'log.jsonl') || '').split('\n');
-  let result = null;
-  for (let i = lines.length - 1; i >= 0 && !result; i--) {
-    if (!lines[i].includes('"type":"result"')) continue;
-    try {
-      const event = JSON.parse(lines[i]);
-      if (event.type === 'result') result = event;
-    } catch {}
-  }
+  const result = await readResult(job.dir);
   const outcome = { ok: false, summary: '', usd: 0, tokens: 0, model: '', runner: 'claude', exit };
   if (!result) {
-    const said = (await readOwn(job, 'stderr.log', 2000) || '').trim() || (await readOwn(job, 'setup.log', 2000) || '').trim();
+    const said = (await readOwn(job.dir, 'stderr.log', 2000) || '').trim() || (await readOwn(job.dir, 'setup.log', 2000) || '').trim();
     outcome.summary = `the agent left no result${said ? `: ${said.slice(-1000)}` : ''}`;
     return outcome;
   }
-  // Every member is the job's to shape: one that is no object counts for nothing.
-  const models = Object.entries(Object(result.modelUsage)).map(([name, u]) => [name, Object(u)]);
-  outcome.ok = exit === 0 && result.is_error !== true;
-  outcome.summary = typeof result.result === 'string' ? result.result.slice(0, SUMMARY_CAP) : '';
-  outcome.usd = figure(result.total_cost_usd);
-  outcome.tokens = models.length > 0
-    ? models.reduce((sum, [, u]) => sum + figure(u.inputTokens) + figure(u.outputTokens) + figure(u.cacheReadInputTokens) + figure(u.cacheCreationInputTokens), 0)
-    : ['input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'].reduce((sum, k) => sum + figure(result.usage?.[k]), 0);
-  outcome.model = models.sort((a, b) => figure(b[1].costUSD) - figure(a[1].costUSD))[0]?.[0] || '';
-  return outcome;
+  const { failed, ...named } = result;
+  return { ...outcome, ...named, ok: exit === 0 && !failed };
 }
 
 // What a job says it took of the model is its own word, and this machine's budget is
-// counted from it; what the broker carried to the model for the job is the host's own
-// measure. Every token crossed the broker as a byte or more, in a request or in an
-// answer, so neither figure stands above what that traffic could have held, and a job
-// that sent the model nothing took nothing of it. An outcome of which a figure was
+// counted from it; what the broker carried to the model for the job, in the requests the
+// provider took and its answers to them, is the host's own measure. Every token crossed
+// the broker as a byte or more of those, so neither figure stands above what that
+// traffic could have held, and a job the provider took nothing from took nothing of it. An outcome of which a figure was
 // lowered says so, as `capped`.
-function capOutcome(outcome, carried) {
-  const bytes = figure(carried?.bytes);
+function capOutcome(outcome, taken) {
+  const bytes = figure(taken?.bytes);
   const [tokens, usd] = [Math.min(outcome.tokens, bytes), Math.min(outcome.usd, bytes * USD_PER_BYTE)];
   return tokens < outcome.tokens || usd < outcome.usd ? { ...outcome, tokens, usd, capped: true } : outcome;
 }
@@ -221,8 +182,9 @@ function capOutcome(outcome, carried) {
 /// `{ prompt, item, base, name, email }`, `proxy` the broker's `{ proxyUrl, caCertPath }`,
 /// `env` whatever else the job's environment carries (the model placeholder), and
 /// `forwards` the broker forwards opened for it (`{ name }` each). `spent()` answers
-/// with `{ bytes }`, what the broker has carried to the model for this run, and null
-/// counts as nothing carried: the run's outcome names no more of the model than that.
+/// with `{ bytes }`, what the model provider took of this run and answered through the
+/// broker, and null counts as nothing taken: the run's outcome names no more of the
+/// model than that.
 /// Left out, the outcome's figures are the job's own. Resolves to `{ dir, log, pid }`
 /// once the runner is alive, `pid` its process group.
 export async function startJob(asked) {
@@ -273,14 +235,11 @@ async function begin({ run, container, spec, proxy, env = {}, forwards = [], spe
   fs.rmSync(outcomePath(runId), { force: true });
   fs.symlinkSync(path.relative(RUNS_DIR, dir), link);
 
-  // Where the host put the directory, whatever stands at that name later.
-  const realDir = path.join(fs.realpathSync(container.runsDir), runId);
-  const job = { runId, container: container.name, realDir, inside: `/dn/runs/${runId}`, spent, pid: 0, stopping: false, stopped: false, cutting: false, cut: false, watching: null };
-  const started = await docker(['exec', container.name, '/bin/sh', '-c', START, 'sh', `${job.inside}/run.sh`, runId]);
-  job.pid = started.code === 0 ? groupOf(started.stdout) : 0;
-  if (!job.pid) throw new Error(`the job could not be started in ${container.name}: ${started.stderr.trim().split('\n').pop() || 'its process group was not said'}`);
-  live.set(runId, job);
-  return { dir, log: path.join(dir, 'log.jsonl'), pid: job.pid };
+  const started = await docker(['exec', container.name, '/bin/sh', '-c', START, 'sh', `/dn/runs/${runId}/run.sh`, runId], { maxBuffer: HEARD });
+  const pid = started.code === 0 ? groupOf(started.stdout) : 0;
+  if (!pid) throw new Error(`the job could not be started in ${container.name}: ${clip(started.stderr.trim().split('\n').pop()) || 'its process group was not said'}`);
+  live.set(runId, { runId, container: container.name, dir, spent, pid, stopping: false, stopped: false, cutting: false, cut: false, watching: null });
+  return { dir, log: path.join(dir, 'log.jsonl'), pid };
 }
 
 /// Takes up a run that a daemon before this one started in `container` (`{ name,
@@ -292,13 +251,14 @@ async function begin({ run, container, spec, proxy, env = {}, forwards = [], spe
 export function attachJob({ runId, container, pid = null, spent = null }) {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(runId) || (pid !== null && !groupOf(pid))) return false;
   if (live.has(runId)) return true;
-  let realDir;
+  const dir = path.join(container.runsDir, runId);
+  // Not there, or not to be looked for: root in a container can close the directory
+  // that holds its runs to this user.
   try {
-    realDir = path.join(fs.realpathSync(container.runsDir), runId);
-    if (pid === null && !fs.lstatSync(realDir).isDirectory()) return false;
+    if (pid === null && !fs.lstatSync(dir).isDirectory()) return false;
   } catch { return false; }
   live.set(runId, {
-    runId, container: container.name, realDir, inside: `/dn/runs/${runId}`, spent,
+    runId, container: container.name, dir, spent,
     pid: pid === null ? 0 : groupOf(pid), stopping: false, stopped: false, cutting: false, cut: false, watching: null,
   });
   return true;
@@ -312,11 +272,12 @@ function groupOf(value) {
 }
 
 // stop.sh in the job's container, by one of its verbs.
-const ask = (job, verb, more, timeout) => docker(['exec', job.container, '/bin/sh', '-c', STOP, 'sh', verb, job.runId, String(job.pid), ...more], { timeout });
+const ask = (job, verb, more, timeout) => docker(['exec', job.container, '/bin/sh', '-c', STOP, 'sh', verb, job.runId, String(job.pid), ...more], { timeout, maxBuffer: HEARD });
 
 // Whether the job still runs - its process group for `up`, anything of it for `left` -
 // as the container says in so many words: true, false, or null when nothing was said,
-// by an engine that did not answer or a container in which nothing could be run.
+// by an engine that did not answer, a container in which nothing could be run, or one
+// that wrote on past what is heard out.
 async function alive(job, verb = 'up') {
   const r = await ask(job, verb, [], 20000);
   const said = r.code === 0 ? r.stdout.trim() : '';
@@ -339,7 +300,7 @@ async function cut(job, restart) {
 
 // The exit code the runner left in `done`, or null while that holds none.
 async function exited(job) {
-  const done = await readOwn(job, 'done', 32) ?? '';
+  const done = await readOwn(job.dir, 'done', 32) ?? '';
   return /^\d+\s*$/.test(done) ? Number(done) : null;
 }
 

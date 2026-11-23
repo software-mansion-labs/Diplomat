@@ -42,6 +42,12 @@ export function hoursOf(value) {
   return Number.isFinite(hours) ? Math.min(HOURS_CEILING, Math.max(HOURS_FLOOR, hours)) : HOURS_FLOOR;
 }
 
+// A seat refused to a key the invite's maker sits under, and what the refused host's
+// operator reads of it: that host seated the maker, or one that did, before it began
+// the pool again.
+const SITS_UNDER = 'the maker of that invite sits under the key that brings it';
+const SITS_UNDER_HERE = 'the machine that made that invite came into the pool under this one, before this one began the pool again, and no machine that came in under this one can let it back in: use an invite of one that did not, or - if this machine began that pool, so that every machine there came in under it - have them join this one\'s pool, each by an invite this machine makes';
+
 // What a pool's document keeps of a membership this host left: the record that says so
 // and the members it left behind, or null.
 const gone = (doc) => (isObject(doc.left) && Array.isArray(doc.leftTo) ? { left: doc.left, leftTo: doc.leftTo } : null);
@@ -90,8 +96,9 @@ export function createGossip(host) {
       // member, each `{ nonce, exp }` and, for the keys that came with it, `seats` - the
       // seat each was given, by key; and what is kept of the membership it left before
       // this one. `joinFailed` says why the last invite let this host in nowhere, until
-      // the next one is pasted. `back` are the hosts it left the pool to, from when it
-      // goes back into it until it holds the record of another host.
+      // the next one is pasted. `back` are the hosts it knew in the pool and may no
+      // longer hold the record of - the ones it left the pool to, and the ones whose
+      // records ran out while it was away - until a host it asks answers.
       joining: null, joinFailed: '', invites: [], farewell: gone(doc), back: [],
       // The members that refused this host's hello and have answered it nothing since.
       refusedBy: new Set(),
@@ -107,7 +114,7 @@ export function createGossip(host) {
     if ((doc.linked || doc.away) && Array.isArray(doc.records)) {
       // What the store holds was let in once. A clock that woke up behind those records
       // must not make them the future, and this host a stranger to its own pool.
-      P.pool.merge(doc.records, doc.records.reduce((latest, r) => (Number.isSafeInteger(r?.at) ? Math.max(latest, r.at) : latest), host.now()));
+      const { refused } = P.pool.merge(doc.records, doc.records.reduce((latest, r) => (Number.isSafeInteger(r?.at) ? Math.max(latest, r.at) : latest), host.now()));
       if (isObject(doc.joining)) P.joining = doc.joining;
       if (typeof doc.joinFailed === 'string') P.joinFailed = doc.joinFailed;
       if (Array.isArray(doc.invites)) P.invites = doc.invites;
@@ -115,9 +122,14 @@ export function createGossip(host) {
       // The store holds all of this: nothing is written until something changes.
       P.pool.delta();
       P.head = host.head(P);
+      // The members whose records ran out are asked; `back` is written with the next change.
+      const expired = new Set(refused.filter((r) => r.code === 'expired').map((r) => r.key));
+      P.back = backTo(P, doc.records.filter((r) => r?.type === 'member' && !r.left && expired.has(memberKey(r.pk))).map((r) => r.pk));
     }
     return P;
   }
+
+  const backTo = (P, keys) => [...new Set([...P.back, ...keys])].sort();
 
   /// Links a pool: what the store holds of it is taken up again, and the host is a member
   /// of it at once, alone until it joins or invites someone. A pool this host left stays
@@ -175,14 +187,12 @@ export function createGossip(host) {
   }
 
   // Back into a pool this host left: its member record is signed again over the voucher
-  // it held. Every member it knew hears of it as the pool is caught up; when the records
-  // it kept of them have run out, the hosts it left do.
+  // it held, and the hosts it left the pool to are asked with the members it holds.
   function rejoin(id) {
     const P = load(host.away.get(id), host.store.read(poolFile(id)) ?? {});
-    const left = P.farewell?.leftTo ?? [];
+    P.back = backTo(P, P.farewell?.leftTo ?? []);
     P.farewell = null;
     P.pool.merge(signMember(P), host.now());
-    P.back = left;
     host.away.delete(id);
     host.pools.set(id, P);
     host.moved(P);
@@ -214,17 +224,16 @@ export function createGossip(host) {
       && P.pool.vouched(record.voucher.by, host.now()) && verifyVoucher(record);
   }
 
-  // Every host this one keeps in touch with in a pool: the members, and the ones that
-  // stopped signing their record - or, while it holds no record of another host, the
-  // hosts it left the pool to.
+  // Every host this one keeps in touch with in a pool: the members, the ones that
+  // stopped signing their record, and the ones it is back to.
   function others(P) {
-    const known = P.pool.known(host.now()).map((m) => m.pk).filter((pk) => pk !== host.self);
-    return known.length > 0 ? known : P.back;
+    const known = P.pool.known(host.now()).map((m) => m.pk);
+    return [...new Set([...known, ...P.back])].filter((pk) => pk !== host.self).sort();
   }
 
-  /// Is this host back in a pool it left with no record of another host there, waiting
-  /// for one of the hosts it left to answer?
-  const returning = (P) => P.back.length > 0 && others(P) === P.back;
+  /// Is this host back in a pool after it left or was away for longer than a member
+  /// record is kept, with no answer yet from any host it asked?
+  const returning = (P) => P.back.length > 0;
 
   // The member records that lead from `pk`, this host unless named, to the member that
   // started the pool.
@@ -277,7 +286,7 @@ export function createGossip(host) {
     const given = invite.by === host.self ? P.invites.find((made) => made.nonce === invite.nonce) : null;
     if (!given) return { error: 'denied', detail: 'that invite is no longer good' };
     // A seat under this host for a key this host sits under would close the chain.
-    if (under(P, host.self, from)) return { error: 'denied', detail: 'the maker of that invite sits under the key that brings it' };
+    if (under(P, host.self, from)) return { error: 'denied', detail: SITS_UNDER };
     const seat = seatFor(P, from, now);
     if (seat === null) return { error: 'denied', detail: 'no-seat' };
     given.seats = { ...given.seats, [from]: seat };
@@ -312,7 +321,7 @@ export function createGossip(host) {
     }
     if (record && verifyVoucher(record)) host.take(P, [...chain, record]);
     const failed = own(P) !== record;
-    if (failed) P.joinFailed = answer.ok ? 'its voucher does not hold' : answer.detail || answer.code;
+    if (failed) P.joinFailed = answer.ok ? 'its voucher does not hold' : answer.detail === SITS_UNDER ? SITS_UNDER_HERE : answer.detail || answer.code;
     host.save(P);
     if (failed) {
       host.log(`the invite to ${P.id} let this host in nowhere: ${P.joinFailed}`);
@@ -375,15 +384,15 @@ export function createGossip(host) {
     const chain = chainOf(P);
     const hello = await host.peers.ask(P.id, pk, 'hello', { member: own(P), ...(chain.length > 0 ? { chain } : {}) }, options);
     if (!hello.ok) {
-      // A member that will not have this host is not asked again every minute. One that
-      // could not serve the request this once said nothing of the kind.
-      if (hello.code && hello.code !== 'busy') {
-        snubbed.set(key, host.now() + PEER_BACKOFF_MAX_MS / 1000);
-        P.refusedBy.add(pk);
-      }
+      // A host that refused is not asked again every minute. One that could not serve the
+      // request this once said nothing of the kind, and only one that holds this host for
+      // no member said it has no seat: the others refused this host's clock or its work.
+      if (hello.code && hello.code !== 'busy') snubbed.set(key, host.now() + PEER_BACKOFF_MAX_MS / 1000);
+      if (hello.code === 'denied' || hello.code === 'not-member') P.refusedBy.add(pk);
       return false;
     }
     snubbed.delete(key);
+    P.back = [];
     await settle(P, pk, hello.body, host.now());
     return true;
   }
@@ -426,6 +435,7 @@ export function createGossip(host) {
     const answer = await send(P, pk, 'sync', { asOf, hash: P.pool.stateHash(asOf) }, options);
     if (answer.ok) {
       P.refusedBy.delete(pk);
+      P.back = [];
       await settle(P, pk, answer.body, asOf);
     }
     return answer.ok;
@@ -595,19 +605,18 @@ export function createGossip(host) {
     for (const P of host.pools.values()) {
       // One asking at a time, and a new one at once for a pool that went out of date
       // again: the answers to the asking before are not waited for. Whatever an asking
-      // is at, a pool is out of date for no longer than CATCH_UP_MS with the transport up.
-      if (P.stale !== null && P.catching !== P.epoch) catchUp(P);
-      if (P.stale !== null && host.transport.state().state === 'ready' && now - P.stale >= CATCH_UP_MS / 1000) caughtUp(P, P.epoch);
+      // is at, a pool is out of date for no longer than CATCH_UP_MS with the transport up
+      // - unless this host is returning to it: then it waits for an answer, and the
+      // periodic sync goes on asking.
+      const waited = host.transport.state().state === 'ready' && now - P.stale >= CATCH_UP_MS / 1000;
+      if (P.stale !== null && P.catching !== P.epoch && !(waited && returning(P))) catchUp(P);
+      if (P.stale !== null && waited && !returning(P)) caughtUp(P, P.epoch);
       if (P.joining && now >= P.joining.exp) {
         P.joining = null;
         P.joinFailed = 'the invite ran out before the machine that made it answered';
         host.save(P);
       }
       redeem(P).catch((err) => host.log(`an invite could not be redeemed: ${err?.stack ?? err}`));
-      if (P.back.length > 0 && !returning(P)) {
-        P.back = [];
-        host.save(P);
-      }
       const mine = own(P);
       if (now - mine.at >= RESIGN_INTERVAL_MS / 1000 || mine.maxAcceptedH !== hoursOf(host.settings().maximumAcceptedH)) {
         host.take(P, signMember(P));

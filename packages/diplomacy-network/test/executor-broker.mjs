@@ -25,6 +25,7 @@ Object.assign(process.env, {
 });
 const { createBroker, brokerBindAddress, quietPort, deniedAddress, forgeHosts, forgeSshHosts, normalHost, MODEL_HOSTS, JOB_REQUESTS, JOB_UPSTREAMS } = await import('../src/executor/broker.js');
 const { createCA } = await import('../src/executor/ca.js');
+const { OwnFault } = await import('../src/executor/own-fault.js');
 const { createLLM, PLACEHOLDER } = await import('../src/executor/llm.js');
 const { createMirrors } = await import('../src/executor/mirror.js');
 const { FORGE_BODY_CAP, FORGE_RESPONSE_MAX_BYTES } = await import('../src/paths.js');
@@ -1571,7 +1572,7 @@ try {
       assert.equal(fifth.body, 'this job has 4 connections open through the broker, the most a job gets at a time: close some\n');
       const sixth = await viaProxy(held, 'http://plain.test/x');
       assert.equal(sixth.status, 503);
-      assert.match(JSON.parse(sixth.body).message, /^this job has 4 connections open/);
+      assert.equal(sixth.body, fifth.body);
       const theirs = await tunnel('tunnel.test:443', basic('dn', free.token));
       assert.equal(theirs.status, 200, 'another job has connections of its own');
       theirs.socket.destroy();
@@ -1700,7 +1701,7 @@ try {
     forgeAnswer = async () => okAnswer;
   });
 
-  await check('a job has so many requests in the broker at a time, however few connections it sends them down: at its share it is read no further, and a request already on its way in closes its connection', async () => {
+  await check('a job has so many requests in the broker at a time, however few connections it sends them down: at its share it is read no further, however many requests one write brings', async () => {
     const get = (p) => `GET ${p} HTTP/1.1\r\nHost: api.github.com\r\n\r\n`;
     const traced = [];
     const read = (p) => traced.filter((line) => line.includes(` https://api.github.com${p} `)).length;
@@ -1733,7 +1734,11 @@ try {
       // with its sender.
       conns[0].write(get('/behind-first'));
       conns[3].write(get('/behind-last'));
-      const behind = () => read('/behind-first') + read('/behind-last');
+      // So does the first request of a connection the job opens at its share.
+      const opened = await secure(held, 'api.github.com');
+      opened.on('error', () => {});
+      opened.write(get('/on-a-new-connection'));
+      const behind = () => read('/behind-first') + read('/behind-last') + read('/on-a-new-connection');
       for (let i = 0; i < 4; i++) await turn();
       assert.equal(behind(), 0, 'nothing more is read while the job is at its share');
       assert.equal(load().requests, 4);
@@ -1742,15 +1747,15 @@ try {
       assert.equal((await second)[0].status, 200);
       await until(() => behind() === 1, 'one more to be read once there is room');
       for (let i = 0; i < 4; i++) await turn();
-      assert.deepEqual([behind(), load().requests], [1, 4], 'it takes the place that was given back, and the other waits on');
-      assert.deepEqual(conns.map((s) => s.destroyed), [false, false, false, false]);
-      const both = [answers(conns[0], 2), answers(conns[3], 2)];
+      assert.deepEqual([behind(), load().requests], [1, 4], 'it takes the place that was given back, and the others wait on');
+      assert.deepEqual([...conns, opened].map((s) => s.destroyed), [false, false, false, false, false]);
+      const both = [answers(conns[0], 2), answers(conns[3], 2), answers(opened)];
       answering = true;
       for (const a of pending.splice(0)) a.resolve(okAnswer);
-      assert.deepEqual((await Promise.all(both)).map((got) => got.map((r) => r.status)), [[200, 200], [200, 200]], 'both requests of either connection are answered');
+      assert.deepEqual((await Promise.all(both)).map((got) => got.map((r) => r.status)), [[200, 200], [200, 200], [200]], 'every request of each connection is answered');
       await until(() => load().requests === 0, 'the answered requests to be given back');
       answering = false;
-      for (const s of conns) s.destroy();
+      for (const s of [...conns, opened]) s.destroy();
 
       // Requests sent to the proxy itself are held to the same share. What a tunnel
       // carries is no request: one opened before the job came to its share, and one
@@ -1812,35 +1817,42 @@ try {
       routes.delete('93.184.216.80:7');
       routes.delete('93.184.216.81:80');
 
-      // Six in one write: node has parsed them all before anything here can stop it. Four
-      // are the job's share, and the fifth closes the connection under all of them.
+      // Six in one write: node is handed one request at a time, so four are read, the
+      // job's share, and the other two wait unread on a connection that stays open.
       const six = await secure(held, 'api.github.com');
-      const cut = new Promise((r) => { six.on('close', r); six.on('error', () => {}); });
+      six.on('error', () => {});
+      const sixAnswers = answers(six, 6);
       six.write([1, 2, 3, 4, 5, 6].map((i) => get(`/six${i}`)).join(''));
-      await within(cut, 'the connection of a request past the share to be closed');
+      await until(() => load().requests === 4, 'four of the six to count');
+      for (let i = 0; i < 4; i++) await turn();
       assert.deepEqual([1, 2, 3, 4, 5, 6].map((i) => read(`/six${i}`)), [1, 1, 1, 1, 0, 0]);
-      await until(() => load().requests === 0 && load().waiting === 0 && load().forgeRequests === 0, 'what the closed connection held to be given back');
+      assert.equal(six.destroyed, false);
+      answering = true;
+      for (const a of pending.splice(0)) a.resolve(okAnswer);
+      assert.deepEqual((await sixAnswers).map((r) => r.status), [200, 200, 200, 200, 200, 200], 'each of the six is answered in its turn');
+      assert.deepEqual([1, 2, 3, 4, 5, 6].map((i) => read(`/six${i}`)), [1, 1, 1, 1, 1, 1]);
+      answering = false;
+      six.destroy();
+      await until(() => load().requests === 0 && load().waiting === 0 && load().forgeRequests === 0, 'what the connection held to be given back');
       await turn();
     });
 
     // The same at the size a job gets, from one that sends a hundred thousand requests
-    // down one connection to a requester that answers none of them.
+    // down one connection to a requester that answers none of them: the job's share of
+    // them is read, and the rest is no work for anyone.
     traced.length = 0;
     await withBroker({ trace: (line) => traced.push(line), limits: { answerMs: 600000 } }, async (b) => {
       const flood = await b.addJob({ runId: 'flood', pool: alpha.pool });
-      const s = await secure(flood, 'api.github.com');
-      const cut = new Promise((r) => { s.on('close', r); s.on('error', () => {}); });
-      s.write(get('/flood').repeat(100000));
-      await within(cut, 'the flooding connection to be closed');
-      assert.equal(JOB_REQUESTS, 256);
-      assert.equal(read('/flood'), JOB_REQUESTS, 'what was read of it is the job\'s share');
-      await until(() => b.load('flood').requests === 0, 'the share to be given back');
-      // A job at its share ends at once, with all of it.
       const full = await secure(flood, 'api.github.com');
       const gone = new Promise((r) => { full.on('close', r); full.on('error', () => {}); });
-      full.write(get('/full').repeat(JOB_REQUESTS));
+      full.write(get('/flood').repeat(100000));
+      assert.equal(JOB_REQUESTS, 256);
       await until(() => b.load('flood').requests === JOB_REQUESTS, 'the job to be at its share');
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(read('/flood'), JOB_REQUESTS, 'what was read of it is the job\'s share');
+      assert.equal(full.destroyed, false);
       assert.equal(b.load('flood').waiting, JOB_REQUESTS - b.load('flood').forgeRequests);
+      // A job at its share ends at once, with all of it.
       const from = performance.now();
       b.removeJob('flood');
       const took = performance.now() - from;
@@ -2051,11 +2063,16 @@ try {
       made = 0;
       most = 0;
       const c = net.connect(port, '127.0.0.1');
-      const cut = new Promise((r) => { c.on('close', r); c.on('error', () => {}); });
+      c.on('error', () => {});
       c.write(Array.from({ length: 8000 }, (_, i) => proxied(j, `http://h${i}.flood.test/`)).join(''));
-      await within(cut, 'the flooding connection to be closed');
-      await until(() => open.size === 0 && b.load('out').requests === 0, 'the connections out to close with it');
-      assert.ok(most <= JOB_UPSTREAMS && made <= JOB_REQUESTS, `${made} connections out were made, ${most} of them open at a time`);
+      await until(() => b.load('out').requests === JOB_REQUESTS && open.size === JOB_UPSTREAMS, 'the job to be at its share of requests and of connections out');
+      await new Promise((r) => setTimeout(r, 300));
+      assert.deepEqual([made, most, b.load('out').waiting, b.load('out').requests, c.destroyed], [JOB_UPSTREAMS, JOB_UPSTREAMS, JOB_REQUESTS - JOB_UPSTREAMS, JOB_REQUESTS, false],
+        'the rest of the eight thousand is with its sender, unread');
+      // A job at its share is not read, so not seen to close its connection either: its
+      // requests end with their time, or with the job.
+      b.removeJob('out');
+      await until(() => open.size === 0 && c.destroyed, 'the connections out to close with the job');
     });
     for (let i = 0; i < 8000; i++) names.delete(`h${i}.flood.test`);
     routes.delete('93.184.216.77:80');
@@ -2204,12 +2221,14 @@ try {
     const body = Buffer.from(JSON.stringify({ messages: [] }));
     const ask = (j) => request(j, 'api.anthropic.com', { method: 'POST', path: '/v1/messages', headers: { 'x-api-key': PLACEHOLDER }, body });
     await broker.addJob({ runId: 'run-spend', pool: alpha.pool }).then(async (fresh) => {
-      assert.deepEqual(broker.spent('run-spend'), { requests: 0, bytes: 0 });
+      assert.deepEqual(broker.spent('run-spend'), { requests: 0, bytes: 0, carried: 0 });
       assert.equal(broker.spent('nobody'), null);
       const r = await ask(fresh);
       assert.equal(r.status, 200, 'a listener that fails costs the job nothing');
       await until(() => heard.length === 2, 'the spend to be told as the request is counted and again once its answer has passed');
-      assert.deepEqual(heard, [['run-spend', { requests: 1, bytes: body.length }], ['run-spend', { requests: 1, bytes: body.length + r.body.length }]]);
+      // The provider has taken nothing when the request is counted, and all of it once it answered.
+      const all = body.length + r.body.length;
+      assert.deepEqual(heard, [['run-spend', { requests: 1, bytes: 0, carried: body.length }], ['run-spend', { requests: 1, bytes: all, carried: all }]]);
       assert.deepEqual(broker.spent('run-spend'), heard[1][1]);
       heard[1][1].requests = 99;
       assert.equal(broker.spent('run-spend').requests, 1, 'what a listener is handed is a copy');
@@ -2218,19 +2237,23 @@ try {
     broker.removeJob('run-spend');
     assert.equal(broker.spent('run-spend'), null);
 
-    // One request short of its share, which is 12 here; then all its bytes had.
-    const again = await broker.addJob({ runId: 'run-spend', pool: alpha.pool }, { spent: { requests: 11, bytes: 1000 } });
-    assert.deepEqual(broker.spent('run-spend'), { requests: 11, bytes: 1000 });
+    // One request short of its share, which is 12 here; then all its bytes had, which
+    // are the bytes carried for it and not the ones the provider took.
+    const again = await broker.addJob({ runId: 'run-spend', pool: alpha.pool }, { spent: { requests: 11, bytes: 1000, carried: 2000 } });
+    assert.deepEqual(broker.spent('run-spend'), { requests: 11, bytes: 1000, carried: 2000 });
     assert.deepEqual([(await ask(again)).status, (await ask(again)).status], [200, 429]);
     assert.equal(broker.spent('run-spend').requests, 12);
     broker.removeJob('run-spend');
-    const full = await broker.addJob({ runId: 'run-spend', pool: alpha.pool }, { spent: { requests: 0, bytes: 300000 } });
+    const full = await broker.addJob({ runId: 'run-spend', pool: alpha.pool }, { spent: { requests: 0, bytes: 0, carried: 300000 } });
     assert.equal((await ask(full)).status, 429);
     broker.removeJob('run-spend');
+    const taken = await broker.addJob({ runId: 'run-spend', pool: alpha.pool }, { spent: { requests: 0, bytes: 300000, carried: 299000 } });
+    assert.equal((await ask(taken)).status, 200);
+    broker.removeJob('run-spend');
     // What is no count is none.
-    for (const none of [null, undefined, {}, 'x', { requests: -5, bytes: 'many' }, { requests: NaN, bytes: Infinity }]) {
+    for (const none of [null, undefined, {}, 'x', { requests: -5, bytes: 'many', carried: [] }, { requests: NaN, bytes: Infinity, carried: -Infinity }]) {
       await broker.addJob({ runId: 'run-spend', pool: alpha.pool }, { spent: none });
-      assert.deepEqual(broker.spent('run-spend'), { requests: 0, bytes: 0 }, JSON.stringify(none));
+      assert.deepEqual(broker.spent('run-spend'), { requests: 0, bytes: 0, carried: 0 }, JSON.stringify(none));
       broker.removeJob('run-spend');
     }
     // A listener that has left hears no more.
@@ -2242,6 +2265,232 @@ try {
     await until(() => broker.spent('run-spend').bytes > body.length, 'the answer to be counted');
     assert.equal(heard.length, told);
     broker.removeJob('run-spend');
+  });
+
+  await check('what a job is said to have had of the model is what the provider took: a request it refused, a count of tokens and a request that never reached it add nothing', async () => {
+    const big = Buffer.from(JSON.stringify({ messages: [], pad: 'x'.repeat(30000) }));
+    const post = (j, p, body = big) => request(j, 'api.anthropic.com', { method: 'POST', path: p, headers: { 'x-api-key': PLACEHOLDER }, body });
+    const j = await broker.addJob({ runId: 'run-took', pool: alpha.pool });
+    const settled = async (carried) => {
+      await until(() => broker.spent('run-took').carried === carried, `the answer to be counted: ${JSON.stringify(broker.spent('run-took'))}`);
+      return broker.spent('run-took');
+    };
+    // Refused by the provider, four times over.
+    providerAnswer = (req, res) => { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{"type":"error"}'); };
+    for (let i = 0; i < 4; i++) assert.equal((await post(j, '/v1/messages')).status, 400);
+    let carried = 4 * (big.length + 16);
+    assert.deepEqual(await settled(carried), { requests: 4, bytes: 0, carried });
+    // A count of tokens, which the provider answers and bills nothing for.
+    providerAnswer = (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"input_tokens":9}'); };
+    assert.equal((await post(j, '/v1/messages/count_tokens?beta=true')).status, 200);
+    carried += big.length + 18;
+    assert.deepEqual(await settled(carried), { requests: 5, bytes: 0, carried });
+    // The provider does not answer at all.
+    providerAnswer = (req) => req.socket.destroy();
+    assert.equal((await post(j, '/v1/messages')).status, 502);
+    carried += big.length;
+    assert.deepEqual(await settled(carried), { requests: 6, bytes: 0, carried });
+    // It sends the request elsewhere, which is no answer to it.
+    providerAnswer = (req, res) => { res.writeHead(307, { location: '/v2/messages', 'content-type': 'application/json' }); res.end('{"moved":true}'); };
+    assert.equal((await post(j, '/v1/messages', Buffer.from('{"messages":[]}'))).status, 307);
+    carried += 15 + 14;
+    assert.deepEqual(await settled(carried), { requests: 7, bytes: 0, carried });
+    // An inference request it answers, with a query on its path as the client writes it.
+    providerAnswer = okProvider;
+    const ok = await post(j, '/v1/messages?beta=true');
+    assert.equal(ok.status, 200);
+    carried += big.length + ok.body.length;
+    assert.deepEqual(await settled(carried), { requests: 8, bytes: big.length + ok.body.length, carried });
+    // The share is of everything carried: refused or not, it is gone.
+    providerAnswer = (req, res) => { res.writeHead(400, { 'content-type': 'application/json' }); res.end('{"type":"error"}'); };
+    let status = 400;
+    for (let i = 0; i < 4 && status === 400; i++) status = (await post(j, '/v1/messages')).status;
+    assert.equal(status, 429, 'the model closes on the bytes of refused requests too');
+    assert.equal(broker.spent('run-took').bytes, big.length + ok.body.length);
+    broker.removeJob('run-took');
+    providerAnswer = okProvider;
+  });
+
+  await check('the model provider is whoever its certificate says: where another authority\'s certificate answers at its address the job gets a 502, and nothing of the request is sent there', async () => {
+    const leaf = await (await createCA({ dir: path.join(scratch, 'impostor-ca') }).authority(MODEL_HOSTS)).leaf('api.anthropic.com');
+    const got = [];
+    const impostor = tls.createServer({ key: leaf.key, cert: leaf.cert }, (s) => {
+      s.on('error', () => {});
+      s.on('data', (d) => { got.push(d.toString('latin1')); s.write('HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}'); });
+    });
+    impostor.on('tlsClientError', () => {});
+    const real = routes.get('160.79.104.10:443');
+    routes.set('160.79.104.10:443', await listen(impostor));
+    const asker = await broker.addJob({ runId: 'run-impostor', pool: alpha.pool });
+    try {
+      const seen = providerSeen.length;
+      const dialled = dials.length;
+      // With this machine's credential to gain, and with a key of the job's own.
+      for (const key of [PLACEHOLDER, 'sk-the-jobs-own']) {
+        const r = await request(asker, 'api.anthropic.com', { method: 'POST', path: '/v1/messages', headers: { 'x-api-key': key }, body: Buffer.from('{"messages":[]}') });
+        assert.equal(r.status, 502, key);
+        assert.match(JSON.parse(r.body).message, /^the model provider is unreachable: .*certificate/, key);
+      }
+      assert.deepEqual(dials.slice(dialled), ['160.79.104.10:443', '160.79.104.10:443'], 'the address was reached, both times');
+      assert.deepEqual(got, [], 'and was sent nothing');
+      assert.equal(providerSeen.length, seen);
+    } finally {
+      routes.set('160.79.104.10:443', real);
+      broker.removeJob('run-impostor');
+      impostor.close();
+    }
+    assert.equal((await request(job, 'api.anthropic.com', { method: 'POST', path: '/v1/messages', headers: { 'x-api-key': PLACEHOLDER }, body: Buffer.from('{}') })).status, 200);
+  });
+
+  await check('the git that serves a fetch ends with the request it serves: when its client hangs up, and when its job ends', async () => {
+    const mirrorPath = mirrors.path(alpha.pool);
+    const serving = () => execFileSync('ps', ['-A', '-ww', '-o', 'args='], { encoding: 'utf8' }).split('\n').filter((line) => line.includes('upload-pack') && line.includes(mirrorPath)).length;
+    assert.equal(serving(), 0);
+    const fetcher = await broker.addJob({ runId: 'run-fetch', pool: alpha.pool });
+    // A fetch whose request stops short of its end: git waits for the rest.
+    const hang = async () => {
+      const s = await secure(fetcher, 'github.com');
+      s.on('error', () => {});
+      s.write('POST /dn-test/alpha.git/git-upload-pack HTTP/1.1\r\nHost: github.com\r\nGit-Protocol: version=2\r\nContent-Type: application/x-git-upload-pack-request\r\nContent-Length: 1000\r\n\r\n0014command=ls-refs\n');
+      return s;
+    };
+    const four = [await hang(), await hang(), await hang(), await hang()];
+    await until(() => serving() === 4, 'four gits to serve');
+    four[0].destroy();
+    four[1].destroy();
+    await until(() => serving() === 2, 'the gits of the two that hung up to end');
+    await until(() => broker.load('run-fetch').forgeRequests === 2, 'their places to be given back');
+    broker.removeJob('run-fetch');
+    await until(() => serving() === 0, 'the rest to end with their job');
+  });
+
+  await check('a body that states no length holds the most one may be until it has come, and what the broker held for a request is given back when its connection goes, whatever was still to come on it', async () => {
+    await withBroker({ limits: { upstreams: 1, answerMs: 600000 } }, async (b) => {
+      const j = await b.addJob({ runId: 'gate', pool: alpha.pool });
+      const load = () => b.load('gate');
+      const pending = [];
+      const waitFor = (p) => until(() => pending.some((a) => a.path === p), `${p} to reach the requester`);
+      forgeAnswer = (jb, r) => new Promise((resolve) => pending.push({ path: r.path, resolve }));
+      // The broker cannot know how long a chunked body will be, and its share of memory
+      // is 48 MiB: beside one that is still coming, a body of ten bytes waits.
+      const c = await secure(j, 'api.github.com');
+      c.on('error', () => {});
+      c.write('POST /chunked HTTP/1.1\r\nHost: api.github.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n');
+      await until(() => load().requests === 1, 'the chunked request to be read');
+      assert.deepEqual(load(), { connections: 1, requests: 1, bytes: FORGE_BODY_CAP, forgeRequests: 1, upstreams: 0, waiting: 0 });
+      const small = request(j, 'api.github.com', { method: 'POST', path: '/small', body: Buffer.alloc(10, 1), headers: { 'content-length': 10 } });
+      await until(() => load().waiting === 1, 'the small body to wait');
+      c.write('0\r\n\r\n');
+      await waitFor('/chunked');
+      await waitFor('/small');
+      assert.deepEqual([load().bytes, load().waiting], [15, 0], 'once it has come it holds what it is');
+      for (const a of pending.splice(0)) a.resolve(okAnswer);
+      assert.equal((await small).status, 200);
+      c.destroy();
+      await until(() => load().requests === 0 && load().connections === 0, 'both to be over');
+
+      // Three requests in one write: the second and third are with the requester while
+      // the first has the connection's answer. All three end with the connection.
+      const x = await secure(j, 'api.github.com');
+      x.on('error', () => {});
+      x.write(['/p1', '/p2', '/p3'].map((p) => `GET ${p} HTTP/1.1\r\nHost: api.github.com\r\n\r\n`).join(''));
+      await waitFor('/p3');
+      assert.deepEqual(load(), { connections: 1, requests: 3, bytes: 0, forgeRequests: 3, upstreams: 0, waiting: 0 });
+      x.destroy();
+      await until(() => load().requests === 0 && load().forgeRequests === 0 && load().connections === 0, 'what the three held to be given back');
+      for (const a of pending.splice(0)) a.resolve(okAnswer);
+
+      // A request that waits its turn on a connection that has just gone is not let in
+      // by the place the request before it gave back: no name is asked for it.
+      let release = null;
+      const heldUp = http.createServer((req, res) => { release = () => res.end('late'); });
+      publish('held.test', '93.184.216.45', 80, await listen(heldUp));
+      names.set('late.test', [{ address: '93.184.216.40', family: 4 }]);
+      const before = { lookups: lookups.length, dials: dials.length };
+      const y = net.connect(port, '127.0.0.1');
+      y.on('error', () => {});
+      y.write(['held.test/a', 'late.test/b'].map((u) => `GET http://${u} HTTP/1.1\r\nHost: ${u.split('/')[0]}\r\n${basic('dn', j.token)}\r\n`).join(''));
+      await until(() => release !== null && load().waiting === 1, 'the first to be on its way out and the second to wait for the way');
+      assert.equal(load().upstreams, 1);
+      y.destroy();
+      await until(() => load().connections === 0 && load().requests === 0 && load().upstreams === 0 && load().waiting === 0, 'all of it to be given back');
+      await new Promise((r) => setTimeout(r, 100));
+      assert.deepEqual([lookups.slice(before.lookups), dials.slice(before.dials)], [['held.test'], ['93.184.216.45:80']]);
+      heldUp.closeAllConnections();
+      names.delete('late.test');
+    });
+    forgeAnswer = async () => okAnswer;
+  });
+
+  await check('what is left of a request that was answered early is read and thrown away as far as two of the largest bodies, and no further', async () => {
+    const s = await secure(job, 'api.github.com');
+    s.on('error', () => {});
+    let closed = false;
+    s.on('close', () => { closed = true; });
+    const refused = await exchange(s, `POST /declared HTTP/1.1\r\nHost: api.github.com\r\nContent-Length: ${4 * FORGE_BODY_CAP}\r\n\r\n`);
+    assert.equal(refused.status, 413);
+    const piece = Buffer.alloc(2 ** 20, 1);
+    for (let i = 0; i < 2 * FORGE_BODY_CAP / piece.length; i++) await new Promise((r) => { s.write(piece, r); });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.equal(closed, false, 'the connection is open while as much as that comes');
+    s.write(Buffer.alloc(1));
+    // Sooner than the ten seconds such a request is given whatever it sends.
+    await until(() => closed, 'the connection to be closed on the byte past it', 5000);
+  });
+
+  await check('the repository a GitLab job fetches from the mirror is its own, letter for letter: the same path in other capitals is the requester\'s to answer', async () => {
+    const lab = { id: 'gitlab.example.org/group/sub/repo', forge: 'gitlab', host: 'gitlab.example.org', owner: 'group/sub', repo: 'repo' };
+    await withBroker({ mirrors: { path: () => mirrors.path(alpha.pool) } }, async (b) => {
+      const j = await b.addJob({ runId: 'lab', pool: lab });
+      const advert = (p) => request(j, 'gitlab.example.org', { path: `${p}/info/refs?service=git-upload-pack`, headers: { 'git-protocol': 'version=2' } });
+      const seen = forgeSeen.length;
+      const own = await advert('/group/sub/repo.git');
+      assert.deepEqual([own.status, own.headers['content-type']], [200, 'application/x-git-upload-pack-advertisement']);
+      assert.equal(forgeSeen.length, seen, 'from the mirror');
+      for (const [i, p] of ['/Group/sub/repo.git', '/group/Sub/repo', '/group/sub/REPO.git'].entries()) {
+        assert.equal((await advert(p)).status, 200);
+        assert.equal(forgeSeen.length, seen + i + 1, `${p} is another repository there`);
+        assert.equal(forgeSeen.at(-1).request.path, `${p}/info/refs?service=git-upload-pack`);
+      }
+    });
+  });
+
+  await check('a Git-Protocol header reaches git as it came when it is protocol words of 128 characters at most, and not at all otherwise', async () => {
+    // The git put first on the PATH earlier writes down what it was started with.
+    const environment = path.join(scratch, 'git-environment');
+    const before = process.env.PATH;
+    process.env.PATH = `${path.join(scratch, 'wrapped-git')}${path.delimiter}${before}`;
+    try {
+      const cases = [['version=2:object-format=sha1', true], ['a.B_c-d=9:Z', true], ['v'.repeat(128), true], ['v'.repeat(129), false],
+        ['version=2;x', false], ['version=2,x', false], ['version=2/x', false], ['version=2 x', false], ['version=2\'x', false], ['$version', false], ['version=2+x', false]];
+      for (const [header, passed] of cases) {
+        fs.rmSync(environment, { force: true });
+        const r = await request(job, 'github.com', { path: '/dn-test/alpha.git/info/refs?service=git-upload-pack', headers: { 'git-protocol': header } });
+        assert.equal(r.status, 200, header);
+        const started = Object.fromEntries(fs.readFileSync(environment, 'utf8').split('\n').filter(Boolean).map((line) => line.split(/=(.*)/s).slice(0, 2)));
+        assert.equal(started.GIT_PROTOCOL, passed ? header : undefined, header);
+      }
+    } finally { process.env.PATH = before; }
+  });
+
+  await check('a job that cannot be given a certificate authority is refused as this machine\'s own fault; one refused for its token, or for the authority it names, is not', async () => {
+    const failing = path.join(scratch, 'failing-openssl');
+    fs.writeFileSync(failing, '#!/bin/sh\necho "no entropy today" >&2\nexit 1\n', { mode: 0o755 });
+    const missing = path.join(scratch, 'no-such-openssl');
+    for (const [openssl, said] of [[missing, `certificate authority: ${missing} not found: the broker cannot issue certificates without it`], [failing, /^certificate authority: .*no entropy today/s]]) {
+      await withBroker({ ca: createCA({ dir: path.join(scratch, `ca-of-${path.basename(openssl)}`), openssl }) }, async (b) => {
+        const refused = await b.addJob({ runId: 'no-ca', pool: alpha.pool }).catch((e) => e);
+        assert.ok(refused instanceof OwnFault, String(refused));
+        assert.equal(refused.name, 'OwnFault');
+        if (typeof said === 'string') assert.equal(refused.message, said); else assert.match(refused.message, said);
+        assert.equal(b.load('no-ca'), null);
+        for (const [given, why] of [[{ token: 'abc' }, /cannot be admitted under that token/], [{ generation: 'ffffffffffff' }, /the certificate authority it was started under is gone/]]) {
+          const other = await b.addJob({ runId: 'no-ca', pool: alpha.pool }, given).catch((e) => e);
+          assert.ok(other instanceof Error && !(other instanceof OwnFault), String(other));
+          assert.match(other.message, why);
+        }
+      });
+    }
   });
 
   await check('removing a job cuts its open connections and leaves the other jobs\' alone', async () => {

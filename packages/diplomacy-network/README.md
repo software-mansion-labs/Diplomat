@@ -50,6 +50,7 @@ src/
     forge.js       performs an allowed request with this machine's credentials
   executor/
     broker.js      the proxy every container talks through
+    feed.js        what the broker's http parser is handed of a connection: a request at a time
     ca.js          the broker's certificate authority and leaf certificates
     llm.js         the model credential the broker adds
     mirror.js      the bare mirror a container clones from
@@ -100,7 +101,7 @@ closed at every start.
 | `tor/` | tor's data directory |
 | `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it. A leaf is good for 90 days, is replaced from two weeks before its end, under a running job too, and is removed once past it |
 | `mirrors/<pool part>.git` | bare mirrors, each named by the 128 bits its pool has in a container's name. One is removed a day after its pool was last linked and not left, never from under a job that reads it, and all of them when the network is switched off; one named by sixteen hex digits is an earlier version's, is not read, and goes a day after it was last touched |
-| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended - the directory first, and the link only once the directory is gone, so one that will not go is met again at the next look - and `runs/.containers/<container>/`, with whatever else a job left in it, once the container is gone and no run in it is kept |
+| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. When that requester's next container for the repository is made, the directory moves whole to `runs/.containers/<container>.<n>/`, which no container is shown, and the links to its runs follow it: the new container starts with an empty one. A job's directory and its link are removed a day after the job ended - the directory first, and the link only once the directory is gone, so one that will not go is met again at the next look - and a directory of either name, with whatever else a job left in it, once no container is shown it and no run in it is kept |
 | `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed once its directory is gone |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
@@ -139,13 +140,15 @@ rewrite - and then counts as switched off.
 A `DN_...` variable that sets a number is taken when it says a number of zero or more;
 unset, empty or anything else, the default stands. Zero is zero: a wait of 0 is no wait,
 an allowance of 0 nothing (`DN_JOB_MODEL_REQUESTS=0` gives a job no request to the
-model), an interval of 0 as often as the process can. Seven settings bound how long or
+model), an interval of 0 as often as the process can. Nine settings bound how long or
 how much something of this machine's may take, and what holds them - node's timers,
 docker - reads 0 as no bound at all: `DN_GIT_TIMEOUT_MS`, `DN_MIRROR_TIMEOUT_MS`,
 `DN_IMAGE_BUILD_TIMEOUT_MS`, `DN_CONTAINER_USAGE_TIMEOUT_MS`, `DN_KEYCHAIN_TIMEOUT_MS`,
-`DN_JOB_IDLE_MS` and `DN_CONTAINER_PIDS`. For these 0 is not taken: the default holds,
-and `daemon.log` says so at the start (`DN_CONTAINER_PIDS=0 would leave no bound where
-one always holds: the default is used`).
+`DN_JOB_IDLE_MS`, `DN_CONTAINER_PIDS`, `DN_CONTAINER_MEMORY` and `DN_CONTAINER_CPUS`.
+For these 0 is not taken: the default holds, and `daemon.log` says so at the start
+(`DN_CONTAINER_PIDS=0 would leave no bound where one always holds: the default is
+used`). The last two are amounts in docker's own words (`8g`, `1.5`) and reach it as
+they are said.
 
 The model credential a job's requests leave with is this machine's own, added by the
 broker on the host and never present in a container. The first of these that exists is
@@ -235,14 +238,14 @@ installer, then kill it and have no answer.
 | Flag | Prints |
 | --- | --- |
 | `--check` | `{ "installed": true, "daemonRunning": <bool>, "pid": <pid or null> }` - there is nothing to install, so `installed` is constant |
-| `--start-daemon` | `{ "ok": <bool>, "daemonRunning": <bool>, "pid": <pid or null>, "error"?: "<why>" }` - the daemon that already runs, or one started for it once its socket answers. A daemon that could not finish its start has exited by then, and `error` carries its reason |
-| `--stop-daemon` | the same object: `ok` once no daemon is left, which with none running is at once. With the network switched off in the settings it then does what a daemon that was not running, died before it could switch off, or found the engine down never did. In the store it cancels every offer of this machine's own that has not ended, stops its runs and gives their claims back, under the records a switch-off signs: nobody is told then, and the pools hear when the daemon next starts. `ended` says how many, `{ "offers": <n>, "runs": <n> }` - both 0 after a daemon that switched itself off. The daemon's socket is held meanwhile and answers 503, so a daemon started in that moment exits and none runs; while a daemon has the socket or is taking it, the ending is that daemon's and the answer has no `ended`. It then removes what is left in docker of this state directory's daemons, and `runs/`, `mirrors/` and `ca/` with it. An engine that refuses is asked again every 5 s (`DN_EXECUTOR_RETRY_MS`) for as long as the answer may wait; with it still down or silent by then, `ok` is false and `error` says what is still there, and the next `--stop-daemon` does it again |
+| `--start-daemon` | `{ "ok": <bool>, "daemonRunning": <bool>, "pid": <pid or null>, "error"?: "<why>" }` - the daemon that already runs, or one started for it once its socket answers. A daemon that could not finish its start has exited by then, and `error` carries its reason. With the network switched off in the settings none is started, and the answer comes at once: `ok` false, `error` `the network is switched off in Diplomat's settings: no daemon was started`. Settings that cannot be read are no switch-off: a daemon is started, and decides for itself |
+| `--stop-daemon` | the same object: `ok` once no daemon is left, which with none running is at once. With the network switched off in the settings it then does what a daemon that was not running, died before it could switch off, or found the engine down never did. In the store it cancels every offer of this machine's own that has not ended, stops its runs and gives their claims back, under the records a switch-off signs: nobody is told then, and the pools hear when the daemon next starts. A run whose job had finished with no daemon to say so - under one that did not live to (`runs/<run id>.outcome.json` is there), or after it (the job's `done` is there, and its outcome is read from what the job left, as a daemon reads it) - ends as that job did: a task of this machine's own is `done` with the job's outcome and not cancelled, and a task of another machine's, which cannot be told with no daemon up, has its claim given back. `ended` says how many, `{ "offers": <n cancelled>, "runs": <n ended> }` - both 0 after a daemon that switched itself off - and `daemon.log` how many of the runs ended as their job left them. The daemon's socket is held meanwhile and answers 503, so a daemon started in that moment exits and none runs; while a daemon has the socket or is taking it, the ending is that daemon's and the answer has no `ended`. It then removes what is left in docker of this state directory's daemons, and `ca/`, `mirrors/` and `runs/` with it, each whatever becomes of the others, and what this user may not delete among the run records through the engine. An engine that refuses is asked again every 5 s (`DN_EXECUTOR_RETRY_MS`) for as long as the answer may wait; with it still down or silent by then, `ok` is false and `error` says what is still there. A directory that could not be removed is named in `error` the same way (`<path> could not be removed: a job left among its records what this user may not delete, and no docker engine deleted it. The next --stop-daemon tries again.`), and the next `--stop-daemon` does it again |
 | `--restart-daemon` | the same object: a stop, then a start |
 
 The snapshot:
 
 ```json
-{ "updatedAt": 0, "daemon": { "pid": 0, "startedAt": 0 },
+{ "updatedAt": 0, "daemon": { "pid": 0, "startedAt": 0, "testSettings": [] },
   "identity": { "pk": "...", "onion": "....onion" },
   "transport": { "state": "starting|bootstrapping|publishing|ready|failed", "detail": "" },
   "docker": { "state": "ready|missing|down|building|failed", "image": "", "detail": "" },
@@ -296,21 +299,27 @@ carries the reason. `devices` is `off` until the operator sets `networkDevices`,
 A pool's `joining` is true from the moment an invite is pasted until the machine that made
 it has answered or the invite has run out: this machine is a pool of one meanwhile. Its
 `joinFailed` is why the last invite let this machine in nowhere - what the other machine
-said, or that the invite ran out unanswered - and is empty once another invite is pasted.
-Its `returning` is true while this machine, back in a pool it left, holds the record of no
-other machine there and asks the machines it left: it is a pool of one until one of them
-answers, and needs no invite. That is the machine that started the pool, back after more
-than 30 days; any other asks the machine that invited it, whose record it kept.
-Its `unseated` is true while every other machine this one knows of in the pool - or, while
-it is `returning`, every machine it left - has refused it and answered it nothing since:
+said, or that the invite ran out unanswered, or that its maker came into the pool under
+this machine before this one began the pool again, so no machine that came in under it
+can let it back in - and is empty once another invite is pasted.
+Its `returning` is true while this machine, back in a pool after it left it or after more
+than 30 days away, asks the machines it knew there and none of them has answered yet: it
+takes and gives none of the pool's jobs until one does, and needs no invite.
+Its `unseated` is true while every other machine this one asks in the pool has refused it
+as no member (`denied` or `not-member`) and answered it nothing since - a machine that
+does not answer, is busy, or refuses this one's clock or its work leaves it false:
 the seat it had there is no longer its own - the machine that gave it began the pool again
 or gave the seat away, or the pool moved and left it too far from the machine that started
 it - and it gets into the pool again by an invite.
 
+`daemon.testSettings` lists what the daemon was given that only a test sets, as
+`NAME=value`: empty for a daemon that belongs on the network ("What only a test sets"
+below).
+
 A pool's `notTaking` is why this machine takes none of that pool's jobs, in a sentence,
 and empty while it takes them: the transport is not up, docker is not ready, there is no
-credential for the model, or the last job of the pool could not be started here
-("Executor side" below). An offer's `notTaking` is why this machine does not take that
+credential for the model, there is no `openssl` to make a job's certificate authority
+with, or the last job of the pool could not be started here ("Executor side" below). An offer's `notTaking` is why this machine does not take that
 job of its own while it is `pooled`: its pool's `notTaking`;
 `this machine takes jobs of at most 12 h and this one needs 24` when
 `networkRequiredMinimumH` is above `networkMaximumAcceptedH`;
@@ -361,7 +370,8 @@ installed yet - is started again by the same daemon: after 5 s, then after twice
 each time, up to 5 minutes (`DN_TRANSPORT_RETRY_MS`, `DN_TRANSPORT_RETRY_MAX_MS`). Each
 try is a new transport behind the one the node holds.
 
-It runs `tor`, `docker`, `git`, `gh`, `glab`, `openssl` and `claude` by name. Diplomat,
+It runs `tor`, `docker`, `git`, `gh`, `glab`, `openssl` and `claude` by name, and on
+macOS `security`, which hands it the model credential from the Keychain. Diplomat,
 started by launchd or by a desktop session, is given the system's directories alone and
 so is the daemon it starts, so the daemon looks further: on the PATH it was given, then
 in the directories a user's installs put a tool in - Homebrew's (`/opt/homebrew/bin`,
@@ -369,12 +379,13 @@ in the directories a user's installs put a tool in - Homebrew's (`/opt/homebrew/
 Desktop's (`~/.docker/bin` and the app's own), the nix profiles, MacPorts' and snap's
 (`DN_TOOL_DIRS`, colon-separated, in place of that list) - then beside `node` itself.
 Everything it starts is given that PATH, so `gh` finds `git` there and `docker` its
-credential helper. `DN_TOR`, `DN_DOCKER`, `DN_GIT`, `DN_GH`, `DN_GLAB`, `DN_OPENSSL` and
-`DN_CLAUDE` each name one tool by its path instead. Where each tool is, or that it is in
+credential helper. `DN_TOR`, `DN_DOCKER`, `DN_GIT`, `DN_GH`, `DN_GLAB`, `DN_OPENSSL`,
+`DN_CLAUDE` and `DN_SECURITY` each name one tool by its path instead. Where each tool is, or that it is in
 none of those directories, is in `daemon.log` from the start and again whenever it
 changes: one installed while the daemon runs is found by the next try, with no restart.
 A `tor` that is nowhere is the snapshot's `transport.detail`, a `docker` that is nowhere
-its `docker.detail`.
+its `docker.detail`, and an `openssl` that is nowhere each pool's `notTaking` on a
+machine that has docker and a model credential: it claims nothing until there is one.
 
 It ends in one of two ways. Stopped (`SIGTERM`, `SIGINT`, `SIGHUP`,
 `install.js --stop-daemon`) with the network still on, it stops the node and the
@@ -384,15 +395,21 @@ daemon after it. Switched off
 after the setting was written), it first cancels every offer of its own that has not
 ended, stops its runs and releases their claims, tells its pools, removes every
 container, relay, network and volume that carries this state directory in its `dn.base`
-label (the image stays), then `runs/`, `mirrors/` and `ca/`, and then exits. A job that
+label (the image stays), then `ca/`, `mirrors/` and `runs/`, and then exits. A job that
 was being started when the switch came is not started, and the switch-off waits for its
-start to find that out. Both ends exit 0, with one exception: a switch-off that could
-not take everything out of docker - the engine refused or did not answer, or a start
-outlasted the wait - says in `daemon.log` what may still be there, keeps `runs/`,
-`mirrors/` and `ca/`, and exits 1; `install.js --stop-daemon` removes it once the engine
-answers. A second signal ends the daemon at once, with exit 1. A daemon that was not
-running when the network was switched off ended nothing: `install.js --stop-daemon`,
-which the applets run at the switch, does it in its place.
+start to find that out. Each of the three directories goes whatever becomes of the
+others. What a job left among its run records that this user may not delete - root's
+files, on an engine that runs containers as root - is removed through the engine, as
+the upkeep removes it, in a container of the image this daemon built. Both ends exit 0,
+with two exceptions. A switch-off that could not take everything out of docker - the engine
+refused or did not answer, or a start outlasted the wait - says in `daemon.log` what may
+still be there, keeps `runs/`, `mirrors/` and `ca/`, and exits 1. One that could not
+remove a directory - run records the engine did not remove either, or with no docker on
+the machine - says in one sentence which is still there, and exits 1. Either way
+`install.js --stop-daemon` does it again, and finishes it once it can. A second signal
+ends the daemon at once, with exit 1. A daemon that was not running when the network was
+switched off ended nothing: `install.js --stop-daemon`, which the applets run at the
+switch, does it in its place.
 
 A daemon that ends after another took its socket over - it had answered nothing for
 longer than a start waits - leaves the socket and `daemon.json` to that one.
@@ -417,12 +434,25 @@ long each time, up to 10 minutes. A promise nobody waited for is logged the same
 A tool named by hand is said so in `daemon.log` beside where it is
 (`docker is /x/docker, which DN_DOCKER names`): whatever stands in a tool's place has
 what the daemon gives that tool, and a docker that is none runs a job on this machine
-itself. What only a test sets is honoured by any daemon that is given it, so each is
-said in `daemon.log` at the start, by name and value, and none belongs in a daemon on
-the network: `DN_TRANSPORT=loop` (loopback TCP in place of Tor; the snapshot's
+itself, as whatever stands in `security`'s place is asked for the model credential.
+What only a test sets is honoured by any daemon that is given it, so each is said in
+`daemon.log` at the start, by name and value
+(`DN_LEASE_SECS=60 is set, which only a test does: this daemon is not one to run on the
+network`), and listed in the snapshot's `daemon.testSettings`, and none belongs in a
+daemon on the network: `DN_TRANSPORT=loop` (loopback TCP in place of Tor; the snapshot's
 `transport.detail` then begins `loop (test transport)`), `DN_FORGE_ORIGINS` (where each
-forge host is reached), `DN_POW_*` (how much work a request costs) and `DN_TEST_FAULTS`
-(a file of faults for the daemon to throw).
+forge host is reached), `DN_TEST_FAULTS` (a file of faults for the daemon to throw),
+and every figure the protocol fixes when it is set to anything but its default: how
+much work a request costs (`DN_POW_*`), how long a lease, its grace and a grant hold
+(`DN_LEASE_SECS`, `DN_LEASE_GRACE_SECS`, `DN_GRANT_TTL_SECS`), how long records and
+members are kept (`DN_RECORD_RETENTION_SECS`, `DN_MEMBER_RETENTION_SECS`), how long
+Diplomat's word on free slots is trusted (`DN_ADMIT_TTL_MS`), and the waits, paces and
+timeouts between members (`DN_RANK_DELAY_MS`, `DN_TICK_MS`, `DN_RETRY_MS`,
+`DN_SYNC_INTERVAL_MS`, `DN_REQUEST_TIMEOUT_MS`, `DN_GIVE_UP_WAIT_MS` and the rest of
+`src/paths.js` from "Protocol constants" to the requester's side, where each is read
+the same way, so none is left out). The settings of this machine's own - what a
+container or a job may take of it, and how often the daemon looks after what it holds -
+are not among them.
 
 **Requester side.** `POST /offer` signs an offer record and pushes it to the pool. A
 machine that takes the task asks this one for its offer, and this one gives it to one
@@ -582,7 +612,9 @@ four things and starts the job:
   leaves it is removed with its relay, its network and its `/work` volume, and that
   peer's next job on that repository gets a new one from the image, so nothing a job
   wrote, installed or left running is there for a job that starts after every earlier
-  one has ended. Jobs of one peer on one repository that run at the same time run in
+  one has ended: not in the container, not in `/work`, and not among the run records
+  it is shown, which start empty - what earlier jobs left there is moved out of its
+  sight when it is made. Jobs of one peer on one repository that run at the same time run in
   that one container, each as root, and nothing in it keeps them apart: each can read
   the other's run directory, its proxy token included, and replace any program the
   other runs. What a job starts from is the host's and the image's all the same: its
@@ -615,9 +647,22 @@ four things and starts the job:
   `/work` volume and the run records, and `overQuota()` names the containers past it.
   In the volume and the records a file counts for the blocks it holds plus 4096 bytes,
   no link is followed and no file is opened; in the writable layer a file counts for
-  its full length, holes included. The run records outlive the container by the day
-  they are kept, so they are measured under its name for as long as any are there,
-  container or not. The daemon asks every
+  its full length, holes included. A file a process unlinked and keeps open is in no
+  directory to be counted that way, and its blocks stay taken: while the container
+  runs, a second probe in its pid namespace (`src/executor/held.cjs`) adds the blocks
+  of every such file that a descriptor or a running program of the container names,
+  on any file system but memory. A job can end that probe, which leaves its container
+  unmeasured for that look; so does a probe that writes more than the 65536 characters
+  it is heard out for. An engine whose first answer is that a probe may not read
+  another container's processes - SELinux keeps containers apart that way - is asked
+  no more, says so once in `daemon.log`, and counts no such file. What only a memory
+  mapping holds, or a descriptor on its way through a unix socket, is counted nowhere:
+  the measure names the container that fills the disk in the ordinary way, and a job
+  that sets out to hide what it holds is bounded only where the engine itself sizes
+  what it writes - the layer on storage that takes `--storage-opt size=`, and `/work`,
+  a volume, on none the daemon asks for. The run records outlive the container by the
+  day they are kept, so they are measured under its name for as long as any are there,
+  container or not, those of its earlier containers among them. The daemon asks every
   10 minutes (`DN_SWEEP_MS`). A name past its allowance is discarded: its jobs are
   stopped and end as failed attempts with the reason `the container outgrew its disk
   allowance` - whichever of them filled it would fill the next one too, and three
@@ -629,8 +674,11 @@ four things and starts the job:
   gone only when all of it is; what is left is measured and tried again.
 - **The relay.** On each container's network sits `dn-<pool part>-<peer part>-relay`:
   the same image running `image/relay.mjs`, which carries TCP from that network to the
-  broker's port on this machine and to nothing else, 1024 connections at a time. It is
-  the container's only way out. It is not a job container and not a second container
+  broker's port on this machine and to nothing else, 1024 connections at a time. Of new
+  connections it carries 256 at once and 64 a second from then on, the rest waiting
+  their turn in the order they came: each one it carries takes a port of this machine,
+  and it is the one place that knows a connection for its container's before anything
+  of it is read. It is the container's only way out. It is not a job container and not a second container
   for the peer: no job runs in it and nothing of a job is in it; it has no capability,
   no writable file system and no credential, shares no namespace and no volume with the
   job container, and it is made and removed with the container it serves.
@@ -665,14 +713,23 @@ four things and starts the job:
     forge. A mirror that cannot be made fails the start with git's reason;
   - the model provider's API is forwarded with this machine's own credential added,
     until the job has had its share: past `DN_JOB_MODEL_REQUESTS` requests or
-    `DN_JOB_MODEL_BYTES` bytes it is answered 429. Of the provider's answer the job
+    `DN_JOB_MODEL_BYTES` bytes it is answered 429. The share is counted in every
+    request sent with the credential and every byte carried for one, either way and
+    whatever the provider said to it. The provider is whoever holds a certificate for
+    its name that the daemon's trust roots vouch for; anybody else at its address
+    is sent nothing. Of the provider's answer the job
     gets the body and the headers a client needs (`content-type`, `content-encoding`,
     `content-length`, `cache-control`, `request-id`, `retry-after`, `x-should-retry`);
     the ones that tell of the account behind the credential stay here;
   - everything else is tunnelled untouched, to the public internet only, so installing
     software works as usual. An address inside a network any interface of this machine
     is on, IPv4 or IPv6, is refused, and so is every range that is not publicly routed;
-    the interfaces are read at each connection. What this machine reaches by a route
+    the interfaces are read at each connection. A name is resolved once for each
+    connection, which goes to the address that passed, and by DNS alone: this
+    machine's hosts file, mDNS and search domains are not asked. A name of one label,
+    and one under `localhost`, `local`, `internal`, `intranet`, `private`, `corp`,
+    `home`, `lan` or `home.arpa`, is refused without being asked of anybody: no public
+    name server answers for those. What this machine reaches by a route
     alone the broker does not know of: a publicly addressed range behind a VPN, or on
     another subnet of the operator's site, is tunnelled to like the rest of the
     internet. The hosts github.com hands downloads
@@ -691,14 +748,30 @@ four things and starts the job:
   apart from every other job's: a plain http request goes down a connection of its own,
   closed with it, and the model provider's are kept for the same job's next request.
 
+  A connection is the job's whose token its first request carries, and the broker reads
+  that first request's head before anything else does. One that names no job running
+  here is answered 407 once and read no further, whatever follows it; one that is no
+  HTTP request, or whose head is over 16 KiB, is closed unanswered. A tunnel is asked
+  for by the first request of its connection. A later request on a job's connection
+  that does not carry that job's token is answered 407 and is the connection's last.
+  The broker keeps 1024 connections that are no job's - those that have not yet said
+  whose they are, and those just refused - and closes the one that has waited longest
+  for the next. The requests of the jobs' connections are read one at a time: a
+  connection is read one request head in a turn of the daemon's loop, and all of them
+  together for 4 ms of a turn, so what a container sends, with a token or without, in
+  whatever number of requests and connections, takes a bounded part of the daemon's
+  time and memory.
+
   One job holds so much of the broker and no more:
   - `DN_JOB_CONNECTIONS` (256) connections from its container;
   - 256 requests at a time, those being answered and those waiting their turn
     together, on however few connections it sends them. A job at that share is read
     no further until one of them ends, by its answer or by its time running out: what
     it sends meanwhile stays in its container, and a connection it closes meanwhile is
-    not seen to close. A request that had arrived by then closes the connection it
-    came on. What a tunnel carries is no request, and is read on;
+    not seen to close. What a tunnel carries is no request, and is read on;
+  - 8 names being resolved at a time, each given 5 s to resolve. The rest wait in the
+    order they came, as many of them as the job may have connections, and wait for
+    nothing of another job's;
   - 32 requests at a time that the broker carries upstream itself, plain http ones
     and the model's together, whatever number of hosts they name, each down one
     connection out. A connection to the model provider that is kept for the job's
@@ -722,6 +795,16 @@ four things and starts the job:
   the next with the number left out since. Of a job's own words such a line carries
   300 characters at most, the unprintable ones replaced.
 
+`daemon.log` is read by its lines, each entry beginning with its time in brackets, and
+much of what is logged is somebody else's words: a job's summary, another machine's
+reason, what a forge or the engine answered, the first bytes of a file that does not
+parse. So in whatever the daemon or the installer writes there, a line break is followed
+by two spaces unless a space or another line break follows it already, as in a stack -
+no further line of an entry begins as an entry does - and a control character other than
+the line break, or one that breaks or reorders a line where it is shown, is written `?`.
+One part of an entry is cut at 8000 characters, and of a failed job's summary
+`<run id> ended: failed (...)` carries 300 on one line, as the broker's lines do.
+
 The job itself is Claude Code in headless mode, whatever runner Diplomat is set to use
 for the agents it starts in terminals: a machine with no credential for it takes no job.
 Its exit is the completion signal; its log holds the cost. The daemon reports the outcome
@@ -730,8 +813,10 @@ to the requester with `done`.
 A job that cannot be started for a reason of this machine's own - the mirror cannot be
 made, the engine or the image is not there, the container cannot be made, another
 daemon's object stands under its name - never ran: its claim is given back, which costs
-the requester none of the task's three attempts, and this machine does not go for that
-task again. The executor's parts say which failures those are, as an `OwnFault`
+the requester none of the task's three attempts, and this machine leaves that task to
+the other members for 2 minutes, twice as long each time it gives the same offer back
+and an hour at most, and then may take it again. The executor's parts say which failures
+those are, as an `OwnFault`
 (`src/executor/own-fault.js`). A start that fails any other way - what earlier jobs left
 could not be removed, the container went from under its jobs, the runner did not come up
 in it - may be the doing of the requester's own jobs, so it is a failed attempt like a
@@ -748,15 +833,24 @@ Everything in a job's directory is the job's to write, so the daemon reads `done
 the three logs in the directory that stands where it put it, never through a link,
 without waiting for a writer, off its own thread, and by their last bytes only: 32 of
 `done`, 4 MiB of `log.jsonl`, 2000 of `stderr.log` and `setup.log`. A pipe, a socket, a
-device or a directory in a file's place reads as nothing. Of the result line only
-positive numbers count, and the summary is cut at 4000 characters.
+device or a directory in a file's place reads as nothing. The log is read and made out
+on a thread of its own, which hands the daemon's a result of five small members and
+nothing else of the log. A result line with 100000 commas and opening brackets outside
+its strings, or more, is no result. Of a result line only positive numbers count, the
+models it names count when they are named in an object, the summary is cut at 4000
+characters and a model's name at 100. What a command the daemon runs in a job's
+container writes back - the job's process group at its start, the word on whether it
+still runs - is heard out for 65536 characters and no further.
 
 The tokens and the cost are the job's own word, and this machine's budget is counted
 from them. They stand no higher than what the broker carried to the model for the job:
 one token for each byte of its model requests and their answers, and USD 80 for a
 million of those bytes - the dearest a token is sold at, the output of the top model in
-its fast mode as priced in November 2026. A job that sent the model nothing reports no
-tokens and no cost. An outcome of which a figure was lowered carries `capped: true`.
+its fast mode as priced in November 2026. The requests that count are the inference
+requests the provider answered with a success, under this machine's credential: one it
+refused, one that never reached it and a count of tokens bought nothing, and raise no
+figure. A job that sent the model nothing reports no tokens and no cost. An outcome of
+which a figure was lowered carries `capped: true`.
 
 A machine takes work only while its docker engine answers, the image is there and a
 model credential is; both are looked at again every 30 s, and the snapshot says which is
@@ -769,18 +863,35 @@ reads `jobs.json`, listens where the broker listened, and takes each job up wher
 stands: a job that ended meanwhile is reported with the outcome it left; one still
 running is watched again, in its container as it is, under the proxy token and the
 certificate authority it was started with, with the forwards it was started with and
-its share of the model counted on from what `jobs.json` says it had spent. Until that
-is done no job is started - a run that was still waiting for its key, or an offer made
+its share of the model counted on from what `jobs.json` says it had spent, which is
+written there every 5 s, for a job that is being stopped too. That waits for neither
+the image nor the model credential: while an image is built, which takes minutes, a job
+from before goes on reaching its forge and the model. A job whose run was ended while
+no daemon ran - by a daemon that went before the job was gone, or by a switch-off that
+could not clear docker - is watched and stopped, and is admitted to nothing. An engine
+that does not answer says nothing about the jobs in it: it is asked every 5 s
+(`DN_EXECUTOR_RETRY_MS`), and after 60 s of that (`DN_ENGINE_WAIT_MS`) the jobs from
+before are given back, which costs their requesters no attempt; whatever the engine
+still holds of them is stopped once it answers, found by its run directory. Until the
+jobs from before are taken up, and the image and the credential were looked at once, no
+job is started - a run that was still waiting for its key, or an offer made
 with `now` in the daemon's first moment, waits for it - so a container holding a job
-from before is never made anew under it. A job that cannot be taken up - its container is gone, or the
-broker's port could not be had again - is stopped for that reason, and the node gives
-the task back. So that the port can be had again, the broker listens below the range
+from before is never made anew under it. A job that cannot be taken up - its container is gone or
+stopped, or the broker's port could not be had again - is stopped for that reason, and
+the node gives the task back, at no attempt. A job ends by itself only by writing its
+exit code in `done`, and its container outlives it; a container gone or stopped under a
+job that wrote none went while no daemon ran, as a reboot or a restart of Docker Desktop
+leaves it, which is the machine's doing and not the job's. A job that did write one
+ends as it finished, its outcome read from what it left, whatever became of its
+container since. So that the port can be had again, the broker listens below the range
 Linux deals outgoing connections from, where that range leaves room below it: a port
 of the range may be given to some connection while the daemon is away, and cannot be
 listened on while that connection lasts, nor for a minute after. Every 15 s the jobs in this daemon's containers are held against the
 node's runs, and a job no run stands behind is stopped: one whose run was stopped
 while the engine did not answer, and one `jobs.json` no longer names, which is found by
-its run directory.
+its run directory. The stop of one found that way is begun only once the engine answers
+`docker version`, asked once at a time: with the engine down nothing more is asked of
+it.
 
 **Stopping a job.** A job is root in its container and can write wherever the container
 can, its own run directory included. So nothing the host runs to ask after a job or to

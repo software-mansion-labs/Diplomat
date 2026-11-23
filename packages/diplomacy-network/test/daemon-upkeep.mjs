@@ -22,6 +22,9 @@ process.umask(0o022);
 const FAKE_TOR = fileURLToPath(new URL('./lib/fake-tor.mjs', import.meta.url));
 const bench = await createBench();
 
+const ESC = '\u001b';
+// A line that begins as the log's own entries do.
+const ENTRY = /^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\] /;
 const offerOf = async (m, taskId) => (await m.state()).offers.find((o) => o.taskId === taskId);
 const runOf = async (m, taskId) => (await m.state()).runs.filter((r) => r.taskId === taskId).at(-1) ?? null;
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
@@ -152,7 +155,9 @@ try {
     const runs = path.join(up.base, 'runs');
     const ended = await runOf(up, (await up.state()).offers[0].taskId);
     const going = await waiting(up, await own(up, 'issue-2', 'wait kept\nsay kept'), 'kept');
-    const parts = (run) => [path.join(runs, run.runId), path.join(runs, '.containers', run.container, run.runId), path.join(runs, `${run.runId}.outcome.json`)];
+    // A run's directory is among its container's run records, or where those were moved when the pair's next container was made.
+    const records = (run) => names(path.join(runs, '.containers')).filter((dir) => dir === run.container || dir.startsWith(`${run.container}.`)).map((dir) => path.join(runs, '.containers', dir, run.runId));
+    const parts = (run) => [path.join(runs, run.runId), records(run).find((dir) => exists(dir)) ?? records(run)[0], path.join(runs, `${run.runId}.outcome.json`)];
     const kept = (run) => parts(run).map((part) => { try { fs.lstatSync(part); return true; } catch { return false; } });
     const mirror = path.join(up.base, 'mirrors', names(path.join(up.base, 'mirrors'))[0]);
     const age = (file, hours) => fs.lutimesSync(file, Date.now() / 1000 - hours * 3600, Date.now() / 1000 - hours * 3600);
@@ -180,22 +185,34 @@ try {
     assert.deepEqual(kept(going), [true, true, true], 'a run that ended a moment ago is kept');
 
     // A directory this user cannot remove, as root's files in a job's records are on an
-    // engine that runs containers as root: the engine is asked to, and while it stands
+    // engine that runs containers as root: the engine is asked to, and while it will not
     // the run is not forgotten.
     const locked = path.join(parts(going)[1], 'locked');
     fs.mkdirSync(locked);
     fs.writeFileSync(path.join(locked, 'file'), '');
     fs.chmodSync(locked, 0o500);
+    const refusing = path.join(up.dockerDir, 'fail-run-find');
+    fs.writeFileSync(refusing, 'Error response from daemon: not now\n'.repeat(1000));
     const asked = () => up.docker('run').filter((call) => call.includes('find') && call.includes(`/r/${going.runId}`) && call.includes('-delete')).length;
     for (const part of [parts(going)[0], parts(going)[2]]) age(part, 25);
     try {
       await until('the engine asked to remove it, twice', () => asked() >= 2);
       assert.deepEqual(kept(going), [true, true, true], 'met again at the next look');
+      fs.rmSync(refusing);
+      await until('the run forgotten', () => kept(going).every((there) => !there));
     } finally {
       // Whatever came of it, the bench can remove its own directory.
-      fs.chmodSync(locked, 0o700);
+      try { fs.chmodSync(locked, 0o700); } catch {}
     }
-    await until('the run forgotten', () => kept(going).every((there) => !there));
+
+    // Left, with its repository still linked: the mirror ages as an unlinked pool's does.
+    await up.linked();
+    await done(up, await own(up, 'issue-3', 'say again'));
+    assert.equal(exists(mirror), true);
+    await up.ok('/leave', { pool: POOL });
+    await moreSweeps(up);
+    age(mirror, 25);
+    await until('the mirror of the pool it left removed', () => !exists(mirror));
     await up.kill();
   });
 
@@ -383,6 +400,46 @@ try {
     await m.kill();
   });
 
+  await check('what a job, a file or another machine put into a line of the log stays inside that line: a failed job\'s own words are one short line of it, and a line break in any other entry is followed by no line that begins as an entry does', async () => {
+    const m = await bench.machine('lg').start();
+    await m.linked();
+    const words = `done\n[2026-01-01T00:00:00.000Z] ended\n${ESC}[2J${ESC}[1;1Hall is well ${'x'.repeat(400)}`;
+    await own(m, 'pr-1', `fail\nsays ${JSON.stringify(words)}`);
+    const line = await until('the end of its run logged', () => m.log().split('\n').find((l) => / ended: failed \(/.test(l)));
+    assert.equal(line.replace(/^\[[^\]]+\] \S+ /, ''), `ended: failed (done?[2026-01-01T00:00:00.000Z] ended??[2J?[1;1Hall is well ${'x'.repeat(240)}... (${words.length} characters))`);
+    await m.kill();
+    // A document of the store that is not one: its first characters are in the line that says so.
+    fs.writeFileSync(path.join(m.base, 'peers.json'), 'x\n[2026-01-01T00:00:00.000Z] ended');
+    await m.start();
+    await until('the document said not to parse', () => /store: peers\.json does not parse/.test(m.log()));
+    assert.match(m.log(), /store: peers\.json does not parse \([^\n]*\n  \[2026-01/);
+    assert.deepEqual(m.log().split('\n').filter((line) => line.startsWith('[') && !ENTRY.test(line)), []);
+    await m.kill();
+  });
+
+  await check('a container over its disk allowance is left for the next look while a job in it is still being started: its jobs are stopped together, once that one runs', async () => {
+    const m = await bench.machine('qs', { env: { DN_SWEEP_MS: '200', DN_CONTAINER_DISK_BYTES: String(4 * 2 ** 20) } }).start();
+    await m.linked();
+    const one = await own(m, 'pr-1', 'wait never\nsay never');
+    const first = await waiting(m, one, 'never');
+    // The engine takes the start of a second job in it and does not answer.
+    const hold = path.join(m.dockerDir, 'hold-exec-sh');
+    fs.writeFileSync(hold, '');
+    const two = await own(m, 'pr-2', 'wait never\nsay never');
+    await until('the second job to be started', () => m.docker('exec').filter((call) => call.some((arg) => /run\.sh$/.test(arg))).length === 2);
+    const [volume] = names(path.join(m.dockerDir, 'volumes')).filter((n) => !n.endsWith('.labels'));
+    fs.writeFileSync(path.join(m.dockerDir, 'volumes', volume, 'big'), Buffer.alloc(5 * 2 ** 20, 1));
+    await moreSweeps(m);
+    assert.doesNotMatch(m.log(), /stopping its \d+ job\(s\)|upkeep of .* failed/, 'not while one of its jobs is being started');
+    assert.equal((await runOf(m, one)).state, 'running');
+    fs.rmSync(hold);
+    await until('both offers to say why', async () => (await Promise.all([one, two].map((taskId) => offerOf(m, taskId)))).every((offer) => offer.reason === 'the container outgrew its disk allowance'));
+    await until('the container discarded', () => m.log().includes(`discarded ${first.container}`));
+    assert.match(m.log(), /: stopping its 2 job\(s\) and removing it\n/);
+    assert.doesNotMatch(m.log(), /upkeep of .* failed/);
+    await m.kill();
+  });
+
   await check('a container the engine does not measure, look after look, is held to no allowance: its job is stopped as a failed attempt that says so, and it goes', async () => {
     const m = await bench.machine('um', { env: { DN_SWEEP_MS: '200', DN_CONTAINER_DISK_BYTES: String(2 ** 30) } }).start();
     await m.linked();
@@ -424,15 +481,15 @@ try {
     const jobsFile = path.join(m.base, 'jobs.json');
     const keptOf = () => JSON.parse(fs.readFileSync(jobsFile, 'utf8')).jobs[run.runId];
     assert.deepEqual(await m.stop(), { code: 0, signal: null });
-    assert.deepEqual(keptOf().spent, { requests: 0, bytes: 0 });
+    assert.deepEqual(keptOf().spent, { requests: 0, bytes: 0, carried: 0 });
     // As if the job had used up its share before the daemon went.
     const all = JSON.parse(fs.readFileSync(jobsFile, 'utf8'));
-    all.jobs[run.runId].spent = { requests: 5000, bytes: 123 };
+    all.jobs[run.runId].spent = { requests: 5000, bytes: 123, carried: 456 };
     fs.writeFileSync(jobsFile, JSON.stringify(all));
     const at = fs.statSync(jobsFile).mtimeMs;
     await m.start();
     await until('the job taken up and jobs.json written again', () => m.log().includes(`${run.runId} taken up in ${run.container}`) && fs.statSync(jobsFile).mtimeMs !== at);
-    assert.deepEqual(keptOf().spent, { requests: 5000, bytes: 123 }, 'the broker counts on from what was kept');
+    assert.deepEqual(keptOf().spent, { requests: 5000, bytes: 123, carried: 456 }, 'the broker counts on from what was kept');
     m.release('go');
     await done(m, taskId);
     const step = m.agent(run.runId).steps.find((s) => s.verb === 'model');

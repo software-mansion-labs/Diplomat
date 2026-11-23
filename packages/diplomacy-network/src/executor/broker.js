@@ -1,9 +1,13 @@
 // The proxy every container talks through. One listener per daemon, which a job
 // container reaches through its relay and no other way; a job's proxy URL carries that
-// job's own token, so every request names the job it belongs to and a request without a
-// live token is answered 407 and nothing else.
+// job's own token, so every request names the job it belongs to. A connection is the
+// job's whose token its first request carries. The broker reads that first head itself,
+// off the socket: a connection that names no admitted job is answered 407 once and read
+// no further, and a CONNECT never reaches node's http parser. The other requests of a
+// job's connection reach the parser through a feed (feed.js), one head at a time.
 //
-// What a job's request becomes (a host is read without its case and its trailing dot):
+// What a job's request becomes (a host is read without its case and its trailing dot;
+// a CONNECT is the first request of its connection):
 //   CONNECT <name>.forward.dn -> the forward of that name opened for this job, if any
 //   CONNECT to a forge host of its pool, or to the model provider, on 443
 //                         -> TLS is terminated here with a certificate from ca.js, and
@@ -14,15 +18,17 @@
 //                                               until the job has had its share of it
 //   the same hosts on any other port, over plain http, or by the forge's ssh host
 //                         -> refused: those lead around the reading
-//   CONNECT anywhere else -> a blind tunnel, unless the name resolves to this machine,
-//                            its LAN or the docker bridge
+//   CONNECT anywhere else -> a blind tunnel, unless the name is one of a machine's own
+//                            network (asked of nobody), or DNS resolves it to this
+//                            machine, its LAN or the docker bridge
 //   GET http://...        -> forwarded, same destination rule, framed by the broker
 //
 // Everything a job sends is hostile. No handler lets an exception out (it would end the
 // daemon for every peer), no upstream connection serves two jobs, and what one job may
 // hold of this process at a time is bounded: connections, requests, connections out,
-// request bodies read whole, forge requests in flight, and the time a request may take
-// to arrive.
+// names being resolved, request bodies read whole, forge requests in flight, and the
+// time a request may take to arrive. So is what is no job's: the connections whose
+// first head has not come, or was refused.
 
 import crypto from 'node:crypto';
 import dns from 'node:dns';
@@ -38,7 +44,9 @@ import {
   GIT_BIN, JOB_BODY_MS, JOB_BUFFER_BYTES, JOB_CONNECTIONS, JOB_FORGE_REQUESTS, JOB_HEADER_MS, JOB_IDLE_MS,
   JOB_MODEL_BYTES, JOB_MODEL_REQUESTS, LOCAL_PORTS_PATH, RELAY_HOST,
 } from '../paths.js';
+import { createFeeder, headEnd } from './feed.js';
 import { carriesPlaceholder } from './llm.js';
+import { own } from './own-fault.js';
 import { clip, createSparingLog } from './sparing.js';
 
 /// The model provider's hosts: the ones a job's requests gain this machine's credential on.
@@ -52,6 +60,20 @@ export const JOB_REQUESTS = 256;
 /// down a connection out: its plain http requests and its requests to the model
 /// provider together. A tunnel has a connection out of its own.
 export const JOB_UPSTREAMS = 32;
+
+/// The most names one job has asked of DNS at a time; a connection that needs another
+/// waits for one of them.
+export const JOB_LOOKUPS = 8;
+
+/// How long a name may take to resolve.
+export const LOOKUP_MS = 5000;
+
+/// The most connections the broker keeps that are no job's: those whose first request
+/// has not come, and those refused and given a moment to read why.
+export const STRANGERS = 1024;
+
+// The longest request head a connection's first may be: what node's own parser takes.
+const HEAD_BYTES = http.maxHeaderSize;
 
 // Where the credential goes: inference and nothing else. The provider's other paths
 // (the account's profile, its usage, its files) answer a subscriber's token too, and no
@@ -225,8 +247,32 @@ function dockerBridgeGateway() {
   });
 }
 
-async function systemLookup(host) {
-  return dns.promises.lookup(host, { all: true, order: 'ipv4first' });
+// The names no public name server answers for: a single label, and the names set aside
+// for a machine's own use or its network's. Whether one resolves is the word of this
+// machine's local name services (its hosts file, mDNS, its search domains), which take
+// seconds to say no and say what is on the network around it.
+const LOCAL_NAMES = /(^|\.)(localhost|local|internal|intranet|private|corp|home|lan|home\.arpa)$/;
+
+/// Whether the broker refuses `host`, a name as normalHost gives it, without asking any
+/// resolver: it cannot be a name of the public internet.
+export function localName(host) {
+  return !host.includes('.') || LOCAL_NAMES.test(host);
+}
+
+/// A lookup that asks DNS and nothing else of this machine: not its hosts file, not
+/// mDNS, and not getaddrinfo, whose calls wait their turn for the few threads the
+/// daemon reads its own files on, so that one slow name holds up the next. `lookup(host)`
+/// resolves to `[{ address, family }]`, IPv4 first. `servers` replaces the name servers
+/// of the system.
+export function dnsLookup({ servers = null } = {}) {
+  const resolver = new dns.promises.Resolver({ timeout: LOOKUP_MS / 2, tries: 2 });
+  if (servers) resolver.setServers(servers);
+  return async (host) => {
+    const [v4, v6] = await Promise.allSettled([resolver.resolve4(host), resolver.resolve6(host)]);
+    const found = [...(v4.value ?? []).map((address) => ({ address, family: 4 })), ...(v6.value ?? []).map((address) => ({ address, family: 6 }))];
+    if (found.length === 0) throw v4.reason;
+    return found;
+  };
 }
 
 function systemConnect({ host, port }) {
@@ -292,16 +338,18 @@ function lowerKeys(headers) {
 /// headers, body })` (body base64) resolves to `{ status, headers, body }` (body base64
 /// or a Buffer). `lookup`, `connect` and `upstreamCa` replace name resolution, the
 /// outgoing TCP connection and the trust roots of the model provider: tests have no
-/// other way to stand in for the internet. `limits` replaces what one job may hold at a
-/// time and for how long: `{ connections, requests, upstreams, bufferBytes,
-/// forgeRequests, headerMs, bodyMs, idleMs, answerMs }`, by default JOB_REQUESTS and
-/// JOB_UPSTREAMS, the JOB_* tunables of paths.js and, for `answerMs`,
-/// FORGE_ANSWER_TIMEOUT_MS.
+/// other way to stand in for the internet. `limits` replaces
+/// what one job may hold at a time and for how long, and how many connections may be no
+/// job's: `{ connections, requests, upstreams, lookups, bufferBytes, forgeRequests,
+/// strangers, headerMs, bodyMs, idleMs, answerMs, lookupMs }`, by default JOB_REQUESTS,
+/// JOB_UPSTREAMS, JOB_LOOKUPS, STRANGERS and LOOKUP_MS, the JOB_* tunables of paths.js
+/// and, for `answerMs`, FORGE_ANSWER_TIMEOUT_MS.
 export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace = null,
-  lookup = systemLookup, connect = systemConnect, upstreamCa = undefined, limits: given = {} } = {}) {
+  lookup = dnsLookup(), connect = systemConnect, upstreamCa = undefined, limits: given = {} } = {}) {
   const limits = {
-    connections: JOB_CONNECTIONS, requests: JOB_REQUESTS, upstreams: JOB_UPSTREAMS, bufferBytes: JOB_BUFFER_BYTES, forgeRequests: JOB_FORGE_REQUESTS,
-    headerMs: JOB_HEADER_MS, bodyMs: JOB_BODY_MS, idleMs: JOB_IDLE_MS, answerMs: FORGE_ANSWER_TIMEOUT_MS, ...given,
+    connections: JOB_CONNECTIONS, requests: JOB_REQUESTS, upstreams: JOB_UPSTREAMS, lookups: JOB_LOOKUPS, bufferBytes: JOB_BUFFER_BYTES,
+    forgeRequests: JOB_FORGE_REQUESTS, strangers: STRANGERS,
+    headerMs: JOB_HEADER_MS, bodyMs: JOB_BODY_MS, idleMs: JOB_IDLE_MS, answerMs: FORGE_ANSWER_TIMEOUT_MS, lookupMs: LOOKUP_MS, ...given,
   };
   // What a job brings about as often as it likes is written once a minute for each kind.
   const sparing = createSparingLog(log);
@@ -335,16 +383,46 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     } catch (e) { drop(e); }
   };
 
+  // What a name resolves to, asked for a job: no more of its names are asked at a time
+  // than its share, the rest wait in the order they came, and an answer is waited for no
+  // longer than lookupMs. A job's lookups wait for nothing of another job's. The line
+  // is no longer than the job may have connections: a request whose sender went leaves
+  // its name in it until its turn.
+  async function resolve(job, host) {
+    if (job.looking < limits.lookups) job.looking += 1;
+    else if (job.lookTurns.length >= limits.connections) throw new Error(`${job.lookTurns.length} names of this job wait to be resolved already`);
+    else await new Promise((turn) => job.lookTurns.push(turn));
+    let timer;
+    try {
+      // A place that came round after the job ended is asked nothing for.
+      if (!live(job)) throw new Error('the job has ended');
+      return await Promise.race([
+        lookup(host),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer within ${limits.lookupMs / 1000} s`)), limits.lookupMs); }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      // The place goes to whoever waited longest, or is given back.
+      const next = job.lookTurns.shift();
+      if (next) next();
+      else job.looking -= 1;
+    }
+  }
+
   // One resolution per connection, and the connection goes to the address that passed
   // the check: a name that answers differently a moment later gets no second look.
-  async function dial(host, port) {
+  async function dial(job, host, port) {
     // The names a container knows this machine by mean nothing to the resolver out
     // here, and the job is owed the reason rather than "does not resolve".
     if (host === normalHost(CONTAINER_HOST) || /(^|\.)docker\.internal$/.test(host)) {
       throw new Refusal(403, `the broker does not connect to ${host}: that name is this machine, not a public internet address. ${NOT_HERE}`);
     }
+    const family = net.isIP(host);
+    if (!family && localName(host)) {
+      throw new Refusal(403, `the broker does not connect to ${host}: that is a name of a machine's own network, not of the public internet. ${NOT_HERE}`);
+    }
     let found;
-    try { found = await lookup(host); } catch (e) { throw new Refusal(502, `${host} does not resolve (${e.code || e.message})`); }
+    try { found = family ? [{ address: host, family }] : await resolve(job, host); } catch (e) { throw new Refusal(502, `${host} does not resolve (${e.code || e.message})`); }
     const allowed = found.filter((a) => !deniedAddress(a.address));
     if (allowed.length === 0) {
       throw new Refusal(403, `the broker does not connect to ${host}: ${found.length ? `${found[0].address} is` : 'it has no address and so is'} not a public internet address. ${NOT_HERE}`);
@@ -366,7 +444,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   function agentFor(job, wrap, kept) {
     const agent = new http.Agent(kept);
     agent.createConnection = (opts, cb) => {
-      dial(opts.host, opts.port).then((raw) => {
+      dial(job, opts.host, opts.port).then((raw) => {
         // A job that ended meanwhile: its request is torn down as its connection
         // closes, which is later than this.
         if (!live(job)) {
@@ -390,8 +468,9 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     });
   };
 
-  function jobOf(req) {
-    const m = /^Basic\s+(\S+)$/i.exec(req.headers['proxy-authorization'] || '');
+  // The job a Proxy-Authorization header's value names, or null.
+  function jobBy(authorization) {
+    const m = /^Basic\s+(\S+)$/i.exec(authorization || '');
     if (!m) return null;
     const [user, token] = Buffer.from(m[1], 'base64').toString('utf8').split(/:(.*)/s);
     return user === 'dn' ? tokens.get(token) || null : null;
@@ -406,26 +485,24 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     socket.once('close', () => job.sockets.delete(socket));
   }
 
-  // `socket` is where the requests that come down `client` are read from: `client`
-  // itself, or the terminated connection inside it. While the job is at its share of
-  // requests it is stopped, and stopped again whenever node starts it by itself: after
-  // each request, and for each body. Its server has the connection by now: node's own
-  // listener for the same event starts the reading, and this one has to come after it.
-  function reads(job, client, socket) {
-    job.clients.set(client, socket);
+  // `requests` is the feed the requests that come down `client` are read from: its own
+  // bytes, or those of the terminated connection inside it. While the job is at its
+  // share of requests the feed is stopped, from the first when the job is at its share
+  // by then.
+  function reads(job, client, requests) {
+    job.clients.set(client, requests);
     // Each request it has here watches it close, some from several places.
-    socket.setMaxListeners(0);
-    socket.on('resume', () => { if (job.stopped && job.clients.get(client) === socket) job.stopped.add(socket.pause()); });
+    requests.setMaxListeners(0);
+    if (job.stopped) requests.stop();
   }
 
   // A place among the job's connections for one of its container's, or false when the
   // job has as many as it gets.
   function seat(job, socket) {
-    if (job.clients.has(socket)) return true;
     if (job.clients.size >= limits.connections) return false;
+    job.clients.set(socket, null);
     socket.once('close', () => job.clients.delete(socket));
     hold(job, socket);
-    reads(job, socket, socket);
     return true;
   }
   const crowded = () => `this job has ${limits.connections} connections open through the broker, the most a job gets at a time: close some`;
@@ -509,29 +586,22 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   // ---- how many requests a job may have here at a time
 
   // A request counts from its head to the end of its answer. At the job's share the
-  // connections its requests come on are read no further, so what it sends next waits
-  // with its sender, and so does the news that it closed one, until a request ends by
-  // its answer or its time. Node has by then parsed every request of the read at hand:
-  // one handed over past the share closes the connection it came on. A connection node
-  // had stopped itself, for a body nobody reads yet, is not started from here: that
-  // would read the body into memory.
+  // feeds its requests come through hand nothing on, so what it sends next waits with
+  // its sender, and so does the news that it closed a connection, until a request ends
+  // by its answer or its time. A feed hands node one request head at a time, so none
+  // comes past the share. A feed node had paused itself, for a body nobody reads yet,
+  // stays paused when the stop ends: starting it would read the body into memory.
   function counted(job, req, res) {
-    if (job.asked >= limits.requests) {
-      req.socket.destroy();
-      return false;
-    }
     job.asked += 1;
     over(res, () => {
       job.asked -= 1;
-      const { stopped } = job;
-      job.stopped = null;
-      for (const s of stopped ?? []) s.resume();
+      job.stopped = false;
+      for (const requests of job.clients.values()) requests?.start();
     });
     if (job.asked >= limits.requests) {
-      job.stopped = new Set();
-      for (const s of job.clients.values()) if (s && !s.isPaused()) job.stopped.add(s.pause());
+      job.stopped = true;
+      for (const requests of job.clients.values()) requests?.stop();
     }
-    return true;
   }
 
   // ---- how long a request may take to arrive
@@ -677,30 +747,72 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
 
   // ---- the listener a container sees
 
-  const outer = http.createServer({ requestTimeout: 0 });
-  outer.timeout = limits.idleMs;
-  outer.on('connection', (socket) => expectHead(socket));
-  outer.on('error', (e) => log('broker', `the listener: ${e.message}`));
+  const feed = createFeeder();
+  // The connections that are no job's: those whose first request head has not come, and
+  // those refused, which are given a moment to read why. When there are as many as the
+  // broker keeps, the one that has waited longest is closed for the next.
+  const strangers = new Set();
 
   const onlyHttps = (host, port) => `the broker connects to ${host} on port 443 only, where its requests are read; ${port === 80 ? 'plain http' : `port ${port}`} would lead around that`;
   const noSsh = (job, host) => `the broker does not connect to ${host}: it serves ${job.info.pool.host} over ssh, around the requester, and no key for it is in this container. Use https://${job.info.pool.host}/`;
 
-  outer.on('connect', guard(async (req, socket, head) => {
-    gotHead(socket);
+  // A connection's first request head is read here, off the socket, before node's
+  // parser is given a byte of it: a connection that names no admitted job costs one
+  // look at one head, one answer and nothing after, whatever it sends and however much.
+  const front = net.createServer({ allowHalfOpen: true, noDelay: true }, (socket) => {
     socket.on('error', () => socket.destroy());
     socket.setTimeout(limits.idleMs, () => socket.destroy());
-    const job = jobOf(req);
+    if (strangers.size >= limits.strangers) {
+      const [longest] = strangers;
+      strangers.delete(longest);
+      longest.destroy();
+    }
+    strangers.add(socket);
+    socket.once('close', () => strangers.delete(socket));
+    expectHead(socket);
+    let seen = null;
+    const more = guard((chunk) => {
+      seen = seen ? Buffer.concat([seen, chunk]) : chunk;
+      const end = headEnd(seen);
+      if ((end === -1 ? seen.length : end) > HEAD_BYTES) return socket.destroy();
+      if (end === -1) return undefined;
+      socket.off('data', more);
+      socket.pause();
+      gotHead(socket);
+      return first(socket, seen, end);
+    }, socket);
+    socket.on('data', more);
+  });
+  front.on('error', (e) => log('broker', `the listener: ${e.message}`));
+
+  // What the broker itself goes by in a first head: the request line, and the token.
+  // A CONNECT is answered from here. Any other request is node's to read, the bytes of
+  // its head with it, through a feed.
+  function first(socket, seen, end) {
+    const lines = seen.latin1Slice(0, end).split(/\r?\n/);
+    const line = /^([A-Z]+) (\S+) HTTP\/1\.[01]$/.exec(lines[0]);
+    if (!line) return socket.destroy();
+    const [, method, target] = line;
+    const authorization = lines.find((l) => /^proxy-authorization:/i.test(l));
+    const job = jobBy(authorization?.slice(authorization.indexOf(':') + 1).trim());
     if (!job) {
-      if (trace) trace(`407 CONNECT ${req.url}`);
+      if (trace) trace(`407 ${method} ${method === 'CONNECT' ? target : target.split('?')[0]}`);
       return sayAndClose(socket, DENY_407);
     }
     if (!seat(job, socket)) return refuse(socket, new Refusal(503, crowded()));
-    // What it carries from here on is no request for the broker to read off it.
-    job.clients.set(socket, null);
-    const m = /^(\[[0-9a-fA-F:.]+\]|[^:[\]]+):(\d{1,5})$/.exec(req.url);
+    strangers.delete(socket);
+    if (method === 'CONNECT') return tunnel(job, target, socket, seen.subarray(end));
+    const requests = feed(socket, seen);
+    requests.dn = { job };
+    plain.emit('connection', requests);
+    return reads(job, socket, requests);
+  }
+
+  const tunnel = guard(async (job, target, socket, head) => {
+    const m = /^(\[[0-9a-fA-F:.]+\]|[^:[\]]+):(\d{1,5})$/.exec(target);
     const port = m ? Number(m[2]) : 0;
     const host = m ? normalHost(m[1]) : '';
-    if (!host || port < 1 || port > 65535) return refuse(socket, new Refusal(400, `not a host and port: ${req.url}`));
+    if (!host || port < 1 || port > 65535) return refuse(socket, new Refusal(400, `not a host and port: ${target}`));
     if (trace) trace(`${job.info.runId} CONNECT ${host}:${port}`);
     if (job.intercept.has(host)) {
       if (port !== 443) return refuse(socket, new Refusal(403, onlyHttps(host, port)));
@@ -708,13 +820,13 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     }
     if (job.ssh.has(host)) return refuse(socket, new Refusal(403, noSsh(job, host)));
     const forward = /^([a-z0-9-]+)\.forward\.dn$/.exec(host);
-    const target = forward && job.forwards.get(forward[1]);
-    if (forward && !target) return refuse(socket, new Refusal(404, `this job has no forward named ${forward[1]}`));
+    const to = forward && job.forwards.get(forward[1]);
+    if (forward && !to) return refuse(socket, new Refusal(404, `this job has no forward named ${forward[1]}`));
     let upstream;
     try {
       // A forward leads to this machine on purpose, so it is not held to the rule for
       // everything else; which job may use it is settled by the token it came with.
-      upstream = await (target ? systemConnect({ host: target.host || '127.0.0.1', port: target.port }) : dial(host, port));
+      upstream = await (to ? systemConnect({ host: to.host || '127.0.0.1', port: to.port }) : dial(job, host, port));
     } catch (e) {
       sparing(`job ${job.info.runId} refused`, 'broker', job.info.runId, clip(`refused ${host}:${port}: ${e.message}`));
       return refuse(socket, e);
@@ -729,18 +841,22 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     if (head.length) upstream.write(head);
     socket.pipe(upstream);
     upstream.pipe(socket);
-  }));
+  });
 
-  outer.on('request', guard(async (req, res) => {
+  // The requests of a connection that began with one that was no CONNECT. The
+  // connection is the job's whose token its first request carried, and a request on it
+  // that does not carry that token is its last. So is a CONNECT: node closes the
+  // connection of one that nobody listens for.
+  const plain = http.createServer(guard(async (req, res) => {
     begun(req, res);
-    const job = jobOf(req);
-    if (!job) {
+    const { job } = req.socket.dn;
+    if (jobBy(req.headers['proxy-authorization']) !== job) {
       if (trace) trace(`407 ${req.method} ${req.url.split('?')[0]}`);
+      req.socket.last();
       res.writeHead(407, { 'proxy-authenticate': 'Basic realm="dn"', 'content-length': 0, connection: 'close' });
       return res.end();
     }
-    if (!seat(job, req.socket)) return sendJson(res, 503, { message: crowded() });
-    if (!counted(job, req, res)) return undefined;
+    counted(job, req, res);
     let url;
     try { url = new URL(req.url); } catch { url = null; }
     const host = url ? normalHost(url.hostname) : '';
@@ -757,7 +873,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     // reads on a connection that outlives this one.
     const coding = req.headers['transfer-encoding'];
     const declared = req.headers['content-length'];
-    if (coding !== undefined && (declared !== undefined || coding.trim().toLowerCase() !== 'chunked')) return sendJson(res, 400, { message: FRAMING });
+    if (coding !== undefined && coding.trim().toLowerCase() !== 'chunked') return sendJson(res, 400, { message: FRAMING });
     if (declared !== undefined && !/^\d{1,15}$/.test(declared)) return sendJson(res, 400, { message: FRAMING });
     const headers = { ...requestHeaders(req.headers, ['content-length', 'host']), host: url.host };
     if (coding !== undefined) headers['transfer-encoding'] = 'chunked';
@@ -802,8 +918,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     req.once('close', () => { if (!req.complete) up.destroy(); });
     if (bodied) req.pipe(up); else up.end();
   }));
-
-  outer.on('clientError', (e, socket) => socket.destroy());
+  plain.timeout = limits.idleMs;
+  plain.on('clientError', (e, socket) => socket.destroy());
 
   // ---- the requests inside a terminated connection
 
@@ -827,10 +943,11 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     secure.on('error', () => secure.destroy());
     secure.on('close', () => socket.destroy());
     socket.on('close', () => secure.destroy());
-    secure.dn = { job, host };
-    expectHead(secure);
-    inner.emit('connection', secure);
-    reads(job, socket, secure);
+    const requests = feed(secure);
+    requests.dn = { job, host };
+    expectHead(requests);
+    inner.emit('connection', requests);
+    reads(job, socket, requests);
   }
 
   // Each request on a terminated connection is judged on its own, however many came
@@ -841,7 +958,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     begun(req, res);
     const { job, host } = req.socket.dn;
     if (!live(job)) return res.destroy();
-    if (!counted(job, req, res)) return undefined;
+    counted(job, req, res);
     if (trace) trace(`${job.info.runId} ${req.method} https://${host}${req.url.split('?')[0]} [${Object.keys(req.headers).join(' ')}]`);
     if (!req.url.startsWith('/')) return sendJson(res, 400, { message: 'the request target must be a path' });
     const named = req.rawHeaders.filter((h, i) => i % 2 === 0 && h.toLowerCase() === 'host').length === 1 ? normalHost(req.headers.host.replace(/:\d+$/, '')) : null;
@@ -962,8 +1079,14 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     });
   }
 
+  // What a job has had of the model. Its share is counted in the requests sent for it
+  // and the bytes carried for them, either way and whatever came of them. `bytes` is
+  // the part the provider took: the inference requests it answered with a 2xx, and
+  // those answers.
+  const spentBy = (job) => ({ requests: job.spent.requests, bytes: job.spent.bytes, carried: job.spent.carried });
+
   function heard(job) {
-    const spent = { requests: job.spent.requests, bytes: job.spent.bytes };
+    const spent = spentBy(job);
     for (const fn of spendHeard) {
       try { fn(job.info.runId, spent); } catch (e) { sparing('spend listener', 'broker', `a spend listener failed: ${e?.message ?? e}`); }
     }
@@ -978,15 +1101,15 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     const inject = carriesPlaceholder(req.headers) && MODEL_PATHS.test(req.url.split('?')[0]);
     if (inject) {
       const { spent } = job;
-      if (spent.requests >= JOB_MODEL_REQUESTS || spent.bytes >= JOB_MODEL_BYTES) {
-        if (!spent.said) log('broker', job.info.runId, `the model is closed to this job after ${spent.requests} requests and ${spent.bytes} bytes`);
+      if (spent.requests >= JOB_MODEL_REQUESTS || spent.carried >= JOB_MODEL_BYTES) {
+        if (!spent.said) log('broker', job.info.runId, `the model is closed to this job after ${spent.requests} requests and ${spent.carried} bytes`);
         spent.said = true;
         // The provider's shape for "slow down", marked as not worth another try.
-        return sendJson(res, 429, { type: 'error', error: { type: 'rate_limit_error', message: `this job has used all of the model it gets on this executor (${JOB_MODEL_REQUESTS} requests, ${JOB_MODEL_BYTES} bytes): it made ${spent.requests} requests of ${spent.bytes} bytes. No further request will be answered; finish with what you have.` } },
+        return sendJson(res, 429, { type: 'error', error: { type: 'rate_limit_error', message: `this job has used all of the model it gets on this executor (${JOB_MODEL_REQUESTS} requests, ${JOB_MODEL_BYTES} bytes): it made ${spent.requests} requests of ${spent.carried} bytes. No further request will be answered; finish with what you have.` } },
           { 'x-should-retry': 'false' });
       }
       spent.requests += 1;
-      spent.bytes += body.length;
+      spent.carried += body.length;
       heard(job);
     }
     let upRes;
@@ -1017,7 +1140,12 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     res.writeHead(upRes.statusCode, answerPairs(upRes).filter(([name]) => MODEL_ANSWER_HEADERS.test(name.toLowerCase())).flat());
     res.flushHeaders();
     if (inject) {
-      upRes.on('data', (c) => { job.spent.bytes += c.length; });
+      const taken = upRes.statusCode < 300 && req.url.split('?')[0] === '/v1/messages';
+      if (taken) job.spent.bytes += body.length;
+      upRes.on('data', (c) => {
+        job.spent.carried += c.length;
+        if (taken) job.spent.bytes += c.length;
+      });
       over(res, () => heard(job));
     }
     upRes.once('close', () => { if (!upRes.complete) res.destroy(); });
@@ -1032,20 +1160,22 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   /// onForge as it is. Resolves to `{ proxyUrl, token, caCertPath, generation }`. A job
   /// that is already running, taken up by a later daemon, is admitted under the `token`
   /// it was started with, the CA `generation` it trusts, and what it had `spent` of the
-  /// model by then (`{ requests, bytes }`): its share does not start again.
+  /// model by then, as `spent` gave it: its share does not start again.
   async function addJob(info, { token = crypto.randomBytes(32).toString('hex'), generation = null, spent = null } = {}) {
     if (!listening) throw new Error('the broker is not listening');
     if (jobs.has(info.runId)) throw new Error(`job ${info.runId} is already admitted`);
     const hosts = [...forgeHosts(info.pool), ...MODEL_HOSTS].map(normalHost);
     if (!/^[0-9a-f]{64}$/.test(token) || tokens.has(token)) throw new Error(`job ${info.runId} cannot be admitted under that token`);
-    const authority = generation === null ? await ca.authority(hosts) : ca.kept(generation);
+    // An authority that cannot be made is this machine's doing, and nothing of the job has run.
+    const authority = generation === null ? await own(ca.authority(hosts)) : ca.kept(generation);
     if (!authority) throw new Error(`job ${info.runId} cannot be admitted: the certificate authority it was started under is gone`);
     if (jobs.has(info.runId)) throw new Error(`job ${info.runId} is already admitted`);
     const job = {
       info, token, authority, intercept: new Set(hosts), ssh: new Set(forgeSshHosts(info.pool).map(normalHost)),
       sockets: new Set(), clients: new Map(), forwards: new Map(),
-      spent: { requests: count(spent?.requests), bytes: count(spent?.bytes), said: false },
-      asked: 0, stopped: null,
+      spent: { requests: count(spent?.requests), bytes: count(spent?.bytes), carried: count(spent?.carried), said: false },
+      asked: 0, stopped: false,
+      looking: 0, lookTurns: [],
       gate: { bytes: 0, slots: 0, outs: 0, queue: new Set() },
     };
     job.plain = agentFor(job, plainWrap, {});
@@ -1081,14 +1211,17 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     return { name };
   }
 
-  /// What a job has had of the model on this machine's credential, `{ requests, bytes }`,
-  /// or null for a job that is not admitted: what `addJob` takes back as `spent`.
+  /// What a job has had of the model on this machine's credential, or null for a job
+  /// that is not admitted: `{ requests, bytes, carried }` - the requests sent for it, the
+  /// bytes of the inference requests the provider accepted and of its answers to them,
+  /// and every byte carried either way, whatever came of it. It is what `addJob` takes
+  /// back as `spent`.
   function spent(runId) {
     const job = jobs.get(runId);
-    return job ? { requests: job.spent.requests, bytes: job.spent.bytes } : null;
+    return job ? spentBy(job) : null;
   }
 
-  /// Calls `fn(runId, { requests, bytes })` when a job's spend has grown: as a request is
+  /// Calls `fn(runId, spent)`, `spent` as above, when a job's spend has grown: as a request is
   /// counted, and again when its answer has been passed on. Returns the function that
   /// ends the listening.
   function onSpend(fn) {
@@ -1114,13 +1247,13 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   async function start({ port = BROKER_PORT || quietPort() } = {}) {
     const host = await brokerBindAddress();
     await new Promise((resolve, reject) => {
-      const failed = (err) => { outer.off('listening', up); reject(err); };
-      const up = () => { outer.off('error', failed); resolve(); };
-      outer.once('error', failed);
-      outer.once('listening', up);
-      outer.listen(port, host);
+      const failed = (err) => { front.off('listening', up); reject(err); };
+      const up = () => { front.off('error', failed); resolve(); };
+      front.once('error', failed);
+      front.once('listening', up);
+      front.listen(port, host);
     });
-    listening = { host, port: outer.address().port };
+    listening = { host, port: front.address().port };
     log('broker', `listening on ${host}:${listening.port}`);
     return listening;
   }
@@ -1130,8 +1263,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     for (const runId of [...jobs.keys()]) removeJob(runId);
     if (!listening) return;
     listening = null;
-    outer.closeAllConnections();
-    await new Promise((resolve) => outer.close(resolve));
+    for (const socket of strangers) socket.destroy();
+    await new Promise((resolve) => front.close(resolve));
   }
 
   return { start, stop, address: () => listening, addJob, removeJob, addForward, spent, onSpend, load };

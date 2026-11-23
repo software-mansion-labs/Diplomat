@@ -13,7 +13,9 @@
 // and that cannot be removed from under one; nothing is isolated, and the command a
 // container was made with (a relay's) is recorded and not run. A `run --rm` is the
 // probe container.js measures and clears with: its `du` and its `find -delete` are done
-// here, on the directories its mounts name, and answered the way GNU's are.
+// here, on the directories its mounts name, and answered the way GNU's are. One put in a
+// container's pid namespace is the probe that counts what that container's processes
+// hold open: it prints `held 0`.
 //
 // Staged failures, as files in FAKE_DOCKER_DIR:
 //   down             the engine does not answer
@@ -25,6 +27,8 @@
 //   no-isolated-gateway  a network asked for with the isolated gateway mode is refused
 //   engine-version   the version the engine says it is, in place of a current one
 //   no-storage-opt   a container asked for with a size for its writable layer is refused
+//   held-<container> what a probe in that container's pid namespace prints, in place of
+//                    `held 0`; empty, the probe is killed before it prints
 // calls.jsonl records every invocation's arguments.
 
 import fs from 'node:fs';
@@ -162,7 +166,7 @@ switch (command) {
       console.log('sha256:fake');
     } else if (args[0] === 'ls') {
       const want = (opts['--filter'] || []).map((f) => f.replace(/^label=/, ''));
-      for (const f of fs.readdirSync(file('images'))) {
+      for (const f of fs.readdirSync(file('images')).sort()) {
         if (want.every((w) => (readJson(file('images', f)) || []).includes(w))) console.log(decodeURIComponent(f));
       }
     } else if (args[0] === 'rm') {
@@ -214,7 +218,7 @@ switch (command) {
 
   case 'create':
   case 'run': {
-    const { opts, rest } = parse(args, ['--name', '--label', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--storage-opt', '--add-host', '-v', '--network', '--network-alias', '--user']);
+    const { opts, rest } = parse(args, ['--name', '--label', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--storage-opt', '--add-host', '-v', '--network', '--network-alias', '--user', '--pid']);
     const name = opts['--name'][0];
     const networks = opts['--network'] || ['bridge'];
     for (const n of networks) if (n !== 'bridge' && n !== 'none' && !fs.existsSync(file('networks', `${n}.json`))) die(`docker: Error response from daemon: network ${n} not found`, 125);
@@ -223,6 +227,13 @@ switch (command) {
     if (!fs.existsSync(file('images', encodeURIComponent(rest[0])))) die(`Unable to find image '${rest[0]}' locally`, 125);
     if (opts['--storage-opt'] && fs.existsSync(file('no-storage-opt'))) {
       die('docker: Error response from daemon: --storage-opt is supported only for overlay over xfs with \'pquota\' mount option\n\nRun \'docker run --help\' for more information', 125);
+    }
+    if (opts['--pid']) {
+      const beside = opts['--pid'][0].replace(/^container:/, '');
+      const said = fs.existsSync(file(`held-${beside}`)) ? fs.readFileSync(file(`held-${beside}`), 'utf8').trim() : 'held 0';
+      if (!said) process.exit(137);
+      console.log(said);
+      break;
     }
     if (opts['--rm']) {
       const at = Object.fromEntries((opts['-v'] || []).map((v) => { const [src, dst] = v.split(':'); return [dst, src.startsWith('/') ? src : file('volumes', src)]; }));
@@ -235,6 +246,15 @@ switch (command) {
         // The path it is given, under whichever mount holds it; itself too unless -mindepth keeps it.
         const dst = Object.keys(at).find((d) => rest[2] === d || rest[2].startsWith(`${d}/`));
         const top = at[dst] + rest[2].slice(dst.length);
+        // With the capability a container's root has: no directory's mode keeps it out.
+        const open = (p) => {
+          let st;
+          try { st = fs.lstatSync(p); } catch { return; }
+          if (!st.isDirectory()) return;
+          fs.chmodSync(p, 0o700);
+          for (const n of fs.readdirSync(p)) open(path.join(p, n));
+        };
+        if (args.includes('--cap-add=DAC_OVERRIDE')) open(top);
         if (!rest.includes('-mindepth')) fs.rmSync(top, { recursive: true, force: true });
         else for (const n of fs.readdirSync(top)) fs.rmSync(path.join(top, n), { recursive: true, force: true });
       }

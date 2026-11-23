@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // What the applets run to start and stop the daemon. Each flag prints one JSON object:
 //   node src/install.js --check          -> { installed, daemonRunning, pid }
-//   node src/install.js --start-daemon   -> { ok, daemonRunning, pid, error? }
+//   node src/install.js --start-daemon   -> { ok, daemonRunning, pid, error? }; with the
+//                                           network switched off in Diplomat's config
+//                                           none is started, and `error` says so
 //   node src/install.js --restart-daemon -> the same, after replacing a running daemon
 //   node src/install.js --stop-daemon    -> the same, once the daemon is gone; with the
 //                                           network switched off in Diplomat's config,
@@ -17,14 +19,16 @@ import fs from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { daemonControl } from '../../daemon-core/src/daemon-control.js';
 import { pidAlive, readJson } from '../../daemon-core/src/fsio.js';
-import { createLog } from '../../daemon-core/src/log.js';
 import { holdSocket } from '../../daemon-core/src/serve.js';
 import { createContainers } from './executor/container.js';
+import { attachJob, readOutcome, watch } from './executor/job.js';
 import * as client from './ipc.js';
+import { openLog } from './log.js';
 import { switchOffStored } from './node/offline.js';
+import { clearAway, finishedLeft, readConfig } from './off.js';
 import { createStore } from './node/store.js';
 import {
-  BASE_DIR, CONFIG_PATH, DISCOVERY_PATH, EXECUTOR_RETRY_MS, INSTALLER_ANSWER_MS, LOG_PATH, OFF_REMOVES, SOCKET_PATH, STOP_WAIT_MS, TOOL_PATH,
+  BASE_DIR, DISCOVERY_PATH, EXECUTOR_RETRY_MS, INSTALLER_ANSWER_MS, JOBS_PATH, LOG_PATH, SOCKET_PATH, STOP_WAIT_MS, TOOL_PATH,
 } from './paths.js';
 
 // docker is looked for where the daemon looks for it.
@@ -35,8 +39,12 @@ const { startDaemon, stopDaemon } = daemonControl({ client, discoveryPath: DISCO
 
 const running = async () => (await client.daemonHealth())?.pid ?? null;
 
-// An error message, or null once a daemon answers.
+// An error message, or null once a daemon answers. With the network switched off none is
+// started: a daemon that starts then switches itself off and goes, and would be waited
+// for as one that is slow to answer.
 async function start() {
+  const config = readConfig();
+  if (config && config.networkEnabled !== true) return 'the network is switched off in Diplomat\'s settings: no daemon was started';
   const { error } = await startDaemon();
   if (!error) return null;
   // Only a start that ran out of time is waited for, for the time there is left: a
@@ -64,7 +72,9 @@ let ended = null;
 // offered and gave back nothing it ran: switched on again it would offer work Diplomat
 // has since started elsewhere. That is ended here, in its store, which is this
 // process's for as long as it holds the daemon's socket; while a daemon has the socket
-// or is taking it, the ending is that daemon's. An error message, or null.
+// or is taking it, the ending is that daemon's. A run whose job ended with no daemon
+// left to tell the node, under one that died or under none, ends as that job did. An
+// error message, or null.
 async function endStored() {
   // No daemon ever ran here: there is no store.
   if (!fs.existsSync(BASE_DIR)) return null;
@@ -72,9 +82,20 @@ async function endStored() {
   try {
     release = await holdSocket(SOCKET_PATH);
     if (!release) return null;
-    const log = createLog(LOG_PATH);
-    ended = await switchOffStored({ store: createStore({ dir: BASE_DIR, log }), log });
-    log(`the network is switched off and no daemon runs: ${ended.offers} offer(s) cancelled, ${ended.runs} run(s) stopped and given back`);
+    const log = openLog(LOG_PATH);
+    const kept = readJson(JOBS_PATH)?.jobs ?? {};
+    // A job that finished with no daemon watching has its outcome read from what it left,
+    // as a daemon would, its share of the model as jobs.json last had it.
+    const outcomeOf = async (runId) => {
+      const ended = readOutcome(runId);
+      if (ended) return ended;
+      const left = await finishedLeft(runId);
+      const was = Object.hasOwn(kept, runId) ? kept[runId] : null;
+      return left && attachJob({ runId, container: left.container, pid: was?.pid ?? null, spent: () => was?.spent ?? null }) ? watch({ runId }) : null;
+    };
+    const { offers, runs, reported } = await switchOffStored({ store: createStore({ dir: BASE_DIR, log }), log, outcomeOf });
+    ended = { offers, runs };
+    log(`the network is switched off and no daemon runs: ${offers} offer(s) cancelled, ${runs - reported} run(s) stopped and given back${reported > 0 ? `, ${reported} run(s) ended as the job that had finished left it` : ''}`);
     return null;
   } catch (err) {
     return `what this machine offered and ran could not be ended in its store: ${err?.message ?? err}`;
@@ -92,8 +113,8 @@ async function endStored() {
 // only a config it can read for the network being off.
 async function stopForGood() {
   const error = await stop();
-  const config = readJson(CONFIG_PATH);
-  if (error || config === null || typeof config !== 'object' || config.networkEnabled === true) return error;
+  const config = readConfig();
+  if (error || config === null || config.networkEnabled === true) return error;
   const unended = await endStored();
   const containers = createContainers();
   const late = delay(Math.max(0, answerBy - Date.now()), 'the docker engine did not answer in time');
@@ -102,8 +123,8 @@ async function stopForGood() {
   for (;;) {
     const left = await Promise.race([containers.removeAll().then(() => null, (err) => { said = String(err?.message ?? err); return said; }), late]);
     if (left === null) {
-      for (const dir of OFF_REMOVES) fs.rmSync(dir, { recursive: true, force: true });
-      return unended;
+      const kept = await clearAway(containers, Math.max(0, answerBy - Date.now()));
+      return unended ?? (kept || null);
     }
     if (Date.now() + EXECUTOR_RETRY_MS >= answerBy) return `the daemon is gone, but what it made in docker is still there: ${said ?? left}`;
     await delay(EXECUTOR_RETRY_MS);

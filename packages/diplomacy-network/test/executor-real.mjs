@@ -504,12 +504,15 @@ exit 0
     assert.equal(await sleeping(2), 1, 'what left its group and its environment is there for as long as the container is');
   });
 
-  await check('a container goes with its last job - relay, network and volume too - and the pair\'s next job starts in a new one from the image, with nothing the jobs before it installed, wrote or left running', async () => {
+  await check('a container goes with its last job - relay, network and volume too - and the pair\'s next job starts in a new one from the image, with nothing the jobs before it installed, wrote or left running, and none of their run records', async () => {
     const name = tools.container.name;
     const volume = name.replace('dn-', 'dn-work-');
     assert.deepEqual(await under(name), [name, `${name}-relay`, `network ${name}`, `volume ${volume}`]);
-    // What the jobs so far left in it: two programs installed, files in the volume, a process no job owns.
-    assert.equal(await sh('exec', name, 'sh', '-c', 'ls /usr/games/cowsay /usr/local/bin/cowsay && echo left > /work/left-by-a-job && pgrep -c -f "sleep 60[2]"'), '/usr/games/cowsay\n/usr/local/bin/cowsay\n1');
+    // What the jobs so far left in it: two programs installed, files in the volume, a
+    // process no job owns, and a program beside their run directories.
+    assert.equal(await sh('exec', name, 'sh', '-c', 'ls /usr/games/cowsay /usr/local/bin/cowsay && echo left > /work/left-by-a-job && echo "#!/bin/sh" > /dn/runs/planted-by-an-earlier-job.sh && pgrep -c -f "sleep 60[2]"'), '/usr/games/cowsay\n/usr/local/bin/cowsay\n1');
+    const records = path.join(RUNS_DIR, '.containers');
+    assert.deepEqual(fs.readdirSync(records).filter((dir) => dir.startsWith(name)), [name]);
     const leaving = Date.now();
     await leaveA();
     const left = Date.now();
@@ -521,9 +524,15 @@ exit 0
 step programs "ls /usr/games/cowsay /usr/local/bin/cowsay"
 step work "ls -A /work /work/jobs"
 step strays "pgrep -c -f 'sleep 60[2]'"
+step records "ls -A /dn/runs"
 exit 0
 ` });
     assert.equal((await fresh.outcome).ok, true);
+    // Its own run directory, and the stand-in agent this test put there for it.
+    assert.equal(fresh.out('records'), 'bin\nfresh');
+    assert.deepEqual(fs.readdirSync(records).filter((dir) => dir.startsWith(name)).sort(), [name, `${name}.1`], 'what the earlier jobs left is beside it, where no container is shown it');
+    assert.ok(fs.readdirSync(path.join(records, `${name}.1`)).includes('planted-by-an-earlier-job.sh'));
+    assert.match(fs.readFileSync(path.join(RUNS_DIR, 'tools', 'log.jsonl'), 'utf8'), /"type":"result"/, 'and an earlier run is still read by its link');
     console.log(`INFO the container of a pair between two jobs on this engine: removed in ${left - leaving} ms, made anew in ${made - left} ms`);
     assert.equal(fresh.container.name, name, 'the same name');
     assert.match(fresh.out('programs'), /cowsay.*No such file.*\n.*cowsay.*No such file/);
@@ -627,6 +636,28 @@ exit 0
     assert.equal(await sh('ps', '-a', '-q', ...mine, '--filter', 'label=dn.probe'), '', 'what measured it is gone');
     assert.equal(await containers.usage('dn-no-such-container'), null);
     assert.deepEqual(await containers.overQuota(), [], 'under the 20 GiB a container may hold, none is named');
+
+    // A file written, kept open and unlinked is in no directory, and its blocks stay
+    // taken: in the volume and in the writable layer, 30 MiB each, one of them held
+    // twice; and 20 MiB in memory, which is not disk.
+    await sh('exec', '-d', name, 'sh', '-c', [
+      'dd if=/dev/urandom of=/work/gone.bin bs=1M count=30 2>/dev/null',
+      'dd if=/dev/urandom of=/root/gone.bin bs=1M count=30 2>/dev/null',
+      'dd if=/dev/urandom of=/dev/shm/gone.bin bs=1M count=20 2>/dev/null',
+      'exec 3< /work/gone.bin 4< /root/gone.bin 5< /work/gone.bin 6< /dev/shm/gone.bin',
+      'rm /work/gone.bin /root/gone.bin /dev/shm/gone.bin',
+      'exec sleep 603',
+    ].join(' && '));
+    await until('the files are held with no name', async () => (await docker(['exec', name, 'sh', '-c', 'pgrep -f "sleep 60[3]" && ! ls /work/gone.bin /root/gone.bin /dev/shm/gone.bin'])).code === 0);
+    const layer = async () => Number(await sh('container', 'inspect', '--size', '--format', '{{.SizeRw}}', name));
+    const holding = await containers.usage(name);
+    console.log(`INFO disk use of ${name} with 60 MiB held open under no name: ${holding} bytes (${holding - after} more), the engine's own figure for the layer ${await layer()}`);
+    assert.ok(holding - after >= 60 * MiB && holding - after < 62 * MiB, `${holding - after} for ${60 * MiB}`);
+    assert.equal(await sh('ps', '-a', '-q', ...mine, '--filter', 'label=dn.probe'), '', 'what counted them is gone');
+    await sh('exec', name, 'sh', '-c', 'pkill -f "sleep 60[3]"');
+    await until('the holder is gone', async () => (await docker(['exec', name, 'sh', '-c', 'pgrep -f "sleep 60[3]"'])).code !== 0);
+    const released = await containers.usage(name);
+    assert.ok(Math.abs(released - after) < MiB, `${released} once they are closed, ${after} before they were written`);
     await leave();
     const kept = await containers.usage(name);
     console.log(`INFO disk use under ${name} with the container gone: ${kept} bytes of run records`);
