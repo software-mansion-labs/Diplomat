@@ -67,7 +67,7 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
   that one builder (and over the Python→CLI bridge): a drift fails a CI job
   before it ships. Build the binary with `packages/diplomat-platform/linux/install/build-core.sh`.
 - **The known-author single-PR tier** in `review.json`
-  (`specific.mineOnly` / `specific.theirsOnly` / `specific.reviewerFindingsFirst`
+  (`specific.mineOnly` / `specific.reviewerFindingsFirst`
   and `blocks.noVerdict`) exists because the monitors always know the PR's author,
   so they skip the author-poll CASE A/B prompt the wizards use. It has no golden
   files of its own.

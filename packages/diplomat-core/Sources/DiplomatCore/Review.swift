@@ -282,12 +282,9 @@ public struct ReviewConfig: Codable, Equatable {
 
     /// How a review of someone else's PR closes: the verdict (manual final pass or
     /// automatic policy), else the soft approval, else with `silent` the call left to me.
-    /// The last two withhold the verdict.
     private func verdictClose(_ blocks: [String: String], silent: Bool = false) -> String? {
         if effVerdict, let b = blocks["finalPass"] { return b }
-        guard let close = effSoftApprove ? blocks["softApprove"] : silent ? blocks["noVerdict"].map(fill) : nil
-        else { return nil }
-        return [blocks["withholdVerdict"], close].compactMap { $0 }.joined(separator: " ")
+        return effSoftApprove ? blocks["softApprove"] : silent ? blocks["noVerdict"].map(fill) : nil
     }
 
     /// A single-PR block with its placeholders filled.
@@ -374,8 +371,8 @@ public struct ReviewConfig: Codable, Equatable {
         out.append(fill(scope["single"] ?? ""))
         if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
         out.append(fill(specific["mineOnly"] ?? ""))
-        // First and foremost: screen + verify + fix/dismiss + respond to every reviewer
-        // finding already on the PR, BEFORE the agent's own review.
+        // First and foremost: screen + verify + fix/dismiss every reviewer finding
+        // already on the PR, BEFORE the agent's own review.
         out.append(fill(specific["reviewerFindingsFirst"] ?? ""))
         if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
@@ -385,7 +382,7 @@ public struct ReviewConfig: Codable, Equatable {
         if let b = blocks["noAttribution"] { out.append(b) }
         if let b = blocks["lowsMine"] { out.append(b) }
         // No final verdict for my own PR — I don't approve my own work. The reviewer-
-        // findings block above already covers replying to threads (so the separate reply
+        // findings block above already covers others' threads (so the separate reply
         // block is redundant here).
         // Thread replies this run posts carry the Diplomat attribution tag.
         if let b = diplomatTag(blocks) { out.append(b) }
@@ -403,7 +400,6 @@ public struct ReviewConfig: Codable, Equatable {
         var out: [String] = []
         out.append(fill(scope["single"] ?? ""))
         if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
-        out.append(fill(specific["theirsOnly"] ?? ""))
         out.append(reviewOnlyInstructions(blocks))
         if let b = blocks["premise"] { out.append(b) }
         out.append(chosen.fragment)
