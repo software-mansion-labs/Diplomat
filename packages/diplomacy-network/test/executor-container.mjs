@@ -988,7 +988,7 @@ try {
     assert.deepEqual(calls('run').at(-1), ['run', '--rm', '--name', `${name}-probe`, '--label', `dn.probe=${name}`, '--label', `dn.base=${BASE}`,
       '--network', 'none', '--read-only', '--cap-drop=ALL', '--security-opt', 'no-new-privileges', '--pids-limit', '64', '--memory', '256m', '--memory-swap', '256m', '--cpus', '1',
       '--cap-add=DAC_READ_SEARCH', '-v', `${volumeOf(name)}:/v:ro`, '-v', `${held.runsDir}:/r:ro`,
-      held.image, 'sh', '-c', 'du -sxB1 /v /r; du -sx --inodes /v /r']);
+      held.image, 'sh', '-c', 'du -sxB1 /v /r 2>/dev/null; du -sx --inodes /v /r 2>/dev/null']);
 
     // A measurement an earlier one left half done holds the probe's name: it is removed and the measurement made.
     execFileSync(FAKE, ['run', '-d', '--name', `${name}-probe`, '--label', `dn.probe=${name}`, '--label', `dn.base=${BASE}`, held.image, 'sleep', 'infinity']);

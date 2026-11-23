@@ -84,7 +84,7 @@ try {
     const { name, image } = await ended(1, 'run-1a', MiB);
     const other = await ended(11, 'run-1b');
     between(await containers.usage(name), MiB + 3 * 4096);
-    assert.deepEqual(calls('run').at(-1), [...probeOf(name), '--cap-add=DAC_READ_SEARCH', '-v', `${records(name)}:/r:ro`, image, 'sh', '-c', 'du -sxB1 /r; du -sx --inodes /r']);
+    assert.deepEqual(calls('run').at(-1), [...probeOf(name), '--cap-add=DAC_READ_SEARCH', '-v', `${records(name)}:/r:ro`, image, 'sh', '-c', 'du -sxB1 /r 2>/dev/null; du -sx --inodes /r 2>/dev/null']);
     assert.deepEqual(await containers.overQuota(), [], 'under its allowance nothing is named');
     fs.writeFileSync(path.join(records(name), 'run-1a', 'more.bin'), Buffer.alloc(4 * MiB, 1));
     const over = await containers.overQuota();
@@ -313,7 +313,7 @@ try {
     unstage('hold-run-sh');
     assert.ok(await measuring > 0);
     assert.equal(await erasing, true);
-    assert.deepEqual(calls('run').slice(probes).map((c) => c.at(-1)), ['du -sxB1 /v /r; du -sx --inodes /v /r', '-delete']);
+    assert.deepEqual(calls('run').slice(probes).map((c) => c.at(-1)), ['du -sxB1 /v /r 2>/dev/null; du -sx --inodes /v /r 2>/dev/null', '-delete']);
     assert.deepEqual(calls('rm').filter((c) => c.includes(`${name}-probe`)), [], 'and no probe was taken for one left behind');
     await containers.release({ name, runId: 'run-10b' });
     await containers.discard(name);
@@ -368,7 +368,7 @@ try {
     run(name, 'run-15b', MiB);
     between(await containers.usage(name), 2 * MiB + 7 * 4096);
     assert.deepEqual(calls('run').at(-1), [...probeOf(name), '--cap-add=DAC_READ_SEARCH', '-v', `${volumeOf(name)}:/v:ro`, '-v', `${records(name)}:/r:ro`, '-v', `${records(aside)}:/r1:ro`,
-      image, 'sh', '-c', 'du -sxB1 /v /r /r1; du -sx --inodes /v /r /r1']);
+      image, 'sh', '-c', 'du -sxB1 /v /r /r1 2>/dev/null; du -sx --inodes /v /r /r1 2>/dev/null']);
     // A second container after it, and a third: each earlier one's records in a directory of their own.
     await containers.release({ name, runId: 'run-15b' });
     // As a daemon left them that ended between leading the link and moving the directory.

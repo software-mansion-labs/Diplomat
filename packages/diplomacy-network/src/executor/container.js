@@ -635,8 +635,9 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     // files is counted as the entry it is. A file with holes counts for what it holds.
     const r = await probe(name, image, ['--cap-add=DAC_READ_SEARCH', ...mounts.flatMap(([from, at]) => ['-v', `${from}:${at}:ro`])],
       // du's own exit status says only that a file went away while it counted, which
-      // under a running job is the usual case: the two totals are what is read.
-      ['sh', '-c', `du -sxB1 ${inside}; du -sx --inodes ${inside}`]);
+      // under a running job is the usual case, and so does the line it writes for each
+      // such file, with the name the job gave it: the two totals are what is read.
+      ['sh', '-c', `du -sxB1 ${inside} 2>/dev/null; du -sx --inodes ${inside} 2>/dev/null`]);
     const counts = lines(r.stdout).map((l) => Number(l.split(/\s/)[0]));
     if (r.code === null || counts.length !== 2 * mounts.length || !counts.every(Number.isFinite)) {
       log('docker', `the disk use of ${name} could not be measured: ${lastLine(r.stderr) || 'no answer'}`);

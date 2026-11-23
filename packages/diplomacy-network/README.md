@@ -610,7 +610,8 @@ four things and starts the job:
   runs, a second probe in its pid namespace (`src/executor/held.cjs`) adds the blocks
   of every such file that a descriptor or a running program of the container names,
   on any file system but memory. A job can end that probe, which leaves its container
-  unmeasured for that look. An engine whose first answer is that a probe may not read
+  unmeasured for that look; so does a probe that writes more than the 65536 characters
+  it is heard out for. An engine whose first answer is that a probe may not read
   another container's processes - SELinux keeps containers apart that way - is asked
   no more, says so once in `daemon.log`, and counts no such file. What only a memory
   mapping holds, or a descriptor on its way through a unix socket, is counted nowhere:
