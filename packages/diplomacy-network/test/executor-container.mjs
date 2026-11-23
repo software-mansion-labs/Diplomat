@@ -48,7 +48,7 @@ case "$mode" in
   refused) echo '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"the model refused","total_cost_usd":0.01,"usage":{"input_tokens":5,"output_tokens":1}}'; exit 1 ;;
   link) rm -f "$run/log.jsonl"; ln -s "$FAKE_AGENT_DIR/planted/log.jsonl" "$run/log.jsonl"; exit 0 ;;
   swap) sleep 1; mv "$run" "$run.real"; ln -s "$FAKE_AGENT_DIR/planted" "$run"; exit 0 ;;
-  leave) echo left > "$DN_ROOT/work/left-by-a-job"; echo left > "$DN_ROOT/left-by-a-job" ;;
+  leave) echo left > "$DN_ROOT/work/left-by-a-job"; echo left > "$DN_ROOT/left-by-a-job"; echo left > "$DN_ROOT/dn/runs/left-by-a-job" ;;
   commit) echo fix > fix.txt; git add fix.txt; git commit --quiet -m "fix by the agent"; git log -1 --format='%an <%ae>' > "$out.author" ;;
   forward) node -e 'const [h, p] = process.env.DN_FORWARD_ECHO.split(":"); const s = require("net").connect(p, h); s.on("data", (d) => { process.stdout.write(d); s.end(); }); s.on("error", (e) => console.log(e.message)); s.write("ping");' > "$out.forward" 2>&1 ;;
 esac
@@ -508,8 +508,8 @@ try {
   await check('the same peer on the same repository gets a container of the same name, made anew once the last job has left the one before: nothing an earlier job wrote is in it', async () => {
     const name = first.container.name;
     const runs = calls('run').length;
-    // What a job can leave for the next: a file in the volume and one in the container's
-    // own layer.
+    // What a job can leave for the next: a file in the volume, one in the container's
+    // own layer, and one among the run records beside its own.
     const leaver = await launch(`${R}-2`, PEER_A, alpha, { prompt: 'MODE=leave', base: 'pull/7/head' });
     assert.equal(leaver.container.name, name);
     assert.equal((await leaver.outcome).ok, true);
@@ -526,6 +526,8 @@ try {
     assert.equal(calls('run').length, runs + 2, 'a container for each of the two');
     assert.equal(fs.existsSync(path.join(fakeDir, 'volumes', volumeOf(name), 'left-by-a-job')), false, 'the volume is a new one');
     assert.equal(fs.existsSync(path.join(fakeDir, 'roots', name, 'left-by-a-job')), false, 'and so is the container\'s own file system');
+    assert.deepEqual(fs.readdirSync(path.join(fakeDir, 'roots', name, 'dn/runs')), [`${R}-2b`], 'and among the run records it is shown there is its own job\'s directory alone');
+    assert.match(fs.readFileSync(path.join(RUNS_DIR, `${R}-2`, 'log.jsonl'), 'utf8'), /did run-\d+-2/, 'while the earlier job\'s are where the operator reads them');
     await stopJob(next.run, containers);
     await next.outcome;
   });
@@ -842,6 +844,58 @@ try {
     assert.equal(held.name, name);
     assert.deepEqual(calls('volume').filter((c) => c[1] === 'create').at(-1), ['volume', 'create', ...labels(pool, PEER_B), volumeOf(name)]);
     await containers.release({ name, runId: 'rightful' });
+  });
+
+  await check('what another daemon holds under a pair\'s name is not joined, taken up or removed: no job is started beside a job in a container, on a network or behind a relay that is another daemon\'s, none is taken up in one or in a container off its own network, a probe of another daemon\'s keeps its name, and every listing asks for this daemon\'s own', async () => {
+    const pool = { ...beta.pool, id: 'github.com/dn-test/guarded' };
+    const name = containerName(pool.id, PEER_A);
+    const record = (kind, n) => path.join(fakeDir, kind, `${n}.json`);
+    const rewrite = (kind, n, change) => {
+      const o = JSON.parse(fs.readFileSync(record(kind, n), 'utf8'));
+      change(o);
+      fs.writeFileSync(record(kind, n), JSON.stringify(o));
+    };
+    const relabel = (kind, n, base) => rewrite(kind, n, (o) => { o.labels['dn.base'] = base; });
+    const onlyAsked = (from) => calls().slice(from).every((c) => c[0] === 'version' || c[1] === 'inspect');
+    const held = await containers.acquire({ pool, peer: PEER_A, runId: 'g1' });
+    // With a job counted in the pair's container, what stands under one of its names is another daemon's.
+    for (const [kind, n, what] of [['containers', name, 'container'], ['networks', name, 'network'], ['containers', `${name}-relay`, 'relay']]) {
+      relabel(kind, n, '/somewhere/else');
+      const from = calls().length;
+      await assert.rejects(containers.acquire({ pool, peer: PEER_A, runId: 'g2' }), (e) => e instanceof OwnFault && e.message === `the ${what} ${n} belongs to another daemon on this machine (/somewhere/else)`);
+      assert.ok(onlyAsked(from), 'nothing is made, started or removed');
+      relabel(kind, n, BASE);
+    }
+    assert.deepEqual(containers.list().map((c) => c.jobs), [['g1']]);
+
+    // A daemon after this one, with a job of the one before it to take up.
+    const after = createContainers({ log, now: () => clock.now, imageDir, broker: () => broker.address() });
+    for (const [change, undo] of [
+      [() => relabel('containers', name, '/somewhere/else'), () => relabel('containers', name, BASE)],
+      [() => rewrite('containers', name, (o) => { o.networks = ['bridge']; }), () => rewrite('containers', name, (o) => { o.networks = [name]; })],
+    ]) {
+      change();
+      const from = calls().length;
+      assert.equal(await after.adopt({ pool, peer: PEER_A, runId: 'g1' }), null);
+      assert.ok(onlyAsked(from));
+      assert.deepEqual(after.list(), []);
+      undo();
+    }
+    assert.deepEqual(await after.adopt({ pool, peer: PEER_A, runId: 'g1' }), held, 'as it was made, it is taken up');
+
+    // The probe's name, held by a container of another daemon: no measurement, and no removal.
+    execFileSync(FAKE, ['run', '-d', '--name', `${name}-probe`, '--label', 'dn.base=/somewhere/else', held.image, 'sleep', 'infinity']);
+    const rms = calls('rm').length;
+    assert.equal(await containers.usage(name), null);
+    assert.deepEqual([calls('rm').length, fs.existsSync(record('containers', `${name}-probe`))], [rms, true]);
+    execFileSync(FAKE, ['rm', '-f', `${name}-probe`]);
+
+    await after.sweep();
+    const listings = calls().filter((c) => c[0] === 'ps' || c[1] === 'ls');
+    assert.deepEqual([...new Set(listings.map((c) => c.slice(0, 2).join(' ')))].sort(), ['image ls', 'network ls', 'ps -a', 'volume ls']);
+    assert.ok(listings.every((c) => c.includes(`label=dn.base=${BASE}`)));
+    await after.release({ name, runId: 'g1' });
+    await containers.release({ name, runId: 'g1' });
   });
 
   await check('a relay that leads to where an earlier daemon\'s broker listened is made again, and the container it serves is kept', async () => {

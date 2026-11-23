@@ -13,7 +13,9 @@
 // and that cannot be removed from under one; nothing is isolated, and the command a
 // container was made with (a relay's) is recorded and not run. A `run --rm` is the
 // probe container.js measures and clears with: its `du` and its `find -delete` are done
-// here, on the directories its mounts name, and answered the way GNU's are.
+// here, on the directories its mounts name, and answered the way GNU's are. One put in a
+// container's pid namespace is the probe that counts what that container's processes
+// hold open: it prints `held 0`.
 //
 // Staged failures, as files in FAKE_DOCKER_DIR:
 //   down             the engine does not answer
@@ -25,6 +27,8 @@
 //   no-isolated-gateway  a network asked for with the isolated gateway mode is refused
 //   engine-version   the version the engine says it is, in place of a current one
 //   no-storage-opt   a container asked for with a size for its writable layer is refused
+//   held-<container> what a probe in that container's pid namespace prints, in place of
+//                    `held 0`; empty, the probe is killed before it prints
 // calls.jsonl records every invocation's arguments.
 
 import fs from 'node:fs';
@@ -214,7 +218,7 @@ switch (command) {
 
   case 'create':
   case 'run': {
-    const { opts, rest } = parse(args, ['--name', '--label', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--storage-opt', '--add-host', '-v', '--network', '--network-alias', '--user']);
+    const { opts, rest } = parse(args, ['--name', '--label', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--storage-opt', '--add-host', '-v', '--network', '--network-alias', '--user', '--pid']);
     const name = opts['--name'][0];
     const networks = opts['--network'] || ['bridge'];
     for (const n of networks) if (n !== 'bridge' && n !== 'none' && !fs.existsSync(file('networks', `${n}.json`))) die(`docker: Error response from daemon: network ${n} not found`, 125);
@@ -223,6 +227,13 @@ switch (command) {
     if (!fs.existsSync(file('images', encodeURIComponent(rest[0])))) die(`Unable to find image '${rest[0]}' locally`, 125);
     if (opts['--storage-opt'] && fs.existsSync(file('no-storage-opt'))) {
       die('docker: Error response from daemon: --storage-opt is supported only for overlay over xfs with \'pquota\' mount option\n\nRun \'docker run --help\' for more information', 125);
+    }
+    if (opts['--pid']) {
+      const beside = opts['--pid'][0].replace(/^container:/, '');
+      const said = fs.existsSync(file(`held-${beside}`)) ? fs.readFileSync(file(`held-${beside}`), 'utf8').trim() : 'held 0';
+      if (!said) process.exit(137);
+      console.log(said);
+      break;
     }
     if (opts['--rm']) {
       const at = Object.fromEntries((opts['-v'] || []).map((v) => { const [src, dst] = v.split(':'); return [dst, src.startsWith('/') ? src : file('volumes', src)]; }));

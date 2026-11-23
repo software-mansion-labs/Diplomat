@@ -99,7 +99,7 @@ closed at every start.
 | `tor/` | tor's data directory |
 | `ca/<id>/` (`ca/` is 0700) | the broker's certificate authorities, one per set of hosts it reads: `ca.key`, `ca.crt`, `meta.json` and the `leaves/` issued under it. A leaf is good for 90 days, is replaced from two weeks before its end, under a running job too, and is removed once past it |
 | `mirrors/<pool part>.git` | bare mirrors, each named by the 128 bits its pool has in a container's name. One is removed a day after its pool was last linked and not left, never from under a job that reads it, and all of them when the network is switched off; one named by sixteen hex digits is an earlier version's, is not read, and goes a day after it was last touched |
-| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. Both are removed a day after the job ended - the directory first, and the link only once the directory is gone, so one that will not go is met again at the next look - and `runs/.containers/<container>/`, with whatever else a job left in it, once the container is gone and no run in it is kept |
+| `runs/.containers/<container>/<run id>/` | one job: `prompt.txt`, `env.sh`, `log.jsonl`, `done`. `runs/.containers/<container>/` is all of `runs/` that container is shown, and it can write there; `runs/<run id>` is a link to the job's directory. When that requester's next container for the repository is made, the directory moves whole to `runs/.containers/<container>.<n>/`, which no container is shown, and the links to its runs follow it: the new container starts with an empty one. A job's directory and its link are removed a day after the job ended - the directory first, and the link only once the directory is gone, so one that will not go is met again at the next look - and a directory of either name, with whatever else a job left in it, once no container is shown it and no run in it is kept |
 | `runs/<run id>.outcome.json` | that job's outcome, written by the daemon when the job ends, where no container can write, and removed once its directory is gone |
 | `runs/.staging/` | a job's directory while it is put together, before its container can see it |
 
@@ -569,7 +569,9 @@ four things and starts the job:
   leaves it is removed with its relay, its network and its `/work` volume, and that
   peer's next job on that repository gets a new one from the image, so nothing a job
   wrote, installed or left running is there for a job that starts after every earlier
-  one has ended. Jobs of one peer on one repository that run at the same time run in
+  one has ended: not in the container, not in `/work`, and not among the run records
+  it is shown, which start empty - what earlier jobs left there is moved out of its
+  sight when it is made. Jobs of one peer on one repository that run at the same time run in
   that one container, each as root, and nothing in it keeps them apart: each can read
   the other's run directory, its proxy token included, and replace any program the
   other runs. What a job starts from is the host's and the image's all the same: its
@@ -602,9 +604,21 @@ four things and starts the job:
   `/work` volume and the run records, and `overQuota()` names the containers past it.
   In the volume and the records a file counts for the blocks it holds plus 4096 bytes,
   no link is followed and no file is opened; in the writable layer a file counts for
-  its full length, holes included. The run records outlive the container by the day
-  they are kept, so they are measured under its name for as long as any are there,
-  container or not. The daemon asks every
+  its full length, holes included. A file a process unlinked and keeps open is in no
+  directory to be counted that way, and its blocks stay taken: while the container
+  runs, a second probe in its pid namespace (`src/executor/held.cjs`) adds the blocks
+  of every such file that a descriptor or a running program of the container names,
+  on any file system but memory. A job can end that probe, which leaves its container
+  unmeasured for that look. An engine whose first answer is that a probe may not read
+  another container's processes - SELinux keeps containers apart that way - is asked
+  no more, says so once in `daemon.log`, and counts no such file. What only a memory
+  mapping holds, or a descriptor on its way through a unix socket, is counted nowhere:
+  the measure names the container that fills the disk in the ordinary way, and a job
+  that sets out to hide what it holds is bounded only where the engine itself sizes
+  what it writes - the layer on storage that takes `--storage-opt size=`, and `/work`,
+  a volume, on none the daemon asks for. The run records outlive the container by the
+  day they are kept, so they are measured under its name for as long as any are there,
+  container or not, those of its earlier containers among them. The daemon asks every
   10 minutes (`DN_SWEEP_MS`). A name past its allowance is discarded: its jobs are
   stopped and end as failed attempts with the reason `the container outgrew its disk
   allowance` - whichever of them filled it would fill the next one too, and three
