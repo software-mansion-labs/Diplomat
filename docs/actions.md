@@ -49,8 +49,10 @@ session told to work through fifty. The choices are baked into each prompt:
   even if Diplomat already reviewed this commit. A verified blocker warrants a
   change request. Non-blocking findings and optional coverage advice allow approval.
 
-Inline findings identify behavior the PR makes worse than its target branch’s merge
-base, or a supported case where the submitted change fails its stated purpose.
+Every review judges the PR's premise: whether its diagnosis holds and the change removes
+the cause rather than hiding the symptom. Inline findings identify behavior the PR makes
+worse than its target branch’s merge base, a supported case where the submitted change
+fails its stated purpose, or a workaround that leaves a fixable cause in place.
 Each thread gives the trigger, expected and observed behavior, and impact. A partial
 fix can pass review. Incidental existing defects stay in the operator’s summary.
 Filing a follow-up issue requires an explicit request.

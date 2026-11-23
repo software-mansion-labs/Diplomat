@@ -3159,6 +3159,7 @@ print("review moves + absence pass assertions passed")
 // Every review prompt asks it once, ahead of the depth's instructions, whoever the author.
 section("premise check")
 let premiseParts = ["Identify the behavior this PR sets out to change",
+                    "judge its premise: whether the diagnosis holds and the change removes the cause",
                     "reachable regression against the merge base",
                     "fails a behavior the change explicitly promises",
                     "Open a follow-up issue only when the operator explicitly asks"]
