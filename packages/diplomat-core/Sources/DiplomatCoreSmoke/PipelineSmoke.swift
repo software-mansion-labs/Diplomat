@@ -879,7 +879,18 @@ func pipelineSmoke() throws {
                  "gradle/libs.versions.toml", "Jenkinsfile.release", "app/src/main/AndroidManifest.xml",
                  "ios/App/Info.plist", "Brewfile", "eas.json", "app.json", ".mise.toml", "composer.json", "pubspec.yaml",
                  "Directory.Build.props", "App.fsproj", "requirements/prod.txt", "requirements.in", "GNUmakefile",
-                 "rules.mk"] {
+                 "rules.mk",
+                 "CLAUDE.md", "docs/AGENTS.md", "GEMINI.md", ".cursorrules", ".claude/settings.json",
+                 ".cursor/rules/style.mdc", ".codex/config.toml",
+                 "certs/server.pem", "keys/deploy.key", "ios/dist.p12", "ios/App.mobileprovision",
+                 "package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "Package.resolved", "Cartfile.resolved",
+                 "go.sum", "yarn.lock", "bun.lockb", "third_party/zlib/zlib.h", "node_modules/left-pad/index.js",
+                 "ios/Pods/Alamofire/Session.swift", "Carthage/Checkouts/Lib/Lib.swift", ".npmrc", ".yarnrc",
+                 ".yarnrc.yml", "pnpm-workspace.yaml", ".pnpmfile.cjs", "nuget.config", "ios/Podfile", "Cartfile",
+                 "Lib.podspec", "Gemfile", "app.gemspec", "requirements-dev.txt", "constraints.txt", "pyproject.toml",
+                 "setup.py", "setup.cfg", "Pipfile", "Cargo.toml", "go.mod", "pom.xml", "build.gradle",
+                 "settings.gradle.kts", "gradle.properties", "gradle-wrapper.properties", "App.csproj", "packages.config",
+                 "deno.json", "environment.yml", "mix.exs", "build.sbt"] {
         let got = floor([(path, 1, 1, "MODIFIED"), test])
         check(got == rating(.high, .low), "floor of \(path): \(got)")
     }
