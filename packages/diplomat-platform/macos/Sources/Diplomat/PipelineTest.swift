@@ -457,6 +457,93 @@ enum PipelineTest {
                   && !PipelineView.canStartFix(at(.candidate, writable: false))
                   && !PipelineView.canStartFix(at(.candidate, .pr)))
 
+        print("\npipeline: connectors")
+        func graph(_ cells: [(String, Int, Int)], _ edges: [(String, String, PipelineGraph.EdgeKind)])
+            -> PipelineLayout {
+            PipelineLayout.make(PipelineTickResult(
+                at: Date(), items: cells.map { item($0.0, .issue, author: "bob") },
+                graph: PipelineGraph(nodes: cells.map { PipelineGraph.Node(id: $0.0, column: $0.1, row: $0.2) },
+                                     edges: edges.map { PipelineGraph.Edge(from: $0.0, to: $0.1, kind: $0.2) })),
+                lane: nil)
+        }
+        func gh(_ n: Int) -> String { "https://github.com/o/r/issues/\(n)" }
+        func name(_ id: String) -> String { String(id.split(separator: "/").last ?? "") }
+        let eng10 = "https://linear.app/o/issue/ENG-10"
+        // One row, as the core lays them out when #11 is newer than #12.
+        let stack = graph([(eng10, 0, 0), (gh(11), 1, 0), (gh(12), 2, 0)],
+                          [(eng10, gh(11), .fixes), (eng10, gh(12), .fixes), (gh(11), gh(12), .stacked)])
+        let closes = graph([(gh(30), 0, 0), (gh(31), 1, 0), (gh(34), 2, 0)],
+                           [(gh(30), gh(31), .child), (gh(31), gh(34), .fixes), (gh(30), gh(34), .fixes)])
+        let children = (101...106).map(gh)
+        let fan = graph([(gh(100), 0, 0)] + children.enumerated().map { ($1, 1, $0) },
+                        children.map { (gh(100), $0, .child) })
+        let cycle = graph([(gh(60), 0, 0), (gh(61), 1, 0)],
+                          [(gh(60), gh(61), .stacked), (gh(61), gh(60), .stacked)])
+        func samples(_ link: PipelineLayout.Link) -> [CGPoint] {
+            func at(_ polygon: [CGPoint], _ t: CGFloat) -> CGPoint {
+                polygon.count == 1 ? polygon[0] : at(zip(polygon, polygon.dropFirst()).map {
+                    CGPoint(x: $0.x + ($1.x - $0.x) * t, y: $0.y + ($1.y - $0.y) * t)
+                }, t)
+            }
+            var points: [CGPoint] = []
+            link.path.forEach { element in
+                let from = points.last ?? .zero
+                let polygon: [CGPoint]
+                switch element {
+                case .move(let p): points.append(p); return
+                case .line(let p): polygon = [from, p]
+                case .quadCurve(let p, let c): polygon = [from, c, p]
+                case .curve(let p, let c1, let c2): polygon = [from, c1, c2, p]
+                case .closeSubpath: return
+                }
+                points += (1...200).map { at(polygon, CGFloat($0) / 200) }
+            }
+            return points
+        }
+        /// Each connector inside a card other than its two (1pt clear of it), inside one of its
+        /// own past the side it meets, or off the canvas; each into the next column out of the
+        /// gutter between.
+        func astray(_ layout: PipelineLayout) -> [String] {
+            let frames = Dictionary(uniqueKeysWithValues: layout.cards.map { ($0.item.id, $0.frame) })
+            return layout.links.flatMap { link -> [String] in
+                let points = samples(link), a = frames[link.edge.from]!, b = frames[link.edge.to]!
+                let what = "\(name(link.edge.from)) → \(name(link.edge.to))"
+                var bad = layout.cards.compactMap { card -> String? in
+                    let own = card.item.id == link.edge.from || card.item.id == link.edge.to
+                    let box = card.frame.insetBy(dx: own ? 0.5 : -1, dy: own ? 0.5 : -1)
+                    return points.contains { box.contains($0) } ? "\(what) under \(name(card.item.id))" : nil
+                }
+                if !points.allSatisfy({ CGRect(origin: .zero, size: layout.size).contains($0) }) {
+                    bad.append("\(what) off the canvas")
+                }
+                if abs(b.minX - a.maxX - PipelineLayout.columnGap) < 0.5,
+                   !points.allSatisfy({ $0.x >= a.maxX - 0.01 && $0.x <= b.minX + 0.01 }) {
+                    bad.append("\(what) out of its gutter")
+                }
+                return bad
+            }
+        }
+        func clear(_ name: String, _ layout: PipelineLayout, edges: Int) {
+            let bad = astray(layout)
+            check(name, layout.links.count == edges && bad.isEmpty)
+            if !bad.isEmpty { print("  " + bad.joined(separator: "; ")) }
+        }
+        clear("ENG-10 fixed by #11 and by #12 stacked on it, one row: through gutters and gaps only", stack, edges: 3)
+        clear("#34 closing #30 and its child #31, one row: through gutters and gaps only", closes, edges: 3)
+        clear("#100's six children: through their gutter only", fan, edges: 6)
+        clear("#60 and #61 stacked on each other: the edge back round through the outer gutters", cycle, edges: 2)
+        let cards = fan.cards.map(\.frame).reduce(CGRect.null) { $0.union($1) }, pad = PipelineLayout.inset
+        check("no connector round the outer cards: the canvas is the cards and an inset round them",
+              CGRect(origin: .zero, size: fan.size) == cards.insetBy(dx: -pad, dy: -pad))
+        func port(_ layout: PipelineLayout, _ from: String, _ to: String, end: Bool) -> CGFloat {
+            layout.links.first { $0.edge.from == from && $0.edge.to == to }
+                .flatMap { end ? samples($0).last?.y : samples($0).first?.y } ?? .nan
+        }
+        let out100 = children.map { port(fan, gh(100), $0, end: false) }
+        check("connectors sharing a side meet it apart, in the order they head off to or come in from",
+              zip(out100, out100.dropFirst()).allSatisfy { $1 - $0 >= 10 }
+                  && port(stack, gh(11), gh(12), end: true) + 10 <= port(stack, eng10, gh(12), end: true))
+
         print("\npipeline: identity")
         check("a Linear link by its identifier, a GitHub one by its item key, anything else as it is",
               Store.pipelineIdentity(linear) == "linear:ENG-90010"

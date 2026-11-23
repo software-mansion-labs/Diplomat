@@ -267,19 +267,17 @@ struct PipelineView: View {
 /// are, its rows packed per connected group, groups one below another in the order of
 /// their first row. A lane filter keeps every group with a card in that lane, whole.
 struct PipelineLayout {
-    enum Side { case left, right, top, bottom }
-
     struct Card {
         let item: PipelineItem
         let frame: CGRect
     }
 
+    /// `path` runs from the source's right side to the base of `arrow`, whose tip touches
+    /// the target's left side.
     struct Link {
-        let kind: PipelineGraph.EdgeKind
-        let from: CGPoint
-        let fromSide: Side
-        let to: CGPoint
-        let toSide: Side
+        let edge: PipelineGraph.Edge
+        let path: Path
+        let arrow: Path
     }
 
     var cards: [Card] = []
@@ -293,8 +291,10 @@ struct PipelineLayout {
     static let rowGap: CGFloat = 14
     static let groupGap: CGFloat = 12
     static let inset: CGFloat = 6
-    /// Between the connectors meeting one side of a card.
-    static let fan: CGFloat = 12
+    static let arrowLength: CGFloat = 7
+    static let arrowHalfWidth: CGFloat = 3.5
+    /// The radius a connector turns at.
+    static let corner: CGFloat = 6
 
     static func make(_ result: PipelineTickResult, lane: PipelineLane?) -> PipelineLayout {
         let items = Dictionary(result.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -321,6 +321,9 @@ struct PipelineLayout {
         var out = PipelineLayout()
         var frames: [String: CGRect] = [:]
         let w = cardSize.width, h = cardSize.height
+        // Only a connector into column 0 has to come round through a gutter left of it.
+        let first = Set(groups.joined().filter { $0.column <= 0 }.map(\.id))
+        let left = edges.contains { first.contains($0.to) } ? inset + columnGap / 2 : inset
         var top = inset
         for group in groups {
             let rows = Array(Set(group.map(\.row))).sorted()
@@ -328,7 +331,7 @@ struct PipelineLayout {
             var band = CGRect.null
             for node in group.sorted(by: { ($0.row, $0.column) < ($1.row, $1.column) }) {
                 guard let item = items[node.id] else { continue }
-                let frame = CGRect(x: inset + CGFloat(max(0, node.column)) * (w + columnGap),
+                let frame = CGRect(x: left + CGFloat(max(0, node.column)) * (w + columnGap),
                                    y: top + CGFloat(index[node.row] ?? 0) * (h + rowGap),
                                    width: w, height: h)
                 frames[node.id] = frame
@@ -339,71 +342,86 @@ struct PipelineLayout {
             top = band.maxY + rowGap + groupGap
         }
         out.links = links(edges.filter { frames[$0.from] != nil && frames[$0.to] != nil }, frames)
-        let maxX = out.cards.map(\.frame.maxX).max() ?? 0
-        let maxY = out.cards.map(\.frame.maxY).max() ?? 0
+        let maxX = (out.cards.map(\.frame.maxX) + out.links.map(\.path.boundingRect.maxX)).max() ?? 0
+        let maxY = (out.cards.map(\.frame.maxY) + out.links.map(\.path.boundingRect.maxY)).max() ?? 0
         out.size = CGSize(width: maxX + inset, height: maxY + inset)
         return out
     }
 
-    /// Each edge from the side of its source facing its target to the side of the target
-    /// facing back: right to left when the target is in a later column, else bottom to top
-    /// (or top to bottom). The connectors sharing one side of a card fan out along it, in
-    /// the order of the cards at their other ends.
+    /// Each edge from its source's right side to its target's left side, never across a
+    /// card: into the next column one curve through the gutter between; anything else out
+    /// into the source's gutter, along the middle of the gap between card rows (above the
+    /// source's row toward a target above it, else below), and in through the target's
+    /// gutter. Connectors sharing a side spread along it in the order they head off to or
+    /// come in from.
     private static func links(_ edges: [PipelineGraph.Edge], _ frames: [String: CGRect]) -> [Link] {
-        struct Leg {
-            let edge: PipelineGraph.Edge
-            let fromSide: Side
-            let toSide: Side
+        let src = edges.map { frames[$0.from]! }, dst = edges.map { frames[$0.to]! }
+        func next(_ i: Int) -> Bool { abs(dst[i].minX - src[i].maxX - columnGap) < 0.5 }
+        func gap(_ i: Int) -> CGFloat {
+            dst[i].minY < src[i].minY ? src[i].minY - rowGap / 2 : src[i].maxY + rowGap / 2
         }
-        let legs = edges.map { edge -> Leg in
-            let a = frames[edge.from]!, b = frames[edge.to]!
-            if b.minX >= a.maxX { return Leg(edge: edge, fromSide: .right, toSide: .left) }
-            if b.maxX <= a.minX { return Leg(edge: edge, fromSide: .left, toSide: .right) }
-            return b.minY >= a.maxY ? Leg(edge: edge, fromSide: .bottom, toSide: .top)
-                : Leg(edge: edge, fromSide: .top, toSide: .bottom)
-        }
-        /// Where along its side the `i`th of `n` connectors meets the card.
-        func point(_ frame: CGRect, _ side: Side, _ i: Int, _ n: Int) -> CGPoint {
-            let shift = (CGFloat(i) - CGFloat(n - 1) / 2) * fan
-            switch side {
-            case .right: return CGPoint(x: frame.maxX, y: frame.midY + shift)
-            case .left: return CGPoint(x: frame.minX, y: frame.midY + shift)
-            case .bottom: return CGPoint(x: frame.midX + shift, y: frame.maxY)
-            case .top: return CGPoint(x: frame.midX + shift, y: frame.minY)
+        func ports(out: Bool) -> [CGFloat] {
+            var ys = [CGFloat](repeating: 0, count: edges.count)
+            let shares = Dictionary(grouping: edges.indices, by: { out ? edges[$0].from : edges[$0].to })
+            for share in shares.values {
+                func toward(_ i: Int) -> (CGFloat, CGFloat, Int) {
+                    let far = out ? dst[i] : src[i]
+                    return (next(i) ? far.midY : gap(i), far.minX, i)
+                }
+                for (n, i) in share.sorted(by: { toward($0) < toward($1) }).enumerated() {
+                    let card = out ? src[i] : dst[i]
+                    ys[i] = card.minY + card.height * CGFloat(n + 1) / CGFloat(share.count + 1)
+                }
             }
+            return ys
         }
-        /// Orders the far ends along the side: by y on a left or right side, by x on a top
-        /// or bottom one.
-        func along(_ side: Side, _ frame: CGRect) -> CGFloat {
-            side == .left || side == .right ? frame.midY : frame.midX
-        }
-        var starts: [Int: CGPoint] = [:], ends: [Int: CGPoint] = [:]
-        let indexed = Array(legs.enumerated())
-        for (_, out) in Dictionary(grouping: indexed, by: { "\($0.element.edge.from)|\($0.element.fromSide)" }) {
-            let sorted = out.sorted { along($0.element.fromSide, frames[$0.element.edge.to]!)
-                < along($1.element.fromSide, frames[$1.element.edge.to]!) }
-            for (i, leg) in sorted.enumerated() {
-                starts[leg.offset] = point(frames[leg.element.edge.from]!, leg.element.fromSide, i, sorted.count)
+        let y0 = ports(out: true), y1 = ports(out: false)
+        return edges.indices.map { i in
+            let start = CGPoint(x: src[i].maxX, y: y0[i]), tip = CGPoint(x: dst[i].minX, y: y1[i])
+            let end = CGPoint(x: tip.x - arrowLength, y: tip.y)
+            var path = Path()
+            if next(i) {
+                let mid = (start.x + end.x) / 2
+                path.move(to: start)
+                path.addCurve(to: end, control1: CGPoint(x: mid, y: start.y),
+                              control2: CGPoint(x: mid, y: end.y))
+            } else {
+                let run = gap(i), out = src[i].maxX + columnGap / 2, into = dst[i].minX - columnGap / 2
+                path = rounded([start, CGPoint(x: out, y: start.y), CGPoint(x: out, y: run),
+                                CGPoint(x: into, y: run), CGPoint(x: into, y: end.y), end])
             }
+            var arrow = Path()
+            arrow.move(to: tip)
+            arrow.addLine(to: CGPoint(x: end.x, y: tip.y - arrowHalfWidth))
+            arrow.addLine(to: CGPoint(x: end.x, y: tip.y + arrowHalfWidth))
+            arrow.closeSubpath()
+            return Link(edge: edges[i], path: path, arrow: arrow)
         }
-        for (_, into) in Dictionary(grouping: indexed, by: { "\($0.element.edge.to)|\($0.element.toSide)" }) {
-            let sorted = into.sorted { along($0.element.toSide, frames[$0.element.edge.from]!)
-                < along($1.element.toSide, frames[$1.element.edge.from]!) }
-            for (i, leg) in sorted.enumerated() {
-                ends[leg.offset] = point(frames[leg.element.edge.to]!, leg.element.toSide, i, sorted.count)
-            }
+    }
+
+    /// Straight runs through `points`, each corner rounded at `corner` or half the shorter
+    /// run beside it.
+    private static func rounded(_ points: [CGPoint]) -> Path {
+        func toward(_ at: CGPoint, _ other: CGPoint) -> CGPoint {
+            let length = hypot(other.x - at.x, other.y - at.y)
+            guard length > 0 else { return at }
+            let t = min(corner, length / 2) / length
+            return CGPoint(x: at.x + (other.x - at.x) * t, y: at.y + (other.y - at.y) * t)
         }
-        return indexed.map { i, leg in
-            Link(kind: leg.edge.kind, from: starts[i]!, fromSide: leg.fromSide,
-                 to: ends[i]!, toSide: leg.toSide)
+        var path = Path()
+        path.move(to: points[0])
+        for i in points.indices.dropFirst().dropLast() {
+            path.addLine(to: toward(points[i], points[i - 1]))
+            path.addQuadCurve(to: toward(points[i], points[i + 1]), control: points[i])
         }
+        path.addLine(to: points[points.count - 1])
+        return path
     }
 }
 
 // MARK: - Canvas
 
-/// The cards at their frames over the connectors, which a card's opaque face hides
-/// wherever one passes behind it.
+/// The cards at their frames over the connectors.
 private struct PipelineCanvas: View {
     let layout: PipelineLayout
     let badges: [String: Store.PipelineBadge]
@@ -431,38 +449,10 @@ private struct PipelineCanvas: View {
         .frame(width: layout.size.width, height: layout.size.height, alignment: .topLeading)
     }
 
-    static let arrowLength: CGFloat = 7
-    static let arrowHalfWidth: CGFloat = 3.5
-
-    /// A cubic leaving and entering square to its sides, ending at the base of an arrowhead
-    /// whose tip touches the target.
     static func draw(_ link: PipelineLayout.Link, in ctx: inout GraphicsContext) {
-        func unit(_ side: PipelineLayout.Side) -> CGVector {
-            switch side {
-            case .right: return CGVector(dx: 1, dy: 0)
-            case .left: return CGVector(dx: -1, dy: 0)
-            case .bottom: return CGVector(dx: 0, dy: 1)
-            case .top: return CGVector(dx: 0, dy: -1)
-            }
-        }
-        let out = unit(link.fromSide), into = unit(link.toSide)
-        // The tip points into the card, against the side's outward normal.
-        let base = CGPoint(x: link.to.x + into.dx * arrowLength, y: link.to.y + into.dy * arrowLength)
-        let reach = max(18, hypot(base.x - link.from.x, base.y - link.from.y) / 2.4)
-        var path = Path()
-        path.move(to: link.from)
-        path.addCurve(to: base,
-                      control1: CGPoint(x: link.from.x + out.dx * reach, y: link.from.y + out.dy * reach),
-                      control2: CGPoint(x: base.x + into.dx * reach, y: base.y + into.dy * reach))
-        let tint = PipelineTint.edge(link.kind)
-        ctx.stroke(path, with: .color(tint), style: PipelineTint.stroke(link.kind))
-        let normal = CGVector(dx: -into.dy, dy: into.dx)
-        var head = Path()
-        head.move(to: link.to)
-        head.addLine(to: CGPoint(x: base.x + normal.dx * arrowHalfWidth, y: base.y + normal.dy * arrowHalfWidth))
-        head.addLine(to: CGPoint(x: base.x - normal.dx * arrowHalfWidth, y: base.y - normal.dy * arrowHalfWidth))
-        head.closeSubpath()
-        ctx.fill(head, with: .color(tint))
+        let tint = PipelineTint.edge(link.edge.kind)
+        ctx.stroke(link.path, with: .color(tint), style: PipelineTint.stroke(link.edge.kind))
+        ctx.fill(link.arrow, with: .color(tint))
     }
 }
 
