@@ -115,6 +115,8 @@ private final class Trackers {
     /// Issues a merged PR closes that the open issues' read does not list, by number.
     var others: [Int: (title: String, state: String, repo: String)] = [:]
     var otherAssignees: [Int: [String]] = [:]
+    /// Of `others`, those with more assignees than a read lists.
+    var assigneesPast: Set<Int> = []
     var prs: [PR] = []
     /// Labels the repository has, on an item or not.
     var repoLabels: Set<String> = []
@@ -162,6 +164,8 @@ private final class Trackers {
     var failSubIssue = false
     /// Linear answers every call HTTP 500.
     var linearDown = false
+    /// More attachments link a PR than Linear's `Attached` answer lists.
+    var attachedMore = false
     var squashAllowed = true
     /// Where `claude` may be run: the checkout of each root.
     var checkouts = [checkout, libCheckout]
@@ -342,7 +346,7 @@ private final class Trackers {
             let assignees = issue?.assignees ?? otherAssignees[c] ?? []
             return ["number": c, "url": other.map { "https://github.com/\($0.repo)/issues/\(c)" } ?? issueURL(c),
                     "state": issue == nil ? other?.state ?? "CLOSED" : "OPEN",
-                    "assignees": ["totalCount": assignees.count,
+                    "assignees": ["totalCount": assignees.count + (assigneesPast.contains(c) ? 1 : 0),
                                   "nodes": assignees.map { ["login": $0] }] as [String: Any]]
         }] as [String: Any]
         n["files"] = ["nodes": p.files.map {
@@ -491,7 +495,7 @@ private final class Trackers {
         case "Attached":
             let url = v["url"] as? String ?? ""
             let linked = tickets.filter { ($0.attachments + $0.moreAttachments).contains(url) }
-            return answer(["attachmentsForURL": ["pageInfo": ["hasNextPage": false], "nodes": linked.map {
+            return answer(["attachmentsForURL": ["pageInfo": ["hasNextPage": attachedMore], "nodes": linked.map {
                 ["issue": ["identifier": $0.identifier, "state": ["type": "started"]]]
             }] as [String: Any]])
         case "Labels":
@@ -595,8 +599,10 @@ private func fixture() -> Trackers {
               headRef: "drop", head: sha("08")),
     ]
     t.others = [20: ("Logout keeps the cache", "CLOSED", "acme/app"), 23: ("Lib cache", "CLOSED", "acme/lib"),
-                22: ("Ancient open issue", "OPEN", "acme/app")]
-    t.otherAssignees = [22: ["bob"]]
+                22: ("Ancient open issue", "OPEN", "acme/app"), 28: ("Old issue of mine", "OPEN", "acme/app"),
+                29: ("Crowded issue", "OPEN", "acme/app")]
+    t.otherAssignees = [22: ["bob"], 28: [opLogin], 29: [opLogin]]
+    t.assigneesPast = [29]
     t.repoLabels = Set(t.issues.flatMap(\.labels) + t.prs.flatMap(\.labels) + ["diplomat:fractured"])
     t.labelBook = [("lab-rl", "risk:low", "T1"), ("lab-cl", "complexity:low", nil)]
     t.tickets = [
@@ -1309,6 +1315,8 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
          "would close issues past what one read lists, which Diplomat did not read or may not write to"),
         ("an unread issue it closes that is not mine", { $0.closes.append(22) },
          "would close https://github.com/acme/app/issues/22, which Diplomat did not read or may not write to"),
+        ("an unread issue it closes, its assignees past the page", { $0.closes.append(29) },
+         "would close https://github.com/acme/app/issues/29, which Diplomat did not read or may not write to"),
         ("a Linear issue of a team not read", { $0.body = "Fixes #27. Resolves: OPS-7." },
          "would close OPS-7, which Diplomat did not read or may not write to"),
         ("a Linear issue as a link", { $0.body = "Closes [the ticket](https://linear.app/acme/issue/eng-9/x)" },
@@ -1321,6 +1329,8 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     }
     let (_, web) = try cleared("web-flow") { $0.prs[number($0, 13)].commits = [(opLogin, "web-flow")] }
     check(merged(web), "GitHub committing my own commit is no one else's: \(web.writes)")
+    let (_, mine) = try cleared("unread-mine") { $0.prs[number($0, 13)].closes.append(28) }
+    check(merged(mine), "an unread issue it closes, assigned to me alone: \(mine.writes)")
     let late: [(String, Change, String)] = [
         ("a review requested", { $0.reviewRequests = 1 }, "waits on 1 requested review"),
         ("a person's comment", { $0.comments.append(("alice", false, "Wait")) }, "@alice has commented or reviewed"),
@@ -1471,6 +1481,12 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     let f3 = sync(ftOff, fastTrack, dir("fast-track-off"), later(15))
     check(f3.writes.isEmpty && f3.claude.isEmpty && f3.result.effects.isEmpty && stageOf(f3.result, prURL(13)) == "human/human",
           "reopened: \(f3.writes) \(f3.claude) \(stageOf(f3.result, prURL(13)))")
+    var forceRate = fastTrack
+    forceRate.force = PipelineSettings.Force(rate: [prURL(13)])
+    ftOff.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "one line"]
+    let f4 = sync(ftOff, forceRate, dir("fast-track-off"), later(20))
+    check(f4.claude.count == 1 && !f4.writes.contains("+diplomat:fast-track #13"),
+          "rated again by hand: \(f4.claude) \(f4.writes)")
 
     // One re-rate per head, whatever it answered and whether its labels were written: a
     // medium answer whose labels GitHub refused holds the PR, and is never asked again.
@@ -1486,9 +1502,17 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
           "a re-rate not written: \(r1.claude) \(r1.writes) \(stageOf(r1.result, prURL(13)))")
     rr.refuseLabels = []
     rr.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "one line"]
+    try fm.removeItem(at: dir("rerate-refused").appendingPathComponent("log.jsonl"))
     let r2 = sync(rr, rrSettings, dir("rerate-refused"), later(5))
     check(r2.claude.isEmpty && !merged(r2) && r2.writes == ["-diplomat:fast-track #13"],
           "re-rated again at that head: \(r2.claude) \(r2.writes)")
+    let kept = only([13, 27])
+    kept.prs[0].labels = lowLow + ["diplomat:fast-track"]
+    kept.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "one line"]
+    let k1 = sync(kept, PipelineSettings(roots: [root], rate: true, fastTrack: true), dir("rerate-kept"), t0)
+    try fm.removeItem(at: dir("rerate-kept").appendingPathComponent("log.jsonl"))
+    let k2 = sync(kept, rrSettings, dir("rerate-kept"), later(5))
+    check(k1.claude.count == 1 && k2.claude.isEmpty && merged(k2), "a low re-rate, its log lost: \(k2.claude) \(k2.writes)")
 
     // A state.json there but unreadable: nothing is written, split, merged or asked for.
     let badDir = dir("bad-state")
@@ -1771,6 +1795,23 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     }
     check(!merged(down) && stageOf(down.result, prURL(13)) == "cleared/fast (Linear was not read)"
           && down.result.unread == ["acme/app"], "Linear down: \(down.writes) \(stageOf(down.result, prURL(13)))")
+    let blind = only([1, 3, 4, 13, 27])
+    blind.prs[0].labels.removeAll { $0 == "diplomat:cleared" }
+    blind.linearDown = true
+    try seed(dir("linear-down-root"),
+             PipelineEvent(at: later(-60), item: prURL(13), kind: .rerated, detail: "", head: sha("c3"), rating: low),
+             PipelineEvent(at: later(-60), item: prURL(13), kind: .cleared, detail: "", head: sha("c3")))
+    let bl = sync(blind, PipelineSettings(roots: [root], linearTeams: [team], rate: true, fix: true, fastTrack: true,
+                                          merge: true, fracture: true), dir("linear-down-root"), t0)
+    check(bl.claude.isEmpty && bl.writes.isEmpty && bl.result.effects.isEmpty && bl.result.unread == ["acme/app"],
+          "a root whose Linear team was not read: \(bl.claude) \(bl.writes) \(bl.result.effects)")
+    let keyless = only([13, 27])
+    try seedRerate(dir("linear-no-key"), 13, sha("c3"), at: later(-60))
+    let nk = sync(keyless, PipelineSettings(roots: [root], linearTeams: [.init(key: "ENG", repo: "acme/lib")], merge: true),
+                  dir("linear-no-key"), t0, key: nil)
+    check(!merged(nk) && stageOf(nk.result, prURL(13))
+          == "cleared/fast (Linear was not read, so the issues linking it are unknown)",
+          "Linear not read: \(stageOf(nk.result, prURL(13)))")
     let (_, unwritable) = try cleared("linear-unwritable", settings: withLinear) { t in
         t.prs[0].body = "Fixes #27. Fixes ENG-2."
         t.tickets = [ticket("ENG-2", assignee: ("U_ALICE", "Alice"))]
@@ -1795,6 +1836,10 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
         t.tickets[0].moreAttachments = [prURL(13)]
     }
     check(merged(linked), "linked to a Linear issue Diplomat may write to: \(stageOf(linked.result, prURL(13)))")
+    let (_, crowded) = try cleared("linear-attached-more", settings: withLinear) { $0.attachedMore = true }
+    check(!merged(crowded) && stageOf(crowded.result, prURL(13))
+          == "cleared/fast (more Linear issues link it than one read lists)",
+          "linked past Linear's answer: \(stageOf(crowded.result, prURL(13)))")
     // Only a PR closing a candidate, and on Linear from its team's own root, is put on
     // the fast track.
     func firstRating(_ name: String, _ settings: PipelineSettings, _ change: (Trackers) -> Void) -> Synced {
@@ -1865,7 +1910,8 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
         let lossy = sync(t, fastTrack, dir("lost-\(k)"), later(5))
         t.ghPartial = false
         let after = sync(t, fastTrack, dir("lost-\(k)"), later(10))
-        check(lossy.writes.isEmpty && lossy.claude.isEmpty && lossy.result.unread == ["acme/app"] && merged(after),
+        check(lossy.writes.isEmpty && lossy.claude.isEmpty && lossy.result.effects.isEmpty
+              && lossy.result.unread == ["acme/app"] && merged(after),
               "\(field) lost: \(lossy.writes) \(trail(lossy.events, lossy.result)) then \(after.writes)")
     }
 
@@ -1898,7 +1944,8 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     unlinked.failSubIssue = true
     let l1 = sync(unlinked, split, dir("unlinked"), t0)
     let l2 = sync(unlinked, watch, dir("unlinked"), later(5))
-    check(l1.writes.contains("issue #101 Extract the storage protocol") && item(l2.result, issueURL(101))?.splitFrom == "reporter",
+    check(l1.writes.contains("issue #101 Extract the storage protocol") && !l1.writes.contains("-diplomat:fractured #3")
+          && item(l2.result, issueURL(101))?.splitFrom == "reporter",
           "a part not linked: \(l1.writes) \(String(describing: item(l2.result, issueURL(101))?.splitFrom))")
     // A part's text pings no one and links nothing; at most `maxChildren` are filed.
     let loud = only([3])
@@ -1932,6 +1979,12 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     gone.issues[0].assignees = ["bob"]
     gone.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "x"]
     check(sync(gone, fastTrack, dir("no-candidate"), t0).claude.isEmpty, "re-rated for no candidate")
+    // Nor one whose diff floors it above low/low.
+    let floorFT = only([13, 27])
+    floorFT.prs[0].labels = lowLow + ["diplomat:fast-track"]
+    floorFT.prs[0].files.append(("tests/test_old.py", 0, 20, "DELETED"))
+    floorFT.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "x"]
+    check(sync(floorFT, fastTrack, dir("floored-rerate"), t0).claude.isEmpty, "re-rated above its floor")
     // Labels the read did not hold: no rating Diplomat cannot write whole clears anything.
     try fm.createDirectory(at: dir("unwritten-rerate"), withIntermediateDirectories: true)
     try Data(#"{"\#(prURL(13))":{"rating":{"risk":"low","complexity":"low"},"why":"","unwritten":true}}"#.utf8)

@@ -2,13 +2,13 @@ import Foundation
 
 // MARK: - Pipeline: the model
 //
-// Every open issue and PR of every source (the GitHub roots, Linear teams) is rated for
-// risk and complexity, and a low/low one goes down the fast track: issue -> fix PR -> the
+// Every open issue of every source (the GitHub roots, Linear teams), and the operator's open
+// PRs, is rated for risk and complexity, and a low/low one goes down the fast track: issue -> fix PR -> the
 // PR rated on its own -> reviewed until clean -> rated again at that head -> merged with no
 // human review. Anything else is left to a human. The state is the trackers' labels
 // (`assets/pipeline.json` `labels`) and Diplomat's clean-marker reviews, and in
 // `PipelineLog.dir` what the trackers cannot hold: the guards against repeating a step
-// (`state.json`), the re-rates that make a `cleared` label Diplomat's own (`log.jsonl`)
+// (`state.json`), the re-rates that make a `cleared` label Diplomat's own (there and `log.jsonl`)
 // and the ratings it may not write. `PipelineTick` runs a sync; the Linux front-end
 // reaches it through `diplomat-core pipeline-tick`, never by reimplementing it.
 

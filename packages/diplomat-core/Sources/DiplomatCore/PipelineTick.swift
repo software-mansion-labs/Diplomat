@@ -168,9 +168,6 @@ final class PipelineSync {
     var unread: Set<String> = []
     var githubQuery: String?
     var linear: LinearAPI?
-    /// The Linear read ended without an error: only then is Linear asked which issues link
-    /// a PR.
-    var linearRead = false
     /// Each read Linear issue's index by its identifier, uppercased.
     var linearIssue: [String: Int] = [:]
     /// Linear labels by lowercased name, each with its team (nil for a workspace label).
@@ -236,7 +233,7 @@ final class PipelineSync {
         for n in notices where !state.notices.contains(n) { log("", .error, n) }
         state.notices = notices
         if blocked == nil {
-            state.prune(read: Set(entries.map(\.id)), done: Set(entries.filter { $0.item.state == "merged" }.map(\.id)),
+            state.prune(read: Set(entries.map(\.id)), done: Set(entries.filter { !open($0) }.map(\.id)),
                         readAll: readAll, now: now)
             cache = cache.filter { state.seen[$0.key] != nil }
         }
@@ -438,7 +435,6 @@ final class PipelineSync {
         } catch {
             return unreadable(error.localizedDescription)
         }
-        linearRead = true
         if after != nil {
             notice("Linear holds more open issues than one sync reads; the newest \(read) were read")
             readAll = false
@@ -684,8 +680,7 @@ final class PipelineSync {
     /// this Diplomat has not rated again: each head is rated again once, whatever the
     /// answer.
     func awaitingRerate(_ e: PipelineEntry) -> Bool {
-        guard own(e), open(e), e.item.writable, has(e, model.labels.fastTrack), partial[e.item.repo] == nil,
-              let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
+        guard own(e), open(e), e.item.writable, has(e, model.labels.fastTrack), let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
               e.item.ratedBy == "label", let r = e.item.rating, r.atLeast(e.item.floor ?? r).isFastTrack,
               offTrack(e) == nil else { return false }
         return fixesCandidate(e)
@@ -828,7 +823,7 @@ final class PipelineSync {
         persist()
         // Only a PR's first rating puts it on the fast track: a rated PR without the label is a person's.
         guard first, settings.fastTrack, rating.isFastTrack, !has(entries[i], model.labels.fastTrack),
-              partial[e.item.repo] == nil, fixesCandidate(entries[i]) else { return }
+              fixesCandidate(entries[i]) else { return }
         if add(i, model.labels.fastTrack, .fastTrack) {
             log(e.id, .fastTrack, "+\(model.labels.fastTrack): rated \(describe(rating))")
         }
@@ -1288,7 +1283,7 @@ final class PipelineSync {
     /// Linear team is tracked.
     func linearLinks(_ pr: PipelineEntry) -> String? {
         guard !settings.linearTeams.isEmpty else { return nil }
-        guard linearRead, let api = linear else { return "Linear was not read, so the issues linking it are unknown" }
+        guard let api = linear else { return "Linear was not read, so the issues linking it are unknown" }
         let data: [String: Any]
         do { data = try api.call("Attached", ["url": pr.id]) } catch {
             notice("\(pr.item.label): Linear could not say which issues link it: \(error.localizedDescription)")

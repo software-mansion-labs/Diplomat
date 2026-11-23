@@ -24,7 +24,8 @@ agents, queued like a sweep's asks: behind the [task cap](automation.md#autonomo
 [spending budget](automation.md#the-spending-budget) and the disk floor, each asked for once (a review
 once per head), retried on the monitors' backoff when a run dies, and taken off the queue when a later
 sync no longer owes it. An item whose author is on the prompt-injection ban list, and every issue
-Diplomat split from one, is not rated, split or fixed. The activity feed gets a line for each ask
+Diplomat split from one, is not rated, split or fixed; a Linear issue's author is its creator's
+display name. The activity feed gets a line for each ask
 queued or withdrawn, each merge and split, each new notice, and the sync failing or recovering.
 
 What it does not do:
@@ -35,8 +36,8 @@ What it does not do:
   that, the model's answer and a PR's [diff floor](#the-diff-floor);
 - approve a PR: GitHub does not let you approve your own, so the clean review is a COMMENT and the
   merge uses your [admin rights](#the-merge);
-- fast-track a PR of yours that closes no `candidate` issue, or one a person took a fast-track
-  label off;
+- fast-track a PR of yours that closes no issue or one that is not a `candidate`, that was rated while
+  **Fast-track my PRs** was off, or that a person took a fast-track label off;
 - comment on, assign or close a Linear issue, or hand its key to an agent;
 - read GitLab roots.
 
@@ -59,9 +60,9 @@ A PR:
 |---|---|---|
 | `unrated` | no rating yet | Unrated |
 | `human` | rated, and not on the fast track; every PR that is not yours, once a person labelled it | Human |
-| `fast-track` | yours, labelled `diplomat:fast-track`, closing a `candidate` issue, no clean marker at its head | Fast |
+| `fast-track` | yours, labelled `diplomat:fast-track`, closing only `candidate` issues, no clean marker at its head | Fast |
 | `clean` | the same, with a clean marker at its head | Fast |
-| `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its log says so) | Fast |
+| `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its state or log says so) | Fast |
 | `merged`, `closed` | one of the repo's 20 merged or closed PRs updated last, carrying a pipeline label | Done |
 
 ### The fast track
@@ -74,20 +75,26 @@ A PR:
    `Fixes ENG-12` in its PR's description.
 2. The PR is rated on its own (**Rate issues and PRs**), from its text and diff, never below its
    [diff floor](#the-diff-floor). Every open PR of yours is rated, not only the ones Diplomat opened.
-3. Low/low and closing a `candidate` issue (the fast track is for the fixes the pipeline asks for),
-   it is labelled `diplomat:fast-track` (**Fast-track my PRs**) and a max-depth review run is queued
+3. Low/low at its first rating and closing only `candidate` issues (the fast track is for the fixes
+   the pipeline asks for), it is labelled `diplomat:fast-track` (**Fast-track my PRs**); a PR rated
+   while that is off, or rated anything else, stays a person's. A max-depth review run is queued
    for its head. It reviews the PR and fixes what it finds on the branch until a full pass at the
    head finds nothing, LOW findings included, then posts one COMMENT review whose body begins
    `Clean at <head sha>`: the **clean marker**. A marker counts only on your own review, submitted
    at the commit it names.
-4. At the clean head the PR is rated again. Still low/low, it is labelled `diplomat:cleared`;
-   anything else takes both labels off and leaves it to a person for good.
+4. At the clean head the PR is rated again, once per head. Still low/low, it is labelled
+   `diplomat:cleared`; anything else, its labels written or not, takes both labels off and leaves it
+   to a person for good.
 5. A cleared PR is [merged](#the-merge) (**Merge cleared PRs**) once nothing holds it.
 
-A commit pushed past the clean marker takes `diplomat:cleared` off, and the PR goes back to
-`fast-track` for a review of the new head. A person who takes `diplomat:fast-track` or
+A head no clean marker names, as after a push, takes `diplomat:cleared` off, and the PR goes back
+to `fast-track` for a review of that head. A person who takes `diplomat:fast-track` or
 `diplomat:cleared` off a PR takes it off the fast track for good: Diplomat neither labels, reviews
-nor merges it again.
+nor merges it again, and takes the other label off too, so the labels say so.
+
+An issue's rating covers its title and body when rated, though its fix run also reads later edits
+and comments: what merges is judged on the PR itself, by its rating, its diff floor, the review and
+the rating at the clean head.
 
 ## Ratings
 
@@ -111,7 +118,8 @@ A sync rates up to four items past the ones you asked for with **Rate now**, in 
 first within each: your fast-track PRs clean at their head and awaiting the second rating, your
 unrated open PRs, unrated issues Diplomat may write to, other unrated issues. An issue already split
 or being fixed is not rated, nor is a Linear issue whose team has no repo root. A failed call is a
-notice, tried again next sync.
+notice, and the item is tried again 1, 2, 4 ... syncs later (a day at most), taking none of the four
+slots meanwhile.
 
 Labels for both dimensions are the item's rating (two of one dimension: the higher), and it is not
 rated again but for the fast track's second rating or when you ask. A rating Diplomat writes is the
@@ -159,7 +167,7 @@ someone else's PR is rated only by the labels a person put on it. A PR of yours 
 |---|---|
 | `risk:low`, `risk:medium`, `risk:high` | the risk rating |
 | `complexity:low`, `complexity:medium`, `complexity:high` | the complexity rating |
-| `diplomat:fast-track` | your low/low PR fixing a `candidate` issue, reviewed until clean |
+| `diplomat:fast-track` | your PR rated low/low at its first rating, closing only `candidate` issues, reviewed until clean |
 | `diplomat:cleared` | rated low/low again at its clean head by this Diplomat: only the [holds](#the-merge) stand before the merge |
 | `diplomat:fractured` | an issue split into sub-issues, labelled before the first is filed |
 
@@ -181,10 +189,14 @@ on its own - or no parts, and why.
 The parent is labelled `diplomat:fractured` first, then each part becomes a real child, so the
 trackers themselves keep the graph: on GitHub an issue made a **sub-issue** of the parent, on Linear
 an issue created with the parent as its **parent**. Each child's title and body are the model's, cut
-to 200 and 4000 characters, and the body ends with `Part of <the parent's URL>`. The parent stays on
+to 200 and 4000 characters, its mentions, issue references and GitHub links made inert so it notifies
+and links no one, and the body ends with `Part of <the parent's URL>`. The parent stays on
 the graph in the Fractured lane, its children joined to it; they enter `unrated`, and each one's fix
 PR joins under it. An issue that would not split is not tried again unless you press Fracture; a
-split that fails part-way keeps the label and is never tried again. Either way, why is its hold.
+split that fails after filing a part, linked as a sub-issue or not, keeps the label and is never
+tried again.
+Either way, why is its hold. A call that fails, or a split that files nothing, takes the label off
+again and is tried again 1, 2, 4 ... syncs later, a day at most.
 
 ## The merge
 
@@ -194,13 +206,13 @@ you approve your own PR, so a fast-track PR never has an approval. The merge is 
 squash). `--admin` merges a PR that does not meet the branch's requirements, a person's approving
 review included, so leave this off wherever a second person's review is required.
 
-Only a `cleared` PR is merged. Right before that the sync reads it again, with its commits, its
-head's checks and when it was last marked ready, and merges it only if its head is the one the sync
-read, it is still cleared there, and nothing holds it. A draft is marked ready (`gh pr ready`)
-instead, and merged at a later sync once CI has run on it since. The holds, the first that applies
-winning:
+Only a `cleared` PR is merged. Right before that the sync reads it again, with its commits and its
+head's checks, and merges it only if its head is the one the sync read, it is still cleared there,
+and nothing holds it. A draft is marked ready (`gh pr ready`) instead, and merged at a later sync.
+The holds, the first that applies winning:
 
-- its repo's read returned errors this sync;
+- its repo's read returned errors this sync, on any page, or Linear was not read for a team mapped
+  to it;
 - not open; not yours; from a fork; not into the default branch;
 - anyone but you or a bot reviewed or commented, or it has more reviews or comments than one read lists;
 - you commented or reviewed yourself, not through Diplomat;
@@ -208,16 +220,21 @@ winning:
 - a commit authored or committed by anyone but you (GitHub's own committer of a web commit aside), or
   more commits than one read lists;
 - changes requested; an unresolved review thread;
-- it lacks either fast-track label, closes no `candidate` issue, or would close an issue Diplomat may
-  not write to;
+- it lacks either fast-track label, or is off the fast track for good;
+- it closes no issue, or one that is not a `candidate`;
+- it would close an issue this sync did not read: in another repo and not assigned to you alone,
+  past the closing references one read lists, or a Linear issue the Linear read did not return;
+- with Linear teams set, Linear cannot say which issues link it, or names one, not done, that
+  Diplomat did not read or may not write to;
 - its rating, or its diff floor, is not low/low;
 - it conflicts with its base, or GitHub has not computed whether it can merge;
 - CI was read for an older commit, is still running, or failed; it has no checks (so a repo without
-  CI never merges), every check was skipped, or none has run since it was marked ready;
+  CI never merges), or every check was skipped;
 - its repo allows none of squash, merge or rebase.
 
 A hold shows on the card and is logged each time it changes. A merge `gh` refuses (no admin rights, a
-head that moved) is a notice, and the next sync tries again.
+head that moved) is a notice, and the next sync tries again; it counts as merged only if GitHub then
+shows the PR merged at that head.
 
 ## The Pipeline screen
 
@@ -229,7 +246,8 @@ The header's **Pipeline** button opens it, in both apps.
   that could not be read, a rating that failed, no Linear key.
 - **Lanes** - **All**, **Fast**, **Human**, **Unrated**, **Fractured** and **Done**, with their
   counts. A lane shows every group with a card in it, whole.
-- **The graph** - each connected group on a band of its own, left to right along its edges: a parent
+- **The graph** - each connected group below the one before (on macOS on a band of its own, with a
+  gap between bands), left to right along its edges: a parent
   to its children (dashed), an issue to the PR fixing it (solid), a PR to the PR stacked on it, whose
   base is its head branch (dotted), the arrowhead at the second. Groups with an unrated or fast card
   come first and those with only merged or closed items last, newest first otherwise; at most 300
@@ -242,14 +260,14 @@ The header's **Pipeline** button opens it, in both apps.
   labelled, the rater's sentence and the diff floor; its hold; who may act on it, who opened it and
   who it is assigned to, and for a PR its head and whether a clean marker names it; its
   **traversal**, newest first: each step the sync took or saw (`rated`, `labelled`, `fast-track`,
-  `clean`, `rerated`, `cleared`, `merged`, `held`, `fractured`, `child`, `asked`, `error`). And its
-  actions:
+  `clean`, `rerated`, `cleared`, `merged`, `held`, `fractured`, `child`, `asked`); a sync's errors
+  are its notices, under the status line. And its actions:
   - **Open** - the issue or PR in the browser.
   - **Rate now** (your open PR, or an open issue whose code a sync can read) - rated by a sync
     started at once, ahead of every limit, even with **Rate issues and PRs** off.
   - **Fracture** (an issue Diplomat may write to, not split or being fixed, whose code a sync can
     read) - split the same way, whatever its rating.
-  - **Start fix** (a `candidate` issue) - its fix queued at once, past its attempt record, to wait
+  - **Start fix** (a `candidate` issue no hold stops) - its fix queued at once, past its attempt record, to wait
     for a bay like every ask. A Linear issue's only while **Open fix PRs** is on, since its text
     reaches the fix run through the sync.
 
@@ -270,9 +288,9 @@ running, which reads the switches again (`control.json`) before every step it ta
   five minutes. They run in Diplomat, not in the queue, so the task cap and the spending budget do
   not hold them.
 - **Open fix PRs** - a Fix-issues run for each `candidate` issue no open PR fixes.
-- **Fast-track my PRs** - `diplomat:fast-track` on each low/low PR of yours that closes a `candidate`
-  issue, a review run per head until clean, and `diplomat:cleared` taken off a PR whose head moved
-  past its marker.
+- **Fast-track my PRs** - `diplomat:fast-track` on each PR of yours rated low/low at its first rating
+  that closes only `candidate` issues, a review run per head until clean, and `diplomat:cleared` taken
+  off a PR whose head no marker names. A PR rated while it is off stays a person's.
 - **Merge cleared PRs** - [the merge](#the-merge), with your admin rights.
 - **Split big issues** - [fracturing](#fracturing): one issue and one `claude -p` call a sync.
 - **Linear teams** - `ENG=owner/repo, OPS=owner/other`, commas, semicolons or new lines between
@@ -290,8 +308,8 @@ QSettings (Linux) under the same keys: `pipelineEnabled`, `pipelineRate`, `pipel
 
 Linear is read with a personal API key of yours. The key is read on each sync and reaches only
 `curl`, in a config on its stdin (staged in an owner-only temp file, removed when curl exits), never
-in an argv; no `gh`, `claude` or agent shell Diplomat starts has `DIPLOMAT_LINEAR_TOKEN` in its
-environment. A fix run for a Linear issue gets the issue's text as Diplomat read it, and no access
+in an argv; no agent shell, nor `gh` or `claude` a sync starts, has `DIPLOMAT_LINEAR_TOKEN` in its
+environment, though the Linux app's own `gh` calls inherit one you export. A fix run for a Linear issue gets the issue's text as Diplomat read it, and no access
 to Linear.
 
 1. **Mint** a personal API key in Linear's
@@ -318,11 +336,14 @@ to Linear.
 
 `DIPLOMAT_LINEAR_TOKEN` wins over both. The Keychain item is looked up under your account first,
 then under any; whitespace around the key is dropped. With teams set and no key, Linear is skipped
-with a notice and GitHub still syncs.
+with a notice and GitHub still syncs, but a root a team maps to is only read and shown, and no PR is
+merged.
 
-A sync reads the tracked teams' issues in any state but completed or canceled. A PR fixes a Linear
-issue when one of the issue's attachments links it, or when its title or body names the issue's
-identifier as a word of its own. An issue is known by its link without the title's slug, so a
+A sync reads the tracked teams' issues in any state but completed or canceled. A PR closes a Linear
+issue when one of the issue's attachments links it, or when its title or body names the issue right
+after one of Linear's closing words (any form of close, fix, resolve, complete or implement, or
+`Linear issue`), by identifier or link, alone or in a list: `Fixes ENG-12, ENG-13 and #4`. A bare
+mention closes nothing, and only a PR in the root its team maps to fixes it as a `candidate`. An issue is known by its link without the title's slug, so a
 retitle keeps what Diplomat recorded of it.
 
 ## Where it keeps things
@@ -331,14 +352,16 @@ retitle keeps what Diplomat recorded of it.
 labels are the state; this is what a sync needs besides:
 
 - `log.jsonl` - every step a sync took or saw, which the traversals are drawn from and whose
-  re-rates prove a `cleared` label this Diplomat's own; trimmed to its newest half past 2 MB.
+  re-rates and clears back `state.json`'s; trimmed to its newest half past 2 MB.
 - `last.json` - the last sync's result, which the screen shows until the next one.
 - `ratings.json` - the ratings of items Diplomat may not label, kept while the item is unchanged, and
   of those whose labels the tracker refused, until the item wears a rating; the rater's sentence for
   the rest.
-- `state.json` - the labels made per repo, and the guards against repeating a step: the PRs off the
-  fast track for good and the fast-track labels last seen on each, the issues that would not split
-  and why, and the issues Diplomat filed as parts, with the ban each carries. An item missing from a
+- `state.json` - the labels made per repo, and the guards against repeating a step: each PR's
+  re-rates by head, which prove a `cleared` label this Diplomat's own, and the head it was cleared
+  at; the PRs Diplomat took off the fast track; the items whose rating or split failed, and when to
+  try again; the issues that would not split and why; and the issues Diplomat filed as parts, with
+  the ban each carries. An item missing from a
   read keeps these until it is read merged or closed, or goes 90 days unseen. Also what was last
   logged, so the log does not repeat itself. A `state.json` that is there but cannot be read leaves
   every sync reading and showing only, with a notice.
@@ -362,7 +385,8 @@ the app quits.
   link to.
 - Linear: the 300 open issues of the tracked teams updated last.
 - Past either cap a notice says so. A source that cannot be read, or is read only in part, is a
-  notice, and the sync goes on without what it missed: a root read only in part fixes and splits
-  none of its issues, and an item missing from a read keeps its guards.
+  notice, and the sync goes on without what it missed: a root read past its cap fixes and splits
+  none of its issues, one read with errors, or whose Linear team was not read, is only read and
+  shown, and an item missing from a read keeps its guards.
 - One sync at a time: another started meanwhile reads nothing and says so.
 - Ratings and splits need Claude Code's `claude` on the machine, whichever agent runner you use.

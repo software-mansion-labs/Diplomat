@@ -59,8 +59,8 @@ public enum PipelineLog {
 ///
 /// `decided`, `unsplit`, `rerated`, `cleared`, `retry` and `lineage` guard against
 /// repeating an outward step, so an item missing from a read keeps them: they go once it
-/// is read merged, or after `forgetDays` unseen. The rest only keeps the log from
-/// repeating itself, and also goes with an item missing from a read of every source.
+/// is read merged or closed, or after `forgetDays` unseen. The rest only keeps the log
+/// from repeating itself, and also goes with an item missing from a read of every source.
 struct PipelineState: Codable, Equatable {
     static let forgetDays: Double = 90
 
@@ -136,9 +136,9 @@ struct PipelineState: Codable, Equatable {
         PrivateFiles.writeWhole(data, to: Self.url(in: dir))
     }
 
-    /// Marks `read` seen at `now`, then forgets everything about an item read merged
-    /// (`done`) or unseen for `forgetDays`; with `readAll`, also the log-once entries of an
-    /// item missing from the read. A closed item keeps its guards: it can be reopened.
+    /// Marks `read` seen at `now`, then forgets everything about an item read merged or
+    /// closed (`done`) or unseen for `forgetDays`; with `readAll`, also the log-once
+    /// entries of an item missing from the read.
     mutating func prune(read: Set<String>, done: Set<String>, readAll: Bool, now: Date) {
         for id in read { seen[id] = now }
         let cutoff = now.addingTimeInterval(-Self.forgetDays * 86_400)

@@ -12,7 +12,7 @@ issues, and act on what people ask you on Slack. You decide; they do the legwork
 |---|---|
 | **Time** | A review is written before you open the PR. Conflicts and review threads on your own PRs are fixed and pushed. A new issue from outside the team is reproduced and, if it is real, comes back as a draft PR. A Slack "can you look at #412?" is queued before you have read it. |
 | **Money** | Every task is priced from your real usage, and automatic work holds before your rate limit or credit runs dry. Telemetry shows what each task costs. Work spreads over the machines and devices you already have. |
-| **Power** | One maintainer, a swarm: agents in parallel, each with its own simulator; full-repo audits ranked by severity; every open issue and PR rated, and the low-risk, low-complexity ones fixed, reviewed and merged with nobody in the loop, if you let it. |
+| **Power** | One maintainer, a swarm: agents in parallel, each with its own simulator; full-repo audits ranked by severity; every open issue and your own PRs rated, and the low-risk, low-complexity ones fixed, reviewed and merged with nobody in the loop, if you let it. |
 
 ## How it fits together
 
