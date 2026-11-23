@@ -103,8 +103,9 @@ private final class Trackers {
         var readyEvents = 0
         /// Review-thread comments.
         var threadNotes: [(login: String, body: String)] = []
-        /// Every label ever added to it, in any way.
+        /// Every label ever added to it, in any way, and the label events past what one read lists.
         var history: [String] = []
+        var moreHistory = 0
     }
     struct Ticket {
         var id: String
@@ -270,8 +271,8 @@ private final class Trackers {
                 } else if let p = prs.first(where: { $0.number == n }) {
                     node = prNode(p, gate: false)
                     let ever = p.history + p.labels.filter { !p.history.contains($0) }
-                    node["labeled"] = ["filteredCount": ever.count, "nodes": ever.map { ["label": ["name": $0]] }]
-                        as [String: Any]
+                    node["labeled"] = ["filteredCount": ever.count + p.moreHistory,
+                                       "nodes": ever.map { ["label": ["name": $0]] }] as [String: Any]
                 } else if let other = others[n] {
                     node = otherNode(n, other)
                 } else {
@@ -1821,6 +1822,10 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     let flaky = only([1])
     flaky.onClaude = { _ in flaky.ghFails = true }
     let fl1 = sync(flaky, rateFix, dir("recheck-failed-once"), t0)
+    let flState = try JSONSerialization.jsonObject(with: Data(contentsOf: dir("recheck-failed-once")
+        .appendingPathComponent("state.json"))) as? [String: Any]
+    let flRetry = (flState?["retry"] as? [String: Any])?[issueURL(1)] as? [String: Any]
+    check(flRetry?["failures"] as? Int == 1, "a failed read before the write backs off: \(String(describing: flRetry))")
     flaky.onClaude = nil
     flaky.ghFails = false
     let fl2 = sync(flaky, rateFix, dir("recheck-failed-once"), later(5))
@@ -2388,6 +2393,22 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
     check(la.claude == ["sonnet Wrong color in the header"] && la.writes.isEmpty
           && la.result.notices == ["ENG-1 was not written to, as it changed since this sync read it: assigned to Alice"],
           "a Linear issue assigned while rated: \(la.writes) \(la.result.notices)")
+    // A rating label a person raised meanwhile outranks the rating, asked for or kept.
+    let raisedRate = only([1])
+    raisedRate.onClaude = { _ in raisedRate.issues[0].labels = ["risk:high"] }
+    _ = sync(raisedRate, rateFix, dir("raised-while-rated"), t0)
+    let raisedKept = only([1])
+    raisedKept.onItem = { _ in
+        raisedKept.onItem = nil
+        raisedKept.issues[0].labels = ["risk:high"]
+    }
+    try fm.createDirectory(at: dir("raised-while-kept"), withIntermediateDirectories: true)
+    try Data(#"{"\#(issueURL(1))":{"rating":{"risk":"low","complexity":"low"},"why":"","unwritten":true}}"#.utf8)
+        .write(to: dir("raised-while-kept").appendingPathComponent("ratings.json"))
+    _ = sync(raisedKept, rateFix, dir("raised-while-kept"), t0)
+    check(raisedRate.issues[0].labels == ["risk:high", "complexity:low"]
+          && raisedKept.issues[0].labels == ["risk:high", "complexity:low"],
+          "risk:high put on before the write: \(raisedRate.issues[0].labels) \(raisedKept.issues[0].labels)")
     let splitTaken = only([3])
     splitTaken.onClaude = { _ in splitTaken.issues[0].assignees = ["bob"] }
     let sk = sync(splitTaken, split, dir("assigned-while-split"), t0)
@@ -2439,6 +2460,19 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
           && o2.writes == ["+risk:low #11", "+complexity:low #11"] && o2.result.effects.isEmpty
           && stageOf(o2.result, prURL(11)) == "human/human",
           "labels cleared by a person: \(o2.claude) \(o2.writes) \(stageOf(o2.result, prURL(11)))")
+    // So is one that wore a rating or fast-track label before, or whose label history a read cuts.
+    let worn: [(String, (inout Trackers.PR) -> Void)] = [
+        ("a rating label", { $0.history = ["risk:medium"] }),
+        ("the fast-track label", { $0.history = ["diplomat:fast-track"] }),
+        ("labels past what one read lists", { $0.moreHistory = 1 }),
+    ]
+    for (k, (what, change)) in worn.enumerated() {
+        let t = only([4, 11])
+        change(&t.prs[0])
+        let s = sync(t, rateTrack, dir("worn-\(k)"), t0)
+        check(s.writes.contains("+risk:low #11") && !s.writes.contains("+diplomat:fast-track #11"),
+              "first rated, having worn \(what): \(s.writes)")
+    }
     // A PR whose first rating labels the tracker refused says so.
     let refusedPR = only([4, 11])
     refusedPR.refuseLabels = ["11"]
@@ -2492,6 +2526,17 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
     let dr = sync(drafted, mergeOnly, dir("drafted"), t0)
     check(dr.writes.isEmpty && stageOf(dr.result, prURL(13)) == redrafted,
           "opened ready, then drafted: \(dr.writes) \(stageOf(dr.result, prURL(13)))")
+    // The Merge switch, read again right before a draft is marked ready, stops it.
+    let readyOff = try cleared("ready-switched-off") { t in
+        t.prs[0].draft = true
+        t.onReread = { _ in
+            PipelineControl(enabled: true, rate: true, fix: true, fastTrack: true, merge: false, fracture: true)
+                .save(in: dir("ready-switched-off"))
+        }
+    }
+    check(readyOff.writes.isEmpty
+          && readyOff.result.notices == ["Merge is switched off, so this sync took no merge step past that"],
+          "switched off before marked ready: \(readyOff.writes) \(readyOff.result.notices)")
 
     // A split cleans up after itself: its claim comes off with the pipeline switched off...
     let offDir = dir("split-switched-off")
@@ -2603,6 +2648,8 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
     check(plain.result.fixable == [issueURL(1)] && partial.result.fixable.isEmpty && blocked.result.fixable.isEmpty
           && stageOf(blocked.result, issueURL(1)) == "candidate/fast",
           "fixable: \(plain.result.fixable) \(partial.result.fixable) \(blocked.result.fixable)")
+    let human = sync(only([3]), PipelineSettings(roots: [root]), dir("fixable-human"), t0)
+    check(human.result.fixable.isEmpty, "fixable, rated medium/high: \(human.result.fixable)")
 }
 
 /// Guards each pinned by the smallest scenario that tells it from its absence.
@@ -2627,13 +2674,16 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     }
     let linking = "cleared/fast (would close the Linear issues linking it, which Diplomat did not read or may not write to)"
 
-    // Cleared only at the head this Diplomat rated low/low again.
+    // Cleared only at the head this Diplomat rated low/low again, and still marked clean there at the merge.
     let moved = try cleared("moved") { t in
         t.prs[0].head = sha("c4")
         t.prs[0].reviews = [.init(login: opLogin, body: "\(tag)Clean at \(sha("c4"))", oid: sha("c4"))]
     }
     check(!merged(moved) && stageOf(moved.result, prURL(13)) == "clean/fast",
           "clean at a head not rated again: \(moved.writes) \(stageOf(moved.result, prURL(13)))")
+    let unmarked = try cleared("marker-gone") { t in t.onReread = { _ in t.prs[0].reviews = [] } }
+    check(!merged(unmarked) && stageOf(unmarked.result, prURL(13)) == "cleared/fast (it is no longer cleared at its head)",
+          "its clean marker gone before the merge: \(unmarked.writes) \(stageOf(unmarked.result, prURL(13)))")
     // A merge read again with errors, or whose Linear links are unknown, holds.
     let erred = try cleared("reread-errors") { t in
         t.onReread = { _ in
@@ -2701,6 +2751,13 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
                   dir("rootless"), t0)
     check(stageOf(rl.result, linearURL("ENG-3")) == "candidate/fast (Linear team OPS has no root to fix it in)",
           "a team with no root: \(stageOf(rl.result, linearURL("ENG-3")))")
+    // A team's repository names its root in any case.
+    let casedTeam = only([])
+    casedTeam.tickets = [fixture().tickets[2]]
+    let ctm = sync(casedTeam, PipelineSettings(roots: [root], linearTeams: [.init(key: "ENG", repo: "Acme/App")]),
+                   dir("team-cased"), t0)
+    check(stageOf(ctm.result, linearURL("ENG-3")) == "candidate/fast",
+          "a team's repository in another case: \(stageOf(ctm.result, linearURL("ENG-3")))")
     // `Completes ENG-1` closes it.
     let completes = only([11])
     completes.prs[0].body = "Completes ENG-1."
@@ -2711,6 +2768,8 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     let cased = only([4])
     cased.issues[0].assignees = ["OP"]
     check(stageOf(sync(cased, watch, dir("cased"), t0).result, issueURL(4)) == "candidate/fast", "assigned to OP")
+    let casedCommits = try cleared("cased-commits") { $0.prs[0].commits = [("OP", "OP")] }
+    check(merged(casedCommits), "commits by OP: \(stageOf(casedCommits.result, prURL(13)))")
 
     // Rating: Rate now waits for a whole read; an issue split or being fixed is not rated
     // though no one may write to it; a PR rated only here is not rated again at its head;
