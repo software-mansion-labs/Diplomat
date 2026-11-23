@@ -600,8 +600,10 @@ enum PipelineTest {
         ticks = []
         Store.pipelineTickOverride = { settings in
             ticks.append(settings)
-            store.pipelineSyncAgain = true
-            store.pipelineEnabled = false
+            if ticks.count == 1 {
+                store.pipelineSyncAgain = true
+                store.pipelineEnabled = false
+            }
             return result([])
         }
         await store.runPipelineSyncOnce()
