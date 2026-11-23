@@ -52,9 +52,15 @@ export function fileDisk(dir) {
     read: (name) => text(file(name)),
     appended: (name) => text(logFile(name)),
     append(name, added) {
+      const bytes = Buffer.from(added, 'utf8');
       const fd = fs.openSync(logFile(name), 'a', 0o600);
       try {
-        fs.writeSync(fd, added);
+        // A write may take less than it was given, and say so only by its count.
+        for (let at = 0; at < bytes.length;) {
+          const n = fs.writeSync(fd, bytes, at, bytes.length - at);
+          if (n <= 0) throw new Error(`${name}.log took no more of a line`);
+          at += n;
+        }
         fs.fsyncSync(fd);
       } finally {
         fs.closeSync(fd);
@@ -140,15 +146,20 @@ export function createStore({ dir, disk = fileDisk(dir), log = () => {} }) {
       if (text === null || added === null) return [];
       // A log that follows another document was left by a host that died between the
       // write of this one and the log's removal. What comes after the last line feed is
-      // a line the host died writing.
+      // a line the host died writing. Each line rests on the ones before it: the lines
+      // after one that does not parse are not taken in.
       const [tag, ...lines] = added.split('\n').slice(0, -1);
       if (tag !== tagOf(text)) return [];
-      try {
-        return lines.map((line) => JSON.parse(line));
-      } catch (err) {
-        log(`store: ${name}.log does not parse (${err.message}); read as empty`);
-        return [];
+      const read = [];
+      for (const [n, line] of lines.entries()) {
+        try {
+          read.push(JSON.parse(line));
+        } catch (err) {
+          log(`store: line ${n + 1} of ${name}.log does not parse (${err.message}); read up to it`);
+          break;
+        }
       }
+      return read;
     },
     write(name, value, { line } = {}) {
       const held = dirty.get(name);

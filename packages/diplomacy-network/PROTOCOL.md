@@ -432,7 +432,8 @@ answers `denied` with the detail `no-seat`; the other details are `bad-invite`,
 `wrong-pool`, `expired`, `that invite is no longer good` (not this host's, or made
 before it began the membership it is in) and `the maker of that invite sits under the
 key that brings it`: a host gives no seat to the key that seated it, nor to the key
-that seated that one. The answer is `{ voucher, chain }`: the voucher
+that seated that one, also when that key has since begun another membership. The
+answer is `{ voucher, chain }`: the voucher
 dated by the host's clock at that moment, and the member records that lead from the host
 to the first member, the host's own first.
 
@@ -448,26 +449,33 @@ maker, and joining under it would close the chain.
 
 A member that left was put out by nobody, and comes back as the member it was: it signs
 its record again - a higher `seq`, the voucher it holds, no `left` - and greets the
-members it knew. One that holds no member's record but its own by then - the first
-member of the pool, back after more than 30 days: the others' records ran out in its
-store, and no voucher of its own leads to one - greets the keys of the members it left
-instead, as often as a host asks a member that does not answer, until one of them has
-answered and it holds that one's record. They hold its record still, the first of the
-chain their vouchers lead up, and take the version it signs now. A member record is held for 30 days after it was signed, and for as
+members it knew. A member record is held for 30 days after it was signed, and for as
 long after that as the voucher of a record that is held was signed by its key. A host's
 own record is the exception in its own store: it holds that, and so the era and the
 voucher of its membership, whatever its age. A host that stayed away longer than 30
-days is forgotten by the others unless a member it seated kept signing, and is back the
-moment it signs its record again - the next version of the one it held, under the same
-voucher - unless its seat went to another key meanwhile: then its record is given no
-seat, and it enters by a new invite. The members it had seated were members all the
-while, and are when it is back.
+days is forgotten by the others unless a member it seated kept signing, and is back
+once one of them takes the next version of the record it held, under the same voucher
+- unless its seat went to another key meanwhile: then its record is given no seat, and
+it enters by a new invite. The members it had seated were members all the while, and
+are when it is back.
 
-A host that every other host it knows of in a pool has refused - its seat was given
-away, the member that gave it began another membership, or a move of the members above
-it left it more than two vouchers from the first - holds a seat in its own state alone;
-so does one that is back in a pool and refused by every key it left there.
-It learns of it by those refusals and nothing else, and gets in again by an invite.
+The records such a host held of the others ran out in its store while it was away, but
+for the ones its voucher leads up through, and those members may be gone for good. So
+a host that comes back to a pool - joining it again after it left, or starting after
+the others' records ran out - asks, besides the members whose records it holds, the
+keys of the members it left the pool to and of the members whose records ran out, as
+often as a host asks a member that does not answer, until one of those it asks has
+answered. They hold its record still, or the records its voucher leads up through, and
+take the version it signs now. Until then the pool is out of date for it, whatever the
+time ("A host that was away"): it holds no word of anyone's but its own on what the
+pool is.
+
+A host that every other host it asks in a pool has refused as no member - its seat was
+given away, the member that gave it began another membership, or a move of the members
+above it left it more than two vouchers from the first - holds a seat in its own state
+alone. It learns of it by those refusals (`denied`, `not-member`) and nothing else, and
+gets in again by an invite. A refusal of its clock (`stale`) or its work (`effort`) says
+nothing of its seat.
 
 A member record of any other form - one with a `joinedAt`, without an `era`, or with an
 invite for a voucher - is no record (`bad-record`), wherever it comes from, a host's own
@@ -590,9 +598,9 @@ keeps the `left` record, and the keys of the members it left, for as long as it 
 member again: one of those keys that asks it about the pool has not heard, and is pushed
 that record, at most once in 10 minutes. Nobody else is sent anything. A host dials,
 pushes to and solves a proof of work for only the keys a pool's own records name as its
-members, and for the keys of the members it left while it is back in that pool with no
-record of another member; a key it knows from a request alone it answers and nothing
-more. A host that
+members, and, while it comes back to a pool, for the keys of the members it left there
+and of the members whose records ran out in its store; a key it knows from a request
+alone it answers and nothing more. A host that
 stops taking part without leaving - its network is switched off - cancels its open
 offers and gives its claims back the same way, pushes that once, and stays a member for
 as long as its record is fresh.
@@ -920,8 +928,10 @@ which is the same word from the other side. A member that is asleep, or slow to 
 reached, keeps nobody waiting. With nobody to ask, the pool is up to date at once.
 When nobody answers, the host asks again. 180 s after it went out of date, with its
 transport up, it goes on with what it holds, whatever it was told by then: nothing, or
-part of what a member holds by a member that answers slowly and a page at a time. A
-host that goes out of date again meanwhile starts over: what a member said before says nothing of what came after.
+part of what a member holds by a member that answers slowly and a page at a time -
+unless it is coming back to the pool (section 5), when it waits for an answer however
+long that takes. A host that goes out of date again meanwhile starts over: what a member
+said before says nothing of what came after.
 
 Then it looks at its offers. One whose job was run meanwhile is `done` (above). One
 whose last version this host signed 24 hours ago or longer is `cancelled`: its record
@@ -1152,11 +1162,19 @@ Nothing in a record hides any of this.
   theirs leads to that membership, and go on as the pool they were, under the record it
   signed last in the old one. It is a pool of one, and each of them that is to be with it
   joins it by invite.
-- **The first member, back after more than 30 days, asks keys that may be nobody's.** It
-  greets the keys of the members it left, each no more often than once in 10 minutes,
-  for as long as none of them has answered: a pool whose other members are all gone
-  costs it those requests for as long as it stays linked, and it is a pool of one
-  meanwhile.
+- **A host back after more than 30 days asks keys that may be nobody's.** It greets the
+  keys of the members it knew, each no more often than once in 10 minutes, for as long
+  as none of them has answered: a pool whose other members are all gone costs it those
+  requests for as long as it stays linked, and it takes and gives no job meanwhile. Its
+  operator, knowing the others gone, unlinks the repository and links it again, which
+  begins a pool of one.
+- **A host that began again is let back in by no member under its old record.** A host
+  that unlinked a pool and linked it again began another membership, and every member
+  that sits under the record it signed in the old one - each it seated, each those
+  seated, and, for the first member, every member - refuses it a seat (`the maker of
+  that invite sits under the key that brings it`). The first member is so taken back by
+  no invite at all: the members of the pool it began join its new pool, each by its
+  invite.
 - **Nothing puts a member out, and no key is ever changed.** There is no request and no
   command that removes a member another member seated: a host gives a seat to another
   key only once its holder left or went a day without signing. A member that misbehaves

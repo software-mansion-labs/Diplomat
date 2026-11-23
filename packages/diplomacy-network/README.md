@@ -299,13 +299,15 @@ carries the reason. `devices` is `off` until the operator sets `networkDevices`,
 A pool's `joining` is true from the moment an invite is pasted until the machine that made
 it has answered or the invite has run out: this machine is a pool of one meanwhile. Its
 `joinFailed` is why the last invite let this machine in nowhere - what the other machine
-said, or that the invite ran out unanswered - and is empty once another invite is pasted.
-Its `returning` is true while this machine, back in a pool it left, holds the record of no
-other machine there and asks the machines it left: it is a pool of one until one of them
-answers, and needs no invite. That is the machine that started the pool, back after more
-than 30 days; any other asks the machine that invited it, whose record it kept.
-Its `unseated` is true while every other machine this one knows of in the pool - or, while
-it is `returning`, every machine it left - has refused it and answered it nothing since:
+said, or that the invite ran out unanswered, or that its maker came into the pool under
+this machine before this one began the pool again, so no machine that came in under it
+can let it back in - and is empty once another invite is pasted.
+Its `returning` is true while this machine, back in a pool after it left it or after more
+than 30 days away, asks the machines it knew there and none of them has answered yet: it
+takes and gives none of the pool's jobs until one does, and needs no invite.
+Its `unseated` is true while every other machine this one asks in the pool has refused it
+as no member (`denied` or `not-member`) and answered it nothing since - a machine that
+does not answer, is busy, or refuses this one's clock or its work leaves it false:
 the seat it had there is no longer its own - the machine that gave it began the pool again
 or gave the seat away, or the pool moved and left it too far from the machine that started
 it - and it gets into the pool again by an invite.
