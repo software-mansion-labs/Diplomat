@@ -501,8 +501,9 @@ and "What remains".
 
 A request is checked before it is sent (`requester/authorize.js`). Where the check
 depends on the forge - where a branch is, which branch is the default, whether it is
-protected, who opened a pull request, who is assigned, whose a repository is and what it
-is a fork of, which branch a CI run ran for - the forge is asked, and an answer
+protected or a protection rule would cover a new one's name, who opened a pull request,
+who is assigned, whose a repository is and what it is a fork of, which branch a CI run
+ran for - the forge is asked, and an answer
 that does not settle the question refuses the request: a rate limit or an error is not
 "no such branch". A push goes to the pool's repository or to the fork of it held by the
 account the pool is linked with (its `identity`), where the head branch of a pull
@@ -516,7 +517,9 @@ git's own object check, where the fast-forward and the pushed files are proven.
 What a task has used of its allowances - the branches it created, the pull request it
 opened from each - is the task's, not the key's: it is kept with the offer in
 `offers.json`, written before the request that uses it is sent, so every key issued for
-the task goes on from the same count and a restart forgets none of it. A branch is the
+the task goes on from the same count and a restart forgets none of it. Each machine
+that offers the task keeps its own count, so a task two machines offer may use the
+allowance of each, under each one's key. A branch is the
 task's own once the forge's answer to the push says so, a pull request its one once the
 forge's answer says it was opened. A creation whose answer never came stays counted until
 the forge is asked what became of it, before the task's next push or pull request is

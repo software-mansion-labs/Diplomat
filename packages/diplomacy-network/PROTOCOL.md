@@ -1287,7 +1287,8 @@ git, with which it fetches what a job clones.
    it issued for another claim of the task is revoked first. It answers with:
    - `capability`: `{ keyId, pool, taskId, executor, host, rules, exp, sig }`, signed by
      that host - `keyId` is 16 random bytes, `rules` is the exact list of requests this
-     task may make (section 10), at most 128 of them, `exp` is the moment the claim
+     task may make when the key is issued (section 10), at most 128 of them, `exp` is the
+     moment the claim
      stops holding that host's offer (section 8);
    - `secret`: 32 random bytes;
    - `spec`: what the executor needs to run the task - the prompt, the item, the base
@@ -1310,7 +1311,9 @@ git, with which it fetches what a job clones.
    performs it only when: the envelope is signed by the capability's executor; the key is
    unexpired and unrevoked; `seq` is greater than every `seq` used under the key; the MAC
    matches; the claim the key was issued for still holds the host's offer; and the
-   request matches a rule. A request whose MAC matched has used its `seq` whether or not
+   request matches a rule the host's catalogue gives the task when the request arrives,
+   so a catalogue narrowed since the key was issued narrows what it allows. A request
+   whose MAC matched has used its `seq` whether or not
    it was performed. The host sends the request to the forge with its own credentials
    and answers `{ status, headers, body }`. A request no rule covers is answered the
    same way, with status 403 and a JSON body `{ "message": "<why>" }`; a forge that
@@ -1319,7 +1322,8 @@ git, with which it fetches what a job clones.
    the same `keyId` and secret. An `act` names the key and does not carry it, so the
    executor has nothing to fetch. A key is revoked when the claim it was issued for
    stops holding the host's offer - it ended, it lapsed, it outlived the offer's hours -
-   when the run's `done` is taken, and when the offer ends. The executor stops its run
+   when the run's `done` is taken, when the offer ends, and when an `act` finds that the
+   catalogue gives the task no rules any more. The executor stops its run
    and releases its claim when the claim no longer holds the offer of the host its key
    is from, whatever other offer it holds.
 5. Both sides write a `seq` down before they use it: the executor before the request
@@ -1402,8 +1406,10 @@ through.
 - `"body": { "event": { "oneOf": ["COMMENT"] }, "body": "free" }` pins a JSON body member
   by member. The body is parsed strictly (`application/json`, UTF-8, no duplicate key) and
   a member the rule does not name is refused. A member is `"free"`, or pinned with
-  `equals`, `oneOf`, `prefix`, `prose` (text with no line starting with `/`, which GitLab
-  would run as a quick action), `created` (a branch this task created, from which it has
+  `equals`, `oneOf`, `prefix`, `prose` (text with no line starting with `/`, `@` or
+  `bors`, which GitLab would run as a quick action and a bot on either forge would take
+  for a command), `proseIn` (a list of objects whose member of that name is `prose`),
+  `created` (a branch this task created, from which it has
   opened no pull request yet; `"created": "label"` reads the member as GitHub's head
   label, which is `branch` for a branch of the pool's repository and `account:branch`
   for one in that account's fork of it) or `"assignees": <issue>` (the whole new list of that
@@ -1427,8 +1433,10 @@ through.
   GitLab a pipeline for a tag, is refused. A GitLab pipeline for a merge request counts
   for that merge request's source branch, and under `head` for that merge request alone.
   `pick` lists the members of the forge's JSON answer an executor
-  gets back - of each entry, when the answer is a list. An answer that is neither an
-  object nor a list of objects is not passed on.
+  gets back - of each entry, when the answer is a list - and `blank` the members that
+  come back as null wherever they stand in it: on GitLab, the address of whoever wrote
+  an issue in through the Service Desk (`service_desk_reply_to`). An answer that is
+  neither an object nor a list of objects is not passed on.
 - `{ "graphql": { "forge": "github", "repo": "o/r", "roots": [...], "mutations": [...],
   "item": { "type": "pr", "number": 578 }, "identity": "me" } }` on the GraphQL endpoint
   confines the document, which must be exactly one query or mutation. A query may select
@@ -1449,7 +1457,10 @@ through.
   argument, written in the document or sent as a variable, holds at any depth only the
   members the reader lists. Neither list holds what filters by the account asking: GitHub's
   `viewerSubscribed`, GitLab's `subscribed` and `myReactionEmoji`. Of an account a query
-  reads its public scalars and not its e-mail address; the name, address and date a commit
+  reads its public scalars and not its e-mail address, and the address of whoever turned
+  on a pull request's auto-merge (GitHub's `authorEmail`) or wrote an issue in through
+  the Service Desk (GitLab's `externalAuthor`) comes back as null; the name,
+  address and date a commit
   or a tag was written with (GitHub's `authors`, `committer`, `tagger`) are read as part
   of the commit. A scalar is read freely on
   what is inside the repository, with two exceptions. Of the repository itself - the root
@@ -1477,7 +1488,11 @@ through.
   any open pull request by that author) - an open pull request of `repo` whose head
   branch the forge places in the repository the push goes to. The default branch of
   that repository, and a branch the forge reports as protected there, is never created
-  or moved. The forge is asked where each ref is: a creation
+  or moved, and no ref is created whose name a protection rule of that repository would
+  cover: on GitHub an active ruleset's rule or a branch protection rule's pattern, on
+  GitLab a protected branch's name or wildcard. Every page of those rules is read, and a
+  pattern is matched wider than either forge matches it - without regard to case, with
+  `*` across `/`. The forge is asked where each ref is: a creation
   must be of a name the forge has no branch of, an update must start from the branch's
   current value and be a fast-forward of it, proven by indexing the pack in a quarantine.
   No pushed commit may add, change or delete a path under `denyPaths` - compared without
@@ -1498,8 +1513,8 @@ A rule carrying `graphql` or `git` never allows a request by its host, method an
 alone: its own check must pass too.
 
 Where a check asks the forge - who opened a pull request, where a branch is, which branch
-is the default, who is assigned, whose a repository is and what it is a fork of, which
-branch a CI run ran for - only
+is the default, which protection rules there are, who is assigned, whose a repository is
+and what it is a fork of, which branch a CI run ran for - only
 an answer that settles the question is used. A
 forge that says there is no such thing has answered; a rate limit, an error or anything
 else has not, and the request is refused.
@@ -1509,7 +1524,9 @@ may create, and one pull request from each. A branch in a fork is counted with t
 others and kept under the fork's name, so it is never taken for the branch of that name
 in the pool's repository. The host keeps the count with its offer, on
 disk, so a key issued for a later claim of the same offer goes on from where the last one
-stopped, and a restart forgets nothing. A creation is counted before the push is sent. The
+stopped, and a restart forgets nothing. Each host that offers the task keeps its own: a
+claim that holds the offers of two hosts may use the allowance of each, under each one's
+key. A creation is counted before the push is sent. The
 branch is "a ref this task created" once the forge's report says `ok` for it; a creation
 the forge declined is given back; one whose outcome is not known stays counted and is not
 the task's to move or to open a pull request from, until the forge has said what became
