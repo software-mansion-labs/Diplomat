@@ -8,12 +8,18 @@ import DiplomatCore
 private let smokeKey = "lin_api_smoke_key"
 private let checkout = "/tmp/pipeline-smoke-checkout"
 private let opLogin = "op"
+/// Diplomat's tag, as an agent's comment opens with it.
+private let tag = #"\[[Diplomat](https://github.com/latekvo/Diplomat), Opus 5\]: "#
 
 private func sha(_ pair: String) -> String { String(repeating: pair, count: 20) }
 private func at(_ hhmm: String) -> String { "2026-11-20T\(hhmm):00Z" }
 private func issueURL(_ n: Int) -> String { "https://github.com/acme/app/issues/\(n)" }
 private func prURL(_ n: Int) -> String { "https://github.com/acme/app/pull/\(n)" }
 private func linearURL(_ id: String) -> String { "https://linear.app/acme/issue/\(id)" }
+/// What Linear answers as an issue's `url`: its page, ending in a slug of its title.
+private func linearPage(_ id: String, _ title: String) -> String {
+    linearURL(id) + "/" + title.lowercased().split { !$0.isLetter && !$0.isNumber }.joined(separator: "-")
+}
 private func json(_ object: Any) -> Data {
     (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])) ?? Data()
 }
@@ -41,6 +47,7 @@ private final class Trackers {
         var updated: String
         var parent: Int?
         var subs: [Int] = []
+        var author = "reporter"
     }
     struct PR {
         var number: Int
@@ -57,9 +64,18 @@ private final class Trackers {
         var head: String
         var files = Trackers.tested
         var ciState: String? = "SUCCESS"
+        /// The head's check runs: a conclusion and when each started.
+        var checks: [(conclusion: String, started: String)] = [("SUCCESS", at("09:00"))]
+        /// When it last went from draft to ready.
+        var readied: String?
+        /// Each commit's author and committer login; nil for one GitHub links to no
+        /// account, "web-flow" for GitHub's own committer.
+        var commits: [(author: String?, committer: String?)] = [(opLogin, opLogin)]
         var reviews: [Review] = []
-        var comments: [(login: String, bot: Bool)] = []
+        var comments: [(login: String, bot: Bool, body: String)] = []
         var closes: [Int] = []
+        var reviewRequests = 0
+        var threads = 0
     }
     struct Ticket {
         var id: String
@@ -70,7 +86,7 @@ private final class Trackers {
         var labels: [String] = []
         var updated: String
         var parent: String?
-        var url: String { linearURL(identifier) }
+        var url: String { linearPage(identifier, title) }
     }
     static let tested = [(path: "src/a.swift", add: 3, del: 1, type: "MODIFIED"),
                          (path: "tests/aTests.swift", add: 10, del: 0, type: "MODIFIED")]
@@ -102,6 +118,17 @@ private final class Trackers {
     /// The read answers with its data and an `errors` array, as a GraphQL timeout on one
     /// field does.
     var ghPartial = false
+    /// Open issues and PRs a page of the read lists; nil for all on the first.
+    var page: Int?
+    /// Run before the `PullRequest` read of a PR answers: what changed since the sync's
+    /// first read.
+    var onReread: ((Int) -> Void)?
+    /// `gh pr merge` fails after GitHub merged the PR all the same.
+    var mergeUnconfirmed = false
+    /// When `gh pr ready` marks a PR ready.
+    var readyAt = at("12:00")
+    /// `gh pr diff` of a PR, by number, where it is not a one-line fix.
+    var diffs: [Int: String] = [:]
     var nextIssue = 101
     var nextTicket = 4
     var onGH: (() -> Void)?
@@ -142,16 +169,35 @@ private final class Trackers {
             }
             guard field("owner") == "acme", field("name") == "app" else { return failed("Could not resolve") }
             if ghFails { return failed("Bad Gateway (HTTP 502)") }
-            if ghPartial {
-                return ok(["data": ["repository": repository()], "errors": [["message": "Timeout on reviews"]]])
+            let repository: [String: Any]
+            switch field("operationName") {
+            case "Repo"?:
+                repository = self.repository(after: nil)
+            case "Issues"?, "PullRequests"?:
+                guard let after = field("after") else { return failed("Variable $after was not provided") }
+                let key = field("operationName") == "Issues" ? "issues" : "pullRequests"
+                repository = [key: self.repository(after: after)[key] ?? [:]]
+            case "PullRequest"?:
+                guard let n = args.first(where: { $0.hasPrefix("number=") }).flatMap({ Int($0.dropFirst(7)) }),
+                      args.contains("-F") else { return failed("Variable $number was not provided") }
+                onReread?(n)
+                guard let p = prs.first(where: { $0.number == n }) else { return failed("Could not resolve") }
+                repository = ["defaultBranchRef": ["name": "main"], "pullRequest": prNode(p, gate: true)]
+            default:
+                return failed("Must provide operation name if query contains multiple operations")
             }
-            return ok(["data": ["repository": repository()]])
+            if ghPartial {
+                return ok(["data": ["repository": repository], "errors": [["message": "Timeout on reviews"]]])
+            }
+            return ok(["data": ["repository": repository]])
         }
         if args.starts(with: ["pr", "diff"]), args.count == 5, args[3] == "-R", args[4] == "acme/app" {
-            return .init(status: 0, stdout: Data("diff --git a/src/a.swift b/src/a.swift\n+fix\n".utf8))
+            let n = number(args[2]) ?? 0
+            return .init(status: 0, stdout: Data((diffs[n] ?? "diff --git a/src/a.swift b/src/a.swift\n+fix\n").utf8))
         }
         if args.starts(with: ["pr", "ready"]), let n = number(args[2]), let i = prs.firstIndex(where: { $0.number == n }) {
             prs[i].draft = false
+            prs[i].readied = readyAt
             writes.append("ready #\(n)")
             return ok()
         }
@@ -160,8 +206,13 @@ private final class Trackers {
                            "--match-head-commit", prs[i].head] else { return failed("unexpected merge \(args)") }
             guard !prs[i].draft else { return failed("Pull request is still a draft") }
             prs[i].state = "MERGED"
+            for c in prs[i].closes {
+                guard let k = issues.firstIndex(where: { $0.number == c }) else { continue }
+                others[c] = (issues[k].title, "CLOSED", "acme/app")
+                issues.remove(at: k)
+            }
             writes.append("merge #\(n) --squash \(prs[i].head)")
-            return ok()
+            return mergeUnconfirmed ? failed("Post https://api.github.com/graphql: net/http: timeout") : ok()
         }
         guard args.count >= 4, args[0] == "api", args[1] == "-X" else { return failed("unexpected call \(args)") }
         let method = args[2], path = args[3].split(separator: "/").map(String.init)
@@ -217,46 +268,87 @@ private final class Trackers {
         }
     }
 
-    func repository() -> [String: Any] {
-        func labels(_ names: [String]) -> [String: Any] { ["nodes": names.map { ["name": $0] }] }
+    func labels(_ names: [String]) -> [String: Any] {
+        ["totalCount": names.count, "nodes": names.map { ["name": $0] }]
+    }
+
+    func prNode(_ p: PR, gate: Bool) -> [String: Any] {
         func person(_ login: String, _ bot: Bool) -> [String: Any] {
             ["__typename": bot ? "Bot" : "User", "login": login]
         }
-        let issueNodes: [[String: Any]] = issues.map { i in
+        var n: [String: Any] = ["number": p.number, "title": p.title, "body": p.body, "url": prURL(p.number),
+                                "updatedAt": p.updated, "isDraft": p.draft, "isCrossRepository": p.fork,
+                                "state": p.state]
+        n["mergeable"] = "MERGEABLE"
+        n["reviewDecision"] = NSNull()
+        n["headRefName"] = p.headRef
+        n["headRefOid"] = p.head
+        n["baseRefName"] = p.base
+        n["changedFiles"] = p.files.count
+        n["author"] = ["login": p.author]
+        n["labels"] = labels(p.labels)
+        n["closingIssuesReferences"] = ["totalCount": p.closes.count, "nodes": p.closes.map { c -> [String: Any] in
+            let issue = issues.first { $0.number == c }, other = others[c]
+            return ["number": c, "url": other.map { "https://github.com/\($0.repo)/issues/\(c)" } ?? issueURL(c),
+                    "state": issue == nil ? other?.state ?? "CLOSED" : "OPEN",
+                    "assignees": ["totalCount": issue?.assignees.count ?? 0,
+                                  "nodes": (issue?.assignees ?? []).map { ["login": $0] }] as [String: Any]]
+        }] as [String: Any]
+        n["files"] = ["nodes": p.files.map {
+            ["path": $0.path, "additions": $0.add, "deletions": $0.del, "changeType": $0.type] as [String: Any]
+        }]
+        let rollup: Any = p.ciState.map { ["state": $0] as Any } ?? NSNull()
+        n["tip"] = ["nodes": [["commit": ["oid": p.head, "statusCheckRollup": rollup] as [String: Any]]]]
+        n["reviewRequests"] = ["totalCount": p.reviewRequests]
+        n["reviewThreads"] = ["totalCount": p.threads,
+                              "nodes": (0..<p.threads).map { _ in ["isResolved": false] }] as [String: Any]
+        n["reviews"] = ["totalCount": p.reviews.count, "nodes": p.reviews.map {
+            ["author": person($0.login, $0.bot), "body": $0.body, "commit": ["oid": $0.oid]] as [String: Any]
+        }] as [String: Any]
+        n["comments"] = ["totalCount": p.comments.count,
+                         "nodes": p.comments.map { ["author": person($0.login, $0.bot), "body": $0.body] }]
+            as [String: Any]
+        guard gate else { return n }
+        let contexts: Any = p.ciState == nil ? NSNull() : ["contexts": [
+            "totalCount": p.checks.count,
+            "nodes": p.checks.map { ["conclusion": $0.conclusion, "startedAt": $0.started] },
+        ] as [String: Any]] as [String: Any]
+        n["gateTip"] = ["nodes": [["commit": ["statusCheckRollup": contexts]]]]
+        func user(_ login: String?) -> [String: Any] {
+            switch login {
+            case nil: return ["name": "Someone", "email": "someone@example.com", "user": NSNull()]
+            case "web-flow"?: return ["name": "GitHub", "email": "noreply@github.com", "user": NSNull()]
+            case let login?: return ["name": login, "email": "\(login)@example.com", "user": ["login": login]]
+            }
+        }
+        n["commits"] = ["totalCount": p.commits.count, "nodes": p.commits.map {
+            ["commit": ["author": user($0.author), "committer": user($0.committer)]]
+        }] as [String: Any]
+        n["readied"] = ["nodes": p.readied.map { [["createdAt": $0]] } ?? []]
+        return n
+    }
+
+    /// `Repo`'s answer (`after` nil), or the page of `Issues` or `PullRequests` after the
+    /// cursor `after`, which is the index its page starts at.
+    func repository(after: String?) -> [String: Any] {
+        func pageOf<T>(_ all: [T], _ nodes: (T) -> [String: Any]) -> [String: Any] {
+            let start = after.flatMap { Int($0) } ?? 0
+            let end = page.map { min(all.count, start + $0) } ?? all.count
+            return ["pageInfo": ["hasNextPage": end < all.count, "endCursor": "\(end)"] as [String: Any],
+                    "nodes": all[min(start, all.count)..<end].map(nodes)]
+        }
+        let issueNodes = pageOf(issues) { i in
             var n: [String: Any] = ["number": i.number, "id": "I_\(i.number)", "title": i.title, "body": i.body,
                                     "url": issueURL(i.number), "updatedAt": i.updated]
-            n["author"] = ["login": "reporter"]
+            n["author"] = ["login": i.author]
             n["assignees"] = ["nodes": i.assignees.map { ["login": $0] }]
-            n["labels"] = labels(i.labels)
+            n["labels"] = self.labels(i.labels)
             n["parent"] = i.parent.map { ["url": issueURL($0)] as Any } ?? NSNull()
             n["subIssues"] = ["nodes": i.subs.map { ["url": issueURL($0)] }]
             return n
         }
-        let open: [[String: Any]] = prs.filter { $0.state == "OPEN" }.map { p in
-            var n: [String: Any] = ["number": p.number, "title": p.title, "body": p.body, "url": prURL(p.number),
-                                    "updatedAt": p.updated, "isDraft": p.draft, "isCrossRepository": p.fork]
-            n["mergeable"] = "MERGEABLE"
-            n["reviewDecision"] = NSNull()
-            n["headRefName"] = p.headRef
-            n["headRefOid"] = p.head
-            n["baseRefName"] = p.base
-            n["changedFiles"] = p.files.count
-            n["author"] = ["login": p.author]
-            n["labels"] = labels(p.labels)
-            n["closingIssuesReferences"] = ["nodes": p.closes.map { ["url": issueURL($0)] }]
-            n["files"] = ["nodes": p.files.map {
-                ["path": $0.path, "additions": $0.add, "deletions": $0.del, "changeType": $0.type] as [String: Any]
-            }]
-            let rollup: Any = p.ciState.map { ["state": $0] as Any } ?? NSNull()
-            n["commits"] = ["nodes": [["commit": ["oid": p.head, "statusCheckRollup": rollup] as [String: Any]]]]
-            n["reviewThreads"] = ["totalCount": 0, "nodes": [Any]()] as [String: Any]
-            n["reviews"] = ["totalCount": p.reviews.count, "nodes": p.reviews.map {
-                ["author": person($0.login, $0.bot), "body": $0.body, "commit": ["oid": $0.oid]] as [String: Any]
-            }] as [String: Any]
-            n["comments"] = ["totalCount": p.comments.count,
-                             "nodes": p.comments.map { ["author": person($0.login, $0.bot)] }] as [String: Any]
-            return n
-        }
+        let open = pageOf(prs.filter { $0.state == "OPEN" }) { self.prNode($0, gate: false) }
+        if after != nil { return ["issues": issueNodes, "pullRequests": open] }
         let done: [[String: Any]] = prs.filter { $0.state != "OPEN" }.map { p in
             var n: [String: Any] = ["number": p.number, "title": p.title, "url": prURL(p.number),
                                     "updatedAt": p.updated, "state": p.state, "isCrossRepository": p.fork]
@@ -272,7 +364,7 @@ private final class Trackers {
             return n
         }
         return ["defaultBranchRef": ["name": "main"], "squashMergeAllowed": true, "mergeCommitAllowed": true,
-                "rebaseMergeAllowed": false, "issues": ["nodes": issueNodes], "pullRequests": ["nodes": open],
+                "rebaseMergeAllowed": false, "issues": issueNodes, "pullRequests": open,
                 "done": ["nodes": done]]
     }
 
@@ -330,7 +422,7 @@ private final class Trackers {
                                         "description": t.description, "url": t.url, "updatedAt": t.updated]
                 n["assignee"] = t.assignee.map { ["id": $0.id, "name": $0.name] as Any } ?? NSNull()
                 n["creator"] = ["name": "Reporter"]
-                n["labels"] = ["nodes": t.labels.map { ["id": $0, "name": name($0)] }]
+                n["labels"] = ["pageInfo": ["hasNextPage": false], "nodes": t.labels.map { ["id": $0, "name": name($0)] }] as [String: Any]
                 n["parent"] = t.parent.map { ["url": $0] as Any } ?? NSNull()
                 n["children"] = ["nodes": tickets.filter { $0.parent == t.url }.map { ["url": $0.url] }]
                 n["attachments"] = ["nodes": [Any]()]
@@ -369,7 +461,7 @@ private final class Trackers {
             linearChildren.append(v)
             writes.append("linear-issue \(identifier) \(v["title"] as? String ?? "")")
             return answer(["issueCreate": ["success": true, "issue": ["id": "lin-\(identifier)", "identifier": identifier,
-                                                                      "url": linearURL(identifier)]] as [String: Any]])
+                                                                      "url": linearPage(identifier, v["title"] as? String ?? "")]] as [String: Any]])
         default:
             return (400, [:], json(["errors": [["message": "unknown operation \(op)"]]]))
         }
@@ -394,6 +486,11 @@ private func fixture() -> Trackers {
               labels: ["risk:low", "complexity:low"], updated: at("09:10")),
         // Only a risk label: unrated, and its rating no lower than that label.
         .init(number: 6, title: "Flaky retry logic", labels: ["risk:high"], updated: at("09:30")),
+        // The candidates the fast-track PRs fix.
+        .init(number: 24, title: "Names keep their spaces", labels: ["risk:low", "complexity:low"], updated: at("08:40")),
+        .init(number: 25, title: "Nil avatar crashes", labels: ["risk:low", "complexity:low"], updated: at("08:30")),
+        .init(number: 26, title: "Avatars reload", labels: ["risk:low", "complexity:low"], updated: at("08:20")),
+        .init(number: 27, title: "Logout keeps the cache", labels: ["risk:low", "complexity:low"], updated: at("08:10")),
     ]
     t.prs = [
         .init(number: 11, title: "Fix the docs link", body: "Fixes #4. Also fixes ENG-3.", updated: at("11:30"),
@@ -403,21 +500,22 @@ private func fixture() -> Trackers {
               files: [("package.json", 1, 1, "MODIFIED"), ("tests/test_deps.py", 1, 0, "MODIFIED")]),
         .init(number: 13, title: "Clear the cache on logout",
               labels: ["risk:low", "complexity:low", "diplomat:fast-track", "diplomat:cleared"], updated: at("11:10"),
-              draft: true, headRef: "logout-cache", head: sha("c3"),
-              reviews: [.init(login: opLogin, body: "Clean at \(sha("c3").prefix(12)) - ran the suite", oid: sha("c3"))]),
+              headRef: "logout-cache", head: sha("c3"),
+              reviews: [.init(login: opLogin, body: "\(tag)Clean at \(sha("c3")) - ran the suite", oid: sha("c3"))],
+              closes: [27]),
         .init(number: 14, title: "Trim whitespace in names",
               labels: ["risk:low", "complexity:low", "diplomat:fast-track"], updated: at("11:40"),
               headRef: "trim", head: sha("d4"), ciState: "PENDING",
-              reviews: [.init(login: opLogin, body: "Clean at \(sha("d4").prefix(7))", oid: sha("d4"))]),
+              reviews: [.init(login: opLogin, body: "\(tag)Clean at \(sha("d4"))", oid: sha("d4"))], closes: [24]),
         // Cleared at e0, then pushed to: its marker names an older head.
         .init(number: 15, title: "Guard nil avatar",
               labels: ["risk:low", "complexity:low", "diplomat:fast-track", "diplomat:cleared"], updated: at("11:45"),
               headRef: "avatar", head: sha("e5"),
-              reviews: [.init(login: opLogin, body: "Clean at \(sha("e0").prefix(7))", oid: sha("e0"))]),
+              reviews: [.init(login: opLogin, body: "\(tag)Clean at \(sha("e0"))", oid: sha("e0"))], closes: [25]),
         .init(number: 16, title: "Add dark mode", author: "bob", updated: at("11:00"), headRef: "dark", head: sha("f6")),
         .init(number: 17, title: "Cache avatars", labels: ["risk:low", "complexity:low", "diplomat:fast-track"],
               updated: at("11:50"), headRef: "feat-a", head: sha("a7"),
-              reviews: [.init(login: opLogin, body: "Clean at \(sha("a7").prefix(7))", oid: sha("a7"))]),
+              reviews: [.init(login: opLogin, body: "\(tag)Clean at \(sha("a7"))", oid: sha("a7"))], closes: [26]),
         .init(number: 18, title: "Fork fix", labels: ["risk:low", "complexity:low"], updated: at("10:50"),
               fork: true, headRef: "patch-1", head: sha("b8")),
         .init(number: 19, title: "Stacked on avatars", labels: ["risk:low", "complexity:low"], updated: at("10:40"),
@@ -503,9 +601,11 @@ private func trail(_ events: [PipelineEvent], _ r: PipelineTickResult) -> [Strin
 }
 
 private func reviewFX(_ n: Int, _ head: String) -> PipelineEffect {
-    .review(repo: "acme/app", number: n, url: prURL(n), headSha: head)
+    .review(repo: "acme/app", number: n, url: prURL(n), headSha: head, author: "")
 }
-private func fixFX(_ n: Int) -> PipelineEffect { .fixIssue(repo: "acme/app", number: n, url: issueURL(n)) }
+private func fixFX(_ n: Int, author: String = "reporter") -> PipelineEffect {
+    .fixIssue(repo: "acme/app", number: n, url: issueURL(n), author: author)
+}
 
 func pipelineSmoke() throws {
     section("pipeline")
@@ -565,8 +665,21 @@ func pipelineSmoke() throws {
         return PipelineGate.hold(c, me: me)?.code
     }
     let holds: [(String?, (inout PipelineGate.Candidate) -> Void)] = [
-        (nil, { $0.state = "draft" }),
+        ("draft", { $0.state = "draft" }),
+        ("draft", { $0.state = "draft"; $0.ciState = ""; $0.ciRan = false; $0.ciSinceReady = false }),
+        ("ci-pending", { $0.state = "draft"; $0.ciState = "PENDING" }),
         ("closed", { $0.state = "merged" }),
+        ("operator-comment", { $0.operatorUntagged = true }),
+        ("review-requested", { $0.reviewRequests = 1 }),
+        ("foreign-commits", { $0.foreignCommits = ["dependabot[bot]"] }),
+        ("foreign-commits", { $0.foreignCommits = [""] }),
+        ("off-track", { $0.trackLabels = false }),
+        ("not-a-fix", { $0.fixesCandidate = false }),
+        ("closes-unwritable", { $0.closesUnwritable = ["#5"] }),
+        ("ci-skipped", { $0.ciRan = false }),
+        ("ci-before-ready", { $0.ciSinceReady = false }),
+        ("human", { $0.participants = ["bob"]; $0.reviewRequests = 1; $0.foreignCommits = ["bob"] }),
+        ("review-requested", { $0.reviewRequests = 2; $0.fixesCandidate = false }),
         ("not-mine", { $0.author = "bob" }),
         ("fork", { $0.isCrossRepository = true }),
         ("base", { $0.baseRef = "release" }),
@@ -595,7 +708,9 @@ func pipelineSmoke() throws {
         let got = held(change)
         check(got == want, "hold case \(k): \(got ?? "none"), want \(want ?? "none")")
     }
-    check(held({ _ in }, me: "") == "not-mine", "no login, no merge")
+    check(held({ $0.author = "" }, me: "") == "not-mine", "no login, no merge")
+    check(PipelineGate.hold({ var c = pass; c.foreignCommits = ["", "bob"]; return c }(), me: "op")?.message
+          == "has commits by someone other than me")
     check(PipelineGate.hold({ var c = pass; c.ciState = "FAILURE"; return c }(), me: "op")?.message == "CI failure")
 
     // ---- The graph's layout ----
@@ -627,18 +742,32 @@ func pipelineSmoke() throws {
 
     // ---- The effects and settings as the Linux front-end reads them ----
     let fx = String(decoding: try CommsLog.encoder.encode(reviewFX(15, sha("e5"))), as: UTF8.self)
-    check(fx == #"{"headSha":"\#(sha("e5"))","key":"pipeline-review:https://github.com/acme/app/pull/15","kind":"review","#
-          + #""number":15,"repo":"acme/app","stamp":"\#(sha("e5"))","url":"https://github.com/acme/app/pull/15"}"#,
-          "review effect JSON: \(fx)")
+    check(fx == #"{"author":"","headSha":"\#(sha("e5"))","key":"pipeline-review:https://github.com/acme/app/pull/15","#
+          + #""kind":"review","number":15,"repo":"acme/app","stamp":"\#(sha("e5"))","#
+          + #""url":"https://github.com/acme/app/pull/15"}"#, "review effect JSON: \(fx)")
     let fix = String(decoding: try CommsLog.encoder.encode(fixFX(1)), as: UTF8.self)
-    check(fix == #"{"key":"pipeline-fix:https://github.com/acme/app/issues/1","kind":"fixIssue","number":1,"#
-          + #""repo":"acme/app","stamp":"fix","url":"https://github.com/acme/app/issues/1"}"#, "fix effect JSON: \(fix)")
+    check(fix == #"{"author":"reporter","key":"pipeline-fix:https://github.com/acme/app/issues/1","kind":"fixIssue","#
+          + #""number":1,"repo":"acme/app","stamp":"fix","url":"https://github.com/acme/app/issues/1"}"#,
+          "fix effect JSON: \(fix)")
     for effect in [reviewFX(15, sha("e5")), fixFX(1),
-                   .fixLinear(repo: "acme/app", identifier: "ENG-1", url: linearURL("ENG-1"), text: "a\nb")] {
+                   .fixLinear(repo: "acme/app", identifier: "ENG-1", url: linearURL("ENG-1"), text: "a\nb",
+                              author: "Reporter")] {
         check(try CommsLog.decoder.decode(PipelineEffect.self, from: CommsLog.encoder.encode(effect)) == effect)
     }
-    check((try? CommsLog.decoder.decode(PipelineEffect.self, from: Data(#"{"kind":"merge","repo":"a/b","url":"u"}"#.utf8))) == nil,
+    check((try? CommsLog.decoder.decode(PipelineEffect.self, from: Data(#"{"kind":"merge","repo":"a/b","url":"u","author":""}"#.utf8))) == nil,
           "an unknown effect kind does not decode")
+    check((try? CommsLog.decoder.decode(PipelineEffect.self, from: Data(
+        #"{"kind":"fixIssue","repo":"acme/app","number":1,"url":"\#(issueURL(1))"}"#.utf8))) == nil,
+          "an effect without its author does not decode")
+    let control = PipelineControl(enabled: true, rate: true, fix: false, fastTrack: true, merge: false, fracture: true)
+    let controlDir = FileManager.default.temporaryDirectory.appendingPathComponent("smoke-control-\(getpid())")
+    defer { try? FileManager.default.removeItem(at: controlDir) }
+    check(control.save(in: controlDir) && PipelineControl.read(in: controlDir) == control, "control.json round-trips")
+    check((try? String(contentsOf: controlDir.appendingPathComponent("control.json"), encoding: .utf8))
+          == #"{"enabled":true,"fastTrack":true,"fix":false,"fracture":true,"merge":false,"rate":true}"#,
+          "control.json's shape")
+    try Data(#"{"enabled":true,"rate":true}"#.utf8).write(to: controlDir.appendingPathComponent("control.json"))
+    check(PipelineControl.read(in: controlDir) == nil, "a control.json without all six switches is no control")
     let proof = PipelineEvent(at: CommsLog.parseISO("2026-11-20T11:00:00Z")!, item: prURL(13), kind: .rerated,
                               detail: "d", head: sha("c3"), rating: low)
     let proofJSON = String(decoding: try CommsLog.encoder.encode(proof), as: UTF8.self)
@@ -688,10 +817,11 @@ func pipelineSmoke() throws {
         "+risk:low #11", "+complexity:low #11",
         "+risk:high #12", "+complexity:low #12",
         "+diplomat:fast-track #11",
+        // Claimed before the split, so no other sync splits it meanwhile.
+        "label diplomat:fractured exists", "+diplomat:fractured #3",
         "issue #101 Extract the storage protocol", "sub #3 #101",
         "issue #102 Move SQLite behind it", "sub #3 #102",
-        "label diplomat:fractured exists", "+diplomat:fractured #3",
-        "ready #13", "merge #13 --squash \(sha("c3"))",
+        "merge #13 --squash \(sha("c3"))",
     ], "sync 1 writes: \(s1.writes)")
     check(s1.result.effects == [reviewFX(15, sha("e5")), reviewFX(11, sha("a1"))],
           "sync 1 effects: \(s1.result.effects)")
@@ -731,12 +861,15 @@ func pipelineSmoke() throws {
     check(item(s1.result, prURL(12))?.floor == rating(.high, .low))
     check(item(s1.result, prURL(15))?.cleanAt == sha("e0"))
     let writable = s1.result.items.filter(\.writable).map(\.label).sorted()
-    check(writable == ["#1", "#11", "#12", "#14", "#15", "#17", "#3", "#4", "#6", "ENG-1", "ENG-3"],
+    check(writable == ["#1", "#11", "#12", "#14", "#15", "#17", "#24", "#25", "#26", "#27", "#3", "#4", "#6",
+                      "ENG-1", "ENG-3"],
           "writable: \(writable)")
     let edges1 = Set(s1.result.graph.edges.map { "\($0.from) \($0.kind.rawValue) \($0.to)" })
     check(edges1 == ["\(issueURL(4)) fixes \(prURL(11))", "\(linearURL("ENG-3")) fixes \(prURL(11))",
                      "\(prURL(17)) stacked \(prURL(19))", "\(issueURL(20)) fixes \(prURL(10))",
-                     "\(issueURL(1)) fixes \(prURL(10))"], "sync 1 edges: \(edges1)")
+                     "\(issueURL(1)) fixes \(prURL(10))", "\(issueURL(24)) fixes \(prURL(14))",
+                     "\(issueURL(25)) fixes \(prURL(15))", "\(issueURL(26)) fixes \(prURL(17))",
+                     "\(issueURL(27)) fixes \(prURL(13))"], "sync 1 edges: \(edges1)")
     check(item(s1.result, issueURL(20)).map { "\($0.label) \($0.title) \($0.state) \($0.writable)" }
           == "#20 Logout keeps the cache closed false", "a closed issue a merged PR closed")
     check(item(s1.result, issueURL(1))?.state == "open", "an issue read open keeps its open entry")
@@ -762,7 +895,8 @@ func pipelineSmoke() throws {
         "+complexity:low #6",
     ], "sync 2 writes: \(s2.writes)")
     let linearFix = PipelineEffect.fixLinear(repo: "acme/app", identifier: "ENG-1", url: linearURL("ENG-1"),
-                                             text: "Wrong color in the header\n\nHeader is blue, should be purple.")
+                                             text: "Wrong color in the header\n\nHeader is blue, should be purple.",
+                                             author: "Reporter")
     let effects2 = [reviewFX(15, sha("e5")), reviewFX(11, sha("a1")), linearFix, fixFX(1), fixFX(101), fixFX(102)]
     check(s2.result.effects == effects2, "sync 2 effects: \(s2.result.effects)")
     check(item(s2.result, issueURL(2)).map { "\($0.rating == rating(.medium, .high)) \($0.ratedBy ?? "")" } == "true local",
@@ -786,10 +920,10 @@ func pipelineSmoke() throws {
 
     // Sync 4: #15's agent marks its head clean, and a person comments on #14.
     if let i = t.prs.firstIndex(where: { $0.number == 15 }) {
-        t.prs[i].reviews.append(.init(login: opLogin, body: "Clean at \(sha("e5")) - suite green", oid: sha("e5")))
+        t.prs[i].reviews.append(.init(login: opLogin, body: "\(tag)Clean at \(sha("e5")) - suite green", oid: sha("e5")))
     }
-    if let i = t.prs.firstIndex(where: { $0.number == 14 }) { t.prs[i].comments.append(("bob", false)) }
-    if let i = t.prs.firstIndex(where: { $0.number == 11 }) { t.prs[i].comments.append(("dependabot", true)) }
+    if let i = t.prs.firstIndex(where: { $0.number == 14 }) { t.prs[i].comments.append(("bob", false, "LGTM?")) }
+    if let i = t.prs.firstIndex(where: { $0.number == 11 }) { t.prs[i].comments.append(("dependabot", true, "Bumped.")) }
     let s4 = sync(t, every, dir, t0.addingTimeInterval(900))
     check(s4.claude == ["opus Guard nil avatar"], "sync 4 claude calls: \(s4.claude)")
     check(s4.writes == ["+diplomat:cleared #15", "merge #15 --squash \(sha("e5"))"], "sync 4 writes: \(s4.writes)")
@@ -805,8 +939,8 @@ func pipelineSmoke() throws {
     let s5 = sync(t, every, dir, t0.addingTimeInterval(1200))
     every.force = nil
     check(s5.claude == ["sonnet fracture Wrong color in the header"], "sync 5 claude calls: \(s5.claude)")
-    check(s5.writes == ["linear-issue ENG-4 Pick the header token", "linear-issue ENG-5 Update the header snapshot",
-                        "linear-label diplomat:fractured #5856D6", "+diplomat:fractured ENG-1"],
+    check(s5.writes == ["linear-label diplomat:fractured #5856D6", "+diplomat:fractured ENG-1",
+                        "linear-issue ENG-4 Pick the header token", "linear-issue ENG-5 Update the header snapshot"],
           "sync 5 writes: \(s5.writes)")
     check(t.linearChildren.allSatisfy {
         $0["parentId"] as? String == "lin-1" && $0["teamId"] as? String == "T1"
@@ -834,7 +968,7 @@ func pipelineSmoke() throws {
           && s6.result.items.allSatisfy { $0.source == .linear }, "sync 6: \(s6.writes) \(s6.claude)")
     check(trail(s6.events, s6.result) == [" error", " error"], "sync 6 events: \(trail(s6.events, s6.result))")
     check(stage(s6.result, linearURL("ENG-3"))
-          == "candidate/fast (acme/app could not be read, so a PR fixing it would not be seen)",
+          == "candidate/fast (acme/app could not be read, so a PR fixing it might not be seen)",
           "a Linear issue whose PRs went unread: \(stage(s6.result, linearURL("ENG-3")))")
     t.ghFails = false
     let s7 = sync(t, every, dir, t0.addingTimeInterval(1800))
@@ -853,7 +987,7 @@ func pipelineSmoke() throws {
     // re-rate there: the PR is rated again before anything may merge it.
     func handCleared(_ answer: [String: Any], _ name: String) -> (Trackers, Synced) {
         let h = fixture()
-        h.issues = []
+        h.issues = h.issues.filter { $0.number == 27 }
         h.prs = h.prs.filter { $0.number == 13 }
         h.ratings = ["Clear the cache on logout": answer]
         return (h, sync(h, PipelineSettings(roots: [root], rate: true, fastTrack: true, merge: true),
@@ -872,7 +1006,7 @@ func pipelineSmoke() throws {
     let rated = hl.sequence.firstIndex(of: "claude"), merged = hl.sequence.firstIndex(of: "pr merge")
     check(lowAgain.claude == ["opus Clear the cache on logout"] && rated != nil && merged != nil && rated! < merged!,
           "rated again before the merge: \(hl.sequence)")
-    check(lowAgain.writes == ["ready #13", "merge #13 --squash \(sha("c3"))"], "hand-cleared, low: \(lowAgain.writes)")
+    check(lowAgain.writes == ["merge #13 --squash \(sha("c3"))"], "hand-cleared, low: \(lowAgain.writes)")
     check(trail(lowAgain.events, lowAgain.result) == ["#13 rerated", "#13 cleared", "#13 clean", "#13 merged"],
           "hand-cleared, low: \(trail(lowAgain.events, lowAgain.result))")
     check(lowAgain.events.first { $0.kind == .rerated }.map { "\($0.head ?? "") \($0.rating == low)" }
@@ -907,7 +1041,9 @@ func pipelineSmoke() throws {
     let wholeDir = base.appendingPathComponent("unsplit")
     let splitSettings = PipelineSettings(roots: [root], fix: true, fracture: true)
     let w1 = sync(whole, splitSettings, wholeDir, t0)
-    check(w1.claude == ["sonnet fracture Split the storage layer"] && w1.writes.isEmpty, "unsplit: \(w1.claude) \(w1.writes)")
+    check(w1.claude == ["sonnet fracture Split the storage layer"]
+          && w1.writes == ["label diplomat:fractured exists", "+diplomat:fractured #3", "-diplomat:fractured #3"],
+          "unsplit: the claim is let go: \(w1.claude) \(w1.writes)")
     check(stage(w1.result, issueURL(3)) == "human/human (would not split: one change)", stage(w1.result, issueURL(3)))
     let w2 = sync(whole, splitSettings, wholeDir, t0.addingTimeInterval(300))
     check(w2.claude.isEmpty && w2.events.isEmpty, "unsplit retried: \(w2.claude)")
