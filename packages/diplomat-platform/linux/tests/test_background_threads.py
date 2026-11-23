@@ -125,6 +125,9 @@ def test_a_second_interrupt_during_the_wait_does_not_restart_it(monkeypatch):
     budgets = []
 
     class _Store:
+        def stop_pipeline_sync(self):
+            pass
+
         def wait_for_background(self, timeout=5.0):
             budgets.append(timeout)
             if len(budgets) == 1:
@@ -140,6 +143,23 @@ def test_a_second_interrupt_during_the_wait_does_not_restart_it(monkeypatch):
     app.quit()
 
     assert budgets == [5.0]
+
+
+def test_a_quit_stops_the_pipeline_sync_before_it_waits(monkeypatch):
+    """The sync's core would otherwise outlive the app, and its wait the join's budget."""
+    from diplomat_app.app import DiplomatApp, SingleInstance
+
+    app = DiplomatApp.__new__(DiplomatApp)
+    calls = []
+    app.store = type("_Store", (), {
+        "stop_pipeline_sync": lambda self: calls.append("stop"),
+        "wait_for_background": lambda self, timeout=5.0: calls.append("wait") or []})()
+    app.tray = type("_Tray", (), {"hide": lambda self: None})()
+    app.panel = type("_Panel", (), {"hide": lambda self: None})()
+    app.app = type("_Qt", (), {"quit": lambda self: calls.append("quit")})()
+    monkeypatch.setattr(SingleInstance, "release", staticmethod(lambda: None))
+    app.quit()
+    assert calls == ["stop", "wait", "quit"]
 
 
 # ---- and the abort it exists to prevent ------------------------------------

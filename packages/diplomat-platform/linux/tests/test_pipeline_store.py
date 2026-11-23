@@ -896,6 +896,56 @@ def test_then_runs_once_the_syncs_running_end(pipe, monkeypatch):
     assert calls[-1] == "off"
 
 
+def test_the_apps_sync_timer_is_armed_only_once_a_sync_ends(monkeypatch):
+    from PySide6.QtCore import QObject, QTimer, Signal
+
+    from diplomat_app import app as app_module
+
+    QApplication.instance() or QApplication([])
+    asked = []
+
+    class _Store(QObject):
+        autofix_poll_started = Signal()
+
+        def run_pipeline_sync_async(self, *, then=None):
+            asked.append(then)
+
+        def __getattr__(self, name):
+            return lambda *args, **kwargs: None
+
+    class _Timer(QTimer):
+        @staticmethod
+        def singleShot(*args, **kwargs):
+            pass
+
+    class _Anything:
+        def __getattr__(self, name):
+            return _Anything()
+
+        def __call__(self, *args, **kwargs):
+            return _Anything()
+
+    monkeypatch.setattr(app_module, "Store", _Store)
+    monkeypatch.setattr(app_module, "QTimer", _Timer)
+    for name in ("QApplication", "Panel", "_app_icon"):
+        monkeypatch.setattr(app_module, name, _Anything())
+    monkeypatch.setattr(app_module.DiplomatApp, "_build_tray", lambda self: None)
+    monkeypatch.setattr(app_module.DiplomatApp, "trigger_refresh", lambda self: None)
+    app = app_module.DiplomatApp()
+    try:
+        timer = app.pipeline_timer
+        assert timer.isSingleShot() and not timer.isActive()
+        app._pipeline_tick()
+        assert not timer.isActive()
+        asked[-1]()
+        assert timer.isActive()
+        assert timer.interval() == int(pipeline.sync_secs() * 1000)
+    finally:
+        for t in vars(app).values():
+            if isinstance(t, QTimer):
+                t.stop()
+
+
 def test_a_failing_apply_still_re_arms_the_timer(pipe, monkeypatch):
     def broken(self, result, now):
         raise RuntimeError("boom")
