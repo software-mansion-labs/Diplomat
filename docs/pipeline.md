@@ -23,7 +23,8 @@ Labels, child issues and the merge are done by the sync itself, in code. The fix
 agents, queued like a sweep's asks: behind the [task cap](automation.md#autonomous-monitors), the
 [spending budget](automation.md#the-spending-budget) and the disk floor, each asked for once (a review
 once per head), retried on the monitors' backoff when a run dies, and taken off the queue when a later
-sync no longer owes it - unless you started it with Start fix, or that sync could not read its repo in full. An item whose author is on the prompt-injection ban list, and every issue
+sync no longer owes it - one you started with Start fix only once its issue is no writable candidate, and
+never by a sync that could not read its repo in full. An item whose author is on the prompt-injection ban list, and every issue
 Diplomat split from one, is not rated, split or fixed; a Linear issue's author is its creator's
 display name. The activity feed gets a line for each ask
 queued or withdrawn, each merge and split, each new notice, and the sync failing or recovering.
