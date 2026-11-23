@@ -831,10 +831,13 @@ enum PipelineTest {
 
     /// `DIPLOMAT_PIPELINE_E2E=<dir>`: real syncs (`PipelineTick.run`) of `acme/app`, checked
     /// out at `<dir>/checkout`, through the stubs DIPLOMAT_GH, DIPLOMAT_CLAUDE and
-    /// DIPLOMAT_LINEAR_API name, which log to `<dir>/gh.log`, `claude.log` and `linear.log`.
-    /// None of these is in the repo: whoever runs it supplies an operator `op`, issues #1
-    /// and #5, PR #2 fixing #1, PR #3 labelled cleared by hand at a clean head, someone
-    /// else's PR #4, and Linear's ENG-1, every rating low/low.
+    /// DIPLOMAT_LINEAR_API name, which log to `<dir>/gh.log`, `claude.log` and `linear.log`,
+    /// GitHub's state in `<dir>/gh-state.json`. None of these is in the repo: whoever runs it
+    /// supplies an operator `op`; #1, rated low/low, and op's PR #2 fixing it, fast-tracked
+    /// and clean at its head; unrated #5, and #6 by mallory, whom the gh stub bans once the
+    /// first sync has read the ban list; someone else's PR #4; and Linear's ENG-1, claude
+    /// rating each low/low. Reading #2 again before merging it, the stub writes
+    /// `<dir>/flip-merge` and waits for control.json to say merge is off.
     @MainActor
     private static func live(_ store: Store, harness: URL, check: (String, Bool) -> Void) async {
         print("\npipeline: real syncs against the stubs in \(harness.path)")
@@ -857,11 +860,18 @@ enum PipelineTest {
             }
         }
         func feed() -> [String] {
-            AuditLog.read().filter { $0.action.hasPrefix("pipeline-") }
+            AuditLog.read().filter { $0.action.hasPrefix("pipeline-") || $0.action == "queue-drop" }
                 .map { "\($0.source) \($0.action) \($0.detail)" }.reversed()
         }
         func ids() -> [String] { store.queuedTasks.map(\.id).sorted() }
         func prompt(_ key: String) -> String { store.queuedTasks.first { $0.id == key }?.job.prompt ?? "" }
+        func item(_ number: Int) -> PipelineItem? {
+            store.pipelineResult?.items.first { $0.id == "https://github.com/acme/app/issues/\(number)" }
+        }
+        let banned = URL(fileURLWithPath: ProcessInfo.processInfo.environment["DA_BAN_DIR"] ?? "")
+            .appendingPathComponent("banned.json")
+        try? FileManager.default.removeItem(at: banned)
+        defer { try? FileManager.default.removeItem(at: banned) }
 
         Store.pipelineTickOverride = nil
         Store.pipelineTickLive = true
@@ -884,32 +894,41 @@ enum PipelineTest {
         store.pinAgentRows([])
         let feedBefore = feed().count
 
+        // The Settings switch, flipped while the sync runs.
+        let flip = harness.appendingPathComponent("flip-merge")
+        let flipper = Task { @MainActor in
+            while !FileManager.default.fileExists(atPath: flip.path) && !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            if !Task.isCancelled { store.pipelineMerge = false }
+        }
         truncate()
         await store.runPipelineSyncOnce()
+        flipper.cancel()
         let writes = ghWrites()
         print("  sync 1 gh writes:\n" + writes.map { "    gh \($0)" }.joined(separator: "\n"))
-        print("  sync 1 Linear writes: \(linearWrites())")
-        check("sync 1: gh labels #2 and #5 low/low, fast-tracks #2, and merges #3 at its head, nothing else",
-              writes == [
-                  "api -X POST repos/acme/app/issues/2/labels -f labels[]=risk:low",
-                  "api -X POST repos/acme/app/issues/2/labels -f labels[]=complexity:low",
+        print("  sync 1 hooks: \(log("hooks.log"))")
+        let flipped = log("hooks.log").compactMap { $0 as? [String: Any] }.first { $0["flip"] != nil }
+        check("sync 1: merge switched off mid-sync reaches the core through control.json, and #2 is not merged",
+              (flipped?["control"] as? [String: Any])?["merge"] as? Bool == false
+                  && !store.pipelineMerge && !writes.contains { $0.hasPrefix("pr merge") }
+                  && store.pipelineResult?.notices == ["Merge is switched off, so this sync took no merge step past that"])
+        check("…while gh labels #2 cleared and #5, #6 low/low",
+              writes.filter { $0.contains("/issues/") } == [
+                  "api -X POST repos/acme/app/issues/2/labels -f labels[]=diplomat:cleared",
+                  "api -X POST repos/acme/app/issues/6/labels -f labels[]=risk:low",
+                  "api -X POST repos/acme/app/issues/6/labels -f labels[]=complexity:low",
                   "api -X POST repos/acme/app/issues/5/labels -f labels[]=risk:low",
                   "api -X POST repos/acme/app/issues/5/labels -f labels[]=complexity:low",
-                  "api -X POST repos/acme/app/issues/2/labels -f labels[]=diplomat:fast-track",
-                  "pr merge 3 -R acme/app --admin --squash --match-head-commit " + String(repeating: "e5", count: 20),
               ])
-        check("…the hand-cleared #3 re-rated first, by claude", log("claude.log").count == 4
-              && ((log("claude.log").first as? [String: Any])?["stdin"] as? [String])?.last == "| Guard nil avatar")
-        check("…and Linear labels ENG-1 low/low", linearWrites() == ["AddLabel", "AddLabel"])
-        let reviewKey = "review:acme/app#2", fixKey = "issues:acme/app#5", linearKey = "issues:linear:ENG-1"
-        check("its three effects are queued asks", ids() == [fixKey, linearKey, reviewKey].sorted())
-        for (key, marker) in [(reviewKey, "FAST TRACK"), (linearKey, "Take Linear issue"), (linearKey, "FAST TRACK"),
-                              (fixKey, "FAST TRACK")] {
-            let hit = prompt(key).split(separator: "\n").first { $0.contains(marker) } ?? "(none)"
-            print("  \(key) prompt: \(hit.prefix(150))…")
-        }
-        check("…the review's prompt carries the fast-track block",
-              prompt(reviewKey).contains("THIS PR IS ON THE FAST TRACK"))
+        check("…claude rates four, and Linear labels ENG-1 low/low",
+              log("claude.log").count == 4 && linearWrites() == ["AddLabel", "AddLabel"])
+        let fixKey = "issues:acme/app#5", linearKey = "issues:linear:ENG-1"
+        let effects = store.pipelineResult?.effects.map { "\($0.url) \($0.author)" } ?? []
+        print("  sync 1 effects: \(effects)")
+        check("…#6's fix is emitted under mallory, banned since the core read the list, and not queued",
+              effects.contains("https://github.com/acme/app/issues/6 mallory") && ids() == [fixKey, linearKey].sorted()
+                  && store.loadPipelineAttempts().keys.allSatisfy { !$0.hasSuffix("/issues/6") })
         check("…the Linear fix's the Linear scope and the pipeline's fix block",
               prompt(linearKey).contains("Take Linear issue ENG-1 (https://linear.app/acme/issue/ENG-1), fix it in acme/app")
                   && prompt(linearKey).contains("Header is blue, should be purple.")
@@ -918,34 +937,67 @@ enum PipelineTest {
               prompt(fixKey).contains("THIS ISSUE IS ON DIPLOMAT'S FAST TRACK") && !prompt(fixKey).contains("Linear issue"))
         let lines = Array(feed().dropFirst(feedBefore))
         print("  sync 1 feed:\n" + lines.map { "    \($0)" }.joined(separator: "\n"))
-        check("…and the feed has each ask and the merge once",
-              lines.filter { $0.hasPrefix("auto pipeline-fix ") }.count == 2
-                  && lines.filter { $0.hasPrefix("auto pipeline-review ") }.count == 1
-                  && lines.filter { $0.hasPrefix("auto pipeline-merge ") }
-                      == ["auto pipeline-merge #3: merged e5e5e5e with --admin --squash"]
-                  && lines.count == 4)
+        check("…and the feed has the notice and each ask once",
+              lines.count == 3 && lines.filter { $0.hasPrefix("auto pipeline-fix ") }.count == 2
+                  && lines.contains("auto pipeline-notice Merge is switched off, so this sync took no merge step past that"))
 
         // Events are stamped to the second; a sync in a later one tells them apart.
         try? await Task.sleep(nanoseconds: 1_100_000_000)
         truncate()
-        let queued = ids(), attempts = store.loadPipelineAttempts()
+        let queued = ids(), attempts = store.loadPipelineAttempts(), fed = feed().count
         await store.runPipelineSyncOnce()
         check("sync 2, nothing changed: gh, Linear and claude are only read",
               ghWrites().isEmpty && linearWrites().isEmpty && log("claude.log").isEmpty
                   && !log("gh.log").isEmpty)
         check("…nothing more is queued or attempted, and the feed is told nothing",
-              ids() == queued && store.loadPipelineAttempts() == attempts && feed().count == feedBefore + 4)
+              ids() == queued && store.loadPipelineAttempts() == attempts && feed().count == fed)
+        let six = item(6)
+        print("  #6 as shown: \(six.map(PipelineTint.hover) ?? "(not read)")")
+        check("…#6 is held for the ban, said as a hold, and Start fix refuses it with that hold",
+              six?.hold == "@mallory is on the prompt-injection ban list"
+                  && six.map(PipelineTint.hover)?.contains("\nHeld: @mallory is on the prompt-injection ban list\n") == true
+                  && six.map { store.pipelineFixEffect(for: $0) == nil && store.startPipelineFix($0) == $0.hold } == true
+                  && ids() == queued)
+
+        try? await Task.sleep(nanoseconds: 1_100_000_000)
+        let state = harness.appendingPathComponent("gh-state.json")
+        if var github = (try? Data(contentsOf: state)).flatMap({ try? JSONSerialization.jsonObject(with: $0) })
+            as? [String: Any], var issues = github["issues"] as? [[String: Any]],
+            let five = issues.firstIndex(where: { $0["number"] as? Int == 5 }) {
+            issues[five]["assignees"] = ["carol"]
+            github["issues"] = issues
+            try? JSONSerialization.data(withJSONObject: github).write(to: state)
+        }
+        truncate()
+        await store.runPipelineSyncOnce()
+        let dropped = Array(feed().dropFirst(fed))
+        print("  sync 3 feed: \(dropped)")
+        check("sync 3, #5 assigned to carol: its queued fix is withdrawn, ENG-1's kept",
+              ghWrites().isEmpty && ids() == [linearKey] && dropped.count == 1
+                  && dropped.first?.hasPrefix("panel queue-drop ") == true
+                  && dropped.first?.contains("#5") == true
+                  && dropped.first?.hasSuffix(" - the pipeline no longer owes it, not run") == true)
+
+        try? await Task.sleep(nanoseconds: 1_100_000_000)
+        truncate()
+        store.pipelineMerge = true
+        await store.runPipelineSyncOnce()
+        print("  sync 4 gh writes: \(ghWrites())")
+        check("sync 4, merge switched back on: #2 is merged at the head it was cleared at",
+              ghWrites() == ["pr merge 2 -R acme/app --admin --squash --match-head-commit " + String(repeating: "a2", count: 20)]
+                  && feed().last == "auto pipeline-merge #2: merged a2a2a2a with --admin --squash")
 
         store.pipelineEnabled = false
         check("master off: none of the queued asks may start",
-              store.queuedTasks.count == 3 && store.drainableTasks.isEmpty)
+              store.queuedTasks.count == 1 && store.drainableTasks.isEmpty)
         store.requestedWork = []
         store.queuedTasks = []
         store.savePipelineAttempts([:])
+        let fedOff = feed().count
         truncate()
         await store.runPipelineSyncOnce()
         if let last = store.pipelineResult { await store.applyPipeline(last) }
         check("…and nothing syncs or is queued", log("gh.log").isEmpty && ids().isEmpty
-              && store.loadPipelineAttempts().isEmpty && feed().count == feedBefore + 4)
+              && store.loadPipelineAttempts().isEmpty && feed().count == fedOff)
     }
 }
