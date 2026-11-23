@@ -5,9 +5,15 @@ extension PRRef.LocalRepo {
     /// (`git@github.com:o/r`) or a URL (`https`/`http`/`ssh`/`git`, any user and port), with
     /// or without `.git`; nil off github.com and GitLab (`GitLabHosts.host(of:)`). A GitLab
     /// owner is the whole namespace. Same patterns as `localrepos.py`.
+    ///
+    /// Nil too for an `https` remote on a port but 443 and an `http` one on a port but 80:
+    /// the forge's API is reached on 443 and its host names no port, so that server is not
+    /// it. An ssh port is only how git reaches the forge.
     public static func coordinates(remoteURL: String, gitlabHosts: GitLabHosts = [])
         -> (host: String, owner: String, repo: String)? {
         let s = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let web = groups(s, #"^(https?)://(?:[^@/]+@)?[^/:@]+:([0-9]+)/"#),
+           Int(web[1]) != (web[0].lowercased() == "https" ? 443 : 80) { return nil }
         let github = #"^(?:(?:https?|ssh|git)://(?:[^@/]+@)?github\.com(?::[0-9]+)?/|[^@/:]+@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$"#
         if let g = groups(s, github) { return (PRRef.LocalRepo.github, g[0], g[1]) }
         let gitlab = #"^(?:(?:https?|ssh|git)://(?:[^@/]+@)?([A-Za-z0-9.-]+)(?::[0-9]+)?/|[^@/:]+@([A-Za-z0-9.-]+):)((?:[\w.-]+/)*[\w.-]+)/([\w.-]+?)(?:\.git)?/?$"#

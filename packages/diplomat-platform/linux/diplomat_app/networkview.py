@@ -736,7 +736,7 @@ class NetworkView(QWidget):
         problem = dn.unavailable_summary() if answered is False else None
         self._problem.setText(problem or "")
         self._problem.setVisible(bool(problem))
-        usable = dn.ready() and not store.network_busy
+        usable = dn.ready() and not store.network_busy and not unknown
         self._buttons.setVisible(answered is not None)
         self.start.setVisible(answered is False)
         self.start.setEnabled(usable)

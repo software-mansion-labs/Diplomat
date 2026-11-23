@@ -324,7 +324,9 @@ owner/repo on host is not known yet*. Every other pool follows Settings on the n
 that lasts: a repository linked since gains its pool, one taken out leaves its own, and the
 feed names each pool left and why. A root or a folder that was read and has no GitHub or GitLab
 remote is no pool and holds nothing back; a self-hosted GitLab is recognised by a host name
-starting with `gitlab.` or by `glab` being signed in to it. A list the daemon refuses is shown
+starting with `gitlab.` or by `glab` being signed in to it. A remote over https on a port other
+than 443 (or over http on one other than 80) is no GitHub or GitLab remote, since the network
+reaches a forge on 443 only; one over ssh on another port is the forge's own. A list the daemon refuses is shown
 with the daemon's own sentence and sent again once a minute, or as soon as it changes.
 
 A pool's card says why this machine takes none of that pool's jobs while it takes none - docker
@@ -378,7 +380,10 @@ how many tasks it takes, and offers nothing, whoever asks, until the file reads 
 pools stay as the daemon has them, and the panel's red line and the Network screen say
 *…/config.json cannot be read as settings*. An offer made before that, which the daemon had
 not answered, is still settled with it. The daemon takes five such reads, a second apart, and
-then stops as it does when switched off; Diplomat still starts no agent in a terminal.
+then stops as it does when switched off. Diplomat does not start it again meanwhile - not on its
+own and not at launch, and the Network screen's **Start daemon** and **Restart daemon** are
+greyed out - and starts it on the first cycle after the file reads again. It still starts no
+agent in a terminal.
 
 Switching the network off withdraws this machine's open offers, stops the jobs it runs for the
 pool and frees their PRs and issues for agents in terminals again. The daemon removes its

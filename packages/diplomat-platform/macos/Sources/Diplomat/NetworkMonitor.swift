@@ -100,9 +100,10 @@ extension Store {
         return ok
     }
 
-    /// The Network screen's Start and Restart.
+    /// The Network screen's Start and Restart. Nothing while `networkSettingsUnknown`: a
+    /// daemon started on a config it cannot read switches itself off.
     func startNetworkDaemon(restart: Bool) async {
-        guard networkEnabled, !networkBusy else { return }
+        guard networkEnabled, !networkBusy, networkSettingsUnknown.isEmpty else { return }
         await whileNetworkBusy {
             await self.startNetworkDaemon(source: "panel", restart: restart)
         }
@@ -127,8 +128,8 @@ extension Store {
     /// One round with the daemon while the switch is on: read its snapshot, start it when
     /// it is silent, and tell it which pools this machine is in and how many more tasks
     /// it takes. `pools` is said when it changed and `admit` also once a minute; a
-    /// daemon that started since is told both again. Neither is said while
-    /// `networkSettingsUnknown`.
+    /// daemon that started since is told both again. Neither is said, and no daemon is
+    /// started, while `networkSettingsUnknown`.
     func runNetworkCycleOnce(now: TimeInterval = Date().timeIntervalSince1970) async {
         rereadNetworkSettings()
         guard networkEnabled, !networkCycle.running else { return }
@@ -158,11 +159,11 @@ extension Store {
         await settleOffering(snapshot)
     }
 
-    /// Start a daemon that is not answering, no sooner than its backoff allows.
+    /// Start a daemon that is not answering, no sooner than its backoff allows. While
+    /// the settings are unknown nothing is tried, and the backoff waits as it is.
     private func reviveNetworkDaemon(now: TimeInterval) async {
-        guard DiplomacyNetwork.drivesDaemon, !networkBusy, now >= networkCycle.startAfter else {
-            return
-        }
+        guard DiplomacyNetwork.drivesDaemon, !networkBusy, now >= networkCycle.startAfter,
+              networkSettingsUnknown.isEmpty else { return }
         networkCycle.startDelay = min(max(networkCycle.startDelay * 2,
                                           NetworkCycle.firstStartDelay),
                                       NetworkCycle.longestStartDelay)

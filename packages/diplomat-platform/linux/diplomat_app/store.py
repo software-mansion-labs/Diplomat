@@ -5278,9 +5278,10 @@ class Store(QObject):
     def start_network_async(self, *, restart: bool = False,
                             source: str = autofix.SOURCE_AUTO) -> None:
         """Start the daemon and take a cycle with it. Nothing while the switch is off,
-        or while another start or stop is under way."""
+        while :func:`diplomacynetwork.settings_unknown` - a daemon started on a config it
+        cannot read switches itself off - or while another start or stop is under way."""
         def work() -> None:
-            if not diplomacynetwork.enabled():
+            if not diplomacynetwork.enabled() or diplomacynetwork.settings_unknown():
                 return
             self._start_network_daemon(source, restart=restart)
             self._network_cycle()
@@ -5324,8 +5325,10 @@ class Store(QObject):
         """One round with the daemon while the switch is on: read its snapshot, start
         it when it is silent, and tell it which pools this machine is in and how many
         more tasks it takes. ``pools`` is said when it changed and ``admit`` also once
-        a minute; a daemon that started since is told both again. Neither is said
-        while :func:`diplomacynetwork.settings_unknown`."""
+        a minute; a daemon that started since is told both again. Neither is said, and
+        no daemon is started, while :func:`diplomacynetwork.settings_unknown`; nor
+        anything read from the config while one read of it failed
+        (:func:`appconfig.unreadable_reads`)."""
         if not diplomacynetwork.enabled():
             return
         snapshot = diplomacynetwork.state()
@@ -5344,11 +5347,13 @@ class Store(QObject):
         if diplomacynetwork.settings_unknown():
             self._settle_offering(snapshot)
             return
+        blind = appconfig.unreadable_reads()
         pools, unconfirmed = self._network_pools(now, snapshot)
+        listed = self._listed_paths()
         admit = self._network_admit(snapshot)
-        # Both were read between two looks at the config: one that broke meanwhile
-        # leaves a list of the default root's.
-        if diplomacynetwork.settings_unknown():
+        # A read that fell inside a rewrite of the config took defaults: the default
+        # root's pools, the default cap.
+        if appconfig.unreadable_reads() != blind:
             return
         if pools == memo.pools:
             memo.pools_refused, memo.pools_refusal = None, ""
@@ -5358,7 +5363,7 @@ class Store(QObject):
             why = diplomacynetwork.refusal(reply)
             if why is None:
                 memo.pools, memo.pools_refused, memo.pools_refusal = pools, None, ""
-                self._log_pools_left(snapshot, pools)
+                self._log_pools_left(snapshot, pools, listed)
             elif diplomacynetwork.definite(reply):
                 said = f"The daemon refused this machine's pools: {why}"
                 if (pools, said) != (memo.pools_refused, memo.pools_refusal):
@@ -5378,9 +5383,10 @@ class Store(QObject):
         self.refresh_auto_task_count()
 
     def _revive_network_daemon(self, now: float) -> None:
-        """Start a daemon that is not answering, no sooner than its backoff allows."""
+        """Start a daemon that is not answering, no sooner than its backoff allows.
+        While the settings are unknown nothing is tried, and the backoff waits as it is."""
         memo = self._network_memo
-        if now < memo.start_after:
+        if now < memo.start_after or diplomacynetwork.settings_unknown():
             return
 
         def start() -> None:
@@ -5428,12 +5434,17 @@ class Store(QObject):
         unread += [os.path.expanduser(c.path) for c in checkouts if not c.read]
         return network.pools_listing(roots, others, unread, identities, snapshot.pools)
 
-    def _log_pools_left(self, snapshot: network.Snapshot, pools: list[dict]) -> None:
+    def _listed_paths(self) -> set[str]:
+        """The repo roots and the Other repos checkouts, ``~`` expanded."""
+        return {os.path.expanduser(p)
+                for p in (*review.repo_root_paths(), *self.other_repo_paths)}
+
+    def _log_pools_left(self, snapshot: network.Snapshot, pools: list[dict],
+                        listed: set[str]) -> None:
         """Say in the feed which pools the daemon had that the list it just took
-        omits, each with what became of its path."""
+        omits, each with what became of its path, ``listed`` (:meth:`_listed_paths`)
+        or not."""
         said = {pool["id"] for pool in pools}
-        listed = {os.path.expanduser(p)
-                  for p in (*review.repo_root_paths(), *self.other_repo_paths)}
         left = [pool for pool in snapshot.pools if pool.id not in said]
         for pool in left:
             activity.log(autofix.SOURCE_AUTO, network.AUDIT_LEAVE, f"Left {pool.id}: " + (

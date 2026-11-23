@@ -36,7 +36,7 @@ from pathlib import Path
 
 # The gate's own default + range for the task cap, and the shared atomic writer.
 from . import autofix
-from .atomicjson import read_object, write_atomic
+from .atomicjson import write_atomic
 
 # Keys. Kept in sync with Swift's `AppConfig` (diplomat-platform/macos/Sources/Diplomat/AppConfig.swift).
 #: The repo roots, primary first: a JSON array of paths, ``~`` expanded on use.
@@ -108,25 +108,36 @@ def path() -> Path:
 def read() -> dict:
     """The whole file, or ``{}`` when it's absent, unreadable or not a JSON object —
     a truncated or hand-edited file must degrade to defaults, never break a spawn."""
-    return read_object(path()) or {}
+    data = read_known()
+    return {} if data is None else data
+
+
+_unreadable_reads = 0
+
+
+def unreadable_reads() -> int:
+    """How many reads in this process found the file there and unreadable. One that
+    moved between two looks at it means a setting read in between was a default, the
+    file being caught in a rewrite, however it reads at either look."""
+    return _unreadable_reads
 
 
 def read_known() -> dict | None:
     """The whole file: ``{}`` when there is none, ``None`` when one is there and cannot
     be read as a JSON object. That one says nothing: a caller that must not take a
     default for an answer keeps what it last read, and no setting is written over it
-    (:func:`_editable`)."""
+    (:func:`_editable`), and it counts in :func:`unreadable_reads`."""
+    global _unreadable_reads
     try:
-        text = path().read_text(encoding="utf-8")
+        data = json.loads(path().read_text(encoding="utf-8"))
     except FileNotFoundError:
         return {}
     except (OSError, ValueError):
-        return None
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
+        data = None
+    if isinstance(data, dict):
+        return data
+    _unreadable_reads += 1
+    return None
 
 
 def unreadable_note() -> str:

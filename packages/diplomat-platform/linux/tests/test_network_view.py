@@ -310,6 +310,10 @@ def test_the_buttons_wait_for_node_and_for_a_start_under_way(screen, monkeypatch
         assert not view.start.isEnabled() and not view.restart.isEnabled()
     view.rebuild()
     assert view.start.isEnabled()
+    monkeypatch.setattr(dn, "settings_unknown", lambda: "/c/config.json cannot be read")
+    view.rebuild()
+    assert not view.start.isEnabled() and not view.restart.isEnabled(), (
+        "a daemon started on settings it cannot read switches itself off")
 
 
 def test_the_problem_line_is_for_a_daemon_that_does_not_answer(screen):

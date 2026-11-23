@@ -1987,9 +1987,7 @@ def test_no_list_of_pools_is_posted_while_the_roots_cannot_be_read(
 
     # A daemon started since has heard nothing, and is told nothing either.
     d.state = {**d.state, "daemon": {"pid": 8, "startedAt": 1_793_990_500.0}}
-    store.restart_network_async()
-    assert store.wait_for_background() == []
-    assert [arg for _, arg in installer] == ["--restart-daemon"]
+    store._network_cycle_once(1250.0)
     assert d.sent("pools") == [{"pools": [pool]}] and len(d.sent("admit")) == 1
     assert lines("network-leave") == []
 
@@ -2011,6 +2009,55 @@ def test_a_config_that_breaks_while_the_roots_are_read_posts_no_list(
     monkeypatch.setattr(review, "roots_linking", breaks)
     store._network_cycle_once(1000.0)
     assert d.sent("pools") == [] and d.sent("admit") == []
+
+
+def test_a_read_of_the_config_inside_a_rewrite_of_it_says_nothing_it_read(
+        store, linked, daemon, monkeypatch):
+    """A writer that truncates and rewrites in place leaves the file unreadable for a
+    moment: a setting read then is its default, however the file reads before and after."""
+    pool = {"id": POOL, "path": linked, "forge": "github", "identity": "alice"}
+    d = daemon(state=has_pools((POOL, linked, "alice")))
+
+    def inside_a_rewrite(real):
+        def read(*args):
+            whole = break_config()
+            try:
+                return real(*args)
+            finally:
+                appconfig.path().write_text(whole, encoding="utf-8")
+        return read
+
+    with monkeypatch.context() as patch:
+        patch.setattr(review, "roots_linking", inside_a_rewrite(review.roots_linking))
+        store._network_cycle_once(1000.0)
+    with monkeypatch.context() as patch:
+        patch.setattr(store, "_network_admit", inside_a_rewrite(store._network_admit))
+        store._network_cycle_once(1002.0)
+    assert d.sent("pools") == [] and d.sent("admit") == [], (
+        "the default root's pools, nor the default cap")
+    assert lines("network-leave") == []
+
+    store._network_cycle_once(1004.0)
+    assert d.sent("pools") == [{"pools": [pool]}] and len(d.sent("admit")) == 1
+
+
+def test_no_daemon_is_started_while_the_settings_are_unknown(store, linked, installer):
+    """A daemon started on a config it cannot read switches itself off within seconds:
+    started on each silence, it would come and go for as long as the file stays broken."""
+    assert dn.enabled()
+    whole = break_config()
+    assert dn.settings_unknown()
+    for at in (1000.0, 1001.0, 1100.0):
+        store._network_cycle_once(at)
+    store.start_network_async()
+    store.restart_network_async()
+    assert store.wait_for_background() == []
+    assert installer == [] and lines("network-start") == []
+
+    appconfig.path().write_text(whole, encoding="utf-8")
+    store._network_cycle_once(1101.0)
+    assert installer == [("install.js", "--start-daemon")], (
+        "on the first cycle the file reads, no wait run up meanwhile")
 
 
 def test_an_offer_the_daemon_had_not_answered_is_settled_while_the_settings_are_unknown(

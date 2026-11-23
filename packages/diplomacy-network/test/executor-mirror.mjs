@@ -73,6 +73,15 @@ try {
     assert.equal(remoteSlug('/tmp/somewhere/alpha.git'), null);
   });
 
+  await check('an https or http remote on another port than its own names no repository; an ssh port does not count', () => {
+    for (const url of ['https://gitlab.acme.example:8443/p/api.git', 'https://u:pw@github.com:8443/dn-test/alpha', 'HTTP://github.com:8080/dn-test/alpha', 'http://github.com:443/dn-test/alpha']) {
+      assert.equal(remoteSlug(url), null, url);
+    }
+    for (const url of ['https://github.com:443/dn-test/alpha', 'https://github.com:0443/dn-test/alpha', 'http://github.com:80/dn-test/alpha', 'ssh://git@github.com:2222/dn-test/alpha', 'git://github.com:9418/dn-test/alpha']) {
+      assert.equal(remoteSlug(url), 'github.com/dn-test/alpha', url);
+    }
+  });
+
   await check('there is no mirror until one is asked for', () => {
     assert.equal(mirrors.path(a.pool), null);
   });

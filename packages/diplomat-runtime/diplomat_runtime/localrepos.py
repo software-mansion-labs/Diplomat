@@ -49,6 +49,8 @@ _HOSTED_REMOTE = re.compile(
     r"([\w.-]+(?:/[\w.-]+)*)/([\w.-]+?)(?:\.git)?/?$",
     re.IGNORECASE,
 )
+#: An ``https`` or ``http`` remote's scheme and port, where it names one.
+_WEB_PORT = re.compile(r"^(https?)://(?:[^@/]+@)?[^/:@]+:([0-9]+)/", re.IGNORECASE)
 #: A host key of glab's ``hosts:`` map; its port is dropped, as a remote's is.
 _GLAB_HOST = re.compile(r"^\s+([A-Za-z0-9.-]+)(?::[0-9]+)?:\s*$")
 #: A host's ``ssh_host``, the host its SSH remotes name, quoted or not; port dropped.
@@ -182,8 +184,15 @@ def parse_remote(url: str, hosts: Mapping[str, str] = GITLAB_HOSTS
                  ) -> tuple[str, str, str] | None:
     """``(host, owner, repo)`` of a GitHub remote, or of a GitLab one (``owner`` its
     whole namespace) on a host :func:`is_gitlab_host` takes, the host lowercased and
-    read through ``hosts`` (an ``ssh_host`` names its API host)."""
+    read through ``hosts`` (an ``ssh_host`` names its API host).
+
+    ``None`` for an ``https`` remote on a port but 443 and an ``http`` one on a port but
+    80: the forge's API is reached on 443 and its host names no port, so that server is
+    not it. An ssh port is only how git reaches the forge."""
     url = url.strip()
+    web = _WEB_PORT.match(url)
+    if web and int(web.group(2)) != (443 if web.group(1).lower() == "https" else 80):
+        return None
     m = _GITHUB_REMOTE.match(url)
     if m:
         return GITHUB, m.group(1), m.group(2)

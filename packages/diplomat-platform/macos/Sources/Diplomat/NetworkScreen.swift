@@ -147,6 +147,10 @@ struct NetworkScreen: View {
         return pid + started + DiplomacyNetwork.package.socketPath
     }
 
+    private var startable: Bool {
+        DiplomacyNetwork.ready && !store.networkBusy && store.networkSettingsUnknown.isEmpty
+    }
+
     @ViewBuilder
     private var daemonButtons: some View {
         if let answered = store.networkAnswered {
@@ -157,13 +161,13 @@ struct NetworkScreen: View {
                         Text("Start daemon")
                     }
                     .buttonStyle(.bordered).controlSize(.small)
-                    .disabled(!DiplomacyNetwork.ready || store.networkBusy)
+                    .disabled(!startable)
                 }
                 Button { Task { await store.startNetworkDaemon(restart: true) } } label: {
                     Text("Restart daemon")
                 }
                 .buttonStyle(.bordered).controlSize(.small)
-                .disabled(!DiplomacyNetwork.ready || store.networkBusy)
+                .disabled(!startable)
                 .tooltip(NetworkText.restartHelp)
                 Spacer(minLength: 0)
             }
