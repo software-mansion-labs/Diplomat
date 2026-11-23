@@ -27,7 +27,6 @@ strays() {
   for e in /proc/[0-9]*/environ; do
     p="${e#/proc/}"
     p="${p%/environ}"
-    [ "$p" = "$$" ] && continue
     tr '\0' '\n' 2>/dev/null < "$e" | grep -qx "DN_RUN_ID=$id" && echo "$p"
   done
 }

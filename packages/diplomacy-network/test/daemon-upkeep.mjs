@@ -152,7 +152,9 @@ try {
     const runs = path.join(up.base, 'runs');
     const ended = await runOf(up, (await up.state()).offers[0].taskId);
     const going = await waiting(up, await own(up, 'issue-2', 'wait kept\nsay kept'), 'kept');
-    const parts = (run) => [path.join(runs, run.runId), path.join(runs, '.containers', run.container, run.runId), path.join(runs, `${run.runId}.outcome.json`)];
+    // A run's directory is among its container's run records, or where those were moved when the pair's next container was made.
+    const records = (run) => names(path.join(runs, '.containers')).filter((dir) => dir === run.container || dir.startsWith(`${run.container}.`)).map((dir) => path.join(runs, '.containers', dir, run.runId));
+    const parts = (run) => [path.join(runs, run.runId), records(run).find((dir) => exists(dir)) ?? records(run)[0], path.join(runs, `${run.runId}.outcome.json`)];
     const kept = (run) => parts(run).map((part) => { try { fs.lstatSync(part); return true; } catch { return false; } });
     const mirror = path.join(up.base, 'mirrors', names(path.join(up.base, 'mirrors'))[0]);
     const age = (file, hours) => fs.lutimesSync(file, Date.now() / 1000 - hours * 3600, Date.now() / 1000 - hours * 3600);
