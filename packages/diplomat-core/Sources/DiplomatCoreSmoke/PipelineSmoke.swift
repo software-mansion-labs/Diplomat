@@ -58,7 +58,7 @@ private final class Trackers {
         var title: String
         var author = opLogin
         var body = ""
-        var labels: [String] = []
+        var labels: [String] = [] { didSet { for l in oldValue + labels where !history.contains(l) { history.append(l) } } }
         var updated: String
         var state = "OPEN"
         var draft = false
@@ -91,6 +91,14 @@ private final class Trackers {
         var ciOid: String?
         /// Fields a read with errors answers as null.
         var lost: Set<String> = []
+        /// Each commit's message, in `commits`' order; "" past the list.
+        var messages: [String] = []
+        /// Its ready-for-review and convert-to-draft events.
+        var readyEvents = 0
+        /// Review-thread comments.
+        var threadNotes: [(login: String, body: String)] = []
+        /// Every label ever added to it, in any way.
+        var history: [String] = []
     }
     struct Ticket {
         var id: String
@@ -106,6 +114,7 @@ private final class Trackers {
         var attachments: [String] = []
         var moreAttachments: [String] = []
         var moreLabels = false
+        var state = "started"
         var url: String { linearPage(identifier, title) }
     }
     static let tested = [(path: "src/a.swift", add: 3, del: 1, type: "MODIFIED"),
@@ -154,18 +163,30 @@ private final class Trackers {
     var mergedAt: String?
     /// `gh pr diff` of a PR, by number, where it is not a one-line fix.
     var diffs: [Int: String] = [:]
-    /// The pages after `Repo`'s fail.
+    /// The pages after `Repo`'s fail, or answer with errors.
     var failPages = false
+    var pagesPartial = false
+    /// `gh pr diff` fails.
+    var diffFails = false
     /// Label writes GitHub refuses, adding or removing: every one on item `"<n>"`, or
     /// `"<n> <name>"` only.
     var refuseLabels: Set<String> = []
+    /// Label adds GitHub makes though the call fails, as `"<n> <name>"`.
+    var labelsLost: Set<String> = []
     /// Creating an issue, and linking one as a sub-issue, fail.
     var failCreate = false
     var failSubIssue = false
+    /// Creates GitHub, then Linear, makes all the same though the call fails.
+    var createsLost = 0
+    var linearCreatesLost = 0
+    /// Run before an `Item` read of an issue or PR answers, and as a `claude` call starts.
+    var onItem: ((Int) -> Void)?
+    var onClaude: ((String) -> Void)?
     /// Linear answers every call HTTP 500.
     var linearDown = false
-    /// More attachments link a PR than Linear's `Attached` answer lists.
-    var attachedMore = false
+    /// More attachments link a PR than Linear's `Attached` answer lists; nil: its `pageInfo`
+    /// is null.
+    var attachedMore: Bool? = false
     var squashAllowed = true
     /// Where `claude` may be run: the checkout of each root.
     var checkouts = [checkout, libCheckout]
@@ -224,12 +245,40 @@ private final class Trackers {
                 if failPages { return failed("Bad Gateway (HTTP 502)") }
                 let key = field("operationName") == "Issues" ? "issues" : "pullRequests"
                 repository = [key: self.repository(after: after)[key] ?? [:]]
+                if pagesPartial {
+                    return ok(["data": ["repository": repository], "errors": [["message": "Timeout on labels"]]])
+                }
             case "PullRequest"?:
                 guard let n = args.first(where: { $0.hasPrefix("number=") }).flatMap({ Int($0.dropFirst(7)) }),
                       args.contains("-F") else { return failed("Variable $number was not provided") }
                 onReread?(n)
                 guard let p = prs.first(where: { $0.number == n }) else { return failed("Could not resolve") }
                 repository = ["defaultBranchRef": ["name": "main"], "pullRequest": prNode(p, gate: true)]
+            case "Item"?:
+                guard let n = args.first(where: { $0.hasPrefix("number=") }).flatMap({ Int($0.dropFirst(7)) }),
+                      args.contains("-F") else { return failed("Variable $number was not provided") }
+                onItem?(n)
+                var node: [String: Any]
+                if let i = issues.first(where: { $0.number == n }) {
+                    node = issueNode(i)
+                } else if let p = prs.first(where: { $0.number == n }) {
+                    node = prNode(p, gate: false)
+                    let ever = p.history + p.labels.filter { !p.history.contains($0) }
+                    node["labeled"] = ["filteredCount": ever.count, "nodes": ever.map { ["label": ["name": $0]] }]
+                        as [String: Any]
+                } else if let other = others[n] {
+                    node = otherNode(n, other)
+                } else {
+                    return failed("Could not resolve to an issue or pull request with the number of \(n).")
+                }
+                repository = ["defaultBranchRef": ["name": "main"], "issueOrPullRequest": node]
+            case "Parts"?:
+                let me = field("me")?.lowercased() ?? ""
+                let mine = issues.filter { $0.author.lowercased() == me }.sorted { $0.number > $1.number }.prefix(50)
+                repository = ["issues": ["nodes": mine.map { i -> [String: Any] in
+                    ["id": "I_\(i.number)", "url": issueURL(i.number), "body": i.body,
+                     "parent": i.parent.map { ["url": issueURL($0)] as Any } ?? NSNull()]
+                }]]
             default:
                 return failed("Must provide operation name if query contains multiple operations")
             }
@@ -239,11 +288,13 @@ private final class Trackers {
             return ok(["data": ["repository": repository]])
         }
         if args.starts(with: ["pr", "diff"]), args.count == 5, args[3] == "-R", args[4] == "acme/app" {
+            if diffFails { return failed("Bad Gateway (HTTP 502)") }
             let n = number(args[2]) ?? 0
             return .init(status: 0, stdout: Data((diffs[n] ?? "diff --git a/src/a.swift b/src/a.swift\n+fix\n").utf8))
         }
         if args.starts(with: ["pr", "ready"]), let n = number(args[2]), let i = prs.firstIndex(where: { $0.number == n }) {
             prs[i].draft = false
+            prs[i].readyEvents += 1
             writes.append("ready #\(n)")
             return ok()
         }
@@ -287,6 +338,10 @@ private final class Trackers {
             issues.append(Issue(number: n, title: field("title") ?? "", body: field("body") ?? "",
                                 updated: at("09:00"), author: opLogin))
             writes.append("issue #\(n) \(field("title") ?? "")")
+            if createsLost > 0 {
+                createsLost -= 1
+                return failed("Bad Gateway (HTTP 502)")
+            }
             return ok(["html_url": issueURL(n), "node_id": "I_\(n)", "number": n])
         case ("POST", let rest) where rest.count == 3 && rest[0] == "issues" && rest[2] == "labels":
             guard let n = number(rest[1]), let name = field("labels[]") else { return failed("Bad request (HTTP 400)") }
@@ -300,6 +355,7 @@ private final class Trackers {
                 return failed("Not Found (HTTP 404)")
             }
             writes.append("+\(name) #\(n)")
+            if labelsLost.contains("\(n) \(name)") { return failed("Bad Gateway (HTTP 502)") }
             return ok([["name": name]])
         case ("DELETE", let rest) where rest.count == 4 && rest[0] == "issues" && rest[2] == "labels":
             guard let n = number(rest[1]), let name = rest[3].removingPercentEncoding else {
@@ -378,10 +434,40 @@ private final class Trackers {
             case let login?: return ["name": login, "email": "\(login)@example.com", "user": ["login": login]]
             }
         }
-        n["commits"] = ["totalCount": p.commits.count + p.moreCommits, "nodes": p.commits.map {
-            ["commit": ["author": user($0.author), "committer": user($0.committer)]]
+        n["commits"] = ["totalCount": p.commits.count + p.moreCommits, "nodes": p.commits.indices.map { k in
+            ["commit": ["message": k < p.messages.count ? p.messages[k] : "", "author": user(p.commits[k].author),
+                        "committer": user(p.commits[k].committer)]]
         }] as [String: Any]
+        n["closing"] = ["totalCount": p.closes.count + p.moreCloses, "nodes": p.closes.compactMap { c -> [String: Any]? in
+            if let i = issues.first(where: { $0.number == c }) { return issueNode(i) }
+            return others[c].map { otherNode(c, $0) }
+        }] as [String: Any]
+        n["readied"] = ["filteredCount": p.readyEvents]
+        n["threads"] = ["nodes": [["comments": ["totalCount": p.threadNotes.count, "nodes": p.threadNotes.map {
+            ["author": ["login": $0.login], "body": $0.body] as [String: Any]
+        }] as [String: Any]]]]
         return n
+    }
+
+    /// An open issue as the `Issue` fragment reads it.
+    func issueNode(_ i: Issue) -> [String: Any] {
+        var n: [String: Any] = ["number": i.number, "id": "I_\(i.number)", "title": i.title, "body": i.body,
+                                "url": issueURL(i.number), "updatedAt": i.updated, "state": "OPEN"]
+        n["author"] = ["login": i.author]
+        n["assignees"] = ["nodes": i.assignees.map { ["login": $0] }]
+        n["labels"] = labels(i.labels, more: i.moreLabels)
+        n["parent"] = i.parent.map { ["url": issueURL($0)] as Any } ?? NSNull()
+        n["subIssues"] = ["nodes": i.subs.map { ["url": issueURL($0)] }]
+        return n
+    }
+
+    /// One of `others` as the `Issue` fragment reads it.
+    func otherNode(_ c: Int, _ other: (title: String, state: String, repo: String)) -> [String: Any] {
+        let assignees = otherAssignees[c] ?? []
+        return ["number": c, "id": "I_\(c)", "title": other.title, "body": "", "updatedAt": at("08:00"),
+                "url": "https://github.com/\(other.repo)/issues/\(c)", "state": other.state,
+                "author": ["login": "reporter"], "labels": labels([]), "parent": NSNull(), "subIssues": ["nodes": [Any]()],
+                "assignees": ["nodes": assignees.map { ["login": $0] }] as [String: Any]]
     }
 
     /// `Repo`'s answer (`after` nil), or the page of `Issues` or `PullRequests` after the
@@ -393,16 +479,7 @@ private final class Trackers {
             return ["pageInfo": ["hasNextPage": end < all.count, "endCursor": "\(end)"] as [String: Any],
                     "nodes": all[min(start, all.count)..<end].map(nodes)]
         }
-        let issueNodes = pageOf(issues) { i in
-            var n: [String: Any] = ["number": i.number, "id": "I_\(i.number)", "title": i.title, "body": i.body,
-                                    "url": issueURL(i.number), "updatedAt": i.updated]
-            n["author"] = ["login": i.author]
-            n["assignees"] = ["nodes": i.assignees.map { ["login": $0] }]
-            n["labels"] = self.labels(i.labels, more: i.moreLabels)
-            n["parent"] = i.parent.map { ["url": issueURL($0)] as Any } ?? NSNull()
-            n["subIssues"] = ["nodes": i.subs.map { ["url": issueURL($0)] }]
-            return n
-        }
+        let issueNodes = pageOf(issues) { self.issueNode($0) }
         let open = pageOf(prs.filter { $0.state == "OPEN" }) { self.prNode($0, gate: false) }
         if after != nil { return ["issues": issueNodes, "pullRequests": open] }
         let done: [[String: Any]] = prs.filter { $0.state != "OPEN" }.map { p in
@@ -440,6 +517,7 @@ private final class Trackers {
             return .init(status: 1, stderr: "no stub answer")
         }
         claudeCalls.append("\(model)\(fracture ? " fracture" : "") \(title)")
+        onClaude?(title)
         let sandbox = ["-p", "--model", model, "--tools", "Read,Grep,Glob",
                        "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", "",
                        "--no-session-persistence", "--output-format", "json", "--json-schema", schema]
@@ -470,24 +548,32 @@ private final class Trackers {
             (200, [:], json(["data": data]))
         }
         func name(_ label: String) -> String { labelBook.first { $0.id == label }?.name ?? "?" }
+        func node(_ t: Ticket) -> [String: Any] {
+            var n: [String: Any] = ["id": t.id, "identifier": t.identifier, "title": t.title,
+                                    "description": t.description, "url": t.url, "updatedAt": t.updated]
+            n["assignee"] = t.assignee.map { ["id": $0.id, "name": $0.name] as Any } ?? NSNull()
+            n["creator"] = ["name": "Reporter"]
+            n["labels"] = ["pageInfo": ["hasNextPage": t.moreLabels], "nodes": t.labels.map { ["id": $0, "name": name($0)] }] as [String: Any]
+            n["parent"] = t.parent.map { ["url": $0] as Any } ?? NSNull()
+            n["children"] = ["nodes": tickets.filter { $0.parent == t.url }.map { ["url": $0.url] }]
+            n["attachments"] = ["nodes": t.attachments.map { ["url": $0] }]
+            n["team"] = ["id": t.team == "ENG" ? "T1" : "T_\(t.team)", "key": t.team]
+            n["state"] = ["type": t.state]
+            return n
+        }
         switch op {
+        case "Issue":
+            let id = v["id"] as? String ?? ""
+            guard let t = tickets.first(where: { $0.id == id || $0.identifier == id.uppercased() }) else {
+                return (200, [:], json(["data": NSNull(), "errors": [["message": "Entity not found: Issue"]]]))
+            }
+            return answer(["issue": node(t)])
         case "Issues":
             guard let teams = v["teams"] as? [String], !teams.isEmpty else { return (400, [:], Data()) }
             let first = v["after"] as? String == nil
             let all = tickets.filter { teams.contains($0.team) }
             let page = first ? Array(all.prefix(2)) : Array(all.dropFirst(2))
-            let nodes: [[String: Any]] = page.map { t in
-                var n: [String: Any] = ["id": t.id, "identifier": t.identifier, "title": t.title,
-                                        "description": t.description, "url": t.url, "updatedAt": t.updated]
-                n["assignee"] = t.assignee.map { ["id": $0.id, "name": $0.name] as Any } ?? NSNull()
-                n["creator"] = ["name": "Reporter"]
-                n["labels"] = ["pageInfo": ["hasNextPage": t.moreLabels], "nodes": t.labels.map { ["id": $0, "name": name($0)] }] as [String: Any]
-                n["parent"] = t.parent.map { ["url": $0] as Any } ?? NSNull()
-                n["children"] = ["nodes": tickets.filter { $0.parent == t.url }.map { ["url": $0.url] }]
-                n["attachments"] = ["nodes": t.attachments.map { ["url": $0] }]
-                n["team"] = ["id": t.team == "ENG" ? "T1" : "T_\(t.team)", "key": t.team]
-                return n
-            }
+            let nodes: [[String: Any]] = page.map(node)
             return answer(["viewer": ["id": "U_OP", "name": "Op"],
                            "issues": ["pageInfo": ["hasNextPage": first && all.count > 2, "endCursor": first ? "c1" : "c2"]
                                         as [String: Any],
@@ -495,7 +581,8 @@ private final class Trackers {
         case "Attached":
             let url = v["url"] as? String ?? ""
             let linked = tickets.filter { ($0.attachments + $0.moreAttachments).contains(url) }
-            return answer(["attachmentsForURL": ["pageInfo": ["hasNextPage": attachedMore], "nodes": linked.map {
+            return answer(["attachmentsForURL": ["pageInfo": attachedMore.map { ["hasNextPage": $0] as Any } ?? NSNull(),
+                                                 "nodes": linked.map {
                 ["issue": ["identifier": $0.identifier, "state": ["type": "started"]]]
             }] as [String: Any]])
         case "Labels":
@@ -526,6 +613,10 @@ private final class Trackers {
                                   parent: parent.url))
             linearChildren.append(v)
             writes.append("linear-issue \(identifier) \(v["title"] as? String ?? "")")
+            if linearCreatesLost > 0 {
+                linearCreatesLost -= 1
+                return (502, [:], Data("Bad Gateway".utf8))
+            }
             return answer(["issueCreate": ["success": true, "issue": ["id": "lin-\(identifier)", "identifier": identifier,
                                                                       "url": linearPage(identifier, v["title"] as? String ?? "")]] as [String: Any]])
         default:
@@ -791,6 +882,8 @@ func pipelineSmoke() throws {
         ("not-a-fix", { $0.fixesCandidate = false }),
         ("closes-unwritable", { $0.closesUnwritable = ["#5"] }),
         ("ci-skipped", { $0.ciRan = false }),
+        ("redrafted", { $0.state = "draft"; $0.wasReady = true }),
+        ("review-requested", { $0.state = "draft"; $0.wasReady = true; $0.reviewRequests = 1 }),
         ("human", { $0.participants = ["bob"]; $0.reviewRequests = 1; $0.foreignCommits = ["bob"] }),
         ("review-requested", { $0.reviewRequests = 2; $0.fixesCandidate = false }),
         ("not-mine", { $0.author = "bob" }),
@@ -1094,7 +1187,10 @@ func pipelineSmoke() throws {
         $0["parentId"] as? String == "lin-1" && $0["teamId"] as? String == "T1"
             && ($0["description"] as? String)?.hasSuffix("\n\nPart of \(linearURL("ENG-1"))") == true
     }, "each Linear child names its parent")
-    check(t.issues.filter { $0.number > 100 }.allSatisfy { $0.body.hasSuffix("\n\nPart of \(issueURL(3))") })
+    check(t.issues.filter { $0.number > 100 }.map { $0.body.components(separatedBy: "\n\n").suffix(2) }
+          == [["Part of \(issueURL(3))", "<!-- Diplomat: part 1 of \(issueURL(3)) -->"],
+              ["Part of \(issueURL(3))", "<!-- Diplomat: part 2 of \(issueURL(3)) -->"]],
+          "each GitHub part names its parent, and is marked: \(t.issues.filter { $0.number > 100 }.map(\.body))")
     check(stage(s5.result, linearURL("ENG-1")) == "fractured/fractured" && stage(s5.result, prURL(15)) == "merged/done")
     check(s5.result.effects == [fixFX(1), fixFX(101), fixFX(102)], "sync 5 effects: \(s5.result.effects)")
     check(stage(s5.result, prURL(11)) == "human/human", "taken off the fast track: \(stage(s5.result, prURL(11)))")
@@ -1312,6 +1408,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
         ("no candidate it fixes", { $0.closes = [] }, notAFix),
         ("labels past the page", { $0.moreLabels = 1 }, "has more labels than one read lists"),
         ("a commit by another", { $0.commits.append(("bob", "bob")) }, "has commits by @bob"),
+        ("a commit of mine committed by another", { $0.commits = [(opLogin, "bob")] }, "has commits by @bob"),
         ("a commit by no account", { $0.commits.append((nil, opLogin)) }, "has commits by someone other than me"),
         ("every check skipped", { $0.checks = ["SKIPPED", "NEUTRAL"] }, "every CI check was skipped"),
         ("a person's review", { $0.reviews.append(.init(login: "alice", body: "Please don't merge yet", oid: $0.head)) },
@@ -1337,8 +1434,17 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     }
     let (_, web) = try cleared("web-flow") { $0.prs[number($0, 13)].commits = [(opLogin, "web-flow")] }
     check(merged(web), "GitHub committing my own commit is no one else's: \(web.writes)")
-    let (_, mine) = try cleared("unread-mine") { $0.prs[number($0, 13)].closes.append(28) }
-    check(merged(mine), "an unread issue it closes, assigned to me alone: \(mine.writes)")
+    // An issue it closes that no read judged holds it, whoever it is assigned to.
+    for (n, who) in [(28, "me alone"), (30, "no one")] {
+        let (_, s) = try cleared("unread-\(n)") { t in
+            t.others[30] = ("Unassigned", "OPEN", "acme/lib")
+            t.prs[number(t, 13)].closes.append(n)
+        }
+        let url = n == 30 ? "https://github.com/acme/lib/issues/30" : issueURL(n)
+        check(!merged(s) && stageOf(s.result, prURL(13))
+              == "cleared/fast (would close \(url), which Diplomat did not read or may not write to)",
+              "an unread issue it closes, assigned to \(who): \(s.writes) \(stageOf(s.result, prURL(13)))")
+    }
     let late: [(String, Change, String)] = [
         ("a review requested", { $0.reviewRequests = 1 }, "waits on 1 requested review"),
         ("a person's comment", { $0.comments.append(("alice", false, "Wait")) }, "@alice has commented or reviewed"),
@@ -1346,6 +1452,8 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
         ("CI failing", { $0.ciState = "FAILURE" }, "CI failure"),
         ("a fast-track label taken off", { $0.labels.removeAll { $0 == "diplomat:cleared" } },
          "diplomat:cleared came off it at c3c3c3c"),
+        ("the other taken off", { $0.labels.removeAll { $0 == "diplomat:fast-track" } }, "lacks a fast-track label"),
+        ("labels past the page", { $0.moreLabels = 1 }, "has more labels than one read lists"),
     ]
     for (k, (what, change, hold)) in late.enumerated() {
         let (_, s) = try cleared("late-\(k)") { t in t.onReread = { _ in change(&t.prs[number(t, 13)]) } }
@@ -1589,6 +1697,12 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(stageOf(b2.result, issueURL(102)) == "unrated/unrated (\(nina))", stageOf(b2.result, issueURL(102)))
     check(item(b2.result, issueURL(102))?.splitFrom == "nina" && item(b2.result, issueURL(3))?.splitFrom == nil,
           "a part names whose text it carries: \(String(describing: item(b2.result, issueURL(102))?.splitFrom))")
+    let shouting = only([1])
+    shouting.issues[0].author = "MALLORY"
+    shouting.issues[0].labels = lowLow
+    let sh = sync(shouting, PipelineSettings(roots: [root], fix: true), dir("banned-case"), t0)
+    check(sh.result.effects.isEmpty && stageOf(sh.result, issueURL(1))
+          == "candidate/fast (@MALLORY is on the prompt-injection ban list)", "a ban in another case: \(sh.result.effects)")
 
     // A rating whose labels GitHub refused is kept, and not paid for again.
     let refused = only([1])
@@ -1657,7 +1771,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     _ = sync(capped, split, dir("parts-capped"), t0)
     let part = capped.issues.first { $0.number == 101 }
     check(part?.title.count == 200 && part?.body.contains("END UNTRUSTED TRACKER TEXT") == false
-          && part.map { $0.body.count <= 4000 + "\n\nPart of \(issueURL(3))".count } == true,
+          && part.map { $0.body.count <= 4000 + "\n\nPart of \(issueURL(3))\n\n<!-- Diplomat: part 1 of \(issueURL(3)) -->".count } == true,
           "a part as filed: \(part?.title.count ?? -1) \(part?.body.prefix(80) ?? "")")
     let unsplit = only([3])
     unsplit.fractures["Split the storage layer"] = ["parts": [Any](), "why": "one change"]
@@ -1708,6 +1822,13 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(page.result.effects.isEmpty && stageOf(page.result, issueURL(1)) == candidate
           && page.result.notices.first == "acme/app was read in part: gh: Bad Gateway (HTTP 502)",
           "a page failed: \(page.result.notices)")
+    let pageErrors = partial("page-errors") {
+        $0.page = 1
+        $0.pagesPartial = true
+    }
+    check(pageErrors.result.effects.isEmpty && stageOf(pageErrors.result, issueURL(1)) == candidate
+          && pageErrors.result.notices.first == "acme/app was read in part: Timeout on labels",
+          "a page with errors: \(pageErrors.result.notices)")
     let many = only([1])
     many.issues[0].labels = lowLow
     many.issues += (1000..<1300).map { .init(number: $0, title: "Filler \($0)", updated: at("08:00")) }
@@ -1760,6 +1881,8 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(!mn.result.graph.edges.contains { $0.from == linearURL("ENG-3") }, "XENG-3 names ENG-3")
 
     try pipelineFailClosed(base: base, root: root, team: team, t0: t0)
+    try pipelineFreshReads(base: base, root: root, team: team, t0: t0)
+    try pipelinePinned(base: base, root: root, team: team, t0: t0)
 }
 
 /// What a sync does when what it read leaves a doubt: it holds, or leaves the item be.
@@ -1818,7 +1941,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     let nk = sync(keyless, PipelineSettings(roots: [root], linearTeams: [.init(key: "ENG", repo: "acme/lib")], merge: true),
                   dir("linear-no-key"), t0, key: nil)
     check(!merged(nk) && stageOf(nk.result, prURL(13))
-          == "cleared/fast (Linear was not read, so the issues linking it are unknown)",
+          == "cleared/fast (would close the Linear issues linking it, which Diplomat did not read or may not write to)",
           "Linear not read: \(stageOf(nk.result, prURL(13)))")
     let (_, unwritable) = try cleared("linear-unwritable", settings: withLinear) { t in
         t.prs[0].body = "Fixes #27. Fixes ENG-2."
@@ -1836,8 +1959,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
         t.tickets = [ticket("ENG-2", assignee: ("U_ALICE", "Alice"))]
         t.tickets[0].moreAttachments = [prURL(13)]
     }
-    check(!merged(hidden) && stageOf(hidden.result, prURL(13))
-          == "cleared/fast (would close ENG-2, which Diplomat did not read or may not write to)",
+    check(!merged(hidden) && stageOf(hidden.result, prURL(13)) == "cleared/fast (\(notAFix))",
           "linked past the attachments read: \(stageOf(hidden.result, prURL(13)))")
     let (_, linked) = try cleared("linear-linked-mine", settings: withLinear) { t in
         t.tickets = [ticket("ENG-2")]
@@ -1846,7 +1968,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     check(merged(linked), "linked to a Linear issue Diplomat may write to: \(stageOf(linked.result, prURL(13)))")
     let (_, crowded) = try cleared("linear-attached-more", settings: withLinear) { $0.attachedMore = true }
     check(!merged(crowded) && stageOf(crowded.result, prURL(13))
-          == "cleared/fast (more Linear issues link it than one read lists)",
+          == "cleared/fast (would close the Linear issues linking it, which Diplomat did not read or may not write to)",
           "linked past Linear's answer: \(stageOf(crowded.result, prURL(13)))")
     // Only a PR closing a candidate, and on Linear from its team's own root, is put on
     // the fast track.
@@ -1945,7 +2067,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     unfiled.failCreate = true
     let u1 = sync(unfiled, split, dir("unfiled"), t0)
     check(u1.writes == ["label diplomat:fractured exists", "+diplomat:fractured #3", "-diplomat:fractured #3"]
-          && u1.result.notices == ["#3 was not split: the issue could not be created: gh: Server Error (HTTP 500)"]
+          && u1.result.notices == ["#3 was not split: the issue may not have been created: gh: Server Error (HTTP 500)"]
           && stageOf(u1.result, issueURL(3)) == "human/human", "nothing filed: \(u1.writes) \(u1.result.notices)")
     // A part filed but not linked is still a part, its text its parent's author's.
     let unlinked = only([3])
@@ -2033,4 +2155,417 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     let tiers = PipelineGraph.layout(items: [node("H", .human, "10:00"), node("D", .done, "11:00"), node("G", .done, "12:00")],
                                      edges: [.init(from: "H", to: "D", kind: .fixes)], maxItems: 2)
     check(tiers.items.map(\.id) == ["H", "D"], "a group partly done: \(tiers.items.map(\.id))")
+}
+
+/// What a sync reads again right before it acts, and what an act stopped part-way leaves,
+/// a scenario each.
+private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                                t0: Date) throws {
+    section("pipeline fresh reads")
+    let fm = FileManager.default
+    func dir(_ name: String) -> URL { base.appendingPathComponent("fresh-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    let lowLow = ["risk:low", "complexity:low"]
+    let mergeOnly = PipelineSettings(roots: [root], merge: true)
+    let split = PipelineSettings(roots: [root], fracture: true)
+    let rateTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true)
+    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+    func unread(_ what: String) -> String { "would close \(what), which Diplomat did not read or may not write to" }
+    func cleared(_ name: String, _ change: (Trackers) -> Void) throws -> Synced {
+        let t = only([13, 27])
+        change(t)
+        try seedRerate(dir(name), 13, sha("c3"), at: later(-60))
+        return sync(t, mergeOnly, dir(name), t0)
+    }
+    func state(_ name: String, _ json: String) throws {
+        try fm.createDirectory(at: dir(name), withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: dir(name).appendingPathComponent("state.json"))
+    }
+
+    // The merge judges each issue it would close as GitHub has it at the merge.
+    let meanwhile: [(String, (Trackers) -> Void)] = [
+        ("assigned to bob", { $0.issues[0].assignees = ["bob"] }),
+        ("rated medium", { $0.issues[0].labels = ["risk:medium", "complexity:low"] }),
+        ("split", { $0.issues[0].labels.append("diplomat:fractured") }),
+    ]
+    for (k, (what, change)) in meanwhile.enumerated() {
+        let s = try cleared("meanwhile-\(k)") { t in t.onReread = { _ in change(t) } }
+        check(!merged(s) && stageOf(s.result, prURL(13)) == "cleared/fast (\(notAFix))",
+              "its issue \(what) during the sync: \(s.writes) \(stageOf(s.result, prURL(13)))")
+    }
+    // ...and each one its title or a commit message closes, which GitHub closes on the
+    // merge though its closing references leave it out.
+    let texts: [(String, (inout Trackers.PR) -> Void, String?)] = [
+        ("a commit closing another issue", { $0.messages = ["Fix the cache\n\nFixes #9"] }, unread(issueURL(9))),
+        ("a later commit closing one of another repository", {
+            $0.commits.append((opLogin, opLogin))
+            $0.messages = ["Fix the cache", "closes: acme/lib#4"]
+        }, unread("https://github.com/acme/lib/issues/4")),
+        ("GH-9 in a commit", { $0.messages = ["fixes gh-9"] }, unread("\(issueURL(9)), GH-9")),
+        ("a link in a commit", { $0.messages = ["Resolves https://github.com/acme/app/issues/9"] }, unread(issueURL(9))),
+        ("its title", { $0.title = "Fix #9 too" }, unread(issueURL(9))),
+        ("a Linear issue in a commit", { $0.messages = ["Fixes OPS-7"] }, unread("OPS-7")),
+        ("its own issue in a commit", { $0.messages = ["Fixes #27"] }, nil),
+        ("a mention in a commit", { $0.messages = ["See #9"] }, nil),
+    ]
+    for (k, (what, change, hold)) in texts.enumerated() {
+        let s = try cleared("text-\(k)") { change(&$0.prs[0]) }
+        check(merged(s) == (hold == nil)
+              && stageOf(s.result, prURL(13)) == (hold.map { "cleared/fast (\($0))" } ?? "merged/done"),
+              "\(what): \(s.writes) \(stageOf(s.result, prURL(13)))")
+    }
+    // An inline comment of mine is a comment of mine; a tagged reply in a thread is the agent's.
+    let inline = try cleared("inline-comment") { t in
+        t.prs[0].reviews.append(.init(login: opLogin, body: "", oid: sha("c3")))
+        t.prs[0].threadNotes = [(opLogin, "wait, this breaks logout")]
+    }
+    let answered = try cleared("inline-tagged") { $0.prs[0].threadNotes = [(opLogin, "\(tag)Answered at c3")] }
+    check(!merged(inline) && merged(answered) && stageOf(inline.result, prURL(13))
+          == "cleared/fast (I commented on or reviewed it myself, not through Diplomat)",
+          "an inline comment: \(stageOf(inline.result, prURL(13))) \(answered.writes)")
+
+    // Each write waits on a read of its item made right before it.
+    let taken = only([1])
+    taken.onClaude = { _ in
+        taken.issues[0].assignees = ["bob"]
+        taken.issues[0].updated = at("11:58")
+    }
+    let rateFix = PipelineSettings(roots: [root], rate: true, fix: true)
+    let a1 = sync(taken, rateFix, dir("assigned-while-rated"), t0)
+    let a2 = sync(taken, rateFix, dir("assigned-while-rated"), later(5))
+    check(a1.claude == ["sonnet Typo on the login button"] && a1.writes.isEmpty && a2.claude.isEmpty
+          && a1.result.notices == ["#1 was not written to, as it changed since this sync read it: assigned to @bob"],
+          "assigned while rated: \(a1.writes) \(a1.result.notices) \(a2.claude)")
+    let linTaken = only([])
+    linTaken.tickets = [fixture().tickets[0]]
+    linTaken.onClaude = { _ in linTaken.tickets[0].assignee = ("U_ALICE", "Alice") }
+    let la = sync(linTaken, PipelineSettings(roots: [root], linearTeams: [team], rate: true),
+                  dir("linear-assigned-while-rated"), t0)
+    check(la.claude == ["sonnet Wrong color in the header"] && la.writes.isEmpty
+          && la.result.notices == ["ENG-1 was not written to, as it changed since this sync read it: assigned to Alice"],
+          "a Linear issue assigned while rated: \(la.writes) \(la.result.notices)")
+    let splitTaken = only([3])
+    splitTaken.onClaude = { _ in splitTaken.issues[0].assignees = ["bob"] }
+    let sk = sync(splitTaken, split, dir("assigned-while-split"), t0)
+    check(sk.writes == ["label diplomat:fractured exists", "+diplomat:fractured #3", "-diplomat:fractured #3"],
+          "assigned while split: \(sk.writes)")
+    // A split another pipeline claimed meanwhile is left to it.
+    let raced = only([3])
+    raced.onItem = { n in
+        guard n == 3 else { return }
+        raced.onItem = nil
+        raced.issues[0].labels.append("diplomat:fractured")
+    }
+    let rc = sync(raced, split, dir("claimed-by-another"), t0)
+    check(rc.claude.isEmpty && rc.writes.isEmpty && rc.result.notices == ["#3 was not split: it is split already"],
+          "claimed meanwhile: \(rc.claude) \(rc.writes) \(rc.result.notices)")
+    let pushed = only([14, 24])
+    pushed.prs[0].ciState = "SUCCESS"
+    pushed.onItem = { n in if n == 14 { pushed.prs[0].head = sha("d5") } }
+    try seedRerate(dir("pushed-before-cleared"), 14, sha("d4"), at: later(-60))
+    let pc = sync(pushed, PipelineSettings(roots: [root], fastTrack: true), dir("pushed-before-cleared"), t0)
+    check(!pc.writes.contains("+diplomat:cleared #14"), "pushed before it was cleared: \(pc.writes)")
+
+    // `fast-track` goes on a PR once: one a person took it off, rating labels and all, is theirs.
+    let once = only([4, 11])
+    let o1 = sync(once, rateTrack, dir("fast-track-once"), t0)
+    once.prs[0].labels = []
+    let o2 = sync(once, rateTrack, dir("fast-track-once"), later(5))
+    check(o1.writes.contains("+diplomat:fast-track #11") && o2.claude == ["opus Fix the docs link"]
+          && o2.writes == ["+risk:low #11", "+complexity:low #11"] && o2.result.effects.isEmpty
+          && stageOf(o2.result, prURL(11)) == "human/human",
+          "labels cleared by a person: \(o2.claude) \(o2.writes) \(stageOf(o2.result, prURL(11)))")
+    // A PR whose first rating labels the tracker refused says so.
+    let refusedPR = only([4, 11])
+    refusedPR.refuseLabels = ["11"]
+    let rp = sync(refusedPR, rateTrack, dir("pr-labels-refused"), t0)
+    check(stageOf(rp.result, prURL(11)) == "human/human (off the fast track: its rating labels could not be written)",
+          "a PR's labels refused: \(stageOf(rp.result, prURL(11)))")
+
+    // A draft is marked ready once: one turned back, or opened ready and drafted, is a person's.
+    let redrafted = "cleared/fast (turned back into a draft after it was ready for review)"
+    let redraft = only([13, 27])
+    redraft.prs[0].draft = true
+    try seedRerate(dir("redraft"), 13, sha("c3"), at: later(-60))
+    let r1 = sync(redraft, mergeOnly, dir("redraft"), t0)
+    redraft.prs[0].draft = true
+    redraft.prs[0].readyEvents += 1
+    let r2 = sync(redraft, mergeOnly, dir("redraft"), later(5))
+    let r3 = sync(redraft, mergeOnly, dir("redraft"), later(10))
+    check(r1.writes == ["ready #13"] && r2.writes.isEmpty && r3.writes.isEmpty && r3.events.isEmpty
+          && stageOf(r2.result, prURL(13)) == redrafted && trail(r2.events, r2.result) == ["#13 held"],
+          "turned back into a draft: \(r2.writes) \(r3.writes) \(stageOf(r2.result, prURL(13)))")
+    let drafted = only([13, 27])
+    drafted.prs[0].draft = true
+    drafted.prs[0].readyEvents = 1
+    try seedRerate(dir("drafted"), 13, sha("c3"), at: later(-60))
+    let dr = sync(drafted, mergeOnly, dir("drafted"), t0)
+    check(dr.writes.isEmpty && stageOf(dr.result, prURL(13)) == redrafted,
+          "opened ready, then drafted: \(dr.writes) \(stageOf(dr.result, prURL(13)))")
+
+    // A split cleans up after itself: its claim comes off with the pipeline switched off...
+    let offDir = dir("split-switched-off")
+    let off = only([3])
+    off.onClaude = { _ in
+        PipelineControl(enabled: false, rate: true, fix: true, fastTrack: true, merge: true, fracture: true).save(in: offDir)
+    }
+    let so1 = sync(off, split, offDir, t0)
+    off.onClaude = nil
+    PipelineControl(enabled: true, rate: true, fix: true, fastTrack: true, merge: true, fracture: true).save(in: offDir)
+    let so2 = sync(off, split, offDir, later(5))
+    check(so1.writes == ["label diplomat:fractured exists", "+diplomat:fractured #3", "-diplomat:fractured #3"]
+          && so2.writes.contains("issue #101 Extract the storage protocol"),
+          "switched off mid-split: \(so1.writes) then \(so2.writes)")
+    // ...when the call that put it on failed...
+    let lostClaim = only([3])
+    lostClaim.labelsLost = ["3 diplomat:fractured"]
+    let lc = sync(lostClaim, split, dir("claim-lost"), t0)
+    check(lc.claude.isEmpty
+          && lc.writes == ["label diplomat:fractured exists", "+diplomat:fractured #3", "-diplomat:fractured #3"],
+          "a claim made though its call failed: \(lc.writes)")
+    // ...and at the next sync, when the sync splitting it stopped before filing a part, which
+    // is then tried again; a part filed holds it.
+    let killed = only([3])
+    killed.issues[0].labels.append("diplomat:fractured")
+    try state("killed", #"{"splitting":{"\#(issueURL(3))":[]},"syncs":3}"#)
+    let k1 = sync(killed, split, dir("killed"), t0)
+    let k2 = sync(killed, split, dir("killed"), later(5))
+    check(k1.writes == ["-diplomat:fractured #3"] && k1.claude.isEmpty
+          && k1.result.notices == ["#3: a split stopped before it filed a part, so its claim was taken back"]
+          && k2.claude == ["sonnet fracture Split the storage layer"],
+          "a split killed before a part: \(k1.writes) \(k1.result.notices) then \(k2.claude)")
+    let half = only([3])
+    half.issues[0].labels.append("diplomat:fractured")
+    half.issues.append(.init(number: 101, title: "Extract the storage protocol", updated: at("09:00"), author: opLogin))
+    try state("killed-half", #"{"splitting":{"\#(issueURL(3))":["\#(issueURL(101))"]}}"#)
+    let h1 = sync(half, split, dir("killed-half"), t0)
+    check(h1.writes.isEmpty && stageOf(h1.result, issueURL(3))
+          == "fractured/fractured (split stopped after filing \(issueURL(101)))",
+          "a split killed after a part: \(h1.writes) \(stageOf(h1.result, issueURL(3)))")
+    // A refused claim backs off, so the next issue gets its turn.
+    let refused = only([3])
+    refused.refuseLabels = ["3 diplomat:fractured"]
+    refused.issues.append(.init(number: 7, title: "Rework the settings screen", labels: ["risk:low", "complexity:medium"],
+                                updated: at("09:00")))
+    refused.fractures["Rework the settings screen"] = ["parts": [["title": "Move the toggles", "body": "x"]], "why": "one"]
+    let rf = [0.0, 5, 10].map { sync(refused, split, dir("claim-refused"), later($0)).claude }
+    check(rf == [[], [], ["sonnet fracture Rework the settings screen"]], "a refused claim's turns: \(rf)")
+
+    // A part is filed once: one GitHub or Linear made though the call failed, or one an
+    // earlier try filed, is taken.
+    let lost = only([3])
+    lost.createsLost = 1
+    let cl1 = sync(lost, split, dir("create-lost"), t0)
+    let cl2 = sync(lost, split, dir("create-lost"), later(5))
+    check(cl1.writes == ["label diplomat:fractured exists", "+diplomat:fractured #3",
+                         "issue #101 Extract the storage protocol", "sub #3 #101",
+                         "issue #102 Move SQLite behind it", "sub #3 #102"] && cl2.writes.isEmpty,
+          "a part made though its call failed: \(cl1.writes) then \(cl2.writes)")
+    let orphan = only([3])
+    orphan.issues[0].labels.append("diplomat:fractured")
+    orphan.issues.append(.init(number: 101, title: "Extract the storage protocol",
+                               body: "Define the protocol.\n\nPart of \(issueURL(3))\n\n<!-- Diplomat: part 1 of \(issueURL(3)) -->",
+                               updated: at("09:00"), author: opLogin))
+    orphan.nextIssue = 102
+    try state("orphan", #"{"splitting":{"\#(issueURL(3))":[]}}"#)
+    let or1 = sync(orphan, split, dir("orphan"), t0)
+    let or2 = sync(orphan, split, dir("orphan"), later(5))
+    check(or1.writes == ["-diplomat:fractured #3"]
+          && or2.writes == ["label diplomat:fractured exists", "+diplomat:fractured #3", "sub #3 #101",
+                            "issue #102 Move SQLite behind it", "sub #3 #102"],
+          "a part filed by a split killed before it was recorded: \(or1.writes) then \(or2.writes)")
+    let linLost = only([])
+    linLost.tickets = [fixture().tickets[0]]
+    linLost.linearCreatesLost = 1
+    var forceSplit = PipelineSettings(roots: [root], linearTeams: [team], fracture: true)
+    forceSplit.force = .init(fracture: [linearURL("ENG-1")])
+    let ll = sync(linLost, forceSplit, dir("linear-create-lost"), t0)
+    check(ll.writes == ["linear-label diplomat:fractured #5856D6", "+diplomat:fractured ENG-1",
+                        "linear-issue ENG-4 Pick the header token", "linear-issue ENG-5 Update the header snapshot"]
+          && stageOf(ll.result, linearURL("ENG-1")) == "fractured/fractured",
+          "a Linear part made though its call failed: \(ll.writes) \(stageOf(ll.result, linearURL("ENG-1")))")
+
+    // A Linear rating kept locally is read back: Linear's times have milliseconds.
+    let ms = only([])
+    ms.tickets = [fixture().tickets[1]]
+    ms.tickets[0].updated = "2026-11-20T10:20:00.123Z"
+    let rateLinear = PipelineSettings(roots: [root], linearTeams: [team], rate: true)
+    let ms1 = sync(ms, rateLinear, dir("linear-ms"), t0)
+    let ms2 = sync(ms, rateLinear, dir("linear-ms"), later(5))
+    check(ms1.claude == ["sonnet Payment flow redesign"] && ms2.claude.isEmpty, "rated again: \(ms2.claude)")
+
+    // `fixable`: each candidate a fix may act on, past what the screen shows; none held,
+    // and none at all from a sync that may not act.
+    let many = only([12, 16])
+    many.issues = (1...300).map { .init(number: 1000 + $0, title: "Small \($0)", labels: lowLow, updated: at("08:00")) }
+    let fx = sync(many, PipelineSettings(roots: [root], fix: true), dir("fixable"), t0)
+    check(fx.result.notices.isEmpty && fx.result.items.count == 300
+          && Set(fx.result.fixable) == Set(many.issues.map { issueURL($0.number) }),
+          "fixable: \(fx.result.fixable.count) of \(fx.result.items.count) shown")
+    let one = only([1])
+    one.issues[0].labels = lowLow
+    let plain = sync(one, PipelineSettings(roots: [root]), dir("fixable-one"), t0)
+    one.ghPartial = true
+    let partial = sync(one, PipelineSettings(roots: [root]), dir("fixable-partial"), t0)
+    one.ghPartial = false
+    try state("fixable-blocked", #"{"decided": 7}"#)
+    let blocked = sync(one, PipelineSettings(roots: [root]), dir("fixable-blocked"), t0)
+    check(plain.result.fixable == [issueURL(1)] && partial.result.fixable.isEmpty && blocked.result.fixable.isEmpty
+          && stageOf(blocked.result, issueURL(1)) == "candidate/fast",
+          "fixable: \(plain.result.fixable) \(partial.result.fixable) \(blocked.result.fixable)")
+}
+
+/// Guards each pinned by the smallest scenario that tells it from its absence.
+private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                            t0: Date) throws {
+    section("pipeline pinned")
+    let fm = FileManager.default
+    func dir(_ name: String) -> URL { base.appendingPathComponent("pinned-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    let mergeOnly = PipelineSettings(roots: [root], merge: true)
+    let watch = PipelineSettings(roots: [root])
+    let withLinear = PipelineSettings(roots: [root], linearTeams: [team], merge: true)
+    func cleared(_ name: String, _ settings: PipelineSettings? = nil, _ change: (Trackers) -> Void) throws -> Synced {
+        let t = only([13, 27])
+        change(t)
+        try seedRerate(dir(name), 13, sha("c3"), at: later(-60))
+        return sync(t, settings ?? mergeOnly, dir(name), t0)
+    }
+    func state(_ name: String, _ json: String) throws {
+        try fm.createDirectory(at: dir(name), withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: dir(name).appendingPathComponent("state.json"))
+    }
+    let linking = "cleared/fast (would close the Linear issues linking it, which Diplomat did not read or may not write to)"
+
+    // Cleared only at the head this Diplomat rated low/low again.
+    let moved = try cleared("moved") { t in
+        t.prs[0].head = sha("c4")
+        t.prs[0].reviews = [.init(login: opLogin, body: "\(tag)Clean at \(sha("c4"))", oid: sha("c4"))]
+    }
+    check(!merged(moved) && stageOf(moved.result, prURL(13)) == "clean/fast",
+          "clean at a head not rated again: \(moved.writes) \(stageOf(moved.result, prURL(13)))")
+    // A merge read again with errors, or whose Linear links are unknown, holds.
+    let erred = try cleared("reread-errors") { t in
+        t.onReread = { _ in
+            t.ghPartial = true
+            t.prs[0].lost = ["comments"]
+            t.prs[0].comments.append(("alice", false, "Please don't merge yet"))
+        }
+    }
+    check(!merged(erred) && erred.result.notices == ["#13 was not merged: it could not be read again: Timeout on reviews"],
+          "read again with errors: \(erred.writes) \(erred.result.notices)")
+    let down = try cleared("attached-down", withLinear) { t in t.onReread = { _ in t.linearDown = true } }
+    let bare = try cleared("attached-bare", withLinear) { $0.attachedMore = nil }
+    check(!merged(down) && !merged(bare) && stageOf(down.result, prURL(13)) == linking
+          && stageOf(bare.result, prURL(13)) == linking,
+          "Linear's links unknown: \(stageOf(down.result, prURL(13))) \(stageOf(bare.result, prURL(13)))")
+    // An issue already closed is not one a merge would close.
+    let closed = try cleared("closes-closed") { $0.prs[0].closes.append(20) }
+    check(merged(closed), "also closing a closed issue: \(stageOf(closed.result, prURL(13)))")
+
+    // A push past a cleared head puts the PR back on the fast track.
+    let pushed = only([13, 27])
+    pushed.prs[0].head = sha("c4")
+    try seedRerate(dir("pushed"), 13, sha("c3"), at: later(-60))
+    try state("pushed", #"{"cleared":{"\#(prURL(13))":"\#(sha("c3"))"}}"#)
+    let ps = sync(pushed, PipelineSettings(roots: [root], fastTrack: true), dir("pushed"), t0)
+    check(ps.writes == ["-diplomat:cleared #13"] && stageOf(ps.result, prURL(13)) == "fast-track/fast",
+          "pushed past its cleared head: \(ps.writes) \(stageOf(ps.result, prURL(13)))")
+    // Off the fast track for good: re-rated above low/low at an earlier head, or taken off before.
+    let earlier = only([13, 27])
+    try seed(dir("rerated-earlier"),
+             PipelineEvent(at: later(-90), item: prURL(13), kind: .rerated, detail: "medium risk, low complexity",
+                           head: sha("b2"), rating: PipelineRating(risk: .medium, complexity: .low)),
+             PipelineEvent(at: later(-60), item: prURL(13), kind: .rerated, detail: "low risk, low complexity",
+                           head: sha("c3"), rating: low))
+    let re = sync(earlier, mergeOnly, dir("rerated-earlier"), t0)
+    let decided = try cleared("decided") { _ in _ = try? state("decided", #"{"decided":["\#(prURL(13))"]}"#) }
+    check(!merged(re) && !merged(decided)
+          && stageOf(re.result, prURL(13))
+            == "human/human (off the fast track for good: re-rated medium risk, low complexity at b2b2b2b)"
+          && stageOf(decided.result, prURL(13)) == "human/human (off the fast track for good: Diplomat took it off the fast track)",
+          "off the fast track before: \(stageOf(re.result, prURL(13))) \(stageOf(decided.result, prURL(13)))")
+
+    // A PR of mine on the fast track that fixes no candidate, or whose diff allows more, is a person's.
+    let notFix = only([17])
+    let nf = sync(notFix, watch, dir("not-a-fix"), t0)
+    let floored = only([17, 26])
+    floored.prs[0].files = [("src/a.swift", 1, 1, "MODIFIED")]
+    let fl = sync(floored, watch, dir("floored"), t0)
+    check(stageOf(nf.result, prURL(17)) == "human/human (off the fast track: it closes no issue, "
+            + "or one that is not a low-risk, low-complexity issue Diplomat may act on)"
+          && stageOf(fl.result, prURL(17)) == "human/human (off the fast track: its diff allows no less than medium risk, low complexity)",
+          "off the fast track: \(stageOf(nf.result, prURL(17))) \(stageOf(fl.result, prURL(17)))")
+
+    // No fix is asked for while Open fix PRs is off, though the issue is one a fix may act on.
+    let candidates = only([27])
+    candidates.tickets = [fixture().tickets[2]]
+    let nofix = sync(candidates, PipelineSettings(roots: [root], linearTeams: [team]), dir("fix-off"), t0)
+    check(nofix.result.effects.isEmpty && Set(nofix.result.fixable) == [issueURL(27), linearURL("ENG-3")],
+          "fix off: \(nofix.result.effects) \(nofix.result.fixable)")
+    // A candidate of a Linear team whose repository is no root says why no fix is asked.
+    let rootless = only([])
+    rootless.tickets = [fixture().tickets[2]]
+    rootless.tickets[0].team = "OPS"
+    let rl = sync(rootless, PipelineSettings(roots: [root], linearTeams: [team, .init(key: "OPS", repo: "acme/other")]),
+                  dir("rootless"), t0)
+    check(stageOf(rl.result, linearURL("ENG-3")) == "candidate/fast (Linear team OPS has no root to fix it in)",
+          "a team with no root: \(stageOf(rl.result, linearURL("ENG-3")))")
+    // `Completes ENG-1` closes it.
+    let completes = only([11])
+    completes.prs[0].body = "Completes ENG-1."
+    completes.tickets = [fixture().tickets[0]]
+    let cp = sync(completes, PipelineSettings(roots: [root], linearTeams: [team]), dir("completes"), t0)
+    check(stageOf(cp.result, linearURL("ENG-1")).hasPrefix("fixing/"), "completes: \(stageOf(cp.result, linearURL("ENG-1")))")
+    // My login as GitHub cases it is mine.
+    let cased = only([4])
+    cased.issues[0].assignees = ["OP"]
+    check(stageOf(sync(cased, watch, dir("cased"), t0).result, issueURL(4)) == "candidate/fast", "assigned to OP")
+
+    // Rating: Rate now waits for a whole read; an issue split or being fixed is not rated
+    // though no one may write to it; a PR rated only here is not rated again at its head;
+    // a success clears the backoff, and a diff that cannot be read starts one.
+    let partial = only([1])
+    partial.ghPartial = true
+    var forceRate = watch
+    forceRate.force = .init(rate: [issueURL(1)])
+    let fr = sync(partial, forceRate, dir("rate-partial"), t0)
+    check(fr.claude.isEmpty && fr.result.notices.last == "#1 was not rated: acme/app was read only in part",
+          "Rate now on a root read in part: \(fr.claude) \(fr.result.notices)")
+    let parent = only([2])
+    parent.issues[0].subs = [101]
+    check(sync(parent, PipelineSettings(roots: [root], rate: true), dir("rate-parent"), t0).claude.isEmpty,
+          "someone else's issue with parts is not rated")
+    let local = only([14, 24])
+    local.prs[0].labels = ["diplomat:fast-track"]
+    local.prs[0].ciState = "SUCCESS"
+    local.refuseLabels = ["14"]
+    let rateTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true)
+    let l1 = sync(local, rateTrack, dir("rated-here"), t0), l2 = sync(local, rateTrack, dir("rated-here"), later(5))
+    check(l1.claude == ["opus Trim whitespace in names"] && l2.claude.isEmpty, "rated here, not again: \(l2.claude)")
+    let flaky = only([6])
+    let flakyRating = flaky.ratings.removeValue(forKey: "Flaky retry logic")
+    _ = sync(flaky, PipelineSettings(roots: [root], rate: true), dir("flaky"), t0)
+    flaky.ratings["Flaky retry logic"] = flakyRating
+    _ = sync(flaky, PipelineSettings(roots: [root], rate: true), dir("flaky"), later(5))
+    let flakyState = try JSONSerialization.jsonObject(with: Data(contentsOf: dir("flaky").appendingPathComponent("state.json")))
+    check((flakyState as? [String: Any])?["retry"].map { ($0 as? [String: Any])?.isEmpty == true } ?? true,
+          "a rating that succeeds clears its backoff: \(flakyState)")
+    let diffless = only([11, 4])
+    diffless.diffFails = true
+    let diffCalls = [0.0, 5, 10].map { m -> Int in
+        _ = sync(diffless, PipelineSettings(roots: [root], rate: true), dir("diff-fails"), later(m))
+        defer { diffless.ghCalls = [] }
+        return diffless.ghCalls.filter { $0.starts(with: ["pr", "diff"]) }.count
+    }
+    check(diffCalls == [1, 1, 0], "a diff that cannot be read backs off: \(diffCalls)")
+
+    // An issue a PR fixes is not split.
+    let fixedIssue = only([4, 11])
+    fixedIssue.issues[0].labels = ["risk:low", "complexity:medium"]
+    var forceSplit = PipelineSettings(roots: [root], fracture: true)
+    forceSplit.force = .init(fracture: [issueURL(4)])
+    let fx = sync(fixedIssue, forceSplit, dir("split-fixed"), t0)
+    check(fx.claude.isEmpty && fx.result.notices == ["#4 was not split: an open PR fixes it"],
+          "an issue a PR fixes: \(fx.claude) \(fx.result.notices)")
 }

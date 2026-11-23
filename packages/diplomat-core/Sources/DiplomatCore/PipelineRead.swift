@@ -24,11 +24,23 @@ struct PipelineEntry {
     var children: [String] = []
     /// A PR's closing references; a Linear issue's attachment URLs.
     var links: [String] = []
-    /// A PR's: the Linear identifiers its title and body close (`PipelineRead.linearCloses`).
+    /// A PR's: the Linear identifiers its title and body close (`PipelineRead.linearCloses`),
+    /// and with `Gate` its commit messages too.
     var closesLinear: [String] = []
-    /// A PR's open closing references, each with who it is assigned to: nil when more
-    /// than the read lists, and an empty URL for references past the read's page.
-    var closes: [(url: String, assignees: [String]?)] = []
+    /// A PR's open closing references: an empty URL for references past the read's page.
+    var closes: [String] = []
+    /// A PR's, read with `Gate`: each issue it would close as it stands now, and whether it
+    /// would close more than the read lists.
+    var closing: [PipelineEntry] = []
+    var closingPast = false
+    /// A PR's, read with `Gate`: the GitHub issues its title and commit messages close, which
+    /// GitHub leaves out of its closing references but closes on the merge.
+    var closesText: [String] = []
+    /// A PR's, read with `Gate`: it was ready for review at some point.
+    var readied = false
+    /// A PR's, read with `Item`: the labels ever added to it, lowercased; nil when the read
+    /// did not list them all.
+    var labeled: Set<String>?
     var headRef = ""
     var baseRef = ""
     var defaultBranch = ""
@@ -133,28 +145,11 @@ enum PipelineRead {
             let page = (repo?[key] as? [String: Any])?["pageInfo"] as? [String: Any]
             return bool(page?["hasNextPage"], false) ? page?["endCursor"] as? String : nil
         }
-        let me = root.me.lowercased()
         func label(_ n: Int) -> String { primary ? "#\(n)" : "\(root.slug)#\(n)" }
         var out: [PipelineEntry] = []
 
         for n in nodes(repo, "issues") {
-            guard let number = n["number"] as? Int, let url = n["url"] as? String else { continue }
-            let assignees = nodes(n, "assignees").compactMap { $0["login"] as? String }
-            let labels = nodes(n, "labels").compactMap { $0["name"] as? String }
-            let unwritable = labelsCut(n, labels)
-                ?? (assignees.allSatisfy { $0.lowercased() == me } && !me.isEmpty ? nil
-                    : "assigned to \(assignees.map { "@" + $0 }.joined(separator: ", "))")
-            var e = PipelineEntry(
-                item: PipelineItem(id: url, source: .github, kind: .issue, label: label(number),
-                                   title: n["title"] as? String ?? "", repo: root.slug, state: "open",
-                                   author: login(n), assignees: assignees, writable: unwritable == nil,
-                                   stage: .unrated, lane: .unrated, updatedAt: date(n["updatedAt"])),
-                labels: labels, body: n["body"] as? String ?? "", root: root, number: number,
-                nodeID: n["id"] as? String)
-            e.parent = (n["parent"] as? [String: Any])?["url"] as? String
-            e.children = nodes(n, "subIssues").compactMap { $0["url"] as? String }
-            e.unwritable = unwritable
-            out.append(e)
+            if let e = issue(n, root: root, label: label) { out.append(e) }
         }
 
         for n in nodes(repo, "pullRequests") {
@@ -200,18 +195,54 @@ enum PipelineRead {
         return (read, out, after("issues"), after("pullRequests"))
     }
 
-    /// The `PullRequest` operation's answer: the PR, read with `Gate`, labelled `label`.
+    /// One `Issue` node of `root`'s repository, none for one outside every root, which is no
+    /// one's to write to: open, unless the node says otherwise.
+    static func issue(_ n: [String: Any], root: PipelineSettings.Root?, label: (Int) -> String) -> PipelineEntry? {
+        guard let number = n["number"] as? Int, let url = n["url"] as? String else { return nil }
+        let me = root?.me.lowercased() ?? ""
+        let assignees = nodes(n, "assignees").compactMap { $0["login"] as? String }
+        let labels = nodes(n, "labels").compactMap { $0["name"] as? String }
+        let state = n["state"] as? String == "CLOSED" ? "closed" : "open"
+        let unwritable = state == "closed" ? state : labelsCut(n, labels)
+            ?? (assignees.allSatisfy { $0.lowercased() == me } && !me.isEmpty ? nil
+                : "assigned to \(assignees.map { "@" + $0 }.joined(separator: ", "))")
+        var e = PipelineEntry(
+            item: PipelineItem(id: url, source: .github, kind: .issue, label: label(number),
+                               title: n["title"] as? String ?? "", repo: root?.slug ?? "", state: state,
+                               author: login(n), assignees: assignees, writable: unwritable == nil,
+                               stage: .unrated, lane: .unrated, updatedAt: date(n["updatedAt"])),
+            labels: labels, body: n["body"] as? String ?? "", root: root, number: number,
+            nodeID: n["id"] as? String)
+        e.parent = (n["parent"] as? [String: Any])?["url"] as? String
+        e.children = nodes(n, "subIssues").compactMap { $0["url"] as? String }
+        e.unwritable = unwritable
+        return e
+    }
+
+    /// The `PullRequest` operation's answer: the PR, read with `Gate`, labelled `label`; the
+    /// issues it closes are judged against `roots`.
     static func pullRequest(_ response: [String: Any], root: PipelineSettings.Root, label: String,
-                            model: CoreAssets.PipelineModel) -> PipelineEntry? {
+                            roots: [PipelineSettings.Root], model: CoreAssets.PipelineModel) -> PipelineEntry? {
         let repo = (response["data"] as? [String: Any])?["repository"] as? [String: Any]
         guard let n = repo?["pullRequest"] as? [String: Any] else { return nil }
+        let defaultBranch = (repo?["defaultBranchRef"] as? [String: Any])?["name"] as? String ?? ""
+        return pr(n, root: root, label: { _ in label }, defaultBranch: defaultBranch, roots: roots, model: model)
+    }
+
+    /// The `Item` operation's answer: the issue or PR as it is now, labelled `label`.
+    static func item(_ response: [String: Any], root: PipelineSettings.Root, label: String,
+                     model: CoreAssets.PipelineModel) -> PipelineEntry? {
+        let repo = (response["data"] as? [String: Any])?["repository"] as? [String: Any]
+        guard let n = repo?["issueOrPullRequest"] as? [String: Any] else { return nil }
+        guard n["headRefOid"] != nil else { return issue(n, root: root, label: { _ in label }) }
         let defaultBranch = (repo?["defaultBranchRef"] as? [String: Any])?["name"] as? String ?? ""
         return pr(n, root: root, label: { _ in label }, defaultBranch: defaultBranch, model: model)
     }
 
     /// One node of the `PR` fragment, and of `Gate` when it was read with it.
     static func pr(_ n: [String: Any], root: PipelineSettings.Root, label: (Int) -> String,
-                   defaultBranch: String, model: CoreAssets.PipelineModel) -> PipelineEntry? {
+                   defaultBranch: String, roots: [PipelineSettings.Root] = [],
+                   model: CoreAssets.PipelineModel) -> PipelineEntry? {
         guard let number = n["number"] as? Int, let url = n["url"] as? String,
               let head = n["headRefOid"] as? String else { return nil }
         let me = root.me.lowercased()
@@ -245,13 +276,15 @@ enum PipelineRead {
             labels: labels, body: n["body"] as? String ?? "", root: root, number: number)
         let closing = nodes(n, "closingIssuesReferences")
         e.links = closing.compactMap { $0["url"] as? String }
-        e.closes = closing.compactMap { c in
-            guard c["state"] as? String == "OPEN", let url = c["url"] as? String else { return nil }
-            let who = nodes(c, "assignees").compactMap { $0["login"] as? String }
-            return (url, total(c, "assignees") > who.count ? nil : who)
-        }
-        if total(n, "closingIssuesReferences") > closing.count { e.closes.append(("", nil)) }
+        e.closes = closing.compactMap { $0["state"] as? String == "OPEN" ? $0["url"] as? String : nil }
+        if total(n, "closingIssuesReferences") > closing.count { e.closes.append("") }
         e.closesLinear = linearCloses(e.item.title + "\n" + e.body)
+        if let labeled = n["labeled"] as? [String: Any] {
+            let events = labeled["nodes"] as? [[String: Any]] ?? []
+            let names = events.compactMap { (($0["label"] as? [String: Any])?["name"] as? String)?.lowercased() }
+            let count = labeled["filteredCount"] as? Int ?? Int.max
+            e.labeled = names.count < events.count || count > events.count ? nil : Set(names)
+        }
         e.headRef = n["headRefName"] as? String ?? ""
         e.baseRef = base
         e.defaultBranch = defaultBranch
@@ -278,11 +311,12 @@ enum PipelineRead {
         e.participants = (reviews + comments).map(person)
         e.participantsUnseen = total(n, "reviews") > reviews.count
             || total(n, "comments") > comments.count
-        // A review with no body says what it says in its threads.
-        e.operatorUntagged = !me.isEmpty && (reviews + comments).contains { r in
+        func untagged(_ r: [String: Any]) -> Bool {
             let body = (r["body"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            return login(r).lowercased() == me && !body.isEmpty && !body.hasPrefix(ReviewAudit.tag)
+            return !me.isEmpty && login(r).lowercased() == me && !body.isEmpty && !body.hasPrefix(ReviewAudit.tag)
         }
+        // A review with no body says what it says in its threads, which `Gate` reads.
+        e.operatorUntagged = (reviews + comments).contains(where: untagged)
         e.markers = reviews.compactMap { r -> String? in
             // A pending review is seen by its author alone.
             guard login(r).lowercased() == me, !me.isEmpty, r["state"] as? String != "PENDING",
@@ -291,9 +325,31 @@ enum PipelineRead {
             else { return nil }
             return oid
         }
-        if n["gateTip"] != nil { e.gate = gate(n, me: me) }
+        if n["gateTip"] != nil {
+            e.gate = gate(n, me: me)
+            let messages = nodes(n, "commits").map { ($0["commit"] as? [String: Any])?["message"] as? String ?? "" }
+            e.closesLinear = linearCloses(([e.item.title, e.body] + messages).joined(separator: "\n"))
+            e.closesText = githubCloses(([e.item.title] + messages).joined(separator: "\n"), repo: root.slug)
+            let fresh = nodes(n, "closing")
+            e.closing = fresh.compactMap { c in
+                issue(c, root: (c["url"] as? String).flatMap { PipelineRead.root(of: $0, in: roots) }, label: { "#\($0)" })
+            }
+            e.closingPast = total(n, "closing") > fresh.count
+            // Marked ready, or opened ready and turned into a draft; unread, as if it was.
+            e.readied = ((n["readied"] as? [String: Any])?["filteredCount"] as? Int ?? 1) > 0
+            for t in nodes(n, "threads") {
+                let comments = nodes(t, "comments")
+                if total(t, "comments") > comments.count { e.participantsUnseen = true }
+                if comments.contains(where: untagged) { e.operatorUntagged = true }
+            }
+        }
         e.unwritable = unwritable
         return e
+    }
+
+    /// The root whose repository `url`, an issue or PR page, is in.
+    static func root(of url: String, in roots: [PipelineSettings.Root]) -> PipelineSettings.Root? {
+        roots.first { sameRepo(url, "https://github.com/\($0.slug)/issues/0") }
     }
 
     /// `Gate`'s fields of a PR node, for the operator `me` (lowercased).
@@ -342,38 +398,45 @@ enum PipelineRead {
         let issues = data["issues"] as? [String: Any]
         let page = issues?["pageInfo"] as? [String: Any]
         let next = bool(page?["hasNextPage"], false) ? page?["endCursor"] as? String : nil
-        let entries = (issues?["nodes"] as? [[String: Any]] ?? []).compactMap { n -> PipelineEntry? in
-            guard let id = n["id"] as? String, let url = n["url"] as? String,
-                  let identifier = n["identifier"] as? String else { return nil }
-            let team = n["team"] as? [String: Any]
-            let key = team?["key"] as? String ?? ""
-            let assignee = n["assignee"] as? [String: Any]
-            let labels = nodes(n, "labels")
-            let names = labels.compactMap { $0["name"] as? String }
-            let unwritable = labelsCut(n, names)
-                ?? (assignee == nil || (assignee?["id"] as? String) == viewer ? nil
-                    : "assigned to \(assignee?["name"] as? String ?? "someone else")")
-            let repo = teams.first { $0.key.lowercased() == key.lowercased() }?.repo
-            var e = PipelineEntry(
-                item: PipelineItem(id: linearURL(url), source: .linear, kind: .issue, label: identifier,
-                                   title: n["title"] as? String ?? "", repo: key, state: "open",
-                                   author: (n["creator"] as? [String: Any])?["name"] as? String,
-                                   assignees: (assignee?["name"] as? String).map { [$0] } ?? [],
-                                   writable: unwritable == nil, stage: .unrated, lane: .unrated,
-                                   updatedAt: date(n["updatedAt"])),
-                labels: names, body: n["description"] as? String ?? "",
-                root: roots.first { $0.slug.lowercased() == repo?.lowercased() }, nodeID: id)
-            e.parent = ((n["parent"] as? [String: Any])?["url"] as? String).map(linearURL)
-            e.children = nodes(n, "children").compactMap { ($0["url"] as? String).map(linearURL) }
-            e.links = nodes(n, "attachments").compactMap { $0["url"] as? String }
-            e.teamID = team?["id"] as? String
-            for l in labels {
-                if let name = l["name"] as? String, let id = l["id"] as? String { e.labelIDs[name] = id }
-            }
-            e.unwritable = unwritable
-            return e
+        let entries = (issues?["nodes"] as? [[String: Any]] ?? []).compactMap {
+            linearIssue($0, viewer: viewer, teams: teams, roots: roots)
         }
         return (entries, next)
+    }
+
+    /// One Linear `Issue` node: open, unless its state says completed or canceled.
+    static func linearIssue(_ n: [String: Any], viewer: String, teams: [PipelineSettings.LinearTeam],
+                            roots: [PipelineSettings.Root]) -> PipelineEntry? {
+        guard let id = n["id"] as? String, let url = n["url"] as? String,
+              let identifier = n["identifier"] as? String else { return nil }
+        let team = n["team"] as? [String: Any]
+        let key = team?["key"] as? String ?? ""
+        let assignee = n["assignee"] as? [String: Any]
+        let labels = nodes(n, "labels")
+        let names = labels.compactMap { $0["name"] as? String }
+        let done = ["completed", "canceled"].contains((n["state"] as? [String: Any])?["type"] as? String ?? "")
+        let unwritable = done ? "closed" : labelsCut(n, names)
+            ?? (assignee == nil || (assignee?["id"] as? String) == viewer ? nil
+                : "assigned to \(assignee?["name"] as? String ?? "someone else")")
+        let repo = teams.first { $0.key.lowercased() == key.lowercased() }?.repo
+        var e = PipelineEntry(
+            item: PipelineItem(id: linearURL(url), source: .linear, kind: .issue, label: identifier,
+                               title: n["title"] as? String ?? "", repo: key, state: done ? "closed" : "open",
+                               author: (n["creator"] as? [String: Any])?["name"] as? String,
+                               assignees: (assignee?["name"] as? String).map { [$0] } ?? [],
+                               writable: unwritable == nil, stage: .unrated, lane: .unrated,
+                               updatedAt: date(n["updatedAt"])),
+            labels: names, body: n["description"] as? String ?? "",
+            root: roots.first { $0.slug.lowercased() == repo?.lowercased() }, nodeID: id)
+        e.parent = ((n["parent"] as? [String: Any])?["url"] as? String).map(linearURL)
+        e.children = nodes(n, "children").compactMap { ($0["url"] as? String).map(linearURL) }
+        e.links = nodes(n, "attachments").compactMap { $0["url"] as? String }
+        e.teamID = team?["id"] as? String
+        for l in labels {
+            if let name = l["name"] as? String, let id = l["id"] as? String { e.labelIDs[name] = id }
+        }
+        e.unwritable = unwritable
+        return e
     }
 
     /// One reference in a list after a closing word: a Markdown link, a URL, a GitHub
@@ -393,8 +456,47 @@ enum PipelineRead {
 
     private static let references = try! NSRegularExpression(pattern: reference, options: [])
     private static let identifier = try! NSRegularExpression(pattern: #"^`?([A-Za-z][A-Za-z0-9]*-\d+)`?$"#)
-    private static let linearIssue = try! NSRegularExpression(pattern: #"^https?://linear\.app/[^/\s]+/issue/([A-Za-z0-9]+-\d+)"#,
-                                                               options: [.caseInsensitive])
+    private static let linearLink = try! NSRegularExpression(pattern: #"^https?://linear\.app/[^/\s]+/issue/([A-Za-z0-9]+-\d+)"#,
+                                                              options: [.caseInsensitive])
+    private static let githubIssue = try! NSRegularExpression(
+        pattern: #"^(?:([\w.-]+/[\w.-]+)?#|`?gh-)(\d+)`?$|^https?://github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/(\d+)(?!\d)"#,
+        options: [.caseInsensitive])
+
+    /// Each reference `text` names in a list after a closing word; a Markdown link's text
+    /// and its target both.
+    private static func closingReferences(_ text: String) -> [String] {
+        var out: [String] = []
+        let ns = text as NSString
+        for list in closing.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let refs = ns.substring(with: list.range(at: 1))
+            let rs = refs as NSString
+            for r in references.matches(in: refs, range: NSRange(location: 0, length: rs.length)) {
+                let ref = rs.substring(with: r.range)
+                if ref.hasPrefix("["), let close = ref.range(of: "](") {
+                    out += [String(ref.dropFirst()[..<close.lowerBound]), String(ref[close.upperBound...].dropLast())]
+                } else {
+                    out.append(ref)
+                }
+            }
+        }
+        return out
+    }
+
+    /// The GitHub issues `text` closes, each as `https://github.com/<owner>/<repo>/issues/<n>`
+    /// lowercased: `#n` and `GH-n` of `repo`, `owner/repo#n` or a link, in a list after a
+    /// closing word. GitHub's closing keywords are among Linear's magic words.
+    static func githubCloses(_ text: String, repo: String) -> [String] {
+        var out: [String] = []
+        for t in closingReferences(text) {
+            let ns = t as NSString
+            guard let m = githubIssue.firstMatch(in: t, range: NSRange(location: 0, length: ns.length)) else { continue }
+            func group(_ k: Int) -> String? { m.range(at: k).location == NSNotFound ? nil : ns.substring(with: m.range(at: k)) }
+            let url = group(4).map { "https://github.com/\(group(3) ?? repo)/issues/\($0)" }
+                ?? "https://github.com/\(group(1) ?? repo)/issues/\(group(2) ?? "")"
+            if !out.contains(norm(url)) { out.append(norm(url)) }
+        }
+        return out
+    }
 
     /// The Linear identifiers `text` closes, uppercased: each one in a list after one of
     /// Linear's closing magic words (`Fixes ENG-1, OPS-2, and #3`), named by itself, by its
@@ -406,20 +508,8 @@ enum PipelineRead {
             return ns.substring(with: m.range(at: 1)).uppercased()
         }
         var out: [String] = []
-        let ns = text as NSString
-        for list in closing.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
-            let refs = ns.substring(with: list.range(at: 1))
-            let rs = refs as NSString
-            for r in references.matches(in: refs, range: NSRange(location: 0, length: rs.length)) {
-                let ref = rs.substring(with: r.range)
-                var targets = [ref]
-                if ref.hasPrefix("["), let close = ref.range(of: "](") {
-                    targets = [String(ref.dropFirst()[..<close.lowerBound]), String(ref[close.upperBound...].dropLast())]
-                }
-                for t in targets {
-                    if let id = first(identifier, t) ?? first(linearIssue, t), !out.contains(id) { out.append(id) }
-                }
-            }
+        for t in closingReferences(text) {
+            if let id = first(identifier, t) ?? first(linearLink, t), !out.contains(id) { out.append(id) }
         }
         return out
     }

@@ -57,7 +57,7 @@ public enum PipelineLog {
 /// What a sync remembers between runs besides the trackers' labels, so a step taken or
 /// logged once is not taken or logged again. Keyed by item id.
 ///
-/// `decided`, `unsplit`, `rerated`, `cleared`, `retry` and `lineage` guard against
+/// `decided`, `unsplit`, `splitting`, `rerated`, `cleared`, `retry` and `lineage` guard against
 /// repeating an outward step, so an item missing from a read keeps them: they go once it
 /// is read merged or closed, or after `forgetDays` unseen. The rest only keeps the log
 /// from repeating itself, and also goes with an item missing from a read of every source.
@@ -71,6 +71,8 @@ struct PipelineState: Codable, Equatable {
     /// Issues that would not split, or whose split stopped part-way, and why: not tried
     /// again unless forced.
     var unsplit: [String: String] = [:]
+    /// Per issue claimed for a split that has not finished, the parts filed so far.
+    var splitting: [String: [String]] = [:]
     /// Per PR, each head Diplomat rated it again at, and that rating.
     var rerated: [String: [String: PipelineRating]] = [:]
     /// Per PR, the head Diplomat put `cleared` on at, until Diplomat takes it off.
@@ -95,7 +97,7 @@ struct PipelineState: Codable, Equatable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case labelsMade, decided, unsplit, rerated, cleared, retry, syncs, lineage, seen, holds, clean, asked, notices
+        case labelsMade, decided, unsplit, splitting, rerated, cleared, retry, syncs, lineage, seen, holds, clean, asked, notices
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
@@ -104,6 +106,7 @@ struct PipelineState: Codable, Equatable {
         labelsMade = try c.decodeIfPresent([String: [String]].self, forKey: .labelsMade) ?? [:]
         decided = try c.decodeIfPresent([String].self, forKey: .decided) ?? []
         unsplit = try c.decodeIfPresent([String: String].self, forKey: .unsplit) ?? [:]
+        splitting = try c.decodeIfPresent([String: [String]].self, forKey: .splitting) ?? [:]
         rerated = try c.decodeIfPresent([String: [String: PipelineRating]].self, forKey: .rerated) ?? [:]
         cleared = try c.decodeIfPresent([String: String].self, forKey: .cleared) ?? [:]
         retry = try c.decodeIfPresent([String: PipelineRetry].self, forKey: .retry) ?? [:]
@@ -146,6 +149,7 @@ struct PipelineState: Codable, Equatable {
         func live(_ id: String) -> Bool { seen[id] != nil }
         decided.removeAll { !live($0) }
         unsplit = unsplit.filter { live($0.key) }
+        splitting = splitting.filter { live($0.key) }
         rerated = rerated.filter { live($0.key) }
         cleared = cleared.filter { live($0.key) }
         retry = retry.filter { live($0.key) }
