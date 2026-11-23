@@ -443,16 +443,20 @@ public struct PipelineTickResult: Codable, Equatable, Sendable {
     public var events: [PipelineEvent]
     /// What failed this sync, one line per source or action.
     public var notices: [String]
+    /// The roots (`owner/repo`) this sync could not judge in full, whose effects it may
+    /// have left out: a front-end withdraws no queued ask on them.
+    public var unread: [String]
 
     public init(at: Date, items: [PipelineItem] = [], graph: PipelineGraph = PipelineGraph(),
                 effects: [PipelineEffect] = [], events: [PipelineEvent] = [],
-                notices: [String] = []) {
+                notices: [String] = [], unread: [String] = []) {
         self.at = at
         self.items = items
         self.graph = graph
         self.effects = effects
         self.events = events
         self.notices = notices
+        self.unread = unread
     }
 }
 
