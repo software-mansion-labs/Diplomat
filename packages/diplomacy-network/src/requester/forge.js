@@ -53,17 +53,22 @@ function glabConfigToken(host) {
   for (const dir of dirs) {
     let text;
     try { text = fs.readFileSync(path.join(dir, 'config.yml'), 'utf8'); } catch { continue; }
-    let section = '';
+    let hosts = false;
+    let depth = 0; // how far the hosts' names are indented, once the first is read
     let current = '';
     for (const line of text.split('\n')) {
-      const m = /^(\s*)([^\s#][^:]*):\s*(.*)$/.exec(line);
-      if (!m) continue;
-      const [, indent, key, value] = m;
-      if (indent === '') { section = key; current = ''; continue; }
-      if (section !== 'hosts') continue;
-      if (value === '') { current = key.replace(/^["']|["']$/g, ''); continue; }
+      const body = line.trim();
+      if (body === '' || body[0] === '#') continue;
+      const indent = line.length - line.trimStart().length;
+      if (indent === 0) { hosts = body.split(':')[0] === 'hosts'; continue; }
+      if (!hosts) continue;
+      depth ||= indent;
+      // A name is the whole line up to its last colon, so it may hold a port; in quotes
+      // or not. Any other line this far out ends the entry before it and starts none.
+      if (indent <= depth) { current = body.endsWith(':') ? body.slice(0, -1).replace(/^(["'])(.*)\1$/, '$2') : ''; continue; }
       // glab writes the token behind a "!!null" tag.
-      if (current === host && key === 'token') return value.replace(/^!!null\s+/, '').replace(/^["']|["']$/g, '');
+      const token = /^token:\s*(.+)$/.exec(body);
+      if (current === host && token) return token[1].replace(/^!!null\s+/, '').replace(/^["']|["']$/g, '');
     }
   }
   return '';

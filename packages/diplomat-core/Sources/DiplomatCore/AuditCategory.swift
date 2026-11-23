@@ -102,7 +102,7 @@ public enum AuditCategory: String, CaseIterable, Sendable {
              NetworkAudit.start, NetworkAudit.stop:
             return .network
         case "comms-ping", "comms-review", "comms-fix", "comms-bump", "comms-investigate",
-             "comms-error", "comms-recovered", "comms-notice", "comms-reply":
+             "comms-error", "comms-recovered", "comms-notice":
             return .comms
         default:
             return .system

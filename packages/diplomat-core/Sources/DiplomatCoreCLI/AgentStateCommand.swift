@@ -76,9 +76,6 @@ enum AgentStateCommand {
             "withdrawOnForget": t.records.filter {
                 AgentState.withdrawOnForget($0, evidence: evidence) != nil
             }.map(\.runID).sorted(),
-            "withdrawUnstarted": t.records.filter {
-                AgentState.withdrawUnstarted($0, evidence: evidence) != nil
-            }.map(\.runID).sorted(),
             "network": network(evidence.network),
             "networkSnapshot": snapshot.map(dump) ?? NSNull(),
             "networkRunning": NetworkAdmit.running(snapshot),

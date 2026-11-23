@@ -1295,7 +1295,8 @@ through.
   which, once decoded, holds the character.
 - `"query": { "service": { "equals": "git-receive-pack" } }` pins query parameters:
   `"free"`, `equals`, `oneOf`, or `search` - a forge search string that must carry
-  `repo:<owner>/<name>` exactly once as a term of its own, with no other repository,
+  `repo:<owner>/<name>` exactly once as a term of its own, the qualifier in lower case as
+  `gh` writes it and the name in any, with no other repository,
   organisation or user qualifier, no negation and no top-level OR. Its terms are told
   apart by the plain space alone; a quote may wrap a whole term or the whole value of one
   qualifier, and what it wraps holds no qualifier. A pinned parameter is required unless
@@ -1349,7 +1350,13 @@ through.
   another object up from there. A field takes only the arguments the reader lists, which
   page, order and filter what the object it is selected on holds; one that names an object
   by its node id (GitHub's `pullRequestId`) is resolved on the forge as `node(id:)` is, and
-  any other is refused, since it could name another repository. A scalar is read freely on
+  any other is refused, since it could name another repository. An object given as an
+  argument, written in the document or sent as a variable, holds at any depth only the
+  members the reader lists. Neither list holds what filters by the account asking: GitHub's
+  `viewerSubscribed`, GitLab's `subscribed` and `myReactionEmoji`. Of an account a query
+  reads its public scalars and not its e-mail address; the name, address and date a commit
+  or a tag was written with (GitHub's `authors`, `committer`, `tagger`) are read as part
+  of the commit. A scalar is read freely on
   what is inside the repository, with two exceptions. Of the repository itself - the root
   field, and a `node` that turns out to be it - a query reads the scalars that hold what
   the REST rule's `pick` passes on, and on GitHub `viewerPermission`, which `gh` reads

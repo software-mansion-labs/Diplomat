@@ -9,7 +9,6 @@ live in the shared ``~/.diplomat/config.json`` (see :mod:`appconfig`).
 
 from __future__ import annotations
 
-import collections
 import dataclasses
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,7 +17,6 @@ from PySide6.QtCore import QObject, QSettings, Signal
 
 import json
 import os
-import re
 import subprocess
 import tempfile
 import threading
@@ -44,7 +42,6 @@ from diplomat_runtime import (
     review,
     reviewaudit,
     runner,
-    tasks,
     telemetry,
     tmuxwatch,
 )
@@ -69,72 +66,6 @@ from . import (
 #: The review-request monitor's verb.
 REVIEW_REQ_ACTION = "review-req"
 GITHUB_LOGIN_UNKNOWN = "GitHub login unknown — is `gh` installed and authenticated?"
-
-GITHUB_ITEM = re.compile(r"^https://github\.com/([^/]+)/([^/]+)/(?:pull|issues)/([0-9]+)$")
-#: An issue fix run's label (``RequestedWork.label_among``, the Fix-issues wizard's), past
-#: any ``Auto · `` prefix: its repo's name, absent while one root is loaded, and number.
-_ISSUE_RUN = re.compile(r"(?:^|· )Issues · ([^ #·]*)#([0-9]+) · ")
-
-
-def watched_number(url: str) -> int | None:
-    """The number of a PR or issue of the repo the agents work in; None for any other
-    link."""
-    m = GITHUB_ITEM.match(url)
-    cfg = core.config()
-    if m is None or f"{m[1]}/{m[2]}".lower() != f"{cfg['owner']}/{cfg['repo']}".lower():
-        return None
-    return int(m[3])
-
-
-@dataclass(frozen=True)
-class GoalOverlay:
-    """The watched repo's PRs and issues with an agent on them, and those waiting in
-    the queue: what a goal graph's pills are badged with."""
-
-    agent_prs: frozenset[int] = frozenset()
-    agent_issues: frozenset[int] = frozenset()
-    queued_prs: frozenset[int] = frozenset()
-    queued_issues: frozenset[int] = frozenset()
-
-
-def goal_overlay(records: list, states: dict, asks: list[autofix.RequestedWork],
-                 queued: list[autofix.QueuedTask], watched: LocalRepo) -> GoalOverlay:
-    """A run counts as the dispatch dedup counts it (:func:`agentstate.in_flight`): not
-    released, in a blocking state. A PR's run is known by its item; an issue fix run
-    has none, and is known by its kind and its link's item (by its label when it has no
-    link). Queued: the asks, and every queued task, by its key's verb. Only
-    ``watched``'s items count: the goals are its."""
-    def number(item: str | None) -> int | None:
-        split = split_item_key(item or "")
-        return split[1] if split and split[0] == watched.key else None
-
-    live = [r for r in records if r.run_id in states and not r.released
-            and states[r.run_id].state in agentstate.BLOCKING]
-    agent_issues = set()
-    for r in live:
-        if r.pr_number is not None or r.kind != autofix.QUEUE_ISSUES_ACTION:
-            continue
-        if r.pr_url:
-            n = number(item_key_from_url(r.pr_url))
-            if n is not None:
-                agent_issues.add(n)
-            continue
-        m = _ISSUE_RUN.search(r.label)
-        if m and m[1].lower() in ("", watched.repo.lower()):
-            agent_issues.add(int(m[2]))
-    keys = [a.key for a in asks] + [t.id for t in queued]
-
-    def numbers(items) -> frozenset[int]:
-        return frozenset(n for n in map(number, items) if n is not None)
-
-    return GoalOverlay(
-        agent_prs=numbers(r.item for r in live),
-        agent_issues=frozenset(agent_issues),
-        queued_prs=numbers(t.job.item for t in queued)
-        | numbers(a.item for a in asks if a.action == autofix.QUEUE_REVIEW_ACTION),
-        queued_issues=numbers(autofix.item_of_key(k) for k in keys
-                              if k.startswith(f"{autofix.QUEUE_ISSUES_ACTION}:")),
-    )
 
 
 def app_settings() -> QSettings:
@@ -355,14 +286,6 @@ class Store(QObject):
     ban_noticed = Signal(str, str)
     # A tick's findings, handed to the Qt thread, where the queue is changed.
     _comms_ticked = Signal(object)
-    # `comms-reply`'s answers: [(request, result)], back on the Qt thread.
-    _comms_replied = Signal(object)
-    # Emitted when anything the Tasks screen (the long-running task tracker) draws
-    # changes. Not `tasks_changed`, which is the Agent-tasks queue's.
-    tracked_tasks_changed = Signal()
-    # A `tasks-edit`'s answer, on the Qt thread: (origin, why it did not apply or None).
-    # `origin` is the caller's own, handed back as given.
-    tracked_task_edited = Signal(object, object)
     # Emitted when the repo roots or the other checkouts listed in Settings change, so
     # the wizards re-judge a link they are already holding and the header re-lists.
     local_repos_changed = Signal()
@@ -613,46 +536,6 @@ class Store(QObject):
         # (:meth:`_comms_kept_adopted`).
         self._comms_adopted: dict[str, autofix.QueuedTask] = {}
         self._comms_ticked.connect(self._apply_comms_tick)
-        # Replies go one at a time: two in flight could both read the log before
-        # either wrote its `reply` line, and answer one message twice.
-        self._comms_reply_lock = threading.Lock()
-        self._comms_replied.connect(self._on_comms_replied)
-        # The last tick's `comms.session_locked`: None until one has asked, or when
-        # logind could not say.
-        self._comms_locked: bool | None = None
-
-        # Tasks. `tracked_tasks` is `diplomat-core tasks-list`'s last answer ([TaskView]);
-        # replaced, never mutated, since the sync worker writes it.
-        self.tracked_tasks: list[dict] = []
-        self.tracker_show_archived = False
-        self.tracker_list_error: str | None = None
-        self.tracker_sync_error: str | None = None
-        self.tracker_last_sync: datetime | None = None
-        self.tracker_sync_events = 0
-        self.tracker_syncing = False
-        # Held over each list read plus the assignment of its answer, so an older read
-        # never lands over a newer one. Workers only: a read takes seconds.
-        self._tracker_lock = threading.RLock()
-        # Over the edit queue and the sync flags below, never over a CLI call, so the Qt
-        # thread may take it.
-        self._tracker_queue_lock = threading.Lock()
-        self._tracker_edits: collections.deque = collections.deque()
-        self._tracker_editing = False
-        self._tracker_sync_running = False
-        # A sync asked for while one runs: it follows that one, which may have read the
-        # tasks before the edit that asked. `_force` is any of those asks' `force`.
-        self._tracker_sync_again = False
-        self._tracker_sync_again_force = False
-        # The goal grouper (`tasks-group`): whether one runs (under
-        # `_tracker_queue_lock`), when it last ran, and that run's error.
-        self.tracker_grouping = False
-        self.tracker_grouped_at: datetime | None = None
-        self.tracker_grouper_error: str | None = None
-        #: The PRs whose review threads an `auto` goal wants fixed (its `findings`), as
-        #: of the last poll: the my-review reconcile is not paused for them.
-        self._goal_findings: frozenset[str] = frozenset()
-        #: Issue numbers whose `+` fix is being dispatched, until its run is booked.
-        self._goal_fixes_starting: set[int] = set()
 
         # Pruned on every start — a Store outlives thousands of polls.
         self._workers: list[threading.Thread] = []
@@ -947,7 +830,7 @@ class Store(QObject):
 
     @property
     def review_requests_enabled(self) -> bool:
-        """Full-E2E review PRs that request my review (read-only, never touches their
+        """Review PRs that request my review (read-only, never touches their
         branch), retrying an unaddressed review until it lands. On by default;
         switched off it queues rather than starts, like the toggle above."""
         return self._settings.value("reviewRequestsEnabled", True, bool)
@@ -1173,6 +1056,41 @@ class Store(QObject):
         self._settings.setValue("softApproveEnabled", bool(value))
 
     @property
+    def auto_review_default_depth(self) -> str:
+        """The review depth id a review request's auto-review runs at, unless
+        :attr:`auto_review_overrides` names its author."""
+        return self._settings.value("autoReviewDefaultDepth",
+                                    autofix.AUTO_REVIEW_DEFAULT_DEPTH, str)
+
+    @auto_review_default_depth.setter
+    def auto_review_default_depth(self, value: str) -> None:
+        self._settings.setValue("autoReviewDefaultDepth", str(value))
+
+    @property
+    def auto_review_overrides(self) -> list[autofix.AutoReviewOverride]:
+        """The per-author depth table: the seed until edited, and again whenever what is
+        stored does not read back whole, as a macOS decode would."""
+        raw = self._settings.value("autoReviewOverrides", "", str)
+        try:
+            stored = json.loads(raw)
+        except ValueError:
+            stored = None
+        rows = ([autofix.AutoReviewOverride.from_json(r) for r in stored]
+                if isinstance(stored, list) else [None])
+        return list(autofix.AUTO_REVIEW_SEED) if None in rows else rows
+
+    @auto_review_overrides.setter
+    def auto_review_overrides(self, value: list[autofix.AutoReviewOverride]) -> None:
+        self._settings.setValue("autoReviewOverrides",
+                                json.dumps([r.to_json() for r in value]))
+
+    def auto_review_depth(self, author: str, me: str) -> str:
+        """The depth an auto-review of ``author``'s PR runs at, ``me`` being who I am in
+        its repo."""
+        return autofix.auto_review_depth(author, me, self.auto_review_overrides,
+                                         self.auto_review_default_depth)
+
+    @property
     def verdict_withhold_skill(self) -> bool:
         return self._settings.value("verdictWithholdSkill", True, bool)
 
@@ -1308,51 +1226,6 @@ class Store(QObject):
         self._settings.setValue("commsActInvestigations", bool(value))
 
     @property
-    def comms_replies(self) -> bool:
-        """Acknowledge queued work in Slack, and answer a question while away."""
-        return self._settings.value("commsReplies", True, bool)
-
-    @comms_replies.setter
-    def comms_replies(self, value: bool) -> None:
-        self._settings.setValue("commsReplies", bool(value))
-
-    def _comms_reply_switch(self, key: str) -> bool:
-        """A ``replyTo…`` switch of ``CommsToggles``: only questions start on."""
-        return self._settings.value(key, key == "commsReplyToQuestions", bool)
-
-    @property
-    def comms_reply_to_reviews(self) -> bool:
-        return self._comms_reply_switch("commsReplyToReviews")
-
-    @comms_reply_to_reviews.setter
-    def comms_reply_to_reviews(self, value: bool) -> None:
-        self._settings.setValue("commsReplyToReviews", bool(value))
-
-    @property
-    def comms_reply_to_fixes(self) -> bool:
-        return self._comms_reply_switch("commsReplyToFixes")
-
-    @comms_reply_to_fixes.setter
-    def comms_reply_to_fixes(self, value: bool) -> None:
-        self._settings.setValue("commsReplyToFixes", bool(value))
-
-    @property
-    def comms_reply_to_investigations(self) -> bool:
-        return self._comms_reply_switch("commsReplyToInvestigations")
-
-    @comms_reply_to_investigations.setter
-    def comms_reply_to_investigations(self, value: bool) -> None:
-        self._settings.setValue("commsReplyToInvestigations", bool(value))
-
-    @property
-    def comms_reply_to_questions(self) -> bool:
-        return self._comms_reply_switch("commsReplyToQuestions")
-
-    @comms_reply_to_questions.setter
-    def comms_reply_to_questions(self, value: bool) -> None:
-        self._settings.setValue("commsReplyToQuestions", bool(value))
-
-    @property
     def comms_batch_size(self) -> int:
         return self._settings.value("commsBatchSize", comms.batch_defaults()[0], int)
 
@@ -1367,15 +1240,6 @@ class Store(QObject):
     @comms_flush_after_secs.setter
     def comms_flush_after_secs(self, value: int) -> None:
         self._settings.setValue("commsFlushAfterSecs", int(value))
-
-    @property
-    def comms_away_after_secs(self) -> int:
-        """How long the session must have been locked to count as away."""
-        return self._settings.value("commsAwayAfterSecs", comms.away_after_secs()[0], int)
-
-    @comms_away_after_secs.setter
-    def comms_away_after_secs(self, value: int) -> None:
-        self._settings.setValue("commsAwayAfterSecs", int(value))
 
     @property
     def comms_notify(self) -> bool:
@@ -1402,19 +1266,6 @@ class Store(QObject):
     @comms_seen_at.setter
     def comms_seen_at(self, value: str) -> None:
         self._settings.setValue("commsSeenAt", str(value))
-
-    @property
-    def comms_locked_since(self) -> str:
-        """ISO 8601 of the first tick that found the session locked, "" while it is
-        not; kept across a restart mid-lock."""
-        return str(self._settings.value("commsLockedSince", "", str) or "")
-
-    @comms_locked_since.setter
-    def comms_locked_since(self, value: str) -> None:
-        if value:
-            self._settings.setValue("commsLockedSince", str(value))
-        else:
-            self._settings.remove("commsLockedSince")
 
     # MARK: derived settings
 
@@ -1678,15 +1529,12 @@ class Store(QObject):
                 # succeeds, since the refusal that staged them wrote no attempt
                 # record.
                 self._staged_queue = []
-                # Read before the reconcile below: an `auto` goal's findings unpause it.
-                goal_work = self._read_goal_work()
                 # Both PR monitors run whatever their toggles say; a switched-off one
                 # queues what it finds instead of dispatching it (see is_paused).
                 if snaps is not None:
                     self._poll_my_prs(snaps)
                 self._poll_review_requests(read, complete)
                 self._poll_community_issues(read, complete)
-                self._request_goal_work(goal_work)
                 # Last, so the monitors' finds keep the places they were found in:
                 # the operator's own sweep bands behind them anyway, and a fifty-item
                 # ask offered first would otherwise decide the arrangement of a queue
@@ -1935,135 +1783,6 @@ class Store(QObject):
             marks = {k: v for k, v in marks.items() if k in current}
         self._settings.setValue("communityIssuesSince", json.dumps(marks))
 
-    def _read_goal_work(self) -> list[tuple[str, dict]]:
-        """Re-read the tasks, keep the PRs whose threads an ``auto`` goal wants fixed
-        (``findings``, for :meth:`is_paused`), and return its ``fix-issue`` and
-        ``review`` work by task id. Nothing when the tasks could not be read: what was
-        asked for since the last read is recorded only in the core."""
-        if not self.refresh_tracked_tasks():
-            self._goal_findings = frozenset()
-            return []
-        self.tracked_tasks_changed.emit()
-        work = [(str(v["task"].get("id")), w) for v in self.tracked_tasks
-                for w in v.get("work") or [] if isinstance(w, dict)]
-        self._goal_findings = frozenset(item_key_from_url(str(w.get("url") or "")) or ""
-                                        for _, w in work if w.get("kind") == "findings")
-        return [(t, w) for t, w in work if w.get("kind") in ("fix-issue", "review")]
-
-    def _request_goal_work(self, work: list[tuple[str, dict]]) -> None:
-        """Queue each ``auto`` goal's issue fixes and reviews as asks (the cap, the ban
-        list and the queue switch apply), then record them on their task, the ones
-        already queued too. One whose prompt will not assemble is left for the next
-        pass, as :meth:`_offer_requested_work` leaves an ask. A fix whose issue has an
-        agent on it already is recorded, not asked for. An item in no repo root is
-        skipped, and so is the whole pass while the GitHub login is unknown: a review
-        of my own PR would be asked for as someone else's."""
-        if not self.effective_me:
-            return
-        done: dict[str, list[str]] = {}
-        fixes = any(w["kind"] == "fix-issue" for _, w in work)
-        agent_issues = self.goal_overlay().agent_issues if fixes else frozenset()
-        for task_id, w in work:
-            number, url, author = int(w["number"]), str(w["url"]), str(w.get("author") or "")
-            item = item_key_from_url(url) or ""
-            root = self._root_named(item)
-            if root is None:
-                continue
-            if w["kind"] == "fix-issue" and number in agent_issues:
-                done.setdefault(task_id, []).append(str(w["key"]))
-                continue
-            if w["kind"] == "fix-issue":
-                config = self._goal_fix_config(number, root)
-            else:
-                config = self._review_request_config(number, verdict=False, home=root)
-                me = self.known_me(root)
-                if me and author.lower() == me.lower():
-                    config.specific_author = review.SpecificAuthor.MINE
-                    author = ""
-            try:
-                self._request([autofix.RequestedWork(number=number, url=url, author=author,
-                                                     config=config.prompt_payload(),
-                                                     repo=item.partition("#")[0])])
-            except Exception as exc:  # noqa: BLE001 — a missing/wedged core binary
-                activity.log("auto", "goal", f"could not queue {w['key']}: {exc}")
-                continue
-            done.setdefault(task_id, []).append(str(w["key"]))
-        for task_id, keys in done.items():
-            error = self._edit_tracked_task({"op": "dispatched", "id": task_id, "work": keys})
-            if error:
-                activity.log("auto", "goal", f"could not record {', '.join(keys)}: {error}")
-
-    def _goal_fix_config(self, number: int, home: LocalRepo) -> issues.IssueConfig:
-        """The automatic pass's fix of a goal issue: feature requests included, since
-        the goal it serves is often one, and, as a sweep's, re-checked when its turn
-        comes: one closed or assigned by then is left alone."""
-        return issues.IssueConfig(target=issues.Target.ALL, me=self.known_me(home),
-                                  include_features=True, home=home).for_issue(number)
-
-    def _goal_asks(self, op: dict) -> tuple[str, dict[str, str]] | None:
-        """The goal and its ``dispatched`` fixes and reviews by queue key, when ``op``
-        stops it acting (a mode other than auto, a pin, an archive)."""
-        kind = op.get("op")
-        if not (kind == "mode" and op.get("mode") not in (None, "auto")
-                or kind == "update" and op.get("pinnedStatus")
-                or kind == "archive"):
-            return None
-        task = next((v["task"] for v in self.tracked_tasks if v["task"].get("id") == op.get("id")), None)
-        asks = {}
-        for key in (task or {}).get("dispatched") or {}:
-            m = re.fullmatch(r"(fix|review):([^#]+#\d+)(@.+)?", key)
-            if m:
-                verb = autofix.QUEUE_ISSUES_ACTION if m[1] == "fix" else autofix.QUEUE_REVIEW_ACTION
-                asks[key] = autofix.queue_key(verb, m[2])
-        return (str(op["id"]), asks) if asks else None
-
-    def _withdraw_goal_asks(self, goal: tuple[str, dict[str, str]] | None) -> None:
-        """Take back the asks of ``goal`` nothing has started - one waiting in the queue
-        is cancelled, one the Diplomacy Network carries that no machine has taken has
-        its offer withdrawn (:meth:`_withdraw_unstarted`) - and have the goal forget
-        them, so they are asked for again should it go back to auto."""
-        if goal is None:
-            return
-        task_id, asks = goal
-        waiting = {key for key, q in asks.items()
-                   if any(e.id == q and e.job.requested for e in self.queued_tasks)}
-        for key in waiting:
-            self.cancel_requested_work(asks[key])
-        gone = sorted(waiting | self._withdraw_unstarted(asks))
-        if not gone:
-            return
-        error = self._edit_tracked_task({"op": "withdrawn", "id": task_id, "work": gone})
-        if error:
-            activity.log("auto", "goal", f"could not forget {', '.join(gone)}: {error}")
-
-    def _withdraw_unstarted(self, asks: dict[str, str]) -> set[str]:
-        """Drop each of ``asks`` (a goal's work, by queue key) the network carries and
-        no machine has taken (:func:`agentstate.withdraw_unstarted`), withdrawing its
-        offer and dropping its run, and return the goal's keys of those. One a machine
-        is running is left to finish. A run is dropped whatever the daemon answers, as
-        one the operator forgets is."""
-        carried = {ask.offered: key for key, q in asks.items()
-                   for ask in self.requested_work if ask.key == q and ask.offered}
-        booked = {r.network: r for r in agentregistry.load() if r.network in carried}
-        # Asked afresh, as for a run the operator forgets.
-        evidence = agentstate.Evidence(network=self._network_evidence(
-            diplomacynetwork.state() if booked and diplomacynetwork.enabled() else None))
-        gone: dict[str, str] = {}
-        for task, key in carried.items():
-            run = booked.get(task)
-            if run is not None and agentstate.withdraw_unstarted(run, evidence) is None:
-                continue
-            self._forget_offered(task)
-            gone[key] = run.run_id if run is not None else ""
-            if run is not None:
-                self._withdraw(task, network.WITHDRAW_GOAL, run.label or run.run_id,
-                               run.source)
-        runs = set(gone.values()) - {""}
-        if runs:
-            self._write_book(lambda: agentregistry.forget(runs))
-            self.tasks_changed.emit()
-        return set(gone)
-
     def _poll_review_requests(self, roots: list[LocalRepo], complete: bool = True) -> None:
         """Dispatch the reviews requested of me in every root. A concluded record is
         kept only while the pass sees its request owed (:func:`autofix.retained`), so
@@ -2261,7 +1980,7 @@ class Store(QObject):
                 # device's own cap, which holds nothing offered to the network.
                 # The queue switch has to hold HERE and not only at the drain: a find
                 # that meets a free bay never reaches the queue at all.
-                paused = self.is_paused(job.counter, job.item) or not self.queue_auto_run
+                paused = self.is_paused(job.counter) or not self.queue_auto_run
                 at_capacity = full or paused
             # Measured after capacity and under the same conditions: a device with
             # no free bay has nothing to spend a budget on, so the probe and the
@@ -2454,7 +2173,7 @@ class Store(QObject):
         if root is None:
             return False
         payload = self._review_request_config(
-            r.number, verdict=verdict, home=root).prompt_payload()
+            r.number, author=r.author, verdict=verdict, home=root).prompt_payload()
         job = autofix.AgentJob(
             kind="review",
             audit_action=REVIEW_REQ_ACTION,
@@ -2471,20 +2190,21 @@ class Store(QObject):
         )
         return self.dispatch_agent(job, autofix.SOURCE_AUTO, attempt) == "spawned"
 
-    def _review_request_config(self, number: int, *, verdict: bool,
+    def _review_request_config(self, number: int, *, author: str, verdict: bool,
                                home: LocalRepo) -> review.ReviewConfig:
-        """The review-request monitor's review of someone's PR ``number`` in ``home``: the deepest,
-        left on the PR; ``verdict`` lets a clean one approve, and without it a clean
-        one soft-approves unless that is switched off."""
+        """The review-request monitor's review of ``author``'s PR ``number`` in ``home``, at
+        :meth:`auto_review_depth` and left on the PR; ``verdict`` lets a clean one
+        approve, and without it a clean one soft-approves unless that is switched off."""
+        me = self.known_me(home)
         return review.ReviewConfig(
-            depth="max",
+            depth=self.auto_review_depth(author, me),
             target=PRTarget.SPECIFIC,
-            me=self.known_me(home),
+            me=me,
             mark_ready=False,
             leave_reviews=True,
             reply_to_reviews=False,
             specific_pr=str(number),
-            final_pass=verdict,
+            automatic_verdict=verdict,
             soft_approve=self.soft_approve_enabled,
             specific_author=review.SpecificAuthor.THEIRS,
             home=home,
@@ -3412,21 +3132,16 @@ class Store(QObject):
             self.queued_tasks = remaining
             self.tasks_changed.emit()
 
-    def is_paused(self, counter: str | None, item: str | None = None) -> bool:
+    def is_paused(self, counter: str | None) -> bool:
         """Whether the monitor that owns this work is switched off.
 
         A switched-off monitor still finds its work and still queues it — what your
         PRs owe is worth seeing whether or not this machine is set to act on it — but
         nothing automatic starts it. It waits for "execute now", or for the toggle to
         come back on. That is the whole difference the two toggles make: they decide
-        who starts the work, not whether it is known.
-
-        Review threads on a PR of an ``auto`` goal are fixed whatever the PR toggle
-        says: putting the goal in ``auto`` asked for it."""
+        who starts the work, not whether it is known."""
         if counter == "review_requests":
             return not self.review_requests_enabled
-        if counter == "my_reviews" and item in self._goal_findings:
-            return False
         if counter in ("my_reviews", "conflicts"):
             return not self.pr_autofix_enabled
         # A review the operator asked for: no monitor owns it, so neither toggle
@@ -3452,7 +3167,7 @@ class Store(QObject):
                 owned: dict[str, frozenset[str]] | None = None) -> bool:
         """Paused, unless a Slack ping took it as its ask: then it is asked-for work,
         which switching a monitor off never stops (:meth:`is_paused`)."""
-        return (self.is_paused(task.job.counter, task.job.item)
+        return (self.is_paused(task.job.counter)
                 and task.id not in (self._comms_owned if owned is None else owned))
 
     def _begin_starting(self, entry: autofix.QueuedTask) -> None:
@@ -4478,33 +4193,7 @@ class Store(QObject):
 
     def comms_toggles(self) -> dict:
         return {"requests": self.comms_act_requests, "bumps": self.comms_act_bumps,
-                "investigations": self.comms_act_investigations,
-                "replies": self.comms_replies,
-                "replyToReviews": self.comms_reply_to_reviews,
-                "replyToFixes": self.comms_reply_to_fixes,
-                "replyToInvestigations": self.comms_reply_to_investigations,
-                "replyToQuestions": self.comms_reply_to_questions}
-
-    def note_session_lock(self, locked: bool | None,
-                          now: datetime | None = None) -> None:
-        """A lock that logind could not read leaves the record alone."""
-        self._comms_locked = locked
-        if locked is False:
-            self.comms_locked_since = ""
-        elif locked and not comms.parse_iso(self.comms_locked_since):
-            self.comms_locked_since = comms.iso(now)
-
-    def comms_away(self, now: datetime | None = None) -> bool:
-        """Locked for ``comms_away_after_secs``; ``DIPLOMAT_COMMS_AWAY=1|0`` forces it
-        (``CommsAway.override``)."""
-        forced = os.environ.get("DIPLOMAT_COMMS_AWAY")
-        if forced in ("1", "0"):
-            return forced == "1"
-        since = comms.parse_iso(self.comms_locked_since)
-        if not self._comms_locked or since is None:
-            return False
-        now = now or datetime.now().astimezone()
-        return (now - since).total_seconds() >= self.comms_away_after_secs
+                "investigations": self.comms_act_investigations}
 
     @property
     def comms_unread(self) -> int:
@@ -4554,7 +4243,7 @@ class Store(QObject):
                 plan = self._comms_poll_once()
             except Exception as exc:  # noqa: BLE001 — a tick must never stop the timer
                 plan = {"at": datetime.now().astimezone(), "error": str(exc),
-                        "me": None, "pings": [], "items": [], "locked": None}
+                        "me": None, "pings": [], "items": []}
             finally:
                 self._comms_lock.release()
             self._comms_ticked.emit(plan)
@@ -4570,7 +4259,7 @@ class Store(QObject):
             return {"at": at, "me": None, "pings": [], "items": [],
                     "error": f"waiting for the first repo root, "
                              f"{review.repo_root_paths()[0]}, to resolve to a GitHub "
-                             f"or GitLab checkout", "locked": comms.session_locked()}
+                             f"or GitLab checkout"}
         settings = self.comms_settings_payload()
         result = comms.tick(settings)
         toggles = self.comms_toggles()
@@ -4595,8 +4284,7 @@ class Store(QObject):
         with self._comms_feed_lock:
             self._comms_in_flight |= {str(e["message"].get("id", "")) for e in items}
         return {"at": at, "error": result.get("error"), "me": result.get("me"),
-                "pings": result["pings"], "items": items, "notices": result["notices"],
-                "locked": comms.session_locked()}
+                "pings": result["pings"], "items": items, "notices": result["notices"]}
 
     def _comms_stranded(self, fresh: list[dict]) -> list[dict]:
         """Twin of ``applyComms``' first pass: a logged ping with no action, oldest first.
@@ -4691,12 +4379,10 @@ class Store(QObject):
             if plan.get("me"):
                 self.comms_identity = plan["me"]
             self._settle_comms_error(plan.get("error"))
-            self.note_session_lock(plan.get("locked"))
             notices = plan.get("notices") or []
             for notice in notices:
                 activity.log("auto", "comms-notice", notice)
             banned_now = set(bans.slack_ids(bans.read()))
-            replies = []
             for entry in items:
                 entry["sender_banned"] = (
                     str(entry["message"].get("userID") or "") in banned_now)
@@ -4704,15 +4390,7 @@ class Store(QObject):
                 reported = entry.get("reported") or {}
                 if (entry.get("effect") or {}).get("kind") == "ban" and not reported.get("error"):
                     banned_now.add(str(entry["effect"]["ban"].get("userID") or ""))
-                request = self._comms_reply_request(entry)
-                if request is not None:
-                    replies.append(request)
             self.refresh_comms_feed()
-            # After the loop: a later message of this tick can ban an earlier one's sender.
-            replies = [r for r in replies
-                       if str(r["message"].get("userID") or "") not in banned_now]
-            if replies:
-                self._send_comms_replies(replies)
             if items or notices:
                 self.refresh_activity()
             if self.comms_notify and self.comms_enabled:
@@ -4722,56 +4400,6 @@ class Store(QObject):
         finally:
             with self._comms_feed_lock:
                 self._comms_in_flight -= {str(e["message"].get("id", "")) for e in items}
-        self.comms_changed.emit()
-
-    def _comms_reply_request(self, entry: dict) -> dict | None:
-        """The ``CommsReplyRequest`` for an applied ping, or ``None`` when no reply can
-        be due: queued work is acknowledged, a question answered while away. The core
-        holds the switch, the ban list and at-most-once again (``CommsReplier.reply``)."""
-        decision = entry.get("decision") or {}
-        if not self.comms_enabled or not self.comms_replies:
-            return None
-        request = {"message": entry["message"], "decision": decision,
-                   "away": self.comms_away(), "toggles": self.comms_toggles(),
-                   "settings": self.comms_settings_payload()}
-        effect = entry.get("effect") or {}
-        key = entry.get("queue_key")
-        if effect.get("kind") in ("review", "fix_issue", "investigate") and key:
-            ids = [t.id for t in self.queued_tasks]
-            queued = {"kind": effect["kind"], "number": int(entry.get("work_number") or 0),
-                      "repo": str(effect.get("repo") or ""),
-                      "ahead": ids.index(key) if key in ids else 0,
-                      "bays": self.auto_task_limit}
-            running = entry.get("running")
-            if running is not None:
-                started = self._comms_dispatched(running) or datetime.now().astimezone()
-                queued["startedAt"] = comms.iso(started)
-            return {**request, "queued": queued}
-        return request if decision.get("action") == "question" else None
-
-    def _send_comms_replies(self, requests: list[dict]) -> None:
-        def work() -> None:
-            with self._comms_reply_lock:
-                done = [(r, comms.reply(r)) for r in comms.merge_replies(requests)]
-            self._comms_replied.emit(done)
-
-        self.start_background(work, name="comms-reply")
-
-    def _on_comms_replied(self, done: list) -> None:
-        logged = False
-        for request, result in done:
-            outcome = str(result.get("outcome") or "")
-            if outcome != "sent" and not outcome.startswith("failed:"):
-                continue
-            message = request["message"]
-            to = f"{self.comms_sender(message)} in {self.comms_place(message)}"
-            activity.log("auto", "comms-reply",
-                         f"Replied to {to}: {self.comms_snippet(result.get('text') or '', 160)}"
-                         if outcome == "sent" else f"Reply to {to} {outcome}")
-            logged = True
-        self.refresh_comms_feed()
-        if logged:
-            self.refresh_activity()
         self.comms_changed.emit()
 
     def _settle_comms_error(self, error: str | None) -> None:
@@ -4809,11 +4437,10 @@ class Store(QObject):
         """Act on one triaged ping; returns the outcome its `action` line records.
 
         ``entry`` is ``{message, decision, effect}``, plus ``root`` (:meth:`_comms_root`)
-        and ``target`` (:meth:`_comms_lookup`) for a review or a fix, and ``sender_banned`` for a sender
-        on the ban list (:meth:`_apply_comms_tick`); it gains ``queue_key``, ``running``
-        and ``work_number`` for :meth:`_comms_reply_request`. Every ping ends in exactly
-        one `action` line, even from a tick landing after Comms was switched off: the
-        core has already logged its pings."""
+        and ``target`` (:meth:`_comms_lookup`) for a review or a fix, and ``sender_banned``
+        for a sender on the ban list (:meth:`_apply_comms_tick`). Every ping ends in
+        exactly one `action` line, even from a tick landing after Comms was switched off:
+        the core has already logged its pings."""
         message, effect = entry["message"], entry.get("effect") or {"kind": "none"}
         msg_id = str(message.get("id", ""))
         where, sender = self.comms_place(message), self.comms_sender(message)
@@ -4871,7 +4498,6 @@ class Store(QObject):
                 twin = None if running else next(
                     (t for t in self.starting_tasks if t.id in twins),
                     next((t for t in self.queued_tasks if t.id in twins), None))
-                entry["work_number"] = work.number
                 if running is not None:
                     outcome, key, label = "already running", work.key, running.label
                 elif twin is not None:
@@ -4888,7 +4514,6 @@ class Store(QObject):
                     else:
                         outcome += (" queued" if fresh else " was already queued") + suffix
                         key, label = work.key, work.label
-            entry["queue_key"], entry["running"] = key, running
             if key is not None and running is None:
                 owners = self._comms_owned.get(key, frozenset()) | {msg_id}
                 self._comms_owned = {**self._comms_owned, key: owners}
@@ -5261,234 +4886,6 @@ class Store(QObject):
         if wrote:
             self.refresh_comms_feed()
             self.comms_changed.emit()
-
-    # MARK: Tasks, the long-running task tracker
-
-    def _tracker_live(self) -> list[dict]:
-        return [v for v in self.tracked_tasks if not v["task"].get("archivedAt")]
-
-    @property
-    def tracker_blocked(self) -> int:
-        """The Tasks button's count: unarchived tasks whose status is ``blocked``."""
-        return sum(1 for v in self._tracker_live() if v.get("status") == "blocked")
-
-    def refresh_tracked_tasks(self) -> bool:
-        """``tasks-list``, on a worker: it reads the whole event log. A core that cannot
-        answer leaves the rows as they were, says why, and returns False."""
-        with self._tracker_lock:
-            try:
-                views = tasks.views(archived=self.tracker_show_archived,
-                                    me=self.effective_me)
-            except tasks.Failure as exc:
-                self.tracker_list_error = str(exc)
-                return False
-            self.tracked_tasks = views
-            self.tracker_list_error = None
-            return True
-
-    def refresh_tracked_tasks_async(self) -> None:
-        def work() -> None:
-            self.refresh_tracked_tasks()
-            self.tracked_tasks_changed.emit()
-
-        self.start_background(work, name="tasks-list")
-
-    def run_tracker_sync_async(self, *, force: bool = False) -> None:
-        """Re-read the tasks, then sync them with GitHub and Comms when one is not
-        archived (always when ``force``d: "Sync now"), and re-read them. One asked for
-        while another runs follows it."""
-        with self._tracker_queue_lock:
-            if self._tracker_sync_running:
-                self._tracker_sync_again = True
-                self._tracker_sync_again_force |= force
-                return
-            self._tracker_sync_running = True
-
-        def work() -> None:
-            go, done = force, False
-            try:
-                while not done:
-                    self._sync_tracked_tasks(force=go)
-                    with self._tracker_queue_lock:
-                        done = not self._tracker_sync_again
-                        go = self._tracker_sync_again_force
-                        self._tracker_sync_again = self._tracker_sync_again_force = False
-                        if done:
-                            self._tracker_sync_running = False
-            finally:
-                if not done:
-                    with self._tracker_queue_lock:
-                        self._tracker_sync_running = False
-
-        self.start_background(work, name="tasks-sync")
-
-    def _sync_tracked_tasks(self, *, force: bool) -> None:
-        try:
-            self.refresh_tracked_tasks()
-            live = self._tracker_live()
-            if live or force:
-                self.tracker_syncing = True
-                self.tracked_tasks_changed.emit()
-                links = {link.get("url") for v in live for link in v["task"].get("links", [])
-                         if link.get("kind") in ("pr", "issue")}
-                result = tasks.sync(len(links))
-                self.tracker_last_sync = datetime.now().astimezone()
-                self.tracker_sync_error = result.get("error") or None
-                self.tracker_sync_events = int(result.get("events") or 0)
-                self.refresh_tracked_tasks()
-        finally:
-            self.tracker_syncing = False
-        self.tracked_tasks_changed.emit()
-
-    def edit_tracked_task_async(self, op: dict, origin: object = None) -> None:
-        """``tasks-edit`` on a worker, in the order asked: it re-reads the whole event
-        log. ``tracked_task_edited`` hands back ``origin`` with why it did not apply, or
-        None. A good create, link or unarchive is followed by a sync, so the new link's
-        state shows without waiting for the tick."""
-        with self._tracker_queue_lock:
-            self._tracker_edits.append((op, origin))
-            if self._tracker_editing:
-                return
-            self._tracker_editing = True
-        self.start_background(self._drain_tracker_edits, name="tasks-edit")
-
-    def _drain_tracker_edits(self) -> None:
-        try:
-            while True:
-                with self._tracker_queue_lock:
-                    if not self._tracker_edits:
-                        self._tracker_editing = False
-                        return
-                    op, origin = self._tracker_edits.popleft()
-                self.tracked_task_edited.emit(origin, self._edit_tracked_task(op))
-        except BaseException:
-            with self._tracker_queue_lock:
-                self._tracker_editing = False
-            raise
-
-    def _edit_tracked_task(self, op: dict) -> str | None:
-        # Read first: an archived or dismissed goal leaves the list.
-        withdrawn = self._goal_asks(op)
-        try:
-            tasks.edit(op)
-        except tasks.Failure as exc:
-            return str(exc)
-        self.refresh_tracked_tasks()
-        self.tracked_tasks_changed.emit()
-        self._withdraw_goal_asks(withdrawn)
-        if op.get("op") in ("create", "link", "unarchive"):
-            self.run_tracker_sync_async()
-        if op.get("op") == "mode" and any(v["task"].get("id") == op.get("id") and v.get("work")
-                                          for v in self.tracked_tasks):
-            # Its automatic pass now: a poll already running may have read the task
-            # before the switch. The poll is what fixes its findings.
-            self._request_goal_work(self._read_goal_work())
-            self.run_autofix_poll_async()
-        return None
-
-    def set_tracker_show_archived(self, on: bool) -> None:
-        self.tracker_show_archived = on
-        self.refresh_tracked_tasks_async()
-
-    def run_goal_grouper_async(self, *, force: bool = False) -> None:
-        """``tasks-group``: on the Tasks tick only once it is due, at once when
-        ``force``d ("Find goals"); never two at a time. A run that proposed or added
-        anything is followed by a sync, for the new links' states."""
-        with self._tracker_queue_lock:
-            if self.tracker_grouping:
-                return
-            self.tracker_grouping = True
-
-        def work() -> None:
-            ran = False
-            try:
-                self.tracked_tasks_changed.emit()
-                result = tasks.group(if_due=not force)
-                ran = "skipped" not in result
-                if ran:
-                    self.tracker_grouped_at = datetime.now().astimezone()
-                    self.tracker_grouper_error = result.get("error") or None
-                else:
-                    self.tracker_grouped_at = comms.parse_iso(str(result.get("ranAt") or ""))
-                    self.tracker_grouper_error = result.get("lastError") or None
-            finally:
-                with self._tracker_queue_lock:
-                    self.tracker_grouping = False
-            if ran and (result.get("created") or result.get("added")):
-                self.run_tracker_sync_async()
-            elif ran:
-                self.refresh_tracked_tasks()
-            self.tracked_tasks_changed.emit()
-
-        self.start_background(work, name="tasks-group")
-
-    def goal_overlay(self) -> GoalOverlay:
-        """What the goal graphs badge, from this moment's runs and queue."""
-        t = self._agent_tick()
-        cfg = core.config()
-        overlay = goal_overlay(t.records, t.states, self.requested_work,
-                               self.queued_tasks + self.starting_tasks,
-                               LocalRepo(cfg["owner"], cfg["repo"], ""))
-        return dataclasses.replace(
-            overlay, agent_issues=overlay.agent_issues | frozenset(self._goal_fixes_starting))
-
-    def start_goal_fix_async(self, task_id: str, node: dict) -> None:
-        """A goal graph's ``+``: a fix agent for its issue now, as the Fix-issues
-        wizard's press for one issue starts it (outside the cap), then recorded on the
-        task by ``node["work"]``. Why it did not start comes back as the card's error."""
-        url = str(node.get("url") or "")
-        number = watched_number(url)
-        if number is None:
-            return
-        # Worked in its repo's root, as the automatic pass works it (_request_goal_work).
-        item = item_key_from_url(url) or ""
-        root = self._root_named(item)
-        if root is None:
-            self.tracked_task_edited.emit(
-                ("card", task_id, None),
-                f"{item.partition('#')[0]} is not a repo root, so no fix was started")
-            return
-        with self._tracker_queue_lock:
-            if number in self._goal_fixes_starting:
-                return
-            self._goal_fixes_starting.add(number)
-        self.tracked_tasks_changed.emit()
-
-        def work() -> None:
-            try:
-                # Named, as the wizard's press names it: the operator asked for this one.
-                cfg = issues.IssueConfig(target=issues.Target.SPECIFIC, me=self.known_me(root),
-                                         specific_issue=str(number), include_features=True,
-                                         home=root)
-                payload = cfg.prompt_payload()
-                verdict = self.dispatch_agent(autofix.AgentJob(
-                    kind=autofix.QUEUE_ISSUES_ACTION, audit_action=autofix.QUEUE_ISSUES_ACTION,
-                    label=(f"Issues · {self._item_label(url, number)}"
-                           f" · {issues.depth_by_id(cfg.depth)['title']}"),
-                    prompt=promptcore.build_prompt(payload), pr_url=cfg.single_link,
-                    checkout=root.path, **diplomacynetwork.terms(payload),
-                ), autofix.SOURCE_PANEL)
-                # The card shows the network's own sentence for a job it did not take.
-                verdict = getattr(verdict, "sentence", verdict)
-            except Exception as exc:  # noqa: BLE001 — a core that cannot build the prompt
-                verdict = str(exc)
-            finally:
-                with self._tracker_queue_lock:
-                    self._goal_fixes_starting.discard(number)
-            if verdict == diplomacynetwork.VERDICT_OFFERING:
-                # On its way: recorded as dispatched by the pass that finds its run.
-                self.tracked_tasks_changed.emit()
-                return
-            if verdict == "spawned":
-                self.edit_tracked_task_async(
-                    {"op": "dispatched", "id": task_id, "work": [node["work"]]},
-                    ("card", task_id, None))
-                return
-            self.tracked_task_edited.emit(("card", task_id, None),
-                                          f"The fix for #{number} did not start: {verdict}")
-            self.tracked_tasks_changed.emit()
-
-        self.start_background(work, name="goal-fix")
 
     # MARK: device allocator
 

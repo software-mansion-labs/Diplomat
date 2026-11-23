@@ -959,6 +959,14 @@ enum NetworkTest {
         check("…and one that may not, with it off",
               await options("review", .init(review: verdictOff), next(),
                             prompt: verdictOff.buildPrompt()) == [NetworkOffer.optionVerdict: false])
+        var monitors = review(theirs: true)
+        monitors.automaticVerdict = true
+        check("…and so is the review-request monitor's, whose verdict comes at its own depth",
+              await options("review", .init(review: monitors), next(),
+                            prompt: monitors.buildPrompt()) == [NetworkOffer.optionVerdict: true])
+        var ownMonitored = review(theirs: false)
+        ownMonitored.automaticVerdict = true
+        check("…never on my own PR", !Store.AgentJob.Allows(review: ownMonitored).verdict)
         let readyOn = review(theirs: false, markReady: true)
         let readyOff = review(theirs: false, markReady: false)
         check("a review of my own PR that may mark it ready says so",
@@ -1890,60 +1898,6 @@ enum NetworkTest {
         script.refuse(NetworkRoute.offer, nil)
         store.commitQueue()
         store.queuedTasks = []
-
-        // 36. A goal that stops acting takes back its asks nothing has started: the
-        //     offer no machine has taken is withdrawn with its run and its ask, the one a
-        //     machine is running is left to finish, and an ask whose run has left the
-        //     book goes with the first.
-        script.set(snapshot())
-        store.networkEnabled = true
-        await store.networkLifecycle?.value
-        _ = AgentRegistry.forget(Set(AgentRegistry.load().map(\.runID)))
-        store.requestedWork = []
-        let goalPRs = [90501, 90502, 90503]
-        store.prs = goalPRs.map { n in
-            OpenPR(number: n, title: "PR \(n)", url: url(n), isDraft: true, author: "LatekVO",
-                   createdAt: Date(), readyForReviewAt: nil, files: [], reviewDecision: nil,
-                   reviewThreads: [])
-        }
-        _ = store.requestReviewSweep(ReviewConfig(
-            depth: "deep", target: .mine, me: "LatekVO", includeDrafts: true,
-            includeReady: false))
-        await store.drainQueuedTasks(snaps: [], closed: [])
-        let goalTasks = goalPRs.map(taskOf)
-        let goalLabel = booked(goalTasks[0])?.label ?? ""
-        if let stale = booked(goalTasks[2]) { _ = AgentRegistry.forget([stale.runID]) }
-        script.set(snapshot(offers: [offerRow(goalTasks[0], "pooled"),
-                                     offerRow(goalTasks[1], "claimed", executor: away)]))
-        let goalWork = Dictionary(uniqueKeysWithValues: store.requestedWork.map {
-            ("review:o/r#\($0.number)@abc", $0.key)
-        })
-        let (withdrawnBefore, saidBefore) = (requests(NetworkRoute.withdraw).count,
-                                             feedDetails(NetworkAudit.withdraw).count)
-        let goalGone = await store.withdrawUnstarted(asks: goalWork)
-        let took = Array(requests(NetworkRoute.withdraw).dropFirst(withdrawnBefore))
-        check("a goal that stops acting withdraws its offer no machine has taken",
-              goalWork.count == 3 && took.map { $0["taskId"] as? String } == [goalTasks[0]]
-                && took.first?["reason"] as? String == NetworkRoute.withdrawGoal)
-        check("…with its run, and says so",
-              booked(goalTasks[0]) == nil && !goalLabel.isEmpty
-                && Array(feedDetails(NetworkAudit.withdraw).dropFirst(saidBefore))
-                    == ["\(goalLabel) - withdrawn (its goal stopped)"])
-        check("…leaves the one a machine is running to finish, and forgets the ask whose run left the book",
-              booked(goalTasks[1]) != nil && store.requestedWork.map(\.number) == [90502])
-        check("…and names the goal's work it took back",
-              goalGone == ["review:o/r#90501@abc", "review:o/r#90503@abc"])
-        // A goal no task file holds: the edit is refused, after the asks are taken back.
-        let claimedLabel = booked(goalTasks[1])?.label ?? ""
-        stopDaemon()
-        await store.withdrawGoalAsks((task: "t-no-such-goal", asks: goalWork))
-        check("an offer the daemon cannot be asked about is dropped too, and the feed says it was not withdrawn",
-              AgentRegistry.load().isEmpty && store.requestedWork.isEmpty
-                && feedDetails(NetworkAudit.withdraw).last
-                    == "\(claimedLabel) - not withdrawn: \(DiplomacyNetwork.notAnswering)")
-        startDaemon()
-        store.networkEnabled = false
-        await store.networkLifecycle?.value
 
         // 37. What of the network does not work here is the panel's line: nothing while
         //     it is off or coming up, each failed service with the daemon's detail, and a

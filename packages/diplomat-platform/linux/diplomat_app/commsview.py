@@ -32,7 +32,6 @@ from .widgets import ElidedLabel, GlyphLabel, muted, plain_tooltip, tint_bg
 #: assets/audit-categories.json → comms.colorHex.
 TINT = "#007AFF"
 _RED, _GREEN, _ORANGE, _GREY = "#FF3B30", "#34C759", "#FF9500", glyphs.MUTED
-_PURPLE = "#AF52DE"
 
 
 def _text_color() -> str:
@@ -143,22 +142,7 @@ def action_chip(decision: dict | None) -> tuple[str, str]:
     if decision.get("number"):
         repo = str(((decision.get("targets") or [{}])[0] or {}).get("repo") or "")
         word += f" {repo.rpartition('/')[2]}#{decision['number']}"
-    return word.upper(), {"none": _GREY, "injection": _RED, "question": _PURPLE}.get(
-        action, _GREEN)
-
-
-def reply_chip(item: dict) -> tuple[str, str] | None:
-    """What came of Comms' reply in Slack, if one was due (``replyOutcome``)."""
-    outcome = str(item.get("replyOutcome") or "")
-    if outcome == "sent":
-        return "REPLIED", _GREEN
-    if outcome == "sending":
-        return "REPLYING", _ORANGE
-    if outcome.startswith("failed"):
-        return "REPLY FAILED", _RED
-    if outcome.startswith("skipped"):
-        return "NOT ANSWERED", _GREY
-    return None
+    return word.upper(), {"none": _GREY, "injection": _RED}.get(action, _GREEN)
 
 
 def _flat(text: str) -> str:
@@ -174,8 +158,8 @@ def _small_button(text: str, on_click) -> QPushButton:
 
 
 class PingRow(QFrame):
-    """One line: unread dot, sender, place, the triage's pill, the text cut to fit,
-    the reply's pill and the time. A click opens the rest under it."""
+    """One line: unread dot, sender, place, the triage's pill, the text cut to fit and
+    the time. A click opens the rest under it."""
 
     #: (message id, now expanded)
     toggled = Signal(str, bool)
@@ -217,9 +201,6 @@ class PingRow(QFrame):
             line.addWidget(_chip(f"{glyphs.G_BAN} {mark}", _RED))
         self.text = ElidedLabel(_flat(message.get("text", "")), 10, _text_color())
         line.addWidget(self.text, 1)
-        reply = reply_chip(item)
-        if reply:
-            line.addWidget(_chip(*reply))
         clock = QLabel(_clock(item.get("at")))
         clock.setStyleSheet(muted(9, mono=True))
         line.addWidget(clock)
@@ -278,11 +259,6 @@ class PingRow(QFrame):
                 line(why, muted(9))
         if item.get("outcome"):
             line(f"→ {item['outcome']}", muted(9))
-        reply, outcome = item.get("reply"), str(item.get("replyOutcome") or "")
-        if reply:
-            line(f"↩ {reply}", "font-size: 9px;")
-        if outcome and outcome != "sent":
-            line(f"↩ reply {outcome}", muted(9))
         return host
 
 

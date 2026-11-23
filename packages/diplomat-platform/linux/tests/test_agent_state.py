@@ -1617,22 +1617,6 @@ def test_an_offer_is_withdrawn_while_the_network_still_carries_it(network, merge
             A.withdraw_on_forget(record, evidence)) == want
 
 
-@pytest.mark.parametrize("network,task,want", [
-    (offer("pooled"), TASK, TASK),
-    (offer("claimed", "9f3c"), TASK, None),
-    (offer("done", ok=True), TASK, None),
-    (offer("failed"), TASK, None),
-    (offer("cancelled"), TASK, None),
-    ({}, TASK, TASK),
-    (NO_DAEMON, TASK, TASK),
-    (offer("pooled"), None, None),
-], ids=["in the pool", "a machine runs it", "finished", "given up", "cancelled",
-        "unnamed by the snapshot", "daemon silent", "a local run has no offer"])
-def test_an_offer_no_machine_has_taken_is_withdrawn_when_its_asker_stops(network, task,
-                                                                          want):
-    assert A.withdraw_unstarted(net(network=task), ev(network=network)) == want
-
-
 def test_the_deadline_never_applies_to_a_network_run():
     assert not A.deadline_applies(net())
     assert A.deadline_applies(net(network=None))

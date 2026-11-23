@@ -133,13 +133,12 @@ swaps the panel to a settings screen:
   is its whole namespace (`group/sub`). A GitLab root is read through `glab`, signed in
   to its host, and "me" there is glab's user on that host, not the GitHub username
   above, read again whenever that host's entry in glab's `config.yml` changes (`glab auth
-  login` as another account rewrites it); its agents are told to use `glab`. GitHub-only whatever the roots: Tasks
-  mirroring, the review audit, goal grouping, the username override,
+  login` as another account rewrites it); its agents are told to use `glab`. GitHub-only whatever the roots: the
+  review audit, the username override and
   [the narrow agent token](#a-narrow-github-token-for-agents) (an agent on a GitLab root
-  runs on your full `glab` login) and [Comms](comms.md)' answers to questions (the
-  documentation is read through `gh`, and only github.com links survive in them). A reading
-  older than a minute is taken again when next asked, so a checkout that appears later is
-  picked up by the next poll. A row warns when the path isn't absolute, has no `.git`, or has no
+  runs on your full `glab` login). A reading older than a
+  minute is taken again when next asked, so a checkout that appears later is picked up by
+  the next poll. A row warns when the path isn't absolute, has no `.git`, or has no
   GitHub or GitLab remote - such a root is not watched, and two roots naming the same repo count
   once. A GitHub repo and a GitLab project of the same `owner/repo` are two roots, each
   with its own queue rows, records and links; here and in the header's picker the GitLab
@@ -167,9 +166,14 @@ swaps the panel to a settings screen:
   polling and keeps listing what it finds under [Agent tasks](panel.md#agent-tasks); what
   stops is the automatic start. Nested under the **review-requests** toggle: the
   **author allowlist** (*Only these authors*, blank = anyone), which stays editable
-  while the toggle is off because it is what decides which requests get listed, and -
-  visible only while it's on - **May approve / request changes** (the verdict switch)
-  with its three withhold-the-verdict suppressors (SKILL / installer / community), and
+  while the toggle is off because it is what decides which requests get listed;
+  **Review depth** (what a review request's review runs at, **default
+  standard**) and **Per-author depth** (rows of login → depth that override it, the
+  first row naming the PR's author winning; it starts as one *me* row at max, *me*
+  being whoever I am in the PR's repo), both shown while the toggle is off too, since
+  the monitor still queues its reviews and *execute now* runs them at these depths; and - visible only while it's on - **May approve
+  / request changes** (the verdict switch) with its three withhold-the-verdict
+  suppressors (SKILL / installer / community), and
   **Soft-approve clean PRs** (a thank-you COMMENT review, never an APPROVE; independent
   of the verdict switch).
 - **Fix new community issues** - the [new-community-issue
@@ -245,7 +249,7 @@ swaps the panel to a settings screen:
 - **Comms (Slack)** - the [Slack watcher](comms.md) (**default off**): the switch,
   keywords, a sender allowlist, one switch per thing it may do (queue reviews and
   fixes, bump queued work, investigate bug reports), the batch size and interval,
-  replies and which kinds get one, notifications, the triage model, where the token
+  notifications, the triage model, where the token
   is read from, and **Test**. Every one is described in
   [Comms → Settings](comms.md#settings).
 - **Update** - pull the checkout, rebuild, and relaunch in place. Shows how many

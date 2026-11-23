@@ -978,7 +978,6 @@ def test_comms_waits_while_the_first_root_is_unresolved(store, remotes,  # noqa:
     ticks: list[dict] = []
     monkeypatch.setattr("diplomat_app.store.comms.tick", lambda settings: (
         ticks.append(settings) or {"items": [], "pings": [], "notices": []}))
-    monkeypatch.setattr("diplomat_app.store.comms.session_locked", lambda: None)
     first = remotes.pop("/src/r")
 
     plan = store._comms_poll_once()

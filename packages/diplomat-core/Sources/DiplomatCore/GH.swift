@@ -65,7 +65,7 @@ public enum GH {
     /// Where gh is looked for before the login shell is asked.
     public static let candidatePaths = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "/usr/bin/gh"]
 
-    static func ghPath() throws -> String {
+    private static func ghPath() throws -> String {
         // Read per call, never cached: an override taken back is gone.
         if let env = ProcessInfo.processInfo.environment["DIPLOMAT_GH"], !env.isEmpty { return env }
         pathLock.lock()
@@ -145,8 +145,7 @@ public enum GH {
         return out.stdout
     }
 
-    /// How one `gh` call exited and what it printed. `gh api graphql` exits 1 on any
-    /// GraphQL error yet still prints the response, whose `data` may hold the rest.
+    /// How one `gh` or `glab` call exited and what it printed.
     struct Output {
         let status: Int32
         let stdout: Data

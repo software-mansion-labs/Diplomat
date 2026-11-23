@@ -62,10 +62,13 @@ public enum CoreAssets {
         public let title: String
         public let blurb: String
         public let fragment: String
-        // The "fix it on the branch" disposition for this depth. Only emitted
-        // when we may actually commit (our own PRs / a specific PR); absent
-        // for flag-only depths and never used for someone else's PRs.
+        // What this depth adds on a branch we fix. Only emitted when we may
+        // actually commit (our own PRs / a specific PR); never used for
+        // someone else's PRs.
         public let onBranch: String?
+        // An earlier level of the same ladder whose fragment and onBranch this
+        // one's own text extends.
+        public let extends: String?
     }
 
     public struct Review: Decodable {
@@ -259,67 +262,12 @@ public enum CoreAssets {
         public let classifierGiveUpSecs: Double
         public let maxLogBytes: Int
         public let labelSummaryMax: Int
-        public struct Replies: Decodable {
-            public let prefix: String
-            public let awayAfterSecs: Int
-            public let awayAfterStepSecs: Int
-            public let awayAfterMaxSecs: Int
-            public let maxAgeSecs: Int
-            public let roundMins: Int
-            /// Keyed by `CommsQueuedWork.kind`.
-            public let runSecs: [String: Int]
-            /// Keyed by `CommsDecision.language`.
-            public let languages: [String: Language]
-
-            public struct Language: Decodable {
-                public let locale: String
-                public let `operator`: String
-                public let and: String
-                public let today: String
-                public let tomorrow: String
-                public let what: [String: String]
-                public let whatMany: [String: String]
-                public let queuedAway: String
-                public let runningAway: String
-                public let answeredAway: String
-            }
-
-            /// `code`'s words, else English's: a language the replies do not hold still
-            /// gets a reply.
-            public func language(_ code: String) -> Language? {
-                languages[code] ?? languages[CommsDecision.defaultLanguage]
-            }
-        }
-        public struct Answer: Decodable {
-            public struct Knowledge: Decodable {
-                public let paths: [String]
-                public let exclude: [String]
-                public let maxFiles: Int
-                public let maxBytes: Int
-                public let refreshHours: Double
-                public let fetchSecs: Double
-            }
-            public let model: String
-            public let timeoutSecs: Double
-            public let maxChars: Int
-            public let linkPrefixes: [String]
-            public let knowledge: Knowledge
-            public let instructions: String
-            public let documentation: String
-            public let input: String
-            public let questionLabel: String
-            public let contextLabel: String
-        }
         public let queries: Queries
         public let classifier: Classifier
         public let investigate: Investigate
-        public let replies: Replies
-        public let answer: Answer
         /// `classifier.schema` serialized with sorted keys, the exact `--json-schema`
         /// argument. Not decoded: it is free-form JSON.
         public internal(set) var schema: String = ""
-        /// `answer.schema`, the same way.
-        public internal(set) var answerSchema: String = ""
 
         private enum CodingKeys: String, CodingKey {
             case pollSecs, minPollSecs, maxPerTick, batchSize, batchSizes, flushAfterSecs,
@@ -328,41 +276,7 @@ public enum CoreAssets {
                  maxSearchPages, catchUpHours, httpTimeoutSecs, loginRefreshSecs,
                  loginRefreshTimeoutSecs, slackBudgetSecs, maxProfileReads, model, classifierTimeoutSecs,
                  classifierSecsPerMessage, classifierRetrySecs, classifierRetryMaxSecs,
-                 classifierGiveUpSecs, maxLogBytes, labelSummaryMax, queries, classifier, investigate, replies, answer
-        }
-    }
-
-    /// The Tasks tracker's tunables, `tasks.json`.
-    public struct TasksModel: Decodable {
-        public let syncSecs: Int
-        public let minSyncSecs: Int
-        public let chunk: Int
-        public let commentsPerItem: Int
-        public let staleDays: Int
-        public let maxLogBytes: Int
-        public let historyLimit: Int
-        public let excerptChars: Int
-        public let commsHoldSecs: Int
-        public let noteChars: Int
-        public var grouper: Grouper
-
-        /// `TaskGrouper`'s.
-        public struct Grouper: Decodable {
-            public let groupSecs: Int
-            public let minGroupSecs: Int
-            public let model: String
-            public let timeoutSecs: Int
-            public let bodyChars: Int
-            public let minItems: Int
-            public let maxProposals: Int
-            /// Joined by new lines.
-            public let instructions: [String]
-            /// `schema` serialised with sorted keys, by `loadTasks`.
-            public var schema: String = ""
-
-            private enum CodingKeys: String, CodingKey {
-                case groupSecs, minGroupSecs, model, timeoutSecs, bodyChars, minItems, maxProposals, instructions
-            }
+                 classifierGiveUpSecs, maxLogBytes, labelSummaryMax, queries, classifier, investigate
         }
     }
 
@@ -443,18 +357,6 @@ public enum CoreAssets {
     private static let _models = try? loadJSON("models.json", as: Models.self)
     private static let _telemetry = try? loadJSON("telemetry.json", as: TelemetryModel.self)
     private static let _comms = try? loadComms()
-    private static let _tasks = try? loadTasks()
-
-    private static func loadTasks() throws -> TasksModel {
-        var model = try loadJSON("tasks.json", as: TasksModel.self)
-        let url = try assetsDir().appendingPathComponent("tasks.json")
-        guard let root = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any],
-              let schema = (root["grouper"] as? [String: Any])?["schema"],
-              let data = try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys])
-        else { throw CoreError(message: "tasks.json has no grouper.schema object") }
-        model.grouper.schema = String(decoding: data, as: UTF8.self)
-        return model
-    }
 
     private static func loadComms() throws -> CommsModel {
         var model = try loadJSON("comms.json", as: CommsModel.self)
@@ -466,11 +368,6 @@ public enum CoreAssets {
                                                      options: [.sortedKeys])
         else { throw CoreError(message: "comms.json has no classifier.schema object") }
         model.schema = String(decoding: data, as: UTF8.self)
-        guard let answer = (root["answer"] as? [String: Any])?["schema"],
-              let answerData = try? JSONSerialization.data(withJSONObject: answer,
-                                                           options: [.sortedKeys])
-        else { throw CoreError(message: "comms.json has no answer.schema object") }
-        model.answerSchema = String(decoding: answerData, as: UTF8.self)
         return model
     }
 
@@ -539,11 +436,6 @@ public enum CoreAssets {
     public static func comms() throws -> CommsModel {
         guard let c = _comms else { return try loadComms() }
         return c
-    }
-
-    public static func tasks() throws -> TasksModel {
-        guard let t = _tasks else { return try loadTasks() }
-        return t
     }
 
     public static func graphql(_ name: String) throws -> String {

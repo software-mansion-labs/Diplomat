@@ -54,9 +54,11 @@
 // - Reads are listed by what a kind's work needs, not by what is harmless. Every kind
 //   reads the repository's code - files, refs, commits, a compare, the statuses and check
 //   results recorded on a commit - and, as context, what every pull request and issue of
-//   the repository says and what was said on it. A task reads the rest of an item - a
-//   pull request's files and commits, an issue's events - for its own item only: the PR
-//   or issue it is pinned to, or for a job a PR the forge says it covers. A CI run, its
+//   the repository says and what was said on it. A task reads the lists the forge keeps
+//   of an item - a pull request's files and commits, an issue's events - for its own item
+//   only: the PR or issue it is pinned to, or for a job a PR the forge says it covers. A
+//   PR's diff is no such list: it is repository code, which every kind reads as a compare
+//   and, on GitHub, as the PR itself in diff or patch form (`gh pr diff`). A CI run, its
 //   jobs and logs are read when the forge says the run is of a branch the task made, of
 //   the head branch of such a PR, or - audit and investigate, whose subject is the
 //   repository as it stands - of the default branch. Nothing else is listed: no list of

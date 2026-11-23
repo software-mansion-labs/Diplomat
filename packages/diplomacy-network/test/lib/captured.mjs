@@ -30,6 +30,16 @@ export const GH = {
     query: 'query PullRequestProjectItems($endCursor:String$name:String!$number:Int!$owner:String!){repository(owner: $owner, name: $name){pullRequest(number: $number){projectItems(first: 100, after: $endCursor){totalCount,nodes{id,project{id,title},status:fieldValueByName(name: "Status"){... on ProjectV2ItemFieldSingleSelectValue{optionId,name}}},pageInfo{hasNextPage,endCursor}}}}}',
     variables: { endCursor: null, name: 'r', number: 578, owner: 'o' },
   },
+  // gh pr view 578 --json commits, against the local stand-in
+  prViewCommits: {
+    query: `
+	query PullRequestByNumber($owner: String!, $repo: String!, $pr_number: Int!) {
+		repository(owner: $owner, name: $repo) {
+			pullRequest(number: $pr_number) {commits(first: 100) {nodes {commit {authors(first:100) {nodes {name,email,user{id,login}}},messageHeadline,messageBody,oid,committedDate,authoredDate}}},id,number}
+		}
+	}`,
+    variables: { ...repoVars, pr_number: 578 },
+  },
   // gh pr view 578 --json reviews,comments
   prViewReviews: {
     query: `query PullRequestByNumber($owner: String!, $repo: String!, $pr_number: Int!) {

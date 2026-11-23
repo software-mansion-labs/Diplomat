@@ -584,8 +584,8 @@ def test_the_routes_and_their_bodies():
                                   "withdraw", "invite", "join", "leave", "stop-run"]
     assert N.withdraw_body(TASK, N.WITHDRAW_MERGED) == {"taskId": TASK, "reason": "merged"}
     assert N.WITHDRAW_FORGOTTEN == "forgotten"
-    assert (N.WITHDRAW_STOPPED, N.WITHDRAW_NOT_BOOKED, N.WITHDRAW_SWITCHED_OFF,
-            N.WITHDRAW_GOAL) == ("stopped", "not booked", "switched off", "its goal stopped")
+    assert (N.WITHDRAW_STOPPED, N.WITHDRAW_NOT_BOOKED,
+            N.WITHDRAW_SWITCHED_OFF) == ("stopped", "not booked", "switched off")
     assert N.invite_body("github.com/o/r") == {"pool": "github.com/o/r"}
     assert N.invite_body("github.com/o/r", 600) == {"pool": "github.com/o/r",
                                                    "ttlSecs": 600}

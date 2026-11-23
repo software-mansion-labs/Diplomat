@@ -133,7 +133,7 @@ class WizardView(SpawnWizard):
         # Action toggles
         self.mark_ready = QCheckBox("Mark clean PRs ready for review")
         self.mark_ready.setChecked(True)
-        self.leave_reviews = QCheckBox("Leave reviews (CLAUDE.md format)")
+        self.leave_reviews = QCheckBox("Leave per-line reviews")
         self.leave_reviews.setChecked(True)
         self.reply = QCheckBox("Reply to others' review threads")
         self.reply.setChecked(True)
@@ -150,7 +150,7 @@ class WizardView(SpawnWizard):
 
         self.final_pass = widgets.wizard_escalation(
             glyphs.G_FINAL, "Final E2E pass + verdict",
-            "One last full-E2E pass with big swarms: approve clean PRs, "
+            "Run the affected workflows end to end. Approve clean PRs, "
             "request changes on real blockers.",
         )
         root.addWidget(self.final_pass)

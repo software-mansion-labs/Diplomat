@@ -389,7 +389,7 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Whether to auto-dispatch a full-E2E review when someone requests my review on a
+    /// Whether to auto-dispatch a review when someone requests my review on a
     /// PR (someone else's PR → review-only, leave comments). Persisted; kicks a poll on
     /// enable. Independent of `prAutofixEnabled`.
     @Published var reviewRequestsEnabled: Bool {
@@ -813,6 +813,22 @@ final class Store: ObservableObject {
         didSet { persist(softApproveEnabled, forKey: Keys.softApproveEnabled) }
     }
 
+    /// The `ReviewCatalog` depth id a review request's auto-review runs at, unless
+    /// `autoReviewOverrides` names its author.
+    @Published var autoReviewDefaultDepth: String {
+        didSet { persist(autoReviewDefaultDepth, forKey: Keys.autoReviewDefaultDepth) }
+    }
+
+    @Published var autoReviewOverrides: [AutoReviewOverride] {
+        didSet { persistJSON(autoReviewOverrides, forKey: Keys.autoReviewOverrides) }
+    }
+
+    /// The depth an auto-review of `author`'s PR runs at, `me` being who I am in its repo.
+    func autoReviewDepth(of author: String, me: String) -> String {
+        AutoReviewDepth.resolve(author: author, me: me, overrides: autoReviewOverrides,
+                                otherwise: autoReviewDefaultDepth)
+    }
+
     /// Auto-review verdict policy: each flag independently withholds the "final pass +
     /// verdict" escalation for one class of review-requested PR (SKILL / installer /
     /// community). All default ON. Persisted; no poll kick needed (only affects the next
@@ -875,23 +891,6 @@ final class Store: ObservableObject {
     @Published var commsActInvestigations: Bool {
         didSet { persist(commsActInvestigations, forKey: Keys.commsActInvestigations) }
     }
-    /// `CommsToggles.replies`: whether Comms writes back in Slack.
-    @Published var commsReplies: Bool {
-        didSet { persist(commsReplies, forKey: Keys.commsReplies) }
-    }
-    /// What Comms replies to (`CommsToggles.repliesTo`), under `commsReplies`.
-    @Published var commsReplyToReviews: Bool {
-        didSet { persist(commsReplyToReviews, forKey: Keys.commsReplyToReviews) }
-    }
-    @Published var commsReplyToFixes: Bool {
-        didSet { persist(commsReplyToFixes, forKey: Keys.commsReplyToFixes) }
-    }
-    @Published var commsReplyToInvestigations: Bool {
-        didSet { persist(commsReplyToInvestigations, forKey: Keys.commsReplyToInvestigations) }
-    }
-    @Published var commsReplyToQuestions: Bool {
-        didSet { persist(commsReplyToQuestions, forKey: Keys.commsReplyToQuestions) }
-    }
     /// How many pings one triage call reads (`CommsSettings.batchSize`).
     @Published var commsBatchSize: Int {
         didSet { persist(commsBatchSize, forKey: Keys.commsBatchSize) }
@@ -899,10 +898,6 @@ final class Store: ObservableObject {
     /// How old a shorter queue's newest ping gets before it is triaged anyway.
     @Published var commsFlushAfterSecs: Int {
         didSet { persist(commsFlushAfterSecs, forKey: Keys.commsFlushAfterSecs) }
-    }
-    /// How long the session must have been locked to count as away (`CommsAway`).
-    @Published var commsAwayAfterSecs: Int {
-        didSet { persist(commsAwayAfterSecs, forKey: Keys.commsAwayAfterSecs) }
     }
     @Published var commsNotify: Bool {
         didSet {
@@ -917,14 +912,6 @@ final class Store: ObservableObject {
     /// Pings after this are unread.
     @Published var commsSeenAt: Date {
         didSet { persist(commsSeenAt, forKey: Keys.commsSeenAt) }
-    }
-    /// When the session lock that is still on began (`refreshCommsLock`); kept across a
-    /// relaunch so a long lock is not restarted by one.
-    var commsLockedSince: Date? {
-        didSet {
-            guard commsLockedSince != oldValue else { return }
-            persist(commsLockedSince, forKey: Keys.commsLockedSince)
-        }
     }
 
     // MARK: Comms state the screen draws
@@ -947,34 +934,6 @@ final class Store: ObservableObject {
     var commsMonitorTask: Task<Void, Never>?
     var commsPollInFlight = false
     var commsWakeObserver: NSObjectProtocol?
-    var commsLockObservers: [NSObjectProtocol] = []
-    /// The replies of every apply so far, chained so no two run at once.
-    var commsReplying: Task<Void, Never>?
-
-    // MARK: Tasks (the long-running task tracker) state the screen draws
-
-    /// `TaskStore.views(archived: true)`: archived tasks too, which the screen hides
-    /// until asked.
-    @Published var taskViews: [TaskView] = []
-    /// `TaskTint.labels(of: taskViews)`, read with them.
-    @Published var taskLabels: [String: String] = [:]
-    /// When the last sync finished, whether or not it failed.
-    @Published var tasksLastSync: Date?
-    /// What the last sync could not do: all of it (`ok` false), or some links.
-    @Published var tasksSyncError: String?
-    /// Why the task files did not read on the last reload.
-    @Published var tasksReadError: String?
-    @Published var tasksSyncing = false
-    var tasksSyncAgain = false
-    /// Driven from `TasksMonitor.swift`, hence not private.
-    var tasksMonitorTask: Task<Void, Never>?
-    /// Bumped per reload, so a slower, older read never lands over a newer one.
-    var tasksReloadGeneration = 0
-    /// `TaskGrouper.mark()`: when goals were last looked for, and why that failed.
-    @Published var tasksGrouperMark: TaskGrouper.Mark?
-    @Published var tasksGrouping = false
-    /// Issue numbers whose goal fix (`startGoalFix`) is spawning.
-    @Published var goalFixesStarting: Set<Int> = []
 
     /// Every dispatched agent run the panel draws, in reading order: the sessions this
     /// machine spawned, and any live agent nobody dispatched at all.
@@ -1084,6 +1043,8 @@ final class Store: ObservableObject {
         static let reviewRequestsHandled = "reviewRequestsHandled"
         static let autoApproveEnabled = "autoApproveEnabled"
         static let softApproveEnabled = "softApproveEnabled"
+        static let autoReviewDefaultDepth = "autoReviewDefaultDepth"
+        static let autoReviewOverrides = "autoReviewOverrides"
         static let verdictWithholdSkill = "verdictWithholdSkill"
         static let verdictWithholdInstaller = "verdictWithholdInstaller"
         static let verdictWithholdCommunity = "verdictWithholdCommunity"
@@ -1101,15 +1062,8 @@ final class Store: ObservableObject {
         static let commsActRequests = "commsActRequests"
         static let commsActBumps = "commsActBumps"
         static let commsActInvestigations = "commsActInvestigations"
-        static let commsReplies = "commsReplies"
-        static let commsReplyToReviews = "commsReplyToReviews"
-        static let commsReplyToFixes = "commsReplyToFixes"
-        static let commsReplyToInvestigations = "commsReplyToInvestigations"
-        static let commsReplyToQuestions = "commsReplyToQuestions"
         static let commsBatchSize = "commsBatchSize"
         static let commsFlushAfterSecs = "commsFlushAfterSecs"
-        static let commsAwayAfterSecs = "commsAwayAfterSecs"
-        static let commsLockedSince = "commsLockedSince"
         static let commsNotify = "commsNotify"
         static let commsModel = "commsModel"
         static let commsSeenAt = "commsSeenAt"
@@ -1307,6 +1261,11 @@ final class Store: ObservableObject {
         // Soft-approvals ON by default (absent key ⇒ true): a clean comments-only review
         // still submits a thank-you COMMENT review — never an APPROVE on my behalf.
         softApproveEnabled = defaults.object(forKey: Keys.softApproveEnabled) as? Bool ?? true
+        autoReviewDefaultDepth = defaults.string(forKey: Keys.autoReviewDefaultDepth)
+            ?? AutoReviewDepth.defaultDepth
+        autoReviewOverrides = defaults.data(forKey: Keys.autoReviewOverrides)
+            .flatMap { try? JSONDecoder().decode([AutoReviewOverride].self, from: $0) }
+            ?? AutoReviewDepth.seed
         verdictWithholdSkill = defaults.object(forKey: Keys.verdictWithholdSkill) as? Bool ?? true
         verdictWithholdInstaller = defaults.object(forKey: Keys.verdictWithholdInstaller) as? Bool ?? true
         verdictWithholdCommunity = defaults.object(forKey: Keys.verdictWithholdCommunity) as? Bool ?? true
@@ -1318,23 +1277,10 @@ final class Store: ObservableObject {
         commsActRequests = defaults.object(forKey: Keys.commsActRequests) as? Bool ?? true
         commsActBumps = defaults.object(forKey: Keys.commsActBumps) as? Bool ?? true
         commsActInvestigations = defaults.object(forKey: Keys.commsActInvestigations) as? Bool ?? true
-        commsReplies = defaults.object(forKey: Keys.commsReplies) as? Bool ?? true
-        let commsReplyDefaults = CommsToggles()
-        commsReplyToReviews = defaults.object(forKey: Keys.commsReplyToReviews) as? Bool
-            ?? commsReplyDefaults.replyToReviews
-        commsReplyToFixes = defaults.object(forKey: Keys.commsReplyToFixes) as? Bool
-            ?? commsReplyDefaults.replyToFixes
-        commsReplyToInvestigations = defaults.object(forKey: Keys.commsReplyToInvestigations) as? Bool
-            ?? commsReplyDefaults.replyToInvestigations
-        commsReplyToQuestions = defaults.object(forKey: Keys.commsReplyToQuestions) as? Bool
-            ?? commsReplyDefaults.replyToQuestions
         commsBatchSize = defaults.object(forKey: Keys.commsBatchSize) as? Int
             ?? (try? CoreAssets.comms())?.batchSize ?? 8
         commsFlushAfterSecs = defaults.object(forKey: Keys.commsFlushAfterSecs) as? Int
             ?? (try? CoreAssets.comms())?.flushAfterSecs ?? 1800
-        commsAwayAfterSecs = defaults.object(forKey: Keys.commsAwayAfterSecs) as? Int
-            ?? (try? CoreAssets.comms())?.replies.awayAfterSecs ?? 10800
-        commsLockedSince = defaults.object(forKey: Keys.commsLockedSince) as? Date
         commsNotify = defaults.object(forKey: Keys.commsNotify) as? Bool ?? true
         commsModel = defaults.string(forKey: Keys.commsModel) ?? ""
         // Absent, everything already logged reads as seen: an upgrade must not open on a
@@ -1368,7 +1314,6 @@ final class Store: ObservableObject {
             // `finished` lines into it (`noteCommsRuns`).
             refreshComms()
             startCommsMonitor()
-            startTasksMonitor()
             refreshBanList()
             refreshAudit()
             publishSpawnTerminal()
@@ -2864,7 +2809,6 @@ final class Store: ObservableObject {
             if let snaps { await pollMyPRs(snaps: snaps) }
             await pollReviewRequests(read, complete: complete)
             await pollCommunityIssues(read)
-            await runGoalPass()
             // Last, so the monitors' finds keep the places they were found in: the
             // operator's own sweep bands behind them anyway, and a fifty-item ask
             // offered first would otherwise decide the arrangement of a queue it is
@@ -3155,7 +3099,7 @@ final class Store: ObservableObject {
         if !scan.fresh.isEmpty { refreshAudit() }
     }
 
-    /// PRs that request MY review: dispatch the most-comprehensive review whenever I OWE
+    /// PRs that request MY review: dispatch a review whenever I OWE
     /// one — i.e. the latest "review requested from me" is newer than my last review of
     /// that PR. Robust to re-requests (a fresh request re-qualifies even after I reviewed
     /// once) and does NOT depend on observing a "request removed" transition, which a
@@ -4102,14 +4046,10 @@ final class Store: ObservableObject {
     /// nothing automatic starts it. It waits for "execute now", or for the toggle to
     /// come back on. That is the whole difference the two toggles make: they decide
     /// who starts the work, not whether it is known.
-    ///
-    /// A review-thread fix on a PR an `auto` goal holds (`goalFindingItems`) runs whatever
-    /// the PR toggle says: switching the goal to auto asked for it.
-    func isPaused(_ counter: AutoCounter?, item: String? = nil) -> Bool {
+    func isPaused(_ counter: AutoCounter?) -> Bool {
         switch counter {
         case .reviewRequests:        return !reviewRequestsEnabled
-        case .myReviews:             return !prAutofixEnabled && !goalFindingItems.contains(item ?? "")
-        case .conflicts:             return !prAutofixEnabled
+        case .myReviews, .conflicts: return !prAutofixEnabled
         // A review the operator asked for: no monitor owns it, so neither toggle
         // speaks for it. Switching the monitors off says what this machine may go
         // looking for, not that it should stop doing what it was told — for an ask,
@@ -4135,7 +4075,7 @@ final class Store: ObservableObject {
     /// Paused, unless a Slack ping took it as its ask: then it is asked-for work, which
     /// switching a monitor off never stops (`isPaused`).
     func isHeld(_ task: QueuedAgentTask, owned: Set<String>? = nil) -> Bool {
-        isPaused(task.job.counter, item: task.job.item) && !(owned ?? commsOwnedKeys).contains(task.id)
+        isPaused(task.job.counter) && !(owned ?? commsOwnedKeys).contains(task.id)
     }
 
     /// Dispatch one queued task past the capacity check its caller already made, and
@@ -4371,7 +4311,7 @@ final class Store: ObservableObject {
             init() {}
             init(review cfg: ReviewConfig) {
                 ownPR = cfg.disposition == .mine
-                verdict = cfg.effFinalPass
+                verdict = cfg.effVerdict
                 markReady = cfg.effMarkReady
             }
             init(issues cfg: IssueConfig) { noPRs = !cfg.openPRs }
@@ -4532,7 +4472,7 @@ final class Store: ObservableObject {
             // which holds nothing offered to the network. The queue switch has to hold
             // HERE and not only at the drain: a find that meets a free bay never
             // reaches the queue at all.
-            paused = isPaused(job.counter, item: job.item) || !queueAutoRun
+            paused = isPaused(job.counter) || !queueAutoRun
             atCapacity = full || paused
         }
         // Measured after capacity and under the same conditions: a device with no free
@@ -4829,10 +4769,9 @@ final class Store: ObservableObject {
         return wizardRepos.first { $0.path == directory }?.key ?? ""
     }
 
-    /// Review a PR someone asked me to review (most-comprehensive depth, formal
-    /// per-line comments; verdict only under the auto-approve policy) — the
-    /// review-request monitor's job builder. `attemptNumber` ≥2 means a retry of a
-    /// review a previous agent left unaddressed.
+    /// Review a PR someone asked me to review (`reviewRequestConfig`) — the review-request
+    /// monitor's job builder. `attemptNumber` ≥2 means a retry of a review a previous
+    /// agent left unaddressed.
     @discardableResult
     private func dispatchReviewRequest(_ r: AutofixMonitor.ReviewRequest, attemptNumber: Int = 1) async -> Bool {
         // Auto-approvals must be enabled AND no configured suppressor may match (SKILL /
@@ -4852,11 +4791,7 @@ final class Store: ObservableObject {
         }
         let key = item(url: r.url, number: r.number)
         guard let root = root(ofItem: key) else { return false }
-        var cfg = ReviewConfig(depth: "max", target: .specific, me: knownMe(for: root),
-                               markReady: false, leaveReviews: true, replyToReviews: false,
-                               specificPR: String(r.number), finalPass: verdict,
-                               softApprove: soft, specificAuthor: .theirs)
-        cfg.home = root
+        let cfg = reviewRequestConfig(r, root: root, verdict: verdict)
         let job = AgentJob(kind: "review", auditAction: "review-req",
                            label: "Review-req · \(itemLabel(key)) (@\(r.author))\(tag)",
                            prompt: cfg.buildPrompt(), prURL: r.url, prNumber: r.number,
@@ -4866,6 +4801,22 @@ final class Store: ObservableObject {
                            counter: .reviewRequests, attemptStamp: AttemptStamp.reviewRequest(r),
                            directory: root.path, allows: .init(review: cfg))
         return await dispatchAgent(job, source: .auto, attemptNumber: attemptNumber).didSpawn
+    }
+
+    /// The review-request monitor's review of `r` in `root`, at `autoReviewDepth(of:me:)`
+    /// and left on the PR; `verdict` lets a clean one approve, and without it a clean
+    /// one soft-approves unless that is switched off.
+    func reviewRequestConfig(_ r: AutofixMonitor.ReviewRequest, root: PRRef.LocalRepo,
+                             verdict: Bool) -> ReviewConfig {
+        let me = knownMe(for: root)
+        var cfg = ReviewConfig(depth: autoReviewDepth(of: r.author, me: me),
+                               target: .specific, me: me, markReady: false,
+                               leaveReviews: true, replyToReviews: false,
+                               specificPR: String(r.number),
+                               softApprove: softApproveEnabled, specificAuthor: .theirs)
+        cfg.automaticVerdict = verdict
+        cfg.home = root
+        return cfg
     }
 
     var reviewRequestsHandled: Int {

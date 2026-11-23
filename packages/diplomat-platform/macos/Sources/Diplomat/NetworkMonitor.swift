@@ -258,39 +258,6 @@ extension Store {
                        source: "panel")
     }
 
-    /// Drops each of `asks` (a goal's work, by queue key) the network carries and no
-    /// machine has taken (`AgentState.withdrawUnstarted`), withdrawing its offer and
-    /// dropping its run, and returns the goal's keys of those. One a machine is running
-    /// is left to finish. A run is dropped whatever the daemon answers, as one the
-    /// operator forgets is.
-    func withdrawUnstarted(asks: [String: String]) async -> Set<String> {
-        var carried: [(task: String, key: String)] = []
-        for (key, queueKey) in asks.sorted(by: { $0.key < $1.key }) {
-            if let ask = requestedWork.first(where: { $0.key == queueKey && !$0.offered.isEmpty }) {
-                carried.append((ask.offered, key))
-            }
-        }
-        let tasks = Set(carried.map(\.task))
-        let booked = AgentRegistry.load().filter { tasks.contains($0.network ?? "") }
-        // Asked afresh, as for a run the operator forgets.
-        let snapshot = booked.isEmpty ? nil
-            : await Task.detached(priority: .utility) { DiplomacyNetwork.state() }.value
-        let evidence = AgentState.Evidence(network: NetworkEvidence.tasks(snapshot))
-        var gone: Set<String> = [], runs: Set<String> = []
-        for (task, key) in carried {
-            let run = booked.first { $0.network == task }
-            if let run, AgentState.withdrawUnstarted(run, evidence: evidence) == nil { continue }
-            forgetOffered(task)
-            gone.insert(key)
-            guard let run else { continue }
-            await withdraw(task, reason: NetworkRoute.withdrawGoal,
-                           label: run.label.isEmpty ? run.runID : run.label, source: run.source)
-            runs.insert(run.runID)
-        }
-        if !runs.isEmpty, bookWritten(AgentRegistry.forget(runs)) { await settleAgents() }
-        return gone
-    }
-
     /// The switch went off over jobs whose offer was never definitely answered: withdraw
     /// each one the daemon turns out to hold, and say of every other that it was not
     /// offered.

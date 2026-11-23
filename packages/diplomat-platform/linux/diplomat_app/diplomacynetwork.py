@@ -260,7 +260,8 @@ def terms(payload: Mapping[str, Any]) -> dict[str, bool]:
     if kind == "review":
         whose = payload.get("specificAuthor")
         return {"own_pr": whose == "mine",
-                "verdict": payload.get("finalPass") is True and whose != "mine",
+                "verdict": (payload.get("finalPass") is True
+                            or payload.get("automaticVerdict") is True) and whose != "mine",
                 "mark_ready": payload.get("markReady") is True and whose != "theirs"}
     if kind in ("issues", "audit"):
         return {"opens_prs": payload.get("openPRs") is True}
