@@ -36,7 +36,7 @@ struct PipelineEntry {
     /// A PR's, read with `Gate`: the GitHub issues its title and commit messages close, which
     /// GitHub leaves out of its closing references but closes on the merge.
     var closesText: [String] = []
-    /// A PR's, read with `Gate`: it was ready for review before, or turned into a draft.
+    /// A PR's, read with `Gate`: it was ready for review at some point.
     var readied = false
     /// A PR's, read with `Item`: the labels ever added to it, lowercased; nil when the read
     /// did not list them all.
@@ -335,7 +335,8 @@ enum PipelineRead {
                 issue(c, root: (c["url"] as? String).flatMap { PipelineRead.root(of: $0, in: roots) }, label: { "#\($0)" })
             }
             e.closingPast = total(n, "closing") > fresh.count
-            e.readied = (n["readied"] as? [String: Any])?["filteredCount"] as? Int ?? 1 > 0
+            // Marked ready, or opened ready and turned into a draft; unread, as if it was.
+            e.readied = ((n["readied"] as? [String: Any])?["filteredCount"] as? Int ?? 1) > 0
             for t in nodes(n, "threads") {
                 let comments = nodes(t, "comments")
                 if total(t, "comments") > comments.count { e.participantsUnseen = true }

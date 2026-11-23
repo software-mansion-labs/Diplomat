@@ -408,7 +408,8 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
 /// boolean. A sync reads it right before every outward step (a label written, a child
 /// filed, a PR marked ready or merged) and before each rating call, and skips a step
 /// whose switch, or `enabled`, is off now; a step the operator forced needs `enabled`
-/// alone. It can only stop what the sync's settings allow. A missing file, or one
+/// alone, and taking back the sync's own split claim needs neither. It can only stop what
+/// the sync's settings allow. A missing file, or one
 /// without all six, leaves the settings as they were.
 public struct PipelineControl: Codable, Equatable, Sendable {
     public var enabled: Bool

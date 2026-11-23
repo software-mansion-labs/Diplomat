@@ -163,8 +163,11 @@ private final class Trackers {
     var mergedAt: String?
     /// `gh pr diff` of a PR, by number, where it is not a one-line fix.
     var diffs: [Int: String] = [:]
-    /// The pages after `Repo`'s fail.
+    /// The pages after `Repo`'s fail, or answer with errors.
     var failPages = false
+    var pagesPartial = false
+    /// `gh pr diff` fails.
+    var diffFails = false
     /// Label writes GitHub refuses, adding or removing: every one on item `"<n>"`, or
     /// `"<n> <name>"` only.
     var refuseLabels: Set<String> = []
@@ -181,8 +184,9 @@ private final class Trackers {
     var onClaude: ((String) -> Void)?
     /// Linear answers every call HTTP 500.
     var linearDown = false
-    /// More attachments link a PR than Linear's `Attached` answer lists.
-    var attachedMore = false
+    /// More attachments link a PR than Linear's `Attached` answer lists; nil: its `pageInfo`
+    /// is null.
+    var attachedMore: Bool? = false
     var squashAllowed = true
     /// Where `claude` may be run: the checkout of each root.
     var checkouts = [checkout, libCheckout]
@@ -241,6 +245,9 @@ private final class Trackers {
                 if failPages { return failed("Bad Gateway (HTTP 502)") }
                 let key = field("operationName") == "Issues" ? "issues" : "pullRequests"
                 repository = [key: self.repository(after: after)[key] ?? [:]]
+                if pagesPartial {
+                    return ok(["data": ["repository": repository], "errors": [["message": "Timeout on labels"]]])
+                }
             case "PullRequest"?:
                 guard let n = args.first(where: { $0.hasPrefix("number=") }).flatMap({ Int($0.dropFirst(7)) }),
                       args.contains("-F") else { return failed("Variable $number was not provided") }
@@ -281,6 +288,7 @@ private final class Trackers {
             return ok(["data": ["repository": repository]])
         }
         if args.starts(with: ["pr", "diff"]), args.count == 5, args[3] == "-R", args[4] == "acme/app" {
+            if diffFails { return failed("Bad Gateway (HTTP 502)") }
             let n = number(args[2]) ?? 0
             return .init(status: 0, stdout: Data((diffs[n] ?? "diff --git a/src/a.swift b/src/a.swift\n+fix\n").utf8))
         }
@@ -573,7 +581,8 @@ private final class Trackers {
         case "Attached":
             let url = v["url"] as? String ?? ""
             let linked = tickets.filter { ($0.attachments + $0.moreAttachments).contains(url) }
-            return answer(["attachmentsForURL": ["pageInfo": ["hasNextPage": attachedMore], "nodes": linked.map {
+            return answer(["attachmentsForURL": ["pageInfo": attachedMore.map { ["hasNextPage": $0] as Any } ?? NSNull(),
+                                                 "nodes": linked.map {
                 ["issue": ["identifier": $0.identifier, "state": ["type": "started"]]]
             }] as [String: Any]])
         case "Labels":
@@ -1399,6 +1408,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
         ("no candidate it fixes", { $0.closes = [] }, notAFix),
         ("labels past the page", { $0.moreLabels = 1 }, "has more labels than one read lists"),
         ("a commit by another", { $0.commits.append(("bob", "bob")) }, "has commits by @bob"),
+        ("a commit of mine committed by another", { $0.commits = [(opLogin, "bob")] }, "has commits by @bob"),
         ("a commit by no account", { $0.commits.append((nil, opLogin)) }, "has commits by someone other than me"),
         ("every check skipped", { $0.checks = ["SKIPPED", "NEUTRAL"] }, "every CI check was skipped"),
         ("a person's review", { $0.reviews.append(.init(login: "alice", body: "Please don't merge yet", oid: $0.head)) },
@@ -1442,6 +1452,8 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
         ("CI failing", { $0.ciState = "FAILURE" }, "CI failure"),
         ("a fast-track label taken off", { $0.labels.removeAll { $0 == "diplomat:cleared" } },
          "diplomat:cleared came off it at c3c3c3c"),
+        ("the other taken off", { $0.labels.removeAll { $0 == "diplomat:fast-track" } }, "lacks a fast-track label"),
+        ("labels past the page", { $0.moreLabels = 1 }, "has more labels than one read lists"),
     ]
     for (k, (what, change, hold)) in late.enumerated() {
         let (_, s) = try cleared("late-\(k)") { t in t.onReread = { _ in change(&t.prs[number(t, 13)]) } }
@@ -1685,6 +1697,12 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(stageOf(b2.result, issueURL(102)) == "unrated/unrated (\(nina))", stageOf(b2.result, issueURL(102)))
     check(item(b2.result, issueURL(102))?.splitFrom == "nina" && item(b2.result, issueURL(3))?.splitFrom == nil,
           "a part names whose text it carries: \(String(describing: item(b2.result, issueURL(102))?.splitFrom))")
+    let shouting = only([1])
+    shouting.issues[0].author = "MALLORY"
+    shouting.issues[0].labels = lowLow
+    let sh = sync(shouting, PipelineSettings(roots: [root], fix: true), dir("banned-case"), t0)
+    check(sh.result.effects.isEmpty && stageOf(sh.result, issueURL(1))
+          == "candidate/fast (@MALLORY is on the prompt-injection ban list)", "a ban in another case: \(sh.result.effects)")
 
     // A rating whose labels GitHub refused is kept, and not paid for again.
     let refused = only([1])
@@ -1804,6 +1822,13 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(page.result.effects.isEmpty && stageOf(page.result, issueURL(1)) == candidate
           && page.result.notices.first == "acme/app was read in part: gh: Bad Gateway (HTTP 502)",
           "a page failed: \(page.result.notices)")
+    let pageErrors = partial("page-errors") {
+        $0.page = 1
+        $0.pagesPartial = true
+    }
+    check(pageErrors.result.effects.isEmpty && stageOf(pageErrors.result, issueURL(1)) == candidate
+          && pageErrors.result.notices.first == "acme/app was read in part: Timeout on labels",
+          "a page with errors: \(pageErrors.result.notices)")
     let many = only([1])
     many.issues[0].labels = lowLow
     many.issues += (1000..<1300).map { .init(number: $0, title: "Filler \($0)", updated: at("08:00")) }
@@ -1857,6 +1882,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
 
     try pipelineFailClosed(base: base, root: root, team: team, t0: t0)
     try pipelineFreshReads(base: base, root: root, team: team, t0: t0)
+    try pipelinePinned(base: base, root: root, team: team, t0: t0)
 }
 
 /// What a sync does when what it read leaves a doubt: it holds, or leaves the item be.
@@ -2387,4 +2413,159 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
     check(plain.result.fixable == [issueURL(1)] && partial.result.fixable.isEmpty && blocked.result.fixable.isEmpty
           && stageOf(blocked.result, issueURL(1)) == "candidate/fast",
           "fixable: \(plain.result.fixable) \(partial.result.fixable) \(blocked.result.fixable)")
+}
+
+/// Guards each pinned by the smallest scenario that tells it from its absence.
+private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                            t0: Date) throws {
+    section("pipeline pinned")
+    let fm = FileManager.default
+    func dir(_ name: String) -> URL { base.appendingPathComponent("pinned-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    let mergeOnly = PipelineSettings(roots: [root], merge: true)
+    let watch = PipelineSettings(roots: [root])
+    let withLinear = PipelineSettings(roots: [root], linearTeams: [team], merge: true)
+    func cleared(_ name: String, _ settings: PipelineSettings? = nil, _ change: (Trackers) -> Void) throws -> Synced {
+        let t = only([13, 27])
+        change(t)
+        try seedRerate(dir(name), 13, sha("c3"), at: later(-60))
+        return sync(t, settings ?? mergeOnly, dir(name), t0)
+    }
+    func state(_ name: String, _ json: String) throws {
+        try fm.createDirectory(at: dir(name), withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: dir(name).appendingPathComponent("state.json"))
+    }
+    let linking = "cleared/fast (would close the Linear issues linking it, which Diplomat did not read or may not write to)"
+
+    // Cleared only at the head this Diplomat rated low/low again.
+    let moved = try cleared("moved") { t in
+        t.prs[0].head = sha("c4")
+        t.prs[0].reviews = [.init(login: opLogin, body: "\(tag)Clean at \(sha("c4"))", oid: sha("c4"))]
+    }
+    check(!merged(moved) && stageOf(moved.result, prURL(13)) == "clean/fast",
+          "clean at a head not rated again: \(moved.writes) \(stageOf(moved.result, prURL(13)))")
+    // A merge read again with errors, or whose Linear links are unknown, holds.
+    let erred = try cleared("reread-errors") { t in
+        t.onReread = { _ in
+            t.ghPartial = true
+            t.prs[0].lost = ["comments"]
+            t.prs[0].comments.append(("alice", false, "Please don't merge yet"))
+        }
+    }
+    check(!merged(erred) && erred.result.notices == ["#13 was not merged: it could not be read again: Timeout on reviews"],
+          "read again with errors: \(erred.writes) \(erred.result.notices)")
+    let down = try cleared("attached-down", withLinear) { t in t.onReread = { _ in t.linearDown = true } }
+    let bare = try cleared("attached-bare", withLinear) { $0.attachedMore = nil }
+    check(!merged(down) && !merged(bare) && stageOf(down.result, prURL(13)) == linking
+          && stageOf(bare.result, prURL(13)) == linking,
+          "Linear's links unknown: \(stageOf(down.result, prURL(13))) \(stageOf(bare.result, prURL(13)))")
+    // An issue already closed is not one a merge would close.
+    let closed = try cleared("closes-closed") { $0.prs[0].closes.append(20) }
+    check(merged(closed), "also closing a closed issue: \(stageOf(closed.result, prURL(13)))")
+
+    // A push past a cleared head puts the PR back on the fast track.
+    let pushed = only([13, 27])
+    pushed.prs[0].head = sha("c4")
+    try seedRerate(dir("pushed"), 13, sha("c3"), at: later(-60))
+    try state("pushed", #"{"cleared":{"\#(prURL(13))":"\#(sha("c3"))"}}"#)
+    let ps = sync(pushed, PipelineSettings(roots: [root], fastTrack: true), dir("pushed"), t0)
+    check(ps.writes == ["-diplomat:cleared #13"] && stageOf(ps.result, prURL(13)) == "fast-track/fast",
+          "pushed past its cleared head: \(ps.writes) \(stageOf(ps.result, prURL(13)))")
+    // Off the fast track for good: re-rated above low/low at an earlier head, or taken off before.
+    let earlier = only([13, 27])
+    try seed(dir("rerated-earlier"),
+             PipelineEvent(at: later(-90), item: prURL(13), kind: .rerated, detail: "medium risk, low complexity",
+                           head: sha("b2"), rating: PipelineRating(risk: .medium, complexity: .low)),
+             PipelineEvent(at: later(-60), item: prURL(13), kind: .rerated, detail: "low risk, low complexity",
+                           head: sha("c3"), rating: low))
+    let re = sync(earlier, mergeOnly, dir("rerated-earlier"), t0)
+    let decided = try cleared("decided") { _ in _ = try? state("decided", #"{"decided":["\#(prURL(13))"]}"#) }
+    check(!merged(re) && !merged(decided)
+          && stageOf(re.result, prURL(13))
+            == "human/human (off the fast track for good: re-rated medium risk, low complexity at b2b2b2b)"
+          && stageOf(decided.result, prURL(13)) == "human/human (off the fast track for good: Diplomat took it off the fast track)",
+          "off the fast track before: \(stageOf(re.result, prURL(13))) \(stageOf(decided.result, prURL(13)))")
+
+    // A PR of mine on the fast track that fixes no candidate, or whose diff allows more, is a person's.
+    let notFix = only([17])
+    let nf = sync(notFix, watch, dir("not-a-fix"), t0)
+    let floored = only([17, 26])
+    floored.prs[0].files = [("src/a.swift", 1, 1, "MODIFIED")]
+    let fl = sync(floored, watch, dir("floored"), t0)
+    check(stageOf(nf.result, prURL(17)) == "human/human (off the fast track: it closes no issue, "
+            + "or one that is not a low-risk, low-complexity issue Diplomat may act on)"
+          && stageOf(fl.result, prURL(17)) == "human/human (off the fast track: its diff allows no less than medium risk, low complexity)",
+          "off the fast track: \(stageOf(nf.result, prURL(17))) \(stageOf(fl.result, prURL(17)))")
+
+    // No fix is asked for while Open fix PRs is off, though the issue is one a fix may act on.
+    let candidates = only([27])
+    candidates.tickets = [fixture().tickets[2]]
+    let nofix = sync(candidates, PipelineSettings(roots: [root], linearTeams: [team]), dir("fix-off"), t0)
+    check(nofix.result.effects.isEmpty && Set(nofix.result.fixable) == [issueURL(27), linearURL("ENG-3")],
+          "fix off: \(nofix.result.effects) \(nofix.result.fixable)")
+    // A candidate of a Linear team whose repository is no root says why no fix is asked.
+    let rootless = only([])
+    rootless.tickets = [fixture().tickets[2]]
+    rootless.tickets[0].team = "OPS"
+    let rl = sync(rootless, PipelineSettings(roots: [root], linearTeams: [team, .init(key: "OPS", repo: "acme/other")]),
+                  dir("rootless"), t0)
+    check(stageOf(rl.result, linearURL("ENG-3")) == "candidate/fast (Linear team OPS has no root to fix it in)",
+          "a team with no root: \(stageOf(rl.result, linearURL("ENG-3")))")
+    // `Completes ENG-1` closes it.
+    let completes = only([11])
+    completes.prs[0].body = "Completes ENG-1."
+    completes.tickets = [fixture().tickets[0]]
+    let cp = sync(completes, PipelineSettings(roots: [root], linearTeams: [team]), dir("completes"), t0)
+    check(stageOf(cp.result, linearURL("ENG-1")).hasPrefix("fixing/"), "completes: \(stageOf(cp.result, linearURL("ENG-1")))")
+    // My login as GitHub cases it is mine.
+    let cased = only([4])
+    cased.issues[0].assignees = ["OP"]
+    check(stageOf(sync(cased, watch, dir("cased"), t0).result, issueURL(4)) == "candidate/fast", "assigned to OP")
+
+    // Rating: Rate now waits for a whole read; an issue split or being fixed is not rated
+    // though no one may write to it; a PR rated only here is not rated again at its head;
+    // a success clears the backoff, and a diff that cannot be read starts one.
+    let partial = only([1])
+    partial.ghPartial = true
+    var forceRate = watch
+    forceRate.force = .init(rate: [issueURL(1)])
+    let fr = sync(partial, forceRate, dir("rate-partial"), t0)
+    check(fr.claude.isEmpty && fr.result.notices.last == "#1 was not rated: acme/app was read only in part",
+          "Rate now on a root read in part: \(fr.claude) \(fr.result.notices)")
+    let parent = only([2])
+    parent.issues[0].subs = [101]
+    check(sync(parent, PipelineSettings(roots: [root], rate: true), dir("rate-parent"), t0).claude.isEmpty,
+          "someone else's issue with parts is not rated")
+    let local = only([14, 24])
+    local.prs[0].labels = ["diplomat:fast-track"]
+    local.prs[0].ciState = "SUCCESS"
+    local.refuseLabels = ["14"]
+    let rateTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true)
+    let l1 = sync(local, rateTrack, dir("rated-here"), t0), l2 = sync(local, rateTrack, dir("rated-here"), later(5))
+    check(l1.claude == ["opus Trim whitespace in names"] && l2.claude.isEmpty, "rated here, not again: \(l2.claude)")
+    let flaky = only([6])
+    let flakyRating = flaky.ratings.removeValue(forKey: "Flaky retry logic")
+    _ = sync(flaky, PipelineSettings(roots: [root], rate: true), dir("flaky"), t0)
+    flaky.ratings["Flaky retry logic"] = flakyRating
+    _ = sync(flaky, PipelineSettings(roots: [root], rate: true), dir("flaky"), later(5))
+    let flakyState = try JSONSerialization.jsonObject(with: Data(contentsOf: dir("flaky").appendingPathComponent("state.json")))
+    check((flakyState as? [String: Any])?["retry"].map { ($0 as? [String: Any])?.isEmpty == true } ?? true,
+          "a rating that succeeds clears its backoff: \(flakyState)")
+    let diffless = only([11, 4])
+    diffless.diffFails = true
+    let diffCalls = [0.0, 5, 10].map { m -> Int in
+        _ = sync(diffless, PipelineSettings(roots: [root], rate: true), dir("diff-fails"), later(m))
+        defer { diffless.ghCalls = [] }
+        return diffless.ghCalls.filter { $0.starts(with: ["pr", "diff"]) }.count
+    }
+    check(diffCalls == [1, 1, 0], "a diff that cannot be read backs off: \(diffCalls)")
+
+    // An issue a PR fixes is not split.
+    let fixedIssue = only([4, 11])
+    fixedIssue.issues[0].labels = ["risk:low", "complexity:medium"]
+    var forceSplit = PipelineSettings(roots: [root], fracture: true)
+    forceSplit.force = .init(fracture: [issueURL(4)])
+    let fx = sync(fixedIssue, forceSplit, dir("split-fixed"), t0)
+    check(fx.claude.isEmpty && fx.result.notices == ["#4 was not split: an open PR fixes it"],
+          "an issue a PR fixes: \(fx.claude) \(fx.result.notices)")
 }

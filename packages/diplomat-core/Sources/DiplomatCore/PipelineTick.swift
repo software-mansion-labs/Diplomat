@@ -924,7 +924,7 @@ final class PipelineSync {
         entries[i].item.rating = rating
         entries[i].item.ratedBy = "local"
         guard write else {
-            // Not read again: kept as if the tracker refused the labels.
+            // Its read again failed: kept as if the tracker refused the labels.
             if allowed && entries[i].item.writable { cache[e.id]?.unwritten = true }
             persist()
             return
