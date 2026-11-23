@@ -595,6 +595,7 @@ private struct PipelineDetail: View {
                 if let head = item.headSha {
                     Text(headLine(head)).font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let badge {
                     HStack(spacing: 4) {
@@ -933,9 +934,8 @@ enum PipelineTint {
     }
 
     static func access(_ item: PipelineItem) -> String {
-        guard item.writable else { return "Read only: Diplomat shows it and writes nothing to it." }
-        return item.kind == .pr ? "Your PR: Diplomat labels it, reviews it and may merge it."
-            : "Diplomat labels it and may fix or split it."
+        item.writable ? "Writable: Diplomat may label it and act on it."
+            : "Read only: Diplomat shows it and writes nothing to it."
     }
 
     /// `By @bob · assigned to @carol`, a Linear name as it is. Twin of `pipelineview`'s WHO

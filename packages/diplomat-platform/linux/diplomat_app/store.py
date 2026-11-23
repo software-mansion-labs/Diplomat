@@ -17,7 +17,6 @@ from PySide6.QtCore import QObject, QSettings, Signal
 
 import json
 import os
-import signal
 import subprocess
 import tempfile
 import threading
@@ -113,14 +112,6 @@ def _run_prompt(run_id: str) -> str:
         return agentregistry.prompt_path(run_id).read_text(encoding="utf-8")
     except OSError:
         return ""
-
-
-def _stop_group(proc: subprocess.Popen) -> None:
-    """SIGTERM to the process group ``proc`` leads (``promptcore.cli``'s ``started``)."""
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except OSError:
-        pass  # already gone
 
 
 # MARK: - Value types
@@ -4606,19 +4597,19 @@ class Store(QObject):
 
     def stop_pipeline_sync(self) -> None:
         """At quit: no sync starts again, and the running one's core is stopped with
-        what it runs, as a sync inside the macOS app ends with it."""
+        what it runs (:func:`promptcore.stop`)."""
         with self._pipeline_lock:
             self._pipeline_stopped = True
             proc = self._pipeline_proc
         if proc is not None:
-            _stop_group(proc)
+            promptcore.stop(proc)
 
     def _pipeline_started(self, proc: subprocess.Popen) -> None:
         with self._pipeline_lock:
             self._pipeline_proc = proc
             stopped = self._pipeline_stopped
         if stopped:
-            _stop_group(proc)
+            promptcore.stop(proc)
 
     def _pipeline_sync_once(self) -> dict:
         """The slow half of a sync, off the Qt thread: ``{"result"}`` or ``{"error"}``,
@@ -4653,7 +4644,8 @@ class Store(QObject):
         was handed and the queued asks it no longer owes (:func:`pipeline.withdrawn`),
         and ask for the agent work it owes. A failed sync leaves the last result and
         every force and ask standing; one that answered the last result because another
-        held the lock (:func:`pipeline.ran_since`) every force and ask.
+        held the lock (:func:`pipeline.ran_since`) every force and ask; one landing after
+        the switch went off every ask (switched off midway, it emits no effect).
 
         A notice is logged when it first appears, and each merge and split the core
         made since the previous result once (:func:`pipeline.fresh_events`), whatever
@@ -4678,10 +4670,9 @@ class Store(QObject):
                     self._pipeline_force = {
                         kind: ids - frozenset(handed.get(kind) or ())
                         for kind, ids in self._pipeline_force.items()}
-                if ran:
-                    self._withdraw_pipeline_asks(result)
-                # A sync landing after the switch went off asks for nothing.
                 if self.pipeline_enabled:
+                    if ran:
+                        self._withdraw_pipeline_asks(result)
                     self._apply_pipeline_effects(result, time.time())
             self.pipeline_changed.emit()
         finally:
@@ -4725,6 +4716,7 @@ class Store(QObject):
         The records kept are :func:`pipeline.retained`'s. An ask that could not be
         queued is an attempt too, retried on the same ladder."""
         attempts = self._load_attempts(PIPELINE_ATTEMPTS)
+        dispatched: dict[str, autofix.ReviewAttempt] = {}
         banned = bans.read()
         roots = len(review.repo_roots())
         for effect in result.get("effects") or []:
@@ -4745,7 +4737,7 @@ class Store(QObject):
             if action != "dispatch":
                 continue
             attempt = int(value)
-            attempts[key] = autofix.ReviewAttempt(stamp, now, attempt)
+            dispatched[key] = autofix.ReviewAttempt(stamp, now, attempt)
             verb = "pipeline-review" if kind == "review" else "pipeline-fix"
             try:
                 fresh = self.request_one(work)
@@ -4756,7 +4748,10 @@ class Store(QObject):
             if fresh:
                 activity.log("auto", verb, f"{work.label_among(roots)} queued"
                              + (f" (attempt {attempt})" if attempt > 1 else ""))
-        self._save_attempts(PIPELINE_ATTEMPTS, pipeline.retained(attempts, result, now))
+        # Onto the records as they stand now: a worker thread's retirement may have
+        # concluded one while an ask's prompt was built.
+        self._save_attempts(PIPELINE_ATTEMPTS, pipeline.retained(
+            {**self._load_attempts(PIPELINE_ATTEMPTS), **dispatched}, result, now))
 
     def pipeline_work(self, effect: dict) -> autofix.RequestedWork | None:
         """The ask a ``PipelineEffect`` stands for, in its root's checkout; None when its
@@ -4893,6 +4888,7 @@ class Store(QObject):
         if work is None:
             return (f"{effect.get('repo')} is no GitHub repo root here, so there is "
                     f"nowhere to fix it")
+        work = dataclasses.replace(work, by_hand=True)
         named = work.linear or item_label(work.item or "", len(review.repo_roots()))
         if self._fix_of(self.running_tasks, work.item, named) is not None:
             return "An agent is already fixing it"

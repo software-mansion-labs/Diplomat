@@ -189,11 +189,11 @@ extension Store {
     /// whether or not the queue takes the ask. Not private: the self-test hands it
     /// composed results.
     ///
-    /// A result that lands after the master switch went off queues nothing. One of a sync's
-    /// own (`ran`, `pipelineRan`) first retires the queued asks it no longer owes
-    /// (`pipelineWithdrawn`). A notice is logged when it first appears, and each merge and
-    /// split the core made since the previous result once (`Store.pipelineFreshEvents`),
-    /// whatever the switches.
+    /// A result that lands after the master switch went off queues and withdraws nothing
+    /// (a sync switched off midway emits no effect). One of a sync's own (`ran`,
+    /// `pipelineRan`) first retires the queued asks it no longer owes (`pipelineWithdrawn`).
+    /// A notice is logged when it first appears, and each merge and split the core made
+    /// since the previous result once (`Store.pipelineFreshEvents`), whatever the switches.
     func applyPipeline(_ result: PipelineTickResult, ran: Bool = true, now: Date = Date()) async {
         let previous = pipelineResult
         let seen = Set(previous?.notices ?? [])
@@ -205,7 +205,7 @@ extension Store {
                          Store.pipelineEventLine(event, in: result))
         }
         pipelineResult = result
-        let withdrawn = ran ? withdrawPipelineAsks(result) : false
+        let withdrawn = ran && pipelineEnabled ? withdrawPipelineAsks(result) : false
         var queued = false
         if pipelineEnabled {
             let banned = BanList.read()
@@ -251,11 +251,10 @@ extension Store {
         return !gone.isEmpty
     }
 
-    /// The keys of the pipeline's `asks` that `result`, a sync's own, no longer owes: a
-    /// review it emitted no effect for, a fix of an issue that is no longer a writable
-    /// candidate. An item it did not read is not judged. A candidate it emitted no fix for
-    /// (the fix switch off, a hold on what it could not read) keeps its fix. Twin of
-    /// `pipeline.withdrawn`.
+    /// The keys of the pipeline's `asks` that `result`, a sync's own, no longer owes: one
+    /// it emitted no effect for (a switch off, a hold), but a Start fix (`byHand`) only once
+    /// its issue is no writable candidate. An item it did not read is not judged, nor
+    /// anything in a root it could not judge in full (`unread`). Twin of `pipeline.withdrawn`.
     nonisolated static func pipelineWithdrawn(_ asks: [RequestedWork],
                                               by result: PipelineTickResult) -> [String] {
         let items = Dictionary(result.items.map { (pipelineIdentity($0.id), $0) },
@@ -264,13 +263,14 @@ extension Store {
             if case .review = effect { return "review " + pipelineIdentity(effect.url) }
             return "fix " + pipelineIdentity(effect.url)
         })
+        let unread = Set(result.unread.map { $0.lowercased() })
         return asks.filter { ask in
-            guard ask.config.isPipeline else { return false }
+            guard ask.config.isPipeline, !unread.contains(ask.repo.lowercased()) else { return false }
             let review: Bool
             if case .review = ask.config { review = true } else { review = false }
             let id = pipelineIdentity(ask.url)
             guard let item = items[id], !owed.contains((review ? "review " : "fix ") + id) else { return false }
-            return review || !(item.kind == .issue && item.stage == .candidate && item.writable)
+            return !ask.byHand || !(item.kind == .issue && item.stage == .candidate && item.writable)
         }.map(\.key)
     }
 
@@ -430,12 +430,13 @@ extension Store {
         }.map(\.key)
     }
 
-    /// `attempts` with the record of each of `runs` stamped concluded.
+    /// `attempts` with the record of each of `runs` stamped concluded. A monitor's run (its
+    /// `ledgerKey`) answers that monitor, not the pipeline, whose runs carry none.
     nonisolated static func pipelineConcluded(_ attempts: [String: ReviewAttempt],
                                               runs: [AgentState.RunRecord],
                                               at now: Date) -> [String: ReviewAttempt] {
         var out = attempts
-        for run in runs {
+        for run in runs where run.ledgerKey.isEmpty {
             for key in pipelineOpenKeys(attempts, kind: run.kind, url: run.prURL) { out[key]?.concludedAt = now }
         }
         return out
@@ -509,9 +510,10 @@ extension Store {
               item.kind == .issue, item.stage == .candidate
         else { return "The last sync found it no fix candidate" }
         guard let effect = pipelineFixEffect(for: item) else { return pipelineFixUnknown(item) }
-        guard let ask = pipelineAsk(effect) else {
+        guard var ask = pipelineAsk(effect) else {
             return "\(Store.pipelineRepo(effect)) is no GitHub repo root here, so there is nowhere to fix it"
         }
+        ask.byHand = true
         if pipelineFixRunning(effect.url) { return "An agent is already fixing it" }
         guard requestOne(ask) else { return "Its fix is already queued" }
         var attempts = loadPipelineAttempts()

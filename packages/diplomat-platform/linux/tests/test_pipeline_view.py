@@ -7,7 +7,10 @@ screen draws one, not how a sync makes it.
 
 from __future__ import annotations
 
+import os
 import re
+import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -26,6 +29,7 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, Qt  # noqa: E402
 from PySide6.QtGui import QColor, QFont, QImage, QPalette  # noqa: E402
 from PySide6.QtWidgets import QLabel  # noqa: E402
 
+_LINUX_DIR = Path(__file__).resolve().parents[1]
 _PIPELINE_SWIFT = (Path(__file__).resolve().parents[3] / "diplomat-core" / "Sources"
                    / "DiplomatCore" / "Pipeline.swift")
 
@@ -376,6 +380,35 @@ def test_someone_elses_item_says_who_holds_it(store):
     assert "Nothing logged about it yet." in texts
 
 
+@pytest.mark.parametrize("label, whole", [
+    ("#1810", True),
+    # A root's `owner/repo#N`: the pane does not scroll sideways.
+    ("software-mansion/react-native-reanimated#6789", False),
+])
+def test_the_head_label_is_cut_only_past_the_detail_and_nothing_else_is(store, app, label,
+                                                                        whole):
+    result = _result()
+    result["items"][1] = {**result["items"][1], "label": label}
+    store.pipeline_result = result
+    view = PipelineView(store)
+    view.resize(1100, 700)
+    view.show()
+    try:
+        view.select(P2)
+        app.processEvents()
+        port = view.detail_scroll.viewport().width()
+        assert view.detail.minimumSizeHint().width() <= port
+        assert view.detail.width() == port
+        [head] = view.detail.findChildren(pipelineview._Head)
+        assert head.text() == label and label in head.toolTip()
+        drawn = head.fontMetrics().elidedText(label, Qt.TextElideMode.ElideRight, head.width())
+        assert (drawn == label) is whole
+        [kind] = [w for w in view.detail.findChildren(QLabel) if w.text() == "GitHub PR"]
+        assert kind.mapTo(view.detail, kind.rect().topRight()).x() < port
+    finally:
+        view.close()
+
+
 def test_selection_and_lane_survive_a_rebuild_and_an_opening_resets_them(store):
     view = PipelineView(store)
     view.lane_chips["fast"].click()
@@ -460,6 +493,12 @@ def test_actions_are_offered_where_they_can_act(store, item, shown):
     view = PipelineView(store)
     view.select(item)
     assert list(view.buttons) == shown
+
+
+def test_my_pr_is_mine_whatever_the_case_of_my_login():
+    mine = _item(2, kind="pr", stage="fast-track", lane="fast", author="Me")
+    assert pipelineview.can_rate(mine, "me", rooted=False)
+    assert not pipelineview.can_rate({**mine, "author": "carol"}, "me", rooted=False)
 
 
 def test_a_linear_issue_is_rated_and_split_only_in_a_team_with_a_root(store, monkeypatch):
@@ -767,3 +806,24 @@ def test_the_render_fixture_covers_every_stage_lane_edge_and_event_kind():
     assert {e["item"] for e in result["events"]} <= set(ids)
     # Newest last, as the core hands them over.
     assert [e["at"] for e in result["events"]] == sorted(e["at"] for e in result["events"])
+
+
+@pytest.mark.skipif(not os.environ.get("DIPLOMAT_CORE_BIN"), reason="DIPLOMAT_CORE_BIN not set")
+def test_the_render_mode_draws_through_the_entry_point(tmp_path):
+    """Its fixture goes through the real ``diplomat-core pipeline-last``."""
+    home = tmp_path / "home"
+    home.mkdir()
+    out = tmp_path / "pipeline.png"
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("DIPLOMAT_PIPELINE_DIR", "DIPLOMAT_CONFIG")}
+    env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
+               QT_QPA_PLATFORM="offscreen", DIPLOMAT_SELF_REPO="/nonexistent",
+               DIPLOMAT_RENDER="pipeline", DIPLOMAT_RENDER_OUT=str(out),
+               PYTHONPATH=os.pathsep.join([str(_LINUX_DIR),
+                                           str(_LINUX_DIR.parents[1] / "diplomat-runtime")]))
+    done = subprocess.run([sys.executable, "-m", "diplomat_app"], cwd=str(_LINUX_DIR),
+                          env=env, capture_output=True, text=True, timeout=180)
+    assert done.returncode == 0, done.stderr
+    assert out.stat().st_size > 10_000
+    # Nothing the fixture wrote reached the private HOME's real Pipeline dir.
+    assert not (home / ".diplomat" / "pipeline").exists()

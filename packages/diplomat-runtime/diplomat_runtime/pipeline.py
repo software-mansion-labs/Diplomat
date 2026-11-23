@@ -163,19 +163,20 @@ def _result(obj: object) -> dict | None:
     def rows(value: object) -> list[dict]:
         return [r for r in value if isinstance(r, dict)] if isinstance(value, list) else []
 
-    notices = obj.get("notices")
+    def strings(value: object) -> list[str]:
+        return [s for s in value if isinstance(s, str)] if isinstance(value, list) else []
+
     return {**obj, "items": rows(obj["items"]),
             "graph": {"nodes": rows(graph.get("nodes")), "edges": rows(graph.get("edges"))},
             "effects": rows(obj.get("effects")), "events": rows(obj.get("events")),
-            "notices": ([n for n in notices if isinstance(n, str)]
-                        if isinstance(notices, list) else [])}
+            "notices": strings(obj.get("notices")), "unread": strings(obj.get("unread"))}
 
 
 def tick(settings: dict, started: Callable | None = None) -> dict:
     """``pipeline-tick``: the ``PipelineTickResult`` (``{at, items, graph: {nodes,
-    edges}, effects, events, notices}``), or ``{"error": why}`` when the CLI could not
-    answer. ``started`` is handed the core's process (:func:`promptcore.cli`). Never
-    raises."""
+    edges}, effects, events, notices, unread}``), or ``{"error": why}`` when the CLI
+    could not answer. ``started`` is handed the core's process (:func:`promptcore.cli`).
+    Never raises."""
     try:
         out = json.loads(promptcore.cli(["pipeline-tick"], stdin=settings,
                                         timeout=tick_timeout(settings), started=started))
@@ -281,11 +282,15 @@ def _open_keys(attempts: dict, kind: str, url: str) -> list[str]:
 
 
 def concluded(attempts: dict, runs, now_ts: float) -> dict:
-    """``attempts`` with the record of each of ``runs`` (``kind``, ``pr_url``) stamped
-    concluded: its agent said its turn was over, so what it left, a PR, a clean marker
-    or nothing, is its answer. Twin of ``Store.pipelineConcluded``."""
+    """``attempts`` with the record of each of ``runs`` (``kind``, ``pr_url``,
+    ``ledger_key``) stamped concluded: its agent said its turn was over, so what it left,
+    a PR, a clean marker or nothing, is its answer. A monitor's run (its ``ledger_key``)
+    answers that monitor, not the pipeline, whose runs carry none. Twin of
+    ``Store.pipelineConcluded``."""
     out = dict(attempts)
     for run in runs:
+        if run.ledger_key:
+            continue
         for k in _open_keys(attempts, run.kind, run.pr_url or ""):
             out[k] = replace(out[k], concluded_at=now_ts)
     return out
@@ -310,22 +315,23 @@ def retained(attempts: dict, result: dict, now: float) -> dict:
 
 def withdrawn(asks: list, result: dict) -> list[str]:
     """The keys of the pipeline's ``asks`` (``RequestedWork``) that ``result``, a sync's
-    own, no longer owes: a review it emitted no effect for, a fix of an issue that is
-    no longer a writable candidate. An item it did not read is not judged. A candidate
-    it emitted no fix for (the fix switch off, a hold on what it could not read) keeps
-    its fix. Twin of ``Store.pipelineWithdrawn``."""
+    own, no longer owes: one it emitted no effect for (a switch off, a hold), but a
+    Start fix (``by_hand``) only once its issue is no writable candidate. An item it did
+    not read is not judged, nor anything in a root it could not judge in full
+    (``unread``). Twin of ``Store.pipelineWithdrawn``."""
     items = {identity(str(i.get("id") or "")): i for i in result.get("items") or []}
     owed = {(e.get("kind") == "review", identity(str(e.get("url") or "")))
             for e in result.get("effects") or []}
+    unread = {r.lower() for r in result.get("unread") or []}
     out = []
     for ask in asks:
-        if not ask.pipeline:
+        if not ask.pipeline or ask.repo.lower() in unread:
             continue
         review = ask.action == QUEUE_REVIEW_ACTION
         item = items.get(identity(ask.url))
         if item is None or (review, identity(ask.url)) in owed:
             continue
-        if not review and item.get("kind") == "issue" and item.get("stage") == "candidate" \
+        if ask.by_hand and item.get("kind") == "issue" and item.get("stage") == "candidate" \
                 and item.get("writable"):
             continue
         out.append(ask.key)

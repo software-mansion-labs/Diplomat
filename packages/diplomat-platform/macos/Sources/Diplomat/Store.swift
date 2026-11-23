@@ -3361,6 +3361,8 @@ final class Store: ObservableObject {
         /// is about, whose root the ask runs in; "" for an investigation stored before asks
         /// named one, which runs in the primary root.
         var repo: String
+        /// Queued by the Pipeline screen's Start fix, not by a sync (`pipelineWithdrawn`).
+        var byHand = false
 
         /// This ask's identity everywhere it has one: the queued task's id, the row
         /// the panel draws it as, and what `forgetRequested` drops it by.
@@ -3398,7 +3400,7 @@ final class Store: ObservableObject {
             return (roots.first { $0.key == repo } ?? PRRef.repo(ofKey: repo)).webURL(.issues, number: number)
         }
 
-        private enum CodingKeys: String, CodingKey { case number, url, author, action, config, repo }
+        private enum CodingKeys: String, CodingKey { case number, url, author, action, config, repo, byHand }
 
         /// `repo` nil reads it off `url`.
         init(number: Int, url: String, author: String, config: RequestedConfig,
@@ -3419,6 +3421,7 @@ final class Store: ObservableObject {
             author = try c.decodeIfPresent(String.self, forKey: .author) ?? ""
             // Absent from a row a single-repo build wrote: `decodeRequestedWork` fills it.
             repo = try c.decodeIfPresent(String.self, forKey: .repo) ?? ""
+            byHand = try c.decodeIfPresent(Bool.self, forKey: .byHand) ?? false
             // No verb means a row written while this list held reviews alone, whose
             // `config` is the bare `ReviewConfig` it was stored as.
             let action = try c.decodeIfPresent(String.self, forKey: .action)
@@ -3438,6 +3441,7 @@ final class Store: ObservableObject {
             try c.encode(author, forKey: .author)
             try c.encode(config.action, forKey: .action)
             try c.encode(repo, forKey: .repo)
+            if byHand { try c.encode(byHand, forKey: .byHand) }
             switch config {
             case .review(let cfg): try c.encode(cfg, forKey: .config)
             case .issues(let cfg): try c.encode(cfg, forKey: .config)
