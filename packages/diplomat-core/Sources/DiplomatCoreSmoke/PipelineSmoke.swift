@@ -1373,7 +1373,6 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     optOut.prs = []
     _ = sync(optOut, watch, optDir, later(10))
     optOut.prs = prs
-    optOut.prs[0].labels.removeAll { $0 == "diplomat:fast-track" }
     let o4 = sync(optOut, fastTrack, optDir, later(15))
     check(o4.writes.isEmpty && o4.claude.isEmpty, "back on the fast track after a read without it: \(o4.writes)")
 
@@ -1383,7 +1382,10 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     let badState = #"{"decided": 7}"#
     try Data(badState.utf8).write(to: badDir.appendingPathComponent("state.json"))
     try seedRerate(badDir, 13, sha("c3"), at: later(-60))
+    let badLog = try String(contentsOf: badDir.appendingPathComponent("log.jsonl"), encoding: .utf8)
     let bad = sync(fixture(), everything, badDir, t0)
+    check((try? String(contentsOf: badDir.appendingPathComponent("log.jsonl"), encoding: .utf8)) == badLog,
+          "bad state: the log is left as it was")
     check(bad.writes.isEmpty && bad.claude.isEmpty && bad.result.effects.isEmpty, "bad state: \(bad.writes) \(bad.claude)")
     check(bad.result.notices.count == 1
           && bad.result.notices[0].hasPrefix("\(badDir.path)/state.json could not be read (")

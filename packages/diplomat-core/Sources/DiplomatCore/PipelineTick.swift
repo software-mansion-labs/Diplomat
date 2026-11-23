@@ -231,11 +231,12 @@ final class PipelineSync {
     }
 
     /// The log, the state and the ratings as they stand: after every outward step, so a
-    /// sync that dies between two repeats neither.
+    /// sync that dies between two repeats neither. A blocked sync writes none: without the
+    /// state it would log the same events again at every sync.
     func persist() {
+        guard blocked == nil else { return }
         PipelineLog.append(unsaved, in: dir)
         unsaved = []
-        guard blocked == nil else { return }
         state.save(in: dir)
         PipelineCachedRating.save(cache, in: dir)
     }
@@ -727,7 +728,7 @@ final class PipelineSync {
                 },
             ].map { $0.sorted(by: newer) }
         }
-        // An own PR awaiting its re-rate is unrated too: rated once.
+        // An item in two bands is rated once.
         var rest: [Int] = []
         for i in bands.joined() where !forced.contains(i) && !rest.contains(i) && rest.count < model.rater.perSync {
             rest.append(i)
