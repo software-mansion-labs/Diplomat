@@ -34,12 +34,13 @@ flowchart TB
   TEL -. "prices the next task" .-> GATE
 ```
 
-### Pipeline - every issue and PR, rated and routed
+### Pipeline - every issue and your PRs, rated and routed
 
-Every open issue and PR of your GitHub repos and Linear teams is rated for risk and complexity, as
-labels wherever Diplomat may write. A low/low issue gets a fix PR; a low/low PR of yours is reviewed
-until clean, rated again at that head, and merged with your admin rights. Anything else is left to
-you. Issues, sub-issues, the PRs fixing them and the PRs stacked on those are drawn as one graph.
+Every open issue of your GitHub repos and Linear teams, and every open PR of yours, is rated for risk
+and complexity, as labels wherever Diplomat may write. A low/low issue gets a fix PR; that PR, low/low
+too, is reviewed until clean, rated again at that head, and merged with your admin rights. Anything
+else is left to you. Issues, sub-issues, the PRs fixing them and the PRs stacked on those are drawn
+as one graph.
 Off by default, every step its own switch. [More](docs/pipeline.md)
 
 <img alt="The Pipeline screen" src="docs/img/pipeline.png" />

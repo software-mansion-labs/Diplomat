@@ -260,8 +260,8 @@ beside the cap, which live in the shared `~/.diplomat/config.json` ([`appconfig.
   opens a terminal on the spot is never gated, and nothing is held at all while the
   usage probe cannot read a window. In `~/.diplomat/config.json`, like the cap above.
 - **Pipeline** - the [Pipeline](../../../docs/pipeline.md) (default **off**): the master
-  switch, one per thing it may do, and the Linear teams. The Linear API key is read from the file
-  `linearTokenFile` names in `~/.diplomat/config.json` (`$DIPLOMAT_LINEAR_TOKEN` wins over it).
+  switch, one per thing it may do, the Linear teams, and where the Linear API key is read from: the
+  file `linearTokenFile` names in `~/.diplomat/config.json` (`$DIPLOMAT_LINEAR_TOKEN` wins over it).
 - **Claude API errors** — the tmux watcher toggle, plus a count of nudges sent.
 - **Tools — colour & visibility** — retint or hide any tool card. (SKILL.md PRs
   and Installer/CLI PRs ship hidden.)
