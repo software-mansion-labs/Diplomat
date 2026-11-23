@@ -479,6 +479,13 @@ class Store(QObject):
         # sync that was handed them answers.
         self._pipeline_force: dict[str, frozenset[str]] = {"rate": frozenset(),
                                                            "fracture": frozenset()}
+        # Bumped as the master switch flips or Fix / Fast track goes off: a sync begun
+        # before may have been switched off midway, emitting less than it owes, so its
+        # result withdraws and prunes nothing (:meth:`_apply_pipeline_sync`).
+        self._pipeline_epoch = 0
+        # A sync begun since launch or the master switch went on was applied: until
+        # then the asks queued before it may be stale, so none starts (:meth:`is_paused`).
+        self._pipeline_judged = False
         self._pipeline_synced.connect(self._apply_pipeline_sync)
 
         # Pruned on every start — a Store outlives thousands of polls.
@@ -1220,6 +1227,8 @@ class Store(QObject):
 
     @pipeline_enabled.setter
     def pipeline_enabled(self, value: bool) -> None:
+        if bool(value) != self.pipeline_enabled:
+            self._pipeline_cut(master=True)
         self._settings.setValue("pipelineEnabled", bool(value))
         self._write_pipeline_control()
 
@@ -1240,6 +1249,8 @@ class Store(QObject):
 
     @pipeline_fix.setter
     def pipeline_fix(self, value: bool) -> None:
+        if self.pipeline_fix and not value:
+            self._pipeline_cut()
         self._settings.setValue("pipelineFix", bool(value))
         self._write_pipeline_control()
         if not value:
@@ -1252,6 +1263,8 @@ class Store(QObject):
 
     @pipeline_fast_track.setter
     def pipeline_fast_track(self, value: bool) -> None:
+        if self.pipeline_fast_track and not value:
+            self._pipeline_cut()
         self._settings.setValue("pipelineFastTrack", bool(value))
         self._write_pipeline_control()
         if not value:
@@ -1276,6 +1289,12 @@ class Store(QObject):
     def pipeline_fracture(self, value: bool) -> None:
         self._settings.setValue("pipelineFracture", bool(value))
         self._write_pipeline_control()
+
+    def _pipeline_cut(self, *, master: bool = False) -> None:
+        with self._pipeline_lock:
+            self._pipeline_epoch += 1
+            if master:
+                self._pipeline_judged = False
 
     def pipeline_control(self) -> dict:
         """``control.json``'s switches as they stand (:func:`pipeline.write_control`)."""
@@ -2901,7 +2920,7 @@ class Store(QObject):
         if counter in ("my_reviews", "conflicts"):
             return not self.pr_autofix_enabled
         if counter == PIPELINE_COUNTER:
-            return not self.pipeline_enabled
+            return not (self.pipeline_enabled and self._pipeline_judged)
         # A review the operator asked for: no monitor owns it, so neither toggle
         # speaks for it. Switching the monitors off says what this machine may go
         # looking for, not that it should stop doing what it was told — for an ask,
@@ -4522,8 +4541,7 @@ class Store(QObject):
 
     def pipeline_settings_payload(self) -> dict:
         """The ``PipelineSettings`` JSON a sync is handed. Its roots are the GitHub ones:
-        the Pipeline skips GitLab. The key file's ``~`` is ``$HOME``'s, expanded here:
-        the core's own expansion reads the password database."""
+        the Pipeline skips GitLab."""
         teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
         token_file = os.path.expanduser(appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip())
         with self._pipeline_lock:
@@ -4572,10 +4590,10 @@ class Store(QObject):
 
     def run_pipeline_sync_async(self, *, then=None) -> None:
         """One sync on a worker, while the Pipeline is on. One asked for while another
-        runs follows it: the running one may have been handed the force sets before
-        the ask that added to them. The queue is changed back on the Qt thread
-        (:meth:`_apply_pipeline_sync`), which then calls ``then``; called at once when
-        no sync runs."""
+        runs follows it once the running one is applied: that one may have been handed
+        the force sets before the ask that added to them. The queue is changed back on
+        the Qt thread (:meth:`_apply_pipeline_sync`), which then calls ``then``; called
+        at once when no sync runs."""
         with self._pipeline_lock:
             run = self.pipeline_enabled and not self._pipeline_stopped
             if run and then is not None:
@@ -4589,21 +4607,15 @@ class Store(QObject):
                 then()
             return
         self.pipeline_changed.emit()
+        self._start_pipeline_sync()
 
+    def _start_pipeline_sync(self) -> None:
         def work() -> None:
-            again = True
-            while again:
-                try:
-                    plan = self._pipeline_sync_once()
-                except Exception as exc:  # noqa: BLE001 — a sync must never wedge the flag
-                    plan = {"error": str(exc), "forced": {}}
-                with self._pipeline_lock:
-                    again = (self._pipeline_again and self.pipeline_enabled
-                             and not self._pipeline_stopped)
-                    self._pipeline_again = False
-                    if not again:
-                        self.pipeline_syncing = False
-                self._pipeline_synced.emit(plan)
+            try:
+                plan = self._pipeline_sync_once()
+            except Exception as exc:  # noqa: BLE001 — a sync must never wedge the flag
+                plan = {"error": str(exc), "forced": {}}
+            self._pipeline_synced.emit(plan)
 
         self.start_background(work, name="pipeline-sync")
 
@@ -4627,6 +4639,8 @@ class Store(QObject):
         """The slow half of a sync, off the Qt thread: ``{"result"}`` or ``{"error"}``,
         with the force sets it was handed. Held while no root resolves, and while the
         GitHub login is unknown, which would make none of the operator's PRs theirs."""
+        with self._pipeline_lock:
+            epoch = self._pipeline_epoch
         if review.roots_guessed():
             return {"error": "no repo root in Settings resolves to a GitHub or GitLab "
                              "checkout", "forced": {}}
@@ -4649,25 +4663,33 @@ class Store(QObject):
         if "items" not in out:
             return {"error": out.get("error") or "the sync did not answer",
                     "forced": settings["force"]}
-        return {"result": out, "forced": settings["force"], "started": started}
+        return {"result": out, "forced": settings["force"], "started": started,
+                "epoch": epoch}
 
     def _apply_pipeline_sync(self, plan: dict) -> None:
         """The Qt-thread half of a sync: publish its result, retire the force sets it
         was handed and the queued asks it no longer owes (:func:`pipeline.withdrawn`),
-        and ask for the agent work it owes. A failed sync leaves the last result and
-        every force and ask standing; one that answered the last result again
-        (:func:`pipeline.ran_since`) every force, and every ask but one whose switch is
-        off; one landing after the Pipeline went off every ask (switched off midway, it
-        emits no effect).
+        and ask for the agent work it owes; then start the sync asked for meanwhile. A
+        failed sync leaves the last result and every force and ask standing; one that
+        answered the last result again (:func:`pipeline.ran_since`) every force, and
+        every ask but one whose switch is off, as does one begun in an earlier
+        :attr:`_pipeline_epoch`; one landing after the Pipeline went off every ask
+        (switched off midway, it emits no effect).
 
         A notice is logged when it first appears, and each merge and split the core
         made since the previous result once (:func:`pipeline.fresh_events`), whatever
         the switches."""
+        with self._pipeline_lock:
+            again = (self._pipeline_again and self.pipeline_enabled
+                     and not self._pipeline_stopped)
+            self._pipeline_again = False
+            self.pipeline_syncing = again
         try:
             self._settle_pipeline_error(plan.get("error"))
             result = plan.get("result")
             if result is not None:
                 ran = pipeline.ran_since(result, plan["started"])
+                judged = ran and plan["epoch"] == self._pipeline_epoch
                 handed = (plan.get("forced") or {}) if ran else {}
                 previous = self.pipeline_result
                 seen = set((previous or {}).get("notices") or [])
@@ -4684,14 +4706,19 @@ class Store(QObject):
                         kind: ids - frozenset(handed.get(kind) or ())
                         for kind, ids in self._pipeline_force.items()}
                 if self.pipeline_enabled:
-                    self._withdraw_pipeline_asks(result if ran else None)
-                    self._apply_pipeline_effects(result, time.time())
+                    self._withdraw_pipeline_asks(result if judged else None)
+                    if judged and not self._pipeline_judged:
+                        self._pipeline_judged = True
+                        self._bring_poll_forward(self._settled_load)
+                    self._apply_pipeline_effects(result, time.time(), judged=judged)
             self.pipeline_changed.emit()
         finally:
             with self._pipeline_lock:
                 then = [] if self.pipeline_syncing else self._pipeline_then
                 if then:
                     self._pipeline_then = []
+            if again:
+                self._start_pipeline_sync()
             for call in then:
                 call()
 
@@ -4718,20 +4745,24 @@ class Store(QObject):
         elif before and not self.pipeline_error:
             activity.log("auto", "pipeline-recovered", "Pipeline syncing again")
 
-    def _apply_pipeline_effects(self, result: dict, now: float) -> None:
+    def _apply_pipeline_effects(self, result: dict, now: float, *,
+                                judged: bool = True) -> None:
         """Ask for the agent work a sync owes, each effect once per attempt: every sync
         emits it for as long as it is owed, and :func:`autofix.decide` over
         ``pipelineAttempts``, by the effect's ``key`` and ``stamp``, says whether this
         sync's is a new attempt. A fix only while the fix switch is on, a review only
         while the fast-track one is: the sync may have been handed them before it went
-        off.
+        off. A queued Linear fix whose effect now names another repo or text is queued
+        again with them, as the same attempt: its agent cannot read Linear.
 
-        The records kept are :func:`pipeline.retained`'s. An ask that could not be
-        queued is an attempt too, retried on the same ladder."""
+        The records kept are :func:`pipeline.retained`'s, all of them unless the sync
+        is ``judged`` (:meth:`_apply_pipeline_sync`). An ask that could not be queued is
+        an attempt too, retried on the same ladder."""
         attempts = self._load_attempts(PIPELINE_ATTEMPTS)
         dispatched: dict[str, autofix.ReviewAttempt] = {}
         banned = bans.read()
         roots = len(review.repo_roots())
+        starting = {e.id for e in self.starting_tasks}
         for effect in result.get("effects") or []:
             kind = effect.get("kind")
             if not {"fixIssue": self.pipeline_fix, "fixLinear": self.pipeline_fix,
@@ -4743,6 +4774,22 @@ class Store(QObject):
             except (KeyError, TypeError, ValueError):
                 work = None
             if not key or work is None:
+                continue
+            old = next((w for w in self.requested_work if w.key == work.key), None)
+            if (kind == "fixLinear" and old is not None and work.key not in starting
+                    and (old.repo, old.config.get("linear"))
+                    != (work.repo, work.config.get("linear"))):
+                self._forget_requested(old.key)
+                self._drop_queued_task(old.key)
+                work = dataclasses.replace(work, by_hand=old.by_hand)
+                try:
+                    self.request_one(work)
+                except Exception as exc:  # noqa: BLE001 — a missing/wedged core binary
+                    activity.log("auto", "pipeline-fix", f"{work.label_among(roots)} could "
+                                                         f"not be queued: {exc}")
+                    continue
+                activity.log("auto", "pipeline-fix", f"{work.label_among(roots)} queued "
+                                                     f"again: its repo or text changed")
                 continue
             action, value = autofix.decide(
                 attempts.get(key), stamp, self._pipeline_in_flight(work),
@@ -4763,8 +4810,11 @@ class Store(QObject):
                              + (f" (attempt {attempt})" if attempt > 1 else ""))
         # Onto the records as they stand now: a worker thread's retirement may have
         # concluded one while an ask's prompt was built.
-        self._save_attempts(PIPELINE_ATTEMPTS, pipeline.retained(
-            {**self._load_attempts(PIPELINE_ATTEMPTS), **dispatched}, result, now))
+        records = {**self._load_attempts(PIPELINE_ATTEMPTS), **dispatched}
+        if judged:
+            teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
+            records = pipeline.retained(records, result, now, teams)
+        self._save_attempts(PIPELINE_ATTEMPTS, records)
 
     def pipeline_work(self, effect: dict) -> autofix.RequestedWork | None:
         """The ask a ``PipelineEffect`` stands for, in its root's checkout; None when its
@@ -4872,6 +4922,13 @@ class Store(QObject):
         if item.get("hold"):
             return str(item["hold"])
         return "Diplomat has this Linear issue's text only while Open fix PRs is on"
+
+    def pipeline_banned(self, item: dict) -> str | None:
+        """Who of the ban list wrote the text ``item`` carries (``splitFrom``, else its
+        author), whose item a sync neither rates nor splits; None for none. Twin of
+        ``Store.pipelineBanned``."""
+        who = str(item.get("splitFrom") or item.get("author") or "")
+        return who if who and bans.is_banned(who, self.banned_authors) else None
 
     def pipeline_rooted(self, item: dict) -> bool:
         """Whether a sync can read ``item``'s code: a Linear issue only when its team

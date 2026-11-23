@@ -768,9 +768,10 @@ final class Store: ObservableObject {
     /// and queued pipeline work waits (`AutoCounter.pipeline`).
     @Published var pipelineEnabled: Bool {
         didSet {
+            if pipelineEnabled != oldValue { pipelineCut(master: true) }
             persist(pipelineEnabled, forKey: Keys.pipelineEnabled)
             writePipelineControl()
-            pipelineSwitched(on: pipelineEnabled && !oldValue, master: true)
+            pipelineSwitched(on: pipelineEnabled && !oldValue)
         }
     }
     /// `PipelineSettings.rate`, `.fix`, `.fastTrack`, `.merge`, `.fracture`; each off by
@@ -784,6 +785,7 @@ final class Store: ObservableObject {
     }
     @Published var pipelineFix: Bool {
         didSet {
+            if oldValue && !pipelineFix { pipelineCut() }
             persist(pipelineFix, forKey: Keys.pipelineFix)
             writePipelineControl()
             if !pipelineFix { withdrawPipelineAsks(nil) }
@@ -792,6 +794,7 @@ final class Store: ObservableObject {
     }
     @Published var pipelineFastTrack: Bool {
         didSet {
+            if oldValue && !pipelineFastTrack { pipelineCut() }
             persist(pipelineFastTrack, forKey: Keys.pipelineFastTrack)
             writePipelineControl()
             if !pipelineFastTrack { withdrawPipelineAsks(nil) }
@@ -829,6 +832,15 @@ final class Store: ObservableObject {
     /// Driven from `PipelineMonitor.swift`, hence not private.
     var pipelineMonitorTask: Task<Void, Never>?
     var pipelineSyncAgain = false
+    /// Bumped as the master switch flips or Fix / Fast track goes off: a sync begun
+    /// before may have been switched off midway, emitting less than it owes, so its
+    /// result withdraws and prunes nothing (`runPipelineSyncOnce`).
+    var pipelineEpoch = 0
+    /// A sync begun since launch or the master switch went on was applied: until then
+    /// the asks queued before it may be stale, so none starts (`isPaused`).
+    @Published var pipelineJudged = false {
+        didSet { if pipelineJudged && !oldValue { bringPollForward(capLoad: autoTasksMeasured) } }
+    }
 
     /// Every dispatched agent run the panel draws, in reading order: the sessions this
     /// machine spawned, and any live agent nobody dispatched at all.
@@ -3685,7 +3697,7 @@ final class Store: ObservableObject {
         switch counter {
         case .reviewRequests:        return !reviewRequestsEnabled
         case .myReviews, .conflicts: return !prAutofixEnabled
-        case .pipeline:              return !pipelineEnabled
+        case .pipeline:              return !(pipelineEnabled && pipelineJudged)
         // A review the operator asked for: no monitor owns it, so neither toggle
         // speaks for it. Switching the monitors off says what this machine may go
         // looking for, not that it should stop doing what it was told — for an ask,

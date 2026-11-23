@@ -252,6 +252,7 @@ struct PipelineView: View {
                            enabled: store.pipelineEnabled,
                            forcedRate: store.pipelineForce.rate.contains(id),
                            forcedFracture: store.pipelineForce.fracture.contains(id),
+                           banned: store.pipelineBanned(item),
                            canRate: PipelineView.canRate(item, me: store.effectiveMe, rooted: rooted),
                            canFracture: PipelineView.canFracture(item, edges: result.graph.edges,
                                                                  rooted: rooted),
@@ -542,6 +543,9 @@ private struct PipelineDetail: View {
     let enabled: Bool
     let forcedRate: Bool
     let forcedFracture: Bool
+    /// Its text's author, on the ban list (`Store.pipelineBanned`): a sync would refuse
+    /// to rate or split it.
+    let banned: String?
     let canRate: Bool
     let canFracture: Bool
     /// The fix effect is known: a Linear issue's text comes only with a sync's.
@@ -650,6 +654,8 @@ private struct PipelineDetail: View {
             : "head \(short) · clean at \(clean.prefix(7)), an older head"
     }
 
+    private var ban: String? { banned.map { "@\($0) is on the prompt-injection ban list" } }
+
     private var actions: some View {
         VStack(alignment: .leading, spacing: 4) {
             FlowLayout(spacing: 4) {
@@ -658,19 +664,21 @@ private struct PipelineDetail: View {
                 if canRate {
                     PipelineActionChip(symbol: "gauge.with.needle",
                                        text: forcedRate ? "Rate asked" : "Rate now",
-                                       tint: .accentColor, enabled: enabled && !forcedRate, action: rate)
-                        .tooltip("Rate it in a sync started now, ahead of every limit")
+                                       tint: .accentColor, enabled: enabled && !forcedRate && banned == nil,
+                                       action: rate)
+                        .tooltip(ban ?? "Rate it in a sync started now, ahead of every limit")
                 }
                 if canFracture {
                     PipelineActionChip(symbol: "square.split.2x2",
                                        text: forcedFracture ? "Fracture asked" : "Fracture",
-                                       tint: .purple, enabled: enabled && !forcedFracture && badge == nil,
+                                       tint: .purple,
+                                       enabled: enabled && !forcedFracture && badge == nil && banned == nil,
                                        action: fracture)
-                        .tooltip("Split it into low-complexity child issues in a sync started now")
+                        .tooltip(ban ?? "Split it into low-complexity child issues in a sync started now")
                 }
                 if PipelineView.canStartFix(item) {
                     PipelineActionChip(symbol: "wrench.and.screwdriver", text: "Start fix",
-                                       tint: .green, enabled: enabled && canStartFix && badge == nil,
+                                       tint: .green, enabled: enabled && canStartFix && badge == nil && !forcedFracture,
                                        action: startFix)
                         .tooltip(canStartFix ? "Queue its fix now, past its retry backoff" : fixUnknown)
                 }

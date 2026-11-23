@@ -8,6 +8,7 @@ or a stand-in core that records what it was handed.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import signal
@@ -72,6 +73,12 @@ def _result(*effects: dict, items: tuple = (), at: str | None = None,
     return {"at": at or _now_iso(), "items": list(items),
             "graph": {"nodes": [], "edges": []}, "effects": list(effects), "events": [],
             "notices": [], "unread": list(unread), "fixable": list(fixable)}
+
+
+def _sync(pipe, result: dict) -> None:
+    """A sync's own result, begun since the last switch flipped."""
+    pipe._apply_pipeline_sync({"result": result, "forced": {}, "started": 0,
+                               "epoch": pipe._pipeline_epoch})
 
 
 @pytest.fixture
@@ -303,7 +310,7 @@ def test_a_switch_off_by_the_time_its_sync_lands_asks_for_nothing(pipe, off, ask
 def test_a_sync_landing_after_the_pipeline_went_off_asks_for_nothing(pipe):
     pipe.pipeline_enabled = False
     result = _result(_fix())
-    pipe._apply_pipeline_sync({"result": result, "forced": {}, "started": 0})
+    _sync(pipe, result)
     assert pipe.pipeline_result == result
     assert _keys(pipe) == []
 
@@ -384,7 +391,7 @@ def test_an_ask_that_cannot_be_queued_is_an_attempt(pipe, monkeypatch):
 
 
 def test_pipeline_asks_wait_while_the_pipeline_is_off(pipe):
-    pipe._apply_pipeline_effects(_result(_fix(), _review()), time.time())
+    _sync(pipe, _result(_fix(), _review()))
     pipe._request([autofix.RequestedWork(
         number=13, url="https://github.com/o/r/pull/13", author="",
         config=review.ReviewConfig(specific_pr="13", me="alice", home=ROOT).prompt_payload(),
@@ -396,6 +403,49 @@ def test_pipeline_asks_wait_while_the_pipeline_is_off(pipe):
     pipe.pipeline_enabled = False
     assert pipe.is_paused("pipeline")
     assert [t.id for t in pipe.drainable_tasks] == ["review:o/r#13"]
+
+
+def test_switched_back_on_no_ask_starts_until_a_sync_begun_since_is_applied(pipe,
+                                                                           monkeypatch):
+    """The asks queued before may be stale; that sync withdraws the ones it no longer
+    owes, and brings the poll that drains the rest forward."""
+    _sync(pipe, _result(_fix(), _review()))
+    pipe.pipeline_enabled = False
+    pipe.pipeline_enabled = True
+    assert pipe.is_paused("pipeline")
+    assert (pipe.drainable_tasks, len(pipe.queued_tasks)) == ([], 2)
+    polls = []
+    monkeypatch.setattr(Store, "_bring_poll_forward", lambda self, load: polls.append(load))
+    calls = []
+
+    def tick(settings, started=None):
+        calls.append(1)
+        if len(calls) == 1:
+            return _result(_fix(), at="2026-11-20T10:00:00Z")
+        if len(calls) == 2:
+            pipe.pipeline_enabled = False
+            pipe.pipeline_enabled = True
+        return _result(_fix())
+
+    monkeypatch.setattr(pipeline, "tick", tick)
+    # The last result answered again, then a sync begun before the switch went on.
+    for _ in range(2):
+        pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+        assert pipe.is_paused("pipeline")
+        assert sorted(_keys(pipe)) == ["issues:o/r#12", "review:o/r#7"]
+    assert polls == []
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert not pipe.is_paused("pipeline")
+    assert [t.id for t in pipe.drainable_tasks] == ["issues:o/r#12"]
+    assert len(polls) == 1
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert len(polls) == 1
+
+
+def test_a_launch_starts_no_ask_until_its_first_sync_is_applied(pipe):
+    _sync(pipe, _result(_fix()))
+    again = Store()
+    assert again.pipeline_enabled and again.is_paused("pipeline")
 
 
 # MARK: - The sync
@@ -456,11 +506,10 @@ def test_a_failed_sync_keeps_the_last_result_and_the_forced_items(pipe, monkeypa
 
 def test_a_notice_is_logged_when_it_first_appears(pipe):
     first = {**_result(), "notices": ["Linear was not read: no API key"]}
-    pipe._apply_pipeline_sync({"result": first, "forced": {}, "started": 0})
-    pipe._apply_pipeline_sync({"result": dict(first), "forced": {}, "started": 0})
-    pipe._apply_pipeline_sync({"result": {**first, "notices": [
-        "Linear was not read: no API key", "o/r could not be read: gh: rate limited"]},
-        "forced": {}, "started": 0})
+    _sync(pipe, first)
+    _sync(pipe, dict(first))
+    _sync(pipe, {**first, "notices": [
+        "Linear was not read: no API key", "o/r could not be read: gh: rate limited"]})
     assert _feed("pipeline-notice") == ["Linear was not read: no API key",
                                         "o/r could not be read: gh: rate limited"]
 
@@ -480,18 +529,17 @@ def test_each_merge_and_split_is_logged_once(pipe):
     items = (_item(), _item(PR, kind="pr", label="#7"))
     pipe.pipeline_result = {**_result(items=items), "events": [old]}
     first = {**_result(items=items), "events": [old, rated, merged, split]}
-    pipe._apply_pipeline_sync({"result": first, "forced": {}, "started": 0})
-    pipe._apply_pipeline_sync({"result": dict(first), "forced": {}, "started": 0})
+    _sync(pipe, first)
+    _sync(pipe, dict(first))
     later = _event("2026-11-20T10:00:00Z", "https://github.com/o/r/pull/8", "merged", "merged")
-    pipe._apply_pipeline_sync({"result": {**first, "events": [old, rated, merged, split, later]},
-                               "forced": {}, "started": 0})
+    _sync(pipe, {**first, "events": [old, rated, merged, split, later]})
     assert _feed("pipeline-merge") == ["#7: merged abc1234 with --admin --squash",
                                        "https://github.com/o/r/pull/8: merged"]
     assert _feed("pipeline-fracture") == ["#12: split into 2 parts"]
     # One older than anything the previous result showed is not new, though that
     # result left it out.
     older = _event("2026-11-20T09:30:00Z", PR, "merged", "merged 1111111")
-    pipe._apply_pipeline_sync({"result": {**first, "events": [older]}, "forced": {}, "started": 0})
+    _sync(pipe, {**first, "events": [older]})
     assert len(_feed("pipeline-merge")) == 2
 
 
@@ -523,13 +571,49 @@ def test_a_sync_asked_for_while_one_runs_follows_it(pipe, monkeypatch):
         return _result()
 
     monkeypatch.setattr(pipeline, "tick", tick)
+    QApplication.instance() or QApplication([])
     pipe.run_pipeline_sync_async()
     assert entered.wait(10)
     pipe.pipeline_force_now("rate", ISSUE)
     gate.set()
-    assert pipe.wait_for_background() == []
+    _land(pipe)
     assert handed == [[], [ISSUE]]
     assert not pipe.pipeline_syncing
+
+
+def _land(pipe, syncs: int = 2) -> None:
+    """Wait out each sync and apply it, which starts the one asked for meanwhile."""
+    for _ in range(syncs):
+        assert pipe.wait_for_background() == []
+        QApplication.processEvents()
+
+
+def test_a_sync_asked_for_while_one_runs_waits_for_its_plan_to_be_applied(pipe,
+                                                                          monkeypatch):
+    """So it is handed none of the forces the first one took."""
+    entered, gate = threading.Event(), threading.Event()
+    handed = []
+
+    def tick(settings, started=None):
+        handed.append(settings["force"]["rate"])
+        if len(handed) == 1:
+            entered.set()
+            gate.wait(10)
+        return _result()
+
+    monkeypatch.setattr(pipeline, "tick", tick)
+    QApplication.instance() or QApplication([])
+    pipe.pipeline_force_now("rate", ISSUE)
+    assert entered.wait(10)
+    pipe.pipeline_force_now("rate", PR)
+    gate.set()
+    assert pipe.wait_for_background() == []
+    assert (handed, pipe.pipeline_syncing) == ([[ISSUE]], True)
+    QApplication.processEvents()
+    assert pipe.pipeline_syncing
+    _land(pipe, 1)
+    assert handed == [[ISSUE], [PR]]
+    assert (pipe.pipeline_forced("rate"), pipe.pipeline_syncing) == (frozenset(), False)
 
 
 # MARK: - What the screen shows and starts
@@ -727,11 +811,13 @@ def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
     monkeypatch.setattr(pipeline, "tunables",
                         lambda: {"rater": {"perSync": 4, "timeoutSecs": 300}})
     # 4 ratings, a fracture and the 3 forced: 8 claude calls at 300 + 5 + 16 gh calls of
-    # 65; 2 roots of 10 gh calls; Linear; the lookups and the margin.
+    # 65; each of the 2 splits 6 parts of 5 gh calls; 2 roots of 10 gh calls; Linear; the
+    # lookups and the margin.
     assert pipeline.tick_timeout({
         "roots": [{}, {}], "linearTeams": [{}],
-        "force": {"rate": ["a", "b"], "fracture": ["c"]}}) == 8 * 1345 + 1300 + 300 + 40
-    assert pipeline.tick_timeout({}) == 5 * 1345 + 650 + 40
+        "force": {"rate": ["a", "b"], "fracture": ["c"]}}) == (
+            8 * 1345 + 2 * 1950 + 1300 + 300 + 40)
+    assert pipeline.tick_timeout({}) == 5 * 1345 + 1950 + 650 + 40
 
 
 def test_the_linear_teams_line_is_read_entry_by_entry():
@@ -982,6 +1068,8 @@ def test_then_runs_once_the_syncs_running_end(pipe, monkeypatch):
     gate.set()
     assert pipe.wait_for_background() == []
     QApplication.processEvents()
+    assert calls == []
+    _land(pipe, 1)
     assert (len(ticks), calls) == (2, ["first", "second"])
     pipe.pipeline_enabled = False
     pipe.run_pipeline_sync_async(then=lambda: calls.append("off"))
@@ -1039,7 +1127,7 @@ def test_the_apps_sync_timer_is_armed_only_once_a_sync_ends(monkeypatch):
 
 
 def test_a_failing_apply_still_re_arms_the_timer(pipe, monkeypatch):
-    def broken(self, result, now):
+    def broken(self, result, now, judged):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(Store, "_apply_pipeline_effects", broken)
@@ -1047,7 +1135,7 @@ def test_a_failing_apply_still_re_arms_the_timer(pipe, monkeypatch):
     with pipe._pipeline_lock:
         pipe._pipeline_then = [lambda: calls.append(1)]
     with pytest.raises(RuntimeError):
-        pipe._apply_pipeline_sync({"result": _result(), "forced": {}, "started": 0})
+        _sync(pipe, _result())
     assert calls == [1]
 
 
@@ -1063,12 +1151,13 @@ def test_a_follow_up_sync_stops_once_the_pipeline_is_off(pipe, monkeypatch):
         return _result()
 
     monkeypatch.setattr(pipeline, "tick", tick)
+    QApplication.instance() or QApplication([])
     pipe.run_pipeline_sync_async()
     assert entered.wait(10)
     pipe.pipeline_force_now("rate", ISSUE)
     pipe.pipeline_enabled = False
     gate.set()
-    assert pipe.wait_for_background() == []
+    _land(pipe)
     assert len(ticks) == 1
     assert not pipe.pipeline_syncing
 
@@ -1120,16 +1209,11 @@ def _queued_fix(pipe, effect=None) -> None:
 ])
 def test_a_queued_fix_leaves_when_its_issue_is_no_writable_candidate(pipe, now):
     _queued_fix(pipe)
-    pipe._apply_pipeline_sync({"result": _result(items=(now,)), "forced": {},
-                               "started": 0})
+    _sync(pipe, _result(items=(now,)))
     assert _keys(pipe) == []
     assert pipe.queued_tasks == []
     label = pipe.pipeline_work(_fix()).label_among(1)
     assert _feed("queue-drop") == [f"{label} - the pipeline no longer owes it, not run"]
-
-
-def _sync(pipe, result: dict) -> None:
-    pipe._apply_pipeline_sync({"result": result, "forced": {}, "started": 0})
 
 
 @pytest.mark.parametrize("fix, now", [
@@ -1187,7 +1271,7 @@ def test_a_switch_turned_off_withdraws_what_syncs_queued_for_it_at_once(pipe, mo
     """No sync needed; a Start fix stays."""
     syncs = []
     monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: syncs.append(1))
-    pipe._apply_pipeline_effects(_result(_fix(), _linear(), _review()), time.time())
+    _sync(pipe, _result(_fix(), _linear(), _review()))
     thirteen = _item("https://github.com/o/r/issues/13", label="#13")
     pipe.pipeline_result = _result(items=(thirteen,))
     assert pipe.pipeline_start_fix(thirteen) is None
@@ -1206,7 +1290,8 @@ def test_a_sync_withdraws_an_ask_whose_switch_is_off_even_in_a_root_it_could_not
     pipe._request([pipe.pipeline_work(_fix())])
     assert _keys(pipe) == ["issues:o/r#12"]
     pipe._apply_pipeline_sync({"result": _result(unread=("o/r",), at="2026-11-20T10:00:00Z"),
-                               "forced": {}, "started": 0 if ran else time.time()})
+                               "forced": {}, "started": 0 if ran else time.time(),
+                               "epoch": pipe._pipeline_epoch})
     assert _keys(pipe) == []
 
 
@@ -1230,11 +1315,10 @@ def test_a_queued_review_leaves_when_the_sync_owes_it_no_more(pipe):
     """Off the fast track, or Fast-track my PRs switched off: no review effect."""
     pipe._apply_pipeline_effects(_result(_review()), time.time())
     pr = _item(PR, kind="pr", label="#7", stage="fast-track", lane="fast")
-    pipe._apply_pipeline_sync({"result": _result(_review(), items=(pr,)), "forced": {},
-                               "started": 0})
+    _sync(pipe, _result(_review(), items=(pr,)))
     assert _keys(pipe) == ["review:o/r#7"]
     pipe.pipeline_fast_track = False
-    pipe._apply_pipeline_sync({"result": _result(items=(pr,)), "forced": {}, "started": 0})
+    _sync(pipe, _result(items=(pr,)))
     assert _keys(pipe) == []
 
 
@@ -1242,7 +1326,7 @@ def test_a_linear_fix_is_judged_by_its_issue_whatever_its_link(pipe):
     _queued_fix(pipe, _linear())
     item = _item("https://linear.app/acme/issue/ENG-12", source="linear", label="ENG-12",
                  writable=False)
-    pipe._apply_pipeline_sync({"result": _result(items=(item,)), "forced": {}, "started": 0})
+    _sync(pipe, _result(items=(item,)))
     assert _keys(pipe) == []
 
 
@@ -1258,8 +1342,7 @@ def test_only_the_pipelines_asks_are_withdrawn(pipe):
 def test_a_starting_fix_is_left_to_its_dispatch(pipe):
     _queued_fix(pipe)
     pipe._begin_starting(pipe.queued_tasks[0])
-    pipe._apply_pipeline_sync({"result": _result(items=(_item(writable=False),)),
-                               "forced": {}, "started": 0})
+    _sync(pipe, _result(items=(_item(writable=False),)))
     assert _keys(pipe) == ["issues:o/r#12"]
 
 
@@ -1283,6 +1366,70 @@ def test_a_concluded_record_is_kept_for_thirty_days(pipe):
     assert _keys(pipe) == []
 
 
+@pytest.mark.parametrize("teams, kept", [
+    ("ENG=o/r", [f"pipeline-fix:{ISSUE}", f"pipeline-fix:{LINEAR}"]),
+    # A Linear issue's root is its team's.
+    ("", [f"pipeline-fix:{ISSUE}"]),
+])
+def test_a_sync_keeps_the_records_in_a_root_it_could_not_judge_in_full(pipe, teams, kept):
+    """Read in part, or not at all (``state.json`` unreadable): it may have left their
+    effects out."""
+    pipe.pipeline_linear_teams_raw = teams
+    lapsed = autofix.ReviewAttempt("fix", time.time() - autofix.RETRY_MAX_BACKOFF - 1, 2)
+    pipe._save_attempts(PIPELINE_ATTEMPTS, {
+        f"pipeline-fix:{ISSUE}": lapsed, f"pipeline-fix:{LINEAR}": lapsed,
+        "pipeline-fix:https://github.com/x/y/issues/1": lapsed})
+    _sync(pipe, _result(unread=("O/R",)))
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS) == {k: lapsed for k in kept}
+
+
+@pytest.mark.parametrize("switch", ["pipeline_enabled", "pipeline_fix",
+                                    "pipeline_fast_track"])
+def test_a_sync_a_switch_went_off_during_prunes_no_record(pipe, monkeypatch, switch):
+    """It may have emitted less than it owes; the next sync prunes."""
+    lapsed = autofix.ReviewAttempt("fix", time.time() - autofix.RETRY_MAX_BACKOFF - 1, 2)
+    pipe._save_attempts(PIPELINE_ATTEMPTS, {f"pipeline-fix:{ISSUE}": lapsed})
+
+    def flipped(settings, started=None):
+        setattr(pipe, switch, False)
+        setattr(pipe, switch, True)
+        return _result()
+
+    monkeypatch.setattr(pipeline, "tick", flipped)
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS) == {f"pipeline-fix:{ISSUE}": lapsed}
+    monkeypatch.setattr(pipeline, "tick", lambda settings, started=None: _result())
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS) == {}
+
+
+def test_a_queued_linear_fix_is_queued_again_with_the_repo_and_text_a_sync_reads(
+        pipe, monkeypatch):
+    """Its agent cannot read Linear: the text and the repo it is handed are all it has."""
+    web = LocalRepo("o", "web", "/src/web")
+    monkeypatch.setattr(review, "repo_roots", lambda: [ROOT, web])
+    monkeypatch.setattr("diplomat_runtime.promptcore.build_prompt", json.dumps)
+    _sync(pipe, _result(_linear()))
+    # As Start fix would have queued it.
+    pipe.requested_work = [dataclasses.replace(pipe.requested_work[0], by_hand=True)]
+    records = pipe._load_attempts(PIPELINE_ATTEMPTS)
+    edited = {**_linear(), "text": "A thing\n\nIt breaks twice."}
+    moved = {**edited, "repo": "o/web"}
+    for effect in (edited, moved, moved):
+        _sync(pipe, _result(effect, fixable=(LINEAR,)))
+    [work] = pipe.requested_work
+    [task] = pipe.queued_tasks
+    assert (work.repo, work.config["linear"]["text"], work.by_hand) == (
+        "o/web", "A thing\n\nIt breaks twice.", True)
+    prompt = json.loads(task.job.prompt)
+    assert (prompt["home"]["path"], prompt["linear"]["text"], task.id) == (
+        "/src/web", "A thing\n\nIt breaks twice.", work.key)
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS) == records
+    label = work.label_among(2)
+    assert _feed("pipeline-fix") == [f"{label} queued"] + [
+        f"{label} queued again: its repo or text changed"] * 2
+
+
 # MARK: - The first sync
 
 
@@ -1301,8 +1448,7 @@ def test_with_no_last_result_only_this_syncs_events_are_new(pipe):
     at = _now_iso()
     old = _event("2026-11-20T09:00:00Z", PR, "merged", "merged 0000000")
     now = _event(at, PR, "merged", "merged abc1234")
-    pipe._apply_pipeline_sync({"result": {**_result(at=at), "events": [old, now]},
-                               "forced": {}, "started": 0})
+    _sync(pipe, {**_result(at=at), "events": [old, now]})
     assert _feed("pipeline-merge") == ["https://github.com/o/r/pull/7: merged abc1234"]
 
 

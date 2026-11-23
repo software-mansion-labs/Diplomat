@@ -27,7 +27,7 @@ from urllib.parse import urlsplit
 
 from . import core, promptcore
 from .autofix import QUEUE_ISSUES_ACTION, QUEUE_REVIEW_ACTION, RETRY_MAX_BACKOFF, linear_item
-from .prref import item_key_from_url
+from .prref import item_key_from_url, split_item_key
 
 #: Raised by :func:`last`: the CLI's own reason, or why it could not run.
 Failure = (RuntimeError, promptcore.CoreBinaryMissing, ValueError)
@@ -96,9 +96,12 @@ def sync_secs() -> float:
 
 #: ``GH.timeout`` plus the five seconds ``GH.stop`` waits before its SIGKILL.
 _GH_CALL_SECS = 65
-#: The ``gh`` calls one rating or fracture may bring: a diff, label creates, adds and
-#: removes, a fractured issue's children and their sub-issue links.
+#: The ``gh`` calls one rating, or a split's claim, may bring: a diff, label creates,
+#: adds and removes.
 _GH_CALLS_PER_CLAUDE = 16
+#: And each part of a split: a re-read, the parts filed before (twice after a failed
+#: create), the create and its sub-issue link.
+_GH_CALLS_PER_PART = 5
 #: The read of a root, and its merges.
 _GH_CALLS_PER_ROOT = 10
 #: Linear's reads (300 issues, paged) and its label and child writes.
@@ -112,15 +115,20 @@ def tick_timeout(settings: dict) -> float:
     """How long ``pipeline-tick`` runs before it is killed: every ``claude`` call a sync
     may make (``rater.perSync`` ratings, one fracture, and each one the view forced) at
     ``rater.timeoutSecs`` and the five seconds before its SIGKILL, each with the ``gh``
-    calls around it; the roots' reads and merges; Linear. It bounds a wedged core, not
-    a slow sync, so it is generous."""
-    rater = tunables().get("rater") or {}
+    calls around it, a fracture's for ``fracture.maxChildren`` parts too; the roots'
+    reads and merges; Linear. It bounds a wedged core, not a slow sync, so it is
+    generous."""
+    t = tunables()
+    rater = t.get("rater") or {}
     force = settings.get("force") or {}
-    claude_calls = (int(rater.get("perSync", 4)) + 1 + len(force.get("rate") or [])
-                    + len(force.get("fracture") or []))
+    splits = 1 + len(force.get("fracture") or [])
+    claude_calls = int(rater.get("perSync", 4)) + len(force.get("rate") or []) + splits
     per_claude = float(rater.get("timeoutSecs", 300)) + 5 + _GH_CALLS_PER_CLAUDE * _GH_CALL_SECS
+    per_split = (int((t.get("fracture") or {}).get("maxChildren", 6)) * _GH_CALLS_PER_PART
+                 * _GH_CALL_SECS)
     roots = max(1, len(settings.get("roots") or []))
-    return (claude_calls * per_claude + roots * _GH_CALLS_PER_ROOT * _GH_CALL_SECS
+    return (claude_calls * per_claude + splits * per_split
+            + roots * _GH_CALLS_PER_ROOT * _GH_CALL_SECS
             + (_LINEAR_SECS if settings.get("linearTeams") else 0)
             + _LOOKUP_SECS + _MARGIN_SECS)
 
@@ -301,16 +309,31 @@ def concluded(attempts: dict, runs, now_ts: float) -> dict:
 CONCLUDED_KEEP_SECS = 30 * 86400.0
 
 
-def retained(attempts: dict, result: dict, now: float) -> dict:
-    """The records a sync keeps: each while the sync owes its effect, so its retry
+def _root_of(url: str, teams: list[dict]) -> str:
+    """The root, lowercased, an item's fix or review runs in: a GitHub item's own, a
+    Linear issue's team's in ``teams`` (:func:`parse_linear_teams`); "" for none."""
+    item = identity(url)
+    linear = linear_item("")
+    if item.startswith(linear):
+        team = item[len(linear):].rpartition("-")[0].upper()
+        return next((t["repo"].lower() for t in teams if t["key"] == team), "")
+    split = split_item_key(item)
+    return split[0].lower() if split else ""
+
+
+def retained(attempts: dict, result: dict, now: float, teams: list[dict]) -> dict:
+    """The records a sync keeps: each in a root it did not judge in full (``unread``),
+    whose effect it may have left out; each while it owes the effect, so its retry
     ladder and its conclusion stand; for the backoff ceiling after its last dispatch,
     so an effect a failed read left out is not taken for a new one when it is back; and
     a concluded one for :data:`CONCLUDED_KEEP_SECS` after its run concluded, so a fix
     whose PR was closed unmerged is not asked for again. Twin of
     ``Store.retainedPipelineAttempts``."""
     owed = {str(e.get("key") or "") for e in result.get("effects") or []}
+    unread = {r.lower() for r in result.get("unread") or []}
     return {k: a for k, a in attempts.items()
-            if k in owed or now - a.last_dispatched_at < RETRY_MAX_BACKOFF
+            if k in owed or _root_of(k.partition(":")[2], teams) in unread
+            or now - a.last_dispatched_at < RETRY_MAX_BACKOFF
             or (a.concluded_at is not None and now - a.concluded_at < CONCLUDED_KEEP_SECS)}
 
 

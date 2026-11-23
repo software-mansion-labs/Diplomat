@@ -1412,8 +1412,9 @@ class SettingsView(QWidget):
         self._pipeline_key_row = self._track(SettingRow(
             "Linear API key", QWidget(),
             detail="Read on each sync from the file linearTokenFile names in "
-                   "~/.diplomat/config.json and kept in memory only, never handed to an "
-                   "agent: a fix gets the issue's text as Diplomat read it. "
+                   "~/.diplomat/config.json and staged in an owner-only temp file for each "
+                   "Linear call, never handed to an agent: a fix gets the issue's text as "
+                   "Diplomat read it. "
                    f"${pipeline.TOKEN_ENV} wins over it. Without a key, the teams set "
                    "here are skipped with a notice and GitHub still syncs, but no PR is "
                    "merged."))
@@ -1436,7 +1437,6 @@ class SettingsView(QWidget):
         self.store.tasks_changed.emit()
         if on:
             self.store.run_pipeline_sync_async()
-            self.store.run_autofix_poll_async()
 
     def _on_pipeline_option(self, attr: str, on: bool) -> None:
         """A switch turned on acts at once, not a sync period later."""

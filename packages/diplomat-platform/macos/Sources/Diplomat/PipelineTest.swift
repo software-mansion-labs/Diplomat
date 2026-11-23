@@ -36,6 +36,8 @@ enum PipelineTest {
         defer { AgentProbes.pinDump(nil) }
 
         let store = Store()
+        check("a launch: no pipeline ask queued before it starts until its first sync is applied",
+              !store.pipelineJudged)
         // A headless Store still READS the operator's settings and their stored asks: pin
         // every one an assertion below depends on. Records live in `headlessJSON`.
         store.headlessJSON = [:]
@@ -275,16 +277,27 @@ enum PipelineTest {
         let old = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1)
         let gone = "pipeline-fix:https://github.com/o/r/issues/90077"
         let later = t0.addingTimeInterval(3 * 3600)
+        let teams = [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r")]
         check("at the backoff ceiling, a record no sync owes is dropped, a notice or not",
               Store.retainedPipelineAttempts([gone: old], after: result([], notices: ["Linear: no key"]),
-                                             now: later).isEmpty)
+                                             teams: teams, now: later).isEmpty)
         check("…kept inside it, so a read that failed does not make it new",
               Store.retainedPipelineAttempts([gone: old], after: result([]),
-                                             now: later.addingTimeInterval(-1))[gone] == old)
+                                             teams: teams, now: later.addingTimeInterval(-1))[gone] == old)
         check("…and kept while owed, however old",
               Store.retainedPipelineAttempts([fix.key: old], after: result([fix]),
-                                             now: t0.addingTimeInterval(30 * 86400))[fix.key] == old)
+                                             teams: teams, now: t0.addingTimeInterval(30 * 86400))[fix.key] == old)
+        let unreadRoot = PipelineTickResult(at: Date(), unread: ["O/R"])
+        check("…and in a root the sync did not judge in full, a Linear issue's by its team's",
+              Store.retainedPipelineAttempts([gone: old, fixLinear.key: old], after: unreadRoot,
+                                             teams: teams, now: later) == [gone: old, fixLinear.key: old]
+                  && Store.retainedPipelineAttempts([gone: old, fixLinear.key: old], after: unreadRoot,
+                                                    teams: [], now: later) == [gone: old]
+                  && Store.retainedPipelineAttempts([gone: old], after: PipelineTickResult(at: Date(), unread: ["o/x"]),
+                                                    teams: teams, now: later).isEmpty)
         store.savePipelineAttempts([gone: old])
+        await store.applyPipeline(result([]), judged: false, now: later)
+        check("…all of them after a sync not judged", store.loadPipelineAttempts() == [gone: old])
         await store.applyPipeline(result([]), now: later)
         check("…as a sync saves them", store.loadPipelineAttempts().isEmpty)
         let closedNow = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1, concludedAt: later)
@@ -705,6 +718,78 @@ enum PipelineTest {
                   && !Store.pipelineRan(PipelineTickResult(at: Date(timeIntervalSince1970: 99)),
                                         started: Date(timeIntervalSince1970: 100.2)))
 
+        print("\npipeline: switched back on")
+        await store.applyPipeline(result([fix, review]), now: now)
+        store.pipelineEnabled = false
+        store.pipelineEnabled = true
+        check("on again: none of the asks queued before starts until a sync begun since is applied",
+              store.isPaused(.pipeline) && store.drainableTasks.isEmpty && ids().count == 2)
+        Store.pipelineTickOverride = { _ in PipelineTickResult(at: Date().addingTimeInterval(-60), items: items) }
+        await store.runPipelineSyncOnce()
+        check("…nor once the last result is answered again", store.isPaused(.pipeline) && ids().count == 2)
+        Store.pipelineTickOverride = { _ in
+            store.pipelineEnabled = false
+            store.pipelineEnabled = true
+            return result([fix])
+        }
+        await store.runPipelineSyncOnce()
+        check("…nor once one begun before it is, which withdraws nothing",
+              store.isPaused(.pipeline) && ids().sorted() == [fixKey, reviewKey].sorted())
+        Store.pipelineTickOverride = { _ in result([fix]) }
+        await store.runPipelineSyncOnce()
+        check("…which withdraws what it no longer owes, then lets the rest start",
+              !store.isPaused(.pipeline) && ids() == [fixKey] && store.drainableTasks.map(\.id) == [fixKey])
+        clearQueue()
+        let lapsed = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: Date().addingTimeInterval(-4 * 3600),
+                                   attempts: 2)
+        store.savePipelineAttempts([fix.key: lapsed])
+        Store.pipelineTickOverride = { _ in
+            store.pipelineFix = false
+            store.pipelineFix = true
+            return result([])
+        }
+        await store.runPipelineSyncOnce()
+        check("a sync Open fix PRs went off during keeps the records of the fixes it left out",
+              store.loadPipelineAttempts() == [fix.key: lapsed] && !store.isPaused(.pipeline))
+        Store.pipelineTickOverride = { _ in result([]) }
+        await store.runPipelineSyncOnce()
+        check("…which the next sync drops", store.loadPipelineAttempts().isEmpty)
+        Store.pipelineTickOverride = nil
+
+        print("\npipeline: a queued Linear fix read otherwise")
+        await store.applyPipeline(result([fixLinear]), now: now)
+        // As Start fix would have queued it.
+        if let i = store.requestedWork.firstIndex(where: { $0.key == linearKey }) { store.requestedWork[i].byHand = true }
+        let recorded = store.loadPipelineAttempts()
+        let edited = PipelineEffect.fixLinear(repo: "o/r", identifier: "ENG-90010", url: linear,
+                                              text: "Title\n\nEdited", author: "Bob")
+        func linearAsk() -> (repo: String, text: String?, byHand: Bool)? {
+            guard let a = ask(linearKey), case .issues(let cfg) = a.config else { return nil }
+            return (a.repo, cfg.linear?.text, a.byHand)
+        }
+        func owing(_ effect: PipelineEffect) -> PipelineTickResult {
+            PipelineTickResult(at: Date(), items: items, effects: [effect], fixable: [linear])
+        }
+        await store.applyPipeline(owing(edited), now: now)
+        check("its text edited: queued again with the new text, as the same attempt and the operator's",
+              ids() == [linearKey] && linearAsk().map { $0 == ("o/r", "Title\n\nEdited", true) } == true
+                  && job(linearKey)?.prompt.contains("Edited") == true && store.loadPipelineAttempts() == recorded
+                  && feed("pipeline-fix").last == "auto \(line(linearKey)) queued again: its repo or text changed")
+        let fixLines = feed("pipeline-fix").count
+        let pinnedRoots = store.roots
+        store.pinRoots(pinnedRoots + [PRRef.LocalRepo(owner: "o", repo: "web", path: scratch.path)])
+        let moved = PipelineEffect.fixLinear(repo: "o/web", identifier: "ENG-90010", url: linear,
+                                             text: "Title\n\nEdited", author: "Bob")
+        await store.applyPipeline(owing(moved), now: now)
+        await store.applyPipeline(owing(moved), now: now)
+        check("…its team mapped to another repo: queued again there, once",
+              ids() == [linearKey] && linearAsk()?.repo == "o/web"
+                  && job(linearKey)?.prompt.contains("fix it in o/web") == true
+                  && feed("pipeline-fix").count == fixLines + 1)
+        store.pinRoots(pinnedRoots)
+        clearQueue()
+        store.savePipelineAttempts([:])
+
         print("\npipeline: asks a sync no longer owes")
         let asks = [fix, fixLinear, review].compactMap { store.pipelineAsk($0) } + [sweep]
         func withdrawn(_ seen: [PipelineItem], _ effects: [PipelineEffect], unread: [String] = [],
@@ -757,10 +842,10 @@ enum PipelineTest {
         print("\npipeline: concluded records")
         let closedOut = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1, concludedAt: t0)
         check("a concluded record no sync owes is kept for 30 days after its run concluded",
-              Store.retainedPipelineAttempts([gone: closedOut], after: result([]),
+              Store.retainedPipelineAttempts([gone: closedOut], after: result([]), teams: teams,
                                              now: t0.addingTimeInterval(29 * 86400))[gone] == closedOut)
         check("…and dropped past them",
-              Store.retainedPipelineAttempts([gone: closedOut], after: result([]),
+              Store.retainedPipelineAttempts([gone: closedOut], after: result([]), teams: teams,
                                              now: t0.addingTimeInterval(30 * 86400 + 1)).isEmpty)
 
         print("\npipeline: whose work it is")
@@ -792,6 +877,13 @@ enum PipelineTest {
         check("a held part has no Start fix, and pressing it says the hold",
               store.pipelineFixEffect(for: heldPart) == nil
                   && store.startPipelineFix(heldPart) == heldPart.hold && ids().isEmpty)
+        let bannedBefore = store.bannedAuthors
+        store.bannedAuthors = [BannedAuthor(login: "mallory")]
+        check("the screen holds Rate now and Fracture for the banned author its text came from",
+              store.pipelineBanned(heldPart) == "mallory"
+                  && store.pipelineBanned(item(issue, .issue, author: "Mallory")) == "Mallory"
+                  && store.pipelineBanned(partItem) == nil)
+        store.bannedAuthors = bannedBefore
         var unheld = heldPart
         unheld.hold = nil
         store.pipelineResult = PipelineTickResult(at: Date(), items: items + [unheld])
