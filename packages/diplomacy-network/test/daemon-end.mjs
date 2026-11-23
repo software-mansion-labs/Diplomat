@@ -400,6 +400,20 @@ try {
     }
     assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null, ended: { offers: 0, runs: 0 } });
     assert.equal(fs.existsSync(path.join(m.base, 'runs')), false);
+
+    // The first of the directories stays: the ones after it go all the same.
+    const ca = path.join(m.base, 'ca');
+    const stuck = path.join(ca, 'locked');
+    fs.mkdirSync(stuck, { recursive: true });
+    fs.writeFileSync(path.join(stuck, 'file'), '');
+    fs.chmodSync(stuck, 0o500);
+    for (const dir of ['mirrors', 'runs']) fs.mkdirSync(path.join(m.base, dir, 'left'), { recursive: true });
+    try {
+      assert.deepEqual(await m.install('--stop-daemon'), { ok: false, daemonRunning: false, pid: null, error: `${ca} could not be removed. The next --stop-daemon tries again.`, ended: { offers: 0, runs: 0 } });
+      assert.deepEqual(kept(m).slice(0, 2), ['ca', 'identity.json']);
+    } finally {
+      free(stuck);
+    }
   });
 
   const jobStarts = (m) => m.docker('exec').filter((call) => call.some((arg) => /run\.sh$/.test(arg)));

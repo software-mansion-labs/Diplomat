@@ -1,7 +1,8 @@
 // A daemon that comes back to jobs an earlier one left running: nothing new is started
 // in a container before the jobs left in it were taken up, whether the new job was
-// waiting for its key when the daemon went or is offered the moment it is back, and a
-// job the daemon has lost every record of is found in its container and stopped.
+// waiting for its key when the daemon went or is offered the moment it is back; a job
+// the daemon has lost every record of is found in its container and stopped; and a job
+// whose container the machine's restart stopped is given back, or, finished, reported.
 // Real daemon processes on scratch directories over the loop transport, with the
 // stand-in docker, forge and agent.
 // Run: node test/daemon-restart.mjs
@@ -264,6 +265,21 @@ try {
     await m.kill();
   });
 
+  await check('a job taken up after a restart goes on from what it had spent before it: the model answers it no more than its share all told', async () => {
+    const m = await bench.machine('fuse', { env: { DN_JOBS_WRITE_MS: '100', DN_JOB_MODEL_REQUESTS: '2' } }).start();
+    await m.linked();
+    const taskId = await own(m, 'pr-1', 'model\nwait go\nmodel\nmodel\nsay spent');
+    const run = await waiting(m, taskId, 'go');
+    await until('what it spent, on disk', () => jobsOf(m)[run.runId]?.spent?.requests === 1);
+    assert.deepEqual(await m.stop(), { code: 0, signal: null });
+    await m.start();
+    await until('the job taken up', () => m.log().includes(`${run.runId} taken up in ${run.container}`));
+    m.release('go');
+    await until('its last request answered', () => asks(m, run.runId).length === 3);
+    assert.deepEqual(asks(m, run.runId), [['model', 200], ['model', 200], ['model', 429]]);
+    await m.kill();
+  });
+
   await check('a job whose run was ended while no daemon ran is stopped by the next daemon with nothing of the model or the forge given back to it; a job being stopped keeps on disk what it had spent', async () => {
     // No look at the runs but the one a daemon takes as it starts.
     const m = await bench.machine('ended', { env: { DN_RECONCILE_MS: '600000', DN_INSTALLER_ANSWER_MS: '2000', DN_JOBS_WRITE_MS: '100' } }).start();
@@ -307,7 +323,7 @@ try {
     await m.kill();
   });
 
-  await check('an engine that does not answer the daemon that starts: the job left there is taken up once it does, and after the wait for it the job is given back at no attempt and stopped when the engine is back', async () => {
+  await check('an engine that does not answer the daemon that starts: the job left there is taken up once it does, and after the wait for it the job is given back at no attempt, nothing is asked of it while the engine is down, and it is stopped once when the engine is back', async () => {
     const m = await bench.machine('eng').start();
     await m.linked();
     const taskId = await own(m, 'pr-1', 'wait go\nsay waited for');
@@ -337,10 +353,47 @@ try {
     await until('the job given back', () => m.log().includes(`giving ${left.runId} back: ${why}`), 60000);
     const offer = await until('its task back in the pool', async () => { const at = await offerOf(m, second); return at.state === 'pooled' ? at : null; });
     assert.deepEqual([(await runOf(m, second)).state, offer.attempt, alive(leftPid), Object.keys(jobsOf(m))], ['stopped', 1, true, []]);
+    // Its stop waits for the engine: while that is down nothing is asked of the job.
+    const [execs, versions] = [m.docker('exec').length, m.docker('version').length];
+    await until('the engine looked at, again and again', () => m.docker('version').length >= versions + 3);
+    assert.deepEqual(asked(m, left.runId, execs, group), []);
+    // An engine slow to answer is asked by one look at a time: the job is stopped once.
+    const slow = path.join(m.dockerDir, 'hold-version');
+    fs.writeFileSync(slow, '');
     fs.rmSync(path.join(m.dockerDir, 'down'));
-    await until('the job found in its container and stopped', () => m.log().includes(`stopping ${left.runId} in ${left.container}: this daemon holds no record of the job`));
+    await sleep(3000);
+    fs.rmSync(slow);
+    const stopping = `stopping ${left.runId} in ${left.container}: this daemon holds no record of the job`;
+    await until('the job found in its container and stopped', () => m.log().includes(stopping));
+    await sleep(1000);
+    assert.equal(m.log().split(stopping).length - 1, 1);
     if (PROC) await until('everything of the job gone', () => !alive(leftPid));
     else end(group);
+    await m.kill();
+  });
+
+  await check('a job whose container a restart of the machine left stopped is given back at no attempt; one that had finished by itself before that ends as it finished', async () => {
+    const m = await bench.machine('boot').start();
+    await m.linked();
+    const cut = await own(m, 'pr-1', 'wait never\nsay never');
+    const finished = await own(m, 'pr-2', 'wait go\nsay before the restart');
+    const [run, ended] = [await waiting(m, cut, 'never'), await waiting(m, finished, 'go')];
+    assert.equal(run.container, ended.container);
+    await m.kill();
+    m.release('go');
+    await until('the job to end with nobody watching', () => fs.existsSync(path.join(m.base, 'runs', ended.runId, 'done')));
+    // As the engine is after the machine restarted: the container stopped, nothing of it running.
+    m.killJobs();
+    const record = path.join(m.dockerDir, 'containers', `${run.container}.json`);
+    fs.writeFileSync(record, JSON.stringify({ ...JSON.parse(fs.readFileSync(record, 'utf8')), running: false }));
+    await m.start();
+    const offer = await until('the task back in the pool', async () => { const at = await offerOf(m, cut); return at.state === 'pooled' ? at : null; });
+    assert.deepEqual([offer.attempt, (await runOf(m, cut)).state], [1, 'stopped']);
+    assert.ok(m.log().includes(`giving ${run.runId} back: its container could not be taken up when this daemon started (gone or stopped, as a restart of the machine or of its docker engine leaves it), and the job had not finished`), m.log());
+    await done(m, finished);
+    const { attempt, outcome } = await offerOf(m, finished);
+    // The job named tokens; jobs.json says the model carried none for it.
+    assert.deepEqual([attempt, outcome.summary, outcome.tokens, outcome.capped, (await runOf(m, finished)).state], [1, 'before the restart', 0, true, 'finished']);
     await m.kill();
   });
 

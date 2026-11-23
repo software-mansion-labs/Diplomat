@@ -18,17 +18,17 @@
 import fs from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { daemonControl } from '../../daemon-core/src/daemon-control.js';
-import { pidAlive } from '../../daemon-core/src/fsio.js';
+import { pidAlive, readJson } from '../../daemon-core/src/fsio.js';
 import { holdSocket } from '../../daemon-core/src/serve.js';
 import { createContainers } from './executor/container.js';
-import { readOutcome } from './executor/job.js';
+import { attachJob, readOutcome, watch } from './executor/job.js';
 import * as client from './ipc.js';
 import { openLog } from './log.js';
 import { switchOffStored } from './node/offline.js';
-import { clearAway, readConfig } from './off.js';
+import { clearAway, finishedLeft, readConfig } from './off.js';
 import { createStore } from './node/store.js';
 import {
-  BASE_DIR, DISCOVERY_PATH, EXECUTOR_RETRY_MS, INSTALLER_ANSWER_MS, LOG_PATH, SOCKET_PATH, STOP_WAIT_MS, TOOL_PATH,
+  BASE_DIR, DISCOVERY_PATH, EXECUTOR_RETRY_MS, INSTALLER_ANSWER_MS, JOBS_PATH, LOG_PATH, SOCKET_PATH, STOP_WAIT_MS, TOOL_PATH,
 } from './paths.js';
 
 // docker is looked for where the daemon looks for it.
@@ -72,8 +72,9 @@ let ended = null;
 // offered and gave back nothing it ran: switched on again it would offer work Diplomat
 // has since started elsewhere. That is ended here, in its store, which is this
 // process's for as long as it holds the daemon's socket; while a daemon has the socket
-// or is taking it, the ending is that daemon's. A run whose job ended under a daemon
-// that did not live to tell the node ends as that job did. An error message, or null.
+// or is taking it, the ending is that daemon's. A run whose job ended with no daemon
+// left to tell the node, under one that died or under none, ends as that job did. An
+// error message, or null.
 async function endStored() {
   // No daemon ever ran here: there is no store.
   if (!fs.existsSync(BASE_DIR)) return null;
@@ -82,7 +83,17 @@ async function endStored() {
     release = await holdSocket(SOCKET_PATH);
     if (!release) return null;
     const log = openLog(LOG_PATH);
-    const { offers, runs, reported } = await switchOffStored({ store: createStore({ dir: BASE_DIR, log }), log, outcomeOf: readOutcome });
+    const kept = readJson(JOBS_PATH)?.jobs ?? {};
+    // A job that finished with no daemon watching has its outcome read from what it left,
+    // as a daemon would, its share of the model as jobs.json last had it.
+    const outcomeOf = async (runId) => {
+      const ended = readOutcome(runId);
+      if (ended) return ended;
+      const left = await finishedLeft(runId);
+      const was = Object.hasOwn(kept, runId) ? kept[runId] : null;
+      return left && attachJob({ runId, container: left.container, pid: was?.pid ?? null, spent: () => was?.spent ?? null }) ? watch({ runId }) : null;
+    };
+    const { offers, runs, reported } = await switchOffStored({ store: createStore({ dir: BASE_DIR, log }), log, outcomeOf });
     ended = { offers, runs };
     log(`the network is switched off and no daemon runs: ${offers} offer(s) cancelled, ${runs - reported} run(s) stopped and given back${reported > 0 ? `, ${reported} run(s) ended as the job that had finished left it` : ''}`);
     return null;

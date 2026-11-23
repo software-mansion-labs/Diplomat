@@ -1,9 +1,13 @@
-// What the daemon and the installer both do about the network's switch in Diplomat's
-// config: reading it, and removing what a machine that is switched off keeps nothing of.
+// What the daemon and the installer both do: read the network's switch in Diplomat's
+// config, remove what a machine that is switched off keeps nothing of, and find a job
+// that finished while no daemon watched it.
 
 import fs from 'node:fs';
+import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { readJson } from '../../daemon-core/src/fsio.js';
+import { unended } from './executor/job.js';
+import { readOwn } from './executor/result.js';
 import { CONFIG_PATH, OFF_REMOVES, RUNS_DIR } from './paths.js';
 
 /// Diplomat's config as an object, or null while it cannot be read as one. Only a config
@@ -35,4 +39,14 @@ export async function clearAway(containers, withinMs) {
   if (left.length === 0) return '';
   const records = left.includes(RUNS_DIR) ? ': a job left among its records what this user may not delete, and no docker engine deleted it' : '';
   return `${left.join(' and ')} could not be removed${records}. The next --stop-daemon tries again.`;
+}
+
+/// Of a run whose job ended by itself with no daemon watching it - its runner wrote its
+/// exit code in `done`, which it does last - the run as `attachJob` takes it, `{ runId,
+/// container }`, for `watch` to read the outcome from what the job left. Null for a job
+/// that wrote none, one whose outcome is on record and one this process watches.
+export async function finishedLeft(runId) {
+  const left = unended().find((run) => run.runId === runId);
+  const done = left ? await readOwn(path.join(left.container.runsDir, runId), 'done', 32) : null;
+  return /^\d+\s*$/.test(done ?? '') ? left : null;
 }

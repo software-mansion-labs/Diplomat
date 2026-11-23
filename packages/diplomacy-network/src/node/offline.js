@@ -15,7 +15,7 @@ const noTransport = {
 /// offer of its own that has not ended is cancelled and every run is stopped and its
 /// claim given back, each under a record the host signs, and all of it is on disk when
 /// this resolves. A run whose job ended with no host there to hear of it -
-/// `outcomeOf(runId)` is what that job left on record, or null - ends as its job did
+/// `outcomeOf(runId)` resolves to how that job ended, or to null - ends as its job did
 /// instead: this host's own offer of the task has the outcome; another host's cannot be
 /// told with no transport, and its claim is given back like the rest. Answers
 /// `{ offers, runs, reported }`: the offers it cancelled, the runs it ended, and how many
@@ -41,7 +41,7 @@ export async function switchOffStored({ store, log = () => {}, outcomeOf = () =>
   await node.start();
   let reported = 0;
   for (const { runId } of open(before.runs)) {
-    const outcome = outcomeOf(runId);
+    const outcome = await outcomeOf(runId);
     if (!outcome) continue;
     report(runId, outcome);
     reported += 1;

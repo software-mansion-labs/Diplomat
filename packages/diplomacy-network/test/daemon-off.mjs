@@ -148,29 +148,34 @@ try {
     assert.deepEqual(fs.readdirSync(path.join(never.base, 'pools')).length, 1);
   });
 
-  await check('a job that ended under a daemon that did not live to say so is not given back at the switch-off: the installer ends its run as the job did, this machine\'s own task is done with what the job said, and the job that still ran is stopped', async () => {
+  await check('a job that ended with no daemon to say so, whether one saw its end and died or none was there, is not given back at the switch-off: the installer ends its run as the job did, this machine\'s own task is done with what the job said, and the job that still ran is stopped', async () => {
     const m = await bench.machine('told').start();
     await m.linked();
     const finished = await offer(m, 'pr-1', 'wait go\nsay by itself', true);
     const unfinished = await offer(m, 'pr-2', 'wait never\nsay never', true);
-    const [run, going] = [await waiting(m, finished, 'go'), await waiting(m, unfinished, 'never')];
+    const alone = await offer(m, 'pr-3', 'wait go\nsay alone', true);
+    const [run, going, after] = [await waiting(m, finished, 'go'), await waiting(m, unfinished, 'never'), await waiting(m, alone, 'go')];
     await m.kill();
     m.release('go');
-    await until('the job to end with nobody watching', () => fs.existsSync(path.join(m.base, 'runs', run.runId, 'done')));
-    // As the daemon writes it the moment it sees the job's end.
+    await until('the jobs to end with nobody watching', () => [run, after].every(({ runId }) => fs.existsSync(path.join(m.base, 'runs', runId, 'done'))));
+    // As the daemon writes it the moment it sees the job's end; of the other, only what the job left.
     fs.writeFileSync(path.join(m.base, 'runs', `${run.runId}.outcome.json`), JSON.stringify({ ok: true, summary: 'kept on disk', usd: 0, tokens: 0, model: '', runner: 'claude', exit: 0, state: 'finished' }));
 
     m.setConfig({ networkEnabled: false });
-    assert.deepEqual(await m.install('--stop-daemon'), { ...gone, ended: { offers: 1, runs: 2 } });
-    assert.match(m.log(), /\] the network is switched off and no daemon runs: 1 offer\(s\) cancelled, 1 run\(s\) stopped and given back, 1 run\(s\) ended as the job that had finished left it\n$/);
+    assert.deepEqual(await m.install('--stop-daemon'), { ...gone, ended: { offers: 1, runs: 3 } });
+    assert.match(m.log(), /\] the network is switched off and no daemon runs: 1 offer\(s\) cancelled, 1 run\(s\) stopped and given back, 2 run\(s\) ended as the job that had finished left it\n$/);
     assert.equal(alive(m.agent(going.runId).pid), false);
-    // All of it is on disk by then: the run that was told owes nothing more.
-    assert.equal(JSON.parse(fs.readFileSync(path.join(m.base, 'runs.json'), 'utf8')).runs[run.runId].end, 'over');
+    // All of it is on disk by then: the runs that were told owe nothing more.
+    const runs = JSON.parse(fs.readFileSync(path.join(m.base, 'runs.json'), 'utf8')).runs;
+    assert.deepEqual([runs[run.runId].end, runs[after.runId].end], ['over', 'over']);
     m.setConfig({ networkEnabled: true });
     await m.start();
     const back = await m.state();
-    assert.deepEqual(back.offers.map((o) => [o.taskId, o.state, o.attempt, o.outcome?.summary ?? o.reason]).sort(), [[finished, 'done', 1, 'kept on disk'], [unfinished, 'cancelled', 1, OFF]].sort());
-    assert.deepEqual(back.runs.map((r) => [r.runId, r.state]).sort(), [[run.runId, 'finished'], [going.runId, 'stopped']].sort());
+    assert.deepEqual(back.offers.map((o) => [o.taskId, o.state, o.attempt, o.outcome?.summary ?? o.reason]).sort(), [[finished, 'done', 1, 'kept on disk'], [unfinished, 'cancelled', 1, OFF], [alone, 'done', 1, 'alone']].sort());
+    assert.deepEqual(back.runs.map((r) => [r.runId, r.state]).sort(), [[run.runId, 'finished'], [going.runId, 'stopped'], [after.runId, 'finished']].sort());
+    // The job named tokens; jobs.json says the model carried none for it.
+    const read = back.offers.find((o) => o.taskId === alone).outcome;
+    assert.deepEqual([read.tokens, read.capped], [0, true]);
     await m.kill();
   });
 
