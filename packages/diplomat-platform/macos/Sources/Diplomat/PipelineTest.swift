@@ -969,7 +969,7 @@ enum PipelineTest {
         }
         func linearWrites() -> [String] {
             log("linear.log").compactMap { ($0 as? [String: Any])?["op"] as? String }
-                .filter { !["Issues", "Labels", "Attached"].contains($0) }
+                .filter { !["Issues", "Issue", "Labels", "Attached"].contains($0) }
         }
         func truncate() {
             for name in ["gh.log", "linear.log", "claude.log"] {
