@@ -131,14 +131,43 @@ await check('what changed in a document is written as a line after it, and the d
     disk.write(name, `${JSON.stringify(doc)}\n`);
     fs.writeFileSync(log, `${whole}{"n":\n{"n":7}\n`);
     const said = [];
-    assert.deepEqual(createStore({ dir, log: (text) => said.push(text) }).lines(name), []);
-    assert.match(said.join('\n'), /\.log does not parse .* read as empty/);
+    assert.deepEqual(createStore({ dir, log: (text) => said.push(text) }).lines(name), [{ n: 5 }], 'a line that does not parse ends the log, and the lines before it stand');
+    assert.match(said.join('\n'), /line 2 of .*\.log does not parse .* read up to it/);
     assert.deepEqual(createStore({ dir }).read(name), doc, 'and the document is read as it is');
     const next = createStore({ disk: counted });
     did.splice(0);
     next.write(name, doc, { line: { n: 8 } });
     next.flush();
     assert.deepEqual([did.splice(0), fs.existsSync(log)], [[`write ${name}`, `cut ${name}`], false], 'the log of a life before this one goes with the first write');
+
+    // A write that takes part of a line is given the rest of it.
+    const real = fs.writeSync;
+    const takes = [];
+    fs.writeSync = (fd, bytes, at, length) => {
+      takes.push(length);
+      return real(fd, bytes, at, Math.min(length, 40));
+    };
+    try {
+      next.write(name, doc, { line: { pad: 'é'.repeat(30) } });
+      next.flush();
+    } finally {
+      fs.writeSync = real;
+    }
+    // The log's first line, the document's hash, goes with it.
+    const bytes = 65 + Buffer.byteLength(`${JSON.stringify({ pad: 'é'.repeat(30) })}\n`);
+    assert.deepEqual(takes, [bytes, bytes - 40, bytes - 80, bytes - 120]);
+    assert.deepEqual(written().at(-1), { pad: 'é'.repeat(30) });
+    fs.writeSync = () => 0;
+    try {
+      next.write(name, doc, { line: { n: 11 } });
+      assert.throws(() => next.flush(), /took no more of a line/);
+    } finally {
+      fs.writeSync = real;
+    }
+    did.splice(0);
+    next.write(name, doc, { line: { n: 12 } });
+    next.flush();
+    assert.deepEqual(did.splice(0), [`write ${name}`, `cut ${name}`], 'a write that took nothing is followed by the whole document');
 
     // An append that failed may have left half a line.
     const failing = createStore({
