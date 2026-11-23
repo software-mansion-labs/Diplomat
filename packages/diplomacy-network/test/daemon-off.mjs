@@ -10,6 +10,8 @@ import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { holdSocket } from '../../daemon-core/src/serve.js';
+import { switchOffStored } from '../src/node/offline.js';
+import { createStore } from '../src/node/store.js';
 import { DAEMON, POOL, check, createBench, passed, until } from './lib/daemons.mjs';
 
 const bench = await createBench();
@@ -170,6 +172,26 @@ try {
     assert.deepEqual(back.offers.map((o) => [o.taskId, o.state, o.attempt, o.outcome?.summary ?? o.reason]).sort(), [[finished, 'done', 1, 'kept on disk'], [unfinished, 'cancelled', 1, OFF]].sort());
     assert.deepEqual(back.runs.map((r) => [r.runId, r.state]).sort(), [[run.runId, 'finished'], [going.runId, 'stopped']].sort());
     await m.kill();
+  });
+
+  await check('the switch-off done on a store sets no timer: the host signs what a switch-off signs and takes no step of its own beside it', async () => {
+    const m = await bench.machine('still').start();
+    await m.linked();
+    const run = await waiting(m, await offer(m, 'pr-1', 'wait never\nsay never', true), 'never');
+    await m.kill();
+    const real = globalThis.setTimeout;
+    let timers = 0;
+    globalThis.setTimeout = (...args) => { timers += 1; return real(...args); };
+    let ended;
+    try {
+      ended = await switchOffStored({ store: createStore({ dir: m.base }) });
+    } finally {
+      globalThis.setTimeout = real;
+    }
+    assert.deepEqual([ended, timers], [{ offers: 1, runs: 1, reported: 0 }, 0]);
+    // The installer finds it all ended, and takes the job down.
+    m.setConfig({ networkEnabled: false });
+    assert.deepEqual([await m.install('--stop-daemon'), alive(m.agent(run.runId).pid)], [{ ...gone, ended: { offers: 0, runs: 0 } }, false]);
   });
 
   await check('an installer that cannot read the config, or reads what is no settings, takes the network for on: it stops the daemon and nothing else, with what the machine offered, its job, its containers and its directories as they were; a setting that is anything but true is the network off', async () => {

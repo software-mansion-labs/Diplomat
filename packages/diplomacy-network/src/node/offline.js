@@ -46,12 +46,7 @@ export async function switchOffStored({ store, log = () => {}, outcomeOf = () =>
     report(runId, outcome);
     reported += 1;
   }
-  if (reported > 0) {
-    for (const step of due.splice(0)) step();
-    // What the step began is told within this host over promises alone: a turn of the
-    // loop sees it through, however many of them the switch-off itself waits for.
-    await new Promise(setImmediate);
-  }
+  if (reported > 0) for (const step of due.splice(0)) step();
   await node.switchOff();
   const after = node.snapshot();
   const was = new Set(open(before.offers).map((offer) => offer.taskId));
