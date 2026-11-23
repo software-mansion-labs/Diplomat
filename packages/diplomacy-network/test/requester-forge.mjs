@@ -61,17 +61,26 @@ const stranger = http.createServer((req, res) => {
 await new Promise((resolve) => stranger.listen(0, '127.0.0.1', resolve));
 const strangerOrigin = `http://127.0.0.1:${stranger.address().port}`;
 
-// gh is counted, so a test can tell a cached token from one read again.
+// gh is counted, so a test can tell a cached token from one read again. As gh 2.101.0
+// does, it hands GH_ENTERPRISE_TOKEN or GITHUB_ENTERPRISE_TOKEN, set here, to every host but github.com.
 const ghCalls = path.join(scratch, 'gh-calls');
 const countingGh = path.join(scratch, 'gh');
-fs.writeFileSync(countingGh, `#!/bin/sh\necho call >> "${ghCalls}"\nexec "${forge.env.DN_GH}" "$@"\n`, { mode: 0o755 });
+fs.writeFileSync(countingGh, `#!/bin/sh\necho call >> "${ghCalls}"\nfor t in "$GH_ENTERPRISE_TOKEN" "$GITHUB_ENTERPRISE_TOKEN"; do [ -n "$t" ] && [ "$4" != github.com ] && echo "$t" && exit 0; done\nexec "${forge.env.DN_GH}" "$@"\n`, { mode: 0o755 });
+// glab as glab 1.128.0 answers: a host's own token, and for a host it holds nothing for, the
+// config file's top-level one. A keyring holds the token of one more host.
+const realGlab = path.join(scratch, 'glab-cli');
+fs.writeFileSync(realGlab, `#!/bin/sh\n[ "$5" = gitlab.keyring.example ] && echo glpat-from-the-keyring && exit 0\n"${forge.env.DN_GLAB}" "$@" && exit 0\necho glpat-top-level-decoy\n`, { mode: 0o755 });
 const CONFIG_TOKEN = 'glpat-kept-in-the-config-file';
 fs.mkdirSync(path.join(scratch, 'glab'));
 fs.writeFileSync(path.join(scratch, 'glab', 'config.yml'), `git_protocol: ssh\ntoken: glpat-top-level-decoy\nhosts:\n    other.example:\n        token: glpat-another-hosts\n    gitlab.file.example:\n        api_protocol: https\n        token: !!null ${CONFIG_TOKEN}\n        user: me\nlast: x\n`);
 Object.assign(process.env, forge.env, {
   DN_GH: countingGh,
+  GH_ENTERPRISE_TOKEN: 'ghp_any_enterprise_host',
+  GITHUB_ENTERPRISE_TOKEN: 'ghp_any_enterprise_host_too',
+  DN_GLAB: realGlab,
   GLAB_CONFIG_DIR: path.join(scratch, 'glab'),
   DN_FORGE_ORIGINS: JSON.stringify({ ...JSON.parse(forge.env.DN_FORGE_ORIGINS), 'gitlab.file.example': strangerOrigin, 'gitlab.dead.example': 'http://127.0.0.1:9',
+    'gitlab.other.example': strangerOrigin, 'gitlab.keyring.example': strangerOrigin, 'ghes.other.example': strangerOrigin,
     'gitlab.port.example:8443': strangerOrigin, 'gitlab.quoted.example:8443': strangerOrigin }),
   DN_FORGE_RESPONSE_MAX_BYTES: String(11 * 2 ** 20),
   DN_FORGE_TIMEOUT_MS: '1500',
@@ -302,11 +311,18 @@ await check('the token is read from gh once, kept briefly, and appears in no log
   const heard = strangers.length;
   await perform(glRules('gitlab.file.example'), request('gitlab.file.example'), {}, { forge: 'gitlab', host: 'gitlab.file.example' });
   assert.equal(strangers[heard].headers.authorization, `Bearer ${CONFIG_TOKEN}`);
+  await perform(glRules('gitlab.keyring.example'), request('gitlab.keyring.example'), {}, { forge: 'gitlab', host: 'gitlab.keyring.example' });
+  assert.equal(strangers[heard + 1].headers.authorization, 'Bearer glpat-from-the-keyring');
+  // The top-level token glab gives a host it holds nothing for is no host's own, nor the one gh gives every enterprise host.
+  await failing(perform(glRules('gitlab.other.example'), request('gitlab.other.example'), {}, { forge: 'gitlab', host: 'gitlab.other.example' }), /no gitlab credential for gitlab\.other\.example/);
+  const elsewhere = rulesFor({ forge: 'github', kind: 'investigate', pool: 'ghes.other.example/o/r', item: 'job-x', identity: 'me' });
+  await failing(perform(elsewhere, { ...gh('GET', '/api/v3/repos/o/r'), host: 'ghes.other.example' }, {}, { forge: 'github', host: 'ghes.other.example' }), /no github credential for ghes\.other\.example/);
+  assert.equal(strangers.length, heard + 2);
   await failing(perform(glRules('gitlab.dead.example'), request('gitlab.dead.example'), {}, { forge: 'gitlab', host: 'gitlab.dead.example' }), /no gitlab credential for gitlab\.dead\.example/);
   fs.writeFileSync(path.join(scratch, 'glab', 'config.yml'), 'hosts:\n    gitlab.dead.example:\n        token: "glpat-for-a-dead-host"\n');
   await failing(perform(glRules('gitlab.dead.example'), request('gitlab.dead.example'), {}, { forge: 'gitlab', host: 'gitlab.dead.example' }), /unreachable/);
 
-  const secrets = [GITHUB_TOKEN, GITLAB_TOKEN, CONFIG_TOKEN, 'glpat-for-a-dead-host', Buffer.from(`x-access-token:${GITHUB_TOKEN}`).toString('base64'), Buffer.from(`oauth2:${GITLAB_TOKEN}`).toString('base64')];
+  const secrets = [GITHUB_TOKEN, GITLAB_TOKEN, CONFIG_TOKEN, 'glpat-for-a-dead-host', 'glpat-from-the-keyring', 'glpat-top-level-decoy', 'ghp_any_enterprise_host', 'ghp_any_enterprise_host_too', Buffer.from(`x-access-token:${GITHUB_TOKEN}`).toString('base64'), Buffer.from(`oauth2:${GITLAB_TOKEN}`).toString('base64')];
   assert.ok(logLines.length > 10 && errors.length > 10);
   for (const text of [...logLines, ...errors]) for (const secret of secrets) assert.ok(!text.includes(secret), text);
   assert.ok(logLines.every((line) => !line.includes('?')), 'a log line carries no query string');

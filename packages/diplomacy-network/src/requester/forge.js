@@ -92,10 +92,17 @@ export function createForge({ log = () => {} } = {}) {
     const hit = tokens.get(key);
     if (hit && Date.now() - hit.at < TOKEN_TTL_MS) return hit.token;
     let value = '';
+    // A host's token is the one its tool keeps for that host (gh 2.101.0 and glab 1.128.0, tried).
     if (forge === 'github') {
-      value = (await run(GH_BIN, ['auth', 'token', '--hostname', host], process.env)).stdout.trim();
+      // gh hands these two to every host but github.com.
+      const { GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN, ...env } = process.env;
+      value = (await run(GH_BIN, ['auth', 'token', '--hostname', host], env)).stdout.trim();
     } else if (forge === 'gitlab') {
-      value = (await run(GLAB_BIN, ['config', 'get', 'token', '--host', host], process.env)).stdout.trim() || glabConfigToken(host);
+      // glab gives a host it holds nothing for its config's top-level token: one it gives
+      // a host that cannot exist too is not taken.
+      const ask = async (of) => (await run(GLAB_BIN, ['config', 'get', 'token', '--host', of], process.env)).stdout.trim();
+      const [own, anyHost] = await Promise.all([ask(host), ask('host.invalid')]);
+      value = (own !== anyHost ? own : '') || glabConfigToken(host);
     }
     if (!/^[\x21-\x7e]+$/.test(value)) throw new Error(`forge: no ${forge} credential for ${host} on this machine`);
     tokens.set(key, { token: value, at: Date.now() });
