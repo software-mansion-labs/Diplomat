@@ -297,7 +297,8 @@ running, which reads the switches again (`control.json`) before every step it ta
 `claude` call.
 
 - **Run the pipeline** - the sync itself, every five minutes. With every switch below off it only
-  reads: no label, no `claude` call, but for **Rate now** and **Fracture**. Off, it reads nothing,
+  reads: no label, no `claude` call, but for **Rate now**, **Fracture** and taking back a split's
+  label when the split filed nothing. Off, it reads nothing,
   and the work it queued waits.
 - **Rate issues and PRs** - the ratings and their labels. **Each rating is one `claude -p` call**,
   up to four a sync past the ones you force - 48 an hour while unrated items remain - each allowed
