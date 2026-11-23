@@ -532,6 +532,9 @@ enum PipelineTest {
         clear("#34 closing #30 and its child #31, one row: through gutters and gaps only", closes, edges: 3)
         clear("#100's six children: through their gutter only", fan, edges: 6)
         clear("#60 and #61 stacked on each other: the edge back round through the outer gutters", cycle, edges: 2)
+        let cards = fan.cards.map(\.frame).reduce(CGRect.null) { $0.union($1) }, pad = PipelineLayout.inset
+        check("no connector round the outer cards: the canvas is the cards and an inset round them",
+              CGRect(origin: .zero, size: fan.size) == cards.insetBy(dx: -pad, dy: -pad))
         func port(_ layout: PipelineLayout, _ from: String, _ to: String, end: Bool) -> CGFloat {
             layout.links.first { $0.edge.from == from && $0.edge.to == to }
                 .flatMap { end ? samples($0).last?.y : samples($0).first?.y } ?? .nan

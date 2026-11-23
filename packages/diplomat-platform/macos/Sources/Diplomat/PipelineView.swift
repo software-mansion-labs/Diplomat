@@ -291,9 +291,6 @@ struct PipelineLayout {
     static let rowGap: CGFloat = 14
     static let groupGap: CGFloat = 12
     static let inset: CGFloat = 6
-    /// Round the cards, so a connector in the gutter or gap beside an outer column or row
-    /// stays on the canvas.
-    static let margin = CGSize(width: columnGap / 2 + inset, height: rowGap / 2 + inset)
     static let arrowLength: CGFloat = 7
     static let arrowHalfWidth: CGFloat = 3.5
     /// The radius a connector turns at.
@@ -324,14 +321,17 @@ struct PipelineLayout {
         var out = PipelineLayout()
         var frames: [String: CGRect] = [:]
         let w = cardSize.width, h = cardSize.height
-        var top = margin.height
+        // Only a connector into column 0 has to come round through a gutter left of it.
+        let first = Set(groups.joined().filter { $0.column <= 0 }.map(\.id))
+        let left = edges.contains { first.contains($0.to) } ? inset + columnGap / 2 : inset
+        var top = inset
         for group in groups {
             let rows = Array(Set(group.map(\.row))).sorted()
             let index = Dictionary(uniqueKeysWithValues: rows.enumerated().map { ($1, $0) })
             var band = CGRect.null
             for node in group.sorted(by: { ($0.row, $0.column) < ($1.row, $1.column) }) {
                 guard let item = items[node.id] else { continue }
-                let frame = CGRect(x: margin.width + CGFloat(max(0, node.column)) * (w + columnGap),
+                let frame = CGRect(x: left + CGFloat(max(0, node.column)) * (w + columnGap),
                                    y: top + CGFloat(index[node.row] ?? 0) * (h + rowGap),
                                    width: w, height: h)
                 frames[node.id] = frame
@@ -342,9 +342,9 @@ struct PipelineLayout {
             top = band.maxY + rowGap + groupGap
         }
         out.links = links(edges.filter { frames[$0.from] != nil && frames[$0.to] != nil }, frames)
-        let maxX = out.cards.map(\.frame.maxX).max() ?? 0
-        let maxY = out.cards.map(\.frame.maxY).max() ?? 0
-        out.size = CGSize(width: maxX + margin.width, height: maxY + margin.height)
+        let maxX = (out.cards.map(\.frame.maxX) + out.links.map(\.path.boundingRect.maxX)).max() ?? 0
+        let maxY = (out.cards.map(\.frame.maxY) + out.links.map(\.path.boundingRect.maxY)).max() ?? 0
+        out.size = CGSize(width: maxX + inset, height: maxY + inset)
         return out
     }
 
