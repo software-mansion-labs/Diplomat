@@ -529,6 +529,40 @@ await check('what a task has used belongs to the task: every key issued for it c
   assert.deepEqual(w.stored(req, 'offers')[taskId].used, { asked: 1 });
 });
 
+await check('a request is judged by the rules the catalogue gives its task now, and a task the catalogue gives none loses its key before anything is asked', async () => {
+  const narrow = (rules) => rules.map((r) => ({ ...r, path: r.path.replace('/**', '/files') }));
+  for (const [seed, update] of [[67, narrow], [68, () => null], [69, () => { throw new Error('broken'); }]]) {
+    const w = createWorld({ seed });
+    const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+    const { taskId } = await req.node.offer(offerArgs('pr-1'));
+    await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
+    const job = exe.executor.jobOf(taskId);
+    const get = (leaf) => forgeRequest('GET', `/repos/o/r/pr-1/${leaf}`);
+    const message = (answer) => [answer.status, JSON.parse(Buffer.from(answer.body, 'base64')).message];
+    assert.equal((await w.wait(job.act(get('a')))).status, 200);
+    // An update changes what the catalogue gives this task.
+    const { rulesFor } = req.requester;
+    req.requester.rulesFor = function changed(...args) { return update(rulesFor.apply(this, args)); };
+    await w.restart(req);
+    const authorized = req.requester.calls.filter((c) => c.op === 'authorize').length;
+    if (update === narrow) {
+      assert.deepEqual(message(await w.wait(job.act(get('b')))), [403, 'no rule covers this request']);
+      assert.equal((await w.wait(job.act(get('files')))).status, 200);
+      assert.notEqual(w.stored(req, 'keys').issued[taskId], undefined, 'the key stands');
+      continue;
+    }
+    // Asked by hand, so that nothing the executor does once it is denied clouds what the host did.
+    const { capability: { keyId }, secret } = w.stored(exe, 'keys').held[taskId];
+    const { requests } = w.offerRow(req, taskId);
+    const act = (seq) => w.request(exe, req, 'act', { taskId, keyId, seq, request: get('files'), mac: actMac(unb64u(secret), { keyId, seq, request: get('files') }) });
+    await w.run(1);
+    assert.equal(said(await act(100)), 'denied: the task has no rules any more', `seed ${seed}`);
+    assert.equal(w.stored(req, 'keys').issued[taskId], undefined, 'the key is taken back');
+    assert.equal(w.offerRow(req, taskId).requests, requests, 'and the request is not counted');
+    assert.equal(req.requester.calls.filter((c) => c.op === 'authorize').length, authorized, 'nothing was asked');
+  }
+});
+
 await check('a key that is not there at the first ask is asked for a second later, then two, then four, and every half minute from then on', async () => {
   const w = createWorld({ seed: 59 });
   const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });

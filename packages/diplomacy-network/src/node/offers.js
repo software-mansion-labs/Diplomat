@@ -329,6 +329,13 @@ export function createOffers(host) {
           revoke(taskId);
           return { error: 'denied', detail: 'the claim this key was issued for is not active' };
         }
+        // Judged by the rules the catalogue gives the task now, so that an update which
+        // tightens them reaches a key issued before it.
+        const rules = await rulesOf(P, O);
+        if (!rules) {
+          revoke(taskId);
+          return { error: 'denied', detail: 'the task has no rules any more' };
+        }
         O.requests += 1;
         save();
         // The number is used, on disk, before anything is done under it.
@@ -336,7 +343,7 @@ export function createOffers(host) {
         // What the task has used of its allowances is the offer's: a key issued for a
         // later attempt goes on from where the last one stopped.
         const context = await host.requester.context({ pool: P.link, task: specOf(O), state: (O.used ??= {}) });
-        const verdict = await host.requester.authorize(K.capability.rules, body.request, context);
+        const verdict = await host.requester.authorize(rules, body.request, context);
         save();
         const request = verdict?.ok === true ? verdict.request ?? body.request : null;
         let answer;

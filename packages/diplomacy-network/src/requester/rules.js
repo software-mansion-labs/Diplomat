@@ -98,8 +98,9 @@
 // - GitLab gets no GraphQL mutation: every write its prompts ask for has a REST route
 //   whose path pins the project and the merge request or issue, and a GitLab global id
 //   cannot be traced back to its merge request in one confined query.
-// - Text sent to GitLab may hold no line starting with "/": GitLab runs such a line as a
-//   quick action in the author's name, and /merge is one.
+// - Text the task writes may hold no line starting with "/", "@" or "bors": GitLab runs
+//   such a line as a quick action in the author's name (/merge is one), and comment bots
+//   on GitHub take it for a command from the author (/approve, bors r+, @dependabot merge).
 // - `GET /user` answers with a handful of public members only (`pick`): agents ask it
 //   who they are, and the full answer holds the requester's private profile.
 // - A GitHub Enterprise Server gets github.com's rules on its one host, and one more:
@@ -188,6 +189,9 @@ const GITLAB_PROJECT_PICK = [
   'remove_source_branch_after_merge', 'only_allow_merge_if_pipeline_succeeds', 'only_allow_merge_if_all_discussions_are_resolved',
   'license', 'license_url',
 ];
+// An issue as GitLab answers it carries the address of whoever wrote it in through the
+// Service Desk: that member is let out as null (`blank`).
+const GITLAB_BLANK = { issues: ['service_desk_reply_to'], 'issues/*': ['service_desk_reply_to'] };
 // A GitLab branch without who may push to it or merge into it, the requester included.
 const GITLAB_BRANCH_PICK = ['name', 'commit', 'merged', 'protected', 'default', 'web_url'];
 const GITHUB_ROOTS = ['repository', 'viewer', 'rateLimit', '__type', 'search', 'node'];
@@ -229,6 +233,7 @@ function pullScope(kind, item, me, options) {
 }
 
 const PULL_KINDS = ['review', 'review-own', 'conflicts'];
+const PROSE = { prose: true };
 
 // Whose CI runs a kind reads beside those of the branches the task itself made: the ones
 // of the head branch of a pull request it covers (`head`), or of the default branch
@@ -266,7 +271,7 @@ function github({ kind, options, target, item, me }) {
     mutations.push('createPullRequest');
     rules.push(api('POST', `${repo}/pulls`, { body: {
       head: { created: 'label', required: true }, draft: { equals: true, required: true },
-      title: 'free', body: 'free', base: 'free', maintainer_can_modify: 'free',
+      title: 'free', body: PROSE, base: 'free', maintainer_can_modify: 'free',
     } }));
   };
 
@@ -280,13 +285,13 @@ function github({ kind, options, target, item, me }) {
     graphqlItem = scope;
     if (kind === 'review') {
       const events = options.verdict === true ? ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] : ['COMMENT'];
-      rules.push(api('POST', `${repo}/pulls/${n}/reviews`, { ...asked, body: { commit_id: 'free', body: 'free', comments: 'free', event: { oneOf: events } } }));
-      rules.push(api('POST', `${repo}/pulls/${n}/reviews/*/events`, { ...asked, body: { event: { oneOf: events, required: true }, body: 'free' } }));
+      rules.push(api('POST', `${repo}/pulls/${n}/reviews`, { ...asked, body: { commit_id: 'free', body: PROSE, comments: { proseIn: 'body' }, event: { oneOf: events } } }));
+      rules.push(api('POST', `${repo}/pulls/${n}/reviews/*/events`, { ...asked, body: { event: { oneOf: events, required: true }, body: PROSE } }));
       rules.push(api('DELETE', `${repo}/pulls/${n}/reviews/*`, asked));
       rules.push(api('DELETE', `${repo}/pulls/comments/*`, { comment: { segment: under + 5, repo: target.repo, item: scope, own: true, pending: true, identity: me } }));
       mutations.push('addPullRequestReviewThread', 'addPullRequestReviewThreadReply', 'deletePullRequestReviewComment');
     } else if (kind === 'review-own') {
-      rules.push(api('POST', `${repo}/pulls/${n}/comments/*/replies`, { comment: { segment: under + 6, pullSegment: under + 4, repo: target.repo, item: scope }, body: { body: 'free' } }));
+      rules.push(api('POST', `${repo}/pulls/${n}/comments/*/replies`, { comment: { segment: under + 6, pullSegment: under + 4, repo: target.repo, item: scope }, body: { body: PROSE } }));
       mutations.push('addPullRequestReviewThreadReply', 'resolveReviewThread');
       if (options.markReady === true) mutations.push('markPullRequestReadyForReview');
     }
@@ -302,7 +307,7 @@ function github({ kind, options, target, item, me }) {
         mutations.push('replaceActorsForAssignable', 'updateIssue');
       }
       if (options.comment !== false) {
-        rules.push(api('POST', `${issue}/comments`, { body: { body: 'free' } }));
+        rules.push(api('POST', `${issue}/comments`, { body: { body: PROSE } }));
         mutations.push('addComment');
       }
     }
@@ -366,14 +371,12 @@ function gitlab({ kind, options, target, item, me }) {
       rules.push({ host: target.host, method: 'POST', path: `${base}/git-receive-pack`, fold, git: 'receive-pack', repo: target.repo, denyPaths: ['.gitlab-ci.yml', '.gitlab/ci/**'], ...where, ...more });
     }
   };
-  // GitLab runs a line starting with "/" in a note or description as a quick action
-  // (/merge, /approve, /close), so text is `prose`: free, with no such line.
-  const prose = { prose: true };
   // A merge request is a draft by its title, and nothing else in the body may point it
-  // at another project or merge it.
+  // at another project or merge it. A label is made by naming it, replaces another of its
+  // scope and can start a pipeline: glab sends the empty list, as gh sends none.
   const draft = {
     source_branch: { created: true, required: true }, title: { prefix: 'Draft:', required: true },
-    target_branch: 'free', description: prose, labels: 'free', remove_source_branch: 'free', squash: 'free', allow_collaboration: 'free',
+    target_branch: 'free', description: PROSE, labels: { equals: '' }, remove_source_branch: 'free', squash: 'free', allow_collaboration: 'free',
   };
   const draftMerges = () => {
     // glab names the target project in every merge request it opens; it may only be the pool's own.
@@ -394,20 +397,20 @@ function gitlab({ kind, options, target, item, me }) {
   if (PULL_KINDS.includes(kind)) {
     if (!scope) return null;
     if (kind === 'review') {
-      each('POST', `${mr}/draft_notes`, { ...asked, body: { note: prose, position: 'free', commit_id: 'free', in_reply_to_discussion_id: 'free' } });
-      each('PUT', `${mr}/draft_notes/*`, { ...asked, body: { note: prose, position: 'free' } });
+      each('POST', `${mr}/draft_notes`, { ...asked, body: { note: PROSE, position: 'free', commit_id: 'free', in_reply_to_discussion_id: 'free' } });
+      each('PUT', `${mr}/draft_notes/*`, { ...asked, body: { note: PROSE, position: 'free' } });
       each('DELETE', `${mr}/draft_notes/*`, asked);
       // glab sends "{}" where a route takes no parameters; `body: {}` allows that and no member.
       each('PUT', `${mr}/draft_notes/*/publish`, { ...asked, body: {} });
       each('POST', `${mr}/draft_notes/bulk_publish`, { ...asked, body: {} });
       // The summary a GitHub review carries in its own body is a note of its own here.
-      each('POST', `${mr}/notes`, { ...asked, body: { body: prose } });
+      each('POST', `${mr}/notes`, { ...asked, body: { body: PROSE } });
       if (options.verdict === true) {
         each('POST', `${mr}/approve`, { ...asked, body: { sha: 'free' } });
         each('POST', `${mr}/unapprove`, { ...asked, body: {} });
       }
     } else if (kind === 'review-own') {
-      each('POST', `${mr}/discussions/*/notes`, { ...asked, body: { body: prose } });
+      each('POST', `${mr}/discussions/*/notes`, { ...asked, body: { body: PROSE } });
       // GitLab reads `resolved` from the query or from the body; one of them must say it.
       each('PUT', `${mr}/discussions/*`, { ...asked, query: { resolved: { equals: 'true', optional: true } }, body: { resolved: { oneOf: [true, 'true'], required: true } } });
       if (options.markReady === true) each('PUT', mr, { ...asked, body: { title: 'free' } });
@@ -418,7 +421,7 @@ function gitlab({ kind, options, target, item, me }) {
     if (item.type === 'issue') {
       const issue = `/issues/${item.number}`;
       if (options.noPRs !== true && options.assign !== false) each('PUT', issue, { body: { assignee_ids: { assignees: item.number, required: true } } });
-      if (options.comment !== false) each('POST', `${issue}/notes`, { body: { body: prose } });
+      if (options.comment !== false) each('POST', `${issue}/notes`, { body: { body: PROSE } });
     }
     if (options.noPRs !== true) {
       push({ refs: ['refs/heads/**'], create: 1 });
@@ -438,7 +441,7 @@ function gitlab({ kind, options, target, item, me }) {
   // A compare takes two refs of this project; `from_project_id` would make one another project's.
   each('GET', '/repository/compare', { query: { from: 'free', to: 'free', straight: 'free', unidiff: 'free' } });
   each('GET', '/repository/branches/**', { pick: GITLAB_BRANCH_PICK });
-  for (const tree of [...GITLAB_CONTEXT, ...GITLAB_CODE]) each('GET', `/${tree}`);
+  for (const tree of [...GITLAB_CONTEXT, ...GITLAB_CODE]) each('GET', `/${tree}`, Object.hasOwn(GITLAB_BLANK, tree) ? { blank: GITLAB_BLANK[tree] } : {});
   if (scope) for (const part of GITLAB_PULL) each('GET', `${mr}/${part}`, asked);
   if (item.type === 'issue') for (const part of GITLAB_ISSUE) each('GET', `/issues/${item.number}/${part}`);
   const runs = runScope(kind, options, who);

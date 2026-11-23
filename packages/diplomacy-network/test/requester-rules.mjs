@@ -337,6 +337,38 @@ await check('conflicts: a push to its pull request\'s head branch and not one wr
   await refused(github('conflicts', {}, 'pr-580'), gitPush('github.com', '/o/r.git'), world(), /open pull request #580/);
 });
 
+await check('GitHub: text in the requester\'s name holds no line a comment bot would take for a command, in REST and in GraphQL', async () => {
+  const pushed = () => world({ branches: ['refs/heads/fix-421'] });
+  // Each route's text member, written by `write`, with the task that may write it.
+  const writes = [
+    [github('review'), (body) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', body })],
+    [github('review'), (body) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [{ path: 'a.js', line: 1, body: 'fine' }, { path: 'a.js', line: 2, body }] })],
+    [github('review'), (body) => gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { event: 'COMMENT', body })],
+    [github('review'), (body) => ghql({ ...GH.addThread, variables: { ...GH.addThread.variables, body } })],
+    [github('review'), (body) => ghql({ ...GH.addReply, variables: { ...GH.addReply.variables, body } })],
+    [github('review-own'), (body) => gh('POST', '/repos/o/r/pulls/579/comments/13/replies', { body })],
+    [github('issues'), (body) => gh('POST', '/repos/o/r/issues/421/comments', { body })],
+    [github('issues'), (body) => ghql({ ...GH.issueComment, variables: { input: { subjectId: 'I_421', body } } })],
+    [github('issues'), (body) => gh('POST', '/repos/o/r/pulls', { title: 't', body, head: 'fix-421', base: 'main', draft: true })],
+    [github('issues'), (body) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, body } } })],
+  ];
+  for (const [rules, write] of writes) {
+    await allowed(rules, write('Looks fine. See https://example.com/a/b, ask @mallory, and the borscht recipe.\nBorscht, thanks @x.'), pushed());
+    for (const text of ['Looks fine.\n/approve', '/lgtm', 'ok\r\n  /merge', 'bors r+', 'ok\nBors try', '@bors r+', '@dependabot merge', 'ok\n\t@Mergifyio queue']) {
+      await refused(rules, write(text), pushed(), /a line starting with "\/", "@" or "bors"/);
+    }
+  }
+  // A block string is read for its lines as it stands.
+  const block = (text) => ({ query: `mutation { addComment(input: { subjectId: "I_421", body: """${text}""" }) { clientMutationId } }`, variables: {} });
+  await allowed(github('issues'), ghql(block('fine\n  thanks')), pushed());
+  await refused(github('issues'), ghql(block('fine\n  /close')), pushed(), /"body" has a line starting with/);
+  // A comment list holds objects; anything else is not one GitHub takes.
+  for (const comments of ['/approve', [{ path: 'a.js', body: 5 }], ['x']]) {
+    await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments }), pushed(), /"comments"/);
+  }
+  await allowed(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [] }), pushed());
+});
+
 await check('issues: assign itself, comment on its issue, and a draft pull request from the branch it pushed', async () => {
   const rules = github('issues');
   const pushed = () => world({ branches: ['refs/heads/fix-421'] });
@@ -685,9 +717,25 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
     glab('POST', `${P}/merge_requests`, { ...create, description: 'd\n/merge' }), glab('POST', `${P}/merge_requests`, { ...create, merge_when_pipeline_succeeds: true }),
     glab('POST', `${P}/merge_requests?title=x`, create), glab('POST', `${P}/merge_requests`, { ...create, source_project_id: 100 }),
   ]) await refused(issues, request, pushed());
+  // A label can be made by naming it, replaces another of its scope and may start a pipeline that waits for it: glab sends none.
+  for (const labels of ['x', 'pipeline::deploy', ['x'], ' ']) {
+    for (const rules of [issues, gitlab('audit')]) {
+      for (const base of [P, '/api/v4/projects/99', '/api/v4/projects/me%2Fproj']) {
+        await refused(rules, glab('POST', `${base}/merge_requests`, { ...create, labels }), pushed(), /the body member "labels" has a value this task may not use/);
+      }
+    }
+  }
+  await allowed(issues, glab('POST', '/api/v4/projects/me%2Fproj/merge_requests', create), glWorld(['me/proj:refs/heads/fix-421']));
+  await allowed(issues, glab('POST', `${P}/merge_requests`, { ...create, labels: undefined }), pushed());
   // A merge request is a draft by its title alone, so one sent without a title is not one.
   await refused(issues, glab('POST', `${P}/merge_requests`, { ...create, title: undefined }), pushed(), /the body member "title" is required/);
   await refused(issues, glab('POST', `${P}/merge_requests`, { ...create, source_branch: undefined }), pushed(), /the body member "source_branch" is required/);
+  const unassigned = gitlab('issues', { assign: false });
+  await refused(unassigned, glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7] }), pushed(), /no rule of this task allows the request/);
+  await allowed(unassigned, glab('POST', `${P}/issues/421/notes`, { body: 'hello' }), pushed());
+  const silent = gitlab('issues', { comment: false });
+  await refused(silent, glab('POST', `${P}/issues/421/notes`, { body: 'hello' }), pushed(), /no rule of this task allows the request/);
+  await allowed(silent, glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7] }), pushed());
   const noPRs = gitlab('issues', { noPRs: true });
   await allowed(noPRs, glab('POST', `${P}/issues/421/notes`, { body: 'findings' }), pushed());
   for (const request of [glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7] }), glab('POST', `${P}/merge_requests`, create), gitPush('gitlab.example.com', '/group/sub/proj.git')]) await refused(noPRs, request, pushed());
@@ -737,6 +785,29 @@ function everyRuleList() {
   return lists.filter(([rules]) => rules !== null);
 }
 
+await check('an address of a person is let out as null wherever the answer holds it: GitHub\'s auto-merge author, GitLab\'s Service Desk reporter', async () => {
+  const blankOf = async (rules, request, ctx = world()) => (await allowed(rules, request, ctx)).request.blank;
+  // gh pr view reads the auto-merge author's address with the rest of a pull request.
+  for (const kind of KINDS) assert.deepEqual(await blankOf(github(kind), ghql(GH.prViewDefault)), ['authorEmail']);
+  const hub = (query) => ghql({ query, variables: {} });
+  // A member is named as the answer names it: by its alias.
+  assert.deepEqual((await blankOf(github('investigate'), hub(`{ repository(owner: "o", name: "r") { pullRequests(first: 5) { nodes { a: autoMergeRequest { mail: authorEmail mergeMethod } ...f } } } }
+    fragment f on PullRequest { autoMergeRequest { authorEmail } }`))).sort(), ['authorEmail', 'mail']);
+  assert.equal(await blankOf(github('investigate'), hub('{ repository(owner: "o", name: "r") { pullRequests(first: 5) { nodes { authorEmail: title } } } }')), undefined);
+  // A mutation's answer is read like a query's.
+  assert.deepEqual(await blankOf(github('issues'), hub('mutation { addComment(input: { subjectId: "I_421", body: "x" }) { subject { ... on Issue { timelineItems(first: 1) { totalCount } } } commentEdge { node { issue { number } } } clientMutationId } }'), world()), undefined);
+  const lab = (query) => glab('POST', '/api/graphql', { query });
+  assert.deepEqual((await blankOf(gitlab('investigate'), lab('{ project(fullPath: "group/sub/proj") { issues { nodes { externalAuthor notes { nodes { who: externalAuthor body } } } } } }'), glWorld())).sort(),
+    ['externalAuthor', 'who']);
+  for (const project of [P, '/api/v4/projects/99']) {
+    for (const tail of ['/issues', '/issues/421', '/issues?state=opened']) {
+      for (const kind of KINDS) assert.deepEqual(await blankOf(gitlab(kind), glab('GET', `${project}${tail}`), glWorld()), ['service_desk_reply_to'], `${kind} ${tail}`);
+    }
+    assert.equal(await blankOf(gitlab('investigate'), glab('GET', `${project}/merge_requests/5`), glWorld()), undefined);
+  }
+  assert.equal(await blankOf(github('investigate'), gh('GET', '/repos/o/r/issues/421')), undefined);
+});
+
 await check('no second spelling of any rule\'s path is decided by another rule, on either forge', async () => {
   let asked = 0;
   for (const [rules, ctxFor] of everyRuleList()) {
@@ -760,7 +831,8 @@ await check('no second spelling of any rule\'s path is decided by another rule, 
 });
 
 await check('no rule that refuses, pins or cuts is reached by its own path with a "/" of it encoded', async () => {
-  const plain = (rule) => Object.keys(rule).every((key) => ['host', 'method', 'path', 'fold'].includes(key));
+  // `blank` nulls members of whatever answer comes back, from whichever route.
+  const plain = (rule) => Object.keys(rule).every((key) => ['host', 'method', 'path', 'fold', 'blank'].includes(key));
   let [asked, passed] = [0, 0];
   for (const [rules, ctxFor] of everyRuleList()) {
     const ctx = ctxFor();

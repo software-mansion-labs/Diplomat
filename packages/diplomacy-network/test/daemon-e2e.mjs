@@ -168,7 +168,9 @@ try {
     assert.deepEqual(steps.map((s) => s.author).filter(Boolean), ['a Operator <a@example.com>', 'a Operator <a@example.com>']);
     assert.equal(bench.branch('fix-issue-2').author, 'a Operator <a@example.com>');
     assert.deepEqual(bench.branch('main'), main);
-    const writes = bench.forge.log.slice(before).filter((r) => r.method !== 'GET' && !r.path.endsWith('git-upload-pack')).map((r) => [by(r), r.host, r.path]);
+    // A GraphQL query reads, as the requester asking which protection rules there are does.
+    const read = (r) => r.method === 'GET' || r.path.endsWith('git-upload-pack') || (r.path === '/graphql' && /^\s*query\b/.test(JSON.parse(r.body).query));
+    const writes = bench.forge.log.slice(before).filter((r) => !read(r)).map((r) => [by(r), r.host, r.path]);
     assert.deepEqual(writes, [
       ['a', 'api.github.com', '/repos/acme/widgets/issues/2/comments'], ['a', 'github.com', '/acme/widgets.git/git-receive-pack'],
     ], 'exactly the writes the rules allow, each sent by the requester');

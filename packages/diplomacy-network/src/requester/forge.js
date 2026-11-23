@@ -21,6 +21,11 @@ const RESPONSE_HEADERS = new Set([
 ]);
 const USER_AGENT = 'diplomacy-network';
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+const blanked = (value, names) => {
+  if (Array.isArray(value)) return value.map((v) => blanked(v, names));
+  if (!isObject(value)) return value;
+  return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, names.has(k) ? null : blanked(v, names)]));
+};
 
 const NODE_QUERY = `query($id: ID!) { node(id: $id) { __typename
   ... on Repository { nameWithOwner }
@@ -33,6 +38,29 @@ const NODE_QUERY = `query($id: ID!) { node(id: $id) { __typename
   ... on PullRequestReviewComment { commentState: state author { login } pullRequest { number state author { login } repository { nameWithOwner } } }
   ... on IssueComment { author { login } issue { number state author { login } repository { nameWithOwner } } }
 } }`;
+
+const PROTECTION_QUERY = `query($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) {
+  branchProtectionRules(first: 100, after: $after) { nodes { pattern } pageInfo { hasNextPage endCursor } } } }`;
+// How many pages of protection rules are read before the answer counts as not given.
+const PROTECTION_PAGES = 10;
+
+// Whether a protection rule's name or pattern could cover a branch name. It reads wider
+// than either forge: case is not told apart, `*` and `{...}` match any run of characters,
+// "/" among them (GitLab's `*` spans it, GitHub's does not), and `?` and `[...]` any one.
+function mayCover(pattern, name) {
+  const literal = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  let re = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    const close = { '[': pattern.indexOf(']', i + 2), '{': pattern.indexOf('}', i + 1) }[c] ?? -1;
+    if (c === '*') re += '.*';
+    else if (c === '?') re += '.';
+    else if (close !== -1) { re += c === '[' ? '.' : '.*'; i = close; }
+    else if (c === '\\' && i + 1 < pattern.length) re += literal(pattern[++i]);
+    else re += literal(c);
+  }
+  return new RegExp(`^${re}$`, 'is').test(name);
+}
 
 function run(bin, args, env) {
   return new Promise((resolve) => {
@@ -76,7 +104,7 @@ function glabConfigToken(host) {
 
 /// The requester's side of the forge. `log` receives one line per request made, never a
 /// credential. Returns `{ perform, context, resolveNode, pull, pullsByHead, comment, ciRun,
-/// assignees, self, repository, branch, projectId, fetchInto }`; every function but `perform` and
+/// assignees, self, repository, branch, protects, projectId, fetchInto }`; every function but `perform` and
 /// `context` takes `{ forge, host }` first - "github" or "gitlab", and the host the
 /// credential is for. A lookup throws when the forge's answer does not settle its question.
 export function createForge({ log = () => {} } = {}) {
@@ -87,10 +115,17 @@ export function createForge({ log = () => {} } = {}) {
     const hit = tokens.get(key);
     if (hit && Date.now() - hit.at < TOKEN_TTL_MS) return hit.token;
     let value = '';
+    // A host's token is the one its tool keeps for that host (gh 2.101.0 and glab 1.128.0, tried).
     if (forge === 'github') {
-      value = (await run(GH_BIN, ['auth', 'token', '--hostname', host], process.env)).stdout.trim();
+      // gh hands these two to every host but github.com.
+      const { GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN, ...env } = process.env;
+      value = (await run(GH_BIN, ['auth', 'token', '--hostname', host], env)).stdout.trim();
     } else if (forge === 'gitlab') {
-      value = (await run(GLAB_BIN, ['config', 'get', 'token', '--host', host], process.env)).stdout.trim() || glabConfigToken(host);
+      // glab gives a host it holds nothing for its config's top-level token: one it gives
+      // a host that cannot exist too is not taken.
+      const ask = async (of) => (await run(GLAB_BIN, ['config', 'get', 'token', '--host', of], process.env)).stdout.trim();
+      const [own, anyHost] = await Promise.all([ask(host), ask('host.invalid')]);
+      value = (own !== anyHost ? own : '') || glabConfigToken(host);
     }
     if (!/^[\x21-\x7e]+$/.test(value)) throw new Error(`forge: no ${forge} credential for ${host} on this machine`);
     tokens.set(key, { token: value, at: Date.now() });
@@ -162,18 +197,19 @@ export function createForge({ log = () => {} } = {}) {
       if (RESPONSE_HEADERS.has(name) || name.startsWith('x-ratelimit-')) headers[name] = value;
     }
     let { status, body } = res;
-    if (request.pick && status >= 200 && status < 300) {
-      // The rule lets only some members of this answer out, or of each entry of a list.
-      let whole = null;
+    if ((request.pick || request.blank) && status >= 200 && status < 300) {
+      // The rule lets only some members of this answer out, or of each entry of a list
+      // (`pick`), and the members named in `blank` out as null wherever they stand.
+      let whole;
       try { whole = JSON.parse(body.toString('utf8')); } catch {}
       const cut = (object) => Object.fromEntries(request.pick.filter((k) => Object.hasOwn(object, k)).map((k) => [k, object[k]]));
-      if (isObject(whole)) {
-        body = Buffer.from(JSON.stringify(cut(whole)));
-      } else if (Array.isArray(whole) && whole.every(isObject)) {
-        body = Buffer.from(JSON.stringify(whole.map(cut)));
-      } else {
+      if (request.pick) whole = isObject(whole) ? cut(whole) : Array.isArray(whole) && whole.every(isObject) ? whole.map(cut) : undefined;
+      if (request.blank && whole !== undefined) whole = blanked(whole, new Set(request.blank));
+      if (whole === undefined) {
         status = 502;
         body = Buffer.from('{"message":"the forge\'s answer could not be reduced"}');
+      } else {
+        body = Buffer.from(JSON.stringify(whole));
       }
     }
     return { status, headers, body: body.toString('base64') };
@@ -388,6 +424,43 @@ export function createForge({ log = () => {} } = {}) {
     return { sha, protected: res.json.protected };
   }
 
+  /// Whether a protection rule of `repo` would cover a branch `ref` that nothing holds yet:
+  /// on GitHub an active ruleset's rule or a classic rule's pattern, on GitLab a protected
+  /// branch's name or wildcard. Only what the account may read of them is known.
+  async function protects(target, repo, ref) {
+    if (!ref.startsWith('refs/heads/')) throw new Error(`forge: ${ref} is not a branch`);
+    const name = ref.slice('refs/heads/'.length);
+    const said = `which protection rules cover ${ref}`;
+    const patterns = [];
+    if (target.forge === 'github') {
+      // GitHub answers this for a name no branch has yet.
+      const rules = await api(target, 'GET', `/repos/${repo}/rules/branches/${name.split('/').map(encodeURIComponent).join('/')}`);
+      if (rules.status !== 200 || !Array.isArray(rules.json)) unknown(said, rules);
+      if (rules.json.length > 0) return true;
+      const [owner, short] = repo.split('/');
+      let after = null;
+      for (let page = 0; ; page++) {
+        if (page === PROTECTION_PAGES) throw new Error(`forge: the forge did not say ${said} (it has more than ${PROTECTION_PAGES} pages of them)`);
+        const res = await api(target, 'POST', '/graphql', { query: PROTECTION_QUERY, variables: { owner, name: short, after } });
+        const found = res.json?.data?.repository?.branchProtectionRules;
+        if (res.status !== 200 || res.json?.errors !== undefined || !Array.isArray(found?.nodes) || typeof found.pageInfo?.hasNextPage !== 'boolean') unknown(said, res);
+        patterns.push(...found.nodes.map((n) => n?.pattern));
+        if (!found.pageInfo.hasNextPage) break;
+        after = found.pageInfo.endCursor;
+      }
+    } else {
+      for (let page = 1; ; page++) {
+        if (page > PROTECTION_PAGES) throw new Error(`forge: the forge did not say ${said} (it has more than ${PROTECTION_PAGES} pages of them)`);
+        const res = await api(target, 'GET', `${project(repo)}/protected_branches?per_page=100&page=${page}`);
+        if (res.status !== 200 || !Array.isArray(res.json)) unknown(said, res);
+        patterns.push(...res.json.map((b) => b?.name));
+        if (res.json.length < 100) break;
+      }
+    }
+    if (!patterns.every((p) => typeof p === 'string')) throw new Error(`forge: the forge did not say ${said} (a rule without a name)`);
+    return patterns.some((p) => mayCover(p, name));
+  }
+
   /// A GitLab project's numeric id, which `rulesFor` needs to allow the numeric spelling
   /// of its paths; null on GitHub or when the project is not shown.
   async function projectId(target, repo) {
@@ -440,9 +513,10 @@ export function createForge({ log = () => {} } = {}) {
       self: () => self(target),
       repository: (of = repo) => repository(target, of),
       branch: (ref, of = repo) => branch(target, of, ref),
+      protects: (ref, of = repo) => protects(target, of, ref),
       fetch: (what) => fetchInto(target, { ...what, repo: what.repo ?? repo }),
     };
   }
 
-  return { perform, context, resolveNode, pull, pullsByHead, comment, ciRun, assignees, self, repository, branch, projectId, fetchInto };
+  return { perform, context, resolveNode, pull, pullsByHead, comment, ciRun, assignees, self, repository, branch, protects, projectId, fetchInto };
 }

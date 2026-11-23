@@ -99,6 +99,10 @@ const ctxFor = (more = {}) => ({
     asked.push(`branch ${ref} ${of}`);
     try { return { sha: git(of === undefined ? forge : forkGit, 'rev-parse', '--verify', '--quiet', ref), protected: false }; } catch { return null; }
   },
+  async protects(ref, of) {
+    asked.push(`protects ${ref} ${of}`);
+    return false;
+  },
   // What forge.fetchInto does, from a directory instead of a URL.
   fetch({ env, repo, wants = [], into }) {
     fetches.push(`${repo ?? 'pool'} ${into ?? wants.length}`);
@@ -544,6 +548,28 @@ await check('what cannot be proven is refused: a missing old value, a broken pac
   await refused(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], ctxFor({ pull: undefined })), /nothing here can look a pull request up/);
   await refused(push(NEW_RULE, [[ZERO, C, 'refs/heads/x']], ctxFor({ branch: undefined })), /nothing here can ask the forge about its branches/);
   await refused(push(NEW_RULE, [[ZERO, C, 'refs/heads/x']], ctxFor({ repository: undefined })), /nothing here can ask the forge about its branches/);
+  await refused(push(NEW_RULE, [[ZERO, C, 'refs/heads/x']], ctxFor({ protects: undefined })), /nothing here can ask the forge about its branches/);
+});
+
+await check('a new branch is never one a protection rule would cover: its pushed code would be given what the forge keeps for protected branches', async () => {
+  at(B);
+  const C = commit('for a protected name', { 'src/a.js': 'r\n' });
+  const guarding = (pattern, where) => ctxFor({ async protects(ref, of) { asked.push(`protects ${ref} ${of}`); return of === where && pattern.test(ref); } });
+  asked = [];
+  await refused(push(NEW_RULE, [[ZERO, C, 'refs/heads/release/9.9']], guarding(/^refs\/heads\/release\//)), /refs\/heads\/release\/9\.9: a protection rule of the forge covers that name, and a task never creates such a branch/);
+  assert.ok(asked.includes('protects refs/heads/release/9.9 undefined'), asked.join());
+  await allowed(push(NEW_RULE, [[ZERO, C, 'refs/heads/fix-9']], guarding(/^refs\/heads\/release\//)));
+  await refused(push(NEW_RULE, [[ZERO, C, 'refs/heads/fix-9'], [ZERO, C, 'refs/heads/release/1']], guarding(/^refs\/heads\/release\//)), /refs\/heads\/release\/1: a protection rule/);
+  // In the account's own fork, the fork's rules are asked.
+  const FORK_NEW = { ...NEW_RULE, fork: 'me' };
+  const forked = (ctx) => checkPush(FORK_NEW, ['me', 'r.git', 'git-receive-pack'], pushBody([[ZERO, C, 'refs/heads/release/9.9']], packOf(work, [C], [A, B, M])), ctx);
+  await refused(forked(guarding(/^refs\/heads\/release\//, 'me/r')), /a protection rule of the forge covers that name/);
+  await allowed(forked(guarding(/^refs\/heads\/release\//)));
+  // A branch the forge holds is judged by its own answer, and protection that cannot be told is the caller's refusal to make.
+  asked = [];
+  await allowed(push(HEAD_RULE, [[B, C, 'refs/heads/feature']], guarding(/./)));
+  assert.ok(!asked.some((line) => line.startsWith('protects')), asked.join());
+  await assert.rejects(push(NEW_RULE, [[ZERO, C, 'refs/heads/x']], ctxFor({ async protects() { throw new Error('forge: the forge did not say'); } })), /did not say/);
 });
 
 // A pack written by hand: each object is `{ type, data }` (3 is a blob), `{ base, delta }`

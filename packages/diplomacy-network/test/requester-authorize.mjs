@@ -391,11 +391,12 @@ await check('a body that is not JSON, or says it is something else, cannot step 
   await refused(req('DELETE', '/repos/o/r/pulls/578/reviews/1', { headers: JSON_TYPE, body: b64({ x: 1 }) }), /allows no body/);
 });
 
-await check('text sent to GitLab may hold no line a quick action could start on', async () => {
+await check('text sent to GitLab may hold no line a quick action or a comment bot could start on', async () => {
   const note = (body) => ({ host: 'gitlab.example.com', method: 'POST', path: '/api/v4/projects/group%2Fsub%2Fproj/issues/421/notes', headers: JSON_TYPE, body: b64({ body }) });
-  await allowed(note('Fixed in abc123. See src/a.js and https://example.com/x - 1/2 done.'));
-  for (const text of ['/merge', 'done\n/merge', 'done\r\n/approve', 'done\r/close', '  /assign @mallory', '\t/label ~x', 'a /merge', 'a\u000b/merge', 'a\u000c/merge', 'a\u0085/merge', '```\n/merge\n```']) {
-    await refused(note(text), /starting with "\/"/);
+  await allowed(note('Fixed in abc123. See src/a.js and https://example.com/x - 1/2 done, thanks @x.\nborscht'));
+  for (const text of ['/merge', 'done\n/merge', 'done\r\n/approve', 'done\r/close', '  /assign @mallory', '\t/label ~x', 'a /merge', 'a\u000b/merge', 'a\u000c/merge', 'a\u0085/merge', '```\n/merge\n```',
+    'bors r+', 'BORS try', 'done\n@bors r+', '@dependabot merge']) {
+    await refused(note(text), /starting with "\/", "@" or "bors"/);
   }
   await refused(note(['/merge']), /starting with "\/"/);
   await refused(note(5), /starting with "\/"/);
