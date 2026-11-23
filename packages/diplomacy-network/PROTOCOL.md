@@ -50,12 +50,17 @@ every sender gets the 64 KiB, whoever it says it is.
 - A ticket that brought no whole body - it ran out, its member reserved again, or the
   body its headers announced did not come whole in the time a body has - is a ticket
   unused. The first costs nothing. From the second running, the member's `reserve` is
-  answered `busy` for 60 s, twice as long each time, up to an hour. A body that came
-  whole, whatever it held, ends the count.
+  answered `busy` for 60 s, twice as long each time, up to an hour. A body above
+  64 KiB that came whole, whatever it held, ends the count; a body no larger than
+  that needed no ticket, and the ticket it came with is a ticket unused.
 - When all four places are taken, a member that had no place in the last 60 s takes
   the oldest ticket not yet used of a member that had one: that ticket is void, and
   its member is not counted as having left it unused. A body being read is never put
   out.
+- Among a member and the keys that sit where it does, the one place is yielded the
+  same way: a ticket not yet used, given to a key that had the place in the 60 s
+  before it, goes to a key of theirs that last had the place earlier than that key
+  did, or never.
 
 A request over what the target will read is answered with HTTP status 413 and no envelope;
 its sender may send it again, with a ticket of its own each time, unless it is an `act`:
@@ -157,9 +162,10 @@ A target checks, cheapest first, and stops at the first failure:
 | `to` is its own key | `bad-request` |
 | `ts` within 300 s of its clock | `stale` |
 | `pow.epoch` is the epoch of `ts` | `stale` |
-| `effort` at least `required(from)` | `effort` |
+| `effort` at least a member's `BASE`, the least a request can owe | `effort` |
 | the solution | `effort` |
 | the signature | `effort` |
+| `effort` at least `required(from)` | `effort` |
 | `(from, nonce)` unseen | `replay` |
 
 A request is authenticated once its solution and its signature hold. What a target
@@ -169,16 +175,19 @@ solution that does not hold and a signature that is not the sender's get one ref
 and every refusal up to there quotes one price as the `effort` of its envelope (section
 4): what a stranger owes at that moment, whatever key and pool the request named. So a
 request made of nothing, under the target's own key or a member's, in a pool the target
-is linked to or not, is answered alike. A member learns what it owes from the answers to
-its authenticated requests; one that paid too little pays the stranger's price once, and
-the answer to that names its own.
+is linked to or not, is answered alike. Nor does what the target does for such a
+request depend on what it names: the signature is checked for every solution that holds
+at a member's `BASE` or more, under whatever key, and whether that key is a member of
+the pool is looked up only once the signature is the key's own. A member learns what it
+owes from the answers to its authenticated requests; one that paid too little pays the
+stranger's price once, and the answer to that names its own.
 
-What counts toward `n`: an authenticated request, toward its sender; and a request
-whose solution holds at a stranger's price and whose signature does not, toward the
-strangers. Nothing else. Work that was not done raises nobody's price. A solution at a
-member's price under a member's key, without that member's signature, raises neither
-that member's price nor the strangers': it costs its sender a member's `BASE` of hashes
-and the target one signature check, each time, at a price that does not rise.
+What counts toward `n`: an authenticated request, toward its sender; and any other
+request whose solution holds at a stranger's price, toward the strangers, whatever key
+and pool it names. Nothing else. Work that was not done raises nobody's price. A
+solution at a member's `BASE` under any key, without that key's signature, raises no
+price: it costs its sender that many hashes and the target one signature check, each
+time, at a price that does not rise.
 
 ### After a start
 
@@ -1100,6 +1109,12 @@ Nothing in a record hides any of this.
 - **A record taken in is written at once.** Each request that brings a host a record it
   takes has one line added to the pool's log and the log synced to disk before the
   answer leaves, a sync per request for as long as a member pays for requests.
+- **How long a refusal takes may say that a pool is linked.** A key that is no member,
+  once its request is authenticated at a stranger's price, is refused alike whatever
+  pool it names, and a `hello` it sends in a pool the host is linked to is refused only
+  after the host has judged the member record in it: a few signature checks and one
+  look at the pool later than in a pool the host is not linked to. Each such request
+  costs a stranger's price, which doubles past four a minute.
 - **A grant is good for 120 s of its claimant's clock**, which the giver takes from the
   claimant within 300 s of its own. A claim signed inside that time and shown later is
   taken in when it surfaces. It holds an offer only when no claim its host gave that
@@ -1149,14 +1164,20 @@ Nothing in a record hides any of this.
 - **A ticket taken by a member that had none is a request refused.** The member that
   held it sends its body all the same and gets 413: a `push` goes out again in its
   time, and an `act` is not sent again and fails for its job. It happens to a member that
-  takes a second place inside a minute, at a target whose four places are all taken, in
-  the instant between its `reserve` and its body.
+  takes a second place inside a minute, at a target whose four places are all taken or
+  while another key of the seats it sits in asks, in the instant between its `reserve`
+  and its body.
 - **A ticket waits 10 s, and the work for the body is done inside them.** A sender is
   asked more work than it does in 10 s only after a burst of its own requests - past
   512 times a member's base price at a million hashes a second - and until that price
   is down its large requests find their tickets void.
 - **Members seated by one member wait for one another's large bodies** at each target,
-  one at a time.
+  one at a time. A key among them that takes ticket after ticket and sends nothing above
+  64 KiB is refused from its second ticket on, and one that sends a large body for
+  each ticket yields every other ticket to whoever of them asks. Two keys in those seats
+  that take turns, each sending a whole body as slowly as a body may come, hold the
+  place as four members hold a target's four: the others find it only in the moments
+  between.
 - **A full pool is slow to enter.** The index of a pool at its caps is some 20 pages and
   its records up to 61 MiB, pulled 60 KiB at a time: about a thousand requests, each
   paid for (section 3).

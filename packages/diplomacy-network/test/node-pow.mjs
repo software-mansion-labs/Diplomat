@@ -85,6 +85,29 @@ await check('a request delivered twice is carried out once', async () => {
   assert.equal(performed().length, 6);
 });
 
+await check('six requests with real work at a stranger\'s price and nobody\'s signature are quoted the same prices whatever key and pool they name: the host\'s own key or a member\'s, a pool it is in or not', async () => {
+  const other = 'github.com/acme/other';
+  const rows = [];
+  for (const [pool, named] of [[POOL, 'a'], [other, 'a'], [POOL, 'b'], [POOL, 'unseen'], [other, 'b']]) {
+    const w = createWorld({ seed: 63 });
+    const [a, b] = await w.pool(['a', 'b']);
+    await w.run(61);
+    const s = w.stranger('s');
+    const key = { a, b, unseen: w.stranger('unseen') }[named].pk;
+    // The work is for the key named; the signature is the stranger's own.
+    const forged = { id: { ...s.id, pk: key }, transport: s.transport };
+    const quoted = [];
+    for (let n = 0; n < 6; n += 1) {
+      const answer = await w.request(forged, a, 'sync', { asOf: w.net.now(), hash: w.view(b).hash }, { effort: STRANGER, pool });
+      quoted.push([answer.code, answer.detail, answer.effort].join(' | '));
+    }
+    rows.push(quoted);
+  }
+  const refusal = (effort) => `effort | the work or the signature of this request does not hold | ${effort}`;
+  assert.deepEqual(rows[0], [STRANGER, STRANGER, STRANGER, STRANGER * 2, STRANGER * 2, STRANGER * 2].map(refusal));
+  for (const row of rows.slice(1)) assert.deepEqual(row, rows[0]);
+});
+
 await check('a request that has not paid costs the host no signature check', async () => {
   const w = createWorld({ seed: 64 });
   const [a, b] = await w.pool(['a', 'b']);
@@ -147,7 +170,7 @@ await check('a host reads a large body only for a ticket a member paid and signe
   assert.equal((await reserve(rest[0])).code, 'busy');
   for (const ticket of tickets.slice(1)) assert.equal(limit({ 'dn-ticket': ticket }, 2 ** 19), STRANGER_BODY_BYTES);
   const first = (await reserve(rest[4])).body.ticket;
-  await a.transport.host.handler(Buffer.from('{}'), { headers: { 'dn-ticket': tickets[0] } });
+  await a.transport.host.handler(Buffer.alloc(STRANGER_BODY_BYTES + 1, 0x20), { headers: { 'dn-ticket': tickets[0] } });
   place.release();
   place.release();
   // A member that asks again holds one ticket, the later one.
@@ -159,7 +182,7 @@ await check('a host reads a large body only for a ticket a member paid and signe
   assert.deepEqual([fifth2.code, fifth2.detail], ['busy', 'no place for a large body is free'], 'a place given back is a place, not five, and its member had one until just then');
   const kept = limit({ 'dn-ticket': second }, 2 ** 19);
   assert.equal(kept.bytes, 2 ** 19, 'and takes no ticket from the one that has it');
-  await a.transport.host.handler(Buffer.from('{}'), { headers: { 'dn-ticket': second } });
+  await a.transport.host.handler(Buffer.alloc(STRANGER_BODY_BYTES + 1, 0x20), { headers: { 'dn-ticket': second } });
   kept.release();
 
   // Words in headers repeated every minute take no place from a member that paid for one.
@@ -291,4 +314,62 @@ await check('a member and the keys in its seats have one place for a large body 
   assert.equal(announce(later).bytes, 100000);
   // A member that reserves again left the ticket it had unused.
   assert.deepEqual([(await reserve(exe)).length, await reserve(exe)], [22, UNUSED]);
+});
+
+await check('inside a member\'s seats too, a key that had the place within the last minute yields its unused ticket to one that had it longer ago or never - a body being read is not interrupted - and a body no larger than a stranger may send leaves its ticket unused', async () => {
+  const w = createWorld({ seed: 68 });
+  const [req] = await w.pool(['req', 'exe']);
+  const evil = await w.intruder('evil', req);
+  const { all: [p, q], records } = w.crowd(evil, 2);
+  assert.deepEqual((await w.request(evil, req, 'push', { records }, { effort: MEMBER * 4 })).body.refused, []);
+  const [UNUSED, NONE] = ['the tickets this member took went unused', 'no place for a large body is free'];
+  const reserve = async (from) => {
+    const answer = await w.request(from, req, 'reserve', { kind: 'push', bytes: 100000 }, { effort: MEMBER * 64 });
+    return answer.ok ? answer.body.ticket : answer.detail;
+  };
+  const announce = (ticket) => req.transport.host.limit({ 'dn-ticket': ticket, 'content-length': '100000' });
+  const send = async (ticket, bytes) => {
+    const place = announce(ticket);
+    await req.transport.host.handler(Buffer.alloc(bytes, 0x20), { headers: { 'dn-ticket': ticket } });
+    place.release();
+  };
+  // A first ticket is nobody's to take, and it is void 10 s on.
+  const first = await reserve(evil);
+  assert.equal(await reserve(p), NONE);
+  await w.run(11);
+  // The key that just had the place takes it again: one that never had it takes the ticket.
+  const second = await reserve(evil);
+  const mine = await reserve(p);
+  assert.deepEqual([first.length, second.length, mine.length], [22, 22, 22]);
+  assert.equal(announce(second), STRANGER_BODY_BYTES, 'the ticket taken is good for nothing');
+  assert.equal(await reserve(q), NONE, 'what a key that had no place took is its own');
+  await send(mine, STRANGER_BODY_BYTES + 1);
+  // Two keys that had the place within the minute: the one that had it longer ago takes
+  // the other's ticket, and gives it to neither that one nor itself.
+  const again = await reserve(p);
+  const back = await reserve(evil);
+  await w.run(1);
+  assert.deepEqual([again.length, back.length, announce(again), await reserve(p)], [22, 22, STRANGER_BODY_BYTES, NONE]);
+  // Its body's headers hold the place against a key that never had one.
+  const place = announce(back);
+  assert.equal(await reserve(q), NONE);
+  // The largest body a stranger may send needed no ticket: this one went unused, the
+  // key's second running.
+  await req.transport.host.handler(Buffer.alloc(STRANGER_BODY_BYTES, 0x20), { headers: { 'dn-ticket': back } });
+  place.release();
+  assert.equal(await reserve(evil), UNUSED);
+  await w.run(59);
+  assert.equal(await reserve(evil), UNUSED);
+  // A key that rested a minute is one that had no place: its ticket is its own.
+  await w.run(2);
+  assert.equal((await reserve(evil)).length, 22);
+  assert.equal(await reserve(q), NONE);
+  // Two keys that last had the place in the same second: the one that holds it keeps it.
+  await w.run(11);
+  await send(await reserve(p), STRANGER_BODY_BYTES + 1);
+  const at = w.net.now();
+  assert.equal((await reserve(q)).length, 22);
+  assert.equal(w.net.now(), at, 'both had the place in one second');
+  await w.run(11);
+  assert.deepEqual([(await reserve(p)).length, await reserve(q)], [22, NONE]);
 });
