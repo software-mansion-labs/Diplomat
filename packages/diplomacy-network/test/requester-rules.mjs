@@ -685,9 +685,25 @@ await check('GitLab: each kind writes what its GitHub twin writes, through the r
     glab('POST', `${P}/merge_requests`, { ...create, description: 'd\n/merge' }), glab('POST', `${P}/merge_requests`, { ...create, merge_when_pipeline_succeeds: true }),
     glab('POST', `${P}/merge_requests?title=x`, create), glab('POST', `${P}/merge_requests`, { ...create, source_project_id: 100 }),
   ]) await refused(issues, request, pushed());
+  // A label can be made by naming it, replaces another of its scope and may start a pipeline that waits for it: glab sends none.
+  for (const labels of ['x', 'pipeline::deploy', ['x'], ' ']) {
+    for (const rules of [issues, gitlab('audit')]) {
+      for (const base of [P, '/api/v4/projects/99', '/api/v4/projects/me%2Fproj']) {
+        await refused(rules, glab('POST', `${base}/merge_requests`, { ...create, labels }), pushed(), /the body member "labels" has a value this task may not use/);
+      }
+    }
+  }
+  await allowed(issues, glab('POST', '/api/v4/projects/me%2Fproj/merge_requests', create), glWorld(['me/proj:refs/heads/fix-421']));
+  await allowed(issues, glab('POST', `${P}/merge_requests`, { ...create, labels: undefined }), pushed());
   // A merge request is a draft by its title alone, so one sent without a title is not one.
   await refused(issues, glab('POST', `${P}/merge_requests`, { ...create, title: undefined }), pushed(), /the body member "title" is required/);
   await refused(issues, glab('POST', `${P}/merge_requests`, { ...create, source_branch: undefined }), pushed(), /the body member "source_branch" is required/);
+  const unassigned = gitlab('issues', { assign: false });
+  await refused(unassigned, glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7] }), pushed(), /no rule of this task allows the request/);
+  await allowed(unassigned, glab('POST', `${P}/issues/421/notes`, { body: 'hello' }), pushed());
+  const silent = gitlab('issues', { comment: false });
+  await refused(silent, glab('POST', `${P}/issues/421/notes`, { body: 'hello' }), pushed(), /no rule of this task allows the request/);
+  await allowed(silent, glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7] }), pushed());
   const noPRs = gitlab('issues', { noPRs: true });
   await allowed(noPRs, glab('POST', `${P}/issues/421/notes`, { body: 'findings' }), pushed());
   for (const request of [glab('PUT', `${P}/issues/421`, { assignee_ids: [3, 7] }), glab('POST', `${P}/merge_requests`, create), gitPush('gitlab.example.com', '/group/sub/proj.git')]) await refused(noPRs, request, pushed());

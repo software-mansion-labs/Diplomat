@@ -370,10 +370,11 @@ function gitlab({ kind, options, target, item, me }) {
   // (/merge, /approve, /close), so text is `prose`: free, with no such line.
   const prose = { prose: true };
   // A merge request is a draft by its title, and nothing else in the body may point it
-  // at another project or merge it.
+  // at another project or merge it. A label is made by naming it, replaces another of its
+  // scope and can start a pipeline: glab sends the empty list, as gh sends none.
   const draft = {
     source_branch: { created: true, required: true }, title: { prefix: 'Draft:', required: true },
-    target_branch: 'free', description: prose, labels: 'free', remove_source_branch: 'free', squash: 'free', allow_collaboration: 'free',
+    target_branch: 'free', description: prose, labels: { equals: '' }, remove_source_branch: 'free', squash: 'free', allow_collaboration: 'free',
   };
   const draftMerges = () => {
     // glab names the target project in every merge request it opens; it may only be the pool's own.
