@@ -68,7 +68,7 @@ struct PipelineView: View {
     /// What stands in for the graph while there is none to draw.
     static func emptyText(enabled: Bool, synced: Bool) -> String {
         if !enabled {
-            return "The pipeline is off. Switched on in Settings, it rates every open issue and PR, "
+            return "The pipeline is off. Switched on in Settings, it rates every open issue and your own PRs, "
                 + "sends the low-risk, low-complexity ones down the fast track and shows them here."
         }
         return synced ? "The last sync found no open issue or PR."
@@ -582,7 +582,7 @@ private struct PipelineDetail: View {
             if let hold = item.hold {
                 HStack(alignment: .top, spacing: 5) {
                     Image(systemName: "hand.raised.fill").font(.system(size: 9)).foregroundStyle(.orange)
-                    Text(hold).font(.system(size: 10.5)).fixedSize(horizontal: false, vertical: true)
+                    Text(PipelineTint.held(hold)).font(.system(size: 10.5)).fixedSize(horizontal: false, vertical: true)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .cardChrome(fill: Color.orange.opacity(0.13), padding: 5)
@@ -952,8 +952,11 @@ enum PipelineTint {
     static func hover(_ item: PipelineItem) -> String {
         let source = item.source == .linear ? "Linear issue" : (item.kind == .pr ? "GitHub PR" : "GitHub issue")
         return ([item.title, "\(source) · \(item.stage.rawValue) · \(word(item.lane).lowercased()) lane",
-                 item.hold, item.id] as [String?]).compactMap { $0 }.joined(separator: "\n")
+                 item.hold.map(held), item.id] as [String?]).compactMap { $0 }.joined(separator: "\n")
     }
+
+    /// A hold as the card's tooltip and the detail pane say it, as on Linux.
+    static func held(_ hold: String) -> String { "Held: \(hold)" }
 
     /// The time today; with its date on any other day.
     static func syncTime(_ date: Date, now: Date = Date()) -> String {

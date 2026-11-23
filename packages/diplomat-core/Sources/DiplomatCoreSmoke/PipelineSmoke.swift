@@ -780,6 +780,8 @@ func pipelineSmoke() throws {
     check(PipelineGate.hold({ var c = pass; c.foreignCommits = ["", "bob"]; return c }(), me: "op")?.message
           == "has commits by someone other than me")
     check(PipelineGate.hold({ var c = pass; c.ciState = "FAILURE"; return c }(), me: "op")?.message == "CI failure")
+    check(PipelineGate.hold({ var c = pass; c.trackLabels = false; return c }(), me: "op")?.message
+          == "lacks a fast-track label")
 
     // ---- The graph's layout ----
     func node(_ id: String, _ lane: PipelineLane, _ hhmm: String) -> PipelineItem {
@@ -1245,7 +1247,9 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
         ("a deleted account's comment", { $0.comments.append(("", false, "?")) }, "@ghost has commented or reviewed"),
         ("a review requested", { $0.reviewRequests = 1 }, "waits on 1 requested review"),
         ("my own comment", { $0.comments.append((opLogin, false, "Hold on, checking")) },
-         "I commented on it myself, not through Diplomat"),
+         "I commented on or reviewed it myself, not through Diplomat"),
+        ("my own review", { $0.reviews.append(.init(login: opLogin, body: "Looks fine", oid: $0.head)) },
+         "I commented on or reviewed it myself, not through Diplomat"),
         ("an issue it closes that is not mine", { $0.closes.append(5) }, "would close #5, which Diplomat may not write to"),
         ("no candidate it fixes", { $0.closes = [] }, "closes no low-risk, low-complexity issue Diplomat may act on"),
         ("labels past the page", { $0.moreLabels = 1 }, "has more labels than one read lists"),
@@ -1315,6 +1319,15 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     draft.prs[0].checks = [("SUCCESS", at("12:05"))]
     let d3 = sync(draft, mergeOnly, draftDir, later(10))
     check(d3.writes == ["merge #13 --squash \(sha("c3"))"], "CI ran since it went ready: \(d3.writes)")
+    // With merging off, nothing is marked ready, and the hold says so.
+    let unmerged = only([13, 27])
+    unmerged.prs[0].draft = true
+    let unmergedDir = dir("draft-merge-off")
+    try seedRerate(unmergedDir, 13, sha("c3"), at: later(-60))
+    let d0 = sync(unmerged, PipelineSettings(roots: [root]), unmergedDir, t0)
+    check(d0.writes.isEmpty && stageOf(d0.result, prURL(13))
+          == "cleared/fast (still a draft; it is marked ready first, then merged once CI has run on it)",
+          "a draft, merging off: \(d0.writes) \(stageOf(d0.result, prURL(13)))")
 
     // A merge GitHub made though gh did not say so.
     let (_, unsure) = try cleared("merge-unconfirmed") { $0.mergeUnconfirmed = true }
@@ -1440,6 +1453,8 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
                                 "#1 was not split: @mallory is on the prompt-injection ban list"],
           "banned, forced: \(b2.result.notices)")
     check(stageOf(b2.result, issueURL(102)) == "unrated/unrated (\(nina))", stageOf(b2.result, issueURL(102)))
+    check(item(b2.result, issueURL(102))?.splitFrom == "nina" && item(b2.result, issueURL(3))?.splitFrom == nil,
+          "a part names whose text it carries: \(String(describing: item(b2.result, issueURL(102))?.splitFrom))")
 
     // A rating whose labels GitHub refused is kept, and not paid for again.
     let refused = only([1])

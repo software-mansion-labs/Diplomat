@@ -541,11 +541,24 @@ def test_start_fix_is_for_a_writable_candidate_whose_fix_is_known(store):
     store.pipeline_result["items"][-1]["hold"] = "Linear team ENG has no root to fix it in"
     store.pipeline_changed.emit()
     assert view.buttons["fix"].toolTip() == "Linear team ENG has no root to fix it in"
+    del store.pipeline_result["items"][-1]["hold"]
     store.pipeline_result = {**result, "effects": [{
         "kind": "fixLinear", "repo": "o/r", "identifier": "ENG-5", "url": linear,
         "text": "t", "key": f"pipeline-fix:{linear}", "stamp": "fix"}]}
     store.pipeline_changed.emit()
     assert view.buttons["fix"].isEnabled()
+
+
+def test_start_fix_is_off_for_a_held_issue_the_hold_saying_why(store):
+    """A part split off a banned author's issue, though the operator filed it."""
+    held = "split from an issue of @mallory, who is on the prompt-injection ban list"
+    result = _result()
+    result["items"][4] = {**result["items"][4], "hold": held, "splitFrom": "mallory"}
+    store.pipeline_result = result
+    view = PipelineView(store)
+    view.select(I5)
+    fix = view.buttons["fix"]
+    assert (fix.isEnabled(), fix.toolTip()) == (False, held)
 
 
 def test_why_start_fix_queued_nothing_shows_under_the_buttons(store, monkeypatch):

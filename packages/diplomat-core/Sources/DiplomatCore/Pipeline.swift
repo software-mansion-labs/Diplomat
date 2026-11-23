@@ -95,13 +95,17 @@ public struct PipelineItem: Codable, Equatable, Sendable {
     /// The head the latest Diplomat clean marker names.
     public var cleanAt: String?
     public var updatedAt: Date?
+    /// For an issue Diplomat split off another, the author whose text it carries (the
+    /// root ancestor's): its fix's ban dimension, as `PipelineEffect`'s `author`.
+    public var splitFrom: String?
 
     public init(id: String, source: PipelineSource, kind: PipelineKind, label: String,
                 title: String, repo: String, state: String, author: String? = nil,
                 assignees: [String] = [], writable: Bool, rating: PipelineRating? = nil,
                 ratedBy: String? = nil, why: String? = nil, floor: PipelineRating? = nil,
                 stage: PipelineStage, lane: PipelineLane, hold: String? = nil,
-                headSha: String? = nil, cleanAt: String? = nil, updatedAt: Date? = nil) {
+                headSha: String? = nil, cleanAt: String? = nil, updatedAt: Date? = nil,
+                splitFrom: String? = nil) {
         self.id = id
         self.source = source
         self.kind = kind
@@ -122,6 +126,7 @@ public struct PipelineItem: Codable, Equatable, Sendable {
         self.headSha = headSha
         self.cleanAt = cleanAt
         self.updatedAt = updatedAt
+        self.splitFrom = splitFrom
     }
 }
 

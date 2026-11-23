@@ -1084,6 +1084,7 @@ final class PipelineSync {
             entries[i].item.stage = stage
             entries[i].item.lane = lane
             entries[i].item.hold = banHold(e) ?? hold
+            entries[i].item.splitFrom = state.lineage[e.id]
         }
     }
 
