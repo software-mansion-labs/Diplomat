@@ -640,6 +640,28 @@ def test_a_pool_is_left_only_on_the_daemons_word():
     assert [p.left for p in left.pools] == [True, False, False]
 
 
+def test_a_repository_named_by_a_remote_on_another_port_has_no_pool_and_is_named():
+    from diplomat_runtime import localrepos
+
+    def checkout(url):
+        return localrepos.entries("/src/api", f"remote.origin.url {url}\n")
+
+    ported = checkout("https://gitlab.acme.example:8443/p/api.git")
+    assert ported == [LocalRepo("p", "api", "/src/api", "gitlab.acme.example", 8443)]
+    assert ported[0].key == "gitlab.acme.example/p/api", "named by the bare host"
+    assert [checkout(u)[0].web_port for u in (
+        "https://gitlab.acme.example:8443/p/api.git", "http://gitlab.acme.example:8080/p/api",
+        "https://gitlab.acme.example:443/p/api.git", "http://gitlab.acme.example:80/p/api",
+        "ssh://git@gitlab.acme.example:2222/p/api.git")] == [8443, 8080, None, None, None]
+    known = [N.Pool("gitlab.acme.example/p/api", path="/src/api", identity="me")]
+    logins = {"gitlab.acme.example": "me"}
+    assert N.pools_listing(ported, [], [], logins, known) == ([], [
+        "p/api is reached on port 8443 of gitlab.acme.example, and the Diplomacy Network reaches a forge on 443 only: it has no pool and none of its jobs is offered"]), "not the pool the daemon had either"
+    ssh = checkout("ssh://git@gitlab.acme.example:2222/p/api.git")
+    assert [p["id"] for p in N.pools_listing(ssh, [], [], logins, [])[0]] == [
+        "gitlab.acme.example/p/api"]
+
+
 def test_a_join_under_way_and_why_the_last_invite_failed_are_read_of_a_pool():
     seen = N.Snapshot.from_json({"pools": [
         {"id": "a", "joining": True}, {"id": "b", "joinFailed": "no-seat"}, {"id": "c"},

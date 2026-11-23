@@ -19,9 +19,15 @@ import { own } from './own-fault.js';
 // that, and the path.
 const REMOTE = /^((?:[a-z+]+:\/\/)?(?:[^@/]+@)?([^:/]+)(?::\d+)?[:/])(.+?)(?:\.git)?\/?$/i;
 
-/// `host/owner/repo` in lowercase for any spelling of a remote URL, or null.
+/// `host/owner/repo` in lowercase for any spelling of a remote URL, or null. Null too
+/// for an https remote on a port but 443 and an http one on a port but 80: a pool's id
+/// names a host and no port, and the forge's API is on 443. An ssh port is only how git
+/// reaches the forge.
 export function remoteSlug(url) {
-  const m = REMOTE.exec(String(url).trim());
+  const s = String(url).trim();
+  const web = /^(https?):\/\/(?:[^@/]+@)?[^/:@]+:(\d+)\//i.exec(s);
+  if (web && Number(web[2]) !== (web[1].toLowerCase() === 'https' ? 443 : 80)) return null;
+  const m = REMOTE.exec(s);
   return m ? `${m[2]}/${m[3]}`.toLowerCase() : null;
 }
 

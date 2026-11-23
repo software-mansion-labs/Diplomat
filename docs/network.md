@@ -70,16 +70,17 @@ away its offers are cancelled. A machine with jobs out has to stay awake.
   can each of those the first machine seated, which makes 241 machines the most a pool holds.
 - **Leaving.** **Leave** stops this machine taking the pool's jobs and offering to it. It stays
   left until **Rejoin**. After more than a month away - left, or switched off - the machine
-  comes back the same way, as long as its seat was not given to another machine meanwhile: it asks every machine it knew in
-  the pool and is in again once one of them answers. Until then the pool's card says it is
-  waiting to be let back in, and it takes and offers none of the pool's jobs; if every one of
-  them refuses it as no member, the card says it has no seat there, and it needs an invite
-  again. A machine whose clock is off, or that is asked for more work than it can do, is still
-  waiting, not without a seat. If all the others are gone for good, removing the repository and
-  adding it again starts a pool of one. Removing a repository and adding it again starts another
-  pool of one on this machine. The pool it was in goes on without it and takes it back by no
-  invite of a machine that came in under it; if this machine started that pool, that is every
-  machine there, and they join the new pool instead, each by an invite from this one.
+  comes back the same way, as long as its seat was not given to another machine meanwhile: it
+  asks every machine it knew in the pool and is in again once one of them answers. Until then
+  the pool's card says it is waiting to be let back in, and it takes and offers none of the
+  pool's jobs; if every one of them refuses it as no member, the card says it has no seat there,
+  and it needs an invite again. A machine whose clock is off, or that is asked for more work
+  than it can do, is still waiting, not without a seat. If all the others are gone for good,
+  removing the repository and adding it again starts a pool of one. Removing a repository and
+  adding it again starts another pool of one on this machine. The pool it was in goes on without
+  it and takes it back by no invite of a machine that came in under it; if this machine started
+  that pool, that is every machine there, and they join the new pool instead, each by an invite
+  from this one.
 - **Reaching each other.** A machine is reachable only as a Tor onion service whose address is
   its own public key, so there are no ports to open and no addresses to exchange. A first
   connection between two machines can take minutes; later ones take about a second.
@@ -343,7 +344,11 @@ owner/repo on host is not known yet*. Every other pool follows Settings on the n
 that lasts: a repository linked since gains its pool, one taken out leaves its own, and the
 feed names each pool left and why. A root or a folder that was read and has no GitHub or GitLab
 remote is no pool and holds nothing back; a self-hosted GitLab is recognised by a host name
-starting with `gitlab.` or by `glab` being signed in to it. A list the daemon refuses is shown
+starting with `gitlab.` or by `glab` being signed in to it. A repository whose remote is https on
+a port other than 443 (or http on one other than 80) has no pool, since the network reaches a
+forge on 443 only, and the screen says so; the rest of Diplomat works with it as with any other,
+`glab` reaching it by the `--api-host` it was logged in with. A remote over ssh on another port
+is the forge's own, and keeps its pool. A list the daemon refuses is shown
 with the daemon's own sentence and sent again once a minute, or as soon as it changes.
 
 A pool's card says why this machine takes none of that pool's jobs while it takes none - docker
@@ -397,7 +402,10 @@ how many tasks it takes, and offers nothing, whoever asks, until the file reads 
 pools stay as the daemon has them, and the panel's red line and the Network screen say
 *…/config.json cannot be read as settings*. An offer made before that, which the daemon had
 not answered, is still settled with it. The daemon takes five such reads, a second apart, and
-then stops as it does when switched off; Diplomat still starts no agent in a terminal.
+then stops as it does when switched off. Diplomat does not start it again meanwhile - not on its
+own and not at launch, and the Network screen's **Start daemon** and **Restart daemon** are
+greyed out - and starts it on the first cycle after the file reads again. It still starts no
+agent in a terminal.
 
 Switching the network off withdraws this machine's open offers, stops the jobs it runs for the
 pool and frees their PRs and issues for agents in terminals again. The daemon removes its

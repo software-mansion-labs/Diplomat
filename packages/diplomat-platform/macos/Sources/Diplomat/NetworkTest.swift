@@ -1107,9 +1107,10 @@ enum NetworkTest {
             more: [["id": "github.com/o/back", "returning": true],
                    ["id": "github.com/o/refused-back", "returning": true, "unseated": true],
                    ["id": "github.com/o/seatless", "unseated": true]])).utf8))?.pools ?? []
-        let backIn = "Returning: waiting for a machine this one left to let it back in"
-        let noSeat = "No seat here: every machine this one asked refused it, and it needs an "
-            + "invite again"
+        let backIn = "Returning: waiting for a machine this one knew here to let it back "
+            + "in; until one does, it takes and offers none of this pool's jobs"
+        let noSeat = "No seat here: every machine this one asked refused it as no member, and "
+            + "it needs an invite again"
         check("a pool this machine waits to be let back into says so on its card, until refused",
               seatCards.map(NetworkText.poolReturning) == [nil, backIn, nil, nil])
         check("a pool with no seat for this machine says so on its card, and no other does",
@@ -2219,7 +2220,11 @@ enum NetworkTest {
                      "identity": "latekvo"]]
         }
         try? launchWhole.write(to: AppConfig.url)
+        let handWritten = Data(#"{"config":"\#(AppConfig.url.path)","networkEnabled":true}"#.utf8)
+        try? handWritten.write(to: switchRecord)
         await fresh.runNetworkCycleOnce()
+        check("a record that already has the switch a reading found is left as it is",
+              (try? Data(contentsOf: switchRecord)) == handWritten && isRecorded(true))
         check("once the config reads, the pools of its own roots are said, and the cap",
               saidOf()[0] == saidAtLaunch[0] + 1 && saidOf()[1] == saidAtLaunch[1] + 1
                 && linkedPosted() && fresh.networkTrouble == nil
@@ -2248,11 +2253,24 @@ enum NetworkTest {
         script.set(snapshot(offers: [offerRow("task-launch", "pooled")], more: [linkedPool]))
         let restartsBefore = installer.all.filter { $0 == "--restart-daemon" }.count
         await fresh.startNetworkDaemon(restart: true)
+        await fresh.runNetworkCycleOnce()
         check("while the roots cannot be read no list of pools is posted, to a daemon "
-                + "restarted since either",
+                + "started since either",
               saidOf() == saidWhileRead && fresh.networkEnabled
-                && installer.all.filter { $0 == "--restart-daemon" }.count == restartsBefore + 1
                 && linkedLeft() == leftWhileRead)
+        check("…and Restart starts no daemon on settings it would switch itself off over",
+              installer.all.filter { $0 == "--restart-daemon" }.count == restartsBefore)
+        stopDaemon()
+        let startsWhileUnknown = starts()
+        let spell = Date().timeIntervalSince1970 + 200
+        for at in [spell, spell + 1, spell + 100] { await fresh.runNetworkCycleOnce(now: at) }
+        check("a daemon gone while the settings are unknown is not started again",
+              starts() == startsWhileUnknown && fresh.networkAnswered == false)
+        try? launchWhole.write(to: AppConfig.url)
+        await fresh.runNetworkCycleOnce(now: spell + 101)
+        check("…and is on the first cycle once the config reads, no wait run up meanwhile",
+              starts() == startsWhileUnknown + 1)
+        startDaemon()
         //     One that breaks while the roots are read, by the git that reads them.
         let breaker = scratch.appendingPathComponent("git-breaks-config")
         try? Data("#!/bin/sh\nprintf '{' > '\(AppConfig.url.path)'\nexec \(realGit.path) \"$@\"\n".utf8)

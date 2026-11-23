@@ -319,8 +319,13 @@ def _network_screen_fixture(store: Store, mode: str) -> None:
             {"id": "github.com/latekvo/prompt-bench", "path": "/src/prompt-bench",
              "identity": "latekvo", "hash": "b2",
              "joining": not unsaved,
-             "joinFailed": "the invite ran out before the machine that made it answered"
-                           if unsaved else "",
+             # The daemon's longest reason.
+             "joinFailed": "the machine that made that invite came into the pool under this "
+                           "one, before this one began the pool again, and no machine that "
+                           "came in under this one can let it back in: use an invite of one "
+                           "that did not, or - if this machine began that pool, so that every "
+                           "machine there came in under it - have them join this one's pool, "
+                           "each by an invite this machine makes" if unsaved else "",
              "notTaking": "this machine could not start a job of this pool: "
                           "its repository could not be fetched",
              "members": [{"pk": me, "self": True, "maxAcceptedH": 12,

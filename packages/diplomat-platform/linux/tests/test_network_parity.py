@@ -70,7 +70,16 @@ REMOTES = [
     "https://github.com/o/r#frag", "https://github.com/o r/r", "git@github.com:o/r.git extra",
     "https://github.com/ö/r", "git@gitlab.com:group/sub/r", "https://gitlab.com/o/.git",
     "https://github.com/o/.git", "git@gitlab.acme.example:platform/sub/api.git",
+    "https://github.com:8443/o/r", "https://u:pw@github.com:8443/o/r", "HTTP://github.com:8080/o/r",
+    "http://github.com:443/o/r", "http://github.com:80/o/r", "https://github.com:0443/o/r",
+    "https://gitlab.com:8443/g/r.git", "ssh://git@gitlab.acme.example:2222/p/api.git",
+    "git://github.com:9418/o/r.git", "https://github.com:/o/r",
 ]
+
+#: Remotes on a port the forge's API is not on: no pool.
+OTHER_PORT = ("https://gitlab.acme.example:8443/p/api.git", "https://github.com:8443/o/r",
+              "https://u:pw@github.com:8443/o/r", "HTTP://github.com:8080/o/r",
+              "http://github.com:443/o/r", "https://gitlab.com:8443/g/r.git")
 
 RULES = [
     "github.com", "github.com:443", "www.github.com", "api.github.com", "ghe.com",
@@ -222,6 +231,7 @@ TWIN = {"owner": "O", "repo": "R", "path": "/src/r-again", "host": "github.com"}
 GROUPED = {"owner": "group/sub", "repo": "r", "path": "/src/g", "host": "gitlab.com"}
 GHE = {"owner": "o", "repo": "r", "path": "/src/ghe", "host": "acme.ghe.com"}
 SUB = {"owner": "g/sub", "repo": "p", "path": "/src/sub", "host": "gitlab.github.com"}
+PORTED = {**API, "path": "/src/api-8443", "web_port": 8443}
 BOTH = {"github.com": "octocat", "gitlab.acme.example": "ilatka", "gitlab.com": "ila",
         "acme.ghe.com": "octocat"}
 
@@ -239,6 +249,8 @@ LISTING = [
         ([ROOT, API], [TOOL], ["/mnt/tool"], {}),
         ([API], [ROOT], [], {"gitlab.acme.example": "ilatka"}),
         ([ROOT, GHE], [SUB, GHE, API], [], BOTH),
+        ([ROOT, PORTED], [], [], BOTH),
+        ([PORTED], [API], [], BOTH),
         ([GHE], [SUB], ["/src/ghe"], {}),
     )]
 
@@ -256,7 +268,7 @@ def _python() -> dict:
 
     def pool(url: str, hosts: dict[str, str] = {}) -> str | None:
         at = localrepos.parse_remote(url, hosts)
-        if at is None:
+        if at is None or localrepos.web_port(url) is not None:
             return None
         return N.pool_for(LocalRepo(owner=at[1], repo=at[2], path="", host=at[0]).key)
 
@@ -325,12 +337,19 @@ def test_the_twins_agree(twins, member, rows):
 def test_the_fixture_reaches_what_it_claims_to(twins):
     """Agreement on a fixture that only ever reaches the defaults proves nothing."""
     _, python = twins
-    assert len(HOURS) == 75 and len(REMOTES) == 72
+    assert len(HOURS) == 75 and len(REMOTES) == 82
     hosted = dict(zip(HOSTED_REMOTES, python["hostedPools"]))
     assert hosted["git@ssh.git.example.org:o/r.git"] == "git.example.org/o/r", "an ssh_host"
     assert hosted["https://git.example.org/o/r.git"] == "git.example.org/o/r"
     assert dict(zip(REMOTES, python["pools"]))["https://git.example.org/o/r.git"] is None
-    assert hosted["https://code.acme.example:8443/p/api.git"] == "code.acme.example/p/api"
+    assert hosted["https://code.acme.example:8443/p/api.git"] is None, "another port"
+    by_remote = dict(zip(REMOTES, python["pools"]))
+    assert [by_remote[url] for url in OTHER_PORT] == [None] * len(OTHER_PORT)
+    assert [by_remote[url] for url in (
+        "https://github.com:443/o/r.git", "https://github.com:0443/o/r",
+        "http://github.com:80/o/r", "ssh://git@github.com:22/o/r.git",
+        "git://github.com:9418/o/r.git")] == [POOL] * 5
+    assert by_remote["ssh://git@gitlab.acme.example:2222/p/api.git"] == "gitlab.acme.example/p/api"
     assert hosted["https://other.example.org/o/r.git"] is None
     assert hosted["https://github.com/o/r"] == POOL, "GitHub, whatever glab lists"
     assert len(set(python["hostedPools"])) > len(set(python["pools"])) + 3
@@ -351,6 +370,13 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
         "", tested + "DN_LEASE_SECS=60, DN_TRANSPORT=loop", tested + "DN_TRANSPORT=loop"}
     assert any(row["unconfirmed"] for row in python["listing"])
     assert any(len(row["pools"]) >= 3 for row in python["listing"])
+    ported = [row for row, asked in zip(python["listing"], LISTING) if PORTED in asked["roots"]]
+    assert len(ported) == 6 and all(
+        any("is reached on port 8443 of gitlab.acme.example" in line
+            for line in row["unconfirmed"]) == (API not in asked["others"])
+        for row, asked in zip(ported, [a for a in LISTING if PORTED in a["roots"]]))
+    assert all(LAB not in [p["id"] for p in row["pools"]] for row in ported[0::2]), (
+        "not the pool the daemon had either")
     assert python["rules"].count(False) >= 10 and python["rules"].count(True) >= 15
     assert sum("has no rules for" in " ".join(row["unconfirmed"])
                for row in python["listing"]) == 6
@@ -382,8 +408,8 @@ def test_a_time_the_daemon_wrote_reads_by_this_machines_clock_on_both(kolkata):
 
 @pytest.fixture(scope="module")
 def daemon_answers() -> dict:
-    """The daemon's own ``githubApi`` and ``hoursOf`` over the fixture's hosts and
-    hours, each value as its JSON reaches them from the config."""
+    """The daemon's own ``githubApi``, ``hoursOf`` and ``remoteSlug`` over the fixture's
+    hosts, hours and remotes, each value as its JSON reaches them from the config."""
     node, src = shutil.which("node"), Path(__file__).resolve().parents[3] / "diplomacy-network" / "src"
     if node is None:
         pytest.skip("node is not on PATH: the daemon's own functions are not run")
@@ -393,11 +419,12 @@ def daemon_answers() -> dict:
         "import { readFileSync } from 'node:fs';\n"
         f"import {{ githubApi }} from {json.dumps((src / 'requester' / 'rules.js').as_uri())};\n"
         f"import {{ hoursOf }} from {json.dumps((src / 'node' / 'gossip.js').as_uri())};\n"
+        f"import {{ remoteSlug }} from {json.dumps((src / 'executor' / 'mirror.js').as_uri())};\n"
         "const asked = JSON.parse(readFileSync(0, 'utf8'));\n"
         "console.log(JSON.stringify({ rules: asked.rules.map((host) => githubApi(host) !== null),"
-        " hours: asked.hours.map(hoursOf) }));\n")
+        " hours: asked.hours.map(hoursOf), slugs: asked.remotes.map(remoteSlug) }));\n")
     proc = subprocess.run([node, "--input-type=module", "-e", script],
-                          input=json.dumps({"rules": RULES, "hours": HOURS}).encode("utf-8"),
+                          input=json.dumps({"rules": RULES, "hours": HOURS, "remotes": REMOTES}).encode("utf-8"),
                           capture_output=True, timeout=60, check=False)
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
     return json.loads(proc.stdout)
@@ -408,3 +435,18 @@ def test_each_twin_answers_as_the_daemons_own_function_does(twins, daemon_answer
     swift, python = twins
     assert _differing(rows, daemon_answers[member], python[member]) == []
     assert _differing(rows, daemon_answers[member], swift[member]) == []
+
+
+def test_a_remote_the_twins_make_a_pool_of_is_the_one_the_daemon_names(twins, daemon_answers):
+    """The daemon names a checkout's repository by ``remoteSlug``: no pool either twin
+    makes of a remote is another, and a remote on a port the forge's API is not on
+    names none there either."""
+    named = dict(zip(REMOTES, daemon_answers["slugs"]))
+    # No forge hosts a repository named `.git`, which the daemon reads as no name.
+    nameless = {"https://github.com/o/.git": ("github.com/o/.git", "github.com/o/"),
+                "https://gitlab.com/o/.git": ("gitlab.com/o/.git", "gitlab.com/o/")}
+    for twin in twins:
+        assert {url: (pool, named[url]) for url, pool in zip(REMOTES, twin["pools"])
+                if pool is not None and pool != named[url]} == nameless
+    assert [named[url] for url in OTHER_PORT] == [None] * len(OTHER_PORT)
+    assert named["ssh://git@gitlab.acme.example:2222/p/api.git"] == "gitlab.acme.example/p/api"

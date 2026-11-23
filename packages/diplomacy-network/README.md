@@ -695,8 +695,10 @@ four things and starts the job:
     forge serves git over ssh on (`ssh.github.com`, `altssh.gitlab.com`). A name in
     capitals or with one trailing dot is the same name; one with an empty label, a label
     over 63 characters or a character other than a letter, a digit, a hyphen or an
-    underscore is no name, and is answered 400. A forge on another port has no
-    pool, since a pool's id names a host and no port; and a GitHub pool on a subdomain
+    underscore is no name, and is answered 400. A forge served over https on a port but
+    443 (or http on one but 80) has no pool, since a pool's id names a host and no port;
+    a remote reached over ssh on another port is the forge's own, its API being on 443.
+    A GitHub pool on a subdomain
     of github.com, on ghe.com or on a subdomain of it has no rules, so no task of it
     is offered and no job of it comes here;
   - git fetch and clone of the pool's repository are answered from this machine's bare

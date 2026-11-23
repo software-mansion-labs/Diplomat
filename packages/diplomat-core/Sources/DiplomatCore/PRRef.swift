@@ -22,12 +22,20 @@ public struct PRRef: Equatable {
         public let path: String
         /// Lowercased.
         public let host: String
+        /// The port of the remote that named it, where `LocalRepo.webPort(remoteURL:)`
+        /// finds one. glab reaches such a forge by its bare host and the `api_host` it was
+        /// logged in with, so nothing else of Diplomat minds it; the network reaches a
+        /// forge on 443 only, so it has no pool (`NetworkPools.listing`). No part of `key`,
+        /// and not encoded.
+        public let webPort: Int?
 
-        public init(owner: String, repo: String, path: String, host: String = LocalRepo.github) {
+        public init(owner: String, repo: String, path: String, host: String = LocalRepo.github,
+                    webPort: Int? = nil) {
             self.owner = owner
             self.repo = repo
             self.path = path
             self.host = host.lowercased()
+            self.webPort = webPort
         }
 
         /// The project path the forge's API takes, and what labels show.

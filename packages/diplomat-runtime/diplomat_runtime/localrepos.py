@@ -49,6 +49,8 @@ _HOSTED_REMOTE = re.compile(
     r"([\w.-]+(?:/[\w.-]+)*)/([\w.-]+?)(?:\.git)?/?$",
     re.IGNORECASE,
 )
+#: An ``https`` or ``http`` remote's scheme and port, where it names one (:func:`web_port`).
+_WEB_PORT = re.compile(r"^(https?)://(?:[^@/]+@)?[^/:@]+:([0-9]+)/", re.IGNORECASE)
 #: A host key of glab's ``hosts:`` map; its port is dropped, as a remote's is.
 _GLAB_HOST = re.compile(r"^\s+([A-Za-z0-9.-]+)(?::[0-9]+)?:\s*$")
 #: A host's ``ssh_host``, the host its SSH remotes name, quoted or not; port dropped.
@@ -195,6 +197,16 @@ def parse_remote(url: str, hosts: Mapping[str, str] = GITLAB_HOSTS
         else None
 
 
+def web_port(url: str) -> int | None:
+    """The port an ``https`` remote names other than 443, or an ``http`` one other than
+    80; ``None`` for any other remote. Twin of ``LocalRepo.webPort(remoteURL:)``."""
+    web = _WEB_PORT.match(url.strip())
+    if web is None:
+        return None
+    port = int(web.group(2))
+    return port if port != (443 if web.group(1).lower() == "https" else 80) else None
+
+
 def remote_config(path: str) -> str | None:
     """``git config --local --get-regexp '^remote\\..*\\.url$'`` of the checkout at
     ``path``, or ``None`` when it is no checkout or ``git`` failed. A checkout with no
@@ -251,7 +263,7 @@ def entries(path: str, remotes: str, only: tuple[str, ...] = (),
         if only and key[len("remote."):-len(".url")] not in only:
             continue
         named.append((key[len("remote."):-len(".url")],
-                      LocalRepo(coords[1], coords[2], path, coords[0])))
+                      LocalRepo(coords[1], coords[2], path, coords[0], web_port(url))))
     ranked = sorted(range(len(named)),
                     key=lambda i: (named[i][1].is_gitlab, named[i][0] != "upstream",
                                    named[i][0] != "origin", i))

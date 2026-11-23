@@ -338,17 +338,20 @@ enum NetworkText {
         pool.joining ? "Joining: \(seatedLater)" : nil
     }
 
-    /// A pool card's line while this machine, back in a pool it left, waits to be let
-    /// back in, or nil. Once every machine it asked refused it, `poolUnseated` says so.
+    /// A pool card's line while this machine, back in the pool, waits to be let back in,
+    /// or nil. Once every machine it asked refused it, `poolUnseated` says so instead.
     static func poolReturning(_ pool: NetworkSnapshot.Pool) -> String? {
         pool.returning && !pool.unseated
-            ? "Returning: waiting for a machine this one left to let it back in" : nil
+            ? "Returning: waiting for a machine this one knew here to let it back in; until "
+                + "one does, it takes and offers none of this pool's jobs"
+            : nil
     }
 
-    /// A pool card's line once every machine this one asked refused it a seat, or nil.
+    /// A pool card's line once every machine this one asked refused it as no member, or nil.
     static func poolUnseated(_ pool: NetworkSnapshot.Pool) -> String? {
         pool.unseated
-            ? "No seat here: every machine this one asked refused it, and it needs an invite again"
+            ? "No seat here: every machine this one asked refused it as no member, and it "
+                + "needs an invite again"
             : nil
     }
 

@@ -78,6 +78,11 @@ class LocalRepo:
     repo: str
     path: str
     host: str = GITHUB
+    #: The port of the remote that named it, where :func:`localrepos.web_port` finds one.
+    #: glab reaches such a forge by its bare host and the ``api_host`` it was logged in
+    #: with, so nothing else of Diplomat minds it; the network reaches a forge on 443
+    #: only, so it has no pool (:func:`network.pools_listing`). No part of :attr:`key`.
+    web_port: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "host", self.host.lower())

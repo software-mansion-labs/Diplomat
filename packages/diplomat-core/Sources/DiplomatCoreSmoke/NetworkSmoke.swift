@@ -310,6 +310,27 @@ func networkSmoke() throws {
     check(alone.pools.isEmpty && alone.unconfirmed == [noRules],
           "with no login known there it is not said to wait for one: \(alone)")
     check(NetworkPools.linked(roots: [ghe], identities: ["acme.ghe.com": "me"]).isEmpty)
+    func checkout(_ url: String) -> [PRRef.LocalRepo] {
+        PRRef.LocalRepo.entries(path: "/src/api", remotes: "remote.origin.url \(url)\n")
+    }
+    let ported = checkout("https://gitlab.acme.example:8443/p/api.git")
+    check(ported == [PRRef.LocalRepo(owner: "p", repo: "api", path: "/src/api",
+                                     host: "gitlab.acme.example", webPort: 8443)]
+            && ported.first?.key == "gitlab.acme.example/p/api"
+            && checkout("ssh://git@gitlab.acme.example:2222/p/api.git").first?.webPort == nil
+            && checkout("https://gitlab.acme.example:443/p/api.git").first?.webPort == nil,
+          "a remote on another port names its repository by the bare host, and carries its port")
+    let labKnown = NetworkSnapshot(["pools": [["id": "gitlab.acme.example/p/api",
+                                               "path": "/src/api", "identity": "me"]]]).pools
+    let portless = NetworkPools.listing(roots: ported, others: [], unread: [],
+                                        identities: ["gitlab.acme.example": "me"],
+                                        known: labKnown)
+    check(portless.pools.isEmpty && portless.unconfirmed == ["p/api is reached on port 8443 of gitlab.acme.example, and the Diplomacy Network reaches a forge on 443 only: it has no pool and none of its jobs is offered"],
+          "…and has no pool, not the one the daemon had either, and is named: \(portless)")
+    check(NetworkPools.listing(roots: checkout("ssh://git@gitlab.acme.example:2222/p/api.git"),
+                               others: [], unread: [], identities: ["gitlab.acme.example": "me"],
+                               known: []).pools.map(\.id) == ["gitlab.acme.example/p/api"],
+          "an ssh port keeps the pool")
     check(NetworkPools.body(githubOnly) == ["pools": [
         ["id": "github.com/o/r", "path": "/w/r", "forge": "github", "identity": "octocat"],
         ["id": "github.com/x/y", "path": "/w/y", "forge": "github", "identity": "octocat"]]],
