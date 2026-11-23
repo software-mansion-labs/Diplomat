@@ -151,8 +151,8 @@ extension Store {
     }
 
     /// Whether `result` is a sync begun at or after `started`, not the last one answered
-    /// again because another sync held the lock. A result is dated, to the second, when
-    /// its sync began. Twin of `pipeline.ran_since`.
+    /// again because `tick.lock` was held or could not be opened. A result is dated, to the
+    /// second, when its sync began. Twin of `pipeline.ran_since`.
     nonisolated static func pipelineRan(_ result: PipelineTickResult, started: Date) -> Bool {
         result.at.timeIntervalSince1970 >= started.timeIntervalSince1970.rounded(.down)
     }

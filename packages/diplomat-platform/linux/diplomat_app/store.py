@@ -4643,8 +4643,8 @@ class Store(QObject):
         """The Qt-thread half of a sync: publish its result, retire the force sets it
         was handed and the queued asks it no longer owes (:func:`pipeline.withdrawn`),
         and ask for the agent work it owes. A failed sync leaves the last result and
-        every force and ask standing; one that answered the last result because another
-        held the lock (:func:`pipeline.ran_since`) every force and ask; one landing after
+        every force and ask standing; one that answered the last result again
+        (:func:`pipeline.ran_since`) every force and ask; one landing after
         the switch went off every ask (switched off midway, it emits no effect).
 
         A notice is logged when it first appears, and each merge and split the core
