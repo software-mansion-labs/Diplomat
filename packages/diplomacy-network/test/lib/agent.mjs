@@ -14,6 +14,7 @@
 //   deaf                         ignores SIGTERM from here on
 //   child                        leaves a process of its own session behind, its pid kept
 //   say <text>                   the result's text
+//   says <JSON string>           the result's text, with whatever a line of a script cannot hold
 //   fail                         ends as an agent that reports an error
 //   unsent                       sends the model provider nothing for what the result names
 //   result                       the result now, with the steps after it still to come
@@ -161,6 +162,8 @@ for (const line of prompt.slice(prompt.lastIndexOf('\n---\n') + 5).split('\n')) 
     record.waiting = null;
   } else if (verb === 'say') {
     result = rest.join(' ');
+  } else if (verb === 'says') {
+    result = JSON.parse(rest.join(' '));
   } else if (verb === 'fail') {
     ok = false;
   } else if (verb === 'unsent') {

@@ -47,8 +47,8 @@ try {
     fs.writeFileSync(m.configPath, good);
     await m.start();
     await until('the job taken up', () => m.log().includes(`${run.runId} taken up in ${run.container}`));
-    // As an applet does it: the setting, then the signal.
-    m.setConfig({ networkEnabled: false });
+    // As an applet does it: the setting, then the signal. Anything but true is off.
+    m.setConfig({ networkEnabled: 0 });
     assert.deepEqual(await m.stop(), { code: 0, signal: null });
     assert.deepEqual([world(m), alive(agentPid)], [[0, 0, 0], false]);
     assert.doesNotMatch(m.log(), /ending: the network was switched off/, 'it was the signal that ended it');
@@ -200,7 +200,8 @@ try {
     const told = () => count(m.log(), '] the jobs started from now on are given ');
     // Four times two failed reads, six of which in a row would switch it off.
     for (let round = 1; round <= 4; round += 1) {
-      fs.writeFileSync(m.configPath, '{"networkEna');
+      // Half a file, and a whole one that holds no settings.
+      fs.writeFileSync(m.configPath, round % 2 === 1 ? '{"networkEna' : '[{"networkEnabled":true}]');
       await until(`two more failed reads (${round})`, () => failed() >= 2 * round);
       // A good read, seen by what it changes.
       fs.writeFileSync(m.configPath, JSON.stringify({ ...good, networkDevices: round % 2 === 1 }));
@@ -208,7 +209,32 @@ try {
     }
     assert.doesNotMatch(m.log(), /ending/);
     assert.match(m.log(), /could not be read \(1 of 6\)[\s\S]*could not be read \(1 of 6\)/);
-    await m.kill();
+    // Each setting is on when it says true, and at nothing else.
+    fs.writeFileSync(m.configPath, JSON.stringify({ ...good, networkDevices: 1, networkEnabled: 1 }));
+    assert.deepEqual(await m.exit, { code: 0, signal: null });
+    assert.deepEqual([told(), /ending: the network was switched off in Diplomat's settings\n/.test(m.log())], [4, true]);
+  });
+
+  await check('a daemon that is being switched off takes no task while it waits for its job to be gone', async () => {
+    const [a, b] = [bench.machine('wa'), bench.machine('wb', { env: { DN_SWITCH_OFF_WAIT_MS: '5000' } })];
+    await Promise.all([a.start(), b.start()]);
+    await Promise.all([a.linked(), b.linked()]);
+    await b.ok('/join', { invite: (await a.ok('/invite', { pool: POOL })).invite });
+    await until('two members of one pool', async () => (await Promise.all([a.state(), b.state()])).every((s) => s.pools[0].members.length === 2));
+    const task = (item) => ({ pool: POOL, kind: 'review', item, title: item, prompt: 'wait never\nsay never' });
+    // B has a slot left beside the job it runs, which the engine is slow to stop.
+    await b.admit(2);
+    const first = await a.ok('/offer', task('pr-1'));
+    await waiting(b, first.taskId, 'never');
+    fs.writeFileSync(path.join(b.dockerDir, 'hold-exec-stop'), '');
+    b.setConfig({ networkEnabled: false });
+    await until('B to start ending', () => /ending: the network was switched off/.test(b.log()));
+    const second = await a.ok('/offer', task('pr-2'));
+    assert.deepEqual(await b.exit, { code: 0, signal: null });
+    const records = json(a.base, 'pools', names(path.join(a.base, 'pools'))[0]).records;
+    assert.deepEqual([records.filter((r) => r.type === 'claim' && r.taskId === second.taskId), b.log().includes('could not be started')], [[], false]);
+    assert.equal((await a.state()).pools[0].tasks.find((t) => t.taskId === second.taskId).state, 'available');
+    await a.kill();
   });
 
   const kept = (m) => ['runs', 'mirrors', 'ca', 'identity.json', 'pools', 'links.json', 'offers.json'].filter((name) => fs.existsSync(path.join(m.base, name)));
@@ -292,13 +318,88 @@ try {
     assert.deepEqual([world(m), kept(m)], [[0, 0, 0], ['identity.json', 'pools', 'links.json', 'offers.json']]);
   });
 
-  await check('a machine with no docker at all has nothing in docker to leave: its switch-off and the installer both end well', async () => {
+  // What a job can leave among its run records that this user cannot remove, as root's
+  // files are there on an engine that runs containers as root: a directory with a file
+  // in it and no leave to write. `free` gives the leave back.
+  const lock = (m, container, runId) => {
+    const locked = path.join(m.base, 'runs', '.containers', container, runId, 'locked');
+    fs.mkdirSync(locked, { recursive: true });
+    fs.writeFileSync(path.join(locked, 'file'), '');
+    fs.chmodSync(locked, 0o500);
+    return locked;
+  };
+  const free = (locked) => { try { fs.chmodSync(locked, 0o700); } catch {} };
+  const stays = (m) => `${path.join(m.base, 'runs')} could not be removed: a job left among its records what this user may not delete, and no docker engine deleted it. The next --stop-daemon tries again.`;
+  const wipes = (m) => m.docker('run').filter((call) => call.includes('find') && call.includes('-delete')).length;
+
+  await check('a switch-off removes run records this user may not delete through the engine; where the engine will not, the certificate authorities and the mirrors go all the same, what is left is said in a sentence, and a later stop finishes it', async () => {
+    const m = await bench.machine('recs', { env: { DN_SWITCH_OFF_WAIT_MS: '3000' } }).start();
+    await m.linked();
+    const ended = async (item) => {
+      const taskId = await own(m, item, 'say done');
+      await until('a job that ended', async () => (await offerOf(m, taskId)).state === 'done');
+      return (await runsOf(m, taskId)).at(-1);
+    };
+    const one = await ended('pr-1');
+    let locked = lock(m, one.container, one.runId);
+    try {
+      // The engine takes the asking and answers nothing: the daemon goes in its time.
+      const silent = path.join(m.dockerDir, 'hold-run-find');
+      fs.writeFileSync(silent, '');
+      m.setConfig({ networkEnabled: false });
+      await until('the daemon gone, with the engine still silent', () => m.exited, 60000);
+      assert.deepEqual(await m.exit, { code: 1, signal: null });
+      assert.ok(m.log().includes(`] ${stays(m)}\n`), m.log().slice(-1500));
+      assert.deepEqual([kept(m), world(m), fs.existsSync(locked)], [['runs', 'identity.json', 'pools', 'links.json', 'offers.json'], [0, 0, 0], true]);
+      // Then it refuses, every time it is asked to.
+      const refusing = path.join(m.dockerDir, 'fail-run-find');
+      fs.writeFileSync(refusing, 'Error response from daemon: not now\n'.repeat(50));
+      fs.rmSync(silent);
+      assert.deepEqual(await m.install('--stop-daemon'), { ok: false, daemonRunning: false, pid: null, error: stays(m), ended: { offers: 0, runs: 0 } });
+      assert.equal(fs.existsSync(locked), true);
+      fs.rmSync(refusing);
+      assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null, ended: { offers: 0, runs: 0 } });
+      assert.deepEqual(kept(m), ['identity.json', 'pools', 'links.json', 'offers.json']);
+
+      // A daemon that is running does the same as it goes.
+      m.setConfig({ networkEnabled: true });
+      await m.start();
+      const two = await ended('pr-2');
+      locked = lock(m, two.container, two.runId);
+      const asked = wipes(m);
+      m.setConfig({ networkEnabled: false });
+      assert.deepEqual(await m.exit, { code: 0, signal: null });
+      assert.deepEqual([kept(m), wipes(m) - asked], [['identity.json', 'pools', 'links.json', 'offers.json'], 1]);
+    } finally {
+      // Whatever came of it, the bench can remove its own directory.
+      free(locked);
+    }
+  });
+
+  await check('a machine with no docker at all has nothing in docker to leave: its switch-off and the installer both end well, and say of run records this user may not delete that they are left', async () => {
     const m = await bench.machine('bare', { docker: 'none' }).start();
     await m.linked();
     await until('its word on docker', async () => (await m.state()).docker.state === 'missing');
     m.setConfig({ networkEnabled: false });
     assert.deepEqual(await m.exit, { code: 0, signal: null });
     assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null, ended: { offers: 0, runs: 0 } });
+
+    // As a machine has them whose docker was taken off it since.
+    const locked = lock(m, 'dn-left', 'run-1');
+    fs.mkdirSync(path.join(m.base, 'ca'), { recursive: true });
+    try {
+      assert.deepEqual(await m.install('--stop-daemon'), { ok: false, daemonRunning: false, pid: null, error: stays(m), ended: { offers: 0, runs: 0 } });
+      assert.deepEqual(kept(m).slice(0, 2), ['runs', 'identity.json']);
+      m.setConfig({ networkEnabled: true });
+      await m.start();
+      m.setConfig({ networkEnabled: false });
+      assert.deepEqual(await m.exit, { code: 1, signal: null });
+      assert.ok(m.log().includes(`] ${stays(m)}\n`), m.log().slice(-1500));
+    } finally {
+      free(locked);
+    }
+    assert.deepEqual(await m.install('--stop-daemon'), { ok: true, daemonRunning: false, pid: null, ended: { offers: 0, runs: 0 } });
+    assert.equal(fs.existsSync(path.join(m.base, 'runs')), false);
   });
 
   const jobStarts = (m) => m.docker('exec').filter((call) => call.some((arg) => /run\.sh$/.test(arg)));

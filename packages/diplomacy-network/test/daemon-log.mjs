@@ -1,5 +1,6 @@
 // The log every daemon writes (daemon-core's): however much is written to it, by
-// whoever, it stays within its bound.
+// whoever, it stays within its bound. And this daemon's own: whatever words it is given
+// to write, an entry reads as one.
 // Run: node test/daemon-log.mjs
 
 import assert from 'node:assert/strict';
@@ -8,6 +9,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { check, passed } from './lib/daemons.mjs';
 import { LOG_MAX_BYTES, createLog } from '../../daemon-core/src/log.js';
+import { ENTRY_CHARS, openLog } from '../src/log.js';
 
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-log-'));
 const size = (file) => fs.statSync(file).size;
@@ -80,6 +82,25 @@ try {
     const fresh = path.join(dir, 'e', 'deeper', 'daemon.log');
     createLog(fresh)('first', { with: 'a value' });
     assert.deepEqual(lines(fresh), ['first {"with":"a value"}']);
+  });
+
+  await check('an entry of this daemon\'s log is one entry whatever words it carries: no further line of it begins as an entry does, a stack stays as it is, and what moves a cursor or reorders a line is shown', () => {
+    const file = path.join(dir, 'g', 'daemon.log');
+    const log = openLog(file);
+    const text = () => fs.readFileSync(file, 'utf8').replace(/^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\] /gm, '> ');
+    log('r1 ended: failed (done\n[2026-01-01T00:00:00.000Z] ended\n\n\r[2026-01-01T00:00:00.000Z] daemon listening)');
+    log('uncaught: Error: lost\n    at one (file.js:1:1)\n    at two (file.js:2:2)');
+    log('clear \u001b[2J bell \u0007 back \u0008 del \u007f csi \u009b ls \u2028 ps \u2029 rlo \u202e pdf \u202c rli \u2067 pdi \u2069 tab\t.', { with: 'a\nvalue' }, 7);
+    log('a path /tmp/za\u017c\u00f3\u0142\u0107 and a dash \u2013');
+    assert.equal(text(), [
+      '> r1 ended: failed (done', '  [2026-01-01T00:00:00.000Z] ended', '', '  ?[2026-01-01T00:00:00.000Z] daemon listening)',
+      '> uncaught: Error: lost', '    at one (file.js:1:1)', '    at two (file.js:2:2)',
+      '> clear ?[2J bell ? back ? del ? csi ? ls ? ps ? rlo ? pdf ? rli ? pdi ? tab?. {"with":"a\\nvalue"} 7',
+      '> a path /tmp/za\u017c\u00f3\u0142\u0107 and a dash \u2013', '',
+    ].join('\n'));
+    fs.rmSync(file);
+    log('x'.repeat(ENTRY_CHARS), `${'y'.repeat(ENTRY_CHARS)}z`);
+    assert.equal(text(), `> ${'x'.repeat(ENTRY_CHARS)} ${'y'.repeat(ENTRY_CHARS)}... (${ENTRY_CHARS + 1} characters)\n`);
   });
 
   console.log(`\nall ${passed()} checks passed`);

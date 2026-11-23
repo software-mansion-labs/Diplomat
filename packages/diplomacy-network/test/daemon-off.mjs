@@ -10,6 +10,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { holdSocket } from '../../daemon-core/src/serve.js';
+import { switchOffStored } from '../src/node/offline.js';
 import { createStore, readPool } from '../src/node/store.js';
 import { DAEMON, POOL, check, createBench, passed, until } from './lib/daemons.mjs';
 
@@ -128,7 +129,11 @@ try {
     assert.deepEqual([n.containers(), alive(n.agent(run.runId).pid), fs.existsSync(n.socket), fs.existsSync(`${n.socket}.lock`)], [[], false, false, false]);
     fs.rmdirSync(path.join(n.base, 'offers.json'));
     fs.renameSync(path.join(n.base, 'offers.kept'), path.join(n.base, 'offers.json'));
+    // One that is not a document: what the installer logs of it reads as one entry.
+    fs.writeFileSync(path.join(n.base, 'peers.json'), 'x\n[2026-01-01T00:00:00.000Z] ended');
     assert.deepEqual(await n.install('--stop-daemon'), { ...gone, ended: { offers: 1, runs: 1 } });
+    assert.match(n.log(), /store: peers\.json does not parse \([^\n]*\n  \[2026-01/);
+    assert.deepEqual(n.log().split('\n').filter((line) => line.startsWith('[') && !/^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\] /.test(line)), []);
 
     const never = bench.machine('never');
     never.setConfig({ networkEnabled: false });
@@ -141,6 +146,71 @@ try {
     fs.writeFileSync(path.join(never.base, 'links.json'), JSON.stringify({ pools: [never.link] }));
     assert.deepEqual(await never.install('--stop-daemon'), { ...gone, ended: { offers: 0, runs: 0 } });
     assert.deepEqual(fs.readdirSync(path.join(never.base, 'pools')).length, 1);
+  });
+
+  await check('a job that ended under a daemon that did not live to say so is not given back at the switch-off: the installer ends its run as the job did, this machine\'s own task is done with what the job said, and the job that still ran is stopped', async () => {
+    const m = await bench.machine('told').start();
+    await m.linked();
+    const finished = await offer(m, 'pr-1', 'wait go\nsay by itself', true);
+    const unfinished = await offer(m, 'pr-2', 'wait never\nsay never', true);
+    const [run, going] = [await waiting(m, finished, 'go'), await waiting(m, unfinished, 'never')];
+    await m.kill();
+    m.release('go');
+    await until('the job to end with nobody watching', () => fs.existsSync(path.join(m.base, 'runs', run.runId, 'done')));
+    // As the daemon writes it the moment it sees the job's end.
+    fs.writeFileSync(path.join(m.base, 'runs', `${run.runId}.outcome.json`), JSON.stringify({ ok: true, summary: 'kept on disk', usd: 0, tokens: 0, model: '', runner: 'claude', exit: 0, state: 'finished' }));
+
+    m.setConfig({ networkEnabled: false });
+    assert.deepEqual(await m.install('--stop-daemon'), { ...gone, ended: { offers: 1, runs: 2 } });
+    assert.match(m.log(), /\] the network is switched off and no daemon runs: 1 offer\(s\) cancelled, 1 run\(s\) stopped and given back, 1 run\(s\) ended as the job that had finished left it\n$/);
+    assert.equal(alive(m.agent(going.runId).pid), false);
+    // All of it is on disk by then: the run that was told owes nothing more.
+    assert.equal(JSON.parse(fs.readFileSync(path.join(m.base, 'runs.json'), 'utf8')).runs[run.runId].end, 'over');
+    m.setConfig({ networkEnabled: true });
+    await m.start();
+    const back = await m.state();
+    assert.deepEqual(back.offers.map((o) => [o.taskId, o.state, o.attempt, o.outcome?.summary ?? o.reason]).sort(), [[finished, 'done', 1, 'kept on disk'], [unfinished, 'cancelled', 1, OFF]].sort());
+    assert.deepEqual(back.runs.map((r) => [r.runId, r.state]).sort(), [[run.runId, 'finished'], [going.runId, 'stopped']].sort());
+    await m.kill();
+  });
+
+  await check('the switch-off done on a store sets no timer: the host signs what a switch-off signs and takes no step of its own beside it', async () => {
+    const m = await bench.machine('still').start();
+    await m.linked();
+    const run = await waiting(m, await offer(m, 'pr-1', 'wait never\nsay never', true), 'never');
+    await m.kill();
+    const real = globalThis.setTimeout;
+    let timers = 0;
+    globalThis.setTimeout = (...args) => { timers += 1; return real(...args); };
+    let ended;
+    try {
+      ended = await switchOffStored({ store: createStore({ dir: m.base }) });
+    } finally {
+      globalThis.setTimeout = real;
+    }
+    assert.deepEqual([ended, timers], [{ offers: 1, runs: 1, reported: 0 }, 0]);
+    // The installer finds it all ended, and takes the job down.
+    m.setConfig({ networkEnabled: false });
+    assert.deepEqual([await m.install('--stop-daemon'), alive(m.agent(run.runId).pid)], [{ ...gone, ended: { offers: 0, runs: 0 } }, false]);
+  });
+
+  await check('an installer that cannot read the config, or reads what is no settings, takes the network for on: it stops the daemon and nothing else, with what the machine offered, its job, its containers and its directories as they were; a setting that is anything but true is the network off', async () => {
+    const m = await bench.machine('unread').start();
+    await m.linked();
+    const run = await waiting(m, await offer(m, 'pr-1', 'wait never\nsay never', true), 'never');
+    const pid = m.agent(run.runId).pid;
+    await m.kill();
+    const good = fs.readFileSync(m.configPath, 'utf8');
+    const there = () => [stored(m), m.containers(), alive(pid), ['runs', 'mirrors', 'ca'].filter((dir) => fs.existsSync(path.join(m.base, dir)))];
+    const before = there();
+    assert.deepEqual(before.slice(1), [[run.container, `${run.container}-relay`], true, ['runs', 'mirrors', 'ca']]);
+    for (const config of ['{"networkEna', '', 'null', '"off"', '[]', '[{"networkEnabled":false}]']) {
+      fs.writeFileSync(m.configPath, config);
+      assert.deepEqual([await m.install('--stop-daemon'), there()], [gone, before], `a config of ${JSON.stringify(config)}`);
+    }
+    fs.writeFileSync(m.configPath, JSON.stringify({ ...JSON.parse(good), networkEnabled: 'true' }));
+    assert.deepEqual(await m.install('--stop-daemon'), { ...gone, ended: { offers: 1, runs: 1 } });
+    assert.deepEqual(there().slice(1), [[], false, []]);
   });
 
   await check('a daemon that starts while the state directory is held makes nothing and goes; one that serves is left its socket, and the socket a dead one left is taken', async () => {

@@ -246,6 +246,15 @@ switch (command) {
         // The path it is given, under whichever mount holds it; itself too unless -mindepth keeps it.
         const dst = Object.keys(at).find((d) => rest[2] === d || rest[2].startsWith(`${d}/`));
         const top = at[dst] + rest[2].slice(dst.length);
+        // With the capability a container's root has: no directory's mode keeps it out.
+        const open = (p) => {
+          let st;
+          try { st = fs.lstatSync(p); } catch { return; }
+          if (!st.isDirectory()) return;
+          fs.chmodSync(p, 0o700);
+          for (const n of fs.readdirSync(p)) open(path.join(p, n));
+        };
+        if (args.includes('--cap-add=DAC_OVERRIDE')) open(top);
         if (!rest.includes('-mindepth')) fs.rmSync(top, { recursive: true, force: true });
         else for (const n of fs.readdirSync(top)) fs.rmSync(path.join(top, n), { recursive: true, force: true });
       }
