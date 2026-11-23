@@ -68,6 +68,8 @@ struct PipelineState: Codable, Equatable {
     var labelsMade: [String: [String]] = [:]
     /// PRs Diplomat took off the fast track for good. Only a cache: the labels say it.
     var decided: [String] = []
+    /// PRs the fast-track label could not be put on at their first rating.
+    var untracked: [String] = []
     /// Issues that would not split, or whose split stopped part-way, and why: not tried
     /// again unless forced.
     var unsplit: [String: String] = [:]
@@ -97,7 +99,8 @@ struct PipelineState: Codable, Equatable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case labelsMade, decided, unsplit, splitting, rerated, cleared, retry, syncs, lineage, seen, holds, clean, asked, notices
+        case labelsMade, decided, untracked, unsplit, splitting, rerated, cleared, retry, syncs, lineage, seen, holds,
+             clean, asked, notices
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
@@ -105,6 +108,7 @@ struct PipelineState: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         labelsMade = try c.decodeIfPresent([String: [String]].self, forKey: .labelsMade) ?? [:]
         decided = try c.decodeIfPresent([String].self, forKey: .decided) ?? []
+        untracked = try c.decodeIfPresent([String].self, forKey: .untracked) ?? []
         unsplit = try c.decodeIfPresent([String: String].self, forKey: .unsplit) ?? [:]
         splitting = try c.decodeIfPresent([String: [String]].self, forKey: .splitting) ?? [:]
         rerated = try c.decodeIfPresent([String: [String: PipelineRating]].self, forKey: .rerated) ?? [:]
@@ -148,6 +152,7 @@ struct PipelineState: Codable, Equatable {
         seen = seen.filter { !done.contains($0.key) && $0.value >= cutoff }
         func live(_ id: String) -> Bool { seen[id] != nil }
         decided.removeAll { !live($0) }
+        untracked.removeAll { !live($0) }
         unsplit = unsplit.filter { live($0.key) }
         splitting = splitting.filter { live($0.key) }
         rerated = rerated.filter { live($0.key) }
@@ -172,8 +177,8 @@ struct PipelineRetry: Codable, Equatable {
 
 /// A rating Diplomat made, by item id: the rating itself for an item it may not label,
 /// read back while the item's `updatedAt` is unchanged, or for one whose rating labels
-/// the tracker refused (`unwritten`), until it wears a rating; for one it labelled, only
-/// the why. Forgotten with the item's `PipelineState.seen`.
+/// could not be written (`unwritten`), until they are; for one it labelled, only the why.
+/// Forgotten with the item's `PipelineState.seen`.
 struct PipelineCachedRating: Codable, Equatable {
     var rating: PipelineRating
     var why: String

@@ -31,11 +31,13 @@ public enum PipelineGate {
 
     /// A test file, held to the test limits rather than the source ones.
     public static func isTest(_ path: String, _ floor: CoreAssets.PipelineModel.Floor) -> Bool {
-        let parts = path.split(separator: "/").map(String.init)
-        guard let name = parts.last else { return false }
+        guard let name = path.split(separator: "/").last else { return false }
+        return inTestDir(path, floor) || floor.testFiles.contains { glob($0, String(name)) }
+    }
+
+    static func inTestDir(_ path: String, _ floor: CoreAssets.PipelineModel.Floor) -> Bool {
         let dirs = Set(floor.testDirs.map { $0.lowercased() })
-        return parts.dropLast().contains { dirs.contains($0.lowercased()) }
-            || floor.testFiles.contains { glob($0, name) }
+        return path.split(separator: "/").dropLast().contains { dirs.contains($0.lowercased()) }
     }
 
     /// `*` matches any run of characters; nothing else is special.
@@ -56,9 +58,9 @@ public enum PipelineGate {
 
     /// The least rating a diff allows: a limit broken makes complexity at least medium,
     /// as do files GitHub changed but the read did not list; a denied path makes risk
-    /// high; no test change, a file added outside tests, deleted, renamed, copied or
-    /// otherwise not modified, or one with no lines (binary or a mode change) makes risk
-    /// at least medium.
+    /// high; no test change, a file added outside a test directory, deleted, renamed,
+    /// copied or otherwise not modified, or one with no lines (binary or a mode change)
+    /// makes risk at least medium.
     public static func floor(files: [ChangedFile], changedFiles: Int) -> PipelineRating {
         floorWithReasons(files: files, changedFiles: changedFiles).rating
     }
@@ -84,7 +86,8 @@ public enum PipelineGate {
             if isDenied(file.path, f) {
                 raise(&risk, to: .high, "touches \(file.path), which the fast track never merges")
             }
-            let addedTest = file.changeType == "ADDED" && isTest(file.path, f)
+            // A name alone would let a new module called `test_*.py` pass as a test.
+            let addedTest = file.changeType == "ADDED" && inTestDir(file.path, f)
             if file.changeType != "MODIFIED" && !addedTest {
                 raise(&risk, to: .medium, "\(file.changeType.lowercased()) \(file.path)")
             }
@@ -173,6 +176,12 @@ public enum PipelineGate {
         public var ciRan: Bool
         /// It was ready for review before.
         public var wasReady: Bool
+        /// GitHub's `mergeStateStatus`.
+        public var mergeState: String
+        /// Its base branch has a merge queue, which `--admin` would skip.
+        public var mergeQueue: Bool
+        /// The labels it carries of `pipeline.json` `stopLabels`.
+        public var stopLabels: [String]
 
         /// The fields after `ciState` default to what lets a PR merge.
         public init(state: String, author: String, isCrossRepository: Bool, baseRef: String,
@@ -181,7 +190,8 @@ public enum PipelineGate {
                     floor: PipelineRating, mergeable: String, headSha: String, ciCommit: String,
                     ciState: String, operatorUntagged: Bool = false, reviewRequests: Int = 0,
                     foreignCommits: [String] = [], trackLabels: Bool = true, fixesCandidate: Bool = true,
-                    closesUnwritable: [String] = [], ciRan: Bool = true, wasReady: Bool = false) {
+                    closesUnwritable: [String] = [], ciRan: Bool = true, wasReady: Bool = false,
+                    mergeState: String = "CLEAN", mergeQueue: Bool = false, stopLabels: [String] = []) {
             self.state = state
             self.author = author
             self.isCrossRepository = isCrossRepository
@@ -205,6 +215,9 @@ public enum PipelineGate {
             self.closesUnwritable = closesUnwritable
             self.ciRan = ciRan
             self.wasReady = wasReady
+            self.mergeState = mergeState
+            self.mergeQueue = mergeQueue
+            self.stopLabels = stopLabels
         }
     }
 
@@ -214,6 +227,7 @@ public enum PipelineGate {
         case notMine(String)
         case fork
         case notDefaultBase(String)
+        case mergeQueue
         case human(String)
         case participantsUnseen
         case operatorComment
@@ -222,6 +236,7 @@ public enum PipelineGate {
         case foreignCommits(String)
         case changesRequested
         case threads(Int)
+        case stopLabel(String)
         case offTrack
         case notAFix
         case closesUnwritable(String)
@@ -229,6 +244,7 @@ public enum PipelineGate {
         case floor(PipelineRating)
         case conflicting
         case mergeabilityUnknown
+        case behind
         case ciStale
         case ciPending
         case ciFailing(String)
@@ -244,6 +260,7 @@ public enum PipelineGate {
             case .notMine: return "not-mine"
             case .fork: return "fork"
             case .notDefaultBase: return "base"
+            case .mergeQueue: return "merge-queue"
             case .human: return "human"
             case .participantsUnseen: return "participants-unseen"
             case .operatorComment: return "operator-comment"
@@ -252,6 +269,7 @@ public enum PipelineGate {
             case .foreignCommits: return "foreign-commits"
             case .changesRequested: return "changes-requested"
             case .threads: return "threads"
+            case .stopLabel: return "stop-label"
             case .offTrack: return "off-track"
             case .notAFix: return "not-a-fix"
             case .closesUnwritable: return "closes-unwritable"
@@ -259,6 +277,7 @@ public enum PipelineGate {
             case .floor: return "floor"
             case .conflicting: return "conflicting"
             case .mergeabilityUnknown: return "mergeability-unknown"
+            case .behind: return "behind"
             case .ciStale: return "ci-stale"
             case .ciPending: return "ci-pending"
             case .ciFailing: return "ci-failing"
@@ -277,6 +296,7 @@ public enum PipelineGate {
             case .notMine(let who): return "authored by @\(who.isEmpty ? "ghost" : who), not me"
             case .fork: return "comes from a fork"
             case .notDefaultBase(let base): return "targets \(base), not the default branch"
+            case .mergeQueue: return "its base branch merges through a merge queue"
             case .human(let who): return "@\(who.isEmpty ? "ghost" : who) has commented or reviewed"
             case .participantsUnseen: return "has more reviews or comments than one read lists"
             case .operatorComment: return "I commented on or reviewed it myself, not through Diplomat"
@@ -286,6 +306,7 @@ public enum PipelineGate {
                 return who.isEmpty ? "has commits by someone other than me" : "has commits by @\(who)"
             case .changesRequested: return "has changes requested"
             case .threads(let n): return "has \(n) unresolved review thread\(n == 1 ? "" : "s")"
+            case .stopLabel(let label): return "carries the label \(label)"
             case .offTrack: return "lacks a fast-track label"
             case .notAFix: return "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
             case .closesUnwritable(let what): return "would close \(what), which Diplomat did not read or may not write to"
@@ -293,6 +314,7 @@ public enum PipelineGate {
             case .floor(let r): return "its diff allows no less than \(pair(r))"
             case .conflicting: return "conflicts with its base"
             case .mergeabilityUnknown: return "mergeability not computed yet"
+            case .behind: return "is behind its base branch"
             case .ciStale: return "CI was read for an older commit"
             case .ciPending: return "CI still running"
             case .ciFailing(let state): return "CI \(state.lowercased())"
@@ -307,14 +329,15 @@ public enum PipelineGate {
     /// order: who the PR is and who has seen it, then what it changes, then the state
     /// GitHub is still computing - so a PR that can never merge says why, rather than
     /// reading "CI still running" until its checks finish. A draft passing every rule up
-    /// to a failing or running CI holds as `draft`: CI that skips drafts may run once it is
-    /// ready.
+    /// to the ones on missing or skipped CI holds as `draft`: CI that skips drafts may run
+    /// once it is ready.
     public static func hold(_ c: Candidate, me: String) -> Hold? {
         if c.state != "open" && c.state != "draft" { return .closed }
         let mine = me.lowercased()
         if c.author.lowercased() != mine || mine.isEmpty { return .notMine(c.author) }
         if c.isCrossRepository { return .fork }
         if c.baseRef != c.defaultBranch || c.baseRef.isEmpty { return .notDefaultBase(c.baseRef) }
+        if c.mergeQueue { return .mergeQueue }
         if let other = c.participants.first(where: { $0 != nil && $0!.lowercased() != mine }) {
             return .human(other ?? "")
         }
@@ -325,13 +348,16 @@ public enum PipelineGate {
         if let who = c.foreignCommits.first { return .foreignCommits(who) }
         if c.reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
         if c.unresolvedThreads > 0 { return .threads(c.unresolvedThreads) }
+        if let label = c.stopLabels.first { return .stopLabel(label) }
         if !c.trackLabels { return .offTrack }
         if !c.fixesCandidate { return .notAFix }
         if !c.closesUnwritable.isEmpty { return .closesUnwritable(c.closesUnwritable.joined(separator: ", ")) }
         if c.rating?.isFastTrack != true { return .rated(c.rating) }
         if !c.floor.isFastTrack { return .floor(c.floor) }
         if c.mergeable == "CONFLICTING" { return .conflicting }
-        if c.mergeable != "MERGEABLE" { return .mergeabilityUnknown }
+        if c.mergeable != "MERGEABLE" || ["", "UNKNOWN"].contains(c.mergeState) { return .mergeabilityUnknown }
+        // `--admin` merges a PR behind its base without testing it against the base.
+        if c.mergeState == "BEHIND" { return .behind }
         if c.ciCommit != c.headSha { return .ciStale }
         switch c.ciState {
         case "SUCCESS", "": break

@@ -17,14 +17,16 @@ fragment Issue on Issue {
   author { login }
   assignees(first: 10) { nodes { login } }
   labels(first: 100) { totalCount nodes { name } }
+  issueType { name }
   parent { url }
   subIssues(first: 50) { nodes { url } }
 }
 
 fragment PR on PullRequest {
-  number title body url updatedAt state isDraft isCrossRepository mergeable reviewDecision
-  headRefName headRefOid baseRefName changedFiles
+  number title body url updatedAt state isDraft isCrossRepository mergeable mergeStateStatus
+  isMergeQueueEnabled reviewDecision headRefName headRefOid baseRefName changedFiles
   author { login }
+  assignees(first: 10) { nodes { login } }
   labels(first: 100) { totalCount nodes { name } }
   closingIssuesReferences(first: 10) { totalCount nodes { number url state } }
   files(first: 20) { nodes { path additions deletions changeType } }
@@ -121,6 +123,7 @@ query Item($owner: String!, $name: String!, $number: Int!) {
       ... on PullRequest {
         number title url updatedAt state isDraft isCrossRepository headRefName headRefOid baseRefName
         author { login }
+        assignees(first: 10) { nodes { login } }
         labels(first: 100) { totalCount nodes { name } }
         labeled: timelineItems(itemTypes: [LABELED_EVENT], first: 100) {
           filteredCount
