@@ -971,7 +971,7 @@ def _pipeline_fixture(store: Store) -> str:
     cfg = core.config()
     slug = f"{cfg['owner']}/{cfg['repo']}"
     result = pipeline_fixture_result(slug, datetime.now(timezone.utc))
-    (scratch / "pipeline").mkdir()
+    (scratch / "pipeline").mkdir(exist_ok=True)
     (scratch / "pipeline" / "last.json").write_text(json.dumps(result, sort_keys=True))
     store.refresh_pipeline_last()
     if store.pipeline_result != result:

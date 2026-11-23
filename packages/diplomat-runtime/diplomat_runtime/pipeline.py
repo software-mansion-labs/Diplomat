@@ -13,6 +13,7 @@ Stdlib-only, like the rest of the runtime.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -59,7 +60,8 @@ def write_control(switches: dict) -> None:
             json.dump({k: bool(switches.get(k)) for k in CONTROL_KEYS}, fh, sort_keys=True)
         os.replace(tmp, folder / "control.json")
     except OSError:
-        tmp.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
 
 
 def tunables() -> dict:

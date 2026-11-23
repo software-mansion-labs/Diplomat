@@ -66,7 +66,7 @@ def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
                                     timeout=timeout)
     except subprocess.TimeoutExpired as exc:
         proc.kill()
-        proc.communicate()
+        proc.wait()
         raise RuntimeError(f"diplomat-core {args[0]} did not answer within "
                            f"{int(timeout)}s") from exc
     if proc.returncode != 0:
