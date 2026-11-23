@@ -77,7 +77,7 @@ struct PipelineState: Codable, Equatable {
     var labelled: [String: [String]] = [:]
     /// Per issue Diplomat filed as a split's part, the ban its text carries: its parent's.
     var lineage: [String: String] = [:]
-    /// When each item was last read.
+    /// When each item was last read, or filed by Diplomat.
     var seen: [String: Date] = [:]
     /// The head and hold code last logged as `held`, `"<head> <code>"`.
     var holds: [String: String] = [:]

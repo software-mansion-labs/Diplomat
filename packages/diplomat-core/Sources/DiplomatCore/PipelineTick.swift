@@ -727,7 +727,11 @@ final class PipelineSync {
                 },
             ].map { $0.sorted(by: newer) }
         }
-        let rest = bands.joined().filter { !forced.contains($0) }.prefix(max(0, model.rater.perSync))
+        // An own PR awaiting its re-rate is unrated too: rated once.
+        var rest: [Int] = []
+        for i in bands.joined() where !forced.contains(i) && !rest.contains(i) && rest.count < model.rater.perSync {
+            rest.append(i)
+        }
         for i in forced { rateOne(i, .forced) }
         for i in rest { rateOne(i, .rate) }
     }
@@ -932,6 +936,7 @@ final class PipelineSync {
             case .success(let url):
                 made.append(url)
                 state.lineage[url] = banDimension(e)
+                state.seen[url] = now
                 log(e.id, .child, "\(url): \(part.title)")
                 persist()
                 continue
@@ -1020,12 +1025,15 @@ final class PipelineSync {
                     (code, hold) = ("partial", "\(e.item.repo) was read only in part")
                 } else if let h = mergeHold(e) {
                     (code, hold) = (h.code, h.message)
+                } else if let why = e.unwritable {
+                    (code, hold) = ("unwritable", why)
                 } else if repos[e.item.repo]?.mergeFlag == nil {
                     (code, hold) = ("no-method", "its repository allows none of squash, merge or rebase")
                 } else {
                     code = nil
                 }
-                noteHold(i, code, hold)
+                // `merge` logs what it does with a draft.
+                if code == PipelineGate.Hold.draft.code { holdCodes[e.id] = code } else { noteHold(i, code, hold) }
             } else if has(e, model.labels.fastTrack) {
                 if fixesCandidate(e) {
                     stage = atHead ? .clean : .fastTrack
@@ -1090,13 +1098,12 @@ final class PipelineSync {
     }
 
     /// Logs a cleared PR's hold when it, or the head, changed since the last one logged.
+    /// No hold leaves that record: the first read lacks the fields only `merge`'s
+    /// re-read has, whose holds would otherwise be logged anew at every sync.
     func noteHold(_ i: Int, _ code: String?, _ message: String?) {
         let e = entries[i]
         holdCodes[e.id] = code
-        guard let code else {
-            state.holds[e.id] = nil
-            return
-        }
+        guard let code else { return }
         let head = e.item.headSha ?? ""
         if state.holds[e.id] != "\(head) \(code)" {
             log(e.id, .held, message ?? code)
@@ -1154,7 +1161,7 @@ final class PipelineSync {
             } else if !clearedByMe(fresh) {
                 hold = ("not-cleared", "it is no longer cleared at its head")
             } else {
-                hold = mergeHold(fresh).map { ($0.code, $0.message) }
+                hold = mergeHold(fresh).map { ($0.code, $0.message) } ?? fresh.unwritable.map { ("unwritable", $0) }
             }
             if let hold, hold.code != PipelineGate.Hold.draft.code {
                 entries[i].item.hold = hold.message
@@ -1172,7 +1179,7 @@ final class PipelineSync {
                 entries[i].isDraft = false
                 entries[i].item.hold = PipelineGate.Hold.ciBeforeReady.message
                 log(e.id, .held, "marked ready for review; merged at a later sync, once CI has run on it since")
-                state.holds[e.id] = "\(head) ready"
+                state.holds[e.id] = "\(head) \(PipelineGate.Hold.ciBeforeReady.code)"
                 persist()
                 continue
             }

@@ -62,10 +62,12 @@ enum PipelineRater {
         s.count > n ? String(s.prefix(n)) + "\n[cut at \(n) characters]" : s
     }
 
+    /// No `--allowedTools`: it would let the tools read any path. Unlisted, `-p` refuses
+    /// them every path outside the checkout, as there is no one to grant it, and
+    /// `--setting-sources ""` keeps the checkout's own settings from allowing more.
     static func arguments(model name: String, schema: String, prompt: String) -> [String] {
         ["-p", "--model", name,
          "--tools", tools,
-         "--allowedTools", tools,
          "--strict-mcp-config",
          "--disable-slash-commands",
          "--setting-sources", "",
