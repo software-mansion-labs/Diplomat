@@ -1195,8 +1195,9 @@ struct SettingsView: View {
     private static let linearKeyDetail = """
         Read on each sync from the login Keychain with security find-generic-password and \
         staged in an owner-only temp file for each Linear call, never handed to an agent: \
-        a fix gets the issue's text as Diplomat read it. $DIPLOMAT_LINEAR_TOKEN wins over it. Without a key, the teams set \
-        here are skipped with a notice and GitHub still syncs, but no PR is merged.
+        a fix gets the issue's text as Diplomat read it. $DIPLOMAT_LINEAR_TOKEN wins over \
+        it. Without a key, the teams set here are skipped with a notice and GitHub still \
+        syncs, but no PR is merged.
         """
 
     // MARK: Tool visibility

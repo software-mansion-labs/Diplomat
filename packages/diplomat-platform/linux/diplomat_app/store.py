@@ -4755,9 +4755,9 @@ class Store(QObject):
         off. A queued Linear fix whose effect now names another repo or text is queued
         again with them, as the same attempt: its agent cannot read Linear.
 
-        The records kept are :func:`pipeline.retained`'s, all of them unless the sync
-        is ``judged`` (:meth:`_apply_pipeline_sync`). An ask that could not be queued is
-        an attempt too, retried on the same ladder."""
+        The records kept are :func:`pipeline.retained`'s after a ``judged`` sync
+        (:meth:`_apply_pipeline_sync`), every one after any other. An ask that could not
+        be queued is an attempt too, retried on the same ladder."""
         attempts = self._load_attempts(PIPELINE_ATTEMPTS)
         dispatched: dict[str, autofix.ReviewAttempt] = {}
         banned = bans.read()
@@ -4784,7 +4784,7 @@ class Store(QObject):
                 work = dataclasses.replace(work, by_hand=old.by_hand)
                 try:
                     self.request_one(work)
-                except Exception as exc:  # noqa: BLE001 — a missing/wedged core binary
+                except Exception as exc:  # noqa: BLE001 - a missing/wedged core binary
                     activity.log("auto", "pipeline-fix", f"{work.label_among(roots)} could "
                                                          f"not be queued: {exc}")
                     continue
