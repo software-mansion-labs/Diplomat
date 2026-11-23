@@ -3158,13 +3158,8 @@ print("review moves + absence pass assertions passed")
 // ---- Whether the PR is the right change at all ----
 // Every review prompt asks it once, ahead of the depth's instructions, whoever the author.
 section("premise check")
-let premiseParts = ["JUDGE THE PREMISE, NOT ONLY THE DIFF",
-                    "trace the reported symptom down to where it originates",
-                    "only stop the symptom from showing",
-                    "A PR whose premise fails is NOT clean",
-                    "at least MEDIUM, never a LOW or a nitpick",
-                    "with no case it gets wrong, is a preference: drop it on sight",
-                    "one line per PR: what it is for and whether its premise held",
+let premiseParts = ["Identify the behavior this PR sets out to change",
+                    "judge its premise: whether the diagnosis holds and the change removes the cause",
                     "reachable regression against the merge base",
                     "fails a behavior the change explicitly promises",
                     "Open a follow-up issue only when the operator explicitly asks"]
