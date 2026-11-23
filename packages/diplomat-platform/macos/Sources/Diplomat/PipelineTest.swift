@@ -652,18 +652,34 @@ enum PipelineTest {
         clearQueue()
         store.savePipelineAttempts([:])
         await store.applyPipeline(result([fix, fixLinear, review]), now: now)
+        let other = item("https://github.com/o/r/issues/90014", .issue, author: "bob")
+        store.pipelineResult = PipelineTickResult(at: Date(), items: items + [other])
+        let otherKey = "issues:o/r#90014"
+        check("Start fix queues beside the sync's asks",
+              store.startPipelineFix(other) == nil && ids().sorted() == [fixKey, linearKey, reviewKey, otherKey].sorted())
+        ticks = []
+        Store.pipelineTickOverride = { settings in
+            ticks.append(settings)
+            return PipelineTickResult(at: Date(), items: items + [other], effects: [review], fixable: [other.id])
+        }
+        let dropsBefore = feed("queue-drop").count
         store.pipelineFix = false
-        Store.pipelineTickOverride = { _ in result([review]) }
+        check("Open fix PRs off: the fixes the sync queued are withdrawn at once, no sync run, Start fix's kept",
+              ids().sorted() == [otherKey, reviewKey].sorted() && ticks.isEmpty
+                  && feed("queue-drop").count == dropsBefore + 2)
         await store.runPipelineSyncOnce()
-        check("Open fix PRs off: the fixes the sync queued are withdrawn", ids() == [reviewKey])
-        clearQueue()
-        store.pipelineResult = result([])
-        check("…but not one started from the screen",
-              store.startPipelineFix(items[0]) == nil && ids() == [fixKey])
-        Store.pipelineTickOverride = { _ in result([]) }
+        check("…and a sync keeps the Start fix while its issue is fixable", ids().sorted() == [otherKey, reviewKey].sorted())
+        store.pipelineFastTrack = false
+        check("Fast-track my PRs off: the review the sync queued is withdrawn at once", ids() == [otherKey])
+        if let asked = store.pipelineAsk(fix) { store.requestOne(asked) }
+        Store.pipelineTickOverride = { _ in
+            PipelineTickResult(at: Date().addingTimeInterval(-60), items: items, unread: ["o/r"])
+        }
         await store.runPipelineSyncOnce()
-        check("…while its issue is a writable candidate", ids() == [fixKey])
+        check("a sync withdraws an ask whose switch is off, even with a stale result in an unread root",
+              ids() == [otherKey])
         store.pipelineFix = true
+        store.pipelineFastTrack = true
         clearQueue()
         store.savePipelineAttempts([:])
         check("a result dated in the second its sync began is that sync's",
@@ -675,9 +691,10 @@ enum PipelineTest {
         print("\npipeline: asks a sync no longer owes")
         let asks = [fix, fixLinear, review].compactMap { store.pipelineAsk($0) } + [sweep]
         func withdrawn(_ seen: [PipelineItem], _ effects: [PipelineEffect], unread: [String] = [],
-                       of asks: [Store.RequestedWork] = asks) -> [String] {
+                       fixable: [String] = [], of asks: [Store.RequestedWork] = asks) -> [String] {
             Store.pipelineWithdrawn(asks, by: PipelineTickResult(at: Date(), items: seen, effects: effects,
-                                                                 unread: unread)).sorted()
+                                                                 unread: unread, fixable: fixable),
+                                    fix: true, fastTrack: true).sorted()
         }
         var assigned = items
         assigned[0].writable = false
@@ -696,13 +713,20 @@ enum PipelineTest {
             if case .issues = fix.config { fix.byHand = true }
             return fix
         }
-        check("…but a Start fix stays until its issue is no writable candidate",
-              withdrawn(heldItems, [], of: fromScreen) == [reviewKey]
-                  && withdrawn(assigned, [], of: fromScreen) == [fixKey, reviewKey].sorted())
+        check("…but a Start fix stays while its issue is fixable, shown or not",
+              withdrawn(heldItems, [], fixable: [issue], of: fromScreen) == [linearKey, reviewKey].sorted()
+                  && withdrawn([], [], fixable: [issue, linear], of: fromScreen) == [reviewKey])
         check("…and nothing goes in a root the sync could not judge in full",
               withdrawn(assigned, [], unread: ["O/R"]).isEmpty)
-        check("…as does anything about an item it did not read, and an ask not the pipeline's",
-              withdrawn([], []).isEmpty)
+        check("…an ask whose item a whole read left out goes (closed, or past the layout's cap)",
+              withdrawn([], []) == [fixKey, linearKey, reviewKey].sorted())
+        check("…and one a sync queued goes while its switch is off, in an unread root or with no result",
+              Store.pipelineWithdrawn(asks, by: result([fix, fixLinear, review]), fix: false, fastTrack: true).sorted()
+                  == [fixKey, linearKey].sorted()
+                  && Store.pipelineWithdrawn(asks, by: PipelineTickResult(at: Date(), unread: ["o/r"]),
+                                             fix: true, fastTrack: false) == [reviewKey]
+                  && Store.pipelineWithdrawn(fromScreen, by: nil, fix: false, fastTrack: false) == [reviewKey]
+                  && Store.pipelineWithdrawn(asks, by: nil, fix: true, fastTrack: true).isEmpty)
 
         print("\npipeline: concluded records")
         let closedOut = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1, concludedAt: t0)
@@ -900,7 +924,9 @@ enum PipelineTest {
     /// rating each low/low. Reading #2 again before merging it, the stub writes
     /// `<dir>/flip-merge` and waits for control.json to say merge is off. While the state's
     /// `readErrors` is set, the `Repo` read answers with that error beside its data. The
-    /// state's `later` holds low/low #7 and op's draft PR #3 fixing it, likewise clean.
+    /// state's `later` holds low/low #7 and op's draft PR #3 fixing it, likewise clean, and
+    /// its `more` low/low #8 and #9. `<dir>/linear-state.json`'s `later` adds Linear's
+    /// low/low ENG-2; its `done` names the issues Linear no longer lists.
     @MainActor
     private static func live(_ store: Store, harness: URL, check: (String, Bool) -> Void) async {
         print("\npipeline: real syncs against the stubs in \(harness.path)")
@@ -1071,14 +1097,19 @@ enum PipelineTest {
         check("…Start fix queues it by hand",
               five.map { store.startPipelineFix($0) } == .some(nil) && ask(fixKey)?.byHand == true
                   && ids() == [fixKey, linearKey].sorted())
-        store.pipelineFix = false
         let off = feed().count
-        await sync()
+        truncate()
+        store.pipelineFix = false
         let withdrawn = Array(feed().dropFirst(off))
-        print("  sync 6 feed: \(withdrawn)")
-        check("sync 6, Open fix PRs off: the fix the sync queued is withdrawn, the one Start fix queued kept",
-              store.pipelineResult?.effects.isEmpty == true && ids() == [fixKey]
+        print("  Open fix PRs off: \(withdrawn)")
+        check("Open fix PRs off, before any sync: the fix the sync queued is withdrawn, the one Start fix queued kept",
+              ids() == [fixKey] && log("gh.log").isEmpty
                   && withdrawn == ["panel queue-drop Issues · ENG-1 · deep - the pipeline no longer owes it, not run"])
+        await sync()
+        check("sync 6: no fix is emitted, and the Start fix stays while #5 is fixable",
+              store.pipelineResult?.effects.isEmpty == true && ids() == [fixKey]
+                  && store.pipelineResult?.fixable.contains("https://github.com/acme/app/issues/5") == true
+                  && feed().count == off + 1)
 
         store.pipelineMerge = true
         await sync()
@@ -1108,6 +1139,46 @@ enum PipelineTest {
         check("sync 9: #3 is merged at the head it was marked ready at",
               ghWrites() == ["pr merge 3 -R acme/app --admin --squash --match-head-commit " + String(repeating: "a3", count: 20)]
                   && feed().last == "auto pipeline-merge #3: merged a3a3a3a with --admin --squash")
+
+        patch { github in
+            let more = github["more"] as? [String: Any] ?? [:]
+            github["issues"] = (github["issues"] as? [Any] ?? []) + (more["issues"] as? [Any] ?? [])
+        }
+        let linearState = harness.appendingPathComponent("linear-state.json")
+        try? Data(#"{"later": true}"#.utf8).write(to: linearState)
+        store.pipelineFix = true
+        await sync()
+        let eightKey = "issues:acme/app#8", nineKey = "issues:acme/app#9", eng2Key = "issues:linear:ENG-2"
+        check("sync 10, Open fix PRs back on, low/low #8, #9 and ENG-2 read: their fixes are queued",
+              ids() == [fixKey, eightKey, nineKey, eng2Key].sorted())
+
+        patch { github in
+            var issues = github["issues"] as? [[String: Any]] ?? []
+            for i in issues.indices where issues[i]["number"] as? Int == 8 { issues[i]["state"] = "CLOSED" }
+            github["issues"] = issues
+        }
+        try? Data(#"{"later": true, "done": ["ENG-2"]}"#.utf8).write(to: linearState)
+        let closed = feed().count
+        await sync()
+        let gone = Array(feed().dropFirst(closed)).sorted()
+        print("  sync 11 feed: \(gone)")
+        check("sync 11, #8 closed on GitHub and ENG-2 completed on Linear: their queued fixes are withdrawn",
+              store.pipelineResult?.unread == [] && ids() == [fixKey, nineKey].sorted()
+                  && gone == ["panel queue-drop Issues · #8 · deep - the pipeline no longer owes it, not run",
+                              "panel queue-drop Issues · ENG-2 · deep - the pipeline no longer owes it, not run"])
+
+        patch { $0["readErrors"] = error }
+        await sync()
+        check("sync 12, acme/app read with an error: nothing is withdrawn",
+              store.pipelineResult?.unread == ["acme/app"] && ids() == [fixKey, nineKey].sorted())
+        let unreadOff = feed().count
+        store.pipelineFix = false
+        check("…Open fix PRs off: #9's fix is withdrawn at once though its root is unread, the Start fix kept",
+              ids() == [fixKey] && Array(feed().dropFirst(unreadOff))
+                  == ["panel queue-drop Issues · #9 · deep - the pipeline no longer owes it, not run"])
+        await sync()
+        check("sync 13, still unread: nothing comes back", store.pipelineResult?.unread == ["acme/app"] && ids() == [fixKey])
+        patch { $0["readErrors"] = nil }
 
         store.pipelineEnabled = false
         check("master off: none of the queued asks may start",

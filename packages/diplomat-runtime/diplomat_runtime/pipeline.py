@@ -169,12 +169,13 @@ def _result(obj: object) -> dict | None:
     return {**obj, "items": rows(obj["items"]),
             "graph": {"nodes": rows(graph.get("nodes")), "edges": rows(graph.get("edges"))},
             "effects": rows(obj.get("effects")), "events": rows(obj.get("events")),
-            "notices": strings(obj.get("notices")), "unread": strings(obj.get("unread"))}
+            "notices": strings(obj.get("notices")), "unread": strings(obj.get("unread")),
+            "fixable": strings(obj.get("fixable"))}
 
 
 def tick(settings: dict, started: Callable | None = None) -> dict:
     """``pipeline-tick``: the ``PipelineTickResult`` (``{at, items, graph: {nodes,
-    edges}, effects, events, notices, unread}``), or ``{"error": why}`` when the CLI
+    edges}, effects, events, notices, unread, fixable}``), or ``{"error": why}`` when the CLI
     could not answer. ``started`` is handed the core's process (:func:`promptcore.cli`).
     Never raises."""
     try:
@@ -296,7 +297,7 @@ def concluded(attempts: dict, runs, now_ts: float) -> dict:
     return out
 
 
-#: How long a concluded record is kept once no sync owes its effect.
+#: How long a concluded record is kept after its run concluded, whatever syncs owe.
 CONCLUDED_KEEP_SECS = 30 * 86400.0
 
 
@@ -313,28 +314,30 @@ def retained(attempts: dict, result: dict, now: float) -> dict:
             or (a.concluded_at is not None and now - a.concluded_at < CONCLUDED_KEEP_SECS)}
 
 
-def withdrawn(asks: list, result: dict) -> list[str]:
-    """The keys of the pipeline's ``asks`` (``RequestedWork``) that ``result``, a sync's
-    own, no longer owes: one it emitted no effect for (a switch off, a hold), but a
-    Start fix (``by_hand``) only once its issue is no writable candidate. An item it did
-    not read is not judged, nor anything in a root it could not judge in full
-    (``unread``). Twin of ``Store.pipelineWithdrawn``."""
-    items = {identity(str(i.get("id") or "")): i for i in result.get("items") or []}
+def withdrawn(asks: list, result: dict | None, *, fix: bool, fast_track: bool) -> list[str]:
+    """The keys of the pipeline's ``asks`` (``RequestedWork``) no longer owed: one a sync
+    queued while its kind's switch (``fix``, ``fast_track``) is off; and in a root
+    ``result`` (a sync's own; None judges by the switches alone) read in full, not
+    ``unread``, one it emitted no effect for, or a Start fix (``by_hand``) whose issue is
+    not ``fixable``. Twin of ``Store.pipelineWithdrawn``."""
     owed = {(e.get("kind") == "review", identity(str(e.get("url") or "")))
-            for e in result.get("effects") or []}
-    unread = {r.lower() for r in result.get("unread") or []}
+            for e in (result or {}).get("effects") or []}
+    fixable = {identity(i) for i in (result or {}).get("fixable") or []}
+    unread = {r.lower() for r in (result or {}).get("unread") or []}
     out = []
     for ask in asks:
-        if not ask.pipeline or ask.repo.lower() in unread:
+        if not ask.pipeline:
             continue
         review = ask.action == QUEUE_REVIEW_ACTION
-        item = items.get(identity(ask.url))
-        if item is None or (review, identity(ask.url)) in owed:
+        if not ask.by_hand and not (fast_track if review else fix):
+            out.append(ask.key)
+        elif result is None or ask.repo.lower() in unread:
             continue
-        if ask.by_hand and item.get("kind") == "issue" and item.get("stage") == "candidate" \
-                and item.get("writable"):
-            continue
-        out.append(ask.key)
+        elif ask.by_hand:
+            if identity(ask.url) not in fixable:
+                out.append(ask.key)
+        elif (review, identity(ask.url)) not in owed:
+            out.append(ask.key)
     return out
 
 
