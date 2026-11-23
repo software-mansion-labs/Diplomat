@@ -166,13 +166,13 @@ async function parseOutcome(job, exit) {
 }
 
 // What a job says it took of the model is its own word, and this machine's budget is
-// counted from it; what the broker carried to the model for the job is the host's own
-// measure. Every token crossed the broker as a byte or more, in a request or in an
-// answer, so neither figure stands above what that traffic could have held, and a job
-// that sent the model nothing took nothing of it. An outcome of which a figure was
+// counted from it; what the broker carried to the model for the job, in the requests the
+// provider took and its answers to them, is the host's own measure. Every token crossed
+// the broker as a byte or more of those, so neither figure stands above what that
+// traffic could have held, and a job the provider took nothing from took nothing of it. An outcome of which a figure was
 // lowered says so, as `capped`.
-function capOutcome(outcome, carried) {
-  const bytes = figure(carried?.bytes);
+function capOutcome(outcome, taken) {
+  const bytes = figure(taken?.bytes);
   const [tokens, usd] = [Math.min(outcome.tokens, bytes), Math.min(outcome.usd, bytes * USD_PER_BYTE)];
   return tokens < outcome.tokens || usd < outcome.usd ? { ...outcome, tokens, usd, capped: true } : outcome;
 }
@@ -182,8 +182,9 @@ function capOutcome(outcome, carried) {
 /// `{ prompt, item, base, name, email }`, `proxy` the broker's `{ proxyUrl, caCertPath }`,
 /// `env` whatever else the job's environment carries (the model placeholder), and
 /// `forwards` the broker forwards opened for it (`{ name }` each). `spent()` answers
-/// with `{ bytes }`, what the broker has carried to the model for this run, and null
-/// counts as nothing carried: the run's outcome names no more of the model than that.
+/// with `{ bytes }`, what the model provider took of this run and answered through the
+/// broker, and null counts as nothing taken: the run's outcome names no more of the
+/// model than that.
 /// Left out, the outcome's figures are the job's own. Resolves to `{ dir, log, pid }`
 /// once the runner is alive, `pid` its process group.
 export async function startJob(asked) {
