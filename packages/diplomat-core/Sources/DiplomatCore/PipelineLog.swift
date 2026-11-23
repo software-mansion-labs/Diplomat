@@ -57,24 +57,28 @@ public enum PipelineLog {
 /// What a sync remembers between runs besides the trackers' labels, so a step taken or
 /// logged once is not taken or logged again. Keyed by item id.
 ///
-/// `decided`, `unsplit`, `labelled` and `lineage` guard against repeating an outward
-/// step, so an item missing from a read keeps them: they go once it is read merged or
-/// closed, or after `forgetDays` unseen. The rest only keeps the log from repeating
-/// itself, and also goes with an item missing from a read of every source.
+/// `decided`, `unsplit`, `rerated`, `cleared`, `retry` and `lineage` guard against
+/// repeating an outward step, so an item missing from a read keeps them: they go once it
+/// is read merged, or after `forgetDays` unseen. The rest only keeps the log from
+/// repeating itself, and also goes with an item missing from a read of every source.
 struct PipelineState: Codable, Equatable {
     static let forgetDays: Double = 90
 
     /// Per repository (`owner/repo`), the labels known to exist there.
     var labelsMade: [String: [String]] = [:]
-    /// PRs off the fast track for good: a person took off a fast-track label Diplomat
-    /// put on, or Diplomat rated them off it.
+    /// PRs Diplomat took off the fast track for good. Only a cache: the labels say it.
     var decided: [String] = []
     /// Issues that would not split, or whose split stopped part-way, and why: not tried
     /// again unless forced.
     var unsplit: [String: String] = [:]
-    /// Per PR, the fast-track labels seen on it or put on by Diplomat, less those Diplomat
-    /// took off: one missing from a read was taken off by a person.
-    var labelled: [String: [String]] = [:]
+    /// Per PR, each head Diplomat rated it again at, and that rating.
+    var rerated: [String: [String: PipelineRating]] = [:]
+    /// Per PR, the head Diplomat put `cleared` on at, until Diplomat takes it off.
+    var cleared: [String: String] = [:]
+    /// Per item, its ratings or splits that failed: not tried again unforced before then.
+    var retry: [String: PipelineRetry] = [:]
+    /// Syncs run, the clock `retry` counts in.
+    var syncs = 0
     /// Per issue Diplomat filed as a split's part, the ban its text carries: its parent's.
     var lineage: [String: String] = [:]
     /// When each item was last read, or filed by Diplomat.
@@ -91,7 +95,7 @@ struct PipelineState: Codable, Equatable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case labelsMade, decided, unsplit, labelled, lineage, seen, holds, clean, asked, notices
+        case labelsMade, decided, unsplit, rerated, cleared, retry, syncs, lineage, seen, holds, clean, asked, notices
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
@@ -100,7 +104,10 @@ struct PipelineState: Codable, Equatable {
         labelsMade = try c.decodeIfPresent([String: [String]].self, forKey: .labelsMade) ?? [:]
         decided = try c.decodeIfPresent([String].self, forKey: .decided) ?? []
         unsplit = try c.decodeIfPresent([String: String].self, forKey: .unsplit) ?? [:]
-        labelled = try c.decodeIfPresent([String: [String]].self, forKey: .labelled) ?? [:]
+        rerated = try c.decodeIfPresent([String: [String: PipelineRating]].self, forKey: .rerated) ?? [:]
+        cleared = try c.decodeIfPresent([String: String].self, forKey: .cleared) ?? [:]
+        retry = try c.decodeIfPresent([String: PipelineRetry].self, forKey: .retry) ?? [:]
+        syncs = try c.decodeIfPresent(Int.self, forKey: .syncs) ?? 0
         lineage = try c.decodeIfPresent([String: String].self, forKey: .lineage) ?? [:]
         seen = try c.decodeIfPresent([String: Date].self, forKey: .seen) ?? [:]
         holds = try c.decodeIfPresent([String: String].self, forKey: .holds) ?? [:]
@@ -129,9 +136,9 @@ struct PipelineState: Codable, Equatable {
         PrivateFiles.writeWhole(data, to: Self.url(in: dir))
     }
 
-    /// Marks `read` seen at `now`, then forgets everything about an item read merged or
-    /// closed (`done`) or unseen for `forgetDays`; with `readAll`, also the log-once
-    /// entries of an item missing from the read.
+    /// Marks `read` seen at `now`, then forgets everything about an item read merged
+    /// (`done`) or unseen for `forgetDays`; with `readAll`, also the log-once entries of an
+    /// item missing from the read. A closed item keeps its guards: it can be reopened.
     mutating func prune(read: Set<String>, done: Set<String>, readAll: Bool, now: Date) {
         for id in read { seen[id] = now }
         let cutoff = now.addingTimeInterval(-Self.forgetDays * 86_400)
@@ -139,7 +146,9 @@ struct PipelineState: Codable, Equatable {
         func live(_ id: String) -> Bool { seen[id] != nil }
         decided.removeAll { !live($0) }
         unsplit = unsplit.filter { live($0.key) }
-        labelled = labelled.filter { live($0.key) }
+        rerated = rerated.filter { live($0.key) }
+        cleared = cleared.filter { live($0.key) }
+        retry = retry.filter { live($0.key) }
         lineage = lineage.filter { live($0.key) }
         func keep(_ id: String) -> Bool { live(id) && (!readAll || read.contains(id)) }
         holds = holds.filter { keep($0.key) }
@@ -147,6 +156,14 @@ struct PipelineState: Codable, Equatable {
         // An effect key is `<kind>:<item id>`.
         asked = asked.filter { key, _ in key.split(separator: ":", maxSplits: 1).last.map { keep(String($0)) } ?? false }
     }
+}
+
+/// An item's ratings or splits failed in a row, and when the last did: the next is tried
+/// at sync `after`, 1, 2, 4 ... syncs on, and a day on at the latest.
+struct PipelineRetry: Codable, Equatable {
+    var failures: Int
+    var after: Int
+    var at: Date
 }
 
 /// A rating Diplomat made, by item id: the rating itself for an item it may not label,

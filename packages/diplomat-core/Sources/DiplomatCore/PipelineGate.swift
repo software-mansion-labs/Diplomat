@@ -164,16 +164,13 @@ public enum PipelineGate {
         public var foreignCommits: [String]
         /// Both of Diplomat's fast-track labels are on it.
         public var trackLabels: Bool
-        /// It closes an issue rated low risk and low complexity that Diplomat may act on:
-        /// the fast track is for the fixes the pipeline asked for.
+        /// It closes an issue, and each one it closes is rated low risk and low complexity
+        /// and Diplomat may act on it: the fast track is for the fixes the pipeline asked for.
         public var fixesCandidate: Bool
-        /// The issues it would close that Diplomat may not write to.
+        /// The issues it would close that Diplomat did not read.
         public var closesUnwritable: [String]
         /// A check on the head ran, rather than every one being skipped.
         public var ciRan: Bool
-        /// A check on the head started after the PR last went from draft to ready, or it
-        /// never was a draft.
-        public var ciSinceReady: Bool
 
         /// The fields after `ciState` default to what lets a PR merge.
         public init(state: String, author: String, isCrossRepository: Bool, baseRef: String,
@@ -182,7 +179,7 @@ public enum PipelineGate {
                     floor: PipelineRating, mergeable: String, headSha: String, ciCommit: String,
                     ciState: String, operatorUntagged: Bool = false, reviewRequests: Int = 0,
                     foreignCommits: [String] = [], trackLabels: Bool = true, fixesCandidate: Bool = true,
-                    closesUnwritable: [String] = [], ciRan: Bool = true, ciSinceReady: Bool = true) {
+                    closesUnwritable: [String] = [], ciRan: Bool = true) {
             self.state = state
             self.author = author
             self.isCrossRepository = isCrossRepository
@@ -205,7 +202,6 @@ public enum PipelineGate {
             self.fixesCandidate = fixesCandidate
             self.closesUnwritable = closesUnwritable
             self.ciRan = ciRan
-            self.ciSinceReady = ciSinceReady
         }
     }
 
@@ -236,7 +232,6 @@ public enum PipelineGate {
         case draft
         case ciMissing
         case ciSkipped
-        case ciBeforeReady
 
         /// A stable spelling for the log.
         public var code: String {
@@ -265,7 +260,6 @@ public enum PipelineGate {
             case .draft: return "draft"
             case .ciMissing: return "ci-missing"
             case .ciSkipped: return "ci-skipped"
-            case .ciBeforeReady: return "ci-before-ready"
             }
         }
 
@@ -287,8 +281,8 @@ public enum PipelineGate {
             case .changesRequested: return "has changes requested"
             case .threads(let n): return "has \(n) unresolved review thread\(n == 1 ? "" : "s")"
             case .offTrack: return "lacks a fast-track label"
-            case .notAFix: return "closes no low-risk, low-complexity issue Diplomat may act on"
-            case .closesUnwritable(let what): return "would close \(what), which Diplomat may not write to"
+            case .notAFix: return "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+            case .closesUnwritable(let what): return "would close \(what), which Diplomat did not read or may not write to"
             case .rated(let r): return "rated \(pair(r)) on the tracker"
             case .floor(let r): return "its diff allows no less than \(pair(r))"
             case .conflicting: return "conflicts with its base"
@@ -296,10 +290,9 @@ public enum PipelineGate {
             case .ciStale: return "CI was read for an older commit"
             case .ciPending: return "CI still running"
             case .ciFailing(let state): return "CI \(state.lowercased())"
-            case .draft: return "still a draft; it is marked ready first, then merged once CI has run on it"
+            case .draft: return "still a draft; it is marked ready first, then merged at a later sync"
             case .ciMissing: return "has no CI checks"
             case .ciSkipped: return "every CI check was skipped"
-            case .ciBeforeReady: return "CI has not run since it was marked ready"
             }
         }
     }
@@ -308,7 +301,7 @@ public enum PipelineGate {
     /// order: who the PR is and who has seen it, then what it changes, then the state
     /// GitHub is still computing - so a PR that can never merge says why, rather than
     /// reading "CI still running" until its checks finish. A draft passing every rule up
-    /// to a failing or running CI holds as `draft`: CI that skips drafts runs once it is
+    /// to a failing or running CI holds as `draft`: CI that skips drafts may run once it is
     /// ready.
     public static func hold(_ c: Candidate, me: String) -> Hold? {
         if c.state != "open" && c.state != "draft" { return .closed }
@@ -341,7 +334,6 @@ public enum PipelineGate {
         if c.state == "draft" { return .draft }
         if c.ciState.isEmpty { return .ciMissing }
         if !c.ciRan { return .ciSkipped }
-        if !c.ciSinceReady { return .ciBeforeReady }
         return nil
     }
 }
