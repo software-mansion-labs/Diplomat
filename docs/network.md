@@ -135,9 +135,10 @@ brought, and an older engine takes no job.
   its jobs; the model's API is forwarded with the
   host's credential added, and its answer comes back without the headers that describe the
   host's account; anything else is tunnelled to the public internet, so installing software
-  works. Names are resolved by public DNS alone; a name of one label, or one under `.local`,
-  `.internal`, `.lan` and the like, is refused. Addresses of the host, of every network one of the host's interfaces is on, of every
-  private or otherwise not publicly routed range, IPv4 or IPv6, and of other containers are
+  works. Names are resolved by DNS alone; a name that is not a plain DNS name, one of one label,
+  or one under `.local`, `.internal`, `.lan` and the like, is refused, and a refusal names no
+  address a name resolved to. Addresses of the host, of every network one of the host's
+  interfaces is on, of every private or otherwise not publicly routed range, IPv4 or IPv6, and of other containers are
   refused. A publicly addressed network the host reaches only by a route - behind a VPN, or
   another subnet of its site - is not known to the broker and is reached like the rest of the
   internet.
@@ -145,7 +146,8 @@ brought, and an older engine takes no job.
   disk per container; per job, 256 connections through the broker, 256 requests on them at a
   time, 32 connections out for the requests the broker carries itself, 48 MiB of request
   bodies held at a time, and 8 names being resolved at a time; a connection that names no
-  running job is answered once and read no further. A container found holding more disk than
+  running job is answered once, and what it sends after that is dropped, the connection reset
+  past 64 KiB. A container found holding more disk than
   that is removed - the count includes files its processes keep open after deleting them, where
   the engine lets them be counted - and the jobs in it
   end as failed attempts; so is one the engine could not measure three looks running.
