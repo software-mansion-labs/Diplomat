@@ -1531,7 +1531,7 @@ enum PipelineTest {
         await sync()
         await sync()
         let records = [elevenFix, owedReview].map { key in
-            store.loadPipelineAttempts()[key].map { "\($0.requestedAt) \($0.attempts) concluded \($0.concludedAt != nil)" }
+            store.loadPipelineAttempts()[key].map { "\($0.requestedAt) \($0.attempts) concluded \($0.concludedAt != nil)" } ?? "-"
         }
         print("  syncs 22, 23 records: \(records)")
         check("syncs 22 and 23, past every backoff, still owing both: neither is queued again",
