@@ -446,10 +446,13 @@ public struct PipelineTickResult: Codable, Equatable, Sendable {
     /// The roots (`owner/repo`) this sync could not judge in full, whose effects it may
     /// have left out: a front-end withdraws no queued ask on them.
     public var unread: [String]
+    /// The ids of every issue this sync read that a fix may act on, the ones `items` leaves
+    /// out included: what keeps a fix the operator started queued.
+    public var fixable: [String]
 
     public init(at: Date, items: [PipelineItem] = [], graph: PipelineGraph = PipelineGraph(),
                 effects: [PipelineEffect] = [], events: [PipelineEvent] = [],
-                notices: [String] = [], unread: [String] = []) {
+                notices: [String] = [], unread: [String] = [], fixable: [String] = []) {
         self.at = at
         self.items = items
         self.graph = graph
@@ -457,6 +460,7 @@ public struct PipelineTickResult: Codable, Equatable, Sendable {
         self.events = events
         self.notices = notices
         self.unread = unread
+        self.fixable = fixable
     }
 }
 
