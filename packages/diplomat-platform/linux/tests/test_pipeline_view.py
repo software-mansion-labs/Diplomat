@@ -410,6 +410,31 @@ def test_the_head_label_is_cut_only_past_the_detail_and_nothing_else_is(store, a
         view.close()
 
 
+def test_picking_a_card_shows_its_detail_from_the_top(store, app):
+    result = _result()
+    result["events"] += [{"at": "2026-11-20T10:06:00Z", "item": item, "kind": "held",
+                          "detail": f"step {n}"} for item in (P2, I1) for n in range(40)]
+    store.pipeline_result = result
+    view = PipelineView(store)
+    view.resize(1100, 520)
+    view.show()
+    bar = view.detail_scroll.verticalScrollBar()
+
+    def pick(item_id):
+        view.select(item_id)
+        for _ in range(3):
+            app.processEvents()
+
+    try:
+        pick(P2)
+        assert bar.maximum() > 0
+        bar.setValue(bar.maximum())
+        pick(I1)
+        assert (bar.maximum() > 0, bar.value()) == (True, 0)
+    finally:
+        view.close()
+
+
 def test_selection_and_lane_survive_a_rebuild_and_an_opening_resets_them(store):
     view = PipelineView(store)
     view.lane_chips["fast"].click()
@@ -566,6 +591,42 @@ def test_rate_now_and_fracture_are_off_for_a_banned_authors_text(store):
         held = (False, f"@{who} is on the prompt-injection ban list")
         assert [(view.buttons[k].isEnabled(), view.buttons[k].toolTip())
                 for k in ("rate", "fracture")] == [held, held]
+
+
+def test_a_change_to_the_ban_list_redraws_the_actions(store, monkeypatch):
+    result = _result()
+    result["items"][4] = {**result["items"][4], "author": "mallory"}
+    store.pipeline_result = result
+    view = PipelineView(store)
+    view.select(I5)
+    listed = []
+    monkeypatch.setattr(bans, "read", lambda: list(listed))
+
+    def on() -> list[bool]:
+        return [view.buttons[k].isEnabled() for k in ("rate", "fracture")]
+
+    assert on() == [True, True]
+    listed.append(bans.BannedAuthor("mallory", "prompt injection"))
+    store.refresh_activity()
+    assert on() == [False, False]
+    listed.clear()
+    store.refresh_activity()
+    assert on() == [True, True]
+
+
+def test_fracture_is_off_for_an_issue_held_as_triaged(store):
+    """A sync never splits it; Rate now still rates it."""
+    result = _result()
+    result["items"][4] = {**result["items"][4], "stage": "human", "lane": "human",
+                          "hold": "triaged as enhancement"}
+    store.pipeline_result = result
+    view = PipelineView(store)
+    view.select(I5)
+    fracture = view.buttons["fracture"]
+    assert (fracture.isEnabled(), fracture.toolTip()) == (
+        False, "No sync splits an issue triaged as enhancement")
+    assert view.buttons["rate"].isEnabled()
+    assert pipelineview.fracture_refused({"hold": "an open PR fixes it"}) is None
 
 
 def test_start_fix_and_fracture_are_off_while_anything_is_on_it(store, monkeypatch):

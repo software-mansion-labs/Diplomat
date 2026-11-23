@@ -255,6 +255,47 @@ def test_a_new_head_waits_out_the_re_request_cooldown(pipe):
     assert _feed("pipeline-review") == [f"{label} queued"] * 2
 
 
+def test_a_cancelled_ask_is_asked_for_again_only_at_another_stamp(pipe):
+    """Cancel concludes its record: a review comes back for a new head, a fix only by
+    Start fix."""
+    now = time.time()
+    pipe._apply_pipeline_effects(_result(_fix(), _review("abc")), now)
+    keys = ("issues:o/r#12", "review:o/r#7")
+    labels = {t.id: t.job.label for t in pipe.queued_tasks}
+    for key in keys:
+        pipe.cancel_requested_work(key)
+    assert (_keys(pipe), pipe.queued_tasks) == ([], [])
+    assert _feed("queue-cancel") == [f"{labels[key]} — cancelled, not run" for key in keys]
+    later = now + autofix.RETRY_MAX_BACKOFF
+    for at in (later, later + 60):
+        pipe._apply_pipeline_effects(_result(_fix(), _review("abc")), at)
+        assert _keys(pipe) == []
+    pipe._apply_pipeline_effects(_result(_fix(), _review("def")), later)
+    assert _keys(pipe) == ["review:o/r#7"]
+    records = pipe._load_attempts(PIPELINE_ATTEMPTS)
+    assert {k: (a.requested_at, a.attempts, a.concluded_at is None) for k, a in records.items()
+            } == {f"pipeline-fix:{ISSUE}": ("fix", 1, False),
+                  f"pipeline-review:{PR}": ("def", 1, True)}
+    assert _start(pipe, _item()) is None
+    assert _keys(pipe) == ["review:o/r#7", "issues:o/r#12"]
+    pipe.cancel_requested_work("issues:o/r#12")
+    pipe._apply_pipeline_effects(_result(_fix()), later + autofix.RETRY_MAX_BACKOFF)
+    assert _keys(pipe) == ["review:o/r#7"]
+
+
+def test_a_cancel_concludes_only_its_own_asks_record():
+    now = time.time()
+    other = "https://github.com/o/r/issues/13"
+    attempts = {f"pipeline-fix:{ISSUE}": _attempt(), f"pipeline-fix:{other}": _attempt(),
+                f"pipeline-review:{PR}": _attempt()}
+    out = pipeline.cancelled(attempts, autofix.QUEUE_ISSUES_ACTION, ISSUE, now)
+    assert {k: a.concluded_at for k, a in out.items()} == {
+        f"pipeline-fix:{ISSUE}": now, f"pipeline-fix:{other}": None,
+        f"pipeline-review:{PR}": None}
+    assert pipeline.cancelled(out, autofix.QUEUE_REVIEW_ACTION, PR, now + 1)[
+        f"pipeline-review:{PR}"].concluded_at == now + 1
+
+
 def test_work_already_queued_is_not_asked_for_again(pipe):
     """A row the operator re-ordered keeps its place: the next sync's same effect is
     in flight, not a second ask."""
@@ -350,12 +391,14 @@ def test_a_record_is_kept_while_its_effect_is_owed_whatever_the_switches(pipe):
         f"pipeline-fix:{ISSUE}": held, "pipeline-fix:https://github.com/x/y/issues/1": gone}
 
 
-def test_a_record_concluded_while_a_sync_asks_stays_concluded(pipe, monkeypatch):
-    """A run's retirement saves its record while the sync's pass builds a prompt."""
+@pytest.mark.parametrize("age", [60, autofix.RETRY_MAX_BACKOFF])
+def test_a_record_concluded_while_a_sync_asks_stays_concluded(pipe, monkeypatch, age):
+    """A run's retirement saves its record while the sync's pass builds a prompt, cooling
+    down or past its backoff."""
     now = time.time()
     other = "https://github.com/o/r/issues/13"
     pipe._save_attempts(PIPELINE_ATTEMPTS, {
-        f"pipeline-fix:{other}": autofix.ReviewAttempt("fix", now - 60, 1)})
+        f"pipeline-fix:{other}": autofix.ReviewAttempt("fix", now - age, 1)})
     request = pipe.request_one
 
     def concluding(work):
@@ -1249,8 +1292,7 @@ def test_a_start_fix_leaves_once_a_whole_read_finds_its_issue_gone(pipe):
 
 @pytest.mark.parametrize("effect", [_fix(), _linear()])
 def test_a_queued_fix_leaves_once_a_whole_read_finds_its_issue_gone(pipe, effect):
-    """Closed on GitHub, completed or canceled on Linear, or past the layout's cap: no
-    item, and no effect."""
+    """Closed on GitHub, completed or canceled on Linear: no item, and no effect."""
     _queued_fix(pipe, effect)
     _sync(pipe, _result())
     assert _keys(pipe) == []
@@ -1428,6 +1470,16 @@ def test_a_queued_linear_fix_is_queued_again_with_the_repo_and_text_a_sync_reads
     label = work.label_among(2)
     assert _feed("pipeline-fix") == [f"{label} queued"] + [
         f"{label} queued again: its repo or text changed"] * 2
+
+
+def test_a_starting_linear_fix_is_not_queued_again(pipe):
+    """A second ask beside it would be a second fix run."""
+    _sync(pipe, _result(_linear()))
+    pipe._begin_starting(pipe.queued_tasks[0])
+    _sync(pipe, _result({**_linear(), "text": "A thing\n\nIt breaks twice."}))
+    assert [w.config["linear"]["text"] for w in pipe.requested_work] == ["A thing\n\nIt breaks."]
+    assert pipe.queued_tasks == []
+    assert len(_feed("pipeline-fix")) == 1
 
 
 # MARK: - The first sync

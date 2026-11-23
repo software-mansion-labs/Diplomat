@@ -187,11 +187,11 @@ extension Store {
     // MARK: acting on a sync
 
     /// Queues each owed effect not already waiting, running, cooling down after an attempt
-    /// or concluded by one (`ReviewReconcile.decide`, over `pipelineAttempts`): a fix only
-    /// while the fix switch is on, a review only while the fast-track one is, since the
-    /// sync may have been handed them before either went off. A dispatch is an attempt
-    /// whether or not the queue takes the ask. A queued Linear fix whose effect now names
-    /// another repo or text is queued again with them, as the same attempt: its agent
+    /// or concluded by one or a Cancel (`ReviewReconcile.decide`, over `pipelineAttempts`):
+    /// a fix only while the fix switch is on, a review only while the fast-track one is,
+    /// since the sync may have been handed them before either went off. A dispatch is an
+    /// attempt whether or not the queue takes the ask. A queued Linear fix whose effect now
+    /// names another repo or text is queued again with them, as the same attempt: its agent
     /// cannot read Linear. Not private: the self-test hands it composed results.
     ///
     /// A result that lands after the master switch went off queues and withdraws nothing
@@ -219,8 +219,6 @@ extension Store {
         var queued = false
         if pipelineEnabled {
             let banned = BanList.read()
-            let prior = loadPipelineAttempts()
-            var dispatched: [String: ReviewAttempt] = [:]
             for effect in result.effects {
                 switch effect {
                 case .fixIssue, .fixLinear: guard pipelineFix else { continue }
@@ -239,24 +237,28 @@ extension Store {
                                  "\(ask.label(roots: roots.count)) queued again: its repo or text changed")
                     continue
                 }
+                let inFlight = await pipelineInFlight(effect, ask: ask)
+                // Read after that wait, in which a Cancel, a retirement or Start fix may write a
+                // record; saved before the ask is queued, so a Cancel finds it.
+                var records = loadPipelineAttempts()
                 let decision = ReviewReconcile.decide(
-                    prior: prior[effect.key], stamp: effect.stamp,
-                    inFlight: await pipelineInFlight(effect, ask: ask),
+                    prior: records[effect.key], stamp: effect.stamp, inFlight: inFlight,
                     banned: BanList.isBanned(ask.author, in: banned), now: now)
                 guard case .dispatch(let attempt) = decision else { continue }
-                dispatched[effect.key] = ReviewAttempt(requestedAt: effect.stamp, lastDispatchedAt: now,
-                                                       attempts: attempt)
+                records[effect.key] = ReviewAttempt(requestedAt: effect.stamp, lastDispatchedAt: now,
+                                                    attempts: attempt)
+                savePipelineAttempts(records)
                 if requestOne(ask) {
                     queued = true
                     AuditLog.log("auto", Store.pipelineVerb(effect), "\(ask.label(roots: roots.count)) queued"
                                  + (attempt > 1 ? " (attempt \(attempt))" : ""))
                 }
             }
-            // Onto the records as they stand now: a retirement may have concluded one, or
-            // Start fix written one, while this pass awaited.
-            let records = loadPipelineAttempts().merging(dispatched) { _, new in new }
-            savePipelineAttempts(judged ? Store.retainedPipelineAttempts(
-                records, after: result, teams: Store.pipelineTeams(pipelineLinearTeamsRaw), now: now) : records)
+            if judged {
+                savePipelineAttempts(Store.retainedPipelineAttempts(
+                    loadPipelineAttempts(), after: result, teams: Store.pipelineTeams(pipelineLinearTeamsRaw),
+                    now: now))
+            }
         }
         if !fresh.isEmpty || !done.isEmpty || queued { refreshAudit() }
     }
@@ -496,6 +498,17 @@ extension Store {
         var out = attempts
         for key in pipelineOpenKeys(attempts, kind: job.kind, url: job.prURL ?? "") {
             out[key]?.lastDispatchedAt = now
+        }
+        return out
+    }
+
+    /// `attempts` with the record of the queued `job` the operator cancelled stamped
+    /// concluded, so no sync asks for it again at that stamp. Twin of `pipeline.cancelled`.
+    nonisolated static func pipelineCancelled(_ attempts: [String: ReviewAttempt], job: AgentJob,
+                                              at now: Date) -> [String: ReviewAttempt] {
+        var out = attempts
+        for key in pipelineOpenKeys(attempts, kind: job.kind, url: job.prURL ?? "") {
+            out[key]?.concludedAt = now
         }
         return out
     }

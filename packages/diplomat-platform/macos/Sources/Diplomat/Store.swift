@@ -3677,9 +3677,14 @@ final class Store: ObservableObject {
     /// no longer owed, while an ask on a PR that is still open stands until it runs —
     /// and a fix stands whatever happens to its issue, the poll reading PRs alone.
     /// Without a way back out, a mis-aimed sweep is a day of agents nobody can call off.
+    /// A pipeline ask's attempt record is concluded (`pipelineCancelled`), or its next sync
+    /// would queue it again.
     func cancelRequestedWork(_ id: String) {
         guard let entry = queuedTasks.first(where: { $0.id == id }), entry.job.requested
         else { return }
+        if entry.job.counter == .pipeline {
+            savePipelineAttempts(Store.pipelineCancelled(loadPipelineAttempts(), job: entry.job, at: Date()))
+        }
         forgetRequested(entry.id)
         dropQueuedTask(id)
         AuditLog.log("panel", "queue-cancel", "\(entry.job.label) — cancelled, not run")
