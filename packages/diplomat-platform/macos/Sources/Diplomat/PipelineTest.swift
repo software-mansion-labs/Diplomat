@@ -321,6 +321,14 @@ enum PipelineTest {
         let t2 = Date()
         await store.applyPipeline(result([fix, review]), now: t2)
         let cancelLines = [fixKey, reviewKey].map { "panel \(job($0)?.label ?? $0) — cancelled, not run" }
+        let swept = Store.AgentJob(kind: AgentTaskQueue.reviewAction, auditAction: AgentTaskQueue.reviewAction,
+                                   label: "", prompt: "", prURL: pr, prNumber: nil, authorLogin: nil, counter: nil)
+        check("its Cancel says what asks again: a new head for a review, Start fix for a fix; a sweep's keeps its own",
+              job(reviewKey).flatMap(Store.pipelineCancelHelp)?
+                  .hasSuffix("The pipeline asks for it again once the PR's head moves.") == true
+                  && job(fixKey).flatMap(Store.pipelineCancelHelp)?
+                  .hasSuffix("The pipeline does not ask for it again; Start fix on the Pipeline screen does.") == true
+                  && Store.pipelineCancelHelp(swept) == nil)
         store.cancelRequestedWork(fixKey)
         store.cancelRequestedWork(reviewKey)
         let cancelled = store.loadPipelineAttempts()

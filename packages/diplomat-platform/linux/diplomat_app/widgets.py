@@ -497,7 +497,7 @@ class QueuedTaskRow(QFrame):
     )
 
     def __init__(self, *, task_id: str, label: str, glyph: str, hex_color: str,
-                 paused: bool, cancellable: bool = False) -> None:
+                 paused: bool, cancellable: bool = False, cancel_help: str | None = None) -> None:
         super().__init__()
         self._task_id = task_id
         self._press: QPointF | None = None
@@ -533,7 +533,7 @@ class QueuedTaskRow(QFrame):
             # on or the hand reaches first.
             cancel = QPushButton("cancel")
             cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-            cancel.setToolTip(self._CANCEL_HELP)
+            cancel.setToolTip(cancel_help or self._CANCEL_HELP)
             cancel.setStyleSheet(
                 f"QPushButton {{ color: {glyphs.MUTED}; background-color: transparent;"
                 " border: none; border-radius: 8px; padding: 2px 7px;"

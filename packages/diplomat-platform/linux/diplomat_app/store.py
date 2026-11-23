@@ -2801,6 +2801,18 @@ class Store(QObject):
         activity.log("panel", "queue-cancel", f"{entry.job.label} — cancelled, not run")
         self.refresh_activity()
 
+    @staticmethod
+    def pipeline_cancel_help(job: autofix.AgentJob) -> str | None:
+        """What the queued row's cancel says of a pipeline ask; None for any other. Twin of
+        ``Store.pipelineCancelHelp``."""
+        if job.counter != PIPELINE_COUNTER:
+            return None
+        if job.kind == autofix.QUEUE_REVIEW_ACTION:
+            return ("Drop this review from the queue without running it. The pipeline asks "
+                    "for it again once the PR's head moves.")
+        return ("Drop this fix from the queue without running it. The pipeline does not ask "
+                "for it again; Start fix on the Pipeline screen does.")
+
     def _drain_queued_tasks(self, snaps: list, closed: set[int],
                             read: list[LocalRepo] | None = None) -> None:
         """Run the queue down into whatever room this device has, in the operator's
