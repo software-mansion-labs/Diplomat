@@ -307,6 +307,8 @@ await check('query parameters that change who acts are refused everywhere, and a
 await check('a search must carry the pool\'s repository once, as its own term', async () => {
   await allowed(req('GET', '/search/issues?advanced_search=true&page=1&per_page=2&q=%28+fix+%29+repo%3Ao%2Fr+type%3Apr'));
   await allowed(req('GET', '/search/issues?q=repo:O/R+is:open'));
+  await refused(req('GET', '/search/issues?q=REPO:o/r+is:open'), /does not write the qualifier of the pool's repository as "repo:"/);
+  await refused(req('GET', '/search/issues?q=is:open+Repo%3Ao%2Fr'), /does not write the qualifier/);
   await refused(req('GET', '/search/issues'), /"q" is required/);
   await refused(req('GET', '/search/issues?q=is:open'), /not pinned/);
   await refused(req('GET', '/search/issues?q=repo:o/r+repo:o/secret'), /other than the pool/);

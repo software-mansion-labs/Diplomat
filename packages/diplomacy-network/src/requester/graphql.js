@@ -472,7 +472,8 @@ const OWNER_QUALIFIER = /^-?(repo|org|user|owner|enterprise):/i;
 const SEARCH_TERM = /\s*(?:(\(*)(-?(?:[\w.-]+:)?)"([^"\\]*)"(\)*)|([^\s"]+))(?=\s|$)/y;
 
 /// Whether a forge search string can only return things in `repo` ("owner/name"): it must
-/// carry `repo:owner/name` as a plain term of its own, and nothing that widens it - no
+/// carry `repo:owner/name` as a plain term of its own, the qualifier in lower case and the
+/// name in any, and nothing that widens it - no
 /// other repository, organisation or user qualifier, no top-level OR, no negation of the
 /// term. A quote may only wrap a whole term or a qualifier's whole value, and what it
 /// wraps holds no qualifier: where a quote opens mid-word, this reader and the forge's
@@ -512,6 +513,8 @@ export function searchConfined(q, repo) {
       if (OWNER_QUALIFIER.test(term)) {
         const negated = previous.toUpperCase() === 'NOT';
         if (term.toLowerCase() !== want || depth !== 0 || negated) return 'the search query names something other than the pool\'s repository';
+        // In another case the forge may read it as the qualifier or as a word; `gh` writes this one.
+        if (!term.startsWith('repo:')) return 'the search query does not write the qualifier of the pool\'s repository as "repo:"';
         pinned++;
       }
       previous = term;

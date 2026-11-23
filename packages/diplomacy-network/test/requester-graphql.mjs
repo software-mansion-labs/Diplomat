@@ -202,12 +202,19 @@ await check('a search is confined to the pool\'s repository and to issues and pu
   const q = (query, type = 'ISSUE') => ask(spec(), 'query($q: String!, $t: SearchType!) { search(query: $q, type: $t, first: 5) { issueCount nodes { ... on Issue { title } } } }', { q: query, t: type });
   assert.equal((await q('repo:o/r is:open fix')).ok, true);
   assert.equal((await q('( fix ) repo:O/R type:pr', 'ISSUE_ADVANCED')).ok, true);
+  assert.match((await q('REPO:o/r is:open fix')).reason, /^graphql: the search query does not write the qualifier of the pool's repository as "repo:"$/);
   for (const type of ['REPOSITORY', 'USER', 'DISCUSSION', 'issue', null]) assert.equal((await q('repo:o/r x', type)).ok, false, String(type));
   const table = [
     ['repo:o/r is:open', null],
     ['author:@me repo:o/r state:open type:pr', null],
     ['"fix it" repo:o/r', null],
     ['repo:o/r (label:bug OR label:crash)', null],
+    // The repository's name in any case, the qualifier in the one `gh` writes.
+    ['repo:O/R fix', null],
+    ['REPO:o/r fix', /does not write the qualifier/],
+    ['Repo:o/r', /does not write the qualifier/],
+    ['fix rEPO:O/R', /does not write the qualifier/],
+    ['REPO:o/r repo:o/r', /does not write the qualifier/],
     ['is:open', /not pinned/],
     ['repo:o/other', /other than the pool/],
     ['repo:o/r repo:o/secret', /other than the pool/],
@@ -231,7 +238,7 @@ await check('a search is confined to the pool\'s repository and to issues and pu
     ['repo:o/r x repo:evil/y', /space that is not the plain one/],
     ['repo:o/r\tx', /control character/],
     ['repo:o/rr', /other than the pool/],
-    ['Repo:O/R REPO:victim/x', /other than the pool/],
+    ['repo:O/R REPO:victim/x', /other than the pool/],
     [5, /not a string/],
   ];
   for (const [query, why] of table) {

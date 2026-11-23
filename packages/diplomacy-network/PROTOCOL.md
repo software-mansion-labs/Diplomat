@@ -1295,7 +1295,8 @@ through.
   which, once decoded, holds the character.
 - `"query": { "service": { "equals": "git-receive-pack" } }` pins query parameters:
   `"free"`, `equals`, `oneOf`, or `search` - a forge search string that must carry
-  `repo:<owner>/<name>` exactly once as a term of its own, with no other repository,
+  `repo:<owner>/<name>` exactly once as a term of its own, the qualifier in lower case as
+  `gh` writes it and the name in any, with no other repository,
   organisation or user qualifier, no negation and no top-level OR. Its terms are told
   apart by the plain space alone; a quote may wrap a whole term or the whole value of one
   qualifier, and what it wraps holds no qualifier. A pinned parameter is required unless
