@@ -117,6 +117,17 @@ enum WindowTest {
                   && read["RunAtLoad"] as? Bool == true
                   && read["ProgramArguments"] as? [String] == ["/x/Diplomat"], "\(read)")
         check("a marked plist is left alone", !Daemon.markLoginStartUnattended(plist: plist))
+        let linked = scratch.appendingPathComponent("linked.plist")
+        try? PropertyListSerialization.data(fromPropertyList: old, format: .xml, options: 0).write(to: plist)
+        try? fm.createSymbolicLink(atPath: linked.path, withDestinationPath: "agent.plist")
+        check("a symlinked plist is rewritten", Daemon.markLoginStartUnattended(plist: linked))
+        let target = (try? Data(contentsOf: plist)).flatMap {
+            try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any]
+        }?["EnvironmentVariables"] as? [String: String] ?? [:]
+        check("…through the link, which stays one",
+              target[LaunchMode.backgroundVar] == "1"
+                  && (try? fm.destinationOfSymbolicLink(atPath: linked.path)) == "agent.plist",
+              "\(target)")
         let absent = scratch.appendingPathComponent("none.plist")
         check("no plist, no agent: nothing is written",
               !Daemon.markLoginStartUnattended(plist: absent) && !fm.fileExists(atPath: absent.path))
