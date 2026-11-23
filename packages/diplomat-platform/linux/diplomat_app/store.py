@@ -5283,10 +5283,13 @@ class Store(QObject):
         new_audit = activity.read()
         new_bans = bans.read()
         self._notice_new_bans(new_bans)
-        if new_audit != self.audit_entries or new_bans != self.banned_authors:
+        bans_changed = new_bans != self.banned_authors
+        if new_audit != self.audit_entries or bans_changed:
             self.audit_entries = new_audit
             self.banned_authors = new_bans
             self.activity_changed.emit()
+        if bans_changed:
+            self.pipeline_changed.emit()
 
     def unban_async(self, login: str) -> None:
         """The panel's un-ban, off the GUI thread: the daemon may take seconds."""

@@ -168,6 +168,13 @@ struct PipelineView: View {
             && !edges.contains { $0.kind == .child && $0.from == item.id }
     }
 
+    /// Why a sync would refuse a split `canFracture` offers: the hold triage put on it.
+    /// Twin of `pipelineview.fracture_refused`.
+    static func fractureRefused(_ item: PipelineItem) -> String? {
+        guard let hold = item.hold, hold.hasPrefix("triaged as ") else { return nil }
+        return "No sync splits an issue \(hold)"
+    }
+
     /// An open item a sync rates when asked: a PR only when it is `me`'s, an issue only
     /// when its code can be read (`rooted`). Twin of `pipelineview.can_rate`.
     static func canRate(_ item: PipelineItem, me: String, rooted: Bool) -> Bool {
@@ -655,6 +662,7 @@ private struct PipelineDetail: View {
     }
 
     private var ban: String? { banned.map { "@\($0) is on the prompt-injection ban list" } }
+    private var refused: String? { PipelineView.fractureRefused(item) }
 
     private var actions: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -672,9 +680,11 @@ private struct PipelineDetail: View {
                     PipelineActionChip(symbol: "square.split.2x2",
                                        text: forcedFracture ? "Fracture asked" : "Fracture",
                                        tint: .purple,
-                                       enabled: enabled && !forcedFracture && badge == nil && banned == nil,
+                                       enabled: enabled && !forcedFracture && badge == nil && banned == nil
+                                           && refused == nil,
                                        action: fracture)
-                        .tooltip(ban ?? "Split it into low-complexity child issues in a sync started now")
+                        .tooltip(ban ?? refused
+                                 ?? "Split it into low-complexity child issues in a sync started now")
                 }
                 if PipelineView.canStartFix(item) {
                     PipelineActionChip(symbol: "wrench.and.screwdriver", text: "Start fix",

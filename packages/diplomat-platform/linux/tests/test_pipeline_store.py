@@ -1292,8 +1292,7 @@ def test_a_start_fix_leaves_once_a_whole_read_finds_its_issue_gone(pipe):
 
 @pytest.mark.parametrize("effect", [_fix(), _linear()])
 def test_a_queued_fix_leaves_once_a_whole_read_finds_its_issue_gone(pipe, effect):
-    """Closed on GitHub, completed or canceled on Linear, or past the layout's cap: no
-    item, and no effect."""
+    """Closed on GitHub, completed or canceled on Linear: no item, and no effect."""
     _queued_fix(pipe, effect)
     _sync(pipe, _result())
     assert _keys(pipe) == []

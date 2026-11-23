@@ -587,6 +587,13 @@ enum PipelineTest {
                                                edges: [PipelineGraph.Edge(from: issue, to: "c", kind: .child)],
                                                rooted: true)
                   && !PipelineView.canFracture(at(.human), edges: [], rooted: false))
+        var triaged = at(.human)
+        triaged.hold = "triaged as enhancement"
+        var heldOther = at(.human)
+        heldOther.hold = "an open PR fixes it"
+        check("…which a sync refuses for an issue held as triaged, and the button says so",
+              PipelineView.fractureRefused(triaged) == "No sync splits an issue triaged as enhancement"
+                  && PipelineView.fractureRefused(heldOther) == nil && PipelineView.fractureRefused(at(.human)) == nil)
         check("Start fix: a writable candidate issue only",
               PipelineView.canStartFix(at(.candidate)) && !PipelineView.canStartFix(at(.human))
                   && !PipelineView.canStartFix(at(.candidate, writable: false))
@@ -903,7 +910,7 @@ enum PipelineTest {
                   && withdrawn([], [], fixable: [issue, linear], of: fromScreen) == [reviewKey])
         check("…and nothing goes in a root the sync could not judge in full",
               withdrawn(assigned, [], unread: ["O/R"]).isEmpty)
-        check("…an ask whose item a whole read left out goes (closed, or past the layout's cap)",
+        check("…an ask whose item a whole read left out goes (closed)",
               withdrawn([], []) == [fixKey, linearKey, reviewKey].sorted())
         check("…and one a sync queued goes while its switch is off, in an unread root or with no result",
               Store.pipelineWithdrawn(asks, by: result([fix, fixLinear, review]), fix: false, fastTrack: true).sorted()

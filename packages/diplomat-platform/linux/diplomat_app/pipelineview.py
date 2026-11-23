@@ -685,6 +685,13 @@ def can_fracture(item: dict, edges: list[dict], rooted: bool) -> bool:
             and not any(e.get("kind") == "child" and _ends(e)[0] == item_id for e in edges))
 
 
+def fracture_refused(item: dict) -> str | None:
+    """Why a sync would refuse a split :func:`can_fracture` offers: the hold triage put on
+    it. Twin of ``PipelineView.fractureRefused``."""
+    hold = str(item.get("hold") or "")
+    return f"No sync splits an issue {hold}" if hold.startswith("triaged as ") else None
+
+
 def can_rate(item: dict, me: str, rooted: bool) -> bool:
     """An open item a sync rates when asked: a PR only when it is ``me``'s, an issue
     only when its code can be read (``rooted``). Twin of ``PipelineView.canRate``."""
@@ -822,9 +829,10 @@ class PipelineView(QWidget):
         self.rebuild()
 
     def select(self, item_id: str) -> None:
-        """Show ``item_id``'s detail; "" for none."""
+        """Show ``item_id``'s detail from its top; "" for none."""
         self.selected = item_id or None
         self.rebuild()
+        self.detail_scroll.verticalScrollBar().setValue(0)
 
     def _start_fix(self, item: dict) -> None:
         item_id = str(item.get("id") or "")
@@ -1001,7 +1009,8 @@ class PipelineView(QWidget):
         nothing. Rate now for an item :func:`can_rate` allows; Fracture for an issue
         :func:`can_fracture` allows and Start fix for a candidate issue
         (:func:`can_start_fix`) whose fix is known, each with nothing on it; neither of
-        the first two for a banned author's text, nor Start fix once a split is asked."""
+        the first two for a banned author's text, nor Fracture for a triaged issue
+        (:func:`fracture_refused`), nor Start fix once a split is asked."""
         st = self.store
         item_id = str(item.get("id") or "")
         on = st.pipeline_enabled
@@ -1019,11 +1028,13 @@ class PipelineView(QWidget):
             btn.setEnabled(on and not asked and not banned)
             self.buttons["rate"] = btn
         if can_fracture(item, edges, rooted):
+            refused = fracture_refused(item)
             btn = _small_button("Fracture asked" if split_asked else "Fracture",
                                 lambda: st.pipeline_force_now("fracture", item_id))
-            btn.setToolTip(ban if banned else "Split it into low-complexity child issues "
-                                              "in a sync started now")
-            btn.setEnabled(on and not split_asked and badge is None and not banned)
+            btn.setToolTip(ban if banned else refused or "Split it into low-complexity child "
+                                                         "issues in a sync started now")
+            btn.setEnabled(on and not split_asked and badge is None and not banned
+                           and refused is None)
             self.buttons["fracture"] = btn
         if can_start_fix(item):
             known = st.pipeline_fix_effect(item) is not None
