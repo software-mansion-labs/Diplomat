@@ -72,13 +72,14 @@ enum PipelineTest {
                   && SettingsView.linearTeamsSummary(PipelineSettings.LinearTeam.parse(" ")) == "None: GitHub only"
                   && SettingsView.linearTeamsSummary(PipelineSettings.LinearTeam.parse("eng=o/r,ops=o/x"))
                       == "ENG → o/r · OPS → o/x")
-        check("Fast-track my PRs names only a PR closing a candidate issue",
+        check("Fast-track my PRs names only a PR closing only candidate issues, rated while it is on",
               SettingsView.pipelineFastTrackSummary
                   == "Labels diplomat:fast-track each low/low PR of yours that closes a candidate issue, "
                   + "and reviews it until clean"
                   && SettingsView.pipelineFastTrackDetail.hasPrefix(
-                      "Only your own PRs from the repo itself into its default branch that close a "
-                          + "candidate issue: the fixes the pipeline asks for."))
+                      "Only your own PRs from the repo itself into its default branch that close only "
+                          + "candidate issues: the fixes the pipeline asks for.")
+                  && SettingsView.pipelineFastTrackDetail.hasSuffix(" A PR rated while this is off stays a person's."))
         check("Merge cleared PRs points at every hold rather than listing some",
               SettingsView.pipelineMergeDetail.hasPrefix(
                   "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "

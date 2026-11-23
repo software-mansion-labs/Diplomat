@@ -1376,10 +1376,11 @@ class SettingsView(QWidget):
             inner, "Fast-track my PRs", st.pipeline_fast_track, "pipeline_fast_track",
             "Labels diplomat:fast-track each low/low PR of yours that closes a candidate "
             "issue, and reviews it until clean",
-            "Only your own PRs from the repo itself into its default branch that close a "
-            "candidate issue: the fixes the pipeline asks for. Reviews of it are queued "
+            "Only your own PRs from the repo itself into its default branch that close only "
+            "candidate issues: the fixes the pipeline asks for. Reviews of it are queued "
             "until one finds nothing at its head; at that clean head it is rated again: "
-            "still low/low, it is labelled diplomat:cleared, else it leaves the fast track.")
+            "still low/low, it is labelled diplomat:cleared, else it leaves the fast track. "
+            "A PR rated while this is off stays a person's.")
         self._sw_pipeline_merge = self._pipeline_switch(
             inner, "Merge cleared PRs", st.pipeline_merge, "pipeline_merge",
             "Merges past the review requirement with admin rights (gh pr merge --admin): "

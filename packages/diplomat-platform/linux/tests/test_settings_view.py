@@ -607,8 +607,9 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
          "One medium- or high-complexity issue a sync becomes low-complexity child issues"),
     ]
     assert rows[2]._detail.text().startswith(
-        "Only your own PRs from the repo itself into its default branch that close a "
-        "candidate issue: the fixes the pipeline asks for.")
+        "Only your own PRs from the repo itself into its default branch that close only "
+        "candidate issues: the fixes the pipeline asks for.")
+    assert rows[2]._detail.text().endswith(" A PR rated while this is off stays a person's.")
     assert rows[3]._detail.text().startswith(
         "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
         "to it, checked again right before the merge.")

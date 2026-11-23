@@ -1171,10 +1171,11 @@ struct SettingsView: View {
         + "a candidate issue, and reviews it until clean"
 
     static let pipelineFastTrackDetail = """
-        Only your own PRs from the repo itself into its default branch that close a candidate \
-        issue: the fixes the pipeline asks for. Reviews of it are queued until one finds \
-        nothing at its head; at that clean head it is rated again: still low/low, it is \
-        labelled diplomat:cleared, else it leaves the fast track.
+        Only your own PRs from the repo itself into its default branch that close only \
+        candidate issues: the fixes the pipeline asks for. Reviews of it are queued until one \
+        finds nothing at its head; at that clean head it is rated again: still low/low, it is \
+        labelled diplomat:cleared, else it leaves the fast track. A PR rated while this is \
+        off stays a person's.
         """
 
     static let pipelineMergeDetail = """
