@@ -36,6 +36,8 @@ enum PipelineTest {
         defer { AgentProbes.pinDump(nil) }
 
         let store = Store()
+        check("a launch: no pipeline ask queued before it starts until its first sync is applied",
+              !store.pipelineJudged)
         // A headless Store still READS the operator's settings and their stored asks: pin
         // every one an assertion below depends on. Records live in `headlessJSON`.
         store.headlessJSON = [:]
@@ -275,16 +277,27 @@ enum PipelineTest {
         let old = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1)
         let gone = "pipeline-fix:https://github.com/o/r/issues/90077"
         let later = t0.addingTimeInterval(3 * 3600)
+        let teams = [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r")]
         check("at the backoff ceiling, a record no sync owes is dropped, a notice or not",
               Store.retainedPipelineAttempts([gone: old], after: result([], notices: ["Linear: no key"]),
-                                             now: later).isEmpty)
+                                             teams: teams, now: later).isEmpty)
         check("…kept inside it, so a read that failed does not make it new",
               Store.retainedPipelineAttempts([gone: old], after: result([]),
-                                             now: later.addingTimeInterval(-1))[gone] == old)
+                                             teams: teams, now: later.addingTimeInterval(-1))[gone] == old)
         check("…and kept while owed, however old",
               Store.retainedPipelineAttempts([fix.key: old], after: result([fix]),
-                                             now: t0.addingTimeInterval(30 * 86400))[fix.key] == old)
+                                             teams: teams, now: t0.addingTimeInterval(30 * 86400))[fix.key] == old)
+        let unreadRoot = PipelineTickResult(at: Date(), unread: ["O/R"])
+        check("…and in a root the sync did not judge in full, a Linear issue's by its team's",
+              Store.retainedPipelineAttempts([gone: old, fixLinear.key: old], after: unreadRoot,
+                                             teams: teams, now: later) == [gone: old, fixLinear.key: old]
+                  && Store.retainedPipelineAttempts([gone: old, fixLinear.key: old], after: unreadRoot,
+                                                    teams: [], now: later) == [gone: old]
+                  && Store.retainedPipelineAttempts([gone: old], after: PipelineTickResult(at: Date(), unread: ["o/x"]),
+                                                    teams: teams, now: later).isEmpty)
         store.savePipelineAttempts([gone: old])
+        await store.applyPipeline(result([]), judged: false, now: later)
+        check("…all of them after a sync not judged", store.loadPipelineAttempts() == [gone: old])
         await store.applyPipeline(result([]), now: later)
         check("…as a sync saves them", store.loadPipelineAttempts().isEmpty)
         let closedNow = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1, concludedAt: later)
@@ -705,6 +718,108 @@ enum PipelineTest {
                   && !Store.pipelineRan(PipelineTickResult(at: Date(timeIntervalSince1970: 99)),
                                         started: Date(timeIntervalSince1970: 100.2)))
 
+        print("\npipeline: switched back on")
+        await store.applyPipeline(result([fix, review]), now: now)
+        store.pipelineEnabled = false
+        store.pipelineEnabled = true
+        check("on again: none of the asks queued before starts until a sync begun since is applied",
+              store.isPaused(.pipeline) && store.drainableTasks.isEmpty && ids().count == 2)
+        Store.pipelineTickOverride = { _ in PipelineTickResult(at: Date().addingTimeInterval(-60), items: items) }
+        await store.runPipelineSyncOnce()
+        check("…nor once the last result is answered again", store.isPaused(.pipeline) && ids().count == 2)
+        Store.pipelineTickOverride = { _ in
+            store.pipelineEnabled = false
+            store.pipelineEnabled = true
+            return result([fix])
+        }
+        await store.runPipelineSyncOnce()
+        check("…nor once one begun before it is, which withdraws nothing",
+              store.isPaused(.pipeline) && ids().sorted() == [fixKey, reviewKey].sorted())
+        Store.pipelineTickOverride = { _ in result([fix]) }
+        await store.runPipelineSyncOnce()
+        check("…which withdraws what it no longer owes, then lets the rest start",
+              !store.isPaused(.pipeline) && ids() == [fixKey] && store.drainableTasks.map(\.id) == [fixKey])
+        store.pipelineEnabled = false
+        store.pipelineEnabled = true
+        // `gh` names no login, so a poll stops at its viewer read: each one it logs is a poll.
+        let pollLog = scratch.appendingPathComponent("polls.log"), pollGH = scratch.appendingPathComponent("gh-polls")
+        try? "#!/bin/sh\ncase \"$*\" in *viewer*) echo poll >> '\(pollLog.path)';; esac\necho '{\"data\":{\"viewer\":{\"login\":\"\"}}}'\n"
+            .write(to: pollGH, atomically: true, encoding: .utf8)
+        chmod(pollGH.path, 0o755)
+        let tripwire = ProcessInfo.processInfo.environment["DIPLOMAT_GH"]
+        setenv("DIPLOMAT_GH", pollGH.path, 1)
+        let login = store.usernameOverride
+        store.usernameOverride = ""
+        store.earlyPollFloor = 0
+        store.pollsEarly = true
+        /// The polls run so far, once one brought forward has started (well inside a second)
+        /// and ended.
+        func polls() async -> Int {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            while store.secondsUntilPoll(gap: 0) > 0 { try? await Task.sleep(nanoseconds: 50_000_000) }
+            return ((try? String(contentsOf: pollLog, encoding: .utf8)) ?? "").split(separator: "\n").count
+        }
+        await store.applyPipeline(result([fix]), judged: false)
+        let gated = await polls()
+        await store.applyPipeline(result([fix]))
+        let opened = await polls()
+        await store.applyPipeline(result([fix]))
+        let open = await polls()
+        check("…and brings the poll that drains them forward, once", gated == 0 && opened == 1 && open == 1)
+        store.pollsEarly = false
+        store.usernameOverride = login
+        if let tripwire { setenv("DIPLOMAT_GH", tripwire, 1) } else { unsetenv("DIPLOMAT_GH") }
+        clearQueue()
+        let lapsed = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: Date().addingTimeInterval(-4 * 3600),
+                                   attempts: 2)
+        store.savePipelineAttempts([fix.key: lapsed])
+        Store.pipelineTickOverride = { _ in
+            store.pipelineFix = false
+            store.pipelineFix = true
+            return result([])
+        }
+        await store.runPipelineSyncOnce()
+        check("a sync Open fix PRs went off during keeps the records of the fixes it left out",
+              store.loadPipelineAttempts() == [fix.key: lapsed] && !store.isPaused(.pipeline))
+        Store.pipelineTickOverride = { _ in result([]) }
+        await store.runPipelineSyncOnce()
+        check("…which the next sync drops", store.loadPipelineAttempts().isEmpty)
+        Store.pipelineTickOverride = nil
+
+        print("\npipeline: a queued Linear fix read otherwise")
+        await store.applyPipeline(result([fixLinear]), now: now)
+        // As Start fix would have queued it.
+        if let i = store.requestedWork.firstIndex(where: { $0.key == linearKey }) { store.requestedWork[i].byHand = true }
+        let recorded = store.loadPipelineAttempts()
+        let edited = PipelineEffect.fixLinear(repo: "o/r", identifier: "ENG-90010", url: linear,
+                                              text: "Title\n\nEdited", author: "Bob")
+        func linearAsk() -> (repo: String, text: String?, byHand: Bool)? {
+            guard let a = ask(linearKey), case .issues(let cfg) = a.config else { return nil }
+            return (a.repo, cfg.linear?.text, a.byHand)
+        }
+        func owing(_ effect: PipelineEffect) -> PipelineTickResult {
+            PipelineTickResult(at: Date(), items: items, effects: [effect], fixable: [linear])
+        }
+        await store.applyPipeline(owing(edited), now: now)
+        check("its text edited: queued again with the new text, as the same attempt and the operator's",
+              ids() == [linearKey] && linearAsk().map { $0 == ("o/r", "Title\n\nEdited", true) } == true
+                  && job(linearKey)?.prompt.contains("Edited") == true && store.loadPipelineAttempts() == recorded
+                  && feed("pipeline-fix").last == "auto \(line(linearKey)) queued again: its repo or text changed")
+        let fixLines = feed("pipeline-fix").count
+        let pinnedRoots = store.roots
+        store.pinRoots(pinnedRoots + [PRRef.LocalRepo(owner: "o", repo: "web", path: scratch.path)])
+        let moved = PipelineEffect.fixLinear(repo: "o/web", identifier: "ENG-90010", url: linear,
+                                             text: "Title\n\nEdited", author: "Bob")
+        await store.applyPipeline(owing(moved), now: now)
+        await store.applyPipeline(owing(moved), now: now)
+        check("…its team mapped to another repo: queued again there, once",
+              ids() == [linearKey] && linearAsk()?.repo == "o/web"
+                  && job(linearKey)?.prompt.contains("fix it in o/web") == true
+                  && feed("pipeline-fix").count == fixLines + 1)
+        store.pinRoots(pinnedRoots)
+        clearQueue()
+        store.savePipelineAttempts([:])
+
         print("\npipeline: asks a sync no longer owes")
         let asks = [fix, fixLinear, review].compactMap { store.pipelineAsk($0) } + [sweep]
         func withdrawn(_ seen: [PipelineItem], _ effects: [PipelineEffect], unread: [String] = [],
@@ -757,10 +872,10 @@ enum PipelineTest {
         print("\npipeline: concluded records")
         let closedOut = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1, concludedAt: t0)
         check("a concluded record no sync owes is kept for 30 days after its run concluded",
-              Store.retainedPipelineAttempts([gone: closedOut], after: result([]),
+              Store.retainedPipelineAttempts([gone: closedOut], after: result([]), teams: teams,
                                              now: t0.addingTimeInterval(29 * 86400))[gone] == closedOut)
         check("…and dropped past them",
-              Store.retainedPipelineAttempts([gone: closedOut], after: result([]),
+              Store.retainedPipelineAttempts([gone: closedOut], after: result([]), teams: teams,
                                              now: t0.addingTimeInterval(30 * 86400 + 1)).isEmpty)
 
         print("\npipeline: whose work it is")
@@ -792,6 +907,13 @@ enum PipelineTest {
         check("a held part has no Start fix, and pressing it says the hold",
               store.pipelineFixEffect(for: heldPart) == nil
                   && store.startPipelineFix(heldPart) == heldPart.hold && ids().isEmpty)
+        let bannedBefore = store.bannedAuthors
+        store.bannedAuthors = [BannedAuthor(login: "mallory")]
+        check("the screen holds Rate now and Fracture for the banned author its text came from",
+              store.pipelineBanned(heldPart) == "mallory"
+                  && store.pipelineBanned(item(issue, .issue, author: "Mallory")) == "Mallory"
+                  && store.pipelineBanned(partItem) == nil)
+        store.bannedAuthors = bannedBefore
         var unheld = heldPart
         unheld.hold = nil
         store.pipelineResult = PipelineTickResult(at: Date(), items: items + [unheld])
@@ -953,8 +1075,11 @@ enum PipelineTest {
     /// `<dir>/flip-merge` and waits for control.json to say merge is off. While the state's
     /// `readErrors` is set, the `Repo` read answers with that error beside its data. The
     /// state's `later` holds low/low #7 and op's draft PR #3 fixing it, likewise clean, and
-    /// its `more` low/low #8 and #9. `<dir>/linear-state.json`'s `later` adds Linear's
-    /// low/low ENG-2; its `done` names the issues Linear no longer lists.
+    /// its `more` low/low #8 and #9, its `extra` low/low #10 and #11. While its `holdReads` is
+    /// above 0, a `Repo` read writes its ordinal to `<dir>/held` and waits for `<dir>/go` to
+    /// say the same. `acme/web`, checked out at `<dir>/checkout-web`, is empty.
+    /// `<dir>/linear-state.json`'s `later` adds Linear's low/low ENG-2, its `extra` ENG-3; its
+    /// `done` names the issues Linear no longer lists, its `text` an issue's edited text.
     @MainActor
     private static func live(_ store: Store, harness: URL, check: (String, Bool) -> Void) async {
         print("\npipeline: real syncs against the stubs in \(harness.path)")
@@ -1208,9 +1333,103 @@ enum PipelineTest {
         check("sync 13, still unread: nothing comes back", store.pipelineResult?.unread == ["acme/app"] && ids() == [fixKey])
         patch { $0["readErrors"] = nil }
 
+        patch { github in
+            let extra = github["extra"] as? [String: Any] ?? [:]
+            github["issues"] = (github["issues"] as? [Any] ?? []) + (extra["issues"] as? [Any] ?? [])
+        }
+        try? Data(#"{"later": true, "done": ["ENG-2"], "extra": true}"#.utf8).write(to: linearState)
+        store.pipelineFix = true
+        await sync()
+        let tenKey = "issues:acme/app#10", elevenKey = "issues:acme/app#11", eng3Key = "issues:linear:ENG-3"
+        let owing = [fixKey, tenKey, elevenKey, eng3Key].sorted(), left = [fixKey, elevenKey, eng3Key].sorted()
+        check("sync 14, low/low #10, #11 and ENG-3 read: their fixes are queued, and may start",
+              ids() == owing && store.drainableTasks.map(\.id).sorted() == owing && ask(eng3Key)?.repo == "acme/app")
+
+        func held(_ n: Int) async -> Bool {
+            for _ in 0..<1200 {
+                if (try? String(contentsOf: harness.appendingPathComponent("held"), encoding: .utf8)) == "\(n)" { return true }
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            return false
+        }
+        func release(_ n: Int) { try? Data("\(n)".utf8).write(to: harness.appendingPathComponent("go")) }
+        store.pipelineEnabled = false
+        patch { github in
+            var issues = github["issues"] as? [[String: Any]] ?? []
+            for i in issues.indices where issues[i]["number"] as? Int == 10 { issues[i]["state"] = "CLOSED" }
+            github["issues"] = issues
+            github["holdReads"] = 2
+        }
+        store.pipelineEnabled = true
+        check("master off, #10 closed, master on: no queued fix may start before a sync",
+              ids() == owing && store.drainableTasks.isEmpty)
+        try? await Task.sleep(nanoseconds: 1_100_000_000)
+        truncate()
+        let back = feed().count
+        let syncing = Task { @MainActor in await store.runPipelineSyncOnce() }
+        let first = await held(1)
+        store.pipelineEnabled = false
+        store.pipelineEnabled = true
+        await store.runPipelineSyncOnce()
+        let again = store.pipelineSyncAgain
+        release(1)
+        let second = await held(2)
+        print("  stale sync applied: queue \(ids()), drainable \(store.drainableTasks.map(\.id)), #10 read: \(item(10) != nil)")
+        check("…a sync begun before master went off and on again reads #10 closed, yet withdraws nothing and lets nothing start",
+              first && again && second && item(10) == nil && ids() == owing && store.drainableTasks.isEmpty
+                  && !store.pipelineJudged && feed().count == back)
+        release(2)
+        await syncing.value
+        let since = Array(feed().dropFirst(back))
+        print("  sync begun since: \(since)")
+        check("…the sync begun since withdraws #10's fix and lets the rest start",
+              ids() == left && store.drainableTasks.map(\.id).sorted() == left && store.pipelineJudged
+                  && since == ["panel queue-drop Issues · #10 · deep - the pipeline no longer owes it, not run"])
+
+        store.pinRoots([PRRef.LocalRepo(owner: "acme", repo: "app",
+                                        path: harness.appendingPathComponent("checkout").path),
+                        PRRef.LocalRepo(owner: "acme", repo: "web",
+                                        path: harness.appendingPathComponent("checkout-web").path)])
+        let appOld = "pipeline-fix:https://github.com/acme/app/issues/77"
+        let linearOld = "pipeline-fix:https://linear.app/acme/issue/ENG-77"
+        let webOld = "pipeline-fix:https://github.com/acme/web/issues/78"
+        var seeded = store.loadPipelineAttempts()
+        for key in [appOld, linearOld, webOld] {
+            seeded[key] = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: Date().addingTimeInterval(-2 * 86400),
+                                        attempts: 1)
+        }
+        store.savePipelineAttempts(seeded)
+        patch { $0["readErrors"] = error }
+        await sync()
+        let kept = Set(store.loadPipelineAttempts().keys)
+        print("  sync 17 unread: \(store.pipelineResult?.unread ?? []), records: \(kept.sorted())")
+        check("sync 17, acme/app read with an error beside acme/web: a lapsed record in acme/app or its Linear team stays, acme/web's goes",
+              store.pipelineResult?.unread == ["acme/app"] && kept.isSuperset(of: [appOld, linearOld]) && !kept.contains(webOld))
+        patch { $0["readErrors"] = nil }
+        await sync()
+        let after = Set(store.loadPipelineAttempts().keys)
+        check("sync 18, read whole: they go too",
+              store.pipelineResult?.unread == [] && after.isDisjoint(with: [appOld, linearOld, webOld]))
+
+        store.pipelineLinearTeamsRaw = "ENG=acme/web"
+        let moved = feed().count
+        await sync()
+        let requeued = Array(feed().dropFirst(moved))
+        print("  sync 19 feed: \(requeued), ENG-3 in \(ask(eng3Key)?.repo ?? "-")")
+        check("sync 19, Linear's ENG moved to acme/web: ENG-3's queued fix is queued again there",
+              ids() == left && ask(eng3Key)?.repo == "acme/web" && prompt(eng3Key).contains("fix it in acme/web")
+                  && requeued == ["auto pipeline-fix Issues · ENG-3 · deep queued again: its repo or text changed"])
+        let edited = "Typing any letter drops focus."
+        try? Data(#"{"later": true, "done": ["ENG-2"], "extra": true, "text": {"ENG-3": "\#(edited)"}}"#.utf8)
+            .write(to: linearState)
+        await sync()
+        check("sync 20, ENG-3 edited on Linear: its queued fix is queued again with the new text",
+              ids() == left && ask(eng3Key)?.repo == "acme/web" && prompt(eng3Key).contains(edited)
+                  && feed().last == "auto pipeline-fix Issues · ENG-3 · deep queued again: its repo or text changed")
+
         store.pipelineEnabled = false
         check("master off: none of the queued asks may start",
-              ids() == [fixKey] && store.drainableTasks.isEmpty)
+              ids() == left && store.drainableTasks.isEmpty)
         store.requestedWork = []
         store.queuedTasks = []
         store.savePipelineAttempts([:])

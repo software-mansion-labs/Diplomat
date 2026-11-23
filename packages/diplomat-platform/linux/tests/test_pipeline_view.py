@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from test_autofix import fake_probes
 
-from diplomat_app import pipelineview
+from diplomat_app import bans, pipelineview
 from diplomat_app.pipelineview import EventRow, PipelineView, two_lines
 from diplomat_app.store import Store
 from diplomat_runtime import autofix, comms
@@ -543,6 +543,29 @@ def test_an_ask_waiting_for_its_sync_shows_asked(store, monkeypatch):
     view.buttons["fracture"].click()
     assert (view.buttons["fracture"].text(), view.buttons["fracture"].isEnabled()) == (
         "Fracture asked", False)
+
+
+def test_start_fix_is_off_once_a_fracture_is_asked(store, monkeypatch):
+    monkeypatch.setattr(store, "run_pipeline_sync_async", lambda: None)
+    view = PipelineView(store)
+    view.select(I5)
+    view.buttons["fracture"].click()
+    assert not view.buttons["fix"].isEnabled()
+
+
+def test_rate_now_and_fracture_are_off_for_a_banned_authors_text(store):
+    """A sync neither rates nor splits it."""
+    result = _result()
+    result["items"][4] = {**result["items"][4], "author": "Mallory"}
+    result["items"][5] = {**result["items"][5], "author": "me", "splitFrom": "mallory"}
+    store.pipeline_result = result
+    store.banned_authors = [bans.BannedAuthor("mallory", "prompt injection")]
+    view = PipelineView(store)
+    for item, who in ((I5, "Mallory"), (I6, "mallory")):
+        view.select(item)
+        held = (False, f"@{who} is on the prompt-injection ban list")
+        assert [(view.buttons[k].isEnabled(), view.buttons[k].toolTip())
+                for k in ("rate", "fracture")] == [held, held]
 
 
 def test_start_fix_and_fracture_are_off_while_anything_is_on_it(store, monkeypatch):
