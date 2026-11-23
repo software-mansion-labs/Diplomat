@@ -424,15 +424,15 @@ try {
     const jobsFile = path.join(m.base, 'jobs.json');
     const keptOf = () => JSON.parse(fs.readFileSync(jobsFile, 'utf8')).jobs[run.runId];
     assert.deepEqual(await m.stop(), { code: 0, signal: null });
-    assert.deepEqual(keptOf().spent, { requests: 0, bytes: 0 });
+    assert.deepEqual(keptOf().spent, { requests: 0, bytes: 0, carried: 0 });
     // As if the job had used up its share before the daemon went.
     const all = JSON.parse(fs.readFileSync(jobsFile, 'utf8'));
-    all.jobs[run.runId].spent = { requests: 5000, bytes: 123 };
+    all.jobs[run.runId].spent = { requests: 5000, bytes: 123, carried: 456 };
     fs.writeFileSync(jobsFile, JSON.stringify(all));
     const at = fs.statSync(jobsFile).mtimeMs;
     await m.start();
     await until('the job taken up and jobs.json written again', () => m.log().includes(`${run.runId} taken up in ${run.container}`) && fs.statSync(jobsFile).mtimeMs !== at);
-    assert.deepEqual(keptOf().spent, { requests: 5000, bytes: 123 }, 'the broker counts on from what was kept');
+    assert.deepEqual(keptOf().spent, { requests: 5000, bytes: 123, carried: 456 }, 'the broker counts on from what was kept');
     m.release('go');
     await done(m, taskId);
     const step = m.agent(run.runId).steps.find((s) => s.verb === 'model');
