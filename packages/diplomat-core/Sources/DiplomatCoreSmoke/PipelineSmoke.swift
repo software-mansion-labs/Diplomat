@@ -1220,6 +1220,14 @@ func pipelineSmoke() throws {
     check(nested?.notices == ["another sync held \(busyDir.path)/tick.lock, so this one read nothing"],
           "a second sync: \(nested?.notices ?? [])")
     check(nested?.items.isEmpty == true && nested?.unread == ["acme/app"], "a second sync: \(nested?.unread ?? [])")
+    let shutDir = base.appendingPathComponent("shut")
+    let shut = fixture()
+    // A directory: no `open` for writing, root's (CI's container) included.
+    try FileManager.default.createDirectory(at: shutDir.appendingPathComponent("tick.lock"),
+                                            withIntermediateDirectories: true)
+    let shutOut = PipelineTick.run(settings: PipelineSettings(roots: [root]), now: t0, dir: shutDir, io: shut.io())
+    check(shutOut.notices == ["\(shutDir.path)/tick.lock could not be opened, so this sync read nothing"]
+          && shut.ghCalls.isEmpty && shutOut.unread == ["acme/app"], "a lock not opened: \(shutOut.notices)")
 
     try pipelineGuards(base: base, root: root, team: team, t0: t0)
 
@@ -1922,7 +1930,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     for n in 2...5 { flaky.ratings["Flaky \(n)"] = ["risk": "low", "complexity": "low", "why": "x"] }
     flaky.ratings["Flaky 1"] = ["risk": "extreme"]
     let rateOnly = PipelineSettings(roots: [root], rate: true)
-    let tries = [0.0, 5, 10, 15, 15 + 24 * 60].map { sync(flaky, rateOnly, dir("backoff"), later($0)).claude }
+    let tries = [0.0, 5, 10, 15, Double(15 + 24 * 60)].map { sync(flaky, rateOnly, dir("backoff"), later($0)).claude }
     check(tries == [["sonnet Flaky 1", "sonnet Flaky 2", "sonnet Flaky 3", "sonnet Flaky 4"],
                     ["sonnet Flaky 1", "sonnet Flaky 5"], [], ["sonnet Flaky 1"], ["sonnet Flaky 1"]],
           "a failing rating's tries: \(tries)")

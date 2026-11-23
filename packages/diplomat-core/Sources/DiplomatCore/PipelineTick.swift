@@ -114,18 +114,22 @@ public enum PipelineTick {
     /// the sync goes on without it; a root read past `githubMaxItems` neither fixes nor
     /// splits its issues, and one read with errors, or whose Linear team was not read,
     /// is read and shown only. Such roots, or all of them when the sync is blocked, are
-    /// its `unread`. One sync runs at a time per `dir`: another started meanwhile reads
-    /// nothing and answers the last result with a notice.
+    /// its `unread`. One sync runs at a time per `dir`: another started meanwhile, or one
+    /// that cannot open the lock, reads nothing and answers the last result with a notice.
     public static func run(settings: PipelineSettings, now: Date = Date(),
                            dir: URL = PipelineLog.dir, io: PipelineIO = .live) -> PipelineTickResult {
         PrivateFiles.prepare(dir)
-        if let result = PrivateFiles.locked(dir.appendingPathComponent("tick.lock"), wait: false, {
+        let lock = dir.appendingPathComponent("tick.lock")
+        if let result = PrivateFiles.locked(lock, wait: false, {
             PipelineSync(settings: settings, now: now, dir: dir, io: io).run()
         }) {
             return result
         }
         var last = PipelineLog.last(in: dir) ?? PipelineTickResult(at: now)
-        last.notices.append("another sync held \(dir.path)/tick.lock, so this one read nothing")
+        let fd = open(lock.path, O_RDWR)
+        if fd >= 0 { close(fd) }
+        last.notices.append(fd >= 0 ? "another sync held \(lock.path), so this one read nothing"
+                                    : "\(lock.path) could not be opened, so this sync read nothing")
         last.unread = settings.roots.map(\.slug)
         return last
     }
@@ -680,7 +684,8 @@ final class PipelineSync {
     /// this Diplomat has not rated again: each head is rated again once, whatever the
     /// answer.
     func awaitingRerate(_ e: PipelineEntry) -> Bool {
-        guard own(e), open(e), e.item.writable, has(e, model.labels.fastTrack), let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
+        guard own(e), open(e), e.item.writable, has(e, model.labels.fastTrack),
+              let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
               e.item.ratedBy == "label", let r = e.item.rating, r.atLeast(e.item.floor ?? r).isFastTrack,
               offTrack(e) == nil else { return false }
         return fixesCandidate(e)
