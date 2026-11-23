@@ -1,7 +1,7 @@
 import Foundation
 
-/// Owner-only files guarded by an exclusive `flock`: the primitives Comms' and Tasks'
-/// logs share. Directories 0700, files 0600.
+/// Owner-only files guarded by an exclusive `flock`: the primitives under Comms' log and
+/// state. Directories 0700, files 0600.
 enum PrivateFiles {
     /// Made 0700 even if it already exists: what is in it may be the operator's DMs, and
     /// their home may be readable by other local users.

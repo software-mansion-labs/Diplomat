@@ -145,8 +145,7 @@ public enum GH {
         return out.stdout
     }
 
-    /// How one `gh` call exited and what it printed. `gh api graphql` exits 1 on any
-    /// GraphQL error yet still prints the response, whose `data` may hold the rest.
+    /// How one `gh` or `glab` call exited and what it printed.
     struct Output {
         let status: Int32
         let stdout: Data

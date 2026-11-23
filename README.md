@@ -12,7 +12,7 @@ issues, and act on what people ask you on Slack. You decide; they do the legwork
 |---|---|
 | **Time** | A review is written before you open the PR. Conflicts and review threads on your own PRs are fixed and pushed. A new issue from outside the team is reproduced and, if it is real, comes back as a draft PR. A Slack "can you look at #412?" is queued before you have read it. |
 | **Money** | Every task is priced from your real usage, and automatic work holds before your rate limit or credit runs dry. Telemetry shows what each task costs. Work spreads over the machines and devices you already have. |
-| **Power** | One maintainer, a swarm: agents in parallel, each with its own simulator; full-repo audits ranked by severity; goals that span dozens of PRs and issues tracked as one, with one click on whatever is still missing. |
+| **Power** | One maintainer, a swarm: agents in parallel, each with its own simulator; full-repo audits ranked by severity. |
 
 ## How it fits together
 
@@ -23,28 +23,14 @@ tracked.
 flowchart TB
   GH["GitHub monitors<br/>review requests · your PRs · new issues"] --> Q
   SL["Comms<br/>Slack asks, triaged"] --> Q
-  TK["Goals<br/>issues → PRs → blockers"] --> Q
   YOU["You<br/>panel · wizards"] --> Q
   Q["One queue · priority bands"] --> GATE{"Budget gate + task cap"}
   GATE --> AG["Agents in real terminals<br/>a simulator each · heavy work offloaded to your other machines"]
   AG --> OUT["Reviews · pushes · draft PRs"]
   AG --> TEL["Telemetry<br/>cost · throughput"]
   OUT -. "new commits, threads" .-> GH
-  OUT -. "progress" .-> TK
   TEL -. "prices the next task" .-> GATE
 ```
-
-### Goals - the whole picture, kept moving
-
-Five issues asking for iPhone Duo support, the PR adding it, three PRs unblocking that PR: Diplomat
-spots them and proposes **one goal**, drawn as flat chains - issue → PR → the PRs it waits on, and a
-`+` where an issue has no PR yet - one click on it starts the fix. **Dismiss** the goal,
-**Observe** it and act by hand, or **Automate** it: issues without a PR get a fix, PRs can be
-re-reviewed on every new commit, and review threads on yours are fixed. Any long-running task works
-the same way, its PRs, issues and Slack threads followed and its status explained.
-[More](docs/tasks.md)
-
-<img alt="Goals on the Tasks screen" src="docs/img/goals.png" />
 
 ### Comms - Slack, handled before you read it
 
@@ -109,7 +95,7 @@ Everything here can be changed in Settings (⚙︎).
 |---|---|
 | Fix my PRs: conflicts and review threads | **on** |
 | Review PRs that request me | **on**, from any author (an allowlist narrows it) |
-| Depth of those reviews, and of a goal's | **standard**; my own PRs **max** (a per-author table sets others) |
+| Depth of those reviews | **standard**; my own PRs **max** (a per-author table sets others) |
 | Submit approve / request-changes verdicts | **off**, a neutral `COMMENT` review |
 | Thank-you review (body only) on a perfectly clean PR | **on** |
 | Reproduce and fix new community issues | **on**, issues filed from then on |
@@ -166,4 +152,4 @@ CI if the prompts drift apart.
 
 [The panel](docs/panel.md) · [Actions](docs/actions.md) · [Automatic work](docs/automation.md) ·
 [Settings](docs/settings.md) · [Telemetry](docs/telemetry.md) · [Comms](docs/comms.md) ·
-[Tasks](docs/tasks.md) · [Devices](docs/devices.md) · [Development](docs/development.md)
+[Devices](docs/devices.md) · [Development](docs/development.md)
