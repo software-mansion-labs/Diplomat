@@ -43,7 +43,8 @@ jobs:
         run: swift build
       - name: cold
         working-directory: packages/diplomat-platform/macos
-        run: DIPLOMAT_RELAUNCH_TEST=1 swift run Diplomat 2>&1 | grep -E "FAIL|ok    (a bundle|the failure|it runs)|relaunch: (all|FAILED)|DIAG (P_|relaunch|t\\+)"
+        run: |
+          DIPLOMAT_RELAUNCH_TEST=1 swift run Diplomat 2>&1 | grep -E "FAIL|ok    (a bundle|the failure|it runs)|relaunch: (all|FAILED)|DIAG (P_|relaunch|t\\+)"
 
   swift-macos:
     name: Swift (macOS) · build + core smoke
