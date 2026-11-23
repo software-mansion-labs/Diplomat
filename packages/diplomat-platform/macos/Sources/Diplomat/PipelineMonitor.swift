@@ -10,6 +10,19 @@ import DiplomatCore
 // task cap, the spending budget, the disk floor and the master switch itself
 // (`AutoCounter.pipeline`).
 
+// TEMPORARY SHIM, for the integrator to delete: DiplomatCore's `PipelineEffect` gains
+// `author` (an associated value of every case), which this stands in for until then. Once
+// it has it, delete `PipelineEffectAuthorShim` and this extension, build the effects in
+// `pipelineFixEffect` and in PipelineTest.swift with `author:`, and drop their
+// `PipelineEffectAuthorShim.byKey` lines.
+enum PipelineEffectAuthorShim {
+    static var byKey: [String: String] = [:]
+}
+
+extension PipelineEffect {
+    var author: String { PipelineEffectAuthorShim.byKey[key] ?? "" }
+}
+
 extension Store {
     /// `DIPLOMAT_PIPELINE_SECS` (ignored unless finite), else `pipeline.json`'s `syncSecs`.
     /// Never under its `minSyncSecs` (a sync reads every root and team, and may spend
@@ -47,6 +60,31 @@ extension Store {
             rate: pipelineRate, fix: pipelineFix, fastTrack: pipelineFastTrack,
             merge: pipelineMerge, fracture: pipelineFracture,
             force: force.rate.isEmpty && force.fracture.isEmpty ? nil : force)
+    }
+
+    /// `control.json` in `PipelineLog.dir`: the switches as they stand, which a running sync
+    /// re-reads before each of its writes, merges and ratings. Owner-only, replaced whole;
+    /// a sync that cannot read it goes by the settings it was started with. Headless only
+    /// into a `DIPLOMAT_PIPELINE_DIR`, so a render or self-test never steers the live app's
+    /// sync. Twin of `pipeline.write_control`.
+    func writePipelineControl() {
+        let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"] ?? ""
+        guard !Headless.active || !env.isEmpty else { return }
+        let switches = ["enabled": pipelineEnabled, "rate": pipelineRate, "fix": pipelineFix,
+                        "fastTrack": pipelineFastTrack, "merge": pipelineMerge,
+                        "fracture": pipelineFracture]
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        guard let data = try? encoder.encode(switches) else { return }
+        let dir = PipelineLog.dir
+        let fm = FileManager.default
+        let tmp = dir.appendingPathComponent("control.json.tmp-\(getpid())-\(UUID().uuidString)")
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true,
+                                attributes: [.posixPermissions: 0o700])
+        if !fm.createFile(atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600])
+            || rename(tmp.path, dir.appendingPathComponent("control.json").path) != 0 {
+            try? fm.removeItem(at: tmp)
+        }
     }
 
     /// The teams the Settings line names (`PipelineSettings.LinearTeam.parse`).
@@ -104,6 +142,8 @@ extension Store {
             notePipelineHealth(hold)
             if hold != nil { return }
             let settings = pipelineSettings
+            writePipelineControl()
+            let started = Date()
             let result: PipelineTickResult
             if let stub = Store.pipelineTickOverride {
                 result = stub(settings)
@@ -112,14 +152,22 @@ extension Store {
                     PipelineTick.run(settings: settings)
                 }.value
             }
+            let ran = Store.pipelineRan(result, started: started)
             // Taken by this sync; what was forced during it waits for the next.
-            if let sent = settings.force {
+            if ran, let sent = settings.force {
                 pipelineForce = PipelineSettings.Force(
                     rate: pipelineForce.rate.filter { !sent.rate.contains($0) },
                     fracture: pipelineForce.fracture.filter { !sent.fracture.contains($0) })
             }
-            await applyPipeline(result)
+            await applyPipeline(result, ran: ran)
         } while pipelineSyncAgain && pipelineEnabled
+    }
+
+    /// Whether `result` is a sync begun at or after `started`, not the last one answered
+    /// again because another sync held the lock. A result is dated, to the second, when
+    /// its sync began. Twin of `pipeline.ran_since`.
+    nonisolated static func pipelineRan(_ result: PipelineTickResult, started: Date) -> Bool {
+        result.at.timeIntervalSince1970 >= started.timeIntervalSince1970.rounded(.down)
     }
 
     /// Logs only transitions: a hold lasts every sync until it lifts.
@@ -154,10 +202,12 @@ extension Store {
     /// whether or not the queue takes the ask. Not private: the self-test hands it
     /// composed results.
     ///
-    /// A result that lands after the master switch went off queues nothing. A notice is
-    /// logged when it first appears, and each merge and split the core made since the
-    /// previous result once (`Store.pipelineFreshEvents`), whatever the switches.
-    func applyPipeline(_ result: PipelineTickResult, now: Date = Date()) async {
+    /// A result that lands after the master switch went off queues nothing. One of a sync's
+    /// own (`ran`, `pipelineRan`) first retires the queued asks it no longer owes
+    /// (`pipelineWithdrawn`). A notice is logged when it first appears, and each merge and
+    /// split the core made since the previous result once (`Store.pipelineFreshEvents`),
+    /// whatever the switches.
+    func applyPipeline(_ result: PipelineTickResult, ran: Bool = true, now: Date = Date()) async {
         let previous = pipelineResult
         let seen = Set(previous?.notices ?? [])
         let fresh = result.notices.filter { !seen.contains($0) }
@@ -168,6 +218,7 @@ extension Store {
                          Store.pipelineEventLine(event, in: result))
         }
         pipelineResult = result
+        let withdrawn = ran ? withdrawPipelineAsks(result) : false
         var queued = false
         if pipelineEnabled {
             let banned = BanList.read()
@@ -178,7 +229,7 @@ extension Store {
                 case .fixIssue, .fixLinear: guard pipelineFix else { continue }
                 case .review: guard pipelineFastTrack else { continue }
                 }
-                guard let ask = pipelineAsk(effect, in: result) else { continue }
+                guard let ask = pipelineAsk(effect) else { continue }
                 let decision = ReviewReconcile.decide(
                     prior: prior[effect.key], stamp: effect.stamp,
                     inFlight: await pipelineInFlight(effect, ask: ask),
@@ -197,7 +248,43 @@ extension Store {
             savePipelineAttempts(Store.retainedPipelineAttempts(
                 loadPipelineAttempts().merging(dispatched) { _, new in new }, after: result, now: now))
         }
-        if !fresh.isEmpty || !done.isEmpty || queued { refreshAudit() }
+        if !fresh.isEmpty || !done.isEmpty || queued || withdrawn { refreshAudit() }
+    }
+
+    /// Drops each ask `pipelineWithdrawn` names, unless it is starting; whether any went.
+    private func withdrawPipelineAsks(_ result: PipelineTickResult) -> Bool {
+        let gone = Set(Store.pipelineWithdrawn(requestedWork, by: result))
+            .subtracting(startingTasks.map(\.id))
+        for entry in requestedWork where gone.contains(entry.key) {
+            forgetRequested(entry.key)
+            dropQueuedTask(entry.key)
+            AuditLog.log("panel", "queue-drop",
+                         "\(entry.label(roots: roots.count)) - the pipeline no longer owes it, not run")
+        }
+        return !gone.isEmpty
+    }
+
+    /// The keys of the pipeline's `asks` that `result`, a sync's own, no longer owes: a
+    /// review it emitted no effect for, a fix of an issue that is no longer a writable
+    /// candidate. An item it did not read is not judged. A candidate it emitted no fix for
+    /// (the fix switch off, a hold on what it could not read) keeps its fix. Twin of
+    /// `pipeline.withdrawn`.
+    nonisolated static func pipelineWithdrawn(_ asks: [RequestedWork],
+                                              by result: PipelineTickResult) -> [String] {
+        let items = Dictionary(result.items.map { (pipelineIdentity($0.id), $0) },
+                               uniquingKeysWith: { first, _ in first })
+        let owed = Set(result.effects.map { effect -> String in
+            if case .review = effect { return "review " + pipelineIdentity(effect.url) }
+            return "fix " + pipelineIdentity(effect.url)
+        })
+        return asks.filter { ask in
+            guard ask.config.isPipeline else { return false }
+            let review: Bool
+            if case .review = ask.config { review = true } else { review = false }
+            let id = pipelineIdentity(ask.url)
+            guard let item = items[id], !owed.contains((review ? "review " : "fix ") + id) else { return false }
+            return review || !(item.kind == .issue && item.stage == .candidate && item.writable)
+        }.map(\.key)
     }
 
     /// `pipeline-fix` for a fix, `pipeline-review` for a fast-track review.
@@ -208,11 +295,12 @@ extension Store {
 
     /// The `merged` and `fractured` events of `result` newer than anything `previous`
     /// showed: none older than its newest event, nor one it held (events are stamped to
-    /// the second, so two syncs can share one). Every one when there is no previous result.
+    /// the second, so two syncs can share one). With no previous result, those of
+    /// `result`'s own sync, which stamps them with its date. Twin of `pipeline.fresh_events`.
     nonisolated static func pipelineFreshEvents(_ result: PipelineTickResult,
                                                 after previous: PipelineTickResult?) -> [PipelineEvent] {
         let shown = previous?.events ?? []
-        let newest = shown.map(\.at).max()
+        let newest = previous == nil ? result.at : shown.map(\.at).max()
         return result.events.filter { event in
             [.merged, .fractured].contains(event.kind) && newest.map { event.at >= $0 } != false
                 && !shown.contains(event)
@@ -226,37 +314,34 @@ extension Store {
     }
 
     /// The ask an effect stands for, in the root its repo names; nil once that is no root.
-    func pipelineAsk(_ effect: PipelineEffect, in result: PipelineTickResult) -> RequestedWork? {
+    func pipelineAsk(_ effect: PipelineEffect) -> RequestedWork? {
         func root(_ slug: String) -> PRRef.LocalRepo? {
             PRRef.root(named: slug, in: roots).flatMap { $0.isGitLab ? nil : $0 }
         }
+        guard let root = root(Store.pipelineRepo(effect)) else { return nil }
+        let me = knownMe(for: root)
+        // The ban dimension, which the operator's own work has none of.
+        let mine = !me.isEmpty && effect.author.lowercased() == me.lowercased()
+        let author = mine ? "" : effect.author
         switch effect {
-        case .fixIssue(let repo, let number, let url):
-            guard let root = root(repo) else { return nil }
-            let me = knownMe(for: root)
+        case .fixIssue(_, let number, let url):
             var cfg = IssueConfig(target: .specific, me: me, specificIssue: String(number))
             cfg.home = root
             cfg.pipeline = true
-            // The ban dimension, which the operator's own issue has none of.
-            let author = result.items.first { $0.id == url }?.author ?? ""
-            let mine = !me.isEmpty && author.lowercased() == me.lowercased()
-            return RequestedWork(number: number, url: url, author: mine ? "" : author,
+            return RequestedWork(number: number, url: url, author: author,
                                  config: .issues(cfg), repo: root.key)
-        case .fixLinear(let repo, let identifier, let url, let text):
-            guard let root = root(repo) else { return nil }
-            var cfg = IssueConfig(target: .specific, me: knownMe(for: root))
+        case .fixLinear(_, let identifier, let url, let text):
+            var cfg = IssueConfig(target: .specific, me: me)
             cfg.home = root
             cfg.linear = LinearIssue(identifier: identifier, url: url, text: text)
             cfg.pipeline = true
-            return RequestedWork(number: 0, url: url, author: "", config: .issues(cfg), repo: root.key)
-        case .review(let repo, let number, let url, _):
-            guard let root = root(repo) else { return nil }
+            return RequestedWork(number: 0, url: url, author: author, config: .issues(cfg), repo: root.key)
+        case .review(_, let number, let url, _):
             var cfg = ReviewConfig(depth: Store.pipelineReviewDepth, target: .specific,
-                                   me: knownMe(for: root), specificPR: String(number),
-                                   specificAuthor: .mine)
+                                   me: me, specificPR: String(number), specificAuthor: .mine)
             cfg.home = root
             cfg.fastTrack = true
-            return RequestedWork(number: number, url: url, author: "", config: .review(cfg),
+            return RequestedWork(number: number, url: url, author: author, config: .review(cfg),
                                  repo: root.key)
         }
     }
@@ -285,15 +370,21 @@ extension Store {
         !row.record.released && AgentState.blocking.contains(row.state)
     }
 
+    /// How long a concluded record is kept once no sync owes its effect.
+    nonisolated static let pipelineConcludedKeep: TimeInterval = 30 * 86_400
+
     /// The records a sync keeps: each while the sync owes its effect, so its retry ladder
-    /// and its conclusion stand, and for the backoff ceiling after its last dispatch, so
-    /// an effect a failed read left out is not taken for a new one when it is back.
+    /// and its conclusion stand; for the backoff ceiling after its last dispatch, so an
+    /// effect a failed read left out is not taken for a new one when it is back; and a
+    /// concluded one for `pipelineConcludedKeep` after its run concluded, so a fix whose
+    /// PR was closed unmerged is not asked for again. Twin of `pipeline.retained`.
     nonisolated static func retainedPipelineAttempts(_ attempts: [String: ReviewAttempt],
                                                      after result: PipelineTickResult,
                                                      now: Date) -> [String: ReviewAttempt] {
         let owed = Set(result.effects.map(\.key))
         return attempts.filter { key, rec in
             owed.contains(key) || now.timeIntervalSince(rec.lastDispatchedAt) < ReviewReconcile.retryMaxBackoff
+                || rec.concludedAt.map { now.timeIntervalSince($0) < pipelineConcludedKeep } == true
         }
     }
 
@@ -388,32 +479,52 @@ extension Store {
         syncPipelineNow()
     }
 
-    /// The fix effect an issue Diplomat may act on would be asked for by: a GitHub issue's
-    /// from its link, a Linear one's only as the last sync emitted it, the text being
-    /// Diplomat's read. None for an issue assigned to someone else, which a fix would claim.
+    /// The fix effect an issue Diplomat may act on would be asked for by: the one the last
+    /// sync emitted for it; failing that, a GitHub issue's from its link, by the item's
+    /// author. A Linear issue's text is Diplomat's read, so its fix is only the emitted
+    /// one. None for an issue assigned to someone else, which a fix would claim. Twin of
+    /// `Store.pipeline_fix_effect`.
     func pipelineFixEffect(for item: PipelineItem) -> PipelineEffect? {
         guard item.kind == .issue, item.writable else { return nil }
-        if item.source == .linear {
-            return pipelineResult?.effects.first {
-                if case .fixLinear = $0 { return Store.pipelineIdentity($0.url) == Store.pipelineIdentity(item.id) }
-                return false
-            }
+        let emitted = pipelineResult?.effects.first {
+            if case .review = $0 { return false }
+            return Store.pipelineIdentity($0.url) == Store.pipelineIdentity(item.id)
         }
+        if emitted != nil || item.source == .linear { return emitted }
         guard let number = PRRef.itemKey(url: item.id).flatMap(PRRef.splitItemKey)?.number else { return nil }
-        return .fixIssue(repo: item.repo, number: number, url: item.id)
+        let effect = PipelineEffect.fixIssue(repo: item.repo, number: number, url: item.id)
+        PipelineEffectAuthorShim.byKey[effect.key] = item.author ?? ""  // SHIM: `author:` above
+        return effect
     }
 
-    /// Start fix: the issue's fix queued now, past its attempt record (one cooling down or
-    /// concluded included), which then records it; it waits for a bay like every ask.
-    /// Returns why it was not, or nil.
+    /// Why an issue has no `pipelineFixEffect`, said to the operator.
+    func pipelineFixUnknown(_ item: PipelineItem) -> String {
+        if !item.writable { return "It is assigned to someone else" }
+        if let hold = item.hold { return hold }
+        return "Diplomat has this Linear issue's text only while Open fix PRs is on"
+    }
+
+    /// Whether a sync can read `item`'s code: a Linear issue only when its team names a
+    /// GitHub root (`PipelineRead.linear`'s match). Twin of `Store.pipeline_rooted`.
+    func pipelineRooted(_ item: PipelineItem) -> Bool {
+        guard item.source == .linear else { return true }
+        let slugs = Set(roots.filter { !$0.isGitLab }.map { "\($0.owner)/\($0.repo)".lowercased() })
+        return Store.pipelineTeams(pipelineLinearTeamsRaw).contains {
+            $0.key.lowercased() == item.repo.lowercased() && slugs.contains($0.repo.lowercased())
+        }
+    }
+
+    /// Start fix: the issue's fix queued now, as the last sync left it, past its attempt
+    /// record (one cooling down or concluded included), which then records it; it waits
+    /// for a bay like every ask. Returns why it was not, or nil.
     @discardableResult
     func startPipelineFix(_ item: PipelineItem) -> String? {
         guard pipelineEnabled else { return "The pipeline is off" }
-        guard item.writable else { return "It is assigned to someone else" }
-        guard let effect = pipelineFixEffect(for: item), let result = pipelineResult else {
-            return "Diplomat has this Linear issue's text only while Open fix PRs is on"
-        }
-        guard let ask = pipelineAsk(effect, in: result) else {
+        guard let item = pipelineResult?.items.first(where: { $0.id == item.id }),
+              item.kind == .issue, item.stage == .candidate
+        else { return "The last sync found it no fix candidate" }
+        guard let effect = pipelineFixEffect(for: item) else { return pipelineFixUnknown(item) }
+        guard let ask = pipelineAsk(effect) else {
             return "\(Store.pipelineRepo(effect)) is no GitHub repo root here, so there is nowhere to fix it"
         }
         if pipelineFixRunning(effect.url) { return "An agent is already fixing it" }
