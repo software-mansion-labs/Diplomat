@@ -435,6 +435,60 @@ const answered = async (host, method, pattern, answer, ask) => {
   try { return await ask(); } finally { remove(); }
 };
 
+await check('the forge says whether a protection rule would cover a branch nothing holds yet: a ruleset, a classic pattern, a GitLab wildcard', async () => {
+  const lab = 'group/sub/proj';
+  const set = (repo, more) => Object.assign(forge.data.repos[repo], more);
+  const asks = async (target, repo, names) => Object.fromEntries(await Promise.all(names.map(async (name) => [name, await client.protects(target, repo, `refs/heads/${name}`)])));
+  try {
+    assert.deepEqual(await asks(GITHUB, 'o/r', ['release/9.9', 'x']), { 'release/9.9': false, x: false });
+    set('o/r', { rulesets: ['release/*'] });
+    assert.deepEqual(await asks(GITHUB, 'o/r', ['release/9.9', 'Release/9.9', 'x']), { 'release/9.9': true, 'Release/9.9': false, x: false });
+    set('o/r', { rulesets: [], protected: ['v[0-9]*', 'hot?ix', 'ci/{a,b}', 'lit\\*', 'ci-[ab]', 'r1.0'] });
+    // Read wider than GitHub matches: in any case, and "*" past a "/".
+    assert.deepEqual(await asks(GITHUB, 'o/r', ['v1', 'V1/deep', 'hotfix', 'ci/a', 'ci/zzz', 'lit*', 'litx', 'w1', 'ci']),
+      { v1: true, 'V1/deep': true, hotfix: true, 'ci/a': true, 'ci/zzz': true, 'lit*': true, litx: false, w1: false, ci: false });
+    assert.deepEqual(await asks(GITHUB, 'o/r', ['hotfixes', 'ci-a', 'ci-ab', 'r1.0', 'r1x0']), { hotfixes: false, 'ci-a': true, 'ci-ab': false, 'r1.0': true, 'r1x0': false });
+    // Every page of a repository's rules is read.
+    set('o/r', { protected: [...Array.from({ length: 250 }, (_, i) => `rule-${i}`), 'last/*'] });
+    assert.equal(await client.protects(GITHUB, 'o/r', 'refs/heads/last/one'), true);
+    set('o/r', { protected: Array.from({ length: 1001 }, (_, i) => `rule-${i}`) });
+    await failing(client.protects(GITHUB, 'o/r', 'refs/heads/x'), /did not say which protection rules cover refs\/heads\/x \(it has more than 10 pages of them\)/);
+    // The fork's own rules decide a branch in the fork.
+    set('o/r', { protected: [] });
+    set('me/r', { protected: ['release/*'] });
+    assert.deepEqual([await client.protects(GITHUB, 'o/r', 'refs/heads/release/1'), await client.protects(GITHUB, 'me/r', 'refs/heads/release/1')], [false, true]);
+
+    set(lab, { protected: ['*-stable', 'release/*'] });
+    assert.deepEqual(await asks(GITLAB, lab, ['9-stable', 'a/b-stable', 'release/1/2', 'Release/1', 'stable']), { '9-stable': true, 'a/b-stable': true, 'release/1/2': true, 'Release/1': true, stable: false });
+    set(lab, { protected: [...Array.from({ length: 100 }, (_, i) => `rule-${i}`), 'main-*'] });
+    assert.equal(await client.protects(GITLAB, lab, 'refs/heads/main-x'), true);
+    set(lab, { protected: Array.from({ length: 1000 }, (_, i) => `rule-${i}`) });
+    await failing(client.protects(GITLAB, lab, 'refs/heads/x'), /more than 10 pages/);
+    set(lab, { protected: [] });
+
+    // An answer that does not say is no "no".
+    for (const [host, method, pattern, status, text, target, repo] of [
+      ['api.github.com', 'GET', /\/rules\/branches\//, 404, '{"message":"Not Found"}', GITHUB, 'o/r'],
+      ['api.github.com', 'GET', /\/rules\/branches\//, 200, '{"rules":[]}', GITHUB, 'o/r'],
+      ['api.github.com', 'GET', /\/rules\/branches\//, 500, '[]', GITHUB, 'o/r'],
+      ['api.github.com', 'POST', /^\/graphql$/, 200, '{"data":{"repository":{"branchProtectionRules":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"errors":[{"message":"partly"}]}', GITHUB, 'o/r'],
+      ['api.github.com', 'POST', /^\/graphql$/, 200, '{"data":{"repository":{"branchProtectionRules":null}},"errors":[{"message":"Must have admin rights"}]}', GITHUB, 'o/r'],
+      ['api.github.com', 'POST', /^\/graphql$/, 200, '{"data":{"repository":null}}', GITHUB, 'o/r'],
+      ['api.github.com', 'POST', /^\/graphql$/, 200, '{"data":{"repository":{"branchProtectionRules":{"nodes":[{"pattern":null}],"pageInfo":{"hasNextPage":false}}}}}', GITHUB, 'o/r'],
+      ['api.github.com', 'POST', /^\/graphql$/, 200, 'not json', GITHUB, 'o/r'],
+      [GITLAB_HOST, 'GET', /\/protected_branches/, 403, '{"message":"403 Forbidden"}', GITLAB, lab],
+      [GITLAB_HOST, 'GET', /\/protected_branches/, 200, '[{"id":1}]', GITLAB, lab],
+      [GITLAB_HOST, 'GET', /\/protected_branches/, 500, '[]', GITLAB, lab],
+    ]) {
+      const remove = forge.route(host, method, pattern, (req, res) => res.writeHead(status, { 'content-type': 'application/json' }).end(text));
+      try { await failing(client.protects(target, repo, 'refs/heads/x'), /forge: the forge did not say which protection rules cover refs\/heads\/x/); } finally { remove(); }
+    }
+    await failing(client.protects(GITHUB, 'o/r', 'refs/tags/v1'), /refs\/tags\/v1 is not a branch/);
+  } finally {
+    for (const repo of ['o/r', 'me/r', lab]) { delete forge.data.repos[repo].protected; delete forge.data.repos[repo].rulesets; }
+  }
+});
+
 await check('a lookup the forge did not settle throws: only the forge\'s own "no such thing" reads as absent', async () => {
   const feature = { name: 'feature', commit: { sha: B }, protected: false };
   const branchOf = /^\/repos\/o\/r\/branches\/feature$/;
@@ -718,6 +772,17 @@ await check('a real git push: the one new branch of an issue task, then a draft 
   const feature = remote('refs/heads/feature');
   assert.equal((await gitPush(`${tunnel.url}/o/r.git`, `${more}:refs/heads/feature`, '--force')).ok, false);
   assert.equal(remote('refs/heads/feature'), feature);
+  // A name a protection rule would cover is not made, however much of the allowance is left.
+  const guarded = await relay(ruleList, ctxFor({}));
+  forge.data.repos['o/r'].rulesets = ['release/*'];
+  try {
+    assert.equal((await gitPush(`${guarded.url}/o/r.git`, `${more}:refs/heads/release/9.9`)).ok, false);
+    assert.match(guarded.refusals.at(-1), /refs\/heads\/release\/9\.9: a protection rule of the forge covers that name/);
+    assert.equal(remote('refs/heads/release/9.9'), null);
+  } finally {
+    delete forge.data.repos['o/r'].rulesets;
+    await guarded.close();
+  }
 
   const before = forge.data.mutations.length;
   assert.equal((await perform(ruleList, ghql(GH.prCreate), ctx)).status, 200);

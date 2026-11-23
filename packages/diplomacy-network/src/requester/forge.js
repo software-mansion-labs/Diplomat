@@ -39,6 +39,29 @@ const NODE_QUERY = `query($id: ID!) { node(id: $id) { __typename
   ... on IssueComment { author { login } issue { number state author { login } repository { nameWithOwner } } }
 } }`;
 
+const PROTECTION_QUERY = `query($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) {
+  branchProtectionRules(first: 100, after: $after) { nodes { pattern } pageInfo { hasNextPage endCursor } } } }`;
+// How many pages of protection rules are read before the answer counts as not given.
+const PROTECTION_PAGES = 10;
+
+// Whether a protection rule's name or pattern could cover a branch name. It reads wider
+// than either forge: case is not told apart, `*` and `{...}` match any run of characters,
+// "/" among them (GitLab's `*` spans it, GitHub's does not), and `?` and `[...]` any one.
+function mayCover(pattern, name) {
+  const literal = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+  let re = '';
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i];
+    const close = { '[': pattern.indexOf(']', i + 2), '{': pattern.indexOf('}', i + 1) }[c] ?? -1;
+    if (c === '*') re += '.*';
+    else if (c === '?') re += '.';
+    else if (close !== -1) { re += c === '[' ? '.' : '.*'; i = close; }
+    else if (c === '\\' && i + 1 < pattern.length) re += literal(pattern[++i]);
+    else re += literal(c);
+  }
+  return new RegExp(`^${re}$`, 'is').test(name);
+}
+
 function run(bin, args, env) {
   return new Promise((resolve) => {
     execFile(bin, args, { env, timeout: GIT_TIMEOUT_MS, maxBuffer: 2 ** 20, encoding: 'utf8' }, (err, stdout) => {
@@ -81,7 +104,7 @@ function glabConfigToken(host) {
 
 /// The requester's side of the forge. `log` receives one line per request made, never a
 /// credential. Returns `{ perform, context, resolveNode, pull, pullsByHead, comment, ciRun,
-/// assignees, self, repository, branch, projectId, fetchInto }`; every function but `perform` and
+/// assignees, self, repository, branch, protects, projectId, fetchInto }`; every function but `perform` and
 /// `context` takes `{ forge, host }` first - "github" or "gitlab", and the host the
 /// credential is for. A lookup throws when the forge's answer does not settle its question.
 export function createForge({ log = () => {} } = {}) {
@@ -401,6 +424,43 @@ export function createForge({ log = () => {} } = {}) {
     return { sha, protected: res.json.protected };
   }
 
+  /// Whether a protection rule of `repo` would cover a branch `ref` that nothing holds yet:
+  /// on GitHub an active ruleset's rule or a classic rule's pattern, on GitLab a protected
+  /// branch's name or wildcard. Only what the account may read of them is known.
+  async function protects(target, repo, ref) {
+    if (!ref.startsWith('refs/heads/')) throw new Error(`forge: ${ref} is not a branch`);
+    const name = ref.slice('refs/heads/'.length);
+    const said = `which protection rules cover ${ref}`;
+    const patterns = [];
+    if (target.forge === 'github') {
+      // GitHub answers this for a name no branch has yet.
+      const rules = await api(target, 'GET', `/repos/${repo}/rules/branches/${name.split('/').map(encodeURIComponent).join('/')}`);
+      if (rules.status !== 200 || !Array.isArray(rules.json)) unknown(said, rules);
+      if (rules.json.length > 0) return true;
+      const [owner, short] = repo.split('/');
+      let after = null;
+      for (let page = 0; ; page++) {
+        if (page === PROTECTION_PAGES) throw new Error(`forge: the forge did not say ${said} (it has more than ${PROTECTION_PAGES} pages of them)`);
+        const res = await api(target, 'POST', '/graphql', { query: PROTECTION_QUERY, variables: { owner, name: short, after } });
+        const found = res.json?.data?.repository?.branchProtectionRules;
+        if (res.status !== 200 || res.json?.errors !== undefined || !Array.isArray(found?.nodes) || typeof found.pageInfo?.hasNextPage !== 'boolean') unknown(said, res);
+        patterns.push(...found.nodes.map((n) => n?.pattern));
+        if (!found.pageInfo.hasNextPage) break;
+        after = found.pageInfo.endCursor;
+      }
+    } else {
+      for (let page = 1; ; page++) {
+        if (page > PROTECTION_PAGES) throw new Error(`forge: the forge did not say ${said} (it has more than ${PROTECTION_PAGES} pages of them)`);
+        const res = await api(target, 'GET', `${project(repo)}/protected_branches?per_page=100&page=${page}`);
+        if (res.status !== 200 || !Array.isArray(res.json)) unknown(said, res);
+        patterns.push(...res.json.map((b) => b?.name));
+        if (res.json.length < 100) break;
+      }
+    }
+    if (!patterns.every((p) => typeof p === 'string')) throw new Error(`forge: the forge did not say ${said} (a rule without a name)`);
+    return patterns.some((p) => mayCover(p, name));
+  }
+
   /// A GitLab project's numeric id, which `rulesFor` needs to allow the numeric spelling
   /// of its paths; null on GitHub or when the project is not shown.
   async function projectId(target, repo) {
@@ -453,9 +513,10 @@ export function createForge({ log = () => {} } = {}) {
       self: () => self(target),
       repository: (of = repo) => repository(target, of),
       branch: (ref, of = repo) => branch(target, of, ref),
+      protects: (ref, of = repo) => protects(target, of, ref),
       fetch: (what) => fetchInto(target, { ...what, repo: what.repo ?? repo }),
     };
   }
 
-  return { perform, context, resolveNode, pull, pullsByHead, comment, ciRun, assignees, self, repository, branch, projectId, fetchInto };
+  return { perform, context, resolveNode, pull, pullsByHead, comment, ciRun, assignees, self, repository, branch, protects, projectId, fetchInto };
 }

@@ -118,7 +118,9 @@ export async function startFakeForge() {
     // GraphQL node ids -> the object `node(id:)` returns.
     nodes: { U_me: viewer },
     // "owner/name" -> { id, pulls: { number: {...} }, issues: { number: {...} } }, and what
-    // a test sets of a repository's settings: defaultBranch, protected (branch names),
+    // a test sets of a repository's settings: defaultBranch, protected (the names and
+    // patterns of its branch protection rules, or GitLab's protected branches), rulesets
+    // (GitHub: the patterns of branches an active ruleset applies to),
     // ciConfigPath (GitLab), parent (the repository it is a fork of; null for none),
     // spelled (its name in the forge's own letter case) and runs, its CI runs by id:
     // { branch, jobs: [ids], repo (GitHub: the repository the branch is in, when another),
@@ -132,6 +134,7 @@ export async function startFakeForge() {
   function repository({ owner, name }) {
     const repo = data.repos[`${owner}/${name}`.toLowerCase()];
     if (!repo) return null;
+    const rules = (repo.protected || []).map((pattern) => ({ pattern }));
     const pulls = Object.values(repo.pulls || {}).map((p) => data.nodes[p.id]);
     const issues = Object.values(repo.issues || {}).map((i) => data.nodes[i.id]);
     return {
@@ -142,6 +145,11 @@ export async function startFakeForge() {
       issueOrPullRequest: ({ number }) => [...issues, ...pulls].find((x) => x.number === number) || null,
       pullRequests: ({ headRefName }) => ({ nodes: pulls.filter((p) => !headRefName || p.headRefName === headRefName), totalCount: pulls.length, pageInfo: { hasNextPage: false, endCursor: null } }),
       issues: () => ({ nodes: issues, totalCount: issues.length, pageInfo: { hasNextPage: false, endCursor: null } }),
+      // Pages of `first`, the cursor being the index the next one starts at.
+      branchProtectionRules: ({ first, after }) => {
+        const from = Number(after ?? 0);
+        return { nodes: rules.slice(from, from + first), pageInfo: { hasNextPage: from + first < rules.length, endCursor: String(from + first) } };
+      },
     };
   }
 
@@ -166,6 +174,10 @@ export async function startFakeForge() {
     return { status: 200, json: { data: project(doc, vars, op.selections, rootData) } };
   }
 
+  // Whether a protection pattern covers a branch, as each forge matches one: GitHub's `*`
+  // stops at "/" and its `**` does not, GitLab's `*` spans it.
+  const covers = (pattern, branch, spans) => new RegExp(`^${pattern.split(/(\*\*|\*)/).map((part) => (part === '**' ? '.*' : part === '*' ? (spans ? '.*' : '[^/]*') : part.replace(/[.+?^${}()|[\]\\/]/g, '\\$&'))).join('')}$`).test(branch);
+  const guards = (repo, branch, spans) => [...(repo.protected || []), ...(spans ? [] : repo.rulesets || [])].some((p) => covers(p, branch, spans));
   // A repository a test did not name a parent for is a fork of one the task must never see.
   const parentOf = (repo) => (repo.parent === undefined ? 'upstream/private-parent' : repo.parent);
   const restPull = (repoName, p) => {
@@ -207,11 +219,16 @@ export async function startFakeForge() {
       const branch = decodeURIComponent(x[1]);
       const sha = revParse(m[1], `refs/heads/${branch}`);
       if (!sha) return { status: 404, json: { message: 'Branch not found' } };
-      const guarded = (repo.protected || []).includes(branch);
+      const guarded = guards(repo, branch, false);
       return { status: 200, json: {
         name: branch, commit: { sha }, protected: guarded, protection_url: `https://api.github.com/repos/${m[1]}/branches/${branch}/protection`,
         protection: { enabled: guarded, required_status_checks: { enforcement_level: guarded ? 'everyone' : 'off', contexts: [] } },
       } };
+    }
+    // The active rules of a ruleset that applies to a branch of that name, whether one exists or not.
+    if (method === 'GET' && (x = /^\/rules\/branches\/(.+)$/.exec(rest))) {
+      const branch = x[1].split('/').map(decodeURIComponent).join('/');
+      return { status: 200, json: (repo.rulesets || []).some((p) => covers(p, branch, false)) ? [{ type: 'pull_request', ruleset_source_type: 'Repository', ruleset_id: 1 }] : [] };
     }
     if (method === 'GET' && (x = /^\/git\/ref\/heads\/(.+)$/.exec(rest))) {
       const sha = revParse(m[1], `refs/heads/${x[1]}`);
@@ -281,12 +298,17 @@ export async function startFakeForge() {
     }
     // A branch as GitLab answers it: who may push and merge, the caller included, beside the branch itself.
     const branchOf = (branch, sha) => {
-      const guarded = (repo.protected || []).includes(branch);
+      const guarded = guards(repo, branch, true);
       return {
         name: branch, commit: { id: sha }, merged: false, protected: guarded, default: branch === (repo.defaultBranch || 'main'),
         developers_can_push: !guarded, developers_can_merge: !guarded, can_push: true, web_url: `https://${GITLAB_HOST}/${repoName}/-/tree/${branch}`,
       };
     };
+    if (method === 'GET' && rest === '/protected_branches') {
+      const [page, per] = [Number(searchParams.get('page') || 1), Number(searchParams.get('per_page') || 20)];
+      const all = (repo.protected || []).map((name, i) => ({ id: i + 1, name, push_access_levels: [{ access_level: 40, access_level_description: 'Maintainers' }], allow_force_push: false }));
+      return { status: 200, json: all.slice((page - 1) * per, page * per) };
+    }
     if (method === 'GET' && rest === '/repository/branches') {
       const heads = git(path.join(gitRoot, `${repoName.toLowerCase()}.git`), 'for-each-ref', '--format=%(refname:lstrip=2) %(objectname)', 'refs/heads');
       return { status: 200, json: heads.split('\n').filter(Boolean).map((line) => branchOf(...line.split(' '))) };

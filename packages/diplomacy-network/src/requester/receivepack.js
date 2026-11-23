@@ -463,16 +463,17 @@ export const branchLabel = (ref, fork) => (fork === undefined ? ref : `${lower(f
 /// create, each as `{ branch, sha }` with its `branchLabel` and the commit it would be at,
 /// for the caller to count against `create` - or `{ ok: false, reason }`. The push goes
 /// to the pool's repository, or under a rule with `fork` (an account) to that account's
-/// own fork of it. A ref may be created when
-/// `create` is positive and `refs` covers it, and updated when it is the head branch
-/// `head` names or one of `ctx.state.branches`, the branches the forge accepted from
-/// this task. The default branch and a branch the forge reports as protected are never
+/// own fork of it. A ref may be created when `create` is positive and `refs` covers it,
+/// and updated when it is the head branch `head` names or one of `ctx.state.branches`,
+/// the branches the forge accepted from this task. The default branch, a branch the
+/// forge reports as protected and a new name a protection rule would cover are never
 /// moved or created. `ctx.checkout` is the linked checkout whose objects the proof may
 /// read, `ctx.fetch({ env, repo, wants | into })` fetches from the forge into the
 /// quarantine, `ctx.repository(repo)` answers `{ id, name, owner, parent, defaultBranch,
-/// ciPaths }` (null for none) and `ctx.branch(ref, repo)` the forge's `{ sha, protected }`
-/// of a branch, null for none; `repo` left out is the pool's repository. A lookup that
-/// throws has not answered, and its error is the caller's to turn into a refusal.
+/// ciPaths }` (null for none), `ctx.branch(ref, repo)` the forge's `{ sha, protected }`
+/// of a branch (null for none) and `ctx.protects(ref, repo)` whether a protection rule
+/// would cover a branch of that name; `repo` left out is the pool's repository. A lookup
+/// that throws has not answered, and its error is the caller's to turn into a refusal.
 export function checkPush(rule, segments, body, ctx = {}) {
   return verdict(async () => {
     if (body.length > PUSH_MAX_BYTES) refuse('the push is larger than a task may send');
@@ -496,7 +497,7 @@ export function checkPush(rule, segments, body, ctx = {}) {
       }
     }
     if (push.pack.length === 0) refuse('the push carries no pack');
-    if (typeof ctx.repository !== 'function' || typeof ctx.branch !== 'function') refuse('nothing here can ask the forge about its branches');
+    if (typeof ctx.repository !== 'function' || typeof ctx.branch !== 'function' || typeof ctx.protects !== 'function') refuse('nothing here can ask the forge about its branches');
     const pool = async () => (await ctx.repository()) ?? refuse('the forge shows no repository where the pool\'s should be');
     const there = fork ?? await pool();
     for (const cmd of push.commands) {
@@ -505,6 +506,9 @@ export function checkPush(rule, segments, body, ctx = {}) {
       if (lower(cmd.ref) === lower(`refs/heads/${there.defaultBranch}`)) refuse(`${cmd.ref}: the default branch is never pushed by a task`);
       const now = await ctx.branch(cmd.ref, fork?.name);
       if (now?.protected) refuse(`${cmd.ref}: a protected branch is never pushed by a task`);
+      // A name nothing holds yet is protected by the rules that would cover it: code pushed
+      // there would run in CI with what the forge keeps for protected branches.
+      if (!now && await ctx.protects(cmd.ref, fork?.name)) refuse(`${cmd.ref}: a protection rule of the forge covers that name, and a task never creates such a branch`);
       // A creation is of a name the forge says is free: creating a branch that exists
       // would be a way to claim it.
       if ((now?.sha ?? '') !== (ZERO.test(cmd.old) ? '' : cmd.old)) refuse(`${cmd.ref}: the forge's branch is not where this push starts from`);
