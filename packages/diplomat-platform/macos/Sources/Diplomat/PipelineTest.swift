@@ -151,7 +151,7 @@ enum PipelineTest {
         if case .review(let cfg)? = ask(reviewKey)?.config {
             check("a fast-track review: my PR, that PR, the fast-track block, the deepest read",
                   cfg.target == .specific && cfg.specificPR == "90011" && cfg.specificAuthor == .mine
-                      && cfg.fastTrack == true && cfg.depth == Store.pipelineReviewDepth)
+                      && cfg.fastTrack == true && cfg.depth == "max")
         } else {
             check("a fast-track review is a Review ask", false)
         }
@@ -174,6 +174,9 @@ enum PipelineTest {
         await store.applyPipeline(all, now: t0.addingTimeInterval(30))
         check("still queued: nothing queued twice", ids().sorted() == [fixKey, linearKey, reviewKey].sorted()
               && store.requestedWork.count == 3)
+        await store.applyPipeline(all, now: t0.addingTimeInterval(ReviewReconcile.retryMaxBackoff))
+        check("…nor asked again past its backoff while it waits in the queue",
+              ids().sorted() == [fixKey, linearKey, reviewKey].sorted() && store.loadPipelineAttempts() == records)
         // As the drain leaves it: the asks dispatched, their agents gone without a word.
         clearQueue()
         await store.applyPipeline(all, now: t0.addingTimeInterval(60))
@@ -233,6 +236,11 @@ enum PipelineTest {
                   && concluded[fixLinear.key]?.concludedAt == nil)
         check("…a Linear fix run its Linear issue's",
               Store.pipelineConcluded(records, runs: [linearRun], at: t1)
+                  .filter { $0.value.concludedAt != nil }.keys.sorted() == [fixLinear.key])
+        var renamedRun = linearRun
+        renamedRun.prURL = "https://linear.app/swm/issue/ENG-90010/a-new-title"
+        check("…under whatever title its link follows",
+              Store.pipelineConcluded(records, runs: [renamedRun], at: t1)
                   .filter { $0.value.concludedAt != nil }.keys.sorted() == [fixLinear.key])
         let reviewRun = AgentState.RunRecord(runID: "r-rev", dispatchedAt: t1.timeIntervalSince1970 + 60,
                                              prNumber: 90011, prURL: pr, kind: AgentTaskQueue.reviewAction)
