@@ -50,6 +50,7 @@ src/
     forge.js       performs an allowed request with this machine's credentials
   executor/
     broker.js      the proxy every container talks through
+    feed.js        what the broker's http parser is handed of a connection: a request at a time
     ca.js          the broker's certificate authority and leaf certificates
     llm.js         the model credential the broker adds
     mirror.js      the bare mirror a container clones from
@@ -616,8 +617,11 @@ four things and starts the job:
   gone only when all of it is; what is left is measured and tried again.
 - **The relay.** On each container's network sits `dn-<pool part>-<peer part>-relay`:
   the same image running `image/relay.mjs`, which carries TCP from that network to the
-  broker's port on this machine and to nothing else, 1024 connections at a time. It is
-  the container's only way out. It is not a job container and not a second container
+  broker's port on this machine and to nothing else, 1024 connections at a time. Of new
+  connections it carries 256 at once and 64 a second from then on, the rest waiting
+  their turn in the order they came: each one it carries takes a port of this machine,
+  and it is the one place that knows a connection for its container's before anything
+  of it is read. It is the container's only way out. It is not a job container and not a second container
   for the peer: no job runs in it and nothing of a job is in it; it has no capability,
   no writable file system and no credential, shares no namespace and no volume with the
   job container, and it is made and removed with the container it serves.
@@ -650,14 +654,23 @@ four things and starts the job:
     forge. A mirror that cannot be made fails the start with git's reason;
   - the model provider's API is forwarded with this machine's own credential added,
     until the job has had its share: past `DN_JOB_MODEL_REQUESTS` requests or
-    `DN_JOB_MODEL_BYTES` bytes it is answered 429. Of the provider's answer the job
+    `DN_JOB_MODEL_BYTES` bytes it is answered 429. The share is counted in every
+    request sent with the credential and every byte carried for one, either way and
+    whatever the provider said to it. The provider is whoever holds a certificate for
+    its name that the daemon's trust roots vouch for; anybody else at its address
+    is sent nothing. Of the provider's answer the job
     gets the body and the headers a client needs (`content-type`, `content-encoding`,
     `content-length`, `cache-control`, `request-id`, `retry-after`, `x-should-retry`);
     the ones that tell of the account behind the credential stay here;
   - everything else is tunnelled untouched, to the public internet only, so installing
     software works as usual. An address inside a network any interface of this machine
     is on, IPv4 or IPv6, is refused, and so is every range that is not publicly routed;
-    the interfaces are read at each connection. What this machine reaches by a route
+    the interfaces are read at each connection. A name is resolved once for each
+    connection, which goes to the address that passed, and by DNS alone: this
+    machine's hosts file, mDNS and search domains are not asked. A name of one label,
+    and one under `localhost`, `local`, `internal`, `intranet`, `private`, `corp`,
+    `home`, `lan` or `home.arpa`, is refused without being asked of anybody: no public
+    name server answers for those. What this machine reaches by a route
     alone the broker does not know of: a publicly addressed range behind a VPN, or on
     another subnet of the operator's site, is tunnelled to like the rest of the
     internet. The hosts github.com hands downloads
@@ -676,14 +689,30 @@ four things and starts the job:
   apart from every other job's: a plain http request goes down a connection of its own,
   closed with it, and the model provider's are kept for the same job's next request.
 
+  A connection is the job's whose token its first request carries, and the broker reads
+  that first request's head before anything else does. One that names no job running
+  here is answered 407 once and read no further, whatever follows it; one that is no
+  HTTP request, or whose head is over 16 KiB, is closed unanswered. A tunnel is asked
+  for by the first request of its connection. A later request on a job's connection
+  that does not carry that job's token is answered 407 and is the connection's last.
+  The broker keeps 1024 connections that are no job's - those that have not yet said
+  whose they are, and those just refused - and closes the one that has waited longest
+  for the next. The requests of the jobs' connections are read one at a time: a
+  connection is read one request head in a turn of the daemon's loop, and all of them
+  together for 4 ms of a turn, so what a container sends, with a token or without, in
+  whatever number of requests and connections, takes a bounded part of the daemon's
+  time and memory.
+
   One job holds so much of the broker and no more:
   - `DN_JOB_CONNECTIONS` (256) connections from its container;
   - 256 requests at a time, those being answered and those waiting their turn
     together, on however few connections it sends them. A job at that share is read
     no further until one of them ends, by its answer or by its time running out: what
     it sends meanwhile stays in its container, and a connection it closes meanwhile is
-    not seen to close. A request that had arrived by then closes the connection it
-    came on. What a tunnel carries is no request, and is read on;
+    not seen to close. What a tunnel carries is no request, and is read on;
+  - 8 names being resolved at a time, each given 5 s to resolve. The rest wait in the
+    order they came, as many of them as the job may have connections, and wait for
+    nothing of another job's;
   - 32 requests at a time that the broker carries upstream itself, plain http ones
     and the model's together, whatever number of hosts they name, each down one
     connection out. A connection to the model provider that is kept for the job's
@@ -740,7 +769,10 @@ The tokens and the cost are the job's own word, and this machine's budget is cou
 from them. They stand no higher than what the broker carried to the model for the job:
 one token for each byte of its model requests and their answers, and USD 80 for a
 million of those bytes - the dearest a token is sold at, the output of the top model in
-its fast mode as priced in November 2026. A job that sent the model nothing reports no
+its fast mode as priced in November 2026. The requests that count are the inference
+requests the provider answered with a success, under this machine's credential: one it
+refused, one that never reached it and a count of tokens bought nothing, and raise no
+figure. A job that sent the model nothing reports no
 tokens and no cost. An outcome of which a figure was lowered carries `capped: true`.
 
 A machine takes work only while its docker engine answers, the image is there and a
