@@ -125,6 +125,34 @@ def test_a_utc_time_in_a_sentence_of_the_daemons_reads_by_this_machines_clock(
     assert N.local_times(sentence) == (sentence if said is None else said)
 
 
+@pytest.mark.parametrize("name, sentence, said", [
+    ("Asia/Kolkata", "until 9999-12-31T23:59:59Z", "until 05:29"),
+    ("Pacific/Kiritimati", "until 9999-12-31T23:59:59.999Z", "until 13:59"),
+    ("America/New_York", "until 0001-01-01T00:00:00Z", "until 19:03"),
+    ("UTC", "until 9999-12-31T23:59:59Z", "until 23:59"),
+    ("Asia/Kolkata", "until 0000-01-01T00:00:00Z", None),
+])
+def test_a_time_at_the_edge_of_the_calendar_costs_no_snapshot(
+        clock_in, name, sentence, said):
+    """The local day of such a time is in no year a date can have."""
+    clock_in(name)
+    assert N.local_times(sentence) == (said or sentence)
+    snap = N.Snapshot.parse(json.dumps(
+        {"pools": [{"id": "p", "notTaking": sentence}],
+         "offers": [{"taskId": "t", "state": "pooled", "notTaking": sentence}]}))
+    assert snap is not None and snap.pools[0].not_taking == (said or sentence)
+    assert snap.offers[0].not_taking == (said or sentence)
+
+
+@pytest.mark.parametrize("error", [OverflowError, OSError])
+def test_a_time_this_machines_clock_cannot_read_is_left_as_written(monkeypatch, error):
+    def refuses(_seconds):
+        raise error("out of range")
+
+    monkeypatch.setattr(N.time, "localtime", refuses)
+    assert N.local_times("until 2026-11-17T10:30:56Z") == "until 2026-11-17T10:30:56Z"
+
+
 def test_what_holds_this_machine_back_names_its_times_by_this_machines_clock(kolkata):
     until = LEFT + "2026-11-17T10:30:56.000Z"
     snap = N.Snapshot.from_json({
@@ -729,6 +757,13 @@ def services(**states) -> N.Snapshot:
 def test_the_panel_line_says_what_of_the_network_does_not_work(answered, snapshot, want):
     assert N.trouble(answered, snapshot) == want
     assert N.TROUBLE_STATES == {"failed", "missing", "down"}
+    # Settings that cannot be read outrank whatever the daemon says.
+    unknown = N.settings_unknown("/home/u/.diplomat/config.json")
+    assert unknown == "/home/u/.diplomat/config.json cannot be read as settings"
+    assert N.trouble(answered, snapshot, unknown) == f"Diplomacy Network: {unknown}"
+    assert N.unknown_note(unknown) == (
+        "/home/u/.diplomat/config.json cannot be read as settings: until it can be, this "
+        "machine's pools stay as the daemon has them and nothing is offered")
 
 
 # MARK: - network: the evidence

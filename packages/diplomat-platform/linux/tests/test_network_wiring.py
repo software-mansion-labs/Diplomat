@@ -26,6 +26,7 @@ from diplomat_runtime import (
     agentregistry,
     agentstate,
     appconfig,
+    atomicjson,
     autofix,
     localrepos,
     network,
@@ -1739,6 +1740,216 @@ def test_a_config_that_cannot_be_read_leaves_the_switch_as_it_was(store, on, dae
     assert not dn.enabled()
 
 
+def break_config() -> str:
+    """Leave the config one brace short, and answer what it held."""
+    whole = appconfig.path().read_text(encoding="utf-8")
+    appconfig.path().write_text(whole.rstrip()[:-1], encoding="utf-8")
+    return whole
+
+
+def unknown() -> str:
+    return f"{appconfig.path()} cannot be read as settings"
+
+
+@pytest.fixture
+def relaunched(on, monkeypatch):
+    """A Diplomat that read the switch as on and quit, and the config it left broken
+    for the next one to start on: named before ``store``, the store is that next one.
+    Gives what the config held."""
+    assert dn.enabled()
+    whole = break_config()
+    monkeypatch.setattr(dn, "_switch_read", None)
+    return whole
+
+
+def test_a_diplomat_that_starts_on_a_config_it_cannot_read_keeps_the_switch_last_read(
+        relaunched, store, daemon, monkeypatch):
+    """A new process has read nothing itself: a login, a crash or a self-update on a
+    broken file would start agents in terminals and take every offer back."""
+    d = daemon(takes_offers("t2"), state=snapshot(offers=[daemon_row("t1")]))
+    calls = _spawn_recorder(monkeypatch)
+    run = book_network_run()
+    broken = appconfig.path().read_text(encoding="utf-8")
+    assert json.loads(dn.switch_record().read_text(encoding="utf-8")) == {
+        "config": str(appconfig.path()), "networkEnabled": True}
+    assert dn.enabled() and store.network_enabled
+    drawn = []
+    store.network_changed.connect(lambda: drawn.append(dn.settings_unknown()))
+
+    for number, source, forced in ((77, autofix.SOURCE_AUTO, False),
+                                   (78, autofix.SOURCE_AUTO, True),
+                                   (79, autofix.SOURCE_PANEL, False)):
+        refused = store.dispatch_agent(job(number), source, forced=forced)
+        assert refused == dn.VERDICT_REFUSED and refused.sentence == unknown()
+    with pytest.raises(review.SpawnError, match="the Diplomacy Network is on"):
+        store._spawn_tracked("P", None, 77, autofix.SOURCE_AUTO)
+    store._settle_agents()
+    store._network_cycle_once(1000.0)
+    store._settle_agents()
+    assert calls == [], "no agent in a terminal"
+    assert [path for method, path, _ in d.got if method == "POST"] == [], (
+        "nothing withdrawn, and nothing said that a setting decides")
+    assert [r.run_id for r in agentregistry.load()] == [run.run_id]
+    store.queued_tasks = [autofix.QueuedTask("review-req:o/r#6", job(6), 1)]
+    assert store.drainable_tasks and not store._drain_has_room(0)
+    assert len(unreadable_notes()) == 1
+    assert dn.settings_unknown() == unknown()
+    assert store.network_trouble == f"Diplomacy Network: {unknown()}"
+    assert drawn[-1] == unknown(), "the panel and the Network screen are redrawn"
+
+    with pytest.raises(OSError):
+        store.set_network_enabled(False)
+    assert dn.enabled() and appconfig.path().read_text(encoding="utf-8") == broken, (
+        "a toggle writes nothing over the file, and moves nothing")
+
+    appconfig.path().write_text(relaunched, encoding="utf-8")
+    store._settle_agents()
+    assert drawn[-1] == "" and store.network_trouble == ""
+    assert dn.settings_unknown() == "" and store._drain_has_room(0)
+    assert isinstance(store.dispatch_agent(job(77), autofix.SOURCE_AUTO), dn.Offered)
+    assert len(d.sent("offer")) == 1 and calls == []
+
+
+@pytest.fixture
+def never_on(monkeypatch):
+    """A config that cannot be read on a machine no Diplomat ever read the switch as on
+    on, for the store named after it to start on."""
+    appconfig.path().write_text('{"networkEnabled": true', encoding="utf-8")
+    monkeypatch.setattr(dn, "_switch_read", None)
+
+
+def test_with_no_switch_on_record_a_broken_config_holds_no_automatic_work(
+        never_on, store, daemon, monkeypatch):
+    d = daemon(takes_offers())
+    calls = _spawn_recorder(monkeypatch)
+    assert not dn.enabled() and not store.network_enabled
+    assert store.dispatch_agent(job(77), autofix.SOURCE_AUTO) == "spawned"
+    store._network_cycle_once(1000.0)
+    store._settle_agents()
+    assert len(calls) == 1 and d.got == [], "a terminal, as with no network at all"
+    assert dn.settings_unknown() == "" and store.network_trouble == ""
+    assert not dn.switch_record().exists()
+
+
+def test_the_switch_on_record_follows_each_reading_of_the_config(monkeypatch):
+    def recorded():
+        return atomicjson.read_object(dn.switch_record())
+
+    assert not dn.enabled() and recorded() is None, "never on: nothing is kept"
+    appconfig.set_bool(network.ENABLED_KEY, True)
+    assert dn.enabled()
+    on = {"config": str(appconfig.path()), "networkEnabled": True}
+    assert recorded() == on
+    wrote = []
+    with monkeypatch.context() as patch:
+        patch.setattr(atomicjson, "write_atomic", lambda *a: wrote.append(a))
+        assert dn.enabled() and dn.enabled() and wrote == [], "written when it moves"
+    break_config()
+    assert dn.enabled() and recorded() == on
+
+    appconfig.path().write_text('{"networkEnabled": false}', encoding="utf-8")
+    assert not dn.enabled() and recorded() == {**on, "networkEnabled": False}
+    appconfig.path().write_text("{", encoding="utf-8")
+    monkeypatch.setattr(dn, "_switch_read", None)
+    assert not dn.enabled(), "off was the last word"
+
+    # A record that is no record, and one of another config, say nothing.
+    for text in ("{", "[true]", json.dumps({**on, "networkEnabled": 1}),
+                 json.dumps({**on, "config": "/elsewhere/config.json"}),
+                 json.dumps({"networkEnabled": True})):
+        dn.switch_record().write_text(text, encoding="utf-8")
+        monkeypatch.setattr(dn, "_switch_read", None)
+        assert not dn.enabled(), text
+
+
+def test_a_record_that_will_not_save_costs_the_record_not_the_reading(monkeypatch):
+    appconfig.set_bool(network.ENABLED_KEY, True)
+
+    def full(*args):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(atomicjson, "write_atomic", full)
+    assert dn.enabled() and not dn.switch_record().exists()
+
+
+@pytest.fixture
+def linked(tmp_path, monkeypatch):
+    """The switch on and one root in Settings: a checkout of github.com/o/r, resolved
+    by the real reading of the roots. Where no Settings list a root, the default one
+    is a checkout of another repository. Gives the root's path."""
+    root = _checkout(tmp_path / "r", "https://github.com/o/r.git")
+    default = _checkout(tmp_path / "default", "https://github.com/o/default.git")
+    appconfig.set_repo_roots([root])
+    appconfig.set_bool(network.ENABLED_KEY, True)
+    monkeypatch.delenv("DIPLOMAT_REPO", raising=False)
+    monkeypatch.setattr(review, "default_repo_path", lambda: default)
+    monkeypatch.setattr(review, "_roots_cache", None)
+    monkeypatch.setattr("diplomat_app.bans.read", lambda: [])
+    return root
+
+
+def test_no_list_of_pools_is_posted_while_the_roots_cannot_be_read(
+        store, linked, daemon, installer):
+    """Every setting reads as its default while the file does not parse, the roots
+    among them: a list built then names the default root, and the daemon closes each
+    pool a list omits."""
+    pool = {"id": POOL, "path": linked, "forge": "github", "identity": "alice"}
+    d = daemon()
+    store._network_cycle_once(1000.0)
+    assert d.sent("pools") == [{"pools": [pool]}] and len(d.sent("admit")) == 1
+
+    d.state = has_pools((POOL, linked, "alice"))
+    whole = break_config()
+    assert dn.enabled() and review.repo_root_paths() != [linked]
+    for at in (1002.0, 1004.0, 1200.0):
+        store._network_cycle_once(at)
+    assert d.sent("pools") == [{"pools": [pool]}], "on the timer and with the screen open"
+    assert len(d.sent("admit")) == 1, "nor how many tasks a default cap would take"
+
+    # A daemon started since has heard nothing, and is told nothing either.
+    d.state = {**d.state, "daemon": {"pid": 8, "startedAt": 1_793_990_500.0}}
+    store.restart_network_async()
+    assert store.wait_for_background() == []
+    assert [arg for _, arg in installer] == ["--restart-daemon"]
+    assert d.sent("pools") == [{"pools": [pool]}] and len(d.sent("admit")) == 1
+    assert lines("network-leave") == []
+
+    appconfig.path().write_text(whole, encoding="utf-8")
+    store._network_cycle_once(1300.0)
+    assert d.sent("pools") == [{"pools": [pool]}] * 2 and len(d.sent("admit")) == 2
+    assert lines("network-leave") == []
+
+
+def test_a_config_that_breaks_while_the_roots_are_read_posts_no_list(
+        store, linked, daemon, monkeypatch):
+    d = daemon(state=has_pools((POOL, linked, "alice")))
+    real = review.roots_linking
+
+    def breaks():
+        break_config()
+        return real()
+
+    monkeypatch.setattr(review, "roots_linking", breaks)
+    store._network_cycle_once(1000.0)
+    assert d.sent("pools") == [] and d.sent("admit") == []
+
+
+def test_an_offer_the_daemon_had_not_answered_is_settled_while_the_settings_are_unknown(
+        store, on, daemon):
+    """It was made of settings that were read: left unsettled, the job the daemon holds
+    would end unbooked, and be offered a second time."""
+    d = daemon({"/offer": (500, {})})
+    store.dispatch_agent(job(), autofix.SOURCE_PANEL)
+    assert len(store.network_offering) == 1
+    break_config()
+    d.state = snapshot(offers=[daemon_row("t7")])
+    store._network_cycle_once(1000.0)
+    assert store.network_offering == []
+    assert [(r.network, r.pr_number) for r in agentregistry.load()] == [("t7", 9)]
+    assert [path for method, path, _ in d.got if method == "POST"] == ["/offer"], (
+        "the one offer made before, and nothing a setting decides")
+
+
 def pool_task(task, **fields) -> network.PoolTask:
     return network.PoolTask(task_id=task, kind="review", item="pr-9", title="Review · #9",
                             state="claimed", **fields)
@@ -2269,6 +2480,17 @@ def mesh(monkeypatch):
         (world.dir / "device.key").write_text("secret")
         (world.dir / "state.json").write_text(json.dumps({"pid": pid}))
 
+    def linked(pid):
+        """The directory as a link to one kept elsewhere, whose state names ``pid``."""
+        behind = world.dir.with_name("mesh-elsewhere")
+        behind.mkdir()
+        (behind / "device.key").write_text("secret")
+        (behind / "state.json").write_text(json.dumps({"pid": pid}))
+        world.dir.symlink_to(behind, target_is_directory=True)
+        return behind
+
+    world.linked = linked
+
     world.names = names
     monkeypatch.setattr(procscan, "scan_own_pids",
                         lambda match: {pid for pid in world.table if match(pid)})
@@ -2294,17 +2516,25 @@ def test_the_launch_ends_the_node_its_directory_names_and_removes_the_directory(
     assert mesh.killed == [11] and len(lines("network-stop")) == 1
 
 
-@pytest.mark.parametrize("state", [
-    '{"pid": 13}', '{"pid": 99}', '{"pid": "11"}', '{"pid": true}', '{"pid": 11.0}',
-    "[11]", "{ not json", None])
+@pytest.mark.parametrize("state, impostor", [
+    ('{"pid": 13}', None), ('{"pid": 99}', None), ('{"pid": "11"}', None),
+    ('{"pid": true}', True), ('{"pid": 11.0}', None), ("[11]", None), ("{ not json", None),
+    (None, None),
+    # No number a process of this user's can have, whatever answers for it.
+    ('{"pid": 0}', 0), ('{"pid": -1}', -1), ('{"pid": 1}', None), ('{"pid": 1.0}', 1),
+    ('{"pid": "7"}', 7), ('{"pid": [1]}', 1), ('{"pid": 2147483648}', 2 ** 31),
+    ('{"pid": 4294967296}', 2 ** 32), ('{"pid": 4294967307}', 2 ** 32 + 11),
+    ('{"pid": 99999999999999999999999}', 99999999999999999999999),
+    ('{"pid": %d}' % os.getpid(), os.getpid())])
 def test_a_directory_that_names_no_running_node_is_removed_and_nothing_is_signalled(
-        store, mesh, state):
+        store, mesh, state, impostor):
     mesh.names(11)
     if state is None:
         (mesh.dir / "state.json").unlink()
     else:
         (mesh.dir / "state.json").write_text(state)
-    mesh.table[True] = mesh.table[11]
+    if impostor is not None:
+        mesh.table[impostor] = mesh.table[11]
 
     store.retire_legacy_node_async()
     assert store.wait_for_background() == []
@@ -2331,6 +2561,25 @@ def test_a_node_that_does_not_quit_keeps_its_directory_for_the_next_launch(store
     assert mesh.killed == [11, 11] and not mesh.dir.exists()
 
 
+@pytest.mark.parametrize("pid, node", [
+    (13, "Removed"), (11, "Ended the retired mesh node (pid 11) and removed")])
+def test_a_directory_that_is_a_link_loses_the_link_and_keeps_what_it_leads_to(
+        store, mesh, pid, node):
+    behind = mesh.linked(pid)
+
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert mesh.killed == ([11] if pid == 11 else [])
+    assert not mesh.dir.is_symlink() and (behind / "device.key").read_text() == "secret"
+    assert lines("network-stop") == [
+        f"{node} the link {mesh.dir}: what it leads to, the retired mesh's state and "
+        "keys, is left as it is"]
+
+    store.retire_legacy_node_async()
+    assert store.wait_for_background() == []
+    assert len(lines("network-stop")) == 1, "said once: the next launch finds nothing"
+
+
 def test_no_directory_is_no_node_whatever_runs(store, mesh):
     store.retire_legacy_node_async()
     assert store.wait_for_background() == []
@@ -2345,7 +2594,7 @@ def test_a_signal_that_fails_is_no_node_asked(mesh, monkeypatch):
         raise ProcessLookupError(pid)
 
     monkeypatch.setattr(dn, "_terminate", gone)
-    assert dn.retire_legacy_node() == (None, mesh.dir)
+    assert dn.retire_legacy_node() == (None, mesh.dir, False)
 
 
 def test_the_suite_reaches_no_real_mesh_directory_and_signals_nothing(tmp_path):

@@ -27,6 +27,8 @@ contract between two machines is its [PROTOCOL.md](../packages/diplomacy-network
 A Diplomat with the network replaces the mesh of earlier versions. At launch it ends the mesh
 node such a version left running - the process `~/.diplomat/mesh/state.json` names, while that is
 a `python -m szpontnet` - and removes `~/.diplomat/mesh` with the keys in it. The feed says so.
+A `~/.diplomat/mesh` that is a link to a directory loses the link alone: what it leads to is
+left as it is, and the feed says that instead.
 
 It needs `tor` and `docker` on the machine, and `gh` or `glab` signed in for the forge each
 repository is on. The daemon looks for them on its `PATH` and in the usual install directories;
@@ -358,9 +360,17 @@ priced, and what asked for it is offered again.
 
 A `config.json` that is there and cannot be read as settings switches nothing. Diplomat keeps
 the switch as it last read it, withdraws and starts nothing on that reading, saves no setting
-over the file, and says so in the feed. The daemon takes five such reads, a second apart, and
-then stops as it does when switched off; Diplomat still starts no agent in a terminal, and the
-panel's red line says when the daemon does not answer.
+over the file, and says so in the feed. That reading outlives Diplomat, in
+`~/.diplomat/network-switch.json`: a Diplomat that starts on such a file holds the network on
+when the switch was last read as on, and on a machine where it never was the network is off.
+
+While the network is held on like this every other setting in the file is unknown too - the
+repo roots, the task cap, the budget. Diplomat tells the daemon neither this machine's pools nor
+how many tasks it takes, and offers nothing, whoever asks, until the file reads again: the
+pools stay as the daemon has them, and the panel's red line and the Network screen say
+*…/config.json cannot be read as settings*. An offer made before that, which the daemon had
+not answered, is still settled with it. The daemon takes five such reads, a second apart, and
+then stops as it does when switched off; Diplomat still starts no agent in a terminal.
 
 Switching the network off withdraws this machine's open offers, stops the jobs it runs for the
 pool and frees their PRs and issues for agents in terminals again. The daemon removes its

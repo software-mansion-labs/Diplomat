@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -609,12 +610,28 @@ class Snapshot:
 TROUBLE_STATES = frozenset({"failed", "missing", "down"})
 
 
-def trouble(answered: bool | None, snapshot: Snapshot | None) -> str:
-    """The panel's one line on what of the network does not work on this machine: a
-    daemon that was asked and did not answer, else each of the transport, docker and
-    the model credential that is in a :data:`TROUBLE_STATES` state, with the daemon's
-    detail. "" while nothing is wrong, the daemon has not been asked, or a service is
-    still coming up."""
+def settings_unknown(path: object) -> str:
+    """Why nothing a setting decides is said to the daemon - no list of pools, no
+    admit, no offer - while the shared config at ``path`` is there and cannot be read:
+    each setting would be read as its default, the repo roots among them, and the
+    daemon closes every pool a list omits."""
+    return f"{path} cannot be read as settings"
+
+
+def unknown_note(unknown: str) -> str:
+    """The Network screen's line while :func:`settings_unknown`."""
+    return (f"{unknown}: until it can be, this machine's pools stay as the daemon has "
+            "them and nothing is offered")
+
+
+def trouble(answered: bool | None, snapshot: Snapshot | None, unknown: str = "") -> str:
+    """The panel's one line on what of the network does not work on this machine:
+    ``unknown`` (:func:`settings_unknown`), else a daemon that was asked and did not
+    answer, else each of the transport, docker and the model credential that is in a
+    :data:`TROUBLE_STATES` state, with the daemon's detail. "" while nothing is wrong,
+    the daemon has not been asked, or a service is still coming up."""
+    if unknown:
+        return f"Diplomacy Network: {unknown}"
     if answered is False:
         return "Diplomacy Network: the daemon is not answering"
     if snapshot is None:
@@ -632,13 +649,17 @@ _UTC_TIME = re.compile(
 
 def local_times(sentence: str) -> str:
     """``sentence`` with each UTC time the daemon wrote in it, as in ``…until
-    2026-11-17T10:30:56.000Z``, as this machine's clock reads it: ``…until 11:30``."""
+    2026-11-17T10:30:56.000Z``, as this machine's clock reads it: ``…until 11:30``. A
+    time the calendar has no year for is left as written."""
     def clock(found: re.Match) -> str:
         try:
             at = datetime.strptime(found[0][:19] + "+0000", "%Y-%m-%dT%H:%M:%S%z")
-        except ValueError:
+            # Not ``astimezone``: the local day of the calendar's first and last can
+            # be in a year no datetime has.
+            here = time.localtime(at.timestamp())
+        except (ValueError, OverflowError, OSError):
             return found[0]
-        return at.astimezone().strftime("%H:%M")
+        return f"{here.tm_hour:02d}:{here.tm_min:02d}"
     return _UTC_TIME.sub(clock, sentence)
 
 

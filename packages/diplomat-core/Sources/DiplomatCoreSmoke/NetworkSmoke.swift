@@ -619,6 +619,17 @@ func networkSmoke() throws {
                                        snapshot: services(["devices": ("failed", "x")])) == ""
                 && NetworkTrouble.states == ["failed", "missing", "down"],
               "the devices are not the panel's to report")
+        let unknown = NetworkSettings.unknown(path: "/home/u/.diplomat/config.json")
+        check(unknown == "/home/u/.diplomat/config.json cannot be read as settings"
+                && NetworkTrouble.line(answered: false, snapshot: services(["transport": ("down", "")]),
+                                       unknown: unknown) == "Diplomacy Network: \(unknown)"
+                && NetworkTrouble.line(answered: false, snapshot: nil, unknown: "") == silent,
+              "settings that cannot be read outrank what the daemon says")
+        check(NetworkSettings.unknownNote(unknown)
+                == "/home/u/.diplomat/config.json cannot be read as settings: until it can "
+                    + "be, this machine's pools stay as the daemon has them and nothing is "
+                    + "offered",
+              "the Network screen's line for settings that cannot be read")
     }
 
     section("network: the evidence")

@@ -250,7 +250,7 @@ def test_a_row_the_network_refused_says_why(panel):
 def test_the_list_says_what_of_the_network_does_not_work(panel):
     """One line under the header, the daemon's detail painted as it is, opening the
     Network screen; gone with the trouble, and drawn while the list is folded."""
-    from diplomat_runtime import network
+    from diplomat_runtime import appconfig, network
 
     from diplomat_app.widgets import NoticeRow
 
@@ -277,6 +277,18 @@ def test_the_list_says_what_of_the_network_does_not_work(panel):
         {"transport": {"state": "ready", "detail": ""}})
     panel.store.network_changed.emit()
     assert _rows(panel, NoticeRow) == []
+
+    # Settings that cannot be read outrank what the daemon says, and a settle that
+    # finds them so redraws the line.
+    appconfig.set_bool(network.ENABLED_KEY, True)
+    panel.store._settle_agents()
+    [notice] = _rows(panel, NoticeRow)
+    assert notice.text._full == "Diplomacy Network: the daemon is not answering"
+    appconfig.path().write_text("{", encoding="utf-8")
+    panel.store._settle_agents()
+    [notice] = _rows(panel, NoticeRow)
+    assert notice.text._full == (
+        f"Diplomacy Network: {appconfig.path()} cannot be read as settings")
 
 
 def test_a_row_reads_as_the_session_it_will_become(panel):

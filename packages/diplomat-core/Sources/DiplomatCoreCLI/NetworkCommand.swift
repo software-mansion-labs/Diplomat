@@ -9,6 +9,8 @@ import Foundation
 /// ```
 /// { "hours": [ <any JSON value>, … ],
 ///   "remotes": [ "<git remote URL>", … ],
+///   "gitlabHosts": { "<host a remote may name>": "<the GitLab host it is on>", … },
+///   "hostedRemotes": [ "<git remote URL>", … ],
 ///   "rules": [ "<forge host>", … ],
 ///   "times": [ "<a sentence of the daemon's>", … ],
 ///   "kinds": [ {"verb", "ownPR"}, … ],
@@ -16,12 +18,14 @@ import Foundation
 ///                "forced"}, … ],
 ///   "snapshots": [ <the daemon's /state>, … ],
 ///   "openTask": [ {"pool", "kind", "item", "snapshot": <index or null>}, … ],
-///   "trouble": [ {"answered": true|false|null, "snapshot": <index or null>}, … ],
+///   "trouble": [ {"answered": true|false|null, "snapshot": <index or null>,
+///                 "unknown": "<a config's path>" or ""}, … ],
 ///   "notTaking": [ {"task", "pool": <index into the snapshot's pools>, "snapshot"}, … ],
 ///   "listing": [ {"roots", "others", "unread", "identities", "snapshot"}, … ] }
 /// ```
-/// Output: one answer per input row under the same member (`pools` for `remotes`),
-/// with sorted keys. An offer is its body, or the sentence it was refused with.
+/// Output: one answer per input row under the same member (`pools` for `remotes`, and
+/// `hostedPools` for `hostedRemotes`, read with `gitlabHosts`), with sorted keys. An
+/// offer is its body, or the sentence it was refused with.
 enum NetworkCommand {
     static func run(_ obj: [String: Any]) {
         let snapshots = (obj["snapshots"] as? [[String: Any]] ?? []).map(NetworkSnapshot.init)
@@ -39,11 +43,16 @@ enum NetworkCommand {
 
         var out: [String: Any] = [:]
         out["hours"] = (obj["hours"] as? [Any] ?? []).map { NetworkSettings.hours(json: $0) }
-        out["pools"] = (obj["remotes"] as? [String] ?? []).map { url -> Any in
-            guard let at = PRRef.LocalRepo.coordinates(remoteURL: url) else { return NSNull() }
+        func pool(_ url: String, _ hosts: GitLabHosts) -> Any {
+            guard let at = PRRef.LocalRepo.coordinates(remoteURL: url, gitlabHosts: hosts) else {
+                return NSNull()
+            }
             let repo = PRRef.LocalRepo(owner: at.owner, repo: at.repo, path: "", host: at.host)
             return NetworkOffer.pool(repoKey: repo.key) ?? NSNull()
         }
+        out["pools"] = (obj["remotes"] as? [String] ?? []).map { pool($0, []) }
+        let hosted = GitLabHosts(obj["gitlabHosts"] as? [String: String] ?? [:])
+        out["hostedPools"] = (obj["hostedRemotes"] as? [String] ?? []).map { pool($0, hosted) }
         out["rules"] = (obj["rules"] as? [String] ?? []).map { NetworkPools.hasRules(host: $0) }
         out["times"] = (obj["times"] as? [String] ?? []).map(NetworkSnapshot.localTimes)
         out["offers"] = rows("offers").map { row -> Any in
@@ -75,7 +84,10 @@ enum NetworkCommand {
         out["trouble"] = rows("trouble").map {
             NetworkTrouble.line(
                 answered: $0["answered"] is NSNull ? nil : JSONInput.flag($0["answered"]),
-                snapshot: snapshot($0))
+                snapshot: snapshot($0),
+                unknown: ($0["unknown"] as? String).flatMap {
+                    $0.isEmpty ? nil : NetworkSettings.unknownNote(NetworkSettings.unknown(path: $0))
+                } ?? "")
         }
         out["listing"] = rows("listing").map { row -> [String: Any] in
             let listing = NetworkPools.listing(

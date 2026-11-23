@@ -303,6 +303,42 @@ enum AppConfig {
     /// daemon reads the same key, and exits while it is not `true`.
     static var networkEnabled: Bool { bool(NetworkSettings.enabledKey, fallback: false) }
 
+    /// Where the switch is kept as the config last read it, for a Diplomat that starts
+    /// while the config cannot be read: `network-switch.json` beside the config, holding
+    /// `{"config": <the config's path>, "networkEnabled": <the switch>}`. The Linux
+    /// applet keeps the same file.
+    static var switchRecordURL: URL {
+        url.deletingLastPathComponent().appendingPathComponent("network-switch.json")
+    }
+
+    /// Whether `switchRecordURL` has the switch of this config as on.
+    static var switchRecorded: Bool {
+        guard let data = try? Data(contentsOf: switchRecordURL),
+              let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              record["config"] as? String == url.path,
+              let on = record[NetworkSettings.enabledKey] as? NSNumber,
+              CFGetTypeID(on) == CFBooleanGetTypeID() else { return false }
+        return on.boolValue
+    }
+
+    /// Keep `on` in `switchRecordURL`, atomically.
+    static func recordSwitch(_ on: Bool) {
+        let data = try? JSONSerialization.data(
+            withJSONObject: ["config": url.path, NetworkSettings.enabledKey: on],
+            options: [.prettyPrinted, .sortedKeys])
+        try? data?.write(to: switchRecordURL, options: .atomic)
+    }
+
+    /// The switch as the config has it; while that cannot be read, as the Diplomat that
+    /// last wrote `switchRecordURL` read it, and off when none on this machine read it
+    /// as on.
+    static var networkEnabledLastRead: Bool { unreadable ? switchRecorded : networkEnabled }
+
+    /// `NetworkSettings.unknown` while the config is `unreadable`, else "".
+    static var settingsUnknown: String {
+        unreadable ? NetworkSettings.unknown(path: url.path) : ""
+    }
+
     /// One of the network's two hour settings, as its daemon reads it.
     static func networkHours(_ key: String) -> Int {
         NetworkSettings.hours(json: read()[key])

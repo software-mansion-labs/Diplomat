@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from diplomat_runtime import appconfig, network
+from diplomat_runtime import appconfig, atomicjson, network
 from . import deviceallocator as da
 from . import procscan
 
@@ -58,17 +58,47 @@ def socket_path() -> Path:
 _switch_read: tuple[Path, bool] | None = None
 
 
+def switch_record() -> Path:
+    """Where the switch is kept as the config last read it, for a Diplomat that starts
+    while the config cannot be read: ``network-switch.json`` beside the config, holding
+    ``{"config": <the config's path>, "networkEnabled": <the switch>}``. The macOS app
+    keeps the same file."""
+    return appconfig.path().with_name("network-switch.json")
+
+
+def _switch_recorded(where: Path) -> bool:
+    record = atomicjson.read_object(switch_record()) or {}
+    return record.get("config") == str(where) and record.get(network.ENABLED_KEY) is True
+
+
 def enabled() -> bool:
     """The switch, as the shared config has it. A config that is there and cannot be
     read says nothing of it - one read can fall in the middle of a rewrite - so the
-    switch is as it was last read, and off when it never was."""
+    switch is as it was last read: by this process, else by the Diplomat that last
+    wrote :func:`switch_record`. It is off when none on this machine read it as on."""
     global _switch_read
     where, config = appconfig.path(), appconfig.read_known()
     if config is None:
-        return _switch_read is not None and _switch_read == (where, True)
+        if _switch_read is None or _switch_read[0] != where:
+            _switch_read = (where, _switch_recorded(where))
+        return _switch_read[1]
     on = config.get(network.ENABLED_KEY) is True
-    _switch_read = (where, on)
+    if _switch_read != (where, on):
+        _switch_read = (where, on)
+        if _switch_recorded(where) != on:
+            try:
+                atomicjson.write_atomic(
+                    switch_record(), {"config": str(where), network.ENABLED_KEY: on})
+            except OSError:
+                pass  # a full disk costs the record, not the reading
     return on
+
+
+def settings_unknown() -> str:
+    """:func:`network.settings_unknown` while the switch is held on over a config that
+    cannot be read, else ""."""
+    return (network.settings_unknown(appconfig.path())
+            if appconfig.read_known() is None and enabled() else "")
 
 
 def set_enabled(on: bool) -> None:
@@ -256,7 +286,7 @@ def legacy_dir() -> Path:
 
 
 def _legacy_node_running(pid: int) -> bool:
-    return bool(procscan.scan_own_pids(
+    return pid != os.getpid() and bool(procscan.scan_own_pids(
         lambda found: found == pid and _is_legacy_node(procscan.cmdline_tokens(found))))
 
 
@@ -264,22 +294,25 @@ def _terminate(pid: int) -> None:
     os.kill(pid, signal.SIGTERM)
 
 
-def retire_legacy_node() -> tuple[int | None, Path | None]:
+def retire_legacy_node() -> tuple[int | None, Path | None, bool]:
     """End the mesh node an earlier Diplomat ran and remove its directory, keys
-    included. That node is the pid the directory's ``state.json`` names, while that
-    pid is a ``python -m szpontnet`` of this user: a node kept anywhere else is its
-    operator's own program. One still running after ``LEGACY_EXIT_SECS`` keeps the
-    directory. Returns the pid asked to quit and the directory removed, each None when
-    there was none. Blocking."""
+    included. That node is the pid the directory's ``state.json`` names - a JSON integer
+    from 1 to 2^31 - 1, the pids a process can have - while that pid is a ``python -m
+    szpontnet`` of this user: a node kept anywhere else is its operator's own program.
+    One still running after ``LEGACY_EXIT_SECS`` keeps the directory. A directory that
+    is a link loses the link alone: what it leads to was put there by its operator.
+    Returns the pid asked to quit and the directory removed, each None when there was
+    none, and whether that directory is a link. Blocking."""
     where = legacy_dir()
     if not where.is_dir():
-        return None, None
+        return None, None, False
+    link = where.is_symlink()
     try:
         pid = json.loads((where / "state.json").read_text()).get("pid")
     except (OSError, ValueError, AttributeError):
         pid = None
     asked = None
-    if type(pid) is int and _legacy_node_running(pid):
+    if type(pid) is int and 0 < pid < 2 ** 31 and _legacy_node_running(pid):
         try:
             _terminate(pid)
             asked = pid
@@ -288,16 +321,26 @@ def retire_legacy_node() -> tuple[int | None, Path | None]:
         deadline = time.monotonic() + LEGACY_EXIT_SECS
         while _legacy_node_running(pid):
             if time.monotonic() >= deadline:
-                return asked, None
+                return asked, None, link
             time.sleep(0.1)
-    shutil.rmtree(where, ignore_errors=True)
-    return asked, None if where.exists() else where
+    if link:
+        try:
+            where.unlink()
+        except OSError:
+            pass
+    else:
+        shutil.rmtree(where, ignore_errors=True)
+    return asked, None if where.exists() else where, link
 
 
-def legacy_retired_line(asked: int | None, removed: Path | None, where: Path) -> str | None:
+def legacy_retired_line(asked: int | None, removed: Path | None, link: bool,
+                        where: Path) -> str | None:
     """What the feed says of :func:`retire_legacy_node`; None when it found nothing."""
     if removed is not None:
         node = f"Ended the retired mesh node (pid {asked}) and removed" if asked else "Removed"
+        if link:
+            return (f"{node} the link {removed}: what it leads to, the retired mesh's "
+                    "state and keys, is left as it is")
         return f"{node} {removed}, the retired mesh's state and keys"
     if asked is not None:
         return (f"Asked the retired mesh node (pid {asked}) to quit: {where} is removed "

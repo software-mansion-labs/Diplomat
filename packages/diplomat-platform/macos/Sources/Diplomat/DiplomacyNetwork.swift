@@ -136,36 +136,46 @@ enum DiplomacyNetwork {
     }
 
     /// End that node and remove its directory, keys included. The node is the pid the
-    /// directory's `state.json` names, while that pid is a `-m szpontnet` of this user:
-    /// a node kept anywhere else is its operator's own program. One still running after
-    /// `legacyExitWait` keeps the directory. Returns the pid asked to quit and the
-    /// directory removed, each nil when there was none. Blocking.
-    static func retireLegacyMeshNode() -> (asked: Int?, removed: String?) {
+    /// directory's `state.json` names - a JSON integer from 1 to 2^31 - 1, the pids a
+    /// process can have - while that pid is a `-m szpontnet` of this user: a node kept
+    /// anywhere else is its operator's own program. One still running after
+    /// `legacyExitWait` keeps the directory. A directory that is a link loses the link
+    /// alone: what it leads to was put there by its operator. Returns the pid asked to
+    /// quit and the directory removed, each nil when there was none, and whether that
+    /// directory is a link. Blocking.
+    static func retireLegacyMeshNode() -> (asked: Int?, removed: String?, link: Bool) {
         var isDir: ObjCBool = false
         guard let dir = legacyStateDir,
               FileManager.default.fileExists(atPath: dir.path, isDirectory: &isDir),
-              isDir.boolValue else { return (nil, nil) }
+              isDir.boolValue else { return (nil, nil, false) }
+        let link = (try? FileManager.default.destinationOfSymbolicLink(atPath: dir.path)) != nil
         let state = (try? Data(contentsOf: dir.appendingPathComponent("state.json")))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
         var asked: Int?
         if let named = state?["pid"] as? NSNumber, CFGetTypeID(named) != CFBooleanGetTypeID(),
-           !CFNumberIsFloatType(named), case let pid = named.intValue, legacyNodeRunning(pid) {
+           !CFNumberIsFloatType(named), let fits = Int32(exactly: named.doubleValue), fits > 0,
+           case let pid = Int(fits), legacyNodeRunning(pid) {
             if terminate(pid) { asked = pid }
             let deadline = Date().addingTimeInterval(legacyExitWait)
             while legacyNodeRunning(pid) {
-                if Date() >= deadline { return (asked, nil) }
+                if Date() >= deadline { return (asked, nil, link) }
                 Thread.sleep(forTimeInterval: 0.1)
             }
         }
+        // Of a link, this removes the link.
         try? FileManager.default.removeItem(at: dir)
-        return (asked, FileManager.default.fileExists(atPath: dir.path) ? nil : dir.path)
+        return (asked, FileManager.default.fileExists(atPath: dir.path) ? nil : dir.path, link)
     }
 
     /// What the feed says of `retireLegacyMeshNode`; nil when it found nothing.
-    static func legacyRetiredLine(asked: Int?, removed: String?) -> String? {
+    static func legacyRetiredLine(asked: Int?, removed: String?, link: Bool) -> String? {
         if let removed {
             let node = asked.map { "Ended the retired mesh node (pid \($0)) and removed" }
-            return "\(node ?? "Removed") \(removed), the retired mesh's state and keys"
+                ?? "Removed"
+            return link
+                ? "\(node) the link \(removed): what it leads to, the retired mesh's state "
+                    + "and keys, is left as it is"
+                : "\(node) \(removed), the retired mesh's state and keys"
         }
         guard let asked, let dir = legacyStateDir else { return nil }
         return "Asked the retired mesh node (pid \(asked)) to quit: \(dir.path) is removed "

@@ -506,15 +506,24 @@ def _drain_qt_widgets():
 
 
 @pytest.fixture
-def kolkata():
-    """This machine's clock, and that of every process the test starts, five and a half
-    hours ahead of UTC."""
+def clock_in():
+    """Set this machine's clock, and that of every process the test starts, to a time
+    zone by its name."""
     before = os.environ.get("TZ")
-    os.environ["TZ"] = "Asia/Kolkata"
-    time.tzset()
-    yield
+
+    def to(zone: str) -> None:
+        os.environ["TZ"] = zone
+        time.tzset()
+
+    yield to
     if before is None:
-        del os.environ["TZ"]
+        os.environ.pop("TZ", None)
     else:
         os.environ["TZ"] = before
     time.tzset()
+
+
+@pytest.fixture
+def kolkata(clock_in):
+    """That clock five and a half hours ahead of UTC."""
+    clock_in("Asia/Kolkata")

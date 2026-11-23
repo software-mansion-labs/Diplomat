@@ -88,6 +88,14 @@ final class Store: ObservableObject {
     /// Whether the feed has said the shared config cannot be read, for the current spell
     /// of it.
     var configUnreadableLogged = false
+    /// `AppConfig.settingsUnknown` as the launch and each network cycle since found it
+    /// while the switch is on: nothing a setting decides is said to the daemon meanwhile.
+    @Published private(set) var networkSettingsUnknown: String
+    /// The switch as last held against `AppConfig.switchRecordURL`.
+    private var switchNoted: Bool?
+    /// Whether the cap and the roots' fields are still those of a launch that could not
+    /// read the config: a default each.
+    private var knobsReadBlind = AppConfig.unreadable
     /// Why the network refused each queued job that it refused for a reason of the job's
     /// own, by the job's label: what its row says, and what the feed has said.
     @Published var networkJobRefusals: [String: String] = [:]
@@ -160,7 +168,9 @@ final class Store: ObservableObject {
         didSet {
             if writesConfig, !readingConfig,
                !configSaved(AppConfig.setEditableRepoRoots(repoRootPaths)) {
-                readBack { repoRootPaths = AppConfig.editableRepoRoots }
+                // A file that cannot be read says nothing of the roots.
+                let known = AppConfig.unreadable ? oldValue : AppConfig.editableRepoRoots
+                readBack { repoRootPaths = known }
             }
             Task { await refreshRoots() }
         }
@@ -188,6 +198,9 @@ final class Store: ObservableObject {
     private var rootsLinked: [PRRef.LocalRepo] = []
     private var rootPathsUnread = RepoPaths.rootPaths.map(RepoRoots.expand)
     private var rootsPinned = false
+    /// Whether that reading fell while the config could not be read: its paths are then
+    /// the default root's, and a pools list made of them would close every pool.
+    private(set) var rootsReadBlind = AppConfig.unreadable
 
     /// Re-resolve the roots off the main actor, and follow a change with the panel.
     func refreshRoots() async {
@@ -195,6 +208,7 @@ final class Store: ObservableObject {
         let paths = RepoPaths.rootPaths
         let next = await Task.detached(priority: .utility) { RepoPaths.resolved(for: paths) }.value
         guard !rootsPinned, paths == RepoPaths.rootPaths else { return }
+        rootsReadBlind = AppConfig.unreadable
         rootsResolved = next.complete
         primaryResolved = next.primaryResolved
         rootsGuessed = next.guessed
@@ -215,6 +229,7 @@ final class Store: ObservableObject {
                   unread: [String] = []) {
         guard Headless.active, !pinned.isEmpty else { return }
         rootsPinned = true
+        rootsReadBlind = false
         rootsResolved = complete
         primaryResolved = primary
         rootsGuessed = guessed
@@ -458,7 +473,9 @@ final class Store: ObservableObject {
             guard writesConfig, !readingConfig,
                   !configSaved(AppConfig.setInt(AppConfig.autoTaskLimitKey, clamped))
             else { return }
-            readBack { autoTaskLimit = AppConfig.autoTaskLimit }
+            // A file that cannot be read says nothing of the cap.
+            let known = AppConfig.unreadable ? oldValue : AppConfig.autoTaskLimit
+            readBack { autoTaskLimit = known }
         }
     }
 
@@ -492,8 +509,18 @@ final class Store: ObservableObject {
                 readBack { networkEnabled = known }
                 return
             }
+            recordNetworkSwitch()
             networkSwitched()
         }
+    }
+
+    /// Keep the switch, as the config was just read or written to have it, in
+    /// `AppConfig.switchRecordURL` when that says otherwise. A record the disk refuses
+    /// is the record's loss alone.
+    private func recordNetworkSwitch() {
+        guard writesConfig, switchNoted != networkEnabled else { return }
+        switchNoted = networkEnabled
+        if AppConfig.switchRecorded != networkEnabled { AppConfig.recordSwitch(networkEnabled) }
     }
 
     /// The hours a job offered from here asks for, and the longest job this machine takes
@@ -539,7 +566,8 @@ final class Store: ObservableObject {
     /// file, and another process may have written it. A switch that moved is followed
     /// as one moved here is. A file that is there and cannot be read says nothing - one
     /// read can fall in the middle of a rewrite - so every setting stays as it was last
-    /// read, and the feed says so once for the spell.
+    /// read, and the feed says so once for the spell. The first reading after a launch
+    /// that had none takes the cap and the roots' fields too (`knobsReadBlind`).
     func rereadNetworkSettings() {
         guard writesConfig else { return }
         let unreadable = AppConfig.unreadable
@@ -548,10 +576,19 @@ final class Store: ObservableObject {
             refreshAudit()
         }
         configUnreadableLogged = unreadable
+        let unknown = unreadable && networkEnabled
+            ? NetworkSettings.unknown(path: AppConfig.url.path) : ""
+        if unknown != networkSettingsUnknown { networkSettingsUnknown = unknown }
         guard !unreadable else { return }
         let on = AppConfig.networkEnabled
         let switched = on != networkEnabled
         readBack {
+            if knobsReadBlind {
+                let limit = AppConfig.autoTaskLimit
+                if limit != autoTaskLimit { autoTaskLimit = limit }
+                let roots = AppConfig.editableRepoRoots
+                if roots != repoRootPaths { repoRootPaths = roots }
+            }
             if switched { networkEnabled = on }
             let required = AppConfig.networkHours(NetworkSettings.requiredMinimumHKey)
             if required != networkRequiredMinimumH { networkRequiredMinimumH = required }
@@ -560,6 +597,8 @@ final class Store: ObservableObject {
             let devices = AppConfig.networkDevices
             if devices != networkDevices { networkDevices = devices }
         }
+        knobsReadBlind = false
+        recordNetworkSwitch()
         if switched { networkSwitched() }
     }
 
@@ -1239,7 +1278,9 @@ final class Store: ObservableObject {
         agentModel = AppConfig.agentModel
         autoTaskLimit = AppConfig.autoTaskLimit
         autoBudgetGate = AppConfig.autoBudgetGate
-        networkEnabled = AppConfig.networkEnabled
+        let switchLastRead = AppConfig.networkEnabledLastRead
+        networkEnabled = switchLastRead
+        networkSettingsUnknown = switchLastRead ? AppConfig.settingsUnknown : ""
         networkRequiredMinimumH = AppConfig.networkHours(NetworkSettings.requiredMinimumHKey)
         networkMaximumAcceptedH = AppConfig.networkHours(NetworkSettings.maximumAcceptedHKey)
         networkDevices = AppConfig.networkDevices
@@ -2200,7 +2241,8 @@ final class Store: ObservableObject {
 
     /// The panel's line on what of the network does not work on this machine, or nil.
     var networkTrouble: String? {
-        let line = NetworkTrouble.line(answered: networkAnswered, snapshot: networkState)
+        let line = NetworkTrouble.line(answered: networkAnswered, snapshot: networkState,
+                                       unknown: networkSettingsUnknown)
         return line.isEmpty ? nil : line
     }
 
@@ -2728,9 +2770,10 @@ final class Store: ObservableObject {
     }
 
     /// With the network on the room is the pool's, which has it whenever its daemon
-    /// answers.
-    private func drainHasRoom(capLoad: Int) -> Bool {
-        (networkEnabled ? networkAnswered != false : capLoad < autoTaskLimit)
+    /// answers and the settings can be read.
+    func drainHasRoom(capLoad: Int) -> Bool {
+        (networkEnabled ? networkAnswered != false && networkSettingsUnknown.isEmpty
+            : capLoad < autoTaskLimit)
             && !drainableTasks.isEmpty
     }
 
@@ -4599,17 +4642,24 @@ final class Store: ObservableObject {
     /// While the daemon is known not to answer (`networkAnswered`) automatic work is not
     /// offered at all: each offer would wait out its timeout, and it is the network cycle
     /// that finds the daemon back. What the operator starts asks.
+    ///
+    /// While the config cannot be read (`AppConfig.settingsUnknown`) nothing is offered,
+    /// whoever started it: the job and the pool it would go into come of settings that
+    /// each read as a default.
     private func offerToNetwork(_ job: AgentJob, source: AgentDispatchGate.Source,
                                 attemptNumber: Int, forced: Bool,
                                 rowLabel: String) async -> DispatchOutcome {
         let refusal: String
         var own = false
+        let unknown = AppConfig.settingsUnknown
         switch NetworkOffer.from(
             verb: job.auditAction, ownPR: job.allows.ownPR, number: networkNumber(job),
             repoKey: networkRepoKey(job), label: job.label, prompt: job.prompt,
             source: source, forced: forced, verdict: job.allows.verdict,
             markReady: job.allows.markReady, noPRs: job.allows.noPRs,
             readOnly: job.allows.readOnly) {
+        case _ where !unknown.isEmpty:
+            refusal = unknown
         case .refused(let why):
             refusal = why
             own = true

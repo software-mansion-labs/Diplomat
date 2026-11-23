@@ -813,7 +813,7 @@ class Panel(QWidget):
         self.tasks_col.addWidget(header)
         # Above the fold of the section: with the network on, every row below waits
         # on what this line says does not work.
-        trouble = network.trouble(self.store.network_answered, self.store.network_state)
+        trouble = self.store.network_trouble
         if trouble:
             notice = NoticeRow(trouble)
             notice.clicked.connect(self._open_network)

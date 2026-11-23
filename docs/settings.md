@@ -240,6 +240,8 @@ swaps the panel to a settings screen:
   limits and the switch that lets jobs use this machine's devices. `networkEnabled`,
   `networkRequiredMinimumH`, `networkMaximumAcceptedH` (whole hours, 12 to 720; anything else
   is rounded and held to that range) and `networkDevices` in `~/.diplomat/config.json`.
+  Diplomat keeps the switch as it last read it in `~/.diplomat/network-switch.json`, for a
+  launch that finds a `config.json` it [cannot read](network.md#the-network-screen).
 - **Comms (Slack)** - the [Slack watcher](comms.md) (**default off**): the switch,
   keywords, a sender allowlist, one switch per thing it may do (queue reviews and
   fixes, bump queued work, investigate bug reports), the batch size and interval,

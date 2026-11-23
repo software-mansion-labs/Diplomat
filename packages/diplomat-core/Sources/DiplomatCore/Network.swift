@@ -29,6 +29,18 @@ public enum NetworkSettings {
         return Int(min(max((v + 0.5).rounded(.down), Double(hoursFloor)), Double(hoursCeiling)))
     }
 
+    /// Why nothing a setting decides is said to the daemon - no list of pools, no admit,
+    /// no offer - while the shared config at `path` is there and cannot be read: each
+    /// setting would be read as its default, the repo roots among them, and the daemon
+    /// closes every pool a list omits.
+    public static func unknown(path: String) -> String { "\(path) cannot be read as settings" }
+
+    /// The Network screen's line while `unknown`.
+    public static func unknownNote(_ unknown: String) -> String {
+        "\(unknown): until it can be, this machine's pools stay as the daemon has them "
+            + "and nothing is offered"
+    }
+
     /// A stored hours value, as `JSONSerialization` or `JSONInput` reads one, as the
     /// daemon reads it: `hours` of its JavaScript number.
     public static func hours(json stored: Any?) -> Int { hours(jsNumber(stored)) }
@@ -703,11 +715,13 @@ public enum NetworkTrouble {
     /// Network screen draws them red, and the panel says so (`line`).
     public static let states: Set<String> = ["failed", "missing", "down"]
 
-    /// The panel's one line: a daemon that was asked and did not answer, else each of
-    /// the transport, docker and the model credential that is in one of `states`, with
-    /// the daemon's detail. "" while nothing is wrong, the daemon has not been asked, or
-    /// a service is still coming up.
-    public static func line(answered: Bool?, snapshot: NetworkSnapshot?) -> String {
+    /// The panel's one line: `unknown` (`NetworkSettings.unknown`), else a daemon that
+    /// was asked and did not answer, else each of the transport, docker and the model
+    /// credential that is in one of `states`, with the daemon's detail. "" while nothing
+    /// is wrong, the daemon has not been asked, or a service is still coming up.
+    public static func line(answered: Bool?, snapshot: NetworkSnapshot?,
+                            unknown: String = "") -> String {
+        if !unknown.isEmpty { return "Diplomacy Network: \(unknown)" }
         if answered == false { return "Diplomacy Network: the daemon is not answering" }
         guard let snapshot else { return "" }
         let wrong = [("transport", snapshot.transport.state, snapshot.transport.detail),

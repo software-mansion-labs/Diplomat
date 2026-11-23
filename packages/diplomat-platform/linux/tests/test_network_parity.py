@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 
 import pytest
@@ -173,6 +174,23 @@ TIMES = [
     "until 2026-11-17 10:30:56Z", "until 2026-11-17T10:30:56.000z",
     "until \u0662\u0660\u0662\u0666-11-17T10:30:56Z", "2026-11-17T10:30:56Z2026-11-17T10:31:56Z",
 ]
+#: Times whose local day is in no year a date can have, east or west of UTC, and the
+#: year before the first.
+EDGE = ["until 9999-12-31T23:59:59Z", "until 9999-12-31T23:59:59.999Z",
+        "until 0001-01-01T00:00:00Z", "until 0000-01-01T00:00:00Z"]
+TIMES += EDGE
+
+#: Hosts as glab's config lists them (:func:`localrepos.config_hosts`): each to itself,
+#: an ``ssh_host`` to its host. github.com is GitHub whatever glab lists.
+HOSTED = {"git.example.org": "git.example.org", "ssh.git.example.org": "git.example.org",
+          "code.acme.example": "code.acme.example", "mygitlab.example": "mygitlab.example",
+          "github.com": "github.com", "gitlab.acme.example": "gitlab.acme.example"}
+HOSTED_REMOTES = REMOTES + [
+    "git@ssh.git.example.org:o/r.git", "ssh://git@SSH.Git.Example.Org:2222/Group/Sub/R.git",
+    "https://Git.Example.Org/O/R", "https://code.acme.example:8443/p/api.git",
+    "https://code.acme.example/a/b/c/api", "https://ssh.git.example.org/o/r",
+    "https://other.example.org/o/r.git", "git@mygitlab.example:o/r.git",
+]
 NOT_TAKING = [{"task": task, "pool": pool, "snapshot": at}
               for at, pools in ((HELD, (0, 1)), (1, (0, 1, 2)), (None, (0,)))
               for pool in pools
@@ -189,7 +207,8 @@ OPEN_TASK = [{"pool": pool, "kind": kind, "item": item, "snapshot": at}
 OPEN_TASK += [{"pool": WIDGETS, "kind": "review", "item": "pr-1", "snapshot": REAL + at}
               for at in range(len(DAEMON))]
 
-TROUBLE = [{"answered": answered, "snapshot": at}
+TROUBLE = [{"answered": answered, "snapshot": at, "unknown": unknown}
+           for unknown in ("", "/home/u/.diplomat/config.json")
            for answered in (None, False, True)
            for at in (None, *range(len(SNAPSHOTS)))]
 
@@ -221,6 +240,7 @@ LISTING = [
     )]
 
 PAYLOAD = {"hours": HOURS, "remotes": REMOTES, "rules": RULES, "kinds": KINDS,
+           "gitlabHosts": HOSTED, "hostedRemotes": HOSTED_REMOTES,
            "offers": OFFERS, "snapshots": SNAPSHOTS, "openTask": OPEN_TASK,
            "trouble": TROUBLE, "notTaking": NOT_TAKING, "listing": LISTING, "times": TIMES}
 
@@ -231,8 +251,8 @@ def _python() -> dict:
     def snapshot(row: dict) -> N.Snapshot | None:
         return None if row["snapshot"] is None else snapshots[row["snapshot"]]
 
-    def pool(url: str) -> str | None:
-        at = localrepos.parse_remote(url, {})
+    def pool(url: str, hosts: dict[str, str] = {}) -> str | None:
+        at = localrepos.parse_remote(url, hosts)
         if at is None:
             return None
         return N.pool_for(LocalRepo(owner=at[1], repo=at[2], path="", host=at[0]).key)
@@ -258,13 +278,16 @@ def _python() -> dict:
     return {
         "hours": [N.hours(v) for v in HOURS],
         "pools": [pool(url) for url in REMOTES],
+        "hostedPools": [pool(url, {**localrepos.GITLAB_HOSTS, **HOSTED})
+                        for url in HOSTED_REMOTES],
         "rules": [N.has_rules(host) for host in RULES],
         "offers": [offer(row) for row in OFFERS],
         "notTaking": [not_taking(row) for row in NOT_TAKING],
         "kinds": [N.kind_for(k["verb"], k["ownPR"]) for k in KINDS],
         "openTask": [N.open_task(r["pool"], r["kind"], r["item"], snapshot(r))
                      for r in OPEN_TASK],
-        "trouble": [N.trouble(r["answered"], snapshot(r)) for r in TROUBLE],
+        "trouble": [N.trouble(r["answered"], snapshot(r), r["unknown"] and N.unknown_note(
+            N.settings_unknown(r["unknown"]))) for r in TROUBLE],
         "listing": [listing(r) for r in LISTING],
         "times": [N.local_times(sentence) for sentence in TIMES],
     }
@@ -285,7 +308,8 @@ def _differing(rows: list, swift: list, python: list) -> list:
 
 
 @pytest.mark.parametrize("member, rows", [
-    ("hours", HOURS), ("pools", REMOTES), ("rules", RULES), ("kinds", KINDS),
+    ("hours", HOURS), ("pools", REMOTES), ("hostedPools", HOSTED_REMOTES),
+    ("rules", RULES), ("kinds", KINDS),
     ("offers", OFFERS), ("openTask", OPEN_TASK), ("trouble", TROUBLE),
     ("notTaking", NOT_TAKING), ("listing", LISTING), ("times", TIMES)])
 def test_the_twins_agree(twins, member, rows):
@@ -297,6 +321,14 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
     """Agreement on a fixture that only ever reaches the defaults proves nothing."""
     _, python = twins
     assert len(HOURS) == 75 and len(REMOTES) == 72
+    hosted = dict(zip(HOSTED_REMOTES, python["hostedPools"]))
+    assert hosted["git@ssh.git.example.org:o/r.git"] == "git.example.org/o/r", "an ssh_host"
+    assert hosted["https://git.example.org/o/r.git"] == "git.example.org/o/r"
+    assert dict(zip(REMOTES, python["pools"]))["https://git.example.org/o/r.git"] is None
+    assert hosted["https://code.acme.example:8443/p/api.git"] == "code.acme.example/p/api"
+    assert hosted["https://other.example.org/o/r.git"] is None
+    assert hosted["https://github.com/o/r"] == POOL, "GitHub, whatever glab lists"
+    assert len(set(python["hostedPools"])) > len(set(python["pools"])) + 3
     assert {12, 13, 14, 24, 25, 36, 48, 101, 720} <= set(python["hours"])
     pools = set(python["pools"])
     assert {None, POOL, "github.com/owner/repo", "gitlab.com/group/sub/r", LAB} <= pools
@@ -304,7 +336,11 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
                                     "audit", "investigate"}
     assert {None, "t-open", "t-issue", "t-lab", f"{WIDGETS}#review:pr-1@ra",
             f"{WIDGETS}#review:pr-1@rs", f"{WIDGETS}#review:pr-1@rl"} == set(python["openTask"])
-    assert "" in python["trouble"] and len(set(python["trouble"])) >= 6
+    assert "" in python["trouble"] and len(set(python["trouble"])) >= 7
+    assert python["trouble"].count(
+        "Diplomacy Network: /home/u/.diplomat/config.json cannot be read as settings: "
+        "until it can be, this machine's pools stay as the daemon has them and nothing "
+        "is offered") == len(TROUBLE) // 2
     assert any(row["unconfirmed"] for row in python["listing"])
     assert any(len(row["pools"]) >= 3 for row in python["listing"])
     assert python["rules"].count(False) >= 10 and python["rules"].count(True) >= 15
@@ -331,4 +367,36 @@ def test_a_time_the_daemon_wrote_reads_by_this_machines_clock_on_both(kolkata):
     swift = json.loads(proc.stdout)["times"]
     assert swift == [N.local_times(sentence) for sentence in TIMES]
     assert swift[:3] == [LEFT + "16:00", LEFT + "00:15", "from 05:30 to 06:30, twice"]
-    assert swift[-1] == "16:0016:01" and swift[3:-1] == TIMES[3:-1]
+    plain = len(TIMES) - len(EDGE)
+    assert swift[plain - 1] == "16:0016:01" and swift[3:plain - 1] == TIMES[3:plain - 1]
+    assert swift[plain:] == ["until 05:29", "until 05:29", "until 05:53", EDGE[3]]
+
+
+@pytest.fixture(scope="module")
+def daemon_answers() -> dict:
+    """The daemon's own ``githubApi`` and ``hoursOf`` over the fixture's hosts and
+    hours, each value as its JSON reaches them from the config."""
+    node, src = shutil.which("node"), Path(__file__).resolve().parents[3] / "diplomacy-network" / "src"
+    if node is None:
+        pytest.skip("node is not on PATH: the daemon's own functions are not run")
+    if not (src / "requester" / "rules.js").is_file():
+        pytest.skip(f"the daemon package is not at {src.parent}")
+    script = (
+        "import { readFileSync } from 'node:fs';\n"
+        f"import {{ githubApi }} from {json.dumps((src / 'requester' / 'rules.js').as_uri())};\n"
+        f"import {{ hoursOf }} from {json.dumps((src / 'node' / 'gossip.js').as_uri())};\n"
+        "const asked = JSON.parse(readFileSync(0, 'utf8'));\n"
+        "console.log(JSON.stringify({ rules: asked.rules.map((host) => githubApi(host) !== null),"
+        " hours: asked.hours.map(hoursOf) }));\n")
+    proc = subprocess.run([node, "--input-type=module", "-e", script],
+                          input=json.dumps({"rules": RULES, "hours": HOURS}).encode("utf-8"),
+                          capture_output=True, timeout=60, check=False)
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("member, rows", [("rules", RULES), ("hours", HOURS)])
+def test_each_twin_answers_as_the_daemons_own_function_does(twins, daemon_answers, member, rows):
+    swift, python = twins
+    assert _differing(rows, daemon_answers[member], python[member]) == []
+    assert _differing(rows, daemon_answers[member], swift[member]) == []

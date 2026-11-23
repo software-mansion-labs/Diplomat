@@ -153,7 +153,13 @@ enum NetworkTest {
             4004: ["python3", "-c", "run('-m szpontnet')"],
             4005: ["python3", "-m", "szpontnet"],
             4006: ["/bin/zsh", "-c", "python3 -m szpontnet"],
+            4007: ["python3", "-m", "szpontnet"],
             own: ["python3", "-m", "szpontnet"],
+            // No pid a process can have, whatever answers for it.
+            0: ["python3", "-m", "szpontnet"], -1: ["python3", "-m", "szpontnet"],
+            7: ["python3", "-m", "szpontnet"],
+            2_147_483_648: ["python3", "-m", "szpontnet"],
+            4_294_967_296: ["python3", "-m", "szpontnet"],
         ]
         let ended = Calls<Int>()
         let (realArguments, realTerminate) = (DiplomacyNetwork.argumentsOf, DiplomacyNetwork.terminate)
@@ -190,6 +196,10 @@ enum NetworkTest {
             "{\"pid\": 4002}", "{\"pid\": 4003}", "{\"pid\": 4004}", "{\"pid\": 4006}",
             "{\"pid\": \(own)}", "{\"pid\": 4999}", "{\"pid\": \"4001\"}", "{\"pid\": 4001.0}",
             "{\"pid\": true}", "[4001]", "{ not json", nil,
+            "{\"pid\": 0}", "{\"pid\": -1}", "{\"pid\": 1.0}", "{\"pid\": \"7\"}",
+            "{\"pid\": [1]}", "{\"pid\": 2147483648}", "{\"pid\": 4294967296}",
+            "{\"pid\": 99999999999999999999999}",
+            "{\"pid\": \(4_294_967_296 + 4001)}",  // 4001, cut to 32 bits
         ]
         for state in noNode {
             meshNames(state)
@@ -201,6 +211,14 @@ enum NetworkTest {
                     && Array(feedDetails(NetworkAudit.stop).dropFirst(before))
                         == ["Removed \(meshDir.path), the retired mesh's state and keys"])
         }
+        DiplomacyNetwork.argumentsOf = realArguments
+        for state in ["{\"pid\": 2147483648}", "{\"pid\": 4294967296}"] {
+            meshNames(state)
+            await store.retireLegacyMeshNode()
+            check("…nor is the kernel asked of a pid it has no type for (\(state))",
+                  ended.all.isEmpty && !meshThere())
+        }
+        DiplomacyNetwork.argumentsOf = quits
         meshNames("{\"pid\": 4001}")
         var stopsSaid = feedDetails(NetworkAudit.stop).count
         await store.retireLegacyMeshNode()
@@ -235,6 +253,31 @@ enum NetworkTest {
         check("once it has quit, the directory goes",
               !meshThere() && feedDetails(NetworkAudit.stop).last
                 == "Removed \(meshDir.path), the retired mesh's state and keys")
+        //    A directory that is a link loses the link: what it leads to is not
+        //    Diplomat's to delete, and the feed says which of the two went.
+        let behind = scratch.appendingPathComponent("mesh-elsewhere")
+        DiplomacyNetwork.terminate = { ended.add($0); return true }
+        for (pid, node, signalled) in [
+            (4002, "Removed", [4001, 4005]),
+            (4007, "Ended the retired mesh node (pid 4007) and removed", [4001, 4005, 4007]),
+        ] {
+            try? FileManager.default.createDirectory(at: behind, withIntermediateDirectories: true)
+            try? Data("secret".utf8).write(to: behind.appendingPathComponent("device.key"))
+            try? Data("{\"pid\": \(pid)}".utf8).write(to: behind.appendingPathComponent("state.json"))
+            try? FileManager.default.createSymbolicLink(at: meshDir, withDestinationURL: behind)
+            stopsSaid = feedDetails(NetworkAudit.stop).count
+            await store.retireLegacyMeshNode()
+            await store.retireLegacyMeshNode()
+            check("a directory that is a link loses the link and keeps what it leads to (pid \(pid))",
+                  ended.all == signalled
+                    && (try? FileManager.default.destinationOfSymbolicLink(atPath: meshDir.path)) == nil
+                    && (try? Data(contentsOf: behind.appendingPathComponent("device.key")))
+                        == Data("secret".utf8)
+                    && Array(feedDetails(NetworkAudit.stop).dropFirst(stopsSaid))
+                        == ["\(node) the link \(meshDir.path): what it leads to, the retired "
+                            + "mesh's state and keys, is left as it is"])
+        }
+        try? FileManager.default.removeItem(at: behind)
         DiplomacyNetwork.legacyStateDir = nil
         DiplomacyNetwork.legacyExitWait = realExitWait
         DiplomacyNetwork.argumentsOf = realArguments
@@ -2003,7 +2046,13 @@ enum NetworkTest {
         func unreadableNotes() -> Int {
             feedDetails("warn").filter { $0 == AppConfig.unreadableNote }.count
         }
+        script.refuse(NetworkRoute.offer, (500, "boom"))
+        _ = await store.dispatchAgent(job(90381), source: .panel)
+        script.refuse(NetworkRoute.offer, nil)
+        let offeredBeforeSpell = requests(NetworkRoute.offer).count
         try? configWhole.dropLast(3).write(to: AppConfig.url)
+        script.set(snapshot(offers: [offerRow("task-cfg", "pooled"),
+                                     offerRow("task-cfg-held", "pooled", item: item(90381))]))
         await store.runNetworkCycleOnce()
         await store.settleAgents()
         check("one brace short, the config says nothing: the switch stays on",
@@ -2011,8 +2060,20 @@ enum NetworkTest {
         check("…nothing is withdrawn and the run stays booked",
               requests(NetworkRoute.withdraw).count == configWithdrawn
                 && booked("task-cfg") != nil)
+        check("…and an offer the daemon had not answered is settled against what it holds",
+              offering() == [] && booked("task-cfg-held")?.prNumber == 90381
+                && requests(NetworkRoute.offer).count == offeredBeforeSpell)
         await store.runNetworkCycleOnce()
         check("…and the feed says so once for the spell", unreadableNotes() == 1)
+        let unknown = NetworkSettings.unknown(path: AppConfig.url.path)
+        let saidInSpell = [NetworkRoute.pools, NetworkRoute.admit].map { requests($0).count }
+        await store.runNetworkCycleOnce(now: Date().timeIntervalSince1970 + 120)
+        check("…the cap is not said again as a default would have it",
+              [NetworkRoute.pools, NetworkRoute.admit].map { requests($0).count } == saidInSpell)
+        await screenSettles { screenShows(NetworkSettings.unknownNote(unknown)) }
+        check("…and the panel and the Network screen say that the settings cannot be read",
+              store.networkTrouble == "Diplomacy Network: \(unknown)"
+                && screenShows(NetworkSettings.unknownNote(unknown)))
         let limit = store.autoTaskLimit
         store.networkDevices.toggle()
         check("no setting is saved over a file that cannot be read",
@@ -2045,6 +2106,175 @@ enum NetworkTest {
         try? FileManager.default.removeItem(at: AppConfig.url)
         check("…and no file is no setting, which a write may follow",
               !AppConfig.unreadable && AppConfig.setInt(AppConfig.autoTaskLimitKey, limit))
+        check("…and the settings are known again",
+              store.networkTrouble == nil && !screenShows(NetworkSettings.unknownNote(unknown)))
+
+        // 44. The switch is on record beside the config as each reading had it: a
+        //     Diplomat that starts while the config cannot be read takes that for the
+        //     switch, starts no agent in a terminal and takes no offer back.
+        let switchRecord = AppConfig.url.deletingLastPathComponent()
+            .appendingPathComponent("network-switch.json")
+        func isRecorded(_ on: Bool) -> Bool {
+            let record = (try? Data(contentsOf: switchRecord))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+            return record?.count == 2 && record?["config"] as? String == AppConfig.url.path
+                && record?[NetworkSettings.enabledKey] as? Bool == on
+        }
+        check("a switch that went off is on record as off", isRecorded(false))
+        let linked = scratch.appendingPathComponent("linked").path
+        git("init", "-q", linked)
+        git("-C", linked, "remote", "add", "origin", "https://github.com/o/linked.git")
+        let linkedPool: [String: Any] = [
+            "id": "github.com/o/linked", "path": linked, "identity": "latekvo", "hash": "h",
+            "members": [[String: Any]](), "tasks": [[String: Any]]()]
+        if daemon == nil { startDaemon() }
+        script.set(snapshot(offers: [offerRow("task-launch", "pooled")], more: [linkedPool]))
+        check("the linked root is saved", AppConfig.setRepoRoots([linked]))
+        storeRaw(NetworkSettings.enabledKey, true)
+        storeRaw(AppConfig.autoTaskLimitKey, 5)
+        await store.runNetworkCycleOnce()
+        await store.networkLifecycle?.value
+        check("the switch a reading of the config had is on record beside it",
+              store.networkEnabled && isRecorded(true))
+        bookByHand(90400, task: "task-launch")
+        let launchWhole = (try? Data(contentsOf: AppConfig.url)) ?? Data()
+        try? launchWhole.dropLast(3).write(to: AppConfig.url)
+
+        let fresh = Store()
+        fresh.writesConfig = true
+        fresh.me = "latekvo"
+        fresh.reviewRequestsEnabled = true
+        fresh.queueAutoRun = true
+        func saidOf() -> [Int] {
+            [NetworkRoute.pools, NetworkRoute.admit, NetworkRoute.offer, NetworkRoute.withdraw]
+                .map { requests($0).count }
+        }
+        let (saidAtLaunch, terminalsAtLaunch, notesAtLaunch) = (
+            saidOf(), AgentSpawner.refusedTerminals, unreadableNotes())
+        check("a Diplomat that starts on a config it cannot read keeps the switch last read",
+              AppConfig.unreadable && fresh.networkEnabled)
+        await fresh.runNetworkCycleOnce()
+        await fresh.settleAgents()
+        await fresh.refreshRoots()
+        await fresh.runNetworkCycleOnce(now: Date().timeIntervalSince1970 + 120)
+        let heldJobs = [await fresh.dispatchAgent(job(90401), source: .auto),
+                    await fresh.dispatchAgent(job(90402), source: .auto, forced: true),
+                    await fresh.dispatchAgent(job(90403), source: .panel)]
+        fresh.commitQueue()
+        var launchThrown: Error?
+        do {
+            _ = try await fresh.spawnTracked(kind: "review", label: "x", prURL: nil,
+                                             prNumber: nil, prompt: "", source: "panel",
+                                             terminal: fresh.terminal)
+        } catch { launchThrown = error }
+        check("…nothing is withdrawn or retired, and nothing a setting decides is said",
+              saidOf() == saidAtLaunch && booked("task-launch") != nil
+                && fresh.networkAnswered == true)
+        check("…no agent starts in a terminal, and each job is answered with why",
+              AgentSpawner.refusedTerminals == terminalsAtLaunch
+                && heldJobs == Array(repeating: .networkDown(unknown), count: 3)
+                && (launchThrown as? AgentSpawner.SpawnError).map {
+                    if case .network = $0 { return true } else { return false }
+                } == true)
+        check("…the queue has no room to drain into",
+              !fresh.queuedTasks.isEmpty && !fresh.drainHasRoom(capLoad: 0))
+        check("…and the panel and the feed say why",
+              fresh.networkTrouble == "Diplomacy Network: \(unknown)"
+                && unreadableNotes() == notesAtLaunch + 1)
+        fresh.networkEnabled = false
+        check("…a toggle writes nothing over the file and moves nothing",
+              fresh.networkEnabled && isRecorded(true)
+                && (try? Data(contentsOf: AppConfig.url)) == launchWhole.dropLast(3))
+
+        // 45. Read again, the roots are the config's own and not the default root's:
+        //     the pools list is said from them, through the real reading of the roots.
+        func linkedPosted() -> Bool {
+            requests(NetworkRoute.pools).last?["pools"] as? [[String: String]]
+                == [["id": "github.com/o/linked", "path": linked, "forge": "github",
+                     "identity": "latekvo"]]
+        }
+        try? launchWhole.write(to: AppConfig.url)
+        await fresh.runNetworkCycleOnce()
+        check("once the config reads, the pools of its own roots are said, and the cap",
+              saidOf()[0] == saidAtLaunch[0] + 1 && saidOf()[1] == saidAtLaunch[1] + 1
+                && linkedPosted() && fresh.networkTrouble == nil
+                && fresh.drainHasRoom(capLoad: 0))
+        check("…the cap being the file's and not a default's, as the roots Settings shows are",
+              fresh.autoTaskLimit == 5 && fresh.repoRootPaths == [linked]
+                && requests(NetworkRoute.admit).last?["slots"] as? Int == 5)
+        //     One that breaks while Diplomat runs: the roots read meanwhile are the
+        //     default root's, and no list of them is posted - on the timer, with the
+        //     screen open, or after a restart of the daemon.
+        let saidWhileRead = saidOf()
+        func linkedLeft() -> Int {
+            feedDetails(NetworkAudit.leave).filter { $0.contains("o/linked") }.count
+        }
+        let leftWhileRead = linkedLeft()
+        try? launchWhole.dropLast(3).write(to: AppConfig.url)
+        fresh.autoTaskLimit = 9
+        fresh.repoRootPaths = ["/elsewhere"]
+        check("a cap and a root typed meanwhile are not saved, and each keeps what was last read",
+              fresh.autoTaskLimit == 5 && fresh.repoRootPaths == [linked] && fresh.configSaveFailed
+                && (try? Data(contentsOf: AppConfig.url)) == launchWhole.dropLast(3))
+        await fresh.refreshRoots()
+        await fresh.runNetworkCycleOnce()
+        await fresh.runNetworkCycleOnce(now: Date().timeIntervalSince1970 + 120)
+        daemonPid += 1
+        script.set(snapshot(offers: [offerRow("task-launch", "pooled")], more: [linkedPool]))
+        let restartsBefore = installer.all.filter { $0 == "--restart-daemon" }.count
+        await fresh.startNetworkDaemon(restart: true)
+        check("while the roots cannot be read no list of pools is posted, to a daemon "
+                + "restarted since either",
+              saidOf() == saidWhileRead && fresh.networkEnabled
+                && installer.all.filter { $0 == "--restart-daemon" }.count == restartsBefore + 1
+                && linkedLeft() == leftWhileRead)
+        //     One that breaks while the roots are read, by the git that reads them.
+        let breaker = scratch.appendingPathComponent("git-breaks-config")
+        try? Data("#!/bin/sh\nprintf '{' > '\(AppConfig.url.path)'\nexec \(realGit.path) \"$@\"\n".utf8)
+            .write(to: breaker)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                               ofItemAtPath: breaker.path)
+        try? launchWhole.write(to: AppConfig.url)
+        LocalRepos.gitCall = (breaker.path, realGit.timeout)
+        await fresh.runNetworkCycleOnce(now: Date().timeIntervalSince1970 + 240)
+        LocalRepos.gitCall = realGit
+        check("a config that breaks while the roots are read is no list either, and no cap",
+              AppConfig.unreadable && saidOf() == saidWhileRead)
+        try? launchWhole.write(to: AppConfig.url)
+        await fresh.runNetworkCycleOnce()
+        check("…and read again, the list the daemon is told is the config's own",
+              saidOf()[0] == saidWhileRead[0] + 1 && linkedPosted()
+                && requests(NetworkRoute.admit).last?["slots"] as? Int == 5
+                && linkedLeft() == leftWhileRead)
+
+        // 46. With no switch on record a config that cannot be read is no network at
+        //     all: a job starts in a terminal, and the daemon is asked nothing.
+        fresh.networkEnabled = false
+        await fresh.networkLifecycle?.value
+        check("switched off, the record says so", isRecorded(false))
+        try? FileManager.default.removeItem(at: switchRecord)
+        storeRaw(NetworkSettings.enabledKey, true)
+        try? launchWhole.dropLast(3).write(to: AppConfig.url)
+        let cold = Store()
+        cold.writesConfig = true
+        func heard() -> Int { (earlier + (daemon?.requests ?? [])).count }
+        let (heardCold, terminalsCold) = (heard(), AgentSpawner.refusedTerminals)
+        await cold.runNetworkCycleOnce()
+        let coldRun = await cold.dispatchAgent(job(90410), source: .panel)
+        check("with no switch on record a broken config holds no work back",
+              !cold.networkEnabled && cold.networkTrouble == nil && heard() == heardCold
+                && coldRun == .failed(AgentSpawner.SpawnError.headless.localizedDescription)
+                && AgentSpawner.refusedTerminals == terminalsCold + 1
+                && !FileManager.default.fileExists(atPath: switchRecord.path))
+        for text in ["{", "[true]", "{\"networkEnabled\": 1, \"config\": \"\(AppConfig.url.path)\"}",
+                     "{\"networkEnabled\": true, \"config\": \"/elsewhere/config.json\"}",
+                     "{\"networkEnabled\": true}"] {
+            try? Data(text.utf8).write(to: switchRecord)
+            check("a record that is none, or another config's, says nothing (\(text))",
+                  !Store().networkEnabled)
+        }
+        try? FileManager.default.removeItem(at: switchRecord)
+        try? FileManager.default.removeItem(at: AppConfig.url)
 
         print(pass ? "NETWORK TEST OK" : "NETWORK TEST FAILED")
         return pass

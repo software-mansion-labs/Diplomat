@@ -1603,9 +1603,10 @@ class Store(QObject):
 
     def _drain_has_room(self, load: int) -> bool:
         # With the network on the room is the pool's, which has it whenever its daemon
-        # answers.
-        room = (self.network_answered is not False if diplomacynetwork.enabled()
-                else load < self.auto_task_limit)
+        # answers and the settings can be read.
+        room = (self.network_answered is not False
+                and not diplomacynetwork.settings_unknown()
+                if diplomacynetwork.enabled() else load < self.auto_task_limit)
         return room and bool(self.drainable_tasks)
 
     def _autofix_poll_once(self) -> None:
@@ -2606,7 +2607,14 @@ class Store(QObject):
         While the daemon is known not to answer (:attr:`network_answered`) automatic
         work is not offered at all: each offer would wait out its timeout, and it is
         the network cycle that finds the daemon back. What the operator starts asks.
+
+        While the config cannot be read (:func:`diplomacynetwork.settings_unknown`)
+        nothing is offered, whoever started it: the job and the pool it would go into
+        come of settings that each read as a default.
         """
+        unknown = diplomacynetwork.settings_unknown()
+        if unknown:
+            return self._network_refused(job, source, attempt, unknown)
         repo_key, number = self._offer_target(job)
         offer = network.offer_for(
             job.audit_action, job.own_pr, number, repo_key, job.label, job.prompt,
@@ -3684,12 +3692,16 @@ class Store(QObject):
 
     def _note_unreadable_config(self) -> None:
         """Say once per spell that the shared config cannot be read: every setting
-        reads as its default meanwhile, and the switch as it was last read."""
+        reads as its default meanwhile, and the switch as it was last read. The panel
+        and the Network screen say so while it lasts, and are redrawn as it turns."""
         unreadable = appconfig.read_known() is None
-        if unreadable and not self._config_unreadable_logged:
+        if unreadable == self._config_unreadable_logged:
+            return
+        self._config_unreadable_logged = unreadable
+        if unreadable:
             activity.log("auto", "warn", appconfig.unreadable_note())
             self.refresh_activity()
-        self._config_unreadable_logged = unreadable
+        self.network_changed.emit()
 
     def _note_silent_probes(self) -> None:
         """Say out loud when a probe has stopped answering.
@@ -5783,6 +5795,12 @@ class Store(QObject):
         return diplomacynetwork.enabled()
 
     @property
+    def network_trouble(self) -> str:
+        """The panel's line on what of the network does not work (:func:`network.trouble`)."""
+        return network.trouble(self.network_answered, self.network_state,
+                               diplomacynetwork.settings_unknown())
+
+    @property
     def network_busy(self) -> bool:
         return self._network_lifecycle.locked()
 
@@ -5884,9 +5902,9 @@ class Store(QObject):
         """End the mesh node an earlier Diplomat left running and remove its
         directory, whatever the switch says."""
         def work() -> None:
-            asked, removed = diplomacynetwork.retire_legacy_node()
+            asked, removed, link = diplomacynetwork.retire_legacy_node()
             line = diplomacynetwork.legacy_retired_line(
-                asked, removed, diplomacynetwork.legacy_dir())
+                asked, removed, link, diplomacynetwork.legacy_dir())
             if line:
                 activity.log(autofix.SOURCE_AUTO, network.AUDIT_STOP, line)
                 self.refresh_activity()
@@ -5909,7 +5927,10 @@ class Store(QObject):
         """One round with the daemon while the switch is on: read its snapshot, start
         it when it is silent, and tell it which pools this machine is in and how many
         more tasks it takes. ``pools`` is said when it changed and ``admit`` also once
-        a minute; a daemon that started since is told both again."""
+        a minute; a daemon that started since is told both again. Neither is said
+        while the config cannot be read (:func:`diplomacynetwork.settings_unknown`):
+        the roots and the cap would be defaults, and the daemon closes each pool a
+        list omits."""
         if not diplomacynetwork.enabled():
             return
         snapshot = diplomacynetwork.state()
@@ -5925,7 +5946,15 @@ class Store(QObject):
         memo = self._network_memo
         memo.start_after = memo.start_delay = 0.0
         memo.start_failure_logged = False
+        if diplomacynetwork.settings_unknown():
+            self._settle_offering(snapshot)
+            return
         pools, unconfirmed = self._network_pools(now, snapshot)
+        admit = self._network_admit(snapshot)
+        # Both were read between two looks at the config: one that broke meanwhile
+        # leaves a list of the default root's.
+        if diplomacynetwork.settings_unknown():
+            return
         if pools == memo.pools:
             memo.pools_refused, memo.pools_refusal = None, ""
         elif (pools != memo.pools_refused
@@ -5945,7 +5974,6 @@ class Store(QObject):
         if held != self.network_pools_held:
             self.network_pools_held = held
             self.network_changed.emit()
-        admit = self._network_admit(snapshot)
         if admit != memo.admit or now - memo.admit_at >= self.NETWORK_ADMIT_EVERY:
             if diplomacynetwork.refusal(diplomacynetwork.send(
                     network.ROUTE_ADMIT, admit.body)) is None:

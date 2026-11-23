@@ -74,7 +74,25 @@ def seeded(monkeypatch):
 ])
 def test_each_render_seeds_what_the_panel_says_of_the_network(seeded, mode, line):
     store = seeded(mode)
-    assert network.trouble(store.network_answered, store.network_state) == line
+    assert store.network_trouble == line
+
+
+def test_the_screen_says_that_the_settings_cannot_be_read(screen):
+    view = screen(RICH)
+    assert view._unknown.isHidden()
+    appconfig.path().write_text("{", encoding="utf-8")
+    view.rebuild()
+    assert not view._unknown.isHidden() and view._unknown.text() == (
+        f"{appconfig.path()} cannot be read as settings: until it can be, this "
+        "machine's pools stay as the daemon has them and nothing is offered")
+    appconfig.path().unlink()
+    view.rebuild()
+    assert view._unknown.isHidden()
+
+    off = screen(OFF)
+    appconfig.path().write_text("{", encoding="utf-8")
+    off.rebuild()
+    assert off._unknown.isHidden(), "with the switch off there is nothing to hold"
 
 
 def test_the_unsaved_render_seeds_hours_that_say_so(screen):

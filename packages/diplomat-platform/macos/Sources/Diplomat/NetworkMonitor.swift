@@ -113,8 +113,9 @@ extension Store {
     /// whatever the switch says.
     func retireLegacyMeshNode() async {
         let line = await Task.detached(priority: .utility) {
-            let (asked, removed) = DiplomacyNetwork.retireLegacyMeshNode()
-            return DiplomacyNetwork.legacyRetiredLine(asked: asked, removed: removed)
+            let retired = DiplomacyNetwork.retireLegacyMeshNode()
+            return DiplomacyNetwork.legacyRetiredLine(
+                asked: retired.asked, removed: retired.removed, link: retired.link)
         }.value
         guard let line else { return }
         AuditLog.log("auto", NetworkAudit.stop, line)
@@ -126,7 +127,9 @@ extension Store {
     /// One round with the daemon while the switch is on: read its snapshot, start it when
     /// it is silent, and tell it which pools this machine is in and how many more tasks
     /// it takes. `pools` is said when it changed and `admit` also once a minute; a
-    /// daemon that started since is told both again.
+    /// daemon that started since is told both again. Neither is said while the config
+    /// cannot be read (`networkSettingsUnknown`): the roots and the cap would be
+    /// defaults, and the daemon closes each pool a list omits.
     func runNetworkCycleOnce(now: TimeInterval = Date().timeIntervalSince1970) async {
         rereadNetworkSettings()
         guard networkEnabled, !networkCycle.running else { return }
@@ -146,6 +149,11 @@ extension Store {
         networkCycle.startDelay = 0
         networkCycle.startAfter = 0
         networkCycle.startFailureLogged = false
+        guard networkSettingsUnknown.isEmpty else {
+            await settleOffering(snapshot)
+            return
+        }
+        if rootsReadBlind { await refreshRoots() }
         await postNetworkPools(snapshot, now: now)
         await postNetworkAdmit(snapshot, now: now)
         await settleOffering(snapshot)
@@ -171,6 +179,7 @@ extension Store {
     /// may have gained a remote.
     private func postNetworkPools(_ snapshot: NetworkSnapshot, now: TimeInterval) async {
         await rereadLocalRepos()
+        guard !rootsReadBlind else { return }
         let listing = networkPools(known: snapshot.pools)
         if !listing.unconfirmed.isEmpty,
            now - networkCycle.identitiesAskedAt >= NetworkCycle.admitEvery {
@@ -222,8 +231,10 @@ extension Store {
                 affordable: !AutoBudget.enabled || AutoBudget.decide().affordable,
                 autoRun: autoRun)
         }.value
+        // The budget's knobs were read for it: from defaults, had the config broken.
         guard answer != networkCycle.admit
-                || now - networkCycle.admitAt >= NetworkCycle.admitEvery else { return }
+                || now - networkCycle.admitAt >= NetworkCycle.admitEvery,
+              !AppConfig.unreadable else { return }
         let body = answer.body
         let reply = await Task.detached(priority: .utility) {
             DiplomacyNetwork.post(NetworkRoute.admit, body)
