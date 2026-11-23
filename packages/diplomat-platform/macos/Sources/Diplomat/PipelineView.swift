@@ -53,7 +53,7 @@ struct PipelineView: View {
                         .frame(width: PipelineView.detailWidth, alignment: .topLeading)
                 }
             } else {
-                Text(emptyText)
+                Text(PipelineView.emptyText(enabled: store.pipelineEnabled, synced: result != nil))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .cardChrome(padding: 6)
@@ -65,12 +65,15 @@ struct PipelineView: View {
         .task { await store.loadPipelineLast() }
     }
 
-    private var emptyText: String {
-        store.pipelineEnabled
-            ? "Nothing read yet: the first sync lists every open issue and PR of the GitHub roots "
-                + "and the tracked Linear teams here."
-            : "The pipeline is off. Switched on in Settings, it rates every open issue and PR, "
+    /// What stands in for the graph while there is none to draw.
+    static func emptyText(enabled: Bool, synced: Bool) -> String {
+        if !enabled {
+            return "The pipeline is off. Switched on in Settings, it rates every open issue and PR, "
                 + "sends the low-risk, low-complexity ones down the fast track and shows them here."
+        }
+        return synced ? "The last sync found no open issue or PR."
+            : "Nothing read yet: the first sync lists every open issue and PR of the GitHub roots "
+                + "and the tracked Linear teams here."
     }
 
     // MARK: - Header and status
@@ -111,7 +114,7 @@ struct PipelineView: View {
     }
 
     private func statusText(_ result: PipelineTickResult?) -> String {
-        let last = result.map { "last sync \(Fmt.clock($0.at))" } ?? "not synced yet"
+        let last = result.map { "last sync \(PipelineTint.syncTime($0.at))" } ?? "not synced yet"
         guard store.pipelineEnabled else { return "Off: switch the pipeline on in Settings · \(last)" }
         let roots = store.roots.filter { !$0.isGitLab }.count
         let teams = Store.pipelineTeams(store.pipelineLinearTeamsRaw).map(\.key)
@@ -158,10 +161,19 @@ struct PipelineView: View {
     static let lanes: [PipelineLane] = [.fast, .human, .unrated, .fractured, .done]
 
     /// A writable open issue not split yet: not `fractured`, with no child, and no PR
-    /// fixing it (`fixing`). Twin of `pipelineview.can_fracture`.
-    static func canFracture(_ item: PipelineItem, edges: [PipelineGraph.Edge]) -> Bool {
-        item.kind == .issue && item.writable && [.unrated, .human, .candidate].contains(item.stage)
+    /// fixing it (`fixing`), whose code a sync can read (`rooted`, `Store.pipelineRooted`).
+    /// Twin of `pipelineview.can_fracture`.
+    static func canFracture(_ item: PipelineItem, edges: [PipelineGraph.Edge], rooted: Bool) -> Bool {
+        item.kind == .issue && item.writable && rooted && [.unrated, .human, .candidate].contains(item.stage)
             && !edges.contains { $0.kind == .child && $0.from == item.id }
+    }
+
+    /// An open item a sync rates when asked: a PR only when it is `me`'s, an issue only
+    /// when its code can be read (`rooted`). Twin of `pipelineview.can_rate`.
+    static func canRate(_ item: PipelineItem, me: String, rooted: Bool) -> Bool {
+        guard item.state == "open" || item.state == "draft" else { return false }
+        if item.kind == .pr { return !me.isEmpty && item.author?.lowercased() == me.lowercased() }
+        return rooted
     }
 
     /// A candidate issue: low/low, writable, no open PR fixing it.
@@ -233,14 +245,18 @@ struct PipelineView: View {
     @ViewBuilder
     private func detail(_ result: PipelineTickResult) -> some View {
         if let id = selected, let item = result.items.first(where: { $0.id == id }) {
+            let rooted = store.pipelineRooted(item)
             PipelineDetail(item: item,
                            events: result.events.filter { $0.item == id }.reversed(),
                            badge: store.pipelineBadges[Store.pipelineIdentity(item.id)],
                            enabled: store.pipelineEnabled,
                            forcedRate: store.pipelineForce.rate.contains(id),
                            forcedFracture: store.pipelineForce.fracture.contains(id),
-                           canFracture: PipelineView.canFracture(item, edges: result.graph.edges),
+                           canRate: PipelineView.canRate(item, me: store.effectiveMe, rooted: rooted),
+                           canFracture: PipelineView.canFracture(item, edges: result.graph.edges,
+                                                                 rooted: rooted),
                            canStartFix: store.pipelineFixEffect(for: item) != nil,
+                           fixUnknown: store.pipelineFixUnknown(item),
                            error: actionError,
                            rate: { store.forcePipeline(rate: id) },
                            fracture: { store.forcePipeline(fracture: id) },
@@ -536,9 +552,12 @@ private struct PipelineDetail: View {
     let enabled: Bool
     let forcedRate: Bool
     let forcedFracture: Bool
+    let canRate: Bool
     let canFracture: Bool
     /// The fix effect is known: a Linear issue's text comes only with a sync's.
     let canStartFix: Bool
+    /// Why it is not (`Store.pipelineFixUnknown`).
+    let fixUnknown: String
     let error: String?
     let rate: () -> Void
     let fracture: () -> Void
@@ -580,6 +599,8 @@ private struct PipelineDetail: View {
             }
             section("WHO MAY ACT") {
                 Text(PipelineTint.access(item)).font(.system(size: 10.5))
+                    .fixedSize(horizontal: false, vertical: true)
+                Text(PipelineTint.people(item)).font(.system(size: 10)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 if let head = item.headSha {
                     Text(headLine(head)).font(.system(size: 10, design: .monospaced))
@@ -643,7 +664,7 @@ private struct PipelineDetail: View {
             FlowLayout(spacing: 4) {
                 PipelineActionChip(symbol: "arrow.up.right.square", text: "Open", tint: .accentColor,
                                    action: open)
-                if item.lane != .done {
+                if canRate {
                     PipelineActionChip(symbol: "gauge.with.needle",
                                        text: forcedRate ? "Rate asked" : "Rate now",
                                        tint: .accentColor, enabled: enabled && !forcedRate, action: rate)
@@ -659,8 +680,7 @@ private struct PipelineDetail: View {
                     PipelineActionChip(symbol: "wrench.and.screwdriver", text: "Start fix",
                                        tint: .green, enabled: enabled && canStartFix && badge == nil,
                                        action: startFix)
-                        .tooltip(canStartFix ? "Queue its fix now, past its retry backoff"
-                                 : "Diplomat has this Linear issue's text only while Open fix PRs is on")
+                        .tooltip(canStartFix ? "Queue its fix now, past its retry backoff" : fixUnknown)
                 }
             }
             if let error {
@@ -923,22 +943,34 @@ enum PipelineTint {
     }
 
     static func access(_ item: PipelineItem) -> String {
-        if item.writable {
-            return item.kind == .pr ? "Your PR: Diplomat labels it, reviews it and may merge it."
-                : "Diplomat labels it and may fix or split it."
-        }
-        if item.kind == .pr {
-            let by = item.author.map { " by @\($0)" } ?? ""
-            return "Read only: a PR\(by) that is not yours from this repo into its default branch."
-        }
-        let who = item.assignees.map { "@\($0)" }.joined(separator: ", ")
-        return "Read only: assigned to \(who.isEmpty ? "someone else" : who)."
+        guard item.writable else { return "Read only: Diplomat shows it and writes nothing to it." }
+        return item.kind == .pr ? "Your PR: Diplomat labels it, reviews it and may merge it."
+            : "Diplomat labels it and may fix or split it."
+    }
+
+    /// `By @bob · assigned to @carol`, a Linear name as it is. Twin of the Linux WHO line.
+    static func people(_ item: PipelineItem) -> String {
+        func who(_ name: String) -> String { item.source == .linear ? name : "@\(name)" }
+        var parts = item.author.flatMap { $0.isEmpty ? nil : ["by \(who($0))"] } ?? []
+        parts.append(item.assignees.isEmpty ? "unassigned"
+                     : "assigned to " + item.assignees.map(who).joined(separator: ", "))
+        let text = parts.joined(separator: " · ")
+        return text.prefix(1).uppercased() + text.dropFirst()
     }
 
     static func hover(_ item: PipelineItem) -> String {
         let source = item.source == .linear ? "Linear issue" : (item.kind == .pr ? "GitHub PR" : "GitHub issue")
         return ([item.title, "\(source) · \(item.stage.rawValue) · \(word(item.lane).lowercased()) lane",
                  item.hold, item.id] as [String?]).compactMap { $0 }.joined(separator: "\n")
+    }
+
+    /// The time today; with its date on any other day.
+    static func syncTime(_ date: Date, now: Date = Date()) -> String {
+        guard !Calendar.current.isDate(date, inSameDayAs: now) else { return Fmt.clock(date) }
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMM dd HH:mm"
+        return f.string(from: date)
     }
 
     /// `now`, `12m`, `5h`, `3d`.

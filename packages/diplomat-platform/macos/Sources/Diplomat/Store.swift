@@ -769,6 +769,7 @@ final class Store: ObservableObject {
     @Published var pipelineEnabled: Bool {
         didSet {
             persist(pipelineEnabled, forKey: Keys.pipelineEnabled)
+            writePipelineControl()
             pipelineSwitched(on: pipelineEnabled && !oldValue, master: true)
         }
     }
@@ -777,30 +778,35 @@ final class Store: ObservableObject {
     @Published var pipelineRate: Bool {
         didSet {
             persist(pipelineRate, forKey: Keys.pipelineRate)
+            writePipelineControl()
             pipelineSwitched(on: pipelineRate && !oldValue)
         }
     }
     @Published var pipelineFix: Bool {
         didSet {
             persist(pipelineFix, forKey: Keys.pipelineFix)
+            writePipelineControl()
             pipelineSwitched(on: pipelineFix && !oldValue)
         }
     }
     @Published var pipelineFastTrack: Bool {
         didSet {
             persist(pipelineFastTrack, forKey: Keys.pipelineFastTrack)
+            writePipelineControl()
             pipelineSwitched(on: pipelineFastTrack && !oldValue)
         }
     }
     @Published var pipelineMerge: Bool {
         didSet {
             persist(pipelineMerge, forKey: Keys.pipelineMerge)
+            writePipelineControl()
             pipelineSwitched(on: pipelineMerge && !oldValue)
         }
     }
     @Published var pipelineFracture: Bool {
         didSet {
             persist(pipelineFracture, forKey: Keys.pipelineFracture)
+            writePipelineControl()
             pipelineSwitched(on: pipelineFracture && !oldValue)
         }
     }
@@ -3639,8 +3645,9 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Drop one ask, by the queue key that is its identity.
-    private func forgetRequested(_ key: String) {
+    /// Drop one ask, by the queue key that is its identity. Not private: the pipeline
+    /// withdraws its own (`PipelineMonitor.swift`).
+    func forgetRequested(_ key: String) {
         requestedWork.removeAll { $0.key == key }
     }
 
