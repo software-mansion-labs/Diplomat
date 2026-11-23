@@ -246,7 +246,7 @@ enum SelfUpdate {
                     + standing())
             }
         }
-        if name == "Exits.app" { relaunchDiag(launched, name: name, requested: requested, lister: { lister(app) }) }
+        if name == "Exits.app" || ProcessInfo.processInfo.environment["DIAG_ALL"] != nil { relaunchDiag(launched, name: name, requested: requested, lister: { lister(app) }) }
     }
 
     // TEMP DIAG (issue #15)
@@ -267,6 +267,10 @@ enum SelfUpdate {
         let r = proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size)
         let comm = withUnsafeBytes(of: info.pbi_comm) { String(cString: $0.bindMemory(to: CChar.self).baseAddress!) }
         let st = Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec) + TimeInterval(info.pbi_start_tvusec) / 1e6)
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        var kp = kinfo_proc(); var ksz = MemoryLayout<kinfo_proc>.size
+        sysctl(&mib, 4, &kp, &ksz, nil, 0)
+        err("P_TRANSLATED=\(kp.kp_proc.p_flag & P_TRANSLATED != 0)")
         err("relaunch \(name) accepted pid \(pid); pidinfo=\(r) status=\(info.pbi_status) flags=\(String(info.pbi_flags, radix: 16)) ppid=\(info.pbi_ppid) comm=\(comm) startedAfterRequest=\(st.timeIntervalSince(requested)) now-request=\(Date().timeIntervalSince(requested)) listed=\(lister())")
         for a in NSRunningApplication.runningApplications(withBundleIdentifier: "com.ignacy.diplomat.relaunchtest.Exits") + NSWorkspace.shared.runningApplications.filter({ $0.processIdentifier == pid }) {
             err("app pid=\(a.processIdentifier) term=\(a.isTerminated) fin=\(a.isFinishedLaunching) url=\(a.bundleURL?.path ?? "nil") exe=\(a.executableURL?.path ?? "nil") launchDate=\(a.launchDate.map { "\($0.timeIntervalSince(requested))" } ?? "nil")")

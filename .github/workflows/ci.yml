@@ -25,29 +25,25 @@ jobs:
   # Xcode 16.0 is Swift 6.0, the oldest compiler a hosted macOS image still ships: one
   # older cannot read the image's SDK, so nothing here builds the app with Swift 5.x.
   diag-relaunch:
-    name: DIAG relaunch ${{ matrix.order }} ${{ matrix.n }}
+    name: DIAG relaunch ${{ matrix.variant }} ${{ matrix.n }}
     runs-on: macos-15
     strategy:
       fail-fast: false
       matrix:
-        order: [probe-first, selftest-first]
+        variant: [fixed, prefix]
         n: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - run: sudo xcode-select -s /Applications/Xcode_16.app
-      - run: swiftc -O .github/diag/probe.swift -o "$RUNNER_TEMP/probe" && mkdir -p "$RUNNER_TEMP/pb"
+      - name: pre-fix variant drops the plist key
+        if: matrix.variant == 'prefix'
+        run: sed -i '' '/LSArchitecturePriority/d' packages/diplomat-platform/macos/Sources/Diplomat/RelaunchTest.swift && ! grep -q LSArchitecturePriority packages/diplomat-platform/macos/Sources/Diplomat/RelaunchTest.swift
       - name: Build the macOS app
         working-directory: packages/diplomat-platform/macos
         run: swift build
       - name: cold
         working-directory: packages/diplomat-platform/macos
-        run: |
-          if [ "${{ matrix.order }}" = probe-first ]; then "$RUNNER_TEMP/probe" "$RUNNER_TEMP/pb"; else DIPLOMAT_RELAUNCH_TEST=1 swift run Diplomat || echo "::warning::cold selftest failed"; fi
-      - name: warm
-        working-directory: packages/diplomat-platform/macos
-        run: |
-          "$RUNNER_TEMP/probe" "$RUNNER_TEMP/pb"
-          DIPLOMAT_RELAUNCH_TEST=1 swift run Diplomat || echo "::warning::warm selftest failed"
+        run: DIPLOMAT_RELAUNCH_TEST=1 swift run Diplomat 2>&1 | grep -E "FAIL|ok    (a bundle|the failure|it runs)|relaunch: (all|FAILED)|DIAG (P_|relaunch|t\\+)"
 
   swift-macos:
     name: Swift (macOS) · build + core smoke
