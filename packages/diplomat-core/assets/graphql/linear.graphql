@@ -23,6 +23,22 @@ query Issues($teams: [String!], $after: String) {
   }
 }
 
+# One issue as it is now, by its id or its identifier: read right before Diplomat writes to
+# it, and for each issue a PR about to merge would close. ~60.
+query Issue($id: String!) {
+  issue(id: $id) {
+    id identifier title description url updatedAt
+    state { type }
+    assignee { id name }
+    creator { name }
+    labels(first: 20) { pageInfo { hasNextPage } nodes { id name } }
+    parent { url }
+    children(first: 10) { nodes { url } }
+    attachments(first: 10) { nodes { url } }
+    team { id key }
+  }
+}
+
 # The issues of any team an attachment links `url` (a PR) from, with their state: Linear
 # moves a linked issue when the PR merges.
 query Attached($url: String!) {

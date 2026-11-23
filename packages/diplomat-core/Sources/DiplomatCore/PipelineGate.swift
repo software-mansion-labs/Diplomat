@@ -171,6 +171,8 @@ public enum PipelineGate {
         public var closesUnwritable: [String]
         /// A check on the head ran, rather than every one being skipped.
         public var ciRan: Bool
+        /// It was ready for review before.
+        public var wasReady: Bool
 
         /// The fields after `ciState` default to what lets a PR merge.
         public init(state: String, author: String, isCrossRepository: Bool, baseRef: String,
@@ -179,7 +181,7 @@ public enum PipelineGate {
                     floor: PipelineRating, mergeable: String, headSha: String, ciCommit: String,
                     ciState: String, operatorUntagged: Bool = false, reviewRequests: Int = 0,
                     foreignCommits: [String] = [], trackLabels: Bool = true, fixesCandidate: Bool = true,
-                    closesUnwritable: [String] = [], ciRan: Bool = true) {
+                    closesUnwritable: [String] = [], ciRan: Bool = true, wasReady: Bool = false) {
             self.state = state
             self.author = author
             self.isCrossRepository = isCrossRepository
@@ -202,6 +204,7 @@ public enum PipelineGate {
             self.fixesCandidate = fixesCandidate
             self.closesUnwritable = closesUnwritable
             self.ciRan = ciRan
+            self.wasReady = wasReady
         }
     }
 
@@ -215,6 +218,7 @@ public enum PipelineGate {
         case participantsUnseen
         case operatorComment
         case reviewRequested(Int)
+        case redrafted
         case foreignCommits(String)
         case changesRequested
         case threads(Int)
@@ -244,6 +248,7 @@ public enum PipelineGate {
             case .participantsUnseen: return "participants-unseen"
             case .operatorComment: return "operator-comment"
             case .reviewRequested: return "review-requested"
+            case .redrafted: return "redrafted"
             case .foreignCommits: return "foreign-commits"
             case .changesRequested: return "changes-requested"
             case .threads: return "threads"
@@ -276,6 +281,7 @@ public enum PipelineGate {
             case .participantsUnseen: return "has more reviews or comments than one read lists"
             case .operatorComment: return "I commented on or reviewed it myself, not through Diplomat"
             case .reviewRequested(let n): return "waits on \(n) requested review\(n == 1 ? "" : "s")"
+            case .redrafted: return "turned back into a draft after it was ready for review"
             case .foreignCommits(let who):
                 return who.isEmpty ? "has commits by someone other than me" : "has commits by @\(who)"
             case .changesRequested: return "has changes requested"
@@ -315,6 +321,7 @@ public enum PipelineGate {
         if c.participantsUnseen { return .participantsUnseen }
         if c.operatorUntagged { return .operatorComment }
         if c.reviewRequests > 0 { return .reviewRequested(c.reviewRequests) }
+        if c.state == "draft" && c.wasReady { return .redrafted }
         if let who = c.foreignCommits.first { return .foreignCommits(who) }
         if c.reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
         if c.unresolvedThreads > 0 { return .threads(c.unresolvedThreads) }
