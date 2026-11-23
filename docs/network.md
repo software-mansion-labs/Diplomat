@@ -70,10 +70,10 @@ away its offers are cancelled. A machine with jobs out has to stay awake.
   can each of those the first machine seated, which makes 241 machines the most a pool holds.
 - **Leaving.** **Leave** stops this machine taking the pool's jobs and offering to it. It stays
   left until **Rejoin**. After more than a month away the machine comes back the same way, as
-  long as its seat was not given to another machine meanwhile: it asks the machine that invited
-  it - or, if it started the pool, the machines that were in it when it left - and is in again
-  once one of them answers. Until then the pool's card says it is waiting to be let back in; if
-  every one of them refuses it, the card says it has no seat there, and it needs an invite again.
+  long as its seat was not given to another machine meanwhile: it asks every machine it knew in
+  the pool and is in again once one of them answers. Until then the pool's card says it is
+  waiting to be let back in, and it takes and offers none of the pool's jobs; if every one of
+  them refuses it as no member, the card says it has no seat there, and it needs an invite again.
 - **Reaching each other.** A machine is reachable only as a Tor onion service whose address is
   its own public key, so there are no ports to open and no addresses to exchange. A first
   connection between two machines can take minutes; later ones take about a second.

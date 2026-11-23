@@ -1107,9 +1107,10 @@ enum NetworkTest {
             more: [["id": "github.com/o/back", "returning": true],
                    ["id": "github.com/o/refused-back", "returning": true, "unseated": true],
                    ["id": "github.com/o/seatless", "unseated": true]])).utf8))?.pools ?? []
-        let backIn = "Returning: waiting for a machine this one left to let it back in"
-        let noSeat = "No seat here: every machine this one asked refused it, and it needs an "
-            + "invite again"
+        let backIn = "Returning: waiting for a machine this one knew here to let it back "
+            + "in; until one does, it takes and offers none of this pool's jobs"
+        let noSeat = "No seat here: every machine this one asked refused it as no member, and "
+            + "it needs an invite again"
         check("a pool this machine waits to be let back into says so on its card, until refused",
               seatCards.map(NetworkText.poolReturning) == [nil, backIn, nil, nil])
         check("a pool with no seat for this machine says so on its card, and no other does",

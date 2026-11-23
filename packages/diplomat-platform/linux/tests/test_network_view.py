@@ -572,15 +572,24 @@ def test_a_join_under_way_and_an_invite_that_came_to_nothing_are_said_on_the_poo
     from diplomat_app import networkview as nv
 
     joining = "Joining: the machine that made the invite seats this one once it is reached"
-    ran_out = ("The last invite came to nothing: the invite ran out before the machine that "
-               "made it answered")
+    refused = ("The last invite came to nothing: the machine that made that invite came "
+               "into the pool under this one, before this one began the pool again, and no "
+               "machine that came in under this one can let it back in: use an invite of one "
+               "that did not, or - if this machine began that pool, so that every machine "
+               "there came in under it - have them join this one's pool, each by an invite "
+               "this machine makes")
     first, second = (texts(p) for p in screen(RICH).panels)
     assert second.index(joining) == second.index("Members") - 2, "above what holds it back"
     assert joining not in first
     assert not [line for line in first + second if "came to nothing" in line]
 
-    first, second = (texts(p) for p in screen(UNSAVED).panels)
-    assert second.index(ran_out) == second.index("Members") - 2 and ran_out not in first
+    view = screen(UNSAVED)
+    first, second = (texts(p) for p in view.panels)
+    assert second.index(refused) == second.index("Members") - 2 and refused not in first
+    label = next(lb for lb in view.panels[1].findChildren(QLabel) if lb.text() == refused)
+    assert label.wordWrap() and label.height() > 2 * label.fontMetrics().height(), (
+        "the daemon's longest reason wraps, whole, within the card")
+    assert label.width() <= view.panels[1].width()
     assert not [line for line in first + second if line.startswith("Joining:")]
 
     view = screen(RICH)
@@ -600,9 +609,10 @@ def test_a_return_under_way_and_a_seat_refused_are_said_on_the_pools_card(screen
 
     from diplomat_app import networkview as nv
 
-    returning = "Returning: waiting for a machine this one left to let it back in"
-    unseated = ("No seat here: every machine this one asked refused it, and it needs an "
-                "invite again")
+    returning = ("Returning: waiting for a machine this one knew here to let it back in; "
+                 "until one does, it takes and offers none of this pool's jobs")
+    unseated = ("No seat here: every machine this one asked refused it as no member, and it "
+                "needs an invite again")
     view = screen(RICH)
     pool = view.store.network_state.pools[0]
     assert nv.pool_returning(pool) == "" and nv.pool_unseated(pool) == ""

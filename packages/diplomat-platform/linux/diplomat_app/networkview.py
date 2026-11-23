@@ -151,17 +151,19 @@ def pool_joining(pool: network.Pool) -> str:
 
 
 def pool_returning(pool: network.Pool) -> str:
-    """A pool card's line while this machine, back in a pool it left, waits to be let
-    back in, else "". Once every machine it asked refused it, :func:`pool_unseated` says
-    so."""
-    return ("Returning: waiting for a machine this one left to let it back in"
+    """A pool card's line while this machine, back in the pool, waits to be let back in,
+    else "". Once every machine it asked refused it, :func:`pool_unseated` says so
+    instead."""
+    return ("Returning: waiting for a machine this one knew here to let it back in; until "
+            "one does, it takes and offers none of this pool's jobs"
             if pool.returning and not pool.unseated else "")
 
 
 def pool_unseated(pool: network.Pool) -> str:
-    """A pool card's line once every machine this one asked refused it a seat, else ""."""
-    return ("No seat here: every machine this one asked refused it, and it needs an "
-            "invite again" if pool.unseated else "")
+    """A pool card's line once every machine this one asked refused it as no member,
+    else ""."""
+    return ("No seat here: every machine this one asked refused it as no member, and it "
+            "needs an invite again" if pool.unseated else "")
 
 
 def pool_join_failed(pool: network.Pool) -> str:
