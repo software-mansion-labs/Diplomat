@@ -1414,7 +1414,8 @@ class SettingsView(QWidget):
                    "~/.diplomat/config.json and kept in memory only, never handed to an "
                    "agent: a fix gets the issue's text as Diplomat read it. "
                    f"${pipeline.TOKEN_ENV} wins over it. Without a key, the teams set "
-                   "here are skipped with a notice and GitHub still syncs."))
+                   "here are skipped with a notice and GitHub still syncs, but no PR is "
+                   "merged."))
         options.addWidget(self._pipeline_key_row)
         self._refresh_pipeline_ui()
         return card

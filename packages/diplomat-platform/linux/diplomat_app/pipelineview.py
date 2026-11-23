@@ -665,7 +665,7 @@ _KIND_WORD = {("github", "issue"): "GitHub issue", ("github", "pr"): "GitHub PR"
               ("linear", "issue"): "Linear issue"}
 
 _RATED_BY = {"label": "Read off its labels.",
-             "local": "Diplomat's own, kept on this machine: it may not label this item."}
+             "local": "Rated here, not labelled."}
 
 
 def can_start_fix(item: dict) -> bool:
@@ -998,9 +998,9 @@ class PipelineView(QWidget):
 
     def _build_actions(self, item: dict, badge: str | None, edges: list[dict]) -> None:
         """Open always; the rest only while the Pipeline is on, which off acts on
-        nothing. Rate now for an item :func:`can_rate` allows, Fracture for an issue
-        :func:`can_fracture` allows, Start fix for a candidate issue
-        (:func:`can_start_fix`) whose fix is known, with nothing on it."""
+        nothing. Rate now for an item :func:`can_rate` allows; Fracture for an issue
+        :func:`can_fracture` allows and Start fix for a candidate issue
+        (:func:`can_start_fix`) whose fix is known, each with nothing on it."""
         st = self.store
         item_id = str(item.get("id") or "")
         on = st.pipeline_enabled
@@ -1019,7 +1019,7 @@ class PipelineView(QWidget):
                                 lambda: st.pipeline_force_now("fracture", item_id))
             btn.setToolTip("Split it into low-complexity child issues in a sync started "
                            "now")
-            btn.setEnabled(on and not asked)
+            btn.setEnabled(on and not asked and badge is None)
             self.buttons["fracture"] = btn
         if can_start_fix(item):
             known = st.pipeline_fix_effect(item) is not None
