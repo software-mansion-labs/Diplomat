@@ -108,11 +108,12 @@ export function containerName(poolId, peer) {
 }
 
 /// Runs docker; resolves to `{ code, stdout, stderr }`, `code` null when it could not
-/// be run at all or was cut off.
-export function docker(args, { timeout = 60000, onLine = null } = {}) {
+/// be run at all or was cut off: at `timeout`, or once it had written more than
+/// `maxBuffer` characters to one of the two, of which that many are then given.
+export function docker(args, { timeout = 60000, onLine = null, maxBuffer = 16 * 2 ** 20 } = {}) {
   return new Promise((resolve) => {
     if (!onLine) {
-      return execFile(DOCKER_BIN, args, { timeout, encoding: 'utf8', maxBuffer: 16 * 2 ** 20 }, (err, stdout, stderr) => {
+      return execFile(DOCKER_BIN, args, { timeout, encoding: 'utf8', maxBuffer }, (err, stdout, stderr) => {
         resolve({ code: !err ? 0 : typeof err.code === 'number' ? err.code : null, stdout, stderr: err && err.code === 'ENOENT' ? 'ENOENT' : stderr });
       });
     }

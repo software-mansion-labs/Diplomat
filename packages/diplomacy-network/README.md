@@ -762,8 +762,14 @@ Everything in a job's directory is the job's to write, so the daemon reads `done
 the three logs in the directory that stands where it put it, never through a link,
 without waiting for a writer, off its own thread, and by their last bytes only: 32 of
 `done`, 4 MiB of `log.jsonl`, 2000 of `stderr.log` and `setup.log`. A pipe, a socket, a
-device or a directory in a file's place reads as nothing. Of the result line only
-positive numbers count, and the summary is cut at 4000 characters.
+device or a directory in a file's place reads as nothing. The log is read and made out
+on a thread of its own, which hands the daemon's a result of five small members and
+nothing else of the log. A result line with 100000 commas and opening brackets outside
+its strings, or more, is no result. Of a result line only positive numbers count, the
+models it names count when they are named in an object, the summary is cut at 4000
+characters and a model's name at 100. What a command the daemon runs in a job's
+container writes back - the job's process group at its start, the word on whether it
+still runs - is heard out for 65536 characters and no further.
 
 The tokens and the cost are the job's own word, and this machine's budget is counted
 from them. They stand no higher than what the broker carried to the model for the job:
