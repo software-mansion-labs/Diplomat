@@ -329,9 +329,8 @@ enum AppConfig {
         try? data?.write(to: switchRecordURL, options: .atomic)
     }
 
-    /// The switch as the config has it; while that cannot be read, as the Diplomat that
-    /// last wrote `switchRecordURL` read it, and off when none on this machine read it
-    /// as on.
+    /// The switch as the config has it, and as `switchRecorded` has it while the config
+    /// cannot be read.
     static var networkEnabledLastRead: Bool { unreadable ? switchRecorded : networkEnabled }
 
     /// `NetworkSettings.unknown` while the config is `unreadable`, else "".

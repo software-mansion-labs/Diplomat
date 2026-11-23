@@ -332,6 +332,10 @@ machine takes jobs of at most 12 h and this one needs 24*, that its run was stop
 that this machine failed at it or gave it back and until when it leaves it to the others. A
 time in such a sentence is this machine's clock time.
 
+A daemon that was given what only a test sets - a loopback transport in place of Tor, a figure
+of the protocol changed - is no member to run on the network, and the screen says so in red
+with each setting by name.
+
 A job offered to the network shows in the task list like any other: *in the pool*, *running on
 this machine* or on another member's key, then finished or failed. A job started by hand whose
 offer the daemon has not answered yet reads *Offering to the pool…* until it has. That wait is
@@ -378,7 +382,9 @@ pool and frees their PRs and issues for agents in terminals again. The daemon re
 containers, mirrors and run records and exits; the machine's key, its pools and the image stay,
 so switched on again it is the member it was. With no daemon running to do it, the stop
 itself cancels the offers and ends the runs left in the daemon's store, and its line in the
-feed says how many. Work that was asked for and
+feed says how many. A stop that could not remove one of those directories says which in the
+same line, reads *ok: false* with no daemon left running, and the next switch-off tries
+again. Work that was asked for and
 had not run is started in a terminal from the queue on the next poll. A monitor's own find
 counts its offer as an attempt, so it is started again on that monitor's retry schedule. A job
 started by hand whose offer the daemon had not answered is withdrawn if the daemon turns out to

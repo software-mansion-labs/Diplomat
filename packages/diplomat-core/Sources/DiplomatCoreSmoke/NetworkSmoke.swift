@@ -395,6 +395,15 @@ func networkSmoke() throws {
     }
     check(snap.updatedAt == 1794000300 && snap.pid == 4321 && snap.startedAt == 1794000000
           && snap.pk == "aaaabbbbccccdddd" && snap.onion == "abc.onion")
+    let tested = NetworkSnapshot(["daemon": ["testSettings": [
+        "DN_TRANSPORT=loop", 7, "", NSNull(), ["DN_X=1"], true, "DN_LEASE_SECS=60"] as [Any]]])
+    check(snap.testSettings.isEmpty && snap.testSettingsNote.isEmpty
+          && tested.testSettings == ["DN_TRANSPORT=loop", "DN_LEASE_SECS=60"]
+          && tested.testSettingsNote == "The daemon runs with settings only a test gives "
+            + "it, and is not one for the network: DN_TRANSPORT=loop, DN_LEASE_SECS=60"
+          && NetworkSnapshot(["daemon": ["testSettings": "DN_TRANSPORT=loop"]])
+            .testSettings.isEmpty,
+          "what only a test gave the daemon is listed, and said")
     check(snap.transport.state == "ready" && snap.transport.detail == ""
           && snap.docker.state == "building" && snap.docker.image == "dn:1"
           && snap.docker.detail == "layer 3"

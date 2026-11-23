@@ -25,7 +25,8 @@ import Foundation
 /// ```
 /// Output: one answer per input row under the same member (`pools` for `remotes`, and
 /// `hostedPools` for `hostedRemotes`, read with `gitlabHosts`), with sorted keys. An
-/// offer is its body, or the sentence it was refused with.
+/// offer is its body, or the sentence it was refused with. `testSettings` is each
+/// snapshot's `testSettingsNote`.
 enum NetworkCommand {
     static func run(_ obj: [String: Any]) {
         let snapshots = (obj["snapshots"] as? [[String: Any]] ?? []).map(NetworkSnapshot.init)
@@ -89,6 +90,7 @@ enum NetworkCommand {
                     $0.isEmpty ? nil : NetworkSettings.unknownNote(NetworkSettings.unknown(path: $0))
                 } ?? "")
         }
+        out["testSettings"] = snapshots.map(\.testSettingsNote)
         out["listing"] = rows("listing").map { row -> [String: Any] in
             let listing = NetworkPools.listing(
                 roots: repos(row["roots"]), others: repos(row["others"]),

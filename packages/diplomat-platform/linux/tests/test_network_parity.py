@@ -144,6 +144,9 @@ SNAPSHOTS = [
               devices={"state": "none", "detail": "no adb server answers"}),
     _snapshot(transport={"state": "down"}, devices={"state": "failed"}),
     _snapshot(transport={"state": "odd"}, docker={}, model={"state": ""}),
+    _snapshot(daemon={"pid": 7, "testSettings": ["DN_LEASE_SECS=60", "DN_TRANSPORT=loop"]}),
+    _snapshot(daemon={"testSettings": ["DN_TRANSPORT=loop", 7, "", None, ["DN_X=1"], True]}),
+    _snapshot(daemon={"testSettings": "DN_TRANSPORT=loop"}),
     _snapshot(offers=[_offer("t-down", "pooled", not_taking=DOWN),
                       _offer("t-short", "pooled", item="pr-2", not_taking=SHORT),
                       _offer("t-free", "pooled", item="pr-3"),
@@ -289,6 +292,7 @@ def _python() -> dict:
         "trouble": [N.trouble(r["answered"], snapshot(r), r["unknown"] and N.unknown_note(
             N.settings_unknown(r["unknown"]))) for r in TROUBLE],
         "listing": [listing(r) for r in LISTING],
+        "testSettings": [seen.test_settings_note for seen in snapshots],
         "times": [N.local_times(sentence) for sentence in TIMES],
     }
 
@@ -311,7 +315,8 @@ def _differing(rows: list, swift: list, python: list) -> list:
     ("hours", HOURS), ("pools", REMOTES), ("hostedPools", HOSTED_REMOTES),
     ("rules", RULES), ("kinds", KINDS),
     ("offers", OFFERS), ("openTask", OPEN_TASK), ("trouble", TROUBLE),
-    ("notTaking", NOT_TAKING), ("listing", LISTING), ("times", TIMES)])
+    ("notTaking", NOT_TAKING), ("listing", LISTING), ("times", TIMES),
+    ("testSettings", SNAPSHOTS)])
 def test_the_twins_agree(twins, member, rows):
     swift, python = twins
     assert _differing(rows, swift[member], python[member]) == []
@@ -341,6 +346,9 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
         "Diplomacy Network: /home/u/.diplomat/config.json cannot be read as settings: "
         "until it can be, this machine's pools stay as the daemon has them and nothing "
         "is offered") == len(TROUBLE) // 2
+    tested = "The daemon runs with settings only a test gives it, and is not one for the network: "
+    assert set(python["testSettings"]) == {
+        "", tested + "DN_LEASE_SECS=60, DN_TRANSPORT=loop", tested + "DN_TRANSPORT=loop"}
     assert any(row["unconfirmed"] for row in python["listing"])
     assert any(len(row["pools"]) >= 3 for row in python["listing"])
     assert python["rules"].count(False) >= 10 and python["rules"].count(True) >= 15

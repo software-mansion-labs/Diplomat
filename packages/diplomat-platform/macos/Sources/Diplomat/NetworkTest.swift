@@ -343,6 +343,8 @@ enum NetworkTest {
         let withdrawnAtStop = Calls<Int>()
         // The offers and runs the next stop finds left in the store.
         let leftInStore = Calls<(Int, Int)>()
+        // What the installer answers as its error, with no daemon running; "" for none.
+        let installerError = Calls<String>()
         DiplomacyNetwork.installerForSelfTest = { verb in
             installer.add(verb)
             var result = AllocatorInstall()
@@ -351,6 +353,10 @@ enum NetworkTest {
                 (result.endedOffers, result.endedRuns) = leftInStore.all.last ?? (0, 0)
             }
             result.daemonRunning = verb != "--stop-daemon" && FileManager.default.fileExists(atPath: socket)
+            if let why = installerError.all.last, !why.isEmpty {
+                result.error = why
+                result.daemonRunning = false
+            }
             return result
         }
         defer { DiplomacyNetwork.installerForSelfTest = nil }
@@ -1438,6 +1444,28 @@ enum NetworkTest {
         for (answer, line) in stopAnswers {
             check("a stop that answers \(answer) is said as \(line)", stopped(answer) == line)
         }
+        // The installer's own sentences: it starts no daemon while the network is off,
+        // and a stop that could not remove a directory left no daemon all the same.
+        let startOff = "the network is switched off in Diplomat's settings: no daemon was started"
+        let stopLeft = "/h/ca and /h/runs could not be removed. The next --stop-daemon tries again."
+        installerError.add(startOff)
+        store.networkEnabled = true
+        await store.networkLifecycle?.value
+        check("a start the installer refuses with the network off is said in its sentence",
+              feedDetails(NetworkAudit.start).last
+                == "Started the Diplomacy Network daemon (ok: false): \(startOff)")
+        installerError.add(stopLeft)
+        let stopsBeforeLeft = installer.all.filter { $0 == "--stop-daemon" }.count
+        store.networkEnabled = false
+        await store.networkLifecycle?.value
+        await store.runNetworkCycleOnce()
+        check("a stop that left a directory says so, and is no daemon that stayed",
+              feedDetails(NetworkAudit.stop).last
+                == "Stopped the Diplomacy Network daemon (ok: false): \(stopLeft)"
+                && store.networkState == nil && store.networkAnswered == nil
+                && store.networkTrouble == nil
+                && installer.all.filter { $0 == "--stop-daemon" }.count == stopsBeforeLeft + 1)
+        installerError.add("")
 
         // 26. An ask is answered by work that ran, not by its offer. Offered, it stands
         //     marked and is not offered twice; its run finishing forgets it, and so does
@@ -1995,6 +2023,21 @@ enum NetworkTest {
         await store.networkLifecycle?.value
         bookByHand(90380, task: "task-cfg")
         await store.runNetworkCycleOnce()
+        var testDaemon = snapshot(offers: [offerRow("task-cfg", "pooled")])
+        testDaemon["daemon"] = (testDaemon["daemon"] as? [String: Any] ?? [:])
+            .merging(["testSettings": ["DN_LEASE_SECS=60", "DN_TRANSPORT=loop"]]) { $1 }
+        script.set(testDaemon)
+        await store.runNetworkCycleOnce()
+        let testedNote = "The daemon runs with settings only a test gives it, and is not "
+            + "one for the network: DN_LEASE_SECS=60, DN_TRANSPORT=loop"
+        await screenSettles { screenShows(testedNote) }
+        check("what only a test gave the daemon is read from its snapshot",
+              store.networkState?.testSettings == ["DN_LEASE_SECS=60", "DN_TRANSPORT=loop"])
+        check("…and the Network screen says so", screenShows(testedNote))
+        script.set(snapshot(offers: [offerRow("task-cfg", "pooled")]))
+        await store.runNetworkCycleOnce()
+        await screenSettles { !screenShows(testedNote) }
+        check("…and a daemon that lists none is not", !screenShows(testedNote))
         let configWhole = (try? Data(contentsOf: AppConfig.url)) ?? Data()
         let configWithdrawn = requests(NetworkRoute.withdraw).count
         func unreadableNotes() -> Int {
@@ -2051,7 +2094,8 @@ enum NetworkTest {
         await store.runNetworkCycleOnce()
         try? Data("[]".utf8).write(to: AppConfig.url)
         await store.runNetworkCycleOnce()
-        check("a second spell is said again", store.networkEnabled && unreadableNotes() == 2)
+        check("an array is no settings either, and a second spell is said again",
+              AppConfig.unreadable && store.networkEnabled && unreadableNotes() == 2)
         try? Data("{\"networkEnabled\": \"true\"}".utf8).write(to: AppConfig.url)
         await store.runNetworkCycleOnce()
         await store.networkLifecycle?.value

@@ -29,10 +29,9 @@ public enum NetworkSettings {
         return Int(min(max((v + 0.5).rounded(.down), Double(hoursFloor)), Double(hoursCeiling)))
     }
 
-    /// Why nothing a setting decides is said to the daemon - no list of pools, no admit,
-    /// no offer - while the shared config at `path` is there and cannot be read: each
-    /// setting would be read as its default, the repo roots among them, and the daemon
-    /// closes every pool a list omits.
+    /// Why no pools, admit or offer is said to the daemon while the shared config at
+    /// `path` cannot be read: each setting reads as its default, the repo roots among
+    /// them, and the daemon closes every pool a list omits.
     public static func unknown(path: String) -> String { "\(path) cannot be read as settings" }
 
     /// The Network screen's line while `unknown`.
@@ -577,6 +576,9 @@ public struct NetworkSnapshot: Equatable {
     public let updatedAt: Double?
     public let pid: Int?
     public let startedAt: Double?
+    /// What the daemon was given that only a test sets, each as `NAME=value`: none for
+    /// a daemon that belongs on the network.
+    public let testSettings: [String]
     public let pk: String
     public let onion: String
     public let transport: Service
@@ -591,6 +593,12 @@ public struct NetworkSnapshot: Equatable {
     /// `nil` when the document has no `offers` list, which says nothing about any
     /// offer; an empty list says there are none.
     public let offers: [Offer]?
+
+    /// The Network screen's line for a daemon with `testSettings`, else "".
+    public var testSettingsNote: String {
+        testSettings.isEmpty ? "" : "The daemon runs with settings only a test gives it, "
+            + "and is not one for the network: " + testSettings.joined(separator: ", ")
+    }
 
     /// The daemon's answer, or `nil` when there was none or it is not a JSON object.
     public static func parse(_ data: Data?) -> NetworkSnapshot? {
@@ -634,6 +642,8 @@ public struct NetworkSnapshot: Equatable {
         let daemon = object(d["daemon"])
         pid = integer(daemon["pid"])
         startedAt = number(daemon["startedAt"])
+        testSettings = (daemon["testSettings"] as? [Any] ?? [])
+            .compactMap { $0 as? String }.filter { !$0.isEmpty }
         let identity = object(d["identity"])
         pk = text(identity["pk"])
         onion = text(identity["onion"])

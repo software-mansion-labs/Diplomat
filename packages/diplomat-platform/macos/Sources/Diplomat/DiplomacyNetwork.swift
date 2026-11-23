@@ -162,7 +162,6 @@ enum DiplomacyNetwork {
                 Thread.sleep(forTimeInterval: 0.1)
             }
         }
-        // Of a link, this removes the link.
         try? FileManager.default.removeItem(at: dir)
         return (asked, FileManager.default.fileExists(atPath: dir.path) ? nil : dir.path, link)
     }
@@ -187,7 +186,8 @@ extension NetworkSnapshot {
     /// Whether `other` says what this does, whenever each was written.
     func saysTheSame(as other: NetworkSnapshot?) -> Bool {
         guard let other else { return false }
-        return pid == other.pid && startedAt == other.startedAt && pk == other.pk
+        return pid == other.pid && startedAt == other.startedAt
+            && testSettings == other.testSettings && pk == other.pk
             && onion == other.onion && transport == other.transport && docker == other.docker
             && model == other.model && devices == other.devices && admit == other.admit
             && pools == other.pools

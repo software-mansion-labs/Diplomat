@@ -33,6 +33,11 @@ struct NetworkScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
+            if let tested = snapshot?.testSettingsNote, !tested.isEmpty {
+                Text(tested).font(.system(size: 10)).foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
             if store.networkEnabled {
                 HStack(alignment: .top, spacing: 12) {
                     statusCard.frame(width: MainRoot.columnWidth, alignment: .topLeading)

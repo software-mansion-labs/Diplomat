@@ -683,6 +683,24 @@ def test_an_empty_document_is_a_snapshot_of_defaults_and_lists_no_offers():
             empty.offers) == (None, None, "", "", 0, None, (), (), None)
 
 
+@pytest.mark.parametrize("daemon, settings", [
+    ({"pid": 7}, ()),
+    ({"testSettings": []}, ()),
+    ({"testSettings": ["DN_LEASE_SECS=60", "DN_TRANSPORT=loop"]},
+     ("DN_LEASE_SECS=60", "DN_TRANSPORT=loop")),
+    ({"testSettings": ["DN_TRANSPORT=loop", 7, "", None, ["DN_X=1"], True]},
+     ("DN_TRANSPORT=loop",)),
+    ({"testSettings": "DN_TRANSPORT=loop"}, ()),
+    ({"testSettings": {"DN_TRANSPORT": "loop"}}, ()),
+])
+def test_a_snapshot_lists_what_only_a_test_gave_the_daemon(daemon, settings):
+    snap = N.Snapshot.parse(json.dumps({"daemon": daemon}))
+    assert snap.test_settings == settings
+    assert snap.test_settings_note == (
+        ("The daemon runs with settings only a test gives it, and is not one for the "
+         "network: " + ", ".join(settings)) if settings else "")
+
+
 SPOILT = """
 {"updatedAt": "soon", "daemon": 7, "identity": ["pk"], "transport": "ready",
  "admit": {"slots": true, "at": "now", "reason": 3}, "extra": {"k": 1},

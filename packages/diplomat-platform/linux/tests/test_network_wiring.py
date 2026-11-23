@@ -719,6 +719,61 @@ def test_a_stop_with_no_daemon_answering_runs_the_installer_and_says_what_it_end
     assert lines("network-stop") == [line]
 
 
+#: What the daemon's installer answers a start with while the network is off, and a
+#: stop that could not remove what a machine switched off keeps nothing of.
+START_OFF = ("the network is switched off in Diplomat's settings: no daemon was started")
+STOP_LEFT = ("/h/.diplomat/network/ca and /h/.diplomat/network/runs could not be removed: "
+             "a job left among its records what this user may not delete, and no docker "
+             "engine deleted it. The next --stop-daemon tries again.")
+
+
+@pytest.mark.parametrize("restart, did", [(False, "Started"), (True, "Restarted")])
+def test_a_start_the_installer_refuses_with_the_network_off_says_its_sentence(
+        store, on, daemon, monkeypatch, restart, did):
+    daemon()
+    monkeypatch.setattr(da, "run_installer", lambda script, arg: {
+        "ok": False, "daemonRunning": False, "pid": None, "error": START_OFF})
+    store.start_network_async(restart=restart, source=autofix.SOURCE_PANEL)
+    assert store.wait_for_background() == []
+    assert lines("network-start") == [
+        f"{did} the Diplomacy Network daemon (ok: false): {START_OFF}"]
+
+
+def test_a_stop_that_left_a_directory_says_so_and_holds_no_daemon(store, on, daemon,
+                                                                  monkeypatch):
+    d = daemon()
+    store._network_cycle_once(1000.0)
+    assert store.network_answered is True
+    ran = []
+    monkeypatch.setattr(da, "run_installer", lambda script, arg: ran.append(arg) or {
+        "ok": False, "daemonRunning": False, "pid": None, "error": STOP_LEFT,
+        "ended": {"offers": 1, "runs": 0}})
+    asked = len(d.got)
+    store.set_network_enabled(False)
+    assert store.wait_for_background() == []
+    assert lines("network-stop") == [
+        "Stopped the Diplomacy Network daemon (ok: false), cancelling 1 offer" + LEFT
+        + f": {STOP_LEFT}"]
+    assert ran == ["--stop-daemon"], "said, and not tried again as a daemon that stayed"
+    assert store.network_state is None and store.network_answered is None
+    assert not dn.enabled() and store.network_trouble == ""
+    store._network_cycle_once(1100.0)
+    assert len(d.got) == asked and ran == ["--stop-daemon"]
+
+
+def test_a_snapshot_that_differs_only_in_its_test_settings_is_kept_and_drawn(
+        store, on, daemon):
+    d = daemon()
+    store._network_cycle_once(1000.0)
+    assert store.network_state.test_settings == ()
+    drawn = []
+    store.network_changed.connect(lambda: drawn.append(store.network_state.test_settings))
+    d.state = {**d.state, "daemon": {**d.state["daemon"],
+                                     "testSettings": ["DN_TRANSPORT=loop"]}}
+    store._network_cycle_once(1002.0)
+    assert drawn and drawn[-1] == ("DN_TRANSPORT=loop",)
+
+
 def test_a_start_says_nothing_of_a_store(store, on, monkeypatch):
     monkeypatch.setattr(da, "run_installer", lambda script, arg: {
         "daemonRunning": True, "ended": {"offers": 2, "runs": 1}})
@@ -1833,6 +1888,22 @@ def test_with_no_switch_on_record_a_broken_config_holds_no_automatic_work(
     assert len(calls) == 1 and d.got == [], "a terminal, as with no network at all"
     assert dn.settings_unknown() == "" and store.network_trouble == ""
     assert not dn.switch_record().exists()
+
+
+@pytest.mark.parametrize("text", [
+    "[]", '[{"networkEnabled": false}]', "null", "7", '"off"', ""])
+def test_a_config_that_is_no_object_says_nothing_of_the_switch(store, on, daemon, text):
+    """The daemon and its installer take only an object for settings: an array is no
+    switch-off to them, and is none here."""
+    d = daemon()
+    assert dn.enabled()
+    appconfig.path().write_text(text, encoding="utf-8")
+    assert appconfig.read_known() is None
+    assert dn.enabled() and dn.settings_unknown() == unknown()
+    store._settle_agents()
+    store._network_cycle_once(1000.0)
+    assert [path for method, path, _ in d.got if method == "POST"] == []
+    assert store.network_trouble == f"Diplomacy Network: {unknown()}"
 
 
 def test_the_switch_on_record_follows_each_reading_of_the_config(monkeypatch):

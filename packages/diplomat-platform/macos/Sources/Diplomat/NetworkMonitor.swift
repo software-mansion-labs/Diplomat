@@ -127,9 +127,8 @@ extension Store {
     /// One round with the daemon while the switch is on: read its snapshot, start it when
     /// it is silent, and tell it which pools this machine is in and how many more tasks
     /// it takes. `pools` is said when it changed and `admit` also once a minute; a
-    /// daemon that started since is told both again. Neither is said while the config
-    /// cannot be read (`networkSettingsUnknown`): the roots and the cap would be
-    /// defaults, and the daemon closes each pool a list omits.
+    /// daemon that started since is told both again. Neither is said while
+    /// `networkSettingsUnknown`.
     func runNetworkCycleOnce(now: TimeInterval = Date().timeIntervalSince1970) async {
         rereadNetworkSettings()
         guard networkEnabled, !networkCycle.running else { return }

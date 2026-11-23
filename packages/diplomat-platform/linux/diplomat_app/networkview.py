@@ -446,6 +446,8 @@ class NetworkView(QWidget):
         root.addWidget(self._save_error)
         self._unknown = _note("", _RED)
         root.addWidget(self._unknown)
+        self._tested = _note("", _RED)
+        root.addWidget(self._tested)
 
         self._off_card, off, off_pill = settings_card(
             glyphs.G_NETWORK, "DIPLOMACY NETWORK", _TEAL)
@@ -703,6 +705,9 @@ class NetworkView(QWidget):
         unknown = dn.settings_unknown()
         self._unknown.setText(network.unknown_note(unknown) if unknown else "")
         self._unknown.setVisible(bool(unknown))
+        tested = state.test_settings_note if state else ""
+        self._tested.setText(tested)
+        self._tested.setVisible(bool(tested))
         self._off_card.setVisible(not on)
         self._on_host.setVisible(on)
         if not on:

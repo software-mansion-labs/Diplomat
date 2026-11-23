@@ -5325,9 +5325,7 @@ class Store(QObject):
         it when it is silent, and tell it which pools this machine is in and how many
         more tasks it takes. ``pools`` is said when it changed and ``admit`` also once
         a minute; a daemon that started since is told both again. Neither is said
-        while the config cannot be read (:func:`diplomacynetwork.settings_unknown`):
-        the roots and the cap would be defaults, and the daemon closes each pool a
-        list omits."""
+        while :func:`diplomacynetwork.settings_unknown`."""
         if not diplomacynetwork.enabled():
             return
         snapshot = diplomacynetwork.state()

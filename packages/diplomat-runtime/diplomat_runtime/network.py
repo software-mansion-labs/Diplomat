@@ -543,6 +543,9 @@ class Snapshot:
     updated_at: float | None = None
     pid: int | None = None
     started_at: float | None = None
+    #: What the daemon was given that only a test sets, each as ``NAME=value``: none
+    #: for a daemon that belongs on the network.
+    test_settings: tuple[str, ...] = ()
     pk: str = ""
     onion: str = ""
     transport: Service = field(default_factory=Service)
@@ -557,6 +560,14 @@ class Snapshot:
     #: ``None`` when the document has no ``offers`` list, which says nothing about any
     #: offer; an empty tuple says there are none.
     offers: tuple[OfferState, ...] | None = None
+
+    @property
+    def test_settings_note(self) -> str:
+        """The Network screen's line for a daemon with :attr:`test_settings`, else ""."""
+        if not self.test_settings:
+            return ""
+        return ("The daemon runs with settings only a test gives it, and is not one for "
+                "the network: " + ", ".join(self.test_settings))
 
     @staticmethod
     def parse(text: str | bytes | None) -> "Snapshot | None":
@@ -576,11 +587,13 @@ class Snapshot:
     def from_json(d: dict) -> "Snapshot":
         daemon, identity = _object(d.get("daemon")), _object(d.get("identity"))
         dock, adm = _object(d.get("docker")), _object(d.get("admit"))
-        offers = d.get("offers")
+        offers, knobs = d.get("offers"), daemon.get("testSettings")
         return Snapshot(
             updated_at=_number(d.get("updatedAt")),
             pid=_integer(daemon.get("pid")),
             started_at=_number(daemon.get("startedAt")),
+            test_settings=tuple(k for k in knobs if isinstance(k, str) and k)
+            if isinstance(knobs, list) else (),
             pk=_text(identity.get("pk")),
             onion=_text(identity.get("onion")),
             transport=_service(d.get("transport")),
@@ -609,10 +622,9 @@ TROUBLE_STATES = frozenset({"failed", "missing", "down"})
 
 
 def settings_unknown(path: object) -> str:
-    """Why nothing a setting decides is said to the daemon - no list of pools, no
-    admit, no offer - while the shared config at ``path`` is there and cannot be read:
-    each setting would be read as its default, the repo roots among them, and the
-    daemon closes every pool a list omits."""
+    """Why no pools, admit or offer is said to the daemon while the shared config at
+    ``path`` cannot be read: each setting reads as its default, the repo roots among
+    them, and the daemon closes every pool a list omits."""
     return f"{path} cannot be read as settings"
 
 
@@ -648,7 +660,7 @@ _UTC_TIME = re.compile(
 def local_times(sentence: str) -> str:
     """``sentence`` with each UTC time the daemon wrote in it, as in ``…until
     2026-11-17T10:30:56.000Z``, as this machine's clock reads it: ``…until 11:30``. A
-    time the calendar has no year for is left as written."""
+    time that clock cannot read is left as written."""
     def clock(found: re.Match) -> str:
         try:
             at = datetime.strptime(found[0][:19] + "+0000", "%Y-%m-%dT%H:%M:%S%z")

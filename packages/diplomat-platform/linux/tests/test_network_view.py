@@ -95,6 +95,18 @@ def test_the_screen_says_that_the_settings_cannot_be_read(screen):
     assert off._unknown.isHidden(), "with the switch off there is nothing to hold"
 
 
+def test_the_screen_says_that_the_daemon_runs_with_a_tests_settings(screen):
+    view = screen(RICH)
+    assert view._tested.isHidden(), "a daemon that belongs on the network lists none"
+    view.store.network_state = dataclasses.replace(
+        view.store.network_state, test_settings=("DN_LEASE_SECS=60", "DN_TRANSPORT=loop"))
+    view.rebuild()
+    assert not view._tested.isHidden() and view._tested.text() == (
+        "The daemon runs with settings only a test gives it, and is not one for the "
+        "network: DN_LEASE_SECS=60, DN_TRANSPORT=loop")
+    assert screen(OFF)._tested.isHidden()
+
+
 def test_the_unsaved_render_seeds_hours_that_say_so(screen):
     from diplomat_app import networkview as nv
 
