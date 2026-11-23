@@ -166,7 +166,7 @@ switch (command) {
       console.log('sha256:fake');
     } else if (args[0] === 'ls') {
       const want = (opts['--filter'] || []).map((f) => f.replace(/^label=/, ''));
-      for (const f of fs.readdirSync(file('images'))) {
+      for (const f of fs.readdirSync(file('images')).sort()) {
         if (want.every((w) => (readJson(file('images', f)) || []).includes(w))) console.log(decodeURIComponent(f));
       }
     } else if (args[0] === 'rm') {

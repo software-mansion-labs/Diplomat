@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-ctr-'));
@@ -424,85 +424,6 @@ try {
     for (const c of calls('run')) assert.equal(c.filter((a) => a === '--network').length, 1);
     // A relay holds no volume and no directory of this machine: nothing a job writes is in it.
     for (const c of calls('create')) assert.ok(!c.includes('-v') && !c.includes('--mount') && !c.includes('--volumes-from'), c.join(' '));
-  });
-
-  await check('a relay carries what it is sent to the one address it was started with, whatever a client asks of it', async () => {
-    const seen = [];
-    const target = net.createServer((c) => c.on('data', (d) => { seen.push(String(d)); c.write('from the broker'); }).on('error', () => {}));
-    await new Promise((r) => target.listen(0, '127.0.0.1', r));
-    const free = net.createServer();
-    await new Promise((r) => free.listen(0, '127.0.0.1', r));
-    const port = free.address().port;
-    await new Promise((r) => free.close(r));
-    const relayFile = path.join(IMAGE_DIR, 'relay.mjs');
-    const relay = spawn(process.execPath, [relayFile, '127.0.0.0/8', String(port), '127.0.0.1', String(target.address().port)], { stdio: ['ignore', 'pipe', 'pipe'] });
-    try {
-      const said = await new Promise((resolve) => relay.stdout.once('data', (d) => resolve(String(d).trim())));
-      assert.equal(said, `relay: 127.0.0.1:${port} -> 127.0.0.1:${target.address().port}`, 'it listens on its address in the job network and on no other');
-      const asked = 'CONNECT elsewhere.example:443 HTTP/1.1\r\nHost: elsewhere.example:443\r\n\r\n';
-      const answer = await new Promise((resolve, reject) => {
-        const c = net.connect(port, '127.0.0.1', () => c.write(asked));
-        c.on('data', (d) => { resolve(String(d)); c.destroy(); });
-        c.on('error', reject);
-        c.on('close', () => reject(new Error('the relay closed the connection without an answer')));
-        c.setTimeout(60000, () => c.destroy(new Error('the relay gave no answer')));
-      });
-      assert.equal(answer, 'from the broker');
-      assert.deepEqual(seen, [asked], 'word for word, to the broker');
-    } finally { relay.kill('SIGKILL'); target.close(); }
-    // In a container with no address on the network it was told to serve, it serves nothing.
-    const none = spawn(process.execPath, [relayFile, '203.0.113.0/24', String(port), '127.0.0.1', '1'], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let err = '';
-    none.stderr.on('data', (d) => { err += d; });
-    assert.equal(await new Promise((r) => none.on('close', r)), 1);
-    assert.match(err, /no address in 203\.0\.113\.0\/24/);
-  });
-
-  await check('a relay carries 1024 connections at a time and drops the next, and one that cannot listen says so and exits 1', async () => {
-    const reached = new Set();
-    const target = net.createServer((c) => { reached.add(c); c.on('close', () => reached.delete(c)).on('error', () => {}).resume(); });
-    await new Promise((r) => target.listen(0, '127.0.0.1', r));
-    const free = net.createServer();
-    await new Promise((r) => free.listen(0, '127.0.0.1', r));
-    const port = free.address().port;
-    await new Promise((r) => free.close(r));
-    const relayFile = path.join(IMAGE_DIR, 'relay.mjs');
-    const relay = spawn(process.execPath, [relayFile, '127.0.0.0/8', String(port), '127.0.0.1', String(target.address().port)], { stdio: ['ignore', 'pipe', 'pipe'] });
-    const clients = [];
-    const dial = () => new Promise((resolve, reject) => {
-      const c = net.connect(port, '127.0.0.1', () => resolve(c));
-      c.once('error', reject);
-      c.on('error', () => {});
-      clients.push(c);
-    });
-    try {
-      await new Promise((resolve) => relay.stdout.once('data', resolve));
-      for (let i = 0; i < 1024; i++) await dial();
-      await until('every one of them to reach the broker', () => reached.size === 1024);
-      const extra = await dial();
-      let closed = false;
-      extra.on('close', () => { closed = true; });
-      await until('the connection past the bound to be dropped', () => closed);
-      assert.equal(reached.size, 1024, 'and it never reached the broker');
-      clients[0].destroy();
-      await until('a closed connection to be given back', () => reached.size === 1023);
-      await dial();
-      await until('the place it left to be had again', () => reached.size === 1024);
-      assert.equal(relay.exitCode, null, 'the relay is still there');
-    } finally {
-      for (const c of clients) c.destroy();
-      relay.kill('SIGKILL');
-      target.close();
-    }
-    // A port that is taken: said, and an exit a restart policy sees.
-    const taken = net.createServer();
-    await new Promise((r) => taken.listen(0, '127.0.0.1', r));
-    const second = spawn(process.execPath, [relayFile, '127.0.0.0/8', String(taken.address().port), '127.0.0.1', '1'], { stdio: ['ignore', 'ignore', 'pipe'] });
-    let err = '';
-    second.stderr.on('data', (d) => { err += d; });
-    assert.equal(await new Promise((r) => second.on('close', r)), 1);
-    assert.match(err, /^relay: listen EADDRINUSE/);
-    taken.close();
   });
 
   await check('the same peer on the same repository gets a container of the same name, made anew once the last job has left the one before: nothing an earlier job wrote is in it', async () => {

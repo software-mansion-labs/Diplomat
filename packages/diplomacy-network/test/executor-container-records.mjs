@@ -420,7 +420,8 @@ try {
     assert.deepEqual(calls('run')[from], [...probeOf(name), '--pid', `container:${name}`, '--cap-add=DAC_READ_SEARCH', '--cap-add=SYS_PTRACE', image, 'node', '-e', HELD]);
     assert.deepEqual(await containers.overQuota(), [{ name, bytes: named + 5 * MiB, jobs: ['run-16'] }]);
     // Killed before it printed, and saying that it could not look: neither is a count.
-    for (const [answer, why] of [['', 'no answer'], ['blind\n', 'blind']]) {
+    // So is one that writes on past what a probe has to say: it is heard no further.
+    for (const [answer, why] of [['', 'no answer'], ['blind\n', 'blind'], ['held 1\n'.repeat(20000), 'no answer']]) {
       stage(`held-${name}`, answer);
       const said = logged.length;
       assert.equal(await containers.usage(name), null);
@@ -458,6 +459,70 @@ try {
     unstage(`held-${name}`);
     await containers.release({ name, runId: 'run-17' });
     await containers.discard(name);
+    nothingLeft();
+  });
+
+  await check('a daemon that is switched off erases the run records under every name, those of its earlier containers among them and nothing else: what this user may not delete goes through a probe, on the image jobs are started in or, in a daemon that has none, on one this daemon built', async () => {
+    const one = await ended(40, 'run-40a');
+    await containers.acquire({ pool: pool(40), peer: PEER, runId: 'run-40b' });
+    run(one.name, 'run-40b');
+    await containers.release({ name: one.name, runId: 'run-40b' });
+    const other = await ended(41, 'run-41');
+    const aside = `${one.name}.1`;
+    fs.mkdirSync(records('somebody-elses'));
+    assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.containers')).sort(), [one.name, aside, other.name, 'somebody-elses'].sort());
+    // `from.eraseAll()` with `dir` refused this user once, as a directory with root's files
+    // in it is, and with this user's first removal held until `go`. Resolves to what this
+    // user was asked to remove, in order.
+    const erasing = async (from, dir, go = Promise.resolve(), first = () => {}) => {
+      const real = fs.promises.rm;
+      const asked = [];
+      fs.promises.rm = async (target, options) => {
+        asked.push(target);
+        if (asked.length === 1) await go;
+        if (target === dir && asked.filter((t) => t === dir).length === 1) throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        return real(target, options);
+      };
+      try {
+        const before = first(asked);
+        await from.eraseAll();
+        await before;
+      } finally { fs.promises.rm = real; }
+      return asked;
+    };
+    const emptied = (name, dir, image) => [...probeOf(name), '--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '-v', `${records(dir)}:/r`, image, 'find', '/r', '-mindepth', '1', '-delete'];
+    const [ran, listed] = [calls('run').length, calls('image').length];
+    // One run under the name is being erased meanwhile: everything under that name waits its turn behind it.
+    let go;
+    const held = new Promise((resolve) => { go = resolve; });
+    const asked = await erasing(containers, records(aside), held, (seen) => {
+      const single = containers.erase(aside, 'run-40a');
+      (async () => {
+        await until('the records of the other name to be asked for', () => seen.includes(records(other.name)));
+        await settle();
+        assert.deepEqual(seen, [path.join(records(aside), 'run-40a'), records(other.name)], 'nothing under the name is touched while one of its runs is being erased');
+        go();
+      })();
+      return single;
+    });
+    assert.deepEqual(asked.filter((t) => t === records(aside)).length, 2, 'refused once, and asked again after the engine');
+    assert.deepEqual(calls('run').slice(ran), [emptied(one.name, aside, one.image)], 'under the name of the container whose records they were');
+    assert.equal(calls('image').length, listed, 'the image jobs are started in is known');
+    assert.deepEqual(fs.readdirSync(path.join(RUNS_DIR, '.containers')), ['somebody-elses']);
+    fs.rmdirSync(records('somebody-elses'));
+    for (const runId of ['run-40a', 'run-40b', 'run-41']) fs.unlinkSync(path.join(RUNS_DIR, runId));
+
+    // A daemon that never had an image to start jobs in: its engine was down, or its image did not build.
+    const left = await ended(42, 'run-42');
+    const off = createContainers({ log: (...a) => logged.push(a.join(' ')), imageDir, broker: () => ({ port: 4321 }) });
+    assert.equal(off.dockerState().image, '');
+    // An image somebody built on top of this daemon's carries its label, and is not it.
+    stage(path.join('images', encodeURIComponent('aaa-built-on-top:1')), JSON.stringify([`dn.base=${BASE}`]));
+    const from = calls('run').length;
+    assert.equal((await erasing(off, records(left.name))).length, 2);
+    assert.deepEqual(calls('run').slice(from), [emptied(left.name, left.name, left.image)]);
+    unstage(path.join('images', encodeURIComponent('aaa-built-on-top:1')));
+    fs.unlinkSync(path.join(RUNS_DIR, 'run-42'));
     nothingLeft();
   });
 

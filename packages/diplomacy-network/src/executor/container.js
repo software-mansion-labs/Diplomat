@@ -29,7 +29,8 @@
 // its storage can; `usage` measures the layer, the volume and the run records wherever
 // it cannot, with the files its processes hold open under no name, and `overQuota`
 // names the containers past it. The run records outlive the container, so they are
-// measured under its name while any are kept.
+// measured under its name while any are kept; `eraseAll` removes them under every name,
+// for a daemon that is switched off.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -61,6 +62,9 @@ const RELAY_LIMITS = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges', '
 // directory root made in a bind mount on Linux.
 const PROBE_LIMITS = ['--network', 'none', '--read-only', '--cap-drop=ALL', '--security-opt', 'no-new-privileges',
   '--pids-limit', '64', '--memory', '256m', '--memory-swap', '256m', '--cpus', '1'];
+// A probe is heard out for this many characters of either stream: its answers are a few
+// short lines, and one that writes more has answered nothing.
+const PROBE_OUTPUT = 65536;
 const INODE_BYTES = 4096;
 // held.cjs, which counts what a container's processes hold in files with no name left.
 const HELD = fs.readFileSync(new URL('./held.cjs', import.meta.url), 'utf8');
@@ -182,8 +186,8 @@ const pairOf = (dir) => ASIDE.exec(dir)?.[1] ?? dir;
 /// ever in once it has been seen for CONTAINER_IDLE_MS. And every image this daemon
 /// built but the one jobs are started in, once no container is of it.
 /// `broker()` is the broker's `address()`: where relays lead.
-/// `restart`, `usage`, `overQuota`, `erase`, `discard` and `removeAll` are described where
-/// they are defined. `imageDir` is the directory the image is built from.
+/// `restart`, `usage`, `overQuota`, `erase`, `discard`, `removeAll` and `eraseAll` are
+/// described where they are defined. `imageDir` is the directory the image is built from.
 export function createContainers({ log = () => {}, now = Date.now, imageDir = IMAGE_DIR, broker = () => null } = {}) {
   let state = { state: 'down', image: '', detail: 'not checked yet' };
   let building = null;
@@ -579,10 +583,11 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     return probeTurn(name, async () => {
       const args = ['run', '--rm', '--name', probeOf(name), '--label', `dn.probe=${name}`, '--label', `dn.base=${BASE_DIR}`,
         ...PROBE_LIMITS, ...extra, image, ...command];
-      let r = await docker(args, { timeout: CONTAINER_USAGE_TIMEOUT_MS });
+      const heard = { timeout: CONTAINER_USAGE_TIMEOUT_MS, maxBuffer: PROBE_OUTPUT };
+      let r = await docker(args, heard);
       const left = async () => mine((await inspect(probeOf(name)))?.labels) && (await docker(['rm', '-f', probeOf(name)])).code === 0;
-      // A probe cut off by an earlier timeout still holds the name.
-      if (r.code !== 0 && /already in use/i.test(r.stderr) && await left()) r = await docker(args, { timeout: CONTAINER_USAGE_TIMEOUT_MS });
+      // A probe cut off earlier still holds the name.
+      if (r.code !== 0 && /already in use/i.test(r.stderr) && await left()) r = await docker(args, heard);
       if (r.code === null) await left();
       return r;
     });
@@ -598,7 +603,8 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
   async function holds(name, image) {
     if (sight === false) return 0;
     const r = await probe(name, image, ['--pid', `container:${name}`, '--cap-add=DAC_READ_SEARCH', '--cap-add=SYS_PTRACE'], ['node', '-e', HELD]);
-    const said = r.stdout.trim();
+    // What a probe that was cut off had written by then is no answer.
+    const said = r.code === null ? '' : r.stdout.trim();
     const [, bytes] = /^held (\d+)$/.exec(said) ?? [];
     if (bytes) {
       sight = true;
@@ -680,11 +686,11 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
   // elsewhere. Otherwise, and where this user may not (root's files in a bind mount on
   // Linux), through the probe, where a link leads nowhere but into the probe's read-only
   // root. The probe mounts the records' directory, which no job can replace, never a
-  // path in it.
-  async function wipe(dir, runId, alone) {
+  // path in it, and is a container of `image`.
+  async function wipe(dir, runId, alone, image = state.image) {
     const target = path.join(runsDirOf(dir), runId);
     const own = () => fs.promises.rm(target, { recursive: true, force: true });
-    const engine = () => probe(pairOf(dir), state.image, ['--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '-v', `${runsDirOf(dir)}:/r`],
+    const engine = () => probe(pairOf(dir), image, ['--cap-add=DAC_OVERRIDE', '--cap-add=FOWNER', '-v', `${runsDirOf(dir)}:/r`],
       ['find', path.posix.join('/r', runId), ...(runId ? [] : ['-mindepth', '1']), '-delete']);
     await (alone ? own().catch(async () => { await engine(); await own(); }) : engine())
       .catch((e) => log('docker', `the run records ${target} could not be removed: ${e.message}`));
@@ -757,6 +763,18 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     return gone;
   }
 
+  /// Removes the run records under every container's name, those of its earlier
+  /// containers among them, for a daemon that is switched off, once `removeAll` left no
+  /// container: what this user may not remove goes through the probe, on the image jobs
+  /// are started in or, with none, on any this daemon built. What could not be removed
+  /// is still there afterwards.
+  async function eraseAll() {
+    const dirs = (await fs.promises.readdir(path.join(RUNS_DIR, '.containers')).catch(() => [])).filter((dir) => isJobName(pairOf(dir)));
+    const built = async () => lines((await docker(['image', 'ls', ...OWN, '--format', '{{.Repository}}:{{.Tag}}'])).stdout).find((i) => i.startsWith(`${IMAGE_REPO}:`)) ?? '';
+    const image = state.state === 'ready' ? state.image : await built();
+    await Promise.all(dirs.map((dir) => serial(pairOf(dir), () => wipe(dir, '', true, image))));
+  }
+
   return {
     dockerState: () => state,
     ensureImage,
@@ -770,6 +788,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     erase,
     discard,
     removeAll,
+    eraseAll,
     list: () => [...known.values()].map((e) => ({ name: e.name, image: e.image, jobs: [...e.jobs] })),
   };
 }
