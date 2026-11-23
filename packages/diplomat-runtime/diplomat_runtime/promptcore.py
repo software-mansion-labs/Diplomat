@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 
 from . import core
@@ -41,27 +42,36 @@ def core_bin() -> str:
     )
 
 
-def cli(args: list[str], *, stdin: object = None, timeout: float = 30) -> str:
+def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
+        started: Callable[[subprocess.Popen], None] | None = None) -> str:
     """``diplomat-core <args>``'s stdout, with ``stdin`` handed over as JSON; or
     :class:`RuntimeError` saying why not (:class:`CoreBinaryMissing` when there is no
-    binary)."""
+    binary). ``started`` is handed the process, which then leads a process group of
+    its own, so the caller can stop it and whatever it runs."""
     env = dict(os.environ)
     env.setdefault("DIPLOMAT_CORE", str(core.assets_dir()))
     try:
-        proc = subprocess.run(  # noqa: S603 — argv is a literal list
+        proc = subprocess.Popen(  # noqa: S603 — argv is a literal list
             [core_bin(), *args],
-            input=None if stdin is None else json.dumps(stdin),
-            stdin=subprocess.DEVNULL if stdin is None else None,
-            capture_output=True, text=True, env=env, timeout=timeout,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+            start_new_session=started is not None,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"diplomat-core {args[0]} did not answer within "
-                           f"{int(timeout)}s") from exc
     except OSError as exc:
         raise RuntimeError(f"diplomat-core could not be run: {exc}") from exc
+    if started is not None:
+        started(proc)
+    try:
+        out, err = proc.communicate(None if stdin is None else json.dumps(stdin),
+                                    timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        proc.kill()
+        proc.communicate()
+        raise RuntimeError(f"diplomat-core {args[0]} did not answer within "
+                           f"{int(timeout)}s") from exc
     if proc.returncode != 0:
-        raise RuntimeError(f"diplomat-core {args[0]} failed: {proc.stderr.strip()}")
-    return proc.stdout
+        raise RuntimeError(f"diplomat-core {args[0]} failed: {err.strip()}")
+    return out
 
 
 def opencode_session_model() -> str:

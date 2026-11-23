@@ -17,11 +17,15 @@ import json
 import math
 import os
 import re
+import uuid
+from collections.abc import Callable
 from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import core, promptcore
-from .autofix import QUEUE_ISSUES_ACTION, QUEUE_REVIEW_ACTION, linear_item
+from .autofix import QUEUE_ISSUES_ACTION, QUEUE_REVIEW_ACTION, RETRY_MAX_BACKOFF, linear_item
 from .prref import item_key_from_url
 
 #: Raised by :func:`last`: the CLI's own reason, or why it could not run.
@@ -29,6 +33,33 @@ Failure = (RuntimeError, promptcore.CoreBinaryMissing, ValueError)
 
 #: The Linear key's environment override, which wins over ``linearTokenFile``.
 TOKEN_ENV = "DIPLOMAT_LINEAR_TOKEN"
+
+
+def pipeline_dir() -> Path:
+    """Must match ``PipelineLog.dir``: the core reads ``control.json`` there."""
+    env = os.environ.get("DIPLOMAT_PIPELINE_DIR")
+    return Path(env) if env else Path.home() / ".diplomat" / "pipeline"
+
+
+#: ``control.json``'s keys, the switches a running sync re-reads before each of its
+#: writes, merges and ratings.
+CONTROL_KEYS = ("enabled", "rate", "fix", "fastTrack", "merge", "fracture")
+
+
+def write_control(switches: dict) -> None:
+    """``control.json`` from ``switches`` (:data:`CONTROL_KEYS`): owner-only, replaced
+    whole. Never raises; a sync that cannot read it goes by the settings it was started
+    with. Twin of ``Store.writePipelineControl``."""
+    folder = pipeline_dir()
+    tmp = folder / f"control.json.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+    try:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({k: bool(switches.get(k)) for k in CONTROL_KEYS}, fh, sort_keys=True)
+        os.replace(tmp, folder / "control.json")
+    except OSError:
+        tmp.unlink(missing_ok=True)
 
 
 def tunables() -> dict:
@@ -138,13 +169,14 @@ def _result(obj: object) -> dict | None:
                         if isinstance(notices, list) else [])}
 
 
-def tick(settings: dict) -> dict:
+def tick(settings: dict, started: Callable | None = None) -> dict:
     """``pipeline-tick``: the ``PipelineTickResult`` (``{at, items, graph: {nodes,
     edges}, effects, events, notices}``), or ``{"error": why}`` when the CLI could not
-    answer. Never raises."""
+    answer. ``started`` is handed the core's process (:func:`promptcore.cli`). Never
+    raises."""
     try:
         out = json.loads(promptcore.cli(["pipeline-tick"], stdin=settings,
-                                        timeout=tick_timeout(settings)))
+                                        timeout=tick_timeout(settings), started=started))
     except Failure as exc:
         return {"error": str(exc)}
     result = _result(out)
@@ -153,12 +185,32 @@ def tick(settings: dict) -> dict:
     return result
 
 
-def last() -> dict:
-    """``pipeline-last``: the last sync's result, as its ``last.json`` holds it."""
+#: ``pipeline-last``'s date before the first sync.
+_NEVER = "1970-01-01T00:00:00Z"
+
+
+def last() -> dict | None:
+    """``pipeline-last``: the last sync's result, as its ``last.json`` holds it; None
+    before the first sync."""
     result = _result(json.loads(promptcore.cli(["pipeline-last"])))
     if result is None:
         raise ValueError("diplomat-core pipeline-last answered something that is not a sync")
-    return result
+    return None if result.get("at") == _NEVER else result
+
+
+def _epoch(iso: str) -> float | None:
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def ran_since(result: dict, started: float) -> bool:
+    """Whether ``result`` is a sync begun at or after ``started`` (epoch seconds), not
+    the last one answered again because another sync held the lock. A result is dated,
+    to the second, when its sync began. Twin of ``Store.pipelineRan``."""
+    at = _epoch(str(result.get("at") or ""))
+    return at is not None and at >= math.floor(started)
 
 
 # MARK: - reading a result
@@ -167,10 +219,12 @@ def last() -> dict:
 def fresh_events(result: dict, previous: dict | None) -> list[dict]:
     """The ``merged`` and ``fractured`` events of ``result`` newer than anything
     ``previous`` showed: none older than its newest event, nor one it held (events are
-    stamped to the second, so two syncs can share one). Every one when there is no
-    previous result. Twin of ``Store.pipelineFreshEvents``."""
+    stamped to the second, so two syncs can share one). With no previous result, those
+    of ``result``'s own sync, which stamps them with its date. Twin of
+    ``Store.pipelineFreshEvents``."""
     shown = (previous or {}).get("events") or []
-    newest = max((str(e.get("at") or "") for e in shown), default=None)
+    newest = (max((str(e.get("at") or "") for e in shown), default=None)
+              if previous is not None else str(result.get("at") or ""))
     return [e for e in result.get("events") or []
             if e.get("kind") in ("merged", "fractured")
             and (newest is None or str(e.get("at") or "") >= newest)
@@ -232,6 +286,47 @@ def concluded(attempts: dict, runs, now_ts: float) -> dict:
     for run in runs:
         for k in _open_keys(attempts, run.kind, run.pr_url or ""):
             out[k] = replace(out[k], concluded_at=now_ts)
+    return out
+
+
+#: How long a concluded record is kept once no sync owes its effect.
+CONCLUDED_KEEP_SECS = 30 * 86400.0
+
+
+def retained(attempts: dict, result: dict, now: float) -> dict:
+    """The records a sync keeps: each while the sync owes its effect, so its retry
+    ladder and its conclusion stand; for the backoff ceiling after its last dispatch,
+    so an effect a failed read left out is not taken for a new one when it is back; and
+    a concluded one for :data:`CONCLUDED_KEEP_SECS` after its run concluded, so a fix
+    whose PR was closed unmerged is not asked for again. Twin of
+    ``Store.retainedPipelineAttempts``."""
+    owed = {str(e.get("key") or "") for e in result.get("effects") or []}
+    return {k: a for k, a in attempts.items()
+            if k in owed or now - a.last_dispatched_at < RETRY_MAX_BACKOFF
+            or (a.concluded_at is not None and now - a.concluded_at < CONCLUDED_KEEP_SECS)}
+
+
+def withdrawn(asks: list, result: dict) -> list[str]:
+    """The keys of the pipeline's ``asks`` (``RequestedWork``) that ``result``, a sync's
+    own, no longer owes: a review it emitted no effect for, a fix of an issue that is
+    no longer a writable candidate. An item it did not read is not judged. A candidate
+    it emitted no fix for (the fix switch off, a hold on what it could not read) keeps
+    its fix. Twin of ``Store.pipelineWithdrawn``."""
+    items = {identity(str(i.get("id") or "")): i for i in result.get("items") or []}
+    owed = {(e.get("kind") == "review", identity(str(e.get("url") or "")))
+            for e in result.get("effects") or []}
+    out = []
+    for ask in asks:
+        if not ask.pipeline:
+            continue
+        review = ask.action == QUEUE_REVIEW_ACTION
+        item = items.get(identity(ask.url))
+        if item is None or (review, identity(ask.url)) in owed:
+            continue
+        if not review and item.get("kind") == "issue" and item.get("stage") == "candidate" \
+                and item.get("writable"):
+            continue
+        out.append(ask.key)
     return out
 
 

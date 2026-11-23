@@ -155,14 +155,15 @@ class DiplomatApp:
         self.store.start_background(self._load_comms, name="comms-feed")
         QTimer.singleShot(10000, self.store.run_comms_poll_async)
 
-        # The Pipeline: a sync no-ops while it is off. The last sync's result loads up
-        # front, so its screen opens on it.
+        # The Pipeline: a sync no-ops while it is off, and the period runs from the end
+        # of one, as on macOS. The last sync's result loads up front, so its screen
+        # opens on it.
         self.pipeline_timer = QTimer()
+        self.pipeline_timer.setSingleShot(True)
         self.pipeline_timer.setInterval(int(pipeline.sync_secs() * 1000))
-        self.pipeline_timer.timeout.connect(self.store.run_pipeline_sync_async)
-        self.pipeline_timer.start()
+        self.pipeline_timer.timeout.connect(self._pipeline_tick)
         self.store.start_background(self.store.refresh_pipeline_last, name="pipeline-last")
-        QTimer.singleShot(15000, self.store.run_pipeline_sync_async)
+        QTimer.singleShot(15000, self._pipeline_tick)
 
         # Resolve identity + first fetch eagerly.
         self.store.start_background(self.store.fetch_me)
@@ -266,8 +267,12 @@ class DiplomatApp:
         self.panel.hide()
         # Before the widgets a worker is about to signal go away. The window and the
         # tray icon are already hidden, so the pause this can cost goes unseen.
+        self.store.stop_pipeline_sync()
         self.store.wait_for_background()
         self.app.quit()
+
+    def _pipeline_tick(self) -> None:
+        self.store.run_pipeline_sync_async(then=self.pipeline_timer.start)
 
     def exec(self) -> int:
         # Let Ctrl+C in a terminal kill the app cleanly.
