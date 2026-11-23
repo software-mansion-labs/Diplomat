@@ -664,7 +664,8 @@ private struct PipelineDetail: View {
                 if canFracture {
                     PipelineActionChip(symbol: "square.split.2x2",
                                        text: forcedFracture ? "Fracture asked" : "Fracture",
-                                       tint: .purple, enabled: enabled && !forcedFracture, action: fracture)
+                                       tint: .purple, enabled: enabled && !forcedFracture && badge == nil,
+                                       action: fracture)
                         .tooltip("Split it into low-complexity child issues in a sync started now")
                 }
                 if PipelineView.canStartFix(item) {

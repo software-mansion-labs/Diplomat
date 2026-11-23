@@ -190,8 +190,9 @@ extension Store {
     /// composed results.
     ///
     /// A result that lands after the master switch went off queues and withdraws nothing
-    /// (a sync switched off midway emits no effect). One of a sync's own (`ran`,
-    /// `pipelineRan`) first retires the queued asks it no longer owes (`pipelineWithdrawn`).
+    /// (a sync switched off midway emits no effect). Any other first retires the queued asks
+    /// no longer owed (`pipelineWithdrawn`), by the result only if it is a sync's own (`ran`,
+    /// `pipelineRan`).
     /// A notice is logged when it first appears, and each merge and split the core made
     /// since the previous result once (`Store.pipelineFreshEvents`), whatever the switches.
     func applyPipeline(_ result: PipelineTickResult, ran: Bool = true, now: Date = Date()) async {
@@ -205,7 +206,7 @@ extension Store {
                          Store.pipelineEventLine(event, in: result))
         }
         pipelineResult = result
-        let withdrawn = ran && pipelineEnabled ? withdrawPipelineAsks(result) : false
+        if pipelineEnabled { withdrawPipelineAsks(ran ? result : nil) }
         var queued = false
         if pipelineEnabled {
             let banned = BanList.read()
@@ -235,12 +236,13 @@ extension Store {
             savePipelineAttempts(Store.retainedPipelineAttempts(
                 loadPipelineAttempts().merging(dispatched) { _, new in new }, after: result, now: now))
         }
-        if !fresh.isEmpty || !done.isEmpty || queued || withdrawn { refreshAudit() }
+        if !fresh.isEmpty || !done.isEmpty || queued { refreshAudit() }
     }
 
-    /// Drops each ask `pipelineWithdrawn` names, unless it is starting; whether any went.
-    private func withdrawPipelineAsks(_ result: PipelineTickResult) -> Bool {
-        let gone = Set(Store.pipelineWithdrawn(requestedWork, by: result))
+    /// Drops each ask `pipelineWithdrawn` names, unless it is starting.
+    func withdrawPipelineAsks(_ result: PipelineTickResult?) {
+        let gone = Set(Store.pipelineWithdrawn(requestedWork, by: result, fix: pipelineFix,
+                                               fastTrack: pipelineFastTrack))
             .subtracting(startingTasks.map(\.id))
         for entry in requestedWork where gone.contains(entry.key) {
             forgetRequested(entry.key)
@@ -248,29 +250,29 @@ extension Store {
             AuditLog.log("panel", "queue-drop",
                          "\(entry.label(roots: roots.count)) - the pipeline no longer owes it, not run")
         }
-        return !gone.isEmpty
+        if !gone.isEmpty { refreshAudit() }
     }
 
-    /// The keys of the pipeline's `asks` that `result`, a sync's own, no longer owes: one
-    /// it emitted no effect for (a switch off, a hold), but a Start fix (`byHand`) only once
-    /// its issue is no writable candidate. An item it did not read is not judged, nor
-    /// anything in a root it could not judge in full (`unread`). Twin of `pipeline.withdrawn`.
-    nonisolated static func pipelineWithdrawn(_ asks: [RequestedWork],
-                                              by result: PipelineTickResult) -> [String] {
-        let items = Dictionary(result.items.map { (pipelineIdentity($0.id), $0) },
-                               uniquingKeysWith: { first, _ in first })
-        let owed = Set(result.effects.map { effect -> String in
+    /// The keys of the pipeline's `asks` no longer owed: one a sync queued while its kind's
+    /// switch (`fix`, `fastTrack`) is off; and in a root `result` (a sync's own; nil judges by
+    /// the switches alone) read in full, not `unread`, one it emitted no effect for, or a
+    /// Start fix (`byHand`) whose issue is not `fixable`. Twin of `pipeline.withdrawn`.
+    nonisolated static func pipelineWithdrawn(_ asks: [RequestedWork], by result: PipelineTickResult?,
+                                              fix: Bool, fastTrack: Bool) -> [String] {
+        let owed = Set((result?.effects ?? []).map { effect -> String in
             if case .review = effect { return "review " + pipelineIdentity(effect.url) }
             return "fix " + pipelineIdentity(effect.url)
         })
-        let unread = Set(result.unread.map { $0.lowercased() })
+        let fixable = Set((result?.fixable ?? []).map(pipelineIdentity))
+        let unread = Set((result?.unread ?? []).map { $0.lowercased() })
         return asks.filter { ask in
-            guard ask.config.isPipeline, !unread.contains(ask.repo.lowercased()) else { return false }
+            guard ask.config.isPipeline else { return false }
             let review: Bool
             if case .review = ask.config { review = true } else { review = false }
+            if !ask.byHand && !(review ? fastTrack : fix) { return true }
+            guard result != nil, !unread.contains(ask.repo.lowercased()) else { return false }
             let id = pipelineIdentity(ask.url)
-            guard let item = items[id], !owed.contains((review ? "review " : "fix ") + id) else { return false }
-            return !ask.byHand || !(item.kind == .issue && item.stage == .candidate && item.writable)
+            return ask.byHand ? !fixable.contains(id) : !owed.contains((review ? "review " : "fix ") + id)
         }.map(\.key)
     }
 
@@ -357,7 +359,7 @@ extension Store {
         !row.record.released && AgentState.blocking.contains(row.state)
     }
 
-    /// How long a concluded record is kept once no sync owes its effect.
+    /// How long a concluded record is kept after its run concluded, whatever syncs owe.
     nonisolated static let pipelineConcludedKeep: TimeInterval = 30 * 86_400
 
     /// The records a sync keeps: each while the sync owes its effect, so its retry ladder

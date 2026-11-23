@@ -86,7 +86,7 @@ def _result() -> dict:
                       "edges": [{"from": a, "to": b, "kind": k} for a, b, k in edges]},
             "effects": [],
             "events": [{"at": t, "item": i, "kind": k, "detail": d} for t, i, k, d in events],
-            "notices": []}
+            "notices": [], "unread": [], "fixable": [I5]}
 
 
 def _rect(column: int, row: int) -> QRectF:
@@ -198,6 +198,7 @@ def test_a_connector_into_its_own_or_an_earlier_column_goes_round_the_cards(stor
     x, y, z = _url(10), _url(11, "pr"), _url(12, "pr")
     store.pipeline_result = {
         "at": "2026-11-20T10:00:00Z", "effects": [], "events": [], "notices": [],
+        "unread": [], "fixable": [],
         "items": [_item(10, stage="fixing", lane="fast"),
                   _item(11, kind="pr", stage="human", lane="human"),
                   _item(12, kind="pr", stage="human", lane="human")],
@@ -376,7 +377,7 @@ def test_someone_elses_item_says_who_holds_it(store):
     texts = _labels(view.detail)
     assert "Read only: Diplomat shows it and writes nothing to it." in texts
     assert "By @carol · assigned to @bob, @dave" in texts
-    assert "Diplomat's own, kept on this machine: it may not label this item." in texts
+    assert "Rated here, not labelled." in texts
     assert "Nothing logged about it yet." in texts
 
 
@@ -544,22 +545,27 @@ def test_an_ask_waiting_for_its_sync_shows_asked(store, monkeypatch):
         "Fracture asked", False)
 
 
-def test_start_fix_is_off_while_anything_is_on_it(store, monkeypatch):
+def test_start_fix_and_fracture_are_off_while_anything_is_on_it(store, monkeypatch):
     view = PipelineView(store)
     view.select(I5)
     fix = view.buttons["fix"]
     assert (fix.text(), fix.isEnabled(), fix.toolTip()) == (
         "Start fix", True, "Queue its fix now, past its retry backoff")
+    assert view.buttons["fracture"].isEnabled()
+
+    def on() -> list[bool]:
+        return [view.buttons[k].isEnabled() for k in ("fix", "fracture")]
+
     store.queued_tasks = [autofix.QueuedTask(
         autofix.queue_key(autofix.QUEUE_ISSUES_ACTION, "o/r#5"),
         autofix.AgentJob(kind="issues", audit_action="issues", label="Issues · #5",
                          prompt=""), 1)]
     store.tasks_changed.emit()
-    assert not view.buttons["fix"].isEnabled()
+    assert on() == [False, False]
     store.queued_tasks = []
     _fixing(monkeypatch, 5)
     store.tasks_changed.emit()
-    assert not view.buttons["fix"].isEnabled()
+    assert on() == [False, False]
 
 
 def test_start_fix_is_for_a_writable_candidate_whose_fix_is_known(store):
@@ -812,16 +818,18 @@ def test_the_render_fixture_covers_every_stage_lane_edge_and_event_kind():
 
 
 @pytest.mark.skipif(not os.environ.get("DIPLOMAT_CORE_BIN"), reason="DIPLOMAT_CORE_BIN not set")
-def test_the_render_mode_draws_through_the_entry_point(tmp_path):
-    """Its fixture goes through the real ``diplomat-core pipeline-last``."""
+@pytest.mark.parametrize("mode", ["pipeline", "settings"])
+def test_the_render_mode_draws_through_the_entry_point(tmp_path, mode):
+    """The pipeline fixture goes through the real ``diplomat-core pipeline-last``; the
+    settings one switches the Pipeline on."""
     home = tmp_path / "home"
     home.mkdir()
-    out = tmp_path / "pipeline.png"
+    out = tmp_path / f"{mode}.png"
     env = {k: v for k, v in os.environ.items()
            if k not in ("DIPLOMAT_PIPELINE_DIR", "DIPLOMAT_CONFIG")}
     env.update(HOME=str(home), XDG_CONFIG_HOME=str(home / ".config"),
                QT_QPA_PLATFORM="offscreen", DIPLOMAT_SELF_REPO="/nonexistent",
-               DIPLOMAT_RENDER="pipeline", DIPLOMAT_RENDER_OUT=str(out),
+               DIPLOMAT_RENDER=mode, DIPLOMAT_RENDER_OUT=str(out),
                PYTHONPATH=os.pathsep.join([str(_LINUX_DIR),
                                            str(_LINUX_DIR.parents[1] / "diplomat-runtime")]))
     done = subprocess.run([sys.executable, "-m", "diplomat_app"], cwd=str(_LINUX_DIR),

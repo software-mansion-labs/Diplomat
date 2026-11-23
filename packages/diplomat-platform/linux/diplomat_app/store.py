@@ -1221,7 +1221,7 @@ class Store(QObject):
     @pipeline_enabled.setter
     def pipeline_enabled(self, value: bool) -> None:
         self._settings.setValue("pipelineEnabled", bool(value))
-        pipeline.write_control(self.pipeline_control())
+        self._write_pipeline_control()
 
     @property
     def pipeline_rate(self) -> bool:
@@ -1231,7 +1231,7 @@ class Store(QObject):
     @pipeline_rate.setter
     def pipeline_rate(self, value: bool) -> None:
         self._settings.setValue("pipelineRate", bool(value))
-        pipeline.write_control(self.pipeline_control())
+        self._write_pipeline_control()
 
     @property
     def pipeline_fix(self) -> bool:
@@ -1241,7 +1241,9 @@ class Store(QObject):
     @pipeline_fix.setter
     def pipeline_fix(self, value: bool) -> None:
         self._settings.setValue("pipelineFix", bool(value))
-        pipeline.write_control(self.pipeline_control())
+        self._write_pipeline_control()
+        if not value:
+            self._withdraw_pipeline_asks(None)
 
     @property
     def pipeline_fast_track(self) -> bool:
@@ -1251,7 +1253,9 @@ class Store(QObject):
     @pipeline_fast_track.setter
     def pipeline_fast_track(self, value: bool) -> None:
         self._settings.setValue("pipelineFastTrack", bool(value))
-        pipeline.write_control(self.pipeline_control())
+        self._write_pipeline_control()
+        if not value:
+            self._withdraw_pipeline_asks(None)
 
     @property
     def pipeline_merge(self) -> bool:
@@ -1261,7 +1265,7 @@ class Store(QObject):
     @pipeline_merge.setter
     def pipeline_merge(self, value: bool) -> None:
         self._settings.setValue("pipelineMerge", bool(value))
-        pipeline.write_control(self.pipeline_control())
+        self._write_pipeline_control()
 
     @property
     def pipeline_fracture(self) -> bool:
@@ -1271,13 +1275,21 @@ class Store(QObject):
     @pipeline_fracture.setter
     def pipeline_fracture(self, value: bool) -> None:
         self._settings.setValue("pipelineFracture", bool(value))
-        pipeline.write_control(self.pipeline_control())
+        self._write_pipeline_control()
 
     def pipeline_control(self) -> dict:
         """``control.json``'s switches as they stand (:func:`pipeline.write_control`)."""
         return {"enabled": self.pipeline_enabled, "rate": self.pipeline_rate,
                 "fix": self.pipeline_fix, "fastTrack": self.pipeline_fast_track,
                 "merge": self.pipeline_merge, "fracture": self.pipeline_fracture}
+
+    def _write_pipeline_control(self) -> None:
+        """:func:`pipeline.write_control`; headless only into a
+        ``DIPLOMAT_PIPELINE_DIR``, so a render never steers the live app's sync. Twin of
+        ``Store.writePipelineControl``."""
+        if headless.active(os.environ) and not os.environ.get("DIPLOMAT_PIPELINE_DIR"):
+            return
+        pipeline.write_control(self.pipeline_control())
 
     @property
     def pipeline_linear_teams_raw(self) -> str:
@@ -4627,7 +4639,7 @@ class Store(QObject):
         # read before the sync replaces it.
         if self.pipeline_result is None:
             self.refresh_pipeline_last()
-        pipeline.write_control(self.pipeline_control())
+        self._write_pipeline_control()
         started = time.time()
         try:
             out = pipeline.tick(settings, self._pipeline_started)
@@ -4644,8 +4656,9 @@ class Store(QObject):
         was handed and the queued asks it no longer owes (:func:`pipeline.withdrawn`),
         and ask for the agent work it owes. A failed sync leaves the last result and
         every force and ask standing; one that answered the last result again
-        (:func:`pipeline.ran_since`) every force and ask; one landing after
-        the switch went off every ask (switched off midway, it emits no effect).
+        (:func:`pipeline.ran_since`) every force, and every ask but one whose switch is
+        off; one landing after the Pipeline went off every ask (switched off midway, it
+        emits no effect).
 
         A notice is logged when it first appears, and each merge and split the core
         made since the previous result once (:func:`pipeline.fresh_events`), whatever
@@ -4671,8 +4684,7 @@ class Store(QObject):
                         kind: ids - frozenset(handed.get(kind) or ())
                         for kind, ids in self._pipeline_force.items()}
                 if self.pipeline_enabled:
-                    if ran:
-                        self._withdraw_pipeline_asks(result)
+                    self._withdraw_pipeline_asks(result if ran else None)
                     self._apply_pipeline_effects(result, time.time())
             self.pipeline_changed.emit()
         finally:
@@ -4683,8 +4695,9 @@ class Store(QObject):
             for call in then:
                 call()
 
-    def _withdraw_pipeline_asks(self, result: dict) -> None:
-        gone = set(pipeline.withdrawn(self.requested_work, result))
+    def _withdraw_pipeline_asks(self, result: dict | None) -> None:
+        gone = set(pipeline.withdrawn(self.requested_work, result, fix=self.pipeline_fix,
+                                      fast_track=self.pipeline_fast_track))
         gone -= {e.id for e in self.starting_tasks}
         roots = len(review.repo_roots())
         for entry in [w for w in self.requested_work if w.key in gone]:

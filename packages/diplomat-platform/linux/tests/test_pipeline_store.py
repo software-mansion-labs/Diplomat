@@ -67,11 +67,11 @@ def _now_iso() -> str:
 
 
 def _result(*effects: dict, items: tuple = (), at: str | None = None,
-            unread: tuple = ()) -> dict:
+            unread: tuple = (), fixable: tuple = ()) -> dict:
     """Dated now unless ``at`` says otherwise: a sync's result is dated when it began."""
     return {"at": at or _now_iso(), "items": list(items),
             "graph": {"nodes": [], "edges": []}, "effects": list(effects), "events": [],
-            "notices": [], "unread": list(unread)}
+            "notices": [], "unread": list(unread), "fixable": list(fixable)}
 
 
 @pytest.fixture
@@ -803,11 +803,12 @@ def test_a_core_past_its_deadline_is_an_error_at_once(tmp_path, monkeypatch):
 def test_a_malformed_result_keeps_only_what_it_should_hold(tmp_path, monkeypatch):
     _fake_core(tmp_path, monkeypatch, json.dumps({
         "at": "x", "items": [{"id": "a"}, 3], "graph": {"nodes": "no", "edges": [None]},
-        "effects": [{"kind": "review"}, "x"], "notices": ["one", 2], "unread": ["o/r", 3]}))
+        "effects": [{"kind": "review"}, "x"], "notices": ["one", 2], "unread": ["o/r", 3],
+        "fixable": [ISSUE, None]}))
     assert pipeline.tick({}) == {
         "at": "x", "items": [{"id": "a"}], "graph": {"nodes": [], "edges": []},
         "effects": [{"kind": "review"}], "events": [], "notices": ["one"],
-        "unread": ["o/r"]}
+        "unread": ["o/r"], "fixable": [ISSUE]}
 
 
 # MARK: - What a running sync reads
@@ -841,6 +842,19 @@ def test_a_sync_writes_the_switches_before_it_starts(pipe, monkeypatch):
     pipe._pipeline_sync_once()
     assert seen == [{"enabled": True, "rate": False, "fix": True, "fastTrack": True,
                      "merge": False, "fracture": False}]
+
+
+def test_a_headless_store_writes_the_switches_only_into_a_named_dir(pipe, tmp_path,
+                                                                    monkeypatch):
+    """A render's switches never reach the live app's sync."""
+    monkeypatch.setenv("DIPLOMAT_RENDER", "settings")
+    monkeypatch.delenv("DIPLOMAT_PIPELINE_DIR")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    pipe.pipeline_merge = True
+    assert not (tmp_path / "home").exists()
+    monkeypatch.setenv("DIPLOMAT_PIPELINE_DIR", str(tmp_path / "named"))
+    pipe.pipeline_merge = False
+    assert _control()["merge"] is False
 
 
 def test_an_unwritable_control_file_is_no_raise(pipe, tmp_path, monkeypatch):
@@ -1131,26 +1145,69 @@ def test_a_queued_fix_leaves_once_the_sync_emits_none(pipe, fix, now):
     assert _keys(pipe) == []
 
 
-def test_a_start_fix_stays_while_its_issue_is_a_writable_candidate(pipe):
+def test_a_start_fix_stays_while_its_issue_is_fixable(pipe):
+    """``fixable`` names it whether or not ``items``, which the layout caps, holds it."""
     pipe.pipeline_fix = False
     assert _start(pipe, _item()) is None
-    _sync(pipe, _result(items=(_item(),)))
+    _sync(pipe, _result(items=(_item(),), fixable=(ISSUE,)))
+    _sync(pipe, _result(fixable=(ISSUE,)))
     assert _keys(pipe) == ["issues:o/r#12"]
     _sync(pipe, _result(items=(_item(writable=False, assignees=["bob"]),)))
     assert _keys(pipe) == []
 
 
-def test_a_queued_fix_stays_while_its_issue_was_not_read(pipe):
-    """Its root failed, so nothing is known of it."""
-    _queued_fix(pipe)
+def test_a_start_fix_leaves_once_a_whole_read_finds_its_issue_gone(pipe):
+    pipe.pipeline_fix = False
+    assert _start(pipe, _item()) is None
     _sync(pipe, _result())
-    assert _keys(pipe) == ["issues:o/r#12"]
+    assert _keys(pipe) == []
+
+
+@pytest.mark.parametrize("effect", [_fix(), _linear()])
+def test_a_queued_fix_leaves_once_a_whole_read_finds_its_issue_gone(pipe, effect):
+    """Closed on GitHub, completed or canceled on Linear, or past the layout's cap: no
+    item, and no effect."""
+    _queued_fix(pipe, effect)
+    _sync(pipe, _result())
+    assert _keys(pipe) == []
 
 
 def test_nothing_leaves_in_a_root_the_sync_could_not_judge_in_full(pipe):
     _queued_fix(pipe)
     _sync(pipe, _result(items=(_item(writable=False, assignees=["bob"]),), unread=("O/R",)))
     assert _keys(pipe) == ["issues:o/r#12"]
+
+
+@pytest.mark.parametrize("switch, left", [
+    ("pipeline_fix", ["issues:o/r#13", "review:o/r#7"]),
+    ("pipeline_fast_track", ["issues:linear:ENG-12", "issues:o/r#12", "issues:o/r#13"]),
+])
+def test_a_switch_turned_off_withdraws_what_syncs_queued_for_it_at_once(pipe, monkeypatch,
+                                                                        switch, left):
+    """No sync needed; a Start fix stays."""
+    syncs = []
+    monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: syncs.append(1))
+    pipe._apply_pipeline_effects(_result(_fix(), _linear(), _review()), time.time())
+    thirteen = _item("https://github.com/o/r/issues/13", label="#13")
+    pipe.pipeline_result = _result(items=(thirteen,))
+    assert pipe.pipeline_start_fix(thirteen) is None
+    setattr(pipe, switch, False)
+    assert sorted(_keys(pipe)) == left
+    assert sorted(t.id for t in pipe.drainable_tasks) == left
+    assert syncs == []
+
+
+@pytest.mark.parametrize("ran", [True, False])
+def test_a_sync_withdraws_an_ask_whose_switch_is_off_even_in_a_root_it_could_not_read(
+        pipe, ran):
+    """However it was queued, and whether the result is its own or the last answered
+    again."""
+    pipe.pipeline_fix = False
+    pipe._request([pipe.pipeline_work(_fix())])
+    assert _keys(pipe) == ["issues:o/r#12"]
+    pipe._apply_pipeline_sync({"result": _result(unread=("o/r",), at="2026-11-20T10:00:00Z"),
+                               "forced": {}, "started": 0 if ran else time.time()})
+    assert _keys(pipe) == []
 
 
 @pytest.mark.parametrize("now", [_item(), _item(writable=False, assignees=["bob"])])
@@ -1194,7 +1251,8 @@ def test_only_the_pipelines_asks_are_withdrawn(pipe):
         number=12, url=ISSUE, author="",
         config={"kind": "issues", "target": "specific", "specificIssue": "12"}, repo="o/r")
     assert not sweep.pipeline
-    assert pipeline.withdrawn([sweep], _result(items=(_item(writable=False),))) == []
+    assert pipeline.withdrawn([sweep], _result(items=(_item(writable=False),)), fix=False,
+                              fast_track=False) == []
 
 
 def test_a_starting_fix_is_left_to_its_dispatch(pipe):
@@ -1231,7 +1289,7 @@ def test_a_concluded_record_is_kept_for_thirty_days(pipe):
 def test_pipeline_last_before_any_sync_is_no_sync(tmp_path, monkeypatch, pipe):
     _fake_core(tmp_path, monkeypatch, json.dumps({
         "at": "1970-01-01T00:00:00Z", "items": [], "graph": {"nodes": [], "edges": []},
-        "effects": [], "events": [], "notices": []}))
+        "effects": [], "events": [], "notices": [], "unread": [], "fixable": []}))
     assert pipeline.last() is None
     pipe.refresh_pipeline_last()
     assert pipe.pipeline_result is None

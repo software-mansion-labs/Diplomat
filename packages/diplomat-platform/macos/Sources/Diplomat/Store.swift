@@ -786,6 +786,7 @@ final class Store: ObservableObject {
         didSet {
             persist(pipelineFix, forKey: Keys.pipelineFix)
             writePipelineControl()
+            if !pipelineFix { withdrawPipelineAsks(nil) }
             pipelineSwitched(on: pipelineFix && !oldValue)
         }
     }
@@ -793,6 +794,7 @@ final class Store: ObservableObject {
         didSet {
             persist(pipelineFastTrack, forKey: Keys.pipelineFastTrack)
             writePipelineControl()
+            if !pipelineFastTrack { withdrawPipelineAsks(nil) }
             pipelineSwitched(on: pipelineFastTrack && !oldValue)
         }
     }
