@@ -117,6 +117,13 @@ try {
     assert.equal(await ask('host:tport:serial:emulator-5554', 'shell,v2,raw:ls'), 'OKAY\x01\0\0\0\0\0\0\0OKAYran shell,v2,raw:ls');
     assert.equal(await talk([`${frame('host:transport:192.168.1.5:5555')}${frame('sync:')}`]), 'OKAYOKAYran sync:');
     for (const service of ['exec:id', 'tcp:8080', 'jdwp:123']) assert.equal(await ask('host:transport:emulator-5554', service), `OKAYOKAYran ${service}`);
+    // A service is bytes, and goes on as the bytes it came as with the length it came
+    // with: one counted in characters and sent in another encoding would end short of
+    // its end at the server, and what was left of it would be the device's to read.
+    const bytes = 'shell:echo \xe9\xe8\xfc \xff';
+    const said = await talk([Buffer.from(`${frame('host:transport:emulator-5554')}${frame(bytes)}`, 'latin1')]);
+    assert.ok(said.startsWith('OKAYOKAYran shell:echo '), said);
+    assert.equal(server.asked.at(-1), bytes);
 
     // The server reads the request behind a switch as it read the first: one of its own
     // would be carried out there, and a device's reverse leads back to this machine.
