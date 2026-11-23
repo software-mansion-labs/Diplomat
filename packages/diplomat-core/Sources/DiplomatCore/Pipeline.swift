@@ -6,10 +6,11 @@ import Foundation
 // risk and complexity, and a low/low one goes down the fast track: issue -> fix PR -> the
 // PR rated on its own -> reviewed until clean -> rated again at that head -> merged with no
 // human review. Anything else is left to a human. The state is the trackers' labels
-// (`assets/pipeline.json` `labels`) and Diplomat's clean-marker reviews; `PipelineLog.dir`
-// only logs what happened and caches ratings Diplomat may not write. `PipelineTick` runs a
-// sync; the Linux front-end reaches it through `diplomat-core pipeline-tick`, never by
-// reimplementing it.
+// (`assets/pipeline.json` `labels`) and Diplomat's clean-marker reviews, and in
+// `PipelineLog.dir` what the trackers cannot hold: the guards against repeating a step
+// (`state.json`), the re-rates that make a `cleared` label Diplomat's own (`log.jsonl`)
+// and the ratings it may not write. `PipelineTick` runs a sync; the Linux front-end
+// reaches it through `diplomat-core pipeline-tick`, never by reimplementing it.
 
 /// Ordered, so the higher of two is `max`.
 public enum PipelineLevel: String, Codable, CaseIterable, Comparable, Sendable {
@@ -60,7 +61,8 @@ public enum PipelineLane: String, Codable, CaseIterable, Sendable {
 }
 
 public struct PipelineItem: Codable, Equatable, Sendable {
-    /// Its URL: GitHub's issue or PR page, Linear's issue page.
+    /// Its URL: GitHub's issue or PR page; for Linear, its issue page without the title's
+    /// slug, `https://linear.app/<workspace>/issue/<IDENTIFIER>`, so a retitle keeps it.
     public var id: String
     public var source: PipelineSource
     public var kind: PipelineKind
@@ -202,18 +204,29 @@ public struct PipelineEvent: Codable, Equatable, Sendable {
 ///
 /// JSON, flat: `{"kind": "fixIssue", "repo", "number", "url"}`, `{"kind": "fixLinear",
 /// "repo", "identifier", "url", "text"}`, `{"kind": "review", "repo", "number", "url",
-/// "headSha"}`, each with its `key` and `stamp` beside (written, never read back).
+/// "headSha"}`, each with its `author`, `key` and `stamp` beside (the last two written,
+/// never read back).
+///
+/// `author` is the work's ban dimension, the one a front-end checks against the ban
+/// list: the issue's author, and for an issue Diplomat filed as a split's part, the
+/// author its root ancestor had; "" only for the operator's own (a review of their PR).
 public enum PipelineEffect: Codable, Equatable, Sendable {
     /// A Fix-issues run for one GitHub issue of the root `repo`.
-    case fixIssue(repo: String, number: Int, url: String)
+    case fixIssue(repo: String, number: Int, url: String, author: String)
     /// A Fix-issues run in the root `repo` for one Linear issue, whose text Diplomat read.
-    case fixLinear(repo: String, identifier: String, url: String, text: String)
+    case fixLinear(repo: String, identifier: String, url: String, text: String, author: String)
     /// A fast-track review of the operator's PR at `headSha`.
-    case review(repo: String, number: Int, url: String, headSha: String)
+    case review(repo: String, number: Int, url: String, headSha: String, author: String)
 
     public var url: String {
         switch self {
-        case .fixIssue(_, _, let url), .fixLinear(_, _, let url, _), .review(_, _, let url, _): return url
+        case .fixIssue(_, _, let url, _), .fixLinear(_, _, let url, _, _), .review(_, _, let url, _, _): return url
+        }
+    }
+
+    public var author: String {
+        switch self {
+        case .fixIssue(_, _, _, let a), .fixLinear(_, _, _, _, let a), .review(_, _, _, _, let a): return a
         }
     }
 
@@ -227,28 +240,31 @@ public enum PipelineEffect: Codable, Equatable, Sendable {
 
     /// What a new attempt is owed for: a review per head; a fix once.
     public var stamp: String {
-        if case .review(_, _, _, let sha) = self { return sha }
+        if case .review(_, _, _, let sha, _) = self { return sha }
         return "fix"
     }
 
     private enum CodingKeys: String, CodingKey {
-        case kind, repo, number, url, identifier, text, headSha, key, stamp
+        case kind, repo, number, url, identifier, text, headSha, author, key, stamp
     }
 
+    /// An effect without its `author` does not decode: a missing one must not read as
+    /// the operator's own.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let kind = try c.decode(String.self, forKey: .kind)
         let repo = try c.decode(String.self, forKey: .repo)
         let url = try c.decode(String.self, forKey: .url)
+        let author = try c.decode(String.self, forKey: .author)
         switch kind {
         case "fixIssue":
-            self = .fixIssue(repo: repo, number: try c.decode(Int.self, forKey: .number), url: url)
+            self = .fixIssue(repo: repo, number: try c.decode(Int.self, forKey: .number), url: url, author: author)
         case "fixLinear":
             self = .fixLinear(repo: repo, identifier: try c.decode(String.self, forKey: .identifier),
-                              url: url, text: try c.decode(String.self, forKey: .text))
+                              url: url, text: try c.decode(String.self, forKey: .text), author: author)
         case "review":
             self = .review(repo: repo, number: try c.decode(Int.self, forKey: .number), url: url,
-                           headSha: try c.decode(String.self, forKey: .headSha))
+                           headSha: try c.decode(String.self, forKey: .headSha), author: author)
         default:
             throw DecodingError.dataCorruptedError(forKey: .kind, in: c,
                                                    debugDescription: "unknown effect \(kind)")
@@ -258,21 +274,22 @@ public enum PipelineEffect: Codable, Equatable, Sendable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         switch self {
-        case .fixIssue(let repo, let number, _):
+        case .fixIssue(let repo, let number, _, _):
             try c.encode("fixIssue", forKey: .kind)
             try c.encode(repo, forKey: .repo)
             try c.encode(number, forKey: .number)
-        case .fixLinear(let repo, let identifier, _, let text):
+        case .fixLinear(let repo, let identifier, _, let text, _):
             try c.encode("fixLinear", forKey: .kind)
             try c.encode(repo, forKey: .repo)
             try c.encode(identifier, forKey: .identifier)
             try c.encode(text, forKey: .text)
-        case .review(let repo, let number, _, let headSha):
+        case .review(let repo, let number, _, let headSha, _):
             try c.encode("review", forKey: .kind)
             try c.encode(repo, forKey: .repo)
             try c.encode(number, forKey: .number)
             try c.encode(headSha, forKey: .headSha)
         }
+        try c.encode(author, forKey: .author)
         try c.encode(url, forKey: .url)
         try c.encode(key, forKey: .key)
         try c.encode(stamp, forKey: .stamp)
@@ -377,6 +394,38 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
                   rate: try on(.rate), fix: try on(.fix), fastTrack: try on(.fastTrack),
                   merge: try on(.merge), fracture: try on(.fracture),
                   force: try c.decodeIfPresent(Force.self, forKey: .force))
+    }
+}
+
+/// The pipeline's switches as the front-end has them now: `control.json` in
+/// `PipelineLog.dir`, owner-only, which it rewrites whole whenever one changes and before
+/// each sync, as `{"enabled", "rate", "fix", "fastTrack", "merge", "fracture"}`, each a
+/// boolean. A sync reads it right before every outward step (a label written, a child
+/// filed, a PR marked ready or merged) and before each rating call, and skips a step
+/// whose switch, or `enabled`, is off now; a step the operator forced needs `enabled`
+/// alone. It can only stop what the sync's settings allow. A missing file, or one
+/// without all six, leaves the settings as they were.
+public struct PipelineControl: Codable, Equatable, Sendable {
+    public var enabled: Bool
+    public var rate: Bool
+    public var fix: Bool
+    public var fastTrack: Bool
+    public var merge: Bool
+    public var fracture: Bool
+
+    public init(enabled: Bool, rate: Bool, fix: Bool, fastTrack: Bool, merge: Bool, fracture: Bool) {
+        self.enabled = enabled
+        self.rate = rate
+        self.fix = fix
+        self.fastTrack = fastTrack
+        self.merge = merge
+        self.fracture = fracture
+    }
+
+    /// `settings`' switches, enabled.
+    public init(settings: PipelineSettings) {
+        self.init(enabled: true, rate: settings.rate, fix: settings.fix, fastTrack: settings.fastTrack,
+                  merge: settings.merge, fracture: settings.fracture)
     }
 }
 

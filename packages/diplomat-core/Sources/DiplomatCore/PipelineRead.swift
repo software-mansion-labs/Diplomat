@@ -3,6 +3,18 @@ import Foundation
 /// One item as a sync read it: the `PipelineItem` the view gets, and what the sync decides
 /// on besides.
 struct PipelineEntry {
+    /// What only `PullRequest`'s `Gate` reads of a PR.
+    struct Gate {
+        /// Who, besides the operator, authored or committed one of its commits: "" for
+        /// one GitHub links to no account, or for commits past the read's page.
+        var foreignCommits: [String] = []
+        /// A check on the head ran rather than being skipped.
+        var ciRan = false
+        /// A check on the head started after it last went from draft to ready, or it never
+        /// was a draft.
+        var ciSinceReady = false
+    }
+
     var item: PipelineItem
     var labels: [String]
     var body: String
@@ -15,6 +27,9 @@ struct PipelineEntry {
     var children: [String] = []
     /// A PR's closing references; a Linear issue's attachment URLs.
     var links: [String] = []
+    /// A PR's open closing references, each with who it is assigned to: nil when more
+    /// than the read lists, and an empty URL for references past the read's page.
+    var closes: [(url: String, assignees: [String]?)] = []
     var headRef = ""
     var baseRef = ""
     var defaultBranch = ""
@@ -27,10 +42,15 @@ struct PipelineEntry {
     var ciCommit = ""
     var ciState = ""
     var unresolvedThreads = 0
+    var reviewRequests = 0
     var participants: [String?] = []
     var participantsUnseen = false
+    /// A comment or review body of the operator's that does not open with Diplomat's tag.
+    var operatorUntagged = false
     /// The heads the operator's clean-marker reviews name, oldest first.
     var markers: [String] = []
+    /// Nil unless it was read with `Gate`.
+    var gate: Gate?
     /// Linear: the team's id, and the issue's labels by name.
     var teamID: String?
     var labelIDs: [String: String] = [:]
@@ -64,6 +84,10 @@ enum PipelineRead {
 
     static func date(_ value: Any?) -> Date? { (value as? String).flatMap(CommsLog.parseISO) }
 
+    static func login(_ node: [String: Any]?) -> String {
+        (node?["author"] as? [String: Any])?["login"] as? String ?? ""
+    }
+
     /// Whether two GitHub issue or PR links are of one repository: the same
     /// `https://host/owner/repo/` before their last two components.
     static func sameRepo(_ a: String, _ b: String) -> Bool {
@@ -73,112 +97,71 @@ enum PipelineRead {
         return base(a) != nil && base(a) == base(b)
     }
 
-    /// Whether `body` names, right after `marker`, `oid` or a prefix of it at least seven
-    /// characters long: a marker counts only on the commit it was submitted at.
+    /// Whether a clean-marker review's `body`, past Diplomat's tag, opens with `marker` and
+    /// the full `oid` the review was submitted at.
     static func names(_ body: String, marker: String, oid: String) -> Bool {
         guard !oid.isEmpty else { return false }
-        var rest = Substring(body)
-        while let hit = rest.range(of: marker + " ") {
-            let sha = rest[hit.upperBound...].prefix { $0.isHexDigit }
-            if sha.count >= 7, oid.lowercased().hasPrefix(sha.lowercased()) { return true }
-            rest = rest[hit.upperBound...]
+        var text = Substring(body.trimmingCharacters(in: .whitespacesAndNewlines))
+        if text.hasPrefix(ReviewAudit.tag), let close = text.range(of: #"\]: "#) {
+            text = text[close.upperBound...]
         }
-        return false
+        guard text.hasPrefix(marker + " ") else { return false }
+        return text.dropFirst(marker.count + 1).prefix { $0.isHexDigit }.lowercased() == oid.lowercased()
     }
 
-    /// A `pipeline-repo.graphql` response for `root`. `primary` is the first root, whose
-    /// items are labelled `#N`; others' are `owner/repo#N`.
+    /// Why an item whose labels run past the read's page may not be written: a rating
+    /// label among the unread ones would go unseen. GitHub counts them; Linear says
+    /// whether a page follows.
+    static func labelsCut(_ node: [String: Any], _ labels: [String]) -> String? {
+        let page = (node["labels"] as? [String: Any])?["pageInfo"] as? [String: Any]
+        return total(node, "labels") > labels.count || bool(page?["hasNextPage"], false)
+            ? "has more labels than one read lists" : nil
+    }
+
+    /// One page of a `pipeline-repo.graphql` operation for `root`: `Repo`'s, or one of
+    /// `Issues` or `PullRequests` given the `repo` that `Repo` read, with the cursors of
+    /// the pages after it. `primary` is the first root, whose items are labelled `#N`;
+    /// others' are `owner/repo#N`.
     static func github(_ response: [String: Any], root: PipelineSettings.Root, primary: Bool,
-                       model: CoreAssets.PipelineModel) -> (PipelineRepo, [PipelineEntry]) {
+                       model: CoreAssets.PipelineModel, repo known: PipelineRepo? = nil)
+        -> (repo: PipelineRepo, entries: [PipelineEntry], issuesAfter: String?, prsAfter: String?) {
         let repo = (response["data"] as? [String: Any])?["repository"] as? [String: Any]
-        let defaultBranch = (repo?["defaultBranchRef"] as? [String: Any])?["name"] as? String ?? ""
-        let mergeFlag = [("squashMergeAllowed", "--squash"), ("mergeCommitAllowed", "--merge"),
-                         ("rebaseMergeAllowed", "--rebase")]
-            .first { bool(repo?[$0.0], false) }?.1
+        let read = known ?? PipelineRepo(
+            defaultBranch: (repo?["defaultBranchRef"] as? [String: Any])?["name"] as? String ?? "",
+            mergeFlag: [("squashMergeAllowed", "--squash"), ("mergeCommitAllowed", "--merge"),
+                        ("rebaseMergeAllowed", "--rebase")].first { bool(repo?[$0.0], false) }?.1)
+        func after(_ key: String) -> String? {
+            let page = (repo?[key] as? [String: Any])?["pageInfo"] as? [String: Any]
+            return bool(page?["hasNextPage"], false) ? page?["endCursor"] as? String : nil
+        }
         let me = root.me.lowercased()
         func label(_ n: Int) -> String { primary ? "#\(n)" : "\(root.slug)#\(n)" }
-        func login(_ node: [String: Any]?) -> String {
-            (node?["author"] as? [String: Any])?["login"] as? String ?? ""
-        }
-        func person(_ node: [String: Any]) -> String? {
-            guard let a = node["author"] as? [String: Any] else { return "" }
-            return a["__typename"] as? String == "Bot" ? nil : a["login"] as? String ?? ""
-        }
         var out: [PipelineEntry] = []
 
         for n in nodes(repo, "issues") {
             guard let number = n["number"] as? Int, let url = n["url"] as? String else { continue }
             let assignees = nodes(n, "assignees").compactMap { $0["login"] as? String }
-            let writable = assignees.allSatisfy { $0.lowercased() == me } && !me.isEmpty
+            let labels = nodes(n, "labels").compactMap { $0["name"] as? String }
+            let unwritable = labelsCut(n, labels)
+                ?? (assignees.allSatisfy { $0.lowercased() == me } && !me.isEmpty ? nil
+                    : "assigned to \(assignees.map { "@" + $0 }.joined(separator: ", "))")
             var e = PipelineEntry(
                 item: PipelineItem(id: url, source: .github, kind: .issue, label: label(number),
                                    title: n["title"] as? String ?? "", repo: root.slug, state: "open",
-                                   author: login(n), assignees: assignees, writable: writable,
+                                   author: login(n), assignees: assignees, writable: unwritable == nil,
                                    stage: .unrated, lane: .unrated, updatedAt: date(n["updatedAt"])),
-                labels: nodes(n, "labels").compactMap { $0["name"] as? String },
-                body: n["body"] as? String ?? "", root: root, number: number,
+                labels: labels, body: n["body"] as? String ?? "", root: root, number: number,
                 nodeID: n["id"] as? String)
             e.parent = (n["parent"] as? [String: Any])?["url"] as? String
             e.children = nodes(n, "subIssues").compactMap { $0["url"] as? String }
-            e.unwritable = writable ? nil : "assigned to \(assignees.map { "@" + $0 }.joined(separator: ", "))"
+            e.unwritable = unwritable
             out.append(e)
         }
 
         for n in nodes(repo, "pullRequests") {
-            guard let number = n["number"] as? Int, let url = n["url"] as? String,
-                  let head = n["headRefOid"] as? String else { continue }
-            let author = login(n)
-            let draft = bool(n["isDraft"], false)
-            let fork = bool(n["isCrossRepository"], true)
-            let base = n["baseRefName"] as? String ?? ""
-            let unwritable: String? = author.lowercased() != me || me.isEmpty
-                ? "authored by @\(author.isEmpty ? "ghost" : author), not me"
-                : fork ? "comes from a fork"
-                : base != defaultBranch || base.isEmpty ? "targets \(base), not the default branch"
-                : nil
-            var e = PipelineEntry(
-                item: PipelineItem(id: url, source: .github, kind: .pr, label: label(number),
-                                   title: n["title"] as? String ?? "", repo: root.slug,
-                                   state: draft ? "draft" : "open", author: author,
-                                   writable: unwritable == nil, stage: .unrated, lane: .unrated,
-                                   headSha: head, updatedAt: date(n["updatedAt"])),
-                labels: nodes(n, "labels").compactMap { $0["name"] as? String },
-                body: n["body"] as? String ?? "", root: root, number: number)
-            e.links = nodes(n, "closingIssuesReferences").compactMap { $0["url"] as? String }
-            e.headRef = n["headRefName"] as? String ?? ""
-            e.baseRef = base
-            e.defaultBranch = defaultBranch
-            e.isDraft = draft
-            e.isCrossRepository = fork
-            e.mergeable = n["mergeable"] as? String ?? ""
-            e.reviewDecision = n["reviewDecision"] as? String ?? ""
-            // A count it cannot read is one past every limit.
-            e.changedFiles = n["changedFiles"] as? Int ?? Int.max
-            e.files = nodes(n, "files").compactMap { f in
-                guard let path = f["path"] as? String else { return nil }
-                return PipelineGate.ChangedFile(path: path, additions: f["additions"] as? Int ?? 0,
-                                                deletions: f["deletions"] as? Int ?? 0,
-                                                changeType: f["changeType"] as? String ?? "")
+            if let e = pr(n, root: root, label: label, defaultBranch: read.defaultBranch, model: model) {
+                out.append(e)
             }
-            let commit = nodes(n, "commits").first?["commit"] as? [String: Any]
-            e.ciCommit = commit?["oid"] as? String ?? ""
-            e.ciState = (commit?["statusCheckRollup"] as? [String: Any])?["state"] as? String ?? ""
-            let threads = nodes(n, "reviewThreads")
-            e.unresolvedThreads = threads.filter { !bool($0["isResolved"], false) }.count
-                + max(0, total(n, "reviewThreads") - threads.count)
-            let reviews = nodes(n, "reviews"), comments = nodes(n, "comments")
-            e.participants = (reviews + comments).map(person)
-            e.participantsUnseen = total(n, "reviews") > reviews.count
-                || total(n, "comments") > comments.count
-            e.markers = reviews.compactMap { r -> String? in
-                guard login(r).lowercased() == me, !me.isEmpty,
-                      let oid = (r["commit"] as? [String: Any])?["oid"] as? String,
-                      names(r["body"] as? String ?? "", marker: model.cleanMarker, oid: oid)
-                else { return nil }
-                return oid
-            }
-            e.unwritable = unwritable
-            out.append(e)
         }
 
         let pipelineLabels = Set(model.all.map { $0.lowercased() })
@@ -197,7 +180,7 @@ enum PipelineRead {
             e.links = nodes(n, "closingIssuesReferences").compactMap { $0["url"] as? String }
             e.headRef = n["headRefName"] as? String ?? ""
             e.baseRef = n["baseRefName"] as? String ?? ""
-            e.defaultBranch = defaultBranch
+            e.defaultBranch = read.defaultBranch
             e.isCrossRepository = bool(n["isCrossRepository"], true)
             e.unwritable = merged ? "merged" : "closed"
             out.append(e)
@@ -215,7 +198,143 @@ enum PipelineRead {
                 out.append(closed)
             }
         }
-        return (PipelineRepo(defaultBranch: defaultBranch, mergeFlag: mergeFlag), out)
+        return (read, out, after("issues"), after("pullRequests"))
+    }
+
+    /// The `PullRequest` operation's answer: the PR, read with `Gate`, labelled `label`.
+    static func pullRequest(_ response: [String: Any], root: PipelineSettings.Root, label: String,
+                            model: CoreAssets.PipelineModel) -> PipelineEntry? {
+        let repo = (response["data"] as? [String: Any])?["repository"] as? [String: Any]
+        guard let n = repo?["pullRequest"] as? [String: Any] else { return nil }
+        let defaultBranch = (repo?["defaultBranchRef"] as? [String: Any])?["name"] as? String ?? ""
+        return pr(n, root: root, label: { _ in label }, defaultBranch: defaultBranch, model: model)
+    }
+
+    /// One node of the `PR` fragment, and of `Gate` when it was read with it.
+    static func pr(_ n: [String: Any], root: PipelineSettings.Root, label: (Int) -> String,
+                   defaultBranch: String, model: CoreAssets.PipelineModel) -> PipelineEntry? {
+        guard let number = n["number"] as? Int, let url = n["url"] as? String,
+              let head = n["headRefOid"] as? String else { return nil }
+        let me = root.me.lowercased()
+        func person(_ node: [String: Any]) -> String? {
+            guard let a = node["author"] as? [String: Any] else { return "" }
+            return a["__typename"] as? String == "Bot" ? nil : a["login"] as? String ?? ""
+        }
+        let author = login(n)
+        let draft = bool(n["isDraft"], false)
+        let fork = bool(n["isCrossRepository"], true)
+        let base = n["baseRefName"] as? String ?? ""
+        let state: String
+        switch n["state"] as? String {
+        case "MERGED"?: state = "merged"
+        case "CLOSED"?: state = "closed"
+        default: state = draft ? "draft" : "open"
+        }
+        let labels = nodes(n, "labels").compactMap { $0["name"] as? String }
+        let unwritable: String? = state == "merged" || state == "closed" ? state
+            : author.lowercased() != me || me.isEmpty
+            ? "authored by @\(author.isEmpty ? "ghost" : author), not me"
+            : fork ? "comes from a fork"
+            : base != defaultBranch || base.isEmpty ? "targets \(base), not the default branch"
+            : labelsCut(n, labels)
+        var e = PipelineEntry(
+            item: PipelineItem(id: url, source: .github, kind: .pr, label: label(number),
+                               title: n["title"] as? String ?? "", repo: root.slug,
+                               state: state, author: author,
+                               writable: unwritable == nil, stage: .unrated, lane: .unrated,
+                               headSha: head, updatedAt: date(n["updatedAt"])),
+            labels: labels, body: n["body"] as? String ?? "", root: root, number: number)
+        let closing = nodes(n, "closingIssuesReferences")
+        e.links = closing.compactMap { $0["url"] as? String }
+        e.closes = closing.compactMap { c in
+            guard c["state"] as? String == "OPEN", let url = c["url"] as? String else { return nil }
+            let who = nodes(c, "assignees").compactMap { $0["login"] as? String }
+            return (url, total(c, "assignees") > who.count ? nil : who)
+        }
+        if total(n, "closingIssuesReferences") > closing.count { e.closes.append(("", nil)) }
+        e.headRef = n["headRefName"] as? String ?? ""
+        e.baseRef = base
+        e.defaultBranch = defaultBranch
+        e.isDraft = draft
+        e.isCrossRepository = fork
+        e.mergeable = n["mergeable"] as? String ?? ""
+        e.reviewDecision = n["reviewDecision"] as? String ?? ""
+        // A count it cannot read is one past every limit.
+        e.changedFiles = n["changedFiles"] as? Int ?? Int.max
+        e.files = nodes(n, "files").compactMap { f in
+            guard let path = f["path"] as? String else { return nil }
+            return PipelineGate.ChangedFile(path: path, additions: f["additions"] as? Int ?? 0,
+                                            deletions: f["deletions"] as? Int ?? 0,
+                                            changeType: f["changeType"] as? String ?? "")
+        }
+        let tip = nodes(n, "tip").first?["commit"] as? [String: Any]
+        e.ciCommit = tip?["oid"] as? String ?? ""
+        e.ciState = (tip?["statusCheckRollup"] as? [String: Any])?["state"] as? String ?? ""
+        let threads = nodes(n, "reviewThreads")
+        e.unresolvedThreads = threads.filter { !bool($0["isResolved"], false) }.count
+            + max(0, total(n, "reviewThreads") - threads.count)
+        e.reviewRequests = total(n, "reviewRequests")
+        let reviews = nodes(n, "reviews"), comments = nodes(n, "comments")
+        e.participants = (reviews + comments).map(person)
+        e.participantsUnseen = total(n, "reviews") > reviews.count
+            || total(n, "comments") > comments.count
+        // A review with no body says what it says in its threads.
+        e.operatorUntagged = !me.isEmpty && (reviews + comments).contains { r in
+            let body = (r["body"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            return login(r).lowercased() == me && !body.isEmpty && !body.hasPrefix(ReviewAudit.tag)
+        }
+        e.markers = reviews.compactMap { r -> String? in
+            guard login(r).lowercased() == me, !me.isEmpty,
+                  let oid = (r["commit"] as? [String: Any])?["oid"] as? String,
+                  names(r["body"] as? String ?? "", marker: model.cleanMarker, oid: oid)
+            else { return nil }
+            return oid
+        }
+        if n["gateTip"] != nil { e.gate = gate(n, me: me) }
+        e.unwritable = unwritable
+        return e
+    }
+
+    /// `Gate`'s fields of a PR node, for the operator `me` (lowercased).
+    static func gate(_ n: [String: Any], me: String) -> PipelineEntry.Gate {
+        var g = PipelineEntry.Gate()
+        func note(_ who: String) {
+            if who.lowercased() != me, !g.foreignCommits.contains(who) { g.foreignCommits.append(who) }
+        }
+        let commits = nodes(n, "commits")
+        for c in commits {
+            let commit = c["commit"] as? [String: Any]
+            func user(_ key: String) -> String {
+                ((commit?[key] as? [String: Any])?["user"] as? [String: Any])?["login"] as? String ?? ""
+            }
+            let committer = commit?["committer"] as? [String: Any]
+            // GitHub's own committer, of a commit made or merged on the web, signs for
+            // the author.
+            let gitHub = !(committer?["user"] is [String: Any])
+                && (committer?["email"] as? String)?.lowercased() == "noreply@github.com"
+            note(user("author"))
+            if !gitHub { note(user("committer")) }
+        }
+        if total(n, "commits") > commits.count { note("") }
+        let rollup = (nodes(n, "gateTip").first?["commit"] as? [String: Any])?["statusCheckRollup"] as? [String: Any]
+        let readied = date(nodes(n, "readied").first?["createdAt"])
+        g.ciSinceReady = readied == nil
+        for c in nodes(rollup, "contexts") {
+            // A check run skipped did not run; a commit status always did.
+            if let conclusion = c["conclusion"] as? String, ["SKIPPED", "NEUTRAL"].contains(conclusion) { continue }
+            guard c["conclusion"] != nil || c["state"] != nil else { continue }
+            g.ciRan = true
+            if let readied, let at = date(c["startedAt"] ?? c["createdAt"]), at > readied { g.ciSinceReady = true }
+        }
+        return g
+    }
+
+    /// A Linear issue's page URL without the title's slug, which a retitle changes:
+    /// `https://linear.app/<workspace>/issue/<IDENTIFIER>`.
+    static func linearURL(_ url: String) -> String {
+        guard let issue = url.range(of: "/issue/") else { return url }
+        let rest = url[issue.upperBound...]
+        return String(url[..<issue.upperBound]) + rest.prefix { $0 != "/" && $0 != "?" && $0 != "#" }
     }
 
     /// One page of the `Issues` operation (`assets/graphql/linear.graphql`): its issues, and
@@ -231,29 +350,29 @@ enum PipelineRead {
             let team = n["team"] as? [String: Any]
             let key = team?["key"] as? String ?? ""
             let assignee = n["assignee"] as? [String: Any]
-            let writable = assignee == nil || (assignee?["id"] as? String) == viewer
+            let labels = nodes(n, "labels")
+            let names = labels.compactMap { $0["name"] as? String }
+            let unwritable = labelsCut(n, names)
+                ?? (assignee == nil || (assignee?["id"] as? String) == viewer ? nil
+                    : "assigned to \(assignee?["name"] as? String ?? "someone else")")
             let repo = teams.first { $0.key.lowercased() == key.lowercased() }?.repo
-            let labels = (n["labels"] as? [String: Any])?["nodes"] as? [[String: Any]] ?? []
             var e = PipelineEntry(
-                item: PipelineItem(id: url, source: .linear, kind: .issue, label: identifier,
+                item: PipelineItem(id: linearURL(url), source: .linear, kind: .issue, label: identifier,
                                    title: n["title"] as? String ?? "", repo: key, state: "open",
                                    author: (n["creator"] as? [String: Any])?["name"] as? String,
                                    assignees: (assignee?["name"] as? String).map { [$0] } ?? [],
-                                   writable: writable, stage: .unrated, lane: .unrated,
+                                   writable: unwritable == nil, stage: .unrated, lane: .unrated,
                                    updatedAt: date(n["updatedAt"])),
-                labels: labels.compactMap { $0["name"] as? String },
-                body: n["description"] as? String ?? "",
+                labels: names, body: n["description"] as? String ?? "",
                 root: roots.first { $0.slug.lowercased() == repo?.lowercased() }, nodeID: id)
-            e.parent = (n["parent"] as? [String: Any])?["url"] as? String
-            e.children = ((n["children"] as? [String: Any])?["nodes"] as? [[String: Any]] ?? [])
-                .compactMap { $0["url"] as? String }
-            e.links = ((n["attachments"] as? [String: Any])?["nodes"] as? [[String: Any]] ?? [])
-                .compactMap { $0["url"] as? String }
+            e.parent = ((n["parent"] as? [String: Any])?["url"] as? String).map(linearURL)
+            e.children = nodes(n, "children").compactMap { ($0["url"] as? String).map(linearURL) }
+            e.links = nodes(n, "attachments").compactMap { $0["url"] as? String }
             e.teamID = team?["id"] as? String
             for l in labels {
                 if let name = l["name"] as? String, let id = l["id"] as? String { e.labelIDs[name] = id }
             }
-            e.unwritable = writable ? nil : "assigned to \(assignee?["name"] as? String ?? "someone else")"
+            e.unwritable = unwritable
             return e
         }
         return (entries, next)
@@ -275,15 +394,22 @@ enum PipelineRead {
         return false
     }
 
+    static func norm(_ url: String) -> String {
+        var u = url
+        while u.hasSuffix("/") { u.removeLast() }
+        return u.lowercased()
+    }
+
+    /// Whether `pr` fixes the Linear issue `issue`: the issue's attachments link it, or its
+    /// title or body names the issue's identifier.
+    static func fixes(_ pr: PipelineEntry, linear issue: PipelineEntry) -> Bool {
+        issue.links.contains { norm($0) == norm(pr.id) } || mentions(pr.item.title + "\n" + pr.body, issue.item.label)
+    }
+
     /// Every edge between `entries`: parent -> child, issue -> the PR fixing it (a GitHub
-    /// closing reference; for Linear, a PR the issue's attachments link or whose title or
-    /// body names its identifier), PR -> the PR stacked on it in the same repository.
+    /// closing reference; for Linear, `fixes`), PR -> the PR stacked on it in the same
+    /// repository.
     static func edges(_ entries: [PipelineEntry]) -> [PipelineGraph.Edge] {
-        func norm(_ url: String) -> String {
-            var u = url
-            while u.hasSuffix("/") { u.removeLast() }
-            return u.lowercased()
-        }
         var byURL: [String: String] = [:]
         for e in entries { byURL[norm(e.id)] = e.id }
         var out: [PipelineGraph.Edge] = []
@@ -305,12 +431,7 @@ enum PipelineRead {
                     add(e.id, other.id, .stacked)
                 }
             case (.issue, .linear):
-                for link in e.links {
-                    if let pr = byURL[norm(link)], prs.contains(where: { $0.id == pr }) { add(e.id, pr, .fixes) }
-                }
-                for pr in prs where mentions(pr.item.title + "\n" + pr.body, e.item.label) {
-                    add(e.id, pr.id, .fixes)
-                }
+                for pr in prs where fixes(pr, linear: e) { add(e.id, pr.id, .fixes) }
             case (.issue, .github):
                 break
             }
@@ -319,11 +440,13 @@ enum PipelineRead {
     }
 }
 
-/// Linear's GraphQL API, reached with the operator's API key: read on each sync, never
-/// cached or written, and never handed to a child process or an agent. The transport is
-/// `SlackAPI.curl`'s, so the key travels in a config on curl's stdin.
+/// Linear's GraphQL API, reached with the operator's API key, read on each sync and never
+/// cached. The transport is `SlackAPI.curl`'s: the key travels in a config on curl's
+/// stdin, which `CommsClassifier.execute` stages in an owner-only file of its own 0700
+/// directory, removed when curl exits.
 public struct LinearAPI {
-    /// Overrides the Keychain item and the file. Never reaches a child process.
+    /// Overrides the Keychain item and the file. `CommsClassifier.childEnvironment`, and so
+    /// every child Diplomat starts, goes without it.
     public static let envVar = "DIPLOMAT_LINEAR_TOKEN"
 
     let key: String
@@ -347,7 +470,7 @@ public struct LinearAPI {
 
     /// `DIPLOMAT_LINEAR_TOKEN`; else on macOS the Keychain item `keychainItem`, the
     /// operator's own account first since an empty same-named item can shadow it; else
-    /// the file `tokenFile`, `~` expanded. Nil when none holds a key.
+    /// the file `tokenFile`, its `~` read as `PrivateFiles.home`. Nil when none holds a key.
     static func key(keychainItem: String?, tokenFile: String?) -> String? {
         if let env = ProcessInfo.processInfo.environment[envVar], !env.isEmpty { return env }
         func trimmed(_ data: Data) -> String? {
@@ -368,7 +491,7 @@ public struct LinearAPI {
         }
 #endif
         if let file = tokenFile, !file.isEmpty,
-           let data = FileManager.default.contents(atPath: (file as NSString).expandingTildeInPath) {
+           let data = FileManager.default.contents(atPath: PrivateFiles.expandingTilde(file)) {
             return trimmed(data)
         }
         return nil

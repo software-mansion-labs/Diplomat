@@ -111,6 +111,26 @@ public enum PipelineGate {
         return (PipelineRating(risk: risk, complexity: complexity), reasons)
     }
 
+    /// What the diff's text adds to `floor`: a diff longer than the rater is shown
+    /// (`diffChars`) makes complexity at least medium, and a submodule moved risk high,
+    /// since GitHub lists that as one modified line whatever it pulls in.
+    static func diffFloor(_ diff: String, diffChars: Int) -> (rating: PipelineRating, reasons: [String]) {
+        var rating = PipelineRating(risk: .low, complexity: .low)
+        var reasons: [String] = []
+        if diff.count > diffChars {
+            rating.complexity = .medium
+            reasons.append("its diff is longer than the \(diffChars) characters the rater reads")
+        }
+        let moved = diff.split(separator: "\n").contains {
+            $0.hasPrefix("+Subproject commit ") || $0.hasPrefix("-Subproject commit ")
+        }
+        if moved {
+            rating.risk = .high
+            reasons.append("moves a submodule")
+        }
+        return (rating, reasons)
+    }
+
     /// A cleared PR as the merge gate reads it.
     public struct Candidate: Equatable, Sendable {
         public var state: String
@@ -134,12 +154,35 @@ public enum PipelineGate {
         public var ciCommit: String
         /// `statusCheckRollup.state`, "" when the commit has no checks at all.
         public var ciState: String
+        /// A comment or review of the operator's that does not carry Diplomat's tag: a
+        /// person, not an agent, said something on it.
+        public var operatorUntagged: Bool
+        /// Reviews requested and not given yet, of a user or a team.
+        public var reviewRequests: Int
+        /// Who, besides the operator, authored or committed one of its commits; "" for one
+        /// whose author has no GitHub account, or for commits past what the read lists.
+        public var foreignCommits: [String]
+        /// Both of Diplomat's fast-track labels are on it.
+        public var trackLabels: Bool
+        /// It closes an issue rated low risk and low complexity that Diplomat may act on:
+        /// the fast track is for the fixes the pipeline asked for.
+        public var fixesCandidate: Bool
+        /// The issues it would close that Diplomat may not write to.
+        public var closesUnwritable: [String]
+        /// A check on the head ran, rather than every one being skipped.
+        public var ciRan: Bool
+        /// A check on the head started after the PR last went from draft to ready, or it
+        /// never was a draft.
+        public var ciSinceReady: Bool
 
+        /// The fields after `ciState` default to what lets a PR merge.
         public init(state: String, author: String, isCrossRepository: Bool, baseRef: String,
                     defaultBranch: String, participants: [String?], participantsUnseen: Bool = false,
                     reviewDecision: String, unresolvedThreads: Int, rating: PipelineRating?,
                     floor: PipelineRating, mergeable: String, headSha: String, ciCommit: String,
-                    ciState: String) {
+                    ciState: String, operatorUntagged: Bool = false, reviewRequests: Int = 0,
+                    foreignCommits: [String] = [], trackLabels: Bool = true, fixesCandidate: Bool = true,
+                    closesUnwritable: [String] = [], ciRan: Bool = true, ciSinceReady: Bool = true) {
             self.state = state
             self.author = author
             self.isCrossRepository = isCrossRepository
@@ -155,6 +198,14 @@ public enum PipelineGate {
             self.headSha = headSha
             self.ciCommit = ciCommit
             self.ciState = ciState
+            self.operatorUntagged = operatorUntagged
+            self.reviewRequests = reviewRequests
+            self.foreignCommits = foreignCommits
+            self.trackLabels = trackLabels
+            self.fixesCandidate = fixesCandidate
+            self.closesUnwritable = closesUnwritable
+            self.ciRan = ciRan
+            self.ciSinceReady = ciSinceReady
         }
     }
 
@@ -166,16 +217,26 @@ public enum PipelineGate {
         case notDefaultBase(String)
         case human(String)
         case participantsUnseen
+        case operatorComment
+        case reviewRequested(Int)
+        case foreignCommits(String)
         case changesRequested
         case threads(Int)
+        case offTrack
+        case notAFix
+        case closesUnwritable(String)
         case rated(PipelineRating?)
         case floor(PipelineRating)
         case conflicting
         case mergeabilityUnknown
         case ciStale
-        case ciMissing
         case ciPending
         case ciFailing(String)
+        /// Everything else lets it merge: it is marked ready, and merged at a later sync.
+        case draft
+        case ciMissing
+        case ciSkipped
+        case ciBeforeReady
 
         /// A stable spelling for the log.
         public var code: String {
@@ -186,16 +247,25 @@ public enum PipelineGate {
             case .notDefaultBase: return "base"
             case .human: return "human"
             case .participantsUnseen: return "participants-unseen"
+            case .operatorComment: return "operator-comment"
+            case .reviewRequested: return "review-requested"
+            case .foreignCommits: return "foreign-commits"
             case .changesRequested: return "changes-requested"
             case .threads: return "threads"
+            case .offTrack: return "off-track"
+            case .notAFix: return "not-a-fix"
+            case .closesUnwritable: return "closes-unwritable"
             case .rated: return "rated"
             case .floor: return "floor"
             case .conflicting: return "conflicting"
             case .mergeabilityUnknown: return "mergeability-unknown"
             case .ciStale: return "ci-stale"
-            case .ciMissing: return "ci-missing"
             case .ciPending: return "ci-pending"
             case .ciFailing: return "ci-failing"
+            case .draft: return "draft"
+            case .ciMissing: return "ci-missing"
+            case .ciSkipped: return "ci-skipped"
+            case .ciBeforeReady: return "ci-before-ready"
             }
         }
 
@@ -210,16 +280,26 @@ public enum PipelineGate {
             case .notDefaultBase(let base): return "targets \(base), not the default branch"
             case .human(let who): return "@\(who.isEmpty ? "ghost" : who) has commented or reviewed"
             case .participantsUnseen: return "has more reviews or comments than one read lists"
+            case .operatorComment: return "I commented on it myself, not through Diplomat"
+            case .reviewRequested(let n): return "waits on \(n) requested review\(n == 1 ? "" : "s")"
+            case .foreignCommits(let who):
+                return who.isEmpty ? "has commits by someone other than me" : "has commits by @\(who)"
             case .changesRequested: return "has changes requested"
             case .threads(let n): return "has \(n) unresolved review thread\(n == 1 ? "" : "s")"
+            case .offTrack: return "does not wear both fast-track labels"
+            case .notAFix: return "closes no low-risk, low-complexity issue Diplomat may act on"
+            case .closesUnwritable(let what): return "would close \(what), which Diplomat may not write to"
             case .rated(let r): return "rated \(pair(r)) on the tracker"
             case .floor(let r): return "its diff allows no less than \(pair(r))"
             case .conflicting: return "conflicts with its base"
             case .mergeabilityUnknown: return "mergeability not computed yet"
             case .ciStale: return "CI was read for an older commit"
-            case .ciMissing: return "has no CI checks"
             case .ciPending: return "CI still running"
             case .ciFailing(let state): return "CI \(state.lowercased())"
+            case .draft: return "a draft: marked ready, and merged once CI has run on it since"
+            case .ciMissing: return "has no CI checks"
+            case .ciSkipped: return "every CI check was skipped"
+            case .ciBeforeReady: return "CI has not run since it was marked ready"
             }
         }
     }
@@ -227,7 +307,9 @@ public enum PipelineGate {
     /// The hold on `c`, or nil when it may merge. The first broken rule wins, in a fixed
     /// order: who the PR is and who has seen it, then what it changes, then the state
     /// GitHub is still computing - so a PR that can never merge says why, rather than
-    /// reading "CI still running" until its checks finish.
+    /// reading "CI still running" until its checks finish. A draft passing every rule up
+    /// to a failing or running CI holds as `draft`: CI that skips drafts runs once it is
+    /// ready.
     public static func hold(_ c: Candidate, me: String) -> Hold? {
         if c.state != "open" && c.state != "draft" { return .closed }
         let mine = me.lowercased()
@@ -238,18 +320,28 @@ public enum PipelineGate {
             return .human(other ?? "")
         }
         if c.participantsUnseen { return .participantsUnseen }
+        if c.operatorUntagged { return .operatorComment }
+        if c.reviewRequests > 0 { return .reviewRequested(c.reviewRequests) }
+        if let who = c.foreignCommits.first { return .foreignCommits(who) }
         if c.reviewDecision == "CHANGES_REQUESTED" { return .changesRequested }
         if c.unresolvedThreads > 0 { return .threads(c.unresolvedThreads) }
+        if !c.trackLabels { return .offTrack }
+        if !c.fixesCandidate { return .notAFix }
+        if !c.closesUnwritable.isEmpty { return .closesUnwritable(c.closesUnwritable.joined(separator: ", ")) }
         if c.rating?.isFastTrack != true { return .rated(c.rating) }
         if !c.floor.isFastTrack { return .floor(c.floor) }
         if c.mergeable == "CONFLICTING" { return .conflicting }
         if c.mergeable != "MERGEABLE" { return .mergeabilityUnknown }
         if c.ciCommit != c.headSha { return .ciStale }
         switch c.ciState {
-        case "SUCCESS": return nil
-        case "": return .ciMissing
+        case "SUCCESS", "": break
         case "PENDING", "EXPECTED": return .ciPending
         default: return .ciFailing(c.ciState)
         }
+        if c.state == "draft" { return .draft }
+        if c.ciState.isEmpty { return .ciMissing }
+        if !c.ciRan { return .ciSkipped }
+        if !c.ciSinceReady { return .ciBeforeReady }
+        return nil
     }
 }

@@ -3,6 +3,23 @@ import Foundation
 /// Owner-only files guarded by an exclusive `flock`: the primitives under Comms' log and
 /// state. Directories 0700, files 0600.
 enum PrivateFiles {
+    /// `$HOME` when set, else the account's home. Off macOS Foundation's own lookups read
+    /// the password database, and the Linux front-end's `Path.home()` reads `$HOME`: where
+    /// the two differ, the core and the front-end would read different `~/.diplomat`s.
+    static var home: URL {
+        if let env = ProcessInfo.processInfo.environment["HOME"], !env.isEmpty {
+            return URL(fileURLWithPath: env, isDirectory: true)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    /// `path` with a leading `~` read as `home`, as Python's `expanduser` reads it.
+    static func expandingTilde(_ path: String) -> String {
+        if path == "~" { return home.path }
+        guard path.hasPrefix("~/") else { return path }
+        return home.appendingPathComponent(String(path.dropFirst(2))).path
+    }
+
     /// Made 0700 even if it already exists: what is in it may be the operator's DMs, and
     /// their home may be readable by other local users.
     static func prepare(_ dir: URL) {

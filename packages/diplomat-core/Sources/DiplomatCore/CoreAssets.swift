@@ -340,6 +340,7 @@ public enum CoreAssets {
         public let httpTimeoutSecs: Double
         public let linearAPI: String
         public let linearMaxIssues: Int
+        public let githubMaxItems: Int
         public let labels: Labels
         public let levels: Levels
         public let floor: Floor
@@ -354,8 +355,8 @@ public enum CoreAssets {
 
         private enum CodingKeys: String, CodingKey {
             case syncSecs, minSyncSecs, maxItems, maxEvents, maxLogBytes, httpTimeoutSecs,
-                 linearAPI, linearMaxIssues, labels, levels, floor, rater, fracture, blocks,
-                 cleanMarker
+                 linearAPI, linearMaxIssues, githubMaxItems, labels, levels, floor, rater, fracture,
+                 blocks, cleanMarker
         }
 
         /// The labels that put an item on the pipeline's graph once it is merged or closed.
