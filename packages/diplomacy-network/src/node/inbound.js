@@ -25,10 +25,10 @@ export function createInbound(host) {
   let latest = Math.min(Number(host.store.read('heard')?.ts) || 0, host.now());
   const floor = latest;
   // member -> its place for a body above the stranger's cap: `{ ticket, bytes, again,
-  // branch }` from the `reserve` that gave it until the body's headers arrive -
-  // `again` for a member that had a place a moment before - and `{ branch, whole }`
-  // while the body is read and served. The oldest ticket comes first. A timer finds
-  // its ticket gone when the ticket was used, given up or taken.
+  // last, branch }` from the `reserve` that gave it until the body's headers arrive -
+  // `again` for a member that had a place a moment before, at `last` - and
+  // `{ branch, whole }` while the body is read and served. The oldest ticket comes
+  // first. A timer finds its ticket gone when the ticket was used, given up or taken.
   const places = new Map();
   const reading = new Map(); // ticket -> the place its body is read in
   const had = new Map(); // member -> when it last had a place
@@ -79,10 +79,12 @@ export function createInbound(host) {
     /// A member asks for a place to send one request of `kind` of up to `bytes`: a member
     /// has one place at a time, there are MAX_LARGE_BODIES over all members, and only the
     /// holder of a key of this host gets the `act` cap. A member and the keys in its seats
-    /// have one place between them. A ticket is void when the body's headers have not
-    /// come TICKET_WAIT_MS later, and a member whose tickets bring no whole body gets
-    /// none for a while. When no place is free, a member that had none for
-    /// TICKET_REST_MS takes the oldest unused ticket of a member that had.
+    /// have one place between them: one of them that had it within TICKET_REST_MS
+    /// yields its unused ticket to one that had it longer ago, or never. A ticket is
+    /// void when the body's headers have not come TICKET_WAIT_MS later, and a member
+    /// whose tickets bring no whole body above the stranger's cap gets none for a
+    /// while. When no place is free, a member that had none for TICKET_REST_MS takes the
+    /// oldest unused ticket of a member that had.
     reserve(P, from, body) {
       const cap = body.kind === 'act' && host.offers.keyHeldBy(from) ? MAX_ACT_BODY_BYTES : MAX_BODY_BYTES;
       const fine = shaped(body, {
@@ -96,14 +98,20 @@ export function createInbound(host) {
       if (places.has(from)) lapse(from);
       if (now < unused.get(from)?.until) return { error: 'busy', detail: 'the tickets this member took went unused' };
       const branch = P.pool.branch(from, now);
-      if ([...places.values()].some((held) => held.branch === branch)) return full;
-      const again = now - had.get(from) < TICKET_REST_MS / 1000;
+      const last = had.get(from) ?? -Infinity;
+      const again = now - last < TICKET_REST_MS / 1000;
+      const [mate, taken] = [...places].find(([, held]) => held.branch === branch) ?? [];
+      if (taken) {
+        // A body being read has no `again`.
+        if (!taken.again || last >= taken.last) return full;
+        places.delete(mate);
+      }
       if (places.size >= MAX_LARGE_BODIES) {
         const [other] = [...places].find(([, held]) => held.ticket && held.again) ?? [];
         if (again || other === undefined) return full;
         places.delete(other);
       }
-      const place = { ticket: b64u(host.random(16)), bytes: body.bytes, again, branch };
+      const place = { ticket: b64u(host.random(16)), bytes: body.bytes, again, last, branch };
       host.clock.setTimeout(() => places.get(from) === place && lapse(from), TICKET_WAIT_MS);
       places.set(from, place);
       had.set(from, now);
@@ -144,10 +152,11 @@ export function createInbound(host) {
 
   /// The signed response to the bytes of one request. Only the canonical form of a
   /// request is one: any other spelling of the same JSON is refused as malformed. A
-  /// body that came whole made use of the ticket in its `headers`, whatever it holds.
+  /// body above the stranger's cap that came whole made use of the ticket in its
+  /// `headers`, whatever it holds; a smaller one needed none.
   async function receive(bytes, { headers } = {}) {
     const read = reading.get(headers?.['dn-ticket']);
-    if (read) read.whole = true;
+    if (read && bytes.length > STRANGER_BODY_BYTES) read.whole = true;
     tally.requests += 1;
     const request = parseCanon(bytes);
     const re = requestDigest(request) ?? b64u(hash(bytes));

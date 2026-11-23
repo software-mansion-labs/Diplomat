@@ -170,6 +170,11 @@ export class EffortMeter {
     return this.#members.get(sender);
   }
 
+  /// The least a request can owe: the lower of the two base prices.
+  get least() {
+    return Math.min(this.#tiers.member.base, this.#tiers.stranger.base);
+  }
+
   /// The effort a request from `sender` owes at `now`, that request counted:
   /// `BASE << min(CAP, max(0, ceil(log2(n / ALLOW))))`. `member` says whether the sender
   /// is a member of the request's pool here.

@@ -11,6 +11,7 @@ import { sign, verify } from '../src/core/identity.js';
 import { buildPing, endClaim } from '../src/core/lease.js';
 import { buildCapability, specDigest, wireOutcome } from '../src/core/capability.js';
 import { createVoucher } from '../src/core/membership.js';
+import { Pool } from '../src/core/pool.js';
 import { backers, buildTaskId, memberRecord, offerRecord } from '../src/core/records.js';
 import { POW } from '../src/paths.js';
 
@@ -458,4 +459,37 @@ await check('a lock binds for 120 s by the clock of the member that gave it, wha
   assert.deepEqual((await lock(b, 'BBBBBBBBBBA')).body.challenge, { reason: 'locked', holder: a.pk });
   await w.run(3);
   assert.equal((await lock(b, 'BBBBBBBBBBA')).body.grant.executor, b.pk);
+});
+
+await check('a member that answers a pull with more records than were asked for has as many taken as were asked for', async () => {
+  const w = createWorld({ seed: 59 });
+  const [l, d] = await w.pool(['l', 'd']);
+  const evil = await w.intruder('evil', l);
+  await w.net.until(() => [l, d].every((h) => w.members(h).includes(evil.pk)), { what: 'the member known' });
+  // Its index names one key it seated; its answer to the pull of that key brings three.
+  const { all: made, records } = w.crowd(evil, 3);
+  const held = new Pool({ id: POOL, self: evil.pk });
+  held.merge([...w.records(d).filter((r) => r.type === 'member'), records[0]], w.net.now());
+  const asked = [];
+  evil.transport.onRequest(async (bytes) => {
+    const request = JSON.parse(bytes.toString('utf8'));
+    const body = { sync: () => held.answerSync(request.body, w.net.now()).body, pull: () => ({ records }) }[request.kind]?.() ?? { accepted: [], refused: [] };
+    if (request.kind === 'pull') asked.push(request.body.keys);
+    return canon(buildResponse(evil.id, { re: requestDigest(request), effort: 8, body }));
+  });
+  await w.net.until(() => asked.length > 0, { maxMs: 10 * 60 * 1000, what: 'a pull' });
+  await w.run(120);
+  assert.deepEqual(asked[0], [`member/${made[0].pk}`]);
+  for (const h of [l, d]) assert.deepEqual(made.map((m) => w.members(h).includes(m.pk)), [true, false, false], h.name);
+});
+
+await check('a key is heard of once it asks as a member: the hello that let it in was a stranger\'s', async () => {
+  const w = createWorld({ seed: 60 });
+  const [a] = await w.pool(['a', 'b']);
+  const evil = await w.intruder('evil', a);
+  const seen = () => w.view(a).members.find((m) => m.pk === evil.pk).lastSeen;
+  assert.equal(seen(), 0);
+  const now = w.net.now();
+  assert.equal((await w.request(evil, a, 'sync', { asOf: now, hash: w.view(a).hash })).ok, true);
+  assert.ok(seen() >= now);
 });

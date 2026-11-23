@@ -90,7 +90,8 @@ closed at every start.
 | `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it, or at or before the second of the start where that time is ahead of this machine's clock |
 | `peers.json` (0600) | the machines this host has asked in vain for more than 3 minutes, and since when: after a start a claim round waits 15 s for each of them, not the 90 s and more it gives a machine it has yet to reach |
 | `links.json` (0600) | the linked repositories, as Diplomat last posted them |
-| `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left |
+| `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left, which it keeps once it is back until it holds the record of one of them |
+| `pools/<pool hash>.log` (0600) | what changed in that pool since its document was written: the hash of the document it follows, then a line for each change - the records taken in and the keys of the records dropped. Once it is as long as the document, and no shorter than 64 KiB, the document is written whole and the log removed |
 | `locks.json` (0600) | the claim locks this host granted |
 | `keys.json` (0600) | live capabilities this host issued or holds |
 | `offers.json` (0600) | the tasks this host asked for: prompt, counters, outcome, what each has used of its rules' allowances, and which members gave it back a moment ago |
@@ -249,7 +250,7 @@ The snapshot:
   "devices": { "state": "off|ready|none", "detail": "" },
   "admit": { "slots": 0, "at": 0, "reason": "" },
   "pools": [ { "id": "", "path": "", "identity": "", "hash": "", "left": false, "joining": false,
-      "joinFailed": "", "notTaking": "",
+      "joinFailed": "", "unseated": false, "returning": false, "notTaking": "",
       "members": [ { "pk": "", "self": false, "maxAcceptedH": 12, "lastSeen": 0, "reachable": true,
           "skew": false } ],
       "tasks": [ { "taskId": "", "kind": "", "item": "", "title": "", "identity": "", "hours": 12,
@@ -296,6 +297,15 @@ A pool's `joining` is true from the moment an invite is pasted until the machine
 it has answered or the invite has run out: this machine is a pool of one meanwhile. Its
 `joinFailed` is why the last invite let this machine in nowhere - what the other machine
 said, or that the invite ran out unanswered - and is empty once another invite is pasted.
+Its `returning` is true while this machine, back in a pool it left, holds the record of no
+other machine there and asks the machines it left: it is a pool of one until one of them
+answers, and needs no invite. That is the machine that started the pool, back after more
+than 30 days; any other asks the machine that invited it, whose record it kept.
+Its `unseated` is true while every other machine this one knows of in the pool - or, while
+it is `returning`, every machine it left - has refused it and answered it nothing since:
+the seat it had there is no longer its own - the machine that gave it began the pool again
+or gave the seat away, or the pool moved and left it too far from the machine that started
+it - and it gets into the pool again by an invite.
 
 A pool's `notTaking` is why this machine takes none of that pool's jobs, in a sentence,
 and empty while it takes them: the transport is not up, docker is not ready, there is no

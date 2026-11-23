@@ -192,8 +192,26 @@ check('a host accepts the keys seated under the member its own vouchers lead up 
   assert.deepEqual(seating(ben.pk, [...again.slice(0, 3), member(ann, { voucher: seat(root), seq: 7, era: 7 })]), new Map([[ben.pk, 0]]));
   // Two keys that vouch for each other are a pool of their own, each seated once.
   const loop = [member(ann, { voucher: seat(ben) }), member(ben, { voucher: seat(ann) })];
-  assert.deepEqual(seating(ann.pk, loop), new Map([[ben.pk, 0], [ann.pk, 1]]));
+  const [low, high] = [ann.pk, ben.pk].sort();
+  for (const self of [ann, ben]) assert.deepEqual(seating(self.pk, loop), new Map([[high, 0], [low, 1]]), 'vouchers of one second: the higher key is the first member');
   assert.deepEqual(seating(root.pk, [member(root), ...loop]), new Map([[root.pk, 0]]));
+});
+
+check('a chain of vouchers that closes on itself ends at the record in it with the latest voucher, for every host that holds it', () => {
+  // root seated ann and cat, ann seated ben - and root signed a record under a voucher of ann's.
+  const rest = [member(ben, { voucher: seat(ann, { n: 1 }) }), member(cat, { voucher: seat(root, { n: 1 }) })];
+  const closed = (rootAt, annAt) => [member(root, { seq: 1, at: T0 + 9, voucher: seat(ann, { at: rootAt }) }), member(ann, { at: T0 + 9, voucher: seat(root, { at: annAt }) }), ...rest];
+  const under = (top, next, ...last) => new Map([[top.pk, 0], [next.pk, 1], ...last.map((id) => [id.pk, 2])]);
+  for (const self of [root, ann, ben, cat]) {
+    // The voucher root holds is the later: it counts for nothing, and root is the first member.
+    assert.deepEqual(seating(self.pk, closed(T0 + 5, T0)), new Map([[root.pk, 0], [ann.pk, 1], [cat.pk, 1], [ben.pk, 2]]), 'the pool as it was');
+  }
+  for (const self of [root, ann, ben]) assert.deepEqual(seating(self.pk, closed(T0, T0 + 5)), new Map([[ann.pk, 0], [root.pk, 1], [ben.pk, 1], [cat.pk, 2]]));
+  // Three keys in a ring, and one seated by a key of the ring: whichever of them looks.
+  const ring = [member(root, { voucher: seat(ben, { at: T0 + 1 }) }), member(ann, { voucher: seat(root, { at: T0 + 3 }) }), member(ben, { voucher: seat(ann, { at: T0 + 2 }) }), member(cat, { voucher: seat(ben, { n: 1, at: T0 + 7 }) })];
+  for (const self of [root, ann, ben]) assert.deepEqual(seating(self.pk, ring), under(ann, ben, root, cat));
+  assert.deepEqual(seating(cat.pk, ring), under(ann, ben, root, cat));
+  for (const self of [root, ann, ben, cat]) assert.deepEqual(seating(self.pk, [...ring].reverse()), under(ann, ben, root, cat), 'in whatever order the records are held');
 });
 
 check('the members a host ends with do not depend on the order their records arrive in', () => {
@@ -287,6 +305,27 @@ check('a member that stops signing its record is no member after a day, and keep
   assert.ok(pool.answerHello({ member: fresh }, ann.pk, gone + 400).body);
 });
 
+check('a host holds its own member record whatever its age, and the records its voucher leads up through: the others have forgotten it, and take it back by the record it signs next', () => {
+  const records = [member(root), member(ann, { voucher: seat(root) }), member(ben, { voucher: seat(ann) })];
+  const late = T0 + MONTH + 300;
+  const [mine, theirs] = [poolOf(ann, records), poolOf(root, records)];
+  for (const pool of [mine, theirs]) pool.merge(member(root, { seq: 1, at: late }), late);
+  assert.deepEqual(mine.records().map(recordKey), [`member/${ann.pk}`, `member/${root.pk}`].sort(), 'its own, and the one that seated it');
+  assert.deepEqual([mine.member(ann.pk, late), mine.vouched(ann.pk, late)], [null, true], 'no member until it signs again');
+  assert.deepEqual(theirs.records().map(recordKey), [`member/${root.pk}`]);
+  const again = member(ann, { voucher: seat(root), seq: 1, at: late });
+  for (const pool of [mine, theirs]) assert.deepEqual([pool.merge(again, late).refused, pool.members(late).map((m) => m.pk)], [[], [root.pk, ann.pk].sort()]);
+});
+
+check('a newer version of a record that is given no place leaves the version held where it was', () => {
+  const held = member(ann, { voucher: seat(root) });
+  const pool = poolOf(root, [member(root), held, member(ben, { voucher: seat(ann) })]);
+  // Its own key signed it, under the voucher of a key with no seat here.
+  const moved = member(ann, { seq: 1, voucher: seat(eve) });
+  assert.equal(codes(pool.merge(moved, T0)).length, 1);
+  assert.deepEqual([pool.get(`member/${ann.pk}`), pool.members(T0).map((m) => m.pk)], [held, [root, ann, ben].map(pk).sort()]);
+});
+
 check('a version that says a member left outlives every version it replaced', () => {
   const pool = poolOf(root, [member(root), member(ann, { voucher: seat(root) })]);
   const resigned = member(ann, { voucher: seat(root), seq: 1, at: T0 + 20 * DAY });
@@ -341,6 +380,37 @@ check('every version of an offer is dropped a day after it was signed, for every
   assert.equal(Object.keys(a.pool.index(T0 + 70 + DAY)).length, 2, 'an open offer nobody signed again goes the same way');
   assert.deepEqual(codes(a.pool.merge(done, T0 + 50 + 2 * DAY)), ['expired']);
   assert.deepEqual(codes(a.pool.merge(waiting, T0 + 70 + DAY + 300)), ['expired']);
+});
+
+check('a pool says what changed since it was last asked: the records taken in that it holds, and the keys of the ones it dropped', () => {
+  const [a, b] = club(2);
+  const keys = (records) => records.map(recordKey).sort();
+  const said = () => {
+    const { put, drop } = a.pool.delta();
+    return [put.map(recordKey), drop];
+  };
+  a.pool.delta();
+  assert.deepEqual(said(), [[], []], 'nothing, asked twice');
+  const open = offer(a.id);
+  const done = offer(a.id, { seq: 1, at: T0 + 50, state: 'done' });
+  const other = offer(b.id, { item: 'pr-9', at: T0 + 60, createdAt: T0 + 60 });
+  a.pool.merge([open, other], T0 + 60);
+  assert.deepEqual(codes(a.pool.merge([done, open, { type: 'offer' }], T0 + 60)), ['older', 'bad-record']);
+  assert.deepEqual(a.pool.delta().put, a.pool.records(keys([done, other])), 'the version held of each record taken in, in key order');
+  a.pool.prune(T0 + 60 + 2 * DAY);
+  assert.deepEqual(said(), [[], keys([done, other])], 'the records that ran out');
+  // Taken in and dropped since: gone. Dropped and taken in again since: held.
+  const late = offer(b.id, { item: 'pr-7', at: T0 + 60, createdAt: T0 + 60 });
+  const [mine, again] = [resign(a.id, member(a.id), { seq: 1, at: T0 + 3 * DAY }), resign(b.id, member(b.id), { seq: 1, at: T0 + 3 * DAY })];
+  a.pool.merge([mine, again], T0 + 3 * DAY);
+  a.pool.delta();
+  a.pool.merge(late, T0 + 61);
+  a.pool.prune(T0 + 60 + 2 * DAY);
+  a.pool.merge(resign(b.id, late, { seq: 1, at: T0 + 3 * DAY }), T0 + 3 * DAY);
+  assert.deepEqual(said(), [keys([late]), []]);
+  a.pool.merge(resign(b.id, other, { seq: 1, at: T0 + 3 * DAY }), T0 + 3 * DAY);
+  a.pool.prune(T0 + 5 * DAY);
+  assert.deepEqual(said(), [[], keys([late, other])]);
 });
 
 check('an offer signed again inside its retention stays, and keeps the day it was created', () => {

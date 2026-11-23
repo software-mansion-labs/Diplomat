@@ -4,9 +4,11 @@
 
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
+import { UNSERVED } from '../src/core/envelope.js';
 import { sign } from '../src/core/identity.js';
 import { createInvite, createVoucher, inviteToken } from '../src/core/membership.js';
 import { LIMITS, memberRecord } from '../src/core/records.js';
+import { poolFile } from '../src/node/store.js';
 import { STRANGER_BODY_BYTES } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
@@ -66,7 +68,7 @@ await check('a host that left a pool stays out of it, whatever its list of pools
   const [a, b, c] = await w.pool(['a', 'b', 'c']);
   c.node.leave({ pool: POOL });
   await w.net.until(() => w.members(a).length === 2 && w.members(b).length === 2, { what: 'c gone' });
-  const out = { id: POOL, path: '/repos/widgets', identity: 'Octocat', hash: '', left: true, joining: false, joinFailed: '', members: [], tasks: [] };
+  const out = { id: POOL, path: '/repos/widgets', identity: 'Octocat', hash: '', left: true, joining: false, joinFailed: '', unseated: false, returning: false, members: [], tasks: [] };
   assert.deepEqual(w.view(c), out);
   await assert.rejects(c.node.offer(offerArgs('pr-1')), /This machine left the pool .*: join it again first\./);
   assert.throws(() => c.node.invite({ pool: POOL }), /This machine left the pool/);
@@ -85,7 +87,7 @@ await check('a host that left a pool stays out of it, whatever its list of pools
   await w.net.until(() => [a, b, c].every((h) => w.members(h).length === 3), { maxMs: 10000, what: 'c back at once, with no invite' });
   await w.agreed([a, b, c]);
   assert.equal(w.view(c).left, false);
-  assert.equal(w.stored(c, [...c.disk.files.keys()].find((name) => name.startsWith('pools/'))).left, undefined, 'a member keeps no farewell');
+  assert.equal(w.doc(c).left, undefined, 'a member keeps no farewell');
   assert.deepEqual(w.records(c).find((r) => r.type === 'member' && r.pk === c.pk).voucher, w.records(a).find((r) => r.pk === c.pk).voucher);
   assert.equal(w.records(a).find((r) => r.pk === c.pk).voucher.by, a.pk);
   // It leaves once more, and this time comes back by an invite.
@@ -207,6 +209,9 @@ await check('a pool unlinked and linked again is a pool of the host\'s own, and 
   w.net.heal();
   await w.run(60);
   assert.deepEqual([asked > 2, w.net.count({ from: 'late', to: 'a', kind: 'hello' }), w.members(a)], [true, asked, [a.pk]]);
+  // The invite of before is no better for the one given since: an invite is the one it names.
+  const old = await w.request(w.stranger('old'), a, 'hello', { invite: before.invite }, { effort: 2 ** 16 });
+  assert.deepEqual([old.code, old.detail, w.doc(a).invites.length], ['denied', 'that invite is no longer good', 1]);
   // Nor is a voucher it signed then: a member of what it left has no seat under it.
   const hello = await w.request(b, a, 'hello', { member: w.records(b).find((r) => r.pk === b.pk) }, { effort: 2 ** 16 });
   assert.deepEqual([hello.code, hello.detail, w.members(a)], ['denied', 'no-seat', [a.pk]]);
@@ -463,7 +468,7 @@ await check('a store of member records without vouchers is a pool of the host\'s
   for (const h of all) w.net.kill(h.name);
   const file = [...a.disk.files.keys()].find((name) => name.startsWith('pools/'));
   for (const h of all) {
-    const { joining, invites, ...doc } = JSON.parse(h.disk.read(file));
+    const { joining, invites, ...doc } = w.doc(h);
     const now = w.net.now();
     const records = doc.records.map((r) => (r.type === 'member' ? formerly(all.find((g) => g.pk === r.pk), { seq: r.seq + 1, at: now, invite: r.voucher && 'an invite' }) : r));
     h.disk.write(file, JSON.stringify({ ...doc, records, inviter: a.pk }));
@@ -479,4 +484,221 @@ await check('a store of member records without vouchers is a pool of the host\'s
   await b.node.join(a.node.invite({ pool: POOL }));
   await w.net.until(() => b.executor.jobOf(taskId), { what: 'the job running at the host that joined again' });
   assert.deepEqual(w.members(a), [a.pk, b.pk].sort());
+});
+
+await check('a machine joins by no invite of a machine that came into the pool through it, and a member seats no key it sits under: the pool stays one', async () => {
+  const w = createWorld({ seed: 37 });
+  const [r, a, h] = await w.pool(['r', 'a', 'h']);
+  const [b, c] = [w.add('b'), w.add('c')];
+  for (const [x, by] of [[b, a], [c, h]]) {
+    await w.start(x);
+    await x.node.join(by.node.invite({ pool: POOL }));
+  }
+  const all = [r, a, h, b, c];
+  await w.net.until(() => all.every((x) => w.members(x).length === 5), { what: 'five members' });
+  await w.agreed(all);
+  const hash = w.view(r).hash;
+  const through = /^Error: The machine that made that invite came into the pool .* through this one, which is in it already: an invite takes a machine in under its maker\. To move this machine, use an invite of a machine that did not come in through it\.$/;
+  const made = (by) => ({ invite: inviteToken(createInvite(by.id, { pool: POOL, exp: w.net.now() + 3600, nonce: w.net.rnd.bytes(16) })) });
+  await assert.rejects(r.node.join(a.node.invite({ pool: POOL })), through);
+  await assert.rejects(r.node.join(made(b)), through, 'two vouchers out');
+  await assert.rejects(a.node.join(made(b)), through);
+  assert.deepEqual([w.view(r).joining, w.view(a).joining], [false, false]);
+  // The member that made an invite judges the same of a key that brings it all the same.
+  const ask = async (from, to, body) => {
+    const { ok, code, detail, body: answer } = await w.request(from, to, 'hello', body, { effort: 4096 });
+    return ok ? answer : [code, detail];
+  };
+  const above = ['denied', 'the maker of that invite sits under the key that brings it'];
+  assert.deepEqual(await ask(r, a, a.node.invite({ pool: POOL })), above);
+  assert.deepEqual(await ask(r, h, h.node.invite({ pool: POOL })), above);
+  assert.equal((await ask(h, a, a.node.invite({ pool: POOL }))).voucher.by, a.pk, 'a key beside it is given a seat');
+  await w.run(30 * 60);
+  for (const x of all) assert.deepEqual([w.members(x).length, w.view(x).hash], [5, hash], x.name);
+});
+
+await check('two machines that each began the pool and join by one another\'s invite in one moment are one pool with one first member, whichever of its machines looks', async () => {
+  const w = createWorld({ seed: 38 });
+  const names = ['r1', 'a', 'x', 'r2', 'b', 'y'];
+  const [r1, a, x, r2, b, y] = names.map((name) => w.add(name));
+  for (const h of [r1, a, x, r2, b, y]) await w.start(h);
+  for (const [h, by] of [[a, r1], [x, a], [b, r2], [y, b]]) {
+    await h.node.join(by.node.invite({ pool: POOL }));
+    await w.net.until(() => w.members(by).includes(h.pk) && w.members(h).includes(by.pk), { what: `${h.name} a member` });
+  }
+  await w.agreed([r1, a, x]);
+  await w.agreed([r2, b, y]);
+  const [to2, to1] = [r2.node.invite({ pool: POOL }), r1.node.invite({ pool: POOL })];
+  r1.node.join(to2);
+  r2.node.join(to1);
+  await w.run(30 * 60);
+  // One of the two is the first member; the machine three vouchers from it has no seat.
+  const [top, low] = w.records(r1).find((rec) => rec.pk === r1.pk).voucher.at > w.records(r2).find((rec) => rec.pk === r2.pk).voucher.at ? [[r1, a, x, r2, b], y] : [[r2, b, y, r1, a], x];
+  const members = top.map((h) => h.pk).sort();
+  for (const h of top) assert.deepEqual([w.members(h), w.view(h).hash], [members, w.view(top[0]).hash], h.name);
+  assert.equal(members.includes(low.pk), false);
+  // Its row says so: every machine it knows of refuses it. An invite of one that has a seat to give lets it in again.
+  assert.deepEqual([...top, low].map((h) => w.view(h).unseated), [false, false, false, false, false, true]);
+  await low.node.join(top[0].node.invite({ pool: POOL }));
+  await w.net.until(() => w.members(top[1]).includes(low.pk) && w.members(low).length === 6, { what: 'the sixth a member again' });
+  assert.equal(w.view(low).unseated, false);
+});
+
+await check('a machine that was off for longer than a member record is kept comes back as the member it was, by what its own store holds: the machines it seated were members all along and are members still', async () => {
+  const w = createWorld({ seed: 40 });
+  const [r, a, h] = await w.pool(['r', 'a', 'h']);
+  const b = w.add('b');
+  await w.start(b);
+  await b.node.join(a.node.invite({ pool: POOL }));
+  const all = [r, a, h, b];
+  await w.net.until(() => all.every((x) => w.members(x).length === 4), { what: 'four members' });
+  await w.agreed(all);
+  // The first member and one it seated are off for 31 days; a machine each of them seated stays.
+  const mine = (x) => w.records(x).find((rec) => rec.pk === x.pk);
+  const before = [mine(r), mine(a)];
+  w.net.kill('r');
+  w.net.kill('a');
+  await w.run(31 * 24 * 3600);
+  for (const x of [h, b]) assert.deepEqual(w.members(x), [h.pk, b.pk].sort(), `${x.name} while the two are off`);
+  for (const [i, x] of [r, a].entries()) {
+    await w.restart(x);
+    assert.deepEqual([mine(x).era, mine(x).voucher?.by, mine(x).seq > before[i].seq], [before[i].era, before[i].voucher?.by, true], `${x.name} signs the membership it had`);
+  }
+  await w.net.until(() => all.every((x) => w.members(x).length === 4), { maxMs: 10 * 60 * 1000, what: 'four members again' });
+  await w.agreed(all);
+  assert.deepEqual([mine(r).era, mine(r).voucher, mine(a).era, mine(a).voucher.by], [0, undefined, before[1].era, r.pk]);
+});
+
+await check('a machine whose seat went to another key reads so in its pool\'s row once every machine it knows of has refused it, and is a member again the moment it joins by a new invite', async () => {
+  const w = createWorld({ seed: 42 });
+  const [a, b, c] = await w.pool(['a', 'b', 'c']);
+  const lone = w.add('lone');
+  await w.start(lone);
+  assert.deepEqual([a, b, c, lone].map((h) => w.view(h).unseated), [false, false, false, false]);
+  // The seat b sits in is given again, as the key of a alone can, to a key that takes it;
+  // c cannot hear a, and goes on taking b for a member.
+  w.net.cut('a', 'c');
+  await w.run(2);
+  const p = w.stranger('p');
+  const mine = () => w.records(b).find((rec) => rec.pk === b.pk);
+  const seated = (id, seq, seat) => memberRecord(id, { pool: POOL, seq, at: w.net.now(), era: 0, maxAcceptedH: 12, voucher: createVoucher(a.id, { pool: POOL, era: 0, pk: id.pk, seat, at: w.net.now() }) });
+  const now = w.net.now();
+  assert.equal((await w.request(p, a, 'hello', { member: seated(p.id, 0, mine().voucher.seat) }, { effort: 4096 })).ok, true);
+  await w.net.until(() => w.net.count({ from: 'b', to: 'a', kind: 'hello', since: now }) > 0, { maxMs: 10 * 60 * 1000, what: 'b refused by a' });
+  await w.run(120);
+  assert.deepEqual([w.members(a).includes(b.pk), w.members(c).includes(b.pk), w.view(b).unseated], [false, true, false], 'one machine that refuses it is not all of them');
+  w.net.heal();
+  await w.net.until(() => w.view(b).unseated, { maxMs: 30 * 60 * 1000, what: 'its row saying it has no seat' });
+  assert.deepEqual([w.members(c).includes(b.pk), w.view(a).unseated, w.view(c).unseated], [false, false, false]);
+  const asked = w.net.now();
+  await b.node.join(a.node.invite({ pool: POOL }));
+  await w.net.until(() => w.members(a).includes(b.pk) && w.members(c).includes(b.pk), { maxMs: 60 * 1000, what: 'a member again within the minute' });
+  assert.deepEqual([w.view(b).unseated, w.net.now() - asked < 60], [false, true]);
+  // Its seat goes to another key once more, and then a gives it a third it never asked
+  // for: the machines that refused it answer it again, and its row says no more of it.
+  await w.run(2);
+  const q = w.stranger('q');
+  const theirs = seated(q.id, 0, mine().voucher.seat);
+  assert.equal((await w.request(q, a, 'hello', { member: theirs }, { effort: 4096 })).ok, true);
+  await w.net.until(() => w.view(b).unseated, { maxMs: 30 * 60 * 1000, what: 'its row saying it has no seat again' });
+  await w.run(2);
+  const records = [memberRecord(q.id, { ...theirs, seq: 1, at: w.net.now(), left: true }), seated(b.id, mine().seq + 1, 9)];
+  assert.deepEqual((await w.request(q, a, 'push', { records }, { effort: 4096 })).body.refused, []);
+  await w.net.until(() => !w.view(b).unseated, { maxMs: 30 * 60 * 1000, what: 'its row saying nothing' });
+  assert.equal(mine().voucher.seat, 9);
+});
+
+await check('a machine that goes back into a pool it left more than a month before is back: one a member seated by the record of that member it kept, and the one that began the pool by asking the machines it left - whenever they answer, however often it starts, and though it leaves and joins once more meanwhile', async () => {
+  const w = createWorld({ seed: 43 });
+  const all = await w.pool(['a', 'b', 'c']);
+  const [a, b, c] = all;
+  const row = (h) => {
+    const { left, joining, joinFailed, returning, unseated } = w.view(h);
+    return [left, joining, joinFailed, returning, unseated, w.members(h).length, w.doc(h).back.length];
+  };
+  c.node.leave({ pool: POOL });
+  await w.run(31 * 24 * 3600);
+  assert.deepEqual(await c.node.join({ pool: POOL }), { pool: POOL });
+  await w.net.until(() => all.every((h) => w.members(h).length === 3), { maxMs: 60 * 1000, what: 'c a member again within the minute' });
+  await w.agreed(all);
+  assert.deepEqual(row(c), [false, false, '', false, false, 3, 0]);
+
+  // The machine that began the pool holds no record but its own. Nobody it left can be
+  // reached: its row says that it waits for them, and it asks them as often as a member
+  // asks one that does not answer.
+  a.node.leave({ pool: POOL });
+  await w.run(31 * 24 * 3600);
+  w.net.kill('b');
+  w.net.kill('c');
+  const others = [b.pk, c.pk].sort();
+  assert.deepEqual(await a.node.join({ pool: POOL }), { pool: POOL });
+  assert.deepEqual([row(a), [...w.doc(a).back].sort()], [[false, false, '', true, false, 1, 2], others]);
+  await w.run(600);
+  const since = w.net.now();
+  await w.run(1800);
+  assert.deepEqual([w.net.count({ from: 'a', since }), w.net.count({ from: 'a', kind: 'hello', since })], [6, 6]);
+  await w.restart(a);
+  await w.run(60);
+  assert.deepEqual([row(a), [...w.doc(a).back].sort()], [[false, false, '', true, false, 1, 2], others], 'started again');
+  a.node.leave({ pool: POOL });
+  assert.deepEqual([...w.stored(a, poolFile(POOL)).leftTo].sort(), others, 'what it leaves once more, it leaves to them');
+  await w.run(60);
+  await a.node.join({ pool: POOL });
+  await w.restart(c);
+  await w.net.until(() => w.members(a).length === 3 && w.members(c).length === 3, { maxMs: 15 * 60 * 1000, what: 'a back once one of them answers' });
+  await w.run(2);
+  assert.deepEqual(row(a), [false, false, '', false, false, 3, 0]);
+  await w.restart(b);
+  await w.net.until(() => all.every((h) => w.members(h).length === 3), { maxMs: 15 * 60 * 1000, what: 'three members' });
+  await w.agreed(all);
+});
+
+await check('a version a machine signs after its clock was set back is dated earlier than the one before, and takes its place on every member all the same', async () => {
+  const w = createWorld({ seed: 47 });
+  const [a, b] = await w.pool(['a', 'b']);
+  const held = () => w.records(b).find((r) => r.pk === a.pk);
+  a.skew = 200;
+  a.settings.maximumAcceptedH = 24;
+  await w.net.until(() => held().maxAcceptedH === 24, { maxMs: 60 * 1000, what: 'the version signed ahead of time' });
+  const ahead = held();
+  a.skew = 0;
+  a.settings.maximumAcceptedH = 48;
+  await w.net.until(() => held().maxAcceptedH === 48, { maxMs: 60 * 1000, what: 'the version signed by the clock set right' });
+  assert.deepEqual([held().seq > ahead.seq, ahead.at - held().at > 100, ahead.at - w.net.now() > 100], [true, true, true]);
+  await w.agreed([a, b]);
+});
+
+await check('a machine back in a pool it left, refused by every machine it left, reads in its row that it has no seat there', async () => {
+  const w = createWorld({ seed: 45 });
+  const [a, b] = await w.pool(['a', 'b']);
+  a.node.leave({ pool: POOL });
+  await w.run(31 * 24 * 3600);
+  // The machine it left began the pool again meanwhile.
+  b.node.setPools([]);
+  b.node.setPools(b.pools);
+  await a.node.join({ pool: POOL });
+  await w.net.until(() => w.view(a).unseated, { maxMs: 10 * 60 * 1000, what: 'its row saying it has no seat' });
+  assert.deepEqual([w.view(a).returning, w.members(a), w.members(b)], [true, [a.pk], [b.pk]]);
+  // A machine that refused it is asked again every 10 minutes, not at every sync.
+  const since = w.net.now();
+  await w.run(1800);
+  const hellos = w.net.count({ from: 'a', to: 'b', kind: 'hello', since });
+  assert.ok(hellos >= 2 && hellos <= 4, `${hellos} in 30 minutes`);
+});
+
+await check('an invite its maker could not serve this once is asked about again: the maker had just started, and serves nothing dated up to what it served in its life before', async () => {
+  const w = createWorld({ seed: 46 });
+  const [a, b] = await w.pool(['a', 'b']);
+  const c = w.add('c');
+  await w.start(c);
+  c.skew = -20;
+  assert.equal((await w.request(b, a, 'sync', { asOf: w.net.now(), hash: w.view(b).hash })).ok, true);
+  await w.restart(a);
+  const since = w.net.now();
+  const { invite } = a.node.invite({ pool: POOL });
+  const first = await w.request(c, a, 'hello', { invite }, { effort: 2 ** 16, ts: w.net.now() - 20 });
+  assert.deepEqual([first.code, first.detail], ['busy', UNSERVED]);
+  await c.node.join({ invite });
+  await w.net.until(() => w.members(a).includes(c.pk), { maxMs: 60 * 1000, what: 'c let in within the minute' });
+  assert.deepEqual([w.view(c).joining, w.view(c).joinFailed, w.net.count({ from: 'c', to: 'a', kind: 'hello', since }) > 3], [false, '', true]);
 });

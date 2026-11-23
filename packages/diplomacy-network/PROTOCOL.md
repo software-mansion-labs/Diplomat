@@ -50,12 +50,17 @@ every sender gets the 64 KiB, whoever it says it is.
 - A ticket that brought no whole body - it ran out, its member reserved again, or the
   body its headers announced did not come whole in the time a body has - is a ticket
   unused. The first costs nothing. From the second running, the member's `reserve` is
-  answered `busy` for 60 s, twice as long each time, up to an hour. A body that came
-  whole, whatever it held, ends the count.
+  answered `busy` for 60 s, twice as long each time, up to an hour. A body above
+  64 KiB that came whole, whatever it held, ends the count; a body no larger than
+  that needed no ticket, and the ticket it came with is a ticket unused.
 - When all four places are taken, a member that had no place in the last 60 s takes
   the oldest ticket not yet used of a member that had one: that ticket is void, and
   its member is not counted as having left it unused. A body being read is never put
   out.
+- Among a member and the keys that sit where it does, the one place is yielded the
+  same way: a ticket not yet used, given to a key that had the place in the 60 s
+  before it, goes to a key of theirs that last had the place earlier than that key
+  did, or never.
 
 A request over what the target will read is answered with HTTP status 413 and no envelope;
 its sender may send it again, with a ticket of its own each time, unless it is an `act`:
@@ -157,9 +162,10 @@ A target checks, cheapest first, and stops at the first failure:
 | `to` is its own key | `bad-request` |
 | `ts` within 300 s of its clock | `stale` |
 | `pow.epoch` is the epoch of `ts` | `stale` |
-| `effort` at least `required(from)` | `effort` |
+| `effort` at least a member's `BASE`, the least a request can owe | `effort` |
 | the solution | `effort` |
 | the signature | `effort` |
+| `effort` at least `required(from)` | `effort` |
 | `(from, nonce)` unseen | `replay` |
 
 A request is authenticated once its solution and its signature hold. What a target
@@ -169,16 +175,19 @@ solution that does not hold and a signature that is not the sender's get one ref
 and every refusal up to there quotes one price as the `effort` of its envelope (section
 4): what a stranger owes at that moment, whatever key and pool the request named. So a
 request made of nothing, under the target's own key or a member's, in a pool the target
-is linked to or not, is answered alike. A member learns what it owes from the answers to
-its authenticated requests; one that paid too little pays the stranger's price once, and
-the answer to that names its own.
+is linked to or not, is answered alike. Nor does what the target does for such a
+request depend on what it names: the signature is checked for every solution that holds
+at a member's `BASE` or more, under whatever key, and whether that key is a member of
+the pool is looked up only once the signature is the key's own. A member learns what it
+owes from the answers to its authenticated requests; one that paid too little pays the
+stranger's price once, and the answer to that names its own.
 
-What counts toward `n`: an authenticated request, toward its sender; and a request
-whose solution holds at a stranger's price and whose signature does not, toward the
-strangers. Nothing else. Work that was not done raises nobody's price. A solution at a
-member's price under a member's key, without that member's signature, raises neither
-that member's price nor the strangers': it costs its sender a member's `BASE` of hashes
-and the target one signature check, each time, at a price that does not rise.
+What counts toward `n`: an authenticated request, toward its sender; and any other
+request whose solution holds at a stranger's price, toward the strangers, whatever key
+and pool it names. Nothing else. Work that was not done raises nobody's price. A
+solution at a member's `BASE` under any key, without that key's signature, raises no
+price: it costs its sender that many hashes and the target one signature check, each
+time, at a price that does not rise.
 
 ### After a start
 
@@ -276,8 +285,12 @@ Two versions with the same precedence are ordered by `H(canon(record))`, lower w
 ```
 
 Every record carries `at`, the time that version was signed. A record dated more than
-300 s past the receiver's clock is refused until its time comes. A host signs each
-version of a record of its own with an `at` no earlier than the version before.
+300 s past the receiver's clock is refused until its time comes. A host dates each
+version of a record of its own by its clock, and no earlier than what the version rests
+on: a member record no earlier than its voucher, an offer no earlier than its
+`createdAt`, a claim no earlier than its `claimedAt`. A version may so be dated earlier
+than the one before it - its signer's clock was set back in between - and takes that
+one's place all the same: which of two versions holds is no matter of `at`.
 `offer.state` is `open`, `cancelled` or `done`; `createdAt` is when the host began to
 offer the task and stays the same through every version until the offer ends. An offer
 never carries the prompt. A member that started its pool has no `voucher`; `era` and the
@@ -309,8 +322,11 @@ time, a `seq`, an `era` or a `gen` is at most 2^40.
 
 So a member's records never take more than 256 KiB of a pool, and a pool's never more
 than 61 MiB, which takes every seat filled to its quota. A host keeps a pool as one
-document and writes it whole when a record changes; a pool of ten members with 64 offers
-each is half a megabyte. A claim carries the grant of every member that gave one, about
+document, and after it a log of what changed: the records a request brought are one line
+of the log, on disk before the request is answered, and the document is written whole
+again once the log is as long as it, and no shorter than 64 KiB. So what a request costs
+a host's disk is the length of the records it brought, about three times over; a pool of
+ten members with 64 offers each is half a megabyte. A claim carries the grant of every member that gave one, about
 0.5 KiB plus 0.4 KiB per grant, and an executor's claims of the last day share its 256
 KiB: in a pool of ten members an executor makes about fifty claims a day, in a pool of
 fifty about ten, in a full one two.
@@ -376,7 +392,11 @@ host that holds the same records:
 
 - The host follows its own voucher to its signer, that one's to its signer, and so on,
   for as long as the signer's record is held and of the era the voucher names. Where
-  that ends is the first member.
+  that ends is the first member. A chain that closes on itself - each key in it sits
+  under the next, and the last under the first - ends at the record in it whose voucher
+  has the latest `at`, among equals the highest `pk`: that voucher counts for nothing,
+  and its key is the first member, whichever host looks and wherever its own chain
+  enters the loop.
 - Under a seated key, each of its seats goes to the record with the latest voucher `at`
   for that seat, and among equals to the lowest `pk`. A key is seated once, at the
   place nearest the first member, and nothing is seated more than two vouchers from it.
@@ -394,10 +414,13 @@ it keeps its seat, and comes back by signing the record again.
 **Whose word a seat is.** Nothing orders members but the vouchers above them, so the
 only keys that can take a member's seat are the one that gave it and the one that gave
 that one its own: by a later voucher for the seat, or by leaving the era the vouchers
-were given in. No record another member signs moves anybody. A member one voucher from
-the first decides who sits in its own 15 seats and nowhere else - itself and 15 keys, 16
-seats of the 241, and m such members together 16 m; a member two vouchers out holds its
-own seat and gives none; the first member decides every seat.
+were given in. The keys a member seated sit where that member sits: one that signs its
+record under another voucher, or under none, is followed there by the keys in its seats,
+on every host that takes that record. No record of any other member moves anybody. A
+member one voucher from the first decides who sits in its own 15 seats and nowhere
+else - itself and 15 keys, 16 seats of the 241, and m such members together 16 m; a
+member two vouchers out holds its own seat and gives none; the first member decides
+every seat.
 
 **Giving a seat.** A host answers `hello { invite }` only for an invite of its own that
 it made in the membership it is in and that has not run out. The key gets the seat it
@@ -406,8 +429,10 @@ no unexpired invite has given to a key that has not taken it yet; else, of the s
 whose holders left or have signed no record for 24 hours, the one whose holder's record
 is the oldest. A host with none of those, or two vouchers from the first member,
 answers `denied` with the detail `no-seat`; the other details are `bad-invite`,
-`wrong-pool`, `expired` and `that invite is no longer good` (not this host's, or made
-before it began the membership it is in). The answer is `{ voucher, chain }`: the voucher
+`wrong-pool`, `expired`, `that invite is no longer good` (not this host's, or made
+before it began the membership it is in) and `the maker of that invite sits under the
+key that brings it`: a host gives no seat to the key that seated it, nor to the key
+that seated that one. The answer is `{ voucher, chain }`: the voucher
 dated by the host's clock at that moment, and the member records that lead from the host
 to the first member, the host's own first.
 
@@ -417,13 +442,32 @@ others with `hello { member, chain? }`. The host it greets may not have heard ye
 member that seated it, so `chain` carries the member records between the newcomer and
 the first member - at most 2. The greeted host takes them in together with the
 newcomer's record, before it decides. Joining costs a newcomer two requests at a
-stranger's price (section 3).
+stranger's price (section 3). A host takes no invite made by a key that sits under it -
+one it seated, or one such a key seated: it is in that pool already, above the invite's
+maker, and joining under it would close the chain.
 
 A member that left was put out by nobody, and comes back as the member it was: it signs
 its record again - a higher `seq`, the voucher it holds, no `left` - and greets the
-members it knew. A member record is held for 30 days after it was signed. A host that
-stayed away longer is forgotten, and is back the moment it signs its record again,
-unless its seat went to another key meanwhile: then it enters by a new invite.
+members it knew. One that holds no member's record but its own by then - the first
+member of the pool, back after more than 30 days: the others' records ran out in its
+store, and no voucher of its own leads to one - greets the keys of the members it left
+instead, as often as a host asks a member that does not answer, until one of them has
+answered and it holds that one's record. They hold its record still, the first of the
+chain their vouchers lead up, and take the version it signs now. A member record is held for 30 days after it was signed, and for as
+long after that as the voucher of a record that is held was signed by its key. A host's
+own record is the exception in its own store: it holds that, and so the era and the
+voucher of its membership, whatever its age. A host that stayed away longer than 30
+days is forgotten by the others unless a member it seated kept signing, and is back the
+moment it signs its record again - the next version of the one it held, under the same
+voucher - unless its seat went to another key meanwhile: then its record is given no
+seat, and it enters by a new invite. The members it had seated were members all the
+while, and are when it is back.
+
+A host that every other host it knows of in a pool has refused - its seat was given
+away, the member that gave it began another membership, or a move of the members above
+it left it more than two vouchers from the first - holds a seat in its own state alone;
+so does one that is back in a pool and refused by every key it left there.
+It learns of it by those refusals and nothing else, and gets in again by an invite.
 
 A member record of any other form - one with a `joinedAt`, without an `era`, or with an
 invite for a voucher - is no record (`bad-record`), wherever it comes from, a host's own
@@ -546,7 +590,9 @@ keeps the `left` record, and the keys of the members it left, for as long as it 
 member again: one of those keys that asks it about the pool has not heard, and is pushed
 that record, at most once in 10 minutes. Nobody else is sent anything. A host dials,
 pushes to and solves a proof of work for only the keys a pool's own records name as its
-members; a key it knows from a request alone it answers and nothing more. A host that
+members, and for the keys of the members it left while it is back in that pool with no
+record of another member; a key it knows from a request alone it answers and nothing
+more. A host that
 stops taking part without leaving - its network is switched off - cancels its open
 offers and gives its claims back the same way, pushes that once, and stays a member for
 as long as its record is fresh.
@@ -1067,7 +1113,20 @@ Nothing in a record hides any of this.
 - **A lock costs one request.** A member can ask every member for a lock on a task and
   commit nothing. Each lock binds for 120 s of its giver's clock, and while it does that member grants no
   other executor one. Asking again keeps the task locked, at the price of the requests
-  (section 3).
+  (section 3). A host keeps the locks it granted in one document, about 150 bytes a lock,
+  and writes it whole for each lock it grants or lets go of: a member one voucher from
+  the first that keeps a lock on each of the thousand tasks its keys may offer has each
+  host it asks write about 140 KiB a request, some 65 MiB a minute at the free rate of
+  its 16 keys.
+- **A record taken in is written at once.** Each request that brings a host a record it
+  takes has one line added to the pool's log and the log synced to disk before the
+  answer leaves, a sync per request for as long as a member pays for requests.
+- **How long a refusal takes may say that a pool is linked.** A key that is no member,
+  once its request is authenticated at a stranger's price, is refused alike whatever
+  pool it names, and a `hello` it sends in a pool the host is linked to is refused only
+  after the host has judged the member record in it: a few signature checks and one
+  look at the pool later than in a pool the host is not linked to. Each such request
+  costs a stranger's price, which doubles past four a minute.
 - **A grant is good for 120 s of its claimant's clock**, which the giver takes from the
   claimant within 300 s of its own. A claim signed inside that time and shown later is
   taken in when it surfaces. It holds an offer only when no claim its host gave that
@@ -1082,10 +1141,22 @@ Nothing in a record hides any of this.
 - **A seat is the word of the members above it.** The member that gave a seat, and the
   one that gave that member its own, take it away by a later voucher for it, and nothing
   tells the member that lost it: the hosts that seat it no longer answer it as they
-  answer a stranger. A host that leaves a pool,
-  unlinks it and links it again has begun another membership: wherever its new record
-  arrives, the members it had seated are seated no longer, though it meant only to come
-  back, and each of them joins again by invite.
+  answer a stranger. A member one voucher from the first that signs its record under a
+  voucher of a key of its own, or under none, takes the keys it seated with it: each of
+  them takes the record, finds that member or its key for the first member, and holds a
+  pool of that member's keys and one another, while the hosts under the first member
+  refuse the record and count them members for a day more. Nothing tells those keys'
+  operators but the members their pool's row lists. A host that leaves a pool,
+  unlinks it and links it again has begun another membership, though it meant only to
+  come back: the members it had seated take none of its new records, since no voucher of
+  theirs leads to that membership, and go on as the pool they were, under the record it
+  signed last in the old one. It is a pool of one, and each of them that is to be with it
+  joins it by invite.
+- **The first member, back after more than 30 days, asks keys that may be nobody's.** It
+  greets the keys of the members it left, each no more often than once in 10 minutes,
+  for as long as none of them has answered: a pool whose other members are all gone
+  costs it those requests for as long as it stays linked, and it is a pool of one
+  meanwhile.
 - **Nothing puts a member out, and no key is ever changed.** There is no request and no
   command that removes a member another member seated: a host gives a seat to another
   key only once its holder left or went a day without signing. A member that misbehaves
@@ -1110,14 +1181,20 @@ Nothing in a record hides any of this.
 - **A ticket taken by a member that had none is a request refused.** The member that
   held it sends its body all the same and gets 413: a `push` goes out again in its
   time, and an `act` is not sent again and fails for its job. It happens to a member that
-  takes a second place inside a minute, at a target whose four places are all taken, in
-  the instant between its `reserve` and its body.
+  takes a second place inside a minute, at a target whose four places are all taken or
+  while another key of the seats it sits in asks, in the instant between its `reserve`
+  and its body.
 - **A ticket waits 10 s, and the work for the body is done inside them.** A sender is
   asked more work than it does in 10 s only after a burst of its own requests - past
   512 times a member's base price at a million hashes a second - and until that price
   is down its large requests find their tickets void.
 - **Members seated by one member wait for one another's large bodies** at each target,
-  one at a time.
+  one at a time. A key among them that takes ticket after ticket and sends nothing above
+  64 KiB is refused from its second ticket on, and one that sends a large body for
+  each ticket yields every other ticket to whoever of them asks. Two keys in those seats
+  that take turns, each sending a whole body as slowly as a body may come, hold the
+  place as four members hold a target's four: the others find it only in the moments
+  between.
 - **A full pool is slow to enter.** The index of a pool at its caps is some 20 pages and
   its records up to 61 MiB, pulled 60 KiB at a time: about a thousand requests, each
   paid for (section 3).

@@ -36,7 +36,7 @@ await check('a host joins a pool that is as full as a pool gets and holds what e
   // The first host has them on disk when it starts.
   w.net.kill('a');
   const file = [...a.disk.files.keys()].find((name) => name.startsWith('pools/'));
-  const doc = JSON.parse(a.disk.read(file));
+  const doc = w.doc(a);
   a.disk.write(file, JSON.stringify({ ...doc, records: [...doc.records, ...records] }));
   await w.restart(a);
   const full = 1 + others.length * (1 + LIMITS.offers + LIMITS.claims);

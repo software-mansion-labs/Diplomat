@@ -260,6 +260,9 @@ check('a claim its executor released or completed frees the task at once', () =>
       assert.deepEqual([h.pool.task(TASK, T0 + 30).state, h.pool.task(TASK, T0 + 30).claim], ['available', null]);
     }
     assert.equal(backing(claimNow(hosts, 2, TASK, T0 + 31, 1), hosts[0].id.pk).gen, 2);
+    // Ended by a clock set back behind the claim's start, it is dated by that start.
+    const early = endClaim(executor, claim, state, T0 - 100, JOB);
+    assert.deepEqual([early.at, early.state, early.seq], [claim.claimedAt, state, 1]);
   }
 });
 

@@ -94,9 +94,11 @@ export function extendClaim(identity, claim, ping, now) {
 
 /// The claim's last version, with `state` `completed` or `released`. A completed claim
 /// names the job its run did: `spec`, the digest of the spec it was handed with its key.
+/// It is dated no earlier than the claim was made, whatever the clock says since.
 export function endClaim(identity, claim, state, now, spec) {
   const { sig: _, ping: __, ...fields } = claim;
-  return signRecord(identity, { ...fields, seq: claim.seq + 1, at: now, state, ...(state === 'completed' ? { spec } : {}) });
+  const at = Math.max(now, claim.claimedAt);
+  return signRecord(identity, { ...fields, seq: claim.seq + 1, at, state, ...(state === 'completed' ? { spec } : {}) });
 }
 
 /// Null when a well-shaped claim's times are the ones its `claimedAt`, `hours` and `seq`
