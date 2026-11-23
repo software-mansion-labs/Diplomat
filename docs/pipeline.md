@@ -66,10 +66,12 @@ A PR:
 | `cleared` | labelled `diplomat:cleared`, clean at its head, and rated low/low again there by this Diplomat (its state or log says so) | Fast |
 | `merged`, `closed` | one of the repo's 20 merged or closed PRs updated last, carrying a pipeline label | Done |
 
-An issue labelled `wontfix`, `won't fix`, `duplicate`, `invalid`, `question`, `enhancement`,
-`feature`, `feature request`, `improvement`, `discussion`, `proposal` or `rfc` in any case
-(`pipeline.json` `triageLabels`, on Linear too), or of a GitHub issue type other than Bug, is
-**triaged**: never a `candidate` nor split, and once rated its hold is `triaged as <that label or type>`.
+An issue labelled `wontfix`, `wont fix`, `won't fix`, `duplicate`, `invalid`, `question`,
+`enhancement`, `feature`, `feature request`, `improvement`, `discussion`, `proposal` or `rfc` in any
+case, after a leading `prefix:` or `prefix/` and with `-` or `_` for a space (`type: Feature`,
+`kind/feature`, `feature-request`; `pipeline.json` `triageLabels`, on Linear too), or of a GitHub
+issue type other than Bug, is **triaged**: never a `candidate` nor split, and once rated its hold
+is `triaged as <that label or type>`.
 
 ### The fast track
 
@@ -227,9 +229,10 @@ you approve your own PR, so a fast-track PR never has an approval. The merge is 
 squash). `--admin` merges a PR that does not meet the branch's requirements, a person's approving
 review included, so leave this off wherever a second person's review is required.
 
-Only a `cleared` PR is merged. Right before that the sync reads it again, with its commits, its
-head's checks and each issue it would close, and merges it only if its head is the one the sync
-read, it is still cleared there, and nothing holds it. A draft never ready for review before is
+Only a `cleared` PR is merged. Right before that the sync reads Linear's issues it would close,
+then the PR again, last, with its commits, its head's checks, the checks its base branch requires
+and each issue it would close, and merges it only if its head is the one the sync read, it is still
+cleared there, and nothing holds it. A draft never ready for review before is
 marked ready (`gh pr ready`) instead, and merged at a later sync. The issues it would close are
 GitHub's closing references, each one a closing word names in its title or a commit message, and
 each Linear issue its title, body or a commit message closes or that links it. The holds, the first
@@ -257,6 +260,8 @@ that applies winning:
 - it conflicts with its base or is behind it, or GitHub has not computed whether it can merge;
 - CI was read for an older commit, is still running, or failed; it has no checks (so a repo without
   CI never merges), or every check was skipped;
+- a status check its base branch requires (branch protection or a ruleset) has not succeeded on its
+  head, a skipped or never reported one included, or those checks could not be read;
 - it is assigned to anyone but you;
 - its repo allows none of squash, merge or rebase.
 
@@ -392,8 +397,8 @@ labels are the state; this is what a sync needs besides:
   try again; the issues that would not split and why, and those being split with the parts filed so
   far; and the issues Diplomat filed as parts, with the ban each carries. An item missing from a
   read keeps these until it is read merged or closed, or goes 90 days unseen. Also what was last
-  logged, so the log does not repeat itself. A `state.json` that is there but cannot be read leaves
-  every sync reading and showing only, with a notice.
+  logged, so the log does not repeat itself. A `state.json` or `ratings.json` that is there but
+  cannot be read leaves every sync reading and showing only, with a notice.
 - `control.json` - the switches as the app has them, rewritten whenever one changes and before
   each sync.
 
@@ -407,11 +412,14 @@ the app quits.
 
 ## Limits
 
-- Per root: the 300 open issues and the 300 open PRs created last; each PR's first 20 files, last 40
-  reviews, last 40 comments, first 50 review threads and first 10 closing references (more of any of
-  the last four holds its merge), and when it is read again to merge, its first 100 commits and
-  each review thread's first 50 comments (more holds it); and the 20 merged or closed PRs updated
-  last, with the closed issues of the repo they link to.
+- Per root: the 300 open issues and the 300 open PRs created last, read 100 issues and 12 PRs a
+  page; a page GitHub times out on is read again at half its size, down to 3, and the root's later
+  pages keep that size. A root renamed or moved on GitHub is first read by its configured name,
+  which GitHub follows; its later reads, writes and links use the name GitHub answers. Each PR's
+  first 20 files, last 40 reviews, last 40 comments, first 50 review threads and first 10 closing
+  references (more of any of the last four holds its merge), and when it is read again to merge,
+  its first 100 commits and each review thread's first 50 comments (more holds it); and the 20
+  merged or closed PRs updated last, with the closed issues of the repo they link to.
 - Linear: the 300 open issues of the tracked teams updated last, and each one's first 10 attachments
   (more holds its fix and split).
 - Past either cap a notice says so. A source that cannot be read, or is read only in part, is a

@@ -10,6 +10,10 @@ struct PipelineEntry {
         var foreignCommits: [String] = []
         /// A check on the head ran rather than being skipped.
         var ciRan = false
+        /// The checks its base branch requires, by name; nil when they could not be read.
+        var requiredChecks: [String]? = []
+        /// The head's checks that succeeded as ones its base branch requires of it.
+        var passedChecks: Set<String> = []
     }
 
     var item: PipelineItem
@@ -342,7 +346,7 @@ enum PipelineRead {
             e.gate = gate(n, me: me)
             let messages = nodes(n, "commits").map { ($0["commit"] as? [String: Any])?["message"] as? String ?? "" }
             e.closesLinear = linearCloses(([e.item.title, e.body] + messages).joined(separator: "\n"))
-            e.closesText = githubCloses(([e.item.title] + messages).joined(separator: "\n"), repo: root.slug)
+            e.closesText = githubCloses(([e.item.title] + messages).joined(separator: "\n"), repo: root.name)
             let fresh = nodes(n, "closing")
             e.closing = fresh.compactMap { c in
                 issue(c, root: (c["url"] as? String).flatMap { PipelineRead.root(of: $0, in: roots) }, label: { "#\($0)" })
@@ -362,7 +366,7 @@ enum PipelineRead {
 
     /// The root whose repository `url`, an issue or PR page, is in.
     static func root(of url: String, in roots: [PipelineSettings.Root]) -> PipelineSettings.Root? {
-        roots.first { sameRepo(url, "https://github.com/\($0.slug)/issues/0") }
+        roots.first { sameRepo(url, "https://github.com/\($0.name)/issues/0") }
     }
 
     /// `Gate`'s fields of a PR node, for the operator `me` (lowercased).
@@ -388,12 +392,39 @@ enum PipelineRead {
         if total(n, "commits") > commits.count { note("") }
         let rollup = (nodes(n, "gateTip").first?["commit"] as? [String: Any])?["statusCheckRollup"] as? [String: Any]
         for c in nodes(rollup, "contexts") {
+            if bool(c["isRequired"], false), (c["conclusion"] ?? c["state"]) as? String == "SUCCESS",
+               let name = (c["name"] ?? c["context"]) as? String { g.passedChecks.insert(name) }
             // A check run skipped did not run; a commit status always did.
             if let conclusion = c["conclusion"] as? String, ["SKIPPED", "NEUTRAL"].contains(conclusion) { continue }
             guard c["conclusion"] != nil || c["state"] != nil else { continue }
             g.ciRan = true
         }
+        g.requiredChecks = requiredChecks(n["baseRef"] as? [String: Any])
         return g
+    }
+
+    /// The status checks `base`, a PR's base branch read with `Gate`, requires: its branch
+    /// protection rule's, which an admin reads as `branchProtectionRule` and anyone else as
+    /// `refUpdateRule`, and its active rulesets'. Nil when the branch or a ruleset past the
+    /// read's page leaves them unknown.
+    static func requiredChecks(_ base: [String: Any]?) -> [String]? {
+        guard let base, let rules = base["rules"] as? [String: Any], let ruleNodes = rules["nodes"] as? [[String: Any]],
+              total(base, "rules") <= ruleNodes.count else { return nil }
+        var names: [String] = []
+        func add(_ list: Any?) {
+            for name in list as? [String] ?? [] where !names.contains(name) { names.append(name) }
+        }
+        if let rule = base["branchProtectionRule"] as? [String: Any], bool(rule["requiresStatusChecks"], true) {
+            guard rule["requiredStatusCheckContexts"] is [String] else { return nil }
+            add(rule["requiredStatusCheckContexts"])
+        }
+        add((base["refUpdateRule"] as? [String: Any])?["requiredStatusCheckContexts"])
+        for r in ruleNodes where r["type"] as? String == "REQUIRED_STATUS_CHECKS" {
+            guard let checks = (r["parameters"] as? [String: Any])?["requiredStatusChecks"] as? [[String: Any]]
+            else { return nil }
+            add(checks.compactMap { $0["context"] as? String })
+        }
+        return names
     }
 
     /// A Linear issue's page URL without the title's slug, which a retitle changes:
