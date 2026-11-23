@@ -1333,6 +1333,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     let markers: [(String, (Trackers) -> Void)] = [
         ("someone else's marker", review("bob", "\(tag)Clean at \(sha("c3"))", sha("c3"))),
         ("a marker posted at another commit", review(opLogin, "\(tag)Clean at \(sha("c3"))", sha("c2"))),
+        ("a marker naming another commit", review(opLogin, "\(tag)Clean at \(sha("c2"))", sha("c3"))),
         ("a marker naming a short sha", review(opLogin, "\(tag)Clean at \(sha("c3").prefix(7))", sha("c3"))),
         ("a marker inside a review", review(opLogin, "LGTM. Clean at \(sha("c3"))", sha("c3"))),
         ("a marker at an older head", review(opLogin, "\(tag)Clean at \(sha("c2"))", sha("c2"))),
