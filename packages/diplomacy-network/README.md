@@ -521,7 +521,8 @@ the repository itself is cut to the same list on both surfaces, by `pick` on the
 answer and by a list of readable fields in a GraphQL document (`requester/graphql.js`;
 it adds GitHub's `viewerPermission`, which `gh` reads before it opens a pull request).
 A document is refused whole when it asks for more, takes an argument that could name
-another repository, or reads what tells of the linked account and not of the repository.
+another repository, or reads what tells of the linked account and not of the repository -
+as a field, or as a filter over a list (the issues it is subscribed to).
 
 **Where the time goes.** What happened between an offer and its job is in `daemon.log`,
 in seconds and counts and nothing any machine said: one line a claim round -

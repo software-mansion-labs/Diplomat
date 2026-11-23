@@ -45,7 +45,7 @@ async function refused(rules, request, ctx = world(), pattern = /./) {
 // What every kind reads: gh's own queries, the repository's code, and what every pull
 // request and issue of it says.
 const READS = [
-  ...['prViewAuthor', 'prViewDefault', 'prProjectItems', 'prViewReviews', 'prViewMergeable', 'typeFields', 'prChecks', 'prList', 'prSearch', 'prStatus',
+  ...['prViewAuthor', 'prViewDefault', 'prViewCommits', 'prProjectItems', 'prViewReviews', 'prViewMergeable', 'typeFields', 'prChecks', 'prList', 'prSearch', 'prStatus',
     'issueView', 'issueList', 'userCurrent', 'repositoryInfo', 'repoView'].map((name) => ghql(GH[name])),
   gh('GET', '/repos/o/r/readme'), // gh repo view
   { ...gh('GET', '/repos/o/r/pulls/578'), headers: { ...gh('GET', '/x').headers, accept: 'application/vnd.github.v3.diff' } }, // gh pr diff 578

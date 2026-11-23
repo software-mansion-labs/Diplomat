@@ -34,7 +34,7 @@ async function refused(s, query, variables, pattern, ctx) {
 const IN = (inner, vars = '') => `query${vars} { repository(owner: "o", name: "r") { ${inner} } }`;
 
 await check('every query the gh CLI sends for a task on o/r is allowed', async () => {
-  const reads = ['prViewAuthor', 'prViewDefault', 'prProjectItems', 'prViewReviews', 'prViewMergeable', 'typeFields', 'prChecks', 'prList',
+  const reads = ['prViewAuthor', 'prViewDefault', 'prViewCommits', 'prProjectItems', 'prViewReviews', 'prViewMergeable', 'typeFields', 'prChecks', 'prList',
     'prSearch', 'prStatus', 'issueView', 'issueList', 'issueForEdit', 'userCurrent', 'repositoryInfo', 'prForBranch', 'prForReady', 'repoView'];
   for (const name of reads) {
     const verdict = await ask(spec(), GH[name].query, GH[name].variables);
@@ -164,6 +164,7 @@ await check('a selection cannot walk out of the repository through its owner, a 
 
 await check('the viewer gives its name and nothing it owns', async () => {
   await allowed(spec(), '{ viewer { login id name databaseId url avatarUrl } }');
+  await refused(spec(), '{ viewer { login email } }', undefined, /"email" may not be read on a user or organisation/);
   for (const inner of ['repositories(first: 100) { nodes { nameWithOwner } }', 'organizations(first: 9) { nodes { login } }', 'gists(first: 9) { nodes { name } }',
     'bio', 'company', 'location', 'status { message }', 'sponsorshipsAsSponsor(first: 9) { totalCount }', 'repository(name: "secret") { id }', 'publicKeys(first: 9) { nodes { key } }']) {
     await refused(spec(), `{ viewer { ${inner} } }`, undefined, /may not be read|not a field this task may select/);
@@ -420,6 +421,10 @@ await check('GitLab queries are confined to the pool\'s project, and GitLab gets
 const LAB = (inner) => `{ project(fullPath: "group/sub/proj") { ${inner} } }`;
 const within = { github: (inner) => IN(`pullRequest(number: 578) { ${inner} }`), gitlab: (inner) => LAB(`issue(iid: "421") { ${inner} }`) };
 const specs = { github: spec(), gitlab };
+// Whether what the schema calls `name`, of type `type`, names an object by its id, or a
+// repository, an owner or a group.
+const selects = (name, type) => (/ID$/.test(type) && type !== 'GitObjectID' && name !== 'iid') || (/Ids?$/.test(name) && type === 'String')
+  || /repository|project|group|namespace|owner/i.test(name);
 
 await check('no field is told by argument which repository or object to read from', async () => {
   // An issue's type is the owner's, and lists the issues of whichever repository it is given.
@@ -464,20 +469,105 @@ await check('no field is told by argument which repository or object to read fro
   await allowed(gitlab, LAB('issues(iids: ["5"], first: 3) { nodes { title labels(first: 3) { nodes { title } } } }'));
 
   // Every argument the schemas give a reachable field: one that names an object by id,
-  // or a repository, an owner or a group, is refused or resolved; the rest filter and page.
-  const selects = (name, type) => (/ID$/.test(type) && type !== 'GitObjectID' && name !== 'iid') || (/Ids?$/.test(name) && type === 'String')
-    || /repository|project|group|namespace|owner/i.test(name);
+  // or a repository, an owner or a group, is refused or resolved, one that filters by what
+  // the account asking did is refused; the rest filter and page.
   const carriers = { github: (arg) => IN(`pullRequests(${arg}: "PR_elsewhere") { totalCount }`), gitlab: (arg) => LAB(`issues(${arg}: "gid://gitlab/Project/7") { count }`) };
   const kept = { github: 0, gitlab: 0 };
   for (const forge of ['github', 'gitlab']) {
     for (const entry of SCHEMA[forge].arguments) {
       const [name, type] = entry.split('@')[0].split(':');
       const verdict = await ask(specs[forge], carriers[forge](name));
-      assert.equal(verdict.ok, !selects(name, type), `${forge}: ${entry}: ${verdict.reason}`);
+      assert.equal(verdict.ok, !selects(name, type) && !SCHEMA[forge].accountArguments.includes(name), `${forge}: ${entry}: ${verdict.reason}`);
       if (verdict.ok) kept[forge]++;
     }
   }
-  assert.deepEqual(kept, { github: 53, gitlab: 87 });
+  assert.deepEqual(kept, { github: 53, gitlab: 85 });
+  assert.deepEqual(SCHEMA.gitlab.accountArguments, ['myReactionEmoji', 'subscribed']);
+  const mine = /"(issues|mergeRequests)" may not be given "(subscribed|myReactionEmoji|viewerSubscribed)", which/;
+  await refused(gitlab, LAB('issues(subscribed: EXPLICITLY_SUBSCRIBED) { nodes { title } }'), undefined, mine);
+  await refused(gitlab, LAB('mergeRequests(subscribed: EXPLICITLY_UNSUBSCRIBED, first: 5) { nodes { title } }'), undefined, mine);
+  await refused(gitlab, LAB('issues(myReactionEmoji: "thumbsup") { nodes { title } }'), undefined, mine);
+  await refused(spec(), IN('issues(viewerSubscribed: true) { totalCount }'), undefined, mine);
+});
+
+await check('an object given as an argument holds only members that filter and order what is there, however it is given', async () => {
+  const told = /"issues" may not be given "viewerSubscribed" inside "filterBy", which could name something outside the pool's repository or tell of the account asking/;
+  await refused(spec(), IN('issues(first: 5, filterBy: {viewerSubscribed: true}) { totalCount }'), undefined, told);
+  const byVariable = IN('issues(first: 5, filterBy: $f) { totalCount }', '($f: IssueFilters)');
+  await refused(spec(), byVariable, { f: { viewerSubscribed: true } }, told);
+  await refused(spec(), byVariable, { f: { labels: ['bug'], viewerSubscribed: null } }, told);
+  await allowed(spec(), byVariable, { f: { labels: ['bug'], states: ['OPEN'], assignee: '@me', createdBy: 'me', mentioned: 'me', milestone: 'v1', since: '2026-01-01T00:00:00Z' } });
+  await allowed(spec(), byVariable, { f: null });
+  await allowed(spec(), byVariable, {});
+  // A variable that is not sent has its default; one that is sent does not.
+  const byDefault = IN('issues(filterBy: $f) { totalCount }', '($f: IssueFilters = {viewerSubscribed: true})');
+  await refused(spec(), byDefault, undefined, told);
+  await refused(spec(), byDefault, {}, told);
+  await allowed(spec(), byDefault, { f: { labels: ['bug'] } });
+  await allowed(spec(), byDefault, { f: null });
+  await refused(spec(), IN('issues(filterBy: $f) { totalCount }'), { f: { labels: ['bug'] } }, /variable "\$f" is not defined/);
+  // In a list, inside another object, in a variable inside a literal, at any depth.
+  await refused(spec(), IN('issues(filterBy: [{viewerSubscribed: true}]) { totalCount }'), undefined, told);
+  await refused(spec(), IN('issues(filterBy: {labels: {states: [{viewerSubscribed: true}]}}) { totalCount }'), undefined, told);
+  await refused(spec(), IN('issues(filterBy: {labels: [$l]}) { totalCount }', '($l: String)'), { l: [[{ states: { viewerSubscribed: true } }]] }, told);
+  await refused(spec(), IN('issues(filterBy: {labels: $l}) { totalCount }', '($l: [String!] = [{viewerSubscribed: true}])'), undefined, told);
+  // On a field that selects nothing, and among what a mutation answers with.
+  await refused(spec(), IN('pullRequest(number: 578) { title(first: {viewerSubscribed: true}) }'), undefined, /"title" may not be given "viewerSubscribed" inside "first"/);
+  await refused(issues, 'mutation($i: AddCommentInput!) { addComment(input: $i) { subject { ... on Issue { labels(orderBy: {viewerSubscribed: true}) { totalCount } } } } }',
+    { i: { subjectId: 'I_421', body: 'x' } }, /"labels" may not be given "viewerSubscribed" inside "orderBy"/);
+
+  // A member that names an object by its id is no filter over what is there.
+  const history = (author) => IN(`object(expression: "main") { ... on Commit { history(author: ${author}) { totalCount } } }`);
+  await refused(spec(), history('{id: "U_other"}'), undefined, /"history" may not be given "id" inside "author"/);
+  await allowed(spec(), history('{emails: ["a@example.com"]}'));
+  await allowed(spec(), IN('issues(orderBy: {field: CREATED_AT, direction: DESC}, filterBy: {issueFieldValues: [{fieldName: "Priority", singleSelectOptionValue: "High"}]}) { totalCount }'));
+  await refused(spec(), IN('issues(filterBy: {issueFieldValues: [{fieldId: "IF_1", textValue: "x"}]}) { totalCount }'), undefined, /"issues" may not be given "fieldId" inside "filterBy"/);
+
+  await refused(gitlab, LAB('mergeRequests(not: {myReactionEmoji: "thumbsup"}) { nodes { title } }'), undefined, /"mergeRequests" may not be given "myReactionEmoji" inside "not"/);
+  await refused(gitlab, LAB('issues(not: {assigneeId: "7"}) { count }'), undefined, /"issues" may not be given "assigneeId" inside "not"/);
+  await allowed(gitlab, LAB('issues(not: {labelName: ["bug"], authorUsername: "x"}, or: {assigneeUsernames: ["a", "b"]}) { count }'));
+
+  // Every member the schemas give the input objects a reachable field's arguments take,
+  // in a literal, in a variable and inside a list: one that names an object by id or
+  // tells of the account asking is refused; the rest filter and order.
+  const holders = {
+    github: (value, vars = '') => IN(`issues(filterBy: ${value}) { totalCount }`, vars),
+    gitlab: (value, vars = '') => `query${vars} ${LAB(`issues(not: ${value}) { count }`)}`,
+  };
+  const kept = { github: new Set(), gitlab: new Set() };
+  for (const forge of ['github', 'gitlab']) {
+    for (const entry of SCHEMA[forge].inputs) {
+      const [member, type] = entry.split(':');
+      const name = member.split('.')[1];
+      const want = !selects(name, type) && !SCHEMA[forge].accountInputs.includes(member);
+      for (const [query, variables] of [[holders[forge](`{${name}: "x"}`)], [holders[forge]('$v', '($v: Filter)'), { v: { [name]: 'x' } }], [holders[forge](`[{labels: {${name}: "x"}}]`)]]) {
+        const verdict = await ask(specs[forge], query, variables);
+        assert.equal(verdict.ok, want, `${forge}: ${entry}: ${verdict.reason}`);
+        if (!verdict.ok) assert.match(verdict.reason, new RegExp(`may not be given "${name}" inside "(filterBy|not)"`));
+      }
+      if (want) kept[forge].add(name);
+    }
+  }
+  assert.deepEqual({ github: kept.github.size, gitlab: kept.gitlab.size }, { github: 25, gitlab: 26 });
+  assert.deepEqual(SCHEMA.github.accountInputs, ['IssueFilters.viewerSubscribed']);
+  assert.deepEqual(SCHEMA.gitlab.accountInputs, ['MergeRequestsResolverNegatedParams.myReactionEmoji', 'NegatedIssueFilterInput.myReactionEmoji']);
+});
+
+await check('a commit\'s author line gives the e-mail address the commit holds, an account gives none', async () => {
+  const commit = (inner) => IN(`pullRequest(number: 578) { commits(first: 5) { nodes { commit { ${inner} } } } }`);
+  await allowed(spec(), commit('authors(first: 5) { totalCount nodes { __typename name email date avatarUrl(size: 40) user { id login } } } committer { name email date }'));
+  await allowed(spec(), IN('ref(qualifiedName: "refs/tags/v1") { target { ... on Tag { tagger { name email date user { login } } } } }'));
+  const account = /"email" may not be read on a user or organisation/;
+  await refused(spec(), commit('authors(first: 5) { nodes { user { login email } } }'), undefined, account);
+  await refused(spec(), commit('committer { user { email } }'), undefined, account);
+  await refused(spec(), IN('pullRequest(number: 578) { author { login ... on User { email } } }'), undefined, account);
+  // `author` is an account on everything but a commit, and is read as one on a commit too.
+  await refused(spec(), commit('author { name email }'), undefined, account);
+  await allowed(spec(), commit('author { name date user { login } }'));
+  // The line holds nothing else and leads to its account alone.
+  await refused(spec(), commit('committer { login }'), undefined, /"login" may not be read of a commit's author line/);
+  await refused(spec(), commit('committer { user { repositories(first: 5) { nodes { name } } } }'), undefined, /"repositories" is not a field this task may select into here/);
+  await refused(spec(), commit('committer { repositories { totalCount } }'), undefined, /"repositories" is not a field this task may select into here/);
 });
 
 // The member of the forge's REST answer about the repository that holds what a GraphQL

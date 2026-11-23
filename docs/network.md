@@ -238,8 +238,9 @@ and the repository's protection settings are not readable.
 A GraphQL request is refused whole when it asks for anything off that list, or for anything
 else the forge would say about the account that offered the job rather than about the
 repository: what that account may do to an issue, a PR or a comment, whether it is subscribed
-to one or has read it, its e-mail addresses. Which comments the account wrote is told, because
-`gh` asks.
+to one or has read it - asked for outright, or by listing only the ones it is subscribed to or
+reacted to - its e-mail addresses. Which comments the account wrote is told, because `gh` asks,
+and so are the name and address a commit was written with, which are part of the commit.
 (GitHub serves the commits of a repository's forks through the repository to whoever knows
 their id; the rules do not narrow what the forge itself calls part of the repository.)
 
