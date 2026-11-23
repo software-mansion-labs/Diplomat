@@ -651,6 +651,15 @@ def test_a_join_under_way_and_why_the_last_invite_failed_are_read_of_a_pool():
         "", "no-seat", "", "", "", "its voucher does not hold"]
 
 
+def test_a_return_under_way_and_a_seat_refused_are_read_of_a_pool():
+    seen = N.Snapshot.from_json({"pools": [
+        {"id": "a", "returning": True}, {"id": "b", "unseated": True},
+        {"id": "c", "returning": True, "unseated": True}, {"id": "d"},
+        {"id": "e", "returning": 1, "unseated": "true"}]}).pools
+    assert [p.returning for p in seen] == [True, False, True, False, False]
+    assert [p.unseated for p in seen] == [False, True, True, False, False]
+
+
 def test_what_an_offer_row_carries_and_no_word_on_where_it_runs_is_not_a_no():
     offered = N.Snapshot.parse(FULL_SNAPSHOT).offers
     assert (offered[0].pool, offered[0].kind, offered[0].item, offered[0].title,

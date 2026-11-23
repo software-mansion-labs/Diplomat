@@ -591,6 +591,39 @@ def test_a_join_under_way_and_an_invite_that_came_to_nothing_are_said_on_the_poo
         "a quiet line while it waits, a warning once it failed")
 
 
+def test_a_return_under_way_and_a_seat_refused_are_said_on_the_pools_card(screen):
+    from PySide6.QtWidgets import QLabel
+
+    from diplomat_app import networkview as nv
+
+    returning = "Returning: waiting for a machine this one left to let it back in"
+    unseated = ("No seat here: every machine this one asked refused it, and it needs an "
+                "invite again")
+    view = screen(RICH)
+    pool = view.store.network_state.pools[0]
+    assert nv.pool_returning(pool) == "" and nv.pool_unseated(pool) == ""
+    assert not [line for p in view.panels for line in texts(p)
+                if line in (returning, unseated)]
+
+    _with(view, pools=(dataclasses.replace(pool, returning=True),))
+    shown = texts(view.panels[0])
+    assert shown[shown.index("Members") - 1] == returning and unseated not in shown
+
+    _with(view, pools=(dataclasses.replace(pool, returning=True, unseated=True),))
+    shown = texts(view.panels[0])
+    assert shown[shown.index("Members") - 1] == unseated, "refused, it waits for nothing"
+    assert returning not in shown
+    tints = {lb.text(): lb.styleSheet() for lb in view.panels[0].findChildren(QLabel)}
+    assert nv._ORANGE in tints[unseated]
+
+    _with(view, pools=(dataclasses.replace(pool, unseated=True),))
+    assert texts(view.panels[0])[texts(view.panels[0]).index("Members") - 1] == unseated
+
+    _with(view, pools=(dataclasses.replace(pool, left=True, returning=True, unseated=True),))
+    assert not [line for line in texts(view.panels[0]) if line in (returning, unseated)], (
+        "a pool this machine left says only that")
+
+
 def test_a_title_or_pool_id_from_elsewhere_is_drawn_as_it_is_and_takes_no_width(screen):
     from diplomat_app.widgets import ElidedLabel
 

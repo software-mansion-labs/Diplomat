@@ -515,6 +515,11 @@ public struct NetworkSnapshot: Equatable {
         /// Why the last invite let this machine in nowhere, in the daemon's words; "" for
         /// none.
         public let joinFailed: String
+        /// Whether this machine, back in the pool after leaving it, waits for a machine it
+        /// left to let it back in.
+        public let returning: Bool
+        /// Whether every machine this one asked refused it a seat: it needs an invite.
+        public let unseated: Bool
         /// Why this machine takes none of the pool's jobs, in the daemon's sentence; ""
         /// while it takes them.
         public let notTaking: String
@@ -682,6 +687,8 @@ public struct NetworkSnapshot: Equatable {
                         hash: text(p["hash"]), left: JSONInput.flag(p["left"]),
                         joining: JSONInput.flag(p["joining"]),
                         joinFailed: text(p["joinFailed"]),
+                        returning: JSONInput.flag(p["returning"]),
+                        unseated: JSONInput.flag(p["unseated"]),
                         notTaking: Self.localTimes(text(p["notTaking"])),
                         members: members, tasks: tasks)
         }

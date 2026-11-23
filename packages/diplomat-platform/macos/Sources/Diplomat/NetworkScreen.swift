@@ -400,9 +400,9 @@ struct NetworkPoolPanel: View {
                 note(NetworkText.leftNote)
                 leftActions
             } else {
-                if let joining = NetworkText.poolJoining(pool) { note(joining) }
-                if let failed = NetworkText.poolJoinFailed(pool) { note(failed, tint: .orange) }
-                if let held = NetworkText.poolHeld(pool) { note(held, tint: .orange) }
+                ForEach(NetworkText.poolNotes(pool), id: \.text) {
+                    note($0.text, tint: $0.warns ? .orange : .secondary)
+                }
                 section("Members") {
                     if pool.members.isEmpty { note(NetworkText.noMembers) }
                     ForEach(pool.members, id: \.pk) { member($0) }

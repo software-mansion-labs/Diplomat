@@ -88,6 +88,7 @@ def _dump(s: N.Snapshot) -> dict:
         "pools": [{
             "id": p.id, "path": p.path, "identity": p.identity, "hash": p.hash,
             "left": p.left, "joining": p.joining, "joinFailed": p.join_failed,
+            "returning": p.returning, "unseated": p.unseated,
             "notTaking": p.not_taking,
             "members": [{"pk": m.pk, "self": m.is_self, "maxAcceptedH": m.max_accepted_h,
                          "lastSeen": m.last_seen, "reachable": m.reachable}
@@ -554,7 +555,8 @@ def _snapshot() -> dict:
         "admit": {"slots": 2, "at": 1794000290, "reason": ""},
         "pools": [{
             "id": "github.com/o/r", "path": "/w/r", "identity": "octocat", "hash": "h1",
-            "left": False, "joining": False, "joinFailed": "", "notTaking": "",
+            "left": False, "joining": False, "joinFailed": "", "returning": False,
+            "unseated": False, "notTaking": "",
             "members": [
                 {"pk": SELF, "self": True, "maxAcceptedH": 24, "lastSeen": 1794000299,
                  "reachable": True},
@@ -758,7 +760,7 @@ _SPOILT_SNAPSHOTS = {
         s["pools"][0]["tasks"][0].update(hours=12.0, claimedAt=None),
         s["pools"][0]["members"][0].update(maxAcceptedH=True, lastSeen="x"))),
     "flags that are not": _spoil(lambda s: (
-        s["pools"][0].update(left=1, joining=1),
+        s["pools"][0].update(left=1, joining=1, returning="true", unseated=1),
         s["pools"][0]["members"][0].update(self=1, reachable="yes"),
         s["pools"][0]["tasks"][0].update(offeredHere=1.0, executorHere=1),
         s["offers"][0].update(executorHere=0), s["offers"][3].update(executorHere="yes"),
@@ -795,12 +797,17 @@ _SPOILT_SNAPSHOTS = {
         lambda s: s["pools"][0].update(joining=True)),
     "a pool whose last invite came to nothing": _spoil(
         lambda s: s["pools"][0].update(joinFailed="no-seat")),
+    "a pool this machine is returning to": _spoil(
+        lambda s: s["pools"][0].update(returning=True)),
+    "a pool that has no seat for this machine": _spoil(
+        lambda s: s["pools"][0].update(returning=True, unseated=True)),
     "a pool whose jobs this machine does not take": _spoil(lambda s: (
         s["pools"][0].update(notTaking="docker is down: no engine"),
         s["offers"][3].update(notTaking="docker is down: no engine"))),
     "rows as an earlier daemon wrote them": _spoil(lambda s: (
         s["pools"][0].pop("notTaking"), s["offers"][3].pop("notTaking"),
         s["pools"][0].pop("joining"), s["pools"][0].pop("joinFailed"),
+        s["pools"][0].pop("returning"), s["pools"][0].pop("unseated"),
         s["offers"][2]["outcome"].pop("capped"),
         s["runs"][0].update(log="/l/1"), s["runs"][1].update(log=""))),
     "the same task offered twice": _spoil(lambda s: s["offers"].append(
@@ -876,6 +883,15 @@ def test_the_spoilt_snapshots_that_carry_the_offers_own_fields_reach_them():
     assert join("a pool whose last invite came to nothing") == (False, "no-seat")
     assert join("flags that are not") == (False, "") == join("text that is not")
     assert join("rows as an earlier daemon wrote them") == (False, "")
+
+    def seat(name: str) -> tuple[bool, bool]:
+        pool = read(name)["networkSnapshot"]["pools"][0]
+        return pool["returning"], pool["unseated"]
+
+    assert seat("a pool this machine is returning to") == (True, False)
+    assert seat("a pool that has no seat for this machine") == (True, True)
+    assert seat("flags that are not") == (False, False) == seat(
+        "rows as an earlier daemon wrote them")
 
 
 @pytest.mark.parametrize("value", [7, "", None, True, ["t"], {"taskId": "t"}],

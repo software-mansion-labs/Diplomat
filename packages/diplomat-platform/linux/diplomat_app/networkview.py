@@ -150,6 +150,20 @@ def pool_joining(pool: network.Pool) -> str:
     return f"Joining: {dn.SEATED_LATER}" if pool.joining else ""
 
 
+def pool_returning(pool: network.Pool) -> str:
+    """A pool card's line while this machine, back in a pool it left, waits to be let
+    back in, else "". Once every machine it asked refused it, :func:`pool_unseated` says
+    so."""
+    return ("Returning: waiting for a machine this one left to let it back in"
+            if pool.returning and not pool.unseated else "")
+
+
+def pool_unseated(pool: network.Pool) -> str:
+    """A pool card's line once every machine this one asked refused it a seat, else ""."""
+    return ("No seat here: every machine this one asked refused it, and it needs an "
+            "invite again" if pool.unseated else "")
+
+
 def pool_join_failed(pool: network.Pool) -> str:
     """A pool card's line on why the last invite let this machine in nowhere, else ""."""
     return f"The last invite came to nothing: {pool.join_failed}" if pool.join_failed else ""
@@ -275,6 +289,10 @@ class PoolPanel(QWidget):
         pill.set_state(f"{n} member{'' if n == 1 else 's'}", _TEAL)
         if pool_joining(pool):
             col.addWidget(_note(pool_joining(pool)))
+        if pool_returning(pool):
+            col.addWidget(_note(pool_returning(pool)))
+        if pool_unseated(pool):
+            col.addWidget(_note(pool_unseated(pool), _ORANGE))
         if pool_join_failed(pool):
             col.addWidget(_note(pool_join_failed(pool), _ORANGE))
         if pool_held(pool):

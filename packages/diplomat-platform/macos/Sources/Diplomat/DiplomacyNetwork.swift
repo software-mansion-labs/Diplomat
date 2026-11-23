@@ -338,6 +338,20 @@ enum NetworkText {
         pool.joining ? "Joining: \(seatedLater)" : nil
     }
 
+    /// A pool card's line while this machine, back in a pool it left, waits to be let
+    /// back in, or nil. Once every machine it asked refused it, `poolUnseated` says so.
+    static func poolReturning(_ pool: NetworkSnapshot.Pool) -> String? {
+        pool.returning && !pool.unseated
+            ? "Returning: waiting for a machine this one left to let it back in" : nil
+    }
+
+    /// A pool card's line once every machine this one asked refused it a seat, or nil.
+    static func poolUnseated(_ pool: NetworkSnapshot.Pool) -> String? {
+        pool.unseated
+            ? "No seat here: every machine this one asked refused it, and it needs an invite again"
+            : nil
+    }
+
     /// A pool card's line on why the last invite let this machine in nowhere, or nil.
     static func poolJoinFailed(_ pool: NetworkSnapshot.Pool) -> String? {
         pool.joinFailed.isEmpty ? nil : "The last invite came to nothing: \(pool.joinFailed)"
@@ -347,6 +361,14 @@ enum NetworkText {
     static func poolHeld(_ pool: NetworkSnapshot.Pool) -> String? {
         pool.notTaking.isEmpty ? nil
             : "This machine takes none of this pool's jobs: \(pool.notTaking)"
+    }
+
+    /// The lines a pool card this machine has not left says above its members, in order;
+    /// `warns` tints a line as a warning.
+    static func poolNotes(_ pool: NetworkSnapshot.Pool) -> [(text: String, warns: Bool)] {
+        [(poolJoining(pool), false), (poolReturning(pool), false), (poolUnseated(pool), true),
+         (poolJoinFailed(pool), true), (poolHeld(pool), true)]
+            .compactMap { line, warns in line.map { ($0, warns) } }
     }
 
     /// A task row's line on why this machine does not take that job of its own, where

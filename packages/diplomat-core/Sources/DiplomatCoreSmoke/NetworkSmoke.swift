@@ -427,6 +427,14 @@ func networkSmoke() throws {
     check(joins.map(\.joining) == [true, false, false, false, false, true]
           && joins.map(\.joinFailed) == ["", "no-seat", "", "", "", "its voucher does not hold"],
           "a join under way and why the last invite failed are read of a pool")
+    let seats = NetworkSnapshot.parse(Data("""
+        {"pools": [{"id": "a", "returning": true}, {"id": "b", "unseated": true},
+                   {"id": "c", "returning": true, "unseated": true}, {"id": "d"},
+                   {"id": "e", "returning": 1, "unseated": "true"}]}
+        """.utf8))?.pools ?? []
+    check(seats.map(\.returning) == [true, false, true, false, false]
+          && seats.map(\.unseated) == [false, true, true, false, false],
+          "a return under way and a seat refused are read of a pool")
     let members = snap.pools[0].members
     check(members.map(\.pk) == ["aaaabbbbccccdddd", "eeeeffff00001111"]
           && members.map(\.isSelf) == [true, false]
