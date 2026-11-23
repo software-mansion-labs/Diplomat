@@ -698,6 +698,17 @@ function checkQuery(doc, op, vars, spec, lookups) {
 
 // ---------------------------------------------------------------------- mutations
 
+// A line a forge or a bot on it runs as a command: GitLab's quick actions ("/merge"),
+// Prow's "/approve" and "/lgtm", bors's "bors r+", and a bot named first on its line
+// ("@dependabot merge", "@Mergifyio queue"). Text posted in the requester's name is
+// otherwise a way to do anything such a command can.
+const COMMAND_LINE = /(^|[\r\n\v\f\u0085\u2028\u2029])[ \t]*(\/|@|bors\b)/i;
+/// Whether `text` is a string with no line that `COMMAND_LINE` would take for a command.
+export const isProse = (text) => typeof text === 'string' && !COMMAND_LINE.test(text);
+/// Why text that is not `isProse` is refused.
+export const COMMAND_REASON = 'has a line starting with "/", "@" or "bors", which the forge or a bot on it would take for a command';
+const PROSE = { prose: true };
+
 // What each mutation's `input` may hold. A key the table does not name is refused, so a
 // field that changes what the mutation does (an `event`, a second target) cannot ride
 // along. `node` values are opaque ids the forge is asked about before anything is sent:
@@ -705,7 +716,7 @@ function checkQuery(doc, op, vars, spec, lookups) {
 //   own       it was written by the identity the task acts as
 //   pending   it is part of a review that has not been submitted
 //   repo      it is the pool's repository
-// `free` is text or layout the task decides. `created` is a branch the task created,
+// `free` is text or layout the task decides, `prose` text that is `isProse`. `created` is a branch the task created,
 // from which it has opened no pull request: "branch", or "account:branch" for one in
 // that account's fork.
 // `assignees` is the issue's whole new assignee list, which may differ from the list the
@@ -716,13 +727,13 @@ const MUTATIONS = {
   github: {
     addPullRequestReviewThread: {
       pullRequestReviewId: { node: REVIEW, item: 'pr', own: true, pending: true, required: true },
-      path: 'free', line: 'free', side: 'free', startLine: 'free', startSide: 'free', body: 'free', subjectType: 'free',
+      path: 'free', line: 'free', side: 'free', startLine: 'free', startSide: 'free', body: PROSE, subjectType: 'free',
       clientMutationId: 'free',
     },
     addPullRequestReviewThreadReply: {
       pullRequestReviewThreadId: { node: THREAD, item: 'pr', required: true },
       pullRequestReviewId: { node: REVIEW, item: 'pr', own: true, pending: true },
-      body: 'free', clientMutationId: 'free',
+      body: PROSE, clientMutationId: 'free',
     },
     deletePullRequestReviewComment: {
       id: { node: ['PullRequestReviewComment'], item: 'pr', own: true, pending: true, required: true },
@@ -738,7 +749,7 @@ const MUTATIONS = {
     },
     addComment: {
       subjectId: { node: ['Issue'], item: 'issue', required: true },
-      body: 'free', clientMutationId: 'free',
+      body: PROSE, clientMutationId: 'free',
     },
     replaceActorsForAssignable: {
       assignableId: { node: ['Issue'], item: 'issue', required: true },
@@ -755,7 +766,7 @@ const MUTATIONS = {
       repositoryId: { node: ['Repository'], repo: true, required: true },
       headRefName: { created: true, required: true },
       draft: { equals: true, required: true },
-      baseRefName: 'free', title: 'free', body: 'free', maintainerCanModify: 'free', clientMutationId: 'free',
+      baseRefName: 'free', title: 'free', body: PROSE, maintainerCanModify: 'free', clientMutationId: 'free',
     },
   },
   gitlab: {},
@@ -794,6 +805,8 @@ function checkMutation(doc, op, vars, spec, lookups, effects) {
     } else if (rule.created) {
       if (typeof val !== 'string') refuse(`graphql: "${key}" is not a branch name`);
       effects.push({ head: val });
+    } else if (rule.prose) {
+      if (!isProse(typeof val === 'object' ? val.blockString : val)) refuse(`graphql: "${key}" ${COMMAND_REASON}`);
     } else if (val !== rule.equals) {
       refuse(`graphql: ${field.name} needs "${key}" to be ${JSON.stringify(rule.equals)}`);
     }

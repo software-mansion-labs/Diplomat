@@ -337,6 +337,38 @@ await check('conflicts: a push to its pull request\'s head branch and not one wr
   await refused(github('conflicts', {}, 'pr-580'), gitPush('github.com', '/o/r.git'), world(), /open pull request #580/);
 });
 
+await check('GitHub: text in the requester\'s name holds no line a comment bot would take for a command, in REST and in GraphQL', async () => {
+  const pushed = () => world({ branches: ['refs/heads/fix-421'] });
+  // Each route's text member, written by `write`, with the task that may write it.
+  const writes = [
+    [github('review'), (body) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', body })],
+    [github('review'), (body) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [{ path: 'a.js', line: 1, body: 'fine' }, { path: 'a.js', line: 2, body }] })],
+    [github('review'), (body) => gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { event: 'COMMENT', body })],
+    [github('review'), (body) => ghql({ ...GH.addThread, variables: { ...GH.addThread.variables, body } })],
+    [github('review'), (body) => ghql({ ...GH.addReply, variables: { ...GH.addReply.variables, body } })],
+    [github('review-own'), (body) => gh('POST', '/repos/o/r/pulls/579/comments/13/replies', { body })],
+    [github('issues'), (body) => gh('POST', '/repos/o/r/issues/421/comments', { body })],
+    [github('issues'), (body) => ghql({ ...GH.issueComment, variables: { input: { subjectId: 'I_421', body } } })],
+    [github('issues'), (body) => gh('POST', '/repos/o/r/pulls', { title: 't', body, head: 'fix-421', base: 'main', draft: true })],
+    [github('issues'), (body) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, body } } })],
+  ];
+  for (const [rules, write] of writes) {
+    await allowed(rules, write('Looks fine. See https://example.com/a/b, ask @mallory, and the borscht recipe.\nBorscht, thanks @x.'), pushed());
+    for (const text of ['Looks fine.\n/approve', '/lgtm', 'ok\r\n  /merge', 'bors r+', 'ok\nBors try', '@bors r+', '@dependabot merge', 'ok\n\t@Mergifyio queue']) {
+      await refused(rules, write(text), pushed(), /a line starting with "\/", "@" or "bors"/);
+    }
+  }
+  // A block string is read for its lines as it stands.
+  const block = (text) => ({ query: `mutation { addComment(input: { subjectId: "I_421", body: """${text}""" }) { clientMutationId } }`, variables: {} });
+  await allowed(github('issues'), ghql(block('fine\n  thanks')), pushed());
+  await refused(github('issues'), ghql(block('fine\n  /close')), pushed(), /"body" has a line starting with/);
+  // A comment list holds objects; anything else is not one GitHub takes.
+  for (const comments of ['/approve', [{ path: 'a.js', body: 5 }], ['x']]) {
+    await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments }), pushed(), /"comments"/);
+  }
+  await allowed(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [] }), pushed());
+});
+
 await check('issues: assign itself, comment on its issue, and a draft pull request from the branch it pushed', async () => {
   const rules = github('issues');
   const pushed = () => world({ branches: ['refs/heads/fix-421'] });

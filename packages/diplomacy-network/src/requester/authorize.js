@@ -8,7 +8,7 @@
 // decides, alone - its pins and deep checks are not retried against a later rule. What
 // matches nothing is refused.
 
-import { checkGraphql, itemMismatch, sameButSelf, searchConfined } from './graphql.js';
+import { COMMAND_REASON, checkGraphql, isProse, itemMismatch, sameButSelf, searchConfined } from './graphql.js';
 import { branchLabel, checkAdvertise, checkFork, checkPush, pushReport } from './receivepack.js';
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
@@ -22,9 +22,6 @@ const QUERY_CHARS = /^[A-Za-z0-9\-._~!$&'()*+,=:@%/?]*$/;
 const DENIED_QUERY = new Set(['sudo', 'private_token', 'access_token', 'job_token', '_method']);
 const JSON_TYPE = /^application\/json\s*(;\s*charset=utf-8\s*)?$/i;
 const RECEIVE_PACK_TYPE = 'application/x-git-receive-pack-request';
-// A line GitLab would read as a quick action ("/merge", "/approve", "/assign @x"): text
-// posted in the requester's name is otherwise a way to do anything a quick action can.
-const COMMAND_LINE = /(^|[\r\n\v\f\u0085\u2028\u2029])[ \t]*\//;
 const MAX_PATH = 8192;
 // The members of a rule that decides by its path and nothing else.
 const BY_PATH_ALONE = new Set(['host', 'method', 'path', 'fold']);
@@ -290,7 +287,10 @@ async function checkBodyPins(spec, req, ctx, effects, given, fork) {
     if (pin.equals !== undefined && !sameJson(value, pin.equals, pin.fold)) refuse(`the body member "${key}" has a value this task may not use`);
     if (pin.oneOf && !pin.oneOf.some((allowed) => sameJson(value, allowed, pin.fold))) refuse(`the body member "${key}" has a value this task may not use`);
     if (pin.prefix !== undefined && !(typeof value === 'string' && value.startsWith(pin.prefix))) refuse(`the body member "${key}" must start with "${pin.prefix}"`);
-    if (pin.prose && !(typeof value === 'string' && !COMMAND_LINE.test(value))) refuse(`the body member "${key}" has a line starting with "/", which the forge would run as a command`);
+    if (pin.prose && !isProse(value)) refuse(`the body member "${key}" ${COMMAND_REASON}`);
+    if (pin.proseIn && !(Array.isArray(value) && value.every((item) => isProse(item?.[pin.proseIn])))) {
+      refuse(`the body member "${key}" is not a list of objects whose "${pin.proseIn}" is text, or holds text that ${COMMAND_REASON}`);
+    }
     if (pin.created) effects.push(pin.created === 'label' ? { head: value } : { pull: value, fork });
     if (pin.assignees !== undefined) {
       if (typeof ctx.self !== 'function' || typeof ctx.assignees !== 'function') refuse('nothing here can tell who is assigned, or which account this task acts as');
