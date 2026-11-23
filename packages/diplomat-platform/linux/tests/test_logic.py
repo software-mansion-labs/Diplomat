@@ -153,7 +153,7 @@ def test_review_prompt_blocks_by_target():
     # (theirs -> review only, never touch the branch, DO NOT mark ready).
     assert "WHO AUTHORED IT" in single_prompt
     assert "CASE A" in single_prompt and "CASE B" in single_prompt
-    assert "on the PR's branch" in single_prompt  # depth onBranch fix step
+    assert "it is FIXED on the branch" in single_prompt  # CASE A
     assert "mark it ready for review" in single_prompt  # CASE A
     assert "ABSOLUTELY DO NOT touch their branch" in single_prompt  # CASE B guard
     assert "isn't yours to advance" in single_prompt  # CASE B: don't mark ready

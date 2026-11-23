@@ -62,10 +62,13 @@ public enum CoreAssets {
         public let title: String
         public let blurb: String
         public let fragment: String
-        // The "fix it on the branch" disposition for this depth. Only emitted
-        // when we may actually commit (our own PRs / a specific PR); absent
-        // for flag-only depths and never used for someone else's PRs.
+        // What this depth adds on a branch we fix. Only emitted when we may
+        // actually commit (our own PRs / a specific PR); never used for
+        // someone else's PRs.
         public let onBranch: String?
+        // An earlier level of the same ladder whose fragment and onBranch this
+        // one's own text extends.
+        public let extends: String?
     }
 
     public struct Review: Decodable {

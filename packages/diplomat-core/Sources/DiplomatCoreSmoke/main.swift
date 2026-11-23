@@ -512,7 +512,7 @@ let singlePrompt = single("337").buildPrompt()
 check(singlePrompt.contains("WHO AUTHORED IT"))
 check(singlePrompt.contains("CASE A") && singlePrompt.contains("CASE B"))
 // CASE A keeps the fix-on-branch + mark-ready + attribution behaviour…
-check(singlePrompt.contains("on the PR's branch"))   // depth onBranch fix step
+check(singlePrompt.contains("it is FIXED on the branch"))
 check(singlePrompt.contains("mark it ready for review"))
 check(singlePrompt.contains("No AI attribution"))
 // …CASE B is the hard look-don't-touch guard, with an explicit do-not-advance line.
@@ -2850,7 +2850,7 @@ check(km.contains("FIRST AND FOREMOST, resolve every reviewer finding"))
 check(km.contains(#""Fixed in <commit_hash>""#))
 // The reviewer-findings step comes before the agent's own deep-review approach.
 check(km.range(of: "FIRST AND FOREMOST")!.lowerBound < km.range(of: "dispatch swarms of agents")!.lowerBound)
-check(km.contains("fix it directly on the PR's branch"))
+check(km.contains("Keep dispatching swarms until"), "deep's on-branch loop")
 check(km.contains("No AI attribution"))
 check(!km.contains("mark it ready for review"), "markReady=false omits the block")
 // The gated (author-unknown) path still branches, for the manual Specific-PR wizard.
@@ -2877,7 +2877,7 @@ for (label, cfg) in [("soft-approve", ReviewConfig(depth: "deep", target: .speci
 // Own branches retain the fix disposition. External reviews stop after verification.
 let fixLows = "it is FIXED on the branch"
 check(km.contains(fixLows) && km.contains("ZERO pending findings"))
-check(!other.buildPrompt().contains(fixLows))
+check(!other.buildPrompt().contains(fixLows) && !other.buildPrompt().contains("Keep dispatching swarms until"))
 let gatedA = gated.range(of: "▸ CASE A")!.lowerBound, gatedB = gated.range(of: "▸ CASE B")!.lowerBound
 check(gated[gatedA..<gatedB].contains(fixLows) && !gated[gatedB...].contains(fixLows))
 check(gated[gatedB...].contains("retry the original trigger"))
@@ -2938,7 +2938,7 @@ check(kt.contains("a COMMENT review carrying that body ONLY"), "the soft approva
 check(!kt.contains("top-level comment (not an inline finding)"), "no standalone soft-approve comment")
 check(!kt.contains("PR #500 looks clean"), "soft-approve replaces the silent no-verdict close")
 check(!kt.contains("still APPROVE"), "the finalPass approve-verdict block is gone")
-check(!kt.contains("fix it directly on the PR's branch"), "never fixes someone else's branch")
+check(!kt.contains("Keep dispatching swarms until"), "never fixes someone else's branch")
 check(!kt.contains("No AI attribution"), "no commits ⇒ no attribution block")
 print("known-theirs (soft-approve) review prompt assertions passed")
 
@@ -2982,7 +2982,7 @@ check(!ktNoReview.contains("addPullRequestReviewThread"), "no formal review ⇒ 
 check(!ktNoReview.lowercased().contains("every finding goes in as an inline comment")
       && !ktNoReview.lowercased().contains("post every finding"),
       "no formal review ⇒ the closing block asks for none")
-check(ktNoReview.contains("Any review you submit on this PR uses the neutral COMMENT event"),
+check(ktNoReview.contains("Do NOT submit an APPROVE"),
       "…while still ruling out a verdict")
 check(ktNoReview.contains("Do NOT post your findings on the PR"), "no formal review ⇒ findings stay unposted")
 check(ktNoReview.contains("This outranks every other line here that puts findings in the review"),
@@ -3122,8 +3122,9 @@ let absencePass = ["a sibling that has it", "prose that promises it", "symmetry"
 for swarmDepth in ["deep", "max"] {
     let p = ReviewConfig(depth: swarmDepth, me: "latekvo").buildPrompt()
     for move in moves {
-        check(p.contains(move), "\(swarmDepth) depth names the '\(move)' move")
+        check(p.components(separatedBy: move).count == 2, "\(swarmDepth) depth names the '\(move)' move once")
     }
+    check(p.contains("Keep dispatching swarms until"), "\(swarmDepth) depth loops its own fixes")
     for part in absencePass {
         check(p.contains(part), "\(swarmDepth) depth carries the absence pass — '\(part)'")
     }
@@ -3141,10 +3142,13 @@ check(!focusedVerdict.contains("Thank you for contributing"))
 let quickPrompt = ReviewConfig(depth: "quick", me: "latekvo").buildPrompt()
 check(!quickPrompt.contains("nearest twin"), "quick depth runs no swarm and names no moves")
 check(!quickPrompt.contains("a sibling that has it"), "quick depth carries no absence pass")
+check(!ReviewConfig(depth: "standard", me: "latekvo").buildPrompt().contains("Keep dispatching swarms"),
+      "only the swarm depths loop")
 for swarmDepth in ["deep", "max"] {
     let p = IssueConfig(depth: swarmDepth, me: "latekvo").forIssue(7).buildPrompt()
     for move in moves {
-        check(p.contains(move), "issues \(swarmDepth) depth names and defines the '\(move)' move")
+        check(p.components(separatedBy: move).count == 2,
+              "issues \(swarmDepth) depth names and defines the '\(move)' move once")
     }
 }
 // The prompt runs on machines that have none of the operator's files.
@@ -3152,6 +3156,10 @@ for name in ["review", "issues", "audit", "conflicts"] {
     let text = try! String(contentsOf: CoreAssets.assetsDir().appendingPathComponent("\(name).json"),
                            encoding: .utf8)
     check(!text.contains("CLAUDE.md"), "\(name).json defers to no CLAUDE.md the agent may not have")
+    if name == "review" || name == "issues" {
+        check(text.components(separatedBy: "nearest twin (").count == 2,
+              "\(name).json writes the moves once, for every depth that extends it")
+    }
 }
 print("review moves + absence pass assertions passed")
 
