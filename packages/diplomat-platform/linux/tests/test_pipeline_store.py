@@ -12,6 +12,7 @@ import json
 import os
 import signal
 import stat
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -22,7 +23,7 @@ from test_autofix import _spawn_recorder, fake_probes, store  # noqa: F401 — f
 
 from diplomat_app import bans
 from diplomat_app.store import PIPELINE_ATTEMPTS, Store, app_settings
-from diplomat_runtime import activity, appconfig, autofix, pipeline, review
+from diplomat_runtime import activity, appconfig, autofix, pipeline, promptcore, review
 from diplomat_runtime.prref import LocalRepo
 
 pytest.importorskip("PySide6")
@@ -65,11 +66,12 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _result(*effects: dict, items: tuple = (), at: str | None = None) -> dict:
+def _result(*effects: dict, items: tuple = (), at: str | None = None,
+            unread: tuple = ()) -> dict:
     """Dated now unless ``at`` says otherwise: a sync's result is dated when it began."""
     return {"at": at or _now_iso(), "items": list(items),
             "graph": {"nodes": [], "edges": []}, "effects": list(effects), "events": [],
-            "notices": []}
+            "notices": [], "unread": list(unread)}
 
 
 @pytest.fixture
@@ -264,6 +266,13 @@ def test_a_fix_running_under_a_linear_label_is_in_flight(pipe, monkeypatch):
     assert _keys(pipe) == []
 
 
+def test_a_review_waits_while_an_agent_is_on_its_pr(pipe, monkeypatch):
+    monkeypatch.setattr(Store, "_in_flight", lambda self, url: url == PR)
+    pipe._apply_pipeline_effects(_result(_review()), time.time())
+    assert _keys(pipe) == []
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS) == {}
+
+
 def test_a_banned_authors_issue_is_not_asked_for(pipe):
     pipe._apply_pipeline_effects(_result(_fix(author="mallory")), time.time())
     assert _keys(pipe) == []
@@ -332,6 +341,28 @@ def test_a_record_is_kept_while_its_effect_is_owed_whatever_the_switches(pipe):
                                  now)
     assert pipe._load_attempts(PIPELINE_ATTEMPTS) == {
         f"pipeline-fix:{ISSUE}": held, "pipeline-fix:https://github.com/x/y/issues/1": gone}
+
+
+def test_a_record_concluded_while_a_sync_asks_stays_concluded(pipe, monkeypatch):
+    """A run's retirement saves its record while the sync's pass builds a prompt."""
+    now = time.time()
+    other = "https://github.com/o/r/issues/13"
+    pipe._save_attempts(PIPELINE_ATTEMPTS, {
+        f"pipeline-fix:{other}": autofix.ReviewAttempt("fix", now - 60, 1)})
+    request = pipe.request_one
+
+    def concluding(work):
+        pipe._save_attempts(PIPELINE_ATTEMPTS, pipeline.concluded(
+            pipe._load_attempts(PIPELINE_ATTEMPTS), [_run(autofix.QUEUE_ISSUES_ACTION, other)],
+            now))
+        return request(work)
+
+    monkeypatch.setattr(pipe, "request_one", concluding)
+    pipe._apply_pipeline_effects(_result(_fix(), _fix(13)), now)
+    assert _keys(pipe) == ["issues:o/r#12"]
+    records = pipe._load_attempts(PIPELINE_ATTEMPTS)
+    assert {k: (a.attempts, a.concluded_at) for k, a in records.items()} == {
+        f"pipeline-fix:{ISSUE}": (1, None), f"pipeline-fix:{other}": (1, now)}
 
 
 def test_an_ask_that_cannot_be_queued_is_an_attempt(pipe, monkeypatch):
@@ -544,6 +575,7 @@ def test_start_fix_queues_the_candidates_fix_past_its_record(pipe):
     label = pipe.pipeline_work(_fix()).label_among(1)
     assert _feed("pipeline-fix") == [f"{label} queued from the Pipeline screen"]
     assert pipe.pipeline_badges() == {ISSUE: "queued"}
+    assert [w.by_hand for w in pipe.requested_work] == [True]
     assert _start(pipe, item) == "Its fix is already queued"
 
 
@@ -771,10 +803,11 @@ def test_a_core_past_its_deadline_is_an_error_at_once(tmp_path, monkeypatch):
 def test_a_malformed_result_keeps_only_what_it_should_hold(tmp_path, monkeypatch):
     _fake_core(tmp_path, monkeypatch, json.dumps({
         "at": "x", "items": [{"id": "a"}, 3], "graph": {"nodes": "no", "edges": [None]},
-        "effects": [{"kind": "review"}, "x"], "notices": ["one", 2]}))
+        "effects": [{"kind": "review"}, "x"], "notices": ["one", 2], "unread": ["o/r", 3]}))
     assert pipeline.tick({}) == {
         "at": "x", "items": [{"id": "a"}], "graph": {"nodes": [], "edges": []},
-        "effects": [{"kind": "review"}], "events": [], "notices": ["one"]}
+        "effects": [{"kind": "review"}], "events": [], "notices": ["one"],
+        "unread": ["o/r"]}
 
 
 # MARK: - What a running sync reads
@@ -818,13 +851,32 @@ def test_an_unwritable_control_file_is_no_raise(pipe, tmp_path, monkeypatch):
 
 
 def _core_that_waits(tmp_path, monkeypatch):
-    """A ``diplomat-core`` that starts a child of its own, notes both pids, and waits."""
+    """A ``diplomat-core`` that starts a child in a process group of its own, as
+    Foundation's ``Process`` starts ``gh`` and ``claude``, and waits on it. The child
+    notes both pids."""
+    child = ("import os, sys, time; os.setpgid(0, 0); "
+             "open(sys.argv[1], 'w').write(f'{os.getppid()} {os.getpid()}'); time.sleep(300)")
     core = tmp_path / "diplomat-core"
     core.write_text(f"#!/bin/sh\n[ \"$1\" = pipeline-tick ] || exit 1\n"
-                    f"sleep 300 &\necho $$ $! > {tmp_path}/pids\nwait\n")
+                    f"'{sys.executable}' -c \"{child}\" {tmp_path}/pids &\nwait\n")
     core.chmod(0o755)
     monkeypatch.setenv("DIPLOMAT_CORE_BIN", str(core))
     return tmp_path / "pids"
+
+
+def _pids(pids_file) -> tuple[int, int]:
+    deadline = time.time() + 10
+    while not (pids_file.exists() and pids_file.read_text().strip()) and time.time() < deadline:
+        time.sleep(0.05)
+    core, child = (int(x) for x in pids_file.read_text().split())
+    return core, child
+
+
+def _all_dead(*pids: int) -> bool:
+    deadline = time.time() + 5
+    while any(_alive(pid) for pid in pids) and time.time() < deadline:
+        time.sleep(0.05)
+    return not any(_alive(pid) for pid in pids)
 
 
 def _alive(pid: int) -> bool:
@@ -849,19 +901,13 @@ def test_stopping_the_sync_ends_its_core_and_what_the_core_started(pipe, tmp_pat
     worker = threading.Thread(target=lambda: done.append(pipe._pipeline_sync_once()),
                               daemon=True)
     worker.start()
-    deadline = time.time() + 10
-    while not (pids_file.exists() and pids_file.read_text().strip()) and time.time() < deadline:
-        time.sleep(0.05)
-    core, child = (int(x) for x in pids_file.read_text().split())
+    core, child = _pids(pids_file)
     try:
         pipe.stop_pipeline_sync()
         worker.join(10)
         assert not worker.is_alive()
         assert done[0]["error"].startswith("diplomat-core pipeline-tick failed")
-        deadline = time.time() + 5
-        while (_alive(core) or _alive(child)) and time.time() < deadline:
-            time.sleep(0.05)
-        assert (_alive(core), _alive(child)) == (False, False)
+        assert _all_dead(core, child)
     finally:
         for pid in (core, child):
             with contextlib.suppress(OSError):
@@ -872,9 +918,26 @@ def test_stopping_the_sync_ends_its_core_and_what_the_core_started(pipe, tmp_pat
     assert pipe.wait_for_background() == []
 
 
+def test_a_core_past_its_deadline_is_ended_with_what_it_started(tmp_path, monkeypatch):
+    pids_file = _core_that_waits(tmp_path, monkeypatch)
+    monkeypatch.setattr(pipeline, "tick_timeout", lambda settings: 2)
+    done = []
+    worker = threading.Thread(target=lambda: done.append(pipeline.tick({})), daemon=True)
+    worker.start()
+    core, child = _pids(pids_file)
+    try:
+        worker.join(15)
+        assert done == [{"error": "diplomat-core pipeline-tick did not answer within 2s"}]
+        assert _all_dead(core, child)
+    finally:
+        for pid in (core, child):
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+
+
 def test_a_core_that_starts_after_the_stop_is_stopped_at_once(pipe, monkeypatch):
     stopped = []
-    monkeypatch.setattr("diplomat_app.store._stop_group", lambda proc: stopped.append(proc))
+    monkeypatch.setattr(promptcore, "stop", lambda proc: stopped.append(proc))
     pipe.stop_pipeline_sync()
     pipe._pipeline_started("proc")
     assert stopped == ["proc"]
@@ -1051,18 +1114,51 @@ def test_a_queued_fix_leaves_when_its_issue_is_no_writable_candidate(pipe, now):
     assert _feed("queue-drop") == [f"{label} - the pipeline no longer owes it, not run"]
 
 
-@pytest.mark.parametrize("now", [
-    # Not read: its root failed, so nothing is known of it.
-    None,
-    # Read, a candidate the sync owes no fix: the switch is off, or it is held.
-    _item(),
-    _item(hold="o/r could not be read in full"),
+def _sync(pipe, result: dict) -> None:
+    pipe._apply_pipeline_sync({"result": result, "forced": {}, "started": 0})
+
+
+@pytest.mark.parametrize("fix, now", [
+    # Open fix PRs switched off.
+    (False, _item()),
+    # A hold.
+    (True, _item(hold="the author is banned")),
 ])
-def test_a_queued_fix_stays_while_nothing_says_it_is_not_owed(pipe, now):
+def test_a_queued_fix_leaves_once_the_sync_emits_none(pipe, fix, now):
     _queued_fix(pipe)
+    pipe.pipeline_fix = fix
+    _sync(pipe, _result(items=(now,)))
+    assert _keys(pipe) == []
+
+
+def test_a_start_fix_stays_while_its_issue_is_a_writable_candidate(pipe):
     pipe.pipeline_fix = False
-    pipe._apply_pipeline_sync({"result": _result(items=(now,) if now else ()),
-                               "forced": {}, "started": 0})
+    assert _start(pipe, _item()) is None
+    _sync(pipe, _result(items=(_item(),)))
+    assert _keys(pipe) == ["issues:o/r#12"]
+    _sync(pipe, _result(items=(_item(writable=False, assignees=["bob"]),)))
+    assert _keys(pipe) == []
+
+
+def test_a_queued_fix_stays_while_its_issue_was_not_read(pipe):
+    """Its root failed, so nothing is known of it."""
+    _queued_fix(pipe)
+    _sync(pipe, _result())
+    assert _keys(pipe) == ["issues:o/r#12"]
+
+
+def test_nothing_leaves_in_a_root_the_sync_could_not_judge_in_full(pipe):
+    _queued_fix(pipe)
+    _sync(pipe, _result(items=(_item(writable=False, assignees=["bob"]),), unread=("O/R",)))
+    assert _keys(pipe) == ["issues:o/r#12"]
+
+
+@pytest.mark.parametrize("now", [_item(), _item(writable=False, assignees=["bob"])])
+def test_a_sync_landing_after_the_pipeline_went_off_withdraws_nothing(pipe, now):
+    """Switched off midway, a sync emits no effect."""
+    _queued_fix(pipe)
+    pipe.pipeline_enabled = False
+    _sync(pipe, _result(items=(now,)))
     assert _keys(pipe) == ["issues:o/r#12"]
 
 
@@ -1155,8 +1251,8 @@ def test_with_no_last_result_only_this_syncs_events_are_new(pipe):
 # MARK: - Which runs answer which records
 
 
-def _run(kind: str, url: str) -> SimpleNamespace:
-    return SimpleNamespace(kind=kind, pr_url=url)
+def _run(kind: str, url: str, ledger_key: str = "") -> SimpleNamespace:
+    return SimpleNamespace(kind=kind, pr_url=url, ledger_key=ledger_key)
 
 
 def _attempt(concluded=None) -> autofix.ReviewAttempt:
@@ -1181,6 +1277,12 @@ def test_a_review_run_concludes_its_prs_review_record():
     assert {k: a.concluded_at for k, a in out.items()} == {
         f"pipeline-review:{PR}": 500.0,
         "pipeline-fix:https://github.com/o/r/issues/7": None}
+
+
+def test_a_monitors_run_on_the_pr_concludes_no_record():
+    attempts = {f"pipeline-review:{PR}": _attempt()}
+    reply = _run(autofix.QUEUE_REVIEW_ACTION, PR, ledger_key=f"review-reply:{PR}@aaa111")
+    assert pipeline.concluded(attempts, [reply], 500.0) == attempts
 
 
 def test_a_concluded_record_is_not_dated_again_by_a_spawn():

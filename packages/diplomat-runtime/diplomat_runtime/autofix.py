@@ -1027,6 +1027,8 @@ class RequestedWork:
     config: dict
     #: The item's root, as its ``LocalRepo.key``; "" in a row single-repo builds stored.
     repo: str = ""
+    #: Queued by the Pipeline screen's Start fix, not by a sync (``pipeline.withdrawn``).
+    by_hand: bool = False
 
     @property
     def linear(self) -> str:
@@ -1092,7 +1094,8 @@ class RequestedWork:
 
     def to_json(self) -> dict:
         return {"number": self.number, "url": self.url, "author": self.author,
-                "config": self.config, "repo": self.repo}
+                "config": self.config, "repo": self.repo,
+                **({"byHand": True} if self.by_hand else {})}
 
     @staticmethod
     def from_json(obj: dict) -> "RequestedWork | None":
@@ -1111,7 +1114,7 @@ class RequestedWork:
             return None
         return RequestedWork(number=number, url=str(obj.get("url", "")),
                              author=str(obj.get("author", "")), config=config,
-                             repo=str(obj.get("repo", "")))
+                             repo=str(obj.get("repo", "")), by_hand=obj.get("byHand") is True)
 
 
 @dataclass(frozen=True)
