@@ -2151,6 +2151,9 @@ enum NetworkTest {
             saidOf(), AgentSpawner.refusedTerminals, unreadableNotes())
         check("a Diplomat that starts on a config it cannot read keeps the switch last read",
               AppConfig.unreadable && fresh.networkEnabled)
+        check("…and knows before its first cycle that neither its settings nor its roots "
+                + "are the config's",
+              fresh.networkTrouble == "Diplomacy Network: \(unknown)" && fresh.rootsReadBlind)
         await fresh.runNetworkCycleOnce()
         await fresh.settleAgents()
         await fresh.refreshRoots()
@@ -2244,6 +2247,21 @@ enum NetworkTest {
               saidOf()[0] == saidWhileRead[0] + 1 && linkedPosted()
                 && requests(NetworkRoute.admit).last?["slots"] as? Int == 5
                 && linkedLeft() == leftWhileRead)
+        //     One that breaks with the roots as they were last read, under a daemon
+        //     that started since and has heard nothing: it is told nothing either.
+        let saidRead = saidOf()
+        try? launchWhole.dropLast(3).write(to: AppConfig.url)
+        daemonPid += 1
+        script.set(snapshot(offers: [offerRow("task-launch", "pooled")], more: [linkedPool]))
+        await fresh.runNetworkCycleOnce(now: Date().timeIntervalSince1970 + 300)
+        check("a daemon started since the config broke is told no list and no cap, "
+                + "whenever the roots were read",
+              AppConfig.unreadable && !fresh.rootsReadBlind && saidOf() == saidRead)
+        try? launchWhole.write(to: AppConfig.url)
+        await fresh.runNetworkCycleOnce(now: Date().timeIntervalSince1970 + 301)
+        check("…and both once the config reads",
+              saidOf()[0] == saidRead[0] + 1 && saidOf()[1] == saidRead[1] + 1
+                && linkedPosted())
 
         // 46. With no switch on record a config that cannot be read is no network at
         //     all: a job starts in a terminal, and the daemon is asked nothing.

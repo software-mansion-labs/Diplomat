@@ -1964,7 +1964,7 @@ def linked(tmp_path, monkeypatch):
 
 
 def test_no_list_of_pools_is_posted_while_the_roots_cannot_be_read(
-        store, linked, daemon, installer):
+        store, linked, daemon, installer, monkeypatch):
     """Every setting reads as its default while the file does not parse, the roots
     among them: a list built then names the default root, and the daemon closes each
     pool a list omits."""
@@ -1976,8 +1976,12 @@ def test_no_list_of_pools_is_posted_while_the_roots_cannot_be_read(
     d.state = has_pools((POOL, linked, "alice"))
     whole = break_config()
     assert dn.enabled() and review.repo_root_paths() != [linked]
-    for at in (1002.0, 1004.0, 1200.0):
-        store._network_cycle_once(at)
+    walked, real = [], review.roots_linking
+    with monkeypatch.context() as patch:
+        patch.setattr(review, "roots_linking", lambda: walked.append(1) or real())
+        for at in (1002.0, 1004.0, 1200.0):
+            store._network_cycle_once(at)
+    assert walked == [], "no checkout is read for a list that will not be said"
     assert d.sent("pools") == [{"pools": [pool]}], "on the timer and with the screen open"
     assert len(d.sent("admit")) == 1, "nor how many tasks a default cap would take"
 
