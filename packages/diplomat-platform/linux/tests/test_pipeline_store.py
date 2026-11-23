@@ -854,13 +854,30 @@ def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
     monkeypatch.setattr(pipeline, "tunables",
                         lambda: {"rater": {"perSync": 4, "timeoutSecs": 300}})
     # 4 ratings, a fracture and the 3 forced: 8 claude calls at 300 + 5 + 16 gh calls of
-    # 65; each of the 2 splits 6 parts of 5 gh calls; 2 roots of 10 gh calls; Linear; the
-    # lookups and the margin.
+    # 65; each of the 2 splits 6 parts of 5 gh calls; 2 roots of 216 gh calls (below);
+    # Linear; the lookups and the margin.
     assert pipeline.tick_timeout({
         "roots": [{}, {}], "linearTeams": [{}],
         "force": {"rate": ["a", "b"], "fracture": ["c"]}}) == (
-            8 * 1345 + 2 * 1950 + 1300 + 300 + 40)
-    assert pipeline.tick_timeout({}) == 5 * 1345 + 1950 + 650 + 40
+            8 * 1345 + 2 * 1950 + 2 * 14040 + 300 + 40)
+    assert pipeline.tick_timeout({}) == 5 * 1345 + 1950 + 14040 + 40
+
+
+def test_a_syncs_deadline_fits_a_capped_roots_whole_read():
+    """A root read whole at ``githubMaxItems`` open issues and as many open PRs, every page
+    cut to ``githubPage.least`` by timeouts: 300 / 3 pages of each, the first two in one
+    ``Repo`` call, the halvings that cut them (100 issues to 3 in five, 12 PRs in two),
+    and 10 calls for its merges."""
+    t = pipeline.tunables()
+    assert (t["githubMaxItems"], t["githubPage"]) == (300, {"issues": 100, "prs": 12, "least": 3})
+    per_root = pipeline.tick_timeout({"roots": [{}, {}]}) - pipeline.tick_timeout({"roots": [{}]})
+    assert per_root == (2 * 100 - 1 + 5 + 2 + 10) * 65
+
+
+def test_a_syncs_deadline_is_a_day_at_most(monkeypatch):
+    monkeypatch.setattr(pipeline, "tunables",
+                        lambda: {"githubMaxItems": 10**6, "githubPage": {"least": 0}})
+    assert pipeline.tick_timeout({"roots": [{}]}) == pipeline.MAX_SYNC_SECS
 
 
 def test_the_linear_teams_line_is_read_entry_by_entry():

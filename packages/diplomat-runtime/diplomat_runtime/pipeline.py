@@ -102,7 +102,7 @@ _GH_CALLS_PER_CLAUDE = 16
 #: And each part of a split: a re-read, the parts filed before (twice after a failed
 #: create), the create and its sub-issue link.
 _GH_CALLS_PER_PART = 5
-#: The read of a root, and its merges.
+#: A root's merges and their re-reads.
 _GH_CALLS_PER_ROOT = 10
 #: Linear's reads (300 issues, paged) and its label and child writes.
 _LINEAR_SECS = 300
@@ -111,13 +111,27 @@ _LOOKUP_SECS = 10
 _MARGIN_SECS = 30
 
 
+def _read_calls(t: dict) -> int:
+    """The ``gh`` calls of a root's read at ``githubMaxItems`` open issues and as many open
+    PRs, every page ``githubPage.least`` long, as timeouts may halve it to: ``Repo``
+    carries the first page of each, and each halving is a call of its own."""
+    page = t.get("githubPage") or {}
+    least = max(1, int(page.get("least", 3)))
+    halvings = 0
+    for size in (int(page.get("issues", 100)), int(page.get("prs", 12))):
+        while size > least:
+            size = max(least, size // 2)
+            halvings += 1
+    return 2 * math.ceil(max(1, int(t.get("githubMaxItems", 300))) / least) - 1 + halvings
+
+
 def tick_timeout(settings: dict) -> float:
     """How long ``pipeline-tick`` runs before it is killed: every ``claude`` call a sync
     may make (``rater.perSync`` ratings, one fracture, and each one the view forced) at
     ``rater.timeoutSecs`` and the five seconds before its SIGKILL, each with the ``gh``
-    calls around it, a fracture's for ``fracture.maxChildren`` parts too; the roots'
-    reads and merges; Linear. It bounds a wedged core, not a slow sync, so it is
-    generous."""
+    calls around it, a fracture's for ``fracture.maxChildren`` parts too; each root's
+    whole read (:func:`_read_calls`) and merges; Linear. Never over a day. It bounds a
+    wedged core, not a slow sync, so it is generous."""
     t = tunables()
     rater = t.get("rater") or {}
     force = settings.get("force") or {}
@@ -127,10 +141,10 @@ def tick_timeout(settings: dict) -> float:
     per_split = (int((t.get("fracture") or {}).get("maxChildren", 6)) * _GH_CALLS_PER_PART
                  * _GH_CALL_SECS)
     roots = max(1, len(settings.get("roots") or []))
-    return (claude_calls * per_claude + splits * per_split
-            + roots * _GH_CALLS_PER_ROOT * _GH_CALL_SECS
-            + (_LINEAR_SECS if settings.get("linearTeams") else 0)
-            + _LOOKUP_SECS + _MARGIN_SECS)
+    return min(MAX_SYNC_SECS, claude_calls * per_claude + splits * per_split
+               + roots * (_read_calls(t) + _GH_CALLS_PER_ROOT) * _GH_CALL_SECS
+               + (_LINEAR_SECS if settings.get("linearTeams") else 0)
+               + _LOOKUP_SECS + _MARGIN_SECS)
 
 
 #: Spaces, tabs and a pasted CRLF line's carriage return, never Unicode spacing.
