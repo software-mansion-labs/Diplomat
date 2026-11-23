@@ -1472,6 +1472,16 @@ def test_a_queued_linear_fix_is_queued_again_with_the_repo_and_text_a_sync_reads
         f"{label} queued again: its repo or text changed"] * 2
 
 
+def test_a_starting_linear_fix_is_not_queued_again(pipe):
+    """A second ask beside it would be a second fix run."""
+    _sync(pipe, _result(_linear()))
+    pipe._begin_starting(pipe.queued_tasks[0])
+    _sync(pipe, _result({**_linear(), "text": "A thing\n\nIt breaks twice."}))
+    assert [w.config["linear"]["text"] for w in pipe.requested_work] == ["A thing\n\nIt breaks."]
+    assert pipe.queued_tasks == []
+    assert len(_feed("pipeline-fix")) == 1
+
+
 # MARK: - The first sync
 
 

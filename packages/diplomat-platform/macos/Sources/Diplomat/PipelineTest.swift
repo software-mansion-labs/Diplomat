@@ -832,18 +832,22 @@ enum PipelineTest {
         clearQueue()
         let lapsed = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: Date().addingTimeInterval(-4 * 3600),
                                    attempts: 2)
-        store.savePipelineAttempts([fix.key: lapsed])
-        Store.pipelineTickOverride = { _ in
-            store.pipelineFix = false
-            store.pipelineFix = true
-            return result([])
+        let flips: [(String, ReferenceWritableKeyPath<Store, Bool>)] = [
+            ("Open fix PRs", \.pipelineFix), ("Fast-track my PRs", \.pipelineFastTrack)]
+        for (name, flip) in flips {
+            store.savePipelineAttempts([fix.key: lapsed])
+            Store.pipelineTickOverride = { _ in
+                store[keyPath: flip] = false
+                store[keyPath: flip] = true
+                return result([])
+            }
+            await store.runPipelineSyncOnce()
+            check("a sync \(name) went off during keeps the records of the asks it left out",
+                  store.loadPipelineAttempts() == [fix.key: lapsed] && !store.isPaused(.pipeline))
+            Store.pipelineTickOverride = { _ in result([]) }
+            await store.runPipelineSyncOnce()
+            check("…which the next sync drops", store.loadPipelineAttempts().isEmpty)
         }
-        await store.runPipelineSyncOnce()
-        check("a sync Open fix PRs went off during keeps the records of the fixes it left out",
-              store.loadPipelineAttempts() == [fix.key: lapsed] && !store.isPaused(.pipeline))
-        Store.pipelineTickOverride = { _ in result([]) }
-        await store.runPipelineSyncOnce()
-        check("…which the next sync drops", store.loadPipelineAttempts().isEmpty)
         Store.pipelineTickOverride = nil
 
         print("\npipeline: a queued Linear fix read otherwise")
@@ -876,6 +880,12 @@ enum PipelineTest {
               ids() == [linearKey] && linearAsk()?.repo == "o/web"
                   && job(linearKey)?.prompt.contains("fix it in o/web") == true
                   && feed("pipeline-fix").count == fixLines + 1)
+        if let task = store.queuedTasks.first(where: { $0.id == linearKey }) { store.beginStarting(task) }
+        await store.applyPipeline(owing(.fixLinear(repo: "o/web", identifier: "ENG-90010", url: linear,
+                                                   text: "Title\n\nStarting", author: "Bob")), now: now)
+        check("…but not while it starts: no second ask beside it",
+              ids().isEmpty && linearAsk()?.text == "Title\n\nEdited" && feed("pipeline-fix").count == fixLines + 1)
+        store.endStarting(linearKey)
         store.pinRoots(pinnedRoots)
         clearQueue()
         store.savePipelineAttempts([:])
