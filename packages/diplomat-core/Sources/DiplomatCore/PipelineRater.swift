@@ -62,6 +62,17 @@ enum PipelineRater {
         s.count > n ? String(s.prefix(n)) + "\n[cut at \(n) characters]" : s
     }
 
+    private static let references = try! NSRegularExpression(
+        pattern: #"(@)(?=[A-Za-z0-9])|(#)(?=\d)|\b(GH-)(?=\d)|(github)(?=\.com/)"#, options: [.caseInsensitive])
+
+    /// `text` with a zero-width space after each `@` of a mention, `#` or `GH-` of an issue
+    /// reference and `github` of a GitHub link: filed under the operator's account, it
+    /// then notifies no one and links nothing.
+    static func inert(_ text: String) -> String {
+        references.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length),
+                                            withTemplate: "$1$2$3$4\u{200B}")
+    }
+
     /// No `--allowedTools`: it would let the tools read any path. Unlisted, `-p` refuses
     /// them every path outside the checkout, as there is no one to grant it, and
     /// `--setting-sources ""` keeps the checkout's own settings from allowing more.

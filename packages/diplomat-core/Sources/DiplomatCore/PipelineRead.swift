@@ -10,9 +10,6 @@ struct PipelineEntry {
         var foreignCommits: [String] = []
         /// A check on the head ran rather than being skipped.
         var ciRan = false
-        /// A check on the head started after it last went from draft to ready, or it never
-        /// was a draft.
-        var ciSinceReady = false
     }
 
     var item: PipelineItem
@@ -27,6 +24,8 @@ struct PipelineEntry {
     var children: [String] = []
     /// A PR's closing references; a Linear issue's attachment URLs.
     var links: [String] = []
+    /// A PR's: the Linear identifiers its title and body close (`PipelineRead.linearCloses`).
+    var closesLinear: [String] = []
     /// A PR's open closing references, each with who it is assigned to: nil when more
     /// than the read lists, and an empty URL for references past the read's page.
     var closes: [(url: String, assignees: [String]?)] = []
@@ -252,6 +251,7 @@ enum PipelineRead {
             return (url, total(c, "assignees") > who.count ? nil : who)
         }
         if total(n, "closingIssuesReferences") > closing.count { e.closes.append(("", nil)) }
+        e.closesLinear = linearCloses(e.item.title + "\n" + e.body)
         e.headRef = n["headRefName"] as? String ?? ""
         e.baseRef = base
         e.defaultBranch = defaultBranch
@@ -284,7 +284,8 @@ enum PipelineRead {
             return login(r).lowercased() == me && !body.isEmpty && !body.hasPrefix(ReviewAudit.tag)
         }
         e.markers = reviews.compactMap { r -> String? in
-            guard login(r).lowercased() == me, !me.isEmpty,
+            // A pending review is seen by its author alone.
+            guard login(r).lowercased() == me, !me.isEmpty, r["state"] as? String != "PENDING",
                   let oid = (r["commit"] as? [String: Any])?["oid"] as? String,
                   names(r["body"] as? String ?? "", marker: model.cleanMarker, oid: oid)
             else { return nil }
@@ -317,14 +318,11 @@ enum PipelineRead {
         }
         if total(n, "commits") > commits.count { note("") }
         let rollup = (nodes(n, "gateTip").first?["commit"] as? [String: Any])?["statusCheckRollup"] as? [String: Any]
-        let readied = date(nodes(n, "readied").first?["createdAt"])
-        g.ciSinceReady = readied == nil
         for c in nodes(rollup, "contexts") {
             // A check run skipped did not run; a commit status always did.
             if let conclusion = c["conclusion"] as? String, ["SKIPPED", "NEUTRAL"].contains(conclusion) { continue }
             guard c["conclusion"] != nil || c["state"] != nil else { continue }
             g.ciRan = true
-            if let readied, let at = date(c["startedAt"] ?? c["createdAt"]), at > readied { g.ciSinceReady = true }
         }
         return g
     }
@@ -378,20 +376,52 @@ enum PipelineRead {
         return (entries, next)
     }
 
-    /// Whether `text` names `identifier` as a word of its own: `ENG-12` in "fixes ENG-12."
-    /// but not in "ENG-123" or "XENG-12".
-    static func mentions(_ text: String, _ identifier: String) -> Bool {
-        let id = identifier.lowercased()
-        let hay = text.lowercased()
-        var from = hay.startIndex
-        while let hit = hay.range(of: id, range: from..<hay.endIndex) {
-            let before = hit.lowerBound == hay.startIndex ? nil : hay[hay.index(before: hit.lowerBound)]
-            let after = hit.upperBound == hay.endIndex ? nil : hay[hit.upperBound]
-            func word(_ c: Character?) -> Bool { c.map { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" } ?? false }
-            if !word(before) && !word(after) { return true }
-            from = hit.upperBound
+    /// One reference in a list after a closing word: a Markdown link, a URL, a GitHub
+    /// reference, or an identifier-shaped token (`ENG-12`, any team, any case).
+    private static let reference = #"\[[^\]\n]*\]\([^)\s]*\)|https?://[^\s<>()\[\]]+|[\w.-]+/[\w.-]+#\d+|#\d+|`?[A-Za-z][A-Za-z0-9]*-\d+`?(?![\w-])"#
+
+    /// Linear's closing magic words, each followed by a list of references.
+    private static let closing: NSRegularExpression = {
+        let words = "close[sd]?|closing|fix(?:e[sd]|ing)?|resolve[sd]?|resolving|complete[sd]?|completing"
+            + "|implement(?:s|ed|ing)?|linear issue"
+        let gap = #"(?:[ \t]*,[ \t]*(?:and[ \t]+)?|[ \t]+and[ \t]+|[ \t]*&[ \t]*|[ \t]+)"#
+        return try! NSRegularExpression(
+            pattern: #"(?<![\w-])(?:"# + words + #")(?![\w-])\s*:?\s*((?:"# + reference + ")(?:" + gap
+                + "(?:" + reference + "))*)",
+            options: [.caseInsensitive])
+    }()
+
+    private static let references = try! NSRegularExpression(pattern: reference, options: [])
+    private static let identifier = try! NSRegularExpression(pattern: #"^`?([A-Za-z][A-Za-z0-9]*-\d+)`?$"#)
+    private static let linearIssue = try! NSRegularExpression(pattern: #"^https?://linear\.app/[^/\s]+/issue/([A-Za-z0-9]+-\d+)"#,
+                                                               options: [.caseInsensitive])
+
+    /// The Linear identifiers `text` closes, uppercased: each one in a list after one of
+    /// Linear's closing magic words (`Fixes ENG-1, OPS-2, and #3`), named by itself, by its
+    /// link, or as a Markdown link's text or target. A bare mention closes nothing.
+    static func linearCloses(_ text: String) -> [String] {
+        func first(_ re: NSRegularExpression, _ s: String) -> String? {
+            let ns = s as NSString
+            guard let m = re.firstMatch(in: s, range: NSRange(location: 0, length: ns.length)) else { return nil }
+            return ns.substring(with: m.range(at: 1)).uppercased()
         }
-        return false
+        var out: [String] = []
+        let ns = text as NSString
+        for list in closing.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let refs = ns.substring(with: list.range(at: 1))
+            let rs = refs as NSString
+            for r in references.matches(in: refs, range: NSRange(location: 0, length: rs.length)) {
+                let ref = rs.substring(with: r.range)
+                var targets = [ref]
+                if ref.hasPrefix("["), let close = ref.range(of: "](") {
+                    targets = [String(ref.dropFirst()[..<close.lowerBound]), String(ref[close.upperBound...].dropLast())]
+                }
+                for t in targets {
+                    if let id = first(identifier, t) ?? first(linearIssue, t), !out.contains(id) { out.append(id) }
+                }
+            }
+        }
+        return out
     }
 
     static func norm(_ url: String) -> String {
@@ -400,14 +430,14 @@ enum PipelineRead {
         return u.lowercased()
     }
 
-    /// Whether `pr` fixes the Linear issue `issue`: the issue's attachments link it, or its
-    /// title or body names the issue's identifier.
-    static func fixes(_ pr: PipelineEntry, linear issue: PipelineEntry) -> Bool {
-        issue.links.contains { norm($0) == norm(pr.id) } || mentions(pr.item.title + "\n" + pr.body, issue.item.label)
+    /// Whether merging `pr` would close the Linear issue `issue`: it names the issue after a
+    /// closing word (`closesLinear`), or one of the issue's attachments links it.
+    static func closes(_ pr: PipelineEntry, linear issue: PipelineEntry) -> Bool {
+        pr.closesLinear.contains(issue.item.label.uppercased()) || issue.links.contains { norm($0) == norm(pr.id) }
     }
 
     /// Every edge between `entries`: parent -> child, issue -> the PR fixing it (a GitHub
-    /// closing reference; for Linear, `fixes`), PR -> the PR stacked on it in the same
+    /// closing reference; for Linear, `closes`), PR -> the PR stacked on it in the same
     /// repository.
     static func edges(_ entries: [PipelineEntry]) -> [PipelineGraph.Edge] {
         var byURL: [String: String] = [:]
@@ -431,7 +461,7 @@ enum PipelineRead {
                     add(e.id, other.id, .stacked)
                 }
             case (.issue, .linear):
-                for pr in prs where fixes(pr, linear: e) { add(e.id, pr.id, .fixes) }
+                for pr in prs where closes(pr, linear: e) { add(e.id, pr.id, .fixes) }
             case (.issue, .github):
                 break
             }

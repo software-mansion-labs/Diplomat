@@ -31,12 +31,12 @@ fragment PR on PullRequest {
   tip: commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
   reviewRequests(first: 1) { totalCount }
   reviewThreads(first: 50) { totalCount nodes { isResolved } }
-  reviews(last: 40) { totalCount nodes { author { __typename login } body commit { oid } } }
+  reviews(last: 40) { totalCount nodes { author { __typename login } state body commit { oid } } }
   comments(last: 40) { totalCount nodes { author { __typename login } body } }
 }
 
-# What only a PR about to be marked ready or merged is read for: its head's checks, every
-# commit's author and committer, and when it last went from draft to ready.
+# What only a PR about to be marked ready or merged is read for: its head's checks, and every
+# commit's author and committer.
 fragment Gate on PullRequest {
   gateTip: commits(last: 1) {
     nodes {
@@ -45,8 +45,8 @@ fragment Gate on PullRequest {
           contexts(first: 100) {
             totalCount
             nodes {
-              ... on CheckRun { conclusion startedAt }
-              ... on StatusContext { state createdAt }
+              ... on CheckRun { conclusion }
+              ... on StatusContext { state }
             }
           }
         }
@@ -56,9 +56,6 @@ fragment Gate on PullRequest {
   commits(first: 100) {
     totalCount
     nodes { commit { author { name user { login } } committer { name email user { login } } } }
-  }
-  readied: timelineItems(last: 1, itemTypes: [READY_FOR_REVIEW_EVENT]) {
-    nodes { ... on ReadyForReviewEvent { createdAt } }
   }
 }
 

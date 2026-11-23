@@ -18,6 +18,7 @@ import Foundation
 //   diplomat-core comms-effect      < request.json   # what a triaged ping makes a front-end do
 //   diplomat-core pipeline-tick     < settings.json  # one pipeline sync (see PipelineCommand)
 //   diplomat-core pipeline-last                      # the last pipeline sync's result
+//   diplomat-core pipeline-teams    < {"raw": line}  # the Linear teams setting parsed
 //   diplomat-core opencode-session-model             # what an unpinned 2.x spawn names
 //
 // build-prompt: the JSON config's "kind" field ("review" | "conflicts" | "audit" |

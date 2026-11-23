@@ -38,6 +38,7 @@ private final class Trackers {
         var body: String
         var oid: String
         var bot = false
+        var state = "COMMENTED"
     }
     struct Issue {
         var number: Int
@@ -67,10 +68,8 @@ private final class Trackers {
         var head: String
         var files = Trackers.tested
         var ciState: String? = "SUCCESS"
-        /// The head's check runs: a conclusion and when each started.
-        var checks: [(conclusion: String, started: String)] = [("SUCCESS", at("09:00"))]
-        /// When it last went from draft to ready.
-        var readied: String?
+        /// The head's check runs' conclusions.
+        var checks = ["SUCCESS"]
         /// Each commit's author and committer login; nil for one GitHub links to no
         /// account, "web-flow" for GitHub's own committer.
         var commits: [(author: String?, committer: String?)] = [(opLogin, opLogin)]
@@ -80,12 +79,18 @@ private final class Trackers {
         var reviewRequests = 0
         var threads = 0
         var moreLabels = 0
-        /// Comments past what one read lists.
+        /// Comments, reviews, threads, commits and closing references past what one read lists.
         var moreComments = 0
+        var moreReviews = 0
+        var moreThreads = 0
+        var moreCommits = 0
+        var moreCloses = 0
         var mergeable = "MERGEABLE"
         var decision: String?
         /// The commit CI was read for, when the index lags behind the head.
         var ciOid: String?
+        /// Fields a read with errors answers as null.
+        var lost: Set<String> = []
     }
     struct Ticket {
         var id: String
@@ -97,6 +102,10 @@ private final class Trackers {
         var updated: String
         var parent: String?
         var team = "ENG"
+        /// The URLs linked to it, as the `Issues` read lists them and past what it lists.
+        var attachments: [String] = []
+        var moreAttachments: [String] = []
+        var moreLabels = false
         var url: String { linearPage(identifier, title) }
     }
     static let tested = [(path: "src/a.swift", add: 3, del: 1, type: "MODIFIED"),
@@ -105,6 +114,9 @@ private final class Trackers {
     var issues: [Issue] = []
     /// Issues a merged PR closes that the open issues' read does not list, by number.
     var others: [Int: (title: String, state: String, repo: String)] = [:]
+    var otherAssignees: [Int: [String]] = [:]
+    /// Of `others`, those with more assignees than a read lists.
+    var assigneesPast: Set<Int> = []
     var prs: [PR] = []
     /// Labels the repository has, on an item or not.
     var repoLabels: Set<String> = []
@@ -136,16 +148,24 @@ private final class Trackers {
     /// Run before the `PullRequest` read of a PR answers: what changed since the sync's
     /// first read.
     var onReread: ((Int) -> Void)?
-    /// `gh pr merge` fails after GitHub merged the PR all the same.
+    /// `gh pr merge` fails after GitHub merged the PR all the same: at its head, or at
+    /// `mergedAt` a person pushed and merged meanwhile.
     var mergeUnconfirmed = false
-    /// When `gh pr ready` marks a PR ready.
-    var readyAt = at("12:00")
+    var mergedAt: String?
     /// `gh pr diff` of a PR, by number, where it is not a one-line fix.
     var diffs: [Int: String] = [:]
     /// The pages after `Repo`'s fail.
     var failPages = false
-    /// Label writes GitHub refuses: every one on item `"<n>"`, or `"<n> <name>"` only.
+    /// Label writes GitHub refuses, adding or removing: every one on item `"<n>"`, or
+    /// `"<n> <name>"` only.
     var refuseLabels: Set<String> = []
+    /// Creating an issue, and linking one as a sub-issue, fail.
+    var failCreate = false
+    var failSubIssue = false
+    /// Linear answers every call HTTP 500.
+    var linearDown = false
+    /// More attachments link a PR than Linear's `Attached` answer lists.
+    var attachedMore = false
     var squashAllowed = true
     /// Where `claude` may be run: the checkout of each root.
     var checkouts = [checkout, libCheckout]
@@ -178,6 +198,7 @@ private final class Trackers {
         if args.starts(with: ["api", "graphql"]) {
             let query = field("query") ?? ""
             if query.contains("addSubIssue") {
+                if failSubIssue { return failed("Bad Gateway (HTTP 502)") }
                 guard let p = field("issueId").flatMap({ Int($0.dropFirst(2)) }),
                       let c = field("subIssueId").flatMap({ Int($0.dropFirst(2)) }),
                       let pi = issues.firstIndex(where: { $0.number == p }),
@@ -223,7 +244,6 @@ private final class Trackers {
         }
         if args.starts(with: ["pr", "ready"]), let n = number(args[2]), let i = prs.firstIndex(where: { $0.number == n }) {
             prs[i].draft = false
-            prs[i].readied = readyAt
             writes.append("ready #\(n)")
             return ok()
         }
@@ -231,6 +251,11 @@ private final class Trackers {
             guard args == ["pr", "merge", "\(n)", "-R", "acme/app", "--admin", "--squash",
                            "--match-head-commit", prs[i].head] else { return failed("unexpected merge \(args)") }
             guard !prs[i].draft else { return failed("Pull request is still a draft") }
+            if let head = mergedAt {
+                prs[i].head = head
+                prs[i].state = "MERGED"
+                return failed("Head branch was modified. Review and try the merge again.")
+            }
             prs[i].state = "MERGED"
             for c in prs[i].closes {
                 guard let k = issues.firstIndex(where: { $0.number == c }) else { continue }
@@ -256,6 +281,7 @@ private final class Trackers {
             writes.append("label \(name) \(field("color") ?? "")")
             return ok()
         case ("POST", ["issues"]):
+            if failCreate { return failed("Server Error (HTTP 500)") }
             let n = nextIssue
             nextIssue += 1
             issues.append(Issue(number: n, title: field("title") ?? "", body: field("body") ?? "",
@@ -279,6 +305,7 @@ private final class Trackers {
             guard let n = number(rest[1]), let name = rest[3].removingPercentEncoding else {
                 return failed("Bad request (HTTP 400)")
             }
+            if refuseLabels.contains("\(n)") || refuseLabels.contains("\(n) \(name)") { return failed("Resource not accessible by integration (HTTP 403)") }
             var had = false
             if let i = issues.firstIndex(where: { $0.number == n }) {
                 had = issues[i].labels.contains(name)
@@ -314,12 +341,13 @@ private final class Trackers {
         n["changedFiles"] = p.files.count
         n["author"] = ["login": p.author]
         n["labels"] = labels(p.labels, more: p.moreLabels)
-        n["closingIssuesReferences"] = ["totalCount": p.closes.count, "nodes": p.closes.map { c -> [String: Any] in
+        n["closingIssuesReferences"] = ["totalCount": p.closes.count + p.moreCloses, "nodes": p.closes.map { c -> [String: Any] in
             let issue = issues.first { $0.number == c }, other = others[c]
+            let assignees = issue?.assignees ?? otherAssignees[c] ?? []
             return ["number": c, "url": other.map { "https://github.com/\($0.repo)/issues/\(c)" } ?? issueURL(c),
                     "state": issue == nil ? other?.state ?? "CLOSED" : "OPEN",
-                    "assignees": ["totalCount": issue?.assignees.count ?? 0,
-                                  "nodes": (issue?.assignees ?? []).map { ["login": $0] }] as [String: Any]]
+                    "assignees": ["totalCount": assignees.count + (assigneesPast.contains(c) ? 1 : 0),
+                                  "nodes": assignees.map { ["login": $0] }] as [String: Any]]
         }] as [String: Any]
         n["files"] = ["nodes": p.files.map {
             ["path": $0.path, "additions": $0.add, "deletions": $0.del, "changeType": $0.type] as [String: Any]
@@ -327,18 +355,20 @@ private final class Trackers {
         let rollup: Any = p.ciState.map { ["state": $0] as Any } ?? NSNull()
         n["tip"] = ["nodes": [["commit": ["oid": p.ciOid ?? p.head, "statusCheckRollup": rollup] as [String: Any]]]]
         n["reviewRequests"] = ["totalCount": p.reviewRequests]
-        n["reviewThreads"] = ["totalCount": p.threads,
+        n["reviewThreads"] = ["totalCount": p.threads + p.moreThreads,
                               "nodes": (0..<p.threads).map { _ in ["isResolved": false] }] as [String: Any]
-        n["reviews"] = ["totalCount": p.reviews.count, "nodes": p.reviews.map {
-            ["author": person($0.login, $0.bot), "body": $0.body, "commit": ["oid": $0.oid]] as [String: Any]
+        n["reviews"] = ["totalCount": p.reviews.count + p.moreReviews, "nodes": p.reviews.map {
+            ["author": person($0.login, $0.bot), "state": $0.state, "body": $0.body, "commit": ["oid": $0.oid]]
+                as [String: Any]
         }] as [String: Any]
         n["comments"] = ["totalCount": p.comments.count + p.moreComments,
                          "nodes": p.comments.map { ["author": $0.login.isEmpty ? NSNull() as Any : person($0.login, $0.bot) as Any, "body": $0.body] }]
             as [String: Any]
+        if ghPartial { for field in p.lost { n[field] = NSNull() } }
         guard gate else { return n }
         let contexts: Any = p.ciState == nil ? NSNull() : ["contexts": [
             "totalCount": p.checks.count,
-            "nodes": p.checks.map { ["conclusion": $0.conclusion, "startedAt": $0.started] },
+            "nodes": p.checks.map { ["conclusion": $0] },
         ] as [String: Any]] as [String: Any]
         n["gateTip"] = ["nodes": [["commit": ["statusCheckRollup": contexts]]]]
         func user(_ login: String?) -> [String: Any] {
@@ -348,10 +378,9 @@ private final class Trackers {
             case let login?: return ["name": login, "email": "\(login)@example.com", "user": ["login": login]]
             }
         }
-        n["commits"] = ["totalCount": p.commits.count, "nodes": p.commits.map {
+        n["commits"] = ["totalCount": p.commits.count + p.moreCommits, "nodes": p.commits.map {
             ["commit": ["author": user($0.author), "committer": user($0.committer)]]
         }] as [String: Any]
-        n["readied"] = ["nodes": p.readied.map { [["createdAt": $0]] } ?? []]
         return n
     }
 
@@ -436,6 +465,7 @@ private final class Trackers {
         }
         let v = body["variables"] as? [String: Any] ?? [:]
         linearOps.append(op)
+        if linearDown { return (500, [:], Data("Internal Server Error".utf8)) }
         func answer(_ data: [String: Any]) -> (status: Int, headers: [String: String], body: Data) {
             (200, [:], json(["data": data]))
         }
@@ -451,10 +481,10 @@ private final class Trackers {
                                         "description": t.description, "url": t.url, "updatedAt": t.updated]
                 n["assignee"] = t.assignee.map { ["id": $0.id, "name": $0.name] as Any } ?? NSNull()
                 n["creator"] = ["name": "Reporter"]
-                n["labels"] = ["pageInfo": ["hasNextPage": false], "nodes": t.labels.map { ["id": $0, "name": name($0)] }] as [String: Any]
+                n["labels"] = ["pageInfo": ["hasNextPage": t.moreLabels], "nodes": t.labels.map { ["id": $0, "name": name($0)] }] as [String: Any]
                 n["parent"] = t.parent.map { ["url": $0] as Any } ?? NSNull()
                 n["children"] = ["nodes": tickets.filter { $0.parent == t.url }.map { ["url": $0.url] }]
-                n["attachments"] = ["nodes": [Any]()]
+                n["attachments"] = ["nodes": t.attachments.map { ["url": $0] }]
                 n["team"] = ["id": t.team == "ENG" ? "T1" : "T_\(t.team)", "key": t.team]
                 return n
             }
@@ -462,6 +492,12 @@ private final class Trackers {
                            "issues": ["pageInfo": ["hasNextPage": first && all.count > 2, "endCursor": first ? "c1" : "c2"]
                                         as [String: Any],
                                       "nodes": nodes] as [String: Any]])
+        case "Attached":
+            let url = v["url"] as? String ?? ""
+            let linked = tickets.filter { ($0.attachments + $0.moreAttachments).contains(url) }
+            return answer(["attachmentsForURL": ["pageInfo": ["hasNextPage": attachedMore], "nodes": linked.map {
+                ["issue": ["identifier": $0.identifier, "state": ["type": "started"]]]
+            }] as [String: Any]])
         case "Labels":
             let names = v["names"] as? [String] ?? []
             let found: [[String: Any]] = labelBook.filter { names.contains($0.name) }.map {
@@ -563,7 +599,10 @@ private func fixture() -> Trackers {
               headRef: "drop", head: sha("08")),
     ]
     t.others = [20: ("Logout keeps the cache", "CLOSED", "acme/app"), 23: ("Lib cache", "CLOSED", "acme/lib"),
-                22: ("Ancient open issue", "OPEN", "acme/app")]
+                22: ("Ancient open issue", "OPEN", "acme/app"), 28: ("Old issue of mine", "OPEN", "acme/app"),
+                29: ("Crowded issue", "OPEN", "acme/app")]
+    t.otherAssignees = [22: ["bob"], 28: [opLogin], 29: [opLogin]]
+    t.assigneesPast = [29]
     t.repoLabels = Set(t.issues.flatMap(\.labels) + t.prs.flatMap(\.labels) + ["diplomat:fractured"])
     t.labelBook = [("lab-rl", "risk:low", "T1"), ("lab-cl", "complexity:low", nil)]
     t.tickets = [
@@ -622,12 +661,15 @@ private func seedRerate(_ dir: URL, _ n: Int, _ head: String, at when: Date) thr
                                 head: head, rating: low))
 }
 
-/// `event` as the only line of the log in `dir`.
-private func seed(_ dir: URL, _ event: PipelineEvent) throws {
+/// `events` as the only lines of the log in `dir`.
+private func seed(_ dir: URL, _ events: PipelineEvent...) throws {
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    var line = try CommsLog.encoder.encode(event)
-    line.append(UInt8(ascii: "\n"))
-    try line.write(to: dir.appendingPathComponent("log.jsonl"))
+    var lines = Data()
+    for event in events {
+        lines.append(try CommsLog.encoder.encode(event))
+        lines.append(UInt8(ascii: "\n"))
+    }
+    try lines.write(to: dir.appendingPathComponent("log.jsonl"))
 }
 
 /// `id`'s stage in `r` as `stage/lane (hold)`, or `absent`.
@@ -696,6 +738,10 @@ func pipelineSmoke() throws {
         ("an env file", [("config/.env.local", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
         ("an added source file", [("src/new.swift", 5, 0, "ADDED"), test], nil, rating(.medium, .low)),
         ("an added test", [("src/a.swift", 1, 0, "MODIFIED"), ("tests/test_new.py", 5, 0, "ADDED")], nil, low),
+        ("a deleted test", [("src/a.swift", 1, 0, "MODIFIED"), test, ("tests/test_old.py", 0, 20, "DELETED")], nil,
+         rating(.medium, .low)),
+        ("a renamed test", [("src/a.swift", 1, 0, "MODIFIED"), ("tests/test_new.py", 0, 0, "RENAMED")], nil,
+         rating(.medium, .low)),
         ("a rename", [("src/b.swift", 1, 0, "RENAMED"), test], nil, rating(.medium, .low)),
         ("a deletion", [("src/b.swift", 0, 9, "DELETED"), test], nil, rating(.medium, .low)),
         ("a binary change", [("assets/logo.png", 0, 0, "MODIFIED"), test], nil, rating(.medium, .low)),
@@ -734,7 +780,7 @@ func pipelineSmoke() throws {
     }
     let holds: [(String?, (inout PipelineGate.Candidate) -> Void)] = [
         ("draft", { $0.state = "draft" }),
-        ("draft", { $0.state = "draft"; $0.ciState = ""; $0.ciRan = false; $0.ciSinceReady = false }),
+        ("draft", { $0.state = "draft"; $0.ciState = ""; $0.ciRan = false }),
         ("ci-pending", { $0.state = "draft"; $0.ciState = "PENDING" }),
         ("closed", { $0.state = "merged" }),
         ("operator-comment", { $0.operatorUntagged = true }),
@@ -745,7 +791,6 @@ func pipelineSmoke() throws {
         ("not-a-fix", { $0.fixesCandidate = false }),
         ("closes-unwritable", { $0.closesUnwritable = ["#5"] }),
         ("ci-skipped", { $0.ciRan = false }),
-        ("ci-before-ready", { $0.ciSinceReady = false }),
         ("human", { $0.participants = ["bob"]; $0.reviewRequests = 1; $0.foreignCommits = ["bob"] }),
         ("review-requested", { $0.reviewRequests = 2; $0.fixesCandidate = false }),
         ("not-mine", { $0.author = "bob" }),
@@ -908,11 +953,11 @@ func pipelineSmoke() throws {
           "sync 1 claude calls: \(s1.claude)")
     check(s1.writes == [
         "-diplomat:cleared #15",
-        "+risk:medium #17", "-risk:low #17", "-diplomat:fast-track #17",
-        "+diplomat:cleared #14",
-        "+risk:low #11", "+complexity:low #11",
+        "+risk:medium #17", "-risk:low #17",
+        // Its first rating puts it on the fast track.
+        "+risk:low #11", "+complexity:low #11", "+diplomat:fast-track #11",
         "+risk:high #12", "+complexity:low #12",
-        "+diplomat:fast-track #11",
+        "+diplomat:cleared #14", "-diplomat:fast-track #17",
         // Claimed before the split, so no other sync splits it meanwhile.
         "label diplomat:fractured exists", "+diplomat:fractured #3",
         "issue #101 Extract the storage protocol", "sub #3 #101",
@@ -922,11 +967,13 @@ func pipelineSmoke() throws {
     check(s1.result.effects == [reviewFX(15, sha("e5")), reviewFX(11, sha("a1"))],
           "sync 1 effects: \(s1.result.effects)")
     check(trail(s1.events, s1.result) == [
-        "#15 labelled", "#17 rerated", "#17 labelled", "#17 labelled", "#14 rerated", "#14 cleared",
-        "#11 rated", "#11 labelled", "#12 rated", "#12 labelled", "#11 fast-track",
+        "#15 labelled", "#17 rerated", "#17 labelled", "#14 rerated",
+        "#11 rated", "#11 labelled", "#11 fast-track", "#12 rated", "#12 labelled",
+        "#13 cleared", "#14 cleared", "#17 labelled",
         "#3 child", "#3 child", "#3 fractured", "#13 clean", "#14 held", "#14 clean", "#13 merged",
         "#15 asked", "#11 asked",
     ], "sync 1 events: \(trail(s1.events, s1.result))")
+    check(s1.result.unread.isEmpty, "sync 1 unread: \(s1.result.unread)")
     check(s1.events.contains { $0.kind == .rated && $0.detail.hasPrefix("high risk, low complexity, floored by its diff (touches package.json") },
           "a floored rating says why")
     check(s1.events.contains { $0.kind == .held && $0.detail == "CI still running" })
@@ -1068,6 +1115,7 @@ func pipelineSmoke() throws {
     check(s6.writes.isEmpty && s6.claude.isEmpty && s6.result.effects.isEmpty
           && s6.result.items.allSatisfy { $0.source == .linear }, "sync 6: \(s6.writes) \(s6.claude)")
     check(trail(s6.events, s6.result) == [" error", " error"], "sync 6 events: \(trail(s6.events, s6.result))")
+    check(s6.result.unread == ["acme/app"], "sync 6 unread: \(s6.result.unread)")
     check(stage(s6.result, linearURL("ENG-3"))
           == "candidate/fast (acme/app could not be read, so a PR fixing it might not be seen)",
           "a Linear issue whose PRs went unread: \(stage(s6.result, linearURL("ENG-3")))")
@@ -1132,8 +1180,8 @@ func pipelineSmoke() throws {
     try seedRerate(partDir, 13, sha("c3"), at: t0.addingTimeInterval(-3600))
     let part = sync(lossy, PipelineSettings(roots: [root], merge: true), partDir, t0)
     check(part.result.notices == ["acme/app was read in part: Timeout on reviews"], "partial: \(part.result.notices)")
-    check(part.writes.isEmpty && stage(part.result, prURL(13)) == "cleared/fast (acme/app was read only in part)",
-          "partial: \(part.writes) \(stage(part.result, prURL(13)))")
+    check(part.writes.isEmpty && stage(part.result, prURL(13)) == "cleared/fast (acme/app was read only in part)"
+          && part.result.unread == ["acme/app"], "partial: \(part.writes) \(stage(part.result, prURL(13)))")
 
     // An issue that would not split is not tried again, and is fixed once a person
     // rates it low.
@@ -1159,7 +1207,8 @@ func pipelineSmoke() throws {
                      t0, key: nil)
     check(nokey.result.notices == ["Linear was not read: no API key (DIPLOMAT_LINEAR_TOKEN, none set)"],
           "no key: \(nokey.result.notices)")
-    check(keyless.linearOps.isEmpty && nokey.result.items.contains { $0.id == prURL(11) })
+    check(keyless.linearOps.isEmpty && nokey.result.items.contains { $0.id == prURL(11) }
+          && nokey.result.unread == ["acme/app"], "no key: \(nokey.result.unread)")
 
     // One sync at a time per directory: one started meanwhile reads nothing.
     let busy = fixture()
@@ -1170,7 +1219,15 @@ func pipelineSmoke() throws {
     _ = PipelineTick.run(settings: PipelineSettings(roots: [root]), now: t0, dir: busyDir, io: busy.io())
     check(nested?.notices == ["another sync held \(busyDir.path)/tick.lock, so this one read nothing"],
           "a second sync: \(nested?.notices ?? [])")
-    check(nested?.items.isEmpty == true)
+    check(nested?.items.isEmpty == true && nested?.unread == ["acme/app"], "a second sync: \(nested?.unread ?? [])")
+    let shutDir = base.appendingPathComponent("shut")
+    let shut = fixture()
+    // A directory: no `open` for writing, root's (CI's container) included.
+    try FileManager.default.createDirectory(at: shutDir.appendingPathComponent("tick.lock"),
+                                            withIntermediateDirectories: true)
+    let shutOut = PipelineTick.run(settings: PipelineSettings(roots: [root]), now: t0, dir: shutDir, io: shut.io())
+    check(shutOut.notices == ["\(shutDir.path)/tick.lock could not be opened, so this sync read nothing"]
+          && shut.ghCalls.isEmpty && shutOut.unread == ["acme/app"], "a lock not opened: \(shutOut.notices)")
 
     try pipelineGuards(base: base, root: root, team: team, t0: t0)
 
@@ -1237,6 +1294,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
 
     // A hold on the first read, or on that last one.
     typealias Change = (inout Trackers.PR) -> Void
+    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
     let holds: [(String, Change, String)] = [
         ("more comments than a read lists", { $0.moreComments = 1 }, "has more reviews or comments than one read lists"),
         ("an unresolved thread", { $0.threads = 1 }, "has 1 unresolved review thread"),
@@ -1250,13 +1308,27 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
          "I commented on or reviewed it myself, not through Diplomat"),
         ("my own review", { $0.reviews.append(.init(login: opLogin, body: "Looks fine", oid: $0.head)) },
          "I commented on or reviewed it myself, not through Diplomat"),
-        ("an issue it closes that is not mine", { $0.closes.append(5) }, "would close #5, which Diplomat may not write to"),
-        ("no candidate it fixes", { $0.closes = [] }, "closes no low-risk, low-complexity issue Diplomat may act on"),
+        ("an issue it closes that is not mine", { $0.closes.append(5) }, notAFix),
+        ("no candidate it fixes", { $0.closes = [] }, notAFix),
         ("labels past the page", { $0.moreLabels = 1 }, "has more labels than one read lists"),
         ("a commit by another", { $0.commits.append(("bob", "bob")) }, "has commits by @bob"),
         ("a commit by no account", { $0.commits.append((nil, opLogin)) }, "has commits by someone other than me"),
-        ("every check skipped", { $0.checks = [("SKIPPED", at("11:00")), ("NEUTRAL", at("11:00"))] },
-         "every CI check was skipped"),
+        ("every check skipped", { $0.checks = ["SKIPPED", "NEUTRAL"] }, "every CI check was skipped"),
+        ("a person's review", { $0.reviews.append(.init(login: "alice", body: "Please don't merge yet", oid: $0.head)) },
+         "@alice has commented or reviewed"),
+        ("reviews past the page", { $0.moreReviews = 1 }, "has more reviews or comments than one read lists"),
+        ("threads past the page", { $0.moreThreads = 1 }, "has 1 unresolved review thread"),
+        ("commits past the page", { $0.moreCommits = 1 }, "has commits by someone other than me"),
+        ("closing references past the page", { $0.moreCloses = 1 },
+         "would close issues past what one read lists, which Diplomat did not read or may not write to"),
+        ("an unread issue it closes that is not mine", { $0.closes.append(22) },
+         "would close https://github.com/acme/app/issues/22, which Diplomat did not read or may not write to"),
+        ("an unread issue it closes, its assignees past the page", { $0.closes.append(29) },
+         "would close https://github.com/acme/app/issues/29, which Diplomat did not read or may not write to"),
+        ("a Linear issue of a team not read", { $0.body = "Fixes #27. Resolves: OPS-7." },
+         "would close OPS-7, which Diplomat did not read or may not write to"),
+        ("a Linear issue as a link", { $0.body = "Closes [the ticket](https://linear.app/acme/issue/eng-9/x)" },
+         "would close ENG-9, which Diplomat did not read or may not write to"),
     ]
     for (k, (what, change, hold)) in holds.enumerated() {
         let (_, s) = try cleared("hold-\(k)") { change(&$0.prs[number($0, 13)]) }
@@ -1265,13 +1337,15 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     }
     let (_, web) = try cleared("web-flow") { $0.prs[number($0, 13)].commits = [(opLogin, "web-flow")] }
     check(merged(web), "GitHub committing my own commit is no one else's: \(web.writes)")
+    let (_, mine) = try cleared("unread-mine") { $0.prs[number($0, 13)].closes.append(28) }
+    check(merged(mine), "an unread issue it closes, assigned to me alone: \(mine.writes)")
     let late: [(String, Change, String)] = [
         ("a review requested", { $0.reviewRequests = 1 }, "waits on 1 requested review"),
         ("a person's comment", { $0.comments.append(("alice", false, "Wait")) }, "@alice has commented or reviewed"),
         ("a push", { $0.head = sha("c4") }, "its head moved to c4c4c4c since this sync read it"),
         ("CI failing", { $0.ciState = "FAILURE" }, "CI failure"),
         ("a fast-track label taken off", { $0.labels.removeAll { $0 == "diplomat:cleared" } },
-         "a fast-track label came off it"),
+         "diplomat:cleared came off it at c3c3c3c"),
     ]
     for (k, (what, change, hold)) in late.enumerated() {
         let (_, s) = try cleared("late-\(k)") { t in t.onReread = { _ in change(&t.prs[number(t, 13)]) } }
@@ -1303,22 +1377,18 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
           && noRate.result.notices == ["Rate is switched off, so this sync took no rate step past that"],
           "rating switched off: \(noRate.claude) \(noRate.writes) \(noRate.result.notices)")
 
-    // A draft is marked ready, and merged only once CI has run on it since.
+    // A draft whose CI passed is marked ready in one sync and merged at the next, with no
+    // check run since: CI triggered on new commits does not run again for it.
     let draft = only([13, 27])
     draft.prs[0].draft = true
     let draftDir = dir("draft")
     try seedRerate(draftDir, 13, sha("c3"), at: later(-60))
     let d1 = sync(draft, mergeOnly, draftDir, t0)
-    check(d1.writes == ["ready #13"] && trail(d1.events, d1.result) == ["#13 clean", "#13 held"]
-          && stageOf(d1.result, prURL(13)) == "cleared/fast (CI has not run since it was marked ready)",
+    check(d1.writes == ["ready #13"] && trail(d1.events, d1.result) == ["#13 cleared", "#13 clean", "#13 held"]
+          && stageOf(d1.result, prURL(13)) == "cleared/fast (marked ready for review; merged at a later sync)",
           "a draft: \(d1.writes) \(trail(d1.events, d1.result)) \(stageOf(d1.result, prURL(13)))")
     let d2 = sync(draft, mergeOnly, draftDir, later(5))
-    check(d2.writes.isEmpty && d2.events.isEmpty
-          && stageOf(d2.result, prURL(13)) == "cleared/fast (CI has not run since it was marked ready)",
-          "ready, CI not run since: \(d2.writes) \(trail(d2.events, d2.result))")
-    draft.prs[0].checks = [("SUCCESS", at("12:05"))]
-    let d3 = sync(draft, mergeOnly, draftDir, later(10))
-    check(d3.writes == ["merge #13 --squash \(sha("c3"))"], "CI ran since it went ready: \(d3.writes)")
+    check(d2.writes == ["merge #13 --squash \(sha("c3"))"], "ready, its CI run as a draft: \(d2.writes)")
     // With merging off, nothing is marked ready, and the hold says so.
     let unmerged = only([13, 27])
     unmerged.prs[0].draft = true
@@ -1326,13 +1396,18 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try seedRerate(unmergedDir, 13, sha("c3"), at: later(-60))
     let d0 = sync(unmerged, PipelineSettings(roots: [root]), unmergedDir, t0)
     check(d0.writes.isEmpty && stageOf(d0.result, prURL(13))
-          == "cleared/fast (still a draft; it is marked ready first, then merged once CI has run on it)",
+          == "cleared/fast (still a draft; it is marked ready first, then merged at a later sync)",
           "a draft, merging off: \(d0.writes) \(stageOf(d0.result, prURL(13)))")
 
     // A merge GitHub made though gh did not say so.
     let (_, unsure) = try cleared("merge-unconfirmed") { $0.mergeUnconfirmed = true }
     check(merged(unsure) && unsure.result.notices.isEmpty && unsure.events.contains { $0.kind == .merged }
           && stageOf(unsure.result, prURL(13)) == "merged/done", "an unconfirmed merge: \(unsure.result.notices)")
+    // ...but a merge refused while a person pushed and merged is not this merge.
+    let (_, elsewhere) = try cleared("merged-elsewhere") { $0.mergedAt = sha("c4") }
+    check(!elsewhere.events.contains { $0.kind == .merged }
+          && elsewhere.result.notices == ["#13 was not merged: gh: Head branch was modified. Review and try the merge again."],
+          "merged by a person at another head: \(trail(elsewhere.events, elsewhere.result)) \(elsewhere.result.notices)")
     let (_, noMethod) = try cleared("no-method") { $0.squashAllowed = false }
     check(!merged(noMethod)
           && stageOf(noMethod.result, prURL(13)) == "cleared/fast (its repository allows none of squash, merge or rebase)",
@@ -1350,6 +1425,10 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
         ("a marker naming a short sha", review(opLogin, "\(tag)Clean at \(sha("c3").prefix(7))", sha("c3"))),
         ("a marker inside a review", review(opLogin, "LGTM. Clean at \(sha("c3"))", sha("c3"))),
         ("a marker at an older head", review(opLogin, "\(tag)Clean at \(sha("c2"))", sha("c2"))),
+        ("a marker never submitted", {
+            $0.prs[number($0, 13)].reviews = [.init(login: opLogin, body: "\(tag)Clean at \(sha("c3"))", oid: sha("c3"),
+                                                     state: "PENDING")]
+        }),
     ]
     for (k, (what, change)) in markers.enumerated() {
         let (_, s) = try cleared("marker-\(k)", change)
@@ -1363,11 +1442,13 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
         let t = only([13, 27])
         try seed(dir("proof-\(k)"), proof)
         let s = sync(t, mergeOnly, dir("proof-\(k)"), t0)
-        check(!merged(s) && stageOf(s.result, prURL(13)) == "clean/fast", "\(what) at the head: \(stageOf(s.result, prURL(13)))")
+        let want = k == 0 ? "clean/fast"
+            : "human/human (off the fast track for good: re-rated medium risk, low complexity at this head)"
+        check(!merged(s) && stageOf(s.result, prURL(13)) == want, "\(what) at the head: \(stageOf(s.result, prURL(13)))")
     }
 
-    // A person taking a fast-track label off takes the PR off the fast track for good,
-    // though a read misses it meanwhile.
+    // A person taking `cleared` off takes the PR off the fast track for good: Diplomat
+    // takes `fast-track` off too, so the labels say so though state.json is lost.
     let optDir = dir("opt-out")
     let optOut = only([13, 27])
     optOut.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "one line"]
@@ -1376,18 +1457,70 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     let fastTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true, merge: true)
     _ = sync(optOut, watch, optDir, t0)
     optOut.prs[0].labels.removeAll { $0 == "diplomat:cleared" }
+    try fm.removeItem(at: optDir.appendingPathComponent("state.json"))
     let o2 = sync(optOut, fastTrack, optDir, later(5))
-    check(o2.claude.isEmpty && o2.writes.isEmpty
-          && stageOf(o2.result, prURL(13)) == "human/human (off the fast track for good: a fast-track label came off it)",
+    check(o2.claude.isEmpty && o2.writes == ["-diplomat:fast-track #13"] && stageOf(o2.result, prURL(13)) == "human/human",
           "cleared taken off: \(o2.claude) \(o2.writes) \(stageOf(o2.result, prURL(13)))")
-    check(o2.events.map(\.detail) == ["diplomat:cleared taken off by a person: off the fast track for good"],
+    check(o2.events.map(\.detail) == ["-diplomat:fast-track: diplomat:cleared came off it at c3c3c3c, for a human"],
           "logged once: \(o2.events.map(\.detail))")
+    // A rated PR without `fast-track` is a person's, whatever state.json holds or lacks,
+    // closed, unread and reopened.
     let prs = optOut.prs
+    optOut.prs[0].state = "CLOSED"
+    _ = sync(optOut, fastTrack, optDir, later(10))
     optOut.prs = []
-    _ = sync(optOut, watch, optDir, later(10))
+    _ = sync(optOut, watch, optDir, later(15))
     optOut.prs = prs
-    let o4 = sync(optOut, fastTrack, optDir, later(15))
-    check(o4.writes.isEmpty && o4.claude.isEmpty, "back on the fast track after a read without it: \(o4.writes)")
+    try fm.removeItem(at: optDir.appendingPathComponent("state.json"))
+    let o4 = sync(optOut, fastTrack, optDir, later(20))
+    check(o4.writes.isEmpty && o4.claude.isEmpty && stageOf(o4.result, prURL(13)) == "human/human",
+          "back on the fast track: \(o4.writes) \(stageOf(o4.result, prURL(13)))")
+    // So is one a person took `fast-track` off before it was clean.
+    let ftOff = only([13, 27])
+    ftOff.prs[0].labels = lowLow + ["diplomat:fast-track"]
+    ftOff.prs[0].reviews = []
+    _ = sync(ftOff, watch, dir("fast-track-off"), t0)
+    ftOff.prs[0].labels = lowLow
+    _ = sync(ftOff, fastTrack, dir("fast-track-off"), later(5))
+    ftOff.prs[0].state = "CLOSED"
+    _ = sync(ftOff, fastTrack, dir("fast-track-off"), later(10))
+    ftOff.prs[0].state = "OPEN"
+    ftOff.prs[0].reviews = [.init(login: opLogin, body: "\(tag)Clean at \(sha("c3"))", oid: sha("c3"))]
+    let f3 = sync(ftOff, fastTrack, dir("fast-track-off"), later(15))
+    check(f3.writes.isEmpty && f3.claude.isEmpty && f3.result.effects.isEmpty && stageOf(f3.result, prURL(13)) == "human/human",
+          "reopened: \(f3.writes) \(f3.claude) \(stageOf(f3.result, prURL(13)))")
+    var forceRate = fastTrack
+    forceRate.force = PipelineSettings.Force(rate: [prURL(13)])
+    ftOff.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "one line"]
+    let f4 = sync(ftOff, forceRate, dir("fast-track-off"), later(20))
+    check(f4.claude.count == 1 && !f4.writes.contains("+diplomat:fast-track #13"),
+          "rated again by hand: \(f4.claude) \(f4.writes)")
+
+    // One re-rate per head, whatever it answered and whether its labels were written: a
+    // medium answer whose labels GitHub refused holds the PR, and is never asked again.
+    let rr = only([13, 27])
+    rr.prs[0].labels = lowLow + ["diplomat:fast-track"]
+    rr.refuseLabels = ["13"]
+    rr.ratings["Clear the cache on logout"] = ["risk": "medium", "complexity": "low", "why": "cache eviction"]
+    let rrSettings = PipelineSettings(roots: [root], rate: true, fastTrack: true, merge: true)
+    let r1 = sync(rr, rrSettings, dir("rerate-refused"), t0)
+    check(r1.claude == ["opus Clear the cache on logout"] && r1.writes == ["label risk:medium exists"] && !merged(r1)
+          && stageOf(r1.result, prURL(13))
+          == "human/human (off the fast track for good: re-rated medium risk, low complexity at this head)",
+          "a re-rate not written: \(r1.claude) \(r1.writes) \(stageOf(r1.result, prURL(13)))")
+    rr.refuseLabels = []
+    rr.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "one line"]
+    try fm.removeItem(at: dir("rerate-refused").appendingPathComponent("log.jsonl"))
+    let r2 = sync(rr, rrSettings, dir("rerate-refused"), later(5))
+    check(r2.claude.isEmpty && !merged(r2) && r2.writes == ["-diplomat:fast-track #13"],
+          "re-rated again at that head: \(r2.claude) \(r2.writes)")
+    let kept = only([13, 27])
+    kept.prs[0].labels = lowLow + ["diplomat:fast-track"]
+    kept.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "one line"]
+    let k1 = sync(kept, PipelineSettings(roots: [root], rate: true, fastTrack: true), dir("rerate-kept"), t0)
+    try fm.removeItem(at: dir("rerate-kept").appendingPathComponent("log.jsonl"))
+    let k2 = sync(kept, rrSettings, dir("rerate-kept"), later(5))
+    check(k1.claude.count == 1 && k2.claude.isEmpty && merged(k2), "a low re-rate, its log lost: \(k2.claude) \(k2.writes)")
 
     // A state.json there but unreadable: nothing is written, split, merged or asked for.
     let badDir = dir("bad-state")
@@ -1399,7 +1532,8 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     let bad = sync(fixture(), everything, badDir, t0)
     check((try? String(contentsOf: badDir.appendingPathComponent("log.jsonl"), encoding: .utf8)) == badLog,
           "bad state: the log is left as it was")
-    check(bad.writes.isEmpty && bad.claude.isEmpty && bad.result.effects.isEmpty, "bad state: \(bad.writes) \(bad.claude)")
+    check(bad.writes.isEmpty && bad.claude.isEmpty && bad.result.effects.isEmpty && bad.result.unread == ["acme/app"],
+          "bad state: \(bad.writes) \(bad.claude) \(bad.result.unread)")
     check(bad.result.notices.count == 1
           && bad.result.notices[0].hasPrefix("\(badDir.path)/state.json could not be read (")
           && bad.result.notices[0].hasSuffix("), so this sync writes, splits and merges nothing"),
@@ -1468,23 +1602,14 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(u2.claude.isEmpty && u2.result.effects.isEmpty
           && stageOf(u2.result, issueURL(1)) == "candidate/fast (its rating labels could not be written)",
           "rated again: \(u2.claude) \(stageOf(u2.result, issueURL(1)))")
-    // ...nor does a re-rate whose labels did not land clear anything.
-    let rerate = only([13, 27])
-    rerate.prs[0].labels = ["diplomat:fast-track"]
-    rerate.refuseLabels = ["13 risk:low"]
-    rerate.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "one line"]
-    let r1 = sync(rerate, PipelineSettings(roots: [root], rate: true, fastTrack: true), dir("rerate-refused"), t0)
-    check(r1.claude == ["opus Clear the cache on logout"] && !r1.writes.contains("+diplomat:cleared #13"),
-          "a re-rate not written: \(r1.claude) \(r1.writes)")
-
-    // A low/low PR whose diff floors it higher is not put on the fast track; nor is an
-    // unwritable one touched.
+    // A PR rated low/low whose diff floors it higher is not put on the fast track; nor is
+    // an unwritable one touched.
     let floored = only([1, 12])
-    floored.prs[0].labels = lowLow
     floored.prs[0].closes = [1]
     floored.issues[0].labels = lowLow
-    let f1 = sync(floored, PipelineSettings(roots: [root], fastTrack: true), dir("floored"), t0)
-    check(f1.writes.isEmpty, "floored above low/low: \(f1.writes)")
+    let f1 = sync(floored, PipelineSettings(roots: [root], rate: true, fastTrack: true), dir("floored"), t0)
+    check(f1.writes == ["label risk:high exists", "+risk:high #12", "+complexity:low #12"],
+          "floored above low/low: \(f1.writes)")
     let stacked = only([19])
     stacked.prs[0].labels = lowLow + ["diplomat:cleared"]
     let st = sync(stacked, PipelineSettings(roots: [root], fastTrack: true), dir("unwritable"), t0)
@@ -1633,4 +1758,279 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     mention.prs[0].body = "Fixes #4. Also see XENG-3."
     let mn = sync(mention, PipelineSettings(roots: [root], linearTeams: [team]), dir("mention"), t0)
     check(!mn.result.graph.edges.contains { $0.from == linearURL("ENG-3") }, "XENG-3 names ENG-3")
+
+    try pipelineFailClosed(base: base, root: root, team: team, t0: t0)
+}
+
+/// What a sync does when what it read leaves a doubt: it holds, or leaves the item be.
+private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                                t0: Date) throws {
+    section("pipeline fails closed")
+    let fm = FileManager.default
+    let model = try CoreAssets.pipeline()
+    func dir(_ name: String) -> URL { base.appendingPathComponent("closed-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    let lowLow = ["risk:low", "complexity:low"]
+    let watch = PipelineSettings(roots: [root])
+    let fastTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true, merge: true)
+    let notAFix = "closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on"
+    func cleared(_ name: String, settings: PipelineSettings = PipelineSettings(roots: [root], merge: true),
+                 _ change: (Trackers) -> Void = { _ in }) throws -> (Trackers, Synced) {
+        let t = only([13, 27])
+        change(t)
+        try seedRerate(dir(name), 13, sha("c3"), at: later(-60))
+        return (t, sync(t, settings, dir(name), t0))
+    }
+    func ticket(_ id: String, assignee: (String, String)? = nil) -> Trackers.Ticket {
+        .init(id: "lin-\(id)", identifier: id, title: "Ticket \(id)", assignee: assignee, labels: ["lab-rl", "lab-cl"],
+              updated: at("10:00"))
+    }
+    let withLinear = PipelineSettings(roots: [root], linearTeams: [team], merge: true)
+
+    // A Linear issue it closes that was not read, or may not be written to, holds the
+    // merge: Linear's integration would close it. A mention alone closes nothing.
+    let (_, refs) = try cleared("linear-references") {
+        $0.prs[0].body = "fixes ENG-1, OPS-2 and #3. Resolves: [x](https://linear.app/a/issue/ENG-4/t) "
+            + "Closes `web-5` & WEB-6; see ENG-7. Fixes #12: ISO-8601. Fixing UTF-8. Prefixes ENG-8. Linear issue ENG-9"
+    }
+    check(!merged(refs) && stageOf(refs.result, prURL(13)) == "cleared/fast (would close ENG-1, OPS-2, ENG-4, WEB-5, "
+          + "WEB-6, UTF-8, ENG-9, which Diplomat did not read or may not write to)",
+          "closing references: \(stageOf(refs.result, prURL(13)))")
+    let (_, down) = try cleared("linear-down", settings: withLinear) { t in
+        t.prs[0].body = "Fixes #27. Fixes ENG-2."
+        t.tickets = [ticket("ENG-2", assignee: ("U_ALICE", "Alice"))]
+        t.linearDown = true
+    }
+    check(!merged(down) && stageOf(down.result, prURL(13)) == "cleared/fast (Linear was not read)"
+          && down.result.unread == ["acme/app"], "Linear down: \(down.writes) \(stageOf(down.result, prURL(13)))")
+    let blind = only([1, 3, 4, 13, 27])
+    blind.prs[0].labels.removeAll { $0 == "diplomat:cleared" }
+    blind.linearDown = true
+    try seed(dir("linear-down-root"),
+             PipelineEvent(at: later(-60), item: prURL(13), kind: .rerated, detail: "", head: sha("c3"), rating: low),
+             PipelineEvent(at: later(-60), item: prURL(13), kind: .cleared, detail: "", head: sha("c3")))
+    let bl = sync(blind, PipelineSettings(roots: [root], linearTeams: [team], rate: true, fix: true, fastTrack: true,
+                                          merge: true, fracture: true), dir("linear-down-root"), t0)
+    check(bl.claude.isEmpty && bl.writes.isEmpty && bl.result.effects.isEmpty && bl.result.unread == ["acme/app"],
+          "a root whose Linear team was not read: \(bl.claude) \(bl.writes) \(bl.result.effects)")
+    let keyless = only([13, 27])
+    try seedRerate(dir("linear-no-key"), 13, sha("c3"), at: later(-60))
+    let nk = sync(keyless, PipelineSettings(roots: [root], linearTeams: [.init(key: "ENG", repo: "acme/lib")], merge: true),
+                  dir("linear-no-key"), t0, key: nil)
+    check(!merged(nk) && stageOf(nk.result, prURL(13))
+          == "cleared/fast (Linear was not read, so the issues linking it are unknown)",
+          "Linear not read: \(stageOf(nk.result, prURL(13)))")
+    let (_, unwritable) = try cleared("linear-unwritable", settings: withLinear) { t in
+        t.prs[0].body = "Fixes #27. Fixes ENG-2."
+        t.tickets = [ticket("ENG-2", assignee: ("U_ALICE", "Alice"))]
+    }
+    check(!merged(unwritable) && stageOf(unwritable.result, prURL(13)) == "cleared/fast (\(notAFix))",
+          "closes a Linear issue of Alice's: \(stageOf(unwritable.result, prURL(13)))")
+    let (_, attached) = try cleared("linear-attached", settings: withLinear) { t in
+        t.tickets = [ticket("ENG-2", assignee: ("U_ALICE", "Alice"))]
+        t.tickets[0].attachments = [prURL(13)]
+    }
+    check(!merged(attached) && stageOf(attached.result, prURL(13)) == "cleared/fast (\(notAFix))",
+          "linked to a Linear issue of Alice's: \(stageOf(attached.result, prURL(13)))")
+    let (_, hidden) = try cleared("linear-attached-late", settings: withLinear) { t in
+        t.tickets = [ticket("ENG-2", assignee: ("U_ALICE", "Alice"))]
+        t.tickets[0].moreAttachments = [prURL(13)]
+    }
+    check(!merged(hidden) && stageOf(hidden.result, prURL(13))
+          == "cleared/fast (would close ENG-2, which Diplomat did not read or may not write to)",
+          "linked past the attachments read: \(stageOf(hidden.result, prURL(13)))")
+    let (_, linked) = try cleared("linear-linked-mine", settings: withLinear) { t in
+        t.tickets = [ticket("ENG-2")]
+        t.tickets[0].moreAttachments = [prURL(13)]
+    }
+    check(merged(linked), "linked to a Linear issue Diplomat may write to: \(stageOf(linked.result, prURL(13)))")
+    let (_, crowded) = try cleared("linear-attached-more", settings: withLinear) { $0.attachedMore = true }
+    check(!merged(crowded) && stageOf(crowded.result, prURL(13))
+          == "cleared/fast (more Linear issues link it than one read lists)",
+          "linked past Linear's answer: \(stageOf(crowded.result, prURL(13)))")
+    // Only a PR closing a candidate, and on Linear from its team's own root, is put on
+    // the fast track.
+    func firstRating(_ name: String, _ settings: PipelineSettings, _ change: (Trackers) -> Void) -> Synced {
+        let t = only([11])
+        t.prs[0].closes = []
+        t.tickets = [fixture().tickets[2]]
+        change(t)
+        return sync(t, settings, dir(name), t0)
+    }
+    let rateTrack = PipelineSettings(roots: [root], linearTeams: [team], rate: true, fastTrack: true)
+    let mentioned = firstRating("mention", rateTrack) { $0.prs[0].body = "Background: ENG-3 discusses the docs." }
+    let closing = firstRating("closing", rateTrack) { $0.prs[0].body = "Fixes ENG-3." }
+    let lib = PipelineSettings.Root(owner: "acme", repo: "lib", path: libCheckout, me: opLogin)
+    let elsewhere = firstRating("other-root", PipelineSettings(roots: [root, lib], linearTeams: [.init(key: "ENG", repo: "acme/lib")],
+                                                               rate: true, fastTrack: true)) {
+        $0.prs[0].body = "Fixes ENG-3."
+    }
+    check(mentioned.writes.contains("+risk:low #11") && !mentioned.writes.contains("+diplomat:fast-track #11"),
+          "a mention: \(mentioned.writes)")
+    check(closing.writes.contains("+diplomat:fast-track #11"), "a closing reference: \(closing.writes)")
+    check(elsewhere.writes.contains("+risk:low #11") && !elsewhere.writes.contains("+diplomat:fast-track #11"),
+          "a Linear issue of another root: \(elsewhere.writes)")
+
+    // Every issue it closes is a candidate: low/low on its labels, writable, unsplit,
+    // not of a banned author.
+    try fm.createDirectory(at: dir("candidate-4"), withIntermediateDirectories: true)
+    try Data(#"{"\#(issueURL(27))":{"rating":{"risk":"low","complexity":"low"},"why":"","unwritten":true}}"#.utf8)
+        .write(to: dir("candidate-4").appendingPathComponent("ratings.json"))
+    let candidates: [(String, (inout Trackers.Issue) -> Void)] = [
+        ("rated medium", { $0.labels = ["risk:medium", "complexity:low"] }),
+        ("someone else's", { $0.assignees = ["bob"] }),
+        ("split", { $0.labels.append("diplomat:fractured") }),
+        ("with parts", { $0.subs = [99] }),
+        ("rated off its labels", { $0.labels = [] }),
+        ("of a banned author", { $0.author = "mallory" }),
+    ]
+    for (k, (what, change)) in candidates.enumerated() {
+        let (_, s) = try cleared("candidate-\(k)") { change(&$0.issues[0]) }
+        check(!merged(s) && stageOf(s.result, prURL(13)) == "cleared/fast (\(notAFix))",
+              "closes an issue \(what): \(stageOf(s.result, prURL(13)))")
+    }
+    let (_, two) = try cleared("closes-two") { t in
+        t.issues.append(.init(number: 3, title: "Split the storage layer", labels: ["risk:low", "complexity:high"],
+                              updated: at("09:40")))
+        t.prs[0].closes = [27, 3]
+    }
+    check(!merged(two) && stageOf(two.result, prURL(13)) == "cleared/fast (\(notAFix))",
+          "closes a candidate and a complex issue: \(stageOf(two.result, prURL(13)))")
+    // Two PRs closing one candidate: the first merge closes it, and the second waits.
+    let pair = only([13, 14, 27])
+    pair.prs[1].closes = [27]
+    pair.prs[1].ciState = "SUCCESS"
+    pair.prs[1].labels = lowLow + ["diplomat:fast-track", "diplomat:cleared"]
+    try seed(dir("pair"), PipelineEvent(at: later(-60), item: prURL(13), kind: .rerated, detail: "", head: sha("c3"), rating: low),
+             PipelineEvent(at: later(-60), item: prURL(14), kind: .rerated, detail: "", head: sha("d4"), rating: low))
+    let both = sync(pair, PipelineSettings(roots: [root], merge: true), dir("pair"), t0)
+    check(both.writes == ["merge #13 --squash \(sha("c3"))"]
+          && stageOf(both.result, prURL(14)) == "cleared/fast (\(notAFix))", "two fixes: \(both.writes)")
+
+    // A root read with errors is read and shown only: a field it lost reads as a person's
+    // step, or no one's.
+    for (k, field) in ["reviews", "labels"].enumerated() {
+        let t = only([13, 27])
+        try seedRerate(dir("lost-\(k)"), 13, sha("c3"), at: later(-60))
+        _ = sync(t, watch, dir("lost-\(k)"), t0)
+        t.ghPartial = true
+        t.prs[0].lost = [field]
+        let lossy = sync(t, fastTrack, dir("lost-\(k)"), later(5))
+        t.ghPartial = false
+        let after = sync(t, fastTrack, dir("lost-\(k)"), later(10))
+        check(lossy.writes.isEmpty && lossy.claude.isEmpty && lossy.result.effects.isEmpty
+              && lossy.result.unread == ["acme/app"] && merged(after),
+              "\(field) lost: \(lossy.writes) \(trail(lossy.events, lossy.result)) then \(after.writes)")
+    }
+
+    // A rating or split that fails is tried again after 1, 2, 4 ... syncs, a day at
+    // most, and keeps no slot meanwhile.
+    let flaky = only([])
+    flaky.issues = (1...5).map { .init(number: 30 + $0, title: "Flaky \($0)", updated: at(String(format: "10:%02d", 10 - $0))) }
+    for n in 2...5 { flaky.ratings["Flaky \(n)"] = ["risk": "low", "complexity": "low", "why": "x"] }
+    flaky.ratings["Flaky 1"] = ["risk": "extreme"]
+    let rateOnly = PipelineSettings(roots: [root], rate: true)
+    let tries = [0.0, 5, 10, 15, Double(15 + 24 * 60)].map { sync(flaky, rateOnly, dir("backoff"), later($0)).claude }
+    check(tries == [["sonnet Flaky 1", "sonnet Flaky 2", "sonnet Flaky 3", "sonnet Flaky 4"],
+                    ["sonnet Flaky 1", "sonnet Flaky 5"], [], ["sonnet Flaky 1"], ["sonnet Flaky 1"]],
+          "a failing rating's tries: \(tries)")
+    let flakySplit = only([3])
+    flakySplit.fractures["Split the storage layer"] = ["parts": "none"]
+    let split = PipelineSettings(roots: [root], fracture: true)
+    let splits = [0.0, 5, 10].map { sync(flakySplit, split, dir("backoff-split"), later($0)) }
+    check(splits.map(\.claude.count) == [1, 1, 0] && splits[0].writes.last == "-diplomat:fractured #3",
+          "a failing split's tries: \(splits.map(\.claude)) \(splits[0].writes)")
+    // A split that filed nothing lets its claim go.
+    let unfiled = only([3])
+    unfiled.failCreate = true
+    let u1 = sync(unfiled, split, dir("unfiled"), t0)
+    check(u1.writes == ["label diplomat:fractured exists", "+diplomat:fractured #3", "-diplomat:fractured #3"]
+          && u1.result.notices == ["#3 was not split: the issue could not be created: gh: Server Error (HTTP 500)"]
+          && stageOf(u1.result, issueURL(3)) == "human/human", "nothing filed: \(u1.writes) \(u1.result.notices)")
+    // A part filed but not linked is still a part, its text its parent's author's.
+    let unlinked = only([3])
+    unlinked.failSubIssue = true
+    let l1 = sync(unlinked, split, dir("unlinked"), t0)
+    let l2 = sync(unlinked, watch, dir("unlinked"), later(5))
+    check(l1.writes.contains("issue #101 Extract the storage protocol") && !l1.writes.contains("-diplomat:fractured #3")
+          && item(l2.result, issueURL(101))?.splitFrom == "reporter",
+          "a part not linked: \(l1.writes) \(String(describing: item(l2.result, issueURL(101))?.splitFrom))")
+    // A part's text pings no one and links nothing; at most `maxChildren` are filed.
+    let loud = only([3])
+    loud.fractures["Split the storage layer"] = ["parts": (1...9).map {
+        ["title": "Part \($0) for @alice", "body": "cc @alice, see #2, acme/lib#9, gh-3 and https://github.com/acme/lib/issues/4"]
+    }, "why": "x"]
+    _ = sync(loud, split, dir("loud"), t0)
+    let parts = loud.issues.filter { $0.number > 100 }
+    check(parts.count == model.fracture.maxChildren && parts.allSatisfy {
+        $0.body.hasPrefix("cc @\u{200B}alice, see #\u{200B}2, acme/lib#\u{200B}9, gh-\u{200B}3 and "
+                          + "https://github\u{200B}.com/acme/lib/issues/4") && $0.title.hasSuffix("@\u{200B}alice")
+    }, "parts as filed: \(parts.count) \(parts.first?.body ?? "")")
+
+    // A fast-track label a person added is no fast track for a PR rated above low/low.
+    let hand = only([17, 26])
+    hand.prs[0].labels = ["risk:medium", "complexity:low", "diplomat:fast-track"]
+    hand.prs[0].reviews = []
+    let h1 = sync(hand, PipelineSettings(roots: [root], fastTrack: true), dir("hand-fast-track"), t0)
+    check(h1.result.effects.isEmpty && stageOf(h1.result, prURL(17))
+          == "human/human (off the fast track: it is rated medium risk, low complexity on the tracker)",
+          "a hand-added fast-track: \(h1.result.effects) \(stageOf(h1.result, prURL(17)))")
+    // A `cleared` with no clean marker is taken off as such.
+    let noMarker = only([13, 27])
+    noMarker.prs[0].reviews = []
+    let nm = sync(noMarker, PipelineSettings(roots: [root], fastTrack: true), dir("no-marker"), t0)
+    check(nm.events.first?.detail == "-diplomat:cleared: no clean marker names its head c3c3c3c",
+          "no marker: \(nm.events.map(\.detail))")
+    // A fast-track PR whose issue is no candidate now is not paid a re-rate.
+    let gone = only([13, 27])
+    gone.prs[0].labels = lowLow + ["diplomat:fast-track"]
+    gone.issues[0].assignees = ["bob"]
+    gone.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "x"]
+    check(sync(gone, fastTrack, dir("no-candidate"), t0).claude.isEmpty, "re-rated for no candidate")
+    // Nor one whose diff floors it above low/low.
+    let floorFT = only([13, 27])
+    floorFT.prs[0].labels = lowLow + ["diplomat:fast-track"]
+    floorFT.prs[0].files.append(("tests/test_old.py", 0, 20, "DELETED"))
+    floorFT.ratings["Clear the cache on logout"] = ["risk": "low", "complexity": "low", "why": "x"]
+    check(sync(floorFT, fastTrack, dir("floored-rerate"), t0).claude.isEmpty, "re-rated above its floor")
+    // Labels the read did not hold: no rating Diplomat cannot write whole clears anything.
+    try fm.createDirectory(at: dir("unwritten-rerate"), withIntermediateDirectories: true)
+    try Data(#"{"\#(prURL(13))":{"rating":{"risk":"low","complexity":"low"},"why":"","unwritten":true}}"#.utf8)
+        .write(to: dir("unwritten-rerate").appendingPathComponent("ratings.json"))
+    let (_, local) = try cleared("unwritten-rerate") { $0.prs[0].labels = ["diplomat:fast-track", "diplomat:cleared"] }
+    check(!merged(local) && stageOf(local.result, prURL(13))
+          == "human/human (off the fast track: its rating labels could not be written)",
+          "rated only here: \(stageOf(local.result, prURL(13)))")
+
+    // The Fast track switch, read live, stops its step mid-sync.
+    let liveDir = dir("control-fast-track")
+    PipelineControl(enabled: true, rate: true, fix: true, fastTrack: false, merge: true, fracture: true).save(in: liveDir)
+    let live = only([4, 11])
+    live.tickets = []
+    let lv = sync(live, PipelineSettings(roots: [root], rate: true, fastTrack: true), liveDir, t0)
+    check(lv.writes.contains("+risk:low #11") && !lv.writes.contains("+diplomat:fast-track #11")
+          && lv.result.notices == ["Fast track is switched off, so this sync took no fast track step past that"],
+          "fast track switched off: \(lv.writes) \(lv.result.notices)")
+
+    // Who may be written to: no one past a read's labels; on Linear, the operator.
+    let seen = only([1])
+    seen.issues[0].moreLabels = 1
+    seen.tickets = [ticket("ENG-7", assignee: ("U_OP", "Op")), ticket("ENG-8")]
+    seen.tickets[1].moreLabels = true
+    let sn = sync(seen, PipelineSettings(roots: [root], linearTeams: [team]), dir("writable"), t0)
+    check(item(sn.result, issueURL(1))?.writable == false && item(sn.result, linearURL("ENG-7"))?.writable == true
+          && item(sn.result, linearURL("ENG-8"))?.writable == false,
+          "writable: \(sn.result.items.map { "\($0.label) \($0.writable)" })")
+
+    // The teams line trims ASCII spacing only, as the Linux front-end does.
+    let nbsp = PipelineSettings.LinearTeam.parse("ENG=o/r\u{00A0}")
+    check(nbsp.teams.isEmpty && nbsp.bad == ["ENG=o/r\u{00A0}"], "a trailing no-break space: \(nbsp)")
+    // A group is tiered done only once every item in it is.
+    func node(_ id: String, _ lane: PipelineLane, _ hhmm: String) -> PipelineItem {
+        PipelineItem(id: id, source: .github, kind: .issue, label: id, title: id, repo: "acme/app", state: "open",
+                     writable: true, stage: .unrated, lane: lane, updatedAt: CommsLog.parseISO(at(hhmm)))
+    }
+    let tiers = PipelineGraph.layout(items: [node("H", .human, "10:00"), node("D", .done, "11:00"), node("G", .done, "12:00")],
+                                     edges: [.init(from: "H", to: "D", kind: .fixes)], maxItems: 2)
+    check(tiers.items.map(\.id) == ["H", "D"], "a group partly done: \(tiers.items.map(\.id))")
 }

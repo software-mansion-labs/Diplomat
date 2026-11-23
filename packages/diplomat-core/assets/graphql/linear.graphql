@@ -23,6 +23,15 @@ query Issues($teams: [String!], $after: String) {
   }
 }
 
+# The issues of any team an attachment links `url` (a PR) from, with their state: Linear
+# moves a linked issue when the PR merges.
+query Attached($url: String!) {
+  attachmentsForURL(url: $url, first: 50) {
+    pageInfo { hasNextPage }
+    nodes { issue { identifier state { type } } }
+  }
+}
+
 # The labels named `names`, with the team each belongs to (none for a workspace label).
 query Labels($names: [String!]) {
   issueLabels(first: 50, filter: { name: { in: $names } }) {
