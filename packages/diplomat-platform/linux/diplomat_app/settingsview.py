@@ -1340,7 +1340,8 @@ class SettingsView(QWidget):
             "Run the pipeline", self._sw_pipeline,
             detail="Reads every open issue and PR and draws them on the Pipeline screen "
                    "by stage; what it may do about them is the switches under this one, "
-                   "and with all of them off it only reads. Its state is the trackers' "
+                   "and with all of them off it only reads, but for taking diplomat:fractured "
+                   "off an issue whose split filed nothing. Its state is the trackers' "
                    "labels: risk:, complexity: and diplomat:. Diplomat writes labels, "
                    "opens child issues or merges only on an issue unassigned or assigned "
                    "to you, or your own PR from the repo itself into its default branch; "
