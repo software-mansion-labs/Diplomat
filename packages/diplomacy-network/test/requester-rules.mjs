@@ -49,6 +49,7 @@ const READS = [
     'issueView', 'issueList', 'userCurrent', 'repositoryInfo', 'repoView'].map((name) => ghql(GH[name])),
   gh('GET', '/repos/o/r/readme'), // gh repo view
   { ...gh('GET', '/repos/o/r/pulls/578'), headers: { ...gh('GET', '/x').headers, accept: 'application/vnd.github.v3.diff' } }, // gh pr diff 578
+  { ...gh('GET', '/repos/o/r/pulls/12'), headers: { ...gh('GET', '/x').headers, accept: 'application/vnd.github.v3.patch' } }, // gh pr diff 12 --patch
   gh('GET', '/repos/o/r/pulls/578/comments'),
   gh('GET', '/repos/o/r/pulls/578/reviews'), gh('GET', '/repos/o/r/pulls/578/reviews/3/comments'), gh('GET', '/repos/o/r/pulls/comments/12'),
   gh('GET', '/repos/o/r/pulls?state=all'), gh('GET', '/repos/o/r/pulls/579'), gh('GET', '/repos/o/r/issues?state=open'), gh('GET', '/repos/o/r/issues/421'),
