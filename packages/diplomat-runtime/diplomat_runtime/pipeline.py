@@ -42,8 +42,8 @@ def pipeline_dir() -> Path:
     return Path(env) if env else Path.home() / ".diplomat" / "pipeline"
 
 
-#: ``control.json``'s keys, the switches a running sync re-reads before each of its
-#: writes, merges and ratings.
+#: ``control.json``'s keys: the switches a running sync re-reads before each outward
+#: action.
 CONTROL_KEYS = ("enabled", "rate", "fix", "fastTrack", "merge", "fracture")
 
 
