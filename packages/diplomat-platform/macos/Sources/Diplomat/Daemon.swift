@@ -78,7 +78,8 @@ enum Daemon {
         dict["EnvironmentVariables"] = env
         guard let out = try? PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0)
         else { return false }
-        return (try? out.write(to: url, options: .atomic)) != nil
+        // To the file a symlink names: an atomic write replaces the link itself.
+        return (try? out.write(to: url.resolvingSymlinksInPath(), options: .atomic)) != nil
     }
 
     private static func installScriptPath() -> String? {
