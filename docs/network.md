@@ -322,7 +322,8 @@ drew it is neither stopped nor withdrawn, and the card says so. **Restart daemon
 jobs in this machine's containers running; the daemon that starts takes them up at once, before
 it has built its image or read the model credential, and a job whose run ended meanwhile is
 stopped. If docker does not answer for a minute, the jobs go back to the pool at no cost to
-their attempts.
+their attempts. So does a job whose container a reboot or a restart of Docker Desktop stopped
+before it finished; one that had finished by then ends as it finished.
 
 The daemon leaves a pool that is missing from the list Diplomat gives it, so what Diplomat
 cannot confirm is never dropped from that list. A repo root or a checkout under Other repos
