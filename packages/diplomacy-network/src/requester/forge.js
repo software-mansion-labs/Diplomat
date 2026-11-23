@@ -60,12 +60,12 @@ function glabConfigToken(host) {
       const body = line.trim();
       if (body === '' || body[0] === '#') continue;
       const indent = line.length - line.trimStart().length;
-      if (indent === 0) { hosts = body.split(':')[0] === 'hosts'; depth = 0; continue; }
+      if (indent === 0) { hosts = body.split(':')[0] === 'hosts'; continue; }
       if (!hosts) continue;
       depth ||= indent;
       // A name is the whole line up to its last colon, so it may hold a port; in quotes
       // or not. Any other line this far out ends the entry before it and starts none.
-      if (indent <= depth) { current = indent === depth && body.endsWith(':') ? body.slice(0, -1).replace(/^(["'])(.*)\1$/, '$2') : ''; continue; }
+      if (indent <= depth) { current = body.endsWith(':') ? body.slice(0, -1).replace(/^(["'])(.*)\1$/, '$2') : ''; continue; }
       // glab writes the token behind a "!!null" tag.
       const token = /^token:\s*(.+)$/.exec(body);
       if (current === host && token) return token[1].replace(/^!!null\s+/, '').replace(/^["']|["']$/g, '');

@@ -290,17 +290,19 @@ await check('a host\'s token in glab\'s config file comes from that host\'s own 
   fs.writeFileSync(path.join(scratch, 'glab', 'config.yml'), [
     'hosts:',
     '    gitlab.file.example:', '        api_protocol: https', '        user: me',
-    '    gitlab.port.example:8443:', '        token: glpat-of-the-port',
+    '',
+    '    gitlab.port.example:8443:', '    # a note', '        oauth2_refresh_token: glrt-of-the-port', '        token: glpat-of-the-port',
     '    "gitlab.quoted.example:8443":', '        token: glpat-of-the-quoted',
     '    gitlab.empty.example:', '        user: me',
     '    gitlab.last.example: # a name this does not read', '        token: glpat-of-the-last',
+    '    gitlab.bare.example?', '        token: glpat-of-the-bare',
     'other:',
     '    gitlab.file.example:', '        token: glpat-of-no-host',
     ''].join('\n'));
   const fresh = createForge();
   const heard = strangers.length;
   // An entry without a token has none, whatever the entries after it hold.
-  for (const host of ['gitlab.file.example', 'gitlab.empty.example', 'gitlab.last.example', 'gitlab.port.example', 'gitlab.quoted.example']) {
+  for (const host of ['gitlab.file.example', 'gitlab.empty.example', 'gitlab.last.example', 'gitlab.bare.example', 'gitlab.port.example', 'gitlab.quoted.example']) {
     await failing(fresh.projectId({ forge: 'gitlab', host }, 'group/sub/proj'), new RegExp(`^forge: no gitlab credential for ${host.replaceAll('.', '\\.')} on this machine$`));
   }
   assert.equal(strangers.length, heard, 'nothing was sent');

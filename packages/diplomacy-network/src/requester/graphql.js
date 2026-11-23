@@ -529,13 +529,13 @@ export function searchConfined(q, repo) {
 
 // ------------------------------------------------------------------------ queries
 
+const UNLISTED = 'which could name something outside the pool\'s repository or tell of the account asking';
+
 // `lookups` takes the node ids the document's arguments name, for the caller to resolve.
 function walker(doc, forge, op, vars, lookups) {
   const tables = FORGES[forge];
   const done = new Set(); // "fragment name/context": a fragment is read once per context
   let fields = 0;
-
-  const UNLISTED = 'which could name something outside the pool\'s repository or tell of the account asking';
 
   // A variable stands for what is sent for it, else for its default.
   function checkMembers(sel, arg, value) {
