@@ -70,7 +70,8 @@ public struct IssueConfig: Codable, Equatable {
     /// scope (`pipeline.json` `blocks.linearScope`), and the run never claims or comments
     /// on a GitHub issue for it. Optional so a queued config stored without it decodes.
     public var linear: LinearIssue?
-    /// A pipeline fast-track candidate (`pipeline.json` `blocks.pipelineFix`). Optional for
+    /// A pipeline fast-track candidate (`pipeline.json` `blocks.pipelineFix`, and the
+    /// re-check `pipelineRecheck`, `pipelineRecheckLinear` for a Linear one). Optional for
     /// the same reason.
     public var pipeline: Bool?
 
@@ -218,11 +219,14 @@ public struct IssueConfig: Codable, Equatable {
         }
         if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
 
-        // 2. What a swept issue has to be re-checked for, its turn having come long
-        //    after the sweep chose it: closed since, and claimed since.
+        // 2. What a swept or pipeline-queued issue has to be re-checked for, its turn
+        //    having come long after it was chosen: closed since, and claimed since.
         if !isSingleIssue && onGitHub {
             if let b = blocks["swept"] { out.append(fill(b)) }
             if unassignedOnly, let b = blocks["unassigned"] { out.append(fill(b)) }
+        }
+        if pipeline == true, let b = pipelineBlocks[onGitHub ? "pipelineRecheck" : "pipelineRecheckLinear"] {
+            out.append(fill(b))
         }
 
         // 3. Whether it is this run's business at all — a bug, or a feature too.

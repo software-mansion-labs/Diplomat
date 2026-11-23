@@ -3766,6 +3766,23 @@ do {
     unsetenv("DIPLOMAT_GH")
 }
 
+// ---- GH: its child gets no token ----
+do {
+    let stub = FileManager.default.temporaryDirectory.appendingPathComponent("smoke-gh-env-\(getpid()).sh")
+    try "#!/bin/sh\nenv\n".write(to: stub, atomically: true, encoding: .utf8)
+    chmod(stub.path, 0o755)
+    defer { try? FileManager.default.removeItem(at: stub) }
+    setenv("DIPLOMAT_GH", stub.path, 1)
+    setenv(LinearAPI.envVar, "lin_api_gh_env", 1)
+    setenv(SlackToken.envVar, "xoxp-gh-env", 1)
+    let env = String(decoding: (try? await GH.run(["api", "/"])) ?? Data(), as: UTF8.self)
+    unsetenv("DIPLOMAT_GH")
+    unsetenv(LinearAPI.envVar)
+    unsetenv(SlackToken.envVar)
+    check(env.contains("PATH=") && !env.contains("lin_api_gh_env") && !env.contains("xoxp-gh-env"),
+          "gh's environment holds a token")
+}
+
 // ---- API: the panel's open PRs are read a page at a time (mirrors test_open_prs.py) ----
 // The stub answers the page `<owner>-<after>.json` names (`-.json` for the first) and
 // logs each call's cursor; a page it has no file for fails the call.

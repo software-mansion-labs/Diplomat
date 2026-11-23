@@ -94,19 +94,10 @@ extension PipelineGraph {
             }
             for s in starts where row[s] == nil { place(s, next) }
 
+            // No two share a cell: a row holds one chain of forward edges, along which the
+            // column only grows.
             var cell: [String: (row: Int, column: Int)] = [:]
-            var taken = Set<String>()
-            let ordered = list.sorted { (row[$0] ?? 0, column[$0] ?? 0) < (row[$1] ?? 0, column[$1] ?? 0) }
-            for n in ordered {
-                var r = row[n] ?? 0
-                let c = column[n] ?? 0
-                if !taken.insert("\(r),\(c)").inserted {
-                    r = next
-                    next += 1
-                    taken.insert("\(r),\(c)")
-                }
-                cell[n] = (r, c)
-            }
+            for n in list { cell[n] = (row[n] ?? 0, column[n] ?? 0) }
             let lanes = Set(list.compactMap { byID[$0]?.lane })
             let tier = !lanes.isDisjoint(with: [.unrated, .fast]) ? 0 : lanes == [.done] ? 2 : 1
             return Group(ids: list, cell: cell, tier: tier,

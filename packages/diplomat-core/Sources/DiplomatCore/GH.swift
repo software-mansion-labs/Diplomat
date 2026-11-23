@@ -184,7 +184,7 @@ public enum GH {
             proc.executableURL = URL(fileURLWithPath: path)
             proc.arguments = args
 
-            var env = ProcessInfo.processInfo.environment
+            var env = CommsClassifier.childEnvironment
             let extra = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
             env["PATH"] = env["PATH"].map { "\($0):\(extra)" } ?? extra
             proc.environment = env
