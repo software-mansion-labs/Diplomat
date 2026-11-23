@@ -37,6 +37,19 @@ jobs:
       - name: Build the macOS app
         working-directory: packages/diplomat-platform/macos
         run: swift build
+      - name: DIAG relaunch probe (fresh runner)
+        run: |
+          swiftc -O .github/diag/probe.swift -o "$RUNNER_TEMP/probe"
+          mkdir -p "$RUNNER_TEMP/pb"
+          "$RUNNER_TEMP/probe" "$RUNNER_TEMP/pb"
+          "$RUNNER_TEMP/probe" "$RUNNER_TEMP/pb"
+          spctl --status || true
+          sw_vers; uname -a
+      - name: DIAG relaunch self-test x3
+        working-directory: packages/diplomat-platform/macos
+        run: |
+          for i in 1 2 3; do DIPLOMAT_RELAUNCH_TEST=1 swift run Diplomat || echo "::warning::relaunch run $i failed"; done
+          "$RUNNER_TEMP/probe" "$RUNNER_TEMP/pb"
       - name: Run shared-core smoke test
         working-directory: packages/diplomat-core
         run: swift run DiplomatCoreSmoke
