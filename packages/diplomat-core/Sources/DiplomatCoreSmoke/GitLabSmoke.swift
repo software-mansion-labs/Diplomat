@@ -350,7 +350,7 @@ func gitlabSmoke() async throws {
     let keySplits: [Any] = ((keysIn["split"] as? [String]) ?? []).map {
         PRRef.splitItemKey($0).map { [$0.root, $0.number] as [Any] } ?? NSNull()
     }
-    let goldens = try CoreAssets.assetsDir().appendingPathComponent("golden-prompts")
+    let goldens = try CoreAssets.assetsDir().deletingLastPathComponent().appendingPathComponent("Tests/fixtures/prompts")
     let keyPrompts: [Any] = try ((keysIn["prompts"] as? [[String: Any]]) ?? []).map { p in
         let text = try (p["golden"] as? String).map {
             try String(contentsOf: goldens.appendingPathComponent($0), encoding: .utf8)
@@ -786,7 +786,7 @@ func gitlabSmoke() async throws {
     var githubHome = ReviewConfig(depth: "max", target: .specific, me: "testuser", specificPR: "337")
     githubHome.home = gh
     check(!githubHome.buildPrompt().contains("glab"), "a GitHub home's prompt says nothing of glab")
-    let goldenDir = try CoreAssets.assetsDir().appendingPathComponent("golden-prompts")
+    let goldenDir = try CoreAssets.assetsDir().deletingLastPathComponent().appendingPathComponent("Tests/fixtures/prompts")
     for file in ((try? fm.contentsOfDirectory(atPath: goldenDir.path)) ?? []) where !file.contains("gitlab") {
         let text = (try? String(contentsOf: goldenDir.appendingPathComponent(file), encoding: .utf8)) ?? ""
         check(!text.contains("glab") && !text.contains("hosted on GitLab"), "\(file) is a GitHub prompt")

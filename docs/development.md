@@ -267,7 +267,7 @@ DIPLOMAT_APPLOG_TEST=1 ...                       # self-test: the diagnostic log
 # The shared core itself is independently buildable & testable (also on Linux):
 swift run DiplomatCoreSmoke                    # loads assets/, runs filter + prompt + golden-file assertions
 DIPLOMAT_DUMP=1 swift run DiplomatCoreSmoke    # + live gh dump, cross-checks the Linux front-end
-DIPLOMAT_GOLDEN_WRITE=1 swift run DiplomatCoreSmoke  # regenerate assets/golden-prompts/ after an intentional change
+DIPLOMAT_GOLDEN_WRITE=1 swift run DiplomatCoreSmoke  # regenerate Tests/fixtures/prompts/ after an intentional change
 ```
 
 The `SETTINGS_DUMP` / `RENDER` checks read UserDefaults, so run them through the
@@ -302,7 +302,7 @@ The triage logic is single-sourced in
 [`packages/diplomat-core/assets/`](../packages/diplomat-core/assets/README.md) -
 language-neutral GraphQL queries, the tool catalog, filter constants, and the
 prompt fragments for all four actions. Both front-ends load it and assert their
-assembled prompts byte-for-byte against `assets/golden-prompts/`, so they can only
+assembled prompts byte-for-byte against `Tests/fixtures/prompts/`, so they can only
 drift from each other by failing a CI job. Both also run the full monitor stack;
 what stays macOS-only is the per-row **Merge** button, the clickable *session* rows
 of the [Agent tasks](panel.md#agent-tasks) list (a Linux spawn is a detached `Popen` with no
@@ -351,7 +351,6 @@ packages/
   diplomat-core/               ← the shared triage brain: everything both front-ends agree on
     assets/                    ← the language-neutral source of truth (see its README): GraphQL queries,
                                  tool catalog, filter constants, prompt fragments
-      golden-prompts/            canonical prompt outputs, asserted byte-for-byte by BOTH platforms' tests
     Sources/
       DiplomatCore/            ← Foundation-only Swift; loads assets/. Builds on macOS AND Linux.
         CoreAssets.swift           resolves + decodes assets/ (config, catalog, filters, review, conflicts, audit, comms, graphql)
@@ -392,6 +391,8 @@ packages/
                                  instead of reimplementing them; `tool-data` and `telemetry` expose the two
                                  engines the Linux side reimplements, so the parity tests can diff them;
                                  `comms-tick`, `comms-auth`, `comms-feed` and `comms-effect` run Comms for the Linux applet
+    Tests/fixtures/            ← test inputs and expected outputs, not shipped
+      prompts/                   expected prompt outputs (`<mode>.expected.txt`), asserted byte-for-byte by BOTH platforms' tests
 
   diplomat-runtime/            ← the platform-neutral Python half: the twin of diplomat-core plus
                                  everything below the UI that has no Swift counterpart

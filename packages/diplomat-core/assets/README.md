@@ -32,7 +32,6 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
 | `telemetry.json` | the Telemetry screen's model: where the ledger and the transcript-scan cursor live, how often a quota sample is taken and how much history is kept, the lookback ranges (7/14/30/60, default 14), the histogram/series resolution, the confidence level — and the ten metrics with their per-platform icon + tint. The arithmetic over the ledger is `../Sources/DiplomatCore/Telemetry.swift`, mirrored by `diplomat_runtime/telemetry.py` and diffed field-for-field by `diplomat-platform/linux/tests/test_telemetry_parity.py` |
 | `comms.json` | Comms, the Slack watcher (`../Sources/DiplomatCore/Comms.swift`, `CommsWatch.swift`, `SlackAPI.swift`): the poll period and its floor, how many messages one tick triages, how a failed triage call is tried again, how far the watermark trails Slack's search index, how far back a tick catches up, how much of one query it pages through, how it borrows and refreshes Claude Code's Slack MCP login, the time and profile reads one tick may spend on Slack, the search calls' keywords and filters (DMs, mentions, one per keyword), the sandboxed classifier's instructions + stdin block + JSON answer schema, and the investigate agent's prompt blocks. Linux reaches the rest through the `diplomat-core` CLI (`comms-tick`, `comms-auth`, `comms-feed`, `comms-effect`, `build-prompt` kind `investigate`) and reads only its own timings (`pollSecs`, `minPollSecs`, and the five that bound how long it lets `comms-tick` run: `maxPerTick`, `classifierTimeoutSecs`, `httpTimeoutSecs`, `slackBudgetSecs`, `loginRefreshTimeoutSecs`) from the file itself |
 | `gitlab.json` | `promptNote`, the paragraph every review, issue, conflict and audit prompt whose repo is a GitLab root carries right after its opening line (`{host}`, `{owner}`, `{repo}` filled in): read GitLab and `glab` wherever the prompt says GitHub and `gh`, with the `glab` equivalents |
-| `golden-prompts/` | canonical prompt outputs, one `.txt` per mode; regenerate with `DIPLOMAT_GOLDEN_WRITE=1 swift run DiplomatCoreSmoke`, asserted byte-for-byte by the Swift smoke test AND `diplomat-platform/linux/tests/test_golden_prompts.py` |
 
 ## Contract notes
 
@@ -59,9 +58,10 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
   Python, it shells out to the `diplomat-core` CLI
   (`diplomat-runtime/diplomat_runtime/promptcore.py` → `../Sources/DiplomatCoreCLI`), so the two
   front-ends are identical by construction rather than by convention. The
-  `golden-prompts/` assertions on both sides remain as the regression net over
-  that one builder (and over the Python→CLI bridge): a drift fails a CI job
-  before it ships. Build the binary with `packages/diplomat-platform/linux/install/build-core.sh`.
+  expected prompts in `../Tests/fixtures/prompts/` (regenerated with
+  `DIPLOMAT_GOLDEN_WRITE=1 swift run DiplomatCoreSmoke`) are asserted on both
+  sides as the regression net over that one builder (and over the Python→CLI
+  bridge): a drift fails a CI job before it ships. Build the binary with `packages/diplomat-platform/linux/install/build-core.sh`.
 - **The known-author single-PR tier** in `review.json`
   (`specific.mineOnly` / `specific.reviewerFindingsFirst`
   and `blocks.noVerdict`) exists because the monitors always know the PR's author,

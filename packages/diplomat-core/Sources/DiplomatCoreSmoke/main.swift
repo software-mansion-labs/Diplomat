@@ -3663,7 +3663,7 @@ try await gitlabSmoke()
 
 // ---- Golden prompts (cross-platform parity) ----
 // Every prompt mode both front-ends can assemble is compared byte-for-byte against a
-// committed golden file in assets/golden-prompts/. The Linux tests assert the SAME
+// committed golden file in Tests/fixtures/prompts/. The Linux tests assert the SAME
 // files, so Swift and Python can only drift from each other by failing one CI job.
 // Regenerate after an intentional core/*.json change: DIPLOMAT_GOLDEN_WRITE=1 swift run
 // DiplomatCoreSmoke.
@@ -3713,19 +3713,19 @@ let goldenModes: [(String, String)] = [
                                c.home = goldenGitLab
                                return c.buildPrompt() }()),
 ]
-let goldenDir = try CoreAssets.assetsDir().appendingPathComponent("golden-prompts")
+let goldenDir = try CoreAssets.assetsDir().deletingLastPathComponent().appendingPathComponent("Tests/fixtures/prompts")
 if ProcessInfo.processInfo.environment["DIPLOMAT_GOLDEN_WRITE"] == "1" {
     try FileManager.default.createDirectory(at: goldenDir, withIntermediateDirectories: true)
     for (name, prompt) in goldenModes {
-        try prompt.write(to: goldenDir.appendingPathComponent("\(name).txt"),
+        try prompt.write(to: goldenDir.appendingPathComponent("\(name).expected.txt"),
                          atomically: true, encoding: .utf8)
     }
     print("wrote \(goldenModes.count) golden prompts to \(goldenDir.path)")
 } else {
     for (name, prompt) in goldenModes {
-        let url = goldenDir.appendingPathComponent("\(name).txt")
+        let url = goldenDir.appendingPathComponent("\(name).expected.txt")
         let golden = (try? String(contentsOf: url, encoding: .utf8)) ?? ""
-        check(!golden.isEmpty, "missing golden \(name).txt — run DIPLOMAT_GOLDEN_WRITE=1")
+        check(!golden.isEmpty, "missing golden \(name).expected.txt — run DIPLOMAT_GOLDEN_WRITE=1")
         check(prompt == golden, "prompt \(name) drifted from its golden file")
     }
     print("golden-prompt assertions passed (\(goldenModes.count) modes)")
