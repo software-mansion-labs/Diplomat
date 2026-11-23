@@ -89,10 +89,10 @@ public struct PipelineIO {
 public enum PipelineTick {
     /// One sync. Reads every root's open issues and PRs (at most `githubMaxItems` of each),
     /// its recently merged or closed PRs that carry a pipeline label and the closed issues
-    /// they close, and every tracked Linear team's open issues; with `rate` (or forced)
-    /// rates up to `rater.perSync` unrated ones, forced first, then clean PRs awaiting
-    /// their second rating, the operator's unrated PRs, writable issues, other open
-    /// issues, newest first, leaving out for 1, 2, 4 ... syncs (a day at most) one whose
+    /// they close, and every tracked Linear team's open issues; rates each forced item, and
+    /// with `rate` up to `rater.perSync` unrated ones besides: clean PRs awaiting their
+    /// second rating, the operator's unrated PRs, writable issues, other open issues,
+    /// newest first, leaving out for 1, 2, 4 ... syncs (a day at most) one whose
     /// rating just failed; writes each rating as labels where Diplomat may, never lower
     /// than the labels or the diff's floor, and caches the rest, a rating whose labels
     /// could not be written counting over lower labels until a later sync writes them, on
@@ -111,13 +111,13 @@ public enum PipelineTick {
     /// the result is saved as `last.json`.
     ///
     /// Right before each outward step and each model call it reads `PipelineControl`, and
-    /// skips the step whose switch is off now. A `state.json` that cannot be read leaves
-    /// the sync reading and showing only. A read that fails is a notice, and the rest of
-    /// the sync goes on without it; a root read past `githubMaxItems` neither fixes nor
-    /// splits its issues, and one read with errors, or whose Linear team was not read,
-    /// is read and shown only. Such roots, or all of them when the sync is blocked, are
-    /// its `unread`. One sync runs at a time per `dir`: another started meanwhile, or one
-    /// that cannot open the lock, reads nothing and answers the last result with a notice.
+    /// skips the step whose switch is off now. A `state.json` or `ratings.json` that cannot
+    /// be read leaves the sync reading and showing only. A read that fails is a notice, and
+    /// the rest of the sync goes on without it; a root read past `githubMaxItems` neither
+    /// fixes nor splits its issues, and one read with errors, or whose Linear team was not
+    /// read, is read and shown only. Such roots, or all of them when the sync is blocked,
+    /// are its `unread`. One sync runs at a time per `dir`: another started meanwhile, or
+    /// one that cannot open the lock, reads nothing and answers the last result with a notice.
     public static func run(settings: PipelineSettings, now: Date = Date(),
                            dir: URL = PipelineLog.dir, io: PipelineIO = .live) -> PipelineTickResult {
         PrivateFiles.prepare(dir)
@@ -144,6 +144,8 @@ final class PipelineSync {
     enum Step { case rate, fix, fastTrack, merge, fracture, forced, undo }
 
     let settings: PipelineSettings
+    /// `settings.roots`, each with the name its `Repo` read answered.
+    var roots: [PipelineSettings.Root]
     let now: Date
     let dir: URL
     let io: PipelineIO
@@ -151,7 +153,7 @@ final class PipelineSync {
     var state: PipelineState
     var cache: [String: PipelineCachedRating]
     /// Why this sync writes, splits and merges nothing: a `state.json` there but not
-    /// readable, whose guards it would act without.
+    /// readable, whose guards it would act without, or such a `ratings.json`.
     var blocked: String?
     var entries: [PipelineEntry] = []
     var pos: [String: Int] = [:]
@@ -173,6 +175,8 @@ final class PipelineSync {
     /// The roots judged on less than all they hold, besides `incomplete` and `partial`.
     var unread: Set<String> = []
     var githubQuery: String?
+    /// Per root, the page sizes a read halved after a timeout left, by `graphql` variable.
+    var pages: [String: [String: Int]] = [:]
     var linear: LinearAPI?
     /// The Linear key's user.
     var linearViewer = ""
@@ -193,6 +197,7 @@ final class PipelineSync {
 
     init(settings: PipelineSettings, now: Date, dir: URL, io: PipelineIO) {
         self.settings = settings
+        roots = settings.roots
         self.now = now
         self.dir = dir
         self.io = io
@@ -203,13 +208,19 @@ final class PipelineSync {
             state = PipelineState()
             blocked = f.message
         }
-        cache = PipelineCachedRating.load(in: dir)
+        switch PipelineCachedRating.load(in: dir) {
+        case .success(let c):
+            cache = c
+        case .failure(let f):
+            cache = [:]
+            blocked = blocked ?? f.message
+        }
     }
 
     func run() -> PipelineTickResult {
-        let roots = settings.roots.map(\.slug)
+        let slugs = settings.roots.map(\.slug)
         guard let model = try? CoreAssets.pipeline() else {
-            return PipelineTickResult(at: now, notices: ["assets/pipeline.json could not be read"], unread: roots)
+            return PipelineTickResult(at: now, notices: ["assets/pipeline.json could not be read"], unread: slugs)
         }
         self.model = model
         if let blocked { notice("\(blocked), so this sync writes, splits and merges nothing") }
@@ -252,7 +263,7 @@ final class PipelineSync {
         let result = PipelineTickResult(at: now, items: laid.items, graph: laid.graph, effects: effects,
                                         events: Array(PipelineLog.read(in: dir).suffix(model.maxEvents)),
                                         notices: notices,
-                                        unread: blocked == nil ? roots.filter(short.contains) : roots,
+                                        unread: blocked == nil ? slugs.filter(short.contains) : slugs,
                                         fixable: blocked == nil ? fixable.map(\.id) : [])
         PipelineLog.writeLast(result, in: dir)
         return result
@@ -326,26 +337,52 @@ final class PipelineSync {
 
     // MARK: - Reading
 
-    /// One `pipeline-repo.graphql` operation on `root`, tried once more on failure: GitHub
-    /// times the heavy reads out now and then. The response when it holds the repository,
-    /// with any errors beside it; else why not.
-    func graphql(_ root: PipelineSettings.Root, _ operation: String, _ variables: [String])
-        -> (response: [String: Any]?, errors: [String], why: String) {
+    /// One `pipeline-repo.graphql` operation on `root`, its `sized` variables (`issues`, `prs`)
+    /// the root's page sizes. One GitHub times out on is asked again with those halved, down
+    /// to `githubPage.least`, which the root's later pages keep; any other failure is tried
+    /// once more. The response when it holds the repository, with any errors beside it; else
+    /// why not.
+    func graphql(_ root: PipelineSettings.Root, _ operation: String, _ variables: [String],
+                 sized: [String] = []) -> (response: [String: Any]?, errors: [String], why: String) {
         guard let query = githubQuery else { return (nil, [], "assets/graphql/pipeline-repo.graphql was not read") }
+        let name = root.name.split(separator: "/", maxSplits: 1).map(String.init)
         let args = ["api", "graphql", "-f", "query=\(query)", "-f", "operationName=\(operation)",
-                    "-f", "owner=\(root.owner)", "-f", "name=\(root.repo)"] + variables
-        var out = io.gh(args)
-        if !out.ok {
-            Thread.sleep(forTimeInterval: 0.8)
-            out = io.gh(args)
+                    "-f", "owner=\(name.first ?? "")", "-f", "name=\(name.last ?? "")"] + variables
+        let least = model.githubPage.least
+        var tried = false
+        while true {
+            let page = pages[root.slug] ?? ["issues": model.githubPage.issues, "prs": model.githubPage.prs]
+            let out = io.gh(args + sized.flatMap { ["-F", "\($0)=\(page[$0] ?? least)"] })
+            let response = (try? JSONSerialization.jsonObject(with: out.stdout)) as? [String: Any]
+            let raw = response?["errors"] as? [[String: Any]] ?? []
+            let errors = raw.compactMap { $0["message"] as? String }
+            let read = (response?["data"] as? [String: Any])?["repository"] is [String: Any]
+            if out.ok && read && raw.isEmpty { return (response, [], "") }
+            if Self.overloaded(out, raw), sized.contains(where: { page[$0, default: least] > least }) {
+                for k in sized { pages[root.slug, default: page][k] = max(least, page[k, default: least] / 2) }
+                continue
+            }
+            if !out.ok && !tried {
+                tried = true
+                Thread.sleep(forTimeInterval: 0.8)
+                continue
+            }
+            let why = errors.isEmpty ? out.why : errors.joined(separator: "; ")
+            return (read ? response : nil, errors, why)
         }
-        let response = (try? JSONSerialization.jsonObject(with: out.stdout)) as? [String: Any]
-        let errors = (response?["errors"] as? [[String: Any]] ?? []).compactMap { $0["message"] as? String }
-        let why = errors.isEmpty ? out.why : errors.joined(separator: "; ")
-        guard let response, (response["data"] as? [String: Any])?["repository"] is [String: Any] else {
-            return (nil, errors, why)
+    }
+
+    /// Whether a read failed as one past GitHub's ten-second limit does: a 5xx (`gh: HTTP
+    /// 502`), an answer cut off, or an error naming a timeout or a resource limit.
+    static func overloaded(_ out: PipelineIO.Exit, _ errors: [[String: Any]]) -> Bool {
+        let stderr = out.stderr.lowercased()
+        if !out.ok, stderr.contains("unexpected end of json")
+            || stderr.range(of: #"http 5\d\d"#, options: .regularExpression) != nil { return true }
+        return errors.contains {
+            let message = ($0["message"] as? String ?? "").lowercased()
+            return $0["type"] as? String == "RESOURCE_LIMITS_EXCEEDED" || message.contains("timeout")
+                || message.contains("respond to your request in time")
         }
-        return (response, errors, why)
     }
 
     func readGitHub() {
@@ -355,8 +392,9 @@ final class PipelineSync {
             for root in settings.roots { incomplete[root.slug] = "\(root.slug) could not be read" }
             return
         }
-        for (n, root) in settings.roots.enumerated() {
-            let first = graphql(root, "Repo", [])
+        for n in roots.indices {
+            let first = graphql(roots[n], "Repo", [], sized: ["issues", "prs"])
+            let root = roots[n]
             guard let response = first.response else {
                 notice("\(root.slug) could not be read: \(first.why)")
                 readAll = false
@@ -370,7 +408,9 @@ final class PipelineSync {
                 incomplete[root.slug] = "\(root.slug) was read only in part"
             }
             if !first.errors.isEmpty { readInPart(first.why) }
-            let page = PipelineRead.github(response, root: root, primary: n == 0, model: model)
+            let repository = (response["data"] as? [String: Any])?["repository"] as? [String: Any]
+            if let name = repository?["nameWithOwner"] as? String, name.contains("/") { roots[n].nameWithOwner = name }
+            let page = PipelineRead.github(response, root: roots[n], primary: n == 0, model: model)
             repos[root.slug] = page.repo
             entries += page.entries
             for (operation, kind, start) in [("Issues", PipelineKind.issue, page.issuesAfter),
@@ -378,12 +418,13 @@ final class PipelineSync {
                 var after = start
                 var read = page.entries.filter { $0.item.kind == kind && open($0) }.count
                 while let cursor = after, read < model.githubMaxItems {
-                    let next = graphql(root, operation, ["-f", "after=\(cursor)"])
+                    let next = graphql(roots[n], operation, ["-f", "after=\(cursor)"],
+                                       sized: [kind == .issue ? "issues" : "prs"])
                     guard let r = next.response, next.errors.isEmpty else {
                         readInPart(next.why)
                         break
                     }
-                    let more = PipelineRead.github(r, root: root, primary: n == 0, model: model, repo: page.repo)
+                    let more = PipelineRead.github(r, root: roots[n], primary: n == 0, model: model, repo: page.repo)
                     entries += more.entries
                     read += more.entries.count
                     after = kind == .issue ? more.issuesAfter : more.prsAfter
@@ -438,7 +479,7 @@ final class PipelineSync {
             repeat {
                 let data = try api.call("Issues", ["teams": teams.map(\.key), "after": after ?? NSNull()])
                 linearViewer = (data["viewer"] as? [String: Any])?["id"] as? String ?? ""
-                let page = PipelineRead.linear(data, viewer: linearViewer, teams: teams, roots: settings.roots)
+                let page = PipelineRead.linear(data, viewer: linearViewer, teams: teams, roots: roots)
                 entries += page.entries
                 read += page.entries.count
                 after = page.next
@@ -521,8 +562,8 @@ final class PipelineSync {
         guard may(step) else { return false }
         switch e.item.source {
         case .github:
-            guard let root = e.root, let n = e.number, ensureLabel(root.slug, name) else { return false }
-            let out = io.gh(["api", "-X", "POST", "repos/\(root.slug)/issues/\(n)/labels", "-f", "labels[]=\(name)"])
+            guard let root = e.root, let n = e.number, ensureLabel(root, name) else { return false }
+            let out = io.gh(["api", "-X", "POST", "repos/\(root.name)/issues/\(n)/labels", "-f", "labels[]=\(name)"])
             guard out.ok else {
                 notice("\(e.item.label): could not add \(name): \(out.why)")
                 return false
@@ -554,7 +595,7 @@ final class PipelineSync {
         case .github:
             guard let root = e.root, let n = e.number else { return false }
             let path = actual.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? actual
-            let out = io.gh(["api", "-X", "DELETE", "repos/\(root.slug)/issues/\(n)/labels/\(path)"])
+            let out = io.gh(["api", "-X", "DELETE", "repos/\(root.name)/issues/\(n)/labels/\(path)"])
             // Already off is off.
             guard out.ok || out.stderr.contains("HTTP 404") else {
                 notice("\(e.item.label): could not remove \(actual): \(out.why)")
@@ -592,7 +633,7 @@ final class PipelineSync {
             do {
                 let data = try api.call("Issue", ["id": id])
                 fresh = (data["issue"] as? [String: Any]).flatMap {
-                    PipelineRead.linearIssue($0, viewer: linearViewer, teams: settings.linearTeams, roots: settings.roots)
+                    PipelineRead.linearIssue($0, viewer: linearViewer, teams: settings.linearTeams, roots: roots)
                 }
             } catch {
                 why = error.localizedDescription
@@ -631,12 +672,13 @@ final class PipelineSync {
         return true
     }
 
-    /// Makes `name` exist in `slug` before an item is given it, once per repository.
-    func ensureLabel(_ slug: String, _ name: String) -> Bool {
+    /// Makes `name` exist in `root` before an item is given it, once per repository.
+    func ensureLabel(_ root: PipelineSettings.Root, _ name: String) -> Bool {
+        let slug = root.slug
         if state.labelsMade[slug, default: []].contains(name) { return true }
         let seen = entries.contains { $0.item.source == .github && $0.item.repo == slug && has($0, name) }
         if !seen {
-            let out = io.gh(["api", "-X", "POST", "repos/\(slug)/labels", "-f", "name=\(name)",
+            let out = io.gh(["api", "-X", "POST", "repos/\(root.name)/labels", "-f", "name=\(name)",
                              "-f", "color=\(model.labels.color)"])
             // 422: it exists already.
             guard out.ok || out.stderr.contains("HTTP 422") else {
@@ -754,16 +796,11 @@ final class PipelineSync {
             + pr.closesLinear.filter { linearIssue[$0] == nil }
     }
 
-    /// What merging `pr`, read again with `Gate`, would close, judged on reads made now:
-    /// whether it closes an open issue and each one is a candidate, and what it would close
-    /// that no read here judged. GitHub closes the issues its closing references list, and
-    /// those a closing word names in its title or a commit message; Linear the issues its
-    /// text closes and those it is attached to.
-    func freshCloses(_ pr: PipelineEntry) -> (fixes: Bool, unjudged: [String]) {
-        var closing = pr.closing.filter(open)
-        var unjudged = pr.closingPast ? ["issues past what one read lists"] : []
-        let listed = Set(pr.closing.map { PipelineRead.norm($0.id) })
-        unjudged += pr.closesText.filter { !listed.contains($0) }
+    /// The Linear issues merging `pr`, read again with `Gate`, would close, read now: the
+    /// open ones, those left unjudged, and every identifier looked at.
+    func linearJudged(_ pr: PipelineEntry) -> (closing: [PipelineEntry], unjudged: [String], seen: Set<String>) {
+        var closing: [PipelineEntry] = []
+        var unjudged: [String] = []
         var ids = pr.closesLinear
         if !settings.linearTeams.isEmpty {
             let linking = "the Linear issues linking it"
@@ -793,7 +830,7 @@ final class PipelineSync {
             do {
                 let data = try api.call("Issue", ["id": id])
                 guard let x = (data["issue"] as? [String: Any]).flatMap({
-                    PipelineRead.linearIssue($0, viewer: linearViewer, teams: settings.linearTeams, roots: settings.roots)
+                    PipelineRead.linearIssue($0, viewer: linearViewer, teams: settings.linearTeams, roots: roots)
                 }) else { throw LinearAPI.Failure.api("Linear answered no issue") }
                 if open(x) { closing.append(x) }
             } catch {
@@ -801,6 +838,23 @@ final class PipelineSync {
                 unjudged.append(id)
             }
         }
+        return (closing, unjudged, Set(ids))
+    }
+
+    /// What merging `pr`, read again with `Gate`, would close: whether it closes an open
+    /// issue and each one is a candidate, and what it would close that no read judged.
+    /// GitHub closes the issues its closing references list, and those a closing word names
+    /// in its title or a commit message; Linear the issues its text closes and those it is
+    /// attached to, as `linear` read them, an identifier it did not read unjudged.
+    func freshCloses(_ pr: PipelineEntry, linear: (closing: [PipelineEntry], unjudged: [String], seen: Set<String>))
+        -> (fixes: Bool, unjudged: [String]) {
+        // One this sync's merge closed may still read open: GitHub and Linear close it a moment later.
+        let closing = (pr.closing.filter(open) + linear.closing)
+            .filter { byURL[PipelineRead.norm($0.id)].map { open(entries[$0]) } ?? true }
+        var unjudged = pr.closingPast ? ["issues past what one read lists"] : []
+        let listed = Set(pr.closing.map { PipelineRead.norm($0.id) })
+        unjudged += pr.closesText.filter { !listed.contains($0) }
+        unjudged += linear.unjudged + pr.closesLinear.filter { !linear.seen.contains($0) }
         return (!closing.isEmpty && closing.allSatisfy { isCandidate($0, for: pr) }, unjudged)
     }
 
@@ -808,8 +862,16 @@ final class PipelineSync {
     /// type other than Bug.
     func triaged(_ e: PipelineEntry) -> String? {
         if let type = e.issueType, type.lowercased() != "bug" { return type }
-        let triage = Set(model.triageLabels.map { $0.lowercased() })
-        return e.labels.first { triage.contains($0.lowercased()) }
+        let triage = Set(model.triageLabels.map(Self.triageForm))
+        return e.labels.first { triage.contains(Self.triageForm($0)) }
+    }
+
+    /// `label` as triage matches it: lowercased, a leading `prefix:` or `prefix/` dropped
+    /// (`type: Feature`, `kind/feature`), `-` and `_` read as spaces.
+    static func triageForm(_ label: String) -> String {
+        var s = Substring(label.lowercased())
+        if let cut = s.firstIndex(where: { $0 == ":" || $0 == "/" }) { s = s[cut...].dropFirst() }
+        return s.split { $0.isWhitespace || $0 == "-" || $0 == "_" }.joined(separator: " ")
     }
 
     /// An issue already split, or already being fixed: a rating would route it nowhere.
@@ -925,7 +987,7 @@ final class PipelineSync {
         let again = awaitingRerate(e)
         var diff: String?
         if e.item.kind == .pr, let n = e.number {
-            let out = io.gh(["pr", "diff", "\(n)", "-R", root.slug])
+            let out = io.gh(["pr", "diff", "\(n)", "-R", root.name])
             guard out.ok else {
                 notice("\(e.item.label) was not rated: its diff could not be read: \(out.why)")
                 return failed(e.id)
@@ -1267,7 +1329,7 @@ final class PipelineSync {
             if let why = found.failure { return (nil, "the parts filed before could not be read: \(why)") }
             var why = ""
             if found.part == nil {
-                let out = io.gh(["api", "-X", "POST", "repos/\(root.slug)/issues", "-f", "title=\(title)",
+                let out = io.gh(["api", "-X", "POST", "repos/\(root.name)/issues", "-f", "title=\(title)",
                                  "-f", "body=\(body)\n\n\(marker)"])
                 let answer = (try? JSONSerialization.jsonObject(with: out.stdout)) as? [String: Any]
                 if out.ok, let url = answer?["html_url"] as? String, let node = answer?["node_id"] as? String {
@@ -1453,7 +1515,9 @@ final class PipelineSync {
             trackLabels: has(e, model.labels.fastTrack) && has(e, model.labels.cleared),
             fixesCandidate: fixes, closesUnwritable: unjudged, ciRan: e.gate?.ciRan ?? true,
             wasReady: e.readied, mergeState: e.mergeState, mergeQueue: e.mergeQueue,
-            stopLabels: e.labels.filter { stop.contains($0.lowercased()) }), me: e.root?.me ?? "")
+            stopLabels: e.labels.filter { stop.contains($0.lowercased()) },
+            requiredChecks: e.gate.map(\.requiredChecks) ?? [], passedChecks: e.gate?.passedChecks ?? []),
+            me: e.root?.me ?? "")
     }
 
     // MARK: - Merge
@@ -1465,7 +1529,7 @@ final class PipelineSync {
         let r = graphql(root, "PullRequest", ["-F", "number=\(n)"])
         guard let response = r.response, r.errors.isEmpty,
               var fresh = PipelineRead.pullRequest(response, root: root, label: e.item.label,
-                                                   roots: settings.roots, model: model)
+                                                   roots: roots, model: model)
         else {
             notice("\(e.item.label) was not merged: it could not be read again: \(r.why)")
             return nil
@@ -1482,7 +1546,10 @@ final class PipelineSync {
             && [nil, "draft"].contains(holdCodes[entries[i].id]) {
             let e = entries[i]
             guard let root = e.root, let n = e.number, let head = e.item.headSha,
-                  let flag = repos[e.item.repo]?.mergeFlag, may(.merge), let fresh = reread(e) else { continue }
+                  let flag = repos[e.item.repo]?.mergeFlag, may(.merge), let read = reread(e) else { continue }
+            // Linear first, so GitHub's last read sees whatever changed on the PR meanwhile.
+            let judged = linearJudged(read)
+            guard let fresh = linear == nil ? read : reread(e) else { continue }
             var hold: (code: String, message: String)?
             if fresh.item.headSha != head {
                 hold = ("moved", "its head moved to \((fresh.item.headSha ?? "").prefix(7)) since this sync read it")
@@ -1491,7 +1558,7 @@ final class PipelineSync {
             } else if !clearedByMe(fresh) {
                 hold = ("not-cleared", "it is no longer cleared at its head")
             } else {
-                let closes = freshCloses(fresh)
+                let closes = freshCloses(fresh, linear: judged)
                 let gate = mergeHold(fresh, fixes: closes.fixes, unjudged: closes.unjudged)
                     .map { (code: $0.code, message: $0.message) }
                 hold = gate.flatMap { $0.code == PipelineGate.Hold.draft.code ? nil : $0 }
@@ -1504,7 +1571,7 @@ final class PipelineSync {
             }
             if hold != nil || fresh.isDraft {
                 guard may(.merge) else { continue }
-                let ready = io.gh(["pr", "ready", "\(n)", "-R", root.slug])
+                let ready = io.gh(["pr", "ready", "\(n)", "-R", root.name])
                 guard ready.ok else {
                     notice("\(e.item.label) was not marked ready: \(ready.why)")
                     continue
@@ -1518,7 +1585,7 @@ final class PipelineSync {
                 continue
             }
             guard may(.merge) else { continue }
-            let out = io.gh(["pr", "merge", "\(n)", "-R", root.slug, "--admin", flag,
+            let out = io.gh(["pr", "merge", "\(n)", "-R", root.name, "--admin", flag,
                              "--match-head-commit", head])
             // GitHub may have merged it all the same; at another head, it was not this merge.
             guard out.ok || reread(e).map({ $0.item.state == "merged" && $0.item.headSha == head }) == true else {

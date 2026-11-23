@@ -1,9 +1,10 @@
 # Everything a pipeline sync reads of one repository, each operation named by `gh api
-# graphql -f operationName=<name>`. `Repo` reads its default branch and merge methods, the
-# first page of its open issues and PRs, and its recently merged or closed PRs
-# (`PipelineRead.github` keeps the ones carrying a pipeline label, and the closed issues
-# of this repository they close); `Issues` and `PullRequests` read the next pages, newest
-# created first so an item updated meanwhile keeps its place; `PullRequest` reads one PR
+# graphql -f operationName=<name>`. `Repo` reads its name as GitHub has it now, its default
+# branch and merge methods, the first page of its open issues and PRs, and its recently
+# merged or closed PRs (`PipelineRead.github` keeps the ones carrying a pipeline label, and
+# the closed issues of this repository they close); `Issues` and `PullRequests` read the
+# next pages, newest created first so an item updated meanwhile keeps its place, each page
+# `$issues` or `$prs` long; `PullRequest` reads one PR
 # again, with `Gate`, right before Diplomat marks it ready or merges it; `Item` reads one
 # issue or PR again right before Diplomat writes to it; `Parts` finds the parts of a split
 # filed before. `files` needs to see more than `floor.maxFiles` only to know a PR exceeds
@@ -37,10 +38,22 @@ fragment PR on PullRequest {
   comments(last: 40) { totalCount nodes { author { __typename login } body } }
 }
 
-# What only a PR about to be marked ready or merged is read for: its head's checks, every
+# What only a PR about to be marked ready or merged is read for: its head's checks, the
+# checks its base branch requires (its protection rule, which an admin reads as
+# `branchProtectionRule` and anyone else as `refUpdateRule`, and its rulesets), every
 # commit's author, committer and message, each issue it would close as it stands, whether
-# it was ever ready for review before, and every review-thread comment.
+# it was ever ready for review before, and every review-thread comment. A required check
+# that never reported is missing from `contexts`; `isRequired` tells the required one from
+# another app's check of its name.
 fragment Gate on PullRequest {
+  baseRef {
+    branchProtectionRule { requiresStatusChecks requiredStatusCheckContexts }
+    refUpdateRule { requiredStatusCheckContexts }
+    rules(first: 100) {
+      totalCount
+      nodes { type parameters { ... on RequiredStatusChecksParameters { requiredStatusChecks { context } } } }
+    }
+  }
   gateTip: commits(last: 1) {
     nodes {
       commit {
@@ -48,8 +61,8 @@ fragment Gate on PullRequest {
           contexts(first: 100) {
             totalCount
             nodes {
-              ... on CheckRun { conclusion }
-              ... on StatusContext { state }
+              ... on CheckRun { name conclusion isRequired(pullRequestNumber: $number) }
+              ... on StatusContext { context state isRequired(pullRequestNumber: $number) }
             }
           }
         }
@@ -67,15 +80,16 @@ fragment Gate on PullRequest {
   }
 }
 
-query Repo($owner: String!, $name: String!) {
+query Repo($owner: String!, $name: String!, $issues: Int!, $prs: Int!) {
   repository(owner: $owner, name: $name) {
+    nameWithOwner
     defaultBranchRef { name }
     squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
-    issues(states: OPEN, first: 100, orderBy: {field: CREATED_AT, direction: DESC}) {
+    issues(states: OPEN, first: $issues, orderBy: {field: CREATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes { ...Issue }
     }
-    pullRequests(states: OPEN, first: 50, orderBy: {field: CREATED_AT, direction: DESC}) {
+    pullRequests(states: OPEN, first: $prs, orderBy: {field: CREATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes { ...PR }
     }
@@ -90,18 +104,18 @@ query Repo($owner: String!, $name: String!) {
   }
 }
 
-query Issues($owner: String!, $name: String!, $after: String!) {
+query Issues($owner: String!, $name: String!, $after: String!, $issues: Int!) {
   repository(owner: $owner, name: $name) {
-    issues(states: OPEN, first: 100, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) {
+    issues(states: OPEN, first: $issues, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes { ...Issue }
     }
   }
 }
 
-query PullRequests($owner: String!, $name: String!, $after: String!) {
+query PullRequests($owner: String!, $name: String!, $after: String!, $prs: Int!) {
   repository(owner: $owner, name: $name) {
-    pullRequests(states: OPEN, first: 50, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) {
+    pullRequests(states: OPEN, first: $prs, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) {
       pageInfo { hasNextPage endCursor }
       nodes { ...PR }
     }

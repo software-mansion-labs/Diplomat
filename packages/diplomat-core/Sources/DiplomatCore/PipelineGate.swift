@@ -182,6 +182,10 @@ public enum PipelineGate {
         public var mergeQueue: Bool
         /// The labels it carries of `pipeline.json` `stopLabels`.
         public var stopLabels: [String]
+        /// The status checks its base branch requires, nil when they could not be read; and
+        /// those that succeeded on the head as the ones required of it.
+        public var requiredChecks: [String]?
+        public var passedChecks: Set<String>
 
         /// The fields after `ciState` default to what lets a PR merge.
         public init(state: String, author: String, isCrossRepository: Bool, baseRef: String,
@@ -191,7 +195,8 @@ public enum PipelineGate {
                     ciState: String, operatorUntagged: Bool = false, reviewRequests: Int = 0,
                     foreignCommits: [String] = [], trackLabels: Bool = true, fixesCandidate: Bool = true,
                     closesUnwritable: [String] = [], ciRan: Bool = true, wasReady: Bool = false,
-                    mergeState: String = "CLEAN", mergeQueue: Bool = false, stopLabels: [String] = []) {
+                    mergeState: String = "CLEAN", mergeQueue: Bool = false, stopLabels: [String] = [],
+                    requiredChecks: [String]? = [], passedChecks: Set<String> = []) {
             self.state = state
             self.author = author
             self.isCrossRepository = isCrossRepository
@@ -218,6 +223,8 @@ public enum PipelineGate {
             self.mergeState = mergeState
             self.mergeQueue = mergeQueue
             self.stopLabels = stopLabels
+            self.requiredChecks = requiredChecks
+            self.passedChecks = passedChecks
         }
     }
 
@@ -252,6 +259,8 @@ public enum PipelineGate {
         case draft
         case ciMissing
         case ciSkipped
+        case requiredUnread
+        case requiredChecks([String])
 
         /// A stable spelling for the log.
         public var code: String {
@@ -284,6 +293,8 @@ public enum PipelineGate {
             case .draft: return "draft"
             case .ciMissing: return "ci-missing"
             case .ciSkipped: return "ci-skipped"
+            case .requiredUnread: return "required-unread"
+            case .requiredChecks: return "required-checks"
             }
         }
 
@@ -321,6 +332,10 @@ public enum PipelineGate {
             case .draft: return "still a draft; it is marked ready first, then merged at a later sync"
             case .ciMissing: return "has no CI checks"
             case .ciSkipped: return "every CI check was skipped"
+            case .requiredUnread: return "the checks its base branch requires could not be read"
+            case .requiredChecks(let names):
+                return names.count == 1 ? "the required check \(names[0]) has not passed"
+                    : "the required checks \(names.joined(separator: ", ")) have not passed"
             }
         }
     }
@@ -329,8 +344,9 @@ public enum PipelineGate {
     /// order: who the PR is and who has seen it, then what it changes, then the state
     /// GitHub is still computing - so a PR that can never merge says why, rather than
     /// reading "CI still running" until its checks finish. A draft passing every rule up
-    /// to the ones on missing or skipped CI holds as `draft`: CI that skips drafts may run
-    /// once it is ready.
+    /// to the ones on missing, skipped or required CI holds as `draft`: CI that skips drafts
+    /// may run once it is ready. A required check that never reported is missing from the
+    /// rollup `ciState` sums up, so each one must have succeeded by name.
     public static func hold(_ c: Candidate, me: String) -> Hold? {
         if c.state != "open" && c.state != "draft" { return .closed }
         let mine = me.lowercased()
@@ -367,6 +383,9 @@ public enum PipelineGate {
         if c.state == "draft" { return .draft }
         if c.ciState.isEmpty { return .ciMissing }
         if !c.ciRan { return .ciSkipped }
+        guard let required = c.requiredChecks else { return .requiredUnread }
+        let missing = required.filter { !c.passedChecks.contains($0) }
+        if !missing.isEmpty { return .requiredChecks(missing) }
         return nil
     }
 }

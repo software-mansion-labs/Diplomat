@@ -187,11 +187,16 @@ struct PipelineCachedRating: Codable, Equatable {
 
     static func url(in dir: URL) -> URL { dir.appendingPathComponent("ratings.json") }
 
-    static func load(in dir: URL) -> [String: PipelineCachedRating] {
-        guard let data = try? Data(contentsOf: url(in: dir)),
-              let cache = try? CommsLog.decoder.decode([String: PipelineCachedRating].self, from: data)
-        else { return [:] }
-        return cache
+    /// Like `PipelineState.load`: a missing file is empty, one that does not decode a
+    /// failure, since an empty cache would let lower labels count over a kept rating.
+    static func load(in dir: URL) -> Result<[String: PipelineCachedRating], PipelineIO.Failure> {
+        let url = url(in: dir)
+        guard FileManager.default.fileExists(atPath: url.path) else { return .success([:]) }
+        do {
+            return .success(try CommsLog.decoder.decode([String: PipelineCachedRating].self, from: Data(contentsOf: url)))
+        } catch {
+            return .failure(.init("\(url.path) could not be read (\(error.localizedDescription))"))
+        }
     }
 
     static func save(_ cache: [String: PipelineCachedRating], in dir: URL) {

@@ -308,6 +308,9 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
         public var repo: String
         public var path: String
         public var me: String
+        /// GitHub's `owner/repo` for it as a sync read it, which a rename or transfer makes
+        /// differ from `slug`; never encoded.
+        var nameWithOwner: String?
 
         public init(owner: String, repo: String, path: String, me: String) {
             self.owner = owner
@@ -316,7 +319,12 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
             self.me = me
         }
 
+        private enum CodingKeys: String, CodingKey { case owner, repo, path, me }
+
+        /// The root as configured, which the settings, `unread` and effects name it by.
         public var slug: String { "\(owner)/\(repo)" }
+        /// The name its links carry and its calls use.
+        var name: String { nameWithOwner ?? slug }
     }
 
     /// A Linear team tracked, and the root (`owner/repo`) its issues are fixed in.
@@ -355,7 +363,8 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
     /// the key. `DIPLOMAT_LINEAR_TOKEN` overrides either.
     public var linearKeychainItem: String?
     public var linearTokenFile: String?
-    /// Rate unrated items. Off, a sync only reads.
+    /// Rate items unasked, and write the ratings kept while their labels could not be. It
+    /// stops nothing else: a forced rating, and each other switch's steps, go on with it off.
     public var rate: Bool
     /// Ask for a fix PR for each candidate issue.
     public var fix: Bool

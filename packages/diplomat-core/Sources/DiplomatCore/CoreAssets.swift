@@ -332,6 +332,13 @@ public enum CoreAssets {
             public let maxChildren: Int
             public let instructions: [String]
         }
+        /// How many open issues and PRs one page of a root's read asks for, and the least a
+        /// page halved after a timeout asks for.
+        public struct GitHubPage: Decodable {
+            public let issues: Int
+            public let prs: Int
+            public let least: Int
+        }
         public let syncSecs: Int
         public let minSyncSecs: Int
         public let maxItems: Int
@@ -341,6 +348,7 @@ public enum CoreAssets {
         public let linearAPI: String
         public let linearMaxIssues: Int
         public let githubMaxItems: Int
+        public let githubPage: GitHubPage
         public let labels: Labels
         /// A label of these (any case) keeps an issue off the fast track.
         public let triageLabels: [String]
@@ -359,7 +367,7 @@ public enum CoreAssets {
 
         private enum CodingKeys: String, CodingKey {
             case syncSecs, minSyncSecs, maxItems, maxEvents, maxLogBytes, httpTimeoutSecs,
-                 linearAPI, linearMaxIssues, githubMaxItems, labels, triageLabels, stopLabels, levels, floor,
+                 linearAPI, linearMaxIssues, githubMaxItems, githubPage, labels, triageLabels, stopLabels, levels, floor,
                  rater, fracture, blocks, cleanMarker
         }
 
