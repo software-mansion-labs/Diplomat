@@ -1154,15 +1154,17 @@ try {
     for (const made of [left, 'notes', `${empty}-relay`]) fs.rmSync(dir(made), { recursive: true });
   });
 
-  await check('a stop the engine did not hear has stopped nothing: it is asked again until the job is gone', async () => {
+  await check('a stop the engine did not hear has stopped nothing: the engine is looked at until it answers, and the job asked after until it is gone', async () => {
     const job = await launch(`${R}-40`, PEER_A, alpha, { prompt: 'MODE=sleep' });
     await until('the agent runs', () => fs.existsSync(path.join(agentDir, `${R}-40.started`)));
     const { pid } = job.started;
     const asked = () => calls('exec').filter((c) => c[6] === 'stop' && c[7] === `${R}-40`).length;
+    const looked = calls('version').length;
     fs.writeFileSync(path.join(fakeDir, 'down'), '');
     let settled = false;
     const stopping = stopJob(job.run, containers).then((outcome) => { settled = true; return outcome; });
-    await until('the engine was asked a second time', () => asked() >= 2);
+    await until('the engine was looked at a second time', () => calls('version').length >= looked + 2);
+    assert.equal(asked(), 0, 'and asked nothing else');
     assert.equal(settled, false, 'the run is not called stopped');
     assert.equal(pidAlive(pid), true, 'and it is not');
     assert.equal(readOutcome(`${R}-40`), null);

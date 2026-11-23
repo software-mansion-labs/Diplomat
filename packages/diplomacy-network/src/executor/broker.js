@@ -44,7 +44,7 @@ import {
   GIT_BIN, JOB_BODY_MS, JOB_BUFFER_BYTES, JOB_CONNECTIONS, JOB_FORGE_REQUESTS, JOB_HEADER_MS, JOB_IDLE_MS,
   JOB_MODEL_BYTES, JOB_MODEL_REQUESTS, LOCAL_PORTS_PATH, RELAY_HOST,
 } from '../paths.js';
-import { createFeeder, headEnd } from './feed.js';
+import { createFeeder, edgeAfter, headEnd } from './feed.js';
 import { carriesPlaceholder } from './llm.js';
 import { own } from './own-fault.js';
 import { clip, createSparingLog } from './sparing.js';
@@ -95,12 +95,25 @@ const MODEL_ANSWER_HEADERS = /^(content-type|content-encoding|content-length|cac
 const LINGER_MS = 10 * 1000;
 const LINGER_BYTES = 2 * FORGE_BODY_CAP;
 
+// What of a refused connection is read and dropped after its answer; past it the
+// connection is reset. Bytes left unread wait in this machine's network memory.
+const REFUSED_BYTES = 64 * 1024;
+
+// The pieces a streamed body is written on in.
+const CARRY_BYTES = 16 * 1024;
+
 const FRAMING = 'the broker carries a request body by its Content-Length or as Transfer-Encoding: chunked, one of the two and nothing else';
 
-/// A host name as every decision here reads it: lowercase, without brackets and without
-/// the trailing dot of a fully qualified name.
+/// A host as every decision here reads it: an address, without brackets, or a name in
+/// lowercase without the one trailing dot of a fully qualified name. '' for anything
+/// else: a name is labels of letters, digits, hyphens and underscores, none empty and
+/// none over 63 characters, 253 characters in all.
 export function normalHost(host) {
-  return String(host ?? '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  const text = String(host ?? '').toLowerCase();
+  const bare = text.replace(/^\[(.*)\]$/, '$1');
+  if (net.isIP(bare)) return bare;
+  const name = text.replace(/\.$/, '');
+  return name.length <= 253 && /^[a-z0-9_-]{1,63}(\.[a-z0-9_-]{1,63})*$/.test(name) ? name : '';
 }
 
 /// The hosts a pool's forge is spoken to on: the ones whose requests go to the requester.
@@ -425,7 +438,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     try { found = family ? [{ address: host, family }] : await resolve(job, host); } catch (e) { throw new Refusal(502, `${host} does not resolve (${e.code || e.message})`); }
     const allowed = found.filter((a) => !deniedAddress(a.address));
     if (allowed.length === 0) {
-      throw new Refusal(403, `the broker does not connect to ${host}: ${found.length ? `${found[0].address} is` : 'it has no address and so is'} not a public internet address. ${NOT_HERE}`);
+      throw new Refusal(403, `the broker does not connect to ${host}: ${family ? 'that is' : found.length ? 'what it resolves to is' : 'it has no address and so is'} not a public internet address. ${NOT_HERE}`);
     }
     let last;
     for (const a of allowed.slice(0, 3)) {
@@ -507,9 +520,17 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   }
   const crowded = () => `this job has ${limits.connections} connections open through the broker, the most a job gets at a time: close some`;
 
-  // Written whole, and the connection closed once the client has had a moment to read it.
+  // Written whole, and the connection closed once the client has had a moment to read
+  // it. What the client sends meanwhile is read and dropped; one that sends more than
+  // REFUSED_BYTES is closed under what it sends, which resets it.
   function sayAndClose(socket, text) {
     socket.end(text);
+    let dropped = 0;
+    socket.on('data', (c) => {
+      dropped += c.length;
+      if (dropped > REFUSED_BYTES) socket.destroy();
+    });
+    socket.resume();
     const timer = setTimeout(() => socket.destroy(), LINGER_MS);
     timer.unref();
     socket.once('close', () => clearTimeout(timer));
@@ -628,6 +649,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   function begun(req, res) {
     const { socket } = req;
     gotHead(socket);
+    socket.bodyOf(req);
     socket[BUSY] = (socket[BUSY] || 0) + 1;
     res.on('error', () => res.destroy());
     res.once('close', () => {
@@ -667,6 +689,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   function enter(job, req, res, { slot = false, out = false, streamed = false }) {
     const { gate } = job;
     const declared = req.headers['content-length'];
+    // The parser takes a length of up to 20 digits; past 15 it is not the number it reads
+    // as, which matters to a body streamed on.
     if (declared !== undefined && !/^\d{1,15}$/.test(declared)) return Promise.reject(new Refusal(400, FRAMING));
     const need = streamed ? 0 : req.headers['transfer-encoding'] !== undefined ? FORGE_BODY_CAP : Number(declared ?? 0);
     if (need > FORGE_BODY_CAP) {
@@ -719,10 +743,12 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   }
 
   // The whole body: a Refusal(413) once it passes the cap, a Refusal(408) when it has
-  // not all come within bodyMs.
+  // not all come within bodyMs. It is copied into one buffer as it comes, whatever the
+  // chunks it comes in.
   function collect(req) {
     return new Promise((resolve, reject) => {
-      const chunks = [];
+      const declared = Number(req.headers['content-length'] ?? 0);
+      let body = null;
       let size = 0;
       let settled = false;
       const settle = (fn, value) => {
@@ -734,14 +760,62 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       };
       const timer = setTimeout(() => settle(reject, new Refusal(408, `the request body did not arrive within ${limits.bodyMs / 1000} s`)), limits.bodyMs);
       const onData = (c) => {
+        if (size + c.length > FORGE_BODY_CAP) return settle(reject, new Refusal(413, `the request body is over ${FORGE_BODY_CAP / 2 ** 20} MiB, the most the network carries in one request`));
+        if (!body || body.length - size < c.length) {
+          const bigger = Buffer.allocUnsafe(Math.min(FORGE_BODY_CAP, Math.max(declared, 2 * (size + c.length), 65536)));
+          body?.copy(bigger, 0, 0, size);
+          body = bigger;
+        }
+        c.copy(body, size);
         size += c.length;
-        if (size > FORGE_BODY_CAP) return settle(reject, new Refusal(413, `the request body is over ${FORGE_BODY_CAP / 2 ** 20} MiB, the most the network carries in one request`));
-        chunks.push(c);
       };
       req.on('data', onData);
-      req.once('end', () => settle(resolve, Buffer.concat(chunks)));
+      req.once('end', () => settle(resolve, !body ? Buffer.alloc(0) : size === body.length ? body : Buffer.from(body.subarray(0, size))));
       req.once('error', (e) => settle(reject, e));
       req.once('close', () => settle(reject, new Error('the client went away')));
+    });
+  }
+
+  // A body passed on to `to` as it comes, in pieces of up to CARRY_BYTES: the parser
+  // hands it on in the chunks its sender framed it in, down to a byte, and each written
+  // on its own would be a write of its own all the way out. `req` waits while `to` is
+  // full, and what comes after `to` closed is read and dropped.
+  function carry(req, to) {
+    let piece = null;
+    let length = 0;
+    let soon = null;
+    let gone = false;
+    to.once('close', () => {
+      gone = true;
+      req.resume();
+    });
+    const flush = () => {
+      clearImmediate(soon);
+      soon = null;
+      if (length === 0 || gone) return;
+      const out = piece.subarray(0, length);
+      piece = null;
+      length = 0;
+      if (!to.write(out) && !req.isPaused()) {
+        req.pause();
+        to.once('drain', () => req.resume());
+      }
+    };
+    req.on('data', (c) => {
+      if (length + c.length > CARRY_BYTES) flush();
+      if (c.length >= CARRY_BYTES) {
+        piece = c;
+        length = c.length;
+        return flush();
+      }
+      piece ??= Buffer.allocUnsafe(CARRY_BYTES);
+      c.copy(piece, length);
+      length += c.length;
+      soon ??= setImmediate(flush);
+    });
+    req.once('end', () => {
+      flush();
+      if (!gone) to.end();
     });
   }
 
@@ -770,16 +844,30 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     strangers.add(socket);
     socket.once('close', () => strangers.delete(socket));
     expectHead(socket);
-    let seen = null;
+    // What came before the chunk at hand, at the start of a buffer with room for more:
+    // each chunk is looked at once, however few bytes it brings.
+    let kept = null;
+    let length = 0;
+    let edge = 0;
     const more = guard((chunk) => {
-      seen = seen ? Buffer.concat([seen, chunk]) : chunk;
-      const end = headEnd(seen);
-      if ((end === -1 ? seen.length : end) > HEAD_BYTES) return socket.destroy();
-      if (end === -1) return undefined;
+      const found = headEnd(chunk, edge);
+      const end = found === -1 ? -1 : length + found;
+      if ((end === -1 ? length + chunk.length : end) > HEAD_BYTES) return socket.destroy();
+      if (end === -1) {
+        edge = edgeAfter(chunk, edge);
+        if (!kept || kept.length - length < chunk.length) {
+          const bigger = Buffer.allocUnsafe(Math.min(HEAD_BYTES, Math.max(2 * (length + chunk.length), 1024)));
+          kept?.copy(bigger, 0, 0, length);
+          kept = bigger;
+        }
+        chunk.copy(kept, length);
+        length += chunk.length;
+        return undefined;
+      }
       socket.off('data', more);
       socket.pause();
       gotHead(socket);
-      return first(socket, seen, end);
+      return first(socket, length ? Buffer.concat([kept.subarray(0, length), chunk]) : chunk, end);
     }, socket);
     socket.on('data', more);
   });
@@ -859,10 +947,9 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     counted(job, req, res);
     let url;
     try { url = new URL(req.url); } catch { url = null; }
-    const host = url ? normalHost(url.hostname) : '';
-    if (!host || url.protocol !== 'http:') {
-      return sendJson(res, 400, { message: 'this is a proxy: it takes CONNECT and http:// requests' });
-    }
+    if (url?.protocol !== 'http:') return sendJson(res, 400, { message: 'this is a proxy: it takes CONNECT and http:// requests' });
+    const host = normalHost(url.hostname);
+    if (!host) return sendJson(res, 400, { message: `not a host: ${url.hostname}` });
     const port = Number(url.port) || 80;
     if (trace) trace(`${job.info.runId} ${req.method} http://${url.host}${url.pathname}`);
     if (job.intercept.has(host)) return sendText(res, 403, onlyHttps(host, port));
@@ -874,7 +961,6 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     const coding = req.headers['transfer-encoding'];
     const declared = req.headers['content-length'];
     if (coding !== undefined && coding.trim().toLowerCase() !== 'chunked') return sendJson(res, 400, { message: FRAMING });
-    if (declared !== undefined && !/^\d{1,15}$/.test(declared)) return sendJson(res, 400, { message: FRAMING });
     const headers = { ...requestHeaders(req.headers, ['content-length', 'host']), host: url.host };
     if (coding !== undefined) headers['transfer-encoding'] = 'chunked';
     else if (declared !== undefined) headers['content-length'] = String(Number(declared));
@@ -916,7 +1002,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     }, res));
     over(res, () => up.destroy());
     req.once('close', () => { if (!req.complete) up.destroy(); });
-    if (bodied) req.pipe(up); else up.end();
+    if (bodied) carry(req, up); else up.end();
   }));
   plain.timeout = limits.idleMs;
   plain.on('clientError', (e, socket) => socket.destroy());
@@ -1031,9 +1117,12 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       }, res));
       over(res, () => child.kill('SIGKILL'));
       if (advertise) return child.stdin.end();
-      const body = /^(x-)?gzip$/i.test(req.headers['content-encoding'] || '') ? req.pipe(zlib.createGunzip()) : req;
-      body.on('error', () => child.kill('SIGKILL'));
-      body.pipe(child.stdin);
+      req.on('error', () => child.kill('SIGKILL'));
+      if (!/^(x-)?gzip$/i.test(req.headers['content-encoding'] || '')) return carry(req, child.stdin);
+      const gunzip = zlib.createGunzip();
+      gunzip.on('error', () => child.kill('SIGKILL'));
+      carry(req, gunzip);
+      gunzip.pipe(child.stdin);
     });
   }
 

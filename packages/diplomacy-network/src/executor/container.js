@@ -38,7 +38,7 @@ import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import {
-  BASE_DIR, CONTAINER_CPUS, CONTAINER_DISK_BYTES, CONTAINER_HOST, CONTAINER_IDLE_MS, CONTAINER_MEMORY, CONTAINER_PIDS,
+  BASE_DIR, CONTAINER_CPUS, CONTAINER_DISK_BYTES, CONTAINER_HELD_TIMEOUT_MS, CONTAINER_HOST, CONTAINER_IDLE_MS, CONTAINER_MEMORY, CONTAINER_PIDS,
   CONTAINER_USAGE_TIMEOUT_MS, DOCKER_BIN, IMAGE_BUILD_TIMEOUT_MS, IMAGE_REPO, RELAY_HOST, RUNS_DIR,
 } from '../paths.js';
 import { OwnFault, own } from './own-fault.js';
@@ -577,13 +577,14 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     }
   }
 
-  // One run of the probe container beside `name`, on `image`: resolves to docker's
-  // answer. In its turn among the probes of that name, which is one container's name.
-  function probe(name, image, extra, command) {
+  // One run of the probe container beside `name`, on `image`, given `timeout`: resolves
+  // to docker's answer. In its turn among the probes of that name, which is one
+  // container's name.
+  function probe(name, image, extra, command, timeout = CONTAINER_USAGE_TIMEOUT_MS) {
     return probeTurn(name, async () => {
       const args = ['run', '--rm', '--name', probeOf(name), '--label', `dn.probe=${name}`, '--label', `dn.base=${BASE_DIR}`,
         ...PROBE_LIMITS, ...extra, image, ...command];
-      const heard = { timeout: CONTAINER_USAGE_TIMEOUT_MS, maxBuffer: PROBE_OUTPUT };
+      const heard = { timeout, maxBuffer: PROBE_OUTPUT };
       let r = await docker(args, heard);
       const left = async () => mine((await inspect(probeOf(name)))?.labels) && (await docker(['rm', '-f', probeOf(name)])).code === 0;
       // A probe cut off earlier still holds the name.
@@ -595,14 +596,15 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
 
   // What the processes of the running container `name` hold of the disk in files that
   // have no name left, in bytes, counted by held.cjs from a probe in the container's pid
-  // namespace; null when it could not be counted. The job can end that probe, which
-  // counts nothing: its container is unmeasured for that. An engine whose first answer
+  // namespace; null when it could not be counted. The job can end that probe, or stop it
+  // until its CONTAINER_HELD_TIMEOUT_MS is over, which counts nothing: its container is
+  // unmeasured for that. An engine whose first answer
   // is that a probe may not read another container's processes (SELinux keeps one
   // container's from another's) is asked no more, and on it such a file is not counted;
   // one that has counted before is not believed blind.
   async function holds(name, image) {
     if (sight === false) return 0;
-    const r = await probe(name, image, ['--pid', `container:${name}`, '--cap-add=DAC_READ_SEARCH', '--cap-add=SYS_PTRACE'], ['node', '-e', HELD]);
+    const r = await probe(name, image, ['--pid', `container:${name}`, '--cap-add=DAC_READ_SEARCH', '--cap-add=SYS_PTRACE'], ['node', '-e', HELD], CONTAINER_HELD_TIMEOUT_MS);
     // What a probe that was cut off had written by then is no answer.
     const said = r.code === null ? '' : r.stdout.trim();
     const [, bytes] = /^held (\d+)$/.exec(said) ?? [];

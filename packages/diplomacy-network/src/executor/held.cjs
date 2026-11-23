@@ -5,8 +5,10 @@
 // pid namespace. It prints `held <bytes>`, or `blind` where a process's descriptors are
 // not this one's to read.
 //
-// Counted is what a descriptor or a running program names. What only a mapping holds,
-// or a descriptor on its way through a unix socket, is in neither place.
+// Counted is what a descriptor of any of a process's threads or a running program names:
+// a process whose first thread ended shows its descriptors only under the others, and a
+// thread can hold a table of its own. What only a mapping holds, or a descriptor on its
+// way through a unix socket, is in neither place.
 const fs = require('node:fs');
 
 // tmpfs (shared memory and memfd among it), ramfs and hugetlbfs hold memory, which the
@@ -17,16 +19,21 @@ const seen = new Set();
 let bytes = 0;
 let blind = false;
 for (const pid of fs.readdirSync('/proc').filter((name) => /^\d+$/.test(name))) {
-  let open = [];
-  // A process that ended meanwhile holds nothing; one that may not be read is known by
-  // its program below.
-  try { open = fs.readdirSync(`/proc/${pid}/fd`).map((fd) => `fd/${fd}`); } catch {}
-  for (const name of [...open, 'exe']) {
+  const open = [`/proc/${pid}/exe`];
+  // A process or a thread that ended meanwhile holds nothing; one that may not be read
+  // is known by its program.
+  let tasks = [];
+  try { tasks = fs.readdirSync(`/proc/${pid}/task`); } catch {}
+  for (const tid of tasks) {
+    const dir = `/proc/${pid}/task/${tid}/fd`;
+    try { open.push(...fs.readdirSync(dir).map((fd) => `${dir}/${fd}`)); } catch {}
+  }
+  for (const at of open) {
     try {
-      const st = fs.statSync(`/proc/${pid}/${name}`);
+      const st = fs.statSync(at);
       if (st.nlink !== 0 || !st.isFile() || seen.has(`${st.dev}:${st.ino}`)) continue;
       seen.add(`${st.dev}:${st.ino}`);
-      if (!MEMORY.has(fs.statfsSync(`/proc/${pid}/${name}`).type)) bytes += st.blocks * 512;
+      if (!MEMORY.has(fs.statfsSync(at).type)) bytes += st.blocks * 512;
     } catch (e) { blind ||= DENIED.has(e.code); }
   }
 }
