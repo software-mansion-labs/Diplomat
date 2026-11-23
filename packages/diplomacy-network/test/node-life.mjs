@@ -41,6 +41,14 @@ await check('a task is offered, claimed, acted on under the requester\'s key, an
   assert.equal(await reserve(other, MAX_BODY_BYTES + 1), 'bad-request', 'nobody else may');
   assert.equal(await reserve(other, MAX_BODY_BYTES), 'ok');
   assert.equal(await reserve(other, STRANGER_BODY_BYTES), 'bad-request', 'what anyone may send needs no place');
+  // A key past its time earns its holder no more than any member: the requester's clock
+  // is a day on, before it has looked at its offers again.
+  await w.run(61);
+  req.skew = 24 * 3600;
+  const past = await w.request(exe, req, 'reserve', { kind: 'act', bytes: MAX_ACT_BODY_BYTES }, { ts: w.net.now() + req.skew });
+  req.skew = 0;
+  assert.equal(past.code, 'bad-request');
+  assert.equal(await reserve(exe, MAX_ACT_BODY_BYTES), 'ok');
 
   // Three requests: two carried out, one no rule covers.
   req.requester.refuse('/secrets', 'this task may not read secrets');
@@ -228,6 +236,25 @@ await check('an executor whose clock runs behind the requester\'s still gets its
   await w.net.until(() => w.offerRow(req, taskId).state === 'done', { what: 'the offer done' });
   await w.run(300);
   assert.equal(exe.executor.started.length, 1, 'and it is not run again');
+});
+
+await check('an executor whose clock was ahead when it claimed and is set right before its run ends signs the end of its claim all the same', async () => {
+  for (const how of ['end', 'stop']) {
+    const w = createWorld({ seed: 20 });
+    const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
+    exe.skew = 200;
+    const { taskId, job } = await going(w, req, exe, 'pr-1');
+    const { claimedAt } = w.claim(exe, taskId);
+    exe.skew = 0;
+    await w.run(5);
+    assert.ok(w.net.now() < claimedAt - 100, 'by its clock now, the claim is yet to be made');
+    if (how === 'end') exe.executor.end(job.runId);
+    else await exe.node.stopRun({ runId: job.runId });
+    await w.net.until(() => w.task(req, taskId).state === (how === 'end' ? 'done' : 'available'), { maxMs: 30 * 1000, what: `the task ${how === 'end' ? 'done' : 'in the pool again'}` });
+    const last = w.records(req).find((r) => r.type === 'claim');
+    assert.deepEqual([last.state, last.at, last.executor], [how === 'end' ? 'completed' : 'released', claimedAt, exe.pk]);
+    assert.deepEqual(exe.log.filter((line) => line.includes('could not')), []);
+  }
 });
 
 await check('a run stopped by the operator is stopped, its claim given back, and the task left to another machine', async () => {

@@ -317,6 +317,15 @@ check('a host holds its own member record whatever its age, and the records its 
   for (const pool of [mine, theirs]) assert.deepEqual([pool.merge(again, late).refused, pool.members(late).map((m) => m.pk)], [[], [root.pk, ann.pk].sort()]);
 });
 
+check('a newer version of a record that is given no place leaves the version held where it was', () => {
+  const held = member(ann, { voucher: seat(root) });
+  const pool = poolOf(root, [member(root), held, member(ben, { voucher: seat(ann) })]);
+  // Its own key signed it, under the voucher of a key with no seat here.
+  const moved = member(ann, { seq: 1, voucher: seat(eve) });
+  assert.equal(codes(pool.merge(moved, T0)).length, 1);
+  assert.deepEqual([pool.get(`member/${ann.pk}`), pool.members(T0).map((m) => m.pk)], [held, [root, ann, ben].map(pk).sort()]);
+});
+
 check('a version that says a member left outlives every version it replaced', () => {
   const pool = poolOf(root, [member(root), member(ann, { voucher: seat(root) })]);
   const resigned = member(ann, { voucher: seat(root), seq: 1, at: T0 + 20 * DAY });

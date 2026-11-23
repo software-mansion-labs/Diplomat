@@ -90,8 +90,9 @@ export function createGossip(host) {
       // member, each `{ nonce, exp }` and, for the keys that came with it, `seats` - the
       // seat each was given, by key; and what is kept of the membership it left before
       // this one. `joinFailed` says why the last invite let this host in nowhere, until
-      // the next one is pasted.
-      joining: null, joinFailed: '', invites: [], farewell: gone(doc),
+      // the next one is pasted. `back` are the hosts it left the pool to, from when it
+      // goes back into it until it holds the record of another host.
+      joining: null, joinFailed: '', invites: [], farewell: gone(doc), back: [],
       // The members that refused this host's hello and have answered it nothing since.
       refusedBy: new Set(),
       // Since when what this host holds of the pool may be out of date - it started, it
@@ -110,6 +111,7 @@ export function createGossip(host) {
       if (isObject(doc.joining)) P.joining = doc.joining;
       if (typeof doc.joinFailed === 'string') P.joinFailed = doc.joinFailed;
       if (Array.isArray(doc.invites)) P.invites = doc.invites;
+      if (Array.isArray(doc.back)) P.back = doc.back;
       // The store holds all of this: nothing is written until something changes.
       P.pool.delta();
       P.head = host.head(P);
@@ -173,11 +175,14 @@ export function createGossip(host) {
   }
 
   // Back into a pool this host left: its member record is signed again over the voucher
-  // it held. Every member it knew hears of it as the pool is caught up.
+  // it held. Every member it knew hears of it as the pool is caught up; when the records
+  // it kept of them have run out, the hosts it left do.
   function rejoin(id) {
     const P = load(host.away.get(id), host.store.read(poolFile(id)) ?? {});
+    const left = P.farewell?.leftTo ?? [];
     P.farewell = null;
     P.pool.merge(signMember(P), host.now());
+    P.back = left;
     host.away.delete(id);
     host.pools.set(id, P);
     host.moved(P);
@@ -210,8 +215,16 @@ export function createGossip(host) {
   }
 
   // Every host this one keeps in touch with in a pool: the members, and the ones that
-  // stopped signing their record.
-  const others = (P) => P.pool.known(host.now()).map((m) => m.pk).filter((pk) => pk !== host.self);
+  // stopped signing their record - or, while it holds no record of another host, the
+  // hosts it left the pool to.
+  function others(P) {
+    const known = P.pool.known(host.now()).map((m) => m.pk).filter((pk) => pk !== host.self);
+    return known.length > 0 ? known : P.back;
+  }
+
+  /// Is this host back in a pool it left with no record of another host there, waiting
+  /// for one of the hosts it left to answer?
+  const returning = (P) => P.back.length > 0 && others(P) === P.back;
 
   // The member records that lead from `pk`, this host unless named, to the member that
   // started the pool.
@@ -591,6 +604,10 @@ export function createGossip(host) {
         host.save(P);
       }
       redeem(P).catch((err) => host.log(`an invite could not be redeemed: ${err?.stack ?? err}`));
+      if (P.back.length > 0 && !returning(P)) {
+        P.back = [];
+        host.save(P);
+      }
       const mine = own(P);
       if (now - mine.at >= RESIGN_INTERVAL_MS / 1000 || mine.maxAcceptedH !== hoursOf(host.settings().maximumAcceptedH)) {
         host.take(P, signMember(P));
@@ -693,7 +710,7 @@ export function createGossip(host) {
 
   return {
     link, unlink, forget, tell, noPool, farewell, invited, send, syncWith, woke, spread, deliver, start, stop, step, invite, join,
-    unseated,
+    unseated, returning,
     handlers,
   };
 }

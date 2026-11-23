@@ -66,7 +66,7 @@ export function createNode({
   const host = {
     id, self: id.pk, store, transport, clock, random, log, requester, executor, settings, solve, keys,
     now: () => clock.now(),
-    pools: new Map(), // pool id -> { id, link, pool, locks, seq, joining, invites, farewell, stale, epoch, catching, head }
+    pools: new Map(), // pool id -> { id, link, pool, locks, seq, joining, invites, farewell, back, stale, epoch, catching, head }
     away: new Map(), // pool id -> the link of a pool that is linked and that this host left
     // pool id -> the locks of a pool this host is not in now: one read from the store and
     // not linked yet, or one it left.
@@ -76,7 +76,7 @@ export function createNode({
       toJSON: () => ({ ...host.heldLocks, ...Object.fromEntries([...host.pools.values()].map((P) => [P.id, P.locks.entries()])) }),
     }),
     /// What a pool's document holds beside its records and this host's sequence number.
-    head: (P) => JSON.stringify([P.joining, P.joinFailed, P.invites, P.farewell]),
+    head: (P) => JSON.stringify([P.joining, P.joinFailed, P.invites, P.farewell, P.back]),
     /// Has what a pool's document holds written: the records that changed since it was
     /// last asked, as a line, while nothing else in the document did.
     save: (P) => {
@@ -87,7 +87,7 @@ export function createNode({
       P.head = head;
       store.write(poolFile(P.id), {
         toJSON: () => ({
-          id: P.id, linked: true, seq: P.seq, joining: P.joining, joinFailed: P.joinFailed, invites: P.invites, ...P.farewell,
+          id: P.id, linked: true, seq: P.seq, joining: P.joining, joinFailed: P.joinFailed, invites: P.invites, back: P.back, ...P.farewell,
           records: P.pool.records(),
         }),
       }, { line: same ? { seq: P.seq, put, drop } : undefined });
@@ -236,7 +236,7 @@ export function createNode({
     };
     return {
       id: P.id, path: P.link.path ?? '', identity: P.link.identity ?? '', hash: P.pool.stateHash(now), left: false,
-      joining: P.joining !== null, joinFailed: P.joinFailed, unseated: host.gossip.unseated(P),
+      joining: P.joining !== null, joinFailed: P.joinFailed, unseated: host.gossip.unseated(P), returning: host.gossip.returning(P),
       members: members.map((m) => ({
         pk: m.pk, self: m.pk === host.self, maxAcceptedH: m.maxAcceptedH,
         ...(m.pk === host.self
@@ -383,7 +383,7 @@ export function createNode({
         pools: [
           ...[...host.pools.values()].map((P) => poolRow(P, now)),
           ...[...host.away.values()].map((info) => ({
-            id: info.id, path: info.path ?? '', identity: info.identity ?? '', hash: '', left: true, joining: false, joinFailed: '', unseated: false,
+            id: info.id, path: info.path ?? '', identity: info.identity ?? '', hash: '', left: true, joining: false, joinFailed: '', unseated: false, returning: false,
             members: [], tasks: [],
           })),
         ],

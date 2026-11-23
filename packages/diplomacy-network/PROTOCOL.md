@@ -285,8 +285,12 @@ Two versions with the same precedence are ordered by `H(canon(record))`, lower w
 ```
 
 Every record carries `at`, the time that version was signed. A record dated more than
-300 s past the receiver's clock is refused until its time comes. A host signs each
-version of a record of its own with an `at` no earlier than the version before.
+300 s past the receiver's clock is refused until its time comes. A host dates each
+version of a record of its own by its clock, and no earlier than what the version rests
+on: a member record no earlier than its voucher, an offer no earlier than its
+`createdAt`, a claim no earlier than its `claimedAt`. A version may so be dated earlier
+than the one before it - its signer's clock was set back in between - and takes that
+one's place all the same: which of two versions holds is no matter of `at`.
 `offer.state` is `open`, `cancelled` or `done`; `createdAt` is when the host began to
 offer the task and stays the same through every version until the offer ends. An offer
 never carries the prompt. A member that started its pool has no `voucher`; `era` and the
@@ -444,7 +448,12 @@ maker, and joining under it would close the chain.
 
 A member that left was put out by nobody, and comes back as the member it was: it signs
 its record again - a higher `seq`, the voucher it holds, no `left` - and greets the
-members it knew. A member record is held for 30 days after it was signed, and for as
+members it knew. One that holds no member's record but its own by then - the first
+member of the pool, back after more than 30 days: the others' records ran out in its
+store, and no voucher of its own leads to one - greets the keys of the members it left
+instead, as often as a host asks a member that does not answer, until one of them has
+answered and it holds that one's record. They hold its record still, the first of the
+chain their vouchers lead up, and take the version it signs now. A member record is held for 30 days after it was signed, and for as
 long after that as the voucher of a record that is held was signed by its key. A host's
 own record is the exception in its own store: it holds that, and so the era and the
 voucher of its membership, whatever its age. A host that stayed away longer than 30
@@ -456,7 +465,8 @@ while, and are when it is back.
 
 A host that every other host it knows of in a pool has refused - its seat was given
 away, the member that gave it began another membership, or a move of the members above
-it left it more than two vouchers from the first - holds a seat in its own state alone.
+it left it more than two vouchers from the first - holds a seat in its own state alone;
+so does one that is back in a pool and refused by every key it left there.
 It learns of it by those refusals and nothing else, and gets in again by an invite.
 
 A member record of any other form - one with a `joinedAt`, without an `era`, or with an
@@ -580,7 +590,9 @@ keeps the `left` record, and the keys of the members it left, for as long as it 
 member again: one of those keys that asks it about the pool has not heard, and is pushed
 that record, at most once in 10 minutes. Nobody else is sent anything. A host dials,
 pushes to and solves a proof of work for only the keys a pool's own records name as its
-members; a key it knows from a request alone it answers and nothing more. A host that
+members, and for the keys of the members it left while it is back in that pool with no
+record of another member; a key it knows from a request alone it answers and nothing
+more. A host that
 stops taking part without leaving - its network is switched off - cancels its open
 offers and gives its claims back the same way, pushes that once, and stays a member for
 as long as its record is fresh.
@@ -1140,6 +1152,11 @@ Nothing in a record hides any of this.
   theirs leads to that membership, and go on as the pool they were, under the record it
   signed last in the old one. It is a pool of one, and each of them that is to be with it
   joins it by invite.
+- **The first member, back after more than 30 days, asks keys that may be nobody's.** It
+  greets the keys of the members it left, each no more often than once in 10 minutes,
+  for as long as none of them has answered: a pool whose other members are all gone
+  costs it those requests for as long as it stays linked, and it is a pool of one
+  meanwhile.
 - **Nothing puts a member out, and no key is ever changed.** There is no request and no
   command that removes a member another member seated: a host gives a seat to another
   key only once its holder left or went a day without signing. A member that misbehaves
