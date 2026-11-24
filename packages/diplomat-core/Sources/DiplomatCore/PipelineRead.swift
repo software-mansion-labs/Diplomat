@@ -9,6 +9,7 @@ struct PipelineEntry {
         var requiredChecks: [String]? = []
         var passedChecks: Set<String> = []
         var baseRules: [String]? = []
+        var behindBy: Int?
         var unsignedCommits = false
         /// The `gh pr merge` flags every pull request rule on its base branch allows.
         var mergeFlags = PipelineRead.mergeFlags.map(\.flag)
@@ -442,6 +443,7 @@ enum PipelineRead {
         }
         g.requiredChecks = requiredChecks(n["baseRef"] as? [String: Any])
         g.baseRules = baseRules(n["baseRef"] as? [String: Any])
+        g.behindBy = ((n["baseRef"] as? [String: Any])?["compare"] as? [String: Any])?["behindBy"] as? Int
         for r in nodes(n["baseRef"] as? [String: Any], "rules") where r["type"] as? String == "PULL_REQUEST" {
             let allowed = (r["parameters"] as? [String: Any])?["allowedMergeMethods"] as? [String] ?? []
             g.mergeFlags = g.mergeFlags.filter { flag in mergeFlags.contains { $0.flag == flag && allowed.contains($0.method) } }

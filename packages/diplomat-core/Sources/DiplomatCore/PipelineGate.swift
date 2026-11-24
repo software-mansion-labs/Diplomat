@@ -166,6 +166,8 @@ public enum PipelineGate {
         public var wasReady: Bool
         /// GitHub's `mergeStateStatus`.
         public var mergeState: String
+        /// The commits its base branch has that its head lacks; nil when unread.
+        public var behindBy: Int?
         /// Its base branch has a merge queue, which `--admin` would skip.
         public var mergeQueue: Bool
         /// The `stopLabels` it carries.
@@ -190,7 +192,7 @@ public enum PipelineGate {
                     ciState: String, operatorUntagged: Bool = false, reviewRequests: Int = 0,
                     foreignCommits: [String] = [], trackLabels: Bool = true, fixesCandidate: Bool = true,
                     closesUnwritable: [String] = [], ciRan: Bool = true, wasReady: Bool = false,
-                    mergeState: String = "CLEAN", mergeQueue: Bool = false, stopLabels: [String] = [],
+                    mergeState: String = "CLEAN", behindBy: Int? = 0, mergeQueue: Bool = false, stopLabels: [String] = [],
                     requiredChecks: [String]? = [], passedChecks: Set<String> = [], baseRules: [String]? = [],
                     unsignedCommits: Bool = false, mergeFlag: String = "--squash") {
             self.state = state
@@ -217,6 +219,7 @@ public enum PipelineGate {
             self.ciRan = ciRan
             self.wasReady = wasReady
             self.mergeState = mergeState
+            self.behindBy = behindBy
             self.mergeQueue = mergeQueue
             self.stopLabels = stopLabels
             self.requiredChecks = requiredChecks
@@ -253,6 +256,7 @@ public enum PipelineGate {
         case conflicting
         case mergeabilityUnknown
         case behind
+        case uncompared
         case ciStale
         case ciPending
         case ciFailing(String)
@@ -291,6 +295,7 @@ public enum PipelineGate {
             case .conflicting: return "conflicting"
             case .mergeabilityUnknown: return "mergeability-unknown"
             case .behind: return "behind"
+            case .uncompared: return "uncompared"
             case .ciStale: return "ci-stale"
             case .ciPending: return "ci-pending"
             case .ciFailing: return "ci-failing"
@@ -334,6 +339,7 @@ public enum PipelineGate {
             case .conflicting: return "conflicts with its base"
             case .mergeabilityUnknown: return "mergeability not computed yet"
             case .behind: return "is behind its base branch"
+            case .uncompared: return "could not be compared with its base branch"
             case .ciStale: return "CI was read for an older commit"
             case .ciPending: return "CI still running"
             case .ciFailing(let state): return "CI \(state.lowercased())"
@@ -380,8 +386,10 @@ public enum PipelineGate {
         if !c.floor.isFastTrack { return .floor(c.floor) }
         if c.mergeable == "CONFLICTING" { return .conflicting }
         if c.mergeable != "MERGEABLE" || ["", "UNKNOWN"].contains(c.mergeState) { return .mergeabilityUnknown }
-        // `--admin` merges a PR behind its base without testing it against the base.
-        if c.mergeState == "BEHIND" { return .behind }
+        // `--admin` merges a PR behind its base without testing it against the base; GitHub
+        // says BEHIND only of a base that requires branches to be up to date.
+        if c.mergeState == "BEHIND" || c.behindBy ?? 0 > 0 { return .behind }
+        if c.behindBy == nil { return .uncompared }
         if c.ciCommit != c.headSha { return .ciStale }
         switch c.ciState {
         case "SUCCESS", "": break

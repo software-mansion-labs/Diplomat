@@ -1751,7 +1751,7 @@ final class PipelineSync {
             foreignCommits: e.gate?.foreignCommits ?? [],
             trackLabels: has(e, model.labels.fastTrack) && has(e, model.labels.cleared),
             fixesCandidate: fixes, closesUnwritable: unjudged, ciRan: e.gate?.ciRan ?? true,
-            wasReady: e.readied, mergeState: e.mergeState, mergeQueue: e.mergeQueue,
+            wasReady: e.readied, mergeState: e.mergeState, behindBy: e.gate.map(\.behindBy) ?? 0, mergeQueue: e.mergeQueue,
             stopLabels: stops(e),
             requiredChecks: e.gate.map(\.requiredChecks) ?? [], passedChecks: e.gate?.passedChecks ?? [],
             baseRules: e.gate.map(\.baseRules) ?? [], unsignedCommits: e.gate?.unsignedCommits ?? false,
@@ -1769,7 +1769,7 @@ final class PipelineSync {
     /// when it could not be read whole.
     func reread(_ e: PipelineEntry, _ outcome: String = "was not merged") -> PipelineEntry? {
         guard let root = e.root, let n = e.number else { return nil }
-        let r = graphql(root, "PullRequest", ["-F", "number=\(n)"])
+        let r = graphql(root, "PullRequest", ["-F", "number=\(n)", "-f", "head=\(e.item.headSha ?? "")"])
         guard let response = r.response, r.errors.isEmpty,
               var fresh = PipelineRead.pullRequest(response, root: root, label: e.item.label,
                                                    roots: roots, model: model)

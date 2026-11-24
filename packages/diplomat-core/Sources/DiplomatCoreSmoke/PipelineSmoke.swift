@@ -98,6 +98,8 @@ private final class Trackers {
         /// `mergeStateStatus` and `isMergeQueueEnabled`; nil leaves the field out.
         var mergeState: String? = "CLEAN"
         var mergeQueue: Bool? = false
+        /// The commits its base has that its head lacks; nil: GitHub could not compare them.
+        var behind: Int? = 0
         var assignees: [String] = []
         var decision: String?
         /// The commit CI was read for, when the index lags behind the head.
@@ -333,6 +335,7 @@ private final class Trackers {
             case "PullRequest"?:
                 guard let n = args.first(where: { $0.hasPrefix("number=") }).flatMap({ Int($0.dropFirst(7)) }),
                       args.contains("-F") else { return failed("Variable $number was not provided") }
+                guard field("head") != nil else { return failed("Variable $head was not provided") }
                 onReread?(n)
                 guard let p = prs.first(where: { $0.number == n }) else { return failed("Could not resolve") }
                 repository = ["defaultBranchRef": ["name": "main"], "pullRequest": prNode(p, gate: true)]
@@ -559,6 +562,7 @@ private final class Trackers {
                       "requiresLinearHistory"] { rule[field] = protection[field] ?? false }
         let ruled = requiredByAdminRule != nil || requiredByRule != nil || !protection.isEmpty
         n["baseRef"] = baseUnread ? NSNull() as Any : [
+            "compare": p.behind.map { ["behindBy": $0] as Any } ?? NSNull(),
             "branchProtectionRule": ruled && !notAdmin ? rule as Any : NSNull(),
             "refUpdateRule": ruled ? ["requiredStatusCheckContexts": requiredByRule ?? []] as Any : NSNull(),
             "rules": ["totalCount": ruleNodes.count + (rulesPast ? 1 : 0), "nodes": ruleNodes] as [String: Any],
@@ -2737,6 +2741,22 @@ private func pipelineGatePass1(base: URL, root: PipelineSettings.Root, team: Pip
     let creators = try CoreAssets.graphql("linear").components(separatedBy: "creator {").dropFirst()
     check(!creators.isEmpty && creators.allSatisfy { $0.prefix { $0 != "}" }.contains("displayName") },
           "every Linear issue read asks for its creator's display name")
+
+    // GitHub says BEHIND only of a base that requires branches to be up to date.
+    let behind: [(String, String, Int?, String)] = [
+        ("behind", "CLEAN", 2, "is behind its base branch"),
+        ("behind-blocked", "BLOCKED", 2, "is behind its base branch"),
+        ("uncompared", "CLEAN", nil, "could not be compared with its base branch"),
+    ]
+    for (name, state, commits, hold) in behind {
+        let t = only([13, 27])
+        t.prs[0].mergeState = state
+        t.prs[0].behind = commits
+        try seedRerate(dir(name), 13, sha("c3"), at: t0.addingTimeInterval(-3600))
+        let s = sync(t, PipelineSettings(roots: [root], merge: true), dir(name), t0)
+        check(!merged(s) && stageOf(s.result, prURL(13)) == "cleared/fast (\(hold))",
+              "#13 \(state), \(commits.map(String.init) ?? "not compared") behind its base: \(s.writes) \(stageOf(s.result, prURL(13)))")
+    }
 }
 
 /// What a sync does when what it read leaves a doubt: it holds, or leaves the item be.
