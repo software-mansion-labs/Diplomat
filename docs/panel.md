@@ -134,4 +134,5 @@ keeps listing what it finds (reading *queued · monitor off*), but nothing start
 itself - only *execute now* does, or a [Comms](comms.md) ping that asked for that work. So the toggles decide who starts the work, not
 whether you get to see it, and turning both off does not stop the 3-minute GitHub
 poll. **Auto-execute queue** holds every kind at once, the reviews you asked for
-included - which is the one thing no monitor toggle speaks for.
+included - which is the one thing no monitor toggle speaks for. The
+[Pipeline](pipeline.md) holds its own asks on two more.

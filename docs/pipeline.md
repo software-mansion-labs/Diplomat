@@ -21,7 +21,8 @@ Every five minutes while it is on, a **sync**:
 
 Labels, child issues and the merge are done by the sync itself, in code. The fix and review runs are
 agents, queued like a sweep's asks: behind the [task cap](automation.md#autonomous-monitors), the
-[spending budget](automation.md#the-spending-budget) and the disk floor, each asked for once (a review
+[spending budget](automation.md#the-spending-budget) and the disk floor, and held while the ban list cannot be
+read and, after a launch or the pipeline going on, until a sync since has judged their item; each asked for once (a review
 once per head), retried on the monitors' backoff when a run dies, and taken off the queue when a later
 sync no longer owes it - one you started with Start fix only once a sync that read its repo in full
 finds its issue held or no candidate; any other by a sync that could not read its repo in full only
@@ -450,7 +451,7 @@ the app quits.
   merged or closed PRs updated last, with the closed issues of the repo they link to.
 - Linear: the 300 open issues of the tracked teams updated last, and each one's first 10 attachments
   (more holds it).
-- Past either cap a notice says so. An item an ask waits on that these reads miss (closed, archived
+- Past either cap a notice says so. An item an ask or attempt record names that these reads miss (closed, archived
   on Linear, or past a cap) is read by itself. A source that cannot be read, or is read only in part, is a
   notice, and the sync goes on without what it missed: a root read past its cap fixes and splits
   none of its issues, one read with errors, or whose Linear team was not read, is only read and
