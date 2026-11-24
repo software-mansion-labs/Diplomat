@@ -1287,11 +1287,16 @@ final class PipelineSync {
             let e = entries[i]
             guard own(e), open(e), has(e, model.labels.fastTrack), has(e, model.labels.cleared),
                   partial[e.item.repo] == nil, let head = e.item.headSha, e.item.cleanAt != head,
-                  offTrack(e) == nil, recheck(i), takeOff(i, model.labels.cleared, .fastTrack) == true else { continue }
+                  offTrack(e) == nil, recheck(i) else { continue }
+            let off = takeOff(i, model.labels.cleared, .fastTrack)
+            guard off != false else { continue }
+            // Also when gh failed: GitHub may have taken it off all the same.
             state.cleared[e.id] = nil
-            log(e.id, .labelled, "-\(model.labels.cleared): " + (e.item.cleanAt == nil
-                ? "no clean marker names its head \(head.prefix(7))"
-                : "the head moved to \(head.prefix(7)), past its clean marker"))
+            if off == true {
+                log(e.id, .labelled, "-\(model.labels.cleared): " + (e.item.cleanAt == nil
+                    ? "no clean marker names its head \(head.prefix(7))"
+                    : "the head moved to \(head.prefix(7)), past its clean marker"))
+            }
             persist()
         }
     }

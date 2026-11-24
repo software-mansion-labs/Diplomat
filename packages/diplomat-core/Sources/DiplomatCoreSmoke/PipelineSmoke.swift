@@ -4811,8 +4811,8 @@ private func pipelinePins10(base: URL, root: PipelineSettings.Root, team: Pipeli
     }
 }
 
-/// A first rating's labels against a push meanwhile and a write lost part-way, and the fast
-/// track against what no read judged.
+/// A first rating's labels against a push meanwhile and a write lost part-way, `cleared`
+/// against a removal gh lost, and the fast track against what no read judged.
 private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
                                  t0: Date) throws {
     section("pipeline rating pass 1")
@@ -4872,4 +4872,21 @@ private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: P
                 + "which Diplomat did not read or may not write to)",
               "fast-tracked, closing acme/lib#40, clean \(marked): \(s.claude) \(s.writes) \(stageOf(s.result, prURL(14)))")
     }
+
+    // `cleared` the sync took off, though gh answered a failure, is no person's opt-out.
+    let lost = only([15, 25])
+    try FileManager.default.createDirectory(at: dir("cleared-lost"), withIntermediateDirectories: true)
+    try Data(#"{"cleared": {"\#(prURL(15))": "\#(sha("e0"))"}}"#.utf8)
+        .write(to: dir("cleared-lost").appendingPathComponent("state.json"))
+    let ftOn = PipelineSettings(roots: [root], fastTrack: true)
+    var lossy = lost.io()
+    lossy.gh = { args in
+        let out = lost.gh(args)
+        return args.starts(with: ["api", "-X", "DELETE"]) ? .init(status: 1, stderr: "gh: net/http: timeout\n") : out
+    }
+    _ = PipelineTick.run(settings: ftOn, now: t0, dir: dir("cleared-lost"), io: lossy)
+    let cl = sync(lost, ftOn, dir("cleared-lost"), later(5))
+    check(lost.writes.first == "-diplomat:cleared #15" && cl.writes.isEmpty
+          && stageOf(cl.result, prURL(15)) == "fast-track/fast" && cl.result.effects == [reviewFX(15, sha("e5"))],
+          "cleared taken off, gh failing: \(lost.writes) \(stageOf(cl.result, prURL(15)))")
 }
