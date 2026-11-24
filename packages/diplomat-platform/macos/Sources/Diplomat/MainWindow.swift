@@ -145,12 +145,22 @@ struct MainRoot: View {
                 }
             }
         }
+        .scrollAnchoredTopLeading()
     }
 
     private var panel: ContentView {
         ContentView(showSettings: screen == .settings, showTelemetry: screen == .telemetry,
                     showDevices: screen == .devices, showMachines: screen == .machines,
                     showComms: screen == .comms, showPipeline: screen == .pipeline)
+    }
+}
+
+private extension View {
+    /// Built for macOS 13, SwiftUI opens the window's scroll views, the Pipeline graph's
+    /// among them, on the middle of their content. The anchor reaches every one below it.
+    @ViewBuilder
+    func scrollAnchoredTopLeading() -> some View {
+        if #available(macOS 14, *) { defaultScrollAnchor(.topLeading) } else { self }
     }
 }
 
