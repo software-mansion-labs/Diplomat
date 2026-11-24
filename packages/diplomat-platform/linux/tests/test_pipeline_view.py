@@ -677,19 +677,44 @@ def test_start_fix_is_off_once_a_fracture_is_asked(store, monkeypatch):
     assert not view.buttons["fix"].isEnabled()
 
 
-def test_rate_now_and_fracture_are_off_for_a_banned_authors_text(store):
-    """A sync neither rates nor splits it."""
+def test_rate_now_and_fracture_are_off_where_the_last_sync_would_refuse_them(store):
+    """Each with the reason it gave."""
+    split = "it is tracked on GitHub as o/r#24"
+    part = "split from an issue whose author could not be read"
+    stop = "it carries the label wip"
     result = _result()
-    result["items"][4] = {**result["items"][4], "author": "Mallory"}
-    result["items"][5] = {**result["items"][5], "author": "me", "splitFrom": "mallory"}
+    result["items"][1] = {**result["items"][1], "rateRefused": stop}
+    result["items"][4] = {**result["items"][4], "stage": "human", "lane": "human",
+                          "hold": split, "fractureRefused": split}
+    result["items"][5] = {**result["items"][5], "hold": part, "rateRefused": part,
+                          "fractureRefused": part}
     store.pipeline_result = result
+    view = PipelineView(store)
+
+    def shown(*keys: str) -> list[tuple[bool, str]]:
+        return [(view.buttons[k].isEnabled(), _tip(view.buttons[k])) for k in keys]
+
+    view.select(I5)
+    assert shown("rate", "fracture") == [
+        (True, "Rate it in a sync started now, ahead of every limit"), (False, split)]
+    view.select(I6)
+    assert shown("rate", "fracture") == [(False, part), (False, part)]
+    view.select(P2)
+    assert shown("rate") == [(False, stop)]
+
+
+def test_no_hold_ban_or_root_read_in_part_turns_rate_now_or_fracture_off_by_itself(store):
+    """The last sync says which of them it refuses on."""
+    result = _result()
+    result["items"][4] = {**result["items"][4], "stage": "human", "lane": "human",
+                          "hold": "carries the label wip", "author": "mallory"}
+    result["items"][5] = {**result["items"][5], "hold": "triaged as enhancement"}
+    store.pipeline_result = {**result, "unread": ["O/R"]}
     store.banned_authors = [bans.BannedAuthor("mallory", "prompt injection")]
     view = PipelineView(store)
-    for item, who in ((I5, "Mallory"), (I6, "mallory")):
+    for item in (I5, I6):
         view.select(item)
-        held = (False, f"@{who} is on the prompt-injection ban list")
-        assert [(view.buttons[k].isEnabled(), _tip(view.buttons[k]))
-                for k in ("rate", "fracture")] == [held, held]
+        assert [view.buttons[k].isEnabled() for k in ("rate", "fracture")] == [True, True]
 
 
 def test_start_fix_is_off_for_a_banned_authors_text(store):
@@ -705,8 +730,11 @@ def test_start_fix_is_off_for_a_banned_authors_text(store):
 
 
 def test_rate_now_fracture_and_start_fix_are_off_while_the_ban_list_cannot_be_read(store):
-    """A sync then holds every item."""
-    store.pipeline_result = _result()
+    """A sync then holds every item, whatever the last one refused it for."""
+    result = _result()
+    result["items"][4] = {**result["items"][4], "rateRefused": "it carries the label wip",
+                          "fractureRefused": "it carries the label wip"}
+    store.pipeline_result = result
     bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
     bans.banned_path().write_text("{", encoding="utf-8")
     store.refresh_activity()
@@ -719,29 +747,19 @@ def test_rate_now_fracture_and_start_fix_are_off_while_the_ban_list_cannot_be_re
 
 def test_tracker_text_in_an_actions_tooltip_is_never_read_as_markup(store):
     """Labels and names are anyone's text."""
+    triaged = "triaged as enhancement: <b>urgent</b>"
+    banned = "@<i>m</i> is on the prompt-injection ban list"
     result = _result()
-    result["items"][4] = {**result["items"][4], "hold": "triaged as enhancement: <b>urgent</b>"}
-    result["items"][5] = {**result["items"][5], "author": "<i>m</i>"}
+    result["items"][4] = {**result["items"][4], "hold": triaged, "fractureRefused": triaged,
+                          "author": "<i>m</i>"}
+    result["items"][5] = {**result["items"][5], "rateRefused": banned}
     store.pipeline_result = result
     store.banned_authors = [bans.BannedAuthor("<i>m</i>", "prompt injection")]
     view = PipelineView(store)
     view.select(I5)
-    assert [_tip(view.buttons[k]) for k in ("fracture", "fix")] == [
-        "No sync splits an issue triaged as enhancement: <b>urgent</b>",
-        "triaged as enhancement: <b>urgent</b>"]
+    assert [_tip(view.buttons[k]) for k in ("fracture", "fix")] == [triaged, banned]
     view.select(I6)
-    assert [_tip(view.buttons[k]) for k in ("rate", "fracture")] == [
-        "@<i>m</i> is on the prompt-injection ban list"] * 2
-
-
-def test_rate_now_and_fracture_are_off_in_a_root_the_last_sync_did_not_read_all_of(store):
-    """A sync may refuse them there."""
-    store.pipeline_result = {**_result(), "unread": ["O/R"]}
-    view = PipelineView(store)
-    view.select(I5)
-    held = (False, "The last sync did not read all of O/R")
-    assert [(view.buttons[k].isEnabled(), _tip(view.buttons[k]))
-            for k in ("rate", "fracture")] == [held, held]
+    assert _tip(view.buttons["rate"]) == banned
 
 
 def test_a_sync_that_read_no_item_says_what_it_did_not_read(store, monkeypatch):
@@ -777,43 +795,10 @@ def test_a_change_to_the_ban_list_redraws_the_actions(store, monkeypatch):
     assert on() == [True, True, True]
     listed.append(bans.BannedAuthor("mallory", "prompt injection"))
     store.refresh_activity()
-    assert on() == [False, False, False]
+    assert on() == [True, True, False]
     listed.clear()
     store.refresh_activity()
     assert on() == [True, True, True]
-
-
-def test_fracture_is_off_for_an_issue_held_as_triaged(store):
-    """A sync never splits it; Rate now still rates it."""
-    result = _result()
-    result["items"][4] = {**result["items"][4], "stage": "human", "lane": "human",
-                          "hold": "triaged as enhancement"}
-    store.pipeline_result = result
-    view = PipelineView(store)
-    view.select(I5)
-    fracture = view.buttons["fracture"]
-    assert (fracture.isEnabled(), _tip(fracture)) == (
-        False, "No sync splits an issue triaged as enhancement")
-    assert view.buttons["rate"].isEnabled()
-    assert pipelineview.fracture_refused({"hold": "an open PR fixes it"}) is None
-
-
-def test_rate_now_and_fracture_are_off_for_an_item_held_for_a_stop_label(store):
-    result = _result()
-    result["items"][4] = {**result["items"][4], "hold": "carries the label wip"}
-    result["items"][1] = {**result["items"][1], "hold": "carries the label wip"}
-    rated = (False, "No sync rates an item that carries the label wip")
-    # Read in part, and read whole: the label alone turns Rate now off.
-    for unread in (["o/r"], []):
-        store.pipeline_result = {**result, "unread": unread}
-        view = PipelineView(store)
-        view.select(I5)
-        assert [(view.buttons[k].isEnabled(), _tip(view.buttons[k]))
-                for k in ("rate", "fracture")] == [
-            rated, (False, "No sync splits an issue that carries the label wip")]
-        view.select(P2)
-        assert (view.buttons["rate"].isEnabled(), _tip(view.buttons["rate"])) == rated
-    assert pipelineview.rate_refused({"hold": "triaged as enhancement"}) is None
 
 
 def test_rate_now_is_on_the_prs_of_ghs_account_not_the_settings_username(store):

@@ -4982,13 +4982,20 @@ class Store(QObject):
             return str(item["hold"])
         return "Diplomat has this Linear issue's text only while Open fix PRs is on"
 
+    def pipeline_ban_unread(self) -> str | None:
+        """Why, by the ban list as it reads now, a sync would rate and split nothing: it
+        cannot be read; None while it can. Twin of ``Store.pipelineBanUnread``."""
+        return ("The prompt-injection ban list could not be read" if self.ban_list_unreadable
+                else None)
+
     def pipeline_ban(self, item: dict) -> str | None:
-        """Why a sync neither rates nor splits ``item``, nor the queue runs its fix, by
-        the ban list: it cannot be read, or names who wrote the text ``item`` carries
+        """Why the queue would not run ``item``'s fix, by the ban list:
+        :meth:`pipeline_ban_unread`, or it names who wrote the text ``item`` carries
         (``splitFrom``, else its author); None for neither. Twin of
         ``Store.pipelineBan``."""
-        if self.ban_list_unreadable:
-            return "The prompt-injection ban list could not be read"
+        unread = self.pipeline_ban_unread()
+        if unread:
+            return unread
         who = str(item.get("splitFrom") or item.get("author") or "")
         return (f"@{who} is on the prompt-injection ban list"
                 if who and bans.is_banned(who, self.banned_authors) else None)
@@ -5002,17 +5009,6 @@ class Store(QObject):
         slugs = {f"{r.owner}/{r.repo}".lower() for r in review.repo_roots() if not r.is_gitlab}
         key = str(item.get("repo") or "").lower()
         return any(t["key"].lower() == key and t["repo"].lower() in slugs for t in teams)
-
-    def pipeline_unread(self, item: dict) -> str | None:
-        """``item``'s root as the last sync's ``unread`` names it, a Linear issue's its
-        team's: one it did not read all of, whose items a sync may refuse to rate or
-        split; None for one it did. Twin of ``Store.pipelineUnread``."""
-        root = str(item.get("repo") or "")
-        if item.get("source") == "linear":
-            teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
-            root = next((t["repo"] for t in teams if t["key"] == root.upper()), "")
-        return next((r for r in (self.pipeline_result or {}).get("unread") or []
-                     if root and r.lower() == root.lower()), None)
 
     def pipeline_start_fix(self, item: dict) -> str | None:
         """The screen's "Start fix" for a candidate issue, as the last sync left it: its

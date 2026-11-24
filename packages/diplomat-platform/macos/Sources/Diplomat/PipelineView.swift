@@ -182,22 +182,6 @@ struct PipelineView: View {
             && !edges.contains { $0.kind == .child && $0.from == item.id }
     }
 
-    /// Why a sync would refuse a split `canFracture` offers: the hold triage or a stop label
-    /// put on it. Twin of `pipelineview.fracture_refused`.
-    static func fractureRefused(_ item: PipelineItem) -> String? {
-        guard let hold = item.hold else { return nil }
-        if hold.hasPrefix("triaged as ") { return "No sync splits an issue \(hold)" }
-        if hold.hasPrefix("carries the label ") { return "No sync splits an issue that \(hold)" }
-        return nil
-    }
-
-    /// Why a sync would refuse a rating `canRate` offers: the hold a stop label put on it.
-    /// Twin of `pipelineview.rate_refused`.
-    static func rateRefused(_ item: PipelineItem) -> String? {
-        guard let hold = item.hold, hold.hasPrefix("carries the label ") else { return nil }
-        return "No sync rates an item that \(hold)"
-    }
-
     /// An open item a sync rates when asked: a PR only when it is `me`'s, an issue only
     /// when its code can be read (`rooted`). Twin of `pipelineview.can_rate`.
     static func canRate(_ item: PipelineItem, me: String, rooted: Bool) -> Bool {
@@ -283,7 +267,7 @@ struct PipelineView: View {
                            forcedRate: store.pipelineForce.rate.contains(id),
                            forcedFracture: store.pipelineForce.fracture.contains(id),
                            ban: store.pipelineBan(item),
-                           unread: store.pipelineUnread(item),
+                           banUnread: store.pipelineBanUnread,
                            canRate: store.pipelineCanRate(item),
                            canFracture: PipelineView.canFracture(item, edges: result.graph.edges,
                                                                  rooted: rooted),
@@ -574,12 +558,11 @@ struct PipelineDetail: View {
     let enabled: Bool
     let forcedRate: Bool
     let forcedFracture: Bool
-    /// Why, by the ban list, a sync would refuse to rate or split it, the queue to run its
-    /// fix (`Store.pipelineBan`).
+    /// Why, by the ban list, the queue would refuse to run its fix (`Store.pipelineBan`).
     let ban: String?
-    /// Its root, which the last sync did not read all of (`Store.pipelineUnread`): a sync
-    /// may refuse to rate or split it.
-    let unread: String?
+    /// Why, by the ban list as it reads now, a sync would rate and split nothing
+    /// (`Store.pipelineBanUnread`).
+    let banUnread: String?
     let canRate: Bool
     let canFracture: Bool
     /// The fix effect is known: a Linear issue's text comes only with a sync's.
@@ -688,17 +671,13 @@ struct PipelineDetail: View {
             : "head \(short) · clean at \(clean.prefix(7)), an older head"
     }
 
-    private var refused: String? { PipelineView.fractureRefused(item) }
-    private var stopped: String? { PipelineView.rateRefused(item) }
-    private var partly: String? { unread.map { "The last sync did not read all of \($0)" } }
-
-    var rateEnabled: Bool { enabled && !forcedRate && ban == nil && stopped == nil && unread == nil }
-    var rateTip: String { ban ?? stopped ?? partly ?? "Rate it in a sync started now, ahead of every limit" }
+    var rateEnabled: Bool { enabled && !forcedRate && banUnread == nil && item.rateRefused == nil }
+    var rateTip: String { banUnread ?? item.rateRefused ?? "Rate it in a sync started now, ahead of every limit" }
     var fractureEnabled: Bool {
-        enabled && !forcedFracture && badge == nil && ban == nil && refused == nil && unread == nil
+        enabled && !forcedFracture && badge == nil && banUnread == nil && item.fractureRefused == nil
     }
     var fractureTip: String {
-        ban ?? refused ?? partly ?? "Split it into low-complexity child issues in a sync started now"
+        banUnread ?? item.fractureRefused ?? "Split it into low-complexity child issues in a sync started now"
     }
     var fixEnabled: Bool { enabled && canStartFix && badge == nil && !forcedFracture && ban == nil }
     var fixTip: String { ban ?? (canStartFix ? "Queue its fix now, past its retry backoff" : fixUnknown) }
