@@ -1337,13 +1337,19 @@ enum PipelineTest {
                                          .init(id: lone.id, column: 0, row: 1)],
                                  edges: [.init(from: issue, to: pr, kind: .fixes)]))
         let older = "https://github.com/o/r/issues/10", newer = "https://github.com/o/r/issues/9"
+        let fixer = "https://github.com/o/r/pull/11", child = "https://github.com/o/r/issues/12"
         let rows = PipelineLayout.make(PipelineTickResult(
-            at: Date(), items: [item(older, .issue, author: "bob"), item(newer, .issue, author: "bob")],
-            graph: PipelineGraph(nodes: [.init(id: newer, column: 0, row: 0), .init(id: older, column: 0, row: 1)],
-                                 edges: [])),
+            at: Date(), items: [older, newer, fixer, child].map { item($0, .issue, author: "bob") },
+            graph: PipelineGraph(nodes: [.init(id: newer, column: 0, row: 0), .init(id: older, column: 0, row: 1),
+                                         .init(id: fixer, column: 1, row: 1), .init(id: child, column: 1, row: 2)],
+                                 edges: [.init(from: older, to: fixer, kind: .fixes),
+                                         .init(from: older, to: child, kind: .child)])),
                                        lane: nil).cards
-        check("groups stack in the core's row order, not by id",
-              rows.map(\.item.id) == [newer, older] && rows[0].frame.minY < rows[1].frame.minY)
+        let frames: [CGRect] = [(6, 6), (6, 120), (216, 120), (216, 222)].map {
+            CGRect(x: $0.0, y: $0.1, width: 170, height: 88)
+        }
+        check("groups stack in the core's row order, not by id, each right under the last",
+              rows.map(\.item.id) == [newer, older, fixer, child] && rows.map(\.frame) == frames)
         check("a lane keeps each group with any member in it, whole",
               Set(PipelineLayout.make(laneResult, lane: .done).cards.map(\.item.id)) == [issue, pr])
         var eng = items[2]
