@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import DiplomatCore
 
@@ -94,6 +95,15 @@ extension Store {
 
     /// Never stopped: a sync with the master switch off returns at once.
     func startPipelineMonitor() {
+        // The loop's sleep pauses while the Mac sleeps; a sync on wake catches up at once.
+        // Headless too, where a sync runs only the self-test's stand-ins.
+        if pipelineWakeObserver == nil {
+            pipelineWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { await self?.runPipelineSyncOnce() }
+            }
+        }
         guard pipelineMonitorTask == nil, !Headless.active else { return }
         pipelineMonitorTask = Task { [weak self] in
             while !Task.isCancelled {

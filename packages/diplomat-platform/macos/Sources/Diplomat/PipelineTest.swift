@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import DiplomatCore
 
@@ -585,6 +586,11 @@ enum PipelineTest {
               ticks.count == 1 && store.pipelineError == nil
                   && feed("pipeline-recovered").count == recoveries + 1
                   && feed("pipeline-recovered").last == "auto Pipeline syncing again")
+        ticks = []
+        store.startPipelineMonitor()
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        for _ in 0..<250 where ticks.isEmpty { try? await Task.sleep(nanoseconds: 20_000_000) }
+        check("a wake syncs at once", ticks.count == 1)
 
         print("\npipeline: Start fix")
         store.pipelineForce = PipelineSettings.Force()
