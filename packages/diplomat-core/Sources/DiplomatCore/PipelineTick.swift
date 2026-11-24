@@ -140,6 +140,8 @@ final class PipelineSync {
     var partial: [String: String] = [:]
     /// The roots judged on less than all they hold, besides `incomplete` and `partial`.
     var unread: Set<String> = []
+    /// The Linear issues a failed recheck left unjudged.
+    var unrechecked: Set<String> = []
     /// Per root a tracked Linear team maps to, why that team was not read whole: an issue
     /// it missed may be attached to any of the root's issues.
     var linearShort: [String: String] = [:]
@@ -244,7 +246,9 @@ final class PipelineSync {
         let laid = PipelineGraph.layout(items: entries.map(\.item), edges: edges, maxItems: model.maxItems)
         let short = unread.union(incomplete.keys).union(partial.keys)
         let fixable = entries.filter { $0.item.kind == .issue && $0.item.stage == .candidate && $0.item.hold == nil }
-        let judged = entries.filter { $0.root.map { partial[$0.slug] == nil && repos[$0.slug] != nil } ?? false }
+        let judged = entries.filter {
+            !unrechecked.contains($0.id) && $0.root.map { partial[$0.slug] == nil && repos[$0.slug] != nil } ?? false
+        }
         // Without the ban list no item was judged in full.
         let whole = blocked == nil && banned != nil
         let result = PipelineTickResult(at: now, items: laid.items, graph: laid.graph, effects: effects,
@@ -362,7 +366,12 @@ final class PipelineSync {
             let out = io.gh(args + sized.flatMap { ["-F", "\($0)=\(page[$0] ?? least)"] })
             let response = (try? JSONSerialization.jsonObject(with: out.stdout)) as? [String: Any]
             let raw = response?["errors"] as? [[String: Any]] ?? []
-            let errors = raw.compactMap { $0["message"] as? String }
+            // Stripped of GitHub's time and request id, a lasting failure reads the same at each sync.
+            let errors = raw.compactMap {
+                ($0["message"] as? String)?.replacingOccurrences(
+                    of: #" on \d{4}-\d\d-\d\dT[\d:]+Z|\s*Please include `[^`]*` when reporting this issue\."#, with: "",
+                    options: .regularExpression)
+            }
             let read = (response?["data"] as? [String: Any])?["repository"] is [String: Any]
             if out.ok && read && raw.isEmpty { return (response, [], "") }
             if Self.overloaded(out, raw), sized.contains(where: { page[$0, default: least] > least }) {
@@ -1765,7 +1774,7 @@ final class PipelineSync {
             foreignCommits: e.gate?.foreignCommits ?? [],
             trackLabels: has(e, model.labels.fastTrack) && has(e, model.labels.cleared),
             fixesCandidate: fixes, closesUnwritable: unjudged, ciRan: e.gate?.ciRan ?? true,
-            wasReady: e.readied, mergeState: e.mergeState, mergeQueue: e.mergeQueue,
+            wasReady: e.readied, mergeState: e.mergeState, behindBy: e.gate.map(\.behindBy) ?? 0, mergeQueue: e.mergeQueue,
             stopLabels: stops(e),
             requiredChecks: e.gate.map(\.requiredChecks) ?? [], passedChecks: e.gate?.passedChecks ?? [],
             baseRules: e.gate.map(\.baseRules) ?? [], unsignedCommits: e.gate?.unsignedCommits ?? false,
@@ -1783,7 +1792,7 @@ final class PipelineSync {
     /// when it could not be read whole.
     func reread(_ e: PipelineEntry, _ outcome: String = "was not merged") -> PipelineEntry? {
         guard let root = e.root, let n = e.number else { return nil }
-        let r = graphql(root, "PullRequest", ["-F", "number=\(n)"])
+        let r = graphql(root, "PullRequest", ["-F", "number=\(n)", "-f", "head=\(e.item.headSha ?? "")"])
         guard let response = r.response, r.errors.isEmpty,
               var fresh = PipelineRead.pullRequest(response, root: root, label: e.item.label,
                                                    roots: roots, model: model)
@@ -1949,7 +1958,11 @@ final class PipelineSync {
             }
         } catch {
             notice("Linear: the issues a fix was about to be asked for could not be read again: \(error.localizedDescription)")
-            for i in picks { entries[i].item.hold = "it could not be read again right before its fix was asked for" }
+            for i in picks {
+                entries[i].item.hold = "it could not be read again right before its fix was asked for"
+                unrechecked.insert(entries[i].id)
+                if let root = entries[i].root { unread.insert(root.slug) }
+            }
             return
         }
         for i in picks {

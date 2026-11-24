@@ -287,7 +287,8 @@ its commits, its base branch and the checks it requires read only for a PR nothi
   Linear cannot say which issues link it or an open GitHub issue it would close, or one that does is
   of a team not tracked or could not be read;
 - its rating, or its diff floor, is not low/low;
-- it conflicts with its base or is behind it, or GitHub has not computed whether it can merge;
+- it conflicts with its base, is behind it or could not be compared with it, or GitHub has not computed
+  whether it can merge;
 - CI was read for an older commit, is still running, or failed; it has no checks (so a repo without
   CI never merges), or every check was skipped;
 - a status check its base branch requires (branch protection or a ruleset) has not succeeded on its
