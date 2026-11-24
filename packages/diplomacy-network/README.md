@@ -242,7 +242,7 @@ installer, then kill it and have no answer.
 | --- | --- |
 | `--check` | `{ "installed": true, "daemonRunning": <bool>, "pid": <pid or null> }` - there is nothing to install, so `installed` is constant |
 | `--start-daemon` | `{ "ok": <bool>, "daemonRunning": <bool>, "pid": <pid or null>, "error"?: "<why>" }` - the daemon that already runs, or one started for it once its socket answers. A daemon that could not finish its start has exited by then, and `error` carries its reason. With the network switched off in the settings none is started, and the answer comes at once: `ok` false, `error` `the network is switched off in Diplomat's settings: no daemon was started`. Settings that cannot be read are no switch-off: a daemon is started, and decides for itself |
-| `--stop-daemon` | the same object: `ok` once no daemon is left, which with none running is at once. With the network switched off in the settings it then does what a daemon that was not running, died before it could switch off, or found the engine down never did. In the store it cancels every offer of this machine's own that has not ended, stops its runs and gives their claims back, under the records a switch-off signs: nobody is told then, and the pools hear when the daemon next starts. A run whose job had finished with no daemon to say so - under one that did not live to (`runs/<run id>.outcome.json` is there), or after it (the job's `done` is there, and its outcome is read from what the job left, as a daemon reads it) - ends as that job did: a task of this machine's own is `done` with the job's outcome and not cancelled, and a task of another machine's, which cannot be told with no daemon up, has its claim given back. `ended` says how many, `{ "offers": <n cancelled>, "runs": <n ended> }` - both 0 after a daemon that switched itself off - and `daemon.log` how many of the runs ended as their job left them. The daemon's socket is held meanwhile and answers 503, so a daemon started in that moment exits and none runs; while a daemon has the socket or is taking it, the ending is that daemon's and the answer has no `ended`. It then removes what is left in docker of this state directory's daemons, and `ca/`, `mirrors/` and `runs/` with it, each whatever becomes of the others, and what this user may not delete among the run records through the engine. An engine that refuses is asked again every 5 s (`DN_EXECUTOR_RETRY_MS`) for as long as the answer may wait; with it still down or silent by then, `ok` is false and `error` says what is still there. A directory that could not be removed is named in `error` the same way (`<path> could not be removed: a job left among its records what this user may not delete, and no docker engine deleted it. The next --stop-daemon tries again.`), and the next `--stop-daemon` does it again |
+| `--stop-daemon` | the same object: `ok` once no daemon is left, which with none running is at once. With the network switched off in the settings it then does what a daemon that was not running, died before it could switch off, or found the engine down never did. In the store it cancels every offer of this machine's own that has not ended, stops its runs and gives their claims back, under the records a switch-off signs: nobody is told then, and the pools hear when the daemon next starts. A run whose job had finished with no daemon to say so - under one that did not live to (`runs/<run id>.outcome.json` is there), or after it (the job's `done` is there, and its outcome is read from what the job left, as a daemon reads it, with nothing asked of the engine) - ends as that job did: a task of this machine's own is `done` with the job's outcome and not cancelled, and a task of another machine's, which cannot be told with no daemon up, has its claim given back. `ended` says how many, `{ "offers": <n cancelled>, "runs": <n ended> }` - both 0 after a daemon that switched itself off - and `daemon.log` how many of the runs ended as their job left them. The daemon's socket is held meanwhile and answers 503, so a daemon started in that moment exits and none runs; while a daemon has the socket or is taking it, the ending is that daemon's and the answer has no `ended`. It then removes what is left in docker of this state directory's daemons, and `ca/`, `mirrors/` and `runs/` with it, each whatever becomes of the others, and what this user may not delete among the run records through the engine. An engine that refuses is asked again every 5 s (`DN_EXECUTOR_RETRY_MS`) for as long as the answer may wait; with it still down or silent by then, `ok` is false and `error` says what is still there. A directory that could not be removed is named in `error` the same way (`<path> could not be removed: a job left among its records what this user may not delete, and no docker engine deleted it. The next --stop-daemon tries again.`), and the next `--stop-daemon` does it again |
 | `--restart-daemon` | the same object: a stop, then a start |
 
 The snapshot:
@@ -933,14 +933,28 @@ still holds of them is stopped once it answers, found by its run directory. Unti
 jobs from before are taken up, and the image and the credential were looked at once, no
 job is started - a run that was still waiting for its key, or an offer made
 with `now` in the daemon's first moment, waits for it - so a container holding a job
-from before is never made anew under it. A job that cannot be taken up - its container is gone or
-stopped, or the broker's port could not be had again - is stopped for that reason, and
-the node gives the task back, at no attempt. A job ends by itself only by writing its
-exit code in `done`, and its container outlives it; a container gone or stopped under a
-job that wrote none went while no daemon ran, as a reboot or a restart of Docker Desktop
-leaves it, which is the machine's doing and not the job's. A job that did write one
-ends as it finished, its outcome read from what it left, whatever became of its
-container since. So that the port can be had again, the broker listens below the range
+from before is never made anew under it. A job that cannot be taken up - its container was
+ended by the engine, or the broker's port could not be had again - is stopped for that
+reason, and the node gives the task back, at no attempt. A job that did write its exit
+code in `done` ends as it finished, its outcome read from what it left, whatever became
+of its container since.
+
+**Who ended a job.** A job ends by itself only by writing its exit code in `done`. One
+whose processes went without it, under a running daemon or while none ran, is judged by
+what the engine holds of its container and of the container's relay. A job is root in
+its container and can stop it from inside, but it cannot reach the relay, which a
+restart of Docker Desktop, of the engine or of the machine stops with the container.
+So a container that is gone or stopped together with its relay was ended by the engine:
+the job is given back at no attempt. A container stopped while its relay runs on (or
+the relay ran out of memory), and a job whose processes went in a container that still
+runs, are the job's doing: a failed attempt, which says which of the two. An engine that
+does not answer `docker version` says nothing of a job: a running daemon asks it every
+15 s (`DN_RECONCILE_MS`) while it has a job, a look that goes unanswered counts for
+nothing against the job, and after 60 s of such looks (`DN_ENGINE_WAIT_MS`) every job is
+given back, as at a start; whatever the engine still holds of them is stopped once it
+answers. An engine that answers `docker version` while nothing can be run in a
+container is no such silence, since a job can bring that about by what it puts in its
+container: three such looks are a failed attempt. So that the port can be had again, the broker listens below the range
 Linux deals outgoing connections from, where that range leaves room below it: a port
 of the range may be given to some connection while the daemon is away, and cannot be
 listened on while that connection lasts, nor for a minute after. Every 15 s the jobs in this daemon's containers are held against the

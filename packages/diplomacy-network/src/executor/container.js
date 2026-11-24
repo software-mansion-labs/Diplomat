@@ -190,8 +190,9 @@ const pairOf = (dir) => ASIDE.exec(dir)?.[1] ?? dir;
 /// ever in once it has been seen for CONTAINER_IDLE_MS. And every image this daemon
 /// built but the one jobs are started in, once no container is of it.
 /// `broker()` is the broker's `address()`: where relays lead.
-/// `restart`, `usage`, `overQuota`, `erase`, `discard`, `removeAll` and `eraseAll` are
-/// described where they are defined. `imageDir` is the directory the image is built from.
+/// `restart`, `endedBy`, `usage`, `overQuota`, `erase`, `discard`, `removeAll` and
+/// `eraseAll` are described where they are defined. `imageDir` is the directory the image
+/// is built from.
 export function createContainers({ log = () => {}, now = Date.now, imageDir = IMAGE_DIR, broker = () => null } = {}) {
   let state = { state: 'down', image: '', detail: 'not checked yet' };
   let building = null;
@@ -261,7 +262,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     if (r.code !== 0) return null;
     try {
       const c = JSON.parse(r.stdout);
-      return { running: c.State.Running === true, image: c.Config.Image, labels: c.Config.Labels || {}, network: c.HostConfig.NetworkMode, layerBytes: size ? c.SizeRw : undefined };
+      return { running: c.State.Running === true, oom: c.State.OOMKilled === true, image: c.Config.Image, labels: c.Config.Labels || {}, network: c.HostConfig.NetworkMode, layerBytes: size ? c.SizeRw : undefined };
     } catch { return null; }
   }
 
@@ -770,6 +771,19 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     return gone;
   }
 
+  /// Who ended the container `name`, by what the engine holds of it and of its relay,
+  /// which no job reaches: 'engine' when both are gone or stopped, as a restart of the
+  /// engine or of the machine leaves them, and so does a removal; 'job' when the
+  /// container stopped and its relay runs on, or ran out of memory, which a job can bring
+  /// about from inside; '' while the container runs; null when the engine does not
+  /// answer.
+  async function endedBy(name) {
+    if ((await docker(['version', '--format', '{{.Server.Version}}'], { timeout: 20000 })).code !== 0) return null;
+    const [found, relay] = [await inspect(name), await inspect(relayOf(name))];
+    if (found?.running) return '';
+    return found && relay && (relay.running || relay.oom) ? 'job' : 'engine';
+  }
+
   /// Removes the run records under every container's name, those of its earlier
   /// containers among them, for a daemon that is switched off, once `removeAll` left no
   /// container: what this user may not remove goes through the probe, on the image jobs
@@ -789,6 +803,7 @@ export function createContainers({ log = () => {}, now = Date.now, imageDir = IM
     adopt,
     release,
     restart,
+    endedBy,
     sweep,
     usage,
     overQuota,

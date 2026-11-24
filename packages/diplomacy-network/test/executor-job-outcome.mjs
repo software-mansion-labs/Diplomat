@@ -77,7 +77,8 @@ try {
   await check('a container that answers every question with megabytes is heard out for 64 KiB of them, and has then said nothing', async () => {
     const blob = path.join(scratch, 'blob');
     fs.writeFileSync(blob, '\n'.repeat(15 * 2 ** 20));
-    const outcome = await daemon(`cat ${blob}; cat ${blob} >&2; exit 1`, {}, '15 MiB of empty lines on both streams');
+    // The engine itself answers: what a container says is no silence of the engine's.
+    const outcome = await daemon(`[ "$1" = version ] && exit 0; cat ${blob}; cat ${blob} >&2; exit 1`, {}, '15 MiB of empty lines on both streams');
     assert.match(outcome.summary, /disappeared without finishing/);
   });
 

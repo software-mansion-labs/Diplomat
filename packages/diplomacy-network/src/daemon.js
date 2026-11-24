@@ -23,8 +23,8 @@ import { identityFromSeed } from './core/identity.js';
 import { adbDevices, createAdbFilter } from './executor/adb.js';
 import { createBroker } from './executor/broker.js';
 import { createCA } from './executor/ca.js';
-import { createContainers, docker } from './executor/container.js';
-import { attachJob, forgetRuns, readOutcome, startJob, stopJob, unended, watch } from './executor/job.js';
+import { containerName, createContainers, docker } from './executor/container.js';
+import { VANISHED, attachJob, forgetRuns, readOutcome, startJob, stopJob, unended, watch } from './executor/job.js';
 import { createLLM } from './executor/llm.js';
 import { createMirrors } from './executor/mirror.js';
 import { OwnFault } from './executor/own-fault.js';
@@ -331,11 +331,14 @@ async function settle(runId, ended) {
   if (!job) return;
   // A job this machine ended for a fault of its own making is a failed attempt, in the
   // machine's words.
-  const outcome = job.verdict ? { ...ended, ok: false, state: 'failed', summary: job.verdict } : ended;
+  let outcome = job.verdict ? { ...ended, ok: false, state: 'failed', summary: job.verdict } : ended;
+  const by = !job.verdict && ended.summary === VANISHED ? await containers.endedBy(job.container).catch(() => null) : undefined;
+  if (by === 'job' || by === '') outcome = { ...ended, summary: INSIDE[by] };
   // The summary is the job's own words.
   log(`${runId} ended: ${outcome.state ?? 'failed'}${outcome.ok ? '' : ` (${clip(outcome.summary)})`}`);
   job.ended = true;
-  report(runId, outcome);
+  if (by === 'engine' || by === null) giveBack(runId, by === null ? MUTE : ENGINE_ENDED);
+  else report(runId, outcome);
   broker.removeJob(runId);
   job.release();
   try {
@@ -495,11 +498,20 @@ const OUTGREW = 'the container outgrew its disk allowance';
 const UNMEASURED = 'the container could not be measured against its disk allowance';
 
 const NO_RUN = 'no run of this host stands behind it';
-// A job that ends by itself writes its exit code in `done`, and its container stays up.
-// One whose container a daemon finds gone or stopped at its start with no exit code left
-// lost it while no daemon ran - the job cannot take its daemon down with it - as a
-// restart of the machine or of the engine does: the machine's doing, not the job's.
-const GONE = 'its container could not be taken up when this daemon started (gone or stopped, as a restart of the machine or of its docker engine leaves it), and the job had not finished';
+// A job that ends by itself writes its exit code in `done`. One whose processes went
+// without it is the machine's doing when the engine says so (`containers.endedBy`): a job
+// is root in its container and can stop it, but not its relay, which a restart of the
+// engine or of the machine stops with it. That is given back; the job's doing is a
+// failed attempt.
+const GONE = 'its container and the container\'s relay were gone or stopped when this daemon started, as a restart of the machine or of its docker engine leaves them, and the job had not finished';
+const ENGINE_ENDED = 'the docker engine stopped its container and the container\'s relay under the job, as a restart of the engine or of the machine does';
+const UNTAKEN = 'its container runs but could not be taken up by this daemon';
+const INSIDE = {
+  job: 'the job\'s container stopped before the job finished, its relay running on: it was stopped from inside',
+  '': 'the job\'s processes went before it finished, in a container that runs on',
+};
+const MUTE = 'the docker engine did not answer when its container was looked at, and nothing can be said of the job in it';
+const silent = (when) => `the docker engine did not answer for ${Math.round(ENGINE_WAIT_MS / 1000)} s ${when}, and nothing can be said of the job in it`;
 
 // A job this daemon can no longer serve is given back: the node stops it for that
 // reason and releases its claim, which costs its requester no attempt. One the node
@@ -517,10 +529,11 @@ const stands = (runId) => node.snapshot().runs.some((run) => run.runId === runId
 // on and, while its run stands, admitted to the broker under the token and CA it was
 // started with; one whose run was ended meanwhile is stopped and admitted to nothing.
 // One that ended meanwhile is reported, and so is one that finished by itself (`done`)
-// with nobody watching. Any other is given back when its container cannot be taken up
-// (GONE), or when the engine did not answer for ENGINE_WAIT_MS (`answers` false), and
-// nothing can be said of it: what is still there of it is stopped by `reconcile` once
-// the engine answers. A run the node calls running whose
+// with nobody watching. One whose container cannot be taken up is a failed attempt
+// when it was stopped from inside, and is given back when the engine ended it (GONE),
+// or when the engine did not answer for ENGINE_WAIT_MS (`answers` false) and nothing
+// can be said of it: what is still there of it is stopped by `reconcile` once the
+// engine answers. A run the node calls running whose
 // job is on no list is asked after too: its outcome is on disk if it ended under a
 // daemon that did not live to tell the node.
 async function takeUp(kept, answers) {
@@ -541,7 +554,11 @@ async function takeUp(kept, answers) {
           follow(runId);
           continue;
         }
-        giveBack(runId, answers ? GONE : `the docker engine did not answer for ${Math.round(ENGINE_WAIT_MS / 1000)} s after this daemon started, and nothing can be said of the job in it`);
+        const by = answers ? await containers.endedBy(containerName(was.pool.id, was.peer)) : null;
+        if (by === 'job') {
+          log(`${runId} ended while no daemon watched it: ${INSIDE.job}`);
+          report(runId, { ok: false, summary: INSIDE.job, usd: 0, tokens: 0, model: '', runner: 'claude', exit: null, state: 'failed' });
+        } else giveBack(runId, !answers ? silent('after this daemon started') : by === 'engine' ? GONE : by === '' ? UNTAKEN : MUTE);
         continue;
       }
       if (!was.pid) {
@@ -586,8 +603,11 @@ async function takeUp(kept, answers) {
 // could not go through, or the node's own record of it was lost. So is a job this
 // daemon holds no record of at all, which jobs.json lost leaves behind: it runs on in
 // its container with a proxy token nobody takes. Its stop asks the engine until it
-// answers, so it is begun only once the engine has answered here.
+// answers, so it is begun only once the engine has answered here. While there is a job,
+// the engine is asked whether it answers, one look at a time: after ENGINE_WAIT_MS of
+// looks it did not answer, every job is given back, as a daemon that starts does.
 let reconciling = false;
+let silentSince = 0;
 async function reconcile() {
   if (!takenUp || reconciling) return;
   const going = new Set(node.snapshot().runs.filter((run) => run.endedAt === 0).map((run) => run.runId));
@@ -596,13 +616,25 @@ async function reconcile() {
     if (!going.has(runId) && !job.ended) stopRun(runId, NO_RUN);
   }
   const strays = unended().filter(({ runId }) => !jobs.has(runId));
-  if (strays.length === 0) return;
+  if (strays.length === 0 && jobs.size === 0) {
+    silentSince = 0;
+    return;
+  }
   reconciling = true;
+  const asked = Date.now();
+  let answers = false;
   try {
-    if (!(await engineAnswers())) return;
+    answers = await engineAnswers();
   } finally {
     reconciling = false;
   }
+  if (!answers) {
+    silentSince ||= asked;
+    if (Date.now() - silentSince < ENGINE_WAIT_MS) return;
+    for (const [runId, job] of jobs) if (!job.ended && !job.stopping) giveBack(runId, silent('while the job ran'));
+    return;
+  }
+  silentSince = 0;
   for (const { runId, container } of strays) {
     if (jobs.has(runId) || !attachJob({ runId, container })) continue;
     log(`stopping ${runId} in ${container.name}: this daemon holds no record of the job`);

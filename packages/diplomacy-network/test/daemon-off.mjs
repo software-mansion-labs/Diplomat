@@ -149,33 +149,46 @@ try {
   });
 
   await check('a job that ended with no daemon to say so, whether one saw its end and died or none was there, is not given back at the switch-off: the installer ends its run as the job did, this machine\'s own task is done with what the job said, and the job that still ran is stopped', async () => {
-    const m = await bench.machine('told').start();
+    const m = await bench.machine('told', { env: { DN_JOBS_WRITE_MS: '100' } }).start();
     await m.linked();
+    await m.admit(4);
     const finished = await offer(m, 'pr-1', 'wait go\nsay by itself', true);
     const unfinished = await offer(m, 'pr-2', 'wait never\nsay never', true);
     const alone = await offer(m, 'pr-3', 'wait go\nsay alone', true);
-    const [run, going, after] = [await waiting(m, finished, 'go'), await waiting(m, unfinished, 'never'), await waiting(m, alone, 'go')];
+    const spending = await offer(m, 'pr-4', 'model\nwait go\nsay spent', true);
+    const [run, going, after, spender] = [await waiting(m, finished, 'go'), await waiting(m, unfinished, 'never'), await waiting(m, alone, 'go'), await waiting(m, spending, 'go')];
+    const jobsKept = () => JSON.parse(fs.readFileSync(path.join(m.base, 'jobs.json'), 'utf8')).jobs;
+    await until('what the job spent, on disk', () => jobsKept()[spender.runId]?.spent?.bytes > 0);
     await m.kill();
     m.release('go');
-    await until('the jobs to end with nobody watching', () => [run, after].every(({ runId }) => fs.existsSync(path.join(m.base, 'runs', runId, 'done'))));
+    await until('the jobs to end with nobody watching', () => [run, after, spender].every(({ runId }) => fs.existsSync(path.join(m.base, 'runs', runId, 'done'))));
     // As the daemon writes it the moment it sees the job's end; of the other, only what the job left.
     fs.writeFileSync(path.join(m.base, 'runs', `${run.runId}.outcome.json`), JSON.stringify({ ok: true, summary: 'kept on disk', usd: 0, tokens: 0, model: '', runner: 'claude', exit: 0, state: 'finished' }));
 
     m.setConfig({ networkEnabled: false });
-    assert.deepEqual(await m.install('--stop-daemon'), { ...gone, ended: { offers: 1, runs: 3 } });
-    assert.match(m.log(), /\] the network is switched off and no daemon runs: 1 offer\(s\) cancelled, 1 run\(s\) stopped and given back, 2 run\(s\) ended as the job that had finished left it\n$/);
+    // An engine that runs nothing in a container: what the jobs left is read without it.
+    const silent = path.join(m.dockerDir, 'hold-exec');
+    fs.writeFileSync(silent, '');
+    const from = Date.now();
+    try {
+      assert.deepEqual(await m.install('--stop-daemon'), { ...gone, ended: { offers: 1, runs: 4 } });
+    } finally {
+      fs.rmSync(silent);
+    }
+    assert.ok(Date.now() - from < 15000, `answered after ${Date.now() - from} ms`);
+    assert.match(m.log(), /\] the network is switched off and no daemon runs: 1 offer\(s\) cancelled, 1 run\(s\) stopped and given back, 3 run\(s\) ended as the job that had finished left it\n$/);
     assert.equal(alive(m.agent(going.runId).pid), false);
     // All of it is on disk by then: the runs that were told owe nothing more.
     const runs = JSON.parse(fs.readFileSync(path.join(m.base, 'runs.json'), 'utf8')).runs;
-    assert.deepEqual([runs[run.runId].end, runs[after.runId].end], ['over', 'over']);
+    assert.deepEqual([run, after, spender].map(({ runId }) => runs[runId].end), ['over', 'over', 'over']);
     m.setConfig({ networkEnabled: true });
     await m.start();
     const back = await m.state();
-    assert.deepEqual(back.offers.map((o) => [o.taskId, o.state, o.attempt, o.outcome?.summary ?? o.reason]).sort(), [[finished, 'done', 1, 'kept on disk'], [unfinished, 'cancelled', 1, OFF], [alone, 'done', 1, 'alone']].sort());
-    assert.deepEqual(back.runs.map((r) => [r.runId, r.state]).sort(), [[run.runId, 'finished'], [going.runId, 'stopped'], [after.runId, 'finished']].sort());
-    // The job named tokens; jobs.json says the model carried none for it.
-    const read = back.offers.find((o) => o.taskId === alone).outcome;
-    assert.deepEqual([read.tokens, read.capped], [0, true]);
+    assert.deepEqual(back.offers.map((o) => [o.taskId, o.state, o.attempt, o.outcome?.summary ?? o.reason]).sort(), [[finished, 'done', 1, 'kept on disk'], [unfinished, 'cancelled', 1, OFF], [alone, 'done', 1, 'alone'], [spending, 'done', 1, 'spent']].sort());
+    assert.deepEqual(back.runs.map((r) => [r.runId, r.state]).sort(), [[run.runId, 'finished'], [going.runId, 'stopped'], [after.runId, 'finished'], [spender.runId, 'finished']].sort());
+    // Each named tokens, held to what jobs.json says the model carried for it: none for one.
+    const read = (taskId) => back.offers.find((o) => o.taskId === taskId).outcome;
+    assert.deepEqual([read(alone).tokens, read(alone).capped, read(spending).tokens > 0], [0, true, true]);
     await m.kill();
   });
 

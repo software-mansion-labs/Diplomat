@@ -43,8 +43,9 @@ export async function clearAway(containers, withinMs) {
 
 /// Of a run whose job ended by itself with no daemon watching it - its runner wrote its
 /// exit code in `done`, which it does last - the run as `attachJob` takes it, `{ runId,
-/// container }`, for `watch` to read the outcome from what the job left. Null for a job
-/// that wrote none, one whose outcome is on record and one this process watches.
+/// container }`, for `watch` or `readFinished` to read the outcome from what the job
+/// left. Null for a job that wrote none, one whose outcome is on record and one this
+/// process watches.
 export async function finishedLeft(runId) {
   const left = unended().find((run) => run.runId === runId);
   const done = left ? await readOwn(path.join(left.container.runsDir, runId), 'done', 32) : null;
