@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { canon } from '../src/core/canon.js';
 import { authorize } from '../src/requester/authorize.js';
+import { readPolicy } from '../src/requester/policybot.js';
 import { AUDIT_BRANCHES, rulesFor } from '../src/requester/rules.js';
 import { GH, gh, ghql, gitPush, glab } from './lib/captured.mjs';
 import { world } from './lib/world.mjs';
@@ -1052,7 +1053,7 @@ await check('every member a write takes text in, on either forge, holds nothing 
   // A pull request's body is checked against the policy read for the branch it goes into; a policy that cannot be read
   // refuses it, saying why.
   const policed = (policies) => Object.assign(pushed(), { policies });
-  const POLICY = { comments: [], patterns: [], bodies: [{ source: '(?i)^approved', re: /^approved/i }], from: ['o/r/.policy.yml'] };
+  const POLICY = { ...readPolicy("body_patterns: ['(?i)^approved']\n"), from: ['o/r/.policy.yml'] };
   const opened = [
     (t, base) => gh('POST', '/repos/o/r/pulls', { title: 't', body: t, head: 'fix-421', base, draft: true }),
     (t, base) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, baseRefName: base, body: t } } }),
@@ -1065,12 +1066,15 @@ await check('every member a write takes text in, on either forge, holds nothing 
   }
   // A comment on a pull request is checked against the policy for its base, and its `comments` and `comment_patterns`;
   // a comment on an issue is not.
-  const COMMENTS = { comments: ['LGTM'], patterns: [{ source: 'ship', re: /ship/ }], bodies: [{ source: 'x', re: /x/ }], from: ['o/.github/policy.yml'] };
+  const COMMENTS = { ...readPolicy('comments: [LGTM]\ncomment_patterns: [ship]\nbody_patterns: [x]\n'), from: ['o/.github/policy.yml'] };
   await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { body: 'LGTM' }), policed({ main: COMMENTS }), /^the body member "body" holds "LGTM", which the pool repository's policy-bot policy \(o\/\.github\/policy\.yml\) counts/);
   await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { event: 'COMMENT', body: 'we ship' }), policed({ main: COMMENTS }), /^the body member "body" matches the pattern "ship"/);
   await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { body: 'fine' }), policed({ main: { fault: 'odd' } }), /cannot be checked against the pool repository's policy-bot policy, so no text is sent on its pull requests: odd$/);
   await allowed(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { body: 'x marks it' }), policed({ main: COMMENTS }));
   await allowed(github('issues'), gh('POST', '/repos/o/r/issues/421/comments', { body: 'LGTM' }), policed({ main: COMMENTS }));
+  // What is checked is the comment as it is posted, its mark included.
+  const MARKED = { ...readPolicy('comments: [sent through the Diplomacy Network]\n'), from: ['o/r/.policy.yml'] };
+  await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { body: 'fine' }), policed({ main: MARKED }), /^the body member "body" holds "sent through the Diplomacy Network"/);
   // Without a verdict the task's review event is COMMENT only, so it never approves.
   await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { event: 'APPROVE', body: 'fine' }), pushed());
   await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { event: 'APPROVE' }), pushed());

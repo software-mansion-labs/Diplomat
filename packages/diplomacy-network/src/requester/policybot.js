@@ -10,8 +10,9 @@
 //
 // A policy is a YAML file, read here by a reader of its own: block and flow collections,
 // the three scalar styles, block scalars, anchors and aliases. Its patterns are Go regular
-// expressions, translated to JavaScript ones that match the same texts. What either cannot
-// read is a policy this cannot check text against, and text is refused on its repository.
+// expressions, matched by an engine of their own that reads Go's syntax and takes time
+// linear in the text, as Go's does. What either cannot read is a policy this cannot check
+// text against, and text is refused on its repository; so is text too long to check in time.
 
 const WORDS = [':+1:', '👍', ':-1:', '👎'];
 
@@ -40,7 +41,11 @@ function policyFault(text, kind, policy) {
     const word = policy.comments.find((w) => text.includes(w));
     if (word !== undefined) return say(`holds ${JSON.stringify(word)}`);
   }
-  const pattern = (kind === 'comment' ? policy.patterns : policy.bodies).find((p) => p.re.test(text));
+  const patterns = kind === 'comment' ? policy.patterns : policy.bodies;
+  if (text.length * patterns.reduce((sum, p) => sum + p.program.size, 0) > BUDGET) {
+    return `is too long for this to check in time against the patterns of the pool repository's policy-bot policy (${policy.from.join(', ')}): shorten it and send the request again`;
+  }
+  const pattern = patterns.find((p) => matches(p.program, text));
   return pattern === undefined ? null : say(`matches the pattern ${JSON.stringify(pattern.source)}`);
 }
 
@@ -49,7 +54,7 @@ const LISTS = { comments: 'comments', comment_patterns: 'patterns', github_revie
 /// What a policy file holds: `{ remote: { repo, path, ref } }` for one that names a policy in
 /// another repository (`path` and `ref` '' where it names none), else `{ comments, patterns,
 /// bodies }` - every text-matching method of the file, wherever it stands, with each
-/// pattern as `{ source, re }`. Throws, saying why, for a file this cannot read.
+/// pattern as `{ source, program }`. Throws, saying why, for a file this cannot read.
 export function readPolicy(text) {
   const doc = parseYaml(text);
   // go-githubapp reads a file of these members only, `remote` among them, as a reference.
@@ -71,7 +76,7 @@ export function readPolicy(text) {
           // policy-bot reads a null entry as "", which every text holds.
           if (item !== null && typeof item !== 'string') throw new Error(`its "${key}" holds something other than text`);
           if (list === 'comments') out.comments.push(item ?? '');
-          else out[list].push({ source: item ?? '', re: goRegExp(item ?? '') });
+          else out[list].push({ source: item ?? '', program: goPattern(item ?? '') });
         }
       }
       walk(value);
@@ -90,6 +95,9 @@ const HEX_ESCAPES = { x: 2, u: 4, U: 8 };
 // One YAML document as yaml.v2 decodes it into strings: a mapping is a Map, a sequence an
 // array, every scalar its text and a plain null (`~`, `null`, nothing) null.
 function parseYaml(source) {
+  // yaml.v2 also breaks lines at these, which this reader does not.
+  const odd = /\r(?!\n)|[\x85\u2028\u2029]/.exec(source);
+  if (odd) throw new Error(`its line ${source.slice(0, odd.index).split('\n').length} holds a line break this does not read (U+${odd[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')})`);
   const lines = source.replace(/^﻿/, '').split(/\r?\n/);
   // Whether the last line ends in a line break, which a block scalar at the end keeps.
   const broken = lines.at(-1) === '';
@@ -254,15 +262,17 @@ function parseYaml(source) {
     i++;
     const start = i;
     let indent = digit ? Math.max(parent, 0) + Number(digit) : 0;
-    const body = [];
+    let set = digit !== undefined;
+    let body = [];
     for (; i < lines.length; i++) {
       const line = lines[i];
       if (/^ *$/.test(line)) { body.push(line); continue; }
       const ind = spaces(line);
-      if (indent === 0) {
+      if (!set) {
         if (ind <= parent) break;
         if (body.some((b) => b.length > ind)) fail('opens a block scalar with a line indented more than its text', start);
         indent = ind;
+        set = true;
       }
       if (ind < indent) {
         if (ind > parent && !blank(line)) fail('is indented less than the block scalar it stands in');
@@ -270,6 +280,8 @@ function parseYaml(source) {
       }
       body.push(line);
     }
+    // With no line of text, every line is an empty one, however many spaces it holds.
+    if (!set) body = body.map(() => '');
     let content = body.map((line) => line.slice(indent));
     let trailing = 0;
     while (content.length > 0 && content.at(-1) === '') { content.pop(); trailing++; }
@@ -389,126 +401,236 @@ function parseYaml(source) {
 
 // ------------------------------------------------------------- Go regular expressions
 
+// A pattern is read in Go's syntax and run as a Pike VM: like Go's regexp, its work grows
+// with the text's length times the pattern's size and no more. A class is a JavaScript
+// RegExp over one character, which holds nothing to backtrack over.
+
+// The most one text may cost against a policy's patterns, its length times their steps,
+// about 200 ms of matching; and the most steps one pattern may compile to.
+const BUDGET = 3_000_000;
+const MAX_PROGRAM = 100_000;
+
 const PERL = { d: '0-9', w: '0-9A-Za-z_', s: '\\t\\n\\f\\r ' };
 const POSIX = {
   alnum: '0-9A-Za-z', alpha: 'A-Za-z', ascii: '\\x00-\\x7f', blank: '\\t ', cntrl: '\\x00-\\x1f\\x7f', digit: '0-9', graph: '!-~',
   lower: 'a-z', print: ' -~', punct: '!-\\/:-@\\[-`\\{-~', space: '\\t\\n\\v\\f\\r ', upper: 'A-Z', word: '0-9A-Za-z_', xdigit: '0-9A-Fa-f',
 };
 const CONTROL = { a: 7, f: 12, t: 9, n: 10, r: 13, v: 11 };
-// Go's \b and \B look at ASCII word characters even under (?i), where JavaScript's count
-// "ſ" and the Kelvin sign as word characters too.
-const WORD = '[0-9A-Za-z_]';
-const BOUNDARY = `(?-i:(?<=${WORD})(?!${WORD})|(?<!${WORD})(?=${WORD}))`;
-const INSIDE = `(?-i:(?<=${WORD})(?=${WORD})|(?<!${WORD})(?!${WORD}))`;
+// Go's names for \p{...} (unicode.Categories, unicode.CategoryAliases, unicode.Scripts).
+const CATEGORIES = [
+  'C Cc Cf Cn Co Cs L Ll Lm Lo Lt Lu M Mc Me Mn N Nd Nl No P Pc Pd Pe Pf Pi Po Ps S Sc Sk',
+  'Sm So Z Zl Zp Zs',
+].join(' ').split(' ');
+const LONG_CATEGORIES = [
+  'Cased_Letter=LC Close_Punctuation=Pe Combining_Mark=M Connector_Punctuation=Pc',
+  'Control=Cc Currency_Symbol=Sc Dash_Punctuation=Pd Decimal_Number=Nd Enclosing_Mark=Me',
+  'Final_Punctuation=Pf Format=Cf Initial_Punctuation=Pi Letter=L Letter_Number=Nl',
+  'Line_Separator=Zl Lowercase_Letter=Ll Mark=M Math_Symbol=Sm Modifier_Letter=Lm',
+  'Modifier_Symbol=Sk Nonspacing_Mark=Mn Number=N Open_Punctuation=Ps Other=C',
+  'Other_Letter=Lo Other_Number=No Other_Punctuation=Po Other_Symbol=So',
+  'Paragraph_Separator=Zp Private_Use=Co Punctuation=P Separator=Z Space_Separator=Zs',
+  'Spacing_Mark=Mc Surrogate=Cs Symbol=S Titlecase_Letter=Lt Unassigned=Cn',
+  'Uppercase_Letter=Lu cntrl=Cc digit=Nd punct=P',
+].join(' ').split(' ');
+const SCRIPTS = [
+  'Adlam Ahom Anatolian_Hieroglyphs Arabic Armenian Avestan Balinese Bamum Bassa_Vah',
+  'Batak Bengali Beria_Erfe Bhaiksuki Bopomofo Brahmi Braille Buginese Buhid',
+  'Canadian_Aboriginal Carian Caucasian_Albanian Chakma Cham Cherokee Chorasmian Common',
+  'Coptic Cuneiform Cypriot Cypro_Minoan Cyrillic Deseret Devanagari Dives_Akuru Dogra',
+  'Duployan Egyptian_Hieroglyphs Elbasan Elymaic Ethiopic Garay Georgian Glagolitic',
+  'Gothic Grantha Greek Gujarati Gunjala_Gondi Gurmukhi Gurung_Khema Han Hangul',
+  'Hanifi_Rohingya Hanunoo Hatran Hebrew Hiragana Imperial_Aramaic Inherited',
+  'Inscriptional_Pahlavi Inscriptional_Parthian Javanese Kaithi Kannada Katakana Kawi',
+  'Kayah_Li Kharoshthi Khitan_Small_Script Khmer Khojki Khudawadi Kirat_Rai Lao Latin',
+  'Lepcha Limbu Linear_A Linear_B Lisu Lycian Lydian Mahajani Makasar Malayalam Mandaic',
+  'Manichaean Marchen Masaram_Gondi Medefaidrin Meetei_Mayek Mende_Kikakui',
+  'Meroitic_Cursive Meroitic_Hieroglyphs Miao Modi Mongolian Mro Multani Myanmar',
+  'Nabataean Nag_Mundari Nandinagari New_Tai_Lue Newa Nko Nushu Nyiakeng_Puachue_Hmong',
+  'Ogham Ol_Chiki Ol_Onal Old_Hungarian Old_Italic Old_North_Arabian Old_Permic',
+  'Old_Persian Old_Sogdian Old_South_Arabian Old_Turkic Old_Uyghur Oriya Osage Osmanya',
+  'Pahawh_Hmong Palmyrene Pau_Cin_Hau Phags_Pa Phoenician Psalter_Pahlavi Rejang Runic',
+  'Samaritan Saurashtra Sharada Shavian Siddham Sidetic SignWriting Sinhala Sogdian',
+  'Sora_Sompeng Soyombo Sundanese Sunuwar Syloti_Nagri Syriac Tagalog Tagbanwa Tai_Le',
+  'Tai_Tham Tai_Viet Tai_Yo Takri Tamil Tangsa Tangut Telugu Thaana Thai Tibetan Tifinagh',
+  'Tirhuta Todhri Tolong_Siki Toto Tulu_Tigalari Ugaritic Vai Vithkuqi Wancho Warang_Citi',
+  'Yezidi Yi Zanabazar_Square',
+].join(' ').split(' ');
+// Each name as the JavaScript class it stands for, keyed as Go looks a name up: "_", "-"
+// and " " dropped, the first letter upper case and the others lower.
+const canonical = (name) => name.replace(/[-_ ]/g, '').replace(/^[a-z]/, (c) => c.toUpperCase()).replace(/(?<!^)[A-Z]/g, (c) => c.toLowerCase());
+const PROPERTIES = new Map();
+for (const [name, body] of [
+  ['Any', '\\u{0}-\\u{10ffff}'], ['Assigned', '\\p{Assigned}'], ['ASCII', '\\u{0}-\\u{7f}'], ['LC', '\\p{LC}'],
+  ...CATEGORIES.map((c) => [c, `\\p{General_Category=${c}}`]),
+  ...SCRIPTS.map((s) => [s, `\\p{Script=${s}}`]),
+]) PROPERTIES.set(canonical(name), body);
+for (const [name, c] of LONG_CATEGORIES.map((pair) => pair.split('='))) PROPERTIES.set(canonical(name), PROPERTIES.get(canonical(c)));
 
-// `source`, a pattern in Go's regexp syntax, as a JavaScript RegExp that finds a match in
-// the same texts. `.`, `^`, `$`, `\A`, `\z` and the Perl classes are spelled out as Go reads
-// them; a flag group's `i` becomes a modifier group, and its `s` and `m` are applied here.
-// Throws for what it does not translate: backreferences and octal, `(?U)`, a negated POSIX
-// class, `\S` inside a class, and anything either engine would not compile.
-function goRegExp(source) {
+const [CHAR, SET, ANY, ANY_BUT_NL, SPLIT, JMP, ASSERT, MATCH] = [0, 1, 2, 3, 4, 5, 6, 7];
+const [TEXT_START, TEXT_END, LINE_START, LINE_END, BOUNDARY, INSIDE] = [0, 1, 2, 3, 4, 5];
+const WORD = new Uint8Array(128).map((_, c) => /\w/.test(String.fromCharCode(c)));
+const hex = (cp) => `\\u{${cp.toString(16)}}`;
+
+// The characters a class matches: those in `pos` and those outside each of `negs` (bodies
+// of JavaScript classes), each part closed under case folding first when `fold` holds, as
+// Go folds a class before it negates any part of it; all of it negated when `negate` does.
+function charSet(pos, negs, fold, negate) {
+  const parts = negs.map((body) => `[^${body}]`);
+  if (pos !== '') parts.unshift(`[${pos}]`);
+  const re = new RegExp(`^(?:${parts.join('|')})$`, fold ? 'iu' : 'u');
+  const ascii = new Uint8Array(128);
+  const other = new Map();
+  return (cp) => {
+    if (cp < 128) {
+      if (ascii[cp] === 0) ascii[cp] = re.test(String.fromCharCode(cp)) !== negate ? 1 : 2;
+      return ascii[cp] === 1;
+    }
+    let has = other.get(cp);
+    if (has === undefined) other.set(cp, (has = re.test(String.fromCodePoint(cp)) !== negate));
+    return has;
+  };
+}
+
+// `source`, a pattern in Go's regexp syntax, as a program for `matches`: `{ size, op, arg,
+// arg2, sets }`. Throws for a pattern Go would not compile, and for one of more than
+// `MAX_PROGRAM` steps.
+function goPattern(source) {
   const s = Array.from(source);
   let p = 0;
   const no = (why) => { throw new Error(`its pattern ${JSON.stringify(source)} ${why}`); };
-  const hex = (cp) => `\\u{${cp.toString(16)}}`;
-  // A class of one: V8 does not case-fold an escaped literal inside a modifier group.
-  const lit = (cp) => (/^[A-Za-z0-9 ]$/.test(String.fromCodePoint(cp)) ? String.fromCodePoint(cp) : `[${hex(cp)}]`);
-  const cp = (k = p) => s[k].codePointAt(0);
-  const property = () => {
-    const negate = s[p] === 'P';
-    p++;
-    let name;
-    if (s[p] === '{') {
-      const close = s.indexOf('}', p);
-      if (close === -1) no('has a class it does not close');
-      name = s.slice(p + 1, close).join('');
-      p = close + 1;
-    } else {
-      name = s[p++] ?? no('ends in the middle of an escape');
+  const cp = (k) => s[k].codePointAt(0);
+  const sets = [];
+  const set = (pos, negs, fold, negate) => ({ t: SET, k: sets.push(charSet(pos, negs, fold, negate)) - 1 });
+  const lit = (c, fold) => (fold ? set(hex(c), [], true, false) : { t: CHAR, k: c });
+
+  // The character escaped by the "\\" before `p`, as Go's parseEscape reads it.
+  const escaped = () => {
+    const c = s[p++] ?? no('ends in a backslash');
+    const octal = (k) => /^[0-7]$/.test(s[k] ?? '');
+    if (c === '0' || (/^[1-7]$/.test(c) && octal(p))) {
+      let r = Number(c);
+      for (let k = 1; k < 3 && octal(p); k++) r = r * 8 + Number(s[p++]);
+      return r;
     }
-    const not = name.startsWith('^') !== negate;
-    name = name.replace(/^\^/, '');
-    const js = name === 'Any' || /^[A-Z][a-z]?$/.test(name) ? name : `Script=${name}`;
-    return `\\${not ? 'P' : 'p'}{${js}}`;
-  };
-  // One escape after "\\" at `p`: [JavaScript, whether it stands for one character,
-  // whether a repetition may follow it].
-  const escape = (inClass) => {
-    const char = (code) => (inClass ? hex(code) : lit(code));
-    const c = s[p] ?? no('ends in the middle of an escape');
-    if (/[0-9]/.test(c)) no('holds a backreference or an octal escape, which this does not translate');
-    if (c === 'p' || c === 'P') return [property(), false, true];
-    p++;
-    if (Object.hasOwn(PERL, c)) return [inClass ? PERL[c] : `[${PERL[c]}]`, false, true];
-    if (Object.hasOwn(PERL, c.toLowerCase())) {
-      if (!inClass) return [`[^${PERL[c.toLowerCase()]}]`, false, true];
-      // JavaScript's \S leaves out more white space than Go's.
-      if (c === 'S') no('negates white space inside a class, which this does not translate');
-      return [`\\${c}`, false, true];
-    }
-    if (Object.hasOwn(CONTROL, c)) return [char(CONTROL[c]), true, true];
     if (c === 'x') {
-      const m = s[p] === '{' ? /^\{([0-9a-fA-F]{1,6})\}/.exec(s.slice(p).join('')) : /^[0-9a-fA-F]{2}/.exec(s.slice(p).join(''));
-      if (!m) no('holds an escape that is not one');
-      p += m[0].length;
-      return [char(parseInt(m[1] ?? m[0], 16)), true, true];
+      const brace = s[p] === '{';
+      const end = brace ? s.indexOf('}', p) : p + 2;
+      const digits = s.slice(brace ? p + 1 : p, end).join('');
+      if (end === -1 || !/^[0-9A-Fa-f]+$/.test(digits) || (!brace && digits.length !== 2) || parseInt(digits, 16) > 0x10ffff) no('holds an escape that is not one');
+      p = brace ? end + 1 : end;
+      return parseInt(digits, 16);
     }
-    if (/^[!-/:-@[-`{-~]$/.test(c)) return [char(cp(p - 1)), true, true];
-    if (inClass) no('holds an escape that is not one');
-    if (c === 'A') return ['(?:^)', false, true];
-    if (c === 'z') return ['(?:$)', false, true];
-    if (c === 'b' || c === 'B') return [c === 'b' ? BOUNDARY : INSIDE, false, true];
-    if (c === 'Q') {
-      let close = p;
-      while (close < s.length && !(s[close] === '\\' && s[close + 1] === 'E')) close++;
-      const out = s.slice(p, close).map((ch) => lit(ch.codePointAt(0))).join('');
-      p = Math.min(close + 2, s.length);
-      return [out, false, out !== ''];
-    }
+    if (Object.hasOwn(CONTROL, c)) return CONTROL[c];
+    if (/^[\x00-\x7f]$/.test(c) && !/^[0-9A-Za-z]$/.test(c)) return cp(p - 1);
     return no('holds an escape that is not one');
   };
-  const charClass = () => {
+
+  // A Perl class (\d, \s, \w, negated in upper case) or a Unicode one (\pL, \p{Name},
+  // negated as \P or with "^" before the name) at `p`, as [its JavaScript class, whether
+  // it is negated], or null for none.
+  const named = () => {
+    const c = s[p + 1];
+    if (s[p] !== '\\' || c === undefined) return null;
+    if (/^[dswDSW]$/.test(c)) {
+      p += 2;
+      return [PERL[c.toLowerCase()], c !== c.toLowerCase()];
+    }
+    if (c !== 'p' && c !== 'P') return null;
+    p += 2;
+    let name = s[p++] ?? '';
+    if (name === '{') {
+      const close = s.indexOf('}', p);
+      if (close === -1) no('has a class it does not close');
+      name = s.slice(p, close).join('');
+      p = close + 1;
+    }
+    const negated = name.startsWith('^');
+    return [PROPERTIES.get(canonical(name.slice(negated ? 1 : 0))) ?? no('names a class Go does not know'), (c === 'P') !== negated];
+  };
+
+  const charClass = (fold) => {
     p++;
-    let out = '[';
-    if (s[p] === '^') { out += '^'; p++; }
-    for (let first = true; ; first = false) {
+    const negate = s[p] === '^';
+    if (negate) p++;
+    let pos = '';
+    const negs = [];
+    const add = ([body, negated]) => {
+      if (negated) negs.push(body);
+      else pos += body;
+    };
+    const one = () => {
       if (p >= s.length) no('has a class it does not close');
-      if (s[p] === ']' && !first) { p++; return `${out}]`; }
-      if (s[p] === '[' && s[p + 1] === ':') {
-        const m = /^\[:(\^?)([a-z]+):\]/.exec(s.slice(p).join(''));
-        if (!m || m[1] || !Object.hasOwn(POSIX, m[2])) no('holds a class name this does not translate');
-        out += POSIX[m[2]];
-        p += m[0].length;
+      if (s[p] !== '\\') return cp(p++);
+      p++;
+      return escaped();
+    };
+    for (let first = true; first || s[p] !== ']'; first = false) {
+      if (s[p] === '[' && s[p + 1] === ':' && p + 2 < s.length) {
+        let end = p + 2;
+        while (end < s.length && !(s[end] === ':' && s[end + 1] === ']')) end++;
+        if (end < s.length) {
+          const m = /^\[:(\^?)([a-z]+):\]$/.exec(s.slice(p, end + 2).join(''));
+          if (!m || !Object.hasOwn(POSIX, m[2])) no('holds a class name Go does not know');
+          add([POSIX[m[2]], m[1] === '^']);
+          p = end + 2;
+          continue;
+        }
+      }
+      const perl = named();
+      if (perl) {
+        add(perl);
         continue;
       }
-      const one = () => {
-        if (s[p] === '\\') { p++; return escape(true); }
-        const c = cp();
+      const lo = one();
+      let hi = lo;
+      if (s[p] === '-' && s[p + 1] !== undefined && s[p + 1] !== ']') {
         p++;
-        return [hex(c), true, c];
-      };
-      const [lo, single] = one();
-      if (single && s[p] === '-' && s[p + 1] !== undefined && s[p + 1] !== ']') {
-        p++;
-        const [hi, ok] = one();
-        if (!ok) no('holds a range that ends in a class');
-        out += `${lo}-${hi}`;
-      } else {
-        out += lo;
+        hi = one();
+        if (hi < lo) no('holds a range that runs backwards');
       }
+      pos += lo === hi ? hex(lo) : `${hex(lo)}-${hex(hi)}`;
     }
+    p++;
+    return set(pos, negs, fold, negate);
   };
-  // The alternatives of a group from `p`, up to its ")" (or the end, at the top), under
-  // the group's `flags`.
-  const group = (flags, top) => {
-    const outer = flags.i;
-    const branches = [];
-    let open = 0;
-    let out = '';
-    const reopen = () => {
-      if (flags.i !== outer) { out += flags.i ? '(?i:' : '(?-i:'; open = 1; } else { open = 0; }
+
+  // "{n}", "{n,}" or "{n,m}" at `p` as [n, m (-1 for no bound), its length], or null when
+  // it is none, and then a "{" that stands for itself. Go reads no number with a leading 0.
+  const counted = () => {
+    let k = p + 1;
+    const int = () => {
+      const start = k;
+      while (/^[0-9]$/.test(s[k] ?? '')) k++;
+      return k === start || (s[start] === '0' && k - start > 1) ? null : Number(s.slice(start, k).join(''));
     };
-    let quantifiable = false;
+    const min = int();
+    if (min === null) return null;
+    let max = min;
+    if (s[k] === ',') {
+      k++;
+      max = s[k] === '}' ? -1 : int();
+      if (max === null) return null;
+    }
+    return s[k] === '}' ? [min, max, k + 1 - p] : null;
+  };
+  // Whether the counted repetitions nested in `node` repeat it at most `n` times
+  // (repeatIsValid in Go's regexp/syntax).
+  const fits = (node, n) => {
+    if (node.t === 'rep' && node.counted) {
+      const m = node.max < 0 ? node.min : node.max;
+      if (node.max === 0) return true;
+      if (m > n) return false;
+      if (m > 0) n = Math.floor(n / m);
+    }
+    return (node.subs ?? []).every((sub) => fits(sub, n));
+  };
+
+  // The alternatives from `p` up to the ")" that closes the group (or the end, at the top),
+  // under the group's `flags`, which a flag group changes for the rest of the group.
+  const group = (flags, top) => {
+    const branches = [];
+    let items = [];
+    let repeated = false;
     for (;;) {
       if (p >= s.length) {
         if (!top) no('opens a group it does not close');
@@ -520,65 +642,217 @@ function goRegExp(source) {
         p++;
         break;
       }
+      const count = c === '{' ? counted() : null;
+      if (c === '*' || c === '+' || c === '?' || count) {
+        const [min, max, length] = count ?? (c === '*' ? [0, -1, 1] : c === '+' ? [1, -1, 1] : [0, 1, 1]);
+        if (max >= 0 && min > max) no('repeats fewer times at most than at least');
+        p += length;
+        // A lazy repetition matches the same texts.
+        if (s[p] === '?') p++;
+        if (repeated) no('repeats a repetition');
+        if (items.length === 0) no('repeats nothing');
+        const node = { t: 'rep', subs: [items.pop()], min, max, counted: count !== null };
+        if (count && (min >= 2 || max >= 2) && !fits(node, 1000)) no('repeats more than 1000 times');
+        items.push(node);
+        repeated = true;
+        continue;
+      }
+      repeated = false;
       if (c === '|') {
         p++;
-        branches.push(out + ')'.repeat(open));
-        out = '';
-        reopen();
-        quantifiable = false;
-        continue;
-      }
-      const repeat = /^(?:[*+?]|\{([0-9]+)(,([0-9]*))?\})/.exec(s.slice(p, p + 16).join(''));
-      if (repeat) {
-        if (!quantifiable) no('repeats nothing, or repeats a repetition');
-        if (Number(repeat[1] ?? 0) > 1000 || Number(repeat[3] || 0) > 1000) no('repeats more than 1000 times');
-        p += repeat[0].length;
-        out += repeat[0];
-        if (s[p] === '?') { out += '?'; p++; }
-        quantifiable = false;
-        continue;
-      }
-      quantifiable = true;
-      if (c === '(') {
+        branches.push(items);
+        items = [];
+      } else if (c === '(') {
         p++;
-        if (s[p] !== '?') { out += `(?:${group({ ...flags }, false)})`; continue; }
-        const named = /^\?P?<[A-Za-z0-9_]+>/.exec(s.slice(p, p + 300).join(''));
-        if (named) { p += named[0].length; out += `(?:${group({ ...flags }, false)})`; continue; }
-        const set = /^\?([imsU]*)(?:-([imsU]*))?([:)])/.exec(s.slice(p, p + 16).join(''));
-        if (!set || (set[1] === '' && set[2] === undefined && set[3] === ')') || (set[2] === '')) no('holds a group this does not translate');
-        if (`${set[1]}${set[2] ?? ''}`.includes('U')) no('makes repetition lazy, which this does not translate');
-        p += set[0].length;
-        const next = { ...flags };
-        for (const f of set[1]) next[f] = true;
-        for (const f of set[2] ?? '') next[f] = false;
-        if (set[3] === ':') {
-          out += `(?${next.i === flags.i ? '' : next.i ? 'i' : '-i'}:${group(next, false)})`;
+        if (s[p] !== '?') {
+          items.push(group({ ...flags }, false));
+        } else if (s[p + 1] === '<' || (s[p + 1] === 'P' && s[p + 2] === '<')) {
+          const close = s.indexOf('>', p);
+          if (close === -1 || !/^\?P?<[0-9A-Za-z_]+$/.test(s.slice(p, close).join(''))) no('names a group in a way Go does not read');
+          p = close + 1;
+          items.push(group({ ...flags }, false));
         } else {
-          const was = flags.i;
-          Object.assign(flags, next);
-          if (flags.i !== was) { out += flags.i ? '(?i:' : '(?-i:'; open++; }
-          quantifiable = false;
+          p++;
+          const next = { ...flags };
+          let on = true;
+          let saw = false;
+          for (;;) {
+            const f = s[p++];
+            if (f === 'i' || f === 'm' || f === 's' || f === 'U') {
+              next[f] = on;
+              saw = true;
+            } else if (f === '-' && on) {
+              on = false;
+              saw = false;
+            } else if ((f === ':' || f === ')') && (on || saw)) {
+              if (f === ':') items.push(group(next, false));
+              else Object.assign(flags, next);
+              break;
+            } else {
+              no('holds a group Go does not read');
+            }
+          }
         }
-        continue;
+      } else if (c === '[') {
+        items.push(charClass(flags.i));
+      } else if (c === '.') {
+        p++;
+        items.push({ t: flags.s ? ANY : ANY_BUT_NL });
+      } else if (c === '^' || c === '$') {
+        p++;
+        items.push({ t: ASSERT, k: c === '^' ? (flags.m ? LINE_START : TEXT_START) : (flags.m ? LINE_END : TEXT_END) });
+      } else if (c === '\\' && Object.hasOwn({ A: 0, z: 0, b: 0, B: 0 }, s[p + 1])) {
+        items.push({ t: ASSERT, k: { A: TEXT_START, z: TEXT_END, b: BOUNDARY, B: INSIDE }[s[p + 1]] });
+        p += 2;
+      } else if (c === '\\' && s[p + 1] === 'Q') {
+        p += 2;
+        while (p < s.length && !(s[p] === '\\' && s[p + 1] === 'E')) items.push(lit(cp(p++), flags.i));
+        p += 2;
+      } else if (c === '\\') {
+        const perl = named();
+        if (perl) {
+          items.push(perl[1] ? set('', [perl[0]], flags.i, false) : set(perl[0], [], flags.i, false));
+        } else {
+          p++;
+          items.push(lit(escaped(), flags.i));
+        }
+      } else {
+        p++;
+        items.push(lit(cp(p - 1), flags.i));
       }
-      if (c === '[') { out += charClass(); continue; }
-      p++;
-      if (c === '\\') {
-        const [js, , repeatable] = escape(false);
-        out += js;
-        quantifiable = repeatable;
-      } else if (c === '.') out += flags.s ? '[\\s\\S]' : '[^\\n]';
-      else if (c === '^') out += flags.m ? '(?:(?<=^|\\n))' : '(?:^)';
-      else if (c === '$') out += flags.m ? '(?:(?=\\n|$))' : '(?:$)';
-      else out += lit(cp(p - 1));
     }
-    branches.push(out + ')'.repeat(open));
-    return branches.join('|');
+    branches.push(items);
+    const alts = branches.map((subs) => ({ t: 'cat', subs }));
+    return alts.length === 1 ? alts[0] : { t: 'alt', subs: alts };
   };
-  const js = group({ i: false, m: false, s: false }, true);
-  try {
-    return new RegExp(js, 'u');
-  } catch {
-    return no('is one this does not translate');
+  const root = group({ i: false, m: false, s: false, U: false }, true);
+
+  // The steps `node` compiles to, as `emit` writes them.
+  const size = (node) => {
+    if (node.t === 'cat') return node.subs.reduce((sum, sub) => sum + size(sub), 0);
+    if (node.t === 'alt') return node.subs.reduce((sum, sub) => sum + size(sub), 2 * (node.subs.length - 1));
+    if (node.t !== 'rep') return 1;
+    const one = size(node.subs[0]);
+    if (node.max >= 0) return node.min * one + (node.max - node.min) * (one + 1);
+    return node.min > 0 ? node.min * one + 1 : one + 2;
+  };
+  const steps = size(root) + 1;
+  if (steps > MAX_PROGRAM) no(`compiles to ${steps} steps, more than the ${MAX_PROGRAM} this matches`);
+  const op = new Uint8Array(steps);
+  const arg = new Int32Array(steps);
+  const arg2 = new Int32Array(steps);
+  let at = 0;
+  const push = (o, a = 0, b = 0) => {
+    op[at] = o;
+    arg[at] = a;
+    arg2[at] = b;
+    return at++;
+  };
+  const emit = (node) => {
+    if (node.t === 'cat') {
+      node.subs.forEach(emit);
+    } else if (node.t === 'alt') {
+      const jumps = node.subs.map((sub, k) => {
+        if (k === node.subs.length - 1) return emit(sub);
+        const split = push(SPLIT, at + 1);
+        emit(sub);
+        const jump = push(JMP);
+        arg2[split] = at;
+        return jump;
+      });
+      jumps.pop();
+      for (const jump of jumps) arg[jump] = at;
+    } else if (node.t === 'rep') {
+      const [sub] = node.subs;
+      const { min, max } = node;
+      for (let k = 0; k < (max < 0 && min > 0 ? min - 1 : min); k++) emit(sub);
+      if (max < 0 && min > 0) {
+        const start = at;
+        emit(sub);
+        push(SPLIT, start, at + 1);
+      } else if (max < 0) {
+        const split = push(SPLIT, at + 1);
+        emit(sub);
+        push(JMP, split);
+        arg2[split] = at;
+      } else {
+        for (let k = min; k < max; k++) {
+          const split = push(SPLIT, at + 1);
+          emit(sub);
+          arg2[split] = at;
+        }
+      }
+    } else {
+      push(node.t, node.k);
+    }
+  };
+  emit(root);
+  push(MATCH);
+  return { size: steps, op, arg, arg2, sets };
+}
+
+// Whether `program` (`goPattern`) matches anywhere in `text`, as Go's MatchString answers.
+// A lone surrogate reads as U+FFFD, as Go decodes one from JSON.
+function matches(program, text) {
+  const { size, op, arg, arg2, sets } = program;
+  const cps = new Int32Array(text.length);
+  let n = 0;
+  for (const ch of text) {
+    const c = ch.codePointAt(0);
+    cps[n++] = c >= 0xd800 && c <= 0xdfff ? 0xfffd : c;
   }
+  const word = (c) => WORD[c] === 1;
+  const holds = (k, prev, next) => {
+    if (k === TEXT_START) return prev === -1;
+    if (k === TEXT_END) return next === -1;
+    if (k === LINE_START) return prev === -1 || prev === 10;
+    if (k === LINE_END) return next === -1 || next === 10;
+    return (word(prev) !== word(next)) === (k === BOUNDARY);
+  };
+  const mark = new Int32Array(size);
+  const stack = new Int32Array(size);
+  let gen = 1;
+  // Adds to `list` (holding `len` threads) every consuming step reached from `start`
+  // between the characters `prev` and `next` (-1 past either end); -1 when one matches.
+  const follow = (list, len, start, prev, next) => {
+    let sp = 0;
+    const visit = (pc) => {
+      if (mark[pc] !== gen) {
+        mark[pc] = gen;
+        stack[sp++] = pc;
+      }
+    };
+    visit(start);
+    while (sp > 0) {
+      const pc = stack[--sp];
+      const o = op[pc];
+      if (o === MATCH) return -1;
+      if (o === JMP) visit(arg[pc]);
+      else if (o === SPLIT) {
+        visit(arg[pc]);
+        visit(arg2[pc]);
+      } else if (o === ASSERT) {
+        if (holds(arg[pc], prev, next)) visit(pc + 1);
+      } else list[len++] = pc;
+    }
+    return len;
+  };
+  let now = new Int32Array(size);
+  let then = new Int32Array(size);
+  let count = follow(now, 0, 0, -1, n > 0 ? cps[0] : -1);
+  for (let i = 0; i < n && count >= 0; i++) {
+    const c = cps[i];
+    const next = i + 1 < n ? cps[i + 1] : -1;
+    gen++;
+    let added = 0;
+    for (let k = 0; k < count && added >= 0; k++) {
+      const pc = now[k];
+      const o = op[pc];
+      if (o === CHAR ? arg[pc] === c : o === SET ? sets[arg[pc]](c) : o === ANY || c !== 10) added = follow(then, added, pc + 1, c, next);
+    }
+    if (added >= 0) added = follow(then, added, 0, c, next);
+    [now, then] = [then, now];
+    count = added;
+  }
+  return count < 0;
 }

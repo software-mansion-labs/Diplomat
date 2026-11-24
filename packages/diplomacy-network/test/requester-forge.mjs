@@ -255,18 +255,30 @@ await check('text policy-bot would count as an approval is refused, by the polic
   const D = commit('remote', { '.policy.yml': 'remote: o/policies\npath: shared/p.yml\n' });
   git(work, 'push', '--quiet', bare, `${D}:refs/heads/far`);
   forge.pull('o/r', { number: 584, author: 'them', head: 'theirs', base: 'far' });
-  const far = (body) => authorize(rules('review', 'pr-584'), gh('POST', '/repos/o/r/pulls/584/reviews', { event: 'COMMENT', body }), ctxFor());
+  const far = (body, state = {}) => authorize(rules('review', 'pr-584'), gh('POST', '/repos/o/r/pulls/584/reviews', { event: 'COMMENT', body }), ctxFor(state));
   assert.match((await far('fine')).reason, /^the body member "body" cannot be checked against the pool repository's policy-bot policy, so no text is sent on its pull requests: o\/r\/\.policy\.yml names o\/policies\/shared\/p\.yml, which this machine's account cannot read$/);
   const policies = forge.bare('o/policies', { id: 'R_9' });
   git(scratch, 'clone', '--quiet', policies, 'policies');
   const there = path.join(scratch, 'policies');
   fs.mkdirSync(path.join(there, 'shared'));
   fs.writeFileSync(path.join(there, 'shared/p.yml'), 'approval_defaults:\n  options:\n    methods:\n      comments: [":shipit:"]\n');
+  fs.writeFileSync(path.join(there, '.policy.yml'), 'approval_defaults:\n  options:\n    methods:\n      comments: ["+1 by default"]\n');
   git(there, 'add', '-A');
   git(there, 'commit', '--quiet', '-m', 'p');
   git(there, 'push', '--quiet', 'origin', 'HEAD:main');
   assert.match((await far('so :shipit:')).reason, /holds ":shipit:", which the pool repository's policy-bot policy \(o\/policies\/shared\/p\.yml\) counts/);
   assert.equal((await far('fine')).ok, true);
+  // One task's pull requests into two bases are each checked against their own base's policy.
+  const both = {};
+  assert.equal((await far('LGTM', both)).ok, true);
+  assert.match((await review('LGTM', both)).reason, said);
+  // A reference that names no path names the other repository's .policy.yml (go-githubapp appconfig).
+  git(work, 'checkout', '--quiet', '-b', 'near', A);
+  const N = commit('near', { '.policy.yml': 'remote: o/policies\n' });
+  git(work, 'push', '--quiet', bare, `${N}:refs/heads/near`);
+  forge.pull('o/r', { number: 586, author: 'them', head: 'theirs', base: 'near' });
+  const near = await authorize(rules('review', 'pr-586'), gh('POST', '/repos/o/r/pulls/586/reviews', { event: 'COMMENT', body: '+1 by default' }), ctxFor());
+  assert.match(near.reason, /holds "\+1 by default", which the pool repository's policy-bot policy \(o\/policies\/\.policy\.yml\) counts/);
 
   // A policy this cannot read refuses text on the repository, saying why.
   git(work, 'checkout', '--quiet', '-b', 'odd', A);
@@ -286,8 +298,8 @@ await check('text policy-bot would count as an approval is refused, by the polic
   assert.match((await review('+1 from the org')).reason, /\(o\/r\/\.policy\.yml, o\/\.github\/policy\.yml\) counts/);
   // The rest of the file's world is as it was.
   git(work, 'checkout', '--quiet', 'main');
-  git(work, 'push', '--quiet', bare, ':refs/heads/release', ':refs/heads/far', ':refs/heads/odd');
-  for (const n of [583, 584, 585]) {
+  git(work, 'push', '--quiet', bare, ':refs/heads/release', ':refs/heads/far', ':refs/heads/odd', ':refs/heads/near');
+  for (const n of [583, 584, 585, 586]) {
     delete forge.data.repos['o/r'].pulls[n];
     delete forge.data.nodes[`PR_${n}`];
   }
