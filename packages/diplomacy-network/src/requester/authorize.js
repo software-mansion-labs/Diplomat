@@ -8,7 +8,7 @@
 // decides, alone - its pins and deep checks are not retried against a later rule. What
 // matches nothing is refused.
 
-import { COMMAND_REASON, checkGraphql, isProse, itemMismatch, sameButSelf, searchConfined } from './graphql.js';
+import { checkGraphql, itemMismatch, proseFault, sameButSelf, searchConfined } from './graphql.js';
 import { branchLabel, checkAdvertise, checkFork, checkPush, pushReport } from './receivepack.js';
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
@@ -287,9 +287,14 @@ async function checkBodyPins(spec, req, ctx, effects, given, fork) {
     if (pin.equals !== undefined && !sameJson(value, pin.equals, pin.fold)) refuse(`the body member "${key}" has a value this task may not use`);
     if (pin.oneOf && !pin.oneOf.some((allowed) => sameJson(value, allowed, pin.fold))) refuse(`the body member "${key}" has a value this task may not use`);
     if (pin.prefix !== undefined && !(typeof value === 'string' && value.startsWith(pin.prefix))) refuse(`the body member "${key}" must start with "${pin.prefix}"`);
-    if (pin.prose && !isProse(value)) refuse(`the body member "${key}" ${COMMAND_REASON}`);
-    if (pin.proseIn && !(Array.isArray(value) && value.every((item) => isProse(item?.[pin.proseIn])))) {
-      refuse(`the body member "${key}" is not a list of objects whose "${pin.proseIn}" is text, or holds text that ${COMMAND_REASON}`);
+    const fault = pin.prose ? proseFault(value) : null;
+    if (fault) refuse(`the body member "${key}" ${fault}`);
+    if (pin.proseIn) {
+      if (!Array.isArray(value)) refuse(`the body member "${key}" is not a list`);
+      value.forEach((item, i) => {
+        const fault = proseFault(item?.[pin.proseIn]);
+        if (fault) refuse(`the body member "${key}", entry ${i + 1}: its "${pin.proseIn}" ${fault}`);
+      });
     }
     if (pin.created) effects.push(pin.created === 'label' ? { head: value } : { pull: value, fork });
     if (pin.assignees !== undefined) {

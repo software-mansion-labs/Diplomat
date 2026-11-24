@@ -707,17 +707,25 @@ function checkQuery(doc, op, vars, spec, lookups) {
 
 // ---------------------------------------------------------------------- mutations
 
-// What a forge or a bot on it takes for a command: a line starting with "/" (GitLab's
-// quick actions, Prow's "/approve"), and anywhere in the text an account named with "@"
-// or the word "bors" - homu acts on any line naming it, claude-code-action on "@claude"
-// anywhere, Copilot on "@copilot" in any comment. Bots read the text as it was sent, so
-// no markdown hides one. Text posted in the requester's name is otherwise a way to do
-// anything such a command can, and a task has no one to call on.
-const COMMAND = /(^|[\r\n\v\f\u0085\u2028\u2029])[ \t]*\/|@[\p{L}\p{N}_.-]|\bbors\b/iu;
-/// Whether `text` is a string that holds nothing `COMMAND` would take for a command.
-export const isProse = (text) => typeof text === 'string' && !COMMAND.test(text);
-/// Why text that is not `isProse` is refused.
-export const COMMAND_REASON = 'names an account with "@", says "bors" or has a line starting with "/", which the forge or a bot on it would take for a command';
+// What a forge or a bot on it takes for a command: a line that starts with "/" and a word
+// of letters, "_" and "-" before white space or the end (GitLab's quick actions, Prow's
+// "/approve"), and anywhere in the text an account named with "@" or the word "bors" -
+// homu acts on any line naming it, claude-code-action on "@claude" anywhere, Copilot on
+// "@copilot" in any comment. Bots read the text as it was sent, so no markdown hides one.
+// Text posted in the requester's name is otherwise a way to do anything such a command
+// can, and a task has no one to call on.
+const COMMAND = /(^|[\r\n\v\f\u0085\u2028\u2029])[ \t]*\/[a-z][a-z_-]*(?=\s|$)|@[\p{L}\p{N}_.-]|\bbors\b/iu;
+const REWORD = 'text in the requester\'s name names no account with "@" anywhere in it, code included (write "the Override annotation", '
+  + '"types/node", no e-mail address), says no "bors" and starts no line with "/" and a word; reword it and send the request again';
+/// Why `text` may not be written in the requester's name - what in it a forge or a bot
+/// would take for a command, quoted, and how to reword it - or null when it may.
+export function proseFault(text) {
+  if (typeof text !== 'string') return 'is not text';
+  const found = COMMAND.exec(text);
+  if (!found) return null;
+  const said = text.slice(found.index + (found[1] ?? '').length).trimStart().match(/^\S{1,40}/)[0];
+  return `holds ${JSON.stringify(said)}, which the forge or a bot on it would take for a command: ${REWORD}`;
+}
 const PROSE = { prose: true };
 
 // What each mutation's `input` may hold. A key the table does not name is refused, so a
@@ -727,7 +735,7 @@ const PROSE = { prose: true };
 //   own       it was written by the identity the task acts as
 //   pending   it is part of a review that has not been submitted
 //   repo      it is the pool's repository
-// `free` is text or layout the task decides, `prose` text that is `isProse`. `created` is a branch the task created,
+// `free` is text or layout the task decides, `prose` text that has no `proseFault`. `created` is a branch the task created,
 // from which it has opened no pull request: "branch", or "account:branch" for one in
 // that account's fork.
 // `assignees` is the issue's whole new assignee list, which may differ from the list the
@@ -777,7 +785,7 @@ const MUTATIONS = {
       repositoryId: { node: ['Repository'], repo: true, required: true },
       headRefName: { created: true, required: true },
       draft: { equals: true, required: true },
-      baseRefName: 'free', title: 'free', body: PROSE, maintainerCanModify: 'free', clientMutationId: 'free',
+      baseRefName: 'free', title: PROSE, body: PROSE, maintainerCanModify: 'free', clientMutationId: 'free',
     },
   },
   gitlab: {},
@@ -817,7 +825,8 @@ function checkMutation(doc, op, vars, spec, lookups, effects) {
       if (typeof val !== 'string') refuse(`graphql: "${key}" is not a branch name`);
       effects.push({ head: val });
     } else if (rule.prose) {
-      if (!isProse(typeof val === 'object' ? val.blockString : val)) refuse(`graphql: "${key}" ${COMMAND_REASON}`);
+      const fault = proseFault(typeof val === 'object' ? val.blockString : val);
+      if (fault) refuse(`graphql: "${key}" ${fault}`);
     } else if (val !== rule.equals) {
       refuse(`graphql: ${field.name} needs "${key}" to be ${JSON.stringify(rule.equals)}`);
     }

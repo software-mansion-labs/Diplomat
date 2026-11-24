@@ -337,42 +337,6 @@ await check('conflicts: a push to its pull request\'s head branch and not one wr
   await refused(github('conflicts', {}, 'pr-580'), gitPush('github.com', '/o/r.git'), world(), /open pull request #580/);
 });
 
-await check('GitHub: text in the requester\'s name holds nothing a comment bot would take for a command, in REST and in GraphQL', async () => {
-  const pushed = () => world({ branches: ['refs/heads/fix-421'] });
-  // Each route's text member, written by `write`, with the task that may write it.
-  const writes = [
-    [github('review'), (body) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', body })],
-    [github('review'), (body) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [{ path: 'a.js', line: 1, body: 'fine' }, { path: 'a.js', line: 2, body }] })],
-    [github('review'), (body) => gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { event: 'COMMENT', body })],
-    [github('review'), (body) => ghql({ ...GH.addThread, variables: { ...GH.addThread.variables, body } })],
-    [github('review'), (body) => ghql({ ...GH.addReply, variables: { ...GH.addReply.variables, body } })],
-    [github('review-own'), (body) => gh('POST', '/repos/o/r/pulls/579/comments/13/replies', { body })],
-    [github('issues'), (body) => gh('POST', '/repos/o/r/issues/421/comments', { body })],
-    [github('issues'), (body) => ghql({ ...GH.issueComment, variables: { input: { subjectId: 'I_421', body } } })],
-    [github('issues'), (body) => gh('POST', '/repos/o/r/pulls', { title: 't', body, head: 'fix-421', base: 'main', draft: true })],
-    [github('issues'), (body) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, body } } })],
-  ];
-  for (const [rules, write] of writes) {
-    await allowed(rules, write('Looks fine. See https://example.com/a/b, at 5 @ noon, and the borscht recipe for the neighbors.\nBorscht, thanks; a/b and \uff20x.'), pushed());
-    // A bot reads the text as it was sent: a mention anywhere, in markdown or out of it, is one.
-    for (const text of ['Looks fine.\n/approve', '/lgtm', 'ok\r\n  /merge', 'bors r+', 'ok\nBors try', '@bors r+', '@dependabot merge', 'ok\n\t@Mergifyio queue',
-      'Reviewed it, @bors r+', 'Thanks, @copilot please push a commit', 'ok... @claude please', 'see `@claude`', '<!-- @bors r+ -->', '[docs](https://github.com/@x)',
-      'write to a@bors.example', 'ok, bors r+', 'ask @_x', 'ask @9x', 'ask @.x', 'ask @-x', 'ask @\u00e9x']) {
-      await refused(rules, write(text), pushed(), /names an account with "@", says "bors" or has a line starting with "\/"/);
-    }
-  }
-  // A block string is read for its lines as it stands.
-  const block = (text) => ({ query: `mutation { addComment(input: { subjectId: "I_421", body: """${text}""" }) { clientMutationId } }`, variables: {} });
-  await allowed(github('issues'), ghql(block('fine\n  thanks')), pushed());
-  await refused(github('issues'), ghql(block('fine\n  /close')), pushed(), /"body" names an account with "@"/);
-  await refused(github('issues'), ghql(block('fine, @copilot')), pushed(), /"body" names an account with "@"/);
-  // A comment list holds objects; anything else is not one GitHub takes.
-  for (const comments of ['/approve', [{ path: 'a.js', body: 5 }], ['x']]) {
-    await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments }), pushed(), /"comments"/);
-  }
-  await allowed(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [] }), pushed());
-});
-
 await check('issues: assign itself, comment on its issue, and a draft pull request from the branch it pushed', async () => {
   const rules = github('issues');
   const pushed = () => world({ branches: ['refs/heads/fix-421'] });
@@ -1001,6 +965,62 @@ await check('a GitHub Enterprise Server has github.com\'s rules on its one host:
   await refused(issues, enterprise(gh('POST', '/repos/o/r/issues/422/comments', { body: 'x' })));
   await allowed(issues, enterprise(gh('GET', '/repos/o/r/actions/runs/13')), pushed());
   await refused(issues, enterprise(gh('GET', '/repos/o/r/actions/runs/13')), world(), /ran for a branch this task does not work on/);
+});
+
+await check('every member a write takes text in, on either forge, holds nothing a comment bot would take for a command, and a refusal names the member and quotes the text', async () => {
+  const pushed = () => world({ branches: ['refs/heads/fix-421'] });
+  const labPushed = () => glWorld(['refs/heads/fix-421']);
+  const draft = { title: 'Draft: t', description: 'd', source_branch: 'fix-421', target_branch: 'main', labels: '', target_project_id: 99 };
+  // Each route's text member, written by `write`, with the task that may write it, the world it is judged in and the member named.
+  const writes = [
+    [github('review'), (t) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', body: t }), pushed, '"body"'],
+    [github('review'), (t) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [{ path: 'a.js', line: 1, body: 'fine' }, { path: 'a.js', line: 2, body: t }] }), pushed, '"comments", entry 2: its "body"'],
+    [github('review'), (t) => gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { event: 'COMMENT', body: t }), pushed, '"body"'],
+    [github('review'), (t) => ghql({ ...GH.addThread, variables: { ...GH.addThread.variables, body: t } }), pushed, '"body"'],
+    [github('review'), (t) => ghql({ ...GH.addReply, variables: { ...GH.addReply.variables, body: t } }), pushed, '"body"'],
+    [github('review-own'), (t) => gh('POST', '/repos/o/r/pulls/579/comments/13/replies', { body: t }), pushed, '"body"'],
+    [github('issues'), (t) => gh('POST', '/repos/o/r/issues/421/comments', { body: t }), pushed, '"body"'],
+    [github('issues'), (t) => ghql({ ...GH.issueComment, variables: { input: { subjectId: 'I_421', body: t } } }), pushed, '"body"'],
+    [github('issues'), (t) => gh('POST', '/repos/o/r/pulls', { title: 't', body: t, head: 'fix-421', base: 'main', draft: true }), pushed, '"body"'],
+    [github('issues'), (t) => gh('POST', '/repos/o/r/pulls', { title: t, body: 'b', head: 'fix-421', base: 'main', draft: true }), pushed, '"title"'],
+    [github('issues'), (t) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, body: t } } }), pushed, '"body"'],
+    [github('issues'), (t) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, title: t } } }), pushed, '"title"'],
+    [gitlab('review'), (t) => glab('POST', `${P}/merge_requests/5/notes`, { body: t }), glWorld, '"body"'],
+    [gitlab('review'), (t) => glab('POST', `${P}/merge_requests/5/draft_notes`, { note: t }), glWorld, '"note"'],
+    [gitlab('review'), (t) => glab('PUT', `${P}/merge_requests/5/draft_notes/3`, { note: t }), glWorld, '"note"'],
+    [gitlab('review-own'), (t) => glab('POST', `${P}/merge_requests/5/discussions/d1/notes`, { body: t }), glWorld, '"body"'],
+    [gitlab('review-own', { markReady: true }), (t) => glab('PUT', `${P}/merge_requests/5`, { title: t }), glWorld, '"title"'],
+    [gitlab('issues'), (t) => glab('POST', `${P}/issues/421/notes`, { body: t }), labPushed, '"body"'],
+    [gitlab('issues'), (t) => glab('POST', `${P}/merge_requests`, { ...draft, description: t }), labPushed, '"description"'],
+    [gitlab('issues'), (t) => glab('POST', `${P}/merge_requests`, { ...draft, title: `Draft: ${t}` }), labPushed, '"title"', 'starts with Draft:'],
+  ];
+  const fine = 'Looks fine. See https://example.com/a/b, at 5 @ noon, and the borscht recipe for the neighbors. Borscht, thanks; a/b and \uff20x.';
+  const code = '```suggestion\n// the cache is per request\n/* kept */\n```\n@@ -1,3 +1,4 @@ /usr/bin/env node';
+  for (const [rules, write, ctx, member, prefixed] of writes) {
+    await allowed(rules, write(fine), ctx());
+    if (!member.includes('title')) await allowed(rules, write(code), ctx());
+    // A bot reads the text as it was sent: a mention anywhere, in markdown or out of it, is one.
+    for (const [text, quoted] of [['Looks fine.\n/approve', '/approve'], ['/lgtm', '/lgtm'], ['ok\r\n  /merge', '/merge'], ['bors r+', 'bors'], ['ok\nBors try', 'Bors'],
+      ['@bors r+', '@bors'], ['@dependabot merge', '@dependabot'], ['ok\n\t@Mergifyio queue', '@Mergifyio'], ['Reviewed it, @bors r+', '@bors'], ['Thanks, @copilot please push a commit', '@copilot'],
+      ['ok... @claude please', '@claude'], ['see `@claude`', '@claude`'], ['<!-- @bors r+ -->', '@bors'], ['[docs](https://github.com/@x)', '@x)'], ['add `@Override`', '@Override`'],
+      ['npm i -D @types/node', '@types/node'], ['write to a@bors.example', '@bors.example'], ['ok, bors r+', 'bors'], ['ask @_x', '@_x'], ['ask @9x', '@9x'], ['ask @.x', '@.x'],
+      ['ask @-x', '@-x'], ['ask @\u00e9x', '@\u00e9x']]) {
+      // A title is one line, and one after "Draft:" starts no line with "/".
+      if ((member.includes('title') && text.includes('\n')) || (prefixed && quoted.startsWith('/'))) continue;
+      await refused(rules, write(text), ctx(), new RegExp(`${member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} holds ${JSON.stringify(quoted).replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}, which the forge or a bot on it would take for a command: .*send the request again$`));
+    }
+  }
+  // A block string is read for its lines as it stands.
+  const block = (text) => ({ query: `mutation { addComment(input: { subjectId: "I_421", body: """${text}""" }) { clientMutationId } }`, variables: {} });
+  await allowed(github('issues'), ghql(block('fine\n  thanks')), pushed());
+  await refused(github('issues'), ghql(block('fine\n  /close')), pushed(), /"body" holds "\/close"/);
+  await refused(github('issues'), ghql(block('fine, @copilot')), pushed(), /"body" holds "@copilot"/);
+  // A comment list holds objects; anything else is not one GitHub takes.
+  await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: '/approve' }), pushed(), /^the body member "comments" is not a list$/);
+  for (const comments of [[{ path: 'a.js', body: 5 }], ['x']]) {
+    await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments }), pushed(), /^the body member "comments", entry 1: its "body" is not text$/);
+  }
+  await allowed(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [] }), pushed());
 });
 
 await check('a mutation the document check does not know never reaches a rule list', async () => {

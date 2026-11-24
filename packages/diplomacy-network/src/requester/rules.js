@@ -272,7 +272,7 @@ function github({ kind, options, target, item, me }) {
     mutations.push('createPullRequest');
     rules.push(api('POST', `${repo}/pulls`, { body: {
       head: { created: 'label', required: true }, draft: { equals: true, required: true },
-      title: 'free', body: PROSE, base: 'free', maintainer_can_modify: 'free',
+      title: PROSE, body: PROSE, base: 'free', maintainer_can_modify: 'free',
     } }));
   };
 
@@ -376,7 +376,7 @@ function gitlab({ kind, options, target, item, me }) {
   // at another project or merge it. A label is made by naming it, replaces another of its
   // scope and can start a pipeline: glab sends the empty list, as gh sends none.
   const draft = {
-    source_branch: { created: true, required: true }, title: { prefix: 'Draft:', required: true },
+    source_branch: { created: true, required: true }, title: { prefix: 'Draft:', prose: true, required: true },
     target_branch: 'free', description: PROSE, labels: { equals: '' }, remove_source_branch: 'free', squash: 'free', allow_collaboration: 'free',
   };
   const draftMerges = () => {
@@ -414,7 +414,7 @@ function gitlab({ kind, options, target, item, me }) {
       each('POST', `${mr}/discussions/*/notes`, { ...asked, body: { body: PROSE } });
       // GitLab reads `resolved` from the query or from the body; one of them must say it.
       each('PUT', `${mr}/discussions/*`, { ...asked, query: { resolved: { equals: 'true', optional: true } }, body: { resolved: { oneOf: [true, 'true'], required: true } } });
-      if (options.markReady === true) each('PUT', mr, { ...asked, body: { title: 'free' } });
+      if (options.markReady === true) each('PUT', mr, { ...asked, body: { title: PROSE } });
     }
     if (kind !== 'review') push({ head: who });
   } else if (kind === 'issues') {
