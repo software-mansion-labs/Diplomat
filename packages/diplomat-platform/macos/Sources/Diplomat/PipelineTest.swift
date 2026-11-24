@@ -303,6 +303,16 @@ enum PipelineTest {
                                                     teams: [], now: later) == [gone: old]
                   && Store.retainedPipelineAttempts([gone: old], after: PipelineTickResult(at: Date(), unread: ["o/x"]),
                                                     teams: teams, now: later).isEmpty)
+        check("…but there, one of an item it read is dropped",
+              Store.retainedPipelineAttempts([gone: old, fixLinear.key: old],
+                                             after: PipelineTickResult(at: Date(), unread: ["O/R"],
+                                                                       read: [String(gone.dropFirst(13)), linear]),
+                                             teams: teams, now: later).isEmpty)
+        check("…and kept in a root a sync was not handed while one did not resolve",
+              Store.retainedPipelineAttempts([gone: old], after: result([]), handed: ["o/web"],
+                                             teams: teams, now: later) == [gone: old]
+                  && Store.retainedPipelineAttempts([gone: old], after: result([]), handed: ["o/r"],
+                                                    teams: teams, now: later).isEmpty)
         store.savePipelineAttempts([gone: old])
         await store.applyPipeline(result([]), judged: false, now: later)
         check("…all of them after a sync not judged", store.loadPipelineAttempts() == [gone: old])
@@ -366,6 +376,27 @@ enum PipelineTest {
         Task { @MainActor in store.cancelRequestedWork(fixKey) }
         await store.applyPipeline(result([review, fix]), now: t3)
         check("…or of one queued before, while a later pass awaits", ids() == [reviewKey])
+        clearQueue()
+        store.savePipelineAttempts([:])
+        // GitHub answers a renamed root by its new name: the effect's url carries it.
+        let renamed = "https://github.com/o/renamed/issues/90020"
+        let movedFix = PipelineEffect.fixIssue(repo: "o/r", number: 90020, url: renamed, author: "bob")
+        let movedKey = "issues:o/renamed#90020"
+        await store.applyPipeline(result([movedFix]), now: t2)
+        check("a renamed root's fix runs on its effect's link", job(movedKey)?.prURL == renamed)
+        check("…which its spawn dates",
+              job(movedKey).map { Store.pipelineSpawned(store.loadPipelineAttempts(), job: $0, at: t3) }?[movedFix.key]?
+                  .lastDispatchedAt == t3)
+        store.cancelRequestedWork(movedKey)
+        await store.applyPipeline(result([movedFix]), now: t3)
+        check("…and its Cancel concludes, past every backoff",
+              ids().isEmpty && store.loadPipelineAttempts()[movedFix.key]?.concludedAt != nil)
+        clearQueue()
+        store.savePipelineAttempts([:])
+        Task { @MainActor in store.pipelineFastTrack = false }
+        await store.applyPipeline(result([review]), now: t2)
+        check("Fast track turned off while a pass awaits queues no review", ids().isEmpty)
+        store.pipelineFastTrack = true
         clearQueue()
         store.savePipelineAttempts([:])
 
@@ -749,6 +780,20 @@ enum PipelineTest {
         check("a sync switched off midway, which emits nothing, withdraws nothing", ids() == [reviewKey])
         clearQueue()
         store.savePipelineAttempts([:])
+        let resolved = store.roots
+        let unhanded = PipelineEffect.fixIssue(repo: "o/else", number: 90021,
+                                                url: "https://github.com/o/else/issues/90021", author: "bob")
+        store.pinRoots(resolved + [PRRef.LocalRepo(owner: "o", repo: "else", path: scratch.path)])
+        await store.applyPipeline(result([unhanded, review]))
+        store.pinRoots(resolved, complete: false)
+        Store.pipelineTickOverride = { _ in result([]) }
+        await store.runPipelineSyncOnce()
+        check("a root whose path did not resolve keeps its asks, unread", ids() == ["issues:o/else#90021"])
+        store.pinRoots(resolved)
+        await store.runPipelineSyncOnce()
+        check("…until a sync is handed every root", ids().isEmpty)
+        clearQueue()
+        store.savePipelineAttempts([:])
         await store.applyPipeline(result([fix, fixLinear, review]), now: now)
         let other = item("https://github.com/o/r/issues/90014", .issue, author: "bob")
         store.pipelineResult = PipelineTickResult(at: Date(), items: items + [other])
@@ -901,9 +946,10 @@ enum PipelineTest {
         print("\npipeline: asks a sync no longer owes")
         let asks = [fix, fixLinear, review].compactMap { store.pipelineAsk($0) } + [sweep]
         func withdrawn(_ seen: [PipelineItem], _ effects: [PipelineEffect], unread: [String] = [],
-                       fixable: [String] = [], of asks: [Store.RequestedWork] = asks) -> [String] {
+                       fixable: [String] = [], read: [String] = [],
+                       of asks: [Store.RequestedWork] = asks) -> [String] {
             Store.pipelineWithdrawn(asks, by: PipelineTickResult(at: Date(), items: seen, effects: effects,
-                                                                 unread: unread, fixable: fixable),
+                                                                 unread: unread, fixable: fixable, read: read),
                                     fix: true, fastTrack: true).sorted()
         }
         var assigned = items
@@ -928,6 +974,9 @@ enum PipelineTest {
                   && withdrawn([], [], fixable: [issue, linear], of: fromScreen) == [reviewKey])
         check("…and nothing goes in a root the sync could not judge in full",
               withdrawn(assigned, [], unread: ["O/R"]).isEmpty)
+        check("…but an ask there for an item it read",
+              withdrawn([], [], unread: ["O/R"], read: [issue, linear]) == [fixKey, linearKey].sorted()
+                  && withdrawn([], [], unread: ["O/R"], read: [issue], of: fromScreen).isEmpty)
         check("…an ask whose item a whole read left out goes (closed)",
               withdrawn([], []) == [fixKey, linearKey, reviewKey].sorted())
         check("…and one a sync queued goes while its switch is off, in an unread root or with no result",
@@ -948,6 +997,21 @@ enum PipelineTest {
         store.savePipelineAttempts([:])
 
         print("\npipeline: concluded records")
+        let claudeEnv = ProcessInfo.processInfo.environment["DIPLOMAT_CLAUDE_DIR"]
+        setenv("DIPLOMAT_CLAUDE_DIR", scratch.appendingPathComponent("claude").path, 1)
+        await store.applyPipeline(result([fix]), now: t0)
+        let answered = AgentState.RunRecord(runID: AgentRegistry.newRunID(now: Date().timeIntervalSince1970),
+                                            dispatchedAt: Date().timeIntervalSince1970 - 600, prURL: issue,
+                                            kind: AgentTaskQueue.issuesAction, pid: 4242)
+        AgentRegistry.createRun(answered, prompt: "fix")
+        try? "idle \(Date().timeIntervalSince1970)\n"
+            .write(to: AgentRegistry.activityPath(answered.runID), atomically: true, encoding: .utf8)
+        _ = await store.settleAgents()
+        check("a run that reported its turn over concludes its record as it retires",
+              AgentRegistry.load().isEmpty && store.loadPipelineAttempts()[fix.key]?.concludedAt != nil)
+        if let claudeEnv { setenv("DIPLOMAT_CLAUDE_DIR", claudeEnv, 1) } else { unsetenv("DIPLOMAT_CLAUDE_DIR") }
+        clearQueue()
+        store.savePipelineAttempts([:])
         let closedOut = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: t0, attempts: 1, concludedAt: t0)
         check("a concluded record no sync owes is kept for 30 days after its run concluded",
               Store.retainedPipelineAttempts([gone: closedOut], after: result([]), teams: teams,
@@ -1042,6 +1106,8 @@ enum PipelineTest {
         setenv("DIPLOMAT_PIPELINE_SECS", "5", 1)
         let floorSecs = Double((try? CoreAssets.pipeline())?.minSyncSecs ?? 60)
         check("the sync period is never under its floor", floorSecs > 5 && Store.pipelineSyncInterval == floorSecs)
+        setenv("DIPLOMAT_PIPELINE_SECS", "1e11", 1)
+        check("…nor over a day", Store.pipelineSyncInterval == 86_400)
         if let periodEnv { setenv("DIPLOMAT_PIPELINE_SECS", periodEnv, 1) } else { unsetenv("DIPLOMAT_PIPELINE_SECS") }
         let ghEnv = ProcessInfo.processInfo.environment["DIPLOMAT_GH"]
         setenv("DIPLOMAT_GH", "/usr/bin/false", 1)
@@ -1072,6 +1138,14 @@ enum PipelineTest {
             graph: PipelineGraph(nodes: [.init(id: issue, column: 0, row: 0), .init(id: pr, column: 1, row: 0),
                                          .init(id: lone.id, column: 0, row: 1)],
                                  edges: [.init(from: issue, to: pr, kind: .fixes)]))
+        let older = "https://github.com/o/r/issues/10", newer = "https://github.com/o/r/issues/9"
+        let rows = PipelineLayout.make(PipelineTickResult(
+            at: Date(), items: [item(older, .issue, author: "bob"), item(newer, .issue, author: "bob")],
+            graph: PipelineGraph(nodes: [.init(id: newer, column: 0, row: 0), .init(id: older, column: 0, row: 1)],
+                                 edges: [])),
+                                       lane: nil).cards
+        check("groups stack in the core's row order, not by id",
+              rows.map(\.item.id) == [newer, older] && rows[0].frame.minY < rows[1].frame.minY)
         check("a lane keeps each group with any member in it, whole",
               Set(PipelineLayout.make(laneResult, lane: .done).cards.map(\.item.id)) == [issue, pr])
         var eng = items[2]
@@ -1123,7 +1197,17 @@ enum PipelineTest {
         check("a hold is said as one",
               PipelineTint.hover(heldBy).components(separatedBy: "\n")
                   .contains("Held: @carol is on the prompt-injection ban list"))
-        check("a sync that read nothing says so",
+        store.pipelineResult = PipelineTickResult(at: Date(), unread: ["O/R"])
+        check("an item in a root the last sync did not read all of, a Linear issue's by its team, is named so",
+              store.pipelineUnread(items[0]) == "O/R" && store.pipelineUnread(eng) == "O/R"
+                  && store.pipelineUnread(ops) == nil)
+        store.pipelineResult = nil
+        check("a sync that read nothing says what it did not read",
+              PipelineView.emptyText(enabled: true, synced: true, unread: ["o/r", "o/web"])
+                  == "The last sync did not read all of o/r, o/web, and found no open issue or PR in what it did."
+                  && PipelineView.emptyText(enabled: true, synced: true, reads: false)
+                  == "GitLab roots are not read, and no GitHub root or Linear team is set.")
+        check("…and that it found nothing",
               PipelineView.emptyText(enabled: true, synced: true) == "The last sync found no open issue or PR."
                   && PipelineView.emptyText(enabled: true, synced: false).hasPrefix("Nothing read yet")
                   && PipelineView.emptyText(enabled: false, synced: true).hasPrefix(

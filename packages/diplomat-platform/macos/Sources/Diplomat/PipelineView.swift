@@ -53,7 +53,8 @@ struct PipelineView: View {
                         .frame(width: PipelineView.detailWidth, alignment: .topLeading)
                 }
             } else {
-                Text(PipelineView.emptyText(enabled: store.pipelineEnabled, synced: result != nil))
+                Text(PipelineView.emptyText(enabled: store.pipelineEnabled, synced: result != nil,
+                                            unread: result?.unread ?? [], reads: reads))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .cardChrome(padding: 6)
@@ -65,15 +66,28 @@ struct PipelineView: View {
         .task { await store.loadPipelineLast() }
     }
 
-    /// What stands in for the graph while there is none to draw.
-    static func emptyText(enabled: Bool, synced: Bool) -> String {
+    /// What stands in for the graph while there is none to draw: after a sync, what it did
+    /// not read. `reads`: a GitHub root or a Linear team is set. Twin of
+    /// `pipelineview.empty_text`.
+    static func emptyText(enabled: Bool, synced: Bool, unread: [String] = [], reads: Bool = true) -> String {
         if !enabled {
             return "The pipeline is off. Switched on in Settings, it rates every open issue and your own PRs, "
                 + "sends the low-risk, low-complexity ones down the fast track and shows them here."
         }
-        return synced ? "The last sync found no open issue or PR."
-            : "Nothing read yet: the first sync lists every open issue and PR of the GitHub roots "
+        guard synced else {
+            return "Nothing read yet: the first sync lists every open issue and PR of the GitHub roots "
                 + "and the tracked Linear teams here."
+        }
+        if !reads { return "GitLab roots are not read, and no GitHub root or Linear team is set." }
+        if !unread.isEmpty {
+            return "The last sync did not read all of \(unread.joined(separator: ", ")), and found no open "
+                + "issue or PR in what it did."
+        }
+        return "The last sync found no open issue or PR."
+    }
+
+    private var reads: Bool {
+        store.roots.contains { !$0.isGitLab } || !Store.pipelineTeams(store.pipelineLinearTeamsRaw).isEmpty
     }
 
     // MARK: - Header and status
@@ -260,6 +274,7 @@ struct PipelineView: View {
                            forcedRate: store.pipelineForce.rate.contains(id),
                            forcedFracture: store.pipelineForce.fracture.contains(id),
                            banned: store.pipelineBanned(item),
+                           unread: store.pipelineUnread(item),
                            canRate: PipelineView.canRate(item, me: store.effectiveMe, rooted: rooted),
                            canFracture: PipelineView.canFracture(item, edges: result.graph.edges,
                                                                  rooted: rooted),
@@ -553,6 +568,9 @@ private struct PipelineDetail: View {
     /// Its text's author, on the ban list (`Store.pipelineBanned`): a sync would refuse
     /// to rate or split it.
     let banned: String?
+    /// Its root, which the last sync did not read all of (`Store.pipelineUnread`): a sync
+    /// may refuse to rate or split it.
+    let unread: String?
     let canRate: Bool
     let canFracture: Bool
     /// The fix effect is known: a Linear issue's text comes only with a sync's.
@@ -663,6 +681,7 @@ private struct PipelineDetail: View {
 
     private var ban: String? { banned.map { "@\($0) is on the prompt-injection ban list" } }
     private var refused: String? { PipelineView.fractureRefused(item) }
+    private var partly: String? { unread.map { "The last sync did not read all of \($0)" } }
 
     private var actions: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -672,18 +691,19 @@ private struct PipelineDetail: View {
                 if canRate {
                     PipelineActionChip(symbol: "gauge.with.needle",
                                        text: forcedRate ? "Rate asked" : "Rate now",
-                                       tint: .accentColor, enabled: enabled && !forcedRate && banned == nil,
+                                       tint: .accentColor,
+                                       enabled: enabled && !forcedRate && banned == nil && unread == nil,
                                        action: rate)
-                        .tooltip(ban ?? "Rate it in a sync started now, ahead of every limit")
+                        .tooltip(ban ?? partly ?? "Rate it in a sync started now, ahead of every limit")
                 }
                 if canFracture {
                     PipelineActionChip(symbol: "square.split.2x2",
                                        text: forcedFracture ? "Fracture asked" : "Fracture",
                                        tint: .purple,
                                        enabled: enabled && !forcedFracture && badge == nil && banned == nil
-                                           && refused == nil,
+                                           && refused == nil && unread == nil,
                                        action: fracture)
-                        .tooltip(ban ?? refused
+                        .tooltip(ban ?? refused ?? partly
                                  ?? "Split it into low-complexity child issues in a sync started now")
                 }
                 if PipelineView.canStartFix(item) {
