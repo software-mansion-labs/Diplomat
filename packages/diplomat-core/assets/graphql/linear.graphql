@@ -77,8 +77,8 @@ query Queued($filter: IssueFilter!) {
   }
 }
 
-# The issues of any team an attachment links `url` (a PR) from, with their state: Linear
-# moves a linked issue when the PR merges.
+# The issues of any team an attachment links `url` from, with their state: a PR about to
+# merge, which Linear moves them on, or a GitHub issue it would close, which they may hold.
 query Attached($url: String!) {
   attachmentsForURL(url: $url, first: 50) {
     pageInfo { hasNextPage }
