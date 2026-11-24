@@ -162,6 +162,8 @@ extension Store {
                 result = await Task.detached(priority: .utility) {
                     PipelineTick.run(settings: settings)
                 }.value
+                // A login Linear no longer accepts is forgotten by the sync.
+                refreshLinearLogin()
             }
             let ran = Store.pipelineRan(result, started: started)
             // Taken by this sync; what was forced during it waits for the next.

@@ -26,7 +26,7 @@ public enum LinearLogin {
         case refused(String)
         case transport(String)
         case expired
-        case unsaved(String)
+        case file(String)
 
         public var errorDescription: String? {
             switch self {
@@ -49,8 +49,8 @@ public enum LinearLogin {
                 return "Linear could not be reached: \(why)"
             case .expired:
                 return "Linear no longer accepts the login: sign in again (Settings → Pipeline → Linear login)"
-            case .unsaved(let why):
-                return "Linear's login could not be saved: \(why)"
+            case .file(let why):
+                return why
             }
         }
     }
@@ -64,7 +64,8 @@ public enum LinearLogin {
     }
 
     /// The `Authorization` a Linear call carries: the override's key as is, else the saved
-    /// token, refreshed first once it expires within `refreshMarginSecs`. Nil when signed out.
+    /// token, refreshed first once it expires within `refreshMarginSecs`. Nil when signed out;
+    /// a login Linear no longer accepts is forgotten.
     public static func authorization(in dir: URL = PipelineLog.dir, now: Date = Date(),
                                      transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> String? {
         if let env = ProcessInfo.processInfo.environment[LinearAPI.envVar], !env.isEmpty { return env }
@@ -83,13 +84,16 @@ public enum LinearLogin {
                     login.refreshToken = t.refresh ?? refresh
                     login.expiresAt = t.expires
                     try save(login, in: dir)
+                } catch Failure.expired {
+                    unlink(file(in: dir).path)
+                    throw Failure.expired
                 } catch where expires > now {
                     // Still good for now: the next read refreshes it.
                 }
             }
             return "Bearer " + login.accessToken
         }) else {
-            throw Failure.unsaved("\(lock(in: dir).path) could not be locked")
+            throw Failure.file("\(lock(in: dir).path) could not be locked")
         }
         return answer
     }
@@ -152,7 +156,7 @@ public enum LinearLogin {
                                   user: me.user, organization: me.organization)
                 PrivateFiles.prepare(dir)
                 guard try PrivateFiles.locked(lock(in: dir), { try save(login, in: dir) }) != nil else {
-                    throw Failure.unsaved("\(lock(in: dir).path) could not be locked")
+                    throw Failure.file("\(lock(in: dir).path) could not be locked")
                 }
                 call.answer(200, "Diplomat is signed in to Linear as \(me.user) (\(me.organization)). "
                     + "You can close this tab.")
@@ -168,14 +172,15 @@ public enum LinearLogin {
     /// Linear did not.
     public static func signOut(in dir: URL = PipelineLog.dir,
                                transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> String? {
+        guard saved(in: dir) != nil else { return nil }
         guard let login = try PrivateFiles.locked(lock(in: dir), { () throws -> Saved? in
             let login = saved(in: dir)
             if unlink(file(in: dir).path) != 0 && errno != ENOENT {
-                throw Failure.unsaved("\(file(in: dir).path) could not be removed")
+                throw Failure.file("\(file(in: dir).path) could not be removed")
             }
             return login
         }) else {
-            throw Failure.unsaved("\(lock(in: dir).path) could not be locked")
+            throw Failure.file("\(lock(in: dir).path) could not be locked")
         }
         guard let login else { return nil }
         do {
@@ -198,7 +203,7 @@ public enum LinearLogin {
     static func save(_ login: Saved, in dir: URL) throws {
         guard let data = try? CommsLog.encoder.encode(login),
               PrivateFiles.writeWhole(data, to: file(in: dir)) else {
-            throw Failure.unsaved("\(file(in: dir).path) could not be written")
+            throw Failure.file("\(file(in: dir).path) could not be written")
         }
     }
 

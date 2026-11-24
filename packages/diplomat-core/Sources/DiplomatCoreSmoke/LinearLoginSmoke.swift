@@ -249,7 +249,8 @@ func linearLoginSmoke() throws {
           == .transport("timed out after 30s"), "an expired token whose refresh failed")
     auth.tokenFails = false
     auth.token = (400, ["error": "invalid_grant"])
-    check(failure { try LinearLogin.authorization(in: authDir, now: now, transport: auth.transport) } == .expired)
+    check(failure { try LinearLogin.authorization(in: authDir, now: now, transport: auth.transport) } == .expired
+          && LinearLogin.saved(in: authDir) == nil, "a login Linear no longer accepts is forgotten")
     try saveLogin(authDir, expires: now.addingTimeInterval(-60), refresh: nil)
     check(failure { try LinearLogin.authorization(in: authDir, now: now, transport: auth.transport) } == .expired,
           "expired with nothing to refresh it with")
@@ -272,4 +273,6 @@ func linearLoginSmoke() throws {
     out.requests = []
     check((try LinearLogin.signOut(in: outDir, transport: out.transport)) == nil && out.requests.isEmpty,
           "nothing saved: nothing to revoke")
+    check((try LinearLogin.signOut(in: base.appendingPathComponent("none"), transport: out.transport)) == nil,
+          "no directory: nothing to sign out of")
 }
