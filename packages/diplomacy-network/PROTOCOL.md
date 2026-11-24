@@ -483,13 +483,24 @@ out of date for a host that comes back until one of those it asks has answered,
 whatever the time ("A host that was away"): it holds no word of anyone's but its own on
 what the pool is. A host that comes back asks each of those keys, and each key it holds
 a record of, for 30 days from then - the records its voucher leads up through are kept
-at any age, and say nothing of whether their hosts are there. A host that has not come
+at any age, and say nothing of whether their hosts are there. Those are 30 days of the
+host running with its transport up: time it spent switched off, asleep or with no
+transport asks nobody, and counts for none of them. A host that has not come
 back asks the keys whose records ran out too, without waiting for them. Each key is
 asked until it has answered, a record of it is held while the host is not coming back,
 or its 30 days have passed: the one that answered may have come back too, and hold no
 more of the pool than this host does. Once every key it asks has had its 30 days and
 none answered, a host that came back is back, alone, and does not come back again until
 it has heard another host of the pool once more.
+
+A host never stops looking for its pool. It keeps the keys of the members whose records
+it dropped - that left no record saying they left - up to the 1,024 that went last, and
+greets each of them it holds no record of again once a day, give or take half a day,
+while its transport is up. Two parts of a pool cut off from each other for longer than a
+record is kept, each with nobody left that the other holds, are one pool again within a
+day of reaching each other: the hello of either is let in by a voucher the other holds,
+and the two merge as any two members do. A pool none of whose former members is there
+costs each host a hello a day for each of them.
 
 A host that every other host it asks in a pool has refused as no member - its seat was
 given away, the member that gave it began another membership, or a move of the members
@@ -623,7 +634,8 @@ that record, at most once in 10 minutes. Nobody else is sent anything. A host di
 pushes to and solves a proof of work for only the keys a pool's own records name as its
 members, and, for up to 30 days, for the keys of the members it left and of the members
 whose records ran out in its store while it heard nobody (section 5), until each
-has answered or is named by a record it holds; a key it knows from a request
+has answered or is named by a record it holds, and, once a day, for the keys of the
+members whose records it dropped (section 5); a key it knows from a request
 alone it answers and nothing more. A host that
 stops taking part without leaving - its network is switched off - cancels its open
 offers and gives its claims back the same way, pushes that once, and stays a member for
@@ -1193,8 +1205,9 @@ Nothing in a record hides any of this.
   joins it by invite.
 - **A host back after more than 30 days asks keys that may be nobody's.** It greets the
   keys of the members it knew, each no more often than once in 10 minutes, for 30 days
-  or until it answers: a pool whose other members are all gone costs it those requests,
-  and it takes and gives no job until the 30 days are over. Its operator, knowing the
+  of running with its transport up or until it answers: a pool whose other members are
+  all gone costs it those requests, and it takes and gives no job until the 30 days are
+  over. After them it greets each of them once a day, for as long as it is in the pool. Its operator, knowing the
   others gone, unlinks the repository and links it again sooner, which begins a pool of
   one. A host whose every other member stopped signing hears nobody, as a host cut off
   from them does: each job it offers after 6 hours of that waits 180 s for an answer,
