@@ -162,7 +162,8 @@ brought, and an older engine takes no job.
   past 64 KiB. On their way to the broker, all jobs' connections together have at most 16 MiB
   in flight (128 KiB each way a connection), under 64 MiB of the host's kernel memory however
   they are used, shared equally among the jobs: a job that keeps more than
-  its share for 2 s while another waits loses its fullest connections. What all jobs'
+  its share for 2 s while another waits loses its fullest connections, which the job sees
+  reset, never ended. What all jobs'
   connections out to the internet hold in the host's kernel is polled every 500 ms and held
   to 32 MiB, shared equally: a job at its share has its writes kept back until there is room,
   and when what jobs leave unread takes them past 32 MiB, the job holding the most loses its

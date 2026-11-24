@@ -45,7 +45,9 @@ const ACK = 5;
 function carry(conn) {
   const up = net.connect({ host, port: Number(hostPort) });
   up.on('error', () => {});
-  const gone = () => { conn.destroy(); up.destroy(); };
+  // A hop closed without the broker's END is a connection cut short: the client is reset,
+  // so that it never reads what came as all there was.
+  const gone = () => { conn.resetAndDestroy(); up.destroy(); };
   // A socket closed while its far end still sends is reset, and that end loses what it
   // had not read yet: a side whose bytes came to their end is ended instead, and closed
   // once its far end has ended too, or LINGER_MS on.

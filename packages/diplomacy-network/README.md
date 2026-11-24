@@ -828,7 +828,9 @@ four things and starts the job:
   after all it sent, and what the job writes then still goes. Its sockets on the hop are
   closed once both ways have ended, each at most 5 s after it ended its own side: a
   socket closed while its far end still sends is reset, and that end loses what it had
-  not read yet. The hop's ends are this machine's sockets (the
+  not read yet. A connection cut short, by its far host's reset or by the broker for
+  what it holds on the hop or in the kernel, is reset at the job: the job never reads a
+  cut as an end. The hop's ends are this machine's sockets (the
   broker's, and on macOS the ones Docker Desktop opens to it; on Linux the relay's too),
   and every byte in them is one of those counted, held by at most two of them at a time:
   32 MiB of queued bytes at most, under 64 MiB of kernel buffers.
