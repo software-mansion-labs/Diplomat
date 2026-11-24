@@ -30,8 +30,8 @@ if it read that item, never by one that only read and showed the repo. An item w
 prompt-injection ban list, as read right before each step, and every issue Diplomat split from one, is
 not rated, labelled, split or fixed, nor a PR closing it reviewed or merged; a Linear issue's author is
 its creator's display name. Nor is a part whose parent's author is unknown, nor, with a notice, any
-item while the ban list (`~/.diplomat/pr-monitor/banned.json`) cannot be read; a missing one bans no
-one. The activity feed gets a line for each ask
+item once the ban list (`~/.diplomat/pr-monitor/banned.json`) could not be read in a sync; a missing
+one bans no one. The activity feed gets a line for each ask
 queued or withdrawn, each merge and split, each new notice, and the sync failing or recovering.
 
 What it does not do:
@@ -55,7 +55,7 @@ An issue, the first row that holds from the bottom up:
 |---|---|---|
 | `unrated` | no rating yet | Unrated |
 | `candidate` | rated low/low, not triaged, and Diplomat may write to it | Fast |
-| `human` | rated anything else, or low/low but assigned to someone else, triaged or tracked on GitHub | Human |
+| `human` | rated anything else, or low/low but assigned to someone else, triaged, tracked on GitHub, or held by a Linear issue tracking it | Human |
 | `fractured` | labelled `diplomat:fractured`, or it has sub-issues (Linear: children) | Fractured |
 | `fixing` | an open PR fixes it | the PR's: Fast while it is on the fast track, else Human |
 | `closed` | closed, and linked from a merged or closed PR on the graph or read for an ask waiting on it | Done |
@@ -80,7 +80,9 @@ Linear too), of a GitHub issue type other than Bug, or in a Linear triage or dup
 Nothing carrying a [stop label](#the-merge), matched the same way (`[WIP]`, `🚧 wip`), is rated, split,
 fixed, reviewed or merged, nor a PR closing it merged; an item carrying one is held
 `carries the label <label>`. A Linear issue an attachment links to a GitHub issue is that issue's work:
-never a `candidate` nor split, and held `it is tracked on GitHub as <owner/repo#N>`.
+never a `candidate` nor split, and held `it is tracked on GitHub as <owner/repo#N>`. The GitHub issue
+carries that Linear issue's other holds, held `it is tracked on Linear as <ID>: <its hold>`; and while
+a Linear team was not read whole, no issue in the repo it maps to is fixed, split or closed by a merge.
 
 ### The fast track
 
@@ -134,8 +136,8 @@ merge (`rater.model`, `rater.prModel`). It runs in the root's checkout (for a Li
 team's root) with the read-only tools `Read`, `Grep` and `Glob`, none of them pre-approved, so
 `claude -p` lets them read nothing outside the checkout; no MCP servers, no slash commands and no
 settings. It answers only through a JSON schema: `risk`, `complexity` and one sentence of `why`.
-The title and body (up to 6000 characters), and a PR's `gh pr diff` (up to 20,000), are on its
-stdin, fenced as untrusted data.
+The title and body (up to 6000 characters), and a PR's diff at the head its rating is saved under (up
+to 20,000), are on its stdin, fenced as untrusted data.
 
 A sync rates up to four items past the ones you asked for with **Rate now**, in this order, newest
 first within each: your fast-track PRs clean at their head and awaiting the second rating, your
@@ -151,7 +153,7 @@ dimension at a time. Each answer is kept on this machine as it arrives, until it
 so it is not paid for again; one whose labels could not be written comes with a notice. A kept rating
 counts over lower labels, holding the item, moves nothing down the fast track, and its labels are
 written at a later sync, tried again 1, 2, 4 ... syncs later, unless a PR's diff at its head allows
-less: then it is dropped and the PR rated again.
+less: then it is dropped, and the PR is rated by its labels again, or rated anew without them.
 
 ### The diff floor
 
@@ -221,11 +223,13 @@ on its own - or no parts, and why, as for an issue asking for anything new.
 The parent is labelled `diplomat:fractured` first, the split recorded in `state.json` before that,
 then each part becomes a real child, so the trackers themselves keep the graph: on GitHub an issue
 made a **sub-issue** of the parent, on Linear an issue created with the parent as its **parent**.
-Each child's title and body are the model's, cut to 200 and 4000 characters, its mentions, issue
-references and GitHub links made inert so it notifies and links no one, and the body ends with
+Each child's title and body are the model's, stripped of HTML comments and clean markers, cut to 200
+and 4000 characters, its mentions, issue references and GitHub links made inert so it notifies and
+links no one, and the body ends with
 `Part of <the parent's URL>`, then a hidden `<!-- Diplomat: part <n> of <the parent's URL> by
 <author> -->`: the parent's author (a part's, its own marker's), whom the ban list checks the part by,
-read only in an issue you opened. A part that a failed call made all the same is taken, not filed again: on GitHub the one
+read only in an issue you opened, which is a part when it carries one or a `Part of` line linking
+the issue it is a sub-issue (Linear: child) of. A part that a failed call made all the same is taken, not filed again: on GitHub the one
 carrying its marker among your 50 newest issues in the repo, looked for before each part is filed
 and after a create fails; on Linear the parent's one new child. The parent stays on the graph in
 the Fractured lane, its children joined to it; they enter `unrated`, and each one's fix PR joins
@@ -248,11 +252,12 @@ you approve your own PR, so a fast-track PR never has an approval. The merge is 
 request rule on its base branch allows no squash). `--admin` merges a PR that does not meet the branch's requirements, a person's approving
 review included, so leave this off wherever a second person's review is required.
 
-Only a `cleared` PR is merged. Right before that the sync reads Linear's issues it would close,
-then the PR again, last, with its commits, its head's checks, the checks its base branch requires
+Only a `cleared` PR is merged. Right before that the sync reads Linear's issues it would close and
+those attached to each GitHub issue it would close, then the PR again, last, with its commits, its head's checks, the checks its base branch requires
 and each issue it would close, and merges it only if its head is the one the sync read, it is still
-cleared there, and nothing holds it. A draft never ready for review before is
-marked ready (`gh pr ready`) instead, and merged at a later sync. The issues it would close are
+cleared there, and nothing holds it. A draft never ready for review before is marked ready (`gh pr
+ready`) instead when nothing holds it but missing, skipped or required checks, as CI may skip drafts,
+and merged at a later sync once nothing holds it. The issues it would close are
 GitHub's closing references, each one a closing word names in its title or a commit message, and
 each Linear issue its title, body or a commit message closes or that links it. The holds (those on
 its commits, its base branch and the checks it requires read only for a PR nothing else holds):
@@ -271,12 +276,13 @@ its commits, its base branch and the checks it requires read only for a PR nothi
 - a stop label: `do not merge`, `do-not-merge`, `don't merge`, `blocked`, `on hold`, `wip` or
   `work in progress`, matched as triage labels are (`pipeline.json` `stopLabels`);
 - it lacks either fast-track label, or is off the fast track for good;
-- it closes no open issue, or one that is not a `candidate`, or carries a stop label, as read right
-  before the merge;
+- it closes no open issue, or one that is not a `candidate`, carries a stop label, or is held by a
+  Linear issue tracking it, as read right before the merge;
 - it would close an issue no read judged: one this sync did not read, more than the closing
   references one read lists, one a closing word names that GitHub does not list among them, or a
   Linear issue of a team not tracked or that could not be read; with Linear teams set, also when
-  Linear cannot say which issues link it;
+  Linear cannot say which issues link it or an open GitHub issue it would close, or one that does is
+  of a team not tracked or could not be read;
 - its rating, or its diff floor, is not low/low;
 - it conflicts with its base or is behind it, or GitHub has not computed whether it can merge;
 - CI was read for an older commit, is still running, or failed; it has no checks (so a repo without
@@ -456,6 +462,7 @@ the app quits.
   notice, and the sync goes on without what it missed: a root read past its cap fixes and splits
   none of its issues, one read with errors, or whose Linear team was not read, is only read and
   shown, and an item missing from a read keeps its guards.
-- One sync at a time: another started meanwhile reads nothing and says so. One pipeline per repo is
+- One sync at a time: another started meanwhile reads nothing, with a notice in the activity feed,
+  shown with the last sync's result if there is one. One pipeline per repo is
   assumed: two Diplomats syncing the same repo can race each other's writes.
 - Ratings and splits need Claude Code's `claude` on the machine, whichever agent runner you use.

@@ -174,11 +174,21 @@ enum PipelineRead {
         return ns.substring(with: m.range(at: 1)).removingPercentEncoding
     }
 
-    /// Whether `body` says it is a part Diplomat split off: by its marker, in any form, or
-    /// by the line naming its parent, which Linear may keep where it drops the marker.
-    static func isPart(_ body: String) -> Bool {
-        body.contains("<!-- Diplomat: part ")
-            || body.split(separator: "\n").contains { $0.hasPrefix("Part of ") && $0.contains("://") }
+    private static let link = try! NSRegularExpression(pattern: #"https?://[^\s<>()\[\]]+"#)
+
+    /// Whether the body of an issue whose parent is `parent` says it is a part Diplomat split
+    /// off: by its marker, in any form, or by a line naming that parent, which Linear may keep
+    /// where it drops the marker.
+    static func isPart(_ body: String, parent: String?) -> Bool {
+        if body.contains("<!-- Diplomat: part ") { return true }
+        guard let parent else { return false }
+        return body.split(whereSeparator: \.isNewline).contains { line in
+            guard line.hasPrefix("Part of ") else { return false }
+            let text = String(line)
+            return link.matches(in: text, range: NSRange(location: 0, length: (text as NSString).length)).contains {
+                norm(linearURL((text as NSString).substring(with: $0.range))) == norm(parent)
+            }
+        }
     }
 
     /// One page of a `pipeline-repo.graphql` operation for `root`: `Repo`'s, or one of
@@ -269,7 +279,7 @@ enum PipelineRead {
         e.issueType = (n["issueType"] as? [String: Any])?["name"] as? String
         // Diplomat files a part as the operator: no one else's text names a lineage.
         if !me.isEmpty, e.item.author?.lowercased() == me {
-            e.isPart = isPart(e.body)
+            e.isPart = isPart(e.body, parent: e.parent)
             e.lineage = lineage(e.body)
         }
         e.unwritable = unwritable
@@ -566,7 +576,7 @@ enum PipelineRead {
         e.linksPast = bool(((n["attachments"] as? [String: Any])?["pageInfo"] as? [String: Any])?["hasNextPage"], false)
         e.teamID = team?["id"] as? String
         if !viewer.isEmpty, (n["creator"] as? [String: Any])?["id"] as? String == viewer {
-            e.isPart = isPart(e.body)
+            e.isPart = isPart(e.body, parent: e.parent)
             e.lineage = lineage(e.body)
         }
         if ["triage", "duplicate"].contains(type) { e.triageState = state?["name"] as? String ?? type }

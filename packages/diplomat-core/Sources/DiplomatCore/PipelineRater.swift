@@ -73,6 +73,17 @@ enum PipelineRater {
                                             withTemplate: "$1$2$3$4\u{200B}")
     }
 
+    /// `text` with no HTML comment in it, an unclosed one cut to the end as GitHub hides it,
+    /// nor `cleanMarker` before a hex sha: model-written text then forges no Diplomat marker.
+    /// Cut again until nothing is left to cut, as a cut can join two halves into a new one.
+    static func unmarked(_ text: String, cleanMarker: String) -> String {
+        let pattern = #"<!--[\s\S]*?(?:-->|\z)|"# + NSRegularExpression.escapedPattern(for: cleanMarker)
+            + #"\s+[0-9a-f]{7,}"#
+        var s = text
+        while let r = s.range(of: pattern, options: [.regularExpression, .caseInsensitive]) { s.removeSubrange(r) }
+        return s
+    }
+
     /// No `--allowedTools`: it would let the tools read any path. Unlisted, `-p` refuses
     /// them every path outside the checkout, as there is no one to grant it, and
     /// `--setting-sources ""` keeps the checkout's own settings from allowing more.
