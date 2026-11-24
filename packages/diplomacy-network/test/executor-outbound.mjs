@@ -785,6 +785,12 @@ await check('a job\'s tunnels that it ends while the kernel has what they sent a
   const h = await addJob();
   // What there is of the connections out to deaf.test, as the kernel has them.
   const rows = async () => (await systemQueues()).filter((r) => r.remotePort === to).length;
+  // How many of them deaf.test has had 64 KiB down.
+  const delivered = async () => {
+    const all = await systemQueues();
+    const out = new Set(all.filter((r) => r.remotePort === to).map((r) => r.localPort));
+    return all.filter((r) => r.localPort === to && out.has(r.remotePort) && r.bytes >= 64 * 1024).length;
+  };
   try {
     // The job's tunnels through its relay, which then goes as its container would: the
     // broker reads no more of a tunnel whose far host takes nothing, so it learns of their
@@ -795,10 +801,15 @@ await check('a job\'s tunnels that it ends while the kernel has what they sent a
       for (let i = 0; i < 4; i++) hs.push((await tunnel(h, 'deaf.test', theirs.port)).s);
       for (const s of hs) s.write(Buffer.alloc(64 * 1024));
       await until('the connections out', async () => (await rows()) === 4);
+      // One the relay went before it carried anything on had nothing to send: it is
+      // closed, not reset, and stays in the kernel's table for a minute (FIN_WAIT_2).
+      await until('what they were sent to reach deaf.test', async () => (await delivered()) === 4);
+      // Before the job ends them, which is where their linger begins.
+      const at = Date.now();
       theirs.end();
       for (const s of hs) s.destroy();
       await until('the broker to see them go', () => broker.load(h.runId).connections === 0, 3000);
-      return Date.now();
+      return at;
     };
     // Reset for the whole first, which is told of apart from what is reset after the linger.
     const before = logged.length;
@@ -825,17 +836,23 @@ await check('a tunnel a job closed keeps its place among the job\'s connections 
   const to = ports[addresses['deaf.test']];
   // The kernel, but with one more byte to send on every connection to deaf.test, which so
   // never takes all it was sent.
-  const queues = async () => (await systemQueues()).map((r) => (r.remotePort === to ? { ...r, bytes: r.bytes + 1, sending: r.sending + 1 } : r));
+  let polls = 0;
+  const queues = async () => {
+    const rows = await systemQueues();
+    polls++;
+    return rows.map((r) => (r.remotePort === to ? { ...r, bytes: r.bytes + 1, sending: r.sending + 1 } : r));
+  };
   const { broker, addJob, tunnel } = await brokerWith({ linger, queues }, { connections: 4 });
   const t = await addJob();
   try {
     const four = [];
     for (let i = 0; i < 4; i++) four.push((await tunnel(t, 'deaf.test')).s);
     // Polled, and so found to have what they were sent still to send.
-    await sleep(2 * OUT_POLL_MS);
+    const asked = polls;
+    await until('a poll begun after they were there', () => polls >= asked + 2);
+    const closed = Date.now();
     for (const s of four) s.resetAndDestroy();
     await until('the broker to see them go', () => broker.load(t.runId).connections === 0, 3000);
-    const closed = Date.now();
     const refused = await tunnel(t, 'deaf.test');
     assert.match(refused.head, /^HTTP\/1\.1 503 /);
     const said = await within(new Promise((resolve) => {
