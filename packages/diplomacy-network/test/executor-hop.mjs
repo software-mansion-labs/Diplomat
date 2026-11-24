@@ -413,7 +413,7 @@ await check('what connections left unread were sent in the smallest frames costs
   } finally { broker.removeJob(job.runId); }
 });
 
-await check('a connection whose frames are broken, or bring more than it was given room for, or tell of more than it was sent, is closed, as is one that holds a second hop; a stranger is given room for a little of its head at a time, a connection the broker is done with is ended, and a write of no bytes is done at once', async () => {
+await check('a connection whose frames are broken, or bring more than it was given room for, or tell of more than it was sent, is closed, as is one that holds a second hop; a stranger is given room for a little of its head at a time, a connection the broker or the relay is done with is ended both ways, and a write of no bytes is done at once', async () => {
   const job = await addJob();
   try {
     const head = Buffer.from(`CONNECT echo.test:443 HTTP/1.1\r\nHost: echo.test:443\r\nProxy-Authorization: ${job.auth}\r\n\r\n`);
@@ -484,6 +484,20 @@ await check('a connection whose frames are broken, or bring more than it was giv
     a.send(ASK, ask.length);
     await until('the answer and its END', () => after.includes(END));
     assert.match(answer, /^HTTP\/1\.1 200[^]*got 0$/);
+    a.s.destroy();
+    // A tunnel the relay ends is ended on its way out, and so back.
+    const seen = [];
+    let ok = false;
+    a = byHand((type, n, payload) => {
+      seen.push(type);
+      if (type === CREDIT && seen.filter((t) => t === CREDIT).length === 1) a.send(DATA, head.length, head);
+      if (type === DATA && String(payload).startsWith('HTTP/1.1 200')) {
+        ok = true;
+        a.send(END, 0);
+      }
+    });
+    a.send(ASK, head.length);
+    await until('the tunnel to be ended back', () => ok && seen.includes(END));
     a.s.destroy();
     assert.equal(broker.load(job.runId).held, 0);
     await until('every connection to close', () => broker.load(job.runId).connections === 0);

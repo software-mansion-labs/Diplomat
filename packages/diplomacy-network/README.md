@@ -815,7 +815,8 @@ four things and starts the job:
   until it is within it, and one that stays past it for 2 s while another job waits
   loses its newest connections until it is. A connection has at most 128 KiB on its way
   each way, what the broker has read of it and not passed on counted with it; that is in
-  the daemon's memory, not on the hop. The hop's ends are this machine's sockets (the
+  the daemon's memory, about as much as it counts however small the frames it came in,
+  and not on the hop. The hop's ends are this machine's sockets (the
   broker's, and on macOS the ones Docker Desktop opens to it; on Linux the relay's too),
   and every byte in them is one of those counted, held by at most two of them at a time:
   32 MiB of queued bytes at most, under 64 MiB of kernel buffers. A connection out to

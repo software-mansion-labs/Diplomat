@@ -288,7 +288,7 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
     });
     strangers.links.add(link);
     link.go = () => { grant(); send(); };
-    link.behind = () => bucket !== strangers && shareOf(bucket) - bucket.held >= LEAST_BYTES;
+    link.behind = () => bucket !== strangers && bucket.held < shareOf(bucket);
     link.seat = (job) => {
       if (dead || bucket !== strangers) return;
       bucket.held -= held;

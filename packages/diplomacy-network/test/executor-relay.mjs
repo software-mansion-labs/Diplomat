@@ -85,9 +85,13 @@ await check('a relay carries what it is sent to the one address it was started w
 });
 
 await check('a relay carries so many new connections at once and so many more a second, in the order they came, and what it kept back while it was idle is no more than that', async () => {
-  // What reaches the broker: the number each connection wrote, in the order they arrived.
+  // What reaches the broker: the number each connection wrote, in the order the
+  // connections arrived, each a round trip of the hop before what it wrote.
   const reached = [];
-  const target = net.createServer(framed((link) => link.once('data', (d) => reached.push(Number(d))).on('error', () => {})));
+  const target = net.createServer(framed((link) => {
+    const at = reached.push(undefined) - 1;
+    link.once('data', (d) => { reached[at] = Number(d); }).on('error', () => {});
+  }));
   await listening(target);
   const r = await startRelay(target);
   // The most that can have been carried since `from`, when `had` could be carried at once.
@@ -102,7 +106,7 @@ await check('a relay carries so many new connections at once and so many more a 
     await sleep(500);
     assert.ok(reached.length <= most(BURST, started), `${reached.length} reached the broker within ${Date.now() - started} ms`);
     assert.ok(reached.length < 400, 'the rest wait');
-    await until('every one of them to reach the broker', () => reached.length === 400);
+    await until('every one of them to reach the broker', () => reached.length === 400 && !reached.includes(undefined));
     const took = Date.now() - started;
     assert.ok(took >= (400 - BURST - 1) * 1000 / PER_SECOND, `400 connections were carried in ${took} ms`);
     assert.ok(took - (dialled - started) <= (400 - BURST) * 1000 / PER_SECOND * 1.5 + 500, `the ones that waited were carried within ${took - (dialled - started)} ms of the last being opened`);

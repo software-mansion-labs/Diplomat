@@ -61,7 +61,6 @@ function carry(conn) {
 
   let credit = 0;
   let waiting = null; // read from the client, not yet sent
-  let asked = false;
   let ended = false;
   const send = () => {
     while (waiting && credit > 0) {
@@ -70,10 +69,8 @@ function carry(conn) {
       credit -= n;
       waiting = n < waiting.length ? waiting.subarray(n) : null;
     }
-    if (waiting) {
-      if (!asked) frame(ASK, waiting.length);
-      asked = true;
-    } else if (ended) {
+    if (waiting) frame(ASK, waiting.length);
+    else if (ended) {
       ended = false;
       frame(END, 0);
     } else conn.resume();
@@ -113,7 +110,6 @@ function carry(conn) {
       at += 5;
       if (type === CREDIT) {
         credit += n;
-        asked = false;
         send();
       } else if (type === END) conn.end();
       else return gone();
