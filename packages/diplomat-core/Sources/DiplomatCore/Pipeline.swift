@@ -99,6 +99,10 @@ public struct PipelineItem: Codable, Equatable, Sendable {
     /// For an issue Diplomat split off another, the author whose text it carries (the
     /// root ancestor's): its fix's ban dimension, as `PipelineEffect`'s `author`.
     public var splitFrom: String?
+    /// Why a sync would refuse Rate now or Fracture on it, by the checks it refuses with;
+    /// nil when it would go ahead. What a front-end gates those buttons on.
+    public var rateRefused: String?
+    public var fractureRefused: String?
 
     public init(id: String, source: PipelineSource, kind: PipelineKind, label: String,
                 title: String, repo: String, state: String, author: String? = nil,
@@ -106,7 +110,7 @@ public struct PipelineItem: Codable, Equatable, Sendable {
                 ratedBy: String? = nil, why: String? = nil, floor: PipelineRating? = nil,
                 stage: PipelineStage, lane: PipelineLane, hold: String? = nil,
                 headSha: String? = nil, cleanAt: String? = nil, updatedAt: Date? = nil,
-                splitFrom: String? = nil) {
+                splitFrom: String? = nil, rateRefused: String? = nil, fractureRefused: String? = nil) {
         self.id = id
         self.source = source
         self.kind = kind
@@ -128,6 +132,8 @@ public struct PipelineItem: Codable, Equatable, Sendable {
         self.cleanAt = cleanAt
         self.updatedAt = updatedAt
         self.splitFrom = splitFrom
+        self.rateRefused = rateRefused
+        self.fractureRefused = fractureRefused
     }
 }
 
