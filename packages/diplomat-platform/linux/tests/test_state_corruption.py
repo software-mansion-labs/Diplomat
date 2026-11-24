@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 import json
+import time
 
 from diplomat_runtime import appconfig
 
@@ -76,6 +77,11 @@ def test_a_config_that_was_there_and_is_gone_is_unknown_and_still_written():
     assert appconfig.read() == {}
     appconfig.set_int("autoTaskLimit", 3)
     assert appconfig.read_known() == {"autoTaskLimit": 3}, "a setting saved writes it anew"
+
+
+def test_the_grace_runs_on_a_clock_no_wall_clock_step_moves():
+    """Monotonic: a clock set back while a config is gone would keep it unknown that long."""
+    assert appconfig._clock is time.monotonic
 
 
 def test_a_config_gone_past_the_grace_is_forgotten(monkeypatch):

@@ -2139,6 +2139,8 @@ enum NetworkTest {
 
         //    Deleted for good, it is the defaults once gone as long as the daemon takes
         //    to read it as switched off.
+        check("the grace runs on uptime, which no wall-clock step moves",
+              abs(AppConfig.clock() - ProcessInfo.processInfo.systemUptime) < 1)
         var uptime: TimeInterval = 1000
         AppConfig.clock = { uptime }
         func goneNotes() -> Int { feedDetails("warn").filter { $0 == AppConfig.goneNote }.count }
