@@ -71,20 +71,20 @@ away its offers are cancelled. A machine with jobs out has to stay awake.
 - **Leaving.** **Leave** stops this machine taking the pool's jobs and offering to it. It stays
   left until **Rejoin**. After more than a month away - left, or switched off - the machine
   comes back the same way, as long as its seat was not given to another machine meanwhile: it
-  asks every machine it knew in the pool and is in again once one of them answers. It goes on
-  asking the others it knew for up to a month after, so two machines that come back together and
-  reach each other first are one pool with the rest once one of those is up; until then a job
-  offered on both sides can run twice. A machine away for less than a month - asleep overnight,
-  restarted - is not coming back, whatever became of the others, and waits for nobody. Until
-  then the pool's card says it is waiting to be let back in, and it takes and offers none of the
+  asks every machine it knew in the pool and is in again once one of them answers. Until then
+  the pool's card says it is waiting to be let back in, and it takes and offers none of the
   pool's jobs; if every one of them refuses it as no member, the card says it has no seat there,
   and it needs an invite again. A machine whose clock is off, or that is asked for more work
-  than it can do, is still waiting, not without a seat. If all the others are gone for good,
-  removing the repository and adding it again starts a pool of one. Removing a repository and
-  adding it again starts another pool of one on this machine. The pool it was in goes on without
-  it and takes it back by no invite of a machine that came in under it; if this machine started
-  that pool, that is every machine there, and they join the new pool instead, each by an invite
-  from this one.
+  than it can do, is still waiting, not without a seat. It goes on asking the others it knew for
+  up to a month after, so two machines that come back together and reach each other first are
+  one pool with the rest once one of those is up; until then a job offered on both sides can run
+  twice. A machine away for less than a month - asleep overnight, restarted - is not coming
+  back, whatever became of the others, and waits for nobody. If all the others are gone for
+  good, removing the repository and adding it again starts a pool of one. Removing a repository
+  and adding it again starts another pool of one on this machine. The pool it was in goes on
+  without it and takes it back by no invite of a machine that came in under it; if this machine
+  started that pool, that is every machine there, and they join the new pool instead, each by an
+  invite from this one.
 - **Reaching each other.** A machine is reachable only as a Tor onion service whose address is
   its own public key, so there are no ports to open and no addresses to exchange. A first
   connection between two machines can take minutes; later ones take about a second.
