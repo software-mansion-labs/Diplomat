@@ -837,6 +837,7 @@ final class Store: ObservableObject {
     @Published var pipelineForce = PipelineSettings.Force()
     /// Driven from `PipelineMonitor.swift`, hence not private.
     var pipelineMonitorTask: Task<Void, Never>?
+    var pipelineWakeObserver: NSObjectProtocol?
     var pipelineSyncAgain = false
     /// Bumped as the master switch flips or Fix / Fast track goes off: a sync begun
     /// before may have been switched off midway, emitting less than it owes, so its

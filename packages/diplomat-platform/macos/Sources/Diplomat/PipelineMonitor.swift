@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import DiplomatCore
 
@@ -94,6 +95,15 @@ extension Store {
 
     /// Never stopped: a sync with the master switch off returns at once.
     func startPipelineMonitor() {
+        // The loop's sleep pauses while the Mac sleeps; a sync on wake catches up at once.
+        // Headless too, where a sync runs only the self-test's stand-ins.
+        if pipelineWakeObserver == nil {
+            pipelineWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+            ) { [weak self] _ in
+                Task { await self?.runPipelineSyncOnce() }
+            }
+        }
         guard pipelineMonitorTask == nil, !Headless.active else { return }
         pipelineMonitorTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -629,11 +639,17 @@ extension Store {
         return "Diplomat has this Linear issue's text only while Open fix PRs is on"
     }
 
-    /// Why a sync neither rates nor splits `item`, nor the queue runs its fix, by the ban
-    /// list: it cannot be read, or names who wrote the text `item` carries (`splitFrom`,
-    /// else its author); nil for neither. Twin of `Store.pipeline_ban`.
+    /// Why, by the ban list as it reads now, a sync would rate and split nothing: it cannot
+    /// be read; nil while it can. Twin of `Store.pipeline_ban_unread`.
+    var pipelineBanUnread: String? {
+        banListUnreadable ? "The prompt-injection ban list could not be read" : nil
+    }
+
+    /// Why the queue would not run `item`'s fix, by the ban list: `pipelineBanUnread`, or it
+    /// names who wrote the text `item` carries (`splitFrom`, else its author); nil for
+    /// neither. Twin of `Store.pipeline_ban`.
     func pipelineBan(_ item: PipelineItem) -> String? {
-        if banListUnreadable { return "The prompt-injection ban list could not be read" }
+        if let why = pipelineBanUnread { return why }
         let who = item.splitFrom ?? item.author ?? ""
         return !who.isEmpty && BanList.isBanned(who, in: bannedAuthors)
             ? "@\(who) is on the prompt-injection ban list" : nil
@@ -653,16 +669,6 @@ extension Store {
     /// it is the `gh` account's, by which a sync judges it, not the Settings override's.
     func pipelineCanRate(_ item: PipelineItem) -> Bool {
         PipelineView.canRate(item, me: me, rooted: pipelineRooted(item))
-    }
-
-    /// `item`'s root as the last sync's `unread` names it, a Linear issue's its team's: one it
-    /// did not read all of, whose items a sync may refuse to rate or split; nil for one it
-    /// did. Twin of `Store.pipeline_unread`.
-    func pipelineUnread(_ item: PipelineItem) -> String? {
-        let root = item.source == .linear
-            ? Store.pipelineTeams(pipelineLinearTeamsRaw).first { $0.key == item.repo.uppercased() }?.repo
-            : item.repo
-        return root.flatMap { root in pipelineResult?.unread.first { $0.lowercased() == root.lowercased() } }
     }
 
     /// Start fix: the issue's fix queued now, as the last sync left it, past its attempt

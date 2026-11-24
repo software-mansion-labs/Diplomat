@@ -702,24 +702,6 @@ def can_fracture(item: dict, edges: list[dict], rooted: bool) -> bool:
             and not any(e.get("kind") == "child" and _ends(e)[0] == item_id for e in edges))
 
 
-def fracture_refused(item: dict) -> str | None:
-    """Why a sync would refuse a split :func:`can_fracture` offers: the hold triage or a
-    stop label put on it. Twin of ``PipelineView.fractureRefused``."""
-    hold = str(item.get("hold") or "")
-    if hold.startswith("triaged as "):
-        return f"No sync splits an issue {hold}"
-    if hold.startswith("carries the label "):
-        return f"No sync splits an issue that {hold}"
-    return None
-
-
-def rate_refused(item: dict) -> str | None:
-    """Why a sync would refuse a rating :func:`can_rate` offers: the hold a stop label put
-    on it. Twin of ``PipelineView.rateRefused``."""
-    hold = str(item.get("hold") or "")
-    return f"No sync rates an item that {hold}" if hold.startswith("carries the label ") else None
-
-
 def empty_text(unread: list[str], reads: bool) -> str:
     """What stands in for the graph after a sync that read no item: what it did not read.
     ``reads``: a GitHub root or a Linear team is set. Twin of ``PipelineView.emptyText``."""
@@ -1049,42 +1031,38 @@ class PipelineView(QWidget):
         """Open always; the rest only while the Pipeline is on, which off acts on
         nothing. Rate now for an item :func:`can_rate` allows; Fracture for an issue
         :func:`can_fracture` allows and Start fix for a candidate issue
-        (:func:`can_start_fix`) whose fix is known, each with nothing on it; none the
-        ban list holds (``Store.pipeline_ban``), neither of the first two in a root the
-        last sync did not read all of (``Store.pipeline_unread``), nor Rate now for an
-        item carrying a stop label (:func:`rate_refused`), nor Fracture for an issue
-        triaged or carrying one (:func:`fracture_refused`), nor Start fix once a split is
-        asked. A PR is the operator's by ``gh``'s account, as a sync judges it, not the
-        Settings override's."""
+        (:func:`can_start_fix`) whose fix is known, each with nothing on it; neither of
+        the first two that the last sync would refuse (its ``rateRefused`` /
+        ``fractureRefused``) or while the ban list cannot be read
+        (``Store.pipeline_ban_unread``), nor Start fix the ban list holds
+        (``Store.pipeline_ban``) or once a split is asked. A PR is the operator's by
+        ``gh``'s account, as a sync judges it, not the Settings override's."""
         st = self.store
         item_id = str(item.get("id") or "")
         on = st.pipeline_enabled
         rooted = st.pipeline_rooted(item)
-        ban = st.pipeline_ban(item)
-        unread = st.pipeline_unread(item)
-        partly = f"The last sync did not read all of {unread}" if unread else None
+        ban_unread = st.pipeline_ban_unread()
         split_asked = item_id in st.pipeline_forced("fracture")
         self.buttons["open"] = _small_button("Open", lambda: open_url(item_id))
         if can_rate(item, st.me, rooted):
             asked = item_id in st.pipeline_forced("rate")
-            stopped = rate_refused(item)
+            refused = ban_unread or item.get("rateRefused")
             btn = _small_button("Rate asked" if asked else "Rate now",
                                 lambda: st.pipeline_force_now("rate", item_id))
             btn.setToolTip(plain_tooltip(
-                ban or stopped or partly or "Rate it in a sync started now, ahead of every limit"))
-            btn.setEnabled(on and not asked and ban is None and stopped is None and partly is None)
+                refused or "Rate it in a sync started now, ahead of every limit"))
+            btn.setEnabled(on and not asked and not refused)
             self.buttons["rate"] = btn
         if can_fracture(item, edges, rooted):
-            refused = fracture_refused(item)
+            refused = ban_unread or item.get("fractureRefused")
             btn = _small_button("Fracture asked" if split_asked else "Fracture",
                                 lambda: st.pipeline_force_now("fracture", item_id))
             btn.setToolTip(plain_tooltip(
-                ban or refused or partly
-                or "Split it into low-complexity child issues in a sync started now"))
-            btn.setEnabled(on and not split_asked and badge is None and ban is None
-                           and refused is None and partly is None)
+                refused or "Split it into low-complexity child issues in a sync started now"))
+            btn.setEnabled(on and not split_asked and badge is None and not refused)
             self.buttons["fracture"] = btn
         if can_start_fix(item):
+            ban = st.pipeline_ban(item)
             known = st.pipeline_fix_effect(item) is not None
             btn = _small_button("Start fix", lambda: self._start_fix(item))
             btn.setToolTip(plain_tooltip(

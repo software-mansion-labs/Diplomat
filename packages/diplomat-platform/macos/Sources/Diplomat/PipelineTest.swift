@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import DiplomatCore
 
@@ -585,6 +586,11 @@ enum PipelineTest {
               ticks.count == 1 && store.pipelineError == nil
                   && feed("pipeline-recovered").count == recoveries + 1
                   && feed("pipeline-recovered").last == "auto Pipeline syncing again")
+        ticks = []
+        store.startPipelineMonitor()
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        for _ in 0..<250 where ticks.isEmpty { try? await Task.sleep(nanoseconds: 20_000_000) }
+        check("a wake syncs at once", ticks.count == 1)
 
         print("\npipeline: Start fix")
         store.pipelineForce = PipelineSettings.Force()
@@ -663,62 +669,54 @@ enum PipelineTest {
                                                edges: [PipelineGraph.Edge(from: issue, to: "c", kind: .child)],
                                                rooted: true)
                   && !PipelineView.canFracture(at(.human), edges: [], rooted: false))
-        var triaged = at(.human)
-        triaged.hold = "triaged as enhancement"
-        var stopped = at(.candidate)
-        stopped.hold = "carries the label wip"
-        var heldOther = at(.human)
-        heldOther.hold = "an open PR fixes it"
-        check("…which a sync refuses for an issue held as triaged or for a stop label, and the button says so",
-              PipelineView.fractureRefused(triaged) == "No sync splits an issue triaged as enhancement"
-                  && PipelineView.fractureRefused(stopped) == "No sync splits an issue that carries the label wip"
-                  && PipelineView.fractureRefused(heldOther) == nil && PipelineView.fractureRefused(at(.human)) == nil)
-        var stoppedPR = at(.fastTrack, .pr)
-        stoppedPR.hold = "carries the label wip"
-        check("Rate now: a sync refuses it for an item a stop label holds, not for one held as triaged",
-              PipelineView.rateRefused(stopped) == "No sync rates an item that carries the label wip"
-                  && PipelineView.rateRefused(stoppedPR) == "No sync rates an item that carries the label wip"
-                  && PipelineView.rateRefused(triaged) == nil && PipelineView.rateRefused(heldOther) == nil)
         check("Start fix: a writable candidate issue only",
               PipelineView.canStartFix(at(.candidate)) && !PipelineView.canStartFix(at(.human))
                   && !PipelineView.canStartFix(at(.candidate, writable: false))
                   && !PipelineView.canStartFix(at(.candidate, .pr)))
         func detail(_ it: PipelineItem? = nil, badge: Store.PipelineBadge? = nil, enabled: Bool = true,
                     forcedRate: Bool = false, forcedFracture: Bool = false, ban: String? = nil,
-                    unread: String? = nil, canStartFix: Bool = true) -> PipelineDetail {
+                    banUnread: String? = nil, canStartFix: Bool = true) -> PipelineDetail {
             PipelineDetail(item: it ?? at(.candidate), events: [], badge: badge, enabled: enabled,
                            forcedRate: forcedRate, forcedFracture: forcedFracture, ban: ban,
-                           unread: unread, canRate: true, canFracture: true, canStartFix: canStartFix,
+                           banUnread: banUnread, canRate: true, canFracture: true, canStartFix: canStartFix,
                            fixUnknown: "its fix is unknown", error: nil,
                            rate: {}, fracture: {}, startFix: {}, close: {})
         }
-        var refusedItem = at(.candidate)
-        refusedItem.hold = "triaged as enhancement"
+        // A hold's text turns nothing off; the core's refusals do.
+        var held = at(.candidate)
+        held.hold = "carries the label wip"
+        var rateRefused = held
+        rateRefused.rateRefused = "it carries the label wip"
+        var splitRefused = at(.human)
+        splitRefused.hold = "it is tracked on GitHub as o/r#7"
+        splitRefused.fractureRefused = "it is tracked on GitHub as o/r#7"
+        var bothRefused = rateRefused
+        bothRefused.fractureRefused = "it carries the label wip"
+        let unreadBans = "The prompt-injection ban list could not be read"
         let stops: [(String, PipelineDetail, [Bool])] = [
             ("nothing", detail(), [true, true, true]),
             ("the pipeline off", detail(enabled: false), [false, false, false]),
             ("a rate asked", detail(forcedRate: true), [false, true, true]),
             ("a split asked", detail(forcedFracture: true), [true, false, false]),
             ("work on it", detail(badge: .queued), [true, false, false]),
-            ("a ban", detail(ban: "@mallory is on the prompt-injection ban list"), [false, false, false]),
-            ("a root read in part", detail(unread: "o/r"), [false, false, true]),
-            ("a split refused", detail(refusedItem), [true, false, true]),
-            ("a stop label", detail(stopped), [false, false, true]),
+            ("a ban", detail(ban: "@mallory is on the prompt-injection ban list"), [true, true, false]),
+            ("the ban list unread", detail(ban: unreadBans, banUnread: unreadBans), [false, false, false]),
+            ("a hold alone", detail(held), [true, true, true]),
+            ("a rate refused", detail(rateRefused), [false, true, true]),
+            ("a split refused", detail(splitRefused), [true, false, true]),
             ("its fix unknown", detail(canStartFix: false), [true, true, false]),
         ]
         let wrong = stops.filter { [$0.1.rateEnabled, $0.1.fractureEnabled, $0.1.fixEnabled] != $0.2 }.map(\.0)
         check("the detail's Rate now, Fracture and Start fix: each off only for what stops it"
                   + (wrong.isEmpty ? "" : " - wrong for \(wrong)"), wrong.isEmpty)
-        let onBan = detail(refusedItem, ban: "@mallory is on the prompt-injection ban list", unread: "o/r",
-                           canStartFix: false)
-        let inPart = detail(refusedItem, unread: "o/r", canStartFix: false)
-        check("…each tooltip saying why: the ban first, then a refusal, then a root read in part",
-              [onBan.rateTip, onBan.fractureTip, onBan.fixTip]
-                  == Array(repeating: "@mallory is on the prompt-injection ban list", count: 3)
-                  && [inPart.rateTip, inPart.fractureTip, inPart.fixTip]
-                      == ["The last sync did not read all of o/r", "No sync splits an issue triaged as enhancement",
-                          "its fix is unknown"]
-                  && detail(stopped, unread: "o/r").rateTip == "No sync rates an item that carries the label wip"
+        let onBan = detail(bothRefused, ban: unreadBans, banUnread: unreadBans, canStartFix: false)
+        let refused = detail(bothRefused, ban: "@mallory is on the prompt-injection ban list", canStartFix: false)
+        check("…each tooltip saying why: an unread ban list first, then the core's refusal",
+              [onBan.rateTip, onBan.fractureTip, onBan.fixTip] == Array(repeating: unreadBans, count: 3)
+                  && [refused.rateTip, refused.fractureTip, refused.fixTip]
+                      == ["it carries the label wip", "it carries the label wip",
+                          "@mallory is on the prompt-injection ban list"]
+                  && detail(splitRefused).fractureTip == "it is tracked on GitHub as o/r#7"
                   && [detail().rateTip, detail().fractureTip, detail().fixTip]
                       == ["Rate it in a sync started now, ahead of every limit",
                           "Split it into low-complexity child issues in a sync started now",
@@ -1222,7 +1220,7 @@ enum PipelineTest {
                   && store.startPipelineFix(heldPart) == heldPart.hold && ids().isEmpty)
         let bannedBefore = store.bannedAuthors
         store.bannedAuthors = [BannedAuthor(login: "mallory")]
-        check("the screen holds Rate now and Fracture for the banned author its text came from",
+        check("the screen holds Start fix for the banned author its text came from",
               store.pipelineBan(heldPart) == "@mallory is on the prompt-injection ban list"
                   && store.pipelineBan(item(issue, .issue, author: "Mallory")) == "@Mallory is on the prompt-injection ban list"
                   && store.pipelineBan(partItem) == nil)
@@ -1236,11 +1234,19 @@ enum PipelineTest {
         // An unreadable list, as the core's sync reads it: everything holds.
         let queuedFix = store.queuedTasks.first { $0.id == "issues:o/r#90030" }
         let ranBefore = queuedFix.map { store.isHeld($0) } == false
+        let sweepTask = Store.QueuedAgentTask(
+            id: "review:o/r#90021",
+            job: Store.AgentJob(kind: AgentTaskQueue.reviewAction, auditAction: AgentTaskQueue.reviewAction,
+                                label: "", prompt: "", prURL: "https://github.com/o/r/pull/90021",
+                                prNumber: 90021, authorLogin: nil, counter: nil),
+            attemptNumber: 1)
         try? Data("{".utf8).write(to: banDir.appendingPathComponent("banned.json"))
         store.refreshBanList()
         check("an unreadable ban list holds each pipeline ask queued, and every item's Rate now, Fracture and Start fix",
               ranBefore && queuedFix.map { store.isHeld($0) } == true
+                  && store.pipelineBanUnread == "The prompt-injection ban list could not be read"
                   && store.pipelineBan(item(issue, .issue, author: "carol")) == "The prompt-injection ban list could not be read")
+        check("…but no other work", !store.isHeld(sweepTask))
         clearQueue()
         store.savePipelineAttempts([:])
         await store.applyPipeline(result([fix]), now: now)
@@ -1248,7 +1254,8 @@ enum PipelineTest {
         try? FileManager.default.removeItem(at: banDir.appendingPathComponent("banned.json"))
         store.refreshBanList()
         await store.applyPipeline(result([fix]), now: now)
-        check("…until it is read again", ids() == [fixKey] && store.pipelineBan(item(issue, .issue, author: "carol")) == nil)
+        check("…until it is read again", ids() == [fixKey] && store.pipelineBanUnread == nil
+                  && store.pipelineBan(item(issue, .issue, author: "carol")) == nil)
         try? FileManager.default.removeItem(at: banDir.appendingPathComponent("banned.json"))
         clearQueue()
         store.savePipelineAttempts([:])
@@ -1395,10 +1402,6 @@ enum PipelineTest {
         check("a hold is said as one",
               PipelineTint.hover(heldBy).components(separatedBy: "\n")
                   .contains("Held: @carol is on the prompt-injection ban list"))
-        store.pipelineResult = PipelineTickResult(at: Date(), unread: ["O/R"])
-        check("an item in a root the last sync did not read all of, a Linear issue's by its team, is named so",
-              store.pipelineUnread(items[0]) == "O/R" && store.pipelineUnread(eng) == "O/R"
-                  && store.pipelineUnread(ops) == nil)
         store.pipelineResult = nil
         check("a sync that read nothing says what it did not read",
               PipelineView.emptyText(enabled: true, synced: true, unread: ["o/r", "o/web"])
