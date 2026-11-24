@@ -520,16 +520,20 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   }
 
   // A place among the job's connections for one of its container's, or false when the
-  // job has as many as it gets.
+  // job has as many as it gets. A tunnel it closed keeps its place while its connection
+  // out is held for what it was sent.
   function seat(job, socket) {
-    if (job.clients.size >= limits.connections) return false;
+    if (job.clients.size + outbound.lingering(job) >= limits.connections) return false;
     hop.seat(socket, job);
     job.clients.set(socket, null);
     socket.once('close', () => job.clients.delete(socket));
     hold(job, socket);
     return true;
   }
-  const crowded = () => `this job has ${limits.connections} connections open through the broker, the most a job gets at a time: close some`;
+  const crowded = (job) => {
+    const kept = outbound.lingering(job);
+    return `this job has ${limits.connections} connections open through the broker${kept ? `, ${kept} of them tunnels it closed whose far hosts have not yet taken what they were sent` : ''}, the most a job gets at a time: close some`;
+  };
 
   // Written whole, and the connection closed once the client has had a moment to read
   // it. What the client sends meanwhile is read and dropped; one that sends more than
@@ -910,7 +914,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       if (trace) trace(`407 ${method} ${method === 'CONNECT' ? target : target.split('?')[0]}`);
       return sayAndClose(socket, DENY_407);
     }
-    if (!seat(job, socket)) return refuse(socket, new Refusal(503, crowded()));
+    if (!seat(job, socket)) return refuse(socket, new Refusal(503, crowded(job)));
     strangers.delete(socket);
     if (method === 'CONNECT') return tunnel(job, target, socket, seen.subarray(end));
     const requests = feed(socket, seen);
@@ -947,8 +951,11 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     if (socket.destroyed) return upstream.destroy();
     hold(job, upstream);
     outbound.add(job, upstream);
+    // Each way ends on its own, and the job's connection is ended, not closed, once the
+    // far host's has: it closes once both ways have, what it was sent taken.
+    upstream.allowHalfOpen = true;
     socket.on('close', () => outbound.close(upstream));
-    upstream.on('close', () => socket.destroy());
+    upstream.on('close', () => { if (!upstream.readableEnded) socket.destroy(); });
     socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     if (head.length) upstream.write(head);
     socket.pipe(upstream);
@@ -1296,6 +1303,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     job.model = agentFor(job, tlsWrap, { keepAlive: true });
     jobs.set(info.runId, job);
     tokens.set(token, job);
+    hop.admit(job);
     return { proxyUrl: `http://dn:${token}@${RELAY_HOST}:${listening.port}`, token, caCertPath: authority.certPath, generation: authority.id };
   }
 
@@ -1311,6 +1319,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     job.plain.destroy();
     job.model.destroy();
     for (const s of job.sockets) s.destroy();
+    hop.leave(job);
     sparing.end(`job ${runId} `);
   }
 

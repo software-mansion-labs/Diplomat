@@ -1,6 +1,7 @@
 // The relay of a job container, run here as the process it is in its container: where
 // it listens, that it carries every connection to the one address it was started with
-// in the hop's frames, how many it carries at a time, and how many new ones in a second.
+// in the hop's frames, each way's end on its own, how many it carries at a time, and how
+// many new ones in a second.
 // Run: node test/executor-relay.mjs
 
 import assert from 'node:assert/strict';
@@ -25,6 +26,10 @@ const until = async (what, met, ms = 120000) => {
   }
 };
 const listening = (server) => new Promise((resolve) => { server.listen(0, '127.0.0.1', () => resolve(server.address().port)); });
+const within = (promise, what, ms = 10000) => {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`never: ${what}`)), ms); })]).finally(() => clearTimeout(timer));
+};
 async function freePort() {
   const free = net.createServer();
   const port = await listening(free);
@@ -147,7 +152,12 @@ await check('a relay reads nothing of a connection that waits its turn: one that
 
 await check('a relay carries 1024 connections at a time and drops the next, and one that cannot listen says so and exits 1', async () => {
   const reached = new Set();
-  const target = net.createServer((c) => { reached.add(c); c.on('close', () => reached.delete(c)).on('error', () => {}).resume(); });
+  // A broker that ends each connection as its client does.
+  const target = net.createServer(framed((link, c) => {
+    reached.add(c);
+    c.on('close', () => reached.delete(c));
+    link.on('end', () => link.end()).on('error', () => {}).resume();
+  }));
   await listening(target);
   const r = await startRelay(target);
   try {
@@ -319,6 +329,76 @@ await check('a client that does not end its side after the broker ended the conn
     } finally { clearInterval(ticking); }
     assert.ok(closed - ended >= 4500, `after ${closed - ended} ms`);
   } finally { r.end(); }
+});
+
+await check('a relay carries a client\'s end to the broker after what it wrote, and the broker\'s answer back to the client after that: a client that writes and ends at once is answered once all it wrote has come, and one answered and ended before then still has all it wrote reach the broker, and then its end', async () => {
+  // A stranger's window is 2 KiB: most of each upload waits in the relay for room.
+  const each = 16384;
+  const heard = [];
+  const target = net.createServer(framed((link) => {
+    let n = 0;
+    let first = true;
+    link.on('data', (d) => {
+      n += d.length;
+      if (first && String(d).startsWith('early')) link.end('answered early');
+      first = false;
+    });
+    link.on('end', () => {
+      heard.push(n);
+      if (!link.writableEnded) link.end(`got ${n}`);
+    }).on('error', () => {});
+  }));
+  await listening(target);
+  const r = await startRelay(target);
+  const upload = (head) => new Promise((resolve) => {
+    const c = net.connect({ port: r.port, host: '127.0.0.1', allowHalfOpen: true }, () => c.end(Buffer.concat([Buffer.from(head), Buffer.alloc(each - head.length)])));
+    r.clients.push(c);
+    let answer = '';
+    c.on('data', (d) => { answer += d; }).on('error', () => {});
+    c.on('end', () => resolve(answer));
+  });
+  try {
+    assert.deepEqual(await within(Promise.all(Array.from({ length: 10 }, () => upload('late'))), 'the answers'), Array(10).fill(`got ${each}`));
+    assert.deepEqual(await within(Promise.all(Array.from({ length: 10 }, () => upload('early'))), 'the early answers'), Array(10).fill('answered early'));
+    await until('every upload\'s end at the broker', () => heard.length === 20);
+    assert.deepEqual(heard, Array(20).fill(each), 'each whole');
+  } finally { r.end(); }
+});
+
+await check('a client that goes away with a way of its connection still open has the hop ended: at once while the relay reads it, and as the broker sends it more once it has ended its side', async () => {
+  for (const clientFirst of [false, true]) {
+    let hopEnd = null;
+    const target = net.createServer({ allowHalfOpen: true }, (c) => {
+      hopEnd = c;
+      c.on('error', () => {});
+      c.resume();
+    });
+    await listening(target);
+    const r = await startRelay(target);
+    try {
+      const c = await new Promise((resolve, reject) => {
+        const s = net.connect({ port: r.port, host: '127.0.0.1', allowHalfOpen: true }, () => resolve(s));
+        s.once('error', reject);
+      });
+      r.clients.push(c);
+      c.on('error', () => {});
+      c.resume();
+      await until('the hop', () => hopEnd);
+      let ended = false;
+      hopEnd.on('end', () => { ended = true; }).on('close', () => { ended = true; });
+      if (clientFirst) c.end();
+      else hopEnd.write(Buffer.from([END, 0, 0, 0, 0]));
+      await sleep(300);
+      assert.equal(ended, false, 'the hop is kept while the other way is open');
+      c.resetAndDestroy();
+      // Nothing is read of a client that ended its side: it is found gone as it is written to.
+      for (let i = 0; clientFirst && i < 5 && !ended; i++) {
+        await sleep(100);
+        hopEnd.write(Buffer.concat([Buffer.from([DATA, 0, 0, 0, 5]), Buffer.from('hello')]));
+      }
+      await until(`the hop to be ended, the ${clientFirst ? 'client' : 'broker'} having ended first`, () => ended, 3000);
+    } finally { r.end(); }
+  }
 });
 
 console.log(`\nall ${checks} checks passed`);

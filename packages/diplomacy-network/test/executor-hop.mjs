@@ -551,7 +551,10 @@ async function units(options) {
     far.write(PREFACE);
     const link = unit.framed(near);
     link.on('error', () => {});
-    if (job) unit.seat(link, job);
+    if (job) {
+      unit.admit(job);
+      unit.seat(link, job);
+    }
     made.push({ link, far, near });
     return made.at(-1);
   };
@@ -637,6 +640,175 @@ await check('a job past its share for less than the reclaim time loses nothing, 
     (await pair(c)).link.write(Buffer.alloc(window));
     await until('a connection of a job past its share to be lost', () => all.some((p) => p.link.destroyed), 3000);
     assert.ok(Date.now() - since >= reclaimMs * 0.9, `after ${Date.now() - since} ms`);
+  } finally { end(); }
+});
+
+await check('a job past its share while another is held back loses its fullest connections once both have been so for the reclaim time, whatever jobs come and go meanwhile and however often another job\'s connections do', async () => {
+  const window = 8 * 1024;
+  const reclaimMs = 800;
+  const { unit, pair, end } = await units({ jobBytes: 10 * window, window, reclaimMs });
+  const [a, b, c, d] = [{}, {}, {}, {}];
+  let churning = true;
+  try {
+    const holders = [];
+    for (let i = 0; i < 10; i++) {
+      holders.push(await pair(b));
+      holders.at(-1).link.write(Buffer.alloc(window));
+    }
+    await until('the job to hold the whole', () => unit.held(b) === 10 * window, 3000);
+    // From here b is past its share, and a is held back by it.
+    const since = Date.now();
+    (await pair(a)).link.write(Buffer.alloc(window));
+    const churn = (async () => {
+      for (let i = 0; churning; i++) {
+        // A job that comes and goes, and one whose connections do.
+        const job = {};
+        unit.admit(job);
+        const p = await pair(d);
+        await sleep(reclaimMs / 8);
+        p.link.destroy();
+        unit.leave(job);
+        if (i === 2) (await pair(c)).link.write(Buffer.alloc(window));
+      }
+    })();
+    await until('a connection of the job past its share to be lost', () => holders.some((p) => p.link.destroyed), reclaimMs * 3);
+    const after = Date.now() - since;
+    churning = false;
+    await churn;
+    assert.ok(after >= reclaimMs * 0.9 && after < reclaimMs * 1.25, `after ${after} ms`);
+    await until('the jobs held back to be sent what they wait for', () => unit.held(a) === window && unit.held(c) === window, 3000);
+  } finally {
+    churning = false;
+    end();
+  }
+});
+
+// Links of `job` on `unit`, each writing `size`, which the relay never says it passed on.
+const filled = async (pair, job, n, size) => {
+  const made = [];
+  for (let i = 0; i < n; i++) {
+    made.push(await pair(job));
+    made.at(-1).link.write(Buffer.alloc(size));
+  }
+  return made;
+};
+const lost = (made) => made.filter((p) => p.link.destroyed).length;
+
+await check('a job that is past its share again after it was within it is given the reclaim time from then, though another has been held back for longer', async () => {
+  const window = 8 * 1024;
+  const reclaimMs = 800;
+  const { unit, pair, end } = await units({ jobBytes: 12 * window, window, reclaimMs });
+  const [x, b, w, d] = [{}, {}, {}, {}];
+  try {
+    unit.admit(x);
+    unit.admit(b);
+    const xs = await filled(pair, x, 6, window);
+    const bs = [...await filled(pair, b, 4, window), ...await filled(pair, b, 1, window / 2)];
+    await until('x and b to hold theirs', () => unit.held(x) === 6 * window && unit.held(b) === 4.5 * window, 3000);
+    // w comes: x and b are past their shares of 4 windows, and w is held back.
+    const ws = await filled(pair, w, 4, window);
+    await until('w to hold what is left', () => unit.held(w) === 1.5 * window, 3000);
+    await sleep(reclaimMs / 4);
+    // b is within its share, and what it gave up goes to w, which is held back again.
+    bs[0].link.destroy();
+    await until('w to have it', () => unit.held(w) === 2.5 * window, 3000);
+    await sleep(reclaimMs / 4);
+    // d comes: b is past its share of 3 from here, w still held back below it.
+    unit.admit(d);
+    await until('x to lose its fullest', () => lost(xs) > 0, reclaimMs * 2);
+    await sleep(reclaimMs * 0.75);
+    assert.equal(lost(xs), 3, 'x as many as take it back within its share');
+    assert.equal(lost(bs), 1, 'and b none but the one it closed: w was given room once x was within its share');
+    assert.equal(lost(ws), 0);
+  } finally { end(); }
+});
+
+await check('a link given some of the room it waits for and held back again is held back from then', async () => {
+  const window = 8 * 1024;
+  const reclaimMs = 800;
+  const { unit, pair, end } = await units({ jobBytes: 10 * window, window, reclaimMs });
+  const [x, w] = [{}, {}];
+  try {
+    unit.admit(x);
+    const xs = await filled(pair, x, 20, window / 2);
+    await until('x to hold the whole', () => unit.held(x) === 10 * window, 3000);
+    unit.admit(w);
+    await sleep(reclaimMs / 2);
+    // x has been past its share since w came; w is held back from here.
+    const [wl] = await filled(pair, w, 1, window);
+    await sleep(reclaimMs * 0.6);
+    // Half a window freed: w is given it, and held back again for the rest.
+    xs[0].link.destroy();
+    await until('w to have half a window', () => unit.held(w) === window / 2, 3000);
+    const since = Date.now();
+    await until('x to lose more', () => lost(xs) > 1, reclaimMs * 3);
+    assert.ok(Date.now() - since >= reclaimMs * 0.9, `after ${Date.now() - since} ms`);
+    assert.equal(wl.link.destroyed, false);
+  } finally { end(); }
+});
+
+await check('a link seated with what it holds as a stranger counts it as its job\'s: a job it takes past its share loses connections for it while another is held back', async () => {
+  const window = 8 * 1024;
+  const reclaimMs = 300;
+  const { unit, pair, end } = await units({ jobBytes: 10 * window, window, strangerWindow: window, reclaimMs });
+  const [a, b] = [{}, {}];
+  try {
+    unit.admit(a);
+    unit.admit(b);
+    const bs = await filled(pair, b, 5, window);
+    await until('b to hold its share', () => unit.held(b) === 5 * window, 3000);
+    const [stranger] = await filled(pair, null, 1, window);
+    await until('the stranger to hold a window', () => unit.held().strangers === window, 3000);
+    unit.seat(stranger.link, b);
+    assert.equal(unit.held(b), 6 * window);
+    const as = await filled(pair, a, 5, window);
+    await until('a to be given its share', () => unit.held(a) === 5 * window, reclaimMs * 5);
+    assert.equal(lost([...bs, stranger]), 1, 'b one connection, as many as take it back within its share');
+    assert.equal(lost(as), 0);
+  } finally { end(); }
+});
+
+await check('a link held back while its job is within its share is held back by none: it is held back by another from when its job is behind again', async () => {
+  const window = 8 * 1024;
+  const reclaimMs = 800;
+  const { unit, pair, end } = await units({ jobBytes: 10 * window, window, reclaimMs });
+  const [x, w] = [{}, {}];
+  const more = Array.from({ length: 8 }, () => ({}));
+  try {
+    unit.admit(x);
+    const xs = await filled(pair, x, 18, window / 2);
+    await until('x to hold 9 windows', () => unit.held(x) === 9 * window, 3000);
+    unit.admit(w);
+    await filled(pair, w, 1, window);
+    await until('w to hold the last', () => unit.held(w) === window, 3000);
+    // Held back, w behind its share of 5.
+    const [wl] = await filled(pair, w, 1, window);
+    await sleep(reclaimMs / 4);
+    // A share of 1 each: w is within it, its link held back by its own share.
+    for (const job of more) unit.admit(job);
+    await sleep(reclaimMs * 1.25);
+    assert.equal(lost(xs), 0, 'nothing held back by x');
+    for (const job of more) unit.leave(job);
+    const since = Date.now();
+    await until('x to lose its fullest', () => lost(xs) > 0, reclaimMs * 3);
+    assert.ok(Date.now() - since >= reclaimMs * 0.9, `after ${Date.now() - since} ms`);
+    assert.equal(wl.link.destroyed, false);
+  } finally { end(); }
+});
+
+await check('a job that leaves gives its share to the others at once: a link held back by its own job\'s share is given room', async () => {
+  const window = 8 * 1024;
+  const { unit, pair, end } = await units({ jobBytes: 10 * window, window, reclaimMs: 60000 });
+  const [a, b] = [{}, {}];
+  try {
+    unit.admit(b);
+    const as = await filled(pair, a, 6, window);
+    await until('a to hold its share', () => unit.held(a) === 5 * window, 3000);
+    await sleep(100);
+    assert.equal(unit.held(a), 5 * window, 'and no more');
+    unit.leave(b);
+    await until('a to be given the rest', () => unit.held(a) === 6 * window, 1000);
+    assert.equal(lost(as), 0);
   } finally { end(); }
 });
 

@@ -46,29 +46,30 @@ export const HOP_STRANGER_WINDOW = 2 * 1024;
 
 /// What is on the hop at once - granted to relays and not yet come, and sent to them
 /// and not yet passed on - for the connections of all jobs, shared out equally among
-/// the jobs that have connections, and for those that are no job's.
+/// the jobs admitted, and for those that are no job's.
 export const HOP_JOB_BYTES = 14 * 1024 * 1024;
 export const HOP_STRANGER_BYTES = 2 * 1024 * 1024;
 
-/// A job that keeps more than its share on the hop for this long, while another job is
-/// held back by it, loses the connections that hold the most of it until it is within
-/// its share, and none that hold nothing, which would free nothing. A job
-/// gets no room while it is past its share, so one whose connections are read is
+/// A job that has kept more than its share on the hop for this long, while another job
+/// has been held back by it as long, loses the connections that hold the most of it
+/// until it is within its share, and none that hold nothing, which would free nothing.
+/// A job gets no room while it is past its share, so one whose connections are read is
 /// within it as soon as what it was sent is.
 export const HOP_RECLAIM_MS = 2000;
 
 /// `createHop()` makes the count shared by every connection that comes in frames:
 /// `framed(raw, first)` is the Duplex the connection's bytes come out of and go into,
 /// counted as no job's, `raw` the socket the frames come on, `first` what was read of it
-/// already. `seat(link, job)` counts it as the job's from then on. `held(job)` is what a
-/// job's connections have on the hop, and `held()` `{ jobs, strangers }`.
+/// already. `admit(job)` gives a job its share until `leave(job)`, and `seat(link, job)`
+/// counts a link as that job's from then on. `held(job)` is what a job's connections
+/// have on the hop, and `held()` `{ jobs, strangers }`.
 export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANGER_BYTES, window = HOP_WINDOW, strangerWindow = HOP_STRANGER_WINDOW, reclaimMs = HOP_RECLAIM_MS, lingerMs = HOP_LINGER_MS } = {}) {
   const groups = {
     jobs: { held: 0, limit: jobBytes },
     strangers: { held: 0, limit: strangerBytes },
   };
   const strangers = { group: groups.strangers, held: 0, links: new Set(), window: strangerWindow };
-  const jobs = new Map(); // job -> its bucket, while it has a connection that came in frames
+  const jobs = new Map(); // job -> its bucket, while it is admitted
   // Links held back by what the others have on the hop, and not by their own window.
   const waiting = new Set();
   let waking = false;
@@ -76,13 +77,30 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
 
   const shareOf = (bucket) => (bucket === strangers ? strangerBytes : Math.floor(jobBytes / jobs.size));
 
+  // Since when a job has been past its share as it is now.
+  function judge(bucket, now = Date.now()) {
+    if (bucket === strangers) return;
+    if (bucket.held <= shareOf(bucket)) bucket.past = 0;
+    else if (!bucket.past) {
+      bucket.past = now;
+      reclaimSoon();
+    }
+  }
+
   // What a link may be given now, of the `need` it has, `own` counting against its window.
   function room(link, bucket, own, need) {
     const n = Math.min(need, bucket.window - own, shareOf(bucket) - bucket.held, bucket.group.limit - bucket.group.held);
-    if (n >= Math.min(need, LEAST_BYTES)) return n;
+    if (n >= Math.min(need, LEAST_BYTES)) {
+      link.since = 0;
+      return n;
+    }
     if (bucket.window - own >= Math.min(need, LEAST_BYTES)) {
       waiting.add(link);
-      if (link.behind()) reclaimSoon();
+      if (!link.behind()) link.since = 0;
+      else if (!link.since) {
+        link.since = Date.now();
+        reclaimSoon();
+      }
     }
     return 0;
   }
@@ -98,21 +116,31 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
     });
   }
 
-  // A job with room left in its share is held back by jobs past theirs.
+  // A job with room left in its share is held back by jobs past theirs: each of those is
+  // due once it and the longest held back have been so for reclaimMs.
   function reclaimSoon() {
-    if (reclaim) return;
-    reclaim = setTimeout(() => {
-      reclaim = null;
-      if (![...waiting].some((link) => link.behind())) return;
-      const share = Math.floor(jobBytes / jobs.size);
-      for (const bucket of jobs.values()) {
-        const fullest = [...bucket.links].sort((a, b) => b.holding() - a.holding());
-        for (const link of fullest) {
-          if (bucket.held <= share) break;
-          link.destroy(new Error('the job had more than its share of the hop for too long'));
-        }
+    clearTimeout(reclaim);
+    reclaim = null;
+    const held = [...waiting].filter((link) => link.since && link.behind()).map((link) => link.since);
+    if (held.length === 0) return;
+    const since = Math.min(...held);
+    let soonest = Infinity;
+    const now = Date.now();
+    for (const bucket of jobs.values()) {
+      if (!bucket.past) continue;
+      const due = Math.max(bucket.past, since) + reclaimMs;
+      if (due > now) {
+        soonest = Math.min(soonest, due);
+        continue;
       }
-    }, reclaimMs);
+      const fullest = [...bucket.links].sort((a, b) => b.holding() - a.holding());
+      for (const link of fullest) {
+        if (bucket.held <= shareOf(bucket)) break;
+        link.destroy(new Error('the job had more than its share of the hop for too long'));
+      }
+    }
+    if (soonest === Infinity) return;
+    reclaim = setTimeout(reclaimSoon, soonest - now);
     reclaim.unref();
   }
 
@@ -137,6 +165,7 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
       held = now;
       bucket.held += by;
       bucket.group.held += by;
+      judge(bucket);
       if (by < 0) wake();
     }
 
@@ -281,10 +310,6 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
         waiting.delete(link);
         sync();
         bucket.links.delete(link);
-        if (bucket !== strangers && bucket.links.size === 0) {
-          jobs.delete(bucket.job);
-          wake();
-        }
         // A socket closed while the relay still sends is reset, and the relay loses what
         // it had not read yet of the broker's: the hop is ended instead, and closed when
         // the relay ends its side too.
@@ -302,19 +327,15 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
     link.holding = () => held;
     link.seat = (job) => {
       if (dead || bucket !== strangers) return;
+      if (!jobs.has(job)) throw new Error('a link is seated for a job not admitted to the hop');
       bucket.held -= held;
       bucket.group.held -= held;
       bucket.links.delete(link);
-      if (!jobs.has(job)) {
-        jobs.set(job, { group: groups.jobs, held: 0, links: new Set(), window, job });
-        // The others' shares shrink as a job comes: how long they are past them counts from now.
-        clearTimeout(reclaim);
-        reclaim = null;
-      }
       bucket = jobs.get(job);
       bucket.links.add(link);
       bucket.held += held;
       bucket.group.held += held;
+      judge(bucket);
     };
     raw.on('timeout', () => link.emit('timeout'));
     raw.on('data', take);
@@ -326,10 +347,28 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
     return link;
   }
 
+  // The shares change for every job: how long each is past its own counts from when it
+  // was first past it as it is now.
+  function reshare() {
+    const now = Date.now();
+    for (const bucket of jobs.values()) judge(bucket, now);
+    wake();
+  }
+
+  function admit(job) {
+    if (jobs.has(job)) return;
+    jobs.set(job, { group: groups.jobs, held: 0, links: new Set(), window, past: 0 });
+    reshare();
+  }
+
+  function leave(job) {
+    if (jobs.delete(job)) reshare();
+  }
+
   function held(job) {
     if (job === undefined) return { jobs: groups.jobs.held, strangers: groups.strangers.held };
     return jobs.get(job)?.held ?? 0;
   }
 
-  return { framed, seat: (link, job) => link.seat?.(job), held };
+  return { framed, admit, leave, seat: (link, job) => link.seat?.(job), held };
 }

@@ -64,10 +64,10 @@ function procAddress(hex) {
   return groups.join(':');
 }
 
-/// The connections in the text of /proc/net/tcp or tcp6, but those listening:
-/// `{ local, localPort, remote, remotePort, bytes, sending }`, `bytes` what is queued
-/// either way and `sending` what is queued to be sent. Throws on text that is not such
-/// a table.
+/// The connections in the text of /proc/net/tcp or tcp6, but those listening or not yet
+/// connected: `{ local, localPort, remote, remotePort, bytes, sending }`, `bytes` what is
+/// queued either way and `sending` what is queued to be sent. Throws on text that is not
+/// such a table.
 export function parseProc(text) {
   const lines = text.split('\n');
   if (!/^\s*sl\s+local_address\s+rem(?:ote)?_address\s+st\s+tx_queue\s+rx_queue/.test(lines[0])) throw new Error('not a table of TCP sockets');
@@ -76,7 +76,9 @@ export function parseProc(text) {
     if (!line.trim()) continue;
     const m = /^\s*\d+:\s+([0-9A-F]+):([0-9A-F]{4})\s+([0-9A-F]+):([0-9A-F]{4})\s+([0-9A-F]{2})\s+([0-9A-F]{8}):([0-9A-F]{8})\s/.exec(line);
     if (!m) throw new Error(`not a TCP socket: ${line.slice(0, 120)}`);
-    if (m[5] === '0A') continue;
+    // One whose SYN is answered as the table is read can show the far end's sequence
+    // number as what it has come in (SYN_SENT, 02).
+    if (m[5] === '0A' || m[5] === '02') continue;
     rows.push({
       local: procAddress(m[1]), localPort: parseInt(m[2], 16), remote: procAddress(m[3]), remotePort: parseInt(m[4], 16),
       bytes: parseInt(m[6], 16) + parseInt(m[7], 16), sending: parseInt(m[6], 16),
@@ -137,7 +139,8 @@ export async function systemQueues() {
 /// `createOutbound()` makes the count of the connections out of all jobs. `add(job, raw)`
 /// counts `raw`, a connected TCP socket, as the job's; what TLS over it writes is not seen
 /// as it is written, only in the polls; `over(raw, secure)` has the TLS socket over it
-/// shut down as `raw` is. `close(raw)` ends a connection the job is done with.
+/// shut down as `raw` is. `close(raw)` ends a connection the job is done with, and
+/// `lingering(job)` is how many of those are still open, held for what they were sent.
 /// `full(job)` is true while polls fail and the job has `fallback` connections out
 /// open. `drop(job)` resets the job's connections and forgets them. `say(job, text, why)` is
 /// told of each connection reset, `why` 'ended' or 'full' as the reset is for a connection
@@ -154,8 +157,8 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
   let last = 0;
 
   const share = () => Math.floor(bytes / jobs.size);
-  // Whether the kernel may have bytes of the connection to send: by the last poll, or
-  // written since it began.
+  // Whether the kernel may have bytes of the connection to send: by the last poll that
+  // answered, or written since that poll began.
   const sending = (entry) => entry.sending > 0 || entry.raw.bytesWritten > entry.sentAt;
   const to = (entry) => `a connection out of this job to ${entry.remoteText}:${entry.remotePort}`;
   // One whose shutdown has begun, with nothing to send or while polls fail, is closed.
@@ -179,7 +182,7 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
         entry.shut = true;
         final.call(this, cb);
       };
-      if (this.destroyed || failing || !sending(entry)) return shut();
+      if (this.destroyed || !sending(entry)) return shut();
       entry.closing ||= Date.now();
       entry.shuts.push(shut);
       return undefined;
@@ -233,7 +236,7 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     for (const state of jobs.values()) {
       for (const entry of state.entries) {
         entry.base = entry.wrote - (entry.corked ? 0 : entry.raw.writableLength);
-        entry.sentAt = entry.raw.bytesWritten - entry.raw.writableLength;
+        entry.asked = entry.raw.bytesWritten - entry.raw.writableLength;
       }
     }
     let rows;
@@ -266,6 +269,7 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
       state.queued = 0;
       for (const entry of state.entries) {
         entry.wrote -= entry.base;
+        entry.sentAt = entry.asked;
         entry.queued = 0;
         entry.sending = 0;
         for (const row of byPorts.get(`${entry.localPort} ${entry.remotePort}`) ?? []) {
@@ -315,7 +319,7 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     if (!jobs.has(job)) jobs.set(job, { job, entries: new Set(), est: 0, queued: 0 });
     const state = jobs.get(job);
     const entry = {
-      raw, state, wrote: 0, base: 0, queued: 0, sending: 0, sentAt: raw.bytesWritten, corked: false,
+      raw, state, wrote: 0, base: 0, queued: 0, sending: 0, sentAt: raw.bytesWritten, asked: raw.bytesWritten, corked: false,
       closing: 0, closed: false, shuts: [], shut: false,
       local: plainAddress(raw.localAddress), localPort: raw.localPort,
       remote: plainAddress(raw.remoteAddress), remoteText: raw.remoteAddress, remotePort: raw.remotePort,
@@ -352,6 +356,12 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     deferShutdown(secure, entryOf.get(raw));
   }
 
+  function lingering(job) {
+    let n = 0;
+    for (const entry of jobs.get(job)?.entries ?? []) if (entry.closed) n++;
+    return n;
+  }
+
   function full(job) {
     const state = jobs.get(job);
     return failing && !!state && state.entries.size >= fallback;
@@ -364,5 +374,5 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     for (const entry of state.entries) reset(entry);
   }
 
-  return { add, over, close, full, drop, fallback };
+  return { add, over, close, lingering, full, drop, fallback };
 }
