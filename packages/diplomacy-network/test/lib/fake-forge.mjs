@@ -134,12 +134,13 @@ export async function startFakeForge() {
   function repository({ owner, name }) {
     const repo = data.repos[`${owner}/${name}`.toLowerCase()];
     if (!repo) return null;
-    const rules = (repo.protected || []).map((pattern) => ({ pattern }));
+    // GitHub shows classic rules to an admin of the repository alone.
+    const rules = repo.viewerPermission === 'ADMIN' ? (repo.protected || []).map((pattern) => ({ pattern })) : [];
     const pulls = Object.values(repo.pulls || {}).map((p) => data.nodes[p.id]);
     const issues = Object.values(repo.issues || {}).map((i) => data.nodes[i.id]);
     return {
       __typename: 'Repository', id: repo.id, name, nameWithOwner: `${owner}/${name}`, owner: { login: owner, id: 'O_1' },
-      hasIssuesEnabled: true, viewerPermission: 'WRITE', defaultBranchRef: { name: 'main' }, parent: null,
+      hasIssuesEnabled: true, viewerPermission: repo.viewerPermission ?? 'WRITE', defaultBranchRef: { name: 'main' }, parent: null,
       pullRequest: ({ number }) => pulls.find((p) => p.number === number) || null,
       issue: ({ number }) => issues.find((i) => i.number === number) || null,
       issueOrPullRequest: ({ number }) => [...issues, ...pulls].find((x) => x.number === number) || null,
@@ -214,6 +215,13 @@ export async function startFakeForge() {
         permissions: { admin: true, push: true, pull: true }, temp_clone_token: 'TEMPCLONETOKEN', allow_auto_merge: true,
         security_and_analysis: { secret_scanning: { status: 'disabled' } }, ...(parent === null ? {} : { parent: { full_name: parent } }),
       } };
+    }
+    if (method === 'GET' && rest === '/branches') {
+      const heads = git(path.join(gitRoot, `${m[1].toLowerCase()}.git`), 'for-each-ref', '--format=%(refname:lstrip=2) %(objectname)', 'refs/heads');
+      const all = heads.split('\n').filter(Boolean).map((line) => line.split(' ')).map(([name, sha]) => ({ name, commit: { sha }, protected: guards(repo, name, false) }));
+      const [page, per] = [Number(searchParams.get('page') || 1), Number(searchParams.get('per_page') || 30)];
+      const listed = searchParams.get('protected') === 'true' ? all.filter((b) => b.protected) : all;
+      return { status: 200, json: listed.slice((page - 1) * per, page * per) };
     }
     if (method === 'GET' && (x = /^\/branches\/(.+)$/.exec(rest))) {
       const branch = decodeURIComponent(x[1]);

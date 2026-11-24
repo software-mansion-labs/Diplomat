@@ -191,12 +191,15 @@ a job whose kind has no rules any more loses its key. A repository on a GitLab o
 acted on at its own address, with the login `glab` holds for it. Each address gets the login
 `gh` or `glab` keeps for that address: not `glab`'s top-level token, which it gives an address
 it holds nothing for, and not `gh`'s `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`, which
-it gives every GitHub Enterprise Server. The daemon has github.com's rules for a GitHub
-Enterprise Server as well, at that server's address, but Diplomat links only repositories on
-github.com and on a GitLab, so one on a GitHub Enterprise Server has no pool. The network has
-no rules for an address under `ghe.com` (GitHub Enterprise Cloud with data residency), for a
-subdomain of `github.com` or for `github.localhost`: a repository linked there has no pool, no
-job is offered for it, and the Network screen names it.
+it gives every GitHub Enterprise Server. A `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN` or
+`OAUTH_TOKEN` in the daemon's environment, which `glab` gives every GitLab it holds, goes only
+to the GitLab that `GITLAB_HOST` (or `GITLAB_URI`) names, or to gitlab.com when neither is set.
+The daemon has github.com's rules for a GitHub Enterprise Server as well, at that server's
+address, but Diplomat links only repositories on github.com and on a GitLab, so one on a GitHub
+Enterprise Server has no pool. The network has no rules for an address under `ghe.com` (GitHub
+Enterprise Cloud with data residency), for a subdomain of `github.com` or for
+`github.localhost`: a repository linked there has no pool, no job is offered for it, and the
+Network screen names it.
 
 | Job | May write |
 |---|---|
@@ -311,11 +314,18 @@ elsewhere - is a job's to change like any other file. No job creates a branch wh
 protection rule would cover - a GitHub ruleset or branch protection rule, a GitLab protected
 branch or wildcard - in the repository or in your fork: the machine reads every page of those
 rules before the push, matching each pattern more widely than the forge does, without regard to
-case and with `*` across `/`.
+case and with `*` across `/`. GitHub's API answers an account that is no admin of the
+repository as if it had no branch protection rules: for such an account the machine reads which
+branches are protected instead, and refuses a new branch beside one of them under the same `/`
+(`release/9.9` beside a protected `release/1.0`) or one that differs from it only in its digits
+(`v2.0` beside `v1.4`). A rule no protected branch matches yet, or one that covers names of
+other shapes, goes unseen then, and a new branch it covers can be made.
 
-The text of a comment, a review, or a PR's or MR's description holds no line starting with `/`,
-`@` or `bors`: GitLab runs such a line as a quick action in your name, and bots on
-either forge take it for a command from you (`/approve`, `bors r+`, `@dependabot merge`).
+The text of a comment, a review, or a PR's or MR's description names no account with `@` and
+says no `bors` anywhere in it, in whatever markdown, and holds no line starting with `/`: GitLab
+runs such a line as a quick action in your name, and bots on either forge read the text as it
+was sent and take a mention anywhere for a command from you (`@bors r+`, `@copilot ...`,
+`@claude ...`, `/approve`).
 
 Before it allows a push or a write, the machine asks the forge what the rule depends on: where
 the branch is, which branch is the default, which protection rules there are, who opened the

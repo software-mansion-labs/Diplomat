@@ -20,6 +20,10 @@ const RESPONSE_HEADERS = new Set([
   'x-total', 'x-total-pages', 'x-page', 'x-per-page', 'x-next-page', 'x-prev-page',
 ]);
 const USER_AGENT = 'diplomacy-network';
+// A host as GITLAB_HOST spells it, with or without a scheme.
+const hostName = (value) => {
+  try { return new URL(value.includes('://') ? value : `https://${value}`).host; } catch { return ''; }
+};
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const blanked = (value, names) => {
   if (Array.isArray(value)) return value.map((v) => blanked(v, names));
@@ -40,9 +44,18 @@ const NODE_QUERY = `query($id: ID!) { node(id: $id) { __typename
 } }`;
 
 const PROTECTION_QUERY = `query($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) {
-  branchProtectionRules(first: 100, after: $after) { nodes { pattern } pageInfo { hasNextPage endCursor } } } }`;
+  viewerPermission branchProtectionRules(first: 100, after: $after) { nodes { pattern } pageInfo { hasNextPage endCursor } } } }`;
 // How many pages of protection rules are read before the answer counts as not given.
 const PROTECTION_PAGES = 10;
+
+// Whether a classic GitHub rule that covers the protected branch `held` would likely cover
+// `name` too, for an account that cannot read the rule itself: a branch beside it under the
+// same "/", or one that differs from it only in its digits (`v1.2`, `9-stable`).
+function akin(held, name) {
+  const [a, b] = [held.toLowerCase(), name.toLowerCase()];
+  const dir = (n) => n.slice(0, n.lastIndexOf('/') + 1);
+  return (dir(a) !== '' && dir(a) === dir(b)) || a.replace(/[0-9]+/g, '0') === b.replace(/[0-9]+/g, '0');
+}
 
 // Whether a protection rule's name or pattern could cover a branch name. It reads wider
 // than either forge: case is not told apart, `*` and `{...}` match any run of characters,
@@ -121,10 +134,15 @@ export function createForge({ log = () => {} } = {}) {
       const { GH_ENTERPRISE_TOKEN, GITHUB_ENTERPRISE_TOKEN, ...env } = process.env;
       value = (await run(GH_BIN, ['auth', 'token', '--hostname', host], env)).stdout.trim();
     } else if (forge === 'gitlab') {
+      // glab hands these three to every host its config holds; they are meant for the one
+      // it is pointed at, GITLAB_HOST (or GITLAB_URI), else gitlab.com.
+      const { GITLAB_TOKEN, GITLAB_ACCESS_TOKEN, OAUTH_TOKEN, ...bare } = process.env;
+      const meant = process.env.GITLAB_HOST || process.env.GITLAB_URI || 'gitlab.com';
+      const env = hostName(meant) === host.toLowerCase() ? process.env : bare;
       // glab gives a host it holds nothing for its config's top-level token: one it gives
       // a host that cannot exist too is not taken.
-      const ask = async (of) => (await run(GLAB_BIN, ['config', 'get', 'token', '--host', of], process.env)).stdout.trim();
-      const [own, anyHost] = await Promise.all([ask(host), ask('host.invalid')]);
+      const ask = async (of, vars) => (await run(GLAB_BIN, ['config', 'get', 'token', '--host', of], vars)).stdout.trim();
+      const [own, anyHost] = await Promise.all([ask(host, env), ask('host.invalid', bare)]);
       value = (own !== anyHost ? own : '') || glabConfigToken(host);
     }
     if (!/^[\x21-\x7e]+$/.test(value)) throw new Error(`forge: no ${forge} credential for ${host} on this machine`);
@@ -439,14 +457,28 @@ export function createForge({ log = () => {} } = {}) {
       if (rules.json.length > 0) return true;
       const [owner, short] = repo.split('/');
       let after = null;
+      let admin;
       for (let page = 0; ; page++) {
         if (page === PROTECTION_PAGES) throw new Error(`forge: the forge did not say ${said} (it has more than ${PROTECTION_PAGES} pages of them)`);
         const res = await api(target, 'POST', '/graphql', { query: PROTECTION_QUERY, variables: { owner, name: short, after } });
         const found = res.json?.data?.repository?.branchProtectionRules;
         if (res.status !== 200 || res.json?.errors !== undefined || !Array.isArray(found?.nodes) || typeof found.pageInfo?.hasNextPage !== 'boolean') unknown(said, res);
+        admin ??= res.json.data.repository.viewerPermission === 'ADMIN';
         patterns.push(...found.nodes.map((n) => n?.pattern));
         if (!found.pageInfo.hasNextPage) break;
         after = found.pageInfo.endCursor;
+      }
+      // To an account that is no admin of the repository GitHub answers its classic rules
+      // as none, with no error (asked of cli/cli). Which branches are protected, by a rule
+      // or a ruleset, it lists to whoever reads the repository.
+      if (!admin) {
+        for (let page = 1; ; page++) {
+          if (page > PROTECTION_PAGES) throw new Error(`forge: the forge did not say ${said} (it has more than ${PROTECTION_PAGES} pages of protected branches)`);
+          const res = await api(target, 'GET', `/repos/${repo}/branches?protected=true&per_page=100&page=${page}`);
+          if (res.status !== 200 || !Array.isArray(res.json) || !res.json.every((b) => typeof b?.name === 'string')) unknown(said, res);
+          if (res.json.some((b) => akin(b.name, name))) return true;
+          if (res.json.length < 100) break;
+        }
       }
     } else {
       for (let page = 1; ; page++) {

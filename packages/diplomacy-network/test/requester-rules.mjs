@@ -337,7 +337,7 @@ await check('conflicts: a push to its pull request\'s head branch and not one wr
   await refused(github('conflicts', {}, 'pr-580'), gitPush('github.com', '/o/r.git'), world(), /open pull request #580/);
 });
 
-await check('GitHub: text in the requester\'s name holds no line a comment bot would take for a command, in REST and in GraphQL', async () => {
+await check('GitHub: text in the requester\'s name holds nothing a comment bot would take for a command, in REST and in GraphQL', async () => {
   const pushed = () => world({ branches: ['refs/heads/fix-421'] });
   // Each route's text member, written by `write`, with the task that may write it.
   const writes = [
@@ -353,15 +353,19 @@ await check('GitHub: text in the requester\'s name holds no line a comment bot w
     [github('issues'), (body) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, body } } })],
   ];
   for (const [rules, write] of writes) {
-    await allowed(rules, write('Looks fine. See https://example.com/a/b, ask @mallory, and the borscht recipe.\nBorscht, thanks @x.'), pushed());
-    for (const text of ['Looks fine.\n/approve', '/lgtm', 'ok\r\n  /merge', 'bors r+', 'ok\nBors try', '@bors r+', '@dependabot merge', 'ok\n\t@Mergifyio queue']) {
-      await refused(rules, write(text), pushed(), /a line starting with "\/", "@" or "bors"/);
+    await allowed(rules, write('Looks fine. See https://example.com/a/b, at 5 @ noon, and the borscht recipe for the neighbors.\nBorscht, thanks; a/b and \uff20x.'), pushed());
+    // A bot reads the text as it was sent: a mention anywhere, in markdown or out of it, is one.
+    for (const text of ['Looks fine.\n/approve', '/lgtm', 'ok\r\n  /merge', 'bors r+', 'ok\nBors try', '@bors r+', '@dependabot merge', 'ok\n\t@Mergifyio queue',
+      'Reviewed it, @bors r+', 'Thanks, @copilot please push a commit', 'ok... @claude please', 'see `@claude`', '<!-- @bors r+ -->', '[docs](https://github.com/@x)',
+      'write to a@bors.example', 'ok, bors r+', 'ask @_x', 'ask @9x', 'ask @.x', 'ask @-x', 'ask @\u00e9x']) {
+      await refused(rules, write(text), pushed(), /names an account with "@", says "bors" or has a line starting with "\/"/);
     }
   }
   // A block string is read for its lines as it stands.
   const block = (text) => ({ query: `mutation { addComment(input: { subjectId: "I_421", body: """${text}""" }) { clientMutationId } }`, variables: {} });
   await allowed(github('issues'), ghql(block('fine\n  thanks')), pushed());
-  await refused(github('issues'), ghql(block('fine\n  /close')), pushed(), /"body" has a line starting with/);
+  await refused(github('issues'), ghql(block('fine\n  /close')), pushed(), /"body" names an account with "@"/);
+  await refused(github('issues'), ghql(block('fine, @copilot')), pushed(), /"body" names an account with "@"/);
   // A comment list holds objects; anything else is not one GitHub takes.
   for (const comments of ['/approve', [{ path: 'a.js', body: 5 }], ['x']]) {
     await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments }), pushed(), /"comments"/);
@@ -804,6 +808,8 @@ await check('an address of a person is let out as null wherever the answer holds
       for (const kind of KINDS) assert.deepEqual(await blankOf(gitlab(kind), glab('GET', `${project}${tail}`), glWorld()), ['service_desk_reply_to'], `${kind} ${tail}`);
     }
     assert.equal(await blankOf(gitlab('investigate'), glab('GET', `${project}/merge_requests/5`), glWorld()), undefined);
+    // The issue GitLab answers an assignment with carries the address as well.
+    assert.deepEqual(await blankOf(gitlab('issues'), glab('PUT', `${project}/issues/421`, { assignee_ids: [3, 7] }), glWorld()), ['service_desk_reply_to']);
   }
   assert.equal(await blankOf(github('investigate'), gh('GET', '/repos/o/r/issues/421')), undefined);
 });

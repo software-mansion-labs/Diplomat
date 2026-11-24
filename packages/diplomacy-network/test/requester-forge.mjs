@@ -67,9 +67,10 @@ const ghCalls = path.join(scratch, 'gh-calls');
 const countingGh = path.join(scratch, 'gh');
 fs.writeFileSync(countingGh, `#!/bin/sh\necho call >> "${ghCalls}"\nfor t in "$GH_ENTERPRISE_TOKEN" "$GITHUB_ENTERPRISE_TOKEN"; do [ -n "$t" ] && [ "$4" != github.com ] && echo "$t" && exit 0; done\nexec "${forge.env.DN_GH}" "$@"\n`, { mode: 0o755 });
 // glab as glab 1.128.0 answers: a host's own token, and for a host it holds nothing for, the
-// config file's top-level one. A keyring holds the token of one more host.
+// config file's top-level one. A keyring holds the token of one more host. A token in
+// GITLAB_TOKEN, GITLAB_ACCESS_TOKEN or OAUTH_TOKEN, set here, it hands every real host.
 const realGlab = path.join(scratch, 'glab-cli');
-fs.writeFileSync(realGlab, `#!/bin/sh\n[ "$5" = gitlab.keyring.example ] && echo glpat-from-the-keyring && exit 0\n"${forge.env.DN_GLAB}" "$@" && exit 0\necho glpat-top-level-decoy\n`, { mode: 0o755 });
+fs.writeFileSync(realGlab, `#!/bin/sh\nfor t in "$GITLAB_TOKEN" "$GITLAB_ACCESS_TOKEN" "$OAUTH_TOKEN"; do [ -n "$t" ] && [ "$5" != host.invalid ] && echo "$t" && exit 0; done\n[ "$5" = gitlab.keyring.example ] && echo glpat-from-the-keyring && exit 0\n"${forge.env.DN_GLAB}" "$@" && exit 0\necho glpat-top-level-decoy\n`, { mode: 0o755 });
 const CONFIG_TOKEN = 'glpat-kept-in-the-config-file';
 fs.mkdirSync(path.join(scratch, 'glab'));
 fs.writeFileSync(path.join(scratch, 'glab', 'config.yml'), `git_protocol: ssh\ntoken: glpat-top-level-decoy\nhosts:\n    other.example:\n        token: glpat-another-hosts\n    gitlab.file.example:\n        api_protocol: https\n        token: !!null ${CONFIG_TOKEN}\n        user: me\nlast: x\n`);
@@ -78,9 +79,13 @@ Object.assign(process.env, forge.env, {
   GH_ENTERPRISE_TOKEN: 'ghp_any_enterprise_host',
   GITHUB_ENTERPRISE_TOKEN: 'ghp_any_enterprise_host_too',
   DN_GLAB: realGlab,
+  GITLAB_TOKEN: 'glpat-from-the-shell',
+  GITLAB_ACCESS_TOKEN: 'glpat-from-the-shell-too',
+  OAUTH_TOKEN: 'glpat-from-the-shell-as-well',
+  GITLAB_HOST: 'https://GitLab.Shell.example/',
   GLAB_CONFIG_DIR: path.join(scratch, 'glab'),
   DN_FORGE_ORIGINS: JSON.stringify({ ...JSON.parse(forge.env.DN_FORGE_ORIGINS), 'gitlab.file.example': strangerOrigin, 'gitlab.dead.example': 'http://127.0.0.1:9',
-    'gitlab.other.example': strangerOrigin, 'gitlab.keyring.example': strangerOrigin, 'ghes.other.example': strangerOrigin,
+    'gitlab.other.example': strangerOrigin, 'gitlab.keyring.example': strangerOrigin, 'gitlab.shell.example': strangerOrigin, 'ghes.other.example': strangerOrigin,
     'gitlab.port.example:8443': strangerOrigin, 'gitlab.quoted.example:8443': strangerOrigin }),
   DN_FORGE_RESPONSE_MAX_BYTES: String(11 * 2 ** 20),
   DN_FORGE_TIMEOUT_MS: '1500',
@@ -313,16 +318,19 @@ await check('the token is read from gh once, kept briefly, and appears in no log
   assert.equal(strangers[heard].headers.authorization, `Bearer ${CONFIG_TOKEN}`);
   await perform(glRules('gitlab.keyring.example'), request('gitlab.keyring.example'), {}, { forge: 'gitlab', host: 'gitlab.keyring.example' });
   assert.equal(strangers[heard + 1].headers.authorization, 'Bearer glpat-from-the-keyring');
+  // A token in glab's environment is the host's that GITLAB_HOST names, and no other's.
+  await perform(glRules('gitlab.shell.example'), request('gitlab.shell.example'), {}, { forge: 'gitlab', host: 'gitlab.shell.example' });
+  assert.equal(strangers[heard + 2].headers.authorization, 'Bearer glpat-from-the-shell');
   // The top-level token glab gives a host it holds nothing for is no host's own, nor the one gh gives every enterprise host.
   await failing(perform(glRules('gitlab.other.example'), request('gitlab.other.example'), {}, { forge: 'gitlab', host: 'gitlab.other.example' }), /no gitlab credential for gitlab\.other\.example/);
   const elsewhere = rulesFor({ forge: 'github', kind: 'investigate', pool: 'ghes.other.example/o/r', item: 'job-x', identity: 'me' });
   await failing(perform(elsewhere, { ...gh('GET', '/api/v3/repos/o/r'), host: 'ghes.other.example' }, {}, { forge: 'github', host: 'ghes.other.example' }), /no github credential for ghes\.other\.example/);
-  assert.equal(strangers.length, heard + 2);
+  assert.equal(strangers.length, heard + 3);
   await failing(perform(glRules('gitlab.dead.example'), request('gitlab.dead.example'), {}, { forge: 'gitlab', host: 'gitlab.dead.example' }), /no gitlab credential for gitlab\.dead\.example/);
   fs.writeFileSync(path.join(scratch, 'glab', 'config.yml'), 'hosts:\n    gitlab.dead.example:\n        token: "glpat-for-a-dead-host"\n');
   await failing(perform(glRules('gitlab.dead.example'), request('gitlab.dead.example'), {}, { forge: 'gitlab', host: 'gitlab.dead.example' }), /unreachable/);
 
-  const secrets = [GITHUB_TOKEN, GITLAB_TOKEN, CONFIG_TOKEN, 'glpat-for-a-dead-host', 'glpat-from-the-keyring', 'glpat-top-level-decoy', 'ghp_any_enterprise_host', 'ghp_any_enterprise_host_too', Buffer.from(`x-access-token:${GITHUB_TOKEN}`).toString('base64'), Buffer.from(`oauth2:${GITLAB_TOKEN}`).toString('base64')];
+  const secrets = [GITHUB_TOKEN, GITLAB_TOKEN, CONFIG_TOKEN, 'glpat-for-a-dead-host', 'glpat-from-the-keyring', 'glpat-top-level-decoy', 'glpat-from-the-shell', 'ghp_any_enterprise_host', 'ghp_any_enterprise_host_too', Buffer.from(`x-access-token:${GITHUB_TOKEN}`).toString('base64'), Buffer.from(`oauth2:${GITLAB_TOKEN}`).toString('base64')];
   assert.ok(logLines.length > 10 && errors.length > 10);
   for (const text of [...logLines, ...errors]) for (const secret of secrets) assert.ok(!text.includes(secret), text);
   assert.ok(logLines.every((line) => !line.includes('?')), 'a log line carries no query string');
@@ -443,7 +451,8 @@ await check('the forge says whether a protection rule would cover a branch nothi
     assert.deepEqual(await asks(GITHUB, 'o/r', ['release/9.9', 'x']), { 'release/9.9': false, x: false });
     set('o/r', { rulesets: ['release/*'] });
     assert.deepEqual(await asks(GITHUB, 'o/r', ['release/9.9', 'Release/9.9', 'x']), { 'release/9.9': true, 'Release/9.9': false, x: false });
-    set('o/r', { rulesets: [], protected: ['v[0-9]*', 'hot?ix', 'ci/{a,b}', 'lit\\*', 'ci-[ab]', 'r1.0'] });
+    // An admin of the repository is shown its classic rules.
+    set('o/r', { rulesets: [], viewerPermission: 'ADMIN', protected: ['v[0-9]*', 'hot?ix', 'ci/{a,b}', 'lit\\*', 'ci-[ab]', 'r1.0'] });
     // Read wider than GitHub matches: in any case, and "*" past a "/".
     assert.deepEqual(await asks(GITHUB, 'o/r', ['v1', 'V1/deep', 'hotfix', 'ci/a', 'ci/zzz', 'lit*', 'litx', 'w1', 'ci']),
       { v1: true, 'V1/deep': true, hotfix: true, 'ci/a': true, 'ci/zzz': true, 'lit*': true, litx: false, w1: false, ci: false });
@@ -455,8 +464,38 @@ await check('the forge says whether a protection rule would cover a branch nothi
     await failing(client.protects(GITHUB, 'o/r', 'refs/heads/x'), /did not say which protection rules cover refs\/heads\/x \(it has more than 10 pages of them\)/);
     // The fork's own rules decide a branch in the fork.
     set('o/r', { protected: [] });
-    set('me/r', { protected: ['release/*'] });
+    set('me/r', { viewerPermission: 'ADMIN', protected: ['release/*'] });
     assert.deepEqual([await client.protects(GITHUB, 'o/r', 'refs/heads/release/1'), await client.protects(GITHUB, 'me/r', 'refs/heads/release/1')], [false, true]);
+
+    // Anyone else is shown none, and goes by the branches GitHub says are protected: a new one
+    // beside one of them under the same "/", or differing from one only in its digits, may be
+    // covered by the rule it is hidden behind.
+    const head = git(bare, 'rev-parse', 'refs/heads/main');
+    const held = ['release/1.0', 'v2.3', '10-stable', 'plain'];
+    for (const name of held) git(bare, 'update-ref', `refs/heads/${name}`, head);
+    try {
+      set('o/r', { viewerPermission: 'WRITE', protected: ['release/*', 'v*', '*-stable', 'plain'] });
+      assert.deepEqual(await asks(GITHUB, 'o/r', ['release/9.9', 'Release/x', 'release/1.0/deep', 'v9.10', 'V7.1', 'v9', '9-stable', 'x-stable', 'plain2', 'releasex', 'x']),
+        { 'release/9.9': true, 'Release/x': true, 'release/1.0/deep': false, 'v9.10': true, 'V7.1': true, v9: false, '9-stable': true, 'x-stable': false, plain2: false, releasex: false, x: false });
+      // A protected branch GitHub lists past the first page counts, and a list it does not finish does not answer.
+      set('o/r', { protected: ['v*', 'z*'] });
+      for (const name of [...Array.from({ length: 130 }, (_, i) => `v${i}x`), 'z9.1']) {
+        git(bare, 'update-ref', `refs/heads/${name}`, head);
+        held.push(name);
+      }
+      assert.equal(await client.protects(GITHUB, 'o/r', 'refs/heads/z1.1'), true);
+      const endless = forge.route('api.github.com', 'GET', /^\/repos\/o\/r\/branches\?/, (req, res) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify(Array.from({ length: 100 }, (_, i) => ({ name: `q${i}`, protected: true })))));
+      try { await failing(client.protects(GITHUB, 'o/r', 'refs/heads/x'), /more than 10 pages of protected branches/); } finally { endless(); }
+      for (const [status, text] of [[403, '{"message":"no"}'], [500, '[]'], [200, '{"branches":[]}'], [200, '[{"protected":true}]']]) {
+        const remove = forge.route('api.github.com', 'GET', /^\/repos\/o\/r\/branches\?/, (req, res) => res.writeHead(status, { 'content-type': 'application/json' }).end(text));
+        try { await failing(client.protects(GITHUB, 'o/r', 'refs/heads/x'), /the forge did not say which protection rules cover refs\/heads\/x/); } finally { remove(); }
+      }
+      // An admin goes by the rules alone.
+      set('o/r', { viewerPermission: 'ADMIN', protected: ['v2.3'] });
+      assert.equal(await client.protects(GITHUB, 'o/r', 'refs/heads/v9.9'), false);
+    } finally {
+      for (const name of held) git(bare, 'update-ref', '-d', `refs/heads/${name}`);
+    }
 
     set(lab, { protected: ['*-stable', 'release/*'] });
     assert.deepEqual(await asks(GITLAB, lab, ['9-stable', 'a/b-stable', 'release/1/2', 'Release/1', 'stable']), { '9-stable': true, 'a/b-stable': true, 'release/1/2': true, 'Release/1': true, stable: false });
@@ -485,7 +524,7 @@ await check('the forge says whether a protection rule would cover a branch nothi
     }
     await failing(client.protects(GITHUB, 'o/r', 'refs/tags/v1'), /refs\/tags\/v1 is not a branch/);
   } finally {
-    for (const repo of ['o/r', 'me/r', lab]) { delete forge.data.repos[repo].protected; delete forge.data.repos[repo].rulesets; }
+    for (const repo of ['o/r', 'me/r', lab]) for (const key of ['protected', 'rulesets', 'viewerPermission']) delete forge.data.repos[repo][key];
   }
 });
 
@@ -846,7 +885,18 @@ await check('a real git push to the account\'s own fork: its pull request\'s hea
   const issue = await relay(ruleList, ctx);
   git(work, 'checkout', '--quiet', '--detach', remote('refs/heads/main'));
   const fix = commit('fix 421 from the fork', { 'src/fix.js': 'fork\n' });
-  const made = await gitPush(`${issue.url}/me/r.git`, `${fix}:refs/heads/fix-9`);
+  // The fork's own protection rules decide a branch made there, not the pool repository's.
+  Object.assign(forge.data.repos['me/r'], { rulesets: ['release/*'] });
+  Object.assign(forge.data.repos['o/r'], { rulesets: ['fix-*'] });
+  let made;
+  try {
+    assert.equal((await gitPush(`${issue.url}/me/r.git`, `${fix}:refs/heads/release/1`)).ok, false);
+    assert.match(issue.refusals.at(-1), /refs\/heads\/release\/1: a protection rule of the forge covers that name/);
+    made = await gitPush(`${issue.url}/me/r.git`, `${fix}:refs/heads/fix-9`);
+  } finally {
+    delete forge.data.repos['me/r'].rulesets;
+    delete forge.data.repos['o/r'].rulesets;
+  }
   assert.equal(made.ok, true, made.stderr + issue.refusals.join('; '));
   assert.equal(inFork('refs/heads/fix-9'), fix);
   assert.deepEqual(state.branches, ['me/r:refs/heads/fix-9']);
