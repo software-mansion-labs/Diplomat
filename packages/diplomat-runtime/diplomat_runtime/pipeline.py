@@ -192,12 +192,12 @@ def _result(obj: object) -> dict | None:
             "graph": {"nodes": rows(graph.get("nodes")), "edges": rows(graph.get("edges"))},
             "effects": rows(obj.get("effects")), "events": rows(obj.get("events")),
             "notices": strings(obj.get("notices")), "unread": strings(obj.get("unread")),
-            "fixable": strings(obj.get("fixable"))}
+            "fixable": strings(obj.get("fixable")), "read": strings(obj.get("read"))}
 
 
 def tick(settings: dict, started: Callable | None = None) -> dict:
     """``pipeline-tick``: the ``PipelineTickResult`` (``{at, items, graph: {nodes,
-    edges}, effects, events, notices, unread, fixable}``), or ``{"error": why}`` when the CLI
+    edges}, effects, events, notices, unread, fixable, read}``), or ``{"error": why}`` when the CLI
     could not answer. ``started`` is handed the core's process (:func:`promptcore.cli`).
     Never raises."""
     try:
@@ -335,32 +335,50 @@ def _root_of(url: str, teams: list[dict]) -> str:
     return split[0].lower() if split else ""
 
 
-def retained(attempts: dict, result: dict, now: float, teams: list[dict]) -> dict:
-    """The records a sync keeps: each in a root it did not judge in full (``unread``),
-    whose effect it may have left out; each while it owes the effect, so its retry
-    ladder and its conclusion stand; for the backoff ceiling after its last dispatch,
-    so an effect a failed read left out is not taken for a new one when it is back; and
-    a concluded one for :data:`CONCLUDED_KEEP_SECS` after its run concluded, so a fix
-    whose PR was closed unmerged is not asked for again. Twin of
+def _short(result: dict, handed: list[str] | None) -> Callable[[str], bool]:
+    """Whether a root (lowercased) was judged on less than all it holds: in ``unread``,
+    or not among the roots ``handed`` to a sync while a root path did not resolve (None
+    when every one did)."""
+    unread = {r.lower() for r in result.get("unread") or []}
+    given = None if handed is None else {r.lower() for r in handed}
+    return lambda root: root in unread or (given is not None and root not in given)
+
+
+def retained(attempts: dict, result: dict, now: float, teams: list[dict], *,
+             handed: list[str] | None = None) -> dict:
+    """The records a sync keeps: each it may have left out, in a root it did not judge
+    in full (:func:`_short`) and of an item it did not ``read``; each while it owes the
+    effect, so its retry ladder and its conclusion stand; for the backoff ceiling after
+    its last dispatch, so an effect a failed read left out is not taken for a new one
+    when it is back; and a concluded one for :data:`CONCLUDED_KEEP_SECS` after its run
+    concluded, so a fix whose PR was closed unmerged is not asked for again. Twin of
     ``Store.retainedPipelineAttempts``."""
     owed = {str(e.get("key") or "") for e in result.get("effects") or []}
-    unread = {r.lower() for r in result.get("unread") or []}
+    short = _short(result, handed)
+    read = {identity(i) for i in result.get("read") or []}
+
+    def unseen(url: str) -> bool:
+        return short(_root_of(url, teams)) and identity(url) not in read
+
     return {k: a for k, a in attempts.items()
-            if k in owed or _root_of(k.partition(":")[2], teams) in unread
+            if k in owed or unseen(k.partition(":")[2])
             or now - a.last_dispatched_at < RETRY_MAX_BACKOFF
             or (a.concluded_at is not None and now - a.concluded_at < CONCLUDED_KEEP_SECS)}
 
 
-def withdrawn(asks: list, result: dict | None, *, fix: bool, fast_track: bool) -> list[str]:
+def withdrawn(asks: list, result: dict | None, *, fix: bool, fast_track: bool,
+              handed: list[str] | None = None) -> list[str]:
     """The keys of the pipeline's ``asks`` (``RequestedWork``) no longer owed: one a sync
-    queued while its kind's switch (``fix``, ``fast_track``) is off; and in a root
-    ``result`` (a sync's own; None judges by the switches alone) read in full, not
-    ``unread``, one it emitted no effect for, or a Start fix (``by_hand``) whose issue is
-    not ``fixable``. Twin of ``Store.pipelineWithdrawn``."""
+    queued while its kind's switch (``fix``, ``fast_track``) is off; one ``result`` (a
+    sync's own; None judges by the switches alone) emitted no effect for, in a root it
+    judged in full (:func:`_short`) or of an item it ``read``; and a Start fix
+    (``by_hand``) in a root judged in full whose issue is not ``fixable``. Twin of
+    ``Store.pipelineWithdrawn``."""
     owed = {(e.get("kind") == "review", identity(str(e.get("url") or "")))
             for e in (result or {}).get("effects") or []}
     fixable = {identity(i) for i in (result or {}).get("fixable") or []}
-    unread = {r.lower() for r in (result or {}).get("unread") or []}
+    read = {identity(i) for i in (result or {}).get("read") or []}
+    short = _short(result or {}, handed)
     out = []
     for ask in asks:
         if not ask.pipeline:
@@ -368,12 +386,13 @@ def withdrawn(asks: list, result: dict | None, *, fix: bool, fast_track: bool) -
         review = ask.action == QUEUE_REVIEW_ACTION
         if not ask.by_hand and not (fast_track if review else fix):
             out.append(ask.key)
-        elif result is None or ask.repo.lower() in unread:
+        elif result is None:
             continue
         elif ask.by_hand:
-            if identity(ask.url) not in fixable:
+            if not short(ask.repo.lower()) and identity(ask.url) not in fixable:
                 out.append(ask.key)
-        elif (review, identity(ask.url)) not in owed:
+        elif ((review, identity(ask.url)) not in owed
+              and (not short(ask.repo.lower()) or identity(ask.url) in read)):
             out.append(ask.key)
     return out
 

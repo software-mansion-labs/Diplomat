@@ -164,6 +164,8 @@ class ElidedLabel(QLabel):
     ignores the stylesheet pen.
     """
 
+    elide = Qt.TextElideMode.ElideRight
+
     def __init__(self, text: str, font_px: int, color: str) -> None:
         super().__init__()
         self._full = text
@@ -185,9 +187,7 @@ class ElidedLabel(QLabel):
 
         painter = QPainter(self)
         painter.setPen(self._color)
-        elided = self.fontMetrics().elidedText(
-            self._full, Qt.TextElideMode.ElideRight, self.width()
-        )
+        elided = self.fontMetrics().elidedText(self._full, self.elide, self.width())
         painter.drawText(
             self.rect(),
             int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),

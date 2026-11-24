@@ -956,6 +956,7 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
         "notices": [notice],
         "unread": [],
         "fixable": [issue(1821)],
+        "read": [it["id"] for it in items],
     }
 
 
