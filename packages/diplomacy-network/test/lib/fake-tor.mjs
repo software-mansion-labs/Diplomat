@@ -31,6 +31,10 @@
 //   wrong-service-id      ADD_ONION answers with another service's id
 //   no-descriptor         the descriptor is never uploaded
 //   upload-at-once        the upload is reported in the same write as ADD_ONION's reply
+//   bootstrap-first       bootstrap runs before the control port is written
+//   phase-at-once         bootstrap waits at its first step for the bootstrap phase to be
+//                         asked, then reports every step after in the same write as the
+//                         answer
 //   socks-04:<n>          the first <n> CONNECTs are answered 0x04 (host unreachable)
 //   socks-eof:<n>         the first <n> CONNECTs succeed, then close before any byte
 //   socks-stall           no CONNECT is ever answered
@@ -192,6 +196,8 @@ let status = progress(STEPS[0]);
 const cookie = crypto.randomBytes(32);
 replace(path.join(dataDir, 'control_auth_cookie'), cookie);
 const controls = new Set();
+let phaseAsked;
+const askedForPhase = new Promise((resolve) => { phaseAsked = resolve; });
 const emit = (event, text) => {
   for (const c of controls) if (c.events.has(event)) c.socket.write(`650 ${event} ${text}\r\n`);
 };
@@ -237,6 +243,12 @@ function command(conn, line) {
     return setTimeout(() => die('The stand-in was told to die here.'), 500);
   }
   if (verb === 'GETINFO' && rest[0] === 'status/bootstrap-phase') {
+    if (stages.has('phase-at-once')) {
+      // Held until every step the bootstrap takes without pausing is written after it.
+      conn.socket.cork();
+      setImmediate(() => conn.socket.uncork());
+      phaseAsked();
+    }
     return reply(`250-status/bootstrap-phase=${status}`, '250 OK');
   }
   if (verb === 'ADD_ONION') return addOnion(rest, reply);
@@ -362,7 +374,9 @@ const listen = (server) => new Promise((resolve) => {
   server.listen(0, '127.0.0.1', () => resolve(server.address().port));
 });
 socksPort = await listen(socks);
-replace(options.get('ControlPortWriteToFile'), `PORT=127.0.0.1:${await listen(control)}\n`);
+const controlPort = await listen(control);
+const announce = () => replace(options.get('ControlPortWriteToFile'), `PORT=127.0.0.1:${controlPort}\n`);
+if (!stages.has('bootstrap-first')) announce();
 
 const report = (text) => {
   status = text;
@@ -381,8 +395,10 @@ for (const step of STEPS) {
     report(`WARN BOOTSTRAP PROGRESS=${step[0]} TAG=${step[1]} SUMMARY="${step[2]}" WARNING="Network is unreachable" REASON=NOROUTE COUNT=1 RECOMMENDATION=warn HOSTID="${'A'.repeat(40)}" HOSTADDR="192.0.2.1:9001"`);
     break;
   }
-  await sleep(STEP_MS);
+  if (!stages.has('phase-at-once')) await sleep(STEP_MS);
+  else if (step === STEPS[0]) await askedForPhase;
 }
+if (stages.has('bootstrap-first')) announce();
 if (stages.has('long-line')) {
   process.stdout.write(`Jan 01 00:00:00.000 [warn] ${'x'.repeat(300 * 1024)}`);
   process.stdout.write('\n');

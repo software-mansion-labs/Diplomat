@@ -81,9 +81,11 @@ function pump(stream, onLine) {
   });
 }
 
-// A control connection: `send(command)` resolves with the reply's lines or rejects with
-// tor's refusal, every asynchronous event goes to `onEvent`, and `onClose` hears the
-// connection end, whether or not anything was being asked on it.
+// A control connection: `send(command, read)` resolves with the reply's lines or rejects
+// with tor's refusal, every asynchronous event goes to `onEvent`, and `onClose` hears the
+// connection end, whether or not anything was being asked on it. `read` gets the reply's
+// lines in order with the events; whoever awaits the reply runs after every event read
+// with it.
 function openControl(port, onEvent, onClose) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: '127.0.0.1', port });
@@ -111,14 +113,16 @@ function openControl(port, onEvent, onClose) {
         } else {
           const w = waiting.shift();
           // Named by its verb only: an ADD_ONION command holds the host's secret key.
-          if (line[0] === '2') w?.resolve(whole);
-          else w?.reject(new Error(`tor refused ${w.verb}: ${line}`));
+          if (line[0] === '2') {
+            w?.read?.(whole);
+            w?.resolve(whole);
+          } else w?.reject(new Error(`tor refused ${w.verb}: ${line}`));
         }
       }
     });
-    const send = (command) => new Promise((res, rej) => {
+    const send = (command, read) => new Promise((res, rej) => {
       if (socket.destroyed) return rej(new Error(CONTROL_LOST));
-      waiting.push({ resolve: res, reject: rej, verb: command.split(' ')[0] });
+      waiting.push({ resolve: res, reject: rej, read, verb: command.split(' ')[0] });
       socket.write(`${command}\r\n`);
     });
     socket.once('connect', () => resolve({ send, destroy: () => socket.destroy() }));
@@ -307,7 +311,7 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
       if (!tor.socksPort) throw new Error(`tor reported no SOCKS listener: ${socks}`);
       // Progress made before the events were asked for is in the phase; later progress
       // arrives as events.
-      progressed((await step(tor.control.send('GETINFO status/bootstrap-phase'))).join(' '));
+      await step(tor.control.send('GETINFO status/bootstrap-phase', (lines) => progressed(lines.join(' '))));
       await step(bootstrapped);
 
       const added = await step(tor.control.send(
