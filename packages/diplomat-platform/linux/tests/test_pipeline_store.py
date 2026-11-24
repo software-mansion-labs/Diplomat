@@ -1132,6 +1132,18 @@ def test_a_core_past_its_deadline_is_an_error_at_once(tmp_path, monkeypatch):
     assert time.monotonic() - began < 10
 
 
+def test_only_the_syncs_core_leaves_the_apps_process_group(tmp_path, monkeypatch):
+    """Which a terminal's Ctrl+C reaches: a Comms core ends there with the app, and the
+    sync's, in a session of its own, by :func:`promptcore.stop`."""
+    core = tmp_path / "diplomat-core"
+    core.write_text(f"#!/bin/sh\nexec '{sys.executable}' -c 'import os; print(os.getpgrp())'\n")
+    core.chmod(0o755)
+    monkeypatch.setenv("DIPLOMAT_CORE_BIN", str(core))
+    assert int(promptcore.cli(["comms-tick"])) == os.getpgrp()
+    started = []
+    assert int(promptcore.cli(["pipeline-tick"], started=started.append)) == started[0].pid
+
+
 def test_a_malformed_result_keeps_only_what_it_should_hold(tmp_path, monkeypatch):
     _fake_core(tmp_path, monkeypatch, json.dumps({
         "at": "x", "items": [{"id": "a"}, 3], "graph": {"nodes": "no", "edges": [None]},
@@ -1288,7 +1300,8 @@ def test_a_core_past_its_deadline_is_ended_with_what_it_started(tmp_path, monkey
     pids_file = _core_that_waits(tmp_path, monkeypatch)
     monkeypatch.setattr(pipeline, "tick_timeout", lambda settings: 2)
     done = []
-    worker = threading.Thread(target=lambda: done.append(pipeline.tick({})), daemon=True)
+    worker = threading.Thread(target=lambda: done.append(pipeline.tick({}, lambda proc: None)),
+                              daemon=True)
     worker.start()
     core, child = _pids(pids_file)
     try:
