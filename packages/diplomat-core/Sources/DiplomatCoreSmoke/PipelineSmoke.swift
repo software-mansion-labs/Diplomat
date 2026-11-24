@@ -2768,6 +2768,40 @@ private func pipelineGatePass1(base: URL, root: PipelineSettings.Root, team: Pip
           && bl.result.read.contains(issueURL(24)) && !bl.result.read.contains(linearURL("ENG-9"))
           && stageOf(bl.result, linearURL("ENG-9")) == "candidate/fast (it could not be read again right before its fix was asked for)",
           "ENG-9's recheck failed: \(bl.result.effects) \(bl.result.unread) \(bl.result.read)")
+
+    // A failure reads the same at each sync, so it is logged once.
+    let slow = only([])
+    slow.prsTimeOutAbove = 0
+    var busyRuns: [Synced] = []
+    for (k, id) in ["FEFB:10F253:142012:1E3374:6B05A49A", "FF04:120CD3:13FFA7:1E4403:6B05A4A2"].enumerated() {
+        slow.timeOutError = ["message": "Something went wrong while executing your query on 2026-11-24T14:5\(k):12Z. "
+                                + "Please include `\(id)` when reporting this issue."]
+        busyRuns.append(sync(slow, PipelineSettings(roots: [root]), dir("request-id"), t0.addingTimeInterval(Double(k) * 300)))
+    }
+    let unread = "acme/app could not be read: Something went wrong while executing your query."
+    check(busyRuns.map(\.result.notices) == [[unread], [unread]] && busyRuns[1].events.isEmpty,
+          "GitHub timing out twice: \(busyRuns.map(\.result.notices)) \(busyRuns[1].events.map(\.detail))")
+    guard hasCurl else { return print("(no curl here: the curl checks do not apply)") }
+    guard let stalled = Loopback({ _, _ in
+        Thread.sleep(forTimeInterval: 4)
+        return (200, [:], Data())
+    }) else { return check(false, "a loopback socket opens") }
+    for (name, url, notice) in [("linear-timed-out", stalled.url, "Linear could not be reached: timed out after 1s"),
+                                ("linear-refused", URL(string: "http://127.0.0.1:1/graphql")!,
+                                 "Linear could not be reached: curl: (7) Failed to connect to 127.0.0.1 port 1: ")] {
+        var io = only([]).io()
+        io.linear = { request in
+            var r = request
+            r.url = url
+            r.timeout = 1
+            return try SlackAPI.curl(r)
+        }
+        let settings = PipelineSettings(roots: [root], linearTeams: [team])
+        let runs = [0.0, 300].map { PipelineTick.run(settings: settings, now: t0.addingTimeInterval($0), dir: dir(name), io: io) }
+        check(runs.map(\.notices.count) == [1, 1] && runs[0].notices[0].hasPrefix(notice) && runs[1].notices == runs[0].notices
+              && runs[1].events.filter { $0.kind == .error }.count == 1,
+              "Linear failing twice (\(name)): \(runs.map(\.notices))")
+    }
 }
 
 /// What a sync does when what it read leaves a doubt: it holds, or leaves the item be.

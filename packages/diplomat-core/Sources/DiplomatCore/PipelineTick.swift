@@ -366,7 +366,12 @@ final class PipelineSync {
             let out = io.gh(args + sized.flatMap { ["-F", "\($0)=\(page[$0] ?? least)"] })
             let response = (try? JSONSerialization.jsonObject(with: out.stdout)) as? [String: Any]
             let raw = response?["errors"] as? [[String: Any]] ?? []
-            let errors = raw.compactMap { $0["message"] as? String }
+            // Stripped of GitHub's time and request id, a lasting failure reads the same at each sync.
+            let errors = raw.compactMap {
+                ($0["message"] as? String)?.replacingOccurrences(
+                    of: #" on \d{4}-\d\d-\d\dT[\d:]+Z|\s*Please include `[^`]*` when reporting this issue\."#, with: "",
+                    options: .regularExpression)
+            }
             let read = (response?["data"] as? [String: Any])?["repository"] is [String: Any]
             if out.ok && read && raw.isEmpty { return (response, [], "") }
             if Self.overloaded(out, raw), sized.contains(where: { page[$0, default: least] > least }) {

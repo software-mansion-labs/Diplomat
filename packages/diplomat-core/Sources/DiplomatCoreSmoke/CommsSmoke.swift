@@ -212,7 +212,7 @@ private final class StubSlack {
 
 /// HTTP/1.1 on 127.0.0.1, one connection at a time, each answered and closed: the stub
 /// behind a real curl or URLSession.
-private final class Loopback {
+final class Loopback {
     let url: URL
 
     init?(_ handle: @escaping (_ headers: [String: String], _ body: Data)
@@ -1751,7 +1751,7 @@ private func slackTokenSmoke() throws {
     }
 }
 
-private let hasCurl = ["/usr/bin/curl", "/bin/curl"].contains { FileManager.default.isExecutableFile(atPath: $0) }
+let hasCurl = ["/usr/bin/curl", "/bin/curl"].contains { FileManager.default.isExecutableFile(atPath: $0) }
 
 /// Through the live transport (URLSession on macOS, curl elsewhere) to the stub on loopback.
 private func signInSmoke() throws {
