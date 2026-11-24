@@ -189,7 +189,8 @@ public struct PipelineEvent: Codable, Equatable, Sendable {
     public var item: String
     public var kind: Kind
     public var detail: String
-    /// A PR's `rated` or `rerated`: the head it was rated at.
+    /// A PR's `rated` or `rerated`: the head it was rated at; a `cleared`: the head it was
+    /// cleared at.
     public var head: String?
     /// A `rated` or `rerated`: the rating given, never below the labels or the diff's floor.
     public var rating: PipelineRating?
@@ -303,7 +304,8 @@ public enum PipelineEffect: Codable, Equatable, Sendable {
 }
 
 public struct PipelineSettings: Codable, Equatable, Sendable {
-    /// A GitHub root: its checkout, and the operator's login there.
+    /// A GitHub root: its checkout, and the operator's login there, which a sync takes from
+    /// the account `gh` acts as.
     public struct Root: Codable, Equatable, Sendable {
         public var owner: String
         public var repo: String
@@ -455,14 +457,14 @@ public struct PipelineTickResult: Codable, Equatable, Sendable {
     /// What failed this sync, one line per source or action.
     public var notices: [String]
     /// The roots (`owner/repo`) this sync could not judge in full, whose effects it may
-    /// have left out: a front-end withdraws no queued ask on them.
+    /// have left out: a front-end withdraws a queued ask on them only for an item in `read`.
     public var unread: [String]
     /// The ids of every issue this sync read that a fix may act on, the ones `items` leaves
     /// out included: what keeps a fix the operator started queued.
     public var fixable: [String]
     /// The ids of every item this sync read, the ones `items` leaves out included, but none
-    /// of a root it only read and showed, nor of a blocked sync: in an `unread` root, the
-    /// asks a front-end may still judge.
+    /// of a root it only read and showed, nor a Linear issue whose mapped root it did not
+    /// read, nor of a blocked sync: in an `unread` root, the asks a front-end may still judge.
     public var read: [String]
 
     public init(at: Date, items: [PipelineItem] = [], graph: PipelineGraph = PipelineGraph(),

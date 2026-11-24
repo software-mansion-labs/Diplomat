@@ -350,9 +350,9 @@ public enum CoreAssets {
         public let githubMaxItems: Int
         public let githubPage: GitHubPage
         public let labels: Labels
-        /// A label of these (any case) keeps an issue off the fast track.
+        /// A label of these, matched as `PipelineSync.triageForms` reads it, keeps an issue off the fast track.
         public let triageLabels: [String]
-        /// A label of these (any case) holds a PR's merge.
+        /// A label of these, matched the same way, holds the item it is on.
         public let stopLabels: [String]
         public let levels: Levels
         public let floor: Floor

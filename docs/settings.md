@@ -4,9 +4,9 @@ The header **⚙︎** button (next to ↻, the Comms button, the Pipeline button
 swaps the panel to a settings screen:
 
 - **GitHub username** - override the handle used by the "My …" tools, the wizards
-  and the monitors. Blank = the `gh`-authenticated user (`viewer.login`), resolved
-  eagerly at launch so it's the default everywhere. On a GitLab repo root "me" is
-  `glab`'s user on that host, which the override does not change.
+  and the monitors, but not the [Pipeline](pipeline.md). Blank = the `gh`-authenticated
+  user (`viewer.login`), resolved eagerly at launch so it's the default everywhere. On a
+  GitLab repo root "me" is `glab`'s user on that host, which the override does not change.
 - <a id="agent-runner"></a>**Agent runner** - which agent CLI a spawn runs:
   **Claude Code** (the default, and what every existing install keeps), **OpenCode**
   or **Hermes**. Only the agent command changes - the agent word and its flags, or

@@ -1,10 +1,10 @@
 # Everything a pipeline sync reads of one repository, each operation named by `gh api
-# graphql -f operationName=<name>`. `Repo` reads its name as GitHub has it now, its default
-# branch and merge methods, the first page of its open issues and PRs, and its recently
-# merged or closed PRs (`PipelineRead.github` keeps the ones carrying a pipeline label, and
-# the closed issues of this repository they close); `Issues` and `PullRequests` read the
-# next pages, newest created first so an item updated meanwhile keeps its place, each page
-# `$issues` or `$prs` long; `PullRequest` reads one PR
+# graphql -f operationName=<name>`. `Repo` reads the account `gh` acts as, the repository's
+# name as GitHub has it now, its default branch and merge methods, the first page of its
+# open issues and PRs, and its recently merged or closed PRs (`PipelineRead.github` keeps
+# the ones carrying a pipeline label, and the closed issues of this repository they close);
+# `Issues` and `PullRequests` read the next pages, newest created first so an item updated
+# meanwhile keeps its place, each page `$issues` or `$prs` long; `PullRequest` reads one PR
 # again, with `Gate`, right before Diplomat marks it ready or merges it, and after it merges
 # it, for who merged it; `Item` reads one
 # issue or PR again right before Diplomat writes to it; `Parts` finds the parts of a split
@@ -40,15 +40,18 @@ fragment PR on PullRequest {
 }
 
 # What only a PR about to be marked ready or merged is read for: its head's checks, the
-# checks its base branch requires (its protection rule, which an admin reads as
-# `branchProtectionRule` and anyone else as `refUpdateRule`, and its rulesets), every
-# commit's author, committer and message, each issue it would close as it stands, whether
-# it was ever ready for review before, and every review-thread comment. A required check
-# that never reported is missing from `contexts`; `isRequired` tells the required one from
-# another app's check of its name.
+# rules on its base branch and the checks they require (its protection rule, which an admin
+# reads as `branchProtectionRule` and anyone else, in part, as `refUpdateRule`, and its
+# active rulesets), every commit's author, committer, message and signature, each issue it
+# would close as it stands, whether it was ever ready for review before, and every
+# review-thread comment. A required check that never reported is missing from `contexts`;
+# `isRequired` tells the required one from another app's check of its name.
 fragment Gate on PullRequest {
   baseRef {
-    branchProtectionRule { requiresStatusChecks requiredStatusCheckContexts }
+    branchProtectionRule {
+      requiresStatusChecks requiredStatusCheckContexts
+      lockBranch restrictsPushes requiresDeployments requiresCommitSignatures requiresLinearHistory
+    }
     refUpdateRule { requiredStatusCheckContexts }
     rules(first: 100) {
       totalCount
@@ -72,7 +75,9 @@ fragment Gate on PullRequest {
   }
   commits(first: 100) {
     totalCount
-    nodes { commit { message author { name user { login } } committer { name email user { login } } } }
+    nodes {
+      commit { message author { name user { login } } committer { name email user { login } } signature { isValid } }
+    }
   }
   closing: closingIssuesReferences(first: 10) { totalCount nodes { ...Issue state } }
   readied: timelineItems(itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT], first: 1) { filteredCount }
@@ -82,6 +87,7 @@ fragment Gate on PullRequest {
 }
 
 query Repo($owner: String!, $name: String!, $issues: Int!, $prs: Int!) {
+  viewer { login }
   repository(owner: $owner, name: $name) {
     nameWithOwner
     defaultBranchRef { name }
