@@ -469,7 +469,8 @@ public struct PipelineTickResult: Codable, Equatable, Sendable {
     public var fixable: [String]
     /// The ids of every item this sync read, the ones `items` leaves out included, but none
     /// of a root it only read and showed, nor a Linear issue whose mapped root it did not
-    /// read, nor of a blocked sync: in an `unread` root, the asks a front-end may still judge.
+    /// read, nor of a sync blocked or without the ban list: in an `unread` root, the asks a
+    /// front-end may still judge.
     public var read: [String]
 
     public init(at: Date, items: [PipelineItem] = [], graph: PipelineGraph = PipelineGraph(),
