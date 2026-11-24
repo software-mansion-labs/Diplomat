@@ -625,7 +625,7 @@ enum Render {
         ]
         let node = PipelineGraph.Node.init(id:column:row:)
         let graph = PipelineGraph(
-            nodes: [node(i1820, 0, 0), node(p1831, 1, 0), node(p1834, 1, 1),
+            nodes: [node(i1820, 0, 0), node(p1831, 1, 0), node(p1834, 2, 0),
                     node(i1824, 0, 2), node(p1825, 1, 2),
                     node(i1790, 0, 3), node(i1801, 1, 3), node(i1802, 1, 4),
                     node(eng37, 0, 5), node(p1812, 1, 5),
@@ -634,6 +634,7 @@ enum Render {
                     node(i1760, 0, 8), node(p1770, 1, 8)],
             edges: [PipelineGraph.Edge(from: i1820, to: p1831, kind: .fixes),
                     PipelineGraph.Edge(from: i1820, to: p1834, kind: .fixes),
+                    PipelineGraph.Edge(from: p1831, to: p1834, kind: .stacked),
                     PipelineGraph.Edge(from: i1824, to: p1825, kind: .fixes),
                     PipelineGraph.Edge(from: i1790, to: i1801, kind: .child),
                     PipelineGraph.Edge(from: i1790, to: i1802, kind: .child),
