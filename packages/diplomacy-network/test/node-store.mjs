@@ -157,13 +157,19 @@ await check('what changed in a document is written as a line after it, and the d
     const bytes = 65 + Buffer.byteLength(`${JSON.stringify({ pad: 'é'.repeat(30) })}\n`);
     assert.deepEqual(takes, [bytes, bytes - 40, bytes - 80, bytes - 120]);
     assert.deepEqual(written().at(-1), { pad: 'é'.repeat(30) });
-    fs.writeSync = () => 0;
+    let tries = 0;
+    fs.writeSync = () => {
+      tries += 1;
+      if (tries > 1) throw new Error('asked to write again');
+      return 0;
+    };
     try {
       next.write(name, doc, { line: { n: 11 } });
       assert.throws(() => next.flush(), /took no more of a line/);
     } finally {
       fs.writeSync = real;
     }
+    assert.equal(tries, 1, 'a write that took nothing is not tried again');
     did.splice(0);
     next.write(name, doc, { line: { n: 12 } });
     next.flush();

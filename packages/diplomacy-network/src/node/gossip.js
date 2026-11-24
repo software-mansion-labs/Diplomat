@@ -9,7 +9,7 @@ import { MAX_HELLO_CHAIN, MAX_PUSH_RECORDS, Pool } from '../core/pool.js';
 import { LIMITS, checkShape, isObject, memberRecord, shaped } from '../core/records.js';
 import {
   CATCH_UP_MS, HOURS_CEILING, HOURS_FLOOR, INVITE_TTL_SECS, PEER_BACKOFF_MAX_MS, PEER_BACKOFF_MS, PRUNE_INTERVAL_MS, PUSH_REPEAT_MS,
-  RESIGN_INTERVAL_MS, STRANGER_BODY_BYTES, SYNC_INTERVAL_MS,
+  RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, STRANGER_BODY_BYTES, SYNC_INTERVAL_MS,
 } from '../paths.js';
 import { poolFile, readPool } from './store.js';
 
@@ -96,10 +96,12 @@ export function createGossip(host) {
       // member, each `{ nonce, exp }` and, for the keys that came with it, `seats` - the
       // seat each was given, by key; and what is kept of the membership it left before
       // this one. `joinFailed` says why the last invite let this host in nowhere, until
-      // the next one is pasted. `back` are the hosts it knew in the pool and may no
-      // longer hold the record of - the ones it left the pool to, and the ones whose
-      // records ran out while it was away - until a host it asks answers.
-      joining: null, joinFailed: '', invites: [], farewell: gone(doc), back: [],
+      // the next one is pasted. `returning` is true from when this host goes back into
+      // the pool, or starts after longer away than a member record is kept, until a host
+      // it asks answers. `back` are the hosts it knew there and may hold no record of -
+      // the ones it left the pool to, and the ones whose records ran out while it was
+      // away - each `{ pk, until }`: asked until it answers, its record is held, or `until`.
+      joining: null, joinFailed: '', invites: [], farewell: gone(doc), returning: false, back: [],
       // The members that refused this host's hello and have answered it nothing since.
       refusedBy: new Set(),
       // Since when what this host holds of the pool may be out of date - it started, it
@@ -118,18 +120,29 @@ export function createGossip(host) {
       if (isObject(doc.joining)) P.joining = doc.joining;
       if (typeof doc.joinFailed === 'string') P.joinFailed = doc.joinFailed;
       if (Array.isArray(doc.invites)) P.invites = doc.invites;
-      if (Array.isArray(doc.back)) P.back = doc.back;
+      if (Array.isArray(doc.back)) P.back = doc.back.filter((e) => typeof e?.pk === 'string' && Number.isSafeInteger(e.until));
+      P.returning = doc.returning === true;
       // The store holds all of this: nothing is written until something changes.
       P.pool.delta();
       P.head = host.head(P);
-      // The members whose records ran out are asked; `back` is written with the next change.
-      const expired = new Set(refused.filter((r) => r.code === 'expired').map((r) => r.key));
-      P.back = backTo(P, doc.records.filter((r) => r?.type === 'member' && !r.left && expired.has(memberKey(r.pk))).map((r) => r.pk));
+      // Away for longer than the others keep its record: it is coming back, and asks the
+      // members whose records ran out. One that ran out while this host was there, or
+      // away for less, is of a host that stopped signing.
+      if (own(P) && host.now() - own(P).at > RECORD_RETENTION_SECS) {
+        const expired = new Set(refused.filter((r) => r.code === 'expired').map((r) => r.key));
+        P.returning = true;
+        P.back = backTo(P, doc.records.filter((r) => r?.type === 'member' && !r.left && expired.has(memberKey(r.pk))).map((r) => r.pk));
+      }
     }
     return P;
   }
 
-  const backTo = (P, keys) => [...new Set([...P.back, ...keys])].sort();
+  // `P.back` with each of `keys` it does not name, asked for as long as a record is kept.
+  function backTo(P, keys) {
+    const until = host.now() + RECORD_RETENTION_SECS;
+    const added = keys.filter((pk) => pk !== host.self && !P.back.some((e) => e.pk === pk)).map((pk) => ({ pk, until }));
+    return [...P.back, ...added].sort((x, y) => (x.pk < y.pk ? -1 : x.pk > y.pk ? 1 : 0));
+  }
 
   /// Links a pool: what the store holds of it is taken up again, and the host is a member
   /// of it at once, alone until it joins or invites someone. A pool this host left stays
@@ -191,6 +204,7 @@ export function createGossip(host) {
   function rejoin(id) {
     const P = load(host.away.get(id), host.store.read(poolFile(id)) ?? {});
     P.back = backTo(P, P.farewell?.leftTo ?? []);
+    P.returning = true;
     P.farewell = null;
     P.pool.merge(signMember(P), host.now());
     host.away.delete(id);
@@ -228,12 +242,22 @@ export function createGossip(host) {
   // stopped signing their record, and the ones it is back to.
   function others(P) {
     const known = P.pool.known(host.now()).map((m) => m.pk);
-    return [...new Set([...known, ...P.back])].filter((pk) => pk !== host.self).sort();
+    return [...new Set([...known, ...P.back.map((e) => e.pk)])].filter((pk) => pk !== host.self).sort();
   }
 
   /// Is this host back in a pool after it left or was away for longer than a member
   /// record is kept, with no answer yet from any host it asked?
-  const returning = (P) => P.back.length > 0;
+  const returning = (P) => P.returning;
+
+  // `pk` answered: this host is back in the pool, and `pk` need not be asked as one
+  // whose record may be gone. The others it is back to still are: one host that
+  // answers may hold no more of the pool than this one, come back with it.
+  function answered(P, pk) {
+    const back = P.back.filter((e) => e.pk !== pk);
+    if (!P.returning && back.length === P.back.length) return;
+    [P.returning, P.back] = [false, back];
+    host.save(P);
+  }
 
   // The member records that lead from `pk`, this host unless named, to the member that
   // started the pool.
@@ -392,7 +416,7 @@ export function createGossip(host) {
       return false;
     }
     snubbed.delete(key);
-    P.back = [];
+    answered(P, pk);
     await settle(P, pk, hello.body, host.now());
     return true;
   }
@@ -435,7 +459,7 @@ export function createGossip(host) {
     const answer = await send(P, pk, 'sync', { asOf, hash: P.pool.stateHash(asOf) }, options);
     if (answer.ok) {
       P.refusedBy.delete(pk);
-      P.back = [];
+      answered(P, pk);
       await settle(P, pk, answer.body, asOf);
     }
     return answer.ok;
@@ -486,6 +510,10 @@ export function createGossip(host) {
     // With nobody to ask there was nothing to wait for, and nothing to say of it.
     if (pks.length === 0) {
       P.stale = null;
+      if (P.returning) {
+        P.returning = false;
+        host.save(P);
+      }
       return undefined;
     }
     const asked = pks.map((pk) => meet(P, pk, { fresh: true }).then((heard) => heard && caughtUp(P, epoch))
@@ -617,6 +645,12 @@ export function createGossip(host) {
         host.save(P);
       }
       redeem(P).catch((err) => host.log(`an invite could not be redeemed: ${err?.stack ?? err}`));
+      const held = new Set(P.pool.known(now).map((m) => m.pk));
+      const back = P.back.filter((e) => now < e.until && !held.has(e.pk));
+      if (back.length !== P.back.length) {
+        P.back = back;
+        host.save(P);
+      }
       const mine = own(P);
       if (now - mine.at >= RESIGN_INTERVAL_MS / 1000 || mine.maxAcceptedH !== hoursOf(host.settings().maximumAcceptedH)) {
         host.take(P, signMember(P));
