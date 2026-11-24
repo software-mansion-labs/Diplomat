@@ -378,8 +378,8 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
     /// Split writable medium/high-complexity issues into low-complexity children.
     public var fracture: Bool
     public var force: Force?
-    /// The ids of the items the front-end holds a queued pipeline ask for, which a sync reads
-    /// even past a cap or once closed, so `read` can take each back.
+    /// The ids of the items the front-end holds a pipeline ask or attempt record for, which a
+    /// sync reads even past a cap or once closed, so `read` can take each back.
     public var queued: [String]
 
     public init(roots: [Root], linearTeams: [LinearTeam] = [], linearKeychainItem: String? = nil,

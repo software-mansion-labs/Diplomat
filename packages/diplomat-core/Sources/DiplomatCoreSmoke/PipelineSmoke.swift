@@ -2331,7 +2331,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
 }
 
 /// What a sync judges an item by: its own latest read, the lineage its part's body names,
-/// the items queued asks wait on, and a ban list it can read.
+/// the items asks or attempt records name, and a ban list it can read.
 private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
                             t0: Date) throws {
     section("pipeline judged")
@@ -2427,7 +2427,7 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
           "a marker in someone else's Linear issue: \(stageOf(lf.result, linearURL("ENG-7")))")
     try ban([])
 
-    // Each item a queued ask waits on is read when no other read lists it, and is in `read`.
+    // Each item in `queued` is read when no other read lists it, and is in `read`.
     let capped = only([])
     capped.issues = (0..<301).map { .init(number: 1000 + $0, title: "Filler \($0)", updated: at("07:00")) }
     let cq = sync(capped, PipelineSettings(roots: [root], fix: true, queued: [issueURL(20)]), dir("queued-capped"), t0)
@@ -2441,7 +2441,7 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
     let gone = only([])
     let gq = sync(gone, PipelineSettings(roots: [root], queued: [issueURL(999)]), dir("queued-gone"), t0)
     check(!gq.result.read.contains(issueURL(999))
-          && gq.result.notices.contains { $0.hasPrefix("\(issueURL(999)), which an ask waits on, could not be read: ") },
+          && gq.result.notices.contains { $0.hasPrefix("\(issueURL(999)), which an ask or attempt record names, could not be read: ") },
           "a queued item not found: \(gq.result.notices)")
     let crowded = only([])
     crowded.tickets = (0..<302).map { .init(id: "lin-c\($0)", identifier: "ENG-\(100 + $0)", title: "Crowded \($0)",
