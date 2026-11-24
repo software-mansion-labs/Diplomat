@@ -4143,6 +4143,8 @@ private func pipelineCoverage9(base: URL, root: PipelineSettings.Root, team: Pip
     let epic = only([3])
     epic.issues.append(.init(number: 120, title: "Typo in the footer", body: "It says Foter.\n\nPart of \(issueURL(3))",
                              labels: lowLow, updated: at("10:00"), author: opLogin))
+    epic.issues.append(.init(number: 121, title: "Typo in the header", body: "It says Haeder.\n\nPart of \(issueURL(99))",
+                             labels: lowLow, updated: at("10:00"), parent: 3, author: opLogin))
     let header = fixture().tickets[0]
     epic.tickets = [header,
                     .init(id: "lin-7", identifier: "ENG-7", title: "Pick the header token",
@@ -4152,9 +4154,10 @@ private func pipelineCoverage9(base: URL, root: PipelineSettings.Root, team: Pip
                           description: "Refresh it.\n\nPart of \(linearURL("ENG-1"))", labels: ["lab-rl", "lab-cl"],
                           updated: at("10:00"), parent: header.url, creator: ("U_OP", "Op"))]
     let ep = sync(epic, PipelineSettings(roots: [root], linearTeams: [team], fix: true), dir("epic-link"), t0)
-    let parts = [issueURL(120), linearURL("ENG-7"), linearURL("ENG-8")].map { stageOf(ep.result, $0) }
-    check(fixes(ep) == ["#120", "ENG-7"]
-          && parts == ["candidate/fast", "candidate/fast", "candidate/fast (split from an issue whose author could not be read)"],
+    let parts = [issueURL(120), issueURL(121), linearURL("ENG-7"), linearURL("ENG-8")].map { stageOf(ep.result, $0) }
+    check(fixes(ep) == ["#120", "#121", "ENG-7"]
+          && parts == ["candidate/fast", "candidate/fast", "candidate/fast",
+                       "candidate/fast (split from an issue whose author could not be read)"],
           "issues naming an issue they are no sub-issue or child of: \(fixes(ep)) \(parts)")
 
     // A GitHub issue carries the holds of the tracked Linear issues attached to it.

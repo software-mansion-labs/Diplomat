@@ -1752,7 +1752,7 @@ final class PipelineSync {
                 (stage, lane) = (.unrated, .unrated)
             }
             // Rated or not.
-            let refused = triaged(e).map { "triaged as \($0)" } ?? stops(e).first.map { "carries the label \($0)" }
+            let refused: String? = triaged(e).map { "triaged as \($0)" } ?? stops(e).first.map { "carries the label \($0)" }
                 ?? onGitHub(e).map { "it is tracked on GitHub as \($0)" } ?? twinHold(e) ?? (e.linksPast ? Self.linksPast : nil)
             entries[i].item.stage = stage
             entries[i].item.lane = lane
