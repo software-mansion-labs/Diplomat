@@ -24,7 +24,7 @@ from diplomat_runtime.models import Fmt
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QFont, QImage, QPalette, QTextDocument  # noqa: E402
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QImage, QPalette, QTextDocument  # noqa: E402
 from PySide6.QtGui import Qt as GuiQt  # noqa: E402
 from PySide6.QtWidgets import QLabel  # noqa: E402
 
@@ -810,19 +810,26 @@ def test_a_sync_that_read_no_item_says_what_it_did_not_read(store, monkeypatch):
                                        "Linear team is set.")
 
 
-def test_the_empty_graphs_text_wraps_inside_the_canvas(store, monkeypatch):
+def test_the_empty_graphs_text_wraps_inside_the_canvas(store, app, monkeypatch):
     monkeypatch.setattr(review, "repo_roots", lambda: [LocalRepo("o", "r", "/src/r")])
     store.pipeline_result = {**_result(), "items": [], "graph": {"nodes": [], "edges": []},
-                             "read": [], "unread": [f"o/repository-{n}" for n in range(8)]}
-    canvas = PipelineView(store).canvas
-    canvas.resize(400, 300)
-    ground = canvas.palette().color(QPalette.ColorRole.Window)
-    image = QImage(canvas.size(), QImage.Format.Format_ARGB32)
-    image.fill(ground)
-    canvas.render(image)
-    inked = [x for x in range(image.width())
-             if any(image.pixel(x, y) != ground.rgb() for y in range(image.height()))]
-    assert 0 < inked[0] and inked[-1] < image.width() - 1
+                             "read": [], "unread": [f"o/repository-{n}" for n in range(16)]}
+    view = PipelineView(store)
+    view.resize(1100, 700)
+    view.show()
+    try:
+        for _ in range(3):
+            app.processEvents()
+        canvas = view.canvas
+        ground = canvas.palette().color(QPalette.ColorRole.Window).rgb()
+        image = canvas.grab().toImage()
+        inked = [y for y in range(image.height())
+                 if any(image.pixel(x, y) != ground for x in range(image.width()))]
+        font = QFont(canvas.font())
+        font.setPixelSize(11)
+        assert inked[-1] - inked[0] > 2 * QFontMetrics(font).lineSpacing()
+    finally:
+        view.close()
 
 
 def test_a_change_to_the_ban_list_redraws_the_actions(store, monkeypatch):
