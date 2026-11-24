@@ -958,7 +958,7 @@ final class PipelineSync {
         var ids = pr.closesLinear
         var attachedTo: [(issue: String, label: String, ids: [String])] = []
         if !settings.linearTeams.isEmpty {
-            /// The open Linear issues an attachment links `url` from, `name` when it is not the PR's.
+            /// The open Linear issues an attachment links `url` from; a hold names `url` `name`.
             func attached(_ url: String, _ name: String) -> [String] {
                 let linking = "the Linear issues linking \(name)"
                 guard let api = linear else {
