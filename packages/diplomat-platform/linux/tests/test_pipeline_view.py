@@ -700,6 +700,17 @@ def test_fracture_is_off_for_an_issue_held_as_triaged(store):
     assert pipelineview.fracture_refused({"hold": "an open PR fixes it"}) is None
 
 
+def test_fracture_is_off_for_a_candidate_held_for_a_stop_label(store):
+    result = _result()
+    result["items"][4] = {**result["items"][4], "hold": "carries the label wip"}
+    store.pipeline_result = result
+    view = PipelineView(store)
+    view.select(I5)
+    fracture = view.buttons["fracture"]
+    assert (fracture.isEnabled(), fracture.toolTip()) == (
+        False, "No sync splits an issue that carries the label wip")
+
+
 def test_start_fix_and_fracture_are_off_while_anything_is_on_it(store, monkeypatch):
     view = PipelineView(store)
     view.select(I5)

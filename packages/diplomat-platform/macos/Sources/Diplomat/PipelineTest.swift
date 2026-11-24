@@ -628,10 +628,13 @@ enum PipelineTest {
                   && !PipelineView.canFracture(at(.human), edges: [], rooted: false))
         var triaged = at(.human)
         triaged.hold = "triaged as enhancement"
+        var stopped = at(.candidate)
+        stopped.hold = "carries the label wip"
         var heldOther = at(.human)
         heldOther.hold = "an open PR fixes it"
-        check("…which a sync refuses for an issue held as triaged, and the button says so",
+        check("…which a sync refuses for an issue held as triaged or for a stop label, and the button says so",
               PipelineView.fractureRefused(triaged) == "No sync splits an issue triaged as enhancement"
+                  && PipelineView.fractureRefused(stopped) == "No sync splits an issue that carries the label wip"
                   && PipelineView.fractureRefused(heldOther) == nil && PipelineView.fractureRefused(at(.human)) == nil)
         check("Start fix: a writable candidate issue only",
               PipelineView.canStartFix(at(.candidate)) && !PipelineView.canStartFix(at(.human))
