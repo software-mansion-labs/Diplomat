@@ -14,7 +14,7 @@ query Issues($teams: [String!], $after: String) {
       id identifier title description url updatedAt
       state { type name }
       assignee { id name }
-      creator { name }
+      creator { id name }
       labels(first: 20) { pageInfo { hasNextPage } nodes { id name } }
       parent { url }
       children(first: 10) { nodes { url } }
@@ -24,14 +24,14 @@ query Issues($teams: [String!], $after: String) {
   }
 }
 
-# One issue as it is now, by its id or its identifier: read right before Diplomat writes to
-# it, and for each issue a PR about to merge would close. ~60.
+# One issue as it is now, by its id or its identifier, archived or not: read right before
+# Diplomat writes to it, and for each issue a PR about to merge would close. ~60.
 query Issue($id: String!) {
   issue(id: $id) {
-    id identifier title description url updatedAt
+    id identifier title description url updatedAt archivedAt
     state { type name }
     assignee { id name }
-    creator { name }
+    creator { id name }
     labels(first: 20) { pageInfo { hasNextPage } nodes { id name } }
     parent { url }
     children(first: 10) { nodes { url } }
@@ -48,7 +48,26 @@ query Recheck($ids: [ID!]) {
       id identifier title description url updatedAt
       state { type name }
       assignee { id name }
-      creator { name }
+      creator { id name }
+      labels(first: 20) { pageInfo { hasNextPage } nodes { id name } }
+      parent { url }
+      children(first: 10) { nodes { url } }
+      attachments(first: 10) { pageInfo { hasNextPage } nodes { url } }
+      team { id key }
+    }
+  }
+}
+
+# Up to 100 issues of the tracked teams in any state, archived or not, `$filter` naming each
+# by its team's key and its number: those queued asks wait on that `Issues` did not list.
+# ~5,800.
+query Queued($filter: IssueFilter!) {
+  issues(first: 100, includeArchived: true, filter: $filter) {
+    nodes {
+      id identifier title description url updatedAt archivedAt
+      state { type name }
+      assignee { id name }
+      creator { id name }
       labels(first: 20) { pageInfo { hasNextPage } nodes { id name } }
       parent { url }
       children(first: 10) { nodes { url } }
@@ -67,9 +86,10 @@ query Attached($url: String!) {
   }
 }
 
-# The labels named `names`, with the team each belongs to (none for a workspace label).
-query Labels($names: [String!]) {
-  issueLabels(first: 50, filter: { name: { in: $names } }) {
+# The labels named `name` in any case, with the team each belongs to (none for a workspace
+# label).
+query Labels($name: String!) {
+  issueLabels(first: 250, filter: { name: { eqIgnoreCase: $name } }) {
     nodes { id name team { id } }
   }
 }

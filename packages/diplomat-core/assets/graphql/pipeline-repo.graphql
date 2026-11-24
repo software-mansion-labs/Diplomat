@@ -7,8 +7,8 @@
 # meanwhile keeps its place, each page `$issues` or `$prs` long; `PullRequest` reads one PR
 # again, with `Gate`, right before Diplomat marks it ready or merges it, and after it merges
 # it, for who merged it; `Item` reads one
-# issue or PR again right before Diplomat writes to it; `Parts` finds the parts of a split
-# filed before. `files` needs to see more than `floor.maxFiles` only to know a PR exceeds
+# issue or PR again right before Diplomat writes to it; `Queued` reads one a queued ask
+# names that the reads above missed; `Parts` finds the parts of a split filed before. `files` needs to see more than `floor.maxFiles` only to know a PR exceeds
 # it, which `changedFiles` says; any other `totalCount` past what a connection lists reads
 # as whatever holds the item back: a label, an unresolved thread, a reviewer, a commit or a
 # closing reference nobody saw. A timeline's `totalCount` counts every event whatever
@@ -55,7 +55,13 @@ fragment Gate on PullRequest {
     refUpdateRule { requiredStatusCheckContexts }
     rules(first: 100) {
       totalCount
-      nodes { type parameters { ... on RequiredStatusChecksParameters { requiredStatusChecks { context } } } }
+      nodes {
+        type
+        parameters {
+          ... on RequiredStatusChecksParameters { requiredStatusChecks { context } }
+          ... on PullRequestParameters { allowedMergeMethods }
+        }
+      }
     }
   }
   gateTip: commits(last: 1) {
@@ -151,6 +157,16 @@ query Item($owner: String!, $name: String!, $number: Int!) {
           nodes { ... on LabeledEvent { label { name } } }
         }
       }
+    }
+  }
+}
+
+query Queued($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    issueOrPullRequest(number: $number) {
+      ... on Issue { ...Issue state }
+      ... on PullRequest { ...PR }
     }
   }
 }

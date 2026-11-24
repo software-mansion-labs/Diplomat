@@ -18,6 +18,8 @@ struct PipelineEntry {
         var baseRules: [String]? = []
         /// A commit is not signed and verified, or past the read's page.
         var unsignedCommits = false
+        /// The `gh pr merge` flags every pull request rule on its base branch allows.
+        var mergeFlags = PipelineRead.mergeFlags.map(\.flag)
     }
 
     var item: PipelineItem
@@ -34,6 +36,10 @@ struct PipelineEntry {
     var links: [String] = []
     /// A Linear issue's attachments run past the read's page.
     var linksPast = false
+    /// The operator's issue whose body says it is a part Diplomat split off, and whose text
+    /// it carries as its marker names it.
+    var isPart = false
+    var lineage: String?
     /// A GitHub issue's type, nil for none.
     var issueType: String?
     /// A Linear issue's state when its type is triage or duplicate.
@@ -92,8 +98,8 @@ struct PipelineEntry {
 /// What one root's read says about the repository itself.
 struct PipelineRepo {
     var defaultBranch: String
-    /// `--squash`, `--merge` or `--rebase`, the first the repository allows.
-    var mergeFlag: String?
+    /// Of `--squash`, `--merge` and `--rebase`, in that order, those the repository allows.
+    var mergeFlags: [String]
 }
 
 enum PipelineRead {
@@ -147,6 +153,34 @@ enum PipelineRead {
             ? "has more labels than one read lists" : nil
     }
 
+    /// Each `gh pr merge` flag, with the repository setting and the pull request rule's
+    /// `allowedMergeMethods` value that allow it.
+    static let mergeFlags = [(flag: "--squash", setting: "squashMergeAllowed", method: "SQUASH"),
+                             (flag: "--merge", setting: "mergeCommitAllowed", method: "MERGE"),
+                             (flag: "--rebase", setting: "rebaseMergeAllowed", method: "REBASE")]
+
+    /// The hidden marker the `k`th part of `parent` ends with, naming `who`, whose text it
+    /// carries.
+    static func partMarker(_ k: Int, of parent: String, by who: String) -> String {
+        "<!-- Diplomat: part \(k) of \(parent) by \(who.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "") -->"
+    }
+
+    private static let marker = try! NSRegularExpression(pattern: #"<!-- Diplomat: part \d+ of \S+ by (\S*) -->"#)
+
+    /// Whose text a part's `body` carries, as its marker names it; nil for none.
+    static func lineage(_ body: String) -> String? {
+        let ns = body as NSString
+        guard let m = marker.matches(in: body, range: NSRange(location: 0, length: ns.length)).last else { return nil }
+        return ns.substring(with: m.range(at: 1)).removingPercentEncoding
+    }
+
+    /// Whether `body` says it is a part Diplomat split off: by its marker, in any form, or
+    /// by the line naming its parent, which Linear may keep where it drops the marker.
+    static func isPart(_ body: String) -> Bool {
+        body.contains("<!-- Diplomat: part ")
+            || body.split(separator: "\n").contains { $0.hasPrefix("Part of ") && $0.contains("://") }
+    }
+
     /// One page of a `pipeline-repo.graphql` operation for `root`: `Repo`'s, or one of
     /// `Issues` or `PullRequests` given the `repo` that `Repo` read, with the cursors of
     /// the pages after it. `primary` is the first root, whose items are labelled `#N`;
@@ -157,8 +191,7 @@ enum PipelineRead {
         let repo = (response["data"] as? [String: Any])?["repository"] as? [String: Any]
         let read = known ?? PipelineRepo(
             defaultBranch: (repo?["defaultBranchRef"] as? [String: Any])?["name"] as? String ?? "",
-            mergeFlag: [("squashMergeAllowed", "--squash"), ("mergeCommitAllowed", "--merge"),
-                        ("rebaseMergeAllowed", "--rebase")].first { bool(repo?[$0.0], false) }?.1)
+            mergeFlags: mergeFlags.filter { bool(repo?[$0.setting], false) }.map(\.flag))
         func after(_ key: String) -> String? {
             let page = (repo?[key] as? [String: Any])?["pageInfo"] as? [String: Any]
             return bool(page?["hasNextPage"], false) ? page?["endCursor"] as? String : nil
@@ -234,6 +267,11 @@ enum PipelineRead {
         e.parent = (n["parent"] as? [String: Any])?["url"] as? String
         e.children = nodes(n, "subIssues").compactMap { $0["url"] as? String }
         e.issueType = (n["issueType"] as? [String: Any])?["name"] as? String
+        // Diplomat files a part as the operator: no one else's text names a lineage.
+        if !me.isEmpty, e.item.author?.lowercased() == me {
+            e.isPart = isPart(e.body)
+            e.lineage = lineage(e.body)
+        }
         e.unwritable = unwritable
         return e
     }
@@ -414,6 +452,10 @@ enum PipelineRead {
         }
         g.requiredChecks = requiredChecks(n["baseRef"] as? [String: Any])
         g.baseRules = baseRules(n["baseRef"] as? [String: Any])
+        for r in nodes(n["baseRef"] as? [String: Any], "rules") where r["type"] as? String == "PULL_REQUEST" {
+            let allowed = (r["parameters"] as? [String: Any])?["allowedMergeMethods"] as? [String] ?? []
+            g.mergeFlags = g.mergeFlags.filter { flag in mergeFlags.contains { $0.flag == flag && allowed.contains($0.method) } }
+        }
         return g
     }
 
@@ -431,6 +473,9 @@ enum PipelineRead {
         var out: [String] = []
         for r in ruleNodes {
             guard let type = r["type"] as? String else { return nil }
+            if type == "PULL_REQUEST", !((r["parameters"] as? [String: Any])?["allowedMergeMethods"] is [String]) {
+                return nil
+            }
             if !out.contains(type) { out.append(type) }
         }
         if let rule = base["branchProtectionRule"] as? [String: Any] {
@@ -502,7 +547,7 @@ enum PipelineRead {
         let state = n["state"] as? [String: Any]
         let type = state?["type"] as? String ?? ""
         let done = ["completed", "canceled"].contains(type)
-        let unwritable = done ? "closed" : labelsCut(n, names)
+        let unwritable = done ? "closed" : n["archivedAt"] is String ? "archived" : labelsCut(n, names)
             ?? (assignee == nil || (assignee?["id"] as? String) == viewer ? nil
                 : "assigned to \(assignee?["name"] as? String ?? "someone else")")
         let repo = teams.first { $0.key.lowercased() == key.lowercased() }?.repo
@@ -520,6 +565,10 @@ enum PipelineRead {
         e.links = nodes(n, "attachments").compactMap { $0["url"] as? String }
         e.linksPast = bool(((n["attachments"] as? [String: Any])?["pageInfo"] as? [String: Any])?["hasNextPage"], false)
         e.teamID = team?["id"] as? String
+        if !viewer.isEmpty, (n["creator"] as? [String: Any])?["id"] as? String == viewer {
+            e.isPart = isPart(e.body)
+            e.lineage = lineage(e.body)
+        }
         if ["triage", "duplicate"].contains(type) { e.triageState = state?["name"] as? String ?? type }
         for l in labels {
             if let name = l["name"] as? String, let id = l["id"] as? String { e.labelIDs[name] = id }
