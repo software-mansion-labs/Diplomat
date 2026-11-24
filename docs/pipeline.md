@@ -308,7 +308,9 @@ merged at that head by you, and merged by anyone else or at another head, it is 
 
 ## The Pipeline screen
 
-The header's **Pipeline** button opens it, in both apps.
+The header's **Pipeline** button opens it, in both apps. It shows the repo the header's
+[picker](panel.md#layout) chose: each group with a card in it, a Linear issue counting as its
+team's repo, and each group with no card in any root, whole.
 
 - **Status line** - when the last sync ran (on macOS also what it reads, how often, and which
   switches are off), and **Sync now** to run one at once. Under it, why no sync can run, if none

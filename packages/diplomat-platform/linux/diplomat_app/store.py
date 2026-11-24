@@ -663,9 +663,9 @@ class Store(QObject):
 
     @property
     def selected_repo(self) -> LocalRepo:
-        """The repo root the panel's right column works on (the header's picker): its
-        lists, lookup, sweeps and wizards. The stored ``selectedRepo`` root key, or the
-        primary when that is no root any more."""
+        """The repo root the panel's right column and the Pipeline screen work on (the
+        header's picker): its lists, lookup, sweeps and wizards. The stored ``selectedRepo``
+        root key, or the primary when that is no root any more."""
         want = str(self._settings.value("selectedRepo", "", str)).lower()
         roots = review.repo_roots()
         return next((r for r in roots if r.key == want), roots[0])

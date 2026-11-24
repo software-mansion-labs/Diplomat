@@ -403,7 +403,8 @@ class Panel(QWidget):
         row.addWidget(self.repo_label)
         self.repo_picker = QComboBox()
         self.repo_picker.setAccessibleName("Repo root")
-        self.repo_picker.setToolTip("The repo root the lists, search and wizards work on")
+        self.repo_picker.setToolTip("The repo root the lists, search, wizards and Pipeline screen "
+                                     "work on")
         self.repo_picker.activated.connect(self._pick_repo)
         row.addWidget(self.repo_picker)
         self.store.local_repos_changed.connect(self._refresh_repo_picker)

@@ -181,8 +181,8 @@ final class Store: ObservableObject {
         showSelectedRepo()
     }
 
-    /// The root the panel's right column works on, as its `LocalRepo.key`. One that is
-    /// not among the roots reads as the primary (`selectedRoot`).
+    /// The root the panel's right column and the Pipeline screen work on, as its
+    /// `LocalRepo.key`. One that is not among the roots reads as the primary (`selectedRoot`).
     @Published var selectedRepo: String {
         didSet {
             persist(selectedRepo, forKey: Keys.selectedRepo)
