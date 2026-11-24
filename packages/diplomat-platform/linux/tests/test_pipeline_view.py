@@ -740,15 +740,33 @@ def test_fracture_is_off_for_an_issue_held_as_triaged(store):
     assert pipelineview.fracture_refused({"hold": "an open PR fixes it"}) is None
 
 
-def test_fracture_is_off_for_a_candidate_held_for_a_stop_label(store):
+def test_rate_now_and_fracture_are_off_for_an_item_held_for_a_stop_label(store):
     result = _result()
     result["items"][4] = {**result["items"][4], "hold": "carries the label wip"}
-    store.pipeline_result = result
+    result["items"][1] = {**result["items"][1], "hold": "carries the label wip"}
+    store.pipeline_result = {**result, "unread": ["o/r"]}
     view = PipelineView(store)
+    rated = (False, "No sync rates an item that carries the label wip")
     view.select(I5)
-    fracture = view.buttons["fracture"]
-    assert (fracture.isEnabled(), _tip(fracture)) == (
-        False, "No sync splits an issue that carries the label wip")
+    assert [(view.buttons[k].isEnabled(), _tip(view.buttons[k]))
+            for k in ("rate", "fracture")] == [
+        rated, (False, "No sync splits an issue that carries the label wip")]
+    view.select(P2)
+    assert (view.buttons["rate"].isEnabled(), _tip(view.buttons["rate"])) == rated
+    assert pipelineview.rate_refused({"hold": "triaged as enhancement"}) is None
+
+
+def test_rate_now_is_on_the_prs_of_ghs_account_not_the_settings_username(store):
+    """A sync judges the operator's own by the account gh acts as."""
+    result = _result()
+    result["items"][2] = {**result["items"][2], "author": "alice"}
+    store.pipeline_result = result
+    store.username_override = "alice"
+    view = PipelineView(store)
+    view.select(P2)
+    assert "rate" in view.buttons
+    view.select(P3)
+    assert "rate" not in view.buttons
 
 
 def test_start_fix_and_fracture_are_off_while_anything_is_on_it(store, monkeypatch):

@@ -191,6 +191,13 @@ struct PipelineView: View {
         return nil
     }
 
+    /// Why a sync would refuse a rating `canRate` offers: the hold a stop label put on it.
+    /// Twin of `pipelineview.rate_refused`.
+    static func rateRefused(_ item: PipelineItem) -> String? {
+        guard let hold = item.hold, hold.hasPrefix("carries the label ") else { return nil }
+        return "No sync rates an item that \(hold)"
+    }
+
     /// An open item a sync rates when asked: a PR only when it is `me`'s, an issue only
     /// when its code can be read (`rooted`). Twin of `pipelineview.can_rate`.
     static func canRate(_ item: PipelineItem, me: String, rooted: Bool) -> Bool {
@@ -277,7 +284,7 @@ struct PipelineView: View {
                            forcedFracture: store.pipelineForce.fracture.contains(id),
                            banned: store.pipelineBanned(item),
                            unread: store.pipelineUnread(item),
-                           canRate: PipelineView.canRate(item, me: store.effectiveMe, rooted: rooted),
+                           canRate: store.pipelineCanRate(item),
                            canFracture: PipelineView.canFracture(item, edges: result.graph.edges,
                                                                  rooted: rooted),
                            canStartFix: store.pipelineFixEffect(for: item) != nil,
@@ -683,10 +690,11 @@ struct PipelineDetail: View {
 
     private var ban: String? { banned.map { "@\($0) is on the prompt-injection ban list" } }
     private var refused: String? { PipelineView.fractureRefused(item) }
+    private var stopped: String? { PipelineView.rateRefused(item) }
     private var partly: String? { unread.map { "The last sync did not read all of \($0)" } }
 
-    var rateEnabled: Bool { enabled && !forcedRate && banned == nil && unread == nil }
-    var rateTip: String { ban ?? partly ?? "Rate it in a sync started now, ahead of every limit" }
+    var rateEnabled: Bool { enabled && !forcedRate && banned == nil && stopped == nil && unread == nil }
+    var rateTip: String { ban ?? stopped ?? partly ?? "Rate it in a sync started now, ahead of every limit" }
     var fractureEnabled: Bool {
         enabled && !forcedFracture && badge == nil && banned == nil && refused == nil && unread == nil
     }

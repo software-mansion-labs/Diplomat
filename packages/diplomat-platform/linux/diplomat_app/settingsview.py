@@ -221,8 +221,9 @@ class SettingsView(QWidget):
             "GitHub username", field, stacked=True,
             detail="Blank = whoever `gh` is authenticated as. Scopes the “My …” "
                    "tools and the Review wizard: which PRs count as mine, and whose "
-                   "reviews the monitors owe. In a GitLab repo root “me” is `glab`'s "
-                   "user on its host, which this does not change.",
+                   "reviews the monitors owe. The Pipeline always goes by `gh`'s account. "
+                   "In a GitLab repo root “me” is `glab`'s user on its host, which this "
+                   "does not change.",
         ))
         body.addWidget(self._identity_row)
 

@@ -214,8 +214,9 @@ def tick(settings: dict, started: Callable | None = None) -> dict:
     return result
 
 
-#: ``pipeline-last``'s date before the first sync.
-_NEVER = "1970-01-01T00:00:00Z"
+#: The date of a result no sync produced: ``pipeline-last``'s before the first sync, and a
+#: locked-out ``pipeline-tick``'s.
+NEVER = "1970-01-01T00:00:00Z"
 
 
 def last() -> dict | None:
@@ -224,7 +225,7 @@ def last() -> dict | None:
     result = _result(json.loads(promptcore.cli(["pipeline-last"])))
     if result is None:
         raise ValueError("diplomat-core pipeline-last answered something that is not a sync")
-    return None if result.get("at") == _NEVER else result
+    return None if result.get("at") == NEVER else result
 
 
 def _epoch(iso: str) -> float | None:
