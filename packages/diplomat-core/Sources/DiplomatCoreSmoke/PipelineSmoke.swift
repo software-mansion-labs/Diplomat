@@ -3331,6 +3331,10 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
     check(asksLinear(st) && st.result.effects.contains(fixFX(1)) && still.linearOps.filter { $0 == "Recheck" }.count == 1
           && st.result.fixable.contains(linearURL("ENG-9")),
           "a Linear candidate unchanged: \(st.result.effects) \(still.linearOps)")
+    let (_, edited) = racing("linear-edited") { $0.tickets[0].description = "Steps: open the header" }
+    check(edited.result.effects.contains { if case .fixLinear(_, "ENG-9", _, "Wrong margin\n\nSteps: open the header", _) = $0 { return true }
+                                           return false },
+          "a Linear candidate edited during the sync: \(edited.result.effects)")
     let changed: [(String, (Trackers) -> Void, String)] = [
         ("completed", { $0.tickets[0].state = "completed" }, "it changed since this sync read it: closed"),
         ("assigned", { $0.tickets[0].assignee = ("U_ALICE", "Alice") }, "it changed since this sync read it: assigned to Alice"),

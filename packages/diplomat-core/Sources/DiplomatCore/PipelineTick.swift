@@ -94,9 +94,9 @@ public enum PipelineTick {
     /// second rating, the operator's unrated PRs, writable issues, other open issues,
     /// newest first, leaving out for 1, 2, 4 ... syncs (a day at most) one whose
     /// rating just failed; writes each rating as labels where Diplomat may, never lower
-    /// than the labels or the diff's floor, and caches the rest, a rating whose labels
-    /// could not be written counting over lower labels until a later sync writes them, on
-    /// the same backoff; with `fastTrack` labels
+    /// than the labels, a kept rating or the diff's floor, keeping each answer from the
+    /// moment it arrives until its labels are written, and the rest: a kept rating counts
+    /// over lower labels until a later sync writes it, on the same backoff; with `fastTrack` labels
     /// `fastTrack` a PR of the operator's at its first rating if it is low/low and fixes
     /// candidate issues, puts `cleared` on one rated low/low again at a head a clean marker
     /// names, takes `cleared` off one whose head no marker names, takes both off one rated
@@ -105,7 +105,8 @@ public enum PipelineTick {
     /// hold stops again and, if it is unchanged and nothing holds it then, marks a draft
     /// ready or merges it; with `fracture` (or forced) splits one writable
     /// medium/high-complexity issue that is not high risk into children; with `fix` asks
-    /// for a fix PR for each candidate issue. A banned author's item, and every part split
+    /// for a fix PR for each candidate issue, a Linear one only if a read of it right before
+    /// still finds it one. A banned author's item, and every part split
     /// from one, gets none of that. Every step it takes, and each hold, notice and request
     /// the first time it is seen, is logged to `dir`, and its state saved after each step;
     /// the result is saved as `last.json`.
@@ -1724,7 +1725,7 @@ final class PipelineSync {
 
     /// Holds each Linear candidate whose fix is about to be asked for that a read of them all
     /// now, a hundred a query, finds no longer a candidate or linked to other URLs, or that it
-    /// could not read: its fix run cannot read Linear.
+    /// could not read: its fix run cannot read Linear, and gets the text this read finds.
     func recheckLinear() {
         let picks = entries.indices.filter {
             entries[$0].item.source == .linear && entries[$0].item.stage == .candidate && entries[$0].item.hold == nil
@@ -1751,7 +1752,10 @@ final class PipelineSync {
                 entries[i].item.hold = "it changed since this sync read it: it was not found"
                 continue
             }
-            if isCandidate(x), !x.linksPast, Set(x.links) == Set(entries[i].links) { continue }
+            if isCandidate(x), !x.linksPast, Set(x.links) == Set(entries[i].links) {
+                (entries[i].item.title, entries[i].body) = (x.item.title, x.body)
+                continue
+            }
             entries[i].item.hold = "it changed since this sync read it: "
                 + (x.unwritable ?? (isCandidate(x) ? "its links changed" : "it is no longer a candidate"))
         }
