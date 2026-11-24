@@ -2318,6 +2318,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(!mn.result.graph.edges.contains { $0.from == linearURL("ENG-3") }, "XENG-3 names ENG-3")
 
     try pipelineJudged(base: base, root: root, team: team, t0: t0)
+    try pipelineSplitParts(base: base, root: root, team: team, t0: t0)
     try pipelineFailClosed(base: base, root: root, team: team, t0: t0)
     try pipelineFreshReads(base: base, root: root, team: team, t0: t0)
     try pipelinePinned(base: base, root: root, team: team, t0: t0)
@@ -2325,6 +2326,19 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelineKept(base: base, root: root, team: team, t0: t0)
     try pipelineCoverage8(base: base, root: root, team: team, t0: t0)
     try pipelinePins9(base: base, root: root, team: team, t0: t0)
+}
+
+/// A link to its parent makes a body a part's only on a `Part of` line.
+private func pipelineSplitParts(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                                t0: Date) throws {
+    section("pipeline split parts")
+    func dir(_ name: String) -> URL { base.appendingPathComponent("split-parts-" + name) }
+    let linking = only([])
+    linking.issues = [.init(number: 120, title: "A follow-up", body: "Do it after \(issueURL(3)) lands.",
+                            labels: ["risk:low", "complexity:low"], updated: at("10:00"), parent: 3, author: opLogin)]
+    let lk = sync(linking, PipelineSettings(roots: [root], fix: true), dir("linking"), t0)
+    check(stageOf(lk.result, issueURL(120)) == "candidate/fast" && lk.result.effects == [fixFX(120, author: opLogin)],
+          "a sub-issue linking its parent: \(stageOf(lk.result, issueURL(120))) \(lk.result.effects)")
 }
 
 /// What a sync judges an item by: its own latest read, the lineage its part's body names,
