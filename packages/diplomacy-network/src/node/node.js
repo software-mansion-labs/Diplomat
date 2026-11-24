@@ -178,7 +178,7 @@ export function createNode({
   /// by an old state and may come before the step does.
   host.look = () => {
     const now = host.now();
-    if (now - looked > WAKE_GAP_MS / 1000) host.gossip.woke();
+    if (now - looked > WAKE_GAP_MS / 1000) host.gossip.woke(looked);
     looked = now;
   };
 
@@ -269,11 +269,15 @@ export function createNode({
       started = true;
       transport.onRequest(inbound.receive);
       transport.limitFor(inbound.limit);
+      // Since when the transport could reach nobody, or null while it is up.
+      let down = null;
       transport.onState(({ state }) => {
         try {
           host.touch();
-          if (state === 'ready' && started) {
-            host.gossip.woke();
+          if (state !== 'ready') down ??= host.now();
+          else if (started) {
+            host.gossip.woke(down ?? host.now());
+            down = null;
             host.poke();
           }
         } catch (err) {
