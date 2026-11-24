@@ -203,7 +203,7 @@ workspace's, made if there is neither.
 ## Fracturing
 
 With **Split big issues** on, a sync splits at most one issue Diplomat may write to that is medium or
-high complexity and not high risk, not triaged, with no sub-issues, no open PR fixing it (nor, on
+high complexity and not high risk, not triaged, with no stop label, no sub-issues, no open PR fixing it (nor, on
 Linear, attachments past what one read lists), and a repo root to read its code in that this sync
 read whole. **Fracture** on the screen splits one at once, whatever its
 rating. One `claude -p` call (`sonnet`, sandboxed as a rating is) reads the code and answers up to
@@ -309,8 +309,8 @@ The header's **Pipeline** button opens it, in both apps.
   - **Open** - the issue or PR in the browser.
   - **Rate now** (your open PR, or an open issue whose code a sync can read) - rated by a sync
     started at once, ahead of every limit, even with **Rate issues and PRs** off.
-  - **Fracture** (an issue Diplomat may write to, not split or being fixed, whose code a sync can
-    read) - split the same way, whatever its rating.
+  - **Fracture** (an issue Diplomat may write to, not triaged, stop-labelled, split or being fixed,
+    whose code a sync can read) - split the same way, whatever its rating.
   - **Start fix** (a `candidate` issue no hold stops) - its fix queued at once, past its attempt record, to wait
     for a bay like every ask. A Linear issue's only while **Open fix PRs** is on, since its text
     reaches the fix run through the sync.
