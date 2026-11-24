@@ -2327,6 +2327,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelineFreshReads(base: base, root: root, team: team, t0: t0)
     try pipelinePinned(base: base, root: root, team: team, t0: t0)
     try pipelineKept(base: base, root: root, team: team, t0: t0)
+    try pipelineCoverage8(base: base, root: root, team: team, t0: t0)
 }
 
 /// What a sync judges an item by: its own latest read, the lineage its part's body names,
@@ -4092,4 +4093,122 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
               && (s["decided"] as? [String]) == [issueURL(77)] && saved(name, "ratings.json").isEmpty,
               "\(name): \(s) \(saved(name, "ratings.json"))")
     }
+}
+
+private func pipelineCoverage8(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                               t0: Date) throws {
+    section("pipeline coverage 8")
+    let fm = FileManager.default
+    func dir(_ name: String) -> URL { base.appendingPathComponent("cov8-" + name) }
+    func state(_ name: String, _ json: String) throws {
+        try fm.createDirectory(at: dir(name), withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: dir(name).appendingPathComponent("state.json"))
+    }
+    let hourAgo = t0.addingTimeInterval(-3600)
+    let mergeOnly = PipelineSettings(roots: [root], merge: true)
+
+    let half = only([])
+    let parent = fixture().tickets[0]
+    half.tickets = [parent, .init(id: "lin-4", identifier: "ENG-4", title: "Pick the header token", updated: at("09:00"),
+                                  parent: parent.url)]
+    half.nextTicket = 5
+    let headerParts = #"{"parts": [{"title": "Pick the header token", "body": "Choose the token."}, "#
+        + #"{"title": "Update the header snapshot", "body": "Refresh it."}], "why": "token, then snapshot", "forced": false}"#
+    try state("resume-unrecorded", #"{"splitting": {"\#(linearURL("ENG-1"))": []}, "#
+              + #""parts": {"\#(linearURL("ENG-1"))": \#(headerParts)}}"#)
+    let ru = sync(half, PipelineSettings(roots: [root], linearTeams: [team], fracture: true), dir("resume-unrecorded"), t0)
+    check(ru.writes == ["linear-issue ENG-5 Update the header snapshot"],
+          "a Linear split resumed, its filed part unrecorded: \(ru.writes)")
+
+    let capital = PipelineSettings.Root(owner: "acme", repo: "app", path: checkout, me: "Op")
+    try seedRerate(dir("op-capitals"), 13, sha("c3"), at: hourAgo)
+    let caps = sync(only([13, 27]), PipelineSettings(roots: [capital], merge: true), dir("op-capitals"), t0)
+    check(caps.result.notices.isEmpty, "no notice when Settings names @Op and gh acts as @op: \(caps.result.notices)")
+    check(caps.events.filter { $0.kind == .merged }.map(\.detail) == ["merged c3c3c3c with --admin --squash"],
+          "a merge by @op is this sync's when Settings names @Op: \(trail(caps.events, caps.result))")
+
+    let unlinked = only([13, 27])
+    unlinked.prs[0].commits = [(opLogin, nil)]
+    try seedRerate(dir("committer-unlinked"), 13, sha("c3"), at: hourAgo)
+    let ul = sync(unlinked, mergeOnly, dir("committer-unlinked"), t0)
+    check(ul.writes.isEmpty && stageOf(ul.result, prURL(13)) == "cleared/fast (has commits by someone other than me)",
+          "my commit, committed by no account: \(ul.writes) \(stageOf(ul.result, prURL(13)))")
+
+    let labelled = sync(only([6]), PipelineSettings(roots: [root], rate: true), dir("rated-under-label"), t0)
+    let rated6 = labelled.events.filter { $0.kind == .rated && $0.item == issueURL(6) }
+    check(rated6.map(\.detail) == ["high risk, low complexity: a retry constant"]
+          && rated6.map(\.rating) == [rating(.high, .low)],
+          "a low/low answer under risk:high is logged high/low: \(rated6.map(\.detail))")
+
+    // Recheck reads 100 ids a call.
+    let crowd = only([])
+    crowd.tickets = (0..<101).map {
+        .init(id: "lin-k\($0)", identifier: "ENG-\(200 + $0)", title: "Crowded fix \($0)", labels: ["lab-rl", "lab-cl"],
+              updated: at("08:00"))
+    }
+    let cf = sync(crowd, PipelineSettings(roots: [root], linearTeams: [team], fix: true), dir("recheck-pages"), t0)
+    let fixes = cf.result.effects.compactMap { e -> String? in
+        guard case .fixLinear(_, let identifier, _, _, _) = e else { return nil }
+        return identifier
+    }
+    let rechecks = crowd.linearOps.filter { $0 == "Recheck" }.count
+    check(fixes.sorted() == crowd.tickets.map(\.identifier).sorted() && rechecks == 2,
+          "101 Linear candidates: \(fixes.count) fixes asked, \(rechecks) Recheck calls")
+
+    // #77, seen yesterday but unread now, keeps its guards.
+    let done = prURL(10), unread = issueURL(77)
+    let retry = #"{"failures": 1, "after": 2, "at": "2026-11-19T12:00:00Z"}"#
+    try state("prune-guards", """
+        {"untracked": ["\(done)", "\(unread)"],
+         "unsplit": {"\(done)": "would not split: x", "\(unread)": "would not split: x"},
+         "splitting": {"\(done)": [], "\(unread)": []},
+         "retry": {"\(done)": \(retry), "\(unread)": \(retry)},
+         "lineage": {"\(done)": "reporter", "\(unread)": "reporter"},
+         "seen": {"\(done)": "2026-11-19T12:00:00Z", "\(unread)": "2026-11-19T12:00:00Z"}}
+        """)
+    _ = sync(fixture(), PipelineSettings(roots: [root]), dir("prune-guards"), t0)
+    let pruned = (try? Data(contentsOf: dir("prune-guards").appendingPathComponent("state.json")))
+        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+    let fields = ["untracked", "unsplit", "splitting", "retry", "lineage"]
+    let left = fields.map { (pruned[$0] as? [String]) ?? ((pruned[$0] as? [String: Any]) ?? [:]).keys.sorted() }
+    check(left == fields.map { _ in [unread] }, "guards left after \(done) is read merged: \(zip(fields, left).map { "\($0) \($1)" })")
+
+    let mediumLow = rating(.medium, .low)
+    func rerate(_ r: PipelineRating) -> PipelineEvent {
+        PipelineEvent(at: hourAgo, item: prURL(13), kind: .rerated, detail: "", head: sha("c3"), rating: r)
+    }
+    for (name, first, second) in [("replay-rising", low, mediumLow), ("replay-falling", mediumLow, low)] {
+        try seed(dir(name), rerate(first), rerate(second))
+        let s = sync(only([13, 27]), mergeOnly, dir(name), t0)
+        check(s.writes.isEmpty && stageOf(s.result, prURL(13))
+              == "human/human (off the fast track for good: re-rated medium risk, low complexity at this head)",
+              "re-rated \(first.risk) then \(second.risk) risk at one head, read from the log: \(s.writes) "
+              + stageOf(s.result, prURL(13)))
+    }
+
+    // Literals, so a changed rater.diffChars or bodyChars fails here.
+    let header = "diff --git a/src/a.swift b/src/a.swift\n+"
+    func rated(_ name: String, diff: Int, body: Int) -> (stdin: [String], details: [String]) {
+        let t = only([4, 11])
+        t.prs[0].body = String(repeating: "b", count: body)
+        t.diffs[11] = header + String(repeating: "x", count: diff - header.count)
+        let s = sync(t, PipelineSettings(roots: [root], rate: true), dir(name), t0)
+        let stdin = t.handed.first { $0.hasPrefix("BEGIN UNTRUSTED TRACKER TEXT\n| Fix the docs link\n") } ?? ""
+        return (stdin.components(separatedBy: "\n"), s.events.filter { $0.kind == .rated && $0.item == prURL(11) }.map(\.detail))
+    }
+    let body = "| " + String(repeating: "b", count: 6000)
+    let diff = ["| DIFF:", "| diff --git a/src/a.swift b/src/a.swift", "| +" + String(repeating: "x", count: 20000 - header.count)]
+    let whole = rated("rater-whole", diff: 20000, body: 6000)
+    check(whole.stdin == ["BEGIN UNTRUSTED TRACKER TEXT", "| Fix the docs link", "|", body, "|"] + diff
+            + ["END UNTRUSTED TRACKER TEXT"],
+          "the rater's stdin, a 20000-character diff and a 6000-character body: \(whole.stdin.map(\.count))")
+    check(whole.details == ["low risk, low complexity: a link and its test"],
+          "a 20000-character diff's rating: \(whole.details)")
+    let cut = rated("rater-cut", diff: 20001, body: 6001)
+    check(cut.stdin == ["BEGIN UNTRUSTED TRACKER TEXT", "| Fix the docs link", "|", body, "| [cut at 6000 characters]", "|"]
+            + diff + ["| [cut at 20000 characters]", "END UNTRUSTED TRACKER TEXT"],
+          "the rater's stdin, a 20001-character diff and a 6001-character body: \(cut.stdin.map(\.count))")
+    check(cut.details == ["low risk, medium complexity, floored by its diff (its diff is longer than the 20000 characters "
+                          + "the rater reads): a link and its test"],
+          "a 20001-character diff's rating: \(cut.details)")
 }
