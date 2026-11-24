@@ -97,7 +97,7 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
    `Fixes ENG-12` in its PR's description.
 2. The PR is rated on its own (**Rate issues and PRs**), from its text and diff, never below its
    [diff floor](#the-diff-floor). Every open PR of yours is rated, not only the ones Diplomat opened.
-3. Low/low at its first rating (its timeline shows no rating or fast-track label ever on it) and
+3. Low/low at its first rating (its timeline showed no rating or fast-track label before it) and
    closing only `candidate` issues (the fast track is for the fixes the pipeline asks for), it is
    labelled `diplomat:fast-track` (**Fast-track my PRs**); a PR rated while that is off, rated
    anything else, or that the label could not be put on stays a person's, the last with a hold
