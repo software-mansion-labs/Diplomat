@@ -8,7 +8,7 @@ import { UNSERVED } from '../src/core/envelope.js';
 import { sign } from '../src/core/identity.js';
 import { createInvite, createVoucher, inviteToken } from '../src/core/membership.js';
 import { LIMITS, memberRecord } from '../src/core/records.js';
-import { poolFile } from '../src/node/store.js';
+import { heardFile, poolFile } from '../src/node/store.js';
 import { STRANGER_BODY_BYTES } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
@@ -733,6 +733,11 @@ const say = (h, state) => {
   h.transport.host.ready = state === 'ready';
   h.transport.host.watchers.forEach((fn) => fn({ state, detail: '' }));
 };
+// What `h` asks of a key `to` picks goes out and is never answered.
+const silence = (h, to) => {
+  const real = h.transport.request.bind(h.transport);
+  h.transport.request = (pk, ...rest) => (to(pk) ? new Promise(() => {}) : real(pk, ...rest));
+};
 const torDown = (h) => ['failed', 'starting'].forEach((state) => say(h, state));
 const torUp = async (w, h) => {
   say(h, 'bootstrapping');
@@ -833,7 +838,7 @@ await check('a machine back after a month asks a machine that never answers for 
   assert.equal(w.net.count({ from: 'a', to: 'c', since }), 0);
 });
 
-await check('a machine that heard nobody of its pool for a month - asleep, cut off, with its transport down, or cut off and then restarted - comes back: it asks the machines it knew whose records ran out, and is one pool with them', async () => {
+await check('a machine that heard nobody of its pool for a month - asleep, cut off, with its transport down, or cut off and then restarted - comes back: it asks every machine it knew there, and is one pool with them', async () => {
   for (const how of ['sleep', 'cut', 'down', 'woke', 'restart']) {
     const w = createWorld({ seed: 91 });
     const [r, a, b, m] = await w.pool(['r', 'a', 'b', 'm']);
@@ -852,7 +857,8 @@ await check('a machine that heard nobody of its pool for a month - asleep, cut o
     else if (how === 'restart') await w.restart(m);
     const woken = w.net.now();
     await w.run(60);
-    if (how !== 'woke') assert.deepEqual([w.view(m).returning, w.doc(m).back.map((e) => w.name(e.pk)).sort()], [true, ['a', 'b']], how);
+    // r is asked too: m keeps the record of the member that seated it, whatever its age.
+    if (how !== 'woke') assert.deepEqual([w.view(m).returning, w.doc(m).back.map((e) => w.name(e.pk)).sort()], [true, ['a', 'b', 'r']], how);
     cut(false);
     const since = how === 'woke' ? woken : w.net.now();
     await w.net.until(() => [a, b, m].every((h) => w.members(h).length === 3), { maxMs: 30 * 60 * 1000, what: `${how}: m a member again` });
@@ -913,15 +919,10 @@ await check('a machine that only reaches the others, or that only the others rea
   for (const way of ['out', 'in']) {
     const w = createWorld({ seed: 94 });
     const [r, a, b, m] = await w.pool(['r', 'a', 'b', 'm']);
-    const never = () => new Promise(() => {});
-    const silence = (h, to) => {
-      const real = h.transport.request.bind(h.transport);
-      h.transport.request = (pk, ...rest) => (to(pk) ? never() : real(pk, ...rest));
-    };
     if (way === 'out') silence(m, () => true);
     else for (const h of [r, a, b]) silence(h, (pk) => pk === m.pk);
     await w.run(8 * 3600);
-    assert.ok(w.net.now() - w.doc(m).heard <= 30 * 60, way);
+    assert.ok(w.net.now() - w.heard(m).heard <= 30 * 60, way);
   }
 });
 
@@ -930,7 +931,7 @@ await check('a machine that restarts while the other members it hears are off ta
   const [h, , y] = await w.pool(['h', 'x', 'y']);
   w.net.kill('x');
   await w.run(29.5 * 24 * 3600);
-  assert.ok(w.net.now() - w.doc(h).heard <= 600, 'when y was last heard is on disk to within 10 minutes');
+  assert.ok(w.net.now() - w.heard(h).heard <= 600, 'when y was last heard is on disk to within 10 minutes');
   w.net.kill('y');
   await w.restart(h);
   await w.run(1.5 * 24 * 3600);
@@ -941,18 +942,161 @@ await check('a machine that restarts while the other members it hears are off ta
   assert.equal(w.net.count({ from: 'h', to: 'x', since }), 0);
 });
 
-await check('a store that does not say when another member was last heard is read as heard when this machine last signed', async () => {
-  const w = createWorld({ seed: 68 });
-  const [r, a] = await w.pool(['r', 'a']);
-  w.net.kill('r');
-  w.net.kill('a');
-  await w.run(31 * 24 * 3600);
-  const file = [...r.disk.files.keys()].find((name) => name.startsWith('pools/'));
-  const { heard, ...doc } = w.doc(r);
-  assert.ok(Number.isSafeInteger(heard));
-  r.disk.write(file, JSON.stringify(doc));
-  await w.restart(r);
-  assert.deepEqual([w.view(r).returning, w.doc(r).back.map((e) => e.pk)], [true, [a.pk]]);
+await check('a store that keeps when another member was last heard in the pool document is read from it, and one that keeps it nowhere as when this machine last signed', async () => {
+  for (const kept of ['document', 'nowhere']) {
+    const w = createWorld({ seed: 68 });
+    const [r, a] = await w.pool(['r', 'a']);
+    w.net.kill('r');
+    w.net.kill('a');
+    await w.run(31 * 24 * 3600);
+    r.disk.remove(heardFile(POOL));
+    const doc = w.doc(r);
+    r.disk.write(poolFile(POOL), JSON.stringify(kept === 'document' ? { ...doc, heard: w.net.now() - 24 * 3600 } : doc));
+    await w.restart(r);
+    assert.deepEqual([w.view(r).returning, w.doc(r).back.map((e) => e.pk)], kept === 'document' ? [false, []] : [true, [a.pk]], kept);
+    await w.run(60);
+    // Read from the document, it is kept apart from it before the document is written again.
+    assert.equal(w.heard(r)?.heard ?? null, kept === 'document' ? w.net.now() - 60 - 24 * 3600 : null, kept);
+  }
+});
+
+await check('a hello counts as hearing the pool only once it lets its sender in: not one with a copy of a member record, nor one with an invite that ran out', async () => {
+  for (const sent of ['record', 'old', 'fresh']) {
+    const w = createWorld({ seed: 97 });
+    const [, a, , m] = await w.pool(['r', 'a', 'b', 'm']);
+    await w.run(3600);
+    const s = w.stranger('s');
+    const old = m.node.invite({ pool: POOL, ttlSecs: 3600 });
+    const record = w.records(m).find((x) => x.type === 'member' && x.pk === a.pk);
+    for (const x of ['r', 'a', 'b']) w.net.cut('m', x, true);
+    await w.run(7 * 3600);
+    const body = sent === 'record' ? { member: record } : sent === 'old' ? old : m.node.invite({ pool: POOL });
+    const first = await w.request(s, m, 'hello', body, { effort: 128 });
+    const answer = first.code === 'effort' ? await w.request(s, m, 'hello', body, { effort: first.effort }) : first;
+    assert.equal(answer.ok, sent === 'fresh', `${sent}: ${answer.code}`);
+    await w.run(30);
+    assert.equal(w.net.now() - w.heard(m).heard < 60, sent === 'fresh', sent);
+  }
+});
+
+await check('a pool whose members all answer is not written whole for being heard: what it heard is a file of its own', async () => {
+  const w = createWorld({ seed: 96 });
+  const all = await w.pool(['r', 'a', 'b', 'm']);
+  await w.run(3600);
+  const writes = new Map();
+  for (const h of all) {
+    const write = h.disk.write.bind(h.disk);
+    h.disk.write = (name, text) => {
+      writes.set(`${h.name} ${name}`, (writes.get(`${h.name} ${name}`) ?? 0) + 1);
+      write(name, text);
+    };
+  }
+  await w.run(24 * 3600);
+  for (const h of all) {
+    assert.equal(writes.get(`${h.name} ${poolFile(POOL)}`) ?? 0, 0, h.name);
+    assert.ok(writes.get(`${h.name} ${heardFile(POOL)}`) <= 24 * 6, h.name);
+    assert.ok(w.net.now() - w.heard(h).heard <= 600, h.name);
+  }
+});
+
+await check('a machine that leaves a pool, or whose repository is removed, while an answer of the pool is on its way stays out of it - back after a month too: the answer writes nothing, and a pool linked again meanwhile is a pool of one', async () => {
+  for (const act of ['leave', 'back', 'remove', 'again']) {
+    const w = createWorld({ seed: 95 });
+    const [r, a, b] = await w.pool(['r', 'a', 'b']);
+    await w.run(3600);
+    // r hears nobody for 15 minutes, or is off for a month; then each way takes 15 s, as
+    // a slow Tor circuit does, and only answers to r reach it.
+    const cut = (on) => { for (const x of ['a', 'b']) w.net.cut('r', x, on); };
+    for (const h of [a, b]) silence(h, (pk) => pk === r.pk);
+    if (act === 'back') w.net.kill('r');
+    else cut(true);
+    await w.run(act === 'back' ? 31 * 24 * 3600 : 15 * 60);
+    Object.assign(w.net.faults, { minMs: 15000, maxMs: 15000 });
+    let asked = false;
+    w.net.tap(({ from }) => { asked ||= from === 'r'; });
+    if (act === 'back') await w.restart(r);
+    else cut(false);
+    await w.net.until(() => asked, { stepMs: 1, what: `${act}: r asks` });
+    if (act === 'leave' || act === 'back') r.node.leave({ pool: POOL });
+    else r.node.setPools([]);
+    if (act === 'again') r.node.setPools(r.pools);
+    await w.run(120);
+    Object.assign(w.net.faults, { minMs: 5, maxMs: 40 });
+    const doc = JSON.parse(r.disk.read(poolFile(POOL)));
+    if (act === 'again') {
+      assert.deepEqual([doc.linked, w.records(r).filter((x) => x.type === 'member').map((x) => x.pk)], [true, [r.pk]], act);
+      continue;
+    }
+    assert.deepEqual([doc.linked, doc.left?.left, r.disk.read(heardFile(POOL)) === null], [false, true, act === 'remove'], act);
+    if (act !== 'remove') {
+      await w.restart(r);
+      await w.run(7 * 3600);
+      assert.deepEqual([w.view(r)?.left ?? null, w.members(a).includes(r.pk)], [true, false], act);
+      // The repository of a pool it left is removed: nothing is kept of that pool.
+      r.node.setPools([]);
+      await w.run(60);
+      assert.equal(r.disk.read(heardFile(POOL)), null, act);
+    } else {
+      r.node.setPools(r.pools);
+      await w.run(600);
+      assert.deepEqual(w.members(r), [r.pk], act);
+    }
+  }
+});
+
+await check('a machine that leaves a pool, or whose repository is removed and added again, 2 s after it starts or wakes stays out of the pool it was in', async () => {
+  for (const way of ['start', 'wake']) {
+    for (const act of ['leave', 'remove']) {
+      for (let seed = 2000; seed < 2004; seed += 1) {
+        const w = createWorld({ seed });
+        const [r] = await w.pool(['r', 'a', 'b']);
+        await w.run(3600);
+        Object.assign(w.net.faults, { minMs: 1000, maxMs: 20000 });
+        if (way === 'wake') {
+          w.net.sleep('r');
+          await w.run(3600);
+          w.net.sleep('r', false);
+        } else {
+          w.net.kill('r');
+          await w.run(3600);
+          await w.restart(r);
+        }
+        await w.run(2);
+        if (act === 'leave') r.node.leave({ pool: POOL });
+        else r.node.setPools([]);
+        await w.run(300);
+        const what = `${way} ${act} ${seed}`;
+        assert.equal(JSON.parse(r.disk.read(poolFile(POOL))).linked, false, what);
+        if (act === 'leave') continue;
+        r.node.setPools(r.pools);
+        await w.run(60);
+        assert.deepEqual(w.records(r).filter((x) => x.type === 'member').map((x) => x.pk), [r.pk], what);
+      }
+    }
+  }
+});
+
+await check('the last machine of a pool whose others stopped for good waits a month for them once it has heard nobody for a month, founder or not, restarted or not, and then runs its jobs alone', async () => {
+  for (const last of ['m', 'r']) {
+    const w = createWorld({ seed: 33 });
+    const hosts = await w.pool(['r', 'a', 'm']);
+    const s = hosts.find((h) => h.name === last);
+    for (const h of hosts) if (h !== s) w.net.kill(h.name);
+    s.slots = 1;
+    let t = 0;
+    for (const day of [29, 31, 61, 65]) {
+      await w.run((day - t) * 24 * 3600);
+      const { taskId } = await s.node.offer(offerArgs(`pr-${day}`));
+      await w.run(3600);
+      t = day + 1 / 24;
+      assert.deepEqual([w.view(s).returning, Boolean(w.runOf(s, taskId))], [day === 31, day !== 31], `${last} day ${day}`);
+      // What it heard is on disk, though it heard the others only in its first minutes.
+      if (day === 29) await w.restart(s);
+    }
+    await w.restart(s);
+    await w.run(600);
+    assert.equal(w.view(s).returning, false, `${last} restarted`);
+  }
 });
 
 await check('a machine back after a month that nobody answers waits for the machines it asks for 30 days, and then runs its jobs alone', async () => {

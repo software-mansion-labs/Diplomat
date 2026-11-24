@@ -8,7 +8,7 @@ import path from 'node:path';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { identityFromSeed } from '../src/core/identity.js';
 import { memberRecord } from '../src/core/records.js';
-import { createStore, fileDisk, memoryDisk, poolFile, readPool } from '../src/node/store.js';
+import { createStore, fileDisk, heardFile, memoryDisk, poolFile, readPool } from '../src/node/store.js';
 
 const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dn-store-'));
 const mode = (file) => fs.statSync(file).mode & 0o777;
@@ -225,8 +225,8 @@ await check('a host on a real directory comes back as itself; with a file it can
     await w.wait(exe.node.join(req.node.invite({ pool: POOL })));
     const { taskId } = await req.node.offer({ pool: POOL, kind: 'review', item: 'pr-1', title: 't', prompt: 'p' });
     await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
-    assert.deepEqual(tree(dir), ['heard.json', 'identity.json', 'keys.json', 'links.json', 'locks.json', 'offers.json', 'pools', `${poolFile(POOL)}.json`, `${poolFile(POOL)}.log`]);
-    for (const name of tree(dir).filter((n) => n !== 'pools')) assert.equal(mode(path.join(dir, name)), 0o600, name);
+    assert.deepEqual(tree(dir), ['heard', 'heard.json', `${heardFile(POOL)}.json`, 'identity.json', 'keys.json', 'links.json', 'locks.json', 'offers.json', 'pools', `${poolFile(POOL)}.json`, `${poolFile(POOL)}.log`]);
+    for (const name of tree(dir).filter((n) => n !== 'pools' && n !== 'heard')) assert.equal(mode(path.join(dir, name)), 0o600, name);
     assert.ok(JSON.parse(fs.readFileSync(path.join(dir, 'keys.json'), 'utf8')).issued[taskId].secret);
 
     await w.restart(req);

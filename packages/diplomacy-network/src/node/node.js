@@ -75,11 +75,16 @@ export function createNode({
     saveLocks: () => store.write('locks', {
       toJSON: () => ({ ...host.heldLocks, ...Object.fromEntries([...host.pools.values()].map((P) => [P.id, P.locks.entries()])) }),
     }),
+    /// Is `P` the pool this host is in under its id? One it left, or linked again since,
+    /// is not: an answer that comes back to it after that has nothing to change.
+    open: (P) => host.pools.get(P.id) === P,
     /// What a pool's document holds beside its records and this host's sequence number.
-    head: (P) => JSON.stringify([P.joining, P.joinFailed, P.invites, P.farewell, P.heard, P.returning, P.back]),
+    head: (P) => JSON.stringify([P.joining, P.joinFailed, P.invites, P.farewell, P.returning, P.back]),
     /// Has what a pool's document holds written: the records that changed since it was
-    /// last asked, as a line, while nothing else in the document did.
+    /// last asked, as a line, while nothing else in the document did. Nothing is written
+    /// of a pool that is not open.
     save: (P) => {
+      if (!host.open(P)) return;
       const head = host.head(P);
       const { put, drop } = P.pool.delta();
       const same = head === P.head;
@@ -87,7 +92,7 @@ export function createNode({
       P.head = head;
       store.write(poolFile(P.id), {
         toJSON: () => ({
-          id: P.id, linked: true, seq: P.seq, joining: P.joining, joinFailed: P.joinFailed, invites: P.invites, heard: P.heard,
+          id: P.id, linked: true, seq: P.seq, joining: P.joining, joinFailed: P.joinFailed, invites: P.invites,
           returning: P.returning, back: P.back, ...P.farewell,
           records: P.pool.records(),
         }),

@@ -462,8 +462,9 @@ are when it is back.
 The records such a host held of the others ran out in its store while it was away, but
 for the ones its voucher leads up through, and those members may be gone for good. A
 host tells how long it was away from a pool by when another host of it last **answered**
-it, or had a request served by it - a member, or a host a member invited. It keeps that
-on disk, to within 10 minutes, so a restart forgets none of it. Whether the host was
+it, or had a request served by it - any request of a member, or the hello of a host it
+let in. It keeps that on disk, to within 10 minutes and apart from the pool's records,
+so a restart forgets none of it. Whether the host was
 switched off, asleep, without a network or cut off from the others, it heard nobody
 all that while.
 
@@ -480,11 +481,15 @@ often as a host asks a member that does not answer. They hold its record still, 
 records its voucher leads up through, and take the version it signs now. The pool is
 out of date for a host that comes back until one of those it asks has answered,
 whatever the time ("A host that was away"): it holds no word of anyone's but its own on
-what the pool is. A host that has not come back asks those keys too, without waiting
-for them. Each key is asked until it has answered, a record of it is held, or 30 days
-have passed: the one that answered may have come back too, and hold no more of the
-pool than this host does. With nobody left to ask, a host that came back is back: at
-once, or once the last of those 30 days is over.
+what the pool is. A host that comes back asks each of those keys, and each key it holds
+a record of, for 30 days from then - the records its voucher leads up through are kept
+at any age, and say nothing of whether their hosts are there. A host that has not come
+back asks the keys whose records ran out too, without waiting for them. Each key is
+asked until it has answered, a record of it is held while the host is not coming back,
+or its 30 days have passed: the one that answered may have come back too, and hold no
+more of the pool than this host does. Once every key it asks has had its 30 days and
+none answered, a host that came back is back, alone, and does not come back again until
+it has heard another host of the pool once more.
 
 A host that every other host it asks in a pool has refused as no member - its seat was
 given away, the member that gave it began another membership, or a move of the members
@@ -608,7 +613,9 @@ push. These are requests like any other push: none is sent while the host leaves
 member alone after a request that went unanswered, none to a member that has not
 answered the host for 3 minutes, and what is still not acknowledged after the third is
 left to the `sync`. A host that leaves a pool signs its member record
-`left`, ends its claims, cancels its offers, and pushes all of it once. The locks it
+`left`, ends its claims, cancels its offers, and pushes all of it once. An answer about
+the pool that reaches it after that changes nothing it keeps, nor anything of a pool it
+links again under the same id meanwhile. The locks it
 granted bind it for their 120 s all the same, should it join again before. It
 keeps the `left` record, and the keys of the members it left, for as long as it is not a
 member again: one of those keys that asks it about the pool has not heard, and is pushed
@@ -1187,8 +1194,7 @@ Nothing in a record hides any of this.
 - **A host back after more than 30 days asks keys that may be nobody's.** It greets the
   keys of the members it knew, each no more often than once in 10 minutes, for 30 days
   or until it answers: a pool whose other members are all gone costs it those requests,
-  and it takes and gives no job until the 30 days are over - or, while it holds the
-  record of a member above it that never answers, for as long as it stays linked. Its operator, knowing the
+  and it takes and gives no job until the 30 days are over. Its operator, knowing the
   others gone, unlinks the repository and links it again sooner, which begins a pool of
   one. A host whose every other member stopped signing hears nobody, as a host cut off
   from them does: each job it offers after 6 hours of that waits 180 s for an answer,
