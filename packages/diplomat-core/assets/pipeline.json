@@ -19,7 +19,7 @@
     "fractured": "diplomat:fractured",
     "color": "5856D6"
   },
-  "_triageComment": "Matched in any case, a triage label also after a leading `prefix:` or `prefix/` and with `-` or `_` for a space. A triage label, or a GitHub issue type other than Bug, keeps an issue from being a candidate or split; a stop label holds a cleared PR's merge.",
+  "_triageComment": "Matched in any case, a triage label also before or after a `prefix:` or `prefix/` and with `-` or `_` for a space. A triage label, or a GitHub issue type other than Bug, keeps an issue from being a candidate or split; a stop label holds a cleared PR's merge, and on an issue, its fix, its split and the merge of a PR closing it.",
   "triageLabels": [
     "wontfix", "wont fix", "won't fix", "duplicate", "invalid", "question", "enhancement", "feature",
     "feature request", "improvement", "discussion", "proposal", "rfc"

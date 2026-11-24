@@ -46,6 +46,8 @@ struct PipelineEntry {
     var closesText: [String] = []
     /// A PR's, read with `Gate`: it was ready for review at some point.
     var readied = false
+    /// A merged PR's, read with `PullRequest`: who merged it.
+    var mergedBy: String?
     /// A PR's, read with `Item`: the labels ever added to it, lowercased; nil when the read
     /// did not list them all.
     var labeled: Set<String>?
@@ -354,6 +356,7 @@ enum PipelineRead {
             e.closingPast = total(n, "closing") > fresh.count
             // Marked ready, or opened ready and turned into a draft; unread, as if it was.
             e.readied = ((n["readied"] as? [String: Any])?["filteredCount"] as? Int ?? 1) > 0
+            e.mergedBy = (n["mergedBy"] as? [String: Any])?["login"] as? String
             for t in nodes(n, "threads") {
                 let comments = nodes(t, "comments")
                 if total(t, "comments") > comments.count { e.participantsUnseen = true }

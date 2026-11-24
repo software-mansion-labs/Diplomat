@@ -5,7 +5,8 @@
 # the closed issues of this repository they close); `Issues` and `PullRequests` read the
 # next pages, newest created first so an item updated meanwhile keeps its place, each page
 # `$issues` or `$prs` long; `PullRequest` reads one PR
-# again, with `Gate`, right before Diplomat marks it ready or merges it; `Item` reads one
+# again, with `Gate`, right before Diplomat marks it ready or merges it, and after it merges
+# it, for who merged it; `Item` reads one
 # issue or PR again right before Diplomat writes to it; `Parts` finds the parts of a split
 # filed before. `files` needs to see more than `floor.maxFiles` only to know a PR exceeds
 # it, which `changedFiles` says; any other `totalCount` past what a connection lists reads
@@ -125,7 +126,7 @@ query PullRequests($owner: String!, $name: String!, $after: String!, $prs: Int!)
 query PullRequest($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef { name }
-    pullRequest(number: $number) { ...PR ...Gate }
+    pullRequest(number: $number) { ...PR ...Gate mergedBy { login } }
   }
 }
 

@@ -75,8 +75,9 @@ public struct PipelineItem: Codable, Equatable, Sendable {
     public var state: String
     public var author: String?
     public var assignees: [String]
-    /// Diplomat may write its labels and act on it: an issue unassigned or assigned to the
-    /// operator, or the operator's own PR from a branch of the repository itself.
+    /// Diplomat may write its labels and act on it: open, with no labels past what one read
+    /// lists, unassigned or assigned to the operator only, and for a PR, the operator's own
+    /// from a branch of the repository itself into its default branch.
     public var writable: Bool
     public var rating: PipelineRating?
     /// `label` when read off the tracker, `local` when Diplomat rated an item it may not
@@ -459,8 +460,9 @@ public struct PipelineTickResult: Codable, Equatable, Sendable {
     /// The ids of every issue this sync read that a fix may act on, the ones `items` leaves
     /// out included: what keeps a fix the operator started queued.
     public var fixable: [String]
-    /// The ids of every item this sync read, the ones `items` leaves out included: in an
-    /// `unread` root, the asks a front-end may still judge.
+    /// The ids of every item this sync read, the ones `items` leaves out included, but none
+    /// of a root it only read and showed, nor of a blocked sync: in an `unread` root, the
+    /// asks a front-end may still judge.
     public var read: [String]
 
     public init(at: Date, items: [PipelineItem] = [], graph: PipelineGraph = PipelineGraph(),

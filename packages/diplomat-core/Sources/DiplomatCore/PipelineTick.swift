@@ -94,9 +94,9 @@ public enum PipelineTick {
     /// second rating, the operator's unrated PRs, writable issues, other open issues,
     /// newest first, leaving out for 1, 2, 4 ... syncs (a day at most) one whose
     /// rating just failed; writes each rating as labels where Diplomat may, never lower
-    /// than the labels or the diff's floor, and caches the rest, a rating whose labels
-    /// could not be written counting over lower labels until a later sync writes them, on
-    /// the same backoff; with `fastTrack` labels
+    /// than the labels, a kept rating or the diff's floor, keeping each answer from the
+    /// moment it arrives until its labels are written, and the rest: a kept rating counts
+    /// over lower labels until a later sync writes it, on the same backoff; with `fastTrack` labels
     /// `fastTrack` a PR of the operator's at its first rating if it is low/low and fixes
     /// candidate issues, puts `cleared` on one rated low/low again at a head a clean marker
     /// names, takes `cleared` off one whose head no marker names, takes both off one rated
@@ -105,7 +105,8 @@ public enum PipelineTick {
     /// hold stops again and, if it is unchanged and nothing holds it then, marks a draft
     /// ready or merges it; with `fracture` (or forced) splits one writable
     /// medium/high-complexity issue that is not high risk into children; with `fix` asks
-    /// for a fix PR for each candidate issue. A banned author's item, and every part split
+    /// for a fix PR for each candidate issue, a Linear one only if a read of it right before
+    /// still finds it one. A banned author's item, and every part split
     /// from one, gets none of that. Every step it takes, and each hold, notice and request
     /// the first time it is seen, is logged to `dir`, and its state saved after each step;
     /// the result is saved as `last.json`.
@@ -133,6 +134,7 @@ public enum PipelineTick {
         last.notices.append(fd >= 0 ? "another sync held \(lock.path), so this one read nothing"
                                     : "\(lock.path) could not be opened, so this sync read nothing")
         last.unread = settings.roots.map(\.slug)
+        last.read = []
         return last
     }
 }
@@ -260,11 +262,13 @@ final class PipelineSync {
         let laid = PipelineGraph.layout(items: entries.map(\.item), edges: edges, maxItems: model.maxItems)
         let short = unread.union(incomplete.keys).union(partial.keys)
         let fixable = entries.filter { $0.item.kind == .issue && $0.item.stage == .candidate && $0.item.hold == nil }
+        let judged = entries.filter { $0.root.map { partial[$0.slug] == nil } ?? true }
         let result = PipelineTickResult(at: now, items: laid.items, graph: laid.graph, effects: effects,
                                         events: Array(PipelineLog.read(in: dir).suffix(model.maxEvents)),
                                         notices: notices,
                                         unread: blocked == nil ? slugs.filter(short.contains) : slugs,
-                                        fixable: blocked == nil ? fixable.map(\.id) : [])
+                                        fixable: blocked == nil ? fixable.map(\.id) : [],
+                                        read: blocked == nil ? judged.map(\.id) : [])
         PipelineLog.writeLast(result, in: dir)
         return result
     }
@@ -309,7 +313,8 @@ final class PipelineSync {
 
     /// The prompt-injection ban list the front-ends read: `banned.json` in `$DA_BAN_DIR`,
     /// its `~` read as `PrivateFiles.home`, else in `~/.diplomat/pr-monitor`, as
-    /// `{"banned": [{"login": …}, …]}`; lowercased, and empty when it cannot be read.
+    /// `{"banned": [{"login": …}, …]}`; lowercased, an entry without a string `login`
+    /// skipped, and empty when the file cannot be read.
     static func bannedLogins() -> Set<String> {
         let env = ProcessInfo.processInfo.environment["DA_BAN_DIR"] ?? ""
         let dir = env.isEmpty
@@ -317,8 +322,8 @@ final class PipelineSync {
             : URL(fileURLWithPath: PrivateFiles.expandingTilde(env))
         guard let data = try? Data(contentsOf: dir.appendingPathComponent("banned.json")),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let list = obj["banned"] as? [[String: Any]] else { return [] }
-        return Set(list.compactMap { ($0["login"] as? String)?.lowercased() })
+              let list = obj["banned"] as? [Any] else { return [] }
+        return Set(list.compactMap { (($0 as? [String: Any])?["login"] as? String)?.lowercased() })
     }
 
     /// Whose text an item carries, the dimension the ban list is checked on: its author,
@@ -586,31 +591,36 @@ final class PipelineSync {
     /// Takes `name` off a writable item if `step` may happen now; false (with a notice when
     /// the tracker refused) when it is still on.
     @discardableResult
-    func remove(_ i: Int, _ name: String, _ step: Step) -> Bool {
+    func remove(_ i: Int, _ name: String, _ step: Step) -> Bool { takeOff(i, name, step) != nil }
+
+    /// `remove`, telling who took it off: true when this call did, false when it was off
+    /// already, nil when it is still on.
+    func takeOff(_ i: Int, _ name: String, _ step: Step) -> Bool? {
         let e = entries[i]
-        guard e.item.writable else { return false }
-        guard let actual = e.labels.first(where: { $0.lowercased() == name.lowercased() }) else { return true }
-        guard may(step) else { return false }
+        guard e.item.writable else { return nil }
+        guard let actual = e.labels.first(where: { $0.lowercased() == name.lowercased() }) else { return false }
+        guard may(step) else { return nil }
+        var mine = true
         switch e.item.source {
         case .github:
-            guard let root = e.root, let n = e.number else { return false }
+            guard let root = e.root, let n = e.number else { return nil }
             let path = actual.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? actual
             let out = io.gh(["api", "-X", "DELETE", "repos/\(root.name)/issues/\(n)/labels/\(path)"])
-            // Already off is off.
+            mine = out.ok
             guard out.ok || out.stderr.contains("HTTP 404") else {
                 notice("\(e.item.label): could not remove \(actual): \(out.why)")
-                return false
+                return nil
             }
         case .linear:
-            guard let api = linear, let id = e.nodeID, let label = e.labelIDs[actual] else { return false }
+            guard let api = linear, let id = e.nodeID, let label = e.labelIDs[actual] else { return nil }
             do { _ = try api.call("RemoveLabel", ["id": id, "labelId": label]) } catch {
                 notice("\(e.item.label): could not remove \(actual): \(error.localizedDescription)")
-                return false
+                return nil
             }
         }
         entries[i].labels.removeAll { $0.lowercased() == name.lowercased() }
         persist()
-        return true
+        return mine
     }
 
     /// Reads `entries[i]` again and keeps what it says now: its labels, assignees, state,
@@ -769,14 +779,25 @@ final class PipelineSync {
             + entries.indices.filter { entries[$0].item.source == .linear && PipelineRead.closes(pr, linear: entries[$0]) }
     }
 
-    /// Whether `x`, open, is an issue a fix `pr` may close: writable, rated low/low on its
-    /// labels and by any rating kept for it, untriaged, unsplit, not of a banned author, in a
-    /// root, and on Linear, of a team mapped to `pr`'s own repository.
-    func isCandidate(_ x: PipelineEntry, for pr: PipelineEntry) -> Bool {
+    /// Whether `x`, open, is an issue a fix may close: writable, rated low/low on its labels
+    /// and by any rating kept for it, untriaged, with no stop label, unsplit, not of a banned
+    /// author, and in a root.
+    func isCandidate(_ x: PipelineEntry) -> Bool {
         x.item.kind == .issue && x.item.writable
             && labelRating(x.labels).map { raised($0, x.id).isFastTrack } == true && triaged(x) == nil
-            && !has(x, model.labels.fractured) && x.children.isEmpty && banHold(x) == nil
-            && x.root.map { x.item.source == .github || $0.slug.lowercased() == pr.item.repo.lowercased() } == true
+            && stops(x).isEmpty && !has(x, model.labels.fractured) && x.children.isEmpty && banHold(x) == nil
+            && x.root != nil
+    }
+
+    /// `isCandidate` for a fix `pr`: on Linear, of a team mapped to `pr`'s own repository.
+    func isCandidate(_ x: PipelineEntry, for pr: PipelineEntry) -> Bool {
+        isCandidate(x) && (x.item.source == .github || x.root?.slug.lowercased() == pr.item.repo.lowercased())
+    }
+
+    /// The stop labels `e` carries.
+    func stops(_ e: PipelineEntry) -> [String] {
+        let stop = Set(model.stopLabels.map { $0.lowercased() })
+        return e.labels.filter { stop.contains($0.lowercased()) }
     }
 
     /// Whether `pr` is a fix the pipeline asks for: it closes an open issue, and each open
@@ -862,16 +883,17 @@ final class PipelineSync {
     /// type other than Bug.
     func triaged(_ e: PipelineEntry) -> String? {
         if let type = e.issueType, type.lowercased() != "bug" { return type }
-        let triage = Set(model.triageLabels.map(Self.triageForm))
-        return e.labels.first { triage.contains(Self.triageForm($0)) }
+        let triage = Set(model.triageLabels.flatMap(Self.triageForms))
+        return e.labels.first { !triage.isDisjoint(with: Self.triageForms($0)) }
     }
 
-    /// `label` as triage matches it: lowercased, a leading `prefix:` or `prefix/` dropped
-    /// (`type: Feature`, `kind/feature`), `-` and `_` read as spaces.
-    static func triageForm(_ label: String) -> String {
-        var s = Substring(label.lowercased())
-        if let cut = s.firstIndex(where: { $0 == ":" || $0 == "/" }) { s = s[cut...].dropFirst() }
-        return s.split { $0.isWhitespace || $0 == "-" || $0 == "_" }.joined(separator: " ")
+    /// `label` as triage matches it: lowercased, `-` and `_` read as spaces, and with a
+    /// `prefix:` or `prefix/`, each side of it (`type: Feature`, `kind/feature`,
+    /// `enhancement: pending triage`).
+    static func triageForms(_ label: String) -> [String] {
+        let s = label.lowercased()
+        let sides = s.firstIndex { $0 == ":" || $0 == "/" }.map { [s[..<$0], s[$0...].dropFirst()] } ?? [Substring(s)]
+        return sides.map { $0.split { $0.isWhitespace || $0 == "-" || $0 == "_" }.joined(separator: " ") }
     }
 
     /// An issue already split, or already being fixed: a rating would route it nowhere.
@@ -1008,10 +1030,8 @@ final class PipelineSync {
             (said, why) = answer
         }
         state.retry[e.id] = nil
-        let allowed = e.item.writable && may(step)
-        let write = allowed && recheck(i)
-        // Never lower than a label on it now, nor than its diff allows.
-        var rating = atLeastLabels(said, entries[i].labels)
+        // Never lower than a label on it, a rating kept for it, nor than its diff allows.
+        var rating = raised(atLeastLabels(said, e.labels), e.id)
         var detail = describe(rating) + (why.isEmpty ? "" : ": " + why)
         var floor = e.item.floor ?? PipelineRating(risk: .low, complexity: .low)
         var reasons = floorWhy[e.id] ?? []
@@ -1025,33 +1045,52 @@ final class PipelineSync {
             detail = describe(rating) + ", floored by its diff (" + reasons.joined(separator: "; ") + ")"
                 + (why.isEmpty ? "" : ": " + why)
         }
-        if again, let head = e.item.headSha {
-            state.rerated[e.id, default: [:]][head] = rating
-            rerates[e.id, default: [:]][head] = rating
-        }
-        log(e.id, again ? .rerated : .rated, detail, head: e.item.kind == .pr ? e.item.headSha : nil,
-            rating: rating)
-        cache[e.id] = PipelineCachedRating(rating: rating, why: why, updatedAt: entries[i].item.updatedAt)
-        entries[i].item.why = why
-        entries[i].item.rating = rating
-        entries[i].item.ratedBy = "local"
-        guard write else {
-            // Its read again failed: kept as if the tracker refused the labels.
-            guard allowed && entries[i].item.writable else { return persist() }
-            cache[e.id]?.unwritten = true
+        let allowed = e.item.writable && may(step)
+        let head = e.item.kind == .pr ? e.item.headSha : nil
+        // Saved before the labels it leads to: a sync stopped there does not ask again.
+        record(i, rating, why, detail, head: head, again: again, unwritten: allowed)
+        guard allowed else { return }
+        guard recheck(i) else {
+            guard entries[i].item.writable else {
+                cache[e.id]?.unwritten = nil
+                cache[e.id]?.updatedAt = entries[i].item.updatedAt
+                return persist()
+            }
             return failed(e.id)
+        }
+        // A label put on meanwhile.
+        if atLeastLabels(rating, entries[i].labels) != rating {
+            rating = atLeastLabels(rating, entries[i].labels)
+            record(i, rating, why, describe(rating) + ", as labelled meanwhile", head: head, again: again, unwritten: true)
         }
         let before = entries[i].labeled
         writeRating(i, rating, step)
         guard labelRating(entries[i].labels) == rating else {
-            // Kept, so it is not paid for again while the labels cannot be written.
-            cache[e.id]?.unwritten = true
             notice("\(e.item.label): its rating labels could not be written, so the rating is kept here")
             return failed(e.id)
         }
+        cache[e.id]?.unwritten = nil
         entries[i].item.ratedBy = "label"
         persist()
         trackFirst(i, rating, before: before)
+    }
+
+    /// The model's `rating` of `entries[i]`, a PR's at `head`, saved: logged, cached (`unwritten`
+    /// while its labels are still to be written) and, `again`, as its re-rate at that head.
+    func record(_ i: Int, _ rating: PipelineRating, _ why: String, _ detail: String, head: String?, again: Bool,
+                unwritten: Bool) {
+        let e = entries[i]
+        if again, let head {
+            state.rerated[e.id, default: [:]][head] = rating
+            rerates[e.id, default: [:]][head] = rating
+        }
+        log(e.id, again ? .rerated : .rated, detail, head: head, rating: rating)
+        cache[e.id] = PipelineCachedRating(rating: rating, why: why, updatedAt: e.item.updatedAt,
+                                           unwritten: unwritten ? true : nil)
+        entries[i].item.why = why
+        entries[i].item.rating = rating
+        entries[i].item.ratedBy = "local"
+        persist()
     }
 
     /// Puts `fastTrack` on a PR rated low/low that fixes candidates, given `before`, the
@@ -1130,13 +1169,14 @@ final class PipelineSync {
     }
 
     /// `cleared` on my fast-track PR whose head no clean marker names: back to the fast
-    /// track for a review of that head.
+    /// track for a review of that head. One a person took off first is their opt-out, which
+    /// `track` writes.
     func dropStaleClears() {
         for i in entries.indices {
             let e = entries[i]
             guard own(e), open(e), has(e, model.labels.fastTrack), has(e, model.labels.cleared),
                   partial[e.item.repo] == nil, let head = e.item.headSha, e.item.cleanAt != head,
-                  offTrack(e) == nil, recheck(i), remove(i, model.labels.cleared, .fastTrack) else { continue }
+                  offTrack(e) == nil, recheck(i), takeOff(i, model.labels.cleared, .fastTrack) == true else { continue }
             state.cleared[e.id] = nil
             log(e.id, .labelled, "-\(model.labels.cleared): " + (e.item.cleanAt == nil
                 ? "no clean marker names its head \(head.prefix(7))"
@@ -1183,6 +1223,7 @@ final class PipelineSync {
         if !fixers(e).isEmpty { return "an open PR fixes it" }
         if e.linksPast { return Self.linksPast }
         if let t = triaged(e) { return "triaged as \(t)" }
+        if let stop = stops(e).first { return "it carries the label \(stop)" }
         if e.root == nil { return "Linear team \(e.item.repo) has no root to read its code in" }
         if let slug = e.root?.slug, let why = incomplete[slug] ?? partial[slug] { return why }
         if let why = banHold(e) { return why }
@@ -1192,12 +1233,20 @@ final class PipelineSync {
     static let claimHeld = "it was claimed for a split, which did not happen"
     static let linksPast = "it has more attachments than one read lists, so a PR fixing it might not be seen"
 
-    /// Each split a sync stopped in before it finished: its claim taken back, and the split
-    /// tried again later, when it filed no part; else held, naming the parts.
+    /// Each split a sync stopped in before it finished: the rest of its parts filed, once the
+    /// model named them; else its claim taken back, and the split tried again later, when it
+    /// filed no part, or held, naming the parts.
     func resumeSplits() {
         for (id, made) in state.splitting.sorted(by: { $0.key < $1.key }) {
             guard let i = pos[id], open(entries[i]) else { continue }
             let parts = made + entries[i].children.filter { !made.contains($0) }
+            if let answer = state.parts[id] {
+                let step: Step = answer.forced ? .forced : .fracture
+                guard may(step) else { continue }
+                state.splitting[id] = parts
+                file(i, step)
+                continue
+            }
             if !parts.isEmpty {
                 state.unsplit[id] = "split stopped after filing \(parts.joined(separator: ", "))"
             } else if refresh(i), remove(i, model.labels.fractured, .undo) {
@@ -1217,29 +1266,21 @@ final class PipelineSync {
     }
 
     /// Splits one issue, read again first, claiming it with `fractured`, a claim the state
-    /// records before it is made: a split that files no part takes it back, and one stopped
-    /// part-way keeps it, with a hold naming the parts, so no part is filed twice.
+    /// records before it is made, and saving the model's answer before the first part is filed:
+    /// a split that files no part takes the claim back, and one stopped part-way keeps it, with
+    /// a hold naming the parts, so no part is filed twice.
     func fractureOne(_ i: Int, _ step: Step) {
         guard let root = entries[i].root, may(step), recheck(i) else { return }
         let e = entries[i]
         if let why = fractureRefusal(e) { return notice("\(e.item.label) was not split: \(why)") }
         state.splitting[e.id] = []
         persist()
-        func release(_ why: String?) {
-            state.unsplit[e.id] = why
-            if refresh(i), remove(i, model.labels.fractured, .undo) {
-                state.splitting[e.id] = nil
-            } else if why == nil {
-                state.unsplit[e.id] = Self.claimHeld
-            }
-            persist()
-        }
         guard add(i, model.labels.fractured, step) else {
             failed(e.id)
             // A call that failed may have put the claim on all the same.
-            return release(nil)
+            return release(i, nil)
         }
-        guard may(step) else { return release(nil) }
+        guard may(step) else { return release(i, nil) }
         let out = io.claude(PipelineRater.arguments(model: model.rater.model, schema: model.fractureSchema,
                                                     prompt: PipelineRater.fracturePrompt(e, model)),
                             Data(PipelineRater.input(e, diff: nil, model).utf8), root.path,
@@ -1249,31 +1290,44 @@ final class PipelineSync {
         case .failure(let f):
             notice("\(e.item.label) was not split: \(f.message)")
             failed(e.id)
-            return release(nil)
+            return release(i, nil)
         case .success(let answer):
             (parts, why) = answer
         }
         guard !parts.isEmpty else {
             let held = "would not split: " + (why.isEmpty ? "the model named no parts" : why)
             log(e.id, .held, held)
-            return release(held)
+            state.unsplit[e.id] = held
+            persist()
+            return release(i, held)
         }
-        var made: [String] = []
+        state.parts[e.id] = PipelineParts(parts: parts.map { .init(title: $0.title, body: $0.body) }, why: why,
+                                          forced: step == .forced)
+        persist()
+        file(i, step)
+    }
+
+    /// Files the parts the model named for `entries[i]`, from the first not filed yet.
+    func file(_ i: Int, _ step: Step) {
+        let e = entries[i]
+        guard let answer = state.parts[e.id] else { return }
+        var made = state.splitting[e.id] ?? []
         func stop(_ why: String) {
             guard !made.isEmpty else {
                 notice("\(e.item.label) was not split: \(why)")
-                return release(nil)
+                return release(i, nil)
             }
             // Never retried unforced: a second split would file the made parts again.
             state.splitting[e.id] = nil
-            state.unsplit[e.id] = "split stopped after \(made.count) of \(parts.count) parts"
+            state.parts[e.id] = nil
+            state.unsplit[e.id] = "split stopped after \(made.count) of \(answer.parts.count) parts"
                 + " (\(made.joined(separator: ", "))): \(why)"
             notice("\(e.item.label): \(state.unsplit[e.id]!)")
             persist()
         }
-        for (k, part) in parts.enumerated() {
+        for (k, part) in answer.parts.enumerated().dropFirst(made.count) {
             guard may(step) else { return stop("the switch was turned off") }
-            let child = createChild(i, k + 1, part)
+            let child = createChild(i, k + 1, (part.title, part.body))
             if let url = child.url {
                 made.append(url)
                 state.splitting[e.id] = made
@@ -1286,9 +1340,24 @@ final class PipelineSync {
             }
         }
         state.splitting[e.id] = nil
+        state.parts[e.id] = nil
         state.unsplit[e.id] = nil
         state.retry[e.id] = nil
-        log(e.id, .fractured, "split into \(made.count) parts" + (why.isEmpty ? "" : ": " + why))
+        log(e.id, .fractured, "split into \(made.count) parts" + (answer.why.isEmpty ? "" : ": " + answer.why))
+        persist()
+    }
+
+    /// Takes `entries[i]`'s split claim back, read again first, and holds it `why`, or with no
+    /// `why` tries the split again later; a claim it cannot take back holds it.
+    func release(_ i: Int, _ why: String?) {
+        let id = entries[i].id
+        state.unsplit[id] = why
+        state.parts[id] = nil
+        if refresh(i), remove(i, model.labels.fractured, .undo) {
+            state.splitting[id] = nil
+        } else if why == nil {
+            state.unsplit[id] = Self.claimHeld
+        }
         persist()
     }
 
@@ -1475,6 +1544,7 @@ final class PipelineSync {
 
     /// Why no fix is asked for a candidate, nil when one is.
     func candidateHold(_ e: PipelineEntry) -> String? {
+        if let stop = stops(e).first { return "carries the label \(stop)" }
         guard let root = e.root else { return "Linear team \(e.item.repo) has no root to fix it in" }
         if let why = incomplete[root.slug] { return "\(why), so a PR fixing it might not be seen" }
         if let why = partial[root.slug] { return why }
@@ -1502,8 +1572,7 @@ final class PipelineSync {
 
     /// `e`'s merge hold, given whether it fixes candidates and what it would close unjudged.
     func mergeHold(_ e: PipelineEntry, fixes: Bool, unjudged: [String]) -> PipelineGate.Hold? {
-        let stop = Set(model.stopLabels.map { $0.lowercased() })
-        return PipelineGate.hold(PipelineGate.Candidate(
+        PipelineGate.hold(PipelineGate.Candidate(
             state: e.item.state, author: e.item.author ?? "", isCrossRepository: e.isCrossRepository,
             baseRef: e.baseRef, defaultBranch: e.defaultBranch, participants: e.participants,
             participantsUnseen: e.participantsUnseen, reviewDecision: e.reviewDecision,
@@ -1515,23 +1584,23 @@ final class PipelineSync {
             trackLabels: has(e, model.labels.fastTrack) && has(e, model.labels.cleared),
             fixesCandidate: fixes, closesUnwritable: unjudged, ciRan: e.gate?.ciRan ?? true,
             wasReady: e.readied, mergeState: e.mergeState, mergeQueue: e.mergeQueue,
-            stopLabels: e.labels.filter { stop.contains($0.lowercased()) },
+            stopLabels: stops(e),
             requiredChecks: e.gate.map(\.requiredChecks) ?? [], passedChecks: e.gate?.passedChecks ?? []),
             me: e.root?.me ?? "")
     }
 
     // MARK: - Merge
 
-    /// The PR as GitHub has it now, read with `Gate`; nil (with a notice) when it could
-    /// not be read whole.
-    func reread(_ e: PipelineEntry) -> PipelineEntry? {
+    /// The PR as GitHub has it now, read with `Gate`; nil (with a notice saying it `outcome`)
+    /// when it could not be read whole.
+    func reread(_ e: PipelineEntry, _ outcome: String = "was not merged") -> PipelineEntry? {
         guard let root = e.root, let n = e.number else { return nil }
         let r = graphql(root, "PullRequest", ["-F", "number=\(n)"])
         guard let response = r.response, r.errors.isEmpty,
               var fresh = PipelineRead.pullRequest(response, root: root, label: e.item.label,
                                                    roots: roots, model: model)
         else {
-            notice("\(e.item.label) was not merged: it could not be read again: \(r.why)")
+            notice("\(e.item.label) \(outcome): it could not be read again: \(r.why)")
             return nil
         }
         annotate(&fresh)
@@ -1587,12 +1656,18 @@ final class PipelineSync {
             guard may(.merge) else { continue }
             let out = io.gh(["pr", "merge", "\(n)", "-R", root.name, "--admin", flag,
                              "--match-head-commit", head])
-            // GitHub may have merged it all the same; at another head, it was not this merge.
-            guard out.ok || reread(e).map({ $0.item.state == "merged" && $0.item.headSha == head }) == true else {
-                notice("\(e.item.label) was not merged: \(out.why)")
+            // gh exits 0 on a PR merged already, at any head and by anyone, and GitHub may merge
+            // one all the same when gh fails: only a read after tells this merge's.
+            let after = reread(e, out.ok ? "may have been merged" : "was not merged (\(out.why))")
+            guard let after, after.item.state == "merged" else {
+                if let after { notice("\(e.item.label) was not merged: " + (out.ok ? "it is still \(after.item.state)" : out.why)) }
                 continue
             }
-            log(e.id, .merged, "merged \(head.prefix(7)) with --admin \(flag)")
+            if after.item.headSha == head, after.mergedBy?.lowercased() == root.me.lowercased() {
+                log(e.id, .merged, "merged \(head.prefix(7)) with --admin \(flag)")
+            } else {
+                notice("\(e.item.label) was merged, but not by this sync at \(head.prefix(7))")
+            }
             entries[i].item.state = "merged"
             entries[i].item.writable = false
             entries[i].unwritable = "merged"
@@ -1611,6 +1686,7 @@ final class PipelineSync {
     /// `asked` once per stamp.
     func owed() -> [PipelineEffect] {
         let fix = may(.fix), review = may(.fastTrack)
+        if fix { recheckLinear() }
         var out: [PipelineEffect] = []
         for i in entries.indices.sorted(by: newer) {
             let e = entries[i]
@@ -1646,6 +1722,44 @@ final class PipelineSync {
         return out
     }
 
+    /// Holds each Linear candidate whose fix is about to be asked for that a read of them all
+    /// now, a hundred a query, finds no longer a candidate or linked to other URLs, or that it
+    /// could not read: its fix run cannot read Linear, and gets the text this read finds.
+    func recheckLinear() {
+        let picks = entries.indices.filter {
+            entries[$0].item.source == .linear && entries[$0].item.stage == .candidate && entries[$0].item.hold == nil
+        }
+        guard !picks.isEmpty, let api = linear else { return }
+        var fresh: [String: PipelineEntry] = [:]
+        do {
+            for start in stride(from: 0, to: picks.count, by: 100) {
+                let ids = picks[start..<min(picks.count, start + 100)].compactMap { entries[$0].nodeID }
+                let data = try api.call("Recheck", ["ids": ids])
+                for n in PipelineRead.nodes(data, "issues") {
+                    guard let x = PipelineRead.linearIssue(n, viewer: linearViewer, teams: settings.linearTeams,
+                                                           roots: roots), let id = x.nodeID else { continue }
+                    fresh[id] = x
+                }
+            }
+        } catch {
+            notice("Linear: the issues a fix was about to be asked for could not be read again: \(error.localizedDescription)")
+            for i in picks { entries[i].item.hold = "it could not be read again right before its fix was asked for" }
+            return
+        }
+        for i in picks {
+            guard let x = entries[i].nodeID.flatMap({ fresh[$0] }) else {
+                entries[i].item.hold = "it changed since this sync read it: it was not found"
+                continue
+            }
+            if isCandidate(x), !x.linksPast, Set(x.links) == Set(entries[i].links) {
+                (entries[i].item.title, entries[i].body) = (x.item.title, x.body)
+                continue
+            }
+            entries[i].item.hold = "it changed since this sync read it: "
+                + (x.unwritable ?? (isCandidate(x) ? "its links changed" : "it is no longer a candidate"))
+        }
+    }
+
     // MARK: - Log
 
     func log(_ item: String, _ kind: PipelineEvent.Kind, _ detail: String, head: String? = nil,
@@ -1654,10 +1768,13 @@ final class PipelineSync {
         unsaved.append(event)
     }
 
-    /// The re-rates and clears a logged event records: they outlive a lost `state.json`.
+    /// The re-rates and clears a logged event records: they outlive a lost `state.json`. Of two
+    /// re-rates of a head, the higher counts.
     func noteRecord(_ e: PipelineEvent) {
         guard let head = e.head, !head.isEmpty else { return }
-        if e.kind == .rerated, let r = e.rating, rerates[e.item]?[head] == nil { rerates[e.item, default: [:]][head] = r }
+        if e.kind == .rerated, let r = e.rating {
+            rerates[e.item, default: [:]][head] = rerates[e.item]?[head]?.atLeast(r) ?? r
+        }
         if e.kind == .cleared { clearsLogged.insert("\(e.item) \(head)") }
     }
 

@@ -24,7 +24,8 @@ agents, queued like a sweep's asks: behind the [task cap](automation.md#autonomo
 [spending budget](automation.md#the-spending-budget) and the disk floor, each asked for once (a review
 once per head), retried on the monitors' backoff when a run dies, and taken off the queue when a later
 sync no longer owes it - one you started with Start fix only once its issue is no writable candidate, and
-never by a sync that could not read its repo in full. An item whose author is on the prompt-injection ban list, and every issue
+by a sync that could not read its repo in full only if it read that item, never by one that only read and
+showed the repo. An item whose author is on the prompt-injection ban list, and every issue
 Diplomat split from one, is not rated, split or fixed; a Linear issue's author is its creator's
 display name. The activity feed gets a line for each ask
 queued or withdrawn, each merge and split, each new notice, and the sync failing or recovering.
@@ -68,10 +69,12 @@ A PR:
 
 An issue labelled `wontfix`, `wont fix`, `won't fix`, `duplicate`, `invalid`, `question`,
 `enhancement`, `feature`, `feature request`, `improvement`, `discussion`, `proposal` or `rfc` in any
-case, after a leading `prefix:` or `prefix/` and with `-` or `_` for a space (`type: Feature`,
-`kind/feature`, `feature-request`; `pipeline.json` `triageLabels`, on Linear too), or of a GitHub
-issue type other than Bug, is **triaged**: never a `candidate` nor split, and once rated its hold
-is `triaged as <that label or type>`.
+case, before or after a `prefix:` or `prefix/` and with `-` or `_` for a space (`type: Feature`,
+`kind/feature`, `enhancement: pending triage`, `feature-request`; `pipeline.json` `triageLabels`, on
+Linear too), or of a GitHub issue type other than Bug, is **triaged**: never a `candidate` nor split,
+and once rated its hold is `triaged as <that label or type>`. An issue carrying a
+[stop label](#the-merge) is not split, nor a PR closing it merged; a `candidate` carrying one is held
+`carries the label <label>`, and no fix is asked for it.
 
 ### The fast track
 
@@ -79,7 +82,9 @@ is `triaged as <that label or type>`.
    is on the fast track: the smallest fix, a regression test that fails on the base branch, and the
    closing reference kept so the PR links to the issue. The run first reads the issue again and
    stops if it is closed, assigned to someone else, or an open PR already fixes it. A Linear
-   issue's run checks only for an open PR naming it, works in the root its team names and puts
+   issue's run cannot read Linear, so the sync reads the issue again right before asking, and holds
+   it if it is no longer a candidate or its links changed; the run gets its text as that read found
+   it, checks only for an open PR naming it, works in the root its team names and puts
    `Fixes ENG-12` in its PR's description.
 2. The PR is rated on its own (**Rate issues and PRs**), from its text and diff, never below its
    [diff floor](#the-diff-floor). Every open PR of yours is rated, not only the ones Diplomat opened.
@@ -92,15 +97,16 @@ is `triaged as <that label or type>`.
    findings included, then posts one COMMENT review whose body begins
    `Clean at <head sha>`: the **clean marker**. A marker counts only on your own review, submitted
    at the commit it names.
-4. At the clean head the PR is rated again, once per head. Still low/low, it is labelled
+4. At the clean head the PR is rated again, once per head: the answer is recorded as it arrives,
+   so a sync stopped before its labels never asks again for that head. Still low/low, it is labelled
    `diplomat:cleared`; anything else, its labels written or not, takes both labels off and leaves it
    to a person for good.
 5. A cleared PR is [merged](#the-merge) (**Merge cleared PRs**) once nothing holds it.
 
 A head no clean marker names, as after a push, takes `diplomat:cleared` off, and the PR goes back
-to `fast-track` for a review of that head. A person who takes `diplomat:cleared` off a PR takes it
-off the fast track for good: Diplomat neither labels, reviews nor merges it again, and takes
-`diplomat:fast-track` off too, so the labels say so. One who takes `diplomat:fast-track` off leaves
+to `fast-track` for a review of that head. A person who takes `diplomat:cleared` off a PR before
+Diplomat does takes it off the fast track for good: Diplomat neither labels, reviews nor merges it
+again, and takes `diplomat:fast-track` off too, so the labels say so. One who takes `diplomat:fast-track` off leaves
 it to a person: Diplomat never puts that label back.
 
 An issue's rating covers its title and body when rated, though its fix run also reads later edits
@@ -134,10 +140,11 @@ slots meanwhile.
 
 Labels for both dimensions are the item's rating (two of one dimension: the higher), and it is not
 rated again but for the fast track's second rating or when you ask. A rating Diplomat writes is the
-higher of the labels already there, the model's answer and the diff floor, a dimension at a time.
-One whose labels could not be written is kept on this machine with a notice, so it is not paid for
-again: it counts over lower labels, holding the item, moves nothing down the fast track, and its
-labels are written at a later sync, tried again 1, 2, 4 ... syncs later.
+higher of the labels already there, the model's answer, a rating kept for it and the diff floor, a
+dimension at a time. Each answer is kept on this machine as it arrives, until its labels are written,
+so it is not paid for again; one whose labels could not be written comes with a notice. A kept rating
+counts over lower labels, holding the item, moves nothing down the fast track, and its labels are
+written at a later sync, tried again 1, 2, 4 ... syncs later.
 
 ### The diff floor
 
@@ -219,7 +226,9 @@ tried again.
 Either way, why is its hold. A call that fails, a label the tracker refuses, or a split that files
 nothing takes the label off again, even if a switch went off meanwhile, once a read right before
 shows Diplomat may still write to the issue, and is tried again 1, 2, 4 ... syncs later, a day at
-most; for a sync stopped mid-split (the app quit, the sync timed out), the next sync does that.
+most. The model's answer is saved before the first part is filed: a sync stopped mid-split (the app
+quit, the sync timed out) after it leaves the next sync filing the rest of those parts, with
+**Split big issues** on or the split forced; one stopped before it, the next sync taking the label off.
 
 ## The merge
 
@@ -251,7 +260,8 @@ that applies winning:
 - a stop label: `do not merge`, `do-not-merge`, `don't merge`, `blocked`, `on hold`, `wip` or
   `work in progress`, in any case (`pipeline.json` `stopLabels`);
 - it lacks either fast-track label, or is off the fast track for good;
-- it closes no open issue, or one that is not a `candidate` as read right before the merge;
+- it closes no open issue, or one that is not a `candidate`, or carries a stop label, as read right
+  before the merge;
 - it would close an issue no read judged: one this sync did not read, more than the closing
   references one read lists, one a closing word names that GitHub does not list among them, or a
   Linear issue of a team not tracked or that could not be read; with Linear teams set, also when
@@ -266,8 +276,9 @@ that applies winning:
 - its repo allows none of squash, merge or rebase.
 
 A hold shows on the card and is logged each time it changes. A merge `gh` refuses (no admin rights, a
-head that moved) is a notice, and the next sync tries again; it counts as merged only if GitHub then
-shows the PR merged at that head.
+head that moved) is a notice, and the next sync tries again. The PR is read again after every merge,
+as `gh` exits 0 on one merged already: it counts as Diplomat's merge only if GitHub then shows it
+merged at that head by you, and merged by anyone else or at another head, it is a notice.
 
 ## The Pipeline screen
 
@@ -318,9 +329,10 @@ running, which reads the switches again (`control.json`) before every step it ta
   label when the split filed nothing. Off, it reads nothing,
   and the work it queued waits.
 - **Rate issues and PRs** - the ratings and their labels. **Each rating is one `claude -p` call**,
-  up to four a sync past the ones you force - 48 an hour while unrated items remain - each allowed
-  five minutes. They run in Diplomat, not in the queue, so the task cap and the spending budget do
-  not hold them.
+  up to four a sync past the ones you force - 48 an hour from the five-minute syncs while unrated
+  items remain, and four more for each sync you start with **Sync now**, **Rate now**, **Fracture**
+  or a switch turned on - each allowed five minutes. They run in Diplomat, not in the queue, so the
+  task cap and the spending budget do not hold them.
 - **Open fix PRs** - a Fix-issues run for each `candidate` issue no open PR fixes.
 - **Fast-track my PRs** - `diplomat:fast-track` on each PR of yours rated low/low at its first rating
   that closes only `candidate` issues, a review run per head until clean, and `diplomat:cleared` taken
@@ -394,9 +406,9 @@ labels are the state; this is what a sync needs besides:
   re-rates by head, which prove a `cleared` label this Diplomat's own, and the head it was cleared
   at; the PRs Diplomat took off the fast track, or could not put on it; the items whose rating, its
   labels or split failed, and when to
-  try again; the issues that would not split and why, and those being split with the parts filed so
-  far; and the issues Diplomat filed as parts, with the ban each carries. An item missing from a
-  read keeps these until it is read merged or closed, or goes 90 days unseen. Also what was last
+  try again; the issues that would not split and why, and those being split with the parts the
+  model answered and those filed so far; and the issues Diplomat filed as parts, with the ban each
+  carries. An item missing from a read keeps these until it is read merged or closed, or goes 90 days unseen. Also what was last
   logged, so the log does not repeat itself. A `state.json` or `ratings.json` that is there but
   cannot be read leaves every sync reading and showing only, with a notice.
 - `control.json` - the switches as the app has them, rewritten whenever one changes and before
