@@ -282,7 +282,7 @@ struct PipelineView: View {
                            enabled: store.pipelineEnabled,
                            forcedRate: store.pipelineForce.rate.contains(id),
                            forcedFracture: store.pipelineForce.fracture.contains(id),
-                           banned: store.pipelineBanned(item),
+                           ban: store.pipelineBan(item),
                            unread: store.pipelineUnread(item),
                            canRate: store.pipelineCanRate(item),
                            canFracture: PipelineView.canFracture(item, edges: result.graph.edges,
@@ -574,9 +574,9 @@ struct PipelineDetail: View {
     let enabled: Bool
     let forcedRate: Bool
     let forcedFracture: Bool
-    /// Its text's author, on the ban list (`Store.pipelineBanned`): a sync would refuse
-    /// to rate or split it, the queue to run its fix.
-    let banned: String?
+    /// Why, by the ban list, a sync would refuse to rate or split it, the queue to run its
+    /// fix (`Store.pipelineBan`).
+    let ban: String?
     /// Its root, which the last sync did not read all of (`Store.pipelineUnread`): a sync
     /// may refuse to rate or split it.
     let unread: String?
@@ -688,20 +688,19 @@ struct PipelineDetail: View {
             : "head \(short) · clean at \(clean.prefix(7)), an older head"
     }
 
-    private var ban: String? { banned.map { "@\($0) is on the prompt-injection ban list" } }
     private var refused: String? { PipelineView.fractureRefused(item) }
     private var stopped: String? { PipelineView.rateRefused(item) }
     private var partly: String? { unread.map { "The last sync did not read all of \($0)" } }
 
-    var rateEnabled: Bool { enabled && !forcedRate && banned == nil && stopped == nil && unread == nil }
+    var rateEnabled: Bool { enabled && !forcedRate && ban == nil && stopped == nil && unread == nil }
     var rateTip: String { ban ?? stopped ?? partly ?? "Rate it in a sync started now, ahead of every limit" }
     var fractureEnabled: Bool {
-        enabled && !forcedFracture && badge == nil && banned == nil && refused == nil && unread == nil
+        enabled && !forcedFracture && badge == nil && ban == nil && refused == nil && unread == nil
     }
     var fractureTip: String {
         ban ?? refused ?? partly ?? "Split it into low-complexity child issues in a sync started now"
     }
-    var fixEnabled: Bool { enabled && canStartFix && badge == nil && !forcedFracture && banned == nil }
+    var fixEnabled: Bool { enabled && canStartFix && badge == nil && !forcedFracture && ban == nil }
     var fixTip: String { ban ?? (canStartFix ? "Queue its fix now, past its retry backoff" : fixUnknown) }
 
     private var actions: some View {

@@ -345,6 +345,41 @@ def test_the_ban_is_the_effects_author_not_the_items(pipe):
     assert _keys(pipe) == ["issues:o/r#12"]
 
 
+def _unreadable_bans() -> None:
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{", encoding="utf-8")
+
+
+@pytest.mark.parametrize("text, unreadable", [
+    (None, False), ("{}", False), ('{"banned": []}', False),
+    ("{", True), ("[]", True), ('{"banned": {}}', True)])
+def test_the_ban_list_is_unreadable_as_a_sync_reads_it(text, unreadable):
+    if text is not None:
+        bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+        bans.banned_path().write_text(text, encoding="utf-8")
+    assert bans.unreadable() is unreadable
+
+
+def test_an_unreadable_ban_list_asks_for_nothing(pipe):
+    """A sync reads it as banning everyone."""
+    _unreadable_bans()
+    pipe._apply_pipeline_effects(_result(_fix()), time.time())
+    assert (_keys(pipe), pipe._load_attempts(PIPELINE_ATTEMPTS)) == ([], {})
+
+
+def test_an_unreadable_ban_list_holds_each_pipeline_ask_and_every_item(pipe):
+    _sync(pipe, _result(_fix()))
+    assert [t.id for t in pipe.drainable_tasks] == ["issues:o/r#12"]
+    _unreadable_bans()
+    pipe.refresh_activity()
+    assert pipe.drainable_tasks == []
+    assert pipe.pipeline_ban(_item()) == "The prompt-injection ban list could not be read"
+    bans.banned_path().unlink()
+    pipe.refresh_activity()
+    assert [t.id for t in pipe.drainable_tasks] == ["issues:o/r#12"]
+    assert pipe.pipeline_ban(_item()) is None
+
+
 @pytest.mark.parametrize("off, asked", [
     ("pipeline_fix", ["review:o/r#7"]),
     ("pipeline_fast_track", ["issues:o/r#12", "issues:linear:ENG-12"]),
@@ -547,11 +582,9 @@ def test_a_launch_starts_no_old_ask_until_a_sync_judged_its_item(pipe):
     assert _free(again) == ["issues:o/r#12", "review:o/r#7"]
 
 
-def test_a_sync_is_told_the_items_asks_are_held_for(pipe, monkeypatch):
-    """Each pipeline ask's, queued or not yet taken by its spawn, and each agent's running
-    an open pipeline attempt: not a monitor's, a released one's or a concluded one's."""
-    from diplomat_runtime import agentstate
-
+def test_a_sync_is_told_the_items_asks_and_attempt_records_are_held_for(pipe):
+    """Each pipeline ask's, queued or not yet taken by its spawn, and each attempt record's,
+    open or concluded."""
     _sync(pipe, _result(_fix(), _linear(), _review()))
     pipe._request([autofix.RequestedWork(
         number=13, url="https://github.com/o/r/pull/13", author="",
@@ -559,25 +592,11 @@ def test_a_sync_is_told_the_items_asks_are_held_for(pipe, monkeypatch):
         repo="o/r")])
     assert pipe.pipeline_settings_payload()["queued"] == sorted([ISSUE, LINEAR, PR])
     pipe.requested_work = []
-    running, ran = "https://github.com/o/r/issues/30", "https://github.com/o/r/issues/31"
-    pipe._save_attempts(PIPELINE_ATTEMPTS, {f"pipeline-fix:{running}": _attempt(),
+    fixing, ran = "https://github.com/o/r/issues/30", "https://github.com/o/r/issues/31"
+    pipe._save_attempts(PIPELINE_ATTEMPTS, {f"pipeline-fix:{fixing}": _attempt(),
                                             f"pipeline-fix:{ran}": _attempt(concluded=200.0),
                                             f"pipeline-review:{PR}": _attempt()})
-
-    def row(url, kind, state="running", **fields):
-        return (agentstate.RunRecord(run_id=f"r-{len(rows)}", dispatched_at=0.0, pr_url=url,
-                                     kind=kind, **fields), SimpleNamespace(state=state))
-
-    rows: list = []
-    for args, kw in [((running, autofix.QUEUE_ISSUES_ACTION), {}),
-                     ((ran, autofix.QUEUE_ISSUES_ACTION), {}),
-                     ((PR, autofix.QUEUE_REVIEW_ACTION), {"ledger_key": f"review-reply:{PR}@a"}),
-                     ((PR, autofix.QUEUE_REVIEW_ACTION), {"released": True}),
-                     ((PR, autofix.QUEUE_REVIEW_ACTION), {"state": agentstate.FINISHED}),
-                     (("https://github.com/o/r/issues/32", autofix.QUEUE_ISSUES_ACTION), {})]:
-        rows.append(row(*args, **kw))
-    monkeypatch.setattr(pipe, "_agent_tick", lambda: SimpleNamespace(rows=rows))
-    assert pipe.pipeline_settings_payload()["queued"] == [running]
+    assert pipe.pipeline_settings_payload()["queued"] == sorted([fixing, ran, PR])
 
 
 # MARK: - The sync

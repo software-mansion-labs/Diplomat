@@ -603,6 +603,9 @@ final class Store: ObservableObject {
     /// banned.json). They receive no automated reviews, their Slack messages are not
     /// triaged, and they appear in the "Banned" list above the sessions.
     @Published var bannedAuthors: [BannedAuthor] = []
+    /// banned.json is present but unreadable, as `refreshBanList` last read it: the Pipeline
+    /// then acts on nothing, as its sync does (`PipelineTick.bannedLogins`).
+    @Published var banListUnreadable = false
 
     /// Each ban `refreshBanList` has seen, as login and `at`; nil until its first read,
     /// which notifies nothing.
@@ -2925,7 +2928,10 @@ final class Store: ObservableObject {
     /// posts a notification for each ban not seen by an earlier read: a new login, or a
     /// repeat offence (a new `at`).
     func refreshBanList() {
-        let next = BanList.read()
+        let file = BanList.readFile()
+        let next = BanList.read(file)
+        let unreadable = if case .unreadable = file { true } else { false }
+        if unreadable != banListUnreadable { banListUnreadable = unreadable }
         let keys = next.map { "\($0.login.lowercased())@\($0.at ?? "")" }
         if let seen = bansSeen {
             for (ban, key) in zip(next, keys)
@@ -3738,11 +3744,12 @@ final class Store: ObservableObject {
         return queuedTasks.filter { !isHeld($0, owned: owned) }
     }
 
-    /// Paused, or a pipeline ask still stale (`pipelineStale`), unless a Slack ping took it
-    /// as its ask: then it is asked-for work, which switching a monitor off never stops
-    /// (`isPaused`).
+    /// Paused, or a pipeline ask still stale (`pipelineStale`) or held by an unreadable ban
+    /// list (`banListUnreadable`), unless a Slack ping took it as its ask: then it is
+    /// asked-for work, which switching a monitor off never stops (`isPaused`).
     func isHeld(_ task: QueuedAgentTask, owned: Set<String>? = nil) -> Bool {
-        (isPaused(task.job.counter) || (task.job.counter == .pipeline && pipelineStale.contains(task.id)))
+        (isPaused(task.job.counter)
+            || (task.job.counter == .pipeline && (banListUnreadable || pipelineStale.contains(task.id))))
             && !(owned ?? commsOwnedKeys).contains(task.id)
     }
 

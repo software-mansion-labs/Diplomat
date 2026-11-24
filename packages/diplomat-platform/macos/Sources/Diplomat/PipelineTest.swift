@@ -66,7 +66,7 @@ enum PipelineTest {
               settings.rate && settings.fix && settings.fastTrack && settings.merge && !settings.fracture)
         check("the Linear teams", settings.linearTeams == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r")])
         check("no forces while none is asked for", settings.force == nil)
-        check("no item while no ask is held", settings.queued.isEmpty)
+        check("no item while no ask or attempt record is held", settings.queued.isEmpty)
         check("Linear teams: the core's parse, keys in capitals, entries missing a part skipped",
               Store.pipelineTeams("eng=o/r; OPS = o/other\nBAD, =o/x, X=nope, Y=o/, Z=/r, ENG=o/second")
                   == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r"),
@@ -85,6 +85,9 @@ enum PipelineTest {
                       "Only your own PRs from the repo itself into its default branch that close only "
                           + "candidate issues: the fixes the pipeline asks for.")
                   && SettingsView.pipelineFastTrackDetail.hasSuffix(" A PR rated while this is off stays a person's."))
+        check("Rate issues and PRs says a rating kept here raises the tracker's until its labels are written",
+              SettingsView.pipelineRateDetail.hasSuffix(" A rating already on the tracker is the rating, raised by "
+                  + "a higher one kept here until its labels are written; a PR's diff can only raise one."))
         check("Merge cleared PRs points at every hold rather than listing some",
               SettingsView.pipelineMergeDetail.hasPrefix(
                   "A cleared PR is merged only when none of the holds in docs/pipeline.md applies "
@@ -484,7 +487,7 @@ enum PipelineTest {
         check("an agent on the PR holds its fast-track review", ids().isEmpty && store.loadPipelineAttempts().isEmpty)
         _ = AgentRegistry.save([])
 
-        print("\npipeline: the items a sync is told asks are held for")
+        print("\npipeline: the items a sync is told asks and attempt records are held for")
         store.savePipelineAttempts([:])
         let sweptAsk = Store.RequestedWork(number: 90021, url: "https://github.com/o/r/pull/90021", author: "",
                                            config: .review(ReviewConfig(target: .specific, me: "latekvo",
@@ -502,22 +505,8 @@ enum PipelineTest {
         concludedRecord.concludedAt = now
         store.savePipelineAttempts(["pipeline-fix:\(running)": openRecord, "pipeline-fix:\(ran)": concludedRecord,
                                     review.key: openRecord])
-        func run(_ url: String, _ kind: String, ledger: String = "", released: Bool = false,
-                 state: AgentState.RunState = .running) -> Store.AgentRow {
-            var record = AgentState.RunRecord(runID: "r-\(url)-\(ledger)-\(released)-\(state)",
-                                              dispatchedAt: now.timeIntervalSince1970, prURL: url, kind: kind)
-            record.ledgerKey = ledger
-            record.released = released
-            return Store.AgentRow(record: record, state: state, reason: "", window: nil)
-        }
-        store.pinAgentRows([run(running, AgentTaskQueue.issuesAction), run(ran, AgentTaskQueue.issuesAction),
-                            run(pr, AgentTaskQueue.reviewAction, ledger: "review-reply:\(pr)@aaa111"),
-                            run(pr, AgentTaskQueue.reviewAction, released: true),
-                            run(pr, AgentTaskQueue.reviewAction, state: .finished),
-                            run("https://github.com/o/r/issues/90032", AgentTaskQueue.issuesAction)])
-        check("…and of each agent running an open pipeline attempt, no monitor's, released, ended or concluded one's",
-              store.pipelineSettings.queued == [running])
-        store.pinAgentRows([])
+        check("…and of each attempt record kept, open or concluded",
+              store.pipelineSettings.queued == [pr, ran, running].sorted())
         store.savePipelineAttempts([:])
 
         print("\npipeline: the master switch")
@@ -695,10 +684,10 @@ enum PipelineTest {
                   && !PipelineView.canStartFix(at(.candidate, writable: false))
                   && !PipelineView.canStartFix(at(.candidate, .pr)))
         func detail(_ it: PipelineItem? = nil, badge: Store.PipelineBadge? = nil, enabled: Bool = true,
-                    forcedRate: Bool = false, forcedFracture: Bool = false, banned: String? = nil,
+                    forcedRate: Bool = false, forcedFracture: Bool = false, ban: String? = nil,
                     unread: String? = nil, canStartFix: Bool = true) -> PipelineDetail {
             PipelineDetail(item: it ?? at(.candidate), events: [], badge: badge, enabled: enabled,
-                           forcedRate: forcedRate, forcedFracture: forcedFracture, banned: banned,
+                           forcedRate: forcedRate, forcedFracture: forcedFracture, ban: ban,
                            unread: unread, canRate: true, canFracture: true, canStartFix: canStartFix,
                            fixUnknown: "its fix is unknown", error: nil,
                            rate: {}, fracture: {}, startFix: {}, close: {})
@@ -711,7 +700,7 @@ enum PipelineTest {
             ("a rate asked", detail(forcedRate: true), [false, true, true]),
             ("a split asked", detail(forcedFracture: true), [true, false, false]),
             ("work on it", detail(badge: .queued), [true, false, false]),
-            ("a banned author", detail(banned: "mallory"), [false, false, false]),
+            ("a ban", detail(ban: "@mallory is on the prompt-injection ban list"), [false, false, false]),
             ("a root read in part", detail(unread: "o/r"), [false, false, true]),
             ("a split refused", detail(refusedItem), [true, false, true]),
             ("a stop label", detail(stopped), [false, false, true]),
@@ -720,7 +709,8 @@ enum PipelineTest {
         let wrong = stops.filter { [$0.1.rateEnabled, $0.1.fractureEnabled, $0.1.fixEnabled] != $0.2 }.map(\.0)
         check("the detail's Rate now, Fracture and Start fix: each off only for what stops it"
                   + (wrong.isEmpty ? "" : " - wrong for \(wrong)"), wrong.isEmpty)
-        let onBan = detail(refusedItem, banned: "mallory", unread: "o/r", canStartFix: false)
+        let onBan = detail(refusedItem, ban: "@mallory is on the prompt-injection ban list", unread: "o/r",
+                           canStartFix: false)
         let inPart = detail(refusedItem, unread: "o/r", canStartFix: false)
         check("…each tooltip saying why: the ban first, then a refusal, then a root read in part",
               [onBan.rateTip, onBan.fractureTip, onBan.fixTip]
@@ -1233,9 +1223,9 @@ enum PipelineTest {
         let bannedBefore = store.bannedAuthors
         store.bannedAuthors = [BannedAuthor(login: "mallory")]
         check("the screen holds Rate now and Fracture for the banned author its text came from",
-              store.pipelineBanned(heldPart) == "mallory"
-                  && store.pipelineBanned(item(issue, .issue, author: "Mallory")) == "Mallory"
-                  && store.pipelineBanned(partItem) == nil)
+              store.pipelineBan(heldPart) == "@mallory is on the prompt-injection ban list"
+                  && store.pipelineBan(item(issue, .issue, author: "Mallory")) == "@Mallory is on the prompt-injection ban list"
+                  && store.pipelineBan(partItem) == nil)
         store.bannedAuthors = bannedBefore
         var unheld = heldPart
         unheld.hold = nil
@@ -1243,6 +1233,22 @@ enum PipelineTest {
         check("a part with no emitted fix is asked for as the author its text came from",
               store.startPipelineFix(unheld) == nil
                   && job("issues:o/r#90030").map { $0.authorLogin == "mallory" } == true)
+        // An unreadable list, as the core's sync reads it: everything holds.
+        let queuedFix = store.queuedTasks.first { $0.id == "issues:o/r#90030" }
+        let ranBefore = queuedFix.map { store.isHeld($0) } == false
+        try? Data("{".utf8).write(to: banDir.appendingPathComponent("banned.json"))
+        store.refreshBanList()
+        check("an unreadable ban list holds each pipeline ask queued, and every item's Rate now, Fracture and Start fix",
+              ranBefore && queuedFix.map { store.isHeld($0) } == true
+                  && store.pipelineBan(item(issue, .issue, author: "carol")) == "The prompt-injection ban list could not be read")
+        clearQueue()
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix]), now: now)
+        check("…and queues none of the asks a sync owes", ids().isEmpty && store.loadPipelineAttempts().isEmpty)
+        try? FileManager.default.removeItem(at: banDir.appendingPathComponent("banned.json"))
+        store.refreshBanList()
+        await store.applyPipeline(result([fix]), now: now)
+        check("…until it is read again", ids() == [fixKey] && store.pipelineBan(item(issue, .issue, author: "carol")) == nil)
         try? FileManager.default.removeItem(at: banDir.appendingPathComponent("banned.json"))
         clearQueue()
         store.savePipelineAttempts([:])
@@ -1429,7 +1435,8 @@ enum PipelineTest {
     /// rating each low/low. Reading #2 again before merging it, the stub writes
     /// `<dir>/flip-merge` and waits for control.json to say merge is off; read after its
     /// merge, a PR is merged by op. While the state's
-    /// `readErrors` is set, the `Repo` read answers with that error beside its data. The
+    /// `readErrors` is set, the `Repo` read answers with that error beside its data, and while
+    /// its `queuedErrors` is, a `Queued` read fails. The
     /// state's `later` holds low/low #7 and op's draft PR #3 fixing it, likewise clean, and
     /// its `more` low/low #8 and #9, its `extra` low/low #10 and #11, its `review` low/low #13
     /// and op's PR #12 fixing it, fast-tracked with no clean marker. While its `holdReads` is
@@ -1451,7 +1458,7 @@ enum PipelineTest {
         }
         func linearWrites() -> [String] {
             log("linear.log").compactMap { ($0 as? [String: Any])?["op"] as? String }
-                .filter { !["Issues", "Issue", "Recheck", "Labels", "Attached"].contains($0) }
+                .filter { !["Issues", "Issue", "Recheck", "Queued", "Labels", "Attached"].contains($0) }
         }
         func truncate() {
             for name in ["gh.log", "linear.log", "claude.log"] {
@@ -1496,16 +1503,15 @@ enum PipelineTest {
 
         Store.pipelineTickOverride = nil
         // Each sync's `queued` beside what is held as it starts: the asks queued or starting,
-        // and each running agent's item whose attempt is open.
+        // and each attempt record's item.
         var told: [(queued: [String], held: [String])] = []
         var live = store
         Store.pipelineTickLive = { settings in
-            let open = Set(live.loadPipelineAttempts().filter { $0.value.concludedAt == nil }.keys)
-            let running = live.agentRows.filter { row in
-                row.state == .running && ["pipeline-fix:", "pipeline-review:"].contains { open.contains($0 + row.record.prURL) }
-            }.map(\.record.prURL)
+            let recorded = live.loadPipelineAttempts().keys.map {
+                $0.replacingOccurrences(of: "^pipeline-(fix|review):", with: "", options: .regularExpression)
+            }
             let asked = (live.queuedTasks + live.startingTasks).filter { $0.job.counter == .pipeline }.compactMap(\.job.prURL)
-            told.append((settings.queued, Set(asked + running).sorted()))
+            told.append((settings.queued, Set(asked + recorded).sorted()))
         }
         defer { Store.pipelineTickLive = nil }
         store.usernameOverride = "op"
@@ -1745,9 +1751,9 @@ enum PipelineTest {
         let again = store.pipelineSyncAgain
         release(1)
         let second = await held(2)
-        print("  stale sync applied: queue \(ids()), drainable \(store.drainableTasks.map(\.id)), #10 read: \(item(10) != nil)")
+        print("  stale sync applied: queue \(ids()), drainable \(store.drainableTasks.map(\.id)), #10 read: \(item(10)?.state ?? "-")")
         check("…a sync begun before master went off and on again reads #10 closed, yet withdraws nothing and lets nothing start",
-              first && again && second && item(10) == nil && ids() == owing && store.drainableTasks.isEmpty
+              first && again && second && item(10)?.state == "closed" && ids() == owing && store.drainableTasks.isEmpty
                   && !store.pipelineJudged && feed().count == back)
         release(2)
         await syncing.value
@@ -1893,6 +1899,12 @@ enum PipelineTest {
         await sync()
         let readKey = "issues:acme/app#20", pastKey = "issues:acme/app#21"
         check("sync 27: #20's and #21's fixes are queued", Set(ids()).isSuperset(of: [readKey, pastKey]))
+        // #22 past the cap too, with a lapsed attempt record and no ask.
+        let lapsedKey = "pipeline-fix:https://github.com/acme/app/issues/22"
+        var lapsed = store.loadPipelineAttempts()
+        lapsed[lapsedKey] = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: Date().addingTimeInterval(-2 * 86400),
+                                          attempts: 1)
+        store.savePipelineAttempts(lapsed)
         patch { github in
             var issues = github["issues"] as? [[String: Any]] ?? []
             let past = issues.filter { $0["number"] as? Int == 21 }
@@ -1902,16 +1914,23 @@ enum PipelineTest {
                 ["number": n, "title": "Filler \(n)", "body": "", "updatedAt": "2026-01-01T00:00:00Z",
                  "labels": [] as [String], "author": "reporter"]
             }
-            github["issues"] = issues + filler + past
+            let lapsedIssue: [String: Any] = ["number": 22, "title": "Capped 22", "body": "It is broken.",
+                                              "updatedAt": stamp, "labels": ["risk:low", "complexity:low"],
+                                              "author": "reporter"]
+            github["issues"] = issues + filler + past + [lapsedIssue]
+            github["queuedErrors"] = true
         }
         await sync()
+        let pastURL = "https://github.com/acme/app/issues/21"
         let readNow = store.pipelineResult?.read ?? []
-        let readCapped = [20, 21].map { readNow.contains("https://github.com/acme/app/issues/\($0)") }
+        let readCapped = [20, 21, 22].map { readNow.contains("https://github.com/acme/app/issues/\($0)") }
         print("  sync 28 unread: \(store.pipelineResult?.unread ?? []), read \(readNow.count), "
-              + "#20, #21 read \(readCapped), queue \(ids())")
-        check("sync 28, acme/app read past its cap: #20, read and assigned away, is withdrawn; #21, past the cap, stays",
-              store.pipelineResult?.unread == ["acme/app"] && readCapped[0]
+              + "#20, #21, #22 read \(readCapped), queue \(ids()), notices \(store.pipelineResult?.notices ?? [])")
+        check("sync 28, acme/app read past its cap: #20, read and assigned away, is withdrawn; #21, past the cap and not read by id, stays",
+              store.pipelineResult?.unread == ["acme/app"] && readCapped == [true, false, false]
+                  && store.pipelineResult?.notices.contains { $0.hasPrefix("\(pastURL), which an ask or attempt record names, could not be read: ") } == true
                   && !ids().contains(readKey) && ids().contains(pastKey))
+        check("…and #22's lapsed record, its item unread, is kept", store.loadPipelineAttempts()[lapsedKey] != nil)
         store.pipelineRate = true
 
         store.usernameOverride = "alice"
@@ -1928,7 +1947,6 @@ enum PipelineTest {
         store.usernameOverride = "op"
 
         // A relaunch with old asks held, acme/app still read past its cap.
-        let pastURL = "https://github.com/acme/app/issues/21"
         let oldAsks = store.requestedWork.filter(\.config.isPipeline).map(\.key).sorted()
         Store.headlessLaunchJSON = store.headlessJSON
         let reborn = Store()
@@ -1963,7 +1981,6 @@ enum PipelineTest {
             truncate()
             await reborn.runPipelineSyncOnce()
         }
-        patch { $0["itemErrors"] = true }
         await againSync()
         let after1 = relaunched()
         print("  relaunched sync 1: unread \(reborn.pipelineResult?.unread ?? []), free \(after1.free), "
@@ -1971,13 +1988,21 @@ enum PipelineTest {
         check("…its first sync, #21 left unread past the cap: #21 does not start, each old ask it read may",
               reborn.pipelineResult?.unread == ["acme/app"] && !after1.free.contains(pastKey) && after1.free == after1.judged
                   && !after1.free.isEmpty)
-        patch { $0["itemErrors"] = nil }
+        patch { $0["queuedErrors"] = nil }
+        let rebornFed = feed().count
         await againSync()
         let after2 = relaunched()
         let readPast = reborn.pipelineResult?.read.contains(pastURL) == true
-        print("  relaunched sync 2: #21 read \(readPast), free \(after2.free)")
-        check("…the next, #21 read by id or not: it starts only once read",
-              after2.free == after2.judged && after2.free.contains(pastKey) == readPast)
+        let dropped2 = Array(feed().dropFirst(rebornFed))
+        let lapsedRead = reborn.pipelineResult?.read.contains("https://github.com/acme/app/issues/22") == true
+        print("  relaunched sync 2: #21, #22 read \([readPast, lapsedRead]), free \(after2.free), feed \(dropped2)")
+        // A root read past its cap holds every fix, as a PR fixing it might not be seen.
+        check("…the next reads #21 by id: owed no fix past the cap, its ask is withdrawn, never started",
+              readPast && !after2.free.contains(pastKey) && !reborn.queuedTasks.map(\.id).contains(pastKey)
+                  && dropped2.contains("panel queue-drop Issues · #21 · deep - the pipeline no longer owes it, not run")
+                  && after2.free == after2.judged)
+        check("…and #22, read by id for its record, past the cap still: the record goes",
+              lapsedRead && reborn.pipelineResult?.unread == ["acme/app"] && reborn.loadPipelineAttempts()[lapsedKey] == nil)
         patch { github in
             github["issues"] = (github["issues"] as? [[String: Any]] ?? []).filter { ($0["number"] as? Int ?? 0) < 1000 }
         }
@@ -1985,7 +2010,7 @@ enum PipelineTest {
         let after3 = relaunched()
         print("  relaunched sync 3: unread \(reborn.pipelineResult?.unread ?? []), free \(after3.free)")
         check("…and one that read acme/app whole lets every old ask still queued start",
-              reborn.pipelineResult?.unread == [] && after3.free.contains(pastKey)
+              reborn.pipelineResult?.unread == [] && !after3.free.isEmpty
                   && after3.free == reborn.queuedTasks.map(\.id).filter(oldAsks.contains).sorted())
         live = store
 
@@ -2007,7 +2032,7 @@ enum PipelineTest {
         store.pinAgentRows([])
 
         print("  told: \(told.map(\.queued))")
-        check("each of the 34 syncs is told exactly the items asks are held for, queued, starting or running",
+        check("each of the 34 syncs is told exactly the items asks and attempt records are held for",
               told.count == 34 && told.allSatisfy { $0.queued == $0.held })
         let remaining = ids()
 

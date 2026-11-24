@@ -114,9 +114,9 @@ enum BanList {
     static var fileURL: URL { dir.appendingPathComponent("banned.json") }
 
     /// Entry by entry: one without a string `login` is skipped, the rest still read.
-    /// Empty when the file is absent or unreadable (`readFile`).
-    static func read() -> [BannedAuthor] {
-        guard case .list(_, let entries) = readFile() else { return [] }
+    /// Empty when the file is absent or unreadable.
+    static func read(_ file: File = BanList.readFile()) -> [BannedAuthor] {
+        guard case .list(_, let entries) = file else { return [] }
         return entries.compactMap { raw in
             guard let obj = raw as? [String: Any],
                   let data = try? JSONSerialization.data(withJSONObject: obj) else { return nil }

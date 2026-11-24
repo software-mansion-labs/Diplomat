@@ -1367,8 +1367,9 @@ class SettingsView(QWidget):
             "complexity by one claude call with read-only tools in its repo's checkout "
             "and the item's text as data. A rating is labelled where Diplomat may write; "
             "any other issue's rating is kept on this machine only, and someone else's "
-            "PR is not rated. A rating already on the tracker is the rating; a PR's diff "
-            "can only raise one.")
+            "PR is not rated. A rating already on the tracker is the rating, raised by a "
+            "higher one kept here until its labels are written; a PR's diff can only raise "
+            "one.")
         self._sw_pipeline_fix = self._pipeline_switch(
             inner, "Open fix PRs", st.pipeline_fix, "pipeline_fix",
             "Queues an agent that fixes each low-risk, low-complexity issue",

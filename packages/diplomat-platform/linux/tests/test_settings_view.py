@@ -606,6 +606,9 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
         ("Split big issues",
          "One medium- or high-complexity issue a sync becomes low-complexity child issues"),
     ]
+    assert rows[0]._detail.text().endswith(
+        " A rating already on the tracker is the rating, raised by a higher one kept here "
+        "until its labels are written; a PR's diff can only raise one.")
     assert rows[2]._detail.text().startswith(
         "Only your own PRs from the repo itself into its default branch that close only "
         "candidate issues: the fixes the pipeline asks for.")

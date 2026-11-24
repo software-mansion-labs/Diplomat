@@ -704,6 +704,19 @@ def test_start_fix_is_off_for_a_banned_authors_text(store):
     assert (fix.isEnabled(), _tip(fix)) == (False, "@mallory is on the prompt-injection ban list")
 
 
+def test_rate_now_fracture_and_start_fix_are_off_while_the_ban_list_cannot_be_read(store):
+    """A sync then holds every item."""
+    store.pipeline_result = _result()
+    bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
+    bans.banned_path().write_text("{", encoding="utf-8")
+    store.refresh_activity()
+    view = PipelineView(store)
+    view.select(I5)
+    held = (False, "The prompt-injection ban list could not be read")
+    assert [(view.buttons[k].isEnabled(), _tip(view.buttons[k]))
+            for k in ("rate", "fracture", "fix")] == [held] * 3
+
+
 def test_tracker_text_in_an_actions_tooltip_is_never_read_as_markup(store):
     """Labels and names are anyone's text."""
     result = _result()

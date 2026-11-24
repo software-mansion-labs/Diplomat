@@ -34,8 +34,8 @@ extension Store {
 
     /// What a sync is run with: the GitHub roots (GitLab ones are not read yet), the Linear
     /// teams, the switches, whatever the screen forced that no sync has taken, sorted
-    /// as the Linux store hands its forces on, and the items asks are held for
-    /// (`pipelineQueued`).
+    /// as the Linux store hands its forces on, and the items asks and attempt records are
+    /// held for (`pipelineQueued`).
     var pipelineSettings: PipelineSettings {
         let force = PipelineSettings.Force(rate: pipelineForce.rate.sorted(),
                                            fracture: pipelineForce.fracture.sorted())
@@ -49,22 +49,15 @@ extension Store {
             rate: pipelineRate, fix: pipelineFix, fastTrack: pipelineFastTrack,
             merge: pipelineMerge, fracture: pipelineFracture,
             force: force.rate.isEmpty && force.fracture.isEmpty ? nil : force,
-            queued: Store.pipelineQueued(requestedWork, runs: agentRows.filter(Store.blocks).map(\.record),
-                                         attempts: loadPipelineAttempts()))
+            queued: Store.pipelineQueued(requestedWork, attempts: loadPipelineAttempts()))
     }
 
     /// `PipelineSettings.queued`: the item of each of the pipeline's `asks`, queued or
-    /// starting, and of each open attempt one of the live `runs` is the run of (as
-    /// `pipelineConcluded` matches them), sorted. Twin of `pipeline.queued`.
-    nonisolated static func pipelineQueued(_ asks: [RequestedWork], runs: [AgentState.RunRecord],
-                                           attempts: [String: ReviewAttempt]) -> [String] {
-        var out = Set(asks.filter(\.config.isPipeline).map(\.url))
-        for run in runs where run.ledgerKey.isEmpty {
-            for key in pipelineOpenKeys(attempts, kind: run.kind, url: run.prURL) {
-                out.insert(String(key.drop { $0 != ":" }.dropFirst()))
-            }
-        }
-        return out.sorted()
+    /// starting, and of each of its `attempts` records, which a sync that reads the item
+    /// lets `retainedPipelineAttempts` prune, sorted. Twin of `pipeline.queued`.
+    nonisolated static func pipelineQueued(_ asks: [RequestedWork], attempts: [String: ReviewAttempt]) -> [String] {
+        Set(asks.filter(\.config.isPipeline).map(\.url)
+            + attempts.keys.map { String($0.drop { $0 != ":" }.dropFirst()) }).sorted()
     }
 
     /// `control.json` in `PipelineLog.dir`: the switches as they stand, which a running sync
@@ -253,7 +246,9 @@ extension Store {
         }
         var queued = false
         if pipelineEnabled {
-            let banned = BanList.read()
+            let file = BanList.readFile()
+            let banned = BanList.read(file)
+            let unreadable = if case .unreadable = file { true } else { false }
             for effect in result.effects {
                 guard pipelineAsking(effect) else { continue }
                 guard var ask = pipelineAsk(effect) else { continue }
@@ -277,7 +272,7 @@ extension Store {
                 var records = loadPipelineAttempts()
                 let decision = ReviewReconcile.decide(
                     prior: records[effect.key], stamp: effect.stamp, inFlight: inFlight,
-                    banned: BanList.isBanned(ask.author, in: banned), now: now)
+                    banned: unreadable || BanList.isBanned(ask.author, in: banned), now: now)
                 guard case .dispatch(let attempt) = decision else { continue }
                 records[effect.key] = ReviewAttempt(requestedAt: effect.stamp, lastDispatchedAt: now,
                                                     attempts: attempt)
@@ -634,12 +629,14 @@ extension Store {
         return "Diplomat has this Linear issue's text only while Open fix PRs is on"
     }
 
-    /// Who of the ban list wrote the text `item` carries (`splitFrom`, else its author),
-    /// whose item a sync neither rates nor splits; nil for none. Twin of
-    /// `Store.pipeline_banned`.
-    func pipelineBanned(_ item: PipelineItem) -> String? {
+    /// Why a sync neither rates nor splits `item`, nor the queue runs its fix, by the ban
+    /// list: it cannot be read, or names who wrote the text `item` carries (`splitFrom`,
+    /// else its author); nil for neither. Twin of `Store.pipeline_ban`.
+    func pipelineBan(_ item: PipelineItem) -> String? {
+        if banListUnreadable { return "The prompt-injection ban list could not be read" }
         let who = item.splitFrom ?? item.author ?? ""
-        return !who.isEmpty && BanList.isBanned(who, in: bannedAuthors) ? who : nil
+        return !who.isEmpty && BanList.isBanned(who, in: bannedAuthors)
+            ? "@\(who) is on the prompt-injection ban list" : nil
     }
 
     /// Whether a sync can read `item`'s code: a Linear issue only when its team names a

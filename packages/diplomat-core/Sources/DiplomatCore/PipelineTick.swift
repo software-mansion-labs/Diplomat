@@ -484,14 +484,14 @@ final class PipelineSync {
         }
     }
 
-    /// The ids of `settings.queued` no read so far listed: a front-end takes an ask back
-    /// only once a read of its item judged it.
+    /// The ids of `settings.queued` no read so far listed: a front-end takes an ask or record
+    /// back only once a read of its item judged it.
     func unlisted() -> [String] {
         let listed = Set(entries.map { PipelineRead.norm($0.id) })
         return settings.queued.filter { !listed.contains(PipelineRead.norm($0)) }
     }
 
-    /// Each item of root `n` a queued ask names that its read did not list, read by itself:
+    /// Each item of root `n` in `settings.queued` that its read did not list, read by itself:
     /// closed, or past what one sync reads.
     func readQueued(_ n: Int) {
         let root = roots[n]
@@ -501,7 +501,7 @@ final class PipelineSync {
             guard let response = r.response, r.errors.isEmpty,
                   let e = PipelineRead.item(response, root: root, label: n == 0 ? "#\(number)" : "\(root.slug)#\(number)",
                                             model: model) else {
-                notice("\(id), which an ask waits on, could not be read: \(r.why)")
+                notice("\(id), which an ask or attempt record names, could not be read: \(r.why)")
                 continue
             }
             entries.append(done(e))
@@ -571,7 +571,7 @@ final class PipelineSync {
         readQueued(api)
     }
 
-    /// Each issue of a tracked team a queued ask names that the read did not list, read by
+    /// Each issue of a tracked team in `settings.queued` that the read did not list, read by
     /// its team's key and its number, a hundred a query: closed, archived, or past what one
     /// sync reads.
     func readQueued(_ api: LinearAPI) {
@@ -592,7 +592,7 @@ final class PipelineSync {
                 entries += PipelineRead.linear(data, viewer: linearViewer, teams: settings.linearTeams,
                                                roots: roots).entries.map(done)
             } catch {
-                notice("Linear: the issues asks wait on could not be read: \(error.localizedDescription)")
+                notice("Linear: the issues asks or attempt records name could not be read: \(error.localizedDescription)")
             }
         }
     }
