@@ -40,6 +40,10 @@ const until = async (what, met, ms = 10000) => {
     await sleep(5);
   }
 };
+const within = (promise, what, ms = 5000) => {
+  let timer;
+  return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`never: ${what}`)), ms); })]).finally(() => clearTimeout(timer));
+};
 const listening = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 
 // Connections on this machine, each with the far end the test holds, which reads all
@@ -168,7 +172,7 @@ const ending = (s) => new Promise((resolve) => {
   side.once('end', () => resolve('end'));
 });
 
-await check('a connection closed while the kernel may have bytes of it to send is reset, by the last poll or what was written since, and one with none to send is not; one the job ends is closed once a poll finds what it was sent taken, and reset if it is not taken in time', async () => {
+await check('a connection closed while the kernel may have bytes of it to send is reset, by the last poll or what was written since, and one with none to send is not; one the job closes is closed once a poll finds what it was sent taken, its far end told nothing before, and reset if it is not taken in time', async () => {
   const job = {};
   const [polled, written, idle, ended, slow] = [await connected(), await connected(), await connected(), await connected(), await connected()];
   await until('the far ends to be there', () => [polled, written, idle, ended, slow].every((s) => far.some((f) => f.remotePort === s.localPort)));
@@ -181,15 +185,18 @@ await check('a connection closed while the kernel may have bytes of it to send i
   await after(2);
   written.write('x');
   const how = [polled, written, idle, ended].map(ending);
+  let heard = false;
+  how[3].then(() => { heard = true; });
   for (const s of [polled, written, idle]) s.destroy();
   outbound.close(ended);
   const since = Date.now();
   quick.close(slow);
-  assert.deepEqual(await Promise.all(how), ['ECONNRESET', 'ECONNRESET', 'end', 'end']);
+  assert.deepEqual(await Promise.all(how.slice(0, 3)), ['ECONNRESET', 'ECONNRESET', 'end']);
   await after(3);
-  assert.equal(ended.destroyed, false, 'kept while the kernel has what it was sent');
+  assert.deepEqual([ended.destroyed, heard], [false, false], 'kept while the kernel has what it was sent');
   sending.delete(ended);
   await until('it to be closed once that is taken', () => ended.destroyed);
+  assert.equal(await how[3], 'end');
   assert.equal(told.length, 0, 'and nothing is reset');
   await until('the one not taken to be reset', () => slow.destroyed);
   assert.ok(Date.now() - since >= 300, `after ${Date.now() - since} ms`);
@@ -229,6 +236,67 @@ await check('the connections a job ended are its own while the kernel has what t
   outbound.drop(h);
   assert.equal(h2.destroyed, true, 'the one ended and still held goes with its job');
   outbound.drop(v);
+});
+
+// How a socket ended here goes: 'close', or the error a reset of it was refused with,
+// which leaves it open for good and keeps the process from ever exiting.
+const gone = (s) => new Promise((resolve) => {
+  s.on('error', (e) => { if (e.syscall === 'reset') resolve(`reset refused: ${e.code}`); });
+  s.once('close', () => resolve('close'));
+});
+
+await check('a connection out the job ends and at once closes while the kernel may have bytes of it to send is reset, and one a dropped job ended with nothing to send is closed: none is reset while its shutdown is under way, which would leave its socket open for good', async () => {
+  const [job, other] = [{}, {}];
+  const [busy, idle] = [await connected(), await connected()];
+  for (const s of [busy, idle]) row(s, 0);
+  const { outbound, after } = counted({ bytes: 2 ** 20, held: () => [busy, idle].map((s) => row(s, 0)) });
+  outbound.add(job, busy);
+  outbound.add(other, idle);
+  await after(2);
+  const how = [busy, idle].map(gone);
+  const far = ending(busy);
+  // As an http request does that is torn down as it is sent.
+  busy.write('x');
+  busy.end();
+  busy.destroy();
+  idle.end();
+  outbound.drop(other);
+  assert.deepEqual(await within(Promise.all(how), 'both to go'), ['close', 'close']);
+  assert.equal(await far, 'ECONNRESET');
+  outbound.drop(job);
+});
+
+await check('a connection out the job ends while the kernel has what it was sent is ended once that is taken, and reset if it is not in time; a TLS socket over it ends as it does', async () => {
+  const job = {};
+  const [taken, untaken, wrapped] = [await connected(), await connected(), await connected()];
+  for (const s of [taken, untaken, wrapped]) row(s, 0);
+  const sending = new Map([[taken, 700], [untaken, 900], [wrapped, 300]]);
+  const { outbound, told, after } = counted({ bytes: 2 ** 20, held: () => [taken, wrapped].map((s) => row(s, sending.get(s) ?? 0)) });
+  const quick = createOutbound({ bytes: 2 ** 20, every: 20, linger: 300, queues: async () => [row(untaken, sending.get(untaken))], say: (j, text) => told.push({ job: j, text }) });
+  outbound.add(job, taken);
+  outbound.add(job, wrapped);
+  quick.add(job, untaken);
+  // The shutdown of TLS over a connection is all that is looked at of it here.
+  const secure = { destroyed: false, ended: 0, _final(cb) { this.ended++; cb(); } };
+  outbound.over(wrapped, secure);
+  await after(2);
+  const how = [taken, untaken].map(ending);
+  const [finished, untakenGone] = [new Promise((r) => taken.once('finish', () => r('finish'))), gone(untaken)];
+  taken.end();
+  untaken.end();
+  secure._final(() => {});
+  await after(3);
+  assert.deepEqual([taken.writableFinished, secure.ended], [false, 0], 'no end while the kernel has what they were sent');
+  sending.delete(taken);
+  sending.delete(wrapped);
+  assert.equal(await within(finished, 'the end once that is taken'), 'finish');
+  assert.equal(await how[0], 'end');
+  await until('the TLS socket\'s end', () => secure.ended === 1);
+  assert.equal(await within(untakenGone, 'the one not taken to go'), 'close');
+  assert.equal(await how[1], 'ECONNRESET');
+  assert.match(told.at(-1).text, /is reset: the far host had not taken what it was sent 0\.3 s after the job ended it$/);
+  outbound.drop(job);
+  quick.drop(job);
 });
 
 await check('a connection out over IPv6 is found as netstat prints it, its addresses written otherwise', async () => {
@@ -358,6 +426,14 @@ await check('polls that fail stop no job and are told of once: what was kept bac
   assert.equal(sockets[0].writableCorked, 0, 'let go while polls fail');
   assert.equal(ended.destroyed, true, 'and one ended is closed, nothing telling any longer when its bytes are taken');
   assert.deepEqual(told.map((t) => [t.job, t.text]), [[null, 'the kernel\'s queues of the connections out cannot be read (netstat went): until they can, a job may have 3 connections out open, and what they hold is not counted']]);
+  // Nor is one ended and at once closed reset: its shutdown has begun.
+  const shutting = await connected();
+  outbound.add({}, shutting);
+  const shuttingGone = gone(shutting);
+  shutting.write('w');
+  shutting.end();
+  shutting.destroy();
+  assert.equal(await within(shuttingGone, 'it to go'), 'close');
   outbound.add(job, sockets[1]);
   sockets[1].write('y');
   assert.equal(sockets[1].writableCorked, 0, 'and nothing is kept back');

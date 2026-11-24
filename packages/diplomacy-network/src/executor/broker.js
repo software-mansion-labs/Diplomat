@@ -482,6 +482,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   const plainWrap = (raw, opts, cb) => cb(null, raw);
   const tlsWrap = (raw, opts, cb) => {
     const secure = tls.connect({ socket: raw, servername: opts.host, ALPNProtocols: ['http/1.1'], ca: upstreamCa });
+    outbound.over(raw, secure);
     secure.once('error', cb);
     secure.once('secureConnect', () => {
       secure.off('error', cb);
