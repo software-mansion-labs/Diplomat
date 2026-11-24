@@ -640,6 +640,43 @@ enum PipelineTest {
               PipelineView.canStartFix(at(.candidate)) && !PipelineView.canStartFix(at(.human))
                   && !PipelineView.canStartFix(at(.candidate, writable: false))
                   && !PipelineView.canStartFix(at(.candidate, .pr)))
+        func detail(_ it: PipelineItem? = nil, badge: Store.PipelineBadge? = nil, enabled: Bool = true,
+                    forcedRate: Bool = false, forcedFracture: Bool = false, banned: String? = nil,
+                    unread: String? = nil, canStartFix: Bool = true) -> PipelineDetail {
+            PipelineDetail(item: it ?? at(.candidate), events: [], badge: badge, enabled: enabled,
+                           forcedRate: forcedRate, forcedFracture: forcedFracture, banned: banned,
+                           unread: unread, canRate: true, canFracture: true, canStartFix: canStartFix,
+                           fixUnknown: "its fix is unknown", error: nil,
+                           rate: {}, fracture: {}, startFix: {}, close: {})
+        }
+        var refusedItem = at(.candidate)
+        refusedItem.hold = "triaged as enhancement"
+        let stops: [(String, PipelineDetail, [Bool])] = [
+            ("nothing", detail(), [true, true, true]),
+            ("the pipeline off", detail(enabled: false), [false, false, false]),
+            ("a rate asked", detail(forcedRate: true), [false, true, true]),
+            ("a split asked", detail(forcedFracture: true), [true, false, false]),
+            ("work on it", detail(badge: .queued), [true, false, false]),
+            ("a banned author", detail(banned: "mallory"), [false, false, false]),
+            ("a root read in part", detail(unread: "o/r"), [false, false, true]),
+            ("a split refused", detail(refusedItem), [true, false, true]),
+            ("its fix unknown", detail(canStartFix: false), [true, true, false]),
+        ]
+        let wrong = stops.filter { [$0.1.rateEnabled, $0.1.fractureEnabled, $0.1.fixEnabled] != $0.2 }.map(\.0)
+        check("the detail's Rate now, Fracture and Start fix: each off only for what stops it"
+                  + (wrong.isEmpty ? "" : " - wrong for \(wrong)"), wrong.isEmpty)
+        let onBan = detail(refusedItem, banned: "mallory", unread: "o/r", canStartFix: false)
+        let inPart = detail(refusedItem, unread: "o/r", canStartFix: false)
+        check("…each tooltip saying why: the ban first, then a refused split, then a root read in part",
+              [onBan.rateTip, onBan.fractureTip, onBan.fixTip]
+                  == Array(repeating: "@mallory is on the prompt-injection ban list", count: 3)
+                  && [inPart.rateTip, inPart.fractureTip, inPart.fixTip]
+                      == ["The last sync did not read all of o/r", "No sync splits an issue triaged as enhancement",
+                          "its fix is unknown"]
+                  && [detail().rateTip, detail().fractureTip, detail().fixTip]
+                      == ["Rate it in a sync started now, ahead of every limit",
+                          "Split it into low-complexity child issues in a sync started now",
+                          "Queue its fix now, past its retry backoff"])
 
         print("\npipeline: connectors")
         func graph(_ cells: [(String, Int, Int)], _ edges: [(String, String, PipelineGraph.EdgeKind)])
@@ -790,11 +827,16 @@ enum PipelineTest {
         await store.applyPipeline(result([unhanded, review]))
         store.pinRoots(resolved, complete: false)
         Store.pipelineTickOverride = { _ in result([]) }
+        var aged = store.loadPipelineAttempts()
+        aged[unhanded.key]?.lastDispatchedAt = Date().addingTimeInterval(-2 * ReviewReconcile.retryMaxBackoff)
+        store.savePipelineAttempts(aged)
         await store.runPipelineSyncOnce()
         check("a root whose path did not resolve keeps its asks, unread", ids() == ["issues:o/else#90021"])
+        check("…and its records past their backoff", store.loadPipelineAttempts()[unhanded.key] != nil)
         store.pinRoots(resolved)
         await store.runPipelineSyncOnce()
-        check("…until a sync is handed every root", ids().isEmpty)
+        check("…until a sync is handed every root",
+              ids().isEmpty && store.loadPipelineAttempts()[unhanded.key] == nil)
         clearQueue()
         store.savePipelineAttempts([:])
         await store.applyPipeline(result([fix, fixLinear, review]), now: now)
@@ -1012,6 +1054,18 @@ enum PipelineTest {
         _ = await store.settleAgents()
         check("a run that reported its turn over concludes its record as it retires",
               AgentRegistry.load().isEmpty && store.loadPipelineAttempts()[fix.key]?.concludedAt != nil)
+        clearQueue()
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix]), now: t0)
+        let exited = AgentState.RunRecord(runID: AgentRegistry.newRunID(now: Date().timeIntervalSince1970),
+                                          dispatchedAt: Date().timeIntervalSince1970 - 600, prURL: issue,
+                                          kind: AgentTaskQueue.issuesAction, pid: 4242)
+        AgentRegistry.createRun(exited, prompt: "fix")
+        try? "1\n".write(to: AgentRegistry.donePath(exited.runID), atomically: true, encoding: .utf8)
+        _ = await store.settleAgents()
+        check("…one that only exited leaves it open, on the retry ladder",
+              AgentRegistry.load().isEmpty
+                  && store.loadPipelineAttempts()[fix.key].map { $0.concludedAt == nil } == true)
         if let claudeEnv { setenv("DIPLOMAT_CLAUDE_DIR", claudeEnv, 1) } else { unsetenv("DIPLOMAT_CLAUDE_DIR") }
         clearQueue()
         store.savePipelineAttempts([:])
@@ -1105,6 +1159,8 @@ enum PipelineTest {
         check("the screen's badges: an agent on an item outranks its queued work",
               Store.pipelineBadges(rows: [agent(issue)], waiting: [], asks: store.pipelineAsk(fix).map { [$0] } ?? [])
                   == ["o/r#90010": .agent])
+        check("…and a released one, though running, is on no item",
+              Store.pipelineBadges(rows: [finished(pr, .running, released: true)], waiting: [], asks: []).isEmpty)
         let periodEnv = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_SECS"]
         setenv("DIPLOMAT_PIPELINE_SECS", "5", 1)
         let floorSecs = Double((try? CoreAssets.pipeline())?.minSyncSecs ?? 60)
