@@ -314,6 +314,11 @@ def unsupported(repo: str, host: str, port: int | None = None) -> str:
             "no pool and none of its jobs is offered")
 
 
+def not_counted(path: str, repo: str, host: str, port: int) -> str:
+    return (f"{path} reaches {repo} on port {port} of {host}, which the Diplomacy Network "
+            "does not: the pool goes by another checkout of it")
+
+
 def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
                   unread: Iterable[str], identities: Mapping[str, str],
                   known: Iterable["Pool"]) -> tuple[list[dict], list[str]]:
@@ -324,10 +329,12 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
     Every linked repository is a pool: the roots, then what the Other repos checkouts
     name that no root does (``others``). A root or a checkout that was read and names no
     forge is no pool, and is in neither list; a repository on a host without rules
-    (:func:`has_rules`) is no pool either, and is named, and so is one named by a remote
-    on another port than the forge's API (:attr:`LocalRepo.web_port`). What could not be confirmed is
-    said as the daemon last had it (``known``, its snapshot's pools): the pool at a path that could
-    not be read (``unread``), and the pool of a repository whose forge login is unknown.
+    (:func:`has_rules`) is no pool either, and is named. A repository named by a remote on
+    another port than the forge's API (:attr:`LocalRepo.web_port`) makes no pool, and is
+    named as having none, or as not counted where another checkout of it makes one. What
+    could not be confirmed is said as the daemon last had it (``known``, its snapshot's
+    pools): the pool at a path that could not be read (``unread``), and the pool of a
+    repository whose forge login is unknown.
     The daemon leaves a pool the list omits, so the list is never cut short by what is
     unknown, and a repository taken out of Settings leaves its pool whatever else
     cannot be read."""
@@ -336,11 +343,16 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
     listed = {pool["id"] for pool in pools}
     nameless: dict[str, LocalRepo] = {}
     unruled: dict[str, LocalRepo] = {}
+    ported: dict[str, LocalRepo] = {}
     for repo in repos:
         pool = pool_for(repo.key)
-        if pool is not None and pool not in listed:
-            (nameless if repo.web_port is None and has_rules(repo.host)
-             else unruled).setdefault(pool, repo)
+        if pool is None:
+            continue
+        if repo.web_port is not None:
+            ported.setdefault(pool, repo)
+        elif pool not in listed:
+            (nameless if has_rules(repo.host) else unruled).setdefault(pool, repo)
+    kept = listed | set(nameless)
     unread = list(unread)
     for pool in known:
         if pool.id not in listed and (pool.path in unread or pool.id in nameless):
@@ -350,7 +362,10 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
                           "identity": pool.identity})
     return pools, [*map(unconfirmed_unread, unread),
                    *(unconfirmed_account(r.slug, r.host) for r in nameless.values()),
-                   *(unsupported(r.slug, r.host, r.web_port) for r in unruled.values())]
+                   *(unsupported(r.slug, r.host) for r in unruled.values()),
+                   *(not_counted(r.path, r.slug, r.host, r.web_port) if pool in kept
+                     else unsupported(r.slug, r.host, r.web_port)
+                     for pool, r in ported.items())]
 
 
 def pools_body(pools: list[dict]) -> dict:

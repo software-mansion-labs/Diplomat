@@ -251,6 +251,9 @@ LISTING = [
         ([ROOT, GHE], [SUB, GHE, API], [], BOTH),
         ([ROOT, PORTED], [], [], BOTH),
         ([PORTED], [API], [], BOTH),
+        # One project cloned over an https port and over ssh, its login unknown.
+        ([PORTED, API], [], [], {}),
+        ([API, PORTED], [], [], {}),
         ([GHE], [SUB], ["/src/ghe"], {}),
     )]
 
@@ -370,13 +373,23 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
         "", tested + "DN_LEASE_SECS=60, DN_TRANSPORT=loop", tested + "DN_TRANSPORT=loop"}
     assert any(row["unconfirmed"] for row in python["listing"])
     assert any(len(row["pools"]) >= 3 for row in python["listing"])
-    ported = [row for row, asked in zip(python["listing"], LISTING) if PORTED in asked["roots"]]
-    assert len(ported) == 6 and all(
-        any("is reached on port 8443 of gitlab.acme.example" in line
-            for line in row["unconfirmed"]) == (API not in asked["others"])
-        for row, asked in zip(ported, [a for a in LISTING if PORTED in a["roots"]]))
-    assert all(LAB not in [p["id"] for p in row["pools"]] for row in ported[0::2]), (
-        "not the pool the daemon had either")
+    ported = [(row, asked) for row, asked in zip(python["listing"], LISTING)
+              if PORTED in asked["roots"]]
+    assert len(ported) == 12
+    for row, asked in ported:
+        twin = API in asked["roots"] + asked["others"]
+        said = [line for line in row["unconfirmed"] if "port 8443" in line]
+        assert said == [
+            "/src/api-8443 reaches platform/api on port 8443 of gitlab.acme.example, which "
+            "the Diplomacy Network does not: the pool goes by another checkout of it" if twin
+            else "platform/api is reached on port 8443 of gitlab.acme.example, and the "
+            "Diplomacy Network reaches a forge on 443 only: it has no pool and none of its "
+            "jobs is offered"], "one sentence, whichever checkout comes first"
+        if not twin:
+            assert LAB not in [p["id"] for p in row["pools"]], "nor the pool the daemon had"
+        elif not asked["identities"]:
+            assert any(line.startswith("The login for platform/api") for line in
+                       row["unconfirmed"]), "the ssh checkout keeps the pool as it was"
     assert python["rules"].count(False) >= 10 and python["rules"].count(True) >= 15
     assert sum("has no rules for" in " ".join(row["unconfirmed"])
                for row in python["listing"]) == 6

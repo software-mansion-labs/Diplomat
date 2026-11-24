@@ -331,6 +331,20 @@ func networkSmoke() throws {
                                others: [], unread: [], identities: ["gitlab.acme.example": "me"],
                                known: []).pools.map(\.id) == ["gitlab.acme.example/p/api"],
           "an ssh port keeps the pool")
+    let ssh = PRRef.LocalRepo(owner: "p", repo: "api", path: "/src/api-ssh",
+                              host: "gitlab.acme.example")
+    for order in [ported + [ssh], [ssh] + ported] {
+        let both = NetworkPools.listing(roots: order, others: [], unread: [], identities: [:],
+                                        known: labKnown)
+        check(both.pools.map(\.id) == ["gitlab.acme.example/p/api"]
+                && both.unconfirmed == [
+                    "The login for p/api on gitlab.acme.example is not known yet: its pool "
+                        + "stays as the daemon last had it until it is",
+                    "/src/api reaches p/api on port 8443 of gitlab.acme.example, which the "
+                        + "Diplomacy Network does not: the pool goes by another checkout of it"],
+              "cloned over an https port and over ssh, its login unknown, the ssh checkout "
+                + "keeps the pool and the other is not counted, whichever comes first: \(both)")
+    }
     check(NetworkPools.body(githubOnly) == ["pools": [
         ["id": "github.com/o/r", "path": "/w/r", "forge": "github", "identity": "octocat"],
         ["id": "github.com/x/y", "path": "/w/y", "forge": "github", "identity": "octocat"]]],

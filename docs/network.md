@@ -373,8 +373,10 @@ starting with `gitlab.` or by `glab` being signed in to it. A repository whose r
 a port other than 443 (or http on one other than 80) has no pool, since the network reaches a
 forge on 443 only, and the screen says so; the rest of Diplomat works with it as with any other,
 `glab` reaching it by the `--api-host` it was logged in with. A remote over ssh on another port
-is the forge's own, and keeps its pool. A list the daemon refuses is shown
-with the daemon's own sentence and sent again once a minute, or as soon as it changes.
+is the forge's own, and keeps its pool. A project cloned both on such a port and another way
+keeps its pool by the other checkout, and the screen says the first is not counted. A list the
+daemon refuses is shown with the daemon's own sentence and sent again once a minute, or as soon
+as it changes.
 
 A pool's card says why this machine takes none of that pool's jobs while it takes none - docker
 or the model credential missing, Tor not ready, or a job of that pool it could not start - in
@@ -415,9 +417,13 @@ The daemon keeps an ended offer for a day. A job that ended while Diplomat was n
 longer than that reads *the network holds no such offer* when Diplomat is back: it is not
 priced, and what asked for it is offered again.
 
-A `config.json` that is there and cannot be read as settings switches nothing. Diplomat keeps
+A `config.json` that is there and cannot be read as settings switches nothing, and nor does one
+that was there and is gone: an editor that saves by renaming a new file into place, as vim and
+nvim do on Linux, leaves none for a moment. Only a config that was never there - none read by
+this Diplomat, and none named in `network-switch.json` - reads as the defaults. Diplomat keeps
 the switch as it last read it, withdraws and starts nothing on that reading, saves no setting
-over the file, and says so in the feed. That reading outlives Diplomat, in
+over a file that is there, and says so in the feed; a setting saved while the file is gone
+writes it anew. That reading outlives Diplomat, in
 `~/.diplomat/network-switch.json`: a Diplomat that starts on such a file holds the network on
 when the switch was last read as on, and on a machine where it never was the network is off.
 
