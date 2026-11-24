@@ -5,10 +5,10 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-llm-'));
+const scratch = scratchDir('dn-llm-');
 const STORE = path.join(scratch, 'keychain.json'); // "<service>|<account>" -> what `security -w` prints
 const PLAN = path.join(scratch, 'claude-plan.json'); // "auth" | "print" -> keychain entries / a file to write
 const CALLS = path.join(scratch, 'calls.log');

@@ -17,10 +17,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { POOL, check, createBench, passed, sleep, until } from './lib/daemons.mjs';
+import { scratchDir } from './lib/scratch.mjs';
 
 const TOR = process.env.DN_TEST_TOR === 'real';
 const DOCKER = process.env.DN_TEST_DOCKER === 'real';
@@ -268,7 +268,7 @@ async function realAdb() {
   }
 }
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-probe-'));
+const scratch = scratchDir('dn-probe-');
 try {
   const model = await modelHere(scratch);
   const what = [TOR ? 'real tor' : 'the loop transport', DOCKER ? 'real docker' : 'the stand-in docker', model ? 'the real agent' : DOCKER ? 'an agent without a model' : 'the stand-in agent'].join(', ');

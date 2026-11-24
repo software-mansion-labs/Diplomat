@@ -11,17 +11,17 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { onInterrupt } from '../../daemon-core/src/test-interrupt.js';
 import { generateIdentity, onionAddress } from '../src/core/identity.js';
+import { scratchDir } from './lib/scratch.mjs';
 
 const REAL = process.env.DN_TEST_TOR === 'real';
 const SEED = REAL && process.env.DN_TEST_TOR_SEED;
 // Short: tor's paths and the control port file live under it.
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-'));
+const tmp = scratchDir('dn-');
 const NET = path.join(tmp, 'net');
 if (!REAL) {
   process.env.DN_TOR = fileURLToPath(new URL('./lib/fake-tor.mjs', import.meta.url));
@@ -50,7 +50,6 @@ function cleanup() {
   for (const name of fs.readdirSync(tmp)) {
     try { process.kill(Number(fs.readFileSync(path.join(tmp, name, 'tor.pid'), 'utf8')), 'SIGKILL'); } catch {}
   }
-  fs.rmSync(tmp, { recursive: true, force: true });
 }
 onInterrupt(cleanup);
 

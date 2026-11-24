@@ -5,13 +5,13 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { check, passed } from './lib/daemons.mjs';
 import { LOG_MAX_BYTES, createLog } from '../../daemon-core/src/log.js';
 import { ENTRY_CHARS, openLog } from '../src/log.js';
+import { scratchDir } from './lib/scratch.mjs';
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-log-'));
+const dir = scratchDir('dn-log-');
 const size = (file) => fs.statSync(file).size;
 const lines = (file) => fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((line) => line.replace(/^\[[^\]]+\] /, ''));
 const LINE = '[2026-01-01T00:00:00.000Z] line 0000\n'.length;

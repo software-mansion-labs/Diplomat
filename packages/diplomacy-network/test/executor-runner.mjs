@@ -7,12 +7,12 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-runner-'));
+const scratch = scratchDir('dn-runner-');
 // The stand-in container shares the host's /proc, where stop.sh finds a job's processes
 // by run id: two of this file at once under one id would stop each other's jobs.
 const R = `runner-${process.pid}`;
@@ -245,6 +245,5 @@ cp -R '${plantedDir}/templates' "$DN_ROOT/usr/share/git-core/"
   for (const f of fs.existsSync(path.join(fakeDir, 'containers')) ? fs.readdirSync(path.join(fakeDir, 'containers')) : []) {
     try { execFileSync(FAKE, ['rm', '-f', f.replace(/\.json$/, '')]); } catch {}
   }
-  fs.rmSync(scratch, { recursive: true, force: true });
 }
 process.exit(0);

@@ -10,12 +10,12 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-jobf-'));
+const scratch = scratchDir('dn-jobf-');
 const R = `jf-${process.pid}`;
 const stateDir = path.join(scratch, 'state');
 const dockerBin = path.join(scratch, 'docker');
@@ -602,5 +602,4 @@ try {
   for (const dir of fs.readdirSync(container.runsDir, { withFileTypes: true })) {
     if (dir.isDirectory()) unstick(dir.name);
   }
-  fs.rmSync(scratch, { recursive: true, force: true });
 }

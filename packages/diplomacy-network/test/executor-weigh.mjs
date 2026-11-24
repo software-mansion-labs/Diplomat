@@ -5,10 +5,10 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-weigh-'));
+const scratch = scratchDir('dn-weigh-');
 process.env.DN_BASE_DIR = path.join(scratch, 'base');
 const { createWeighing, looksLikeAndroid } = await import('../src/executor/weigh.js');
 

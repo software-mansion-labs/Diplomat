@@ -6,15 +6,15 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { onInterrupt } from '../../daemon-core/src/test-interrupt.js';
 import { generateIdentity, onionAddress } from '../src/core/identity.js';
 import { createTransport } from '../src/transport/index.js';
 import { loopFaults } from '../src/transport/loop.js';
+import { scratchDir } from './lib/scratch.mjs';
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-'));
+const tmp = scratchDir('dn-');
 const dir = path.join(tmp, 'loop');
 const faults = loopFaults(dir);
 const MIB = 1 << 20;
@@ -24,7 +24,6 @@ const children = new Set();
 
 function cleanup() {
   for (const child of children) child.kill('SIGKILL');
-  fs.rmSync(tmp, { recursive: true, force: true });
 }
 onInterrupt(cleanup);
 
