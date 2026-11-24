@@ -39,6 +39,24 @@ query Issue($id: String!) {
   }
 }
 
+# Up to 100 issues by their ids, as they are now: the ones a sync is about to ask a fix for,
+# read again right before it does. ~5,800.
+query Recheck($ids: [ID!]) {
+  issues(first: 100, filter: { id: { in: $ids } }) {
+    nodes {
+      id identifier title description url updatedAt
+      state { type }
+      assignee { id name }
+      creator { name }
+      labels(first: 20) { pageInfo { hasNextPage } nodes { id name } }
+      parent { url }
+      children(first: 10) { nodes { url } }
+      attachments(first: 10) { pageInfo { hasNextPage } nodes { url } }
+      team { id key }
+    }
+  }
+}
+
 # The issues of any team an attachment links `url` (a PR) from, with their state: Linear
 # moves a linked issue when the PR merges.
 query Attached($url: String!) {

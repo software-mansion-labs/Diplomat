@@ -57,8 +57,8 @@ public enum PipelineLog {
 /// What a sync remembers between runs besides the trackers' labels, so a step taken or
 /// logged once is not taken or logged again. Keyed by item id.
 ///
-/// `decided`, `unsplit`, `splitting`, `rerated`, `cleared`, `retry` and `lineage` guard against
-/// repeating an outward step, so an item missing from a read keeps them: they go once it
+/// `decided`, `unsplit`, `splitting`, `parts`, `rerated`, `cleared`, `retry` and `lineage` guard
+/// against repeating an outward step, so an item missing from a read keeps them: they go once it
 /// is read merged or closed, or after `forgetDays` unseen. The rest only keeps the log
 /// from repeating itself, and also goes with an item missing from a read of every source.
 struct PipelineState: Codable, Equatable {
@@ -75,6 +75,8 @@ struct PipelineState: Codable, Equatable {
     var unsplit: [String: String] = [:]
     /// Per issue claimed for a split that has not finished, the parts filed so far.
     var splitting: [String: [String]] = [:]
+    /// Per issue being split, the parts the model answered, filed from here.
+    var parts: [String: PipelineParts] = [:]
     /// Per PR, each head Diplomat rated it again at, and that rating.
     var rerated: [String: [String: PipelineRating]] = [:]
     /// Per PR, the head Diplomat put `cleared` on at, until Diplomat takes it off.
@@ -99,8 +101,8 @@ struct PipelineState: Codable, Equatable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case labelsMade, decided, untracked, unsplit, splitting, rerated, cleared, retry, syncs, lineage, seen, holds,
-             clean, asked, notices
+        case labelsMade, decided, untracked, unsplit, splitting, parts, rerated, cleared, retry, syncs, lineage, seen,
+             holds, clean, asked, notices
     }
 
     /// A field missing is empty; one there but not of its type fails the whole file.
@@ -111,6 +113,7 @@ struct PipelineState: Codable, Equatable {
         untracked = try c.decodeIfPresent([String].self, forKey: .untracked) ?? []
         unsplit = try c.decodeIfPresent([String: String].self, forKey: .unsplit) ?? [:]
         splitting = try c.decodeIfPresent([String: [String]].self, forKey: .splitting) ?? [:]
+        parts = try c.decodeIfPresent([String: PipelineParts].self, forKey: .parts) ?? [:]
         rerated = try c.decodeIfPresent([String: [String: PipelineRating]].self, forKey: .rerated) ?? [:]
         cleared = try c.decodeIfPresent([String: String].self, forKey: .cleared) ?? [:]
         retry = try c.decodeIfPresent([String: PipelineRetry].self, forKey: .retry) ?? [:]
@@ -155,6 +158,7 @@ struct PipelineState: Codable, Equatable {
         untracked.removeAll { !live($0) }
         unsplit = unsplit.filter { live($0.key) }
         splitting = splitting.filter { live($0.key) }
+        parts = parts.filter { live($0.key) }
         rerated = rerated.filter { live($0.key) }
         cleared = cleared.filter { live($0.key) }
         retry = retry.filter { live($0.key) }
@@ -165,6 +169,18 @@ struct PipelineState: Codable, Equatable {
         // An effect key is `<kind>:<item id>`.
         asked = asked.filter { key, _ in key.split(separator: ":", maxSplits: 1).last.map { keep(String($0)) } ?? false }
     }
+}
+
+/// A split's answer: its parts, why, and whether the operator forced it.
+struct PipelineParts: Codable, Equatable {
+    struct Part: Codable, Equatable {
+        var title: String
+        var body: String
+    }
+
+    var parts: [Part]
+    var why: String
+    var forced: Bool
 }
 
 /// An item's ratings or splits failed in a row, and when the last did: the next is tried
