@@ -17,8 +17,10 @@
 // A socket closed while the kernel still has bytes of it to send would keep them, with
 // no process left to count or reset it, for minutes. So a connection out is reset as it
 // is closed if the kernel may have any, by the last poll and what was written since;
-// one the job ends is kept open instead until a poll finds its bytes taken, counted as
-// the job's, and reset once it is OUT_LINGER_MS past its end.
+// one the job closes or ends is kept open instead until a poll finds its bytes taken,
+// counted as the job's, and reset once it is OUT_LINGER_MS past its end. Its shutdown
+// waits for that too: a shutdown waits for room in the kernel's buffer, and a socket
+// whose shutdown is under way cannot be reset (libuv refuses, and node never closes it).
 
 import fs from 'node:fs/promises';
 import os from 'node:os';
@@ -134,8 +136,9 @@ export async function systemQueues() {
 
 /// `createOutbound()` makes the count of the connections out of all jobs. `add(job, raw)`
 /// counts `raw`, a connected TCP socket, as the job's; what TLS over it writes is not seen
-/// as it is written, only in the polls. `close(raw)` ends a connection the job is done
-/// with. `full(job)` is true while polls fail and the job has `fallback` connections out
+/// as it is written, only in the polls; `over(raw, secure)` has the TLS socket over it
+/// shut down as `raw` is. `close(raw)` ends a connection the job is done with.
+/// `full(job)` is true while polls fail and the job has `fallback` connections out
 /// open. `drop(job)` resets the job's connections and forgets them. `say(job, text, why)` is
 /// told of each connection reset, `why` 'ended' or 'full' as the reset is for a connection
 /// past the linger or past the whole, and with `job` null of polls that fail and work again.
@@ -155,6 +158,33 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
   // written since it began.
   const sending = (entry) => entry.sending > 0 || entry.raw.bytesWritten > entry.sentAt;
   const to = (entry) => `a connection out of this job to ${entry.remoteText}:${entry.remotePort}`;
+  // One whose shutdown has begun, with nothing to send or while polls fail, is closed.
+  const reset = (entry) => (entry.shut ? entry.raw.destroy() : entry.raw.resetAndDestroy());
+
+  // What the job ended or closed while the kernel had bytes of it to send, once they are
+  // taken or can no longer be told.
+  function settle(entry) {
+    entry.closing = 0;
+    if (entry.closed) return entry.raw.destroy();
+    for (const shut of entry.shuts.splice(0)) shut();
+    return undefined;
+  }
+
+  // The shutdown that ends a stream's writing, held while the kernel may have bytes of
+  // the connection to send.
+  function deferShutdown(stream, entry) {
+    const final = stream._final;
+    stream._final = function shutting(cb) {
+      const shut = () => {
+        entry.shut = true;
+        final.call(this, cb);
+      };
+      if (this.destroyed || failing || !sending(entry)) return shut();
+      entry.closing ||= Date.now();
+      entry.shuts.push(shut);
+      return undefined;
+    };
+  }
 
   function schedule(delay) {
     const at = Date.now() + delay;
@@ -217,7 +247,7 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
         for (const state of jobs.values()) release(state, Infinity);
       }
       // Nothing tells any longer when what a closing connection was sent is taken.
-      for (const state of jobs.values()) for (const entry of state.entries) if (entry.closing) entry.raw.destroy();
+      for (const state of jobs.values()) for (const entry of state.entries) if (entry.closing) settle(entry);
       if (jobs.size) schedule(every);
       return;
     }
@@ -244,10 +274,10 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
           entry.sending = row.sending;
         }
         if (entry.closing && !entry.raw.destroyed) {
-          if (!sending(entry)) entry.raw.destroy();
+          if (!sending(entry)) settle(entry);
           else if (last - entry.closing >= linger) {
             say(state.job, `${to(entry)} is reset: the far host had not taken what it was sent ${linger / 1000} s after the job ended it`, 'ended');
-            entry.raw.resetAndDestroy();
+            reset(entry);
           }
         }
         if (!entry.raw.destroyed) state.queued += entry.queued;
@@ -268,7 +298,7 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
       }
       if (!worst) break;
       say(worst.job, `${to(fullest)} is reset: the connections out of all jobs held more than the ${bytes / 2 ** 20} MiB of this machine's memory they may, and this job's ${(worst.queued / 2 ** 20).toFixed(1)} MiB the most past its share`, 'full');
-      fullest.raw.resetAndDestroy();
+      reset(fullest);
       total -= fullest.queued;
       worst.queued -= fullest.queued;
     }
@@ -285,7 +315,8 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     if (!jobs.has(job)) jobs.set(job, { job, entries: new Set(), est: 0, queued: 0 });
     const state = jobs.get(job);
     const entry = {
-      raw, state, wrote: 0, base: 0, queued: 0, sending: 0, sentAt: raw.bytesWritten, corked: false, closing: 0,
+      raw, state, wrote: 0, base: 0, queued: 0, sending: 0, sentAt: raw.bytesWritten, corked: false,
+      closing: 0, closed: false, shuts: [], shut: false,
       local: plainAddress(raw.localAddress), localPort: raw.localPort,
       remote: plainAddress(raw.remoteAddress), remoteText: raw.remoteAddress, remotePort: raw.remotePort,
     };
@@ -301,9 +332,10 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     };
     const destroy = raw._destroy;
     raw._destroy = function closing(err, cb) {
-      if (this._handle && sending(entry)) this.resetAndClosing = true;
+      if (this._handle && sending(entry) && !entry.shut) this.resetAndClosing = true;
       return destroy.call(this, err, cb);
     };
+    deferShutdown(raw, entry);
     raw.once('close', () => forget(entry));
     schedule(every);
   }
@@ -311,9 +343,13 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
   function close(raw) {
     const entry = entryOf.get(raw);
     if (failing || !sending(entry)) return raw.destroy();
-    entry.closing = Date.now();
-    raw.end();
+    entry.closing ||= Date.now();
+    entry.closed = true;
     return undefined;
+  }
+
+  function over(raw, secure) {
+    deferShutdown(secure, entryOf.get(raw));
   }
 
   function full(job) {
@@ -325,8 +361,8 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     const state = jobs.get(job);
     if (!state) return;
     jobs.delete(job);
-    for (const entry of state.entries) entry.raw.resetAndDestroy();
+    for (const entry of state.entries) reset(entry);
   }
 
-  return { add, close, full, drop, fallback };
+  return { add, over, close, full, drop, fallback };
 }

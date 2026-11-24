@@ -846,10 +846,11 @@ four things and starts the job:
   whole past by up to that share until then. Between two polls the jobs may be past it
   by what the link brings in 500 ms: 60 MiB at 1 Gbit/s, and 76 MiB measured with 256
   downloads left unread and 25 ms to the far host (108 MiB queued at the most, 152 MiB
-  of kernel buffers). A connection out that the job ends while the kernel may have bytes
-  of it to send is ended and still the job's, closed once a poll finds them taken and
-  reset if they are not 30 s on; one closed otherwise with bytes to send, a removed job's
-  among them, is reset, which frees them at once. A poll costs about
+  of kernel buffers). A connection out that the job ends or closes while the kernel may
+  have bytes of it to send is still the job's, and its end is held until a poll finds
+  them taken (a socket whose end is under way cannot be reset); it is reset if they are
+  not taken 30 s on. One closed otherwise with bytes to send, a removed job's among
+  them, is reset, which frees them at once. A poll costs about
   6 ms of CPU on Linux with 2,000 connections on the host, and 2 ms, netstat's included,
   on macOS with 500. A poll that fails or cannot be read stops nothing: it is logged, as
   is the first that works again, and until then nothing is counted or kept back, and a
