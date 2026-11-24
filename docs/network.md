@@ -375,9 +375,11 @@ nowhere yet. **Stop** asks the daemon what runs here first: a run that ended sin
 drew it is neither stopped nor withdrawn, and the card says so. **Restart daemon** leaves the
 jobs in this machine's containers running; the daemon that starts takes them up at once, before
 it has built its image or read the model credential, and a job whose run ended meanwhile is
-stopped. If docker does not answer for a minute, the jobs go back to the pool at no cost to
-their attempts. So does a job whose container a reboot or a restart of Docker Desktop stopped
-before it finished; one that had finished by then ends as it finished.
+stopped. If docker does not answer for a minute - when the daemon starts or while a job runs -
+the jobs go back to the pool at no cost to their attempts. So does a job whose container a
+reboot or a restart of Docker Desktop stopped before it finished, while the daemon ran or before
+it started; one that had finished by then ends as it finished. A job whose container stopped
+while the container's relay ran on stopped itself, and that costs its requester an attempt.
 
 The daemon leaves a pool that is missing from the list Diplomat gives it, so what Diplomat
 cannot confirm is never dropped from that list. A repo root or a checkout under Other repos
