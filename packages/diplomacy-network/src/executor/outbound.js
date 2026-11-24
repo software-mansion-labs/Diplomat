@@ -212,10 +212,10 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
   function release(state, limit) {
     for (const entry of state.entries) {
       if (!entry.corked) continue;
-      const kept = entry.raw.writableLength;
-      if (state.est + kept > limit && state.est > 0) continue;
+      if (state.est + entry.kept > limit && state.est > 0) continue;
       entry.corked = false;
-      state.est += kept;
+      state.est += entry.kept;
+      entry.kept = 0;
       entry.raw.uncork();
     }
   }
@@ -231,11 +231,13 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     timer = null;
     polling = true;
     // What is written from here on is not in what the kernel is about to say, and
-    // neither is what node has not handed it yet; a kept-back connection's bytes are
-    // counted as it is let go.
+    // neither is what node is still handing it, which goes in as the kernel has room
+    // whether or not the connection is kept back; what node keeps back is counted as it
+    // is let go, which ending the socket does too.
     for (const state of jobs.values()) {
       for (const entry of state.entries) {
-        entry.base = entry.wrote - (entry.corked ? 0 : entry.raw.writableLength);
+        if (!entry.raw.writableCorked) entry.kept = 0;
+        entry.base = entry.wrote - (entry.raw.writableLength - entry.kept);
         entry.asked = entry.raw.bytesWritten - entry.raw.writableLength;
       }
     }
@@ -319,7 +321,7 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     if (!jobs.has(job)) jobs.set(job, { job, entries: new Set(), est: 0, queued: 0 });
     const state = jobs.get(job);
     const entry = {
-      raw, state, wrote: 0, base: 0, queued: 0, sending: 0, sentAt: raw.bytesWritten, asked: raw.bytesWritten, corked: false,
+      raw, state, wrote: 0, base: 0, queued: 0, sending: 0, sentAt: raw.bytesWritten, asked: raw.bytesWritten, corked: false, kept: 0,
       closing: 0, closed: false, shuts: [], shut: false,
       local: plainAddress(raw.localAddress), localPort: raw.localPort,
       remote: plainAddress(raw.remoteAddress), remoteText: raw.remoteAddress, remotePort: raw.remotePort,
@@ -332,6 +334,7 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
       entry.wrote += n;
       state.est += n;
       if (!failing && !entry.corked && state.est >= share()) hold(state);
+      if (entry.corked) entry.kept += n;
       return write.call(this, chunk, encoding, cb);
     };
     const destroy = raw._destroy;

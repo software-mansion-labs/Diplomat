@@ -11,6 +11,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import { Writable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { scratchDir } from './lib/scratch.mjs';
 const RELAY = fileURLToPath(new URL('../image/relay.mjs', import.meta.url));
@@ -448,6 +449,81 @@ await check('what node has not handed the kernel yet when it is asked is counted
     outbound.drop(job);
     deaf.close();
   }
+});
+
+// A connection whose kernel takes what node hands it while it has `room`, and no more.
+let stubs = 0;
+const handed = () => {
+  const s = new Writable({ highWaterMark: 16 * 1024, write: (chunk, encoding, cb) => { s.handing.push([chunk.length, cb]); s.take(); } });
+  Object.assign(s, {
+    localAddress: '127.0.0.1', localPort: ++stubs, remoteAddress: '127.0.0.1', remotePort: 1, room: 0, kernel: 0, handed: 0, handing: [],
+    take() {
+      while (s.handing.length > 0 && s.kernel + s.handing[0][0] <= s.room) {
+        const [n, cb] = s.handing.shift();
+        s.kernel += n;
+        s.handed += n;
+        cb();
+      }
+    },
+    resetAndDestroy: () => s.destroy(),
+  });
+  Object.defineProperty(s, 'bytesWritten', { get: () => s.handed + s.writableLength });
+  return s;
+};
+
+await check('what node is still handing the kernel is counted as written, kept back or not, and what it keeps back as it is let go: a kernel with no room, as under memory pressure, that has room once it is asked takes the job\'s share and no more; a connection whose handing and keeping fit the share is let go; one ended while kept back counts all it has as handing', async () => {
+  const KiB = 1024;
+  const job = {};
+  let polls = 0;
+  let asked = () => {};
+  const conns = [];
+  const outbound = createOutbound({ bytes: 128 * KiB, every: 1000, soonest: 1000, queues: async () => {
+    const rows = conns.map((c) => row(c, c.kernel));
+    polls++;
+    asked();
+    return rows;
+  } });
+  const poll = async () => { const at = polls; await until('a poll', () => polls > at); };
+
+  // 120 KiB handed and not taken, 64 KiB kept back; room as the kernel is asked.
+  const a = handed();
+  conns.push(a);
+  outbound.add(job, a);
+  asked = () => { a.room = Infinity; a.take(); };
+  a.write(Buffer.alloc(120 * KiB));
+  a.write(Buffer.alloc(64 * KiB));
+  assert.ok(a.writableCorked > 0, 'the second write reaches the share');
+  await poll();
+  assert.equal(a.kernel, 120 * KiB, 'what node was handing the kernel, and nothing that was kept back');
+  outbound.drop(job);
+
+  // 64 KiB handed, never taken, and 64 KiB kept back: together the share.
+  const b = handed();
+  conns.splice(0, 1, b);
+  outbound.add(job, b);
+  asked = () => {};
+  b.write(Buffer.alloc(64 * KiB));
+  b.write(Buffer.alloc(64 * KiB));
+  assert.ok(b.writableCorked > 0);
+  await poll();
+  assert.equal(b.writableCorked, 0, 'let go');
+  outbound.drop(job);
+
+  // One connection hands 32 KiB; another 64 KiB, keeps 64 KiB back, and is ended, which
+  // hands that too: 160 KiB, past the share, and the first stays kept back.
+  const [c, d] = [handed(), handed()];
+  conns.splice(0, 1, c, d);
+  outbound.add(job, c);
+  outbound.add(job, d);
+  c.write(Buffer.alloc(32 * KiB));
+  d.write(Buffer.alloc(64 * KiB));
+  d.write(Buffer.alloc(64 * KiB));
+  assert.ok(c.writableCorked > 0 && d.writableCorked > 0);
+  d.end();
+  assert.equal(d.writableCorked, 0);
+  await poll();
+  assert.ok(c.writableCorked > 0, 'still kept back');
+  outbound.drop(job);
 });
 
 await check('polls that fail stop no job and are told of once: what was kept back goes, a job may have the fallback\'s connections out open and no more, and polls that work again are told of too', async () => {
