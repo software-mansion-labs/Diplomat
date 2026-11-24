@@ -87,7 +87,7 @@ Object.assign(process.env, forge.env, {
   GLAB_CONFIG_DIR: path.join(scratch, 'glab'),
   DN_FORGE_ORIGINS: JSON.stringify({ ...JSON.parse(forge.env.DN_FORGE_ORIGINS), 'gitlab.file.example': strangerOrigin, 'gitlab.dead.example': 'http://127.0.0.1:9',
     'gitlab.other.example': strangerOrigin, 'gitlab.keyring.example': strangerOrigin, 'gitlab.shell.example': strangerOrigin, 'ghes.other.example': strangerOrigin,
-    ...Object.fromEntries(['bare', 'uri', 'gl', 'second', 'url-a', 'url-c'].map((n) => [`gitlab.${n}.example`, strangerOrigin])),
+    ...Object.fromEntries(['bare', 'uri', 'gl', 'second', 'url-a', 'url-c', ...[0, 1, 2, 3, 4, 5, 6, 7, 8].map((i) => `repo${i}`)].map((n) => [`gitlab.${n}.example`, strangerOrigin])),
     'gitlab.port.example:8443': strangerOrigin, 'gitlab.quoted.example:8443': strangerOrigin }),
   DN_FORGE_RESPONSE_MAX_BYTES: String(11 * 2 ** 20),
   DN_FORGE_TIMEOUT_MS: '1500',
@@ -208,7 +208,7 @@ await check('a write carries its checked body, and a pinned answer is cut to its
   const [arrived] = seen(before);
   assert.equal(arrived.method, 'POST');
   assert.equal(arrived.headers['content-type'], 'application/json; charset=utf-8');
-  assert.deepEqual(JSON.parse(arrived.body), { commit_id: 'abc123', body: 'héllo' });
+  assert.deepEqual(JSON.parse(arrived.body), { commit_id: 'abc123', body: '<!-- sent through the Diplomacy Network -->\nhéllo' });
   const user = await perform(rules('review', 'pr-578'), gh('GET', '/user'));
   assert.deepEqual(JSON.parse(user.bytes), { login: 'me', id: 7, node_id: 'U_me', type: 'User', name: 'Me', html_url: 'https://github.com/me' });
   // A list is cut entry by entry, and an answer that is neither an object nor a list of them is not passed on.
@@ -333,10 +333,10 @@ await check('the token is read from gh once, kept briefly, and appears in no log
   await failing(perform(glRules('gitlab.dead.example'), request('gitlab.dead.example'), {}, { forge: 'gitlab', host: 'gitlab.dead.example' }), /unreachable/);
 
   // The token is the host's that glab calls its default, by whichever variable; a GITLAB_URL
-  // naming another host makes it nobody's.
+  // or a GITLAB_REPO naming another host makes it nobody's.
   const shell = { GITLAB_HOST: process.env.GITLAB_HOST };
   const named = async (vars, host, token) => {
-    for (const name of ['GITLAB_HOST', 'GITLAB_URI', 'GL_HOST', 'GITLAB_URL']) delete process.env[name];
+    for (const name of ['GITLAB_HOST', 'GITLAB_URI', 'GL_HOST', 'GITLAB_URL', 'GITLAB_REPO']) delete process.env[name];
     Object.assign(process.env, vars);
     const at = strangers.length;
     const sent = perform(glRules(host), request(host), {}, { forge: 'gitlab', host });
@@ -354,8 +354,14 @@ await check('the token is read from gh once, kept briefly, and appears in no log
     await named({ GITLAB_HOST: 'gitlab.first.example', GL_HOST: 'gitlab.second.example' }, 'gitlab.second.example', null);
     await named({ GITLAB_HOST: 'gitlab.url-a.example', GITLAB_URL: 'https://gitlab.url-b.example' }, 'gitlab.url-a.example', null);
     await named({ GITLAB_HOST: 'gitlab.url-c.example', GITLAB_URL: 'https://gitlab.url-c.example/api' }, 'gitlab.url-c.example', 'glpat-from-the-shell');
+    // A host whose token is read once is not asked again for a while, so each case has its own.
+    const repos = [['corp.example/g/p', null], ['https://corp.example/g/p', null], ['git@corp.example:g/p.git', null], ['corp:8443/g/p', null],
+      ['g/p', 'glpat-from-the-shell'], ['group/sub/p', 'glpat-from-the-shell'], ['GitLab.Repo6.example/g/p', 'glpat-from-the-shell'], ['https://gitlab.repo7.example/g/p', 'glpat-from-the-shell'],
+      // OWNER/REPO names no host, a dot in OWNER or not.
+      ['corp.example/p', 'glpat-from-the-shell']];
+    for (const [i, [GITLAB_REPO, token]] of repos.entries()) await named({ GITLAB_HOST: `gitlab.repo${i}.example`, GITLAB_REPO }, `gitlab.repo${i}.example`, token);
   } finally {
-    for (const name of ['GITLAB_URI', 'GL_HOST', 'GITLAB_URL']) delete process.env[name];
+    for (const name of ['GITLAB_URI', 'GL_HOST', 'GITLAB_URL', 'GITLAB_REPO']) delete process.env[name];
     Object.assign(process.env, shell);
   }
 
