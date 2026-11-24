@@ -37,6 +37,7 @@ const CASES = [
   ['a million objects in a member nobody reads', line(`"x":[${fill('{},')}0]`), null],
   ['two million lists inside one another', line(`"x":${'['.repeat(N / 2)}${']'.repeat(N / 2)}`), null],
   ['a line that looks like a result for every few bytes', fill('{"a":{"type":"result"}}\n'), null],
+  ['a result written otherwise after one written as the agent writes it', `${line('"x":0')}{"type": "result","is_error":true,"result":"spaced"}\n`, {}],
 ];
 
 // A daemon whose engine is the script `docker`, over one run with `files` in its

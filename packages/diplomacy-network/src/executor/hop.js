@@ -35,6 +35,8 @@ const LEAST_BYTES = 2 * 1024;
 // What a connection's bytes are kept in while nothing takes them: copied together, so that
 // however small the frames they came in, they cost the daemon about what they count.
 const STASH_BYTES = 16 * 1024;
+/// How long an ended hop waits for the relay to end its side before it is closed.
+export const HOP_LINGER_MS = 5000;
 
 /// What one connection may have on its way each way: granted to the relay and read by
 /// the broker but not yet passed on, and sent but not yet passed on to the job. A
@@ -49,7 +51,8 @@ export const HOP_JOB_BYTES = 14 * 1024 * 1024;
 export const HOP_STRANGER_BYTES = 2 * 1024 * 1024;
 
 /// A job that keeps more than its share on the hop for this long, while another job is
-/// held back by it, loses its newest connections until it is within its share. A job
+/// held back by it, loses the connections that hold the most of it until it is within
+/// its share, and none that hold nothing, which would free nothing. A job
 /// gets no room while it is past its share, so one whose connections are read is
 /// within it as soon as what it was sent is.
 export const HOP_RECLAIM_MS = 2000;
@@ -59,7 +62,7 @@ export const HOP_RECLAIM_MS = 2000;
 /// counted as no job's, `raw` the socket the frames come on, `first` what was read of it
 /// already. `seat(link, job)` counts it as the job's from then on. `held(job)` is what a
 /// job's connections have on the hop, and `held()` `{ jobs, strangers }`.
-export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANGER_BYTES, window = HOP_WINDOW, strangerWindow = HOP_STRANGER_WINDOW, reclaimMs = HOP_RECLAIM_MS } = {}) {
+export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANGER_BYTES, window = HOP_WINDOW, strangerWindow = HOP_STRANGER_WINDOW, reclaimMs = HOP_RECLAIM_MS, lingerMs = HOP_LINGER_MS } = {}) {
   const groups = {
     jobs: { held: 0, limit: jobBytes },
     strangers: { held: 0, limit: strangerBytes },
@@ -103,7 +106,8 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
       if (![...waiting].some((link) => link.behind())) return;
       const share = Math.floor(jobBytes / jobs.size);
       for (const bucket of jobs.values()) {
-        for (const link of [...bucket.links].reverse()) {
+        const fullest = [...bucket.links].sort((a, b) => b.holding() - a.holding());
+        for (const link of fullest) {
           if (bucket.held <= share) break;
           link.destroy(new Error('the job had more than its share of the hop for too long'));
         }
@@ -281,20 +285,32 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
           jobs.delete(bucket.job);
           wake();
         }
-        if (err || raw.writableLength === 0) raw.destroy();
-        else raw.destroySoon();
+        // A socket closed while the relay still sends is reset, and the relay loses what
+        // it had not read yet of the broker's: the hop is ended instead, and closed when
+        // the relay ends its side too.
+        if (err) raw.destroy();
+        else {
+          raw.end();
+          setTimeout(() => raw.destroy(), lingerMs).unref();
+        }
         done(err);
       },
     });
     strangers.links.add(link);
     link.go = () => { grant(); send(); };
     link.behind = () => bucket !== strangers && bucket.held < shareOf(bucket);
+    link.holding = () => held;
     link.seat = (job) => {
       if (dead || bucket !== strangers) return;
       bucket.held -= held;
       bucket.group.held -= held;
       bucket.links.delete(link);
-      if (!jobs.has(job)) jobs.set(job, { group: groups.jobs, held: 0, links: new Set(), window, job });
+      if (!jobs.has(job)) {
+        jobs.set(job, { group: groups.jobs, held: 0, links: new Set(), window, job });
+        // The others' shares shrink as a job comes: how long they are past them counts from now.
+        clearTimeout(reclaim);
+        reclaim = null;
+      }
       bucket = jobs.get(job);
       bucket.links.add(link);
       bucket.held += held;

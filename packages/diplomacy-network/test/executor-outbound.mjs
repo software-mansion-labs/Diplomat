@@ -6,11 +6,14 @@
 // Run: node test/executor-outbound.mjs
 
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+const RELAY = fileURLToPath(new URL('../image/relay.mjs', import.meta.url));
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-outbound-'));
 Object.assign(process.env, {
   DN_BASE_DIR: path.join(scratch, 'base'), DN_BROKER_BIND: '127.0.0.1', DN_RELAY_HOST: '127.0.0.1',
@@ -18,8 +21,8 @@ Object.assign(process.env, {
 });
 const { createBroker } = await import('../src/executor/broker.js');
 const { createCA } = await import('../src/executor/ca.js');
-const { OUT_BYTES, OUT_FALLBACK, OUT_POLL_MS, OUT_SOONEST_MS, createOutbound, parseNetstat, parseProc, plainAddress, systemQueues } = await import('../src/executor/outbound.js');
-assert.deepEqual([OUT_BYTES, OUT_POLL_MS, OUT_SOONEST_MS, OUT_FALLBACK], [32 * 2 ** 20, 500, 100, 32], 'what the README states');
+const { OUT_BYTES, OUT_FALLBACK, OUT_LINGER_MS, OUT_POLL_MS, OUT_SOONEST_MS, createOutbound, parseNetstat, parseProc, plainAddress, systemQueues } = await import('../src/executor/outbound.js');
+assert.deepEqual([OUT_BYTES, OUT_POLL_MS, OUT_SOONEST_MS, OUT_FALLBACK, OUT_LINGER_MS], [32 * 2 ** 20, 500, 100, 32, 30000], 'what the README states');
 
 let checks = 0;
 const check = async (name, fn) => {
@@ -32,16 +35,17 @@ const check = async (name, fn) => {
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const until = async (what, met, ms = 10000) => {
-  for (const end = Date.now() + ms; !met();) {
+  for (const end = Date.now() + ms; !(await met());) {
     if (Date.now() > end) assert.fail(`never: ${what}`);
     await sleep(5);
   }
 };
 const listening = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 
-// Connections on this machine, each with the far end the test holds.
+// Connections on this machine, each with the far end the test holds, which reads all
+// and ends nothing of its own.
 const far = [];
-const sink = net.createServer((s) => {
+const sink = net.createServer({ allowHalfOpen: true }, (s) => {
   s.on('error', () => {});
   far.push(s);
   s.resume();
@@ -53,43 +57,46 @@ const connected = () => new Promise((resolve, reject) => {
 });
 // A connection's addresses are gone from its socket once it is closed, and not from the kernel.
 const tuples = new WeakMap();
-const row = (s, bytes) => {
+const row = (s, bytes, sending = bytes) => {
   if (!tuples.has(s)) tuples.set(s, { local: plainAddress(s.localAddress), localPort: s.localPort, remote: plainAddress(s.remoteAddress), remotePort: s.remotePort });
-  return { ...tuples.get(s), bytes };
+  return { ...tuples.get(s), bytes, sending };
 };
 
-await check('the kernel\'s tables are read as Linux and macOS write them: each connection by its addresses and ports with what is queued either way, listening sockets left out, and a table of anything else refused', async () => {
+await check('the kernel\'s tables are read as Linux and macOS write them: each connection by its addresses and ports with what is queued either way and what to be sent, listening sockets left out, and a table of anything else refused', async () => {
   const proc = [
     '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode',
     '   0: 0100007F:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1 0 100 0 0 10 0',
     '   1: 0100007F:D431 22D8B85D:01BB 01 00000010:00000020 00:00000000 00000000  1000        0 2 1 0 20 4 30 10 -1',
   ].join('\n');
-  assert.deepEqual(parseProc(proc), [{ local: '127.0.0.1', localPort: 54321, remote: '93.184.216.34', remotePort: 443, bytes: 48 }]);
+  assert.deepEqual(parseProc(proc), [{ local: '127.0.0.1', localPort: 54321, remote: '93.184.216.34', remotePort: 443, bytes: 48, sending: 16 }]);
   const proc6 = [
     '  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode',
     '   0: B80D0120000000000000000001000000:9C40 B80D0120000000000000000002000000:01BB 01 00100000:00000000 00:00000000 00000000  1000        0 3 1 0 20 4 30 10 -1',
     '   1: 0000000000000000FFFF00000100007F:9C41 0000000000000000FFFF0000020000C0:0050 01 00000000:00000001 00:00000000 00000000  1000        0 4 1 0 20 4 30 10 -1',
   ].join('\n');
   assert.deepEqual(parseProc(proc6), [
-    { local: plainAddress('2001:db8::1'), localPort: 40000, remote: plainAddress('2001:db8::2'), remotePort: 443, bytes: 0x100000 },
-    { local: plainAddress('::ffff:127.0.0.1'), localPort: 40001, remote: plainAddress('::ffff:192.0.0.2'), remotePort: 80, bytes: 1 },
+    { local: plainAddress('2001:db8::1'), localPort: 40000, remote: plainAddress('2001:db8::2'), remotePort: 443, bytes: 0x100000, sending: 0x100000 },
+    { local: plainAddress('::ffff:127.0.0.1'), localPort: 40001, remote: plainAddress('::ffff:192.0.0.2'), remotePort: 80, bytes: 1, sending: 0 },
   ]);
   assert.equal(plainAddress('2001:db8::1'), '2001:db8:0:0:0:0:0:1');
+  assert.equal(plainAddress('FE80::0435:995e:da13:fd9%en0'), 'fe80:0:0:0:435:995e:da13:fd9');
   assert.throws(() => parseProc('Inter-|   Receive\n face |bytes'), /not a table of TCP sockets/);
   const netstat = [
     'Active Internet connections (including servers)',
-    'Proto Recv-Q Send-Q  Local Address          Foreign Address        (state)    ',
-    'tcp4       0  12345  192.168.1.20.51122     93.184.216.34.443      ESTABLISHED',
-    'tcp6     700      0  2001:db8:85a3:8d3.51123 2606:4700:4700::.443  ESTABLISHED',
-    'tcp6       0      0  ::1.51124              ::1.8080               ESTABLISHED',
-    'tcp4       0      0  *.22                   *.*                    LISTEN     ',
-    'tcp4       0      0  *.62926                *.*                    CLOSED     ',
-    'tcp4       0      0  *.*                    *.*                    CLOSED     ',
+    'Proto Recv-Q Send-Q  Local Address                                 Foreign Address                               (state)    ',
+    'tcp4       0  12345  192.168.1.20.51122                            93.184.216.34.443                             ESTABLISHED',
+    'tcp6     700     20  2001:db8:85a3:8d3:1319:8a2e:370:7348.51123      2606:4700:4700::1111.443                      ESTABLISHED',
+    'tcp6       0      0  fe80::435:995e:da13:fd9%en0.56474             fe80::4277:4e25:9163:65cf%en0.22              ESTABLISHED',
+    'tcp6       0      0  ::1.51124                                     ::1.8080                                      ESTABLISHED',
+    'tcp4       0      0  *.22                                          *.*                                           LISTEN     ',
+    'tcp4       0      0  *.62926                                       *.*                                           CLOSED     ',
+    'tcp4       0      0  *.*                                           *.*                                           CLOSED     ',
   ].join('\n');
   assert.deepEqual(parseNetstat(netstat), [
-    { local: '192.168.1.20', localPort: 51122, localCut: false, remote: '93.184.216.34', remotePort: 443, remoteCut: false, bytes: 12345 },
-    { local: '2001:db8:85a3:8d3', localPort: 51123, localCut: true, remote: '2606:4700:4700::', remotePort: 443, remoteCut: true, bytes: 700 },
-    { local: plainAddress('::1'), localPort: 51124, localCut: false, remote: plainAddress('::1'), remotePort: 8080, remoteCut: false, bytes: 0 },
+    { local: '192.168.1.20', localPort: 51122, remote: '93.184.216.34', remotePort: 443, bytes: 12345, sending: 12345 },
+    { local: '2001:db8:85a3:8d3:1319:8a2e:370:7348', localPort: 51123, remote: '2606:4700:4700:0:0:0:0:1111', remotePort: 443, bytes: 720, sending: 20 },
+    { local: 'fe80:0:0:0:435:995e:da13:fd9', localPort: 56474, remote: 'fe80:0:0:0:4277:4e25:9163:65cf', remotePort: 22, bytes: 0, sending: 0 },
+    { local: plainAddress('::1'), localPort: 51124, remote: plainAddress('::1'), remotePort: 8080, bytes: 0, sending: 0 },
   ]);
   assert.throws(() => parseNetstat('netstat: sysctl: net.inet.tcp.pcblist_n: Operation not permitted'), /no table of connections/);
   assert.throws(() => parseNetstat(`${netstat}\ntcp4       0      0  192.168.1.20.x         93.184.216.34.443      ESTABLISHED`), /not a TCP connection/);
@@ -125,17 +132,15 @@ function counted({ bytes, held = () => [], fail = () => false }) {
   return { outbound, told, after };
 }
 
-await check('past the whole, the job that holds the most loses its connections out that hold the most until all are within it, a closed one still counted while the kernel holds its bytes, and within the whole nothing is lost', async () => {
+await check('past the whole, the job that holds the most loses its connections out that hold the most until all are within it, and within the whole nothing is lost', async () => {
   const a = { name: 'a' };
   const b = { name: 'b' };
   const [a1, a2, a3, b1] = [await connected(), await connected(), await connected(), await connected()];
   for (const s of [a1, a2, a3, b1]) row(s, 0);
   const queued = new Map([[a1, 1500], [a2, 1000], [b1, 1800]]);
-  // A reset connection is let go of by the kernel at once, and one closed is not.
-  const lingering = new Set();
   // Another connection on a3's ports, to an address that only begins as a3's does.
   const other = { ...row(a3, 0), local: '127.0.0', remote: '127.0.0', bytes: 2 ** 30 };
-  const held = () => [other, ...[...queued].filter(([s]) => !s.destroyed || lingering.has(s)).map(([s, n]) => row(s, n))];
+  const held = () => [other, ...[...queued].filter(([s]) => !s.destroyed).map(([s, n]) => row(s, n))];
   const { outbound, told, after } = counted({ bytes: 3000, held });
   for (const [job, s] of [[a, a1], [a, a2], [a, a3], [b, b1]]) outbound.add(job, s);
   // 4300 held: a, with 2500, is reset its 1500, and 2800 are within the whole.
@@ -146,21 +151,120 @@ await check('past the whole, the job that holds the most loses its connections o
   assert.match(told[0].text, new RegExp(`^a connection out of this job to 127\\.0\\.0\\.1:${sinkPort} is reset: the connections out of all jobs held more than the 0\\.0028\\d* MiB`));
   await after(3);
   assert.equal(told.length, 1, 'and nothing more within the whole');
-  // a2 closes with 1000 the kernel still holds: with 1100 more of a3 that is 3900, and a3,
-  // the one of a's that can be reset, is; then 2800 are within it again.
+  // With 1100 more of a3, a holds 2100 and b 1800: a3, the fullest of a's, is reset.
   queued.set(a3, 1100);
-  lingering.add(a2);
-  a2.destroy();
   await after(2);
-  assert.deepEqual([a3.destroyed, b1.destroyed], [true, false], 'what a closed connection holds is counted');
-  // Once the kernel lets go of it, it is not.
-  lingering.delete(a2);
-  queued.set(b1, 2900);
-  await after(3);
-  assert.equal(b1.destroyed, false);
+  assert.deepEqual([a2.destroyed, a3.destroyed, b1.destroyed], [false, true, false]);
   assert.equal(told.length, 2);
   outbound.drop(b);
   assert.equal(b1.destroyed, true, 'a job dropped has its connections reset');
+  outbound.drop(a);
+});
+
+// How the far end of a connection saw it close: 'end' for a FIN, the error's code for a reset.
+const ending = (s) => new Promise((resolve) => {
+  const side = far.find((f) => f.remotePort === s.localPort);
+  side.once('error', (e) => resolve(e.code));
+  side.once('end', () => resolve('end'));
+});
+
+await check('a connection closed while the kernel may have bytes of it to send is reset, by the last poll or what was written since, and one with none to send is not; one the job ends is closed once a poll finds what it was sent taken, and reset if it is not taken in time', async () => {
+  const job = {};
+  const [polled, written, idle, ended, slow] = [await connected(), await connected(), await connected(), await connected(), await connected()];
+  await until('the far ends to be there', () => [polled, written, idle, ended, slow].every((s) => far.some((f) => f.remotePort === s.localPort)));
+  for (const s of [polled, written, idle, ended, slow]) row(s, 0);
+  const sending = new Map([[polled, 500], [ended, 700], [slow, 900]]);
+  const { outbound, told, after } = counted({ bytes: 2 ** 20, held: () => [polled, written, idle, ended, slow].map((s) => row(s, sending.get(s) ?? 0)) });
+  const quick = createOutbound({ bytes: 2 ** 20, every: 20, linger: 300, queues: async () => [row(slow, sending.get(slow))], say: (j, text) => told.push({ job: j, text }) });
+  for (const s of [polled, written, idle, ended]) outbound.add(job, s);
+  quick.add(job, slow);
+  await after(2);
+  written.write('x');
+  const how = [polled, written, idle, ended].map(ending);
+  for (const s of [polled, written, idle]) s.destroy();
+  outbound.close(ended);
+  const since = Date.now();
+  quick.close(slow);
+  assert.deepEqual(await Promise.all(how), ['ECONNRESET', 'ECONNRESET', 'end', 'end']);
+  await after(3);
+  assert.equal(ended.destroyed, false, 'kept while the kernel has what it was sent');
+  sending.delete(ended);
+  await until('it to be closed once that is taken', () => ended.destroyed);
+  assert.equal(told.length, 0, 'and nothing is reset');
+  await until('the one not taken to be reset', () => slow.destroyed);
+  assert.ok(Date.now() - since >= 300, `after ${Date.now() - since} ms`);
+  assert.equal(told.length, 1);
+  assert.match(told[0].text, /is reset: the far host had not taken what it was sent 0\.3 s after the job ended it$/);
+  outbound.drop(job);
+  quick.drop(job);
+});
+
+// A socket as the count sees one, of the addresses given.
+const standIn = (localAddress, remoteAddress) => Object.assign(new EventEmitter(), {
+  localAddress, localPort: 51123, remoteAddress, remotePort: 443, bytesWritten: 0, writableLength: 0, destroyed: false,
+  write() { return true; }, _destroy() {}, cork() {}, uncork() {},
+  resetAndDestroy() { this.destroyed = true; },
+});
+
+await check('the connections a job ended are its own while the kernel has what they were sent: past the whole, they are what is reset of the job past its share, before the fuller connection of a job within its own, and a job dropped has them reset too', async () => {
+  const [h, v] = [{}, {}];
+  const [h1, h2, v1, v2] = [await connected(), await connected(), await connected(), await connected()];
+  for (const s of [h1, h2, v1, v2]) row(s, 0);
+  const queued = new Map();
+  const { outbound, told, after } = counted({ bytes: 3000, held: () => [h1, h2, v1, v2].map((s) => row(s, queued.get(s) ?? 0)) });
+  for (const [job, s] of [[h, h1], [h, h2], [v, v1], [v, v2]]) outbound.add(job, s);
+  await after(2);
+  for (const s of [h1, h2]) {
+    s.write('x');
+    outbound.close(s);
+  }
+  // 3500 held: h, with 2100 of the 1500 a job may, has its fullest reset; v is within it,
+  // though its one connection is the fullest of all.
+  for (const [s, n] of [[h1, 1200], [h2, 900], [v1, 1400]]) queued.set(s, n);
+  await after(2);
+  assert.deepEqual([h1, h2, v1, v2].map((s) => s.destroyed), [true, false, false, false]);
+  assert.equal(told.length, 1);
+  assert.equal(told[0].job, h);
+  assert.match(told[0].text, /is reset: the connections out of all jobs held more than/);
+  outbound.drop(h);
+  assert.equal(h2.destroyed, true, 'the one ended and still held goes with its job');
+  outbound.drop(v);
+});
+
+await check('a connection out over IPv6 is found as netstat prints it, its addresses written otherwise', async () => {
+  const text = [
+    'Proto Recv-Q Send-Q  Local Address                                 Foreign Address                               (state)    ',
+    'tcp6       0   5000  2001:db8:85a3:8d3:1319:8a2e:370:7348.51123      2606:4700:4700::1111.443                      ESTABLISHED',
+  ].join('\n');
+  const raw = standIn('2001:0db8:85a3:08d3:1319:8a2e:0370:7348', '2606:4700:4700:0:0:0:0:1111');
+  const { outbound, after } = counted({ bytes: 1000, held: () => parseNetstat(text) });
+  outbound.add({}, raw);
+  await after(2);
+  assert.equal(raw.destroyed, true, 'its 5000 bytes are past the whole');
+});
+
+// A long address of this machine's, which netstat cuts unless it is asked for whole ones.
+const linkLocal = Object.entries(os.networkInterfaces())
+  .flatMap(([name, list]) => list.filter((a) => a.family === 'IPv6' && !a.internal && a.address.startsWith('fe80:')).map((a) => `${a.address}%${name}`))
+  .find((a) => a.length > 24);
+await check('a connection out to a long IPv6 address of this machine is found in what the kernel says', async () => {
+  if (!linkLocal) {
+    console.log('INFO this machine has no long link-local address to connect to');
+    return;
+  }
+  const server = net.createServer({ pauseOnConnect: true });
+  await new Promise((resolve) => server.listen(0, '::', resolve));
+  const s = await new Promise((resolve, reject) => {
+    const c = net.connect({ port: server.address().port, host: linkLocal }, () => resolve(c));
+    c.once('error', reject);
+  });
+  try {
+    const mine = (r) => r.localPort === s.localPort && r.remotePort === s.remotePort && r.local === plainAddress(s.localAddress) && r.remote === plainAddress(s.remoteAddress);
+    await until(`${linkLocal} in the kernel's queues`, async () => (await systemQueues()).some(mine), 3000);
+  } finally {
+    s.destroy();
+    server.close();
+  }
 });
 
 await check('what a job writes past its share is kept back in node until a poll finds the kernel has room for it, counting what was kept back as it goes', async () => {
@@ -193,11 +297,12 @@ await check('what a job writes past its share is kept back in node until a poll 
   outbound.drop(job);
 });
 
-await check('a job whose writes are kept back is asked for at the soonest after, not at the next of the usual polls', async () => {
+await check('a job whose writes are kept back is asked for at the soonest after, and again while they are, not at the next of the usual polls', async () => {
   const job = {};
   let polls = 0;
   const s = await connected();
-  const outbound = createOutbound({ bytes: 1024, every: 1000, soonest: 20, queues: async () => { polls++; return [row(s, 0)]; } });
+  // The first three polls find the share held: the writes wait for the fourth.
+  const outbound = createOutbound({ bytes: 1024, every: 1000, soonest: 20, queues: async () => { polls++; return [row(s, polls <= 3 ? 1024 : 0)]; } });
   outbound.add(job, s);
   const side = () => far.find((f) => f.remotePort === s.localPort);
   await until('the far end to be there', side);
@@ -207,8 +312,8 @@ await check('a job whose writes are kept back is asked for at the soonest after,
   assert.ok(s.writableCorked > 0);
   const since = Date.now();
   await until('what was kept back at the far end', () => got === 4096);
-  assert.ok(Date.now() - since < 300, `after ${Date.now() - since} ms`);
-  assert.equal(polls, 1);
+  assert.ok(Date.now() - since < 600, `after ${Date.now() - since} ms`);
+  assert.equal(polls, 4);
   outbound.drop(job);
 });
 
@@ -239,13 +344,19 @@ await check('polls that fail stop no job and are told of once: what was kept bac
   const job = {};
   let failing = false;
   const sockets = [await connected(), await connected(), await connected()];
+  const ended = await connected();
   const { outbound, told, after } = counted({ bytes: 1, held: () => [], fail: () => failing });
   outbound.add(job, sockets[0]);
   sockets[0].write('x');
   assert.ok(sockets[0].writableCorked > 0, 'past the share');
+  outbound.add({}, ended);
+  ended.write('z');
+  outbound.close(ended);
+  assert.equal(ended.destroyed, false, 'an ended connection with bytes to send is kept');
   failing = true;
   await after(4);
   assert.equal(sockets[0].writableCorked, 0, 'let go while polls fail');
+  assert.equal(ended.destroyed, true, 'and one ended is closed, nothing telling any longer when its bytes are taken');
   assert.deepEqual(told.map((t) => [t.job, t.text]), [[null, 'the kernel\'s queues of the connections out cannot be read (netstat went): until they can, a job may have 3 connections out open, and what they hold is not counted']]);
   outbound.add(job, sockets[1]);
   sockets[1].write('y');
@@ -294,9 +405,22 @@ const brokerWith = async (outbound) => {
     const { token } = await broker.addJob({ runId, pool: { id: 'github.com/a/b', forge: 'github', host: 'github.com', owner: 'a', repo: 'b' } });
     return { runId, auth: `Basic ${Buffer.from(`dn:${token}`).toString('base64')}` };
   };
-  // A tunnel: resolves to the socket and the head of the answer.
-  const tunnel = (job, host) => new Promise((resolve, reject) => {
-    const s = net.connect(port, '127.0.0.1');
+  // A relay in front of this broker, as a job's container has: `{ port, end() }`, where
+  // end() kills it.
+  const relay = async () => {
+    const free = net.createServer();
+    const at = await listening(free);
+    await new Promise((r) => free.close(r));
+    const child = spawn(process.execPath, [RELAY, '127.0.0.0/8', String(at), '127.0.0.1', String(port)], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const end = () => child.kill('SIGKILL');
+    process.on('exit', end);
+    await new Promise((resolve) => child.stdout.once('data', resolve));
+    return { port: at, end };
+  };
+  // A tunnel, straight to the broker or through a relay at `via`: resolves to the socket
+  // and the head of the answer.
+  const tunnel = (job, host, via = port) => new Promise((resolve, reject) => {
+    const s = net.connect(via, '127.0.0.1');
     s.on('error', () => {});
     s.write(`CONNECT ${host}:443 HTTP/1.1\r\nHost: ${host}:443\r\nProxy-Authorization: ${job.auth}\r\n\r\n`);
     let head = Buffer.alloc(0);
@@ -319,7 +443,7 @@ const brokerWith = async (outbound) => {
     s.write(`POST http://${host}/ HTTP/1.1\r\nHost: ${host}\r\nProxy-Authorization: ${job.auth}\r\nContent-Length: ${2 ** 40}\r\n\r\n`);
     return s;
   };
-  return { broker, addJob, tunnel, upload };
+  return { broker, addJob, tunnel, upload, relay };
 };
 // What the broker's own connections to `host` hold in the kernel, either way.
 const outOf = async (host) => {
@@ -426,6 +550,56 @@ await check('a job that comes while another\'s uploads hold the whole loses noth
     watching = false;
     await watch;
     for (const s of sending) s.destroy();
+    await broker.stop();
+  }
+});
+
+await check('a job\'s tunnels that it ends while the kernel has what they sent are kept until the linger and then reset, and reset as the job is removed: the kernel keeps nothing of them', async () => {
+  const linger = 1500;
+  const to = ports[addresses['deaf.test']];
+  const echoing = ports[addresses['echo.test']];
+  // The kernel, but with one more byte to send to deaf.test on every connection there,
+  // so that its far host never takes all it was sent, and a gigabyte on every connection
+  // to echo.test.
+  const queues = async () => (await systemQueues()).map((r) => {
+    if (r.remotePort === to) return { ...r, bytes: r.bytes + 1, sending: r.sending + 1 };
+    return r.remotePort === echoing ? { ...r, bytes: 2 ** 30 } : r;
+  });
+  const { broker, addJob, tunnel, relay } = await brokerWith({ linger, queues });
+  const h = await addJob();
+  // What there is of the connections out to deaf.test, as the kernel has them.
+  const rows = async () => (await systemQueues()).filter((r) => r.remotePort === to).length;
+  try {
+    // The job's tunnels through its relay, which then goes as its container would: the
+    // broker reads no more of a tunnel whose far host takes nothing, so it learns of their
+    // end from the hop alone.
+    const ended = async () => {
+      const theirs = await relay();
+      const hs = [];
+      for (let i = 0; i < 4; i++) hs.push((await tunnel(h, 'deaf.test', theirs.port)).s);
+      for (const s of hs) s.write(Buffer.alloc(64 * 1024));
+      await until('the connections out', async () => (await rows()) === 4);
+      theirs.end();
+      for (const s of hs) s.destroy();
+      await until('the broker to see them go', () => broker.load(h.runId).connections === 0, 3000);
+      return Date.now();
+    };
+    // Reset for the whole first, which is told of apart from what is reset after the linger.
+    const before = logged.length;
+    const since = () => logged.slice(before);
+    const { s: big } = await tunnel(h, 'echo.test');
+    await until('the gigabyte to be reset', () => since().some((l) => l.includes(h.runId) && l.includes('is reset: the connections out of all jobs held more than')), 3000);
+    big.destroy();
+    const at = await ended();
+    await sleep(3 * OUT_POLL_MS);
+    assert.equal(await rows(), 4, 'kept while the kernel has what they were sent');
+    await until('them to be reset after the linger', async () => (await rows()) === 0, linger + 2000);
+    assert.ok(Date.now() - at >= linger, `after ${Date.now() - at} ms`);
+    assert.ok(since().some((l) => l.includes(h.runId) && l.includes(`had not taken what it was sent ${linger / 1000} s after the job ended it`)));
+    await ended();
+    broker.removeJob(h.runId);
+    await until('them to be reset as the job is removed', async () => (await rows()) === 0, 1000);
+  } finally {
     await broker.stop();
   }
 });

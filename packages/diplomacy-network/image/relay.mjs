@@ -18,6 +18,8 @@ const AT_A_TIME = 1024;
 // connection has closed.
 const BURST = 256;
 const PER_SECOND = 64;
+// How long a connection's side that has ended waits for its far end to end too.
+const LINGER_MS = 5000;
 
 const [subnet, port, host, hostPort] = process.argv.slice(2);
 const [prefix, bits] = String(subnet).split('/');
@@ -44,10 +46,18 @@ function carry(conn) {
   const up = net.connect({ host, port: Number(hostPort) });
   up.on('error', () => {});
   const gone = () => { conn.destroy(); up.destroy(); };
-  for (const s of [conn, up]) {
-    s.on('close', gone);
-    s.setNoDelay(true);
-  }
+  // A socket closed while its far end still sends is reset, and that end loses what it
+  // had not read yet: a side whose bytes came to their end is ended instead, and closed
+  // once its far end has ended too, or LINGER_MS on.
+  const linger = (s) => {
+    s.end();
+    setTimeout(() => s.destroy(), LINGER_MS).unref();
+  };
+  let clientEnded = false;
+  let brokerEnded = false;
+  conn.on('close', () => (clientEnded ? linger(up) : gone()));
+  up.on('close', () => (brokerEnded ? linger(conn) : gone()));
+  for (const s of [conn, up]) s.setNoDelay(true);
   const frame = (type, n, payload) => {
     const head = Buffer.allocUnsafe(5);
     head[0] = type;
@@ -72,6 +82,7 @@ function carry(conn) {
     if (waiting) frame(ASK, waiting.length);
     else if (ended) {
       ended = false;
+      clientEnded = true;
       frame(END, 0);
     } else conn.resume();
   };
@@ -111,8 +122,10 @@ function carry(conn) {
       if (type === CREDIT) {
         credit += n;
         send();
-      } else if (type === END) conn.end();
-      else return gone();
+      } else if (type === END) {
+        brokerEnded = true;
+        conn.end();
+      } else return gone();
     }
     kept = at < buf.length ? buf.subarray(at) : null;
     return undefined;
