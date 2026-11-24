@@ -1642,6 +1642,88 @@ enum PipelineTest {
               ids() == [fixKey, eng3Key, twelveKey].sorted()
                   && store.loadPipelineAttempts()[owedReview].map { $0.requestedAt == pushedHead && $0.attempts == 1 } == true
                   && pushedLines.filter { $0.hasPrefix("auto pipeline-review ") }.count == 1)
+
+        func emptied() {
+            for key in ids() { store.cancelRequestedWork(key) }
+            store.requestedWork = []
+            store.queuedTasks = []
+            store.savePipelineAttempts([:])
+        }
+        // A renamed root: configured as acme-old/app, which GitHub answers as acme/app.
+        emptied()
+        let checkout = harness.appendingPathComponent("checkout").path
+        store.pinRoots([PRRef.LocalRepo(owner: "acme-old", repo: "app", path: checkout)])
+        await sync()
+        let renamedKey = "issues:acme/app#11"
+        let renamedFix = store.pipelineResult?.effects.first { $0.key == elevenFix }
+        let renamedLink = store.queuedTasks.first { $0.id == renamedKey }?.job.prURL
+        print("  sync 25 #11 effect: \(renamedFix.map { "\(Store.pipelineRepo($0)) \($0.url)" } ?? "-"), run link \(renamedLink ?? "-")")
+        check("sync 25, acme-old/app answered as acme/app: #11's fix is queued to run on its effect's link",
+              renamedFix.map(Store.pipelineRepo) == "acme-old/app"
+                  && renamedLink == "https://github.com/acme/app/issues/11")
+        store.cancelRequestedWork(renamedKey)
+        var agedRenamed = store.loadPipelineAttempts()
+        agedRenamed[elevenFix]?.lastDispatchedAt.addTimeInterval(-ReviewReconcile.retryMaxBackoff)
+        store.savePipelineAttempts(agedRenamed)
+        await sync()
+        let renamedRecord = store.loadPipelineAttempts()[elevenFix]
+        print("  sync 26 queue: \(ids()), #11 record concluded: \(renamedRecord.map { $0.concludedAt != nil } ?? false)")
+        check("sync 26, past every backoff, still owing it: the cancelled fix is not queued again",
+              !ids().contains(renamedKey) && renamedRecord?.concludedAt != nil
+                  && store.pipelineResult?.effects.contains { $0.key == elevenFix } == true)
+
+        // A root holding more open issues than a sync reads of it.
+        emptied()
+        store.pinRoots([PRRef.LocalRepo(owner: "acme", repo: "app", path: checkout)])
+        store.pipelineRate = false
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        patch { github in
+            github["issues"] = (github["issues"] as? [Any] ?? []) + [20, 21].map { n -> [String: Any] in
+                ["number": n, "title": "Capped \(n)", "body": "It is broken.", "updatedAt": stamp,
+                 "labels": ["risk:low", "complexity:low"], "author": "reporter"]
+            }
+        }
+        await sync()
+        let readKey = "issues:acme/app#20", pastKey = "issues:acme/app#21"
+        check("sync 27: #20's and #21's fixes are queued", Set(ids()).isSuperset(of: [readKey, pastKey]))
+        patch { github in
+            var issues = github["issues"] as? [[String: Any]] ?? []
+            let past = issues.filter { $0["number"] as? Int == 21 }
+            issues.removeAll { $0["number"] as? Int == 21 }
+            for i in issues.indices where issues[i]["number"] as? Int == 20 { issues[i]["assignees"] = ["bob"] }
+            let filler = (1000..<1300).map { n -> [String: Any] in
+                ["number": n, "title": "Filler \(n)", "body": "", "updatedAt": "2026-01-01T00:00:00Z",
+                 "labels": [] as [String], "author": "reporter"]
+            }
+            github["issues"] = issues + filler + past
+        }
+        var stubbed = false
+        Store.pipelineTickOverride = { settings in
+            var result = PipelineTick.run(settings: settings)
+            // Stands in for the core's own `read` until it fills one: what the stub served,
+            // up to the core's cap of each kind.
+            if result.read.isEmpty, let github = (try? Data(contentsOf: harness.appendingPathComponent("gh-state.json")))
+                .flatMap({ try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] {
+                let cap = (try? CoreAssets.pipeline())?.githubMaxItems ?? 300
+                func urls(_ key: String, _ path: String) -> [String] {
+                    (github[key] as? [[String: Any]] ?? []).prefix(cap).compactMap { $0["number"] as? Int }
+                        .map { "https://github.com/acme/app/\(path)/\($0)" }
+                }
+                result.read = urls("issues", "issues") + urls("prs", "pull")
+                    + result.items.filter { $0.source == .linear }.map(\.id)
+                stubbed = true
+            }
+            return result
+        }
+        await sync()
+        Store.pipelineTickOverride = nil
+        let readNow = store.pipelineResult?.read ?? []
+        print("  sync 28 unread: \(store.pipelineResult?.unread ?? []), read \(readNow.count) (stubbed \(stubbed)), "
+              + "#20 read \(readNow.contains("https://github.com/acme/app/issues/20")), "
+              + "#21 read \(readNow.contains("https://github.com/acme/app/issues/21")), queue \(ids())")
+        check("sync 28, acme/app read past its cap: #20, read and assigned away, is withdrawn; #21, past the cap, stays",
+              store.pipelineResult?.unread == ["acme/app"] && !ids().contains(readKey) && ids().contains(pastKey))
+        store.pipelineRate = true
         let remaining = ids()
 
         store.pipelineEnabled = false
