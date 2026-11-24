@@ -982,12 +982,12 @@ def test_the_status_line_counts_and_says_when(store):
 
 def test_a_failed_sync_and_the_notices_are_banners(store):
     store.pipeline_error = "diplomat-core pipeline-tick failed: boom"
-    store.pipeline_result = {**_result(), "notices": ["Linear: no key", "o/r: HTTP 502"]}
+    store.pipeline_result = {**_result(), "notices": ["Linear: not signed in", "o/r: HTTP 502"]}
     view = PipelineView(store)
     assert not view.error_banner.isHidden()
     assert view.error_banner.text() == "⚠ diplomat-core pipeline-tick failed: boom"
     assert not view.notices_banner.isHidden()
-    assert view.notices_banner.text() == "⚠ Linear: no key\n⚠ o/r: HTTP 502"
+    assert view.notices_banner.text() == "⚠ Linear: not signed in\n⚠ o/r: HTTP 502"
     store.pipeline_error = None
     store.pipeline_result = _result()
     store.pipeline_changed.emit()
@@ -1015,7 +1015,7 @@ def _luminance(c: QColor) -> float:
 def test_a_banners_text_is_readable_on_it(store, banner):
     """WCAG's 4.5:1 between the banner's ground and its darkest or lightest text."""
     store.pipeline_error = "diplomat-core pipeline-tick failed: boom"
-    store.pipeline_result = {**_result(), "notices": ["Linear was not read: no API key"]}
+    store.pipeline_result = {**_result(), "notices": ["Linear was not read: not signed in to Linear"]}
     view = PipelineView(store)
     view.resize(900, 600)
     label = getattr(view, banner)

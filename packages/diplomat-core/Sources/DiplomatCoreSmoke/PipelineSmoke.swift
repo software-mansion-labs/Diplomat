@@ -1503,9 +1503,9 @@ func pipelineSmoke() throws {
     let nokey = sync(keyless, PipelineSettings(roots: [root], linearTeams: [team]), base.appendingPathComponent("nokey"),
                      t0, key: nil)
     check(nokey.result.notices == ["Linear was not read: not signed in to Linear (Settings → Pipeline → Linear login)"],
-          "no key: \(nokey.result.notices)")
+          "no login: \(nokey.result.notices)")
     check(keyless.linearOps.isEmpty && nokey.result.items.contains { $0.id == prURL(11) }
-          && nokey.result.unread == ["acme/app"], "no key: \(nokey.result.unread)")
+          && nokey.result.unread == ["acme/app"], "no login: \(nokey.result.unread)")
 
     // One sync at a time per directory: one started meanwhile reads nothing.
     let busy = fixture()
@@ -2760,9 +2760,9 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     check(bl.claude.isEmpty && bl.writes.isEmpty && bl.result.effects.isEmpty && bl.result.unread == ["acme/app"],
           "a root whose Linear team was not read: \(bl.claude) \(bl.writes) \(bl.result.effects)")
     let keyless = only([13, 27])
-    try seedRerate(dir("linear-no-key"), 13, sha("c3"), at: later(-60))
+    try seedRerate(dir("linear-no-login"), 13, sha("c3"), at: later(-60))
     let nk = sync(keyless, PipelineSettings(roots: [root], linearTeams: [.init(key: "ENG", repo: "acme/lib")], merge: true),
-                  dir("linear-no-key"), t0, key: nil)
+                  dir("linear-no-login"), t0, key: nil)
     check(!merged(nk) && stageOf(nk.result, prURL(13))
           == "cleared/fast (would close the Linear issues linking it, the Linear issues linking #27, which Diplomat did not read or may not write to)",
           "Linear not read: \(stageOf(nk.result, prURL(13)))")

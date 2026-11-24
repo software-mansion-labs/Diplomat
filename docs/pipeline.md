@@ -384,7 +384,7 @@ Linear is read and written as you, through Diplomat's Linear app. **Sign in…**
 consent page in the browser, which hands the login back on `127.0.0.1` (the first free of ports
 29170 to 29172). The login is kept in `~/.diplomat/pipeline/linear-login.json` and refreshed by the
 sync; it reaches only `curl`, in a config on its stdin (staged in an owner-only temp file, removed
-when curl exits, though a sync killed meanwhile leaves it), never in an argv. No agent shell, nor
+when curl exits, though a sync or sign-in killed meanwhile leaves it), never in an argv. No agent shell, nor
 `gh` or `claude` a sync starts, has it or `DIPLOMAT_LINEAR_TOKEN` in its environment, though the
 Linux app's own `gh` calls inherit one you export. A fix run for a Linear issue gets the issue's
 text as Diplomat read it, not the login, though it runs as you and so could read the login where

@@ -15,6 +15,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -46,10 +47,12 @@ def core_bin() -> str:
 
 
 def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
-        started: Callable[[subprocess.Popen], None] | None = None) -> str:
+        started: Callable[[subprocess.Popen], None] | None = None,
+        line: Callable[[str], None] | None = None) -> str:
     """``diplomat-core <args>``'s stdout, with ``stdin`` handed over as JSON; or
     :class:`RuntimeError` saying why not (:class:`CoreBinaryMissing` when there is no
-    binary). ``started`` is handed the process, to :func:`stop` it sooner."""
+    binary). ``started`` is handed the process, to :func:`stop` it sooner; ``line``, each
+    line of stdout as it comes."""
     env = dict(os.environ)
     env.setdefault("DIPLOMAT_CORE", str(core.assets_dir()))
     try:
@@ -63,6 +66,19 @@ def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
         raise RuntimeError(f"diplomat-core could not be run: {exc}") from exc
     if started is not None:
         started(proc)
+    lines: list[str] = []
+    reader = None
+    if line is not None:
+        # Out of communicate()'s reach, which would read it whole.
+        pipe, proc.stdout = proc.stdout, None
+
+        def read() -> None:
+            for text in pipe:
+                lines.append(text)
+                line(text)
+
+        reader = threading.Thread(target=read, name=f"diplomat-core {args[0]}", daemon=True)
+        reader.start()
     try:
         out, err = proc.communicate(None if stdin is None else json.dumps(stdin),
                                     timeout=timeout)
@@ -71,6 +87,9 @@ def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
         proc.wait()
         raise RuntimeError(f"diplomat-core {args[0]} did not answer within "
                            f"{int(timeout)}s") from exc
+    if reader is not None:
+        reader.join()
+        out = "".join(lines)
     if proc.returncode != 0:
         raise RuntimeError(f"diplomat-core {args[0]} failed: {err.strip()}")
     return out

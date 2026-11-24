@@ -19,7 +19,6 @@ public enum LinearLogin {
     public enum Failure: LocalizedError, Equatable {
         case noClient
         case noPort([Int])
-        case noBrowser(String)
         case timedOut
         case cancelled
         case declined(String)
@@ -35,8 +34,6 @@ public enum LinearLogin {
             case .noPort(let ports):
                 return "Linear sign-in needs one of the ports " + ports.map(String.init).joined(separator: ", ")
                     + " free on 127.0.0.1, and none was"
-            case .noBrowser(let url):
-                return "No browser opened Linear's sign-in page: \(url)"
             case .timedOut:
                 return "Linear sign-in was not finished in the browser in time"
             case .cancelled:
@@ -44,7 +41,7 @@ public enum LinearLogin {
             case .declined(let why):
                 return "Linear sign-in was declined: \(why)"
             case .refused(let why):
-                return "Linear refused the sign-in: \(why)"
+                return "Linear gave no token: \(why)"
             case .transport(let why):
                 return "Linear could not be reached: \(why)"
             case .expired:
@@ -65,7 +62,7 @@ public enum LinearLogin {
 
     /// The `Authorization` a Linear call carries: the override's key as is, else the saved
     /// token, refreshed first once it expires within `refreshMarginSecs`. Nil when signed out;
-    /// a login Linear no longer accepts is forgotten.
+    /// a login whose refresh Linear refuses is forgotten.
     public static func authorization(in dir: URL = PipelineLog.dir, now: Date = Date(),
                                      transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> String? {
         if let env = ProcessInfo.processInfo.environment[LinearAPI.envVar], !env.isEmpty { return env }
@@ -98,11 +95,11 @@ public enum LinearLogin {
         return answer
     }
 
-    /// Opens Linear's consent page with `open` and waits on 127.0.0.1 for the browser to
-    /// come back, until `signInSecs` pass or `cancelled` answers true; then exchanges the
-    /// code, asks Linear who the token is, and saves the login.
+    /// Hands `open` Linear's consent page once listening on 127.0.0.1, and waits there for the
+    /// browser to come back, until `signInSecs` pass or `cancelled` answers true; then
+    /// exchanges the code, asks Linear who the token is, and saves the login.
     public static func signIn(in dir: URL = PipelineLog.dir, oauth given: CoreAssets.PipelineModel.LinearOAuth? = nil,
-                              open: (URL) -> Bool, cancelled: () -> Bool = { false },
+                              open: (URL) -> Void, cancelled: () -> Bool = { false },
                               transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> Saved {
         let model = try config()
         let oauth = given ?? model.linearOAuth
@@ -125,7 +122,8 @@ public enum LinearLogin {
             // Lets a second sign-in pick another workspace.
             URLQueryItem(name: "prompt", value: "consent"),
         ]
-        guard let url = page?.url, open(url) else { throw Failure.noBrowser(page?.string ?? oauth.authorize) }
+        guard let url = page?.url else { throw Failure.file("linearOAuth.authorize is not a URL: \(oauth.authorize)") }
+        open(url)
         let path = URLComponents(string: redirect)?.path ?? ""
         let deadline = Date().addingTimeInterval(oauth.signInSecs)
         while true {
@@ -197,7 +195,7 @@ public enum LinearLogin {
     // MARK: - Linear's answers
 
     static func config() throws -> CoreAssets.PipelineModel {
-        do { return try CoreAssets.pipeline() } catch { throw Failure.refused(error.localizedDescription) }
+        do { return try CoreAssets.pipeline() } catch { throw Failure.file(error.localizedDescription) }
     }
 
     static func save(_ login: Saved, in dir: URL) throws {
@@ -225,13 +223,8 @@ public enum LinearLogin {
     static func whoami(_ authorization: String, model: CoreAssets.PipelineModel,
                        transport: @escaping SlackAPI.Transport) throws -> (user: String, organization: String) {
         guard let url = LinearAPI.endpoint(model) else { throw Failure.transport("the Linear API is not a URL") }
-        let data: [String: Any]
-        do {
-            data = try LinearAPI(authorization: authorization, url: url, timeout: model.httpTimeoutSecs,
+        let data = try LinearAPI(authorization: authorization, url: url, timeout: model.httpTimeoutSecs,
                                  transport: transport).call("Viewer", [:])
-        } catch {
-            throw Failure.refused(error.localizedDescription)
-        }
         let user = (data["viewer"] as? [String: Any])?["name"] as? String ?? ""
         return (user, (data["organization"] as? [String: Any])?["name"] as? String ?? "")
     }
@@ -346,7 +339,7 @@ public enum LinearLogin {
             let fd = socket(AF_INET, SOCK_STREAM, 0)
 #endif
             guard fd >= 0 else { return nil }
-            // Rebinds past the last sign-in's connections in TIME_WAIT; never past a listener.
+            // Rebinds past the last sign-in's connections in TIME_WAIT.
             var one: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
             var addr = sockaddr_in()

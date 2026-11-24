@@ -653,12 +653,12 @@ def test_a_failed_sync_keeps_the_last_result_and_the_forced_items(pipe, monkeypa
 
 
 def test_a_notice_is_logged_when_it_first_appears(pipe):
-    first = {**_result(), "notices": ["Linear was not read: no API key"]}
+    first = {**_result(), "notices": ["Linear was not read: not signed in to Linear"]}
     _sync(pipe, first)
     _sync(pipe, dict(first))
     _sync(pipe, {**first, "notices": [
-        "Linear was not read: no API key", "o/r could not be read: gh: rate limited"]})
-    assert _feed("pipeline-notice") == ["Linear was not read: no API key",
+        "Linear was not read: not signed in to Linear", "o/r could not be read: gh: rate limited"]})
+    assert _feed("pipeline-notice") == ["Linear was not read: not signed in to Linear",
                                         "o/r could not be read: gh: rate limited"]
 
 
@@ -1087,7 +1087,7 @@ def _fake_core(tmp_path, monkeypatch, answer: str, status: int = 0):
 
 def test_a_sync_hands_the_core_its_settings_and_reads_back_its_result(tmp_path,
                                                                       monkeypatch):
-    answer = {**_result(_fix(), items=(_item(),)), "notices": ["Linear: no key"],
+    answer = {**_result(_fix(), items=(_item(),)), "notices": ["Linear: not signed in"],
               "graph": {"nodes": [{"id": ISSUE, "column": 0, "row": 0}], "edges": []}}
     _fake_core(tmp_path, monkeypatch, json.dumps(answer))
     settings = {"roots": [], "linearTeams": [], "rate": True, "fix": False,

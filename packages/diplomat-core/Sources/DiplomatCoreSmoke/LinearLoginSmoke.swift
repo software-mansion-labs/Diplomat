@@ -22,6 +22,7 @@ private final class FakeLinear {
                                                              "expires_in": 86399, "refresh_token": "ref1",
                                                              "scope": "read write"])
     var tokenFails = false
+    var viewerFails = false
     var revokeStatus = 200
 
     func transport(_ r: SlackAPI.Request) throws -> (status: Int, headers: [String: String], body: Data) {
@@ -33,6 +34,7 @@ private final class FakeLinear {
         case "/oauth/revoke":
             return (revokeStatus, [:], Data())
         default:
+            if viewerFails { throw SlackError.transport("connection reset") }
             return (200, [:], body(["data": ["viewer": ["id": "u1", "name": "Ada"], "organization": ["name": "Acme"]]]))
         }
     }
@@ -74,7 +76,7 @@ private final class Browser {
 
     init(_ visits: [String]) { self.visits = visits }
 
-    func open(_ url: URL) -> Bool {
+    func open(_ url: URL) {
         opened += 1
         authorize = Dictionary((URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
             .map { ($0.name, $0.value ?? "") }) { a, _ in a }
@@ -89,9 +91,8 @@ private final class Browser {
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
         p.arguments = ["-c", script]
         p.standardOutput = out
-        guard (try? p.run()) != nil else { return false }
+        guard (try? p.run()) != nil else { return }
         process = p
-        return true
     }
 
     /// Each visit's page and status.
@@ -179,7 +180,7 @@ func linearLoginSmoke() throws {
     check(next.authorize["redirect_uri"] == "http://127.0.0.1:39171/linear/callback",
           "past a taken port: \(next.authorize["redirect_uri"] ?? "")")
     let held2 = occupy(39171), held3 = occupy(39172)
-    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { _ in true }) }
+    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { _ in }) }
           == .noPort([39170, 39171, 39172]), "every port taken")
     for fd in [held, held2, held3] { close(fd) }
 
@@ -201,17 +202,30 @@ func linearLoginSmoke() throws {
     check(refused.pages().first?.hasSuffix(" 400") == true && LinearLogin.saved(in: refusedDir) == nil,
           "a refused code: nothing saved")
 
+    let unreachedDir = freshDir()
+    let unreachedFake = FakeLinear()
+    unreachedFake.viewerFails = true
+    let unreached = Browser(["code=c4&state={state}"])
+    var why = ""
+    do {
+        _ = try LinearLogin.signIn(in: unreachedDir, oauth: oauth(), open: unreached.open,
+                                   transport: unreachedFake.transport)
+    } catch { why = error.localizedDescription }
+    check(why == "Linear could not be reached: connection reset" && LinearLogin.saved(in: unreachedDir) == nil,
+          "who the token is, unreached: \(why)")
+    _ = unreached.pages()
+
+    // Nobody comes back: the page was handed over all the same, to be opened by hand.
     let quick = Date()
-    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(secs: 0.5), open: { _ in true }) } == .timedOut)
+    var handed: URL?
+    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(secs: 0.5), open: { handed = $0 }) } == .timedOut)
     check(Date().timeIntervalSince(quick) < 5, "signInSecs bounds the wait")
-    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { _ in true }, cancelled: { true }) }
+    check(handed?.absoluteString.hasPrefix("https://linear.test/oauth/authorize?client_id=smoke-client") == true,
+          "the page handed over: \(String(describing: handed))")
+    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { _ in }, cancelled: { true }) }
           == .cancelled)
-    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { _ in false }) }.map {
-        if case .noBrowser(let url) = $0 { return url.hasPrefix("https://linear.test/oauth/authorize?client_id=smoke-client") }
-        return false
-    } == true, "no browser: the page is named")
     var asked = false
-    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(client: ""), open: { _ in asked = true; return true }) }
+    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(client: ""), open: { _ in asked = true }) }
           == .noClient && !asked, "no client ID: no page opened")
 
     // ---- The Authorization a sync sends, refreshed under the margin ----
