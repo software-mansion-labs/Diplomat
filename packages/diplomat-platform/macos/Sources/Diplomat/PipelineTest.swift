@@ -3,15 +3,11 @@ import Foundation
 import DiplomatCore
 
 /// `DIPLOMAT_PIPELINE_TEST=1`: the app's half of a pipeline sync (the core's is pinned in
-/// `DiplomatCoreSmoke`): what each effect queues and under which key and config, the
-/// attempt records that keep the next sync from queueing it again, the switch that holds
-/// the queued work, and the settings and forces a sync is run with. Composed results go
-/// straight to `applyPipeline`, and `Store.pipelineTickOverride` stands in for the core's
-/// tick, so no `gh`, `claude` or Linear; only `DIPLOMAT_PIPELINE_E2E` adds real syncs,
-/// against stubs (`live`).
+/// `DiplomatCoreSmoke`). Composed results go straight to `applyPipeline`, and
+/// `Store.pipelineTickOverride` stands in for the core's tick, so no `gh`, `claude` or
+/// Linear; only `DIPLOMAT_PIPELINE_E2E` adds real syncs, against stubs (`live`).
 ///
 /// Starts no agent: the queue is drained only by the poll a headless Store never starts.
-/// The feed, the ban list, the run book and the shared config point at scratch.
 enum PipelineTest {
     @discardableResult
     @MainActor
@@ -553,7 +549,6 @@ enum PipelineTest {
         store.pipelineEnabled = true
         Store.pipelineTickOverride = { settings in
             ticks.append(settings)
-            // Forced while this sync runs: the next one takes it.
             store.pipelineForce.rate.append(linear)
             return result([])
         }
@@ -1210,7 +1205,6 @@ enum PipelineTest {
               store.startPipelineFix(partItem) == nil
                   && job("issues:o/r#90030").map { $0.authorLogin == "mallory" } == true)
         clearQueue()
-        // A part the sync held for the ban, emitting no fix for it.
         var heldPart = partItem
         heldPart.splitFrom = "mallory"
         heldPart.hold = "split from an issue of @mallory, who is on the prompt-injection ban list"
@@ -1231,7 +1225,6 @@ enum PipelineTest {
         check("a part with no emitted fix is asked for as the author its text came from",
               store.startPipelineFix(unheld) == nil
                   && job("issues:o/r#90030").map { $0.authorLogin == "mallory" } == true)
-        // An unreadable list, as the core's sync reads it: everything holds.
         let queuedFix = store.queuedTasks.first { $0.id == "issues:o/r#90030" }
         let ranBefore = queuedFix.map { store.isHeld($0) } == false
         let sweepTask = Store.QueuedAgentTask(
@@ -1434,21 +1427,20 @@ enum PipelineTest {
     /// supplies an operator `op`, the account gh acts as; #1, rated low/low, and op's PR #2
     /// fixing it, fast-tracked and clean at its head; unrated #5, and #6 by mallory, whom the
     /// Linear stub bans at the first sync's re-check of ENG-1, after the core's last read of
-    /// the ban list; someone else's PR #4; and Linear's ENG-1, claude
-    /// rating each low/low. Reading #2 again before merging it, the stub writes
-    /// `<dir>/flip-merge` and waits for control.json to say merge is off; read after its
-    /// merge, a PR is merged by op. While the state's
-    /// `readErrors` is set, the `Repo` read answers with that error beside its data, and while
-    /// its `queuedErrors` is, a `Queued` read fails. The
-    /// state's `later` holds low/low #7 and op's draft PR #3 fixing it, likewise clean, and
-    /// its `more` low/low #8 and #9, its `extra` low/low #10 and #11, its `review` low/low #13
-    /// and op's PR #12 fixing it, fast-tracked with no clean marker, its `twins` low/low #30
-    /// labelled `wip`, low/low #31 and high/high #32. While its `holdReads` is
-    /// above 0, a `Repo` read writes its ordinal to `<dir>/held` and waits for `<dir>/go` to
-    /// say the same. `acme/web`, checked out at `<dir>/checkout-web`, is empty.
-    /// `<dir>/linear-state.json`'s `later` adds Linear's low/low ENG-2, its `extra` ENG-3, its
-    /// `twins` ENG-4, triaged and attached to #31, and ENG-5, attached to #32; its
-    /// `done` names the issues Linear no longer lists, its `text` an issue's edited text.
+    /// the ban list; someone else's PR #4; and Linear's ENG-1, claude rating each low/low.
+    /// Reading #2 again before merging it, the stub writes `<dir>/flip-merge` and waits for
+    /// control.json to say merge is off; read after its merge, a PR is merged by op. While the
+    /// state's `readErrors` is set, the `Repo` read answers with that error beside its data,
+    /// and while its `queuedErrors` is, a `Queued` read fails. The state's `later` holds
+    /// low/low #7 and op's draft PR #3 fixing it, likewise clean, and its `more` low/low #8
+    /// and #9, its `extra` low/low #10 and #11, its `review` low/low #13 and op's PR #12
+    /// fixing it, fast-tracked with no clean marker, its `twins` low/low #30 labelled `wip`,
+    /// low/low #31 and high/high #32. While its `holdReads` is above 0, a `Repo` read writes
+    /// its ordinal to `<dir>/held` and waits for `<dir>/go` to say the same. `acme/web`,
+    /// checked out at `<dir>/checkout-web`, is empty. `<dir>/linear-state.json`'s `later`
+    /// adds Linear's low/low ENG-2, its `extra` ENG-3, its `twins` ENG-4, triaged and
+    /// attached to #31, and ENG-5, attached to #32; its `done` names the issues Linear no
+    /// longer lists, its `text` an issue's edited text.
     @MainActor
     private static func live(_ store: Store, harness: URL, check: (String, Bool) -> Void) async {
         print("\npipeline: real syncs against the stubs in \(harness.path)")
@@ -1507,8 +1499,6 @@ enum PipelineTest {
         defer { try? FileManager.default.removeItem(at: banned) }
 
         Store.pipelineTickOverride = nil
-        // Each sync's `queued` beside what is held as it starts: the asks queued or starting,
-        // and each attempt record's item.
         var told: [(queued: [String], held: [String])] = []
         var live = store
         Store.pipelineTickLive = { settings in
@@ -1538,7 +1528,6 @@ enum PipelineTest {
         store.pinAgentRows([])
         let feedBefore = feed().count
 
-        // The Settings switch, flipped while the sync runs.
         let flip = harness.appendingPathComponent("flip-merge")
         let flipper = Task { @MainActor in
             while !FileManager.default.fileExists(atPath: flip.path) && !Task.isCancelled {
@@ -1832,7 +1821,6 @@ enum PipelineTest {
         print("  cancelled: \(Array(feed().dropFirst(called)))")
         check("…Cancel on #11's queued fix and #12's queued review takes both off the queue",
               ids() == [fixKey, eng3Key].sorted() && Array(feed().dropFirst(called)) == cancelLines)
-        // As if the hours past every retry backoff had gone by.
         var aged = store.loadPipelineAttempts()
         for key in [elevenFix, owedReview] {
             aged[key]?.lastDispatchedAt.addTimeInterval(-ReviewReconcile.retryMaxBackoff)
@@ -1973,8 +1961,6 @@ enum PipelineTest {
         live = reborn
         check("a relaunch: the asks stored are queued again, none of them free to start before a sync",
               reborn.queuedTasks.map(\.id).sorted() == oldAsks && oldAsks.contains(pastKey) && reborn.drainableTasks.isEmpty)
-        /// Each of `oldAsks` free to start, and each `reborn`'s last sync judged: in a root it
-        /// read whole, or by reading it.
         func relaunched() -> (free: [String], judged: [String]) {
             let unread = Set(reborn.pipelineResult?.unread ?? []), read = Set(reborn.pipelineResult?.read ?? [])
             let asks = reborn.requestedWork.filter { oldAsks.contains($0.key) }
@@ -2048,8 +2034,7 @@ enum PipelineTest {
         try? Data(#"{"later": true, "done": ["ENG-2"], "extra": true, "text": {"ENG-3": "\#(edited)"}, "twins": true}"#.utf8)
             .write(to: linearState)
         await sync()
-        /// `it`'s detail as the screen builds it: whether Rate now and Fracture are offered,
-        /// enabled, and their tooltips.
+        /// Rate now and Fracture on `it`'s detail, as the screen builds it.
         func actions(_ it: PipelineItem?) -> [String] {
             guard let it, let result = store.pipelineResult else { return ["(not read)"] }
             let d = PipelineDetail(item: it, events: [], badge: store.pipelineBadges[Store.pipelineIdentity(it.id)],
