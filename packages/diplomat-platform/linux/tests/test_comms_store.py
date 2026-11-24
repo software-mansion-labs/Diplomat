@@ -1582,6 +1582,20 @@ def test_auth_without_a_core_says_so(monkeypatch):
 # MARK: - timings
 
 
+def _answering_core(seen: list):
+    class Proc:
+        returncode = 0
+
+        def __init__(self, argv, **kw):
+            self.verb = argv[1]
+
+        def communicate(self, input=None, timeout=None):
+            seen.append((self.verb, timeout))
+            return '{"me": null, "items": [], "error": null}', ""
+
+    return Proc
+
+
 def test_the_tick_is_given_every_bound_the_child_holds_itself_to(monkeypatch):
     """Killed inside its own bounds, the child loses the messages it already marked
     seen, so the front-end's limit is the sum of them: two sign-ins of three calls with a
@@ -1595,16 +1609,8 @@ def test_the_tick_is_given_every_bound_the_child_holds_itself_to(monkeypatch):
     triage = 10 + (1 + t["batchSize"]) * t["classifierTimeoutSecs"]
     assert comms.tick_timeout() == sign_in + deadline + triage + 30
     seen = []
-
-    class Done:
-        returncode, stdout, stderr = 0, '{"me": null, "items": [], "error": null}', ""
-
-    def fake_run(argv, **kw):
-        seen.append((argv[1], kw["timeout"]))
-        return Done()
-
     monkeypatch.setattr("diplomat_runtime.promptcore.core_bin", lambda: "/bin/core")
-    monkeypatch.setattr("subprocess.run", fake_run)
+    monkeypatch.setattr("subprocess.Popen", _answering_core(seen))
     comms.tick({"keywordsRaw": "argent, release train"})
     comms.auth()
     assert seen == [("comms-tick", comms.tick_timeout()),
@@ -1628,14 +1634,11 @@ def test_the_triage_bound_is_a_batch_call_and_one_call_per_message(monkeypatch):
 
 def test_the_tick_child_is_given_the_bound_of_the_operators_batch(monkeypatch):
     seen = []
-
-    class Done:
-        returncode, stdout, stderr = 0, '{"me": null, "items": [], "error": null}', ""
-
     monkeypatch.setattr("diplomat_runtime.promptcore.core_bin", lambda: "/bin/core")
-    monkeypatch.setattr("subprocess.run", lambda argv, **kw: seen.append(kw["timeout"]) or Done())
+    monkeypatch.setattr("subprocess.Popen", _answering_core(seen))
     comms.tick({"batchSize": 64})
-    assert seen == [comms.tick_timeout(64)] and seen[0] > comms.tick_timeout()
+    assert seen == [("comms-tick", comms.tick_timeout(64))]
+    assert seen[0][1] > comms.tick_timeout()
 
 
 @pytest.mark.parametrize("raw", ["inf", "1e12", "-inf", "nan"])

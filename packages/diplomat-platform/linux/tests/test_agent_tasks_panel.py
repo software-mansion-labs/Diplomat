@@ -235,6 +235,26 @@ def test_a_paused_monitors_row_says_nothing_will_start_it(panel):
     assert "monitor off" not in _row_text(_rows(panel, QueuedTaskRow)[0])
 
 
+def test_a_pipeline_asks_cancel_says_what_asks_for_it_again(panel):
+    from PySide6.QtWidgets import QPushButton
+
+    panel.store.queued_tasks = [
+        _queued(31, counter="pipeline", action="review"),
+        _queued(32, counter="pipeline", action="issues", kind="issues"),
+        _queued(33, counter=None, action="review"),
+    ]
+    panel._rebuild_agent_tasks()
+    tips = [next(b for b in row.findChildren(QPushButton) if b.text() == "cancel").toolTip()
+            for row in _rows(panel, QueuedTaskRow)]
+    assert tips == [
+        "Drop this review from the queue without running it. The pipeline asks for it again "
+        "once the PR's head moves.",
+        "Drop this fix from the queue without running it. The pipeline does not ask for it "
+        "again; Start fix on the Pipeline screen does.",
+        QueuedTaskRow._CANCEL_HELP,
+    ]
+
+
 def test_a_row_reads_as_the_session_it_will_become(panel):
     """Same label the activity feed and the agent will carry — a queued retry that
     dropped its "retry 2" would read as a first attempt."""

@@ -44,6 +44,11 @@ G_TELEMETRY = "◫" # telemetry screen header (the per-figure glyphs live in
                   # assets/telemetry.json, like the tool and category ones)
 G_COMMS = "✉"    # Comms screen header button (matches the comms activity
                  # category's linuxGlyph)
+G_PIPELINE = "⊶" # Pipeline screen header button
+
+# --- Pipeline card glyphs (a GitHub issue's is G_ISSUES) ---------------------
+G_PULL = "⎇"     # a GitHub pull request
+G_LINEAR = "◇"   # a Linear issue
 
 # --- Devices screen glyphs -------------------------------------------------
 G_RECENT = "◴"     # the allocator's recent events

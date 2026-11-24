@@ -402,7 +402,8 @@ def test_a_quit_leaves_the_mark_and_the_next_launch_clears_it(monkeypatch):
     from diplomat_app.app import DiplomatApp, SingleInstance
 
     app = DiplomatApp.__new__(DiplomatApp)
-    app.store = type("_Store", (), {"wait_for_background": lambda self, timeout=5.0: []})()
+    app.store = type("_Store", (), {"wait_for_background": lambda self, timeout=5.0: [],
+                                    "stop_pipeline_sync": lambda self: None})()
     app.tray = type("_Tray", (), {"hide": lambda self: None})()
     hidden: list[str] = []
     app.panel = type("_Panel", (), {"hide": lambda self: hidden.append("window")})()

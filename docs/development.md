@@ -211,6 +211,9 @@ DIPLOMAT_RENDER=panel    ./Diplomat.app/Contents/MacOS/Diplomat  # snapshot a sc
                                                      #   scratch dir); comms-panel; comms-badge (the main panel with
                                                      #   unread pings); comms-empty (no Slack login yet);
                                                      #   settings-comms-error (the Comms card's failing pill)
+                                                     #   pipeline (the Pipeline screen over a fixture sync, a held
+                                                     #   PR selected); pipeline-issue (the fast lane, an issue
+                                                     #   selected); pipeline-panel; pipeline-empty (switched off)
                                                      #   settings-unsaved (a change config.json refused)
                                                      #   app (the REAL window root at the width that shows
                                                      #   the whole panel, incl. the legacy scroller lane;
@@ -242,6 +245,11 @@ DIPLOMAT_COMMS_POLL=1    ...                     # one real Slack poll with real
                                                      #   would queue, queues nothing (docs/comms.md)
 DIPLOMAT_COMMS_TEST=1    ...                     # self-test: what each triage answer does to the queue, the switches,
                                                      #   the ban, started/finished. Spawns nothing, reaches no Slack
+DIPLOMAT_PIPELINE_TEST=1 ...                     # self-test: what each pipeline effect queues, the attempt
+                                                     #   records that keep it from queueing twice, the master
+                                                     #   switch, the forces. Spawns nothing, runs no gh/claude/Linear;
+                                                     #   DIPLOMAT_PIPELINE_E2E=<dir> adds real syncs through
+                                                     #   stubs of those three you supply (see PipelineTest.live)
 DIPLOMAT_APIWATCH_TEST=1 ...                     # self-test: who a scan may type into (an agent's session,
                                                      #   including one a terminal only shows through tmux;
                                                      #   never a plain shell). Reads no terminal, sends nothing
@@ -293,8 +301,11 @@ Cadences and paths are overridable too, for tuning: `DIPLOMAT_AUTOFIX_SECS`,
 `DIPLOMAT_APIWATCH_SECS`, `DIPLOMAT_PROC_POLL_SECS` (min 2s),
 `DIPLOMAT_CORE` (where the shared `assets/` live), `DIPLOMAT_DEVICE_ALLOCATOR_DIR`,
 `DIPLOMAT_NODE` (the `node` to use),
-`DIPLOMAT_REPO` (a single repo root for the agents - outranks Settings ▸ *Repo roots*) and
-`DIPLOMAT_CONFIG` (where that shared `config.json` lives).
+`DIPLOMAT_REPO` (a single repo root for the agents - outranks Settings ▸ *Repo roots*),
+`DIPLOMAT_CONFIG` (where that shared `config.json` lives), and for the
+[Pipeline](pipeline.md) `DIPLOMAT_PIPELINE_SECS` (its sync, 60 seconds to a day),
+`DIPLOMAT_PIPELINE_DIR` (its `~/.diplomat/pipeline`), `DIPLOMAT_LINEAR_API` (Linear's GraphQL
+endpoint) and `DIPLOMAT_LINEAR_TOKEN` (a Linear API key, over the Keychain item or `linearTokenFile`).
 
 ## Architecture
 
@@ -382,6 +393,13 @@ packages/
                                    `claude -p` classifier
         CommsLog.swift             ~/.diplomat/comms/events.jsonl, both applets' log, folded for the screen
         LoginShell.swift           locating a CLI through the operator's login shell, past any alias
+        Pipeline.swift             the Pipeline's model: items, stages, lanes, the graph, effects, settings
+        PipelineTick.swift         one pipeline sync: read, rate, fast-track, split, merge, the effects owed
+        PipelineRead.swift         a sync's GitHub and Linear reads, and the edges between what they read
+        PipelineGate.swift         the floor a PR's diff puts under its rating, and the merge holds
+        PipelineRater.swift        the sandboxed `claude -p` rating and split calls (assets/pipeline.json)
+        PipelineLayout.swift       the graph's grid layout
+        PipelineLog.swift          ~/.diplomat/pipeline: the log, the last sync, its state, cached ratings and live switches
         Telemetry.swift            folds the telemetry ledger + every figure on the Telemetry screen: window
                                    calibration, the distribution + its confidence interval, the quota readings,
                                    the pending series
@@ -389,8 +407,10 @@ packages/
       DiplomatCoreCLI/         ← thin `build-prompt` CLI over the core (ships as the `diplomat-core` binary),
                                  so the Linux front-end shells out for Review/Issues/Conflicts/Audit prompts
                                  instead of reimplementing them; `tool-data` and `telemetry` expose the two
-                                 engines the Linux side reimplements, so the parity tests can diff them;
-                                 `comms-tick`, `comms-auth`, `comms-feed` and `comms-effect` run Comms for the Linux applet
+                                 engines the Linux side reimplements, and `pipeline-teams` its parse of the
+                                 Linear teams setting, so the parity tests can diff them;
+                                 `comms-tick`, `comms-auth`, `comms-feed` and `comms-effect` run Comms for the Linux applet,
+                                 and `pipeline-tick` and `pipeline-last` the Pipeline
     Tests/fixtures/            ← test inputs and expected outputs, not shipped
       prompts/                   expected prompt outputs (`<mode>.expected.txt`), asserted byte-for-byte by BOTH platforms' tests
 
@@ -436,6 +456,9 @@ packages/
         CommsMonitor.swift         the Slack watcher: the poll loop, applying each triage answer to the queue
         CommsView.swift            the Comms screen: pings, the jobs they queued, the watcher's status
         CommsTest.swift            self-test of what each triage answer does to the queue (DIPLOMAT_COMMS_TEST)
+        PipelineMonitor.swift      the pipeline's sync loop, applying each effect to the queue, its attempt records
+        PipelineView.swift         the Pipeline screen: the graph of issues and PRs, lanes, the selected card
+        PipelineTest.swift         self-test of what each effect does to the queue (DIPLOMAT_PIPELINE_TEST)
         TelemetryView.swift        the Telemetry screen: the bell curve, the rate-limit windows, the backlog and finished-work series, the token split
         TelemetryLog.swift         writes/reads ~/.diplomat/pr-monitor/telemetry.jsonl (append-only, rotated)
         UsageScan.swift            Claude Code transcript scanner: repo-vs-other tokens, per-task attribution

@@ -85,6 +85,8 @@ final class Store: ObservableObject {
     /// Headless only: what `persistJSON` writes in place of UserDefaults, by key, so
     /// records carry from one poll to the next.
     var headlessJSON: [String: Data]?
+    /// Headless only: a self-test relaunch's `headlessJSON`, read in place of the stored asks.
+    static var headlessLaunchJSON: [String: Data]?
 
     private func storedJSON(forKey key: String) -> Data? {
         if Headless.active, let stored = headlessJSON { return stored[key] }
@@ -140,7 +142,7 @@ final class Store: ObservableObject {
     /// (`RepoRoots.allResolve`). Never for the stand-in `RepoPaths.roots` answers on the
     /// main thread before the first resolution, which knows only the primary path. While
     /// it is false, a repo missing from `roots` may be one that failed to resolve.
-    private var rootsResolved = false
+    private(set) var rootsResolved = false
     /// Of the same reading: whether the first root is the first path's own repo
     /// (`RepoRoots.primaryResolves`). While not, a reference naming no repo has none to
     /// name, the next path's repo standing first.
@@ -600,6 +602,9 @@ final class Store: ObservableObject {
     /// banned.json). They receive no automated reviews, their Slack messages are not
     /// triaged, and they appear in the "Banned" list above the sessions.
     @Published var bannedAuthors: [BannedAuthor] = []
+    /// banned.json is present but unreadable, as `refreshBanList` last read it: the Pipeline
+    /// then acts on nothing, as its sync does (`PipelineTick.bannedLogins`).
+    @Published var banListUnreadable = false
 
     /// Each ban `refreshBanList` has seen, as login and `at`; nil until its first read,
     /// which notifies nothing.
@@ -762,6 +767,90 @@ final class Store: ObservableObject {
     var commsPollInFlight = false
     var commsWakeObserver: NSObjectProtocol?
 
+    // MARK: Pipeline settings, under the Linux store's key strings
+
+    /// The master switch: off, nothing is read, rated, labelled or merged, and queued
+    /// pipeline work waits (`AutoCounter.pipeline`).
+    @Published var pipelineEnabled: Bool {
+        didSet {
+            if pipelineEnabled != oldValue { pipelineCut(master: true) }
+            persist(pipelineEnabled, forKey: Keys.pipelineEnabled)
+            writePipelineControl()
+            pipelineSwitched(on: pipelineEnabled && !oldValue)
+        }
+    }
+    /// `PipelineSettings.rate`, `.fix`, `.fastTrack`, `.merge`, `.fracture`; moot while
+    /// `pipelineEnabled` is off.
+    @Published var pipelineRate: Bool {
+        didSet {
+            persist(pipelineRate, forKey: Keys.pipelineRate)
+            writePipelineControl()
+            pipelineSwitched(on: pipelineRate && !oldValue)
+        }
+    }
+    @Published var pipelineFix: Bool {
+        didSet {
+            if oldValue && !pipelineFix { pipelineCut() }
+            persist(pipelineFix, forKey: Keys.pipelineFix)
+            writePipelineControl()
+            if !pipelineFix { withdrawPipelineAsks(nil) }
+            pipelineSwitched(on: pipelineFix && !oldValue)
+        }
+    }
+    @Published var pipelineFastTrack: Bool {
+        didSet {
+            if oldValue && !pipelineFastTrack { pipelineCut() }
+            persist(pipelineFastTrack, forKey: Keys.pipelineFastTrack)
+            writePipelineControl()
+            if !pipelineFastTrack { withdrawPipelineAsks(nil) }
+            pipelineSwitched(on: pipelineFastTrack && !oldValue)
+        }
+    }
+    @Published var pipelineMerge: Bool {
+        didSet {
+            persist(pipelineMerge, forKey: Keys.pipelineMerge)
+            writePipelineControl()
+            pipelineSwitched(on: pipelineMerge && !oldValue)
+        }
+    }
+    @Published var pipelineFracture: Bool {
+        didSet {
+            persist(pipelineFracture, forKey: Keys.pipelineFracture)
+            writePipelineControl()
+            pipelineSwitched(on: pipelineFracture && !oldValue)
+        }
+    }
+    /// As typed: `ENG=owner/repo, OPS=owner/other` (`Store.pipelineTeams`).
+    @Published var pipelineLinearTeamsRaw: String {
+        didSet { persist(pipelineLinearTeamsRaw, forKey: Keys.pipelineLinearTeams) }
+    }
+
+    // MARK: Pipeline state the screen draws
+
+    /// The last sync's result, or `PipelineLog.last` until the first one here lands.
+    @Published var pipelineResult: PipelineTickResult?
+    @Published var pipelineSyncing = false
+    /// Why syncs are held, nil while they run (`runPipelineSyncOnce`).
+    @Published var pipelineError: String?
+    /// What the screen asked for (Rate now, Fracture) that no sync has taken yet.
+    @Published var pipelineForce = PipelineSettings.Force()
+    /// Driven from `PipelineMonitor.swift`, hence not private.
+    var pipelineMonitorTask: Task<Void, Never>?
+    var pipelineWakeObserver: NSObjectProtocol?
+    /// When the loop's or a wake's sync last ended (`pipelineSyncWait`).
+    var pipelineTimedSyncEnded: Date?
+    var pipelineSyncAgain = false
+    /// A sync begun before a bump (`pipelineCut`) may have been switched off midway,
+    /// emitting less than it owes, so its result withdraws and prunes nothing.
+    var pipelineEpoch = 0
+    /// A sync begun since launch or the master switch went on was applied: until then each
+    /// pipeline ask queued is stale (`pipelineStale`).
+    var pipelineJudged = false
+    /// The keys of the pipeline asks queued before that sync, each until a sync begun since
+    /// judged its item (`pipelineJudgedAsks`): till then it may be stale, so it does not
+    /// start (`isHeld`).
+    @Published var pipelineStale: Set<String> = []
+
     /// Every dispatched agent run the panel draws, in reading order: the sessions this
     /// machine spawned, and any live agent nobody dispatched at all.
     ///
@@ -821,7 +910,11 @@ final class Store: ObservableObject {
     /// it into a fix. Losing this list on a restart would silently drop the rest of a
     /// fifty-item sweep, which is exactly the run long enough to be interrupted.
     var requestedWork: [RequestedWork] {
-        didSet { persistJSON(requestedWork, forKey: Keys.requestedWork) }
+        didSet {
+            persistJSON(requestedWork, forKey: Keys.requestedWork)
+            let stale = pipelineStale.intersection(requestedWork.map(\.key))
+            if stale != pipelineStale { pipelineStale = stale }
+        }
     }
 
     /// Queued work whose dispatch is under way: it has left the queue and its spawn
@@ -894,6 +987,14 @@ final class Store: ObservableObject {
         static let commsNotify = "commsNotify"
         static let commsModel = "commsModel"
         static let commsSeenAt = "commsSeenAt"
+        static let pipelineEnabled = "pipelineEnabled"
+        static let pipelineRate = "pipelineRate"
+        static let pipelineFix = "pipelineFix"
+        static let pipelineFastTrack = "pipelineFastTrack"
+        static let pipelineMerge = "pipelineMerge"
+        static let pipelineFracture = "pipelineFracture"
+        static let pipelineLinearTeams = "pipelineLinearTeams"
+        static let pipelineAttempts = "pipelineAttempts"
         /// The name this list has always been stored under. Kept when it widened
         /// from reviews alone to every sweep, so the asks a Review-PRs sweep left
         /// standing outlive the upgrade that widened it (`RequestedWork` decodes a
@@ -1107,11 +1208,20 @@ final class Store: ObservableObject {
         // Absent, everything already logged reads as seen: an upgrade must not open on a
         // badge for history the operator never saw being kept.
         commsSeenAt = defaults.object(forKey: Keys.commsSeenAt) as? Date ?? Date()
+        pipelineEnabled = defaults.bool(forKey: Keys.pipelineEnabled)
+        pipelineRate = defaults.bool(forKey: Keys.pipelineRate)
+        pipelineFix = defaults.bool(forKey: Keys.pipelineFix)
+        pipelineFastTrack = defaults.bool(forKey: Keys.pipelineFastTrack)
+        pipelineMerge = defaults.bool(forKey: Keys.pipelineMerge)
+        pipelineFracture = defaults.bool(forKey: Keys.pipelineFracture)
+        pipelineLinearTeamsRaw = defaults.string(forKey: Keys.pipelineLinearTeams) ?? ""
         queuedTaskOrder = (defaults.stringArray(forKey: Keys.queuedTaskOrder) ?? [])
             .map { PRRef.migrateQueueKey($0, primary: primary) }
         let configured = CoreAssets.repoCoordinates()
-        requestedWork = Store.decodeRequestedWork(defaults.data(forKey: Keys.requestedWork),
+        let launched = Headless.active ? Store.headlessLaunchJSON?[Keys.requestedWork] : nil
+        requestedWork = Store.decodeRequestedWork(launched ?? defaults.data(forKey: Keys.requestedWork),
                                                   configured: "\(configured.owner)/\(configured.repo)")
+        pipelineStale = Set(requestedWork.filter(\.config.isPipeline).map(\.key))
         listedKey = selectedRoot.key
         refreshLocalRepos()
         if hiddenTools.contains(selected.rawValue),
@@ -1135,6 +1245,7 @@ final class Store: ObservableObject {
             // `finished` lines into it (`noteCommsRuns`).
             refreshComms()
             startCommsMonitor()
+            startPipelineMonitor()
             refreshBanList()
             refreshAudit()
             publishSpawnTerminal()
@@ -1906,6 +2017,7 @@ final class Store: ObservableObject {
             saveReviewReqAttempts(ReviewReconcile.conclude(loadReviewReqAttempts(),
                                                            prs: concluded, at: Date()))
         }
+        concludePipelineRuns(gone, verdicts: t.states)
         // Forgetting deletes every trace a run leaves — record, directory, prompt,
         // handle — so a retirement that was wrong is otherwise just a row that stopped
         // being there. This line is the only thing that says which rung decided.
@@ -2294,7 +2406,7 @@ final class Store: ObservableObject {
     /// Only with something the drain may start and a bay to start it in, never sooner
     /// than `earlyPollFloor` after the last poll started, and one waiting covers every
     /// call until it starts.
-    private func bringPollForward(capLoad: Int) {
+    func bringPollForward(capLoad: Int) {
         guard pollsEarly, earlyAutofixPoll == nil, drainHasRoom(capLoad: capLoad) else { return }
         earlyAutofixPoll = Task { [weak self] in
             while let wait = self?.secondsUntilPoll(gap: self?.earlyPollFloor ?? 0), wait > 0 {
@@ -2817,7 +2929,10 @@ final class Store: ObservableObject {
     /// posts a notification for each ban not seen by an earlier read: a new login, or a
     /// repeat offence (a new `at`).
     func refreshBanList() {
-        let next = BanList.read()
+        let file = BanList.readFile()
+        let next = BanList.read(file)
+        let unreadable = if case .unreadable = file { true } else { false }
+        if unreadable != banListUnreadable { banListUnreadable = unreadable }
         let keys = next.map { "\($0.login.lowercased())@\($0.at ?? "")" }
         if let seen = bansSeen {
             for (ban, key) in zip(next, keys)
@@ -2863,7 +2978,7 @@ final class Store: ObservableObject {
     /// session holds the PR's context) and one nothing is known about — releasing a PR on
     /// missing evidence is how two agents end up on it. A released agent does not: its
     /// run ended.
-    private func inFlight(_ item: String) async -> Bool {
+    func inFlight(_ item: String) async -> Bool {
         await agentTick().tick.inFlight(item: item)
     }
 
@@ -3243,6 +3358,15 @@ final class Store: ObservableObject {
             case .investigate(let cfg): return cfg.buildPrompt()
             }
         }
+
+        /// Asked for by the pipeline (`applyPipeline`), whose master switch holds it.
+        var isPipeline: Bool {
+            switch self {
+            case .review(let cfg): return cfg.fastTrack == true
+            case .issues(let cfg): return cfg.pipeline == true || cfg.linear != nil
+            case .investigate: return false
+            }
+        }
     }
 
     /// One PR to review, issue to fix or investigation to run that a sweep or a Slack
@@ -3257,7 +3381,8 @@ final class Store: ObservableObject {
     /// at the moment of the click.
     struct RequestedWork: Codable, Equatable {
         /// The PR number, the issue number, or an investigation's Slack ts (`CommsTS`):
-        /// three numbering spaces, told apart by the verb in `key` and nowhere else.
+        /// three numbering spaces, told apart by the verb in `key` and nowhere else. 0 for
+        /// a Linear issue's fix, which `item` names by its identifier instead.
         let number: Int
         let url: String
         /// Whose PR / issue — the pipeline's ban dimension. Empty where the sweep
@@ -3268,14 +3393,20 @@ final class Store: ObservableObject {
         /// is about, whose root the ask runs in; "" for an investigation stored before asks
         /// named one, which runs in the primary root.
         var repo: String
+        /// Queued by the Pipeline screen's Start fix, not by a sync (`pipelineWithdrawn`).
+        var byHand = false
 
         /// This ask's identity everywhere it has one: the queued task's id, the row
         /// the panel draws it as, and what `forgetRequested` drops it by.
         var key: String { AgentTaskQueue.key(auditAction: config.action, item: item) }
 
-        /// The item this ask is about, or an investigation's Slack ts.
+        /// The item this ask is about, an investigation's Slack ts, or a Linear issue's
+        /// `linearItem`.
         var item: String {
-            config.action == AgentTaskQueue.investigateAction ? String(number)
+            if case .issues(let cfg) = config, let linear = cfg.linear {
+                return Store.linearItem(linear.identifier)
+            }
+            return config.action == AgentTaskQueue.investigateAction ? String(number)
                 : Store.item(url: url, number: number, root: repo)
         }
 
@@ -3286,18 +3417,23 @@ final class Store: ObservableObject {
         /// number is a meaningless Slack ts, so it wears its own label.
         func label(roots: Int) -> String {
             if case .investigate(let cfg) = config { return cfg.label }
+            if case .issues(let cfg) = config, let linear = cfg.linear {
+                return "\(config.noun) · \(linear.identifier) · \(config.depth)"
+            }
             return "\(config.noun) · \(PRRef.itemLabel(item: item, roots: roots)) · \(config.depth)"
         }
 
         var label: String { label(roots: 1) }
 
-        /// The issue's link a fix records on its run; built from `repo`'s key once its root
-        /// is gone, so the run stays that repo's.
+        /// The issue's link a fix records on its run: a pipeline fix's is its effect's, which
+        /// its attempt record is found by; any other's is built from `repo`, by its key once
+        /// its root is gone, so the run stays that repo's.
         func issueLink(in roots: [PRRef.LocalRepo]) -> String {
-            (roots.first { $0.key == repo } ?? PRRef.repo(ofKey: repo)).webURL(.issues, number: number)
+            if config.isPipeline { return url }
+            return (roots.first { $0.key == repo } ?? PRRef.repo(ofKey: repo)).webURL(.issues, number: number)
         }
 
-        private enum CodingKeys: String, CodingKey { case number, url, author, action, config, repo }
+        private enum CodingKeys: String, CodingKey { case number, url, author, action, config, repo, byHand }
 
         /// `repo` nil reads it off `url`.
         init(number: Int, url: String, author: String, config: RequestedConfig,
@@ -3318,6 +3454,7 @@ final class Store: ObservableObject {
             author = try c.decodeIfPresent(String.self, forKey: .author) ?? ""
             // Absent from a row a single-repo build wrote: `decodeRequestedWork` fills it.
             repo = try c.decodeIfPresent(String.self, forKey: .repo) ?? ""
+            byHand = try c.decodeIfPresent(Bool.self, forKey: .byHand) ?? false
             // No verb means a row written while this list held reviews alone, whose
             // `config` is the bare `ReviewConfig` it was stored as.
             let action = try c.decodeIfPresent(String.self, forKey: .action)
@@ -3337,6 +3474,7 @@ final class Store: ObservableObject {
             try c.encode(author, forKey: .author)
             try c.encode(config.action, forKey: .action)
             try c.encode(repo, forKey: .repo)
+            if byHand { try c.encode(byHand, forKey: .byHand) }
             switch config {
             case .review(let cfg): try c.encode(cfg, forKey: .config)
             case .issues(let cfg): try c.encode(cfg, forKey: .config)
@@ -3430,6 +3568,7 @@ final class Store: ObservableObject {
         let known = Set(requestedWork.map(\.key))
         let fresh = asks.filter { !known.contains($0.key) }
         guard !fresh.isEmpty else { return (0, asks.count) }
+        if !pipelineJudged { pipelineStale.formUnion(fresh.filter(\.config.isPipeline).map(\.key)) }
         requestedWork += fresh
         publishRequested(fresh)
         bringPollForward(capLoad: autoTasksMeasured)
@@ -3444,9 +3583,10 @@ final class Store: ObservableObject {
 
     /// One stored ask as the queued task it stands for.
     ///
-    /// Carries no `counter` and no `ledgerKey`: no monitor owns it (so no
-    /// toggle pauses it and no auto-handled counter counts it), and the telemetry
-    /// ledger measures the monitors, not the operator.
+    /// Carries no `ledgerKey`, and no `counter` but the pipeline's: no monitor owns it (so
+    /// no toggle pauses it and no auto-handled counter counts it), and the telemetry
+    /// ledger measures the monitors, not the operator. The pipeline's asks wait while its
+    /// master switch is off (`AutoCounter.pipeline`).
     ///
     /// The prompt is rebuilt in the root the ask's repo is now, since the root path a
     /// stored config carries is as old as the ask. nil for an ask made in a root that is
@@ -3478,7 +3618,7 @@ final class Store: ObservableObject {
                           prURL: link,
                           prNumber: isPR ? entry.number : nil,
                           authorLogin: entry.author.isEmpty ? nil : entry.author,
-                          counter: nil,
+                          counter: entry.config.isPipeline ? .pipeline : nil,
                           directory: root?.path ?? entry.config.checkout),
             attemptNumber: 1)
     }
@@ -3543,8 +3683,9 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Drop one ask, by the queue key that is its identity.
-    private func forgetRequested(_ key: String) {
+    /// Drop one ask, by the queue key that is its identity. Not private: the pipeline
+    /// withdraws its own (`PipelineMonitor.swift`).
+    func forgetRequested(_ key: String) {
         requestedWork.removeAll { $0.key == key }
     }
 
@@ -3556,9 +3697,14 @@ final class Store: ObservableObject {
     /// no longer owed, while an ask on a PR that is still open stands until it runs —
     /// and a fix stands whatever happens to its issue, the poll reading PRs alone.
     /// Without a way back out, a mis-aimed sweep is a day of agents nobody can call off.
+    /// A pipeline ask's attempt record is concluded (`pipelineCancelled`), or its next sync
+    /// would queue it again.
     func cancelRequestedWork(_ id: String) {
         guard let entry = queuedTasks.first(where: { $0.id == id }), entry.job.requested
         else { return }
+        if entry.job.counter == .pipeline {
+            savePipelineAttempts(Store.pipelineCancelled(loadPipelineAttempts(), job: entry.job, at: Date()))
+        }
         forgetRequested(entry.id)
         dropQueuedTask(id)
         AuditLog.log("panel", "queue-cancel", "\(entry.job.label) — cancelled, not run")
@@ -3576,6 +3722,7 @@ final class Store: ObservableObject {
         switch counter {
         case .reviewRequests:        return !reviewRequestsEnabled
         case .myReviews, .conflicts: return !prAutofixEnabled
+        case .pipeline:              return !pipelineEnabled
         // A review the operator asked for: no monitor owns it, so neither toggle
         // speaks for it. Switching the monitors off says what this machine may go
         // looking for, not that it should stop doing what it was told — for an ask,
@@ -3598,10 +3745,13 @@ final class Store: ObservableObject {
         return queuedTasks.filter { !isHeld($0, owned: owned) }
     }
 
-    /// Paused, unless a Slack ping took it as its ask: then it is asked-for work, which
-    /// switching a monitor off never stops (`isPaused`).
+    /// Paused, or a pipeline ask still stale (`pipelineStale`) or held by an unreadable ban
+    /// list (`banListUnreadable`), unless a Slack ping took it as its ask: then it is
+    /// asked-for work, which switching a monitor off never stops (`isPaused`).
     func isHeld(_ task: QueuedAgentTask, owned: Set<String>? = nil) -> Bool {
-        isPaused(task.job.counter) && !(owned ?? commsOwnedKeys).contains(task.id)
+        (isPaused(task.job.counter)
+            || (task.job.counter == .pipeline && (banListUnreadable || pipelineStale.contains(task.id))))
+            && !(owned ?? commsOwnedKeys).contains(task.id)
     }
 
     /// Dispatch one queued task past the capacity check its caller already made, and
@@ -3680,18 +3830,24 @@ final class Store: ObservableObject {
 
     /// Write the retry-backoff record for a task the queue dispatched, into the same
     /// per-monitor ledger that monitor writes itself: `AgentJob.counter` names the
-    /// ledger, `attemptStamp` is the stamp that monitor compares against.
-    private func recordQueuedAttempt(_ entry: QueuedAgentTask) {
-        guard let key = entry.job.item, let counter = entry.job.counter else { return }
+    /// ledger, `attemptStamp` is the stamp that monitor compares against. Not private:
+    /// the pipeline self-test, which spawns nothing, drives it.
+    func recordQueuedAttempt(_ entry: QueuedAgentTask) {
+        guard let counter = entry.job.counter else { return }
         let record = ReviewAttempt(requestedAt: entry.job.attemptStamp,
                                    lastDispatchedAt: Date(), attempts: entry.attemptNumber)
+        func put(_ load: () -> [String: ReviewAttempt], _ save: ([String: ReviewAttempt]) -> Void) {
+            guard let key = entry.job.item else { return }
+            var map = load(); map[key] = record; save(map)
+        }
         switch counter {
-        case .reviewRequests:
-            var map = loadReviewReqAttempts(); map[key] = record; saveReviewReqAttempts(map)
-        case .myReviews:
-            var map = loadMyReviewAttempts(); map[key] = record; saveMyReviewAttempts(map)
-        case .conflicts:
-            var map = loadMyConflictAttempts(); map[key] = record; saveMyConflictAttempts(map)
+        case .reviewRequests: put(loadReviewReqAttempts, saveReviewReqAttempts)
+        case .myReviews: put(loadMyReviewAttempts, saveMyReviewAttempts)
+        case .conflicts: put(loadMyConflictAttempts, saveMyConflictAttempts)
+        // Keyed by effect, which a fix (no `item`) has too; queueing it wrote the record.
+        case .pipeline:
+            savePipelineAttempts(Store.pipelineSpawned(loadPipelineAttempts(), job: entry.job,
+                                                       at: record.lastDispatchedAt))
         }
     }
 
@@ -3776,7 +3932,7 @@ final class Store: ObservableObject {
         case .reviewRequests: reviewRequestsHandled += 1
         case .myReviews: autofixReviewsHandled += 1
         case .conflicts: autofixConflictsHandled += 1
-        case nil: break
+        case .pipeline, nil: break
         }
     }
 
@@ -3823,7 +3979,8 @@ final class Store: ObservableObject {
         var item: String? { prNumber == nil ? nil : prURL.flatMap(PRRef.itemKey(url:)) }
     }
 
-    enum AutoCounter { case reviewRequests, myReviews, conflicts }
+    /// `pipeline`: owned by its master switch rather than by a monitor, and tallied nowhere.
+    enum AutoCounter { case reviewRequests, myReviews, conflicts, pipeline }
 
     /// What to do about a dispatch the ban gate refused. A monitor's find comes back by
     /// itself once the ban lifts; an ask is retired by the refusal (`settleRequested`).
@@ -4165,6 +4322,18 @@ final class Store: ObservableObject {
     }
     private func saveMyReviewAttempts(_ map: [String: ReviewAttempt]) {
         persistJSON(map, forKey: Keys.myReviewAttempts)
+    }
+
+    /// The pipeline's attempt records, by `PipelineEffect.key`. Not private: written from
+    /// `PipelineMonitor.swift`.
+    func loadPipelineAttempts() -> [String: ReviewAttempt] {
+        guard let data = storedJSON(forKey: Keys.pipelineAttempts),
+              let decoded = try? JSONDecoder().decode([String: ReviewAttempt].self, from: data)
+        else { return [:] }
+        return decoded
+    }
+    func savePipelineAttempts(_ map: [String: ReviewAttempt]) {
+        persistJSON(map, forKey: Keys.pipelineAttempts)
     }
 
     /// The primary root's key, which owns the bare-number keys a single-repo build stored.

@@ -5,27 +5,28 @@ import DiplomatCore
 struct ContentView: View {
     @EnvironmentObject var store: Store
     @State private var query = ""
-    /// Which of the six screens the body shows: Actions ("main"), Devices, Machines, Comms,
-    /// Telemetry or Settings.
+    /// Which of the seven screens the body shows: Actions ("main"), Devices, Machines, Comms,
+    /// Pipeline, Telemetry or Settings.
     @State private var screen: PanelScreen
 
-    enum PanelScreen { case main, devices, machines, comms, telemetry, settings }
+    enum PanelScreen { case main, devices, machines, comms, pipeline, telemetry, settings }
 
-    /// `showSettings` / `showTelemetry` / `showDevices` / `showMachines` / `showComms` seed
-    /// the initial screen — used by the headless render to snapshot those screens in
-    /// context.
+    /// `showSettings` / `showTelemetry` / `showDevices` / `showMachines` / `showComms` /
+    /// `showPipeline` seed the initial screen — used by the headless render to snapshot those
+    /// screens in context.
     /// Defaults to the main view.
     /// `seedPendingUnban` seeds the inline un-ban confirmation for a login (render only).
     /// `seedMutedAudit` pre-mutes Activity filter categories so the filtered feed can be
     /// snapshotted (render only).
     init(showSettings: Bool = false, showTelemetry: Bool = false, showDevices: Bool = false,
-         showMachines: Bool = false, showComms: Bool = false,
+         showMachines: Bool = false, showComms: Bool = false, showPipeline: Bool = false,
          seedPendingUnban: String? = nil, seedMutedAudit: Set<AuditCategory> = []) {
         _screen = State(initialValue: showSettings ? .settings
                                     : showTelemetry ? .telemetry
                                     : showDevices ? .devices
                                     : showMachines ? .machines
-                                    : showComms ? .comms : .main)
+                                    : showComms ? .comms
+                                    : showPipeline ? .pipeline : .main)
         _pendingUnban = State(initialValue: seedPendingUnban)
         _mutedAuditCategories = State(initialValue: seedMutedAudit)
     }
@@ -64,6 +65,9 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .comms:
                 CommsView(isPresented: presenting(.comms))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            case .pipeline:
+                PipelineView(isPresented: presenting(.pipeline))
                     .frame(maxWidth: .infinity, alignment: .leading)
             case .devices:
                 DevicesScreen(isPresented: presenting(.devices))
@@ -136,6 +140,7 @@ struct ContentView: View {
             devicesButton
             machinesButton
             commsButton
+            pipelineButton
             Button { withAnimation(.easeInOut(duration: 0.15)) { screen = screen == .telemetry ? .main : .telemetry } } label: {
                 Image(systemName: screen == .telemetry ? "chart.bar.xaxis" : "chart.bar")
                     .foregroundStyle(screen == .telemetry ? Color.accentColor : .primary)
@@ -201,6 +206,15 @@ struct ContentView: View {
                 }
         }
         .buttonStyle(.borderless).tooltip(help)
+    }
+
+    private var pipelineButton: some View {
+        let open = screen == .pipeline
+        return Button { withAnimation(.easeInOut(duration: 0.15)) { screen = open ? .main : .pipeline } } label: {
+            Image(systemName: open ? "point.3.filled.connected.trianglepath.dotted" : PipelineView.symbol)
+                .foregroundStyle(open ? Color.accentColor : .primary)
+        }
+        .buttonStyle(.borderless).tooltip("Pipeline")
     }
 
     /// Opens the Devices screen; the badge counts the devices in use.
@@ -1022,6 +1036,7 @@ private struct QueuedTaskRow: View {
     private var runHelp: String {
         paused ? QueuedTaskRow.pausedHelp : QueuedTaskRow.heldHelp
     }
+    private var cancelTip: String { Store.pipelineCancelHelp(task.job) ?? QueuedTaskRow.cancelHelp }
 
     private var kindIcon: String { DiplomatUI.agentTaskIcon(task.job.kind) }
 
@@ -1063,7 +1078,7 @@ private struct QueuedTaskRow: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .tooltip(QueuedTaskRow.cancelHelp)
+                .tooltip(cancelTip)
             }
             Button(action: onRun) {
                 Text("execute now")

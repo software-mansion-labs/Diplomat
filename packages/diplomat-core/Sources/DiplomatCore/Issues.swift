@@ -21,9 +21,9 @@ public enum IssueCatalog {
 /// off the machine is which model the agent runs on (`AgentModel`), which the
 /// attribution tag names.
 ///
-/// **Every prompt this builds works ONE issue** — `specificIssue` names it. A scope
-/// is never handed to an agent as a scope: the front-end enumerates it against the
-/// repo's open issues (`Filters.sweptIssues`) and queues one run per issue, each
+/// **Every prompt this builds works ONE issue** — `specificIssue` or `linear` names it.
+/// A scope is never handed to an agent as a scope: the front-end enumerates it against
+/// the repo's open issues (`Filters.sweptIssues`) and queues one run per issue, each
 /// built from `forIssue`. So the three axes below are read by different readers:
 ///
 ///   - `target` / `username` / `unassignedOnly` — WHICH issues the sweep picks up
@@ -63,11 +63,17 @@ public struct IssueConfig: Codable, Equatable {
     public var commentOnIssue: Bool
     /// The one escalation: also take on feature requests, not just bug reports.
     public var includeFeatures: Bool
+    /// A Linear issue to work instead of `specificIssue`, in `targetRepo`, claiming and
+    /// commenting on no GitHub issue. Optional so a queued config stored without it decodes.
+    public var linear: LinearIssue?
+    /// A pipeline fast-track candidate. Optional for the same reason.
+    public var pipeline: Bool?
 
     public init(depth: String = "", target: IssueTarget = .all, username: String = "",
                 me: String = "", specificIssue: String = "", unassignedOnly: Bool = true,
                 assignToMe: Bool = true, openPRs: Bool = true,
-                commentOnIssue: Bool = true, includeFeatures: Bool = false) {
+                commentOnIssue: Bool = true, includeFeatures: Bool = false,
+                linear: LinearIssue? = nil, pipeline: Bool? = nil) {
         self.depth = depth.isEmpty ? IssueCatalog.defaultDepthID() : depth
         self.target = target
         self.username = username
@@ -78,6 +84,8 @@ public struct IssueConfig: Codable, Equatable {
         self.openPRs = openPRs
         self.commentOnIssue = commentOnIssue
         self.includeFeatures = includeFeatures
+        self.linear = linear
+        self.pipeline = pipeline
     }
 
     /// The @handle whose issues we sweep — empty for every scope that names no one
@@ -120,6 +128,7 @@ public struct IssueConfig: Codable, Equatable {
     /// The fixed issue's link, which its run records; nil for a sweep. Python twin:
     /// `IssueConfig.single_link`.
     public var singleLink: String? {
+        if let linear { return linear.url }
         guard isSingleIssue, let n = issueRef.number else { return nil }
         let (owner, repo) = targetRepo
         return (targetLocal ?? PRRef.LocalRepo(owner: owner, repo: repo, path: "")).webURL(.issues, number: n)
@@ -135,6 +144,7 @@ public struct IssueConfig: Codable, Equatable {
     }
 
     public var isValid: Bool {
+        if linear != nil { return true }
         if isSingleIssue { return issueRef.isValid }
         // A scope that names a person needs that person; the rest need nothing.
         return target.needsHandle ? !authorHandle.isEmpty : true
@@ -175,9 +185,15 @@ public struct IssueConfig: Codable, Equatable {
         let scope = issues?.scope ?? [:]
         let blocks = issues?.blocks ?? [:]
         let (owner, repo) = targetRepo
+        let pipelineBlocks = (try? CoreAssets.pipeline())?.blocks ?? [:]
+        let onGitHub = linear == nil
 
         func fill(_ s: String) -> String {
-            s.replacingOccurrences(of: "{issue}", with: issueRef.numberString)
+            var s = s
+            if let id = linear.map({ CommsText.oneLine($0.identifier) }) {
+                s = s.replacingOccurrences(of: "#{issue}", with: id).replacingOccurrences(of: "{issue}", with: id)
+            }
+            return s.replacingOccurrences(of: "{issue}", with: issueRef.numberString)
                 .replacingOccurrences(of: "{owner}", with: owner)
                 .replacingOccurrences(of: "{repo}", with: repo)
         }
@@ -185,14 +201,25 @@ public struct IssueConfig: Codable, Equatable {
         var out: [String] = []
 
         // 1. The one issue in front of the agent.
-        out.append(fill(scope["single"] ?? ""))
+        if let linear {
+            let fence = PipelineRater.fence
+            out.append(CommsText.fillFenced(pipelineBlocks["linearScope"] ?? "", [
+                "identifier": CommsText.oneLine(linear.identifier), "url": CommsText.oneLine(linear.url),
+                "owner": owner, "repo": repo, "text": CommsText.defang(linear.text, marker: fence),
+            ], marker: fence))
+        } else {
+            out.append(fill(scope["single"] ?? ""))
+        }
         if let n = PRRef.LocalRepo.gitlabNote(targetLocal) { out.append(n) }
 
-        // 2. What a swept issue has to be re-checked for, its turn having come long
-        //    after the sweep chose it: closed since, and claimed since.
-        if !isSingleIssue {
+        // 2. What a swept or pipeline-queued issue has to be re-checked for, its turn
+        //    having come long after it was chosen: closed since, and claimed since.
+        if !isSingleIssue && onGitHub {
             if let b = blocks["swept"] { out.append(fill(b)) }
             if unassignedOnly, let b = blocks["unassigned"] { out.append(fill(b)) }
+        }
+        if pipeline == true, let b = pipelineBlocks[onGitHub ? "pipelineRecheck" : "pipelineRecheckLinear"] {
+            out.append(fill(b))
         }
 
         // 3. Whether it is this run's business at all — a bug, or a feature too.
@@ -203,7 +230,7 @@ public struct IssueConfig: Codable, Equatable {
         }
 
         // 4. Claim it before working it, so a second agent doesn't take the same one.
-        if assignToMe, let b = blocks["assignSelf"] { out.append(fill(b)) }
+        if assignToMe && onGitHub, let b = blocks["assignSelf"] { out.append(fill(b)) }
 
         // 5. How hard to prove it, and the bar that proof is held to.
         out.append(IssueCatalog.depth(id: depth).fragment)
@@ -216,12 +243,14 @@ public struct IssueConfig: Codable, Equatable {
         } else if let b = blocks["noPRs"] {
             out.append(fill(b))
         }
-        if commentOnIssue, let b = blocks["comment"] { out.append(fill(b)) }
-        if openPRs && commentOnIssue, let b = blocks["thankReporter"] { out.append(fill(b)) }
+        if pipeline == true, let b = pipelineBlocks["pipelineFix"] { out.append(fill(b)) }
+        let comments = commentOnIssue && onGitHub
+        if comments, let b = blocks["comment"] { out.append(fill(b)) }
+        if openPRs && comments, let b = blocks["thankReporter"] { out.append(fill(b)) }
         // Commit-authoring guidance only when we might actually commit.
         if openPRs, let b = blocks["noAttribution"] { out.append(fill(b)) }
         // The attribution tag only when this run posts something to wear it.
-        if openPRs || commentOnIssue, let b = blocks["diplomatTag"] {
+        if openPRs || comments, let b = blocks["diplomatTag"] {
             out.append(AgentModel.fillTag(fill(b), model: AgentModel.detected()))
         }
         if let b = blocks["summary"] { out.append(fill(b)) }

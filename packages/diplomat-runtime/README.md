@@ -35,6 +35,8 @@ diplomat_runtime/
                   the one way every other module here runs a `diplomat-core` subcommand
   comms.py        Comms, the Slack watcher, through `diplomat-core comms-*`, plus the
                   front-end's own lines of its log
+  pipeline.py     the Pipeline (rate, fast-track, merge), through `diplomat-core
+                  pipeline-*`, and its sync period
   review.py       ReviewConfig + terminal spawner
   reviewaudit.py  a retired review run's review: left PENDING, or split over several
                   (ReviewAudit.swift's twin)

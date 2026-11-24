@@ -123,11 +123,17 @@ public struct ReviewConfig: Codable, Equatable {
     /// always know). Ignored unless single-PR.
     public var specificAuthor: SpecificAuthor
 
+    /// A single PR of mine on the pipeline's fast track (read only with `specificAuthor`
+    /// `.mine`): reviewed until clean and marked so, never marked ready. Optional so a
+    /// queued config stored without it decodes.
+    public var fastTrack: Bool?
+
     public init(depth: String = "", target: Target = .mine, username: String = "",
                 me: String = "", markReady: Bool = true, leaveReviews: Bool = true,
                 replyToReviews: Bool = true, includeDrafts: Bool = true,
                 includeReady: Bool = true, specificPR: String = "", finalPass: Bool = false,
-                softApprove: Bool = true, specificAuthor: SpecificAuthor = .unknown) {
+                softApprove: Bool = true, specificAuthor: SpecificAuthor = .unknown,
+                fastTrack: Bool? = nil) {
         self.depth = depth.isEmpty ? ReviewCatalog.defaultDepthID() : depth
         self.target = target
         self.username = username
@@ -141,6 +147,7 @@ public struct ReviewConfig: Codable, Equatable {
         self.finalPass = finalPass
         self.softApprove = softApprove
         self.specificAuthor = specificAuthor
+        self.fastTrack = fastTrack
     }
 
     /// The @handle whose PRs we go through (empty in single-PR mode).
@@ -378,9 +385,14 @@ public struct ReviewConfig: Codable, Equatable {
         out.append(chosen.fragment)
         if let bar = blocks["bar"] { out.append(bar) }
         if let ob = chosen.onBranch, !ob.isEmpty { out.append(ob) }
-        if effMarkReady, let b = blocks["markReady"] { out.append(b) }
+        if effMarkReady && fastTrack != true, let b = blocks["markReady"] { out.append(b) }
         if let b = blocks["noAttribution"] { out.append(b) }
         if let b = blocks["lowsMine"] { out.append(b) }
+        if fastTrack == true, let pipeline = try? CoreAssets.pipeline(), let b = pipeline.blocks["fastTrack"] {
+            let (owner, repo) = targetRepo
+            out.append(CommsText.fill(b, ["owner": owner, "repo": repo, "pr": prRef.numberString,
+                                          "cleanMarker": pipeline.cleanMarker]))
+        }
         // No final verdict for my own PR — I don't approve my own work. The reviewer-
         // findings block above already covers others' threads (so the separate reply
         // block is redundant here).

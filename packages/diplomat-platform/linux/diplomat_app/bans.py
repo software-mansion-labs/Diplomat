@@ -127,6 +127,14 @@ def read() -> list[BannedAuthor]:
     return out
 
 
+def unreadable() -> bool:
+    """Whether the file is present but no JSON object whose ``banned`` is a list or
+    absent. Twin of ``BanList.readFile``'s ``unreadable``."""
+    path = banned_path()
+    data = atomicjson.read_object(path)
+    return path.exists() if data is None else not isinstance(data.get("banned", []), list)
+
+
 def is_banned(login: str, banned: list[BannedAuthor]) -> bool:
     """Whether ``login`` is on the ban list (case-insensitive, as GitHub logins are).
     Mirrors BanList.isBanned — the monitor must never dispatch an agent for a PR by a

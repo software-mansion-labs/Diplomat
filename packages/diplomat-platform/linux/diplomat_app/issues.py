@@ -83,6 +83,11 @@ class IssueConfig(RepoConfig):
     comment_on_issue: bool = True
     #: The one escalation: also take on feature requests, not just bug reports.
     include_features: bool = False
+    #: A Linear issue (``LinearIssue``: ``identifier``, ``url``, ``text``) worked in place
+    #: of ``specific_issue``: the Pipeline read its text, which the run cannot.
+    linear: dict | None = None
+    #: A Pipeline fast-track candidate, rated low risk and low complexity.
+    pipeline: bool = False
 
     def __post_init__(self) -> None:
         if not self.depth:
@@ -188,6 +193,9 @@ class IssueConfig(RepoConfig):
             "openPRs": self.open_prs,
             "commentOnIssue": self.comment_on_issue,
             "includeFeatures": self.include_features,
+            # Absent unless set, as in a config queued before they existed.
+            **({"linear": self.linear} if self.linear else {}),
+            **({"pipeline": True} if self.pipeline else {}),
             **listed_payload(self.local_repos, self.home),
         }
 

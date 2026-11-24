@@ -280,6 +280,101 @@ public enum CoreAssets {
         }
     }
 
+    public struct PipelineModel: Decodable {
+        public struct PerLevel: Decodable {
+            public let low: String
+            public let medium: String
+            public let high: String
+
+            public subscript(_ level: PipelineLevel) -> String {
+                switch level {
+                case .low: return low
+                case .medium: return medium
+                case .high: return high
+                }
+            }
+        }
+        public struct Labels: Decodable {
+            public let risk: PerLevel
+            public let complexity: PerLevel
+            public let fastTrack: String
+            public let cleared: String
+            public let fractured: String
+            /// Hex digits, for the labels Diplomat creates.
+            public let color: String
+        }
+        /// Each level's definition.
+        public struct Levels: Decodable {
+            public let complexity: PerLevel
+            public let risk: PerLevel
+        }
+        public struct Floor: Decodable {
+            public let maxFiles: Int
+            public let maxSourceFiles: Int
+            public let maxSourceLines: Int
+            public let maxTestLines: Int
+            public let deniedDirs: [String]
+            public let deniedFiles: [String]
+            public let testDirs: [String]
+            public let testFiles: [String]
+        }
+        public struct Rater: Decodable {
+            public let model: String
+            public let prModel: String
+            public let timeoutSecs: Double
+            public let perSync: Int
+            public let bodyChars: Int
+            public let diffChars: Int
+            public let instructions: [String]
+        }
+        public struct Fracture: Decodable {
+            public let maxChildren: Int
+            public let instructions: [String]
+        }
+        /// Page sizes of a root's read; `least` is the floor timeouts halve them down to.
+        public struct GitHubPage: Decodable {
+            public let issues: Int
+            public let prs: Int
+            public let least: Int
+        }
+        public let syncSecs: Int
+        public let minSyncSecs: Int
+        public let maxItems: Int
+        public let maxEvents: Int
+        public let maxLogBytes: Int
+        public let httpTimeoutSecs: Double
+        public let linearAPI: String
+        public let linearMaxIssues: Int
+        public let githubMaxItems: Int
+        public let githubPage: GitHubPage
+        public let labels: Labels
+        /// Labels keeping an issue off the fast track, matched by `PipelineSync.triageForms`.
+        public let triageLabels: [String]
+        /// Labels holding the item they are on, matched the same way.
+        public let stopLabels: [String]
+        public let levels: Levels
+        public let floor: Floor
+        public let rater: Rater
+        public let fracture: Fracture
+        public let blocks: [String: String]
+        public let cleanMarker: String
+        /// The `--json-schema` arguments, filled by `loadPipeline`: free-form JSON, not decoded.
+        public internal(set) var raterSchema: String = ""
+        public internal(set) var fractureSchema: String = ""
+
+        private enum CodingKeys: String, CodingKey {
+            case syncSecs, minSyncSecs, maxItems, maxEvents, maxLogBytes, httpTimeoutSecs,
+                 linearAPI, linearMaxIssues, githubMaxItems, githubPage, labels, triageLabels, stopLabels, levels, floor,
+                 rater, fracture, blocks, cleanMarker
+        }
+
+        /// The labels that put a merged or closed item on the graph.
+        public var all: Set<String> {
+            Set(PipelineLevel.allCases.flatMap { [labels.risk[$0], labels.complexity[$0]] })
+                .union([labels.fastTrack, labels.cleared, labels.fractured])
+        }
+    }
+
     // MARK: - Directory resolution
 
     /// Candidate locations for `assets/`, in priority order: an explicit override,
@@ -357,6 +452,22 @@ public enum CoreAssets {
     private static let _models = try? loadJSON("models.json", as: Models.self)
     private static let _telemetry = try? loadJSON("telemetry.json", as: TelemetryModel.self)
     private static let _comms = try? loadComms()
+    private static let _pipeline = try? loadPipeline()
+
+    private static func loadPipeline() throws -> PipelineModel {
+        var model = try loadJSON("pipeline.json", as: PipelineModel.self)
+        let url = try assetsDir().appendingPathComponent("pipeline.json")
+        let root = (try? JSONSerialization.jsonObject(with: Data(contentsOf: url))) as? [String: Any]
+        func schema(_ section: String) throws -> String {
+            guard let schema = (root?[section] as? [String: Any])?["schema"],
+                  let data = try? JSONSerialization.data(withJSONObject: schema, options: [.sortedKeys])
+            else { throw CoreError(message: "pipeline.json has no \(section).schema object") }
+            return String(decoding: data, as: UTF8.self)
+        }
+        model.raterSchema = try schema("rater")
+        model.fractureSchema = try schema("fracture")
+        return model
+    }
 
     private static func loadComms() throws -> CommsModel {
         var model = try loadJSON("comms.json", as: CommsModel.self)
@@ -436,6 +547,11 @@ public enum CoreAssets {
     public static func comms() throws -> CommsModel {
         guard let c = _comms else { return try loadComms() }
         return c
+    }
+
+    public static func pipeline() throws -> PipelineModel {
+        guard let p = _pipeline else { return try loadPipeline() }
+        return p
     }
 
     public static func graphql(_ name: String) throws -> String {
