@@ -62,21 +62,8 @@ extension Store {
     func writePipelineControl() {
         let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"] ?? ""
         guard !Headless.active || !env.isEmpty else { return }
-        let switches = ["enabled": pipelineEnabled, "rate": pipelineRate, "fix": pipelineFix,
-                        "fastTrack": pipelineFastTrack, "merge": pipelineMerge,
-                        "fracture": pipelineFracture]
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        guard let data = try? encoder.encode(switches) else { return }
-        let dir = PipelineLog.dir
-        let fm = FileManager.default
-        let tmp = dir.appendingPathComponent("control.json.tmp-\(getpid())-\(UUID().uuidString)")
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true,
-                                attributes: [.posixPermissions: 0o700])
-        if !fm.createFile(atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600])
-            || rename(tmp.path, dir.appendingPathComponent("control.json").path) != 0 {
-            try? fm.removeItem(at: tmp)
-        }
+        PipelineControl(enabled: pipelineEnabled, rate: pipelineRate, fix: pipelineFix,
+                        fastTrack: pipelineFastTrack, merge: pipelineMerge, fracture: pipelineFracture).save()
     }
 
     nonisolated static func pipelineTeams(_ raw: String) -> [PipelineSettings.LinearTeam] {

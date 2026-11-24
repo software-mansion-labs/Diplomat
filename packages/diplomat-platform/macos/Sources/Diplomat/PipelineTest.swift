@@ -815,13 +815,18 @@ enum PipelineTest {
         func switches() -> [String: Bool]? {
             (try? Data(contentsOf: control)).flatMap { try? JSONDecoder().decode([String: Bool].self, from: $0) }
         }
+        try? FileManager.default.createDirectory(at: PipelineLog.dir, withIntermediateDirectories: true)
+        chmod(PipelineLog.dir.path, 0o755)
         store.pipelineMerge = false
         check("a switch writes every switch as it stands",
               switches() == ["enabled": true, "rate": true, "fix": true, "fastTrack": true, "merge": false,
                              "fracture": false])
-        let mode = (try? FileManager.default.attributesOfItem(atPath: control.path))?[.posixPermissions] as? Int
+        func mode(_ url: URL) -> Int? {
+            (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
+        }
         let beside = (try? FileManager.default.contentsOfDirectory(atPath: PipelineLog.dir.path)) ?? []
-        check("…owner-only, replaced whole", mode == 0o600 && !beside.contains { $0.hasPrefix("control.json.") })
+        check("…owner-only in a folder made owner-only, replaced whole",
+              mode(control) == 0o600 && mode(PipelineLog.dir) == 0o700 && !beside.contains { $0.hasPrefix("control.json.") })
         try? FileManager.default.removeItem(at: control)
         var handed: [String: Bool]?
         Store.pipelineTickOverride = { _ in
