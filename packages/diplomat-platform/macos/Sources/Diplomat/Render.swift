@@ -252,8 +252,8 @@ enum Render {
         case let s where s.hasPrefix("pipeline"):
             // "pipeline" selects a cleared PR held for its CI; "-issue" filters the fast
             // lane, which keeps the split issue's whole group, and selects its candidate
-            // child; "-panel" draws the screen inside the whole panel (header button,
-            // screen swap); "-empty" the screen before a first sync, switched off.
+            // child; "-panel" draws the screen inside the whole panel; "-empty" the screen
+            // before a first sync, switched off.
             let _ = seedPipeline(store, empty: s.contains("empty"))
             if s.contains("panel") {
                 ContentView(showPipeline: true)
