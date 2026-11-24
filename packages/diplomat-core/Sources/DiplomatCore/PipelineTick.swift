@@ -1072,8 +1072,8 @@ final class PipelineSync {
     }
 
     /// Writes the rating kept for `entries[i]` while its labels could not be written, never
-    /// lower than the labels on it now, with no new rating asked for. A PR's is dropped, to
-    /// be rated again, once its diff at the head this sync read allows less.
+    /// lower than the labels on it now, with no new rating asked for. A PR's is dropped once
+    /// its diff at the head this sync read allows less.
     func rewrite(_ i: Int) {
         let id = entries[i].id
         guard let kept = cache[id]?.rating, may(.rate) else { return }
