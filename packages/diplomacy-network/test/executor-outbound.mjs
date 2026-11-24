@@ -804,6 +804,53 @@ await check('each way of a tunnel ends on its own, straight to the broker and th
   }
 });
 
+await check('a tunnel whose connection out is reset after its far host ended its side is closed, straight to the broker and through a relay: as the job ends its side, and at most 5 s on if it never does', async () => {
+  const to = ports[addresses['halfway.test']];
+  // The kernel, but with a MiB more to send on every connection to halfway.test: past the
+  // whole, the first poll resets it.
+  const queues = async () => (await systemQueues()).map((r) => (r.remotePort === to ? { ...r, bytes: r.bytes + 2 ** 20, sending: r.sending + 2 ** 20 } : r));
+  const { broker, addJob, tunnel, relay } = await brokerWith({ bytes: 2 ** 19, queues });
+  const theirs = await relay();
+  try {
+    for (const via of [undefined, theirs.port]) {
+      for (const ends of [true, false]) {
+        const h = await addJob();
+        const { s } = await tunnel(h, 'halfway.test', via, true);
+        let said = '';
+        s.on('data', (d) => { said += d; });
+        s.resume();
+        await until('the far host\'s end', () => said === 'ready' && s.readableEnded, 3000);
+        s.write(Buffer.alloc(16 * 1024, 1));
+        const resets = logged.filter((l) => l.includes(`${h.runId} `) && l.includes('is reset')).length;
+        await until('the connection out to be reset', () => logged.filter((l) => l.includes(`${h.runId} `) && l.includes('is reset')).length > resets, 3 * OUT_POLL_MS);
+        const reset = Date.now();
+        const where = `${via ? 'through the relay' : 'straight'}, the job ${ends ? 'ending' : 'never ending'} its side`;
+        if (ends) {
+          await sleep(500);
+          s.end();
+          const end = Date.now();
+          await until(`the job's place to be given back, ${where}`, () => broker.load(h.runId).connections === 0, 3000);
+          assert.ok(Date.now() - end < 1000, `${where}: given back ${Date.now() - end} ms after the job's end`);
+        } else {
+          await until(`the job's place to be given back, ${where}`, () => broker.load(h.runId).connections === 0, 8000);
+          assert.ok(Date.now() - reset < 6000, `${where}: given back ${Date.now() - reset} ms after the reset`);
+          // Its side still open, the job finds the connection gone as it writes: through a
+          // relay once the relay has kept its socket for the 5 s it lingers.
+          for (let i = 0; i < 80 && !s.destroyed; i++) {
+            s.write('more');
+            await sleep(100);
+          }
+        }
+        await until(`the job's socket to be closed, ${where}`, () => s.destroyed, 3000);
+        broker.removeJob(h.runId);
+      }
+    }
+  } finally {
+    theirs.end();
+    await broker.stop();
+  }
+});
+
 await check('while the kernel cannot be asked, a job\'s tunnel past the fallback\'s connections out is refused and the rest carry on', async () => {
   const { broker, addJob, tunnel } = await brokerWith({ queues: async () => { throw new Error('no table'); }, fallback: 2 });
   const job = await addJob();

@@ -47,7 +47,7 @@ import {
   JOB_MODEL_BYTES, JOB_MODEL_REQUESTS, LOCAL_PORTS_PATH, RELAY_HOST,
 } from '../paths.js';
 import { createFeeder, edgeAfter, headEnd } from './feed.js';
-import { createHop, PREFACE } from './hop.js';
+import { createHop, HOP_LINGER_MS, PREFACE } from './hop.js';
 import { carriesPlaceholder } from './llm.js';
 import { own } from './own-fault.js';
 import { createOutbound } from './outbound.js';
@@ -952,10 +952,21 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     hold(job, upstream);
     outbound.add(job, upstream);
     // Each way ends on its own, and the job's connection is ended, not closed, once the
-    // far host's has: it closes once both ways have, what it was sent taken.
+    // far host's has: it closes once both ways have, what it was sent taken. One whose
+    // connection out is gone while the job's side is open has nowhere to send what the
+    // job writes: that is read and dropped, and it is closed as the job ends its side,
+    // or 5 s on.
     upstream.allowHalfOpen = true;
     socket.on('close', () => outbound.close(upstream));
-    upstream.on('close', () => { if (!upstream.readableEnded) socket.destroy(); });
+    upstream.on('close', () => {
+      if (!upstream.readableEnded) return socket.destroy();
+      if (socket.readableEnded) return undefined;
+      // Unpiped here, or the pipe's own unpipe, as it sees the close after this, pauses it.
+      socket.unpipe(upstream);
+      socket.resume();
+      setTimeout(() => socket.destroy(), HOP_LINGER_MS).unref();
+      return undefined;
+    });
     socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     if (head.length) upstream.write(head);
     socket.pipe(upstream);

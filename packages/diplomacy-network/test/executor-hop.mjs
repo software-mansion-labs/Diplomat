@@ -723,9 +723,100 @@ await check('a job that is past its share again after it was within it is given 
   } finally { end(); }
 });
 
-await check('a link given some of the room it waits for and held back again is held back from then', async () => {
+await check('a link given part of the room it waits for is held back still, from when it first was; one given all it waits for and held back again is held back from then', async () => {
   const window = 8 * 1024;
   const reclaimMs = 800;
+  for (const all of [false, true]) {
+    const { unit, pair, end } = await units({ jobBytes: 10 * window, window, reclaimMs });
+    const [x, w] = [{}, {}];
+    try {
+      unit.admit(x);
+      const xs = await filled(pair, x, 20, window / 2);
+      await until('x to hold the whole', () => unit.held(x) === 10 * window, 3000);
+      unit.admit(w);
+      await sleep(reclaimMs / 2);
+      // x has been past its share since w came; w is held back from here.
+      const [wl] = await filled(pair, w, 1, all ? window / 2 : window);
+      await sleep(reclaimMs * 0.6);
+      // Half a window freed: w is given it.
+      xs[0].link.destroy();
+      await until('w to have half a window', () => unit.held(w) === window / 2, 3000);
+      const given = Date.now();
+      // Held back again, for more than it was given or for the next it writes.
+      if (all) wl.link.write(Buffer.alloc(window / 2));
+      await until('x to lose more', () => lost(xs) > 1, reclaimMs * 3);
+      const after = Date.now() - given;
+      if (all) assert.ok(after >= reclaimMs * 0.9, `given all it waited for: lost ${after} ms after`);
+      else assert.ok(after < reclaimMs * 0.6, `given part of it: lost ${after} ms after`);
+      assert.equal(wl.link.destroyed, false);
+    } finally { end(); }
+  }
+});
+
+// The relay's end of `p`: passes on, and says so of, all it is sent, counted in `got.n`.
+const reads = (p) => {
+  const got = { n: 0 };
+  let buf = Buffer.alloc(0);
+  p.far.on('data', (d) => {
+    buf = Buffer.concat([buf, d]);
+    while (buf.length >= 5) {
+      const n = buf.readUInt32BE(1);
+      const size = buf[0] === DATA ? 5 + n : 5;
+      if (buf.length < size) break;
+      if (buf[0] === DATA) {
+        got.n += n;
+        p.far.write(relayFrame(ACK, n));
+      }
+      buf = buf.subarray(size);
+    }
+  });
+  return got;
+};
+const relayFrame = (type, n) => {
+  const head = Buffer.alloc(5);
+  head[0] = type;
+  head.writeUInt32BE(n, 1);
+  return head;
+};
+
+await check('a job past its share loses its fullest connections while another is held back, though it passes on a little now and then and a third job takes that and passes on none of it, however small its writes', async () => {
+  // h2's link fills a window only after many of h's 2 KiB, as with the hop's own.
+  const window = 128 * 1024;
+  const reclaimMs = 400;
+  for (const piece of [64 * window, 2 * 1024]) {
+    const { unit, pair, end } = await units({ jobBytes: 10 * window, window, reclaimMs });
+    const [h, h2, v] = [{}, {}, {}];
+    let trickling = null;
+    try {
+      unit.admit(h);
+      const hs = await filled(pair, h, 10, window);
+      await until('h to hold the whole', () => unit.held(h) === 10 * window, 3000);
+      unit.admit(h2);
+      unit.admit(v);
+      // h2's link is held back first, and passes on nothing it is sent.
+      const b = await pair(h2);
+      for (let at = 0; at < 64 * window; at += piece) b.link.write(Buffer.alloc(piece));
+      const since = Date.now();
+      await sleep(50);
+      const vl = await pair(v);
+      const got = reads(vl);
+      vl.link.write(Buffer.alloc(64 * window));
+      // h passes on 2 KiB of one of its connections, more often than the reclaim time.
+      trickling = setInterval(() => hs.find((p) => p.link.holding() >= 2 * 1024)?.far.write(relayFrame(ACK, 2 * 1024)), reclaimMs * 0.7);
+      await until('v to be sent its share', () => got.n >= Math.floor(10 * window / 3), reclaimMs * 4);
+      const after = Date.now() - since;
+      assert.ok(after >= reclaimMs * 0.9, `v was sent its share ${after} ms after h2 was held back`);
+      assert.ok(lost(hs) > 0, 'h lost connections for it');
+    } finally {
+      clearInterval(trickling);
+      end();
+    }
+  }
+});
+
+await check('a relay given part of the room it asks for is held back still when it asks again: the job past its share loses connections from when it first was', async () => {
+  const window = 8 * 1024;
+  const reclaimMs = 600;
   const { unit, pair, end } = await units({ jobBytes: 10 * window, window, reclaimMs });
   const [x, w] = [{}, {}];
   try {
@@ -733,17 +824,17 @@ await check('a link given some of the room it waits for and held back again is h
     const xs = await filled(pair, x, 20, window / 2);
     await until('x to hold the whole', () => unit.held(x) === 10 * window, 3000);
     unit.admit(w);
-    await sleep(reclaimMs / 2);
-    // x has been past its share since w came; w is held back from here.
-    const [wl] = await filled(pair, w, 1, window);
-    await sleep(reclaimMs * 0.6);
-    // Half a window freed: w is given it, and held back again for the rest.
-    xs[0].link.destroy();
-    await until('w to have half a window', () => unit.held(w) === window / 2, 3000);
+    const wl = await pair(w);
+    wl.far.write(relayFrame(ASK, window));
     const since = Date.now();
+    await sleep(reclaimMs / 2);
+    // Half a window freed: the relay is granted it, and asks for the rest.
+    xs[0].link.destroy();
+    await until('w to be granted half a window', () => unit.held(w) === window / 2, 3000);
+    wl.far.write(relayFrame(ASK, window / 2));
     await until('x to lose more', () => lost(xs) > 1, reclaimMs * 3);
-    assert.ok(Date.now() - since >= reclaimMs * 0.9, `after ${Date.now() - since} ms`);
-    assert.equal(wl.link.destroyed, false);
+    const after = Date.now() - since;
+    assert.ok(after >= reclaimMs * 0.9 && after < reclaimMs * 1.5, `lost ${after} ms after w was first held back`);
   } finally { end(); }
 });
 

@@ -73,6 +73,9 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
   // Links held back by what the others have on the hop, and not by their own window.
   const waiting = new Set();
   let waking = false;
+  // A wake is handing out room: the links it woke are out of `waiting` until each has
+  // gone, so the reclaim is reckoned once it is over.
+  let going = false;
   let reclaim = null;
 
   const shareOf = (bucket) => (bucket === strangers ? strangerBytes : Math.floor(jobBytes / jobs.size));
@@ -91,15 +94,18 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
   function room(link, bucket, own, need) {
     const n = Math.min(need, bucket.window - own, shareOf(bucket) - bucket.held, bucket.group.limit - bucket.group.held);
     if (n >= Math.min(need, LEAST_BYTES)) {
-      link.since = 0;
+      // Given part of what it needs, it is held back still: what it takes and does not
+      // pass on frees nothing for the others.
+      if (n === need) link.since = 0;
       return n;
     }
     if (bucket.window - own >= Math.min(need, LEAST_BYTES)) {
+      const back = !waiting.has(link);
       waiting.add(link);
       if (!link.behind()) link.since = 0;
-      else if (!link.since) {
-        link.since = Date.now();
-        reclaimSoon();
+      else {
+        link.since ||= Date.now();
+        if (back) reclaimSoon();
       }
     }
     return 0;
@@ -112,13 +118,17 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
       waking = false;
       const due = [...waiting];
       waiting.clear();
+      going = true;
       for (const link of due) link.go();
+      going = false;
+      reclaimSoon();
     });
   }
 
   // A job with room left in its share is held back by jobs past theirs: each of those is
   // due once it and the longest held back have been so for reclaimMs.
   function reclaimSoon() {
+    if (going) return;
     clearTimeout(reclaim);
     reclaim = null;
     const held = [...waiting].filter((link) => link.since && link.behind()).map((link) => link.since);
