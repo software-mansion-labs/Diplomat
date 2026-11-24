@@ -168,6 +168,12 @@ def test_my_own_issue_has_no_author_to_ban(pipe):
     assert pipe.pipeline_work(_fix(author="Alice")).author == ""
 
 
+def test_an_ask_judges_the_operators_own_by_ghs_account_as_the_sync_does(pipe):
+    pipe.username_override = "bob"
+    assert [pipe.pipeline_work(_fix(author=who)).author for who in ("alice", "bob")] == ["", "bob"]
+    assert pipe.pipeline_work(_review()).config["me"] == "alice"
+
+
 def test_a_linear_fix_carries_the_issue_and_never_a_github_key(pipe):
     work = pipe.pipeline_work(_linear())
     assert work.key == "issues:linear:ENG-12"
@@ -510,9 +516,10 @@ def test_a_sync_is_held_while_the_github_login_is_unknown(pipe, monkeypatch):
     monkeypatch.setattr(pipeline, "tick", lambda settings, started=None: calls.append(settings) or {})
     monkeypatch.setattr(Store, "fetch_me", lambda self: None)
     pipe.me = ""
-    assert pipe._pipeline_sync_once() == {"error": "GitHub login unknown — is `gh` "
-                                                   "installed and authenticated?",
-                                          "forced": {}}
+    held = {"error": "GitHub login unknown — is `gh` installed and authenticated?", "forced": {}}
+    assert pipe._pipeline_sync_once() == held
+    pipe.username_override = "alice"
+    assert pipe._pipeline_sync_once() == held
     assert calls == []
 
 
@@ -1495,6 +1502,20 @@ def test_a_sync_landing_after_the_pipeline_went_off_withdraws_nothing(pipe, now)
     pipe.pipeline_enabled = False
     _sync(pipe, _result(items=(now,)))
     assert _keys(pipe) == ["issues:o/r#12"]
+
+
+def test_a_locked_out_sync_with_no_last_result_is_not_shown(pipe, monkeypatch):
+    """The core dates it at the epoch; it retires no force and withdraws no ask."""
+    monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: None)
+    pipe.pipeline_result = None
+    _queued_fix(pipe)
+    pipe.pipeline_force_now("rate", ISSUE)
+    held = {**_result(at=pipeline.NEVER, unread=("o/r",)), "notices": ["another sync held it"]}
+    pipe._apply_pipeline_sync({"result": held, "forced": {"rate": [ISSUE]},
+                               "started": time.time(), "epoch": pipe._pipeline_epoch})
+    assert (pipe.pipeline_result, pipe.pipeline_forced("rate"), _keys(pipe)) == (
+        None, {ISSUE}, ["issues:o/r#12"])
+    assert _feed("pipeline-notice") == ["another sync held it"]
 
 
 def test_a_failed_sync_withdraws_nothing(pipe, monkeypatch):

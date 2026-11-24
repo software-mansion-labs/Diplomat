@@ -119,8 +119,8 @@ struct SettingsView: View {
     private static let identityDetail = """
         Blank = whoever `gh` is authenticated as. Scopes the “My …” tools and the \
         Review wizard: which PRs count as mine, and whose reviews the monitors owe. \
-        In a GitLab repo root “me” is `glab`'s user on its host, which this does not \
-        change.
+        The Pipeline always goes by `gh`'s account. In a GitLab repo root “me” is \
+        `glab`'s user on its host, which this does not change.
         """
 
     private var identityField: some View {

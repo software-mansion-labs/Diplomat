@@ -4659,18 +4659,18 @@ class Store(QObject):
     def _pipeline_sync_once(self) -> dict:
         """The slow half of a sync, off the Qt thread: ``{"result"}`` or ``{"error"}``,
         with the force sets it was handed. Held while no root resolves, and while the
-        GitHub login is unknown, which would make none of the operator's PRs theirs."""
+        ``gh`` login is unknown, by which the screen and the asks tell the operator's own
+        as the sync does."""
         with self._pipeline_lock:
             epoch = self._pipeline_epoch
         if review.roots_guessed():
             return {"error": "no repo root in Settings resolves to a GitHub or GitLab "
                              "checkout", "forced": {}}
-        if not self.effective_me:
-            self.fetch_me()
+        self.fetch_me()
         settings = self.pipeline_settings_payload()
         handed = (None if review.roots_complete()
                   else [f"{r['owner']}/{r['repo']}" for r in settings["roots"]])
-        if settings["roots"] and not self.effective_me:
+        if settings["roots"] and not self.me:
             return {"error": GITHUB_LOGIN_UNKNOWN, "forced": {}}
         # What this launch's first sync is told apart from (:meth:`_apply_pipeline_sync`),
         # read before the sync replaces it.
@@ -4702,7 +4702,8 @@ class Store(QObject):
 
         A notice is logged when it first appears, and each merge and split the core
         made since the previous result once (:func:`pipeline.fresh_events`), whatever
-        the switches."""
+        the switches. One dated at the epoch, the core's answer while another sync holds
+        its lock and none has a result yet, is not shown."""
         with self._pipeline_lock:
             again = (self._pipeline_again and self.pipeline_enabled
                      and not self._pipeline_stopped)
@@ -4725,7 +4726,8 @@ class Store(QObject):
                     activity.log("auto", "pipeline-merge" if event.get("kind") == "merged"
                                  else "pipeline-fracture", pipeline.event_line(event, result))
                 with self._pipeline_lock:
-                    self.pipeline_result = result
+                    if result.get("at") != pipeline.NEVER:
+                        self.pipeline_result = result
                     self._pipeline_force = {
                         kind: ids - frozenset(handed.get(kind) or ())
                         for kind, ids in self._pipeline_force.items()}
@@ -4850,7 +4852,8 @@ class Store(QObject):
         root = root_named(str(effect.get("repo") or ""), roots)
         if root is None:
             return None
-        me = self.known_me(root)
+        # The sync judges by gh's account, not the Settings override.
+        me = self.me
         url = str(effect.get("url") or "")
         kind = effect.get("kind")
         if kind == "review":

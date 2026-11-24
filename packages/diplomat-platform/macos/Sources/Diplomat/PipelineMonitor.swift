@@ -106,8 +106,8 @@ extension Store {
     /// One sync. The timer, Sync now, a switch and the screen's forces can each ask while
     /// one runs; any number of those asks is answered by one more sync after it. Held, as
     /// `pipelineError`, while no root resolves (a guessed root may check out another
-    /// repo) and while the GitHub login is unknown, which would make none of the
-    /// operator's PRs theirs; the forces then wait.
+    /// repo) and while the `gh` login is unknown, by which the screen and the asks tell
+    /// the operator's own as the sync does; the forces then wait.
     func runPipelineSyncOnce() async {
         guard pipelineEnabled,
               !Headless.active || Store.pipelineTickOverride != nil || Store.pipelineTickLive else { return }
@@ -126,8 +126,8 @@ extension Store {
             if rootsGuessed {
                 hold = "no repo root in Settings resolves to a GitHub or GitLab checkout"
             } else {
-                if effectiveMe.isEmpty { await fetchMe() }
-                if roots.contains(where: { !$0.isGitLab }) && effectiveMe.isEmpty { hold = Store.githubLoginUnknown }
+                await fetchMe()
+                if roots.contains(where: { !$0.isGitLab }) && me.isEmpty { hold = Store.githubLoginUnknown }
             }
             notePipelineHealth(hold)
             if hold != nil { return }
@@ -203,6 +203,8 @@ extension Store {
     /// was handed while a root path did not resolve, nil when every one did.
     /// A notice is logged when it first appears, and each merge and split the core made
     /// since the previous result once (`Store.pipelineFreshEvents`), whatever the switches.
+    /// One dated at the epoch, the core's answer while another sync holds its lock and none
+    /// has a result yet, is not shown.
     func applyPipeline(_ result: PipelineTickResult, judged: Bool = true, handed: Set<String>? = nil,
                        now: Date = Date()) async {
         let previous = pipelineResult
@@ -214,7 +216,7 @@ extension Store {
             AuditLog.log("auto", event.kind == .merged ? "pipeline-merge" : "pipeline-fracture",
                          Store.pipelineEventLine(event, in: result))
         }
-        pipelineResult = result
+        if result.at.timeIntervalSince1970 != 0 { pipelineResult = result }
         if pipelineEnabled {
             withdrawPipelineAsks(judged ? result : nil, handed: handed)
             if judged { pipelineJudged = true }
@@ -352,7 +354,8 @@ extension Store {
             PRRef.root(named: slug, in: roots).flatMap { $0.isGitLab ? nil : $0 }
         }
         guard let root = root(Store.pipelineRepo(effect)) else { return nil }
-        let me = knownMe(for: root)
+        // The sync judges by gh's account, not the Settings override.
+        let me = self.me
         // The ban dimension, which the operator's own work has none of.
         let mine = !me.isEmpty && effect.author.lowercased() == me.lowercased()
         let author = mine ? "" : effect.author
@@ -606,6 +609,12 @@ extension Store {
         return Store.pipelineTeams(pipelineLinearTeamsRaw).contains {
             $0.key.lowercased() == item.repo.lowercased() && slugs.contains($0.repo.lowercased())
         }
+    }
+
+    /// Whether the screen offers Rate now on `item` (`PipelineView.canRate`): a PR only when
+    /// it is the `gh` account's, by which a sync judges it, not the Settings override's.
+    func pipelineCanRate(_ item: PipelineItem) -> Bool {
+        PipelineView.canRate(item, me: me, rooted: pipelineRooted(item))
     }
 
     /// `item`'s root as the last sync's `unread` names it, a Linear issue's its team's: one it

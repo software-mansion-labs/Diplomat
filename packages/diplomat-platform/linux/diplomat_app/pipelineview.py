@@ -701,6 +701,13 @@ def fracture_refused(item: dict) -> str | None:
     return None
 
 
+def rate_refused(item: dict) -> str | None:
+    """Why a sync would refuse a rating :func:`can_rate` offers: the hold a stop label put
+    on it. Twin of ``PipelineView.rateRefused``."""
+    hold = str(item.get("hold") or "")
+    return f"No sync rates an item that {hold}" if hold.startswith("carries the label ") else None
+
+
 def empty_text(unread: list[str], reads: bool) -> str:
     """What stands in for the graph after a sync that read no item: what it did not read.
     ``reads``: a GitHub root or a Linear team is set. Twin of ``PipelineView.emptyText``."""
@@ -1032,9 +1039,10 @@ class PipelineView(QWidget):
         :func:`can_fracture` allows and Start fix for a candidate issue
         (:func:`can_start_fix`) whose fix is known, each with nothing on it; none for a
         banned author's text, neither of the first two in a root the last sync did not
-        read all of (``Store.pipeline_unread``), nor Fracture for an issue triaged or
-        carrying a stop label (:func:`fracture_refused`), nor Start fix once a split is
-        asked."""
+        read all of (``Store.pipeline_unread``), nor Rate now for an item carrying a stop
+        label (:func:`rate_refused`), nor Fracture for an issue triaged or carrying one
+        (:func:`fracture_refused`), nor Start fix once a split is asked. A PR is the
+        operator's by ``gh``'s account, as a sync judges it, not the Settings override's."""
         st = self.store
         item_id = str(item.get("id") or "")
         on = st.pipeline_enabled
@@ -1045,13 +1053,15 @@ class PipelineView(QWidget):
         partly = f"The last sync did not read all of {unread}" if unread else None
         split_asked = item_id in st.pipeline_forced("fracture")
         self.buttons["open"] = _small_button("Open", lambda: open_url(item_id))
-        if can_rate(item, st.effective_me, rooted):
+        if can_rate(item, st.me, rooted):
             asked = item_id in st.pipeline_forced("rate")
+            stopped = rate_refused(item)
             btn = _small_button("Rate asked" if asked else "Rate now",
                                 lambda: st.pipeline_force_now("rate", item_id))
             btn.setToolTip(plain_tooltip(
-                ban if banned else partly or "Rate it in a sync started now, ahead of every limit"))
-            btn.setEnabled(on and not asked and not banned and partly is None)
+                ban if banned else stopped or partly
+                or "Rate it in a sync started now, ahead of every limit"))
+            btn.setEnabled(on and not asked and not banned and stopped is None and partly is None)
             self.buttons["rate"] = btn
         if can_fracture(item, edges, rooted):
             refused = fracture_refused(item)

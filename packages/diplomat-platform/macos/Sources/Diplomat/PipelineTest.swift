@@ -44,6 +44,7 @@ enum PipelineTest {
         store.requestedWork = []
         store.queuedTasks = []
         store.usernameOverride = "latekvo"
+        store.me = "latekvo"
         store.queueAutoRun = true
         store.pinRoots([PRRef.LocalRepo(owner: "o", repo: "r", path: scratch.path),
                         PRRef.LocalRepo(owner: "g", repo: "third", path: scratch.path, host: "gitlab.com")])
@@ -219,6 +220,15 @@ enum PipelineTest {
         check("the operator's own issue: no author to ban", ask(fixKey).map { $0.author.isEmpty } == true)
         clearQueue()
         store.savePipelineAttempts(saved)
+        store.usernameOverride = "alice"
+        let reviewMe: String?
+        if case .review(let cfg)? = store.pipelineAsk(review)?.config { reviewMe = cfg.me } else { reviewMe = nil }
+        check("Settings naming another than gh's account: an ask goes by gh's, as the sync does",
+              store.pipelineAsk(.fixIssue(repo: "o/r", number: 90010, url: issue, author: "latekvo"))?.author == ""
+                  && store.pipelineAsk(.fixIssue(repo: "o/r", number: 90010, url: issue, author: "alice"))?.author
+                      == "alice"
+                  && reviewMe == "latekvo")
+        store.usernameOverride = "latekvo"
 
         print("\npipeline: a run that answered")
         let t1 = t0.addingTimeInterval(2 * 3600)
@@ -636,6 +646,12 @@ enum PipelineTest {
               PipelineView.fractureRefused(triaged) == "No sync splits an issue triaged as enhancement"
                   && PipelineView.fractureRefused(stopped) == "No sync splits an issue that carries the label wip"
                   && PipelineView.fractureRefused(heldOther) == nil && PipelineView.fractureRefused(at(.human)) == nil)
+        var stoppedPR = at(.fastTrack, .pr)
+        stoppedPR.hold = "carries the label wip"
+        check("Rate now: a sync refuses it for an item a stop label holds, not for one held as triaged",
+              PipelineView.rateRefused(stopped) == "No sync rates an item that carries the label wip"
+                  && PipelineView.rateRefused(stoppedPR) == "No sync rates an item that carries the label wip"
+                  && PipelineView.rateRefused(triaged) == nil && PipelineView.rateRefused(heldOther) == nil)
         check("Start fix: a writable candidate issue only",
               PipelineView.canStartFix(at(.candidate)) && !PipelineView.canStartFix(at(.human))
                   && !PipelineView.canStartFix(at(.candidate, writable: false))
@@ -660,6 +676,7 @@ enum PipelineTest {
             ("a banned author", detail(banned: "mallory"), [false, false, false]),
             ("a root read in part", detail(unread: "o/r"), [false, false, true]),
             ("a split refused", detail(refusedItem), [true, false, true]),
+            ("a stop label", detail(stopped), [false, false, true]),
             ("its fix unknown", detail(canStartFix: false), [true, true, false]),
         ]
         let wrong = stops.filter { [$0.1.rateEnabled, $0.1.fractureEnabled, $0.1.fixEnabled] != $0.2 }.map(\.0)
@@ -667,12 +684,13 @@ enum PipelineTest {
                   + (wrong.isEmpty ? "" : " - wrong for \(wrong)"), wrong.isEmpty)
         let onBan = detail(refusedItem, banned: "mallory", unread: "o/r", canStartFix: false)
         let inPart = detail(refusedItem, unread: "o/r", canStartFix: false)
-        check("…each tooltip saying why: the ban first, then a refused split, then a root read in part",
+        check("…each tooltip saying why: the ban first, then a refusal, then a root read in part",
               [onBan.rateTip, onBan.fractureTip, onBan.fixTip]
                   == Array(repeating: "@mallory is on the prompt-injection ban list", count: 3)
                   && [inPart.rateTip, inPart.fractureTip, inPart.fixTip]
                       == ["The last sync did not read all of o/r", "No sync splits an issue triaged as enhancement",
                           "its fix is unknown"]
+                  && detail(stopped, unread: "o/r").rateTip == "No sync rates an item that carries the label wip"
                   && [detail().rateTip, detail().fractureTip, detail().fixTip]
                       == ["Rate it in a sync started now, ahead of every limit",
                           "Split it into low-complexity child issues in a sync started now",
@@ -804,6 +822,14 @@ enum PipelineTest {
         await store.runPipelineSyncOnce()
         check("a stale result retires no force and withdraws no ask",
               store.pipelineForce.rate == [pr] && ids() == [reviewKey])
+        // Held before any sync had a result: the core answers one dated at the epoch.
+        store.pipelineResult = nil
+        Store.pipelineTickOverride = { _ in
+            PipelineTickResult(at: Date(timeIntervalSince1970: 0), notices: ["another sync held it"], unread: ["o/r"])
+        }
+        await store.runPipelineSyncOnce()
+        check("…nor one dated at the epoch, which is not shown either",
+              store.pipelineForce.rate == [pr] && ids() == [reviewKey] && store.pipelineResult == nil)
         Store.pipelineTickOverride = { _ in result([]) }
         await store.runPipelineSyncOnce()
         check("…its own retires the forces it was handed and the asks it no longer owes",
@@ -906,8 +932,9 @@ enum PipelineTest {
         chmod(pollGH.path, 0o755)
         let tripwire = ProcessInfo.processInfo.environment["DIPLOMAT_GH"]
         setenv("DIPLOMAT_GH", pollGH.path, 1)
-        let login = store.usernameOverride
+        let login = store.usernameOverride, ghLogin = store.me
         store.usernameOverride = ""
+        store.me = ""
         store.earlyPollFloor = 0
         store.pollsEarly = true
         /// The polls run so far, once one brought forward has started (well inside a second)
@@ -926,6 +953,7 @@ enum PipelineTest {
         check("…and brings the poll that drains them forward, once", gated == 0 && opened == 1 && open == 1)
         store.pollsEarly = false
         store.usernameOverride = login
+        store.me = ghLogin
         if let tripwire { setenv("DIPLOMAT_GH", tripwire, 1) } else { unsetenv("DIPLOMAT_GH") }
         clearQueue()
         let lapsed = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: Date().addingTimeInterval(-4 * 3600),
@@ -1180,8 +1208,12 @@ enum PipelineTest {
         await store.runPipelineSyncOnce()
         check("with a GitHub root and no login known, no sync runs", ticks.isEmpty
               && store.pipelineError == Store.githubLoginUnknown)
-        if let ghEnv { setenv("DIPLOMAT_GH", ghEnv, 1) } else { unsetenv("DIPLOMAT_GH") }
         store.usernameOverride = "latekvo"
+        await store.runPipelineSyncOnce()
+        check("…nor with only the Settings username known", ticks.isEmpty
+              && store.pipelineError == Store.githubLoginUnknown)
+        if let ghEnv { setenv("DIPLOMAT_GH", ghEnv, 1) } else { unsetenv("DIPLOMAT_GH") }
+        store.me = "latekvo"
         await store.runPipelineSyncOnce()
         check("…and syncs once it is", ticks.count == 1 && store.pipelineError == nil)
         Store.pipelineTickOverride = nil
@@ -1228,6 +1260,10 @@ enum PipelineTest {
                   && !PipelineView.canRate(myPR, me: "", rooted: true)
                   && !PipelineView.canRate(ops, me: "latekvo", rooted: false)
                   && !PipelineView.canRate(closedIssue, me: "latekvo", rooted: true))
+        store.usernameOverride = "alice"
+        check("…the PR mine by gh's account, as the sync judges it, not by the Settings username",
+              store.pipelineCanRate(myPR) && !store.pipelineCanRate(item(pr, .pr, author: "alice")))
+        store.usernameOverride = "latekvo"
         check("why Start fix cannot: assigned, else the hold, else the switch",
               store.pipelineFixUnknown(heldItems[2]) == "Linear team ENG has no root to fix it in"
                   && store.pipelineFixUnknown(assigned[0]) == "It is assigned to someone else"
@@ -1289,9 +1325,10 @@ enum PipelineTest {
     /// out at `<dir>/checkout`, through the stubs DIPLOMAT_GH, DIPLOMAT_CLAUDE and
     /// DIPLOMAT_LINEAR_API name, which log to `<dir>/gh.log`, `claude.log` and `linear.log`,
     /// GitHub's state in `<dir>/gh-state.json`. None of these is in the repo: whoever runs it
-    /// supplies an operator `op`; #1, rated low/low, and op's PR #2 fixing it, fast-tracked
-    /// and clean at its head; unrated #5, and #6 by mallory, whom the gh stub bans once the
-    /// first sync has read the ban list; someone else's PR #4; and Linear's ENG-1, claude
+    /// supplies an operator `op`, the account gh acts as; #1, rated low/low, and op's PR #2
+    /// fixing it, fast-tracked and clean at its head; unrated #5, and #6 by mallory, whom the
+    /// Linear stub bans at the first sync's re-check of ENG-1, after the core's last read of
+    /// the ban list; someone else's PR #4; and Linear's ENG-1, claude
     /// rating each low/low. Reading #2 again before merging it, the stub writes
     /// `<dir>/flip-merge` and waits for control.json to say merge is off; read after its
     /// merge, a PR is merged by op. While the state's
@@ -1364,6 +1401,7 @@ enum PipelineTest {
         Store.pipelineTickLive = true
         defer { Store.pipelineTickLive = false }
         store.usernameOverride = "op"
+        store.me = ""
         store.pinRoots([PRRef.LocalRepo(owner: "acme", repo: "app",
                                         path: harness.appendingPathComponent("checkout").path)])
         store.pipelineEnabled = true
@@ -1396,6 +1434,7 @@ enum PipelineTest {
         print("  sync 1 gh writes:\n" + writes.map { "    gh \($0)" }.joined(separator: "\n"))
         print("  sync 1 hooks: \(log("hooks.log"))")
         let flipped = log("hooks.log").compactMap { $0 as? [String: Any] }.first { $0["flip"] != nil }
+        check("sync 1 reads gh's account first", store.me == "op")
         check("sync 1: merge switched off mid-sync reaches the core through control.json, and #2 is not merged",
               (flipped?["control"] as? [String: Any])?["merge"] as? Bool == false
                   && !store.pipelineMerge && !writes.contains { $0.hasPrefix("pr merge") }
@@ -1766,6 +1805,19 @@ enum PipelineTest {
               store.pipelineResult?.unread == ["acme/app"] && readCapped == [true, false]
                   && !ids().contains(readKey) && ids().contains(pastKey))
         store.pipelineRate = true
+
+        store.usernameOverride = "alice"
+        await sync()
+        let twelveAsk = store.pipelineResult?.effects.first { $0.key == owedReview }.flatMap(store.pipelineAsk)
+        var twelveMe: String?
+        if case .review(let cfg)? = twelveAsk?.config { twelveMe = cfg.me }
+        print("  sync 29 notices: \(store.pipelineResult?.notices ?? []), #12's review asked as @\(twelveMe ?? "-")")
+        check("sync 29, Settings naming @alice: the sync judges by @op, gh's account, and so do the screen and the asks",
+              store.pipelineResult?.notices.contains(
+                  "gh acts as @op, not the @alice Settings names, so Diplomat judges by @op") == true
+                  && item(12, "pull").map(store.pipelineCanRate) == true
+                  && item(4, "pull").map(store.pipelineCanRate) == false && twelveMe == "op")
+        store.usernameOverride = "op"
         let remaining = ids()
 
         store.pipelineEnabled = false
