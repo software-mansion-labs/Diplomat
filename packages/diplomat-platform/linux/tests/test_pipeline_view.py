@@ -457,6 +457,46 @@ def test_the_head_label_is_cut_only_past_the_detail_and_nothing_else_is(store, a
         view.close()
 
 
+WORD = "0123456789abcdef" * 4
+
+
+@pytest.mark.parametrize("field", ["title", "why", "hold", "event"])
+def test_a_word_wider_than_the_detail_breaks_inside_it(store, app, field):
+    result = _result()
+    if field == "event":
+        result["events"].append({"at": "2026-11-20T10:07:00Z", "item": P2, "kind": "held",
+                                 "detail": WORD})
+    else:
+        result["items"][1] = {**result["items"][1], field: WORD}
+    store.pipeline_result = result
+    view = PipelineView(store)
+    view.resize(1100, 700)
+    view.show()
+    try:
+        view.select(P2)
+        for _ in range(3):
+            app.processEvents()
+        port = view.detail_scroll.viewport().width()
+        assert view.detail.minimumSizeHint().width() <= port
+        assert view.detail.width() == port
+        [link] = view.detail.findChildren(pipelineview._Link)
+        [shown] = [w for w in view.detail.findChildren(QLabel) if WORD in w.text()]
+        for label in (link, shown):
+            assert label.mapTo(view.detail, label.rect().topRight()).x() < port
+        assert shown.height() > shown.minimumSizeHint().height()
+    finally:
+        view.close()
+
+
+def test_a_word_wider_than_the_screen_in_a_banner_leaves_its_width(store):
+    view = PipelineView(store)
+    narrowest = view.minimumSizeHint().width()
+    store.pipeline_error = f"diplomat-core pipeline-tick failed: {WORD * 3}"
+    store.pipeline_result = {**_result(), "notices": [WORD * 3]}
+    store.pipeline_changed.emit()
+    assert view.minimumSizeHint().width() == narrowest
+
+
 def test_a_label_cut_for_width_keeps_its_number(store, app, monkeypatch):
     """On the card, the detail's head and its link alike."""
     import PySide6.QtGui as QtGui
@@ -768,6 +808,21 @@ def test_a_sync_that_read_no_item_says_what_it_did_not_read(store, monkeypatch):
     store.pipeline_changed.emit()
     assert view.canvas.placeholder == ("GitLab roots are not read, and no GitHub root or "
                                        "Linear team is set.")
+
+
+def test_the_empty_graphs_text_wraps_inside_the_canvas(store, monkeypatch):
+    monkeypatch.setattr(review, "repo_roots", lambda: [LocalRepo("o", "r", "/src/r")])
+    store.pipeline_result = {**_result(), "items": [], "graph": {"nodes": [], "edges": []},
+                             "read": [], "unread": [f"o/repository-{n}" for n in range(8)]}
+    canvas = PipelineView(store).canvas
+    canvas.resize(400, 300)
+    ground = canvas.palette().color(QPalette.ColorRole.Window)
+    image = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    image.fill(ground)
+    canvas.render(image)
+    inked = [x for x in range(image.width())
+             if any(image.pixel(x, y) != ground.rgb() for y in range(image.height()))]
+    assert 0 < inked[0] and inked[-1] < image.width() - 1
 
 
 def test_a_change_to_the_ban_list_redraws_the_actions(store, monkeypatch):
