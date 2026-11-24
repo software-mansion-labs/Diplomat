@@ -473,6 +473,9 @@ answered by a job that ran, not by its offer:
   agent in a terminal can, and is not offered again.
 - Taking the offer back yourself ends it too: **Withdraw** on the Network screen, or the row's
   ✕ in the task list.
+- So does a [Pipeline](pipeline.md) sync that no longer owes it, which takes the offer back while
+  the network still holds it. A Linear issue's fix is not asked for again while its offer stands,
+  whatever the issue's text or repo has since become: a second offer would be a second fix.
 - An offer that ends any other way without having run - its pool left or closed, the network
   switched off, a daemon that no longer holds it - leaves what was asked for standing, and it is
   offered again on the next poll.

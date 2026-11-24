@@ -5334,14 +5334,36 @@ class Store(QObject):
                                       fast_track=self.pipeline_fast_track, handed=handed))
         gone -= {e.id for e in self.starting_tasks}
         roots = len(review.repo_roots())
+        carried = set()
         for entry in [w for w in self.requested_work if w.key in gone]:
             self._forget_requested(entry.key)
             self._drop_queued_task(entry.key)
+            if entry.offered:
+                carried.add(entry.offered)
+                continue
             activity.log("panel", "queue-drop",
                          f"{entry.label_among(roots)} - the pipeline no longer owes it, "
                          f"not run")
         if gone:
             self.refresh_activity()
+        if carried:
+            self._withdraw_unowed_async(carried)
+
+    def _withdraw_unowed_async(self, tasks: set[str]) -> None:
+        """Take back each offer of ``tasks`` the network still carries: they carried asks
+        the pipeline no longer owes. Its run is retired as the offer ends. Twin of
+        ``Store.withdrawUnowed``."""
+        def work() -> None:
+            seen = self._network_evidence(
+                diplomacynetwork.state() if diplomacynetwork.enabled() else None)
+            for r in agentregistry.load():
+                if r.network not in tasks:
+                    continue
+                task = agentstate.withdraw_on_forget(r, agentstate.Evidence(network=seen))
+                if task is not None:
+                    self._withdraw(task, network.WITHDRAW_NOT_OWED, r.label or r.run_id,
+                                   autofix.SOURCE_AUTO)
+        self.start_background(work, name="network-unowed")
 
     def _settle_pipeline_error(self, error: str | None) -> None:
         """Audited only on the way into failing and back."""
@@ -5360,7 +5382,8 @@ class Store(QObject):
         sync's is a new attempt. A fix only while the fix switch is on, a review only
         while the fast-track one is: the sync may have been handed them before it went
         off. A queued Linear fix whose effect now names another repo or text is queued
-        again with them, as the same attempt: its agent cannot read Linear.
+        again with them, as the same attempt: its agent cannot read Linear. Not one that is
+        starting or that the network carries: a second ask would be a second fix run.
 
         The records kept are :func:`pipeline.retained`'s after a ``judged`` sync, every
         one after any other. An ask that could not be queued is an attempt too, retried
@@ -5383,6 +5406,7 @@ class Store(QObject):
                 continue
             old = next((w for w in self.requested_work if w.key == work.key), None)
             if (kind == "fixLinear" and old is not None and work.key not in starting
+                    and not old.offered
                     and (old.repo, old.config.get("linear"))
                     != (work.repo, work.config.get("linear"))):
                 self._forget_requested(old.key)

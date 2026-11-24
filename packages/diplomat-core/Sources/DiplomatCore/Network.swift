@@ -119,12 +119,14 @@ public enum NetworkRoute {
     public static let stopRun = "stop-run"
 
     /// Why an offer is withdrawn: its PR merged, the operator forgot the run or stopped
-    /// a task no run here carries, its run could not be booked, or the switch went off.
+    /// a task no run here carries, its run could not be booked, the switch went off, or
+    /// the Pipeline no longer owes the work.
     public static let withdrawMerged = "merged"
     public static let withdrawForgotten = "forgotten"
     public static let withdrawStopped = "stopped"
     public static let withdrawNotBooked = "not booked"
     public static let withdrawSwitchedOff = "switched off"
+    public static let withdrawNotOwed = "no longer owed"
 
     public static func withdrawBody(task: String, reason: String) -> [String: String] {
         ["taskId": task, "reason": reason]

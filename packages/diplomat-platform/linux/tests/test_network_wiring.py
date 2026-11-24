@@ -2498,6 +2498,92 @@ def test_a_withdraw_the_daemon_refused_keeps_the_ask(swept_store, on, daemon, mo
     assert asks(swept_store) == [(1, "t-pr-1"), (2, "t-pr-2")]
 
 
+# MARK: - the Pipeline's asks the network carries
+
+LINEAR = "https://linear.app/acme/issue/ENG-12/a-thing"
+ISSUE = "https://github.com/o/r/issues/12"
+
+
+def numbers_tasks():
+    """A daemon that makes a new task of every offer, as it does of one naming no PR."""
+    made = iter(range(1, 100))
+    return {"/offer": lambda body: (200, {"taskId": f"t{next(made)}"})}
+
+
+def pipeline_linear(text="A thing\n\nIt breaks.") -> dict:
+    return {"kind": "fixLinear", "repo": "o/r", "identifier": "ENG-12", "url": LINEAR,
+            "text": text, "key": f"pipeline-fix:{LINEAR}", "stamp": "fix"}
+
+
+def pipeline_fix() -> dict:
+    return {"kind": "fixIssue", "repo": "o/r", "number": 12, "url": ISSUE, "author": "carol",
+            "key": f"pipeline-fix:{ISSUE}", "stamp": "fix"}
+
+
+def pipeline_sync(store, *effects) -> None:
+    """A sync's own result that judged every root in full."""
+    store._apply_pipeline_sync({"result": {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "items": [],
+        "graph": {"nodes": [], "edges": []}, "effects": list(effects), "events": [],
+        "notices": [], "unread": [], "fixable": [], "read": []},
+        "forced": {}, "started": 0, "epoch": store._pipeline_epoch})
+
+
+def offered_by_the_pipeline(store, d, monkeypatch, effect) -> None:
+    store.pipeline_enabled = store.pipeline_fix = True
+    pipeline_sync(store, effect)
+    _poll(store, monkeypatch)
+    assert [w.offered for w in store.requested_work] == ["t1"]
+    d.state = snapshot(offers=[offer("t1", "claimed", executor=PEER)])
+
+
+def test_a_linear_fix_the_network_carries_is_not_offered_again_as_its_text_changes(
+        store, on, daemon, monkeypatch):
+    d = daemon(numbers_tasks())
+    calls = _spawn_recorder(monkeypatch)
+    # The text is in the prompt, and so in the item a Linear fix is offered as.
+    monkeypatch.setattr("diplomat_runtime.promptcore.build_prompt", json.dumps)
+    offered_by_the_pipeline(store, d, monkeypatch, pipeline_linear())
+
+    pipeline_sync(store, pipeline_linear("A thing\n\nIt breaks twice."))
+    _poll(store, monkeypatch)
+    _poll(store, monkeypatch)
+    assert len(d.sent("offer")) == 1 and calls == []
+    assert [(w.offered, w.config["linear"]["text"]) for w in store.requested_work] == [
+        ("t1", "A thing\n\nIt breaks.")]
+    assert store.queued_tasks == [] and lines("pipeline-fix") == ["Issues · ENG-12 · deep queued"]
+
+
+def test_an_ask_the_pipeline_no_longer_owes_takes_its_offer_back(store, on, daemon,
+                                                                  monkeypatch):
+    d = daemon(numbers_tasks())
+    _spawn_recorder(monkeypatch)
+    offered_by_the_pipeline(store, d, monkeypatch, pipeline_fix())
+
+    pipeline_sync(store)
+    assert store.wait_for_background() == []
+    assert d.sent("withdraw") == [{"taskId": "t1", "reason": network.WITHDRAW_NOT_OWED}]
+    assert store.requested_work == [] and lines("queue-drop") == []
+    assert lines("network-withdraw") == ["Issues · #12 · deep - withdrawn (no longer owed)"]
+
+    d.state = snapshot(offers=[offer("t1", "cancelled", reason=network.WITHDRAW_NOT_OWED)])
+    store._settle_agents()
+    _poll(store, monkeypatch)
+    assert agentregistry.load() == [] and len(d.sent("offer")) == 1
+
+
+def test_an_ask_the_pipeline_no_longer_owes_takes_back_only_an_offer_still_held(
+        store, on, daemon, monkeypatch):
+    d = daemon(numbers_tasks())
+    _spawn_recorder(monkeypatch)
+    offered_by_the_pipeline(store, d, monkeypatch, pipeline_fix())
+    d.state = snapshot(offers=[offer("t1", "done", executor=PEER, outcome={"ok": True})])
+
+    pipeline_sync(store)
+    assert store.wait_for_background() == []
+    assert d.sent("withdraw") == [] and store.requested_work == []
+
+
 # MARK: - the three calls of the Network screen
 
 def test_invite_join_and_leave_post_and_are_logged(store, on, daemon):

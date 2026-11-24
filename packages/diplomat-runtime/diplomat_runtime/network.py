@@ -108,12 +108,14 @@ ROUTE_LEAVE = "leave"
 ROUTE_STOP_RUN = "stop-run"
 
 #: Why an offer is withdrawn: its PR merged, the operator forgot the run or stopped a
-#: task no run here carries, its run could not be booked, or the switch went off.
+#: task no run here carries, its run could not be booked, the switch went off, or the
+#: Pipeline no longer owes the work.
 WITHDRAW_MERGED = "merged"
 WITHDRAW_FORGOTTEN = "forgotten"
 WITHDRAW_STOPPED = "stopped"
 WITHDRAW_NOT_BOOKED = "not booked"
 WITHDRAW_SWITCHED_OFF = "switched off"
+WITHDRAW_NOT_OWED = "no longer owed"
 
 
 def withdraw_body(task: str, reason: str) -> dict:

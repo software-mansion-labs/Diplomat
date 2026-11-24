@@ -258,6 +258,19 @@ extension Store {
                        source: "panel")
     }
 
+    /// Withdraw each offer of `tasks` the network still carries: they carried asks the
+    /// pipeline no longer owes. Its run is retired as the offer ends. Twin of
+    /// `Store._withdraw_unowed_async`.
+    func withdrawUnowed(_ tasks: Set<String>) async {
+        let snapshot = await Task.detached(priority: .utility) { DiplomacyNetwork.state() }.value
+        let evidence = AgentState.Evidence(network: NetworkEvidence.tasks(snapshot))
+        for r in AgentRegistry.load() where tasks.contains(r.network ?? "") {
+            guard let task = AgentState.withdrawOnForget(r, evidence: evidence) else { continue }
+            await withdraw(task, reason: NetworkRoute.withdrawNotOwed,
+                           label: r.label.isEmpty ? r.runID : r.label, source: "auto")
+        }
+    }
+
     /// The switch went off over jobs whose offer was never definitely answered: withdraw
     /// each one the daemon turns out to hold, and say of every other that it was not
     /// offered.
