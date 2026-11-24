@@ -356,14 +356,15 @@ function lowerKeys(headers) {
 /// or a Buffer). `lookup`, `connect` and `upstreamCa` replace name resolution, the
 /// outgoing TCP connection and the trust roots of the model provider: tests have no
 /// other way to stand in for the internet. `outbound` is handed to createOutbound
-/// (outbound.js), the count of the kernel memory of the connections out. `limits` replaces
+/// (outbound.js), the count of the kernel memory of the connections out, and `hop` to
+/// createHop (hop.js), the count of what is on the hop from the relays. `limits` replaces
 /// what one job may hold at a time and for how long, and how many connections may be no
 /// job's: `{ connections, requests, upstreams, lookups, bufferBytes, forgeRequests,
 /// strangers, headerMs, bodyMs, idleMs, answerMs, lookupMs }`, by default JOB_REQUESTS,
 /// JOB_UPSTREAMS, JOB_LOOKUPS, STRANGERS and LOOKUP_MS, the JOB_* tunables of paths.js
 /// and, for `answerMs`, FORGE_ANSWER_TIMEOUT_MS.
 export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace = null,
-  lookup = dnsLookup(), connect = systemConnect, upstreamCa = undefined, outbound: outGiven = {}, limits: given = {} } = {}) {
+  lookup = dnsLookup(), connect = systemConnect, upstreamCa = undefined, outbound: outGiven = {}, hop: hopGiven = {}, limits: given = {} } = {}) {
   const limits = {
     connections: JOB_CONNECTIONS, requests: JOB_REQUESTS, upstreams: JOB_UPSTREAMS, lookups: JOB_LOOKUPS, bufferBytes: JOB_BUFFER_BYTES,
     forgeRequests: JOB_FORGE_REQUESTS, strangers: STRANGERS,
@@ -837,7 +838,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   // ---- the listener a container sees
 
   const feed = createFeeder();
-  const hop = createHop();
+  const hop = createHop(hopGiven);
   // The connections that are no job's: those whose first request head has not come, and
   // those refused, which are given a moment to read why. When there are as many as the
   // broker keeps, the one that has waited longest is closed for the next.
