@@ -628,10 +628,13 @@ enum PipelineTest {
                   && !PipelineView.canFracture(at(.human), edges: [], rooted: false))
         var triaged = at(.human)
         triaged.hold = "triaged as enhancement"
+        var stopped = at(.candidate)
+        stopped.hold = "carries the label wip"
         var heldOther = at(.human)
         heldOther.hold = "an open PR fixes it"
-        check("…which a sync refuses for an issue held as triaged, and the button says so",
+        check("…which a sync refuses for an issue held as triaged or for a stop label, and the button says so",
               PipelineView.fractureRefused(triaged) == "No sync splits an issue triaged as enhancement"
+                  && PipelineView.fractureRefused(stopped) == "No sync splits an issue that carries the label wip"
                   && PipelineView.fractureRefused(heldOther) == nil && PipelineView.fractureRefused(at(.human)) == nil)
         check("Start fix: a writable candidate issue only",
               PipelineView.canStartFix(at(.candidate)) && !PipelineView.canStartFix(at(.human))
@@ -1234,7 +1237,8 @@ enum PipelineTest {
     /// and clean at its head; unrated #5, and #6 by mallory, whom the gh stub bans once the
     /// first sync has read the ban list; someone else's PR #4; and Linear's ENG-1, claude
     /// rating each low/low. Reading #2 again before merging it, the stub writes
-    /// `<dir>/flip-merge` and waits for control.json to say merge is off. While the state's
+    /// `<dir>/flip-merge` and waits for control.json to say merge is off; read after its
+    /// merge, a PR is merged by op. While the state's
     /// `readErrors` is set, the `Repo` read answers with that error beside its data. The
     /// state's `later` holds low/low #7 and op's draft PR #3 fixing it, likewise clean, and
     /// its `more` low/low #8 and #9, its `extra` low/low #10 and #11, its `review` low/low #13
@@ -1257,7 +1261,7 @@ enum PipelineTest {
         }
         func linearWrites() -> [String] {
             log("linear.log").compactMap { ($0 as? [String: Any])?["op"] as? String }
-                .filter { !["Issues", "Issue", "Labels", "Attached"].contains($0) }
+                .filter { !["Issues", "Issue", "Recheck", "Labels", "Attached"].contains($0) }
         }
         func truncate() {
             for name in ["gh.log", "linear.log", "claude.log"] {
@@ -1697,32 +1701,14 @@ enum PipelineTest {
             }
             github["issues"] = issues + filler + past
         }
-        var stubbed = false
-        Store.pipelineTickOverride = { settings in
-            var result = PipelineTick.run(settings: settings)
-            // Stands in for the core's own `read` until it fills one: what the stub served,
-            // up to the core's cap of each kind.
-            if result.read.isEmpty, let github = (try? Data(contentsOf: harness.appendingPathComponent("gh-state.json")))
-                .flatMap({ try? JSONSerialization.jsonObject(with: $0) }) as? [String: Any] {
-                let cap = (try? CoreAssets.pipeline())?.githubMaxItems ?? 300
-                func urls(_ key: String, _ path: String) -> [String] {
-                    (github[key] as? [[String: Any]] ?? []).prefix(cap).compactMap { $0["number"] as? Int }
-                        .map { "https://github.com/acme/app/\(path)/\($0)" }
-                }
-                result.read = urls("issues", "issues") + urls("prs", "pull")
-                    + result.items.filter { $0.source == .linear }.map(\.id)
-                stubbed = true
-            }
-            return result
-        }
         await sync()
-        Store.pipelineTickOverride = nil
         let readNow = store.pipelineResult?.read ?? []
-        print("  sync 28 unread: \(store.pipelineResult?.unread ?? []), read \(readNow.count) (stubbed \(stubbed)), "
-              + "#20 read \(readNow.contains("https://github.com/acme/app/issues/20")), "
-              + "#21 read \(readNow.contains("https://github.com/acme/app/issues/21")), queue \(ids())")
+        let readCapped = [20, 21].map { readNow.contains("https://github.com/acme/app/issues/\($0)") }
+        print("  sync 28 unread: \(store.pipelineResult?.unread ?? []), read \(readNow.count), "
+              + "#20, #21 read \(readCapped), queue \(ids())")
         check("sync 28, acme/app read past its cap: #20, read and assigned away, is withdrawn; #21, past the cap, stays",
-              store.pipelineResult?.unread == ["acme/app"] && !ids().contains(readKey) && ids().contains(pastKey))
+              store.pipelineResult?.unread == ["acme/app"] && readCapped == [true, false]
+                  && !ids().contains(readKey) && ids().contains(pastKey))
         store.pipelineRate = true
         let remaining = ids()
 

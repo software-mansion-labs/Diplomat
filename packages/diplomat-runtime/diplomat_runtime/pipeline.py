@@ -102,10 +102,13 @@ _GH_CALLS_PER_CLAUDE = 16
 #: And each part of a split: a re-read, the parts filed before (twice after a failed
 #: create), the create and its sub-issue link.
 _GH_CALLS_PER_PART = 5
-#: A root's merges and their re-reads.
-_GH_CALLS_PER_ROOT = 10
-#: Linear's reads (300 issues, paged) and its label and child writes.
-_LINEAR_SECS = 300
+#: A root's merges: each PR read twice before ``gh pr merge`` (once without Linear) and
+#: once after.
+_MERGES_PER_ROOT = 3
+_GH_CALLS_PER_MERGE = 4
+#: Linear's reads (300 issues, paged), its label and child writes, and the re-read of
+#: their candidates: 3 calls of 100 at ``httpTimeoutSecs``.
+_LINEAR_SECS = 300 + 3 * 30
 #: The login shell's lookups of ``gh`` and ``claude``, and a margin for the rest.
 _LOOKUP_SECS = 10
 _MARGIN_SECS = 30
@@ -142,7 +145,7 @@ def tick_timeout(settings: dict) -> float:
                  * _GH_CALL_SECS)
     roots = max(1, len(settings.get("roots") or []))
     return min(MAX_SYNC_SECS, claude_calls * per_claude + splits * per_split
-               + roots * (_read_calls(t) + _GH_CALLS_PER_ROOT) * _GH_CALL_SECS
+               + roots * (_read_calls(t) + _MERGES_PER_ROOT * _GH_CALLS_PER_MERGE) * _GH_CALL_SECS
                + (_LINEAR_SECS if settings.get("linearTeams") else 0)
                + _LOOKUP_SECS + _MARGIN_SECS)
 

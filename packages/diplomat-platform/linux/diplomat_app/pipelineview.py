@@ -691,10 +691,14 @@ def can_fracture(item: dict, edges: list[dict], rooted: bool) -> bool:
 
 
 def fracture_refused(item: dict) -> str | None:
-    """Why a sync would refuse a split :func:`can_fracture` offers: the hold triage put on
-    it. Twin of ``PipelineView.fractureRefused``."""
+    """Why a sync would refuse a split :func:`can_fracture` offers: the hold triage or a
+    stop label put on it. Twin of ``PipelineView.fractureRefused``."""
     hold = str(item.get("hold") or "")
-    return f"No sync splits an issue {hold}" if hold.startswith("triaged as ") else None
+    if hold.startswith("triaged as "):
+        return f"No sync splits an issue {hold}"
+    if hold.startswith("carries the label "):
+        return f"No sync splits an issue that {hold}"
+    return None
 
 
 def empty_text(unread: list[str], reads: bool) -> str:
@@ -1028,8 +1032,8 @@ class PipelineView(QWidget):
         :func:`can_fracture` allows and Start fix for a candidate issue
         (:func:`can_start_fix`) whose fix is known, each with nothing on it; neither of
         the first two for a banned author's text or in a root the last sync did not read
-        all of (``Store.pipeline_unread``), nor Fracture for a triaged issue
-        (:func:`fracture_refused`), nor Start fix once a split is asked."""
+        all of (``Store.pipeline_unread``), nor Fracture for an issue triaged or carrying a
+        stop label (:func:`fracture_refused`), nor Start fix once a split is asked."""
         st = self.store
         item_id = str(item.get("id") or "")
         on = st.pipeline_enabled

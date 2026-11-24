@@ -182,11 +182,13 @@ struct PipelineView: View {
             && !edges.contains { $0.kind == .child && $0.from == item.id }
     }
 
-    /// Why a sync would refuse a split `canFracture` offers: the hold triage put on it.
-    /// Twin of `pipelineview.fracture_refused`.
+    /// Why a sync would refuse a split `canFracture` offers: the hold triage or a stop label
+    /// put on it. Twin of `pipelineview.fracture_refused`.
     static func fractureRefused(_ item: PipelineItem) -> String? {
-        guard let hold = item.hold, hold.hasPrefix("triaged as ") else { return nil }
-        return "No sync splits an issue \(hold)"
+        guard let hold = item.hold else { return nil }
+        if hold.hasPrefix("triaged as ") { return "No sync splits an issue \(hold)" }
+        if hold.hasPrefix("carries the label ") { return "No sync splits an issue that \(hold)" }
+        return nil
     }
 
     /// An open item a sync rates when asked: a PR only when it is `me`'s, an issue only

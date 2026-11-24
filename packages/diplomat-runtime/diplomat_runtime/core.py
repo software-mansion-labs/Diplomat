@@ -115,9 +115,10 @@ def comms() -> dict:
 
 @functools.lru_cache(maxsize=1)
 def pipeline() -> dict:
-    """The Pipeline's tunables. The front-end reads ``syncSecs``, ``minSyncSecs`` and
-    ``rater`` (:mod:`pipeline`); the labels, levels, floor and prompts only the core
-    (``diplomat-core pipeline-*``)."""
+    """The Pipeline's tunables. The front-end reads ``syncSecs``, ``minSyncSecs`` and, for
+    how long a sync may run, ``rater``, ``fracture.maxChildren``, ``githubPage`` and
+    ``githubMaxItems`` (:mod:`pipeline`); the labels, levels, floor and prompts only the
+    core (``diplomat-core pipeline-*``)."""
     return _read_json("pipeline.json")
 
 
