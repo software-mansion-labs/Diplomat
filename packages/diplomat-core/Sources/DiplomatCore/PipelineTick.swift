@@ -870,6 +870,11 @@ final class PipelineSync {
             + pr.closesLinear.filter { linearIssue[$0] == nil }
     }
 
+    /// The merge gate's hold on what `pr` would close, as this sync read it.
+    func closesHold(_ pr: PipelineEntry) -> PipelineGate.Hold? {
+        PipelineGate.closes(fixesCandidate(pr), closesUnwritable(pr))
+    }
+
     /// What a cleared PR about to merge would close on Linear, read right before: the open
     /// issues it closes, what no read judged, each identifier looked at, and for each GitHub
     /// issue it closes, by `norm`ed URL, why an open Linear issue attached to it holds it (nil
@@ -998,7 +1003,7 @@ final class PipelineSync {
               let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
               e.item.ratedBy == "label", let r = e.item.rating, r.atLeast(e.item.floor ?? r).isFastTrack,
               offTrack(e) == nil else { return false }
-        return fixesCandidate(e)
+        return closesHold(e) == nil
     }
 
     /// `cleared`, with a clean marker at its head, at which this Diplomat rated it low/low
@@ -1202,16 +1207,16 @@ final class PipelineSync {
         persist()
     }
 
-    /// Puts `fastTrack` on a PR rated low/low that fixes candidates at its first rating only:
-    /// one that ever wore (`before`) a rating or fast-track label is a person's. One it could
-    /// not be put on is recorded.
+    /// Puts `fastTrack` on a PR rated low/low that closes only candidates, at its first rating
+    /// only: one that ever wore (`before`) a rating or fast-track label is a person's. One it
+    /// could not be put on is recorded.
     func trackFirst(_ i: Int, _ rating: PipelineRating, before: Set<String>?) {
         let e = entries[i]
         let history = PipelineLevel.allCases.flatMap { [model.labels.risk[$0], model.labels.complexity[$0]] }
             + [model.labels.fastTrack]
         guard e.item.kind == .pr, settings.fastTrack, rating.isFastTrack,
               before?.isDisjoint(with: history.map { $0.lowercased() }) == true,
-              fixesCandidate(e) else { return }
+              closesHold(e) == nil else { return }
         if add(i, model.labels.fastTrack, .fastTrack) {
             log(e.id, .fastTrack, "+\(model.labels.fastTrack): rated \(describe(rating))")
         } else if !state.untracked.contains(e.id) {
@@ -1631,12 +1636,12 @@ final class PipelineSync {
                 }
                 // `merge` logs what it does with a draft.
                 if code == PipelineGate.Hold.draft.code { holdCodes[e.id] = code } else { noteHold(i, code, hold) }
-            } else if fixesCandidate(e) {
+            } else if let h = closesHold(e) {
+                stage = .human
+                hold = "off the fast track: it " + h.message
+            } else {
                 stage = atHead ? .clean : .fastTrack
                 hold = e.unwritable.map { "on the fast track, but \($0)" }
-            } else {
-                stage = .human
-                hold = "off the fast track: it " + PipelineGate.Hold.notAFix.message
             }
             if atHead && state.clean[e.id] != head && [.clean, .cleared].contains(stage) {
                 log(e.id, .clean, "clean marker at \(head.prefix(7))")
@@ -1891,8 +1896,8 @@ final class PipelineSync {
                                           author: banDimension(e)))
                 }
             case (.pr, .fastTrack, _) where review:
-                guard fixesCandidate(e) else {
-                    entries[i].item.hold = "off the fast track: it " + PipelineGate.Hold.notAFix.message
+                if let h = closesHold(e) {
+                    entries[i].item.hold = "off the fast track: it " + h.message
                     continue
                 }
                 if let root = e.root, let n = e.number, let head = e.item.headSha {

@@ -374,8 +374,7 @@ public enum PipelineGate {
         if c.unresolvedThreads > 0 { return .threads(c.unresolvedThreads) }
         if let label = c.stopLabels.first { return .stopLabel(label) }
         if !c.trackLabels { return .offTrack }
-        if !c.fixesCandidate { return .notAFix }
-        if !c.closesUnwritable.isEmpty { return .closesUnwritable(c.closesUnwritable.joined(separator: ", ")) }
+        if let held = closes(c.fixesCandidate, c.closesUnwritable) { return held }
         if c.rating?.isFastTrack != true { return .rated(c.rating) }
         if !c.floor.isFastTrack { return .floor(c.floor) }
         if c.mergeable == "CONFLICTING" { return .conflicting }
@@ -395,6 +394,13 @@ public enum PipelineGate {
         let missing = required.filter { !c.passedChecks.contains($0) }
         if !missing.isEmpty { return .requiredChecks(missing) }
         return nil
+    }
+
+    /// The hold on what a PR would close, nil when that is only candidates: `hold`'s, and the
+    /// fast track's.
+    static func closes(_ fixesCandidate: Bool, _ unwritable: [String]) -> Hold? {
+        if !fixesCandidate { return .notAFix }
+        return unwritable.isEmpty ? nil : .closesUnwritable(unwritable.joined(separator: ", "))
     }
 
     /// Whether `hold` checks `rule`, or it is the review requirement `--admin` exists to

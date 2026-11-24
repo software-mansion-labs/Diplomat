@@ -2959,6 +2959,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     PipelineControl(enabled: true, rate: true, fix: true, fastTrack: false, merge: true, fracture: true).save(in: liveDir)
     let live = only([4, 11])
     live.tickets = []
+    live.prs[0].body = "Fixes #4."
     let lv = sync(live, PipelineSettings(roots: [root], rate: true, fastTrack: true), liveDir, t0)
     check(lv.writes.contains("+risk:low #11") && !lv.writes.contains("+diplomat:fast-track #11")
           && lv.result.notices == ["Fast track is switched off, so this sync took no fast track step past that"],
@@ -3134,6 +3135,7 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
 
     // `fast-track` goes on a PR once: one a person took it off, rating labels and all, is theirs.
     let once = only([4, 11])
+    once.prs[0].body = "Fixes #4."
     let o1 = sync(once, rateTrack, dir("fast-track-once"), t0)
     once.prs[0].labels = []
     let o2 = sync(once, rateTrack, dir("fast-track-once"), later(5))
@@ -3149,6 +3151,7 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
     ]
     for (k, (what, change)) in worn.enumerated() {
         let t = only([4, 11])
+        t.prs[0].body = "Fixes #4."
         change(&t.prs[0])
         let s = sync(t, rateTrack, dir("worn-\(k)"), t0)
         check(s.writes.contains("+risk:low #11") && !s.writes.contains("+diplomat:fast-track #11"),
@@ -3156,6 +3159,7 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
     }
     // A PR whose first rating labels the tracker refused says so.
     let refusedPR = only([4, 11])
+    refusedPR.prs[0].body = "Fixes #4."
     refusedPR.refuseLabels = ["11"]
     let rp = sync(refusedPR, rateTrack, dir("pr-labels-refused"), t0)
     check(stageOf(rp.result, prURL(11)) == "human/human (off the fast track: its rating labels could not be written)",
@@ -3166,6 +3170,7 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
           && stageOf(rp2.result, prURL(11)) == "fast-track/fast",
           "its labels written at the next sync: \(rp2.writes) \(stageOf(rp2.result, prURL(11)))")
     let ftRefused = only([4, 11])
+    ftRefused.prs[0].body = "Fixes #4."
     ftRefused.refuseLabels = ["11 diplomat:fast-track"]
     let fr1 = sync(ftRefused, rateTrack, dir("fast-track-refused"), t0)
     ftRefused.refuseLabels = []
@@ -4806,7 +4811,8 @@ private func pipelinePins10(base: URL, root: PipelineSettings.Root, team: Pipeli
     }
 }
 
-/// A first rating's labels against a push meanwhile.
+/// A first rating's labels against a push meanwhile, and the fast track against what no read
+/// judged.
 private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
                                  t0: Date) throws {
     section("pipeline rating pass 1")
@@ -4831,4 +4837,26 @@ private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: P
     check(p1.writes.isEmpty && p1.result.effects.isEmpty && pushed.prs[0].labels.isEmpty && p2.writes.isEmpty
           && p2.result.notices.contains("#11: the rating kept for it is below what its diff allows now, so it was dropped"),
           "pushed to as it was rated: \(p1.writes) \(p1.result.effects) then \(p2.writes) \(p2.result.notices)")
+
+    // Closing what no read judged keeps a PR off the fast track: no label, review or re-rate.
+    let linear = only([4, 11])
+    let lr = sync(linear, rateTrack, dir("closes-linear"), t0)
+    let lib = fix()
+    lib.others[40] = ("Lib bug", "OPEN", "acme/lib")
+    lib.prs[0].closes = [4, 40]
+    let lb = sync(lib, rateTrack, dir("closes-lib"), t0)
+    check(lr.writes == ["+risk:low #11", "+complexity:low #11"] && lb.writes == lr.writes
+          && lr.result.effects.isEmpty && lb.result.effects.isEmpty,
+          "first rated, closing ENG-3 unread or acme/lib#40: \(lr.writes) \(lb.writes)")
+    for marked in [true, false] {
+        let t = only([14, 24])
+        t.others[40] = ("Lib bug", "OPEN", "acme/lib")
+        t.prs[0].closes = [24, 40]
+        if !marked { t.prs[0].reviews = [] }
+        let s = sync(t, rateTrack, dir("closes-lib-\(marked)"), t0)
+        check(s.claude.isEmpty && s.writes.isEmpty && s.result.effects.isEmpty && stageOf(s.result, prURL(14))
+              == "human/human (off the fast track: it would close https://github.com/acme/lib/issues/40, "
+                + "which Diplomat did not read or may not write to)",
+              "fast-tracked, closing acme/lib#40, clean \(marked): \(s.claude) \(s.writes) \(stageOf(s.result, prURL(14)))")
+    }
 }
