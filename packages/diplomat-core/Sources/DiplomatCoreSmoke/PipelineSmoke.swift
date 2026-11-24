@@ -2335,9 +2335,48 @@ private func pipelineSplitParts(base: URL, root: PipelineSettings.Root, team: Pi
     section("pipeline split parts")
     func dir(_ name: String) -> URL { base.appendingPathComponent("split-parts-" + name) }
     func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    func children(_ s: Synced) -> [String] { s.events.filter { $0.kind == .child }.map(\.detail) }
     let split = PipelineSettings(roots: [root], fracture: true)
     let askedAgain: [String: Any] = ["parts": [["title": "Wrap the storage API", "body": "Wrap it."],
                                                ["title": "Port the SQLite store", "body": "Port it."]], "why": "asked again"]
+
+    // A first part made though its create failed, which no look-up could tell, is filed from
+    // the answer that named it.
+    let lost = only([3])
+    lost.createsLost = 1
+    func partsDown() {
+        lost.ghFails = lost.nextIssue > 101 && lost.ghCalls.last?.contains("operationName=Parts") == true
+        lost.onGH = partsDown
+    }
+    lost.onGH = partsDown
+    let lost1 = sync(lost, split, dir("lost"), t0)
+    (lost.onGH, lost.ghFails) = (nil, false)
+    lost.fractures["Split the storage layer"] = askedAgain
+    let lost2 = sync(lost, split, dir("lost"), later(5))
+    check(lost1.writes == ["label diplomat:fractured exists", "+diplomat:fractured #3", "issue #101 Extract the storage protocol"]
+          && lost2.claude.isEmpty && lost2.writes == ["sub #3 #101", "issue #102 Move SQLite behind it", "sub #3 #102"]
+          && children(lost2) == ["\(issueURL(101)): Extract the storage protocol", "\(issueURL(102)): Move SQLite behind it"],
+          "a first part maybe made: \(lost1.writes) then \(lost2.claude) \(lost2.writes) \(children(lost2))")
+    let linLost = only([])
+    linLost.tickets = [fixture().tickets[0]]
+    linLost.linearCreatesLost = 1
+    linLost.onLinear = { if $0 == "IssueCreate" { linLost.linearIssueDown = true } }
+    var forced = PipelineSettings(roots: [root], linearTeams: [team])
+    forced.force = .init(fracture: [linearURL("ENG-1")])
+    let ll1 = sync(linLost, forced, dir("linear-lost"), t0)
+    (linLost.onLinear, linLost.linearIssueDown) = (nil, false)
+    let ll2 = sync(linLost, PipelineSettings(roots: [root], linearTeams: [team]), dir("linear-lost"), later(5))
+    check(ll1.writes == ["linear-label diplomat:fractured #5856D6", "+diplomat:fractured ENG-1",
+                         "linear-issue ENG-4 Pick the header token"]
+          && ll2.writes == ["linear-issue ENG-5 Update the header snapshot"]
+          && stageOf(ll2.result, linearURL("ENG-1")) == "fractured/fractured",
+          "a Linear first part maybe made: \(ll1.writes) then \(ll2.writes) \(stageOf(ll2.result, linearURL("ENG-1")))")
+    let linUnfiled = only([])
+    linUnfiled.tickets = [fixture().tickets[0]]
+    linUnfiled.onLinear = { linUnfiled.linearDown = $0 == "IssueCreate" }
+    let lu = sync(linUnfiled, forced, dir("linear-unfiled"), t0)
+    check(lu.writes == ["linear-label diplomat:fractured #5856D6", "+diplomat:fractured ENG-1", "-diplomat:fractured ENG-1"],
+          "a Linear first part not made: \(lu.writes)")
 
     // A split again, after a person took the first one's parts off, files its own.
     let again = only([3])

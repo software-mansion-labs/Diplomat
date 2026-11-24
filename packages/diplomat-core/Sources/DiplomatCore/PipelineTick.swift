@@ -1374,8 +1374,8 @@ final class PipelineSync {
 
     /// Splits one issue, read again first, claiming it with `fractured`, a claim the state
     /// records before it is made, and saving the model's answer before the first part is filed:
-    /// a split that files no part takes the claim back, and one stopped part-way keeps it, with
-    /// a hold naming the parts, so no part is filed twice.
+    /// a split that files no part, nor may have, takes the claim back, and one stopped part-way
+    /// keeps it, with a hold naming the parts, so no part is filed twice.
     func fractureOne(_ i: Int, _ step: Step) {
         guard let root = entries[i].root, may(step), recheck(i) else { return }
         let e = entries[i]
@@ -1426,7 +1426,8 @@ final class PipelineSync {
         func stop(_ why: String) {
             guard !made.isEmpty else {
                 notice("\(e.item.label) was not split: \(why)")
-                return release(i, nil)
+                // The next sync files this answer, taking its first part if made.
+                return state.parts[e.id]?.sent == true ? persist() : release(i, nil)
             }
             // Never retried unforced: a second split would file the made parts again.
             state.splitting[e.id] = nil
@@ -1499,6 +1500,10 @@ final class PipelineSync {
             state.seen[url] = now
             persist()
         }
+        func sent(_ maybe: Bool) {
+            state.parts[e.id]?.sent = maybe
+            persist()
+        }
         switch e.item.source {
         case .github:
             guard let root = e.root, let parent = e.nodeID else { return (nil, "no repository to file it in") }
@@ -1521,6 +1526,7 @@ final class PipelineSync {
             if let why = found.failure { return (nil, "the parts filed before could not be read: \(why)") }
             var why = ""
             if found.part == nil {
+                sent(true)
                 let out = io.gh(["api", "-X", "POST", "repos/\(root.name)/issues", "-f", "title=\(title)",
                                  "-f", "body=\(body)"])
                 let answer = (try? JSONSerialization.jsonObject(with: out.stdout)) as? [String: Any]
@@ -1530,6 +1536,7 @@ final class PipelineSync {
                     // GitHub may have made it all the same.
                     why = out.why
                     found = filed()
+                    if found.part == nil && found.failure == nil { sent(false) }
                 }
             }
             guard let child = found.part else { return (nil, "the issue may not have been created: \(why)") }
@@ -1551,6 +1558,7 @@ final class PipelineSync {
                 return (nil, "no Linear team to file it in")
             }
             let before = e.children
+            sent(true)
             do {
                 let data = try api.call("IssueCreate", ["teamId": team, "title": title,
                                                         "description": body, "parentId": parent])
@@ -1559,8 +1567,9 @@ final class PipelineSync {
                 made(PipelineRead.linearURL(url))
                 return (PipelineRead.linearURL(url), nil)
             } catch {
-                _ = refresh(i)
+                let read = refresh(i)
                 let new = entries[i].children.filter { !before.contains($0) }
+                if read && new.isEmpty { sent(false) }
                 guard new.count == 1 else { return (nil, error.localizedDescription) }
                 made(new[0])
                 return (new[0], nil)

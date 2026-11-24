@@ -240,8 +240,9 @@ Either way, why is its hold, unless it is a `candidate`, whose fix is asked for 
 nothing takes the label off again, even if a switch went off meanwhile, once a read right before
 shows Diplomat may still write to the issue, and is tried again 1, 2, 4 ... syncs later, a day at
 most. The model's answer is saved before the first part is filed: a sync stopped mid-split (the app
-quit, the sync timed out) after it leaves the next sync that reads its code in full filing the rest of
-those parts, with **Split big issues** on or the split forced, each only if the issue may be split now;
+quit, the sync timed out) after it, or a split whose first part's create failed with no read showing
+it unmade, leaves the next sync that reads its code in full filing the rest of those parts, with
+**Split big issues** on or the split forced, each only if the issue may be split now;
 one stopped before it, the next sync taking the label off.
 
 ## The merge
