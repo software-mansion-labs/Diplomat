@@ -23,11 +23,10 @@ public enum IssueCatalog {
 /// off the machine is which model the agent runs on (`AgentModel`), which the
 /// attribution tag names.
 ///
-/// **Every prompt this builds works ONE issue** — `specificIssue` names it, or `linear`
-/// for a Linear issue the pipeline queued. A scope is never handed to an agent as a
-/// scope: the front-end enumerates it against the repo's open issues
-/// (`Filters.sweptIssues`) and queues one run per issue, each built from `forIssue`.
-/// So the three axes below are read by different readers:
+/// **Every prompt this builds works ONE issue** — `specificIssue` or `linear` names it.
+/// A scope is never handed to an agent as a scope: the front-end enumerates it against
+/// the repo's open issues (`Filters.sweptIssues`) and queues one run per issue, each
+/// built from `forIssue`. So the three axes below are read by different readers:
 ///
 ///   - `target` / `username` / `unassignedOnly` — WHICH issues the sweep picks up
 ///     (all / mine / one user's / the community's / the org's / one specific issue,
@@ -66,13 +65,10 @@ public struct IssueConfig: Codable, Equatable {
     public var commentOnIssue: Bool
     /// The one escalation: also take on feature requests, not just bug reports.
     public var includeFeatures: Bool
-    /// A Linear issue to work instead of `specificIssue`, in `targetRepo`: its text is the
-    /// scope (`pipeline.json` `blocks.linearScope`), and the run never claims or comments
-    /// on a GitHub issue for it. Optional so a queued config stored without it decodes.
+    /// A Linear issue to work instead of `specificIssue`, in `targetRepo`, claiming and
+    /// commenting on no GitHub issue. Optional so a queued config stored without it decodes.
     public var linear: LinearIssue?
-    /// A pipeline fast-track candidate (`pipeline.json` `blocks.pipelineFix`, and the
-    /// re-check `pipelineRecheck`, `pipelineRecheckLinear` for a Linear one). Optional for
-    /// the same reason.
+    /// A pipeline fast-track candidate. Optional for the same reason.
     public var pipeline: Bool?
 
     public init(depth: String = "", target: IssueTarget = .all, username: String = "",
@@ -131,8 +127,8 @@ public struct IssueConfig: Codable, Equatable {
     /// The repo `targetRepo` names, nil for `assets/config.json`'s.
     public var targetLocal: PRRef.LocalRepo? { (isSingleIssue ? issueRef.repo : nil) ?? home }
 
-    /// The fixed issue's link, which its run records: the Linear issue's for a Linear run;
-    /// nil for a sweep. Python twin: `IssueConfig.single_link`.
+    /// The fixed issue's link, which its run records; nil for a sweep. Python twin:
+    /// `IssueConfig.single_link`.
     public var singleLink: String? {
         if let linear { return linear.url }
         guard isSingleIssue, let n = issueRef.number else { return nil }
@@ -192,7 +188,6 @@ public struct IssueConfig: Codable, Equatable {
         let blocks = issues?.blocks ?? [:]
         let (owner, repo) = targetRepo
         let pipelineBlocks = (try? CoreAssets.pipeline())?.blocks ?? [:]
-        // A Linear issue has no GitHub issue to claim, re-check or comment on.
         let onGitHub = linear == nil
 
         func fill(_ s: String) -> String {

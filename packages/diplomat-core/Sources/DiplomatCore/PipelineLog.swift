@@ -1,10 +1,8 @@
 import Foundation
 
-/// `dir` holds `log.jsonl` (every `PipelineEvent`; a `rerated` one is also the proof a
-/// `cleared` label is this Diplomat's own), `last.json` (the last sync's result),
-/// `ratings.json`, `state.json` (the guards against repeating a step), `control.json`
-/// (the front-end's switches, `PipelineControl`), and the locks `log.lock` and
-/// `tick.lock`: directories 0700, files 0600.
+/// `dir` holds `log.jsonl` (a `rerated` event also proves a `cleared` label is this
+/// Diplomat's own), `last.json`, `ratings.json`, `state.json`, `control.json` and the locks
+/// `log.lock` and `tick.lock`: directories 0700, files 0600.
 public enum PipelineLog {
     public static var dir: URL {
         if let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"], !env.isEmpty {
@@ -16,7 +14,7 @@ public enum PipelineLog {
     static func logURL(in dir: URL) -> URL { dir.appendingPathComponent("log.jsonl") }
     static func lastURL(in dir: URL) -> URL { dir.appendingPathComponent("last.json") }
 
-    /// The last sync's result; nil before the first, or when it cannot be read.
+    /// The last sync's result; nil before the first or when unreadable.
     public static func last(in dir: URL = dir) -> PipelineTickResult? {
         guard let data = try? Data(contentsOf: lastURL(in: dir)) else { return nil }
         return try? CommsLog.decoder.decode(PipelineTickResult.self, from: data)
@@ -28,7 +26,7 @@ public enum PipelineLog {
         PrivateFiles.writeWhole(data, to: lastURL(in: dir))
     }
 
-    /// Under `log.lock`; past `maxLogBytes` the file keeps its newest whole lines.
+    /// Past `maxLogBytes` the file keeps its newest whole lines.
     static func append(_ events: [PipelineEvent], in dir: URL) {
         guard !events.isEmpty else { return }
         var data = Data()
@@ -55,16 +53,15 @@ public enum PipelineLog {
 }
 
 /// What a sync remembers between runs besides the trackers' labels, so a step taken or
-/// logged once is not taken or logged again. Keyed by item id.
+/// logged once is not taken or logged again.
 ///
-/// `decided`, `unsplit`, `splitting`, `parts`, `rerated`, `cleared`, `retry` and `lineage` guard
-/// against repeating an outward step, so an item missing from a read keeps them: they go once it
-/// is read merged or closed, or after `forgetDays` unseen. The rest only keeps the log
-/// from repeating itself, and also goes with an item missing from a read of every source.
+/// An item missing from a read keeps its entries, which guard outward steps: they go once it
+/// is read merged or closed, or after `forgetDays` unseen. The log-only `holds`, `clean` and
+/// `asked` also go with an item missing from a read of every source.
 struct PipelineState: Codable, Equatable {
     static let forgetDays: Double = 90
 
-    /// Per repository (`owner/repo`), the labels known to exist there.
+    /// Per `owner/repo`, the labels known to exist there.
     var labelsMade: [String: [String]] = [:]
     /// PRs Diplomat took off the fast track for good. Only a cache: the labels say it.
     var decided: [String] = []
@@ -81,7 +78,7 @@ struct PipelineState: Codable, Equatable {
     var rerated: [String: [String: PipelineRating]] = [:]
     /// Per PR, the head Diplomat put `cleared` on at, until Diplomat takes it off.
     var cleared: [String: String] = [:]
-    /// Per item, its ratings or splits that failed: not tried again unforced before then.
+    /// Per item, its failed ratings or splits: not tried again unforced before `after`.
     var retry: [String: PipelineRetry] = [:]
     /// Syncs run, the clock `retry` counts in.
     var syncs = 0
@@ -128,8 +125,8 @@ struct PipelineState: Codable, Equatable {
 
     static func url(in dir: URL) -> URL { dir.appendingPathComponent("state.json") }
 
-    /// A missing file reads as a first sync. One that is there but does not decode is a
-    /// failure, never an empty state: that would forget every guard in it.
+    /// A missing file is a first sync; one that does not decode is a failure, never an
+    /// empty state, which would forget every guard.
     static func load(in dir: URL) -> Result<PipelineState, PipelineIO.Failure> {
         let url = url(in: dir)
         guard FileManager.default.fileExists(atPath: url.path) else { return .success(PipelineState()) }
@@ -146,9 +143,6 @@ struct PipelineState: Codable, Equatable {
         PrivateFiles.writeWhole(data, to: Self.url(in: dir))
     }
 
-    /// Marks `read` seen at `now`, then forgets everything about an item read merged or
-    /// closed (`done`) or unseen for `forgetDays`; with `readAll`, also the log-once
-    /// entries of an item missing from the read.
     mutating func prune(read: Set<String>, done: Set<String>, readAll: Bool, now: Date) {
         for id in read { seen[id] = now }
         let cutoff = now.addingTimeInterval(-Self.forgetDays * 86_400)
@@ -171,7 +165,6 @@ struct PipelineState: Codable, Equatable {
     }
 }
 
-/// A split's answer: its parts, why, and whether the operator forced it.
 struct PipelineParts: Codable, Equatable {
     struct Part: Codable, Equatable {
         var title: String
@@ -183,8 +176,8 @@ struct PipelineParts: Codable, Equatable {
     var forced: Bool
 }
 
-/// An item's ratings or splits failed in a row, and when the last did: the next is tried
-/// at sync `after`, 1, 2, 4 ... syncs on, and a day on at the latest.
+/// An item's ratings or splits failed in a row: the next is tried at sync `after`, 1, 2,
+/// 4 ... syncs on, and a day after `at` at the latest.
 struct PipelineRetry: Codable, Equatable {
     var failures: Int
     var after: Int
@@ -225,8 +218,7 @@ struct PipelineCachedRating: Codable, Equatable {
 extension PipelineControl {
     static func url(in dir: URL) -> URL { dir.appendingPathComponent("control.json") }
 
-    /// `control.json` in `dir`; nil when it is missing or does not hold all six switches
-    /// as booleans.
+    /// nil when `control.json` is missing or does not hold every switch as a boolean.
     public static func read(in dir: URL = PipelineLog.dir) -> PipelineControl? {
         guard let data = try? Data(contentsOf: url(in: dir)) else { return nil }
         return try? JSONDecoder().decode(PipelineControl.self, from: data)

@@ -1,16 +1,8 @@
-# Everything a pipeline sync reads of one repository, each operation named by `gh api
-# graphql -f operationName=<name>`. `Repo` reads the account `gh` acts as, the repository's
-# name as GitHub has it now, its default branch and merge methods, the first page of its
-# open issues and PRs, and its recently merged or closed PRs (`PipelineRead.github` keeps
-# the ones carrying a pipeline label, and the closed issues of this repository they close);
-# `Issues` and `PullRequests` read the next pages, newest created first so an item updated
-# meanwhile keeps its place, each page `$issues` or `$prs` long; `PullRequest` reads one PR
-# again, with `Gate`, right before Diplomat marks it ready or merges it, and after it merges
-# it, for who merged it; `Item` reads one
-# issue or PR again right before Diplomat writes to it; `Queued` reads one a queued ask
-# names that the reads above missed; `Parts` finds the parts of a split filed before. `files` needs to see more than `floor.maxFiles` only to know a PR exceeds
-# it, which `changedFiles` says; any other `totalCount` past what a connection lists reads
-# as whatever holds the item back: a label, an unresolved thread, a reviewer, a commit or a
+# Every read a pipeline sync makes of one repository, each picked by `gh api graphql -f
+# operationName=<name>`. Open issues and PRs page newest created first, so an item updated
+# meanwhile keeps its place. `files` need not list past `floor.maxFiles`: `changedFiles`
+# says a PR exceeds it. Any other `totalCount` past what a connection lists reads as
+# whatever holds the item back: a label, an unresolved thread, a reviewer, a commit or a
 # closing reference nobody saw. A timeline's `totalCount` counts every event whatever
 # `itemTypes` says; `filteredCount` counts the ones it names.
 
@@ -39,13 +31,10 @@ fragment PR on PullRequest {
   comments(last: 40) { totalCount nodes { author { __typename login } body } }
 }
 
-# What only a PR about to be marked ready or merged is read for: its head's checks, the
-# rules on its base branch and the checks they require (its protection rule, which an admin
-# reads as `branchProtectionRule` and anyone else, in part, as `refUpdateRule`, and its
-# active rulesets), every commit's author, committer, message and signature, each issue it
-# would close as it stands, whether it was ever ready for review before, and every
-# review-thread comment. A required check that never reported is missing from `contexts`;
-# `isRequired` tells the required one from another app's check of its name.
+# Needed only to mark a PR ready or merge it. An admin reads the base's protection as
+# `branchProtectionRule`, anyone else, in part, as `refUpdateRule`. A required check that
+# never reported is missing from `contexts`; `isRequired` tells the required one from
+# another app's check of its name.
 fragment Gate on PullRequest {
   baseRef {
     branchProtectionRule {
@@ -171,7 +160,6 @@ query Queued($owner: String!, $name: String!, $number: Int!) {
   }
 }
 
-# The operator's newest issues, in any state.
 query Parts($owner: String!, $name: String!, $me: String!) {
   repository(owner: $owner, name: $name) {
     issues(first: 50, filterBy: {createdBy: $me}, orderBy: {field: CREATED_AT, direction: DESC}) {

@@ -1,15 +1,13 @@
 import Foundation
 
-/// The code the pipeline's model never overrules: the floor a PR's diff puts under its
-/// rating, and the holds that keep a cleared PR from merging. Code, never an agent, so
-/// nothing a PR or its issue says can talk its way past either.
+/// The floor a PR's diff puts under its rating, and the holds that keep a cleared PR from
+/// merging: code, never the model, so nothing a PR or its issue says can talk its way past.
 public enum PipelineGate {
-    /// One file of a PR's diff as GitHub lists it.
     public struct ChangedFile: Equatable, Sendable {
         public let path: String
         public let additions: Int
         public let deletions: Int
-        /// GitHub's `PatchStatus`: ADDED, DELETED, MODIFIED, RENAMED, COPIED or CHANGED.
+        /// GitHub's `PatchStatus`.
         public let changeType: String
 
         public init(path: String, additions: Int, deletions: Int, changeType: String) {
@@ -20,7 +18,7 @@ public enum PipelineGate {
         }
     }
 
-    /// A file the fast track never merges a change to, whatever the change.
+    /// A file the fast track never merges a change to.
     public static func isDenied(_ path: String, _ floor: CoreAssets.PipelineModel.Floor) -> Bool {
         let parts = path.split(separator: "/").map { $0.lowercased() }
         guard let name = parts.last else { return true }
@@ -29,7 +27,6 @@ public enum PipelineGate {
             || floor.deniedFiles.contains { glob($0.lowercased(), name) }
     }
 
-    /// A test file, held to the test limits rather than the source ones.
     public static func isTest(_ path: String, _ floor: CoreAssets.PipelineModel.Floor) -> Bool {
         guard let name = path.split(separator: "/").last else { return false }
         return inTestDir(path, floor) || floor.testFiles.contains { glob($0, String(name)) }
@@ -56,16 +53,12 @@ public enum PipelineGate {
         return true
     }
 
-    /// The least rating a diff allows: a limit broken makes complexity at least medium,
-    /// as do files GitHub changed but the read did not list; a denied path makes risk
-    /// high; no test change, a file added outside a test directory, deleted, renamed,
-    /// copied or otherwise not modified, or one with no lines (binary or a mode change)
-    /// makes risk at least medium.
+    /// The least rating a diff allows.
     public static func floor(files: [ChangedFile], changedFiles: Int) -> PipelineRating {
         floorWithReasons(files: files, changedFiles: changedFiles).rating
     }
 
-    /// `floor`, with one short reason per dimension it raised, first cause first.
+    /// `floor`, with the reason for each raise.
     static func floorWithReasons(files: [ChangedFile], changedFiles: Int)
         -> (rating: PipelineRating, reasons: [String]) {
         guard let f = (try? CoreAssets.pipeline())?.floor else {
@@ -114,9 +107,8 @@ public enum PipelineGate {
         return (PipelineRating(risk: risk, complexity: complexity), reasons)
     }
 
-    /// What the diff's text adds to `floor`: a diff longer than the rater is shown
-    /// (`diffChars`) makes complexity at least medium, and a submodule moved risk high,
-    /// since GitHub lists that as one modified line whatever it pulls in.
+    /// What the diff's text adds to `floor`. A moved submodule is high risk: GitHub lists it
+    /// as one modified line whatever it pulls in.
     static func diffFloor(_ diff: String, diffChars: Int) -> (rating: PipelineRating, reasons: [String]) {
         var rating = PipelineRating(risk: .low, complexity: .low)
         var reasons: [String] = []
@@ -134,7 +126,6 @@ public enum PipelineGate {
         return (rating, reasons)
     }
 
-    /// A cleared PR as the merge gate reads it.
     public struct Candidate: Equatable, Sendable {
         public var state: String
         public var author: String
@@ -144,7 +135,7 @@ public enum PipelineGate {
         /// The author of each review and PR comment: nil for a bot, "" for a deleted
         /// account.
         public var participants: [String?]
-        /// More reviews or comments than the read lists, any of which could be a person's.
+        /// More reviews or comments exist than the read lists.
         public var participantsUnseen: Bool
         public var reviewDecision: String
         public var unresolvedThreads: Int
@@ -157,37 +148,34 @@ public enum PipelineGate {
         public var ciCommit: String
         /// `statusCheckRollup.state`, "" when the commit has no checks at all.
         public var ciState: String
-        /// A comment or review of the operator's that does not carry Diplomat's tag: a
-        /// person, not an agent, said something on it.
+        /// A comment or review of the operator's lacks Diplomat's tag, so a person wrote it.
         public var operatorUntagged: Bool
-        /// Reviews requested and not given yet, of a user or a team.
         public var reviewRequests: Int
-        /// Who, besides the operator, authored or committed one of its commits; "" for one
-        /// whose author has no GitHub account, or for commits past what the read lists.
+        /// Who besides the operator authored or committed a commit; "" for an author with no
+        /// GitHub account, or for commits past what the read lists.
         public var foreignCommits: [String]
         /// Both of Diplomat's fast-track labels are on it.
         public var trackLabels: Bool
-        /// It closes an issue, and each one it closes is rated low risk and low complexity
-        /// and Diplomat may act on it: the fast track is for the fixes the pipeline asked for.
+        /// It closes an issue, and every one it closes is low risk, low complexity and one
+        /// Diplomat may act on.
         public var fixesCandidate: Bool
         /// The issues it would close that Diplomat did not read.
         public var closesUnwritable: [String]
-        /// A check on the head ran, rather than every one being skipped.
+        /// Not every check on the head was skipped.
         public var ciRan: Bool
-        /// It was ready for review before.
         public var wasReady: Bool
         /// GitHub's `mergeStateStatus`.
         public var mergeState: String
         /// Its base branch has a merge queue, which `--admin` would skip.
         public var mergeQueue: Bool
-        /// The labels it carries of `pipeline.json` `stopLabels`.
+        /// The `stopLabels` it carries.
         public var stopLabels: [String]
-        /// The status checks its base branch requires, nil when they could not be read; and
-        /// those that succeeded on the head as the ones required of it.
+        /// The status checks its base branch requires, nil when unread; and those that passed
+        /// on the head as required ones.
         public var requiredChecks: [String]?
         public var passedChecks: Set<String>
-        /// Its base branch's rules: each active ruleset rule's type, and each branch
-        /// protection setting on, by its GraphQL field; nil when they could not be read.
+        /// Its base branch's rules: each active ruleset rule's type and each protection
+        /// setting on, by GraphQL field name; nil when unread.
         public var baseRules: [String]?
         /// A commit is not signed and verified, or not read.
         public var unsignedCommits: Bool
@@ -239,7 +227,7 @@ public enum PipelineGate {
         }
     }
 
-    /// Why a cleared PR is not merged at its head.
+    /// Why a cleared PR is not merged.
     public enum Hold: Equatable, Sendable {
         case closed
         case notMine(String)
@@ -268,8 +256,8 @@ public enum PipelineGate {
         case ciStale
         case ciPending
         case ciFailing(String)
-        /// No hold above stands: it is marked ready, as CI may skip drafts, and merged at a later
-        /// sync once the holds below, on its CI, do not stand either.
+        /// No hold above stands: it is marked ready, as CI may skip drafts, and merged once
+        /// the CI holds below clear.
         case draft
         case ciMissing
         case ciSkipped
@@ -360,13 +348,10 @@ public enum PipelineGate {
         }
     }
 
-    /// The hold on `c`, or nil when it may merge. The first broken rule wins, in a fixed
-    /// order: who the PR is and who has seen it, then what it changes, then the state
-    /// GitHub is still computing - so a PR that can never merge says why, rather than
-    /// reading "CI still running" until its checks finish. A draft passing every rule up
-    /// to the ones on missing, skipped or required CI holds as `draft`: CI that skips drafts
-    /// may run once it is ready. A required check that never reported is missing from the
-    /// rollup `ciState` sums up, so each one must have succeeded by name.
+    /// The hold on `c`, or nil when it may merge. The first broken rule wins: who the PR is
+    /// and who has seen it, then what it changes, then what GitHub is still computing, so a
+    /// PR that can never merge says why rather than "CI still running". A required check
+    /// that never reported is missing from `ciState`'s rollup, so each must pass by name.
     public static func hold(_ c: Candidate, me: String) -> Hold? {
         if c.state != "open" && c.state != "draft" { return .closed }
         let mine = me.lowercased()
@@ -412,8 +397,8 @@ public enum PipelineGate {
         return nil
     }
 
-    /// Whether `hold` checks `rule`, one of `c.baseRules`, or it is the review requirement
-    /// `--admin` exists to skip: every other one `--admin` would bypass too.
+    /// Whether `hold` checks `rule`, or it is the review requirement `--admin` exists to
+    /// skip: `--admin` would bypass any other.
     static func checks(_ rule: String, _ c: Candidate) -> Bool {
         switch rule {
         case "PULL_REQUEST", "REQUIRED_STATUS_CHECKS", "NON_FAST_FORWARD", "DELETION", "CREATION": return true

@@ -1,10 +1,8 @@
 import Foundation
 
-/// What a sync reaches outside the process: `gh`, `claude`, Linear's HTTP API and the
-/// Linear key. `live` is the real one; tests hand in stubs.
+/// What a sync reaches outside the process; tests stub it.
 public struct PipelineIO {
-    /// How one `gh` or `claude` call exited and what it printed. A call that could not
-    /// start, or did not finish in time, is status -1 with the reason as `stderr`.
+    /// A call that could not start or finish in time is status -1, the reason as `stderr`.
     public struct Exit: Equatable, Sendable {
         public var status: Int32
         public var stdout: Data
@@ -18,21 +16,18 @@ public struct PipelineIO {
 
         public var ok: Bool { status == 0 }
 
-        /// One line saying why it failed.
         var why: String {
             let tail = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
             return tail.isEmpty ? "exited \(status)" : String(CommsText.oneLine(tail).suffix(200))
         }
     }
 
-    /// Why a step did not happen, one line.
     struct Failure: Error, Equatable {
         let message: String
         init(_ message: String) { self.message = message }
     }
 
     public var gh: ([String]) -> Exit
-    /// `arguments`, `input` on stdin, run in `cwd` for at most `timeout`.
     public var claude: (_ arguments: [String], _ input: Data, _ cwd: String, _ timeout: TimeInterval) -> Exit
     public var linear: SlackAPI.Transport
     public var linearKey: (PipelineSettings) -> String?
@@ -47,10 +42,7 @@ public struct PipelineIO {
         self.linearKey = linearKey
     }
 
-    /// `gh` as `GH` finds it (`DIPLOMAT_GH` overrides), bounded by `GH.timeout`; `claude`
-    /// as `CommsClassifier.binary` finds it (`DIPLOMAT_CLAUDE`); Linear through
-    /// `SlackAPI.curl`; the key from `LinearAPI.key`. Each child gets
-    /// `CommsClassifier.childEnvironment`, which holds no token.
+    /// Each child gets `CommsClassifier.childEnvironment`, which holds no token.
     public static var live: PipelineIO {
         func exit(_ outcome: CommsClassifier.Outcome, _ name: String, _ timeout: TimeInterval) -> Exit {
             switch outcome {
@@ -87,39 +79,10 @@ public struct PipelineIO {
 }
 
 public enum PipelineTick {
-    /// One sync. Reads every root's open issues and PRs (at most `githubMaxItems` of each),
-    /// its recently merged or closed PRs that carry a pipeline label and the closed issues
-    /// they close, and every tracked Linear team's open issues; rates each forced item, and
-    /// with `rate` up to `rater.perSync` unrated ones besides: clean PRs awaiting their
-    /// second rating, the operator's unrated PRs, writable issues, other open issues,
-    /// newest first, leaving out for 1, 2, 4 ... syncs (a day at most) one whose
-    /// rating just failed; writes each rating as labels where Diplomat may, never lower
-    /// than the labels, a kept rating or the diff's floor, keeping each answer from the
-    /// moment it arrives until its labels are written, and the rest: a kept rating counts
-    /// over lower labels until a later sync writes it, on the same backoff; with `fastTrack` labels
-    /// `fastTrack` a PR of the operator's at its first rating if it is low/low and fixes
-    /// candidate issues, puts `cleared` on one rated low/low again at a head a clean marker
-    /// names, takes `cleared` off one whose head no marker names, takes both off one rated
-    /// above low/low again or whose `cleared` a person took off, and asks for a review of
-    /// each fast-track head no marker names; with `merge` reads each cleared PR no merge
-    /// hold stops again and, if it is unchanged and nothing holds it then, marks a draft
-    /// ready or merges it; with `fracture` (or forced) splits one writable
-    /// medium/high-complexity issue that is not high risk into children; with `fix` asks
-    /// for a fix PR for each candidate issue, a Linear one only if a read of it right before
-    /// still finds it one. A banned author's item, and every part split
-    /// from one, gets none of that. Every step it takes, and each hold, notice and request
-    /// the first time it is seen, is logged to `dir`, and its state saved after each step;
-    /// the result is saved as `last.json`.
-    ///
-    /// Right before each outward step and each model call it reads `PipelineControl`, and
-    /// skips the step whose switch is off now. A `state.json` or `ratings.json` that cannot
-    /// be read leaves the sync reading and showing only. A read that fails is a notice, and
-    /// the rest of the sync goes on without it; a root read past `githubMaxItems` neither
-    /// fixes nor splits its issues, and one read with errors, or whose Linear team was not
-    /// read, is read and shown only. Such roots, or all of them when the sync is blocked,
-    /// are its `unread`. One sync runs at a time per `dir`: another started meanwhile, or
-    /// one that cannot open the lock, reads nothing and answers the last result, or before any
-    /// one dated at the epoch, with a notice.
+    /// One sync, as docs/pipeline.md describes it. A read that fails is a notice, and the
+    /// rest of the sync goes on without it. One sync runs at a time per `dir`: another
+    /// started meanwhile, or one that cannot open the lock, reads nothing and answers the
+    /// last result, or before any one dated at the epoch, with a notice.
     public static func run(settings: PipelineSettings, now: Date = Date(),
                            dir: URL = PipelineLog.dir, io: PipelineIO = .live) -> PipelineTickResult {
         PrivateFiles.prepare(dir)
@@ -142,7 +105,6 @@ public enum PipelineTick {
     }
 }
 
-/// One sync's working state; see `PipelineTick.run`.
 final class PipelineSync {
     /// What a switch allows: `forced` is the operator's own request, which needs only
     /// the pipeline enabled; `undo` takes back Diplomat's own claim, which no switch stops.
@@ -157,20 +119,19 @@ final class PipelineSync {
     var model: CoreAssets.PipelineModel!
     var state: PipelineState
     var cache: [String: PipelineCachedRating]
-    /// Why this sync writes, splits and merges nothing: a `state.json` there but not
-    /// readable, whose guards it would act without, or such a `ratings.json`.
+    /// Why this sync writes, splits and merges nothing: a `state.json` or `ratings.json`
+    /// there but unreadable.
     var blocked: String?
     var entries: [PipelineEntry] = []
     var pos: [String: Int] = [:]
-    /// Each entry's index by its id lowercased, without a trailing slash.
+    /// Each entry's index by `PipelineRead.norm` of its id.
     var byURL: [String: Int] = [:]
     var repos: [String: PipelineRepo] = [:]
     var edges: [PipelineGraph.Edge] = []
-    /// Events not in the log yet.
     var unsaved: [PipelineEvent] = []
     var notices: [String] = []
-    /// Every source was read whole; only then does an item gone from the read lose what
-    /// only keeps the log from repeating itself.
+    /// Every source was read whole: only then does an item gone from the read lose its
+    /// log-only state.
     var readAll = true
     /// Per root, why a PR fixing one of its issues might not have been read.
     var incomplete: [String: String] = [:]
@@ -340,11 +301,8 @@ final class PipelineSync {
         return true
     }
 
-    /// The prompt-injection ban list the front-ends read: `banned.json` in `$DA_BAN_DIR`,
-    /// its `~` read as `PrivateFiles.home`, else in `~/.diplomat/pr-monitor`, as
-    /// `{"banned": [{"login": …}, …]}`; lowercased, an entry without a string `login`
-    /// skipped. Empty when there is no file, or it lists no `banned`; nil when it cannot be
-    /// read.
+    /// The prompt-injection ban list the front-ends read, lowercased. Empty when there is
+    /// no file or it lists no `banned`; nil when it cannot be read.
     static func bannedLogins() -> Set<String>? {
         let env = ProcessInfo.processInfo.environment["DA_BAN_DIR"] ?? ""
         let file = (env.isEmpty
@@ -388,10 +346,9 @@ final class PipelineSync {
     // MARK: - Reading
 
     /// One `pipeline-repo.graphql` operation on `root`, its `sized` variables (`issues`, `prs`)
-    /// the root's page sizes. One GitHub times out on is asked again with those halved, down
-    /// to `githubPage.least`, which the root's later pages keep; any other failure is tried
-    /// once more. The response when it holds the repository, with any errors beside it; else
-    /// why not.
+    /// the root's page sizes. A GitHub timeout halves those, down to `githubPage.least`, for
+    /// this and the root's later pages; any other failure is tried once more. The response
+    /// when it holds the repository, with any errors beside it; else why not.
     func graphql(_ root: PipelineSettings.Root, _ operation: String, _ variables: [String],
                  sized: [String] = []) -> (response: [String: Any]?, errors: [String], why: String) {
         guard let query = githubQuery else { return (nil, [], "assets/graphql/pipeline-repo.graphql was not read") }
@@ -422,8 +379,7 @@ final class PipelineSync {
         }
     }
 
-    /// Whether a read failed as one past GitHub's ten-second limit does: a 5xx (`gh: HTTP
-    /// 502`), an answer cut off, or an error naming a timeout or a resource limit.
+    /// Whether a read failed as one past GitHub's ten-second limit does.
     static func overloaded(_ out: PipelineIO.Exit, _ errors: [[String: Any]]) -> Bool {
         let stderr = out.stderr.lowercased()
         if !out.ok, stderr.contains("unexpected end of json")
@@ -508,8 +464,6 @@ final class PipelineSync {
         return settings.queued.filter { !listed.contains(PipelineRead.norm($0)) }
     }
 
-    /// Each item of root `n` in `settings.queued` that its read did not list, read by itself:
-    /// closed, or past what one sync reads.
     func readQueued(_ n: Int) {
         let root = roots[n]
         for id in unlisted() where PipelineRead.root(of: id, in: [root]) != nil {
@@ -525,7 +479,6 @@ final class PipelineSync {
         }
     }
 
-    /// `e` in the done lane when it is no longer open.
     func done(_ e: PipelineEntry) -> PipelineEntry {
         guard !open(e) else { return e }
         var e = e
@@ -589,9 +542,6 @@ final class PipelineSync {
         readQueued(api)
     }
 
-    /// Each issue of a tracked team in `settings.queued` that the read did not list, read by
-    /// its team's key and its number, a hundred a query: closed, archived, or past what one
-    /// sync reads.
     func readQueued(_ api: LinearAPI) {
         let tracked = Set(settings.linearTeams.map { $0.key.uppercased() })
         let wanted = unlisted().compactMap { id -> (key: String, number: Int)? in
@@ -615,8 +565,6 @@ final class PipelineSync {
         }
     }
 
-    /// Its rating off the labels, raised by a kept one, else the cache; an open PR's floor
-    /// and clean marker.
     func annotate(_ e: inout PipelineEntry) {
         if let labelled = labelRating(e.labels) {
             let r = raised(labelled, e.id)
@@ -641,7 +589,7 @@ final class PipelineSync {
 
     // MARK: - Labels
 
-    /// Each dimension's level, the higher of two labels; nil where it has none.
+    /// Each dimension's highest labelled level; nil where it has none.
     func levels(_ labels: [String]) -> (risk: PipelineLevel?, complexity: PipelineLevel?) {
         let have = Set(labels.map { $0.lowercased() })
         func top(_ names: CoreAssets.PipelineModel.PerLevel) -> PipelineLevel? {
@@ -662,7 +610,6 @@ final class PipelineSync {
         return r.atLeast(c.rating)
     }
 
-    /// `r`, never lower than a rating label among `labels`.
     func atLeastLabels(_ r: PipelineRating, _ labels: [String]) -> PipelineRating {
         let have = levels(labels)
         return PipelineRating(risk: max(r.risk, have.risk ?? .low),
@@ -673,8 +620,7 @@ final class PipelineSync {
         e.labels.contains { $0.lowercased() == label.lowercased() }
     }
 
-    /// Adds `name` to a writable item no ban holds if `step` may happen now; false (with a notice when
-    /// the tracker refused) when it was not added.
+    /// False, with a notice when the tracker refused, when `name` was not added.
     @discardableResult
     func add(_ i: Int, _ name: String, _ step: Step) -> Bool {
         let e = entries[i]
@@ -704,8 +650,7 @@ final class PipelineSync {
         return true
     }
 
-    /// Takes `name` off a writable item if `step` may happen now, and no ban holds it but to
-    /// undo; false (with a notice when the tracker refused) when it is still on.
+    /// False, with a notice when the tracker refused, when `name` is still on.
     @discardableResult
     func remove(_ i: Int, _ name: String, _ step: Step) -> Bool { takeOff(i, name, step) != nil }
 
@@ -739,9 +684,8 @@ final class PipelineSync {
         return mine
     }
 
-    /// Reads `entries[i]` again and keeps what it says now: its labels, assignees, state,
-    /// children, an issue's attachments and a PR's head. False, with a notice, when it could
-    /// not be read.
+    /// Reads `entries[i]` again and keeps what it says now. False, with a notice, when it
+    /// could not be read.
     func refresh(_ i: Int) -> Bool {
         let e = entries[i]
         var fresh: PipelineEntry?
@@ -804,7 +748,6 @@ final class PipelineSync {
         return true
     }
 
-    /// Makes `name` exist in `root` before an item is given it, once per repository.
     func ensureLabel(_ root: PipelineSettings.Root, _ name: String) -> Bool {
         let slug = root.slug
         if state.labelsMade[slug, default: []].contains(name) { return true }
@@ -853,8 +796,8 @@ final class PipelineSync {
         }
     }
 
-    /// `rating` as the item's rating labels, a dimension at a time: the label it wants
-    /// added, then any other of that dimension taken off.
+    /// A dimension at a time: the wanted label added, then any other of that dimension
+    /// taken off.
     @discardableResult
     func writeRating(_ i: Int, _ rating: PipelineRating, _ step: Step) -> Bool {
         var changes: [String] = []
@@ -888,23 +831,16 @@ final class PipelineSync {
 
     func open(_ e: PipelineEntry) -> Bool { e.item.state == "open" || e.item.state == "draft" }
 
-    /// The open PRs fixing an issue.
     func fixers(_ e: PipelineEntry) -> [Int] {
         edges.filter { $0.from == e.id && $0.kind == .fixes }
             .compactMap { pos[$0.to] }.filter { open(entries[$0]) }
     }
 
-    /// The read issues `pr` would close: its closing references, and the Linear issues it
-    /// closes.
     func fixed(by pr: PipelineEntry) -> [Int] {
         pr.links.compactMap { byURL[PipelineRead.norm($0)] }
             + entries.indices.filter { entries[$0].item.source == .linear && PipelineRead.closes(pr, linear: entries[$0]) }
     }
 
-    /// Whether `x`, open, is an issue a fix may close: writable, rated low/low on its labels
-    /// and by any rating kept for it, untriaged, with no stop label, not tracked on GitHub nor
-    /// held by a Linear issue tracking it, unsplit, not of a banned author, and in a root
-    /// whose Linear teams were read whole.
     func isCandidate(_ x: PipelineEntry) -> Bool {
         x.item.kind == .issue && x.item.writable
             && labelRating(x.labels).map { raised($0, x.id).isFastTrack } == true && triaged(x) == nil
@@ -912,28 +848,22 @@ final class PipelineSync {
             && !has(x, model.labels.fractured) && x.children.isEmpty && banHold(x) == nil && x.root != nil
     }
 
-    /// `isCandidate` for a fix `pr`: on Linear, of a team mapped to `pr`'s own repository.
     func isCandidate(_ x: PipelineEntry, for pr: PipelineEntry) -> Bool {
         isCandidate(x) && (x.item.source == .github || x.root?.slug.lowercased() == pr.item.repo.lowercased())
     }
 
-    /// The stop labels `e` carries, matched as triage labels are.
     func stops(_ e: PipelineEntry) -> [String] {
         let stop = Set(model.stopLabels.flatMap(Self.triageForms))
         return e.labels.filter { !stop.isDisjoint(with: Self.triageForms($0)) }
     }
 
-    /// Whether `pr` is a fix the pipeline asks for: it closes an open issue, and each open
-    /// issue it closes is a candidate.
     func fixesCandidate(_ pr: PipelineEntry) -> Bool {
         let closing = fixed(by: pr).filter { open(entries[$0]) }
         return !closing.isEmpty && closing.allSatisfy { isCandidate(entries[$0], for: pr) }
     }
 
-    /// The issues `pr` would close that this sync did not read, so `fixesCandidate` did
-    /// not judge: GitHub's past the read or outside every root, and each Linear identifier
-    /// its text closes that the Linear read did not return. Linear's integration closes an
-    /// issue of any team, tracked or not.
+    /// The issues `pr` would close that this sync did not read, so `fixesCandidate` did not
+    /// judge. Linear's integration closes an issue of any team, tracked or not.
     func closesUnwritable(_ pr: PipelineEntry) -> [String] {
         pr.closes.filter { $0.isEmpty || byURL[PipelineRead.norm($0)] == nil }
             .map { $0.isEmpty ? "issues past what one read lists" : $0 }
@@ -951,8 +881,6 @@ final class PipelineSync {
         var twins: [String: String?] = [:]
     }
 
-    /// The Linear issues merging `pr`, read again with `Gate`, would close, and those attached
-    /// to each open GitHub issue it would close, read now.
     func linearJudged(_ pr: PipelineEntry) -> LinearJudged {
         var out = LinearJudged()
         var ids = pr.closesLinear
@@ -1021,12 +949,9 @@ final class PipelineSync {
     }
 
     /// What merging `pr`, read again with `Gate`, would close: whether it closes an open
-    /// issue and each one is a candidate, and what it would close that no read judged.
-    /// GitHub closes the issues its closing references list, and those a closing word names
-    /// in its title or a commit message; Linear the issues its text closes and those it is
-    /// attached to, as `linear` read them, an identifier it did not read unjudged. Each is
-    /// judged as those reads have it, whatever the sync's first read saw, a GitHub one by the
-    /// Linear issues attached to it too, unjudged where `linear` did not look.
+    /// issue and each one is a candidate, and what no read judged. GitHub also closes the
+    /// issues a closing word names in its title or a commit message. Each is judged as these
+    /// fresh reads have it, whatever the sync's first read saw.
     func freshCloses(_ pr: PipelineEntry, linear: LinearJudged) -> (fixes: Bool, unjudged: [String]) {
         let closing = pr.closing.filter(open) + linear.closing
         var unjudged = pr.closingPast ? ["issues past what one read lists"] : []
@@ -1044,8 +969,6 @@ final class PipelineSync {
         }, unjudged)
     }
 
-    /// What triage keeps an issue off the fast track as: a triage label, a GitHub issue
-    /// type other than Bug, or a Linear triage or duplicate state.
     func triaged(_ e: PipelineEntry) -> String? {
         if let state = e.triageState { return state }
         if let type = e.issueType, type.lowercased() != "bug" { return type }
@@ -1063,14 +986,13 @@ final class PipelineSync {
         return sides.map { $0.split { !$0.isLetter && !$0.isNumber }.joined(separator: " ") }
     }
 
-    /// An issue already split, or already being fixed: a rating would route it nowhere.
+    /// Already split or being fixed: a rating would route it nowhere.
     func settled(_ e: PipelineEntry) -> Bool {
         has(e, model.labels.fractured) || !e.children.isEmpty || !fixers(e).isEmpty
     }
 
-    /// A fast-track PR rated low/low and fixing candidates, with a clean marker at a head
-    /// this Diplomat has not rated again: each head is rated again once, whatever the
-    /// answer.
+    /// A fast-track PR at a clean head this Diplomat has not rated again: each head is
+    /// rated again once, whatever the answer.
     func awaitingRerate(_ e: PipelineEntry) -> Bool {
         guard own(e), open(e), e.item.writable, has(e, model.labels.fastTrack),
               let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
@@ -1093,7 +1015,6 @@ final class PipelineSync {
         return x != y ? x > y : entries[a].id < entries[b].id
     }
 
-    /// Why Rate now may not rate `e`, nil when it may.
     func rateRefusal(_ e: PipelineEntry) -> String? {
         if e.item.kind == .pr && !(own(e) && open(e)) { return "only my own open PRs are" }
         if !open(e) { return "it is \(e.item.state)" }
@@ -1141,7 +1062,6 @@ final class PipelineSync {
                 },
             ].map { $0.sorted(by: newer) }
         }
-        // An item in two bands is rated once.
         var rest: [Int] = []
         for i in bands.joined() where !forced.contains(i) && !rest.contains(i) && rest.count < model.rater.perSync {
             rest.append(i)
@@ -1152,9 +1072,8 @@ final class PipelineSync {
     }
 
     /// Writes the rating kept for `entries[i]` while its labels could not be written, never
-    /// lower than the labels on it now, with no new rating asked for; tried again on the
-    /// rating backoff. A PR's is dropped, to be rated again, once its diff at the head this
-    /// sync read allows less.
+    /// lower than the labels on it now, with no new rating asked for. A PR's is dropped, to
+    /// be rated again, once its diff at the head this sync read allows less.
     func rewrite(_ i: Int) {
         let id = entries[i].id
         guard let kept = cache[id]?.rating, may(.rate) else { return }
@@ -1185,8 +1104,8 @@ final class PipelineSync {
         trackFirst(i, rating, before: before)
     }
 
-    /// PR `e`'s three-dot diff against its base branch, as `gh pr diff` reads it but at
-    /// `head`, whatever head the PR has by then; nil outside a root.
+    /// `e`'s three-dot diff against its base, as `gh pr diff` reads it but pinned to `head`;
+    /// nil outside a root.
     func diff(_ e: PipelineEntry, at head: String) -> PipelineIO.Exit? {
         guard let root = e.root else { return nil }
         let base = e.baseRef.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? e.baseRef
@@ -1222,7 +1141,6 @@ final class PipelineSync {
             (said, why) = answer
         }
         state.retry[e.id] = nil
-        // Never lower than a label on it, a rating kept for it, nor than its diff allows.
         var rating = raised(atLeastLabels(said, e.labels), e.id)
         var detail = describe(rating) + (why.isEmpty ? "" : ": " + why)
         var floor = e.item.floor ?? PipelineRating(risk: .low, complexity: .low)
@@ -1268,8 +1186,6 @@ final class PipelineSync {
         trackFirst(i, rating, before: before)
     }
 
-    /// The model's `rating` of `entries[i]`, a PR's at `head`, saved: logged, cached (`unwritten`
-    /// while its labels are still to be written) and, `again`, as its re-rate at that head.
     func record(_ i: Int, _ rating: PipelineRating, _ why: String, _ detail: String, head: String?, again: Bool,
                 unwritten: Bool) {
         let e = entries[i]
@@ -1286,9 +1202,9 @@ final class PipelineSync {
         persist()
     }
 
-    /// Puts `fastTrack` on a PR rated low/low that fixes candidates, given `before`, the
-    /// labels it ever wore: only its first rating does, once, as a PR that wore a rating or
-    /// fast-track label before is a person's. One it could not be put on is recorded.
+    /// Puts `fastTrack` on a PR rated low/low that fixes candidates at its first rating only:
+    /// one that ever wore (`before`) a rating or fast-track label is a person's. One it could
+    /// not be put on is recorded.
     func trackFirst(_ i: Int, _ rating: PipelineRating, before: Set<String>?) {
         let e = entries[i]
         let history = PipelineLevel.allCases.flatMap { [model.labels.risk[$0], model.labels.complexity[$0]] }
@@ -1308,7 +1224,6 @@ final class PipelineSync {
         "\(r.risk.rawValue) risk, \(r.complexity.rawValue) complexity"
     }
 
-    /// Whether `id`'s last rating or split failed too recently to be tried again unforced.
     func backingOff(_ id: String) -> Bool {
         guard let r = state.retry[id] else { return false }
         return state.syncs < r.after && now.timeIntervalSince(r.at) < 86_400
@@ -1322,9 +1237,7 @@ final class PipelineSync {
 
     // MARK: - Fast track
 
-    /// Why my fast-track PR is off the fast track for good, nil when it is not: rated
-    /// again above low/low at some head, `cleared` gone from a head Diplomat put it on at,
-    /// or taken off by Diplomat before.
+    /// Why my fast-track PR is off the fast track for good.
     func offTrack(_ e: PipelineEntry) -> String? {
         let head = e.item.headSha ?? ""
         let above = (rerates[e.id] ?? [:]).filter { !$0.value.isFastTrack }
@@ -1338,9 +1251,6 @@ final class PipelineSync {
         return state.decided.contains(e.id) ? "Diplomat took it off the fast track" : nil
     }
 
-    /// Writes what this Diplomat decided of my PR wearing a fast-track label: both labels
-    /// off once it is off the fast track for good, else `cleared` on at a head rated
-    /// low/low again.
     func track(_ i: Int) {
         let e = entries[i]
         let (ft, cl) = (model.labels.fastTrack, model.labels.cleared)
@@ -1361,9 +1271,8 @@ final class PipelineSync {
         persist()
     }
 
-    /// `cleared` on my fast-track PR whose head no clean marker names: back to the fast
-    /// track for a review of that head. One a person took off first is their opt-out, which
-    /// `track` writes.
+    /// Takes `cleared` off my fast-track PR whose head no clean marker names, for a review
+    /// of that head. One a person took off first is their opt-out, which `track` writes.
     func dropStaleClears() {
         for i in entries.indices {
             let e = entries[i]
@@ -1408,7 +1317,6 @@ final class PipelineSync {
         for (n, i) in picks.enumerated() { fractureOne(i, n < forced ? .forced : .fracture) }
     }
 
-    /// Why an issue may not be split, nil when it may.
     func fractureRefusal(_ e: PipelineEntry) -> String? {
         if e.item.kind != .issue { return "it is not an issue" }
         if let why = e.unwritable { return why }
@@ -1416,7 +1324,7 @@ final class PipelineSync {
         return partRefusal(e) ?? e.root.flatMap { incomplete[$0.slug] ?? partial[$0.slug] } ?? twinsUnread(e)
     }
 
-    /// Why no part of an issue claimed for a split may be filed now, nil when one may.
+    /// Why no part of an issue claimed for a split may be filed now.
     func partRefusal(_ e: PipelineEntry) -> String? {
         if !fixers(e).isEmpty { return "an open PR fixes it" }
         if e.linksPast { return Self.linksPast }
@@ -1564,15 +1472,7 @@ final class PipelineSync {
         persist()
     }
 
-    /// The `k`th part of a writable issue no `partRefusal` holds, read again first: its URL
-    /// once made, recorded as a part of the parent at once, and why it was not made or not
-    /// linked. Its body ends
-    /// with a line naming the parent and a hidden marker naming whose text it carries, which
-    /// every read takes its lineage from. On GitHub the marker finds a part an earlier try
-    /// filed, which is taken rather than filed again; Linear files it as the parent's child
-    /// in one call, so a part made by a call that failed is a new child. The model wrote the
-    /// part from untrusted text, so it is defanged, stripped of HTML comments and clean
-    /// markers, its mentions and references made inert, and cut to the fracture schema's limits.
+    /// The model wrote it from untrusted text.
     func fromModel(_ text: String) -> String {
         PipelineRater.inert(CommsText.defang(PipelineRater.unmarked(text, cleanMarker: model.cleanMarker),
                                              marker: PipelineRater.fence))
@@ -1580,6 +1480,12 @@ final class PipelineSync {
 
     func partTitle(_ title: String) -> String { String(fromModel(CommsText.oneLine(title)).prefix(200)) }
 
+    /// The `k`th part of `entries[i]`: its URL once made, recorded at once, and why it was not
+    /// made or not linked. Its body ends with a line naming the parent and a hidden marker
+    /// naming whose text it carries, which every read takes its lineage from. On GitHub the
+    /// marker finds a part an earlier try filed, which is taken rather than filed again;
+    /// Linear files it as the parent's child in one call, so a part a failed call made is
+    /// found among the new children.
     func createChild(_ i: Int, _ k: Int, _ part: (title: String, body: String)) -> (url: String?, failure: String?) {
         guard recheck(i) else { return (nil, "\(entries[i].item.label) could not be read again, or changed") }
         let e = entries[i]
@@ -1663,7 +1569,7 @@ final class PipelineSync {
     // MARK: - Stages
 
     /// Every open item's stage, lane and hold, PRs first since a fixed issue's lane is
-    /// its PR's; a cleared PR's merge hold logged when it, or the head, changes.
+    /// its PR's.
     func settle() {
         for i in entries.indices where entries[i].item.kind == .pr && open(entries[i]) {
             let e = entries[i]
@@ -1768,15 +1674,14 @@ final class PipelineSync {
         return e.links.lazy.compactMap(Self.githubIssue).first
     }
 
-    /// `owner/repo#N` of a GitHub issue's link; nil for any other link.
     static func githubIssue(_ link: String) -> String? {
         guard let url = URL(string: link), url.host?.lowercased() == "github.com" else { return nil }
         let path = url.path.split(separator: "/")
         return path.count == 4 && path[2] == "issues" && Int(path[3]) != nil ? "\(path[0])/\(path[1])#\(path[3])" : nil
     }
 
-    /// Why a tracked Linear issue holds the GitHub issue it is attached to, nil when it does
-    /// not: its own holds on whose work it is, but being tracked on GitHub.
+    /// Why a tracked Linear issue holds the GitHub issue it is attached to: its own holds on
+    /// whose work it is, but being tracked on GitHub.
     func twinRefusal(_ l: PipelineEntry) -> String? {
         l.unwritable ?? triaged(l).map { "triaged as \($0)" } ?? stops(l).first.map { "it carries the label \($0)" }
             ?? banHold(l)
@@ -1784,8 +1689,6 @@ final class PipelineSync {
 
     static func trackedOnLinear(_ label: String, _ why: String) -> String { "it is tracked on Linear as \(label): \(why)" }
 
-    /// Why a GitHub issue holds for an open Linear issue this sync read attached to it, nil
-    /// when none holds it.
     func twinHold(_ x: PipelineEntry) -> String? {
         guard x.item.source == .github, x.item.kind == .issue, let n = x.number else { return nil }
         let keys = Set([Self.githubIssue(x.id), "\(x.item.repo)#\(n)"].compactMap { $0?.lowercased() })
@@ -1795,14 +1698,11 @@ final class PipelineSync {
         return nil
     }
 
-    /// Why the Linear issues attached to a GitHub issue are not known, nil when they are: a
-    /// team mapped to its root was not read whole.
     func twinsUnread(_ x: PipelineEntry) -> String? {
         guard x.item.source == .github, let why = x.root.flatMap({ linearShort[$0.slug] }) else { return nil }
         return "\(why), so a Linear issue tracking it might not be seen"
     }
 
-    /// Why no fix is asked for a candidate, nil when one is.
     func candidateHold(_ e: PipelineEntry) -> String? {
         guard let root = e.root else { return "Linear team \(e.item.repo) has no root to fix it in" }
         if let why = incomplete[root.slug] { return "\(why), so a PR fixing it might not be seen" }
@@ -1828,7 +1728,6 @@ final class PipelineSync {
         }
     }
 
-    /// `e`'s merge hold, given whether it fixes candidates and what it would close unjudged.
     func mergeHold(_ e: PipelineEntry, fixes: Bool, unjudged: [String]) -> PipelineGate.Hold? {
         PipelineGate.hold(PipelineGate.Candidate(
             state: e.item.state, author: e.item.author ?? "", isCrossRepository: e.isCrossRepository,
@@ -1849,8 +1748,6 @@ final class PipelineSync {
             me: e.root?.me ?? "")
     }
 
-    /// The `gh pr merge` flag `e` merges with: the first its repository allows that every
-    /// pull request rule on its base branch, as `Gate` read them, allows too.
     func mergeFlag(_ e: PipelineEntry) -> String? {
         repos[e.item.repo]?.mergeFlags.first { e.gate?.mergeFlags.contains($0) ?? true }
     }
@@ -1959,8 +1856,8 @@ final class PipelineSync {
 
     // MARK: - Effects
 
-    /// The agent work owed, newest item first, while its switch is on, judged by the ban
-    /// list as it reads now; each logged `asked` once per stamp.
+    /// The agent work owed, newest item first, judged by the ban list as it reads now; each
+    /// logged `asked` once per stamp.
     func owed() -> [PipelineEffect] {
         let fix = may(.fix), review = may(.fastTrack)
         if fix { recheckLinear() }
@@ -2007,9 +1904,9 @@ final class PipelineSync {
         return out
     }
 
-    /// Holds each Linear candidate whose fix is about to be asked for that a read of them all
-    /// now, a hundred a query, finds no longer a candidate or linked to other URLs, or that it
-    /// could not read: its fix run cannot read Linear, and gets the text this read finds.
+    /// Holds each Linear candidate about to be asked a fix for that a fresh read finds no
+    /// longer a candidate, linked to other URLs, or unreadable: its fix run cannot read
+    /// Linear, and gets the text this read finds.
     func recheckLinear() {
         let picks = entries.indices.filter {
             entries[$0].item.source == .linear && entries[$0].item.stage == .candidate && entries[$0].item.hold == nil

@@ -3,9 +3,8 @@ import Foundation
 /// Owner-only files guarded by an exclusive `flock`: the primitives under Comms' log and
 /// state. Directories 0700, files 0600.
 enum PrivateFiles {
-    /// `$HOME` when set, else the account's home. Off macOS Foundation's own lookups read
-    /// the password database, and the Linux front-end's `Path.home()` reads `$HOME`: where
-    /// the two differ, the core and the front-end would read different `~/.diplomat`s.
+    /// `$HOME` first, as the Linux front-end's `Path.home()` reads it: off macOS Foundation
+    /// reads the password database, and the two could find different `~/.diplomat`s.
     static var home: URL {
         if let env = ProcessInfo.processInfo.environment["HOME"], !env.isEmpty {
             return URL(fileURLWithPath: env, isDirectory: true)
@@ -13,7 +12,6 @@ enum PrivateFiles {
         return FileManager.default.homeDirectoryForCurrentUser
     }
 
-    /// `path` with a leading `~` read as `home`, as Python's `expanduser` reads it.
     static func expandingTilde(_ path: String) -> String {
         if path == "~" { return home.path }
         guard path.hasPrefix("~/") else { return path }
@@ -29,7 +27,7 @@ enum PrivateFiles {
     }
 
     /// `body`'s answer, run while holding `lock` (a 0600 file, made if missing); nil when
-    /// the lock cannot be taken, or with `wait` false, when another holder has it.
+    /// the lock cannot be taken, or is held and `wait` is false.
     static func locked<T>(_ lock: URL, wait: Bool = true, _ body: () throws -> T) rethrows -> T? {
         let fd = open(lock.path, O_RDWR | O_CREAT, 0o600)
         guard fd >= 0 else { return nil }

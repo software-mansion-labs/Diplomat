@@ -217,8 +217,8 @@ public enum CommsClassifier {
         case exited(Int32, Data, Data)
     }
 
-    /// Every child Comms and the pipeline start (`claude`, its login-shell lookup, curl,
-    /// `gh`) gets this; curl is handed a token on stdin instead.
+    /// Every child Comms and the pipeline start gets this; curl is handed a token on stdin
+    /// instead.
     static var childEnvironment: [String: String] {
         var env = ProcessInfo.processInfo.environment
         env[SlackToken.envVar] = nil
@@ -229,8 +229,7 @@ public enum CommsClassifier {
     /// Run `exe` for at most `timeout`, then stop it as `GH.run` does. All three streams
     /// are files, since a pipe the child fills blocks it; the wait is a semaphore the
     /// termination handler signals, since corelibs' `waitUntilExit` lasts until every
-    /// holder of the launch socketpair has gone. It runs in `cwd`, else the temp dir, with
-    /// `environment`, else `childEnvironment`.
+    /// holder of the launch socketpair has gone.
     ///
     /// The files hold a token (curl's config) and DM or issue text, and off macOS the temp
     /// dir is usually the shared /tmp: a fresh 0700 directory, each file 0600 from creation.

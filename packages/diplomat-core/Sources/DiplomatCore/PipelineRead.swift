@@ -1,22 +1,14 @@
 import Foundation
 
-/// One item as a sync read it: the `PipelineItem` the view gets, and what the sync decides
-/// on besides.
+/// One item as a sync read it: `item` for the view, the rest for the sync to decide on.
 struct PipelineEntry {
-    /// What only `PullRequest`'s `Gate` reads of a PR.
+    /// As `PipelineGate.Candidate` documents them.
     struct Gate {
-        /// Who, besides the operator, authored or committed one of its commits: "" for
-        /// one GitHub links to no account, or for commits past the read's page.
         var foreignCommits: [String] = []
-        /// A check on the head ran rather than being skipped.
         var ciRan = false
-        /// The checks its base branch requires, by name; nil when they could not be read.
         var requiredChecks: [String]? = []
-        /// The head's checks that succeeded as ones its base branch requires of it.
         var passedChecks: Set<String> = []
-        /// Its base branch's rules (`baseRules`); nil when they could not be read.
         var baseRules: [String]? = []
-        /// A commit is not signed and verified, or past the read's page.
         var unsignedCommits = false
         /// The `gh pr merge` flags every pull request rule on its base branch allows.
         var mergeFlags = PipelineRead.mergeFlags.map(\.flag)
@@ -40,7 +32,6 @@ struct PipelineEntry {
     var isPart = false
     /// Whose text that part carries, as its marker names it.
     var lineage: String?
-    /// A GitHub issue's type, nil for none.
     var issueType: String?
     /// A Linear issue's state when its type is triage or duplicate.
     var triageState: String?
@@ -80,7 +71,6 @@ struct PipelineEntry {
     var reviewRequests = 0
     var participants: [String?] = []
     var participantsUnseen = false
-    /// A comment or review body of the operator's that does not open with Diplomat's tag.
     var operatorUntagged = false
     /// The heads the operator's clean-marker reviews name, oldest first.
     var markers: [String] = []
@@ -89,13 +79,12 @@ struct PipelineEntry {
     /// Linear: the team's id, and the issue's labels by name.
     var teamID: String?
     var labelIDs: [String: String] = [:]
-    /// Why Diplomat may not write to it, nil when it may.
+    /// Why Diplomat may not write to it.
     var unwritable: String?
 
     var id: String { item.id }
 }
 
-/// What one root's read says about the repository itself.
 struct PipelineRepo {
     var defaultBranch: String
     /// Of `--squash`, `--merge` and `--rebase`, in that order, those the repository allows.
@@ -123,8 +112,6 @@ enum PipelineRead {
         (node?["author"] as? [String: Any])?["login"] as? String ?? ""
     }
 
-    /// Whether two GitHub issue or PR links are of one repository: the same
-    /// `https://host/owner/repo/` before their last two components.
     static func sameRepo(_ a: String, _ b: String) -> Bool {
         func base(_ url: String) -> String? {
             URL(string: url)?.deletingLastPathComponent().deletingLastPathComponent().absoluteString.lowercased()
@@ -145,16 +132,13 @@ enum PipelineRead {
     }
 
     /// Why an item whose labels run past the read's page may not be written: a rating
-    /// label among the unread ones would go unseen. GitHub counts them; Linear says
-    /// whether a page follows.
+    /// label among the unread ones would go unseen.
     static func labelsCut(_ node: [String: Any], _ labels: [String]) -> String? {
         let page = (node["labels"] as? [String: Any])?["pageInfo"] as? [String: Any]
         return total(node, "labels") > labels.count || bool(page?["hasNextPage"], false)
             ? "has more labels than one read lists" : nil
     }
 
-    /// Each `gh pr merge` flag, with the repository setting and the pull request rule's
-    /// `allowedMergeMethods` value that allow it.
     static let mergeFlags = [(flag: "--squash", setting: "squashMergeAllowed", method: "SQUASH"),
                              (flag: "--merge", setting: "mergeCommitAllowed", method: "MERGE"),
                              (flag: "--rebase", setting: "rebaseMergeAllowed", method: "REBASE")]
@@ -191,10 +175,8 @@ enum PipelineRead {
         }
     }
 
-    /// One page of a `pipeline-repo.graphql` operation for `root`: `Repo`'s, or one of
-    /// `Issues` or `PullRequests` given the `repo` that `Repo` read, with the cursors of
-    /// the pages after it. `primary` is the first root, whose items are labelled `#N`;
-    /// others' are `owner/repo#N`.
+    /// One page of `Repo`, or of `Issues` or `PullRequests` given the `repo` `Repo` read,
+    /// and the next pages' cursors. `primary` labels items `#N` rather than `owner/repo#N`.
     static func github(_ response: [String: Any], root: PipelineSettings.Root, primary: Bool,
                        model: CoreAssets.PipelineModel, repo known: PipelineRepo? = nil)
         -> (repo: PipelineRepo, entries: [PipelineEntry], issuesAfter: String?, prsAfter: String?) {
@@ -256,8 +238,8 @@ enum PipelineRead {
         return (read, out, after("issues"), after("pullRequests"))
     }
 
-    /// One `Issue` node of `root`'s repository, none for one outside every root, which is no
-    /// one's to write to: open, unless the node says otherwise.
+    /// `root` is nil for an issue outside every root, which is no one's to write to. Open
+    /// unless the node says otherwise.
     static func issue(_ n: [String: Any], root: PipelineSettings.Root?, label: (Int) -> String) -> PipelineEntry? {
         guard let number = n["number"] as? Int, let url = n["url"] as? String else { return nil }
         let me = root?.me.lowercased() ?? ""
@@ -286,8 +268,7 @@ enum PipelineRead {
         return e
     }
 
-    /// The `PullRequest` operation's answer: the PR, read with `Gate`, labelled `label`; the
-    /// issues it closes are judged against `roots`.
+    /// The issues the PR closes are judged against `roots`.
     static func pullRequest(_ response: [String: Any], root: PipelineSettings.Root, label: String,
                             roots: [PipelineSettings.Root], model: CoreAssets.PipelineModel) -> PipelineEntry? {
         let repo = (response["data"] as? [String: Any])?["repository"] as? [String: Any]
@@ -296,7 +277,6 @@ enum PipelineRead {
         return pr(n, root: root, label: { _ in label }, defaultBranch: defaultBranch, roots: roots, model: model)
     }
 
-    /// The `Item` operation's answer: the issue or PR as it is now, labelled `label`.
     static func item(_ response: [String: Any], root: PipelineSettings.Root, label: String,
                      model: CoreAssets.PipelineModel) -> PipelineEntry? {
         let repo = (response["data"] as? [String: Any])?["repository"] as? [String: Any]
@@ -421,12 +401,11 @@ enum PipelineRead {
         return e
     }
 
-    /// The root whose repository `url`, an issue or PR page, is in.
     static func root(of url: String, in roots: [PipelineSettings.Root]) -> PipelineSettings.Root? {
         roots.first { sameRepo(url, "https://github.com/\($0.name)/issues/0") }
     }
 
-    /// `Gate`'s fields of a PR node, for the operator `me` (lowercased).
+    /// `me` must be lowercased.
     static func gate(_ n: [String: Any], me: String) -> PipelineEntry.Gate {
         var g = PipelineEntry.Gate()
         func note(_ who: String) {
@@ -473,10 +452,9 @@ enum PipelineRead {
     static let protections = ["lockBranch", "restrictsPushes", "requiresDeployments", "requiresCommitSignatures",
                               "requiresLinearHistory"]
 
-    /// The rules on `base`, a PR's base branch read with `Gate`: each type of rule its active
-    /// rulesets hold, and each of `protections` its branch protection rule turns on. Nil when
-    /// the branch, its protection rule (which only an admin reads in full) or a ruleset past
-    /// the read's page leaves them unknown.
+    /// Each rule type of `base`'s active rulesets, and each of `protections` its protection
+    /// rule turns on. Nil when the branch, its protection rule (which only an admin reads in
+    /// full) or a ruleset past the read's page leaves them unknown.
     static func baseRules(_ base: [String: Any]?) -> [String]? {
         guard let base, let rules = base["rules"] as? [String: Any], let ruleNodes = rules["nodes"] as? [[String: Any]],
               total(base, "rules") <= ruleNodes.count else { return nil }
@@ -499,10 +477,8 @@ enum PipelineRead {
         return out
     }
 
-    /// The status checks `base`, a PR's base branch read with `Gate`, requires: its branch
-    /// protection rule's, which an admin reads as `branchProtectionRule` and anyone else as
-    /// `refUpdateRule`, and its active rulesets'. Nil when the branch or a ruleset past the
-    /// read's page leaves them unknown.
+    /// The status checks `base`'s protection rule and active rulesets require. Nil when the
+    /// branch or a ruleset past the read's page leaves them unknown.
     static func requiredChecks(_ base: [String: Any]?) -> [String]? {
         guard let base, let rules = base["rules"] as? [String: Any], let ruleNodes = rules["nodes"] as? [[String: Any]],
               total(base, "rules") <= ruleNodes.count else { return nil }
@@ -523,16 +499,13 @@ enum PipelineRead {
         return names
     }
 
-    /// A Linear issue's page URL without the title's slug, which a retitle changes:
-    /// `https://linear.app/<workspace>/issue/<IDENTIFIER>`.
+    /// `url` without the title's slug, which a retitle changes.
     static func linearURL(_ url: String) -> String {
         guard let issue = url.range(of: "/issue/") else { return url }
         let rest = url[issue.upperBound...]
         return String(url[..<issue.upperBound]) + rest.prefix { $0 != "/" && $0 != "?" && $0 != "#" }
     }
 
-    /// One page of the `Issues` operation (`assets/graphql/linear.graphql`): its issues, and
-    /// the next page's cursor when there is one.
     static func linear(_ data: [String: Any], viewer: String, teams: [PipelineSettings.LinearTeam],
                        roots: [PipelineSettings.Root]) -> (entries: [PipelineEntry], next: String?) {
         let issues = data["issues"] as? [String: Any]
@@ -544,7 +517,6 @@ enum PipelineRead {
         return (entries, next)
     }
 
-    /// One Linear `Issue` node: open, unless its state says completed or canceled.
     static func linearIssue(_ n: [String: Any], viewer: String, teams: [PipelineSettings.LinearTeam],
                             roots: [PipelineSettings.Root]) -> PipelineEntry? {
         guard let id = n["id"] as? String, let url = n["url"] as? String,
@@ -668,15 +640,10 @@ enum PipelineRead {
         return u.lowercased()
     }
 
-    /// Whether merging `pr` would close the Linear issue `issue`: it names the issue after a
-    /// closing word (`closesLinear`), or one of the issue's attachments links it.
     static func closes(_ pr: PipelineEntry, linear issue: PipelineEntry) -> Bool {
         pr.closesLinear.contains(issue.item.label.uppercased()) || issue.links.contains { norm($0) == norm(pr.id) }
     }
 
-    /// Every edge between `entries`: parent -> child, issue -> the PR fixing it (a GitHub
-    /// closing reference; for Linear, `closes`), PR -> the PR stacked on it in the same
-    /// repository.
     static func edges(_ entries: [PipelineEntry]) -> [PipelineGraph.Edge] {
         var byURL: [String: String] = [:]
         for e in entries { byURL[norm(e.id)] = e.id }
@@ -708,13 +675,11 @@ enum PipelineRead {
     }
 }
 
-/// Linear's GraphQL API, reached with the operator's API key, read on each sync and never
-/// cached. The transport is `SlackAPI.curl`'s: the key travels in a config on curl's
-/// stdin, which `CommsClassifier.execute` stages in an owner-only file of its own 0700
-/// directory, removed when curl exits.
+/// Linear's GraphQL API, with the operator's key, read on each sync and never cached. The
+/// transport is `SlackAPI.curl`'s: the key travels only in an owner-only config on curl's
+/// stdin.
 public struct LinearAPI {
-    /// Overrides the Keychain item and the file. `CommsClassifier.childEnvironment`, and so
-    /// every child Diplomat starts, goes without it.
+    /// Overrides the Keychain item and the file; no child Diplomat starts inherits it.
     public static let envVar = "DIPLOMAT_LINEAR_TOKEN"
 
     let key: String
@@ -736,9 +701,8 @@ public struct LinearAPI {
         }
     }
 
-    /// `DIPLOMAT_LINEAR_TOKEN`; else on macOS the Keychain item `keychainItem`, the
-    /// operator's own account first since an empty same-named item can shadow it; else
-    /// the file `tokenFile`, its `~` read as `PrivateFiles.home`. Nil when none holds a key.
+    /// The operator's own Keychain account is tried first, as an empty same-named item can
+    /// shadow it.
     static func key(keychainItem: String?, tokenFile: String?) -> String? {
         if let env = ProcessInfo.processInfo.environment[envVar], !env.isEmpty { return env }
         func trimmed(_ data: Data) -> String? {
@@ -765,8 +729,6 @@ public struct LinearAPI {
         return nil
     }
 
-    /// The `data` of `assets/graphql/linear.graphql`'s operation `operation`, or the
-    /// failure: a transport error, an HTTP status other than 200, or an `errors` array.
     func call(_ operation: String, _ variables: [String: Any]) throws -> [String: Any] {
         let query: String
         do { query = try CoreAssets.graphql("linear") } catch { throw Failure.api(error.localizedDescription) }
