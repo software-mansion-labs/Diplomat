@@ -1,18 +1,16 @@
 import Foundation
 
 extension PipelineGraph {
-    /// `items` on the grid, and in the order the grid reads: groups one below another,
-    /// each top to bottom, left to right.
+    /// `items` on the grid, in the order it reads: groups one below another, each by row,
+    /// then column.
     ///
-    /// A group is the items one chain of `edges` connects. Within it an item's column is
-    /// its longest path from the group's sources; its row comes from a walk down from the
-    /// sources, newest first, that puts an item's first child not yet placed on its own row
-    /// and each further one on a new row below everything placed so far, so a child sits
-    /// at the row of the parent it was reached from or below it. An edge closing a cycle is
-    /// left out of both. Groups holding an unrated or fast-track item come first, then
-    /// those with nothing left but merged or closed ones last; within each, newest
-    /// `updatedAt` first. Whole groups are kept while they fit in `maxItems`; a first group
-    /// larger than that keeps its top rows. Equal input lays out the same.
+    /// A group is a connected component of `edges`. An item's column is its longest path
+    /// from the group's sources; walking down from them newest first, an item's first
+    /// unplaced child shares its row and each further one starts a row below all placed so
+    /// far. An edge closing a cycle is ignored for both. Groups with an unrated or
+    /// fast-track item come first, done-only ones last, newest `updatedAt` first within
+    /// each. Whole groups are kept while they fit in `maxItems`; a larger first group keeps
+    /// its top rows. Deterministic.
     public static func layout(items: [PipelineItem], edges: [Edge], maxItems: Int = 300)
         -> (items: [PipelineItem], graph: PipelineGraph) {
         var byID: [String: PipelineItem] = [:]

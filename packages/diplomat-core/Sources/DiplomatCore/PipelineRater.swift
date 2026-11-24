@@ -1,19 +1,13 @@
 import Foundation
 
-/// The pipeline's two model calls, rating and fracture: one `claude -p` each, answering a
-/// fixed schema, sandboxed as `CommsClassifier`'s triage call is but for the read-only
-/// tools it needs to read the code, run in the root's checkout.
-///
-/// The item's text and a PR's diff are untrusted, so they arrive on stdin, defanged and
-/// quoted between fence lines (`CommsText.fillFenced`); the instructions are the argument.
+/// The rating and fracture calls: one `claude -p` each, sandboxed as `CommsClassifier`'s
+/// triage call but for read-only tools, run in the root's checkout. The untrusted item
+/// text and diff arrive on stdin, defanged and fenced; the instructions are the argument.
 enum PipelineRater {
-    /// The fence the item's text is quoted in, on stdin and in a Linear fix's prompt.
     static let fence = "UNTRUSTED TRACKER TEXT"
 
     static let tools = "Read,Grep,Glob"
 
-    /// The placeholders every instruction shares: the level definitions, filled from the
-    /// floor's limits.
     static func values(_ model: CoreAssets.PipelineModel) -> [String: String] {
         let limits = ["maxSourceFiles": String(model.floor.maxSourceFiles),
                       "maxSourceLines": String(model.floor.maxSourceLines),
@@ -27,7 +21,6 @@ enum PipelineRater {
         return out
     }
 
-    /// `owner/repo`, or the Linear team and the repository its code is in.
     static func place(_ e: PipelineEntry) -> String {
         switch e.item.source {
         case .github: return e.item.repo
@@ -49,8 +42,6 @@ enum PipelineRater {
         return model.fracture.instructions.map { CommsText.fill($0, v) }.joined(separator: "\n\n")
     }
 
-    /// The stdin: the title, the body up to `bodyChars` and, for a PR, its diff up to
-    /// `diffChars`, defanged and quoted between the fence lines.
     static func input(_ e: PipelineEntry, diff: String?, _ model: CoreAssets.PipelineModel) -> String {
         var text = e.item.title + "\n\n" + clip(e.body, model.rater.bodyChars)
         if let diff { text += "\n\nDIFF:\n" + clip(diff, model.rater.diffChars) }
@@ -65,17 +56,16 @@ enum PipelineRater {
     private static let references = try! NSRegularExpression(
         pattern: #"(@)(?=[A-Za-z0-9])|(#)(?=\d)|\b(GH-)(?=\d)|(github)(?=\.com/)"#, options: [.caseInsensitive])
 
-    /// `text` with a zero-width space after each `@` of a mention, `#` or `GH-` of an issue
-    /// reference and `github` of a GitHub link: filed under the operator's account, it
-    /// then notifies no one and links nothing.
+    /// Mentions, issue references and GitHub links broken with a zero-width space: filed
+    /// under the operator's account, the text notifies no one and links nothing.
     static func inert(_ text: String) -> String {
         references.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length),
                                             withTemplate: "$1$2$3$4\u{200B}")
     }
 
-    /// `text` with no HTML comment in it, an unclosed one cut to the end as GitHub hides it,
-    /// nor `cleanMarker` before a hex sha: model-written text then forges no Diplomat marker.
-    /// Cut again until nothing is left to cut, as a cut can join two halves into a new one.
+    /// Without HTML comments (an unclosed one to the end, as GitHub hides it) or
+    /// `cleanMarker` before a sha, so model-written text forges no Diplomat marker. Loops,
+    /// as a cut can join two halves into a new match.
     static func unmarked(_ text: String, cleanMarker: String) -> String {
         let pattern = #"<!--[\s\S]*?(?:-->|\z)|"# + NSRegularExpression.escapedPattern(for: cleanMarker)
             + #"\s+[0-9a-f]{7,}"#
@@ -84,9 +74,9 @@ enum PipelineRater {
         return s
     }
 
-    /// No `--allowedTools`: it would let the tools read any path. Unlisted, `-p` refuses
-    /// them every path outside the checkout, as there is no one to grant it, and
-    /// `--setting-sources ""` keeps the checkout's own settings from allowing more.
+    /// No `--allowedTools`: it would let the tools read any path, while unlisted, `-p`
+    /// refuses them every path outside the checkout, having no one to ask.
+    /// `--setting-sources ""` keeps the checkout's settings from allowing more.
     static func arguments(model name: String, schema: String, prompt: String) -> [String] {
         ["-p", "--model", name,
          "--tools", tools,
@@ -99,7 +89,6 @@ enum PipelineRater {
          prompt]
     }
 
-    /// The answer object of one call, or why there is none.
     static func answer(_ exit: PipelineIO.Exit, key: String) -> Result<[String: Any], PipelineIO.Failure> {
         switch CommsDecision.answerObject(in: exit.stdout, key: key) {
         case .object(let o?)?:
@@ -112,7 +101,6 @@ enum PipelineRater {
         }
     }
 
-    /// A rating and its one sentence, or why there is none.
     static func rating(_ exit: PipelineIO.Exit) -> Result<(PipelineRating, String), PipelineIO.Failure> {
         answer(exit, key: "risk").flatMap { o in
             guard let risk = (o["risk"] as? String).flatMap(PipelineLevel.init(rawValue:)),
@@ -123,8 +111,6 @@ enum PipelineRater {
         }
     }
 
-    /// The parts an issue splits into, at most `maxChildren`, and why; or why there is no
-    /// answer.
     static func parts(_ exit: PipelineIO.Exit, max: Int)
         -> Result<(parts: [(title: String, body: String)], why: String), PipelineIO.Failure> {
         answer(exit, key: "parts").flatMap { o in

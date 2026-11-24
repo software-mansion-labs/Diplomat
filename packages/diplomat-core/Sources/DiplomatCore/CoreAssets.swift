@@ -277,9 +277,7 @@ public enum CoreAssets {
         }
     }
 
-    /// The Pipeline model, `pipeline.json`.
     public struct PipelineModel: Decodable {
-        /// One text per level.
         public struct PerLevel: Decodable {
             public let low: String
             public let medium: String
@@ -293,15 +291,13 @@ public enum CoreAssets {
                 }
             }
         }
-        /// The tracker labels: a rating label per level of each dimension, and the three
-        /// stage labels.
         public struct Labels: Decodable {
             public let risk: PerLevel
             public let complexity: PerLevel
             public let fastTrack: String
             public let cleared: String
             public let fractured: String
-            /// The colour a label Diplomat creates is given, as hex digits.
+            /// Hex digits, for the labels Diplomat creates.
             public let color: String
         }
         /// Each level's definition.
@@ -332,8 +328,7 @@ public enum CoreAssets {
             public let maxChildren: Int
             public let instructions: [String]
         }
-        /// How many open issues and PRs one page of a root's read asks for, and the least a
-        /// page halved after a timeout asks for.
+        /// Page sizes of a root's read; `least` is the floor timeouts halve them down to.
         public struct GitHubPage: Decodable {
             public let issues: Int
             public let prs: Int
@@ -350,9 +345,9 @@ public enum CoreAssets {
         public let githubMaxItems: Int
         public let githubPage: GitHubPage
         public let labels: Labels
-        /// A label of these, matched as `PipelineSync.triageForms` reads it, keeps an issue off the fast track.
+        /// Labels keeping an issue off the fast track, matched by `PipelineSync.triageForms`.
         public let triageLabels: [String]
-        /// A label of these, matched the same way, holds the item it is on.
+        /// Labels holding the item they are on, matched the same way.
         public let stopLabels: [String]
         public let levels: Levels
         public let floor: Floor
@@ -360,8 +355,7 @@ public enum CoreAssets {
         public let fracture: Fracture
         public let blocks: [String: String]
         public let cleanMarker: String
-        /// `rater.schema` and `fracture.schema` serialized with sorted keys, the exact
-        /// `--json-schema` arguments. Not decoded: they are free-form JSON.
+        /// The `--json-schema` arguments, filled by `loadPipeline`: free-form JSON, not decoded.
         public internal(set) var raterSchema: String = ""
         public internal(set) var fractureSchema: String = ""
 
@@ -371,7 +365,7 @@ public enum CoreAssets {
                  rater, fracture, blocks, cleanMarker
         }
 
-        /// The labels that put an item on the pipeline's graph once it is merged or closed.
+        /// The labels that put a merged or closed item on the graph.
         public var all: Set<String> {
             Set(PipelineLevel.allCases.flatMap { [labels.risk[$0], labels.complexity[$0]] })
                 .union([labels.fastTrack, labels.cleared, labels.fractured])

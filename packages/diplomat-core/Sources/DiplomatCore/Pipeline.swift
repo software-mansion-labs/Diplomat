@@ -6,13 +6,10 @@ import Foundation
 // open PRs, is rated for risk and complexity, and a low/low one goes down the fast track:
 // issue -> fix PR -> the PR rated on its own -> reviewed until clean -> rated again at that
 // head -> merged with no human review. Anything else is left to a human. The state is the
-// trackers' labels (`assets/pipeline.json` `labels`) and Diplomat's clean-marker reviews,
-// and in `PipelineLog.dir` what the trackers cannot hold: the guards against repeating a
-// step (`state.json`), the re-rates that make a `cleared` label Diplomat's own (there and
-// in `log.jsonl`) and the ratings it may not write. `PipelineTick` runs a sync; the Linux front-end
-// reaches it through `diplomat-core pipeline-tick`, never by reimplementing it.
+// trackers' labels, Diplomat's clean-marker reviews, and in `PipelineLog.dir` what the
+// trackers cannot hold. The Linux front-end reaches `PipelineTick` through `diplomat-core
+// pipeline-tick`, never by reimplementing it.
 
-/// Ordered, so the higher of two is `max`.
 public enum PipelineLevel: String, Codable, CaseIterable, Comparable, Sendable {
     case low, medium, high
 
@@ -32,7 +29,6 @@ public struct PipelineRating: Codable, Equatable, Sendable {
 
     public var isFastTrack: Bool { risk == .low && complexity == .low }
 
-    /// Each dimension raised to `floor`'s, never lowered.
     public func atLeast(_ floor: PipelineRating) -> PipelineRating {
         PipelineRating(risk: max(risk, floor.risk), complexity: max(complexity, floor.complexity))
     }
@@ -85,7 +81,7 @@ public struct PipelineItem: Codable, Equatable, Sendable {
     public var ratedBy: String?
     /// The rater's one sentence, when Diplomat rated it.
     public var why: String?
-    /// A PR's: the least rating its diff allows (`floor` in the asset).
+    /// A PR's: the least rating its diff allows.
     public var floor: PipelineRating?
     public var stage: PipelineStage
     public var lane: PipelineLane
@@ -99,8 +95,8 @@ public struct PipelineItem: Codable, Equatable, Sendable {
     /// For an issue Diplomat split off another, the author whose text it carries (the
     /// root ancestor's): its fix's ban dimension, as `PipelineEffect`'s `author`.
     public var splitFrom: String?
-    /// Why a sync would refuse Rate now or Fracture on it, by the checks it refuses with;
-    /// nil when it would go ahead. What a front-end gates those buttons on.
+    /// Why a sync would refuse Rate now or Fracture on it; nil when it would go ahead. What
+    /// a front-end gates those buttons on.
     public var rateRefused: String?
     public var fractureRefused: String?
 
@@ -137,9 +133,6 @@ public struct PipelineItem: Codable, Equatable, Sendable {
     }
 }
 
-/// Items laid out on a grid: each connected group of items left to right along its edges
-/// (a parent before its children, an issue before the PR fixing it, a PR before the one
-/// stacked on it), groups one below another, unsettled groups first.
 public struct PipelineGraph: Codable, Equatable, Sendable {
     public struct Node: Codable, Equatable, Sendable {
         public var id: String
@@ -183,7 +176,6 @@ public struct PipelineGraph: Codable, Equatable, Sendable {
     }
 }
 
-/// One step of an item's traversal, as Diplomat saw or took it.
 public struct PipelineEvent: Codable, Equatable, Sendable {
     public enum Kind: String, Codable, Sendable {
         case rated, labelled, fastTrack = "fast-track", clean, rerated, cleared, merged, held
@@ -220,9 +212,9 @@ public struct PipelineEvent: Codable, Equatable, Sendable {
 /// "headSha"}`, each with its `author`, `key` and `stamp` beside (the last two written,
 /// never read back).
 ///
-/// `author` is the work's ban dimension, the one a front-end checks against the ban
-/// list: the issue's author, and for an issue Diplomat filed as a split's part, the
-/// author its root ancestor had; "" only for the operator's own (a review of their PR).
+/// `author` is the work's ban dimension, which a front-end checks against the ban list:
+/// the issue's author, or for a split's part, its root ancestor's; "" only for the
+/// operator's own (a review of their PR).
 public enum PipelineEffect: Codable, Equatable, Sendable {
     /// A Fix-issues run for one GitHub issue of the root `repo`.
     case fixIssue(repo: String, number: Int, url: String, author: String)
@@ -310,8 +302,8 @@ public enum PipelineEffect: Codable, Equatable, Sendable {
 }
 
 public struct PipelineSettings: Codable, Equatable, Sendable {
-    /// A GitHub root: its checkout, and the operator's login there, which a sync takes from
-    /// the account `gh` acts as.
+    /// A GitHub root: its checkout, and `me`, which a sync takes from the account `gh` acts
+    /// as.
     public struct Root: Codable, Equatable, Sendable {
         public var owner: String
         public var repo: String
@@ -426,14 +418,11 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
 }
 
 /// The pipeline's switches as the front-end has them now: `control.json` in
-/// `PipelineLog.dir`, owner-only, which it rewrites whole whenever one changes and before
-/// each sync, as `{"enabled", "rate", "fix", "fastTrack", "merge", "fracture"}`, each a
-/// boolean. A sync reads it right before every outward step (a label written, a child
-/// filed, a PR marked ready or merged) and before each rating call, and skips a step
-/// whose switch, or `enabled`, is off now; a step the operator forced needs `enabled`
-/// alone, and taking back the sync's own split claim needs neither. It can only stop what
-/// the sync's settings allow. A missing file, or one
-/// without all six, leaves the settings as they were.
+/// `PipelineLog.dir`, which it rewrites whole whenever one changes and before each sync. A
+/// sync reads it right before every outward step and rating call, and skips a step whose
+/// switch, or `enabled`, is off; a forced step needs `enabled` alone, and taking back the
+/// sync's own split claim needs neither. It can only stop what the settings allow. A
+/// missing or incomplete file leaves the settings as they were.
 public struct PipelineControl: Codable, Equatable, Sendable {
     public var enabled: Bool
     public var rate: Bool
@@ -451,7 +440,6 @@ public struct PipelineControl: Codable, Equatable, Sendable {
         self.fracture = fracture
     }
 
-    /// `settings`' switches, enabled.
     public init(settings: PipelineSettings) {
         self.init(enabled: true, rate: settings.rate, fix: settings.fix, fastTrack: settings.fastTrack,
                   merge: settings.merge, fracture: settings.fracture)
@@ -463,7 +451,7 @@ public struct PipelineTickResult: Codable, Equatable, Sendable {
     public var items: [PipelineItem]
     public var graph: PipelineGraph
     public var effects: [PipelineEffect]
-    /// The log's latest events, newest last: the view's traversals.
+    /// The log's latest events, newest last.
     public var events: [PipelineEvent]
     /// What failed this sync, one line per source or action.
     public var notices: [String]
