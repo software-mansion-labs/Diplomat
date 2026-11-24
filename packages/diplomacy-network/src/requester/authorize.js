@@ -9,6 +9,7 @@
 // matches nothing is refused.
 
 import { checkGraphql, itemMismatch, marked, proseFault, sameButSelf, searchConfined } from './graphql.js';
+import { approvalFault, textFault } from './policybot.js';
 import { branchLabel, checkAdvertise, checkFork, checkPush, pushReport } from './receivepack.js';
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
@@ -287,13 +288,22 @@ async function checkBodyPins(spec, req, ctx, effects, given, fork) {
     if (pin.equals !== undefined && !sameJson(value, pin.equals, pin.fold)) refuse(`the body member "${key}" has a value this task may not use`);
     if (pin.oneOf && !pin.oneOf.some((allowed) => sameJson(value, allowed, pin.fold))) refuse(`the body member "${key}" has a value this task may not use`);
     if (pin.prefix !== undefined && !(typeof value === 'string' && value.startsWith(pin.prefix))) refuse(`the body member "${key}" must start with "${pin.prefix}"`);
-    const fault = pin.prose ? proseFault(value) : null;
+    const fault = pin.prose ? proseFault(value) ?? (pin.comment ? approvalFault(value) : null) : null;
     if (fault) refuse(`the body member "${key}" ${fault}`);
     if (pin.prose && pin.comment) body[key] = marked(value);
+    if (pin.policy) {
+      // Text on the pull request the path names (an issue's text policy-bot does not read),
+      // or the body of the one the request opens.
+      const on = pin.policy.segment !== undefined;
+      if (on && typeof ctx.pull !== 'function') refuse('nothing here can tell what the pull request is');
+      const pull = on ? await ctx.pull(numberAt(req, pin.policy.segment)) : null;
+      const fault = on && !pull ? null : await textFault(ctx, on ? pull.baseRef : body[pin.policy.base], body[key], on ? 'comment' : 'body');
+      if (fault) refuse(`the body member "${key}" ${fault}`);
+    }
     if (pin.proseIn) {
       if (!Array.isArray(value)) refuse(`the body member "${key}" is not a list`);
       value.forEach((item, i) => {
-        const fault = proseFault(item?.[pin.proseIn]);
+        const fault = proseFault(item?.[pin.proseIn]) ?? (pin.comment ? approvalFault(item[pin.proseIn]) : null);
         if (fault) refuse(`the body member "${key}", entry ${i + 1}: its "${pin.proseIn}" ${fault}`);
         if (pin.comment) item[pin.proseIn] = marked(item[pin.proseIn]);
       });
@@ -529,6 +539,15 @@ function asking(ctx) {
       try { return await value.apply(ctx, args); } catch (err) { return refuse(String(err?.message ?? err).replace(/^forge: /, '')); }
     };
   }
+  // A request's checks ask the forge about one pull request once between them.
+  if (out.pull) {
+    const ask = out.pull;
+    const pulls = new Map();
+    out.pull = (number) => {
+      if (!pulls.has(number)) pulls.set(number, ask(number));
+      return pulls.get(number);
+    };
+  }
   return out;
 }
 
@@ -536,8 +555,8 @@ function asking(ctx) {
 /// headers, body }` as the executor sent it (path with its query, body base64). `given`
 /// carries what the deep checks ask the forge and the machine: `resolveNode(id)`,
 /// `pull(number)`, `pullsByHead(ref, owner, ever)`, `comment(id)`, `assignees(number)`, `self()`,
-/// `repository(repo)`, `branch(ref, repo)`, `protects(ref, repo)`, `fetch`, `checkout`
-/// and the task's mutable `state` (`forge.context()` builds one). A lookup that throws
+/// `repository(repo)`, `branch(ref, repo)`, `protects(ref, repo)`, `policy(base)`, `fetch`,
+/// `checkout` and the task's mutable `state` (`forge.context()` builds one). A lookup that throws
 /// refuses the request.
 /// Resolves to `{ ok: true, rule, request }` - `request` is the one to perform, in the
 /// single spelling that was checked - or `{ ok: false, reason }`. What an allowed request

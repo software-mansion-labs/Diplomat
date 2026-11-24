@@ -242,6 +242,15 @@ export async function startFakeForge() {
       const sha = revParse(m[1], `refs/heads/${x[1]}`);
       return sha ? { status: 200, json: { ref: `refs/heads/${x[1]}`, object: { type: 'commit', sha } } } : { status: 404, json: { message: 'Not Found' } };
     }
+    // A file at a ref, or on the default branch, as GitHub hands one over.
+    if (method === 'GET' && (x = /^\/contents\/(.+)$/.exec(rest))) {
+      const at = `${searchParams.get('ref') || repo.defaultBranch || 'main'}:${x[1].split('/').map(decodeURIComponent).join('/')}`;
+      let content;
+      try { content = execFileSync('git', ['-C', path.join(gitRoot, `${m[1].toLowerCase()}.git`), 'cat-file', 'blob', at], { env: { ...GIT_ENV, HOME: gitRoot }, stdio: ['ignore', 'pipe', 'ignore'] }); } catch {
+        return { status: 404, json: { message: 'Not Found' } };
+      }
+      return { status: 200, json: { type: 'file', encoding: 'base64', content: content.toString('base64'), path: x[1] } };
+    }
     if (method === 'GET' && (x = /^\/pulls\/(\d+)$/.exec(rest))) {
       const p = repo.pulls?.[x[1]];
       return p ? { status: 200, json: restPull(m[1], p) } : { status: 404, json: { message: 'Not Found' } };

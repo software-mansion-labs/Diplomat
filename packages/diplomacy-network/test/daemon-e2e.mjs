@@ -105,7 +105,8 @@ try {
     // task did, the executor's own for nothing but its mirror of the repository.
     const seen = bench.forge.log.slice(before).filter((r) => r.headers.authorization);
     assert.deepEqual(seen.filter((r) => r.host === 'api.github.com').map((r) => [by(r), r.method, r.path]), [
-      ['a', 'GET', '/repos/acme/widgets/pulls/1'], ['a', 'POST', '/repos/acme/widgets/pulls/1/reviews'],
+      ['a', 'GET', '/repos/acme/widgets/pulls/1'], ['a', 'GET', '/repos/acme/widgets/pulls/1'], ['a', 'GET', '/repos/acme/widgets/contents/.policy.yml?ref=main'],
+      ['a', 'GET', '/repos/acme/.github/contents/policy.yml'], ['a', 'POST', '/repos/acme/widgets/pulls/1/reviews'],
     ]);
     assert.deepEqual(JSON.parse(seen.find((r) => r.method === 'POST' && r.host === 'api.github.com').body), { event: 'COMMENT', body: posted('from a') });
     assert.deepEqual([...new Set(seen.filter((r) => r.host === 'github.com').map((r) => `${by(r)} ${r.path.replace('/acme/widgets.git/', '')}`))].sort(),

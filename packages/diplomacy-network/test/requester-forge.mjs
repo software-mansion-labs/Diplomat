@@ -201,12 +201,106 @@ await check('the answer comes back whole: status, body, and only the headers an 
   await failing(perform(rules('investigate', 'job-x'), gh('GET', '/repos/o/r/contents/huge.bin')), /larger than a task may receive/);
 });
 
+await check('text policy-bot would count as an approval is refused, by the policy it reads for the pull request\'s base', async () => {
+  // A base branch whose .policy.yml approves on words of its own, and a pull request into it.
+  git(work, 'checkout', '--quiet', '-b', 'release', A);
+  const C = commit('policy', { '.policy.yml': [
+    'approval_rules:',
+    '  - name: one reviewer',
+    '    options:',
+    '      methods:',
+    '        comments: ["LGTM"]',
+    '        comment_patterns:',
+    "          - '(?i)\\bship ?it\\b'",
+    '    requires: { count: 1 }',
+    'policy:',
+    '  approval: [one reviewer]',
+    '',
+  ].join('\n') });
+  git(work, 'push', '--quiet', bare, `${C}:refs/heads/release`);
+  forge.pull('o/r', { number: 583, author: 'them', head: 'theirs', base: 'release' });
+  const review = (body, state = {}) => authorize(rules('review', 'pr-583'), gh('POST', '/repos/o/r/pulls/583/reviews', { event: 'COMMENT', body }), ctxFor(state));
+  const said = /^the body member "body" (holds "LGTM"|matches the pattern "\(\?i\)\\\\bship \?it\\\\b"), which the pool repository's policy-bot policy \(o\/r\/\.policy\.yml\) counts as an approval or a disapproval from whoever wrote it: reword it and send the request again$/;
+  const state = {};
+  const before = forge.log.length;
+  // Go's (?i) folds "ſ" to "s", and its \b counts ASCII word characters alone: "xſhip it" holds a boundary
+  // before "ſhip" there, and a text that starts with "ſ" has none (asked of Go 1.27's regexp).
+  for (const text of ['LGTM, one nit', 'Ship it', 'xſhip it']) {
+    const verdict = await review(text, state);
+    assert.equal(verdict.ok, false, text);
+    assert.match(verdict.reason, said);
+  }
+  for (const text of ['looks fine', 'shipits', 'lgtm', 'ſhip it, then']) assert.equal((await review(text, state)).ok, true, text);
+  // The task read the policy once; another task reads it again.
+  const reads = (from) => seen(from).filter((r) => r.path.includes('/contents/')).map((r) => r.path);
+  assert.deepEqual(reads(before), ['/repos/o/r/contents/.policy.yml?ref=release', '/repos/o/.github/contents/policy.yml']);
+  const again = forge.log.length;
+  assert.equal((await review('Ship it')).ok, false);
+  assert.equal(reads(again).length, 2);
+  // A job-wide review asks about the pull request once for both its checks.
+  const wide = forge.log.length;
+  assert.equal((await authorize(rules('review', 'job-all'), gh('POST', '/repos/o/r/pulls/583/reviews', { event: 'COMMENT', body: 'fine' }), ctxFor(state))).ok, true);
+  assert.deepEqual(seen(wide).map((r) => r.path), ['/repos/o/r/pulls/583']);
+  // A policy's defaults are refused whatever the policy says; an issue's comment is not read for one.
+  assert.match((await review('👍🏽 nice')).reason, /^the body member "body" holds "👍", which policy-bot, a bot that gates merging, counts as an approval/);
+  const onIssue = forge.log.length;
+  assert.equal((await authorize(rules('issues', 'issue-421'), gh('POST', '/repos/o/r/issues/421/comments', { body: 'Ship it' }), ctxFor())).ok, true);
+  assert.deepEqual(reads(onIssue), []);
+  // GitHub posts an issue comment on a pull request's number as a comment on the pull request.
+  assert.match((await authorize(rules('issues', 'issue-583'), gh('POST', '/repos/o/r/issues/583/comments', { body: 'Ship it' }), ctxFor())).reason, said);
+
+  // A policy in another repository, which the account cannot read, and then can.
+  git(work, 'checkout', '--quiet', '-b', 'far', A);
+  const D = commit('remote', { '.policy.yml': 'remote: o/policies\npath: shared/p.yml\n' });
+  git(work, 'push', '--quiet', bare, `${D}:refs/heads/far`);
+  forge.pull('o/r', { number: 584, author: 'them', head: 'theirs', base: 'far' });
+  const far = (body) => authorize(rules('review', 'pr-584'), gh('POST', '/repos/o/r/pulls/584/reviews', { event: 'COMMENT', body }), ctxFor());
+  assert.match((await far('fine')).reason, /^the body member "body" cannot be checked against the pool repository's policy-bot policy, so no text is sent on its pull requests: o\/r\/\.policy\.yml names o\/policies\/shared\/p\.yml, which this machine's account cannot read$/);
+  const policies = forge.bare('o/policies', { id: 'R_9' });
+  git(scratch, 'clone', '--quiet', policies, 'policies');
+  const there = path.join(scratch, 'policies');
+  fs.mkdirSync(path.join(there, 'shared'));
+  fs.writeFileSync(path.join(there, 'shared/p.yml'), 'approval_defaults:\n  options:\n    methods:\n      comments: [":shipit:"]\n');
+  git(there, 'add', '-A');
+  git(there, 'commit', '--quiet', '-m', 'p');
+  git(there, 'push', '--quiet', 'origin', 'HEAD:main');
+  assert.match((await far('so :shipit:')).reason, /holds ":shipit:", which the pool repository's policy-bot policy \(o\/policies\/shared\/p\.yml\) counts/);
+  assert.equal((await far('fine')).ok, true);
+
+  // A policy this cannot read refuses text on the repository, saying why.
+  git(work, 'checkout', '--quiet', '-b', 'odd', A);
+  const E = commit('odd', { '.policy.yml': 'approval_rules:\n  - name: !!str tagged\n' });
+  git(work, 'push', '--quiet', bare, `${E}:refs/heads/odd`);
+  forge.pull('o/r', { number: 585, author: 'them', head: 'theirs', base: 'odd' });
+  const odd = await authorize(rules('review', 'pr-585'), gh('POST', '/repos/o/r/pulls/585/reviews', { event: 'COMMENT', body: 'fine' }), ctxFor());
+  assert.match(odd.reason, /cannot be checked against the pool repository's policy-bot policy, so no text is sent on its pull requests: o\/r\/\.policy\.yml cannot be read here: its line 2 holds a kind of YAML this does not read$/);
+
+  // The owner's shared policy is read beside the repository's own.
+  const shared = forge.bare('o/.github', { id: 'R_10' });
+  git(scratch, 'clone', '--quiet', shared, 'shared');
+  fs.writeFileSync(path.join(scratch, 'shared/policy.yml'), 'approval_rules:\n- name: org\n  options:\n    methods:\n      comments: ["+1 from the org"]\n');
+  git(path.join(scratch, 'shared'), 'add', '-A');
+  git(path.join(scratch, 'shared'), 'commit', '--quiet', '-m', 'org');
+  git(path.join(scratch, 'shared'), 'push', '--quiet', 'origin', 'HEAD:main');
+  assert.match((await review('+1 from the org')).reason, /\(o\/r\/\.policy\.yml, o\/\.github\/policy\.yml\) counts/);
+  // The rest of the file's world is as it was.
+  git(work, 'checkout', '--quiet', 'main');
+  git(work, 'push', '--quiet', bare, ':refs/heads/release', ':refs/heads/far', ':refs/heads/odd');
+  for (const n of [583, 584, 585]) {
+    delete forge.data.repos['o/r'].pulls[n];
+    delete forge.data.nodes[`PR_${n}`];
+  }
+});
+
 await check('a write carries its checked body, and a pinned answer is cut to its public members', async () => {
   const before = forge.log.length;
   const res = await perform(rules('review', 'pr-578'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc123', body: 'héllo' }));
   assert.equal(res.status, 201);
-  const [arrived] = seen(before);
-  assert.equal(arrived.method, 'POST');
+  // Before it, what the review goes on and the policy files policy-bot would read for it.
+  assert.deepEqual(seen(before).map((r) => `${r.method} ${r.path}`), [
+    'GET /repos/o/r/pulls/578', 'GET /repos/o/r/contents/.policy.yml?ref=main', 'GET /repos/o/.github/contents/policy.yml', 'POST /repos/o/r/pulls/578/reviews',
+  ]);
+  const arrived = seen(before).at(-1);
   assert.equal(arrived.headers['content-type'], 'application/json; charset=utf-8');
   assert.deepEqual(JSON.parse(arrived.body), { commit_id: 'abc123', body: '<!-- sent through the Diplomacy Network -->\nhéllo' });
   const user = await perform(rules('review', 'pr-578'), gh('GET', '/user'));

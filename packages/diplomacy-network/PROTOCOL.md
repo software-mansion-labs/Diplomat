@@ -1446,7 +1446,13 @@ through.
   either (the text is a comment, a review or a note, and is sent with
   `<!-- sent through the Diplomacy Network -->` and a line break before it, unless it is
   empty: Atlantis, Terrateam and Digger act on a comment whose first word, trimmed, is their
-  name, and both forges hide the line when they show the text),
+  name, and both forges hide the line when they show the text; it holds none of `:+1:`,
+  `👍`, `:-1:` and `👎`, which policy-bot counts by default as its writer's approval or
+  disapproval), `policy` beside `prose` (GitHub: the text is checked against the policy-bot
+  policy for a pull request's base branch - `"policy": { "segment": 4 }` for a comment or
+  a review on the pull request whose number stands in that path segment, none when the
+  number is an issue's, and `"policy": { "base": "base" }` for the body of the one the
+  request opens into the branch that member names; see `policy` below),
   `created` (a branch this task created, from which it has
   opened no pull request yet; `"created": "label"` reads the member as GitHub's head
   label, which is `branch` for a branch of the pool's repository and `account:branch`
@@ -1476,6 +1482,19 @@ through.
   an issue in through the Service Desk (`service_desk_reply_to`), in the answer to a read
   of an issue and to its assignment alike. An answer that is
   neither an object nor a list of objects is not passed on.
+- `policy` has the forge asked for the policy-bot policy of the pool's repository for a
+  pull request into the base branch, read as policy-bot v1.42.1 reads it: `.policy.yml`
+  at that branch, and `policy.yml` on the default branch of the owner's `.github`
+  repository (where policy-bot looks without the first, or always when its server is so
+  set), each followed once to the file it names with `remote` (and `path`, `ref`) in
+  another repository. The text holds no string of a `comments` list and matches no Go
+  regular expression of `comment_patterns` or `github_review_comment_patterns` (a pull
+  request's body: of `body_patterns`), wherever in the files those lists stand. A file
+  this cannot read - YAML it does not parse, a pattern it cannot translate faithfully, a
+  remote file the account does not see - refuses the text and names the file. A task asks
+  once per base branch. What a policy-bot server is set to itself (its own default words,
+  another policy path) is not read, nor is a `.github` repository the account does not
+  see (the forge answers it as missing), nor any other bot that counts a comment's text.
 - `{ "graphql": { "forge": "github", "repo": "o/r", "roots": [...], "mutations": [...],
   "item": { "type": "pr", "number": 578 }, "identity": "me" } }` on the GraphQL endpoint
   confines the document, which must be exactly one query or mutation. A query may select
@@ -1513,7 +1532,9 @@ through.
   from the list, its input may hold only the members the reader's table names, and every
   object it addresses is resolved on the forge and must belong to the task's own item. The
   text of a comment is taken only from the request's variables, where the `comment` line
-  is written; one in the document itself is refused.
+  is written; one in the document itself is refused. A value that stands where text goes
+  and is not a string is refused, naming the variable. The body of a pull request the
+  mutation opens is checked as `policy` checks one, for the branch `baseRefName` names.
 - `{ "git": "receive-pack", "repo": "o/r", "refs": ["refs/heads/**"], "create": 1,
   "denyPaths": [".github/workflows/**"] }` on the two smart-HTTP push endpoints of a
   repository confines a push. Without `fork` the repository is `repo`, the pool's own,

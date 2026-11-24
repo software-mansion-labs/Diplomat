@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { authorized, conclude } from './authorize.js';
+import { readPolicy } from './policybot.js';
 import { githubApi } from './rules.js';
 import { FORGE_ORIGINS, FORGE_RESPONSE_MAX_BYTES, FORGE_TIMEOUT_MS, GH_BIN, GIT_BIN, GIT_TIMEOUT_MS, GLAB_BIN, TOKEN_TTL_MS } from '../paths.js';
 
@@ -131,6 +132,7 @@ function glabConfigToken(host) {
 /// credential is for. A lookup throws when the forge's answer does not settle its question.
 export function createForge({ log = () => {} } = {}) {
   const tokens = new Map(); // "forge host" -> { token, at }
+  const policies = new WeakMap(); // a task's state -> Map(base branch -> what `policy` answered)
 
   async function token(forge, host) {
     const key = `${forge} ${host}`;
@@ -506,6 +508,60 @@ export function createForge({ log = () => {} } = {}) {
     return patterns.some((p) => mayCover(p, name));
   }
 
+  // A file of a GitHub repository as text, at `ref` or on its default branch; null when the
+  // forge has no such file there.
+  async function contents(target, repo, file, ref) {
+    const res = await api(target, 'GET', `/repos/${repo}/contents/${file.split('/').map(encodeURIComponent).join('/')}${ref ? `?ref=${encodeURIComponent(ref)}` : ''}`);
+    if (missing(res)) return null;
+    if (res.status !== 200 || res.json?.type !== 'file' || res.json.encoding !== 'base64' || typeof res.json.content !== 'string') unknown(`what ${repo}/${file} holds`, res);
+    return Buffer.from(res.json.content, 'base64').toString('utf8');
+  }
+
+  /// What policy-bot would count as an approval in text on `repo` for a pull request into
+  /// `base`, from the files it reads a policy from: `.policy.yml` on `base`, and `policy.yml`
+  /// of the owner's `.github` repository (which policy-bot reads when the first is missing,
+  /// or always when its server says so), each followed to the policy it names in another
+  /// repository. Resolves to `{ comments, patterns, bodies, from }` (see `readPolicy`;
+  /// `from` names the files), `{ fault }` when one of them cannot be read, or null when
+  /// there is none. One task's state keeps each answer for the rest of the task.
+  async function policy(target, repo, base, state) {
+    let kept = state && policies.get(state);
+    if (state && !kept) policies.set(state, (kept = new Map()));
+    if (kept?.has(base)) return kept.get(base);
+    const read = (from, text) => {
+      try { return readPolicy(text); } catch (err) { throw new Error(`${from} cannot be read here: ${err.message}`); }
+    };
+    const out = { comments: [], patterns: [], bodies: [], from: [] };
+    let found = null;
+    try {
+      for (const [of, file, ref] of [[repo, '.policy.yml', base], [`${repo.split('/')[0]}/.github`, 'policy.yml', '']]) {
+        const text = await contents(target, of, file, ref);
+        if (text === null) continue;
+        let from = `${of}/${file}`;
+        let held = read(from, text);
+        if (held.remote) {
+          const { repo: there, path: named, ref: at } = held.remote;
+          const where = named || '.policy.yml';
+          if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(there) || where.split('/').some((part) => ['', '.', '..'].includes(part))) throw new Error(`${from} names a remote policy in a form policy-bot does not read`);
+          const far = await contents(target, there, where, at);
+          if (far === null) throw new Error(`${from} names ${there}/${where}, which this machine's account cannot read`);
+          from = `${there}/${where}`;
+          held = read(from, far);
+          // policy-bot follows one reference, and reads a second as a policy it cannot parse.
+          if (held.remote) continue;
+        }
+        for (const list of ['comments', 'patterns', 'bodies']) out[list].push(...held[list]);
+        out.from.push(from);
+        found = out;
+      }
+    } catch (err) {
+      if (err.message.startsWith('forge: ')) throw err;
+      found = { fault: err.message };
+    }
+    kept?.set(base, found);
+    return found;
+  }
+
   /// A GitLab project's numeric id, which `rulesFor` needs to allow the numeric spelling
   /// of its paths; null on GitHub or when the project is not shown.
   async function projectId(target, repo) {
@@ -559,6 +615,7 @@ export function createForge({ log = () => {} } = {}) {
       repository: (of = repo) => repository(target, of),
       branch: (ref, of = repo) => branch(target, of, ref),
       protects: (ref, of = repo) => protects(target, of, ref),
+      policy: (base) => policy(target, repo, base, state),
       fetch: (what) => fetchInto(target, { ...what, repo: what.repo ?? repo }),
     };
   }

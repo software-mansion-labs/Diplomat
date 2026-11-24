@@ -31,6 +31,8 @@
 // are parsed and ignored, so `@include(if: $x)` hides nothing. A field is known by its
 // name; an alias is only a label on the response.
 
+import { approvalFault, textFault } from './policybot.js';
+
 const MAX_SOURCE = 64 * 1024;
 const MAX_TOKENS = 20000;
 const MAX_DEPTH = 24;
@@ -288,8 +290,11 @@ export function parseDocument(source) {
 // ----------------------------------------------------------------- argument values
 
 // The JSON value an argument has once its variables are filled in, or undefined when a
-// variable has neither a value nor a default. A block string becomes a marker object, so
-// it can pass through as free text but never equals a pinned string.
+// variable has neither a value nor a default. A block string becomes a `BlockString`, which
+// no JSON value is, so it can pass as text but never equals a pinned string.
+class BlockString {
+  constructor(text) { this.text = text; }
+}
 function resolve(v, op, vars) {
   switch (v.k) {
     case 'var': {
@@ -304,7 +309,7 @@ function resolve(v, op, vars) {
       return num;
     }
     case 'float': return Number(v.v);
-    case 'str': return v.block ? { blockString: v.v } : v.v;
+    case 'str': return v.block ? new BlockString(v.v) : v.v;
     case 'bool': return v.v;
     case 'null': return null;
     case 'enum': return v.v;
@@ -743,7 +748,9 @@ const COMMENT = { prose: true, comment: true };
 //   pending   it is part of a review that has not been submitted
 //   repo      it is the pool's repository
 // `free` is text or layout the task decides, `prose` text that has no `proseFault`, and
-// `comment` prose that is sent `marked`. `created` is a branch the task created,
+// `comment` prose that is sent `marked` and holds no `approvalFault`. `policy` prose is a
+// pull request's body, checked against the policy for the base branch the input member
+// `base` names (`textFault`). `created` is a branch the task created,
 // from which it has opened no pull request: "branch", or "account:branch" for one in
 // that account's fork.
 // `assignees` is the issue's whole new assignee list, which may differ from the list the
@@ -793,7 +800,7 @@ const MUTATIONS = {
       repositoryId: { node: ['Repository'], repo: true, required: true },
       headRefName: { created: true, required: true },
       draft: { equals: true, required: true },
-      baseRefName: 'free', title: PROSE, body: PROSE, maintainerCanModify: 'free', clientMutationId: 'free',
+      baseRefName: 'free', title: PROSE, body: { prose: true, policy: { base: 'baseRefName' } }, maintainerCanModify: 'free', clientMutationId: 'free',
     },
   },
   gitlab: {},
@@ -805,7 +812,7 @@ export function knownMutations(forge) {
   return Object.keys(MUTATIONS[forge] || {});
 }
 
-function checkMutation(doc, op, vars, spec, lookups, effects) {
+function checkMutation(doc, op, vars, spec, lookups, effects, texts) {
   const { walk, flatten, blanks } = walker(doc, spec.forge, op, vars, lookups);
   const fields = flatten(op.selections, [], new Set(), 1);
   if (fields.length !== 1) refuse('graphql: a mutation must be exactly one field');
@@ -833,11 +840,15 @@ function checkMutation(doc, op, vars, spec, lookups, effects) {
       if (typeof val !== 'string') refuse(`graphql: "${key}" is not a branch name`);
       effects.push({ head: val });
     } else if (rule.prose) {
-      const fault = proseFault(typeof val === 'object' ? val.blockString : val);
+      const held = inVariables(field, key, vars);
+      const text = val instanceof BlockString ? val.text : val;
+      if (typeof text !== 'string') refuse(`graphql: "${key}"${held ? ` (${held[2]})` : ''} is not text`);
+      const fault = proseFault(text) ?? (rule.comment ? approvalFault(text) : null);
       if (fault) refuse(`graphql: "${key}" ${fault}`);
+      if (rule.policy) texts.push({ key, text, base: input[rule.policy.base] });
       if (rule.comment) {
-        const [holder, name] = textHolder(field, key, vars);
-        holder[name] = marked(holder[name]);
+        if (!held) refuse(`graphql: "${key}" is comment text, which is sent in a variable ("${key}: $${key}", and "variables": { "${key}": "..." }), not written in the query`);
+        held[0][held[1]] = marked(text);
       }
     } else if (val !== rule.equals) {
       refuse(`graphql: ${field.name} needs "${key}" to be ${JSON.stringify(rule.equals)}`);
@@ -851,14 +862,15 @@ function checkMutation(doc, op, vars, spec, lookups, effects) {
   return blanks;
 }
 
-// Where the request's variables hold the text of input member `key`, as [object, name]:
-// the mark is written there, so comment text written into the document is refused.
-function textHolder(field, key, vars) {
+// Where the request's variables hold input member `key`: [object, name, how a reader names
+// it], or null for a value the document writes. The mark is written there, so comment text
+// written into the document is refused.
+function inVariables(field, key, vars) {
   const input = field.args[0].value;
-  if (input.k === 'var' && Object.hasOwn(vars, input.name)) return [vars[input.name], key];
+  if (input.k === 'var' && Object.hasOwn(vars, input.name)) return [vars[input.name], key, `$${input.name}.${key}`];
   const given = input.k === 'obj' ? input.fields.find((f) => f.name === key).value : undefined;
-  if (given?.k === 'var' && Object.hasOwn(vars, given.name)) return [vars, given.name];
-  return refuse(`graphql: "${key}" is comment text, which is sent in a variable ("${key}: $${key}", and "variables": { "${key}": "..." }), not written in the query`);
+  if (given?.k === 'var' && Object.hasOwn(vars, given.name)) return [vars, given.name, `$${given.name}`];
+  return null;
 }
 
 /// Whether a resolved node belongs to the task's item: `item` is `{ type: 'pr'|'issue',
@@ -935,9 +947,14 @@ export async function checkGraphql(spec, payload, ctx = {}) {
     const [op] = doc.operations;
     const lookups = [];
     const effects = [];
+    const texts = [];
     if (op.type === 'subscription') refuse('graphql: subscriptions are not allowed');
-    const blanks = op.type === 'query' ? checkQuery(doc, op, vars, spec, lookups) : checkMutation(doc, op, vars, spec, lookups, effects);
+    const blanks = op.type === 'query' ? checkQuery(doc, op, vars, spec, lookups) : checkMutation(doc, op, vars, spec, lookups, effects, texts);
     await settle(lookups, spec, ctx);
+    for (const { key, text, base } of texts) {
+      const fault = await textFault(ctx, base, text, 'body');
+      if (fault) refuse(`graphql: "${key}" ${fault}`);
+    }
     return { ok: true, effects, ...(blanks.size > 0 ? { blank: [...blanks] } : {}) };
   } catch (err) {
     if (err instanceof Refused) return { ok: false, reason: err.message };
