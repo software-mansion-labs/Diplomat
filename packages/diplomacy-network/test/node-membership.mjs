@@ -658,14 +658,14 @@ await check('a machine that goes back into a pool it left more than a month befo
   w.net.kill('c');
   const others = [b.pk, c.pk].sort();
   assert.deepEqual(await a.node.join({ pool: POOL }), { pool: POOL });
-  assert.deepEqual([row(a), [...w.doc(a).back].sort()], [[false, false, '', true, false, 1, 2], others]);
+  assert.deepEqual([row(a), w.doc(a).back.map((e) => e.pk)], [[false, false, '', true, false, 1, 2], others]);
   await w.run(600);
   const since = w.net.now();
   await w.run(1800);
   assert.deepEqual([w.net.count({ from: 'a', since }), w.net.count({ from: 'a', kind: 'hello', since })], [6, 6]);
   await w.restart(a);
   await w.run(60);
-  assert.deepEqual([row(a), [...w.doc(a).back].sort()], [[false, false, '', true, false, 1, 2], others], 'started again');
+  assert.deepEqual([row(a), w.doc(a).back.map((e) => e.pk)], [[false, false, '', true, false, 1, 2], others], 'started again');
   a.node.leave({ pool: POOL });
   assert.deepEqual([...w.stored(a, poolFile(POOL)).leftTo].sort(), others, 'what it leaves once more, it leaves to them');
   await w.run(60);
@@ -673,6 +673,7 @@ await check('a machine that goes back into a pool it left more than a month befo
   await w.restart(c);
   await w.net.until(() => w.members(a).length === 3 && w.members(c).length === 3, { maxMs: 15 * 60 * 1000, what: 'a back once one of them answers' });
   await w.run(2);
+  // From c it holds b's record again: b is asked as a member.
   assert.deepEqual(row(a), [false, false, '', false, false, 3, 0]);
   await w.restart(b);
   await w.net.until(() => all.every((h) => w.members(h).length === 3), { maxMs: 15 * 60 * 1000, what: 'three members' });
@@ -727,6 +728,100 @@ await check('a machine back after more than a month whose voucher leads up to a 
   }
 });
 
+await check('a machine that was there all along is coming back to nothing: the last of a pool whose other member stopped for good runs its jobs after a night off across that member\'s last day, and after a restart just past it', async () => {
+  for (const how of ['night', 'restart']) {
+    const w = createWorld({ seed: 61 });
+    const [r, a] = await w.pool(['r', 'a']);
+    w.net.kill('a');
+    if (how === 'night') {
+      await w.run(30 * 24 * 3600 - 4 * 3600);
+      w.net.kill('r');
+      await w.run(8 * 3600);
+    } else await w.run(30 * 24 * 3600 + 400);
+    await w.restart(r);
+    await w.run(600);
+    assert.deepEqual([w.view(r).returning, w.doc(r).back, w.members(r)], [false, [], [r.pk]], how);
+    r.slots = 1;
+    const { taskId } = await r.node.offer(offerArgs('pr-1'));
+    await w.net.until(() => r.executor.jobOf(taskId), { maxMs: 3600 * 1000, what: `${how}: its job running` });
+    assert.equal(w.net.count({ from: 'r', to: 'a', kind: 'hello' }), 0, `${how}: the machine that stopped is not asked`);
+  }
+});
+
+await check('two machines back after a month that reach each other first go on asking the machines that stayed, and are one pool with them once those are up', async () => {
+  const w = createWorld({ seed: 64 });
+  const [r, a, b, c, m] = await w.pool(['r', 'a', 'b', 'c', 'm']);
+  w.net.kill('c');
+  w.net.kill('m');
+  await w.run(24 * 3600);
+  w.net.kill('r');
+  await w.run(31 * 24 * 3600);
+  // The two that stayed are off for the night.
+  w.net.kill('a');
+  w.net.kill('b');
+  await w.restart(c);
+  await w.run(600);
+  await w.restart(m);
+  await w.run(3600);
+  const back = (h) => w.doc(h).back.map((e) => e.pk);
+  assert.deepEqual([c, m].map((h) => [w.view(h).returning, w.members(h), back(h)]), [
+    [false, [c.pk, m.pk].sort(), [a.pk, b.pk].sort()],
+    [false, [c.pk, m.pk].sort(), [a.pk, b.pk].sort()],
+  ]);
+  await w.restart(a);
+  await w.restart(b);
+  const live = [a, b, c, m];
+  await w.net.until(() => live.every((h) => w.members(h).length === 4), { maxMs: 30 * 60 * 1000, what: 'one pool of four' });
+  await w.agreed(live);
+  assert.deepEqual(live.map((h) => back(h).length), [0, 0, 0, 0]);
+  for (const h of live) h.slots = 1;
+  const { taskId } = await a.node.offer(offerArgs('pr-1'));
+  await m.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => live.some((h) => h.executor.jobOf(taskId)), { maxMs: 3600 * 1000, what: 'pr-1 running' });
+  await w.run(600);
+  assert.equal(live.filter((h) => h.executor.jobOf(taskId)).length, 1);
+});
+
+await check('a machine back after a month asks a machine that never answers for 30 days, and then no more', async () => {
+  const w = createWorld({ seed: 66 });
+  const all = await w.pool(['a', 'b', 'c']);
+  const [a, b] = all;
+  for (const h of all) w.net.kill(h.name);
+  await w.run(31 * 24 * 3600);
+  await w.restart(a);
+  await w.restart(b);
+  await w.net.until(() => !w.view(a).returning, { maxMs: 3600 * 1000, what: 'b answered' });
+  await w.run(60);
+  assert.deepEqual(w.doc(a).back.map((e) => w.name(e.pk)), ['c']);
+  await w.run(30 * 24 * 3600 + 3600);
+  assert.deepEqual(w.doc(a).back, []);
+  const since = w.net.now();
+  await w.run(24 * 3600);
+  assert.equal(w.net.count({ from: 'a', to: 'c', since }), 0);
+});
+
+await check('a machine back after a month that was answered is back after a restart, whoever is up: what it was told is on disk at once', async () => {
+  const w = createWorld({ seed: 65 });
+  const [r, a] = await w.pool(['r', 'a']);
+  w.net.kill('r');
+  w.net.kill('a');
+  await w.run(31 * 24 * 3600);
+  await w.restart(r);
+  assert.deepEqual([w.doc(r).returning, w.doc(r).back.map((e) => e.pk)], [true, [a.pk]], 'it is coming back, and asks a');
+  await w.restart(a);
+  await w.net.until(() => !w.view(r).returning && !w.view(a).returning, { maxMs: 3600 * 1000, what: 'both answered' });
+  await w.run(60);
+  assert.deepEqual([w.doc(r).returning, w.doc(r).back], [false, []]);
+  w.net.kill('a');
+  await w.run(600);
+  await w.restart(r);
+  await w.run(600);
+  assert.equal(w.view(r).returning, false);
+  r.slots = 1;
+  const { taskId } = await r.node.offer(offerArgs('pr-1'));
+  await w.net.until(() => r.executor.jobOf(taskId), { maxMs: 3600 * 1000, what: 'its job running' });
+});
+
 await check('a machine back in a pool it left, refused by every machine it left, reads in its row that it has no seat there', async () => {
   const w = createWorld({ seed: 45 });
   const [a, b] = await w.pool(['a', 'b']);
@@ -759,6 +854,8 @@ await check('a machine back an hour after it left is back as soon as a member an
   w.net.cut('a', 'b', false);
   await w.net.until(() => !w.view(a).returning, { maxMs: 10 * 60 * 1000, what: 'an answer' });
   assert.equal(w.net.count({ from: 'a', to: 'b', kind: 'hello', since }), 0, 'a sync, answered');
+  await w.run(60);
+  assert.equal(w.doc(a).returning, false);
   a.slots = 1;
   const { taskId } = await b.node.offer(offerArgs('pr-1'));
   await w.net.until(() => a.executor.jobOf(taskId), { maxMs: 10 * 60 * 1000, what: 'the job running at a' });
