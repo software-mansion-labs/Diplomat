@@ -179,13 +179,18 @@ brought, and an older engine takes no job.
 The machine that offered a job performs every forge request the agent makes, with its own `gh` or
 `glab` login, after checking the request against the rules of that job's kind. The key that lets
 an executor ask is handed over once the job is taken, works for that executor and that job only,
-and ends with the job. A repository on a GitLab of your own is acted on at its own address, with
-the login `glab` holds for it. The daemon has github.com's rules for a GitHub Enterprise Server
-as well, at that server's address, but Diplomat links only repositories on github.com and on a
-GitLab, so one on a GitHub Enterprise Server has no pool. The network has no rules for an
-address under `ghe.com` (GitHub Enterprise Cloud with data residency), for a subdomain of
-`github.com` or for `github.localhost`: a repository linked there has no pool, no job is offered
-for it, and the Network screen names it.
+and ends with the job. Each request is checked against the rules the daemon has for the job's
+kind when the request arrives, so an update that narrows them reaches jobs already running, and
+a job whose kind has no rules any more loses its key. A repository on a GitLab of your own is
+acted on at its own address, with the login `glab` holds for it. Each address gets the login
+`gh` or `glab` keeps for that address: not `glab`'s top-level token, which it gives an address
+it holds nothing for, and not `gh`'s `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`, which
+it gives every GitHub Enterprise Server. The daemon has github.com's rules for a GitHub
+Enterprise Server as well, at that server's address, but Diplomat links only repositories on
+github.com and on a GitLab, so one on a GitHub Enterprise Server has no pool. The network has
+no rules for an address under `ghe.com` (GitHub Enterprise Cloud with data residency), for a
+subdomain of `github.com` or for `github.localhost`: a repository linked there has no pool, no
+job is offered for it, and the Network screen names it.
 
 | Job | May write |
 |---|---|
@@ -209,7 +214,12 @@ came is settled before the job opens another, by asking the forge which PRs ther
 branch, open or closed: none, and the job may open it; any, and that is the job's one. While the
 forge does not answer the question, the request that waits on it is refused. The forge's answer
 is taken as it stands - a request the forge was still working on when it answered can land
-afterwards, and is then not counted.
+afterwards, and is then not counted. The count is kept by each machine that offered the job:
+when two of your machines offer the same job, the one that takes it may use the allowance of
+each, under each one's key.
+
+**A draft PR** is opened with no labels, assignees, reviewers or milestone, on either forge. On
+GitLab a label is made by naming it, replaces another of its scope and can start a pipeline.
 
 **Your own fork** is the repository under the account the repository was linked with that the
 forge itself calls a fork of this repository. The machine asks the forge whose it is and what it
@@ -266,7 +276,9 @@ A GraphQL request is refused whole when it asks for anything off that list, or f
 else the forge would say about the account that offered the job rather than about the
 repository: what that account may do to an issue, a PR or a comment, whether it is subscribed
 to one or has read it - asked for outright, or by listing only the ones it is subscribed to or
-reacted to - its e-mail addresses. Which comments the account wrote is told, because `gh` asks,
+reacted to - its e-mail addresses. The address of whoever turned on a PR's auto-merge on GitHub,
+and of whoever wrote an issue in through GitLab's Service Desk, comes back empty. Which comments
+the account wrote is told, because `gh` asks,
 and so are the name and address a commit was written with, which are part of the commit.
 (GitHub serves the commits of a repository's forks through the repository to whoever knows
 their id; the rules do not narrow what the forge itself calls part of the repository.)
@@ -289,11 +301,19 @@ every commit a push builds on without carrying it must already be on a branch of
 pushed to - so a job can bring a CI definition onto its branch exactly as another branch of the
 repository has it, which is what merging the base branch does, and in no other form. What CI
 runs from the rest of the repository - a script, a Makefile, a file a definition includes from
-elsewhere - is a job's to change like any other file. Whether a name that does not exist yet
-would be protected once created is left to the forge, which enforces its own rules on the push.
+elsewhere - is a job's to change like any other file. No job creates a branch whose name a
+protection rule would cover - a GitHub ruleset or branch protection rule, a GitLab protected
+branch or wildcard - in the repository or in your fork: the machine reads every page of those
+rules before the push, matching each pattern more widely than the forge does, without regard to
+case and with `*` across `/`.
+
+The text of a comment, a review, or a PR's or MR's description holds no line starting with `/`,
+`@` or `bors`: GitLab runs such a line as a quick action in your name, and bots on
+either forge take it for a command from you (`/approve`, `bors r+`, `@dependabot merge`).
 
 Before it allows a push or a write, the machine asks the forge what the rule depends on: where
-the branch is, which branch is the default, who opened the PR, who is assigned, whose a fork is.
+the branch is, which branch is the default, which protection rules there are, who opened the
+PR, who is assigned, whose a fork is.
 Only an answer
 that settles the question counts; when the forge is rate-limited, failing or silent, the request
 is refused. A refused request comes back to the agent with the reason.
