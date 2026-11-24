@@ -149,8 +149,8 @@ higher of the labels already there, the model's answer, a rating kept for it and
 dimension at a time. Each answer is kept on this machine as it arrives, until its labels are written,
 so it is not paid for again; one whose labels could not be written comes with a notice. A kept rating
 counts over lower labels, holding the item, moves nothing down the fast track, and its labels are
-written at a later sync, tried again 1, 2, 4 ... syncs later, unless a PR's diff at its head no longer
-allows it: then it is dropped and the PR rated again.
+written at a later sync, tried again 1, 2, 4 ... syncs later, unless a PR's diff at its head allows
+less: then it is dropped and the PR rated again.
 
 ### The diff floor
 

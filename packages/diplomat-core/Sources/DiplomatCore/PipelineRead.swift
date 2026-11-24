@@ -36,9 +36,9 @@ struct PipelineEntry {
     var links: [String] = []
     /// A Linear issue's attachments run past the read's page.
     var linksPast = false
-    /// The operator's issue whose body says it is a part Diplomat split off, and whose text
-    /// it carries as its marker names it.
+    /// The operator's issue says it is a part Diplomat split off.
     var isPart = false
+    /// Whose text that part carries, as its marker names it.
     var lineage: String?
     /// A GitHub issue's type, nil for none.
     var issueType: String?
