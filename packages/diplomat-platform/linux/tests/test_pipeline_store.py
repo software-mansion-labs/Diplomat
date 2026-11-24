@@ -337,6 +337,13 @@ def test_the_ban_is_the_effects_author_not_the_items(pipe):
     assert _keys(pipe) == ["issues:o/r#12"]
 
 
+def test_start_fix_is_banned_by_who_wrote_the_parts_text_not_who_filed_it(pipe):
+    pipe.banned_authors = [bans.BannedAuthor("mallory", "prompt injection")]
+    assert pipe.pipeline_ban(_item(author="alice", splitFrom="mallory")) == (
+        "@mallory is on the prompt-injection ban list")
+    assert pipe.pipeline_ban(_item(author="mallory", splitFrom="alice")) is None
+
+
 def _unreadable_bans() -> None:
     bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
     bans.banned_path().write_text("{", encoding="utf-8")
@@ -762,6 +769,24 @@ def test_a_sync_asked_for_while_one_runs_waits_for_its_plan_to_be_applied(pipe,
     _land(pipe, 1)
     assert handed == [[ISSUE], [PR]]
     assert (pipe.pipeline_forced("rate"), pipe.pipeline_syncing) == (frozenset(), False)
+
+
+def test_a_syncs_asks_are_assembled_off_the_qt_thread_and_only_those_it_queues(pipe,
+                                                                              monkeypatch):
+    """Each prompt is a ``diplomat-core`` subprocess. Synced again, all three are queued
+    and mallory is banned."""
+    on_qt = []
+    build = promptcore.build_prompt
+    monkeypatch.setattr(promptcore, "build_prompt", lambda cfg: on_qt.append(
+        threading.current_thread() is threading.main_thread()) or build(cfg))
+    monkeypatch.setattr(pipeline, "tick", lambda settings, started=None: _result(
+        _fix(), _fix(13), _review(), _fix(14, author="mallory")))
+    QApplication.instance() or QApplication([])
+    for _ in range(2):
+        pipe.run_pipeline_sync_async()
+        _land(pipe, 1)
+    assert (_keys(pipe), on_qt) == (
+        ["issues:o/r#12", "issues:o/r#13", "review:o/r#7"], [False] * 3)
 
 
 # MARK: - What the screen shows and starts

@@ -89,6 +89,44 @@ def _plain(text: str) -> QLabel:
     return label
 
 
+class _Wrapped(QLabel):
+    """:func:`_plain`, wrapped, and broken inside a word wider than the line, as SwiftUI's
+    ``Text`` is: QLabel's own word wrap widens the label to that word."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+
+    def _layout(self, width: float) -> tuple[QTextLayout, float]:
+        layout = QTextLayout(self.text(), self.font())
+        option = QTextOption()
+        option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+        layout.setTextOption(option)
+        layout.beginLayout()
+        height = 0.0
+        while (line := layout.createLine()).isValid():
+            line.setLineWidth(width)
+            line.setPosition(QPointF(0, height))
+            height += line.height()
+        layout.endLayout()
+        return layout, height
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        m = self.contentsMargins()
+        return math.ceil(self._layout(width - m.left() - m.right())[1]) + m.top() + m.bottom()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return QSize(0, super().minimumSizeHint().height())
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setPen(self.palette().color(self.foregroundRole()))
+        box = self.contentsRect()
+        self._layout(box.width())[0].draw(p, QPointF(box.topLeft()))
+        p.end()
+
+
 def _chip(text: str, tint: str) -> QLabel:
     chip = _plain(text)
     chip.setStyleSheet(
@@ -468,7 +506,9 @@ class GraphCanvas(QWidget):
             font.setPixelSize(11)
             p.setFont(font)
             p.setPen(self.palette().color(QPalette.ColorRole.Mid))
-            p.drawText(QRectF(self.rect()), int(Qt.AlignmentFlag.AlignCenter), self.placeholder)
+            p.drawText(QRectF(self.rect()),
+                       int(Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap),
+                       self.placeholder)
         for c in self.connectors:
             on = self.selected in (c.source, c.target)
             color = QColor(TINT if on else _GREY)
@@ -634,8 +674,7 @@ class EventRow(QWidget):
         head.addStretch(1)
         col.addLayout(head)
         if event.get("detail"):
-            detail = _plain(str(event["detail"]))
-            detail.setWordWrap(True)
+            detail = _Wrapped(str(event["detail"]))
             detail.setStyleSheet("font-size: 10px;")
             col.addWidget(detail)
 
@@ -766,8 +805,7 @@ class PipelineView(QWidget):
 
     @staticmethod
     def _banner(tint: str) -> QLabel:
-        banner = _plain("")
-        banner.setWordWrap(True)
+        banner = _Wrapped("")
         banner.setStyleSheet(
             f"background-color: {tint_bg(tint, 0.14)}; border-radius: 6px;"
             " padding: 6px; font-size: 10px;")
@@ -871,8 +909,7 @@ class PipelineView(QWidget):
                              result, edges)
 
     def _line(self, text: str, style: str) -> QLabel:
-        label = _plain(text)
-        label.setWordWrap(True)
+        label = _Wrapped(text)
         label.setStyleSheet(style)
         self.detail_col.addWidget(label)
         return label

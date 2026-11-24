@@ -4695,8 +4695,31 @@ class Store(QObject):
         if "items" not in out:
             return {"error": out.get("error") or "the sync did not answer",
                     "forced": settings["force"]}
+        self._build_pipeline_prompts(out)
         return {"result": out, "forced": settings["force"], "started": started,
                 "epoch": epoch, "handed": handed}
+
+    def _build_pipeline_prompts(self, result: dict) -> None:
+        """Assemble the prompt of each ask :meth:`_apply_pipeline_effects` would queue from
+        ``result`` now, so the Qt thread finds it memoised (:meth:`_requested_task`)
+        rather than running ``diplomat-core`` once per ask."""
+        owed = {"fixIssue": self.pipeline_fix, "fixLinear": self.pipeline_fix,
+                "review": self.pipeline_fast_track}
+        banned, unreadable = bans.read(), bans.unreadable()
+        attempts = self._load_attempts(PIPELINE_ATTEMPTS)
+        now = time.time()
+        for effect in result.get("effects") or []:
+            try:
+                work = self.pipeline_work(effect) if owed.get(effect.get("kind")) else None
+                if work is not None and autofix.decide(
+                        attempts.get(str(effect.get("key") or "")),
+                        str(effect.get("stamp") or ""), self._pipeline_in_flight(work),
+                        unreadable or (bool(work.author)
+                                       and bans.is_banned(work.author, banned)),
+                        now)[0] == "dispatch":
+                    self._requested_task(work)
+            except Exception:  # noqa: BLE001 - the Qt thread's own build says why
+                pass
 
     def _apply_pipeline_sync(self, plan: dict) -> None:
         """The Qt-thread half of a sync: publish its result, retire the force sets it
