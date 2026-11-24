@@ -707,15 +707,17 @@ function checkQuery(doc, op, vars, spec, lookups) {
 
 // ---------------------------------------------------------------------- mutations
 
-// A line a forge or a bot on it runs as a command: GitLab's quick actions ("/merge"),
-// Prow's "/approve" and "/lgtm", bors's "bors r+", and a bot named first on its line
-// ("@dependabot merge", "@Mergifyio queue"). Text posted in the requester's name is
-// otherwise a way to do anything such a command can.
-const COMMAND_LINE = /(^|[\r\n\v\f\u0085\u2028\u2029])[ \t]*(\/|@|bors\b)/i;
-/// Whether `text` is a string with no line that `COMMAND_LINE` would take for a command.
-export const isProse = (text) => typeof text === 'string' && !COMMAND_LINE.test(text);
+// What a forge or a bot on it takes for a command: a line starting with "/" (GitLab's
+// quick actions, Prow's "/approve"), and anywhere in the text an account named with "@"
+// or the word "bors" - homu acts on any line naming it, claude-code-action on "@claude"
+// anywhere, Copilot on "@copilot" in any comment. Bots read the text as it was sent, so
+// no markdown hides one. Text posted in the requester's name is otherwise a way to do
+// anything such a command can, and a task has no one to call on.
+const COMMAND = /(^|[\r\n\v\f\u0085\u2028\u2029])[ \t]*\/|@[\p{L}\p{N}_.-]|\bbors\b/iu;
+/// Whether `text` is a string that holds nothing `COMMAND` would take for a command.
+export const isProse = (text) => typeof text === 'string' && !COMMAND.test(text);
 /// Why text that is not `isProse` is refused.
-export const COMMAND_REASON = 'has a line starting with "/", "@" or "bors", which the forge or a bot on it would take for a command';
+export const COMMAND_REASON = 'names an account with "@", says "bors" or has a line starting with "/", which the forge or a bot on it would take for a command';
 const PROSE = { prose: true };
 
 // What each mutation's `input` may hold. A key the table does not name is refused, so a
