@@ -763,7 +763,7 @@ await check('an address of a person is let out as null wherever the answer holds
     fragment f on PullRequest { autoMergeRequest { authorEmail } }`))).sort(), ['authorEmail', 'mail']);
   assert.equal(await blankOf(github('investigate'), hub('{ repository(owner: "o", name: "r") { pullRequests(first: 5) { nodes { authorEmail: title } } } }')), undefined);
   // A mutation's answer is read like a query's.
-  assert.deepEqual(await blankOf(github('issues'), hub('mutation { addComment(input: { subjectId: "I_421", body: "x" }) { subject { ... on Issue { timelineItems(first: 1) { totalCount } } } commentEdge { node { issue { number } } } clientMutationId } }'), world()), undefined);
+  assert.deepEqual(await blankOf(github('issues'), ghql({ variables: { b: 'x' }, query: 'mutation($b: String!) { addComment(input: { subjectId: "I_421", body: $b }) { subject { ... on Issue { timelineItems(first: 1) { totalCount } } } commentEdge { node { issue { number } } } clientMutationId } }' }), world()), undefined);
   const lab = (query) => glab('POST', '/api/graphql', { query });
   assert.deepEqual((await blankOf(gitlab('investigate'), lab('{ project(fullPath: "group/sub/proj") { issues { nodes { externalAuthor notes { nodes { who: externalAuthor body } } } } } }'), glWorld())).sort(),
     ['externalAuthor', 'who']);
@@ -971,34 +971,60 @@ await check('every member a write takes text in, on either forge, holds nothing 
   const pushed = () => world({ branches: ['refs/heads/fix-421'] });
   const labPushed = () => glWorld(['refs/heads/fix-421']);
   const draft = { title: 'Draft: t', description: 'd', source_branch: 'fix-421', target_branch: 'main', labels: '', target_project_id: 99 };
-  // Each route's text member, written by `write`, with the task that may write it, the world it is judged in and the member named.
+  // Each route's text member, written by `write`, with the task that may write it, the world it is judged in, the member
+  // named and where the text is in what is sent on; `COMMENT` marks a comment, a review or a note, which is sent marked.
+  const COMMENT = true;
+  const at = { body: (b) => b.body, second: (b) => b.comments[1].body, varBody: (b) => b.variables.body, inputBody: (b) => b.variables.input.body,
+    title: (b) => b.title, inputTitle: (b) => b.variables.input.title, note: (b) => b.note, description: (b) => b.description, draftTitle: (b) => b.title.slice('Draft: '.length) };
   const writes = [
-    [github('review'), (t) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', body: t }), pushed, '"body"'],
-    [github('review'), (t) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [{ path: 'a.js', line: 1, body: 'fine' }, { path: 'a.js', line: 2, body: t }] }), pushed, '"comments", entry 2: its "body"'],
-    [github('review'), (t) => gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { event: 'COMMENT', body: t }), pushed, '"body"'],
-    [github('review'), (t) => ghql({ ...GH.addThread, variables: { ...GH.addThread.variables, body: t } }), pushed, '"body"'],
-    [github('review'), (t) => ghql({ ...GH.addReply, variables: { ...GH.addReply.variables, body: t } }), pushed, '"body"'],
-    [github('review-own'), (t) => gh('POST', '/repos/o/r/pulls/579/comments/13/replies', { body: t }), pushed, '"body"'],
-    [github('issues'), (t) => gh('POST', '/repos/o/r/issues/421/comments', { body: t }), pushed, '"body"'],
-    [github('issues'), (t) => ghql({ ...GH.issueComment, variables: { input: { subjectId: 'I_421', body: t } } }), pushed, '"body"'],
-    [github('issues'), (t) => gh('POST', '/repos/o/r/pulls', { title: 't', body: t, head: 'fix-421', base: 'main', draft: true }), pushed, '"body"'],
-    [github('issues'), (t) => gh('POST', '/repos/o/r/pulls', { title: t, body: 'b', head: 'fix-421', base: 'main', draft: true }), pushed, '"title"'],
-    [github('issues'), (t) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, body: t } } }), pushed, '"body"'],
-    [github('issues'), (t) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, title: t } } }), pushed, '"title"'],
-    [gitlab('review'), (t) => glab('POST', `${P}/merge_requests/5/notes`, { body: t }), glWorld, '"body"'],
-    [gitlab('review'), (t) => glab('POST', `${P}/merge_requests/5/draft_notes`, { note: t }), glWorld, '"note"'],
-    [gitlab('review'), (t) => glab('PUT', `${P}/merge_requests/5/draft_notes/3`, { note: t }), glWorld, '"note"'],
-    [gitlab('review-own'), (t) => glab('POST', `${P}/merge_requests/5/discussions/d1/notes`, { body: t }), glWorld, '"body"'],
-    [gitlab('review-own', { markReady: true }), (t) => glab('PUT', `${P}/merge_requests/5`, { title: t }), glWorld, '"title"'],
-    [gitlab('issues'), (t) => glab('POST', `${P}/issues/421/notes`, { body: t }), labPushed, '"body"'],
-    [gitlab('issues'), (t) => glab('POST', `${P}/merge_requests`, { ...draft, description: t }), labPushed, '"description"'],
-    [gitlab('issues'), (t) => glab('POST', `${P}/merge_requests`, { ...draft, title: `Draft: ${t}` }), labPushed, '"title"', 'starts with Draft:'],
+    [github('review'), (t) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', body: t }), pushed, '"body"', at.body, COMMENT],
+    [github('review'), (t) => gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [{ path: 'a.js', line: 1, body: 'fine' }, { path: 'a.js', line: 2, body: t }] }), pushed, '"comments", entry 2: its "body"', at.second, COMMENT],
+    [github('review'), (t) => gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { event: 'COMMENT', body: t }), pushed, '"body"', at.body, COMMENT],
+    [github('review'), (t) => ghql({ ...GH.addThread, variables: { ...GH.addThread.variables, body: t } }), pushed, '"body"', at.varBody, COMMENT],
+    [github('review'), (t) => ghql({ ...GH.addReply, variables: { ...GH.addReply.variables, body: t } }), pushed, '"body"', at.varBody, COMMENT],
+    [github('review-own'), (t) => gh('POST', '/repos/o/r/pulls/579/comments/13/replies', { body: t }), pushed, '"body"', at.body, COMMENT],
+    [github('issues'), (t) => gh('POST', '/repos/o/r/issues/421/comments', { body: t }), pushed, '"body"', at.body, COMMENT],
+    [github('issues'), (t) => ghql({ ...GH.issueComment, variables: { input: { subjectId: 'I_421', body: t } } }), pushed, '"body"', at.inputBody, COMMENT],
+    [github('issues'), (t) => gh('POST', '/repos/o/r/pulls', { title: 't', body: t, head: 'fix-421', base: 'main', draft: true }), pushed, '"body"', at.body],
+    [github('issues'), (t) => gh('POST', '/repos/o/r/pulls', { title: t, body: 'b', head: 'fix-421', base: 'main', draft: true }), pushed, '"title"', at.title],
+    [github('issues'), (t) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, body: t } } }), pushed, '"body"', at.inputBody],
+    [github('issues'), (t) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, title: t } } }), pushed, '"title"', at.inputTitle],
+    [gitlab('review'), (t) => glab('POST', `${P}/merge_requests/5/notes`, { body: t }), glWorld, '"body"', at.body, COMMENT],
+    [gitlab('review'), (t) => glab('POST', `${P}/merge_requests/5/draft_notes`, { note: t }), glWorld, '"note"', at.note, COMMENT],
+    [gitlab('review'), (t) => glab('PUT', `${P}/merge_requests/5/draft_notes/3`, { note: t }), glWorld, '"note"', at.note, COMMENT],
+    [gitlab('review-own'), (t) => glab('POST', `${P}/merge_requests/5/discussions/d1/notes`, { body: t }), glWorld, '"body"', at.body, COMMENT],
+    [gitlab('review-own', { markReady: true }), (t) => glab('PUT', `${P}/merge_requests/5`, { title: t }), glWorld, '"title"', at.title],
+    [gitlab('issues'), (t) => glab('POST', `${P}/issues/421/notes`, { body: t }), labPushed, '"body"', at.body, COMMENT],
+    [gitlab('issues'), (t) => glab('POST', `${P}/merge_requests`, { ...draft, description: t }), labPushed, '"description"', at.description],
+    [gitlab('issues'), (t) => glab('POST', `${P}/merge_requests`, { ...draft, title: `Draft: ${t}` }), labPushed, '"title"', at.draftTitle],
   ];
   const fine = 'Looks fine. See https://example.com/a/b, at 5 @ noon, and the borscht recipe for the neighbors. Borscht, thanks; a/b and \uff20x.';
   const code = '```suggestion\n// the cache is per request\n/* kept */\n```\n@@ -1,3 +1,4 @@ /usr/bin/env node';
-  for (const [rules, write, ctx, member, prefixed] of writes) {
+  // How Atlantis (server/events/comment_parser.go), Terrateam (terrat_comment.ml) and Digger
+  // (backend/controllers/github_comment.go) decide that a comment is a command for them:
+  // each reads only the start of the whole comment, trimmed.
+  const bots = {
+    atlantis: (c) => {
+      const t = c.trim().replace(/^`+|`+$/g, '');
+      return t !== '' && !/.*\r?\n[^\r\n]+/.test(t) && ['run', 'atlantis'].includes(t.split(/\s+/)[0].toLowerCase());
+    },
+    terrateam: (c) => ['terrateam', 'stategraph', 'terraform', 'tofu'].includes(c.trim().replace(/^`+/, '').replace(/`+$/, '').trim().split(' ')[0].toLowerCase()),
+    digger: (c) => c.toLowerCase().trim().startsWith('digger'),
+  };
+  const firstWords = ['atlantis apply -p prod', 'run apply', '  Atlantis apply', '`atlantis apply`', 'terrateam apply', 'tofu apply', 'digger apply'];
+  const sent = (verdict) => JSON.parse(Buffer.from(verdict.request.body, 'base64'));
+  for (const [rules, write, ctx, member, read, comment] of writes) {
     await allowed(rules, write(fine), ctx());
     if (!member.includes('title')) await allowed(rules, write(code), ctx());
+    // A comment is sent with the mark as its first line, so a bot that acts on a comment's first
+    // word reads the mark; any other text is sent as written.
+    for (const text of firstWords) {
+      assert.ok(Object.values(bots).some((bot) => bot(text)), text);
+      const out = read(sent(await allowed(rules, write(text), ctx())));
+      assert.equal(out, comment ? `<!-- sent through the Diplomacy Network -->\n${text}` : text, `${member} ${text}`);
+      if (comment) for (const [name, bot] of Object.entries(bots)) assert.ok(!bot(out), `${name} acts on ${JSON.stringify(out)}`);
+    }
+    if (comment) assert.equal(read(sent(await allowed(rules, write(''), ctx()))), '', 'empty text stays empty');
     // A bot reads the text as it was sent: a mention anywhere, in markdown or out of it, is one.
     for (const [text, quoted] of [['Looks fine.\n/approve', '/approve'], ['/lgtm', '/lgtm'], ['ok\r\n  /merge', '/merge'], ['bors r+', 'bors'], ['ok\nBors try', 'Bors'],
       ['@bors r+', '@bors'], ['@dependabot merge', '@dependabot'], ['ok\n\t@Mergifyio queue', '@Mergifyio'], ['Reviewed it, @bors r+', '@bors'], ['Thanks, @copilot please push a commit', '@copilot'],
@@ -1006,15 +1032,20 @@ await check('every member a write takes text in, on either forge, holds nothing 
       ['npm i -D @types/node', '@types/node'], ['write to a@bors.example', '@bors.example'], ['ok, bors r+', 'bors'], ['ask @_x', '@_x'], ['ask @9x', '@9x'], ['ask @.x', '@.x'],
       ['ask @-x', '@-x'], ['ask @\u00e9x', '@\u00e9x']]) {
       // A title is one line, and one after "Draft:" starts no line with "/".
-      if ((member.includes('title') && text.includes('\n')) || (prefixed && quoted.startsWith('/'))) continue;
+      if ((member.includes('title') && text.includes('\n')) || (read === at.draftTitle && quoted.startsWith('/'))) continue;
       await refused(rules, write(text), ctx(), new RegExp(`${member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} holds ${JSON.stringify(quoted).replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}, which the forge or a bot on it would take for a command: .*send the request again$`));
     }
   }
-  // A block string is read for its lines as it stands.
+  // Comment text in GraphQL is sent in a variable, where the mark is written: in the document itself, as a string,
+  // a block string or a variable's default, it is refused, after a block string is read for its lines as it stands.
+  const inDocument = /"body" is comment text, which is sent in a variable \("body: \$body", and "variables": \{ "body": "\.\.\." \}\), not written in the query$/;
   const block = (text) => ({ query: `mutation { addComment(input: { subjectId: "I_421", body: """${text}""" }) { clientMutationId } }`, variables: {} });
-  await allowed(github('issues'), ghql(block('fine\n  thanks')), pushed());
+  await refused(github('issues'), ghql(block('fine\n  thanks')), pushed(), inDocument);
   await refused(github('issues'), ghql(block('fine\n  /close')), pushed(), /"body" holds "\/close"/);
   await refused(github('issues'), ghql(block('fine, @copilot')), pushed(), /"body" holds "@copilot"/);
+  await refused(github('issues'), ghql({ query: 'mutation { addComment(input: { subjectId: "I_421", body: "atlantis apply" }) { clientMutationId } }', variables: {} }), pushed(), inDocument);
+  await refused(github('issues'), ghql({ query: 'mutation($b: String = "atlantis apply") { addComment(input: { subjectId: "I_421", body: $b }) { clientMutationId } }', variables: {} }), pushed(), inDocument);
+  await refused(github('issues'), ghql({ query: 'mutation($i: AddCommentInput = { subjectId: "I_421", body: "atlantis apply" }) { addComment(input: $i) { clientMutationId } }', variables: {} }), pushed(), inDocument);
   // A comment list holds objects; anything else is not one GitHub takes.
   await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: '/approve' }), pushed(), /^the body member "comments" is not a list$/);
   for (const comments of [[{ path: 'a.js', body: 5 }], ['x']]) {

@@ -21,6 +21,8 @@ const allocator = net.createServer((socket) => socket.end('allocator\n'));
 await new Promise((resolve) => allocator.listen(0, '127.0.0.1', resolve));
 
 const containerOf = (peer, pool = POOL) => containerName(pool, peer);
+// A comment as the forge receives it from the requester.
+const posted = (text) => `<!-- sent through the Diplomacy Network -->\n${text}`;
 const offerOf = async (m, taskId) => (await m.state()).offers.find((o) => o.taskId === taskId);
 const runOf = async (m, taskId) => (await m.state()).runs.filter((r) => r.taskId === taskId).at(-1) ?? null;
 const ended = (m, taskId) => until(`${taskId} to end`, async () => {
@@ -105,7 +107,7 @@ try {
     assert.deepEqual(seen.filter((r) => r.host === 'api.github.com').map((r) => [by(r), r.method, r.path]), [
       ['a', 'GET', '/repos/acme/widgets/pulls/1'], ['a', 'POST', '/repos/acme/widgets/pulls/1/reviews'],
     ]);
-    assert.deepEqual(JSON.parse(seen.find((r) => r.method === 'POST' && r.host === 'api.github.com').body), { event: 'COMMENT', body: 'from a' });
+    assert.deepEqual(JSON.parse(seen.find((r) => r.method === 'POST' && r.host === 'api.github.com').body), { event: 'COMMENT', body: posted('from a') });
     assert.deepEqual([...new Set(seen.filter((r) => r.host === 'github.com').map((r) => `${by(r)} ${r.path.replace('/acme/widgets.git/', '')}`))].sort(),
       ['b git-upload-pack', 'b info/refs?service=git-upload-pack'], 'the clone is the executor\'s mirror, fetched as the executor');
     assert.equal(bench.branch('sneaky'), null);
@@ -200,7 +202,7 @@ try {
     assert.equal((await ended(a, mine.taskId)).outcome.summary, 'done for a');
     assert.equal((await ended(c, theirs.taskId)).outcome.summary, 'done for c');
     const posts = bench.forge.log.slice(before).filter((r) => r.method === 'POST' && r.host === 'api.github.com');
-    assert.deepEqual(posts.map((r) => `${by(r)}: ${JSON.parse(r.body).body}`).sort(), ['a: from a', 'c: from c'], 'each request left with the credential of the machine that asked for the task');
+    assert.deepEqual(posts.map((r) => `${by(r)}: ${JSON.parse(r.body).body}`).sort(), [`a: ${posted('from a')}`, `c: ${posted('from c')}`], 'each request left with the credential of the machine that asked for the task');
     for (const run of runs) assert.equal(b.agent(run.runId).steps.find((s) => s.verb === 'adb').version, 'OKAY00040029', 'each job has the forward it was given');
     await b.admit(1);
   });
@@ -246,7 +248,7 @@ try {
     const api = seen.filter((r) => r.path.startsWith('/api/'));
     assert.deepEqual(api.filter((r) => r.path === project).map((r) => [by(r), r.method]), [['a', 'GET']], 'asked once, by the requester, for both tasks');
     assert.deepEqual(api.filter((r) => r.method !== 'GET').map((r) => [by(r), r.method, r.path, JSON.parse(r.body).body]), [
-      ['a', 'POST', `${project}/merge_requests/1/notes`, 'from a'], ['a', 'POST', '/api/v4/projects/99/merge_requests/1/notes', 'again from a'],
+      ['a', 'POST', `${project}/merge_requests/1/notes`, posted('from a')], ['a', 'POST', '/api/v4/projects/99/merge_requests/1/notes', posted('again from a')],
     ], 'the two notes, each sent with the requester\'s credential, and nothing the rules refused');
     assert.deepEqual([...new Set(seen.filter((r) => !r.path.startsWith('/api/')).map((r) => `${by(r)} ${r.path.replace('/acme/widgets.git/', '')}`))].sort(),
       ['b git-upload-pack', 'b info/refs?service=git-upload-pack'], 'the clone is the executor\'s mirror, fetched as the executor');
