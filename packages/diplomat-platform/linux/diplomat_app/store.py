@@ -236,7 +236,6 @@ class Store(QObject):
     ban_noticed = Signal(str, str)
     # A tick's findings, handed to the Qt thread, where the queue is changed.
     _comms_ticked = Signal(object)
-    # Emitted when anything the Pipeline screen draws changes.
     pipeline_changed = Signal()
     # A Pipeline sync's answer, handed to the Qt thread, where the queue is changed.
     _pipeline_synced = Signal(object)
@@ -1230,8 +1229,7 @@ class Store(QObject):
     def comms_seen_at(self, value: str) -> None:
         self._settings.setValue("commsSeenAt", str(value))
 
-    # The Pipeline (the pipeline* keys of Store.swift, same strings). Off, nothing reads
-    # the trackers and its queued work waits.
+    # The Pipeline (the pipeline* keys of Store.swift, same strings).
 
     @property
     def pipeline_enabled(self) -> bool:
@@ -1316,9 +1314,8 @@ class Store(QObject):
                 "merge": self.pipeline_merge, "fracture": self.pipeline_fracture}
 
     def _write_pipeline_control(self) -> None:
-        """:func:`pipeline.write_control`; headless only into a
-        ``DIPLOMAT_PIPELINE_DIR``, so a render never steers the live app's sync. Twin of
-        ``Store.writePipelineControl``."""
+        """Headless only into a ``DIPLOMAT_PIPELINE_DIR``, so a render never steers the
+        live app's sync. Twin of ``Store.writePipelineControl``."""
         if headless.active(os.environ) and not os.environ.get("DIPLOMAT_PIPELINE_DIR"):
             return
         with self._control_lock:
@@ -2976,9 +2973,8 @@ class Store(QObject):
     def is_held(self, task: autofix.QueuedTask,
                 owned: dict[str, frozenset[str]] | None = None) -> bool:
         """Paused, or a pipeline ask still stale (:attr:`_pipeline_stale`) or held by an
-        unreadable ban list (:attr:`ban_list_unreadable`), unless a Slack ping took it as
-        its ask: then it is asked-for work, which switching a monitor off never stops
-        (:meth:`is_paused`)."""
+        unreadable ban list, unless a Slack ping took it as its ask: then it is
+        asked-for work, which switching a monitor off never stops (:meth:`is_paused`)."""
         held = task.job.counter == PIPELINE_COUNTER and (
             self.ban_list_unreadable or task.id in self._pipeline_stale)
         return ((self.is_paused(task.job.counter) or held)
@@ -4571,14 +4567,12 @@ class Store(QObject):
 
     # MARK: The Pipeline
     #
-    # A sync - reading the trackers, rating, labelling, merging, fracturing, the graph and
-    # the agent work owed - is the core's (:mod:`pipeline`). Here that work becomes asks on
-    # the queue every other ask waits in, so the ban list, the task cap and the budget
-    # all still apply, each asked for once per attempt; and the screen's own actions run.
+    # A sync is the core's (:mod:`pipeline`). The agent work it owes becomes asks on the
+    # queue every other ask waits in, so the ban list, the task cap and the budget all
+    # still apply, each asked for once per attempt.
 
     def pipeline_settings_payload(self) -> dict:
-        """The ``PipelineSettings`` JSON a sync is handed. Its roots are the GitHub ones:
-        the Pipeline skips GitLab."""
+        """The ``PipelineSettings`` JSON a sync is handed; the Pipeline skips GitLab roots."""
         teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
         token_file = os.path.expanduser(appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip())
         with self._pipeline_lock:
@@ -4599,14 +4593,12 @@ class Store(QObject):
         }
 
     def pipeline_forced(self, kind: str) -> frozenset[str]:
-        """The item ids the screen asked to ``rate`` or ``fracture`` that no sync has
-        answered for yet."""
         with self._pipeline_lock:
             return self._pipeline_force[kind]
 
     def pipeline_force_now(self, kind: str, item_id: str) -> None:
-        """The screen's "Rate now" (``kind`` ``rate``) or "Fracture" (``fracture``): the
-        item goes ahead of every limit in a sync started now."""
+        """The screen's "Rate now" (``rate``) or "Fracture" (``fracture``): the item goes
+        ahead of every limit in a sync started now."""
         with self._pipeline_lock:
             self._pipeline_force = {**self._pipeline_force,
                                     kind: self._pipeline_force[kind] | {item_id}}
@@ -4614,9 +4606,9 @@ class Store(QObject):
         self.run_pipeline_sync_async()
 
     def refresh_pipeline_last(self) -> None:
-        """``pipeline-last``, so the screen opens on the last sync's result before this
-        run's first. None before the first sync ever; a core that cannot answer leaves
-        it empty too, and the first sync says why."""
+        """``pipeline-last``, so the screen opens on the last result before this run's
+        first sync. None before any sync, or from a core that cannot answer: the first
+        sync says why."""
         try:
             last = pipeline.last()
         except pipeline.Failure:
@@ -4714,13 +4706,12 @@ class Store(QObject):
         answered the last result again (:func:`pipeline.ran_since`) every force, and
         every ask but one whose switch is off, as does one begun in an earlier
         :attr:`_pipeline_epoch`; one landing after the Pipeline went off every ask
-        (switched off midway, it emits no effect). A root a sync was not ``handed`` while
-        a root path did not resolve counts as unread (:func:`pipeline.withdrawn`).
+        (switched off midway, it emits no effect).
 
-        A notice is logged when it first appears, and each merge and split the core
-        made since the previous result once (:func:`pipeline.fresh_events`), whatever
-        the switches. One dated at the epoch, the core's answer while another sync holds
-        its lock and none has a result yet, is not shown."""
+        Each notice when it first appears, and each merge and split since the previous
+        result (:func:`pipeline.fresh_events`), is logged once, whatever the switches. A
+        result dated at the epoch, the core's answer while another sync holds its lock
+        and none has a result yet, is not shown."""
         with self._pipeline_lock:
             again = (self._pipeline_again and self.pipeline_enabled
                      and not self._pipeline_stopped)
@@ -4804,9 +4795,9 @@ class Store(QObject):
         off. A queued Linear fix whose effect now names another repo or text is queued
         again with them, as the same attempt: its agent cannot read Linear.
 
-        The records kept are :func:`pipeline.retained`'s after a ``judged`` sync
-        (:meth:`_apply_pipeline_sync`), every one after any other. An ask that could not
-        be queued is an attempt too, retried on the same ladder."""
+        The records kept are :func:`pipeline.retained`'s after a ``judged`` sync, every
+        one after any other. An ask that could not be queued is an attempt too, retried
+        on the same ladder."""
         banned = bans.read()
         unreadable = bans.unreadable()
         roots = len(review.repo_roots())
@@ -4903,8 +4894,6 @@ class Store(QObject):
                                      config=cfg.prompt_payload(), repo=root.key)
 
     def _pipeline_in_flight(self, work: autofix.RequestedWork) -> bool:
-        """Whether that work is queued or starting, or has an agent on it: any agent on
-        a review's PR (:meth:`_in_flight`), a fix of a fix's issue."""
         waiting = ({e.id for e in self.queued_tasks + self.starting_tasks}
                    | {w.key for w in self.requested_work})
         if work.key in waiting:
@@ -4914,8 +4903,8 @@ class Store(QObject):
         return self._pipeline_fix_running(work)
 
     def _pipeline_fix_running(self, work: autofix.RequestedWork) -> bool:
-        """Whether an agent runs a fix of ``work``'s issue, found by the link its run
-        carries (:meth:`_requested_task`). Twin of ``Store.pipelineFixRunning``."""
+        """Whether an agent runs a fix of ``work``'s issue. Twin of
+        ``Store.pipelineFixRunning``."""
         named = work.linear or item_label(work.item or "", len(review.repo_roots()))
         return self._fix_of(self.running_tasks, item_key_from_url(work.url), named) is not None
 
@@ -4983,16 +4972,15 @@ class Store(QObject):
         return "Diplomat has this Linear issue's text only while Open fix PRs is on"
 
     def pipeline_ban_unread(self) -> str | None:
-        """Why, by the ban list as it reads now, a sync would rate and split nothing: it
-        cannot be read; None while it can. Twin of ``Store.pipelineBanUnread``."""
+        """Why a sync would rate and split nothing: the ban list cannot be read; None
+        while it can. Twin of ``Store.pipelineBanUnread``."""
         return ("The prompt-injection ban list could not be read" if self.ban_list_unreadable
                 else None)
 
     def pipeline_ban(self, item: dict) -> str | None:
-        """Why the queue would not run ``item``'s fix, by the ban list:
-        :meth:`pipeline_ban_unread`, or it names who wrote the text ``item`` carries
-        (``splitFrom``, else its author); None for neither. Twin of
-        ``Store.pipelineBan``."""
+        """Why the ban list stops ``item``'s fix: :meth:`pipeline_ban_unread`, or it
+        names who wrote the text ``item`` carries (``splitFrom``, else its author); None
+        for neither. Twin of ``Store.pipelineBan``."""
         unread = self.pipeline_ban_unread()
         if unread:
             return unread

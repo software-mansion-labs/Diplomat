@@ -49,8 +49,7 @@ def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
         started: Callable[[subprocess.Popen], None] | None = None) -> str:
     """``diplomat-core <args>``'s stdout, with ``stdin`` handed over as JSON; or
     :class:`RuntimeError` saying why not (:class:`CoreBinaryMissing` when there is no
-    binary). The process leads a session of its own, which :func:`stop` ends past
-    ``timeout``; ``started`` is handed it, to stop it sooner."""
+    binary). ``started`` is handed the process, to :func:`stop` it sooner."""
     env = dict(os.environ)
     env.setdefault("DIPLOMAT_CORE", str(core.assets_dir()))
     try:
@@ -78,10 +77,9 @@ def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
 
 
 def stop(proc: subprocess.Popen) -> None:
-    """SIGKILL to ``proc``, which :func:`cli` started, and to whatever is left in its
-    session: Foundation's ``Process`` starts each of the core's children (``gh``,
-    ``claude``) in a process group of its own. Gives up after a second on any that
-    will not die."""
+    """SIGKILL to the session ``proc`` (from :func:`cli`) leads, not just its group:
+    Foundation's ``Process`` starts each of the core's children (``gh``, ``claude``) in a
+    process group of its own."""
     with contextlib.suppress(OSError):
         os.killpg(proc.pid, signal.SIGKILL)
     for _ in range(50):
@@ -95,7 +93,7 @@ def stop(proc: subprocess.Popen) -> None:
 
 
 def _session(sid: int) -> list[int]:
-    """The processes in session ``sid`` not yet dead, by ``/proc``; none without it."""
+    """The live processes in session ``sid``; none without ``/proc``."""
     try:
         names = os.listdir("/proc")
     except OSError:

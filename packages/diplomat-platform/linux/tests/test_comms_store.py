@@ -1583,9 +1583,6 @@ def test_auth_without_a_core_says_so(monkeypatch):
 
 
 def _answering_core(seen: list):
-    """A ``subprocess.Popen`` whose core answers at once, noting its verb and the bound
-    it was given."""
-
     class Proc:
         returncode = 0
 

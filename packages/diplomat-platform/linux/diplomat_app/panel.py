@@ -310,8 +310,8 @@ class Panel(QWidget):
         comms_scroll.setWidget(self.comms_view)
         self._screens["comms"] = self.body.addWidget(comms_scroll)
 
-        # Page: Pipeline (every open issue and PR, rated and routed). Not scrolled as a
-        # whole like the others: its graph scrolls both ways and its detail on its own.
+        # Page: Pipeline. Not scrolled whole like the others: its graph and its detail
+        # scroll on their own.
         self.pipeline_view = PipelineView(store)
         self.pipeline_view.done.connect(lambda: self._set_screen("main"))
         self._screens["pipeline"] = self.body.addWidget(self.pipeline_view)

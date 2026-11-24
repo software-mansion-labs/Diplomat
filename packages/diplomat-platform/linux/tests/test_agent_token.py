@@ -210,7 +210,6 @@ def test_the_agent_gets_the_token(shell, pid, tmp_path, monkeypatch, token_file)
     assert (tmp_path / "done").read_text() == "0"
 
 
-#: The applet's secrets: the Slack token and the Pipeline's Linear key.
 _SECRETS = pytest.mark.parametrize("secret", [comms.TOKEN_ENV, pipeline.TOKEN_ENV],
                                    ids=["slack", "linear"])
 

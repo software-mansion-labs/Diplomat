@@ -236,8 +236,6 @@ def test_a_paused_monitors_row_says_nothing_will_start_it(panel):
 
 
 def test_a_pipeline_asks_cancel_says_what_asks_for_it_again(panel):
-    """A sweep's ask comes back only if swept again; a pipeline review at the PR's next
-    head, a pipeline fix by Start fix."""
     from PySide6.QtWidgets import QPushButton
 
     panel.store.queued_tasks = [

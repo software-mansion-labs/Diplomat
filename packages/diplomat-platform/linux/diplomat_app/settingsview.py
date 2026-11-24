@@ -1435,7 +1435,7 @@ class SettingsView(QWidget):
     def _on_pipeline_toggled(self, on: bool) -> None:
         self.store.pipeline_enabled = on
         self.store.pipeline_changed.emit()
-        # Its queued rows say whether it is paused, like a monitor's.
+        # Its queued rows show whether it is paused.
         self.store.tasks_changed.emit()
         if on:
             self.store.run_pipeline_sync_async()

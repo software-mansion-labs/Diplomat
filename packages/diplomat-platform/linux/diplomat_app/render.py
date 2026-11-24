@@ -812,9 +812,7 @@ def _pipeline_item(url: str, label: str, title: str, *, kind: str, stage: str, l
 def pipeline_fixture_result(slug: str, now: datetime) -> dict:
     """A ``PipelineTickResult`` over the root ``slug``, as the Swift encoder writes one:
     every stage, lane, edge kind (a ``fixes`` one reaching past the next column) and
-    event kind, two holds, a notice, GitHub and Linear items, writable and not, ratings
-    off labels and Diplomat's own (one with the rater's why and its diff's floor), and
-    the effects a sync owes for them."""
+    event kind, and the effects a sync owes."""
     from diplomat_runtime import comms
 
     home = f"https://github.com/{slug}"
@@ -961,10 +959,9 @@ def pipeline_fixture_result(slug: str, now: datetime) -> dict:
 
 
 def _pipeline_fixture(store: Store) -> str:
-    """:func:`pipeline_fixture_result`, written as ``last.json`` into a scratch
-    ``DIPLOMAT_PIPELINE_DIR`` and read back through the real ``diplomat-core
-    pipeline-last``, which has to hand back exactly what it was given: the fixture is
-    the Swift encoding, so this render is the front-end's half of that contract. One
+    """:func:`pipeline_fixture_result` as ``last.json``, read back through the real
+    ``diplomat-core pipeline-last``, which must hand it back unchanged: the fixture is the
+    Swift encoding, so this render is the front-end's half of that contract. One
     candidate's fix is being dispatched and one fast-track PR's review waits in the
     queue, so both badges draw. Returns the id of the card to select."""
     import json

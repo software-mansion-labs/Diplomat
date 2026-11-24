@@ -1,12 +1,6 @@
-"""The Pipeline screen - every open issue and PR a sync read, as a graph.
-
-Draws ``Store.pipeline_result`` (a ``PipelineTickResult``, from ``diplomat-core
-pipeline-tick`` or ``pipeline-last``): a card per ``graph.nodes`` entry at its column and
-row, a connector per ``graph.edges`` entry, lane filter chips over them, and beside them
-the selected card's detail - its rating, hold, who may act on it, its traversal (the
-result's ``events`` about it) and the asks the screen makes of the Store. The layout,
-the stages and the lanes are the core's, read here as they come. The macOS twin is
-``PipelineView.swift``.
+"""The Pipeline screen: ``Store.pipeline_result`` as a graph of cards, and the selected
+card's detail. The layout, stages and lanes are the core's, drawn as they come. The macOS
+twin is ``PipelineView.swift``.
 """
 
 from __future__ import annotations
@@ -49,13 +43,13 @@ from . import glyphs
 from .store import Store
 from .widgets import ElidedLabel, GlyphLabel, ToggleChip, _draw_glyph, muted, plain_tooltip, tint_bg
 
-#: assets/pipeline.json → labels.color: the colour of the labels Diplomat writes.
+#: assets/pipeline.json → labels.color.
 TINT = "#5856D6"
 _RED, _GREEN, _ORANGE, _BLUE, _PURPLE, _TEAL = (
     "#FF3B30", "#34C759", "#FF9500", "#0A84FF", "#AF52DE", "#30B0C7")
 _GREY = glyphs.MUTED
 
-#: `PipelineLevel`'s raw values. A card's badge shortens the word; the detail spells it.
+#: `PipelineLevel`'s raw values.
 LEVEL_TINT = {"low": _GREEN, "medium": _ORANGE, "high": _RED}
 LEVEL_SHORT = {"low": "LOW", "medium": "MED", "high": "HIGH"}
 
@@ -64,14 +58,13 @@ STAGE_TINT = {"unrated": _GREY, "human": _ORANGE, "candidate": TINT, "fractured"
               "fixing": _BLUE, "fast-track": TINT, "clean": TINT, "cleared": _GREEN,
               "merged": _PURPLE, "closed": _GREY}
 
-#: The filter's chips, in order: every lane, then `PipelineLane`'s raw values.
+#: The filter chips in order: "all", then `PipelineLane`'s raw values.
 LANES = (("all", "All"), ("fast", "Fast"), ("human", "Human"), ("unrated", "Unrated"),
          ("fractured", "Fractured"), ("done", "Done"))
 LANE_TINT = {"fast": TINT, "human": _ORANGE, "unrated": _GREY, "fractured": _TEAL,
              "done": _GREY}
 
-#: `PipelineGraph.EdgeKind`'s raw values, in the order the key beside the lane chips
-#: names them.
+#: `PipelineGraph.EdgeKind`'s raw values, in the edge key's order.
 EDGE_STYLE = {"fixes": Qt.PenStyle.SolidLine, "child": Qt.PenStyle.DashLine,
               "stacked": Qt.PenStyle.DotLine}
 
@@ -80,9 +73,8 @@ EVENT_TINT = {"rated": _GREY, "labelled": _GREY, "fast-track": TINT, "clean": TI
               "rerated": _GREY, "cleared": _GREEN, "merged": _PURPLE, "held": _ORANGE,
               "fractured": _TEAL, "child": _TEAL, "asked": _BLUE, "error": _RED}
 
-#: A card, the gaps between cards, and the canvas margins. A connector bends in the
-#: gutter a column gap leaves; the side margins give the outer columns one too, for a
-#: connector that has to go round into column 0 or out of the last.
+#: A connector bends halfway across a column gap; MARGIN_X gives the outer columns that
+#: room too.
 CARD_W, CARD_H, RADIUS = 170, 88, 5
 COL_GAP, ROW_GAP = 48, 16
 MARGIN_X, MARGIN_Y = 28, 12
@@ -130,7 +122,6 @@ def open_url(url: str) -> None:
 
 
 def _clock(iso: str | None) -> str:
-    """The time today; with its date on any other day."""
     when = comms.parse_iso(iso or "")
     if when is None:
         return "—"
@@ -150,7 +141,6 @@ def source_glyph(item: dict) -> str:
 
 
 def _who(name: str, item: dict) -> str:
-    """A GitHub login as ``@login``; a Linear name as it is."""
     return name if item.get("source") == "linear" else f"@{name}"
 
 
@@ -167,8 +157,7 @@ def _ends(edge: dict) -> tuple[str, str]:
 
 
 def groups(nodes: list[dict], edges: list[dict]) -> dict[str, str]:
-    """Each node's connected group by the union of the edges between nodes, as one id
-    standing for the group."""
+    """Each node id → a representative id of its connected component."""
     parent = {str(n.get("id")): str(n.get("id")) for n in nodes}
 
     def find(x: str) -> str:
@@ -185,9 +174,8 @@ def groups(nodes: list[dict], edges: list[dict]) -> dict[str, str]:
 
 
 def shown_nodes(result: dict, lane: str) -> list[dict]:
-    """The nodes the lane filter keeps, the rows it empties closed up in order: every
-    node for ``all``, else each whole group holding an item in ``lane``, so a card keeps
-    the items it links to beside it."""
+    """The nodes ``lane`` keeps, emptied rows closed up: each whole group with an item in
+    ``lane``, so a card keeps what it links to beside it."""
     items = {str(i.get("id")): i for i in result.get("items") or []}
     graph = result.get("graph") or {}
     nodes = [n for n in graph.get("nodes") or [] if str(n.get("id")) in items]
@@ -210,8 +198,8 @@ def lane_counts(items: list[dict]) -> dict[str, int]:
 
 @dataclass(frozen=True)
 class Connector:
-    """One edge as drawn: out of its source card's right side at ``start``, into its
-    target's left side, where the arrowhead's ``tip`` touches it."""
+    """``start`` is on the source card's right side; ``tip``, the arrowhead's point, on the
+    target's left."""
 
     source: str
     target: str
@@ -227,7 +215,6 @@ class Connector:
 
 
 def _toward(at: QPointF, other: QPointF, radius: float) -> QPointF:
-    """The point ``radius`` from ``at`` toward ``other``, at most half way there."""
     dx, dy = other.x() - at.x(), other.y() - at.y()
     length = math.hypot(dx, dy)
     if not length:
@@ -246,22 +233,18 @@ def _rounded(points: list[QPointF], radius: float = 6.0) -> QPainterPath:
 
 
 def _adjacent(src: QRectF, dst: QRectF) -> bool:
-    """Whether ``dst`` is in the column after ``src``'s."""
+    """Whether ``dst`` is in the next column."""
     return abs(dst.left() - src.right() - COL_GAP) < 0.5
 
 
 def _gap(src: QRectF, dst: QRectF) -> float:
-    """The middle of the gap between card rows that a connector not into the next column
-    runs along: above ``src``'s row toward a target above it, else below."""
+    """The row gap a connector not into the next column runs along."""
     return src.top() - ROW_GAP / 2 if dst.top() < src.top() else src.bottom() + ROW_GAP / 2
 
 
 def _path(src: QRectF, dst: QRectF, y0: float, y1: float) -> QPainterPath:
-    """From ``src``'s right side at ``y0`` to the arrowhead's base before ``dst``'s left
-    side at ``y1``. Into the next column it is one curve through the gutter between
-    them. Further on, or back into the same column or an earlier one, it goes out into
-    the source's gutter, along :func:`_gap`, and in through the target's gutter: a
-    gutter and a gap hold no card to cross."""
+    """Up to the arrowhead's base. Beyond the next column, or backward, it runs through the
+    gutters and a row gap, which hold no card to cross."""
     start, end = QPointF(src.right(), y0), QPointF(dst.left() - ARROW, y1)
     if _adjacent(src, dst):
         mid = (start.x() + end.x()) / 2
@@ -275,10 +258,9 @@ def _path(src: QRectF, dst: QRectF, y0: float, y1: float) -> QPainterPath:
 
 
 def connectors(cards: dict[str, QRectF], edges: list[dict]) -> list[Connector]:
-    """A connector per edge between two cards drawn. Several leaving one card, or
-    arriving at one, share its side out top to bottom in the order they head off or
-    come in from (the card at the other end, or the gap they run along), so neither
-    their lines nor their arrowheads land on each other."""
+    """A connector per edge between two drawn cards. Those sharing a card's side are
+    spread along it in the order they head off or come in from, so neither their lines nor
+    their arrowheads land on each other."""
     shown = [e for e in edges
              if (ends := _ends(e))[0] in cards and ends[1] in cards and ends[0] != ends[1]]
     outs: dict[str, list[dict]] = {}
@@ -289,13 +271,11 @@ def connectors(cards: dict[str, QRectF], edges: list[dict]) -> list[Connector]:
         ins.setdefault(b, []).append(e)
 
     def toward(e: dict, end: int) -> tuple[float, float]:
-        """Where ``e`` heads off to (``end`` 1) or comes in from (``end`` 0)."""
         src, dst = cards[_ends(e)[0]], cards[_ends(e)[1]]
         other = (src, dst)[end]
         return (other.center().y() if _adjacent(src, dst) else _gap(src, dst), other.left())
 
     def slots(by_card: dict[str, list[dict]], end: int) -> dict[int, tuple[int, int]]:
-        """``id(edge)`` → (its place on the side, how many share it)."""
         out: dict[int, tuple[int, int]] = {}
         for es in by_card.values():
             es.sort(key=lambda e: toward(e, end))
@@ -321,8 +301,7 @@ def connectors(cards: dict[str, QRectF], edges: list[dict]) -> list[Connector]:
 
 
 def two_lines(text: str, font: QFont, width: float) -> list[str]:
-    """``text`` wrapped to ``width`` at word boundaries: its first line whole, the rest
-    on a second one, cut to fit."""
+    """The first wrapped line of ``text``, then the rest elided onto a second."""
     layout = QTextLayout(text, font)
     option = QTextOption()
     option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
@@ -333,7 +312,7 @@ def two_lines(text: str, font: QFont, width: float) -> list[str]:
         layout.endLayout()
         return []
     first.setLineWidth(width)
-    # The layout counts UTF-16 units, which a title with an emoji in it outnumbers.
+    # QTextLayout counts UTF-16 units, not code points.
     cut = (first.textStart() + first.textLength()) * 2
     layout.endLayout()
     units = text.encode("utf-16-le")
@@ -349,8 +328,6 @@ def two_lines(text: str, font: QFont, width: float) -> list[str]:
 
 @dataclass(frozen=True)
 class CardFace:
-    """What one card draws, worked out once per rebuild."""
-
     glyph: str
     label: str
     title: str
@@ -387,8 +364,7 @@ def _chip_font(p: QPainter) -> QFont:
 
 def _paint_chip(p: QPainter, x: float, y: float, text: str, tint: str, *,
                 right: bool = False, pad: float = 10.0) -> float:
-    """``text`` in ``tint`` on a capsule of it ``pad`` wider, 14px high, from ``x`` (ending
-    there with ``right``). Returns its width."""
+    """Starts at ``x``, or ends there with ``right``. Returns its width."""
     font = _chip_font(p)
     width = QFontMetricsF(font).horizontalAdvance(text) + pad
     box = QRectF(x - width if right else x, y, width, 14)
@@ -405,8 +381,7 @@ def _paint_chip(p: QPainter, x: float, y: float, text: str, tint: str, *,
 
 
 def _paint_lock(p: QPainter, box: QRectF, color: QColor) -> None:
-    """A padlock: Diplomat writes nothing to this item. Drawn, not a glyph: the text
-    padlocks are all colour emoji."""
+    """Drawn, not a glyph: the text padlocks are all colour emoji."""
     body = QRectF(box.left(), box.top() + box.height() * 0.45, box.width(),
                   box.height() * 0.55)
     p.setPen(Qt.PenStyle.NoPen)
@@ -424,7 +399,6 @@ def _paint_lock(p: QPainter, box: QRectF, color: QColor) -> None:
 
 
 def _paint_hold(p: QPainter, box: QRectF, color: QColor) -> None:
-    """A pause mark: the item is held (its hold is in the tooltip and the detail)."""
     bar = box.width() / 3
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(color)
@@ -433,10 +407,6 @@ def _paint_hold(p: QPainter, box: QRectF, color: QColor) -> None:
 
 
 class GraphCanvas(QWidget):
-    """The cards and their connectors, painted at the graph's own size, which the
-    scroll area around it scrolls both ways. A click on a card selects it; a click
-    beside every card, none."""
-
     #: The id of the card clicked, or "" for none.
     clicked = Signal(str)
 
@@ -446,7 +416,6 @@ class GraphCanvas(QWidget):
         self.faces: dict[str, CardFace] = {}
         self.connectors: list[Connector] = []
         self.selected: str | None = None
-        #: Drawn in place of an empty graph.
         self.placeholder = ""
         self.setMouseTracking(True)
 
@@ -534,8 +503,7 @@ class GraphCanvas(QWidget):
         p.drawPath(outline)
 
         left, right, top = rect.left() + 10, rect.right() - 8, rect.top() + 7
-        # The head: source glyph and label; the badge and the lock at the far end. The
-        # glyph goes first, in the widget's font: a chip leaves the painter's bold.
+        # The glyph goes first: a chip leaves the painter's font bold.
         p.save()
         _draw_glyph(p, QRectF(left, top, 13, 14), face.glyph, text.name(), 11)
         p.restore()
@@ -562,8 +530,7 @@ class GraphCanvas(QWidget):
         for i, line in enumerate(two_lines(face.title, font, right - left)):
             p.drawText(QRectF(left, top + 18 + i * 13, right - left, 13),
                        int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), line)
-        # The foot: the rating's badges, a hold's mark after them, the stage at the far end;
-        # in a wide font the chips give up padding, down to 4px, to keep them apart.
+        # In a wide font the chips give up padding, down to 4px, to keep them apart.
         foot = rect.bottom() - 7 - 14
         chips = [(f"{letter} {LEVEL_SHORT.get(level or '', '?')}",
                   LEVEL_TINT.get(level or "", _GREY))
@@ -583,8 +550,6 @@ class GraphCanvas(QWidget):
 
 
 class _EdgeKey(QWidget):
-    """One edge kind's line and arrowhead, as the graph draws it."""
-
     def __init__(self, kind: str) -> None:
         super().__init__()
         self.kind = kind
@@ -609,8 +574,7 @@ class _EdgeKey(QWidget):
 
 
 class _Link(ElidedLabel):
-    """A URL on one line, cut in the middle to fit, keeping its number; a click opens
-    it."""
+    """Elided in the middle, keeping the URL's number."""
 
     elide = Qt.TextElideMode.ElideMiddle
 
@@ -627,8 +591,8 @@ class _Link(ElidedLabel):
 
 
 class _Head(ElidedLabel):
-    """The item's label, cut in the middle to fit beside its kind, keeping ``#N``: a
-    root's ``owner/repo#N`` may be wider than the pane, which does not scroll sideways."""
+    """Elided in the middle, keeping ``#N``: ``owner/repo#N`` may be wider than the pane,
+    which does not scroll sideways."""
 
     elide = Qt.TextElideMode.ElideMiddle
 
@@ -653,11 +617,9 @@ class _Head(ElidedLabel):
 
 
 class EventRow(QWidget):
-    """One step of a traversal: when, what kind, and what Diplomat said of it."""
-
     def __init__(self, event: dict) -> None:
         super().__init__()
-        #: Not ``event``, which would shadow ``QWidget.event`` from Qt's own calls.
+        #: Not ``event``: that would shadow ``QWidget.event``.
         self.step = event
         col = QVBoxLayout(self)
         col.setContentsMargins(0, 0, 0, 0)
@@ -693,9 +655,8 @@ def can_start_fix(item: dict) -> bool:
 
 
 def can_fracture(item: dict, edges: list[dict], rooted: bool) -> bool:
-    """A writable open issue that is not split yet: not ``fractured``, with no child,
-    and no PR fixing it (``fixing``), whose code a sync can read (``rooted``,
-    ``Store.pipeline_rooted``). Twin of ``PipelineView.canFracture``."""
+    """A writable open issue not split yet and with no PR fixing it, whose code a sync can
+    read (``Store.pipeline_rooted``). Twin of ``PipelineView.canFracture``."""
     item_id = str(item.get("id") or "")
     return (item.get("kind") == "issue" and bool(item.get("writable")) and rooted
             and item.get("stage") in ("unrated", "human", "candidate")
@@ -703,8 +664,8 @@ def can_fracture(item: dict, edges: list[dict], rooted: bool) -> bool:
 
 
 def empty_text(unread: list[str], reads: bool) -> str:
-    """What stands in for the graph after a sync that read no item: what it did not read.
-    ``reads``: a GitHub root or a Linear team is set. Twin of ``PipelineView.emptyText``."""
+    """The placeholder after a sync that read no item. ``reads``: a GitHub root or a Linear
+    team is set. Twin of ``PipelineView.emptyText``."""
     if not reads:
         return "GitLab roots are not read, and no GitHub root or Linear team is set."
     if unread:
@@ -714,8 +675,7 @@ def empty_text(unread: list[str], reads: bool) -> str:
 
 
 def can_rate(item: dict, me: str, rooted: bool) -> bool:
-    """An open item a sync rates when asked: a PR only when it is ``me``'s, an issue
-    only when its code can be read (``rooted``). Twin of ``PipelineView.canRate``."""
+    """An open item a sync rates when asked. Twin of ``PipelineView.canRate``."""
     if item.get("state") not in ("open", "draft"):
         return False
     if item.get("kind") == "pr":
@@ -730,15 +690,10 @@ class PipelineView(QWidget):
         super().__init__()
         self.store = store
         self.setStyleSheet("PipelineView { background: transparent; }")
-        #: Survive the rebuild every store signal causes; each opening starts on every
-        #: lane with nothing selected.
         self.lane = "all"
         self.selected: str | None = None
         #: Why each item's last "Start fix" was not queued.
         self._fix_answers: dict[str, str] = {}
-        #: The detail's action buttons (``open``, ``rate``, ``fracture``, ``fix``), why
-        #: the last "Start fix" was not queued under them, and its traversal's rows,
-        #: newest first.
         self.buttons: dict[str, QPushButton] = {}
         self.fix_answer: QLabel | None = None
         self.event_rows: list[EventRow] = []
@@ -850,7 +805,6 @@ class PipelineView(QWidget):
         self.rebuild()
 
     def select(self, item_id: str) -> None:
-        """Show ``item_id``'s detail from its top; "" for none."""
         self.selected = item_id or None
         self.rebuild()
         self.detail_scroll.verticalScrollBar().setValue(0)
@@ -1028,15 +982,8 @@ class PipelineView(QWidget):
         self.detail_col.addStretch(1)
 
     def _build_actions(self, item: dict, badge: str | None, edges: list[dict]) -> None:
-        """Open always; the rest only while the Pipeline is on, which off acts on
-        nothing. Rate now for an item :func:`can_rate` allows; Fracture for an issue
-        :func:`can_fracture` allows and Start fix for a candidate issue
-        (:func:`can_start_fix`) whose fix is known, each with nothing on it; neither of
-        the first two that the last sync would refuse (its ``rateRefused`` /
-        ``fractureRefused``) or while the ban list cannot be read
-        (``Store.pipeline_ban_unread``), nor Start fix the ban list holds
-        (``Store.pipeline_ban``) or once a split is asked. A PR is the operator's by
-        ``gh``'s account, as a sync judges it, not the Settings override's."""
+        """A PR is the operator's by ``gh``'s account (``Store.me``), as a sync judges it,
+        not the Settings override's."""
         st = self.store
         item_id = str(item.get("id") or "")
         on = st.pipeline_enabled
