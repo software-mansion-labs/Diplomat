@@ -277,7 +277,8 @@ its commits, its base branch and the checks it requires read only for a PR nothi
   `work in progress`, matched as triage labels are (`pipeline.json` `stopLabels`);
 - it lacks either fast-track label, or is off the fast track for good;
 - it closes no open issue, or one that is not a `candidate`, carries a stop label, or is held by a
-  Linear issue tracking it, as read right before the merge;
+  Linear issue tracking it, as read right before the merge, or one a merge this sync asked for may
+  have closed;
 - it would close an issue no read judged: one this sync did not read, more than the closing
   references one read lists, one a closing word names that GitHub does not list among them, or a
   Linear issue of a team not tracked or that could not be read; with Linear teams set, also when

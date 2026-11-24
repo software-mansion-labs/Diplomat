@@ -1522,6 +1522,7 @@ func pipelineSmoke() throws {
           && shut.ghCalls.isEmpty && shutOut.unread == ["acme/app"], "a lock not opened: \(shutOut.notices)")
 
     try pipelineGuards(base: base, root: root, team: team, t0: t0)
+    try pipelineMergeSync(base: base, root: root, team: team, t0: t0)
 
     // The real gh and claude get neither token, and claude runs in the checkout.
     let stubs = base.appendingPathComponent("live-checkout")
@@ -1546,6 +1547,67 @@ func pipelineSmoke() throws {
     check(claudeEnv.components(separatedBy: "\n").first?.hasSuffix("/live-checkout") == true,
           "claude runs in the root's checkout: \(claudeEnv.prefix(200))")
     check(live.linearKey(PipelineSettings(roots: [])) == "lin_api_from_env")
+}
+
+/// The fix asks a sync may not make, and the merges after one it could not confirm.
+private func pipelineMergeSync(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                               t0: Date) throws {
+    section("pipeline merge sync")
+    func dir(_ name: String) -> URL { base.appendingPathComponent("merge-sync-" + name) }
+
+    // #24, a candidate no PR fixes.
+    func asks(_ name: String, _ prepare: (URL) throws -> Void) throws -> [PipelineEffect] {
+        try FileManager.default.createDirectory(at: dir(name), withIntermediateDirectories: true)
+        try prepare(dir(name))
+        return sync(only([24]), PipelineSettings(roots: [root], fix: true), dir(name), t0).result.effects
+    }
+    let asked = try asks("fix") { _ in }
+    let badState = try asks("fix-bad-state") { try Data(#"{"decided": 7}"#.utf8).write(to: $0.appendingPathComponent("state.json")) }
+    let allOff = try asks("fix-all-off") {
+        PipelineControl(enabled: false, rate: true, fix: true, fastTrack: true, merge: true, fracture: true).save(in: $0)
+    }
+    let fixOff = try asks("fix-off") {
+        PipelineControl(enabled: true, rate: true, fix: false, fastTrack: true, merge: true, fracture: true).save(in: $0)
+    }
+    check(asked == [fixFX(24)] && badState.isEmpty && allOff.isEmpty && fixOff.isEmpty,
+          "fix asks, blocked or switched off: \(asked) \(badState) \(allOff) \(fixOff)")
+
+    // #13 and #31 cleared, each closing #27, which GitHub closes only at a later read: once
+    // #13's merge is asked for, #31 waits, whether or not #13 is seen merged.
+    func pair(_ name: String, _ change: (Trackers) -> Void) throws -> (Trackers, Synced) {
+        let t = only([13, 27])
+        var second = t.prs[0]
+        second.number = 31
+        second.headRef = "logout-cache-2"
+        second.head = sha("d3")
+        second.reviews = [.init(login: opLogin, body: "\(tag)Clean at \(sha("d3"))", oid: sha("d3"))]
+        t.prs.append(second)
+        t.closesLater = true
+        change(t)
+        let before = t0.addingTimeInterval(-3600)
+        try seed(dir(name),
+                 PipelineEvent(at: before, item: prURL(13), kind: .rerated, detail: "", head: sha("c3"), rating: low),
+                 PipelineEvent(at: before, item: prURL(31), kind: .rerated, detail: "", head: sha("d3"), rating: low))
+        return (t, sync(t, PipelineSettings(roots: [root], merge: true), dir(name), t0))
+    }
+    let notAFix = "cleared/fast (closes no issue, or one that is not a low-risk, low-complexity issue Diplomat may act on)"
+    let (ut, unread) = try pair("unread") { t in
+        var reads = 0
+        t.onReread = { n in
+            if n == 13 { reads += 1 }
+            t.ghPartial = n == 13 && reads == 2
+        }
+    }
+    check(unread.writes == ["merge #13 --squash \(sha("c3"))"] && stageOf(unread.result, prURL(31)) == notAFix
+          && ut.prs.map(\.state) == ["MERGED", "OPEN"]
+          && unread.result.notices == ["#13 may have been merged: it could not be read again: Timeout on reviews"],
+          "#13 merged, its read after failing: \(unread.writes) \(stageOf(unread.result, prURL(31))) \(unread.result.notices)")
+    let (rt, refused) = try pair("refused") { t in
+        t.onReread = { n in if n == 13 { t.onGH = { t.prs[0].head = sha("c4") } } }
+    }
+    check(refused.writes.isEmpty && stageOf(refused.result, prURL(31)) == notAFix
+          && rt.sequence.filter { $0 == "pr merge" }.count == 1 && rt.prs.map(\.state) == ["OPEN", "OPEN"],
+          "#13's merge refused, read open after: \(refused.writes) \(stageOf(refused.result, prURL(31)))")
 }
 
 /// What keeps the pipeline from acting on a stale, partial or unchecked read, a scenario

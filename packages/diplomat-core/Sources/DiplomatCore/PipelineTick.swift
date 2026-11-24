@@ -166,7 +166,7 @@ final class PipelineSync {
     var banned: Set<String>? = []
     /// Per cleared PR, the code of the hold `settle` found on it.
     var holdCodes: [String: String] = [:]
-    /// Each issue a merge of this sync closed, by its id as `byURL` keys it.
+    /// Each issue a merge this sync asked for may have closed, by its id as `byURL` keys it.
     var closedHere: Set<String> = []
 
     init(settings: PipelineSettings, now: Date, dir: URL, io: PipelineIO) {
@@ -1072,8 +1072,8 @@ final class PipelineSync {
     }
 
     /// Writes the rating kept for `entries[i]` while its labels could not be written, never
-    /// lower than the labels on it now, with no new rating asked for. A PR's is dropped, to
-    /// be rated again, once its diff at the head this sync read allows less.
+    /// lower than the labels on it now, with no new rating asked for. A PR's is dropped once
+    /// its diff at the head this sync read allows less.
     func rewrite(_ i: Int) {
         let id = entries[i].id
         guard let kept = cache[id]?.rating, may(.rate) else { return }
@@ -1822,6 +1822,7 @@ final class PipelineSync {
             }
             let out = io.gh(["pr", "merge", "\(n)", "-R", root.name, "--admin", flag,
                              "--match-head-commit", head])
+            closedHere.formUnion((fresh.closing + judged.closing).map { PipelineRead.norm($0.id) })
             // gh exits 0 on a PR merged already, at any head and by anyone, and GitHub may merge
             // one all the same when gh fails: only a read after tells this merge's.
             let after = reread(e, out.ok ? "may have been merged" : "was not merged (\(out.why))")
@@ -1840,9 +1841,7 @@ final class PipelineSync {
             entries[i].item.stage = .merged
             entries[i].item.lane = .done
             entries[i].item.hold = nil
-            closedHere.formUnion((fresh.closing + judged.closing).map { PipelineRead.norm($0.id) })
             for j in fixed(by: fresh) {
-                closedHere.insert(PipelineRead.norm(entries[j].id))
                 entries[j].item.state = "closed"
                 entries[j].item.writable = false
                 entries[j].unwritable = "closed"
