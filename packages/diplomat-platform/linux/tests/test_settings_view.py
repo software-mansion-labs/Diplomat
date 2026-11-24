@@ -451,15 +451,15 @@ def test_a_healthy_screen_draws_no_line_under_any_row(make_view, monkeypatch, tm
     view = make_view(update_state={"phase": "idle", "commit": "abc1234", "branch": "main",
                                    "upstream": "origin/main", "ahead": 0, "behind": 0})
     # But the PIPELINE card's, whose one-liners read as its macOS twin's do.
-    pipeline_rows = {view._pipeline_row, view._pipeline_teams_row, view._pipeline_key_row,
+    pipeline_rows = {view._pipeline_row, view._pipeline_teams_row, view._pipeline_login_row,
                      *(_row_of(w) for w in (view._sw_pipeline_rate, view._sw_pipeline_fix,
                                             view._sw_pipeline_fast, view._sw_pipeline_merge,
                                             view._sw_pipeline_fracture))}
     assert [(r._control.accessibleName(), r.summary()) for r in view._rows
             if r.summary() and r not in pipeline_rows] == []
-    assert [view._pipeline_teams_row.summary(), view._pipeline_key_row.summary()] == [
-        "None: GitHub only", "No key file: linearTokenFile in ~/.diplomat/config.json names it"]
-    assert "palette(mid)" in view._pipeline_key_row._summary.styleSheet()
+    assert [view._pipeline_teams_row.summary(), view._pipeline_login_row.summary()] == [
+        "None: GitHub only", "Not signed in"]
+    assert "palette(mid)" in view._pipeline_login_row._summary.styleSheet()
     assert str(tmp_path) in view._repo_row._detail.text()
     assert "Devices screen" in view._alloc_row._detail.text()
 
@@ -553,7 +553,7 @@ def test_the_pipeline_options_are_drawn_only_while_it_runs(make_view, monkeypatc
     view, synced = _pipeline_view(make_view, monkeypatch)
     nested = [view._sw_pipeline_rate, view._sw_pipeline_fix, view._sw_pipeline_fast,
               view._sw_pipeline_merge, view._sw_pipeline_fracture, view._pipeline_teams,
-              view._pipeline_key_row]
+              view._pipeline_login_row]
     assert view._pipeline_row.isVisibleTo(view)
     assert not any(w.isVisibleTo(view) for w in nested)
     assert view._pipeline_pill.text() == "off"
@@ -620,8 +620,8 @@ def test_the_pipeline_rows_read_as_their_macos_twins_do(make_view, monkeypatch):
         "Every 5m, the open issues and PRs of the GitHub repo roots and the Linear teams "
         "below")
     assert [view._pipeline_teams_row._control.accessibleName(),
-            view._pipeline_key_row._control.accessibleName()] == ["Linear teams",
-                                                                  "Linear API key"]
+            view._pipeline_login_row._control.accessibleName()] == ["Linear teams",
+                                                                    "Linear login"]
 
 
 def test_the_linear_teams_line_reports_what_it_cannot_read(make_view, monkeypatch):
@@ -636,21 +636,171 @@ def test_the_linear_teams_line_reports_what_it_cannot_read(make_view, monkeypatc
     assert row.summary() == "None: GitHub only"
 
 
-def test_the_linear_key_row_says_where_the_key_is_read(make_view, monkeypatch):
-    from diplomat_runtime import appconfig, pipeline
+def _whoami(monkeypatch, saved: list) -> list:
+    """``pipeline.linear_whoami`` answering the last of ``saved``; returns its calls."""
+    from diplomat_runtime import pipeline
 
-    monkeypatch.delenv(pipeline.TOKEN_ENV, raising=False)
+    calls = []
+    monkeypatch.setattr(pipeline, "linear_whoami",
+                        lambda: calls.append(1) or (saved[-1] if saved else None))
+    return calls
+
+
+def _settle(view) -> None:
+    from PySide6.QtWidgets import QApplication
+
+    assert view.store.wait_for_background() == []
+    QApplication.processEvents()
+
+
+def test_the_linear_login_row_says_who_is_signed_in(make_view, monkeypatch):
+    from diplomat_runtime import pipeline
+
+    saved: list = []
+    _whoami(monkeypatch, saved)
     view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
-    row = view._pipeline_key_row
+    row, button = view._pipeline_login_row, view._linear_button
+    assert (row.summary(), button.text()) == ("Not signed in", "Sign in…")
+    assert "palette(mid)" in row._summary.styleSheet()
+    # A problem once a team needs it.
     view._pipeline_teams.setText("ENG=o/r")
-    assert row.summary() == "No key file: linearTokenFile in ~/.diplomat/config.json names it"
+    assert row.summary() == "Not signed in"
     assert "#FF3B30" in row._summary.styleSheet()
-    appconfig.set_value(appconfig.LINEAR_TOKEN_FILE, "~/.diplomat/linear")
-    view._refresh_pipeline_ui()
-    assert row.summary() == "Read from ~/.diplomat/linear"
     monkeypatch.setenv(pipeline.TOKEN_ENV, "lin_api_x")
     view._refresh_pipeline_ui()
-    assert row.summary() == "$DIPLOMAT_LINEAR_TOKEN, which wins over linearTokenFile"
+    assert row.summary() == "$DIPLOMAT_LINEAR_TOKEN, which wins over the login"
+    assert "palette(mid)" in row._summary.styleSheet()
+    assert row._detail.text() == (
+        "Signs in through the browser to Diplomat's Linear app, which reads the tracked "
+        "teams' issues and writes labels and child issues as you. The login is kept in "
+        "~/.diplomat/pipeline/linear-login.json, readable by you alone, refreshed by the "
+        "sync, and never handed to an agent: a fix gets the issue's text as Diplomat read "
+        "it. Sign out forgets it and asks Linear to revoke it. $DIPLOMAT_LINEAR_TOKEN, a "
+        "personal API key, wins over it. Without a login, the teams set here are skipped "
+        "with a notice and GitHub still syncs, but no PR is merged.")
+
+    monkeypatch.delenv(pipeline.TOKEN_ENV)
+    saved.append({"user": "Ada", "organization": "Ours"})
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    assert (view._pipeline_login_row.summary(), view._linear_button.text()) == (
+        "Signed in as Ada (Ours)", "Sign out")
+
+
+def test_a_sign_in_waits_off_the_ui_thread_and_its_failure_stays_until_the_next(
+        make_view, monkeypatch):
+    import threading
+
+    me = {"user": "Ada", "organization": "Ours"}
+    saved: list = []
+    _whoami(monkeypatch, saved)
+    back = threading.Event()
+    answers = [(None, "Linear refused the sign-in: invalid_grant"), (me, "")]
+
+    def login(self, cancelled):
+        assert back.wait(10)
+        back.clear()
+        answer = answers.pop(0)
+        saved.extend([answer[0]] if answer[0] else [])
+        return answer
+
+    monkeypatch.setattr(Store, "linear_login", login)
+    view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row, button = view._pipeline_login_row, view._linear_button
+    button.click()
+    assert (row.summary(), button.text(), button.isEnabled()) == (
+        "Waiting for the browser…", "Cancel", True)
+    back.set()
+    _settle(view)
+    assert (row.summary(), button.text()) == ("Linear refused the sign-in: invalid_grant",
+                                              "Sign in…")
+    assert "#FF3B30" in row._summary.styleSheet()
+    assert synced == []
+
+    button.click()
+    assert row.summary() == "Waiting for the browser…"
+    back.set()
+    _settle(view)
+    assert (row.summary(), button.text()) == ("Signed in as Ada (Ours)", "Sign out")
+    assert synced == [True]
+
+
+def test_who_is_signed_in_is_read_again_once_a_sync_is_applied(make_view, monkeypatch):
+    """The sync forgets a login Linear no longer accepts."""
+    saved = [{"user": "Ada", "organization": "Ours"}]
+    asked = _whoami(monkeypatch, saved)
+    view, _ = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row, button = view._pipeline_login_row, view._linear_button
+    saved.clear()
+    view.store.pipeline_changed.emit()
+    assert row.summary() == "Signed in as Ada (Ours)"
+    view.store._pipeline_synced.emit({"error": "gh: rate limited", "forced": {}})
+    assert (row.summary(), button.text()) == ("Not signed in", "Sign in…")
+    assert asked == [1, 1]
+
+
+def test_cancel_stops_the_sign_in_and_says_nothing_failed(make_view, monkeypatch):
+    import threading
+
+    _whoami(monkeypatch, [])
+    stopped = threading.Event()
+    monkeypatch.setattr(Store, "stop_linear_login", lambda self: stopped.set())
+    monkeypatch.setattr(Store, "linear_login", lambda self, cancelled: (
+        stopped.wait(10), (None, "diplomat-core linear-login failed: Sign in to Linear"))[1])
+    view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row, button = view._pipeline_login_row, view._linear_button
+    button.click()
+    button.click()
+    assert stopped.is_set()
+    _settle(view)
+    assert (row.summary(), button.text(), button.isEnabled()) == ("Not signed in",
+                                                                  "Sign in…", True)
+    assert synced == []
+
+
+def test_a_sign_out_says_what_it_could_not_do(make_view, monkeypatch):
+    """Who is signed in is asked as the card is built and after each action, never on a
+    refresh."""
+    import threading
+
+    from diplomat_runtime import pipeline
+
+    saved = [{"user": "Ada", "organization": "Ours"}]
+    asked = _whoami(monkeypatch, saved)
+    back = threading.Event()
+    answers = [(False, "/p/linear-login.json could not be removed"),
+               (True, "Linear answered HTTP 500 to the revocation")]
+
+    def logout():
+        assert back.wait(10)
+        back.clear()
+        ok, text = answers.pop(0)
+        if ok:
+            saved.clear()
+        return ok, text
+
+    monkeypatch.setattr(pipeline, "linear_logout", logout)
+    view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
+    row, button = view._pipeline_login_row, view._linear_button
+    view.store.pipeline_changed.emit()
+    view._pipeline_teams.setText("ENG=o/r")
+    assert asked == [1]
+    button.click()
+    assert not button.isEnabled()
+    # The sign-out's own answer says.
+    view.store.pipeline_sync_applied.emit()
+    back.set()
+    _settle(view)
+    assert (row.summary(), button.text()) == ("/p/linear-login.json could not be removed",
+                                              "Sign out")
+    assert "#FF3B30" in row._summary.styleSheet()
+    button.click()
+    back.set()
+    _settle(view)
+    assert (row.summary(), button.text()) == (
+        "Signed out, but Linear answered HTTP 500 to the revocation", "Sign in…")
+    assert "#FF9500" in row._summary.styleSheet()
+    assert asked == [1, 1, 1]
+    assert synced == []
 
 
 def test_the_pipeline_pill_follows_its_sync(make_view, monkeypatch):

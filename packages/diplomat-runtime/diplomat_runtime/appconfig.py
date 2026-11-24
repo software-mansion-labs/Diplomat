@@ -10,10 +10,9 @@ the runner in this package read, and this package imports no Qt, so it has no
 ``QSettings`` to ask; the runner and its model are read by the ``diplomat-core``
 binary as well, which is a separate process.
 
-Two more sit with them without needing to: how long a run may go on before the
+One more sits with them without needing to: how long a run may go on before the
 resolver calls it over, which belongs beside the cap it hands bays back to and is
-read by the ``DIPLOMAT_AGENTS`` dump, a front-end-free path with no store of its own;
-and the Pipeline's Linear key file, beside the agent's token file.
+read by the ``DIPLOMAT_AGENTS`` dump, a front-end-free path with no store of its own.
 The device-allocator daemon, a Node process, reads four more: the terminal spawns
 resolve to (published rather than set here), to open its repair agents in, the two
 idle limits after which it takes a device back from its agent or shuts down one no
@@ -62,9 +61,6 @@ AGENT_MODEL = "agentModel"
 #: enters this file — see :func:`review.token_export`.
 AGENT_TOKEN_KEYCHAIN_ITEM = "agentTokenKeychainItem"
 AGENT_TOKEN_FILE = "agentTokenFile"
-#: The file ``diplomat-core pipeline-tick`` reads the Pipeline's Linear key from on Linux
-#: (``~`` allowed). The key itself never enters this file.
-LINEAR_TOKEN_FILE = "linearTokenFile"
 #: The terminal this front-end's spawns resolve to, published for the device-allocator
 #: daemon to open its repair agents in (``device-allocator/src/terminal.js``). Written,
 #: never read here: the choice itself stays in the front-end's own store.

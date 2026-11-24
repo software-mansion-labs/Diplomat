@@ -58,7 +58,7 @@ def _settings_fixture(store: Store, *, explain: bool) -> None:
     field draws a line rather than the blank placeholder), a typed per-author depth
     row (so the table draws a login field beside the me row), auto-approvals on (so
     the nested verdict policy is unfolded) and the Pipeline on with a Linear team (so
-    its switches unfold and the teams line says where the key comes from). ``explain``
+    its switches unfold and, signed out, the Linear login line draws red). ``explain``
     turns on the header switch,
     the only state that draws the long-form paragraph under each row.
 

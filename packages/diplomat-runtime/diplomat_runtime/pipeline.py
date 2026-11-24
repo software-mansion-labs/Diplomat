@@ -30,7 +30,7 @@ from .prref import item_key_from_url, split_item_key
 #: What :func:`last` raises.
 Failure = (RuntimeError, promptcore.CoreBinaryMissing, ValueError)
 
-#: The Linear key's environment override, which wins over ``linearTokenFile``.
+#: A personal Linear API key, which wins over the Linear login (:func:`linear_login`).
 TOKEN_ENV = "DIPLOMAT_LINEAR_TOKEN"
 
 
@@ -224,6 +224,73 @@ def ran_since(result: dict, started: float) -> bool:
     dated to the second. Twin of ``Store.pipelineRan``."""
     at = _epoch(str(result.get("at") or ""))
     return at is not None and at >= math.floor(started)
+
+
+# MARK: - the Linear login
+
+
+#: Core bounds pipeline.json does not hold: how long the core watches ``$BROWSER``
+#: start, and ``SlackAPI.curl``'s grace past a request's timeout.
+_BROWSER_SECS = 10
+_HTTP_GRACE_SECS = 5
+
+
+def _linear_call_secs(t: dict) -> float:
+    return float(t.get("httpTimeoutSecs", 30)) + _HTTP_GRACE_SECS
+
+
+def _linear_answer(verb: str, timeout: float,
+                   started: Callable | None = None) -> tuple[dict | None, str]:
+    try:
+        out = promptcore.cli([verb], timeout=timeout, started=started)
+    except (RuntimeError, promptcore.CoreBinaryMissing) as exc:
+        return None, str(exc)
+    try:
+        answer = json.loads(out)
+    except ValueError:
+        answer = None
+    if not isinstance(answer, dict):
+        return None, f"diplomat-core {verb} answered something that is not an answer"
+    return answer, ""
+
+
+def linear_login(started: Callable | None = None) -> tuple[dict | None, str]:
+    """``({"user", "organization"}, "")`` once signed in to Linear in the browser, else
+    ``(None, why not)``. ``started`` is handed the core's process, whose death abandons
+    the sign-in. Bounded by the browser's start, ``signInSecs``, and three Linear calls:
+    the code's exchange, who the token is, and a sync's refresh holding the login's
+    lock. Never raises."""
+    t = tunables()
+    timeout = (_BROWSER_SECS + float((t.get("linearOAuth") or {}).get("signInSecs", 300))
+               + 3 * _linear_call_secs(t) + _MARGIN_SECS)
+    answer, error = _linear_answer("linear-login", timeout, started)
+    if answer is None:
+        return None, error
+    if answer.get("ok") is not True:
+        return None, str(answer.get("error") or "Linear sign-in did not say why it failed")
+    return {"user": str(answer.get("user") or ""),
+            "organization": str(answer.get("organization") or "")}, ""
+
+
+def linear_logout() -> tuple[bool, str]:
+    """``(True, why Linear did not revoke the login, else "")`` once it is forgotten, else
+    ``(False, why not)``. Never raises."""
+    answer, error = _linear_answer(
+        "linear-logout", 2 * _linear_call_secs(tunables()) + _MARGIN_SECS)
+    if answer is None:
+        return False, error
+    if answer.get("ok") is not True:
+        return False, str(answer.get("error") or "Linear sign-out did not say why it failed")
+    return True, str(answer.get("warning") or "")
+
+
+def linear_whoami() -> dict | None:
+    """``{"user", "organization"}`` of the saved login, without a call to Linear; None
+    when there is none, or the core cannot say. Never raises."""
+    answer, _ = _linear_answer("linear-whoami", 10)
+    if answer is None or "user" not in answer:
+        return None
+    return {"user": str(answer["user"]), "organization": str(answer.get("organization") or "")}
 
 
 # MARK: - reading a result

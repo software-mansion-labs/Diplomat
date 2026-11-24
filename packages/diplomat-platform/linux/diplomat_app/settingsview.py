@@ -83,6 +83,9 @@ class SettingsView(QWidget):
     done = Signal()
     # The Comms "Test" answer: (identity dict or None, error text).
     _comms_tested = Signal(object, str)
+    # A Linear sign-in's or sign-out's answer: (what failed, why Linear did not revoke
+    # the login, linear-whoami's answer after).
+    _linear_answered = Signal(str, str, object)
 
     def __init__(self, store: Store) -> None:
         super().__init__()
@@ -145,7 +148,9 @@ class SettingsView(QWidget):
         store.apiwatch_changed.connect(self._refresh_apiwatch_ui)
         store.comms_changed.connect(self._refresh_comms_ui)
         store.pipeline_changed.connect(self._refresh_pipeline_ui)
+        store.pipeline_sync_applied.connect(self._on_pipeline_sync_applied)
         self._comms_tested.connect(self._on_comms_tested)
+        self._linear_answered.connect(self._on_linear_answered)
         self._refresh_allocator_ui()
         self._refresh_update_ui()
         self._refresh_autofix_ui()
@@ -1411,16 +1416,23 @@ class SettingsView(QWidget):
                    "in, commas, semicolons or new lines between them. A key is read in "
                    "capitals, as Linear spells it."))
         options.addWidget(self._pipeline_teams_row)
-        self._pipeline_key_row = self._track(SettingRow(
-            "Linear API key", QWidget(),
-            detail="Read on each sync from the file linearTokenFile names in "
-                   "~/.diplomat/config.json and staged in an owner-only temp file for each "
-                   "Linear call, never handed to an agent: a fix gets the issue's text as "
-                   "Diplomat read it. "
-                   f"${pipeline.TOKEN_ENV} wins over it. Without a key, the teams set "
-                   "here are skipped with a notice and GitHub still syncs, but no PR is "
-                   "merged."))
-        options.addWidget(self._pipeline_key_row)
+        self._linear_button = QPushButton()
+        self._linear_button.clicked.connect(self._on_linear_button)
+        self._pipeline_login_row = self._track(SettingRow(
+            "Linear login", self._linear_button,
+            detail="Signs in through the browser to Diplomat's Linear app, which reads the "
+                   "tracked teams' issues and writes labels and child issues as you. The "
+                   "login is kept in ~/.diplomat/pipeline/linear-login.json, readable by "
+                   "you alone, refreshed by the sync, and never handed to an agent: a fix "
+                   "gets the issue's text as Diplomat read it. Sign out forgets it and asks "
+                   f"Linear to revoke it. ${pipeline.TOKEN_ENV}, a personal API key, wins "
+                   "over it. Without a login, the teams set here are skipped with a notice "
+                   "and GitHub still syncs, but no PR is merged."))
+        options.addWidget(self._pipeline_login_row)
+        # linear-whoami's last answer; the last action's failure or warning (text, colour).
+        self._linear_me = pipeline.linear_whoami()
+        self._linear_note: tuple[str, str] | None = None
+        self._linear_signing_in = self._linear_cancelled = False
         self._refresh_pipeline_ui()
         return card
 
@@ -1449,7 +1461,7 @@ class SettingsView(QWidget):
     def _on_pipeline_teams_changed(self, text: str) -> None:
         self.store.pipeline_linear_teams_raw = text
         self._refresh_pipeline_teams_summary()
-        self._refresh_pipeline_key_summary()
+        self._refresh_linear_login()
 
     def _refresh_pipeline_teams_summary(self) -> None:
         teams, bad = pipeline.parse_linear_teams(self.store.pipeline_linear_teams_raw)
@@ -1462,18 +1474,72 @@ class SettingsView(QWidget):
             self._pipeline_teams_row.set_summary(
                 " · ".join(f"{t['key']} → {t['repo']}" for t in teams))
 
-    def _refresh_pipeline_key_summary(self) -> None:
+    def _on_linear_button(self) -> None:
+        """Sign in…, Cancel or Sign out, as the button reads."""
+        if self._linear_signing_in:
+            self._linear_cancelled = True
+            self._linear_button.setEnabled(False)
+            self.store.stop_linear_login()
+            return
+        signing_in = self._linear_me is None
+        self._linear_signing_in = signing_in
+        self._linear_note = None
+        # Live as Cancel; a sign-out cannot be cancelled.
+        self._linear_button.setEnabled(signing_in)
+        self._refresh_linear_login()
+
+        def ask() -> None:
+            # Always answer: the answer is what re-enables the button.
+            error = warning = ""
+            try:
+                if signing_in:
+                    error = self.store.linear_login(lambda: self._linear_cancelled)[1]
+                else:
+                    ok, text = pipeline.linear_logout()
+                    error, warning = ("", text) if ok else (text, "")
+            except Exception as exc:  # noqa: BLE001
+                error = str(exc) or type(exc).__name__
+            self._linear_answered.emit(error, warning, pipeline.linear_whoami())
+
+        self.store.start_background(ask, name="linear-login" if signing_in else "linear-logout")
+
+    def _on_linear_answered(self, error: str, warning: str, me: object) -> None:
+        signed_in = self._linear_signing_in and not error
+        if self._linear_cancelled:
+            error = ""
+        self._linear_signing_in = self._linear_cancelled = False
+        self._linear_me = me if isinstance(me, dict) else None
+        self._linear_note = ((error, _RED) if error
+                             else (f"Signed out, but {warning}", _ORANGE) if warning
+                             else None)
+        self._linear_button.setEnabled(True)
+        self._refresh_linear_login()
+        if signed_in:
+            self.store.run_pipeline_sync_async()
+
+    def _on_pipeline_sync_applied(self) -> None:
+        # The sync forgets a login Linear no longer accepts. An action under way reads
+        # it once answered.
+        if not self._linear_signing_in and self._linear_button.isEnabled():
+            self._linear_me = pipeline.linear_whoami()
+            self._refresh_linear_login()
+
+    def _refresh_linear_login(self) -> None:
+        me, row = self._linear_me, self._pipeline_login_row
+        self._linear_button.setText("Cancel" if self._linear_signing_in
+                                    else "Sign in…" if me is None else "Sign out")
         if os.environ.get(pipeline.TOKEN_ENV):
-            self._pipeline_key_row.set_summary(
-                f"${pipeline.TOKEN_ENV}, which wins over linearTokenFile")
-        elif path := appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip():
-            self._pipeline_key_row.set_summary(f"Read from {path}")
+            row.set_summary(f"${pipeline.TOKEN_ENV}, which wins over the login")
+        elif self._linear_signing_in:
+            row.set_summary("Waiting for the browser…")
+        elif self._linear_note:
+            row.set_summary(self._linear_note[0], color=self._linear_note[1])
+        elif me is not None:
+            row.set_summary(f"Signed in as {me['user']} ({me['organization']})")
         else:
             # A problem only once a team needs it.
             teams, _ = pipeline.parse_linear_teams(self.store.pipeline_linear_teams_raw)
-            self._pipeline_key_row.set_summary(
-                f"No key file: {appconfig.LINEAR_TOKEN_FILE} in ~/.diplomat/config.json "
-                "names it", color=_RED if teams else None)
+            row.set_summary("Not signed in", color=_RED if teams else None)
 
     def _refresh_pipeline_ui(self) -> None:
         st = self.store
@@ -1496,7 +1562,7 @@ class SettingsView(QWidget):
                 "the GitHub repo roots and the Linear teams below")
         self._pipeline_options.setVisible(st.pipeline_enabled)
         self._refresh_pipeline_teams_summary()
-        self._refresh_pipeline_key_summary()
+        self._refresh_linear_login()
 
     # MARK: tool colour & visibility
 
