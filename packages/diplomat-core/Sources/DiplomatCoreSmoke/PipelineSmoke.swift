@@ -4214,6 +4214,19 @@ private func pipelineCoverage9(base: URL, root: PipelineSettings.Root, team: Pip
     check(fixes(cr).isEmpty && stageOf(cr.result, issueURL(24)) == "candidate/fast (\(unseen))"
           && cr.result.notices.contains("#3 was not split: \(unseen)"),
           "candidates with Linear past its cap: \(fixes(cr)) \(stageOf(cr.result, issueURL(24))) \(cr.result.notices)")
+    // Merge off: the sync's own hold on a cleared PR closing such an issue.
+    var heldTwin = twin("ENG-11", of: 27)
+    heldTwin.assignee = ("U_ALICE", "Alice")
+    let pages = (0..<12).map { Trackers.Ticket(id: "lin-p\($0)", identifier: "ENG-\(200 + $0)", title: "Paged \($0)",
+                                               updated: at("08:00")) }
+    let judgedHolds = try [("twin-judged", [heldTwin]), ("cap-judged", pages)].map { name, tickets -> String in
+        let t = only([13, 27])
+        t.tickets = tickets
+        t.linearMore = name == "cap-judged"
+        try seedRerate(dir(name), 13, sha("c3"), at: t0.addingTimeInterval(-3600))
+        return stageOf(sync(t, PipelineSettings(roots: [root], linearTeams: [team]), dir(name), t0).result, prURL(13))
+    }
+    check(judgedHolds == [notAFix, notAFix], "cleared PRs closing #27, held by Linear or past its cap: \(judgedHolds)")
 
     // Model-written text is filed with no marker but Diplomat's own.
     let forged = only([3])
