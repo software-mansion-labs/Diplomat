@@ -37,6 +37,7 @@ from .commsview import CommsView
 from .devicesview import DevicesView
 from .machinesview import MachinesView
 from .networkview import NetworkView
+from .pipelineview import PipelineView
 from .settingsview import SettingsView
 from .store import NetworkRun, Store, tool_by_id
 from .widgets import (
@@ -330,6 +331,12 @@ class Panel(QWidget):
         comms_scroll.setWidget(self.comms_view)
         self._screens["comms"] = self.body.addWidget(comms_scroll)
 
+        # Page: Pipeline. Not scrolled whole like the others: its graph and its detail
+        # scroll on their own.
+        self.pipeline_view = PipelineView(store)
+        self.pipeline_view.done.connect(lambda: self._set_screen("main"))
+        self._screens["pipeline"] = self.body.addWidget(self.pipeline_view)
+
         # Page: settings. Scrolled like the screens above, and for the same
         # reason: its left column is a stack of toggles each carrying the paragraph
         # that says what it does, and on a short window Qt buys the space back by
@@ -455,6 +462,10 @@ class Panel(QWidget):
         row.addWidget(self.comms_btn)
         self.store.comms_changed.connect(self._refresh_comms_button)
         self._refresh_comms_button()
+
+        self.pipeline_btn = _icon_button(glyphs.G_PIPELINE, "Pipeline")
+        self.pipeline_btn.clicked.connect(self._toggle_pipeline)
+        row.addWidget(self.pipeline_btn)
 
         self.telemetry_btn = _icon_button(glyphs.G_TELEMETRY, "Telemetry")
         self.telemetry_btn.clicked.connect(self._toggle_telemetry)
@@ -863,6 +874,7 @@ class Panel(QWidget):
                 # poll, so the button would do nothing anyone could see.
                 cancellable=task.job.requested,
                 refusal=self.store.network_job_refusals.get(task.job.label, ""),
+                cancel_help=Store.pipeline_cancel_help(task.job),
             )
             row.run_requested.connect(
                 lambda tid=task.id: self.store.execute_queued_task_async(tid)
@@ -1060,7 +1072,7 @@ class Panel(QWidget):
 
     def _set_screen(self, name: str) -> None:
         """Flip the body to one of the screens: Actions ("main"), Devices, Machines,
-        Network, Comms, Telemetry or Settings."""
+        Network, Comms, Pipeline, Telemetry or Settings."""
         self._screen = name
         self.body.setCurrentIndex(self._screens[name])
         self.devices_btn.set_state(
@@ -1085,6 +1097,8 @@ class Panel(QWidget):
         if name == "comms":
             # Opening it is what reads the pings.
             self.comms_view.open()
+        if name == "pipeline":
+            self.pipeline_view.open()
         if name == "main":
             self._rebuild_grid()
             self._update_results()
@@ -1109,6 +1123,9 @@ class Panel(QWidget):
 
     def _toggle_comms(self) -> None:
         self._set_screen("main" if self._screen == "comms" else "comms")
+
+    def _toggle_pipeline(self) -> None:
+        self._set_screen("main" if self._screen == "pipeline" else "pipeline")
 
     def _refresh_comms_button(self) -> None:
         n = self.store.comms_unread

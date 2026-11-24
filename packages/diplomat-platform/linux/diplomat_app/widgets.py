@@ -165,11 +165,14 @@ class ElidedLabel(QLabel):
     and however long it is the label asks for no width.
     """
 
+    #: How a subclass elides by default; ``mode`` overrides it for one label.
+    elide = Qt.TextElideMode.ElideRight
+
     def __init__(self, text: str, font_px: int, color: str,
-                 mode: Qt.TextElideMode = Qt.TextElideMode.ElideRight) -> None:
+                 mode: Qt.TextElideMode | None = None) -> None:
         super().__init__()
         self._full = text
-        self._mode = mode
+        self._mode = self.elide if mode is None else mode
         self._color = QColor(color)
         f = self.font()
         f.setPixelSize(font_px)
@@ -520,7 +523,8 @@ class QueuedTaskRow(QFrame):
     )
 
     def __init__(self, *, task_id: str, label: str, glyph: str, hex_color: str,
-                 paused: bool, cancellable: bool = False, refusal: str = "") -> None:
+                 paused: bool, cancellable: bool = False, refusal: str = "",
+                 cancel_help: str | None = None) -> None:
         super().__init__()
         self._task_id = task_id
         self._press: QPointF | None = None
@@ -561,7 +565,7 @@ class QueuedTaskRow(QFrame):
             # on or the hand reaches first.
             cancel = QPushButton("cancel")
             cancel.setCursor(Qt.CursorShape.PointingHandCursor)
-            cancel.setToolTip(self._CANCEL_HELP)
+            cancel.setToolTip(cancel_help or self._CANCEL_HELP)
             cancel.setStyleSheet(
                 f"QPushButton {{ color: {glyphs.MUTED}; background-color: transparent;"
                 " border: none; border-radius: 8px; padding: 2px 7px;"

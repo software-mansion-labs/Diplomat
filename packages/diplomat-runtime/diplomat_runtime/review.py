@@ -28,7 +28,7 @@ import weakref
 from dataclasses import dataclass, replace
 from enum import Enum
 
-from . import appconfig, comms, core, localrepos, runner
+from . import appconfig, comms, core, localrepos, pipeline, runner
 from .configbase import PRSweepConfig, listed_payload
 from .depths import DepthLadder
 from .prref import LocalRepo
@@ -131,6 +131,10 @@ class ReviewConfig(PRSweepConfig):
 
     # Submit an automatic verdict at the selected review depth.
     automatic_verdict: bool = False
+
+    # A Pipeline fast-track PR: reviewed until clean, then given the clean marker the
+    # Pipeline merges on, never marked ready.
+    fast_track: bool = False
 
     def __post_init__(self) -> None:
         if not self.depth:
@@ -241,6 +245,8 @@ class ReviewConfig(PRSweepConfig):
             "automaticVerdict": self.automatic_verdict,
             "softApprove": self.soft_approve,
             "specificAuthor": self.disposition.value,
+            # Absent unless set, as in a config queued before it existed.
+            **({"fastTrack": True} if self.fast_track else {}),
             **listed_payload(self.local_repos, self.home),
         }
 
@@ -515,6 +521,10 @@ def stage_opencode_session(prompt_file: str, checkout: str | None = None) -> str
     return session_id
 
 
+#: Secrets the applet's environment may carry that an agent must never hold.
+SECRET_ENVS = (comms.TOKEN_ENV, pipeline.TOKEN_ENV)
+
+
 def user_shell() -> str:
     """The user's interactive login shell — so the spawned command sees the aliases
     and env exported from their rc (e.g. a `claude` alias in ~/.zshrc). Override with
@@ -527,7 +537,7 @@ def shell_command(prompt_file: str, done_path: str | None = None,
                   settings_file: str | None = None,
                   opencode_session: str | None = None,
                   checkout: str | None = None) -> str:
-    """``cd '<repo>' 2>/dev/null; unset DIPLOMAT_SLACK_TOKEN; <agent>; [{ printf %s $? > done; } 2>/dev/null || :;] exec "$SHELL" -i``
+    """``cd '<repo>' 2>/dev/null; unset DIPLOMAT_SLACK_TOKEN DIPLOMAT_LINEAR_TOKEN; <agent>; [{ printf %s $? > done; } 2>/dev/null || :;] exec "$SHELL" -i``
 
     ``<agent>`` is :func:`runner.agent_command` — ``claude "$(cat '<file>')"``, another
     runner's spelling of the same thing, or OpenCode 2.x's ``opencode api`` chain
@@ -613,9 +623,9 @@ def shell_command(prompt_file: str, done_path: str | None = None,
     exiting, so between them one covers the run that ends and the other the run that
     goes back to its prompt.
 
-    The Slack token (:data:`comms.TOKEN_ENV`) is unset right after the ``cd``, and again
-    inside the inner shell, whose rc may export it: an agent reading untrusted Slack text
-    must never hold it, whatever environment its terminal or tmux server has.
+    The :data:`SECRET_ENVS` are unset right after the ``cd``, and again inside the inner
+    shell, whose rc may export them: an agent reading untrusted Slack or Linear text must
+    never hold them, whatever environment its terminal or tmux server has.
 
     When the operator configured an agent token, everything after that ``unset`` runs
     behind :func:`token_export`, whose export the agent inherits.
@@ -630,14 +640,15 @@ def shell_command(prompt_file: str, done_path: str | None = None,
     if pid_path is None and not opencode_session:
         body = f"{agent_cmd}; {done}"
     else:
-        inner = f"unset {comms.TOKEN_ENV}; {agent_cmd}"
+        inner = f"unset {' '.join(SECRET_ENVS)}; {agent_cmd}"
         if pid_path is not None:
             inner = f"printf %s $$ > {shlex.quote(pid_path)}; {inner}"
         body = f"{shlex.quote(user_shell())} -i -c {shlex.quote(inner)}; {done}"
     token = token_export()
     if token:
         body = f"{token} && {{ {body}}}; "
-    return f'cd {repo} 2>/dev/null; unset {comms.TOKEN_ENV}; {body}exec "$SHELL" -i'
+    return (f"cd {repo} 2>/dev/null; unset {' '.join(SECRET_ENVS)}; "
+            f'{body}exec "$SHELL" -i')
 
 
 #: Appended to the audit line of a run spawned behind :func:`token_export`. Same text
@@ -822,10 +833,11 @@ def spawn_env() -> dict:
     already-running server, with the server's environment. Anything the agent itself
     must see belongs in the command (:func:`runner.agent_command`), not here.
 
-    The Slack token is dropped too, so a tmux server this launch starts never holds it.
+    The :data:`SECRET_ENVS` are dropped too, so a tmux server this launch starts never
+    holds them.
     """
     return {k: v for k, v in os.environ.items()
-            if k not in ("TMUX", "TMUX_PANE", comms.TOKEN_ENV)}
+            if k not in ("TMUX", "TMUX_PANE", *SECRET_ENVS)}
 
 
 def spawn(prompt: str, preferred: SpawnTerminal | None, done_path: str | None = None,

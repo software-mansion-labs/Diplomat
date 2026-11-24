@@ -78,7 +78,7 @@ public enum AuditCategory: String, CaseIterable, Sendable {
     /// through to `.system` so a chip still covers them rather than the row vanishing.
     public static func of(action: String) -> AuditCategory {
         switch action {
-        case "review", "review-req":
+        case "review", "review-req", "pipeline-review":
             return .review
         case "review-reply":
             return .reply
@@ -86,13 +86,13 @@ public enum AuditCategory: String, CaseIterable, Sendable {
             return .conflicts
         case "audit":
             return .audit
-        case "issues", "community-issue":
+        case "issues", "community-issue", "pipeline-fix", "pipeline-fracture":
             return .issues
         case "nudge":
             return .apiRestart
         case "quota-stall", "quota-resume":
             return .quota
-        case "merge", "merge-failed":
+        case "merge", "merge-failed", "pipeline-merge":
             return .merge
         case "ban", "unban", "comms-ban":
             return .bans

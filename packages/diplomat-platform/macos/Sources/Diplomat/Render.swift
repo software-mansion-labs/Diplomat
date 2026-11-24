@@ -42,8 +42,13 @@ enum Render {
             return false
         }
 
-        let renderer = ImageRenderer(content: chrome(view(for: what, store: store), store: store)
+        var content = AnyView(chrome(view(for: what, store: store), store: store)
             .environment(\.isImageRendering, true))
+        // `ImageRenderer` follows no `NSApp.appearance`: the theme reaches it as the colour scheme.
+        if let themed = NSApp.appearance {
+            content = AnyView(content.environment(\.colorScheme, themed.name == .aqua ? .light : .dark))
+        }
+        let renderer = ImageRenderer(content: content)
         renderer.scale = 2
         guard let cg = renderer.cgImage else { print("RENDER ERROR: nil cgImage"); return true }
         let rep = NSBitmapImageRep(cgImage: cg)
@@ -243,6 +248,23 @@ enum Render {
                 ContentView().frame(height: 580)
             } else {
                 CommsView(isPresented: .constant(true))
+            }
+        case let s where s.hasPrefix("pipeline"):
+            // "pipeline" selects a cleared PR held for its CI; "-issue" filters the fast
+            // lane, which keeps the split issue's whole group, and selects its candidate
+            // child; "-panel" draws the screen inside the whole panel; "-empty" the screen
+            // before a first sync, switched off.
+            let _ = seedPipeline(store, empty: s.contains("empty"))
+            if s.contains("panel") {
+                ContentView(showPipeline: true)
+            } else if s.contains("issue") {
+                PipelineView(isPresented: .constant(true),
+                             seedSelected: "https://github.com/software-mansion/argent/issues/1801",
+                             seedLane: .fast)
+            } else {
+                PipelineView(isPresented: .constant(true),
+                             seedSelected: s.contains("empty") ? nil
+                                 : "https://github.com/software-mansion/argent/pull/1825")
             }
         case "unban-confirm", "unban-confirm-slack":
             // Seed the ban list and open the inline "Unban @X?" confirmation on a row —
@@ -526,6 +548,166 @@ enum Render {
 
     /// The pings "comms-open" draws unfolded.
     private static var commsUnfolded: Set<String> = []
+
+    /// One sync's result over every stage, lane and edge kind, with a hold, a notice, a
+    /// review queued and an agent fixing a Linear issue. Assigned rather than synced:
+    /// `PipelineTick` is the core's, and `applyPipeline` would queue its effects.
+    @MainActor
+    @discardableResult
+    private static func seedPipeline(_ store: Store, empty: Bool) -> Bool {
+        let root = PRRef.LocalRepo(owner: "software-mansion", repo: "argent", path: "/render/argent")
+        store.pinRoots([root])
+        // Pinned, because a headless Store still reads the real defaults; headless, a
+        // switch persists nothing and syncs nothing.
+        store.usernameOverride = ""
+        store.me = "latekvo"
+        store.pipelineEnabled = !empty
+        store.pipelineRate = true
+        store.pipelineFix = true
+        store.pipelineFastTrack = true
+        store.pipelineMerge = false
+        store.pipelineFracture = true
+        store.pipelineLinearTeamsRaw = "ENG=software-mansion/argent"
+        store.pipelineForce = PipelineSettings.Force()
+        guard !empty else {
+            store.pipelineResult = nil
+            return true
+        }
+        let now = Date()
+        let low = PipelineLevel.low, medium = PipelineLevel.medium, high = PipelineLevel.high
+        func gh(_ kind: PipelineKind, _ n: Int) -> String {
+            root.webURL(kind == .pr ? .pull : .issues, number: n)
+        }
+        func linear(_ id: String, _ slug: String) -> String { "https://linear.app/swm/issue/\(id)/\(slug)" }
+        func item(_ id: String, _ kind: PipelineKind, _ label: String, _ title: String,
+                  _ stage: PipelineStage, _ lane: PipelineLane, source: PipelineSource = .github,
+                  state: String = "open", author: String = "latekvo", assignees: [String] = [],
+                  writable: Bool = true, rating: (PipelineLevel, PipelineLevel)? = nil,
+                  ratedBy: String? = "label", why: String? = nil,
+                  floor: (PipelineLevel, PipelineLevel)? = nil, hold: String? = nil,
+                  head: String? = nil, clean: String? = nil) -> PipelineItem {
+            PipelineItem(id: id, source: source, kind: kind, label: label, title: title,
+                         repo: source == .linear ? "ENG" : root.slug, state: state, author: author,
+                         assignees: assignees, writable: writable,
+                         rating: rating.map { PipelineRating(risk: $0.0, complexity: $0.1) },
+                         ratedBy: rating == nil ? nil : ratedBy, why: why,
+                         floor: floor.map { PipelineRating(risk: $0.0, complexity: $0.1) },
+                         stage: stage, lane: lane, hold: hold, headSha: head, cleanAt: clean,
+                         updatedAt: now)
+        }
+        let i1820 = gh(.issue, 1820), p1831 = gh(.pr, 1831), p1834 = gh(.pr, 1834)
+        let i1824 = gh(.issue, 1824), p1825 = gh(.pr, 1825)
+        let i1790 = gh(.issue, 1790), i1801 = gh(.issue, 1801), i1802 = gh(.issue, 1802)
+        let eng37 = linear("ENG-37", "metro-cache-survives-a-branch-switch"), p1812 = gh(.pr, 1812)
+        let eng52 = linear("ENG-52", "device-list-flickers-on-refresh")
+        let i1840 = gh(.issue, 1840)
+        let i1760 = gh(.issue, 1760), p1770 = gh(.pr, 1770)
+        let items = [
+            item(i1820, .issue, "#1820", "Simulator picker forgets the last device after a restart",
+                 .fixing, .fast, rating: (low, low)),
+            item(p1831, .pr, "#1831", "Remember the last simulator per project", .clean, .fast,
+                 rating: (low, low), why: "One preference key read and written, with a test.",
+                 floor: (low, low), head: "9c41e0a7d2", clean: "9c41e0a7d2"),
+            item(p1834, .pr, "#1834", "Show the remembered simulator first in the picker",
+                 .fastTrack, .fast, rating: (low, low),
+                 why: "Sorting change in one list, covered by the picker test.",
+                 floor: (low, low), head: "e17b3f9c40"),
+            item(i1824, .issue, "#1824", "Typo in the launch error for a missing Xcode",
+                 .fixing, .fast, rating: (low, low)),
+            item(p1825, .pr, "#1825", "Fix the missing-Xcode launch error wording", .cleared, .fast,
+                 rating: (low, low), why: "A string change and its snapshot.", floor: (low, low),
+                 hold: "CI still running", head: "4a7d1c02be", clean: "4a7d1c02be"),
+            item(i1790, .issue, "#1790", "Rework device allocation for remote pools", .fractured,
+                 .fractured, rating: (medium, high),
+                 why: "Touches the allocator, its protocol and both front-ends."),
+            item(i1801, .issue, "#1801", "Report a remote lease's attach time in the device list",
+                 .candidate, .fast, rating: (low, low), ratedBy: "label"),
+            item(i1802, .issue, "#1802", "Retry a remote lease that never attaches", .unrated,
+                 .unrated),
+            item(eng37, .issue, "ENG-37", "Metro cache survives a branch switch", .human, .human,
+                 source: .linear, author: "Bob", assignees: ["Bob"], writable: false,
+                 rating: (medium, medium), ratedBy: "local",
+                 why: "Cache invalidation across the bundler and the CLI."),
+            item(p1812, .pr, "#1812", "Invalidate the Metro cache on checkout", .human, .human,
+                 author: "alice", writable: false, rating: (high, medium)),
+            item(eng52, .issue, "ENG-52", "Device list flickers on refresh", .candidate, .fast,
+                 source: .linear, author: "Ignacy", rating: (low, low),
+                 why: "A list diff instead of a reload, in one view."),
+            item(i1840, .issue, "#1840", "Support visionOS simulators in the picker", .unrated,
+                 .unrated, author: "alice", assignees: ["alice"], writable: false),
+            item(i1760, .issue, "#1760", "Crash when the device list is empty", .closed, .done,
+                 state: "closed", rating: (low, low)),
+            item(p1770, .pr, "#1770", "Guard the empty device list", .merged, .done,
+                 state: "merged", rating: (low, low), floor: (low, low), head: "b2c90e11aa",
+                 clean: "b2c90e11aa"),
+        ]
+        let node = PipelineGraph.Node.init(id:column:row:)
+        let graph = PipelineGraph(
+            nodes: [node(i1820, 0, 0), node(p1831, 1, 0), node(p1834, 2, 0),
+                    node(i1824, 0, 2), node(p1825, 1, 2),
+                    node(i1790, 0, 3), node(i1801, 1, 3), node(i1802, 1, 4),
+                    node(eng37, 0, 5), node(p1812, 1, 5),
+                    node(eng52, 0, 6),
+                    node(i1840, 0, 7),
+                    node(i1760, 0, 8), node(p1770, 1, 8)],
+            edges: [PipelineGraph.Edge(from: i1820, to: p1831, kind: .fixes),
+                    PipelineGraph.Edge(from: i1820, to: p1834, kind: .fixes),
+                    PipelineGraph.Edge(from: p1831, to: p1834, kind: .stacked),
+                    PipelineGraph.Edge(from: i1824, to: p1825, kind: .fixes),
+                    PipelineGraph.Edge(from: i1790, to: i1801, kind: .child),
+                    PipelineGraph.Edge(from: i1790, to: i1802, kind: .child),
+                    PipelineGraph.Edge(from: eng37, to: p1812, kind: .fixes),
+                    PipelineGraph.Edge(from: i1760, to: p1770, kind: .fixes)])
+        func event(_ minutesAgo: Double, _ id: String, _ kind: PipelineEvent.Kind,
+                   _ detail: String) -> PipelineEvent {
+            PipelineEvent(at: now.addingTimeInterval(-minutesAgo * 60), item: id, kind: kind, detail: detail)
+        }
+        let notice = "#1840 was not rated: claude exited 1 with no answer"
+        let events = [   // newest last, as the core keeps them
+            event(2900, i1824, .rated, "low risk, low complexity"),
+            event(2900, i1824, .labelled, "+risk:low +complexity:low"),
+            event(2880, i1824, .asked, "asked for a fix PR"),
+            event(1440, p1825, .rated, "low risk, low complexity: A string change and its snapshot."),
+            event(1440, p1825, .labelled, "+risk:low +complexity:low"),
+            event(1440, p1825, .fastTrack, "+diplomat:fast-track: rated low risk, low complexity"),
+            event(1435, p1825, .asked, "asked for a fast-track review at 4a7d1c0"),
+            event(1300, i1790, .rated,
+                  "medium risk, high complexity: Touches the allocator, its protocol and both front-ends."),
+            event(1290, i1790, .child, "\(i1801): Report a remote lease's attach time in the device list"),
+            event(1290, i1790, .child, "\(i1802): Retry a remote lease that never attaches"),
+            event(1290, i1790, .fractured, "split into 2 parts"),
+            event(1200, i1801, .rated, "low risk, low complexity"),
+            event(1200, i1801, .asked, "asked for a fix PR"),
+            event(180, p1825, .clean, "clean marker at 4a7d1c0"),
+            event(170, p1825, .rerated, "low risk, low complexity: A string change and its snapshot."),
+            event(170, p1825, .cleared, "cleared at 4a7d1c0"),
+            event(160, p1825, .held, "CI still running"),
+            event(45, eng52, .asked, "asked for a fix PR"),
+            event(12, p1834, .asked, "asked for a fast-track review at e17b3f9"),
+            event(3, "", .error, notice),
+        ]
+        store.pipelineResult = PipelineTickResult(
+            at: now.addingTimeInterval(-90), items: items, graph: graph,
+            effects: [.review(repo: root.slug, number: 1834, url: p1834, headSha: "e17b3f9c40", author: ""),
+                      .fixIssue(repo: root.slug, number: 1801, url: i1801, author: ""),
+                      .fixLinear(repo: root.slug, identifier: "ENG-52", url: eng52,
+                                 text: "Device list flickers on refresh", author: "")],
+            events: events,
+            notices: [notice], fixable: [i1801, eng52], read: items.map(\.id))
+        // The review the last sync asked for, waiting for a bay; an agent on the Linear fix.
+        store.queuedTasks = [Store.QueuedAgentTask(
+            id: AgentTaskQueue.key(auditAction: AgentTaskQueue.reviewAction, item: "\(root.key)#1834"),
+            job: Store.AgentJob(kind: AgentTaskQueue.reviewAction, auditAction: AgentTaskQueue.reviewAction,
+                                label: "Review · #1834 · max", prompt: "", prURL: p1834, prNumber: 1834,
+                                authorLogin: nil, counter: .pipeline),
+            attemptNumber: 1)]
+        store.pinAgentRows([Store.AgentRow(
+            record: AgentState.RunRecord(runID: "r-eng-52", dispatchedAt: now.timeIntervalSince1970 - 2400,
+                                         prNumber: nil, prURL: eng52, kind: AgentTaskQueue.issuesAction,
+                                         label: "Issues · ENG-52 · deep", source: "auto"),
+            state: .running, reason: "", window: nil)])
+        return true
+    }
 
     /// Written through the real `CommsLog.append` into a scratch `DIPLOMAT_COMMS_DIR`
     /// (`CommsLog.dir` reads it per call) and folded by the real `refreshComms`: seeding
@@ -855,7 +1037,7 @@ enum Render {
 
     /// Seed the review-requests settings so the owed-reviews pill renders, the
     /// per-author depth table has a typed row beside the me one, and the nested author
-    /// allowlist + verdict policy are open (DIPLOMAT_RENDER=settings).
+    /// allowlist + verdict policy and the pipeline's rows are open (DIPLOMAT_RENDER=settings).
     @MainActor
     private static func seedSettings(_ store: Store, explain: Bool) {
         store.reviewRequestsEnabled = true
@@ -865,6 +1047,8 @@ enum Render {
         store.autoApproveEnabled = true   // show the master toggle ON + its nested suppressors
         store.autoReviewOverrides = AutoReviewDepth.seed + [AutoReviewOverride(login: "t0tl", depth: "deep")]
         store.communityIssuesEnabled = true
+        store.pipelineEnabled = true   // the pipeline's switches and Linear rows, merge's warning
+        store.pipelineLinearTeamsRaw = "ENG=software-mansion/argent"
         store.settingsExplain = explain
     }
 

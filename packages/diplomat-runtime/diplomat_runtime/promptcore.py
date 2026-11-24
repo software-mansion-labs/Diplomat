@@ -9,10 +9,14 @@ never drift. Build the binary with ``packages/diplomat-platform/linux/install/bu
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
+import time
+from collections.abc import Callable
 from pathlib import Path
 
 from . import core
@@ -41,27 +45,69 @@ def core_bin() -> str:
     )
 
 
-def cli(args: list[str], *, stdin: object = None, timeout: float = 30) -> str:
+def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
+        started: Callable[[subprocess.Popen], None] | None = None) -> str:
     """``diplomat-core <args>``'s stdout, with ``stdin`` handed over as JSON; or
     :class:`RuntimeError` saying why not (:class:`CoreBinaryMissing` when there is no
-    binary)."""
+    binary). ``started`` is handed the process, to :func:`stop` it sooner."""
     env = dict(os.environ)
     env.setdefault("DIPLOMAT_CORE", str(core.assets_dir()))
     try:
-        proc = subprocess.run(  # noqa: S603 — argv is a literal list
+        proc = subprocess.Popen(  # noqa: S603 — argv is a literal list
             [core_bin(), *args],
-            input=None if stdin is None else json.dumps(stdin),
-            stdin=subprocess.DEVNULL if stdin is None else None,
-            capture_output=True, text=True, env=env, timeout=timeout,
+            stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+            start_new_session=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(f"diplomat-core {args[0]} did not answer within "
-                           f"{int(timeout)}s") from exc
     except OSError as exc:
         raise RuntimeError(f"diplomat-core could not be run: {exc}") from exc
+    if started is not None:
+        started(proc)
+    try:
+        out, err = proc.communicate(None if stdin is None else json.dumps(stdin),
+                                    timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        stop(proc)
+        proc.wait()
+        raise RuntimeError(f"diplomat-core {args[0]} did not answer within "
+                           f"{int(timeout)}s") from exc
     if proc.returncode != 0:
-        raise RuntimeError(f"diplomat-core {args[0]} failed: {proc.stderr.strip()}")
-    return proc.stdout
+        raise RuntimeError(f"diplomat-core {args[0]} failed: {err.strip()}")
+    return out
+
+
+def stop(proc: subprocess.Popen) -> None:
+    """SIGKILL to the session ``proc`` (from :func:`cli`) leads, not just its group:
+    Foundation's ``Process`` starts each of the core's children (``gh``, ``claude``) in a
+    process group of its own."""
+    with contextlib.suppress(OSError):
+        os.killpg(proc.pid, signal.SIGKILL)
+    for _ in range(50):
+        left = _session(proc.pid)
+        if not left:
+            return
+        for pid in left:
+            with contextlib.suppress(OSError):
+                os.kill(pid, signal.SIGKILL)
+        time.sleep(0.02)
+
+
+def _session(sid: int) -> list[int]:
+    """The live processes in session ``sid``; none without ``/proc``."""
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return []
+    out = []
+    for name in filter(str.isdigit, names):
+        try:
+            with open(f"/proc/{name}/stat") as fh:
+                state, _ppid, _pgrp, session = fh.read().rpartition(")")[2].split()[:4]
+        except (OSError, ValueError):
+            continue
+        if state not in ("Z", "X") and int(session) == sid:
+            out.append(int(name))
+    return out
 
 
 def opencode_session_model() -> str:

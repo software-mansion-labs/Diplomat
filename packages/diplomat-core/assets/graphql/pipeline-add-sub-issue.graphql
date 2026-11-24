@@ -1,0 +1,4 @@
+# Makes a fractured issue's new child its sub-issue, both named by node id.
+mutation($issueId: ID!, $subIssueId: ID!) {
+  addSubIssue(input: {issueId: $issueId, subIssueId: $subIssueId}) { subIssue { id } }
+}

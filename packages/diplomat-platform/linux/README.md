@@ -259,6 +259,9 @@ beside the cap, which live in the shared `~/.diplomat/config.json` ([`appconfig.
   it, a wizard spawn that
   opens a terminal on the spot is never gated, and nothing is held at all while the
   usage probe cannot read a window. In `~/.diplomat/config.json`, like the cap above.
+- **Pipeline** - the [Pipeline](../../../docs/pipeline.md) (default **off**): the master
+  switch, one per thing it may do, the Linear teams, and where the Linear API key is read from: the
+  file `linearTokenFile` names in `~/.diplomat/config.json` (`$DIPLOMAT_LINEAR_TOKEN` wins over it).
 - **Claude API errors** — the tmux watcher toggle, plus a count of nudges sent.
 - **Tools — colour & visibility** — retint or hide any tool card. (SKILL.md PRs
   and Installer/CLI PRs ship hidden.)
@@ -298,6 +301,9 @@ DIPLOMAT_RENDER=panel DIPLOMAT_RENDER_OUT=/tmp/p.png \
                                                        #   that would not save, switched off)
                                                        #   network-panel (the main panel saying what of the
                                                        #   network does not work)
+                                                       #   pipeline (the Pipeline screen over a synthetic
+                                                       #   last.json in a scratch dir, read back through
+                                                       #   diplomat-core pipeline-last)
 DIPLOMAT_REFRESH_SECS=30 ./diplomat            # faster auto-refresh, for tuning
 ```
 
@@ -395,6 +401,7 @@ diplomat_app/
                   daemon verbs, the switch as last read, the retired mesh node
   networkview.py  the Network screen: the daemon's status, the hours, one card per pool
   telemetryview.py  the Telemetry screen: the bell curves, the rate-limit windows, the backlog series, the token split
+  pipelineview.py the Pipeline screen: every open issue and PR as a graph, lane filter, an item's detail and asks
   widgets.py      cards, chips, rows
   panel.py        the main window (header, search, grid, results, agent tasks, devices)
   settingsview.py two-pane settings screen

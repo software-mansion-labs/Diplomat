@@ -110,6 +110,9 @@ _ACTION_GLYPH: dict[str, str] = {
     "network-failed": "△", "network-withdraw": "↶", "network-unavailable": "△",
     "network-join": "⊕", "network-invite": "✉", "network-leave": "⊖",
     "network-start": "▷", "network-stop": "□",
+    "pipeline-fix": "⊙", "pipeline-review": "☑", "pipeline-merge": "✓",
+    "pipeline-fracture": "⊶", "pipeline-error": "△", "pipeline-recovered": "✓",
+    "pipeline-notice": "△",
 }
 
 

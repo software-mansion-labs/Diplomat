@@ -45,6 +45,9 @@ enum RelaunchTest {
         defer { try? fm.removeItem(at: scratch) }
 
         /// A Dock-less (`LSUIElement`) bundle at `<scratch>/<name>.app` whose executable is `script`.
+        /// LaunchServices runs a script executable under Rosetta unless the bundle puts arm64
+        /// first, and Rosetta's first translation on a fresh machine holds even `exit 7` up
+        /// for seconds, which passes for an instance that came up.
         func bundle(_ name: String, executable: String, script: String) -> URL {
             let app = scratch.appendingPathComponent("\(name).app")
             let macos = app.appendingPathComponent("Contents/MacOS")
@@ -60,11 +63,18 @@ enum RelaunchTest {
             <key>CFBundleExecutable</key><string>\(executable)</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>LSUIElement</key><true/>
+            <key>LSArchitecturePriority</key><array><string>arm64</string><string>x86_64</string></array>
             </dict></plist>
             """
             fm.createFile(atPath: app.appendingPathComponent("Contents/Info.plist").path,
                           contents: Data(plist.utf8))
             return app
+        }
+        func translated(_ pid: pid_t) -> Bool {
+            var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+            var info = kinfo_proc()
+            var size = MemoryLayout<kinfo_proc>.size
+            return sysctl(&mib, 4, &info, &size, nil, 0) == 0 && info.kp_proc.p_flag & P_TRANSLATED != 0
         }
         var reads = 0
         func lossy(_ app: URL) -> [pid_t] {
@@ -113,6 +123,8 @@ enum RelaunchTest {
         check("a bundle that stays up is a relaunch", accepted == nil, accepted ?? "")
         let staying = SelfUpdate.running(stays)
         check("one instance of it is up", staying.count == 1, "pids \(staying)")
+        check("it runs natively, as Diplomat.app does", !staying.isEmpty && !staying.contains(where: translated),
+              "pids \(staying)")
 
         print("relaunch: the environment the instance gets")
         let handed = handedEnvironment()

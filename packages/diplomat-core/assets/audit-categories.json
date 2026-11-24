@@ -48,7 +48,14 @@
     "network-invite": "network",
     "network-leave": "network",
     "network-start": "network",
-    "network-stop": "network"
+    "network-stop": "network",
+    "pipeline-fix": "issues",
+    "pipeline-review": "review",
+    "pipeline-merge": "merge",
+    "pipeline-fracture": "issues",
+    "pipeline-notice": "system",
+    "pipeline-error": "system",
+    "pipeline-recovered": "system"
   },
   "fallback": "system"
 }

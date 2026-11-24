@@ -1,12 +1,12 @@
 # Settings
 
-The header **⚙︎** button (next to ↻, the Network, Comms and Telemetry buttons and ⏻)
+The header **⚙︎** button (next to ↻, the Network, Comms, Pipeline and Telemetry buttons and ⏻)
 swaps the panel to a settings screen:
 
 - **GitHub username** - override the handle used by the "My …" tools, the wizards
-  and the monitors. Blank = the `gh`-authenticated user (`viewer.login`), resolved
-  eagerly at launch so it's the default everywhere. On a GitLab repo root "me" is
-  `glab`'s user on that host, which the override does not change.
+  and the monitors, but not the [Pipeline](pipeline.md). Blank = the `gh`-authenticated
+  user (`viewer.login`), resolved eagerly at launch so it's the default everywhere. On a
+  GitLab repo root "me" is `glab`'s user on that host, which the override does not change.
 - <a id="agent-runner"></a>**Agent runner** - which agent CLI a spawn runs:
   **Claude Code** (the default, and what every existing install keeps), **OpenCode**
   or **Hermes**. Only the agent command changes - the agent word and its flags, or
@@ -134,7 +134,7 @@ swaps the panel to a settings screen:
   to its host, and "me" there is glab's user on that host, not the GitHub username
   above, read again whenever that host's entry in glab's `config.yml` changes (`glab auth
   login` as another account rewrites it); its agents are told to use `glab`. GitHub-only whatever the roots: the
-  review audit, the username override and
+  review audit, the [Pipeline](pipeline.md), the username override and
   [the narrow agent token](#a-narrow-github-token-for-agents) (an agent on a GitLab root
   runs on your full `glab` login). A reading older than a
   minute is taken again when next asked, so a checkout that appears later is picked up by
@@ -252,6 +252,12 @@ swaps the panel to a settings screen:
   notifications, the triage model, where the token
   is read from, and **Test**. Every one is described in
   [Comms → Settings](comms.md#settings).
+- **Pipeline** - the [Pipeline](pipeline.md) (**default off**): the switch, one switch per thing it
+  may do (rate, open fix PRs, fast-track your PRs, merge cleared PRs with your admin rights, split
+  big issues), the Linear teams and where the Linear API key is read from. Every one is
+  described in [Pipeline → Settings](pipeline.md#settings). The key's Keychain item (macOS) or
+  file (Linux) is named in `~/.diplomat/config.json` as `linearKeychainItem` or `linearTokenFile`;
+  see [Pipeline → Linear](pipeline.md#linear).
 - **Update** - pull the checkout, rebuild, and relaunch in place. Shows how many
   commits the checkout is behind *and* ahead of upstream, with a ↻ re-check
   button; the button fetches and **merges** (fast-forward when strictly behind, a

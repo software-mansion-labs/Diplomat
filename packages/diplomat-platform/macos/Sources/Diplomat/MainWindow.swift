@@ -151,7 +151,7 @@ struct MainRoot: View {
         ContentView(showSettings: screen == .settings, showTelemetry: screen == .telemetry,
                     showDevices: screen == .devices, showMachines: screen == .machines,
                     showNetwork: screen == .network,
-                    showComms: screen == .comms)
+                    showComms: screen == .comms, showPipeline: screen == .pipeline)
     }
 }
 

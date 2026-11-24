@@ -1049,8 +1049,9 @@ public enum CommsText {
     /// `fill`, with every line between a `BEGIN` and an `END` fence line prefixed with
     /// `quoteMarker` and a space (an empty line, the marker alone). Any line break in a
     /// value starts a quoted line.
-    public static func fillFenced(_ template: String, _ values: [String: String]) -> String {
-        let begin = "BEGIN " + fenceMarker, end = "END " + fenceMarker
+    public static func fillFenced(_ template: String, _ values: [String: String],
+                                  marker: String = fenceMarker) -> String {
+        let begin = "BEGIN " + marker, end = "END " + marker
         var out: [String] = []
         var inside: [Substring]?
         for line in template.split(separator: "\n", omittingEmptySubsequences: false) {
@@ -1093,7 +1094,7 @@ public enum CommsText {
     /// is what holds the fence. Catches the marker's letters in order with only
     /// non-alphanumerics between, in any case, fullwidth, accented, or as a `lookalikes`
     /// letter; other look-alikes pass.
-    public static func defang(_ text: String) -> String {
+    public static func defang(_ text: String, marker fence: String = fenceMarker) -> String {
         let scalars = Array(text.unicodeScalars)
         // The letters and digits of `text`, folded, each with the scalar it came from.
         var skeleton: [Unicode.Scalar] = []
@@ -1104,7 +1105,7 @@ public enum CommsText {
                 origin.append(i)
             }
         }
-        let marker = Array(fenceMarker.unicodeScalars.filter { $0 != " " })
+        let marker = Array(fence.unicodeScalars.filter { $0 != " " })
         var cuts: [(from: Int, to: Int)] = []
         var k = 0
         while k + marker.count <= skeleton.count {

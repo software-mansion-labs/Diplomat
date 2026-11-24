@@ -199,6 +199,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if env["DIPLOMAT_COMMS_TEST"] == "1" {
             Task { @MainActor in let ok = await CommsTest.run(); exit(ok ? 0 : 1) }
         }
+        // Pipeline self-test: composed sync results into a queue nothing drains. No gh,
+        // claude or Linear. Exit code = pass/fail.
+        if env["DIPLOMAT_PIPELINE_TEST"] == "1" {
+            Task { @MainActor in let ok = await PipelineTest.run(); exit(ok ? 0 : 1) }
+        }
         // Diplomacy Network self-test: the Store's cycle, gate and run handling against a
         // stand-in daemon on a scratch socket, with a stand-in installer and process
         // table. It offers jobs and opens no terminal. Exit code = pass/fail.

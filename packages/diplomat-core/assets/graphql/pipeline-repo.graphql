@@ -1,0 +1,169 @@
+# Every read a pipeline sync makes of one repository, each picked by `gh api graphql -f
+# operationName=<name>`. Open issues and PRs page newest created first, so an item updated
+# meanwhile keeps its place. `files` need not list past `floor.maxFiles`: `changedFiles`
+# says a PR exceeds it. Any other `totalCount` past what a connection lists reads as
+# whatever holds the item back: a label, an unresolved thread, a reviewer, a commit or a
+# closing reference nobody saw. A timeline's `totalCount` counts every event whatever
+# `itemTypes` says; `filteredCount` counts the ones it names.
+
+fragment Issue on Issue {
+  number id title body url updatedAt
+  author { login }
+  assignees(first: 10) { nodes { login } }
+  labels(first: 100) { totalCount nodes { name } }
+  issueType { name }
+  parent { url }
+  subIssues(first: 50) { nodes { url } }
+}
+
+fragment PR on PullRequest {
+  number title body url updatedAt state isDraft isCrossRepository mergeable mergeStateStatus
+  isMergeQueueEnabled reviewDecision headRefName headRefOid baseRefName changedFiles
+  author { login }
+  assignees(first: 10) { nodes { login } }
+  labels(first: 100) { totalCount nodes { name } }
+  closingIssuesReferences(first: 10) { totalCount nodes { number url state } }
+  files(first: 20) { nodes { path additions deletions changeType } }
+  tip: commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+  reviewRequests(first: 1) { totalCount }
+  reviewThreads(first: 50) { totalCount nodes { isResolved } }
+  reviews(last: 40) { totalCount nodes { author { __typename login } state body commit { oid } } }
+  comments(last: 40) { totalCount nodes { author { __typename login } body } }
+}
+
+# Needed only to mark a PR ready or merge it. An admin reads the base's protection as
+# `branchProtectionRule`, anyone else, in part, as `refUpdateRule`. A required check that
+# never reported is missing from `contexts`; `isRequired` tells the required one from
+# another app's check of its name.
+fragment Gate on PullRequest {
+  baseRef {
+    branchProtectionRule {
+      requiresStatusChecks requiredStatusCheckContexts
+      lockBranch restrictsPushes requiresDeployments requiresCommitSignatures requiresLinearHistory
+    }
+    refUpdateRule { requiredStatusCheckContexts }
+    rules(first: 100) {
+      totalCount
+      nodes {
+        type
+        parameters {
+          ... on RequiredStatusChecksParameters { requiredStatusChecks { context } }
+          ... on PullRequestParameters { allowedMergeMethods }
+        }
+      }
+    }
+  }
+  gateTip: commits(last: 1) {
+    nodes {
+      commit {
+        statusCheckRollup {
+          contexts(first: 100) {
+            totalCount
+            nodes {
+              ... on CheckRun { name conclusion isRequired(pullRequestNumber: $number) }
+              ... on StatusContext { context state isRequired(pullRequestNumber: $number) }
+            }
+          }
+        }
+      }
+    }
+  }
+  commits(first: 100) {
+    totalCount
+    nodes {
+      commit { message author { name user { login } } committer { name email user { login } } signature { isValid } }
+    }
+  }
+  closing: closingIssuesReferences(first: 10) { totalCount nodes { ...Issue state } }
+  readied: timelineItems(itemTypes: [READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT], first: 1) { filteredCount }
+  threads: reviewThreads(first: 50) {
+    nodes { comments(first: 50) { totalCount nodes { author { login } body } } }
+  }
+}
+
+query Repo($owner: String!, $name: String!, $issues: Int!, $prs: Int!) {
+  viewer { login }
+  repository(owner: $owner, name: $name) {
+    nameWithOwner
+    defaultBranchRef { name }
+    squashMergeAllowed mergeCommitAllowed rebaseMergeAllowed
+    issues(states: OPEN, first: $issues, orderBy: {field: CREATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ...Issue }
+    }
+    pullRequests(states: OPEN, first: $prs, orderBy: {field: CREATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ...PR }
+    }
+    done: pullRequests(states: [MERGED, CLOSED], first: 20, orderBy: {field: UPDATED_AT, direction: DESC}) {
+      nodes {
+        number title url updatedAt state isCrossRepository headRefName baseRefName
+        author { login }
+        labels(first: 100) { nodes { name } }
+        closingIssuesReferences(first: 10) { nodes { number title url state } }
+      }
+    }
+  }
+}
+
+query Issues($owner: String!, $name: String!, $after: String!, $issues: Int!) {
+  repository(owner: $owner, name: $name) {
+    issues(states: OPEN, first: $issues, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ...Issue }
+    }
+  }
+}
+
+query PullRequests($owner: String!, $name: String!, $after: String!, $prs: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequests(states: OPEN, first: $prs, after: $after, orderBy: {field: CREATED_AT, direction: DESC}) {
+      pageInfo { hasNextPage endCursor }
+      nodes { ...PR }
+    }
+  }
+}
+
+query PullRequest($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    pullRequest(number: $number) { ...PR ...Gate mergedBy { login } }
+  }
+}
+
+query Item($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    issueOrPullRequest(number: $number) {
+      ... on Issue { ...Issue state }
+      ... on PullRequest {
+        number title url updatedAt state isDraft isCrossRepository headRefName headRefOid baseRefName
+        author { login }
+        assignees(first: 10) { nodes { login } }
+        labels(first: 100) { totalCount nodes { name } }
+        labeled: timelineItems(itemTypes: [LABELED_EVENT], first: 100) {
+          filteredCount
+          nodes { ... on LabeledEvent { label { name } } }
+        }
+      }
+    }
+  }
+}
+
+query Queued($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef { name }
+    issueOrPullRequest(number: $number) {
+      ... on Issue { ...Issue state }
+      ... on PullRequest { ...PR }
+    }
+  }
+}
+
+query Parts($owner: String!, $name: String!, $me: String!) {
+  repository(owner: $owner, name: $name) {
+    issues(first: 50, filterBy: {createdBy: $me}, orderBy: {field: CREATED_AT, direction: DESC}) {
+      nodes { id url body parent { url } }
+    }
+  }
+}

@@ -790,9 +790,15 @@ def queue_key(audit_action: str, item: str) -> str:
     return f"{audit_action}:{item}"
 
 
+def linear_item(identifier: str) -> str:
+    """``linear:ENG-12``: a space of its own, so a Linear fix's queue key is no GitHub
+    item's. Twin of ``Store.linearItem``."""
+    return "linear:" + identifier
+
+
 def item_of_key(key: str) -> str | None:
     """The item key a queue key (:func:`queue_key`) is about, or ``None`` for one about
-    no item: an investigation's, numbered by a Slack ts."""
+    no item: an investigation's, numbered by a Slack ts, or a Linear issue's fix."""
     _, _, rest = key.partition(":")
     return rest if split_item_key(rest) is not None else None
 
@@ -1037,7 +1043,7 @@ class RequestedWork:
     """
 
     #: The PR number, or the issue number — two numbering spaces, told apart by the
-    #: verb in :attr:`key` and nowhere else.
+    #: verb in :attr:`key` and nowhere else. 0 for a Linear issue's fix.
     number: int
     url: str
     #: Whose PR / issue — the pipeline's ban dimension. Empty where the sweep names
@@ -1051,12 +1057,28 @@ class RequestedWork:
     #: The Diplomacy Network task this ask is offered as, "" while no offer carries it.
     #: An offer is not a start: the ask stands until the work has run.
     offered: str = ""
+    #: Queued by the Pipeline screen's Start fix, not by a sync (``pipeline.withdrawn``).
+    by_hand: bool = False
+
+    @property
+    def linear(self) -> str:
+        """The identifier (``ENG-12``) of the Linear issue a fix works on, or ""."""
+        issue = self.config.get("linear")
+        return str(issue.get("identifier") or "") if isinstance(issue, dict) else ""
+
+    @property
+    def pipeline(self) -> bool:
+        """Asked for by the Pipeline, so its master switch pauses it (``Store.is_paused``).
+        Twin of ``RequestedConfig.isPipeline``."""
+        return bool(self.config.get("pipeline") or self.config.get("fastTrack")
+                    or self.linear)
 
     @property
     def item(self) -> str | None:
         """The item key of the PR or issue asked about, or ``None`` for a row that names
-        no repo: an investigation, or a legacy row not yet given one."""
-        if self.action == QUEUE_INVESTIGATE_ACTION or not self.repo:
+        no GitHub or GitLab item: an investigation, a Linear issue's fix, or a legacy row
+        not yet given a repo."""
+        if self.action == QUEUE_INVESTIGATE_ACTION or not self.repo or self.linear:
             return None
         return f"{self.repo.lower()}#{self.number}"
 
@@ -1071,8 +1093,10 @@ class RequestedWork:
     def key(self) -> str:
         """This ask's identity everywhere it has one: the queued task's id, the row the
         panel draws it as, and what ``_forget_requested`` drops it by. An
-        investigation keeps its Slack ts, being about no repo."""
-        return queue_key(self.action, self.item or str(self.number))
+        investigation keeps its Slack ts, being about no repo; a Linear issue's fix its
+        :func:`linear_item`."""
+        return queue_key(self.action, self.item
+                         or (linear_item(self.linear) if self.linear else str(self.number)))
 
     @property
     def label(self) -> str:
@@ -1091,13 +1115,18 @@ class RequestedWork:
         if self.action == QUEUE_INVESTIGATE_ACTION:
             return str(self.config.get("label", ""))
         noun = "Issues" if self.action == QUEUE_ISSUES_ACTION else "Review"
-        named = item_label(self.item, roots) if self.item else f"#{self.number}"
+        named = (item_label(self.item, roots) if self.item
+                 else self.linear or f"#{self.number}")
         return f"{noun} · {named} · {self.config.get('depth', '')}"
 
     def to_json(self) -> dict:
         row = {"number": self.number, "url": self.url, "author": self.author,
                "config": self.config, "repo": self.repo}
-        return {**row, "offered": self.offered} if self.offered else row
+        if self.offered:
+            row["offered"] = self.offered
+        if self.by_hand:
+            row["byHand"] = True
+        return row
 
     @staticmethod
     def from_json(obj: dict) -> "RequestedWork | None":
@@ -1117,7 +1146,8 @@ class RequestedWork:
         return RequestedWork(number=number, url=str(obj.get("url", "")),
                              author=str(obj.get("author", "")), config=config,
                              repo=str(obj.get("repo", "")),
-                             offered=str(obj.get("offered", "")))
+                             offered=str(obj.get("offered", "")),
+                             by_hand=obj.get("byHand") is True)
 
 
 @dataclass(frozen=True)
@@ -1167,6 +1197,8 @@ class RunningAgent:
     reason: str = ""
     # The run's PR or issue item key, read off its link; None for neither.
     item: str | None = None
+    # An agent left up after its run ended (`agentstate.release_ended`): no work is its.
+    released: bool = False
 
     @property
     def awaiting_input(self) -> bool:
