@@ -564,7 +564,9 @@ struct PipelineDetail: View {
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(PipelineTint.source(item.source))
                 Text(item.label).font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .lineLimit(1).truncationMode(.middle)
                     .textSelection(.enabled)
+                    .tooltip(item.label)
                 PipelineStageChip(stage: item.stage)
                 Spacer(minLength: 4)
                 Button(action: close) {

@@ -62,21 +62,8 @@ extension Store {
     func writePipelineControl() {
         let env = ProcessInfo.processInfo.environment["DIPLOMAT_PIPELINE_DIR"] ?? ""
         guard !Headless.active || !env.isEmpty else { return }
-        let switches = ["enabled": pipelineEnabled, "rate": pipelineRate, "fix": pipelineFix,
-                        "fastTrack": pipelineFastTrack, "merge": pipelineMerge,
-                        "fracture": pipelineFracture]
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = .sortedKeys
-        guard let data = try? encoder.encode(switches) else { return }
-        let dir = PipelineLog.dir
-        let fm = FileManager.default
-        let tmp = dir.appendingPathComponent("control.json.tmp-\(getpid())-\(UUID().uuidString)")
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true,
-                                attributes: [.posixPermissions: 0o700])
-        if !fm.createFile(atPath: tmp.path, contents: data, attributes: [.posixPermissions: 0o600])
-            || rename(tmp.path, dir.appendingPathComponent("control.json").path) != 0 {
-            try? fm.removeItem(at: tmp)
-        }
+        PipelineControl(enabled: pipelineEnabled, rate: pipelineRate, fix: pipelineFix,
+                        fastTrack: pipelineFastTrack, merge: pipelineMerge, fracture: pipelineFracture).save()
     }
 
     nonisolated static func pipelineTeams(_ raw: String) -> [PipelineSettings.LinearTeam] {
@@ -87,22 +74,41 @@ extension Store {
 
     /// Never stopped: a sync with the master switch off returns at once.
     func startPipelineMonitor() {
-        // The loop's sleep pauses while the Mac sleeps; a sync on wake catches up at once.
-        // Headless too, where a sync runs only the self-test's stand-ins.
+        // The loop's sleep pauses while the Mac sleeps: a wake runs the sync it slept through,
+        // in its place. Headless too, where a sync runs only the self-test's stand-ins.
         if pipelineWakeObserver == nil {
             pipelineWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
             ) { [weak self] _ in
-                Task { await self?.runPipelineSyncOnce() }
+                Task { @MainActor in
+                    guard let self, !self.pipelineSyncing, self.pipelineSyncWait <= 0 else { return }
+                    await self.runTimedPipelineSync()
+                }
             }
         }
         guard pipelineMonitorTask == nil, !Headless.active else { return }
         pipelineMonitorTask = Task { [weak self] in
             while !Task.isCancelled {
-                await AppLog.timed("pipelineSync", slowAfter: 120) { await self?.runPipelineSyncOnce() }
-                try? await Task.sleep(nanoseconds: UInt64(Store.pipelineSyncInterval * 1_000_000_000))
+                guard let wait = self?.pipelineSyncWait else { return }
+                if wait > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                } else {
+                    await AppLog.timed("pipelineSync", slowAfter: 120) { await self?.runTimedPipelineSync() }
+                }
             }
         }
+    }
+
+    /// Until the loop's next sync: an interval after the last timed one ended, by the clock,
+    /// which runs on while the Mac sleeps.
+    var pipelineSyncWait: TimeInterval {
+        let interval = Store.pipelineSyncInterval
+        return pipelineTimedSyncEnded.map { min(interval, interval + $0.timeIntervalSinceNow) } ?? 0
+    }
+
+    private func runTimedPipelineSync() async {
+        await runPipelineSyncOnce()
+        pipelineTimedSyncEnded = Date()
     }
 
     func pipelineCut(master: Bool = false) {

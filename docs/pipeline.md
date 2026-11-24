@@ -23,7 +23,8 @@ Labels, child issues and the merge are done by the sync itself, in code. The fix
 agents, queued like a sweep's asks: behind the [task cap](automation.md#autonomous-monitors), the
 [spending budget](automation.md#the-spending-budget) and the disk floor, and held while the ban list cannot be
 read and, after a launch or the pipeline going on, until a sync since has judged their item; each asked for once (a review
-once per head), retried on the monitors' backoff when a run dies, and taken off the queue when a later
+once per head, a new head's no sooner than an hour after the last one was queued or, if it ran, began),
+retried on the monitors' backoff when a run dies, and taken off the queue when a later
 sync no longer owes it - one you started with Start fix only once a sync that read its repo in full
 finds its issue held or no candidate; any other by a sync that could not read its repo in full only
 if it read that item, never by one that only read and showed the repo. An item whose author is on the

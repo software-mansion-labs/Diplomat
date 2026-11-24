@@ -583,9 +583,14 @@ enum PipelineTest {
                   && feed("pipeline-recovered").last == "auto Pipeline syncing again")
         ticks = []
         store.startPipelineMonitor()
+        store.pipelineTimedSyncEnded = Date().addingTimeInterval(-Store.pipelineSyncInterval)
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
-        for _ in 0..<250 where ticks.isEmpty { try? await Task.sleep(nanoseconds: 20_000_000) }
-        check("a wake syncs at once", ticks.count == 1)
+        for _ in 0..<250 where store.pipelineSyncWait <= 0 { try? await Task.sleep(nanoseconds: 20_000_000) }
+        check("a wake an interval after the last timed sync syncs at once, the loop's next an interval on",
+              ticks.count == 1 && store.pipelineSyncWait > Store.pipelineSyncInterval - 5)
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        check("…one sooner syncs nothing", ticks.count == 1)
 
         print("\npipeline: Start fix")
         store.pipelineForce = PipelineSettings.Force()
@@ -815,13 +820,18 @@ enum PipelineTest {
         func switches() -> [String: Bool]? {
             (try? Data(contentsOf: control)).flatMap { try? JSONDecoder().decode([String: Bool].self, from: $0) }
         }
+        try? FileManager.default.createDirectory(at: PipelineLog.dir, withIntermediateDirectories: true)
+        chmod(PipelineLog.dir.path, 0o755)
         store.pipelineMerge = false
         check("a switch writes every switch as it stands",
               switches() == ["enabled": true, "rate": true, "fix": true, "fastTrack": true, "merge": false,
                              "fracture": false])
-        let mode = (try? FileManager.default.attributesOfItem(atPath: control.path))?[.posixPermissions] as? Int
+        func mode(_ url: URL) -> Int? {
+            (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
+        }
         let beside = (try? FileManager.default.contentsOfDirectory(atPath: PipelineLog.dir.path)) ?? []
-        check("…owner-only, replaced whole", mode == 0o600 && !beside.contains { $0.hasPrefix("control.json.") })
+        check("…owner-only in a folder made owner-only, replaced whole",
+              mode(control) == 0o600 && mode(PipelineLog.dir) == 0o700 && !beside.contains { $0.hasPrefix("control.json.") })
         try? FileManager.default.removeItem(at: control)
         var handed: [String: Bool]?
         Store.pipelineTickOverride = { _ in
@@ -1332,13 +1342,19 @@ enum PipelineTest {
                                          .init(id: lone.id, column: 0, row: 1)],
                                  edges: [.init(from: issue, to: pr, kind: .fixes)]))
         let older = "https://github.com/o/r/issues/10", newer = "https://github.com/o/r/issues/9"
+        let fixer = "https://github.com/o/r/pull/11", child = "https://github.com/o/r/issues/12"
         let rows = PipelineLayout.make(PipelineTickResult(
-            at: Date(), items: [item(older, .issue, author: "bob"), item(newer, .issue, author: "bob")],
-            graph: PipelineGraph(nodes: [.init(id: newer, column: 0, row: 0), .init(id: older, column: 0, row: 1)],
-                                 edges: [])),
+            at: Date(), items: [older, newer, fixer, child].map { item($0, .issue, author: "bob") },
+            graph: PipelineGraph(nodes: [.init(id: newer, column: 0, row: 0), .init(id: older, column: 0, row: 1),
+                                         .init(id: fixer, column: 1, row: 1), .init(id: child, column: 1, row: 2)],
+                                 edges: [.init(from: older, to: fixer, kind: .fixes),
+                                         .init(from: older, to: child, kind: .child)])),
                                        lane: nil).cards
-        check("groups stack in the core's row order, not by id",
-              rows.map(\.item.id) == [newer, older] && rows[0].frame.minY < rows[1].frame.minY)
+        let frames: [CGRect] = [(6, 6), (6, 120), (216, 120), (216, 222)].map {
+            CGRect(x: $0.0, y: $0.1, width: 170, height: 88)
+        }
+        check("groups stack in the core's row order, not by id, each right under the last",
+              rows.map(\.item.id) == [newer, older, fixer, child] && rows.map(\.frame) == frames)
         check("a lane keeps each group with any member in it, whole",
               Set(PipelineLayout.make(laneResult, lane: .done).cards.map(\.item.id)) == [issue, pr])
         var eng = items[2]
