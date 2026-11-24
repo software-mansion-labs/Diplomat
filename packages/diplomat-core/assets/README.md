@@ -36,7 +36,6 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
 | `graphql/pipeline-add-sub-issue.graphql` | makes a split issue's child its sub-issue (`$issueId`, `$subIssueId`) |
 | `graphql/linear.graphql` | every Linear operation the pipeline runs, picked by `operationName`: `Issues` (the tracked teams' open issues, a page at a time, and the viewer), `Issue` (one issue read again right before a write, and each one a PR about to merge would close or that is attached to a GitHub issue it would close), `Recheck` (the issues a fix is about to be asked for, read again by id), `Queued` (the issues asks or attempt records name that `Issues` missed, archived or not), `Attached` (the issues an attachment links a PR from, and each GitHub issue it would close, read before it merges), `Labels`, `LabelCreate`, `AddLabel`, `RemoveLabel`, `IssueCreate` |
 | `gitlab.json` | `promptNote`, the paragraph every review, issue, conflict and audit prompt whose repo is a GitLab root carries right after its opening line (`{host}`, `{owner}`, `{repo}` filled in): read GitLab and `glab` wherever the prompt says GitHub and `gh`, with the `glab` equivalents |
-| `golden-prompts/` | canonical prompt outputs, one `.txt` per mode; regenerate with `DIPLOMAT_GOLDEN_WRITE=1 swift run DiplomatCoreSmoke`, asserted byte-for-byte by the Swift smoke test AND `diplomat-platform/linux/tests/test_golden_prompts.py` |
 
 ## Contract notes
 
@@ -63,11 +62,12 @@ threshold in one file and both platforms pick it up; the golden-prompt tests
   Python, it shells out to the `diplomat-core` CLI
   (`diplomat-runtime/diplomat_runtime/promptcore.py` → `../Sources/DiplomatCoreCLI`), so the two
   front-ends are identical by construction rather than by convention. The
-  `golden-prompts/` assertions on both sides remain as the regression net over
-  that one builder (and over the Python→CLI bridge): a drift fails a CI job
-  before it ships. Build the binary with `packages/diplomat-platform/linux/install/build-core.sh`.
+  expected prompts in `../Tests/fixtures/prompts/` (regenerated with
+  `DIPLOMAT_GOLDEN_WRITE=1 swift run DiplomatCoreSmoke`) are asserted on both
+  sides as the regression net over that one builder (and over the Python→CLI
+  bridge): a drift fails a CI job before it ships. Build the binary with `packages/diplomat-platform/linux/install/build-core.sh`.
 - **The known-author single-PR tier** in `review.json`
-  (`specific.mineOnly` / `specific.theirsOnly` / `specific.reviewerFindingsFirst`
+  (`specific.mineOnly` / `specific.reviewerFindingsFirst`
   and `blocks.noVerdict`) exists because the monitors always know the PR's author,
   so they skip the author-poll CASE A/B prompt the wizards use. It has no golden
   files of its own.

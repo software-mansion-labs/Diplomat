@@ -979,7 +979,7 @@ def test_the_wizards_keep_a_listed_checkouts_repo_on_each_host(lab_only):
 
 # ---- one slug on GitHub and on GitLab ----------------------------------------------
 
-GOLDEN = FIXTURES.parents[2] / "assets/golden-prompts"
+GOLDEN = FIXTURES.parent / "prompts"
 TWIN_HUB = LocalRepo("Acme", "Widget", "/src/hub")
 TWIN_LAB = LocalRepo("acme", "widget", "/src/lab", HOST)
 
@@ -1053,9 +1053,9 @@ def test_one_slug_on_github_and_on_gitlab_is_two_roots_with_two_of_everything(
         LocalRepo("Acme", "Widget", "/hub"), LocalRepo("acme", "widget", "/lab", HOST)]
     assert lab_only.local_repos == (TWIN_HUB, TWIN_LAB)
 
-    hub_prompt = (GOLDEN / "conflicts-single.txt").read_text().replace(
+    hub_prompt = (GOLDEN / "conflicts-single.expected.txt").read_text().replace(
         "software-mansion/argent", "acme/widget").replace("#337", "#5")
-    lab_prompt = (GOLDEN / "review-single-gitlab.txt").read_text().replace(
+    lab_prompt = (GOLDEN / "review-single-gitlab.expected.txt").read_text().replace(
         "group/sub/proj", "acme/widget").replace("#337", "#5")
     # ps prints each argv on one line, a newline in it as "?".
     dump = A.Observation.present("".join(

@@ -34,33 +34,33 @@
   ],
   "prompts": [
     {
-      "golden": "review-single-gitlab.txt",
+      "golden": "review-single-gitlab.expected.txt",
       "roots": [
         "group/sub/proj",
         "gitlab.example.com/group/sub/proj"
       ]
     },
     {
-      "golden": "review-single-gitlab.txt",
+      "golden": "review-single-gitlab.expected.txt",
       "roots": [
         "group/sub/proj"
       ]
     },
     {
-      "golden": "review-single-gitlab.txt",
+      "golden": "review-single-gitlab.expected.txt",
       "roots": [
         "other.example.com/group/sub/proj"
       ]
     },
     {
-      "golden": "review-single-unknown.txt",
+      "golden": "review-single-unknown.expected.txt",
       "roots": [
         "software-mansion/argent",
         "gitlab.example.com/software-mansion/argent"
       ]
     },
     {
-      "golden": "conflicts-single.txt",
+      "golden": "conflicts-single.expected.txt",
       "roots": [
         "gitlab.example.com/software-mansion/argent"
       ]

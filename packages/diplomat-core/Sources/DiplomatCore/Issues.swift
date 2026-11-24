@@ -4,9 +4,7 @@ import Foundation
 public enum IssueCatalog {
     public static func depths() -> [PromptDepth] {
         guard let i = try? CoreAssets.issues() else { return [] }
-        return i.depths.map {
-            PromptDepth(id: $0.id, title: $0.title, blurb: $0.blurb, fragment: $0.fragment)
-        }
+        return PromptDepth.ladder(i.depths)
     }
     public static func defaultDepthID() -> String {
         (try? CoreAssets.issues())?.defaultDepth ?? depths().first?.id ?? ""

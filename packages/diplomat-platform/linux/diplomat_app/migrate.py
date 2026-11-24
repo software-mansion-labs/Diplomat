@@ -51,13 +51,16 @@ def migrate_autostart_entry() -> None:
         launcher = next((ln.removeprefix(prefix).rstrip("\r\n") for ln in rewritten
                          if ln.startswith(prefix)), None)
         if launcher and not menu.exists():
-            menu.parent.mkdir(parents=True, exist_ok=True)
             _write_atomic(menu, MENU_ENTRY.format(launcher=launcher))
     except Exception:  # noqa: BLE001 - migration must never break startup
         pass
 
 
 def _write_atomic(path: Path, text: str) -> None:
+    # Through a symlink, dangling or not: replacing the link would cut a
+    # dotfiles-managed entry loose from its repo.
+    path = Path(os.path.realpath(path))
+    path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
     try:
         with os.fdopen(fd, "w") as f:

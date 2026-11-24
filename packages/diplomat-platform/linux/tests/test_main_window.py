@@ -325,6 +325,24 @@ def test_startup_leaves_an_existing_menu_entry_alone(old_install):
     assert "DIPLOMAT_BACKGROUND=1" in _exec_line(login.read_text())
 
 
+def test_startup_writes_through_entries_a_dotfiles_repo_links_in(old_install, tmp_path):
+    _env, _record, login, menu, (installed_login, installed_menu) = old_install
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    login.rename(dotfiles / "login.desktop")
+    login.symlink_to(os.path.relpath(dotfiles / "login.desktop", login.parent))
+    menu.symlink_to(dotfiles / "menu" / "diplomat.desktop")  # dangling
+    migrate.migrate_autostart_entry()
+    assert login.is_symlink() and menu.is_symlink()
+    assert _exec_line((dotfiles / "login.desktop").read_text()) == _exec_line(installed_login)
+    assert (dotfiles / "menu" / "diplomat.desktop").read_text() == installed_menu
+    # No tmp file left beside either link or either target.
+    assert sorted(p.name for p in login.parent.iterdir()) == ["diplomat.desktop"]
+    assert sorted(p.name for p in menu.parent.iterdir()) == ["diplomat.desktop"]
+    assert sorted(str(p.relative_to(dotfiles)) for p in dotfiles.rglob("*")) == [
+        "login.desktop", "menu", "menu/diplomat.desktop"]
+
+
 def test_startup_creates_no_entry_where_none_is_installed(old_install):
     _env, _record, login, menu, _installed = old_install
     login.unlink()
