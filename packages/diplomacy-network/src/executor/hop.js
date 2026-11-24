@@ -299,6 +299,11 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
         if (fn) this.once('timeout', fn);
         return this;
       }
+
+      // Closed without END, which the relay hands on to the job as a reset.
+      resetAndDestroy() {
+        return this.destroy();
+      }
     })({
       allowHalfOpen: true,
       // What is not taken is kept in the stash, and the link itself holds one chunk.

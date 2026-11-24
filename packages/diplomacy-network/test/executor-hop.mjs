@@ -21,6 +21,7 @@ Object.assign(process.env, {
 });
 const { createBroker } = await import('../src/executor/broker.js');
 const { createCA } = await import('../src/executor/ca.js');
+const { systemQueues } = await import('../src/executor/outbound.js');
 const { ACK, ASK, CREDIT, DATA, END, HOP_JOB_BYTES, HOP_LINGER_MS, HOP_RECLAIM_MS, HOP_STRANGER_BYTES, HOP_STRANGER_WINDOW, HOP_WINDOW, PREFACE, createHop } = await import('../src/executor/hop.js');
 assert.deepEqual([HOP_WINDOW, HOP_STRANGER_WINDOW, HOP_JOB_BYTES, HOP_STRANGER_BYTES, HOP_RECLAIM_MS, HOP_LINGER_MS], [128 * 1024, 2 * 1024, 14 * 2 ** 20, 2 * 2 ** 20, 2000, 5000], 'what the README states');
 const RELAY = fileURLToPath(new URL('../image/relay.mjs', import.meta.url));
@@ -83,8 +84,17 @@ const web = http.createServer((req, res) => {
     }, 5);
   });
 });
-const ports = { '93.184.216.1': await listening(echo), '93.184.216.2': await listening(source), '93.184.216.3': await listening(endless), '93.184.216.4': await listening(web) };
-const addresses = { 'echo.test': '93.184.216.1', 'source.test': '93.184.216.2', 'endless.test': '93.184.216.3', 'web.test': '93.184.216.4', 'hang.test': '93.184.216.5' };
+// Sends a little less than a window of the hop, and is then sent the rest by hand.
+const FIRST = HOP_WINDOW - 64;
+let tailing = null;
+const tail = net.createServer({ allowHalfOpen: true }, (s) => {
+  s.on('error', () => {});
+  s.write(Buffer.alloc(FIRST, 't'));
+  s.resume();
+  tailing = s;
+});
+const ports = { '93.184.216.1': await listening(echo), '93.184.216.2': await listening(source), '93.184.216.3': await listening(endless), '93.184.216.4': await listening(web), '93.184.216.6': await listening(tail) };
+const addresses = { 'echo.test': '93.184.216.1', 'source.test': '93.184.216.2', 'endless.test': '93.184.216.3', 'web.test': '93.184.216.4', 'hang.test': '93.184.216.5', 'tail.test': '93.184.216.6' };
 const lookup = async (name) => [{ address: addresses[name], family: 4, name }];
 // hang.test is reached by no connection that ever opens.
 const connect = ({ host }) => (ports[host] ? new Promise((resolve, reject) => {
@@ -92,9 +102,10 @@ const connect = ({ host }) => (ports[host] ? new Promise((resolve, reject) => {
   s.once('error', reject);
 }) : new Promise(() => {}));
 
+const logged = [];
 const started = async (outbound, hop) => {
   const made = createBroker({ ca: createCA(), llm: { authorize: async (h) => h, refused: async () => null }, mirrors: { path: () => null },
-    onForge: async () => ({ status: 200, headers: {}, body: '' }), lookup, connect, outbound, hop });
+    onForge: async () => ({ status: 200, headers: {}, body: '' }), lookup, connect, outbound, hop, log: (...a) => logged.push(a.join(' ')) });
   return { broker: made, port: (await made.start({ port: 0 })).port };
 };
 let { broker, port } = await started();
@@ -402,6 +413,49 @@ await check('what a job\'s connections send that nobody reads is no more than a 
     await until('the hop to be given back', () => held(jobs) === 0);
   } finally {
     for (const j of jobs) broker.removeJob(j.runId);
+  }
+});
+
+// The kernel, but with a MiB more to send on every connection to tail.test once `inflated`:
+// past the whole, the next poll resets it.
+let inflated = false;
+const queues = async () => (await systemQueues()).map((r) => (inflated && r.remotePort === ports['93.184.216.6'] ? { ...r, bytes: r.bytes + 2 ** 20, sending: r.sending + 2 ** 20 } : r));
+await broker.stop();
+({ broker, port } = await started({ bytes: 2 ** 19, queues }));
+
+await check('a far host\'s end whose connection out is reset while the hop still holds what it sent reaches the job after every byte of that', async () => {
+  const job = await addJob();
+  try {
+    let granted = 0;
+    let got = Buffer.alloc(0);
+    let ended = false;
+    const hand = byHand((type, n, payload) => {
+      if (type === CREDIT) granted += n;
+      if (type === DATA) got = Buffer.concat([got, payload]);
+      if (type === END) ended = true;
+    });
+    const head = Buffer.from(`CONNECT tail.test:443 HTTP/1.1\r\nHost: tail.test:443\r\nProxy-Authorization: ${job.auth}\r\n\r\n`);
+    hand.send(ASK, head.length);
+    await until('room for the head', () => granted === head.length);
+    hand.send(DATA, head.length, head);
+    // Nothing is told back, so all but a few bytes of what comes after the first wait on the
+    // hop: few enough that the broker reads them whole, its writes to the link not held up.
+    await until('the first bytes', () => got.length - got.indexOf('\r\n\r\n') - 4 === FIRST);
+    tailing.end(Buffer.alloc(4096, 't'));
+    // The kernel has the far host's end, and so the broker has read it by the next turn.
+    await until('the far host\'s end at the broker', () => closeWaiting(ports['93.184.216.6']));
+    await sleep(100);
+    const before = logged.length;
+    inflated = true;
+    await until('the connection out to be reset', () => logged.slice(before).some((l) => l.includes(`${job.runId} `) && l.includes('is reset')));
+    hand.send(ACK, got.length);
+    // It comes within the 5 s the tunnel is kept after its connection out is reset.
+    await until('the far host\'s end', () => ended, 10000);
+    assert.equal(got.length - got.indexOf('\r\n\r\n') - 4, FIRST + 4096, 'every byte before it');
+    hand.s.destroy();
+  } finally {
+    inflated = false;
+    broker.removeJob(job.runId);
   }
 });
 
@@ -949,6 +1003,17 @@ await check('an ended link whose relay never ends its side has its hop closed af
   } finally { end(); }
 });
 
+// Whether a connection of this machine to `to` has had its far end's end and not yet
+// ended its own.
+function closeWaiting(to) {
+  if (process.platform === 'linux') {
+    return execFileSync('ss', ['-tnH', 'state', 'close-wait'], { encoding: 'utf8' }).split('\n')
+      .some((line) => Number(/^\s*\d+\s+\d+\s+\S+:\d+\s+\S+:(\d+)/.exec(line)?.[1]) === to);
+  }
+  return execFileSync('netstat', ['-anp', 'tcp'], { encoding: 'utf8' }).split('\n')
+    .some((line) => Number(/^tcp\S*\s+\d+\s+\d+\s+\S+\s+\S+\.(\d+)\s+CLOSE_WAIT/.exec(line)?.[1]) === to);
+}
+
 // The bytes in the kernel's queues of the sockets whose one end is the broker's port.
 function queued() {
   let bytes = 0;
@@ -1005,6 +1070,6 @@ await linuxOnly('a job that floods its connections with requests or leaves them 
 
 assert.deepEqual(faults.map((e) => String(e?.stack ?? e)), []);
 await broker.stop();
-for (const s of [echo, source, endless, web]) s.close();
+for (const s of [echo, source, endless, web, tail]) s.close();
 console.log(`\nall ${checks} checks passed`);
 process.exit(0);

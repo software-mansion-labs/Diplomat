@@ -523,8 +523,15 @@ const halfway = net.createServer({ allowHalfOpen: true }, (s) => {
   s.on('data', (d) => { n += d.length; }).on('end', () => heardHalfway.push(n));
   s.end('ready');
 });
-const ports = { '93.184.216.1': await listening(deaf), '93.184.216.2': await listening(source), '93.184.216.3': await listening(echo), '93.184.216.4': await listening(burst), '93.184.216.5': await listening(halfway) };
-const addresses = { 'deaf.test': '93.184.216.1', 'source.test': '93.184.216.2', 'echo.test': '93.184.216.3', 'burst.test': '93.184.216.4', 'halfway.test': '93.184.216.5' };
+// Resets its connection a moment after it opened.
+const rude = net.createServer((s) => {
+  s.on('error', () => {});
+  setTimeout(() => s.resetAndDestroy(), 100);
+});
+const ports = { '93.184.216.1': await listening(deaf), '93.184.216.2': await listening(source), '93.184.216.3': await listening(echo), '93.184.216.4': await listening(burst), '93.184.216.5': await listening(halfway),
+  '93.184.216.6': await listening(rude) };
+const addresses = { 'deaf.test': '93.184.216.1', 'source.test': '93.184.216.2', 'echo.test': '93.184.216.3', 'burst.test': '93.184.216.4', 'halfway.test': '93.184.216.5',
+  'rude.test': '93.184.216.6' };
 const lookup = async (name) => [{ address: addresses[name], family: 4, name }];
 const connect = ({ host }) => new Promise((resolve, reject) => {
   const s = net.connect(ports[host], '127.0.0.1', () => resolve(s));
@@ -687,7 +694,8 @@ await linuxOnly('a job that comes while another\'s uploads hold the whole loses 
 });
 
 await check('a job\'s tunnels that it ends while the kernel has what they sent are kept until the linger and then reset, and reset as the job is removed: the kernel keeps nothing of them', async () => {
-  const linger = 1500;
+  // Well past the three polls they are looked at after they close.
+  const linger = 3000;
   const to = ports[addresses['deaf.test']];
   const echoing = ports[addresses['echo.test']];
   // The kernel, but with one more byte to send to deaf.test on every connection there,
@@ -849,6 +857,33 @@ await check('a tunnel whose connection out is reset after its far host ended its
         await until(`the job's socket to be closed, ${where}`, () => s.destroyed, 3000);
         broker.removeJob(h.runId);
       }
+    }
+  } finally {
+    theirs.end();
+    await broker.stop();
+  }
+});
+
+await check('a tunnel cut short reaches the job as a reset, never as an end, straight to the broker and through a relay: one whose far host resets it, and one the broker resets for what its connection out holds', async () => {
+  const to = ports[addresses['deaf.test']];
+  // The kernel, but with a MiB more to send on every connection to deaf.test: past the
+  // whole, the first poll resets it.
+  const queues = async () => (await systemQueues()).map((r) => (r.remotePort === to ? { ...r, bytes: r.bytes + 2 ** 20, sending: r.sending + 2 ** 20 } : r));
+  const { broker, addJob, tunnel, relay } = await brokerWith({ bytes: 2 ** 19, queues });
+  const theirs = await relay();
+  const how = (s) => new Promise((resolve) => {
+    s.on('end', () => resolve('end')).on('error', (e) => resolve(e.code));
+    s.resume();
+  });
+  try {
+    for (const via of [undefined, theirs.port]) {
+      const where = via ? 'through the relay' : 'straight';
+      const h = await addJob();
+      for (const host of ['rude.test', 'deaf.test']) {
+        const { s } = await tunnel(h, host, via);
+        assert.equal(await within(how(s), `${where}: the tunnel to ${host} to go`), 'ECONNRESET', `${where}, the tunnel to ${host}`);
+      }
+      broker.removeJob(h.runId);
     }
   } finally {
     theirs.end();

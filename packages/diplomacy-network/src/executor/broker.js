@@ -947,7 +947,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       sparing(`job ${job.info.runId} refused`, 'broker', job.info.runId, clip(`refused ${host}:${port}: ${e.message}`));
       return refuse(socket, e);
     }
-    upstream.on('error', () => socket.destroy());
+    upstream.on('error', () => socket.resetAndDestroy());
     // Removing the job closed its connection, and this one goes with it.
     if (socket.destroyed) return upstream.destroy();
     hold(job, upstream);
@@ -956,11 +956,12 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     // far host's has: it closes once both ways have, what it was sent taken. One whose
     // connection out is gone while the job's side is open has nowhere to send what the
     // job writes: that is read and dropped, and it is closed as the job ends its side,
-    // or 5 s on.
+    // or 5 s on. One whose connection out is gone before its far host's end is reset, so
+    // that the job never reads a cut as an end.
     upstream.allowHalfOpen = true;
     socket.on('close', () => outbound.close(upstream));
     upstream.on('close', () => {
-      if (!upstream.readableEnded) return socket.destroy();
+      if (!upstream.readableEnded) return socket.resetAndDestroy();
       if (socket.readableEnded) return undefined;
       // Unpiped here, or the pipe's own unpipe, as it sees the close after this, pauses it.
       socket.unpipe(upstream);

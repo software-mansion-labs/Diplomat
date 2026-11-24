@@ -401,4 +401,33 @@ await check('a client that goes away with a way of its connection still open has
   }
 });
 
+await check('a hop the broker closes without its END reaches the client as a reset, never as an end: ended, reset, or sent what is no frame', async () => {
+  for (const cut of ['ended', 'reset', 'broken']) {
+    let hopEnd = null;
+    const target = net.createServer({ allowHalfOpen: true }, (c) => {
+      hopEnd = c;
+      c.on('error', () => {});
+      c.resume();
+    });
+    await listening(target);
+    const r = await startRelay(target);
+    try {
+      const c = await r.dial();
+      let got = '';
+      const how = new Promise((resolve) => {
+        c.on('data', (d) => { got += d; });
+        c.on('end', () => resolve('end'));
+        c.on('error', (e) => resolve(e.code));
+      });
+      await until('the hop', () => hopEnd);
+      hopEnd.write(Buffer.concat([Buffer.from([DATA, 0, 0, 0, 5]), Buffer.from('hello')]));
+      await until('the client to have the broker\'s bytes', () => got === 'hello');
+      if (cut === 'ended') hopEnd.end();
+      else if (cut === 'reset') hopEnd.resetAndDestroy();
+      else hopEnd.write(Buffer.from([9, 0, 0, 0, 0]));
+      assert.equal(await within(how, `the client to see the hop ${cut}`, 3000), 'ECONNRESET', cut);
+    } finally { r.end(); }
+  }
+});
+
 console.log(`\nall ${checks} checks passed`);
