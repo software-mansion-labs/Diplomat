@@ -19,6 +19,11 @@ const bench = await createBench();
 const offerOf = async (m, taskId) => (await m.state()).offers.find((o) => o.taskId === taskId);
 const runOf = async (m, taskId) => (await m.state()).runs.filter((r) => r.taskId === taskId).at(-1) ?? null;
 const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+// A container the stand-in docker holds, set to no longer running.
+const stopped = (m, name) => {
+  const file = path.join(m.dockerDir, 'containers', `${name}.json`);
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), running: false }));
+};
 // Whether this host shows a process's environment, as a container's /proc does: where
 // it does not, the stand-in docker cannot find a job's processes by their run id.
 const PROC = fs.existsSync('/proc/self/environ');
@@ -372,7 +377,7 @@ try {
     await m.kill();
   });
 
-  await check('a job whose container a restart of the machine left stopped is given back at no attempt; one that had finished by itself before that ends as it finished', async () => {
+  await check('a job whose container a restart of the machine left stopped, with its relay, is given back at no attempt; one that had finished by itself before that ends as it finished; one whose container was stopped from inside, its relay running on, is a failed attempt', async () => {
     const m = await bench.machine('boot').start();
     await m.linked();
     const cut = await own(m, 'pr-1', 'wait never\nsay never');
@@ -382,18 +387,28 @@ try {
     await m.kill();
     m.release('go');
     await until('the job to end with nobody watching', () => fs.existsSync(path.join(m.base, 'runs', ended.runId, 'done')));
-    // As the engine is after the machine restarted: the container stopped, nothing of it running.
+    // As the engine is after the machine restarted: the container and its relay stopped, nothing of them running.
     m.killJobs();
-    const record = path.join(m.dockerDir, 'containers', `${run.container}.json`);
-    fs.writeFileSync(record, JSON.stringify({ ...JSON.parse(fs.readFileSync(record, 'utf8')), running: false }));
+    stopped(m, run.container);
+    stopped(m, `${run.container}-relay`);
     await m.start();
     const offer = await until('the task back in the pool', async () => { const at = await offerOf(m, cut); return at.state === 'pooled' ? at : null; });
     assert.deepEqual([offer.attempt, (await runOf(m, cut)).state], [1, 'stopped']);
-    assert.ok(m.log().includes(`giving ${run.runId} back: its container could not be taken up when this daemon started (gone or stopped, as a restart of the machine or of its docker engine leaves it), and the job had not finished`), m.log());
+    assert.ok(m.log().includes(`giving ${run.runId} back: its container and the container's relay were gone or stopped when this daemon started, as a restart of the machine or of its docker engine leaves them, and the job had not finished`), m.log());
     await done(m, finished);
     const { attempt, outcome } = await offerOf(m, finished);
     // The job named tokens; jobs.json says the model carried none for it.
     assert.deepEqual([attempt, outcome.summary, outcome.tokens, outcome.capped, (await runOf(m, finished)).state], [1, 'before the restart', 0, true, 'finished']);
+
+    // A job can stop its own container from inside, as root in it; not its relay.
+    const inside = await own(m, 'pr-3', 'wait never\nsay never');
+    const left = await waiting(m, inside, 'never');
+    await m.kill();
+    m.killJobs();
+    stopped(m, left.container);
+    await m.start();
+    const failed = await until('the attempt counted', async () => { const at = await offerOf(m, inside); return at.attempt === 2 ? at : null; });
+    assert.deepEqual([failed.reason, (await runOf(m, inside)).state], ['the job\'s container stopped before the job finished, its relay running on: it was stopped from inside', 'failed']);
     await m.kill();
   });
 

@@ -21,7 +21,7 @@ import { daemonControl } from '../../daemon-core/src/daemon-control.js';
 import { pidAlive, readJson } from '../../daemon-core/src/fsio.js';
 import { holdSocket } from '../../daemon-core/src/serve.js';
 import { createContainers } from './executor/container.js';
-import { attachJob, readOutcome, watch } from './executor/job.js';
+import { readFinished, readOutcome } from './executor/job.js';
 import * as client from './ipc.js';
 import { openLog } from './log.js';
 import { switchOffStored } from './node/offline.js';
@@ -85,13 +85,15 @@ async function endStored() {
     const log = openLog(LOG_PATH);
     const kept = readJson(JOBS_PATH)?.jobs ?? {};
     // A job that finished with no daemon watching has its outcome read from what it left,
-    // as a daemon would, its share of the model as jobs.json last had it.
+    // its share of the model as jobs.json last had it, and the engine is asked nothing:
+    // whatever the job left running goes with its container. One that cannot be read is
+    // stopped and given back like the rest.
     const outcomeOf = async (runId) => {
       const ended = readOutcome(runId);
       if (ended) return ended;
       const left = await finishedLeft(runId);
       const was = Object.hasOwn(kept, runId) ? kept[runId] : null;
-      return left && attachJob({ runId, container: left.container, pid: was?.pid ?? null, spent: () => was?.spent ?? null }) ? watch({ runId }) : null;
+      return left ? readFinished({ runId, container: left.container, spent: () => was?.spent ?? null }).catch(() => null) : null;
     };
     const { offers, runs, reported } = await switchOffStored({ store: createStore({ dir: BASE_DIR, log }), log, outcomeOf });
     ended = { offers, runs };

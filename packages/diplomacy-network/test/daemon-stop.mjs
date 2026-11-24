@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
-import { POOL, check, createBench, passed, until } from './lib/daemons.mjs';
+import { POOL, check, createBench, passed, sleep, until } from './lib/daemons.mjs';
 
 const bench = await createBench();
 
@@ -120,6 +120,29 @@ try {
     await until('the other run failed', async () => (await runOf(b, two.taskId)).state === 'failed');
     await until('the other task back in the pool', async () => (await offerOf(a, two.taskId)).attempt === 2);
     assert.equal((await offerOf(a, two.taskId)).reason, 'the container was restarted to stop another job');
+    await Promise.all([a.kill(), b.kill()]);
+  });
+
+  await check('a stop begun while the engine is down has its time counted from when the engine first answers it: a first pass that does not get through restarts nothing, and the next one stops the job', async () => {
+    const [a, b] = await pair(['da2', 'db2'], { DN_JOB_STOP_BOUND_MS: '1500', DN_JOB_LIVENESS_MS: '600000' });
+    await b.ok('/admit', { slots: 2 });
+    const one = await a.ok('/offer', review('pr-1', 'wait one\nsay one'));
+    const two = await a.ok('/offer', review('pr-2', 'wait two\nsay two'));
+    const [first, second] = [await waiting(b, one.taskId, 'one'), await waiting(b, two.taskId, 'two')];
+    assert.equal(first.container, second.container);
+    const restarts = b.docker('restart').length;
+    const down = path.join(b.dockerDir, 'down');
+    fs.writeFileSync(down, '');
+    await a.ok('/withdraw', { taskId: one.taskId, reason: 'no longer wanted' });
+    await sleep(3000);
+    // The first stop the engine hears does not get through.
+    fs.writeFileSync(path.join(b.dockerDir, 'fail-exec-stop'), 'OCI runtime exec failed: exec failed: resource temporarily unavailable\n');
+    fs.rmSync(down);
+    await until('the stopped run stopped', async () => (await runOf(b, one.taskId)).state === 'stopped');
+    await until('the job gone', () => !alive(b.agent(first.runId).pid));
+    assert.deepEqual([b.docker('restart').length - restarts, alive(b.agent(second.runId).pid)], [0, true]);
+    b.release('two');
+    await until('the other task done', async () => (await offerOf(a, two.taskId)).state === 'done');
     await Promise.all([a.kill(), b.kill()]);
   });
 

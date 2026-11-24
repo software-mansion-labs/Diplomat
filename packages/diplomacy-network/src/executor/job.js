@@ -42,6 +42,8 @@ const STOP = fs.readFileSync(path.join(HERE, 'stop.sh'), 'utf8');
 const START = 's="${DN_ROOT:-}/bin/sh"; echo "$(DN_RUN_ID="$2" "${DN_ROOT:-}/usr/bin/setsid" "$s" -c \'echo "$$"; exec "$0" "$1" < /dev/null > /dev/null 2>&1\' "$s" "$1" &)"';
 /// What a job that ended with its container says of it.
 export const CUT = 'the container was restarted to stop another job';
+/// What a job whose processes went without its writing `done` says of it.
+export const VANISHED = 'the job\'s process disappeared without finishing: its container was removed or the docker engine restarted';
 // What a job that is given `adb` is told of it: executor/adb.js stands between.
 const ADB_SAID = ' `adb devices` lists what is attached to the host, and a device is named by its serial (`adb -s <serial>` or `ANDROID_SERIAL`). `adb connect`, `forward`, `reverse`, `pair` and `kill-server` are refused by the host: do not retry them.';
 // The dearest a token is sold at: USD 80 a million, the output of the top model in its
@@ -333,6 +335,9 @@ async function ending(job) {
       const up = await alive(job);
       // A stop or a restart that began while the container was asked is why it is gone.
       if (job.stopping || job.cutting || job.cut) continue;
+      // Nothing said by an engine that does not answer `docker version` either is the
+      // engine's silence, which says nothing of the job.
+      if (up === null && !(await engineAnswers())) continue;
       unknown = up === null ? unknown + 1 : 0;
       // A runner that is gone has either just written `done` (the next pass reads it)
       // or never will: its container was removed, or the engine restarted under it.
@@ -345,7 +350,7 @@ async function ending(job) {
   const outcome = job.spent ? capOutcome(read, job.spent()) : read;
   if (state === 'stopped') Object.assign(outcome, { ok: false, summary: 'stopped' });
   if (state === 'cut') Object.assign(outcome, { ok: false, summary: CUT });
-  if (state === 'vanished') Object.assign(outcome, { ok: false, summary: 'the job\'s process disappeared without finishing: its container was removed or the docker engine restarted' });
+  if (state === 'vanished') Object.assign(outcome, { ok: false, summary: VANISHED });
   outcome.state = state === 'ended' ? (outcome.ok ? 'finished' : 'failed') : state === 'stopped' ? 'stopped' : 'failed';
   return outcome;
 }
@@ -372,6 +377,18 @@ export function watch(run) {
   if (!job) return Promise.reject(new Error(`run ${run.runId} is not running`));
   job.watching ??= follow(job);
   return job.watching;
+}
+
+/// How a job that wrote its exit code in `done` ended, read from its directory in
+/// `container` (`{ runsDir }`) as `watch` reads it, with nothing asked of the engine;
+/// `spent` is as `startJob` takes it. Null for a job whose `done` holds none.
+export async function readFinished({ runId, container, spent = null }) {
+  const job = { dir: path.join(container.runsDir, runId) };
+  const exit = await exited(job);
+  if (exit === null) return null;
+  const read = await parseOutcome(job, exit);
+  const outcome = spent ? capOutcome(read, spent()) : read;
+  return { ...outcome, state: outcome.ok ? 'finished' : 'failed' };
 }
 
 /// Kills that run's processes, and only that run's, and marks it stopped; resolves to
