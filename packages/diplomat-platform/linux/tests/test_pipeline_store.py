@@ -679,6 +679,20 @@ def test_badges_name_the_items_something_is_on(pipe, monkeypatch):
                                       running["id"]: "agent", PR: "agent"}
 
 
+def test_a_released_agent_is_on_no_item(pipe, monkeypatch):
+    """Typed into again it resolves running, though its run ended."""
+    from diplomat_runtime import agentstate
+
+    pipe.pipeline_result = _result(items=(_item(PR, kind="pr", label="#7"),))
+    heir = agentstate.RunRecord(run_id="untracked:o/r#7", dispatched_at=0.0, pr_number=7,
+                                pr_url=PR, untracked=True, released=True)
+    rows = [(heir, SimpleNamespace(state="running", reason=""))]
+    monkeypatch.setattr(pipe, "_agent_tick", lambda: SimpleNamespace(rows=rows))
+    assert pipe.pipeline_badges() == {}
+    rows[0] = (dataclasses.replace(heir, released=False), rows[0][1])
+    assert pipe.pipeline_badges() == {PR: "agent"}
+
+
 def test_an_item_is_unread_by_its_root_a_linear_issue_by_its_team(pipe):
     pipe.pipeline_linear_teams_raw = "ENG=o/r"
     pipe.pipeline_result = _result(unread=("O/R",))

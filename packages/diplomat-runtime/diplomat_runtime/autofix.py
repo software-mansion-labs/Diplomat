@@ -1164,6 +1164,8 @@ class RunningAgent:
     reason: str = ""
     # The run's PR or issue item key, read off its link; None for neither.
     item: str | None = None
+    # An agent left up after its run ended (`agentstate.release_ended`): no work is its.
+    released: bool = False
 
     @property
     def awaiting_input(self) -> bool:

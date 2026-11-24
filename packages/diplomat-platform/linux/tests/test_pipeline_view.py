@@ -27,7 +27,8 @@ from diplomat_runtime.models import Fmt
 pytest.importorskip("PySide6")
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QFont, QImage, QPalette  # noqa: E402
+from PySide6.QtGui import QColor, QFont, QImage, QPalette, QTextDocument  # noqa: E402
+from PySide6.QtGui import Qt as GuiQt  # noqa: E402
 from PySide6.QtWidgets import QLabel  # noqa: E402
 
 _LINUX_DIR = Path(__file__).resolve().parents[1]
@@ -123,6 +124,16 @@ def _fixing(monkeypatch, n: int) -> None:
 
 def _labels(widget) -> list[str]:
     return [label.text() for label in widget.findChildren(QLabel) if label.parent() is not None]
+
+
+def _tip(widget) -> str:
+    """Its tooltip as Qt draws it: as markup when the text might be some."""
+    tip = widget.toolTip()
+    if not GuiQt.mightBeRichText(tip):
+        return tip
+    shown = QTextDocument()
+    shown.setHtml(tip)
+    return shown.toPlainText()
 
 
 # MARK: the graph
@@ -632,8 +643,37 @@ def test_rate_now_and_fracture_are_off_for_a_banned_authors_text(store):
     for item, who in ((I5, "Mallory"), (I6, "mallory")):
         view.select(item)
         held = (False, f"@{who} is on the prompt-injection ban list")
-        assert [(view.buttons[k].isEnabled(), view.buttons[k].toolTip())
+        assert [(view.buttons[k].isEnabled(), _tip(view.buttons[k]))
                 for k in ("rate", "fracture")] == [held, held]
+
+
+def test_start_fix_is_off_for_a_banned_authors_text(store):
+    """Its fix would be refused at dispatch."""
+    result = _result()
+    result["items"][4] = {**result["items"][4], "author": "mallory"}
+    store.pipeline_result = result
+    store.banned_authors = [bans.BannedAuthor("mallory", "prompt injection")]
+    view = PipelineView(store)
+    view.select(I5)
+    fix = view.buttons["fix"]
+    assert (fix.isEnabled(), _tip(fix)) == (False, "@mallory is on the prompt-injection ban list")
+
+
+def test_tracker_text_in_an_actions_tooltip_is_never_read_as_markup(store):
+    """Labels and names are anyone's text."""
+    result = _result()
+    result["items"][4] = {**result["items"][4], "hold": "triaged as enhancement: <b>urgent</b>"}
+    result["items"][5] = {**result["items"][5], "author": "<i>m</i>"}
+    store.pipeline_result = result
+    store.banned_authors = [bans.BannedAuthor("<i>m</i>", "prompt injection")]
+    view = PipelineView(store)
+    view.select(I5)
+    assert [_tip(view.buttons[k]) for k in ("fracture", "fix")] == [
+        "No sync splits an issue triaged as enhancement: <b>urgent</b>",
+        "triaged as enhancement: <b>urgent</b>"]
+    view.select(I6)
+    assert [_tip(view.buttons[k]) for k in ("rate", "fracture")] == [
+        "@<i>m</i> is on the prompt-injection ban list"] * 2
 
 
 def test_rate_now_and_fracture_are_off_in_a_root_the_last_sync_did_not_read_all_of(store):
@@ -642,7 +682,7 @@ def test_rate_now_and_fracture_are_off_in_a_root_the_last_sync_did_not_read_all_
     view = PipelineView(store)
     view.select(I5)
     held = (False, "The last sync did not read all of O/R")
-    assert [(view.buttons[k].isEnabled(), view.buttons[k].toolTip())
+    assert [(view.buttons[k].isEnabled(), _tip(view.buttons[k]))
             for k in ("rate", "fracture")] == [held, held]
 
 
@@ -674,15 +714,15 @@ def test_a_change_to_the_ban_list_redraws_the_actions(store, monkeypatch):
     monkeypatch.setattr(bans, "read", lambda: list(listed))
 
     def on() -> list[bool]:
-        return [view.buttons[k].isEnabled() for k in ("rate", "fracture")]
+        return [view.buttons[k].isEnabled() for k in ("rate", "fracture", "fix")]
 
-    assert on() == [True, True]
+    assert on() == [True, True, True]
     listed.append(bans.BannedAuthor("mallory", "prompt injection"))
     store.refresh_activity()
-    assert on() == [False, False]
+    assert on() == [False, False, False]
     listed.clear()
     store.refresh_activity()
-    assert on() == [True, True]
+    assert on() == [True, True, True]
 
 
 def test_fracture_is_off_for_an_issue_held_as_triaged(store):
@@ -694,7 +734,7 @@ def test_fracture_is_off_for_an_issue_held_as_triaged(store):
     view = PipelineView(store)
     view.select(I5)
     fracture = view.buttons["fracture"]
-    assert (fracture.isEnabled(), fracture.toolTip()) == (
+    assert (fracture.isEnabled(), _tip(fracture)) == (
         False, "No sync splits an issue triaged as enhancement")
     assert view.buttons["rate"].isEnabled()
     assert pipelineview.fracture_refused({"hold": "an open PR fixes it"}) is None
@@ -707,7 +747,7 @@ def test_fracture_is_off_for_a_candidate_held_for_a_stop_label(store):
     view = PipelineView(store)
     view.select(I5)
     fracture = view.buttons["fracture"]
-    assert (fracture.isEnabled(), fracture.toolTip()) == (
+    assert (fracture.isEnabled(), _tip(fracture)) == (
         False, "No sync splits an issue that carries the label wip")
 
 
@@ -715,7 +755,7 @@ def test_start_fix_and_fracture_are_off_while_anything_is_on_it(store, monkeypat
     view = PipelineView(store)
     view.select(I5)
     fix = view.buttons["fix"]
-    assert (fix.text(), fix.isEnabled(), fix.toolTip()) == (
+    assert (fix.text(), fix.isEnabled(), _tip(fix)) == (
         "Start fix", True, "Queue its fix now, past its retry backoff")
     assert view.buttons["fracture"].isEnabled()
 
@@ -746,12 +786,12 @@ def test_start_fix_is_for_a_writable_candidate_whose_fix_is_known(store):
     assert list(view.buttons) == ["open", "rate"]
     view.select(linear)
     fix = view.buttons["fix"]
-    assert (fix.isEnabled(), fix.toolTip()) == (
+    assert (fix.isEnabled(), _tip(fix)) == (
         False, "Diplomat has this Linear issue's text only while Open fix PRs is on")
     # Held, the hold is why.
     store.pipeline_result["items"][-1]["hold"] = "Linear team ENG has no root to fix it in"
     store.pipeline_changed.emit()
-    assert view.buttons["fix"].toolTip() == "Linear team ENG has no root to fix it in"
+    assert _tip(view.buttons["fix"]) == "Linear team ENG has no root to fix it in"
     del store.pipeline_result["items"][-1]["hold"]
     store.pipeline_result = {**result, "effects": [{
         "kind": "fixLinear", "repo": "o/r", "identifier": "ENG-5", "url": linear,
@@ -769,7 +809,7 @@ def test_start_fix_is_off_for_a_held_issue_the_hold_saying_why(store):
     view = PipelineView(store)
     view.select(I5)
     fix = view.buttons["fix"]
-    assert (fix.isEnabled(), fix.toolTip()) == (False, held)
+    assert (fix.isEnabled(), _tip(fix)) == (False, held)
 
 
 def test_why_start_fix_queued_nothing_shows_under_the_buttons(store, monkeypatch):

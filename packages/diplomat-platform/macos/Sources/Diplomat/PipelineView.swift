@@ -558,7 +558,7 @@ private struct PipelineCard: View {
 
 // MARK: - The detail pane
 
-private struct PipelineDetail: View {
+struct PipelineDetail: View {
     let item: PipelineItem
     /// Newest first.
     let events: [PipelineEvent]
@@ -568,7 +568,7 @@ private struct PipelineDetail: View {
     let forcedRate: Bool
     let forcedFracture: Bool
     /// Its text's author, on the ban list (`Store.pipelineBanned`): a sync would refuse
-    /// to rate or split it.
+    /// to rate or split it, the queue to run its fix.
     let banned: String?
     /// Its root, which the last sync did not read all of (`Store.pipelineUnread`): a sync
     /// may refuse to rate or split it.
@@ -685,6 +685,17 @@ private struct PipelineDetail: View {
     private var refused: String? { PipelineView.fractureRefused(item) }
     private var partly: String? { unread.map { "The last sync did not read all of \($0)" } }
 
+    var rateEnabled: Bool { enabled && !forcedRate && banned == nil && unread == nil }
+    var rateTip: String { ban ?? partly ?? "Rate it in a sync started now, ahead of every limit" }
+    var fractureEnabled: Bool {
+        enabled && !forcedFracture && badge == nil && banned == nil && refused == nil && unread == nil
+    }
+    var fractureTip: String {
+        ban ?? refused ?? partly ?? "Split it into low-complexity child issues in a sync started now"
+    }
+    var fixEnabled: Bool { enabled && canStartFix && badge == nil && !forcedFracture && banned == nil }
+    var fixTip: String { ban ?? (canStartFix ? "Queue its fix now, past its retry backoff" : fixUnknown) }
+
     private var actions: some View {
         VStack(alignment: .leading, spacing: 4) {
             FlowLayout(spacing: 4) {
@@ -693,26 +704,19 @@ private struct PipelineDetail: View {
                 if canRate {
                     PipelineActionChip(symbol: "gauge.with.needle",
                                        text: forcedRate ? "Rate asked" : "Rate now",
-                                       tint: .accentColor,
-                                       enabled: enabled && !forcedRate && banned == nil && unread == nil,
-                                       action: rate)
-                        .tooltip(ban ?? partly ?? "Rate it in a sync started now, ahead of every limit")
+                                       tint: .accentColor, enabled: rateEnabled, action: rate)
+                        .tooltip(rateTip)
                 }
                 if canFracture {
                     PipelineActionChip(symbol: "square.split.2x2",
                                        text: forcedFracture ? "Fracture asked" : "Fracture",
-                                       tint: .purple,
-                                       enabled: enabled && !forcedFracture && badge == nil && banned == nil
-                                           && refused == nil && unread == nil,
-                                       action: fracture)
-                        .tooltip(ban ?? refused ?? partly
-                                 ?? "Split it into low-complexity child issues in a sync started now")
+                                       tint: .purple, enabled: fractureEnabled, action: fracture)
+                        .tooltip(fractureTip)
                 }
                 if PipelineView.canStartFix(item) {
                     PipelineActionChip(symbol: "wrench.and.screwdriver", text: "Start fix",
-                                       tint: .green, enabled: enabled && canStartFix && badge == nil && !forcedFracture,
-                                       action: startFix)
-                        .tooltip(canStartFix ? "Queue its fix now, past its retry backoff" : fixUnknown)
+                                       tint: .green, enabled: fixEnabled, action: startFix)
+                        .tooltip(fixTip)
                 }
             }
             if let error {
