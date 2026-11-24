@@ -90,7 +90,7 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
    is on the fast track: the smallest fix, a regression test that fails on the base branch, and the
    closing reference kept so the PR links to the issue. The run first reads the issue again and
    stops if it is closed, assigned to someone else, or an open PR already fixes it. A Linear
-   issue's run cannot read Linear, so the sync reads the issue again right before asking, and holds
+   issue's run is not given the Linear key, so the sync reads the issue again right before asking, and holds
    it if it is no longer a candidate or its links changed; the run gets its text as that read found
    it, checks only for an open PR naming it, works in the root its team names and puts
    `Fixes ENG-12` in its PR's description.
@@ -379,8 +379,8 @@ QSettings (Linux) under the same keys: `pipelineEnabled`, `pipelineRate`, `pipel
 Linear is read with a personal API key of yours. The key is read on each sync and reaches only
 `curl`, in a config on its stdin (staged in an owner-only temp file, removed when curl exits, though
 a sync killed meanwhile leaves it), never in an argv; no agent shell, nor `gh` or `claude` a sync starts, has `DIPLOMAT_LINEAR_TOKEN` in its
-environment, though the Linux app's own `gh` calls inherit one you export. A fix run for a Linear issue gets the issue's text as Diplomat read it, and no access
-to Linear.
+environment, though the Linux app's own `gh` calls inherit one you export. A fix run for a Linear issue gets the issue's text as Diplomat read it, not the key, though it runs
+as you and so could read the key where Diplomat does.
 
 1. **Mint** a personal API key in Linear's
    [Security & access](https://linear.app/settings/account/security) settings. Diplomat reads the
