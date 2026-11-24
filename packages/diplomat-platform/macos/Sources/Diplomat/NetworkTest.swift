@@ -1609,6 +1609,74 @@ enum NetworkTest {
                 && requests(NetworkRoute.offer).count == offersAsked
                 && store.requestedWork.map(\.number) == [90280, 90281])
 
+        // 26b. The Pipeline's asks the network carries. A Linear fix whose text changed is
+        //      not queued again while its offer stands: a second offer would be a second
+        //      fix. An ask the pipeline no longer owes takes back its offer, if the network
+        //      still holds it.
+        store.queuedTasks = []
+        store.requestedWork = []
+        store.networkEnabled = true
+        await store.networkLifecycle?.value
+        script.set(snapshot())
+        store.pipelineStale = []
+        store.savePipelineAttempts([:])
+        store.pipelineEnabled = true
+        store.pipelineFix = true
+        func linearFix(_ text: String) -> PipelineEffect {
+            .fixLinear(repo: "o/r", identifier: "ENG-90300",
+                       url: "https://linear.app/acme/issue/ENG-90300/a-thing", text: text,
+                       author: "carol")
+        }
+        let issueFix = PipelineEffect.fixIssue(repo: "o/r", number: 90301,
+                                               url: "https://github.com/o/r/issues/90301",
+                                               author: "carol")
+        let doneFix = PipelineEffect.fixIssue(repo: "o/r", number: 90302,
+                                              url: "https://github.com/o/r/issues/90302",
+                                              author: "carol")
+        let (offersPiped, withdrawsPiped) = (requests(NetworkRoute.offer).count,
+                                             requests(NetworkRoute.withdraw).count)
+        await store.applyPipeline(PipelineTickResult(
+            at: Date(), effects: [linearFix("It breaks."), issueFix, doneFix]))
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        let piped = store.requestedWork.map(\.offered)
+        check("the pipeline's asks are offered and stand, marked",
+              requests(NetworkRoute.offer).count == offersPiped + 3
+                && store.requestedWork.map(\.number) == [0, 90301, 90302] && !piped.contains(""))
+        script.set(snapshot(offers: [offerRow(piped[0], "claimed", executor: away),
+                                     offerRow(piped[1], "claimed", executor: away),
+                                     offerRow(piped[2], "done", executor: away,
+                                              outcome: ["ok": true])]))
+        await store.applyPipeline(PipelineTickResult(
+            at: Date(), effects: [linearFix("It breaks twice."), issueFix, doneFix]))
+        store.offerRequestedWork()
+        store.commitQueue()
+        await store.drainQueuedTasks(snaps: [], closed: [])
+        check("a Linear fix the network carries is neither queued nor offered again as its "
+                + "text changes",
+              requests(NetworkRoute.offer).count == offersPiped + 3 && store.queuedTasks.isEmpty
+                && store.requestedWork.map(\.offered) == piped
+                && store.requestedWork.first.flatMap(Store.pipelineLinear)?.text == "It breaks.")
+        await store.applyPipeline(PipelineTickResult(at: Date(), effects: [linearFix("It breaks twice.")]))
+        for _ in 0..<50 where requests(NetworkRoute.withdraw).count == withdrawsPiped {
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        let unowed = Array(requests(NetworkRoute.withdraw).dropFirst(withdrawsPiped))
+        check("an ask the pipeline no longer owes takes back the offer the network still holds, "
+                + "and only that one",
+              unowed.map { "\($0["taskId"] as? String ?? "") \($0["reason"] as? String ?? "")" }
+                == ["\(piped[1]) \(NetworkRoute.withdrawNotOwed)"]
+                && store.requestedWork.map(\.offered) == [piped[0]]
+                && feedDetails(NetworkAudit.withdraw).last?.hasSuffix(
+                    " - withdrawn (\(NetworkRoute.withdrawNotOwed))") == true)
+        store.requestedWork = []
+        store.pipelineEnabled = false
+        store.pipelineFix = false
+        store.savePipelineAttempts([:])
+        _ = AgentRegistry.forget(Set(AgentRegistry.load().map(\.runID)))
+        store.networkEnabled = false
+        await store.networkLifecycle?.value
+
         // 27. The settings are the shared file's: written there by another process, they
         //     are followed on the next cycle, the switch as one moved here is.
         store.queuedTasks = []
