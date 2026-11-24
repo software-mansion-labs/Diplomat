@@ -227,7 +227,7 @@ Each child's title and body are the model's, stripped of HTML comments and clean
 and 4000 characters, its mentions, issue references and GitHub links made inert so it notifies and
 links no one, and the body ends with
 `Part of <the parent's URL>`, then a hidden `<!-- Diplomat: part <n> of <the parent's URL> by
-<author> -->`: the parent's author (a part's, its own marker's), whom the ban list checks the part by,
+<author> at <when the model answered> -->`: the parent's author (a part's, its own marker's), whom the ban list checks the part by,
 read only in an issue you opened, which is a part when it carries one or a `Part of` line linking
 the issue it is a sub-issue (Linear: child) of. A part that a failed call made all the same is taken, not filed again: on GitHub the one
 carrying its marker among your 50 newest issues in the repo, looked for before each part is filed
@@ -240,8 +240,9 @@ Either way, why is its hold, unless it is a `candidate`, whose fix is asked for 
 nothing takes the label off again, even if a switch went off meanwhile, once a read right before
 shows Diplomat may still write to the issue, and is tried again 1, 2, 4 ... syncs later, a day at
 most. The model's answer is saved before the first part is filed: a sync stopped mid-split (the app
-quit, the sync timed out) after it leaves the next sync that reads its code in full filing the rest of
-those parts, with **Split big issues** on or the split forced, each only if the issue may be split now;
+quit, the sync timed out) after it, or a split whose first part's create failed with no read showing
+it unmade, leaves the next sync that reads its code in full filing the rest of those parts, with
+**Split big issues** on or the split forced, each only if the issue may be split now;
 one stopped before it, the next sync taking the label off.
 
 ## The merge

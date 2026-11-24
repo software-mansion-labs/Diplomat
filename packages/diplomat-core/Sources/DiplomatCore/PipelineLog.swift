@@ -174,6 +174,10 @@ struct PipelineParts: Codable, Equatable {
     var parts: [Part]
     var why: String
     var forced: Bool
+    /// When the model answered, which its parts' markers name.
+    var at: String?
+    /// Whether a part's create may have made it unrecorded.
+    var sent: Bool?
 }
 
 /// An item's ratings or splits failed in a row: the next is tried at sync `after`, 1, 2,
