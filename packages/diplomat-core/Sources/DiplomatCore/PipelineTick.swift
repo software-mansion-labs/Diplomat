@@ -268,12 +268,14 @@ final class PipelineSync {
         let short = unread.union(incomplete.keys).union(partial.keys)
         let fixable = entries.filter { $0.item.kind == .issue && $0.item.stage == .candidate && $0.item.hold == nil }
         let judged = entries.filter { $0.root.map { partial[$0.slug] == nil && repos[$0.slug] != nil } ?? false }
+        // Without the ban list no item was judged in full.
+        let whole = blocked == nil && banned != nil
         let result = PipelineTickResult(at: now, items: laid.items, graph: laid.graph, effects: effects,
                                         events: Array(PipelineLog.read(in: dir).suffix(model.maxEvents)),
                                         notices: notices,
-                                        unread: blocked == nil ? slugs.filter(short.contains) : slugs,
-                                        fixable: blocked == nil ? fixable.map(\.id) : [],
-                                        read: blocked == nil ? judged.map(\.id) : [])
+                                        unread: whole ? slugs.filter(short.contains) : slugs,
+                                        fixable: whole ? fixable.map(\.id) : [],
+                                        read: whole ? judged.map(\.id) : [])
         PipelineLog.writeLast(result, in: dir)
         return result
     }

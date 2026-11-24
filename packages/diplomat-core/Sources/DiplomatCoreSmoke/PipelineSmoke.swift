@@ -2488,6 +2488,7 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
         let open = s.result.items.filter { ["open", "draft"].contains($0.state) }
         check(s.claude.isEmpty && s.writes.isEmpty && s.result.effects.isEmpty && !open.isEmpty
               && open.allSatisfy { $0.hold == "the prompt-injection ban list could not be read" }
+              && s.result.read.isEmpty && s.result.fixable.isEmpty && s.result.unread == ["acme/app"]
               && s.result.notices.contains("the prompt-injection ban list could not be read, so every item holds and this sync took no step"),
               "a ban list not read (\(k)): \(s.claude) \(s.writes) \(open.filter { $0.hold != "the prompt-injection ban list could not be read" }.map(\.label)) \(s.result.notices)")
     }
