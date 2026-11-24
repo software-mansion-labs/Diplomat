@@ -78,15 +78,20 @@ away its offers are cancelled. A machine with jobs out has to stay awake.
   than it can do, is still waiting, not without a seat. It goes on asking the others it knew for
   up to a month after, so two machines that come back together and reach each other first are
   one pool with the rest once one of those is up; until then a job offered on both sides can run
-  twice. A month away counts the same whether the machine was switched off, asleep, or without a
-  network; a machine away for less - asleep overnight, off for a weekend, restarted - is not
-  coming back and waits for nobody. If every other machine it asks stays silent for a month, it
-  stops waiting and runs the pool's jobs alone. If all the others are gone for good, removing
-  the repository and adding it again starts a pool of one. Removing a repository and adding it
-  again starts another pool of one on this machine. The pool it was in goes on without it and
-  takes it back by no invite of a machine that came in under it; if this machine started that
-  pool, that is every machine there, and they join the new pool instead, each by an invite from
-  this one.
+  twice. A machine tells how long it was away by when it last heard another machine of the pool,
+  so a month away counts the same whether it was switched off, asleep, without a network or cut
+  off from the others. A machine that heard nobody for less - asleep overnight, off for a
+  weekend - is not coming back, but after six hours of silence each job it offers waits up to
+  three minutes for one of the others to answer before it is taken. If every other machine it
+  asks stays silent for a month, it stops waiting and runs the pool's jobs alone. The last
+  machine of a pool whose others stopped for good cannot tell them from machines it is cut off
+  from: a month after it last heard them it comes back too, and takes no job for a further month
+  - removing the repository and adding it again ends that sooner. If all the others are gone for
+  good, removing the repository and adding it again starts a pool of one. Removing a repository
+  and adding it again starts another pool of one on this machine. The pool it was in goes on
+  without it and takes it back by no invite of a machine that came in under it; if this machine
+  started that pool, that is every machine there, and they join the new pool instead, each by an
+  invite from this one.
 - **Reaching each other.** A machine is reachable only as a Tor onion service whose address is
   its own public key, so there are no ports to open and no addresses to exchange. A first
   connection between two machines can take minutes; later ones take about a second.
