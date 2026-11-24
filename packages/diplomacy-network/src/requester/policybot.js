@@ -11,9 +11,11 @@
 // A policy is a YAML file of at most 256 KiB, read here by a reader of its own: block and
 // flow collections, the three scalar styles, block scalars, anchors and aliases. Its
 // patterns are Go regular expressions, matched by an engine of their own that reads Go's
-// syntax and takes time linear in the text, as Go's does. Reading and compiling take time
-// linear in the file. What either cannot read is a policy this cannot check text against,
-// and text is refused on its repository; so is text that takes too long to check.
+// syntax and takes time linear in the text, as Go's does; a policy's strings and patterns
+// are matched as one program, in one pass. Reading and compiling take time linear in the
+// file, within bounds on what its aliases and its patterns come to. What either cannot read
+// is a policy this cannot check text against, and text is refused on its repository; so is
+// text that takes too long to check.
 
 import { foldsOf, holds, tableFrom, unicodeClass } from './unicode.js';
 
@@ -40,30 +42,27 @@ export async function textFault(ctx, base, text, kind) {
 }
 
 function policyFault(text, kind, policy) {
-  const say = (what) => `${what}, which the pool repository's policy-bot policy (${policy.from.join(', ')}) counts as an approval or a disapproval from whoever wrote it: reword it and send the request again`;
-  if (kind === 'comment') {
-    const word = policy.comments.find((w) => text.includes(w));
-    if (word !== undefined) return say(`holds ${JSON.stringify(word)}`);
-  }
-  // A pattern several rules name is matched once.
-  const patterns = new Map((kind === 'comment' ? policy.patterns : policy.bodies).map((p) => [p.source, p]));
-  const cps = codePoints(text);
-  const work = { left: BUDGET };
-  for (const { source, program } of patterns.values()) {
-    const found = matches(program, cps, work);
-    if (found === null) return `is too long for this to check in time against the patterns of the pool repository's policy-bot policy (${policy.from.join(', ')}): shorten it and send the request again`;
-    if (found) return say(`matches the pattern ${JSON.stringify(source)}`);
-  }
-  return null;
+  const union = unionOf(policy, kind);
+  const found = search(union, codePoints(text), BUDGET);
+  if (found === null) return `is too long for this to check in time against the patterns of the pool repository's policy-bot policy (${policy.from.join(', ')}): shorten it and send the request again`;
+  return found < 0 ? null : `${union.said[found]}, which the pool repository's policy-bot policy (${policy.from.join(', ')}) counts as an approval or a disapproval from whoever wrote it: reword it and send the request again`;
 }
 
 const LISTS = { comments: 'comments', comment_patterns: 'patterns', github_review_comment_patterns: 'patterns', body_patterns: 'bodies' };
+// The most a policy file may hold once its aliases are read in, each alias as a copy of what
+// it names: nodes, a key among them, and characters of its scalars. No file without aliases
+// comes near either.
+const MAX_NODES = 250_000;
+const MAX_TEXT = 16 * MAX_POLICY;
+// The most its distinct patterns may compile to in all (`goPattern`'s `cost`). Its distinct
+// strings hold no more characters in all than it has bytes.
+const MAX_STEPS = 100_000;
 
 /// What a policy file holds: `{ remote: { repo, path, ref } }` for one that names a policy in
 /// another repository (`path` and `ref` '' where it names none), else `{ comments, patterns,
 /// bodies }` - every text-matching method of the file, wherever it stands, with each
-/// pattern as `{ source, program }`. Throws, saying why, for a file this cannot read, among
-/// them one of more than 256 KiB.
+/// pattern as `{ source, program }`, each text and pattern once. Throws, saying why, for a
+/// file this cannot read, among them one larger than the bounds above.
 export function readPolicy(text) {
   const bytes = Buffer.byteLength(text);
   if (bytes > MAX_POLICY) throw new Error(`it is ${bytes} bytes long, more than the ${MAX_POLICY} this reads`);
@@ -74,27 +73,44 @@ export function readPolicy(text) {
     if (![repo, path, ref].every((v) => typeof v === 'string') || repo === '') throw new Error('it names its remote policy in a form policy-bot does not read');
     return { remote: { repo, path, ref } };
   }
-  const out = { comments: [], patterns: [], bodies: [] };
-  const seen = new Set();
+  const out = { comments: new Set(), patterns: new Map(), bodies: new Map() };
+  const compiled = new Map();
+  let [nodes, chars, steps] = [0, 0, 0];
+  const compile = (source) => {
+    if (!compiled.has(source)) {
+      const program = goPattern(source);
+      steps += program.cost;
+      if (steps > MAX_STEPS) throw new Error(`its patterns compile to more than the ${MAX_STEPS} steps in all this matches`);
+      compiled.set(source, { source, program });
+    }
+    return compiled.get(source);
+  };
+  // Every node as often as aliases name it, which the bounds above stop.
   const walk = (node) => {
-    if (node === null || typeof node !== 'object' || seen.has(node)) return;
-    seen.add(node);
+    if (++nodes > MAX_NODES) throw new Error(`it holds more than ${MAX_NODES} nodes with its aliases read in`);
+    if (typeof node === 'string') {
+      chars += node.length;
+      if (chars > MAX_TEXT) throw new Error(`it holds more than ${MAX_TEXT} characters with its aliases read in`);
+    }
+    if (node === null || typeof node !== 'object') return;
     for (const [key, value] of node instanceof Map ? node : node.entries()) {
       const list = node instanceof Map && Object.hasOwn(LISTS, key) ? LISTS[key] : undefined;
+      if (node instanceof Map) walk(key);
       if (list && value !== null) {
         if (!Array.isArray(value)) throw new Error(`its "${key}" is not a list`);
         for (const item of value) {
           // policy-bot reads a null entry as "", which every text holds.
           if (item !== null && typeof item !== 'string') throw new Error(`its "${key}" holds something other than text`);
-          if (list === 'comments') out.comments.push(item ?? '');
-          else out[list].push({ source: item ?? '', program: goPattern(item ?? '') });
+          const text = item ?? '';
+          if (list === 'comments') out.comments.add(text);
+          else out[list].set(text, compile(text));
         }
       }
       walk(value);
     }
   };
   walk(doc);
-  return out;
+  return { comments: [...out.comments], patterns: [...out.patterns.values()], bodies: [...out.bodies.values()] };
 }
 
 // ------------------------------------------------------------------------- YAML
@@ -102,6 +118,8 @@ export function readPolicy(text) {
 const NULLS = new Set(['', '~', 'null', 'Null', 'NULL']);
 const ESCAPES = { 0: '\0', a: '\x07', b: '\b', t: '\t', '\t': '\t', n: '\n', v: '\v', f: '\f', r: '\r', e: '\x1b', ' ': ' ', '"': '"', '/': '/', '\\': '\\', N: '\x85', _: '\xa0', L: ' ', P: ' ' };
 const HEX_ESCAPES = { x: 2, u: 4, U: 8 };
+// The deepest collections may nest (yaml.v2's is 10,000).
+const MAX_DEPTH = 100;
 
 // One YAML document as yaml.v2 decodes it into strings: a mapping is a Map, a sequence an
 // array, every scalar its text and a plain null (`~`, `null`, nothing) null.
@@ -118,8 +136,12 @@ function parseYaml(source) {
   const starts = [];
   for (let k = 0, at = 0; k < lines.length; at += lines[k].length + 1, k++) starts.push(at);
   const anchors = new Map();
-  let i = 0;
+  let [i, depth] = [0, 0];
   const fail = (why, at = i) => { throw new Error(`its line ${at + 1} ${why}`); };
+  const deeper = (by, at) => {
+    depth += by;
+    if (depth > MAX_DEPTH) fail(`nests collections more than ${MAX_DEPTH} deep`, at);
+  };
   const spaces = (line) => /^ */.exec(line)[0].length;
   const blank = (line) => /^[ \t]*(#.*)?$/.test(line);
   const marker = (line) => /^(---|\.\.\.)([ \t]|$)/.test(line);
@@ -203,12 +225,15 @@ function parseYaml(source) {
   }
 
   function sequence(ind) {
+    deeper(1);
     const out = [];
     for (skip(); i < lines.length && spaces(lines[i]) === ind && seqAt(lines[i], ind); skip()) out.push(after(ind, ind + 1, false));
+    deeper(-1);
     return out;
   }
 
   function mapping(ind) {
+    deeper(1);
     const out = new Map();
     for (skip(); i < lines.length && spaces(lines[i]) === ind && !marker(lines[i]); skip()) {
       const found = keyAt(lines[i], ind);
@@ -217,6 +242,7 @@ function parseYaml(source) {
       if (out.has(key)) fail(`holds "${key}" a second time`);
       out.set(key, after(ind, col, true));
     }
+    deeper(-1);
     return out;
   }
 
@@ -376,6 +402,7 @@ function parseYaml(source) {
         const map = src[p] === '{';
         const close = map ? '}' : ']';
         v = map ? new Map() : [];
+        deeper(1, here());
         p++;
         for (gap(); src[p] !== close; gap()) {
           if (p >= src.length) no('opens a flow collection it does not close');
@@ -397,6 +424,7 @@ function parseYaml(source) {
           if (src[p] === ',') p++;
           else if (src[p] !== close) no('holds a flow collection this does not read');
         }
+        deeper(-1);
         p++;
       } else if (src[p] === '*') {
         const name = /^\*([^ \t\n[\]{},]+)/.exec(src.slice(p))?.[1];
@@ -438,9 +466,9 @@ function parseYaml(source) {
 // with the text's length times the pattern's size and no more. A class is a list of tables
 // of code points (unicode.js), each searched by halves.
 
-// The most work one text may cost against a policy's patterns, counted as `matches` does
-// it: about 25 ms on an M4 Pro, and on a laptop i5 under load, the slowest measured, 100 ms
-// (200 ms before the engine is warm). And the most steps one pattern may compile to.
+// The most work one text may cost against a policy, counted as `search` does it: about
+// 25 ms on an M4 Pro, and on a laptop i5 under load, the slowest measured, 100 ms (200 ms
+// before the engine is warm). And the most steps one pattern may compile to.
 const BUDGET = 3_000_000;
 const MAX_PROGRAM = 100_000;
 
@@ -458,9 +486,10 @@ const [CHAR, SET, ANY, ANY_BUT_NL, SPLIT, JMP, ASSERT, MATCH] = [0, 1, 2, 3, 4, 
 const [TEXT_START, TEXT_END, LINE_START, LINE_END, BOUNDARY, INSIDE] = [0, 1, 2, 3, 4, 5];
 const WORD = new Uint8Array(128).map((_, c) => /\w/.test(String.fromCharCode(c)));
 
-// `source`, a pattern in Go's regexp syntax, as a program for `matches`: `{ size, op, arg,
-// arg2, sets }`. Throws for a pattern Go would not compile, and for one of more than
-// `MAX_PROGRAM` steps.
+// `source`, a pattern in Go's regexp syntax, as a program: `{ size, op, arg, arg2, sets,
+// cost }`, `cost` its steps with each part of its classes and each bound of a table one
+// builds. Throws for a pattern Go would not compile, and for one of more than `MAX_PROGRAM`
+// steps.
 function goPattern(source) {
   const s = Array.from(source);
   let p = 0;
@@ -471,13 +500,22 @@ function goPattern(source) {
   // when `out` does; and all of it the other way round when `negate` does. A part's
   // `depth` is the halvings a search of its table takes.
   const sets = [];
-  const set = (parts, negate) => ({ t: SET, k: sets.push({ parts: parts.map((part) => ({ ...part, depth: 32 - Math.clz32(part.table.length >> 1) })), negate }) - 1 });
+  let held = 0;
+  const own = (pairs) => {
+    const table = tableFrom(pairs);
+    held += table.length;
+    return table;
+  };
+  const set = (parts, negate) => {
+    held += parts.length;
+    return { t: SET, k: sets.push({ parts: parts.map((part) => ({ ...part, depth: 32 - Math.clz32(part.table.length >> 1) })), negate }) - 1 };
+  };
   // One class for each character a literal folds, however often it stands.
   const folded = new Map();
   const lit = (c, fold) => {
     const all = fold ? [c, ...foldsOf(c)] : [c];
     if (all.length === 1) return { t: CHAR, k: c };
-    if (!folded.has(c)) folded.set(c, set([{ table: tableFrom(all.map((x) => [x, x])), fold: false, out: false }], false));
+    if (!folded.has(c)) folded.set(c, set([{ table: own(all.map((x) => [x, x])), fold: false, out: false }], false));
     return folded.get(c);
   };
 
@@ -573,7 +611,7 @@ function goPattern(source) {
       ranges.push([lo, hi]);
     }
     p++;
-    parts.unshift({ table: tableFrom(ranges), fold, out: false });
+    parts.unshift({ table: own(ranges), fold, out: false });
     return set(parts, negate);
   };
 
@@ -771,7 +809,7 @@ function goPattern(source) {
   };
   emit(root);
   push(MATCH);
-  return { size: steps, op, arg, arg2, sets };
+  return { size: steps, op, arg, arg2, sets, cost: steps + held };
 }
 
 // `text` as its code points, a lone surrogate read as U+FFFD, as Go decodes one from JSON.
@@ -785,14 +823,102 @@ function codePoints(text) {
   return cps.subarray(0, n);
 }
 
-// Whether `program` (`goPattern`) matches anywhere in the text of `cps` (`codePoints`), as
-// Go's MatchString answers; null when that takes more than `work.left`, the work left to
-// spend, which this takes from: one for each step of the program a thread takes and for
-// each halving of a table a class's test makes.
-function matches(program, cps, work) {
-  const { size, op, arg, arg2, sets } = program;
+// A policy's `comments` strings and patterns (`kind` "comment") or its body patterns
+// ("body") as one program for `search`: `{ size, op, arg, arg2, sets, said, any, ascii,
+// other, texts, lines }`. Each entry's program follows the last, its MATCH holding the
+// entry's index, and `said[k]` says what a text entry k matches does; a string is the
+// program of its characters. An entry is started only where its match can start: before any
+// character when it is in `any`; before a character c in `ascii[c]` (c below 128) or one in
+// `other`; at the text's start in `texts`, and at a line's in `lines`.
+function unionOf(policy, kind) {
+  // A text or a pattern the policy names twice is one entry.
+  const entries = new Map();
+  if (kind === 'comment') for (const w of policy.comments) entries.set(`holds ${JSON.stringify(w)}`, codePoints(w));
+  for (const { source, program } of kind === 'comment' ? policy.patterns : policy.bodies) entries.set(`matches the pattern ${JSON.stringify(source)}`, program);
+  const programs = [...entries.values()];
+  const size = programs.reduce((sum, program) => sum + (program.size ?? program.length + 1), 0);
+  const [op, arg, arg2] = [new Uint8Array(size), new Int32Array(size), new Int32Array(size)];
+  const sets = [];
+  const starts = [];
+  let at = 0;
+  programs.forEach((program, k) => {
+    starts.push(at);
+    if (program instanceof Int32Array) {
+      op.fill(CHAR, at, at + program.length);
+      arg.set(program, at);
+      op[at + program.length] = MATCH;
+      arg[at + program.length] = k;
+      at += program.length + 1;
+      return;
+    }
+    for (let pc = 0; pc < program.size; pc++) {
+      const o = program.op[pc];
+      op[at + pc] = o;
+      arg[at + pc] = o === SPLIT || o === JMP ? program.arg[pc] + at : o === SET ? program.arg[pc] + sets.length : o === MATCH ? k : program.arg[pc];
+      if (o === SPLIT) arg2[at + pc] = program.arg2[pc] + at;
+    }
+    for (const one of program.sets) sets.push(one);
+    at += program.size;
+  });
+  const union = { size, op, arg, arg2, sets, said: [...entries.keys()], any: [], ascii: Array.from({ length: 128 }, () => []), other: [], texts: [], lines: [] };
+  // Where each entry's match can start: before the characters its first consuming steps
+  // take, an assertion passed over but one of a text's or a line's start, where it then
+  // starts. A first step other than a character or a class of one table that neither folds
+  // nor is negated, and it starts everywhere.
+  const mark = new Int32Array(size);
+  const stack = new Int32Array(size);
+  starts.forEach((start, k) => {
+    const chars = new Set();
+    let [everywhere, wide, text, line, sp] = [false, false, false, false, 0];
+    const visit = (pc) => {
+      if (mark[pc] !== k + 1) {
+        mark[pc] = k + 1;
+        stack[sp++] = pc;
+      }
+    };
+    visit(start);
+    while (sp > 0 && !everywhere) {
+      const pc = stack[--sp];
+      const o = op[pc];
+      if (o === JMP) visit(arg[pc]);
+      else if (o === SPLIT) {
+        visit(arg[pc]);
+        visit(arg2[pc]);
+      } else if (o === ASSERT && arg[pc] === TEXT_START) text = true;
+      else if (o === ASSERT && arg[pc] === LINE_START) line = true;
+      else if (o === ASSERT) visit(pc + 1);
+      else if (o === CHAR && arg[pc] < 128) chars.add(arg[pc]);
+      else if (o === CHAR) wide = true;
+      else if (o !== SET) everywhere = true;
+      else {
+        const { parts: [part, ...rest], negate } = sets[arg[pc]];
+        if (rest.length > 0 || negate || part.fold || part.out) everywhere = true;
+        const { table } = part;
+        for (let r = 0; r < table.length && table[r] < 128; r += 2) {
+          for (let c = table[r]; c <= Math.min(table[r + 1], 127); c++) chars.add(c);
+        }
+        if (table.length > 0 && table[table.length - 1] >= 128) wide = true;
+      }
+    }
+    if (text) union.texts.push(start);
+    if (line) union.lines.push(start);
+    if (everywhere) union.any.push(start);
+    else {
+      for (const c of chars) union.ascii[c].push(start);
+      if (wide) union.other.push(start);
+    }
+  });
+  return union;
+}
+
+// Which entry of `union` (`unionOf`) matches anywhere in the text of `cps` (`codePoints`),
+// as Go's MatchString answers for each, or -1 for none; null when that takes more than
+// `budget` work: one for each step of the program to set up, for each step a thread takes
+// and for each halving of a table a class's test makes.
+function search(union, cps, budget) {
+  const { size, op, arg, arg2, sets, any, ascii, other, texts, lines } = union;
   const n = cps.length;
-  let left = work.left;
+  let left = budget - size;
   const word = (c) => WORD[c] === 1;
   const holdsAt = (k, prev, next) => {
     if (k === TEXT_START) return prev === -1;
@@ -821,8 +947,10 @@ function matches(program, cps, work) {
   const mark = new Int32Array(size);
   const stack = new Int32Array(size);
   let gen = 1;
+  let hit = -1;
   // Adds to `list` (holding `len` threads) every consuming step reached from `start`
-  // between the characters `prev` and `next` (-1 past either end); -1 when one matches.
+  // between the characters `prev` and `next` (-1 past either end); -1 when an entry
+  // matches, which `hit` then names.
   const follow = (list, len, start, prev, next) => {
     let sp = 0;
     const visit = (pc) => {
@@ -836,7 +964,10 @@ function matches(program, cps, work) {
       const pc = stack[--sp];
       left--;
       const o = op[pc];
-      if (o === MATCH) return -1;
+      if (o === MATCH) {
+        hit = arg[pc];
+        return -1;
+      }
       if (o === JMP) visit(arg[pc]);
       else if (o === SPLIT) {
         visit(arg[pc]);
@@ -847,9 +978,19 @@ function matches(program, cps, work) {
     }
     return len;
   };
+  // Adds to `list` the threads of every entry whose match can start between `prev` and
+  // `next`.
+  const enter = (list, len, prev, next) => {
+    const all = [any, prev === -1 ? texts : [], prev === -1 || prev === 10 ? lines : []];
+    if (next >= 0) all.push(next < 128 ? ascii[next] : other);
+    for (const starts of all) {
+      for (let k = 0; k < starts.length && len >= 0; k++) len = follow(list, len, starts[k], prev, next);
+    }
+    return len;
+  };
   let now = new Int32Array(size);
   let then = new Int32Array(size);
-  let count = follow(now, 0, 0, -1, n > 0 ? cps[0] : -1);
+  let count = enter(now, 0, -1, n > 0 ? cps[0] : -1);
   for (let i = 0; i < n && count >= 0; i++) {
     const c = cps[i];
     const next = i + 1 < n ? cps[i + 1] : -1;
@@ -862,11 +1003,10 @@ function matches(program, cps, work) {
       left--;
       if (o === CHAR ? arg[pc] === c : o === SET ? inSet(sets[arg[pc]], c) : o === ANY || c !== 10) added = follow(then, added, pc + 1, c, next);
     }
-    if (added >= 0) added = follow(then, added, 0, c, next);
+    if (added >= 0) added = enter(then, added, c, next);
     if (left < 0 && added >= 0) return null;
     [now, then] = [then, now];
     count = added;
   }
-  work.left = left;
-  return count < 0;
+  return count < 0 ? hit : -1;
 }

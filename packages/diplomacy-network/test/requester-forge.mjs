@@ -294,6 +294,44 @@ await check('text policy-bot would count as an approval is refused, by the polic
   const large = await authorize(rules('review', 'pr-585'), gh('POST', '/repos/o/r/pulls/585/reviews', { event: 'COMMENT', body: 'fine' }), ctxFor());
   assert.match(large.reason, /so no text is sent on its pull requests: o\/r\/\.policy\.yml cannot be read here: it is 300000 bytes long, more than the 262144 this reads$/);
 
+  // A task keeps what it read for a base, refs/heads/<branch> being the branch, and for the
+  // text of its files: it reads at most 8 different policies, and another base whose files
+  // hold one of them, as a commit of its branch does, is answered with it.
+  const task = {};
+  const into = (number, base, body, state = task) => {
+    forge.pull('o/r', { number, author: 'them', head: 'theirs', base });
+    return authorize(rules('review', `pr-${number}`), gh('POST', `/repos/o/r/pulls/${number}/reviews`, { event: 'COMMENT', body }), ctxFor(state));
+  };
+  assert.match((await into(590, 'release', 'LGTM')).reason, said);
+  const spelled = forge.log.length;
+  assert.match((await into(591, 'refs/heads/release', 'LGTM')).reason, said);
+  assert.deepEqual(reads(spelled), []);
+  for (let k = 0; k < 8; k++) {
+    git(work, 'checkout', '--quiet', '-b', `cap${k}`, A);
+    const X = commit(`cap${k}`, { '.policy.yml': `comments: ["word ${k}"]\n` });
+    git(work, 'push', '--quiet', bare, `${X}:refs/heads/cap${k}`);
+    const answer = await into(592 + k, `cap${k}`, `say word ${k}`);
+    if (k < 7) assert.match(answer.reason, new RegExp(`holds "word ${k}", which the pool repository's policy-bot policy`), k);
+    else assert.match(answer.reason, /so no text is sent on its pull requests: this task has had 8 different policies read already, the most one task may$/);
+  }
+  const bySha = forge.log.length;
+  assert.match((await into(600, C, 'LGTM')).reason, said);
+  assert.deepEqual(reads(bySha), [`/repos/o/r/contents/.policy.yml?ref=${C}`, '/repos/o/.github/contents/policy.yml']);
+  const late = {};
+  assert.equal((await into(601, 'release', '+1 from the org', late)).ok, true);
+  // It keeps what it answered for 64 bases: a 65th is read each time it is asked about.
+  const other = {};
+  const gone = (number, base) => {
+    forge.pull('o/r', { number, author: 'them', head: 'theirs', base });
+    return authorize(rules('review', `pr-${number}`), gh('POST', `/repos/o/r/pulls/${number}/reviews`, { event: 'COMMENT', body: 'fine' }), ctxFor(other));
+  };
+  for (let k = 0; k < 65; k++) assert.equal((await gone(700 + k, `gone${k}`)).ok, true);
+  const kept = forge.log.length;
+  assert.equal((await gone(700, 'gone0')).ok, true);
+  assert.deepEqual(reads(kept), []);
+  assert.equal((await gone(764, 'gone64')).ok, true);
+  assert.equal(reads(kept).length, 2);
+
   // The owner's shared policy is read beside the repository's own.
   const shared = forge.bare('o/.github', { id: 'R_10' });
   git(scratch, 'clone', '--quiet', shared, 'shared');
@@ -302,10 +340,13 @@ await check('text policy-bot would count as an approval is refused, by the polic
   git(path.join(scratch, 'shared'), 'commit', '--quiet', '-m', 'org');
   git(path.join(scratch, 'shared'), 'push', '--quiet', 'origin', 'HEAD:main');
   assert.match((await review('+1 from the org')).reason, /\(o\/r\/\.policy\.yml, o\/\.github\/policy\.yml\) counts/);
+  // A base asked about after the owner's policy changes is read with it, though its own file
+  // is one the task has read.
+  assert.match((await into(602, C, '+1 from the org', late)).reason, /\(o\/r\/\.policy\.yml, o\/\.github\/policy\.yml\) counts/);
   // The rest of the file's world is as it was.
   git(work, 'checkout', '--quiet', 'main');
-  git(work, 'push', '--quiet', bare, ':refs/heads/release', ':refs/heads/far', ':refs/heads/odd', ':refs/heads/near');
-  for (const n of [583, 584, 585, 586]) {
+  git(work, 'push', '--quiet', bare, ':refs/heads/release', ':refs/heads/far', ':refs/heads/odd', ':refs/heads/near', ...Array.from({ length: 8 }, (_, k) => `:refs/heads/cap${k}`));
+  for (const n of [583, 584, 585, 586, ...Array.from({ length: 13 }, (_, k) => 590 + k), ...Array.from({ length: 65 }, (_, k) => 700 + k)]) {
     delete forge.data.repos['o/r'].pulls[n];
     delete forge.data.nodes[`PR_${n}`];
   }

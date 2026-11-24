@@ -70,6 +70,7 @@ await check('a pattern matches what Go\'s regexp matches', async () => {
     ['\\p{Lc}', [['a', true]]],
     ['\\p{ascii}', [['a', true], ['\u00e9', false]]],
     ['\\p{Any}', [['\u00e9', true]]],
+    ['\\p{Old Italic}', [['\u{10300}', true], ['a', false]]],
     ['\\p{Assigned}', [['a', true], ['\u0377', true], ['\u0378', false], ['\u0379', false], ['\u037a', true]]],
     ['\\p{Old_Italic}', [['\u{10300}', true], ['a', false]]],
     ['\\pN', [['1', true], ['a', false]]],
@@ -161,14 +162,18 @@ await check('a check counts the work it does, and text that takes more than its 
   const fault = (yaml, text) => onTime(() => textFault(asked(policyOf(yaml)), 'main', text, 'comment'));
   const tooLong = /^is too long for this to check in time against the patterns of the pool repository's policy-bot policy \(o\/r\/\.policy\.yml\): shorten it and send the request again$/;
   const [dotStar, words] = ['(?i).*lgtm', '(?i)(\\w+\\s?)+:\\s*approved'];
-  // On 2^17 a's the first takes 1,048,579 of the budget's 3,000,000 steps and the second
-  // 2,097,147: each is checked alone, and not both, the work of every pattern counting
+  // On 2^17 a's the first takes 1,048,587 of the budget's 3,000,000 steps and the second
+  // 2,097,165: each is checked alone, and not both, the work of every pattern counting
   // against the one budget; a pattern named twice is matched once.
   const as = 'a'.repeat(2 ** 17);
   assert.equal(await fault(commentPatterns(dotStar), as), null);
   assert.equal(await fault(commentPatterns(words), as), null);
   assert.match(await fault(commentPatterns(dotStar, words), as), tooLong);
   assert.equal(await fault(commentPatterns(words, words), as), null);
+  // So is one both of a repository's policy files name.
+  const both = policyOf(commentPatterns(words));
+  both.patterns = both.patterns.concat(readPolicy(commentPatterns(words)).patterns);
+  assert.equal(await onTime(() => textFault(asked(both), 'main', as, 'comment')), null);
   // A mebibyte is refused as soon as the budget is spent.
   assert.match(await fault(commentPatterns(dotStar, words), 'a'.repeat(2 ** 20)), tooLong);
   // Work is counted within a character too: at the first, a thousand threads each look for
@@ -181,18 +186,35 @@ await check('a check counts the work it does, and text that takes more than its 
   const longest = 'word '.repeat(13107);
   assert.equal(await fault(commentPatterns(dotStar, words), longest), null);
   assert.match(await fault(commentPatterns(dotStar, words), `${longest.slice(10)}x: approved`), /^matches the pattern "\(\?i\)\(\\\\w\+\\\\s\?\)\+:\\\\s\*approved"/);
-  // So it is under a policy of 40 rules, each with the methods of policy-bot's README.
-  const rules = Array.from({ length: 40 }, (_, k) => [
-    `- name: team ${k}`,
+  // So is a review that long under a policy of 100 rules, each with the methods of
+  // policy-bot's README for its own team: an entry starts only where its match can.
+  const rules = Array.from({ length: 100 }, (_, k) => [
+    `- name: team-${k}`,
     '  options:',
     '    methods:',
-    "      comment_patterns: ['^Signed-off by \\s+$']",
-    "      github_review_comment_patterns: ['\\b(?i)domain\\s*lgtm\\b']",
+    `      comments: [':team-${k}:']`,
+    `      comment_patterns: ['(?i)^team-${k}: lgtm$']`,
+    `      github_review_comment_patterns: ['\\b(?i)team-${k}\\s*lgtm\\b']`,
   ].join('\n'));
-  assert.equal(await fault(`approval_rules:\n${rules.join('\n')}\n`, 'Looks reasonable to me, thanks. '.repeat(2048)), null);
+  const prose = 'Thanks for the change. I left a few notes: the retry loop in `fetchAll()` should back off, and the new test only covers the happy path.\n```js\nfor (const item of items) await handle(item);\n```\n';
+  const review = prose.repeat(Math.ceil(65536 / prose.length)).slice(0, 65536);
+  assert.equal(await fault(`approval_rules:\n${rules.join('\n')}\n`, review), null);
+  assert.match(await fault(`approval_rules:\n${rules.join('\n')}\n`, `${review.slice(0, -40)}\nteam-57 LGTM`), /^matches the pattern "\\\\b\(\?i\)team-57\\\\s\*lgtm\\\\b"/);
+  // The text of `comments` counts too: 2,000 strings that start with "a", each started at
+  // every "a" of the text.
+  const strings = `comments: [${Array.from({ length: 2000 }, (_, k) => `a${k}`).join(', ')}]\n`;
+  assert.match(await fault(strings, 'a'.repeat(1500)), tooLong);
+  assert.equal(await fault(strings, 'b'.repeat(100000)), null);
+  // And so does setting up the policy's program, one step for each of its steps: a pattern of
+  // 73,002 steps that no "a" starts puts 370,000 of them over the budget, which the first
+  // pattern alone takes 2,960,011 of.
+  const alpha = Array.from({ length: 25 }, (_, k) => String.fromCharCode(97 + k)).join('|');
+  assert.equal(await fault(commentPatterns(dotStar), 'a'.repeat(370000)), null);
+  assert.match(await fault(commentPatterns(dotStar, `z(?:${alpha}){1000}`), 'a'.repeat(370000)), tooLong);
+  assert.equal(await fault(commentPatterns(dotStar, `z(?:${alpha}){1000}`), 'a'.repeat(365000)), null);
 });
 
-await check('a policy of at most 256 KiB is read, and its patterns compiled, in time linear in it', async () => {
+await check('a policy of at most 256 KiB is read, and its patterns compiled, in time linear in it, within bounds on what its aliases and patterns come to', async () => {
   const cap = 256 * 1024;
   // Bytes are counted, not characters.
   assert.equal(readPolicy(`comments: [${'x'.repeat(cap - 13)}]\n`).comments[0].length, cap - 13);
@@ -204,17 +226,49 @@ await check('a policy of at most 256 KiB is read, and its patterns compiled, in 
   assert.deepEqual((await read(`approval_rules:\n- name: x${' '.repeat(100000)}y\n`)).comments, []);
   assert.deepEqual((await read(fill('comments:\n- b', ' ', '#c\n'))).comments, ['b']);
   assert.equal((await read(fill('comments:\n- x', ' ', 'y\n'))).comments[0].length, cap - 77);
-  assert.equal((await read(fill('comments: [', "'a', ", "'a']\n"))).comments.length, 52413);
-  assert.equal((await read(fill('', '- comments: [a]\n', ''))).comments.length, 16380);
+  assert.deepEqual((await read(fill('comments: [', "'a', ", "'b']\n"))).comments, ['a', 'b']);
+  assert.deepEqual((await read(fill('', '- comments: [a]\n', ''))).comments, ['a']);
   assert.equal((await read(fill("comment_patterns: ['[", '[:a', "]']\n"))).patterns.length, 1);
-  // A class refers to the tables it names, without copying them: 15,400 such classes under
-  // (?i) check a body of 10 characters each class folds, and refuse one of 30 at the budget.
-  const classes = `body_patterns: ['(?i)(?:${Array(15400).fill('[\\p{L}\\p{N}一]').join('|')})Q']\n`;
+  // A class refers to the tables it names, without copying them: 12,499 such classes under
+  // (?i), 8 steps each with their parts and own tables, compile to 99,997 steps, and check a
+  // body of 10 characters each class folds, refusing one of 30 at the budget. With a pattern
+  // of 3 steps beside them they come to the 100,000 a policy may compile to; one of 4 steps,
+  // or one more class, is past it.
+  const classes = (n) => `body_patterns: ['(?i)(?:${Array(n).fill('[\\p{L}\\p{N}一]').join('|')})Q']\n`;
   const body = (n) => Array.from({ length: n }, (_, k) => String.fromCodePoint(0x4e01 + k)).join('');
-  assert.equal(await onTime(() => textFault(asked(policyOf(classes)), 'main', body(10), 'body')), null);
-  assert.match(await onTime(() => textFault(asked(policyOf(classes)), 'main', body(30), 'body')), /^is too long for this to check in time/);
+  assert.equal(await onTime(() => textFault(asked(policyOf(classes(12499))), 'main', body(10), 'body')), null);
+  assert.match(await onTime(() => textFault(asked(policyOf(classes(12499))), 'main', body(30), 'body')), /^is too long for this to check in time/);
+  assert.equal(readPolicy(`${classes(12499)}comment_patterns: [ab]\n`).patterns.length, 1);
+  assert.throws(() => readPolicy(`${classes(12499)}comment_patterns: [abc]\n`), /^Error: its patterns compile to more than the 100000 steps in all this matches$/);
+  assert.throws(() => readPolicy(classes(12500)), /^Error: its patterns compile to more than the 100000 steps in all this matches$/);
   // A policy of 30,000 of them is over the cap.
-  assert.throws(() => readPolicy(classes.replace('(?:', `(?:${'[\\p{L}\\p{N}一]|'.repeat(14600)}`)), /^Error: it is 480028 bytes long/);
+  assert.throws(() => readPolicy(classes(30000)), /^Error: it is 480028 bytes long/);
+  // A "(?i)" literal is one class for each character, however often it stands: 99,990 k's
+  // compile to 99,991 steps and one class of a part and a table of 6 bounds.
+  assert.equal(readPolicy(commentPatterns(`(?i)${'k'.repeat(99990)}`)).patterns.length, 1);
+  // Aliases are read in as copies of what they name, up to 250,000 nodes, a key among them:
+  // a mapping of two entries is 5, and 49,998 copies of one come to 250,000 with the rest of
+  // the file.
+  const maps = (n) => `x: &p {a: b, c: d}\ny: [q, ${Array(n).fill('*p').join(', ')}]\n`;
+  assert.deepEqual(readPolicy(maps(49998)), { comments: [], patterns: [], bodies: [] });
+  assert.throws(() => readPolicy(maps(49999)), /^Error: it holds more than 250000 nodes with its aliases read in$/);
+  // And up to 4 MiB of characters: 2 of keys and 4,718 in each of 889 copies of a string.
+  const strings = (n) => `x: &p ['${'t'.repeat(4718)}']\ny: [${Array(n).fill('*p').join(', ')}]\n`;
+  assert.deepEqual(readPolicy(strings(888)), { comments: [], patterns: [], bodies: [] });
+  assert.throws(() => readPolicy(strings(889)), /^Error: it holds more than 4194304 characters with its aliases read in$/);
+  // So 475 bytes that double a list 21 times are refused at once.
+  const doubling = Array.from({ length: 22 }, (_, k) => (k === 0 ? 'l0: &l0 [a, b]' : `l${k}: &l${k} [*l${k - 1}, *l${k - 1}]`)).join('\n');
+  assert.throws(() => readPolicy(`${doubling}\ncomments: *l21\n`), /^Error: it holds more than 250000 nodes/);
+  // Collections nest at most 100 deep, block or flow: a line of 100 "- " reads, with a tail
+  // that fills the file, and one of 101 is refused, as are 100 brackets under a key.
+  assert.equal(JSON.stringify((await read(`${'- '.repeat(100)}${'x'.repeat(cap - 400)}\n`)).comments), '[]');
+  assert.throws(() => readPolicy(`${'- '.repeat(101)}x\n`), /^Error: its line 1 nests collections more than 100 deep$/);
+  assert.deepEqual(readPolicy(`x: ${'['.repeat(99)}${']'.repeat(99)}\n`).comments, []);
+  assert.throws(() => readPolicy(`x: ${'['.repeat(100)}${']'.repeat(100)}\n`), /^Error: its line 1 nests collections more than 100 deep$/);
+  assert.equal(readPolicy(Array.from({ length: 101 }, (_, k) => `k${k}:\n- a`).join('\n')).comments.length, 0);
+  // A list that many methods name through an alias is collected, and compiled, once.
+  const shared = `x: &p [${Array.from({ length: 2000 }, (_, k) => `a${k}`).join(', ')}]\ny: [${Array(100).fill('{comment_patterns: *p}').join(', ')}]\n`;
+  assert.equal((await read(shared)).patterns.length, 2000);
 });
 
 await check('every approval method that reads text is collected, wherever the policy holds it', async () => {
@@ -239,7 +293,8 @@ await check('every approval method that reads text is collected, wherever the po
     '        disapprove: { comments: *words, comment_patterns: [nope] }',
     '',
   ].join('\n'));
-  assert.deepEqual(policy.comments, [':shipit:', 'LGTM', 'ship it', 'LGTM', 'ship it']);
+  // A list several methods name through an alias is collected once.
+  assert.deepEqual(policy.comments, [':shipit:', 'LGTM', 'ship it']);
   assert.deepEqual(policy.patterns.map((p) => p.source), ['^ok$', 'nope']);
   assert.deepEqual(policy.bodies.map((p) => p.source), ['(?i)approved']);
   // An empty entry is the empty string to yaml.v2, which every text holds.
