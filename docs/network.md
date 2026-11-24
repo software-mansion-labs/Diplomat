@@ -365,13 +365,13 @@ reads the policy policy-bot would read for a PR: `.policy.yml` on the branch the
 repository in its place. The body of a review or a comment on that PR holds no string of the
 policy's `comments` lists and matches none of its `comment_patterns` and
 `github_review_comment_patterns`, and the description of a draft PR a job opens matches none of
-its `body_patterns`. A policy file the machine cannot read or parse refuses text on that
-repository's PRs, and the refusal names the file; so does text too long to match against the
-policy's patterns in about 200 ms, which the machine matches as Go does, in time linear in the
-text. policy-bot is the one such bot the machine reads: what a policy-bot server is set to
-itself (its own default words, another policy path), an owner's `.github` repository the
-machine's account cannot see, and any other bot that takes a comment's text for an approval go
-unseen.
+its `body_patterns`. A policy file the machine cannot read or parse, or one over 256 KiB,
+refuses text on that repository's PRs, and the refusal names the file; so does text whose match
+against the policy's patterns takes more work than about 200 ms of it on a slow machine, which
+the machine counts as it matches, as Go does, in time linear in the text. policy-bot is the one
+such bot the machine reads: what a policy-bot server is set to itself (its own default words,
+another policy path), an owner's `.github` repository the machine's account cannot see, and any
+other bot that takes a comment's text for an approval go unseen.
 
 Before it allows a push or a write, the machine asks the forge what the rule depends on: where
 the branch is, which branch is the default, which protection rules there are, who opened the

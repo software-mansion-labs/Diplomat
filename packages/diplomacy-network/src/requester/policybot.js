@@ -8,13 +8,17 @@
 // disapproval/disapprove.go). Text in the requester's name is checked against both. A
 // server's own settings and other bots that read comments are not seen.
 //
-// A policy is a YAML file, read here by a reader of its own: block and flow collections,
-// the three scalar styles, block scalars, anchors and aliases. Its patterns are Go regular
-// expressions, matched by an engine of their own that reads Go's syntax and takes time
-// linear in the text, as Go's does. What either cannot read is a policy this cannot check
-// text against, and text is refused on its repository; so is text too long to check in time.
+// A policy is a YAML file of at most 256 KiB, read here by a reader of its own: block and
+// flow collections, the three scalar styles, block scalars, anchors and aliases. Its
+// patterns are Go regular expressions, matched by an engine of their own that reads Go's
+// syntax and takes time linear in the text, as Go's does. Reading and compiling take time
+// linear in the file. What either cannot read is a policy this cannot check text against,
+// and text is refused on its repository; so is text that takes too long to check.
+
+import { foldsOf, holds, tableFrom, unicodeClass } from './unicode.js';
 
 const WORDS = [':+1:', '👍', ':-1:', '👎'];
+const MAX_POLICY = 256 * 1024;
 
 /// Why `text`, posted as a comment or a review in the requester's name, would count as its
 /// approval or disapproval under policy-bot's defaults, or null when it would not.
@@ -41,12 +45,16 @@ function policyFault(text, kind, policy) {
     const word = policy.comments.find((w) => text.includes(w));
     if (word !== undefined) return say(`holds ${JSON.stringify(word)}`);
   }
-  const patterns = kind === 'comment' ? policy.patterns : policy.bodies;
-  if (text.length * patterns.reduce((sum, p) => sum + p.program.size, 0) > BUDGET) {
-    return `is too long for this to check in time against the patterns of the pool repository's policy-bot policy (${policy.from.join(', ')}): shorten it and send the request again`;
+  // A pattern several rules name is matched once.
+  const patterns = new Map((kind === 'comment' ? policy.patterns : policy.bodies).map((p) => [p.source, p]));
+  const cps = codePoints(text);
+  const work = { left: BUDGET };
+  for (const { source, program } of patterns.values()) {
+    const found = matches(program, cps, work);
+    if (found === null) return `is too long for this to check in time against the patterns of the pool repository's policy-bot policy (${policy.from.join(', ')}): shorten it and send the request again`;
+    if (found) return say(`matches the pattern ${JSON.stringify(source)}`);
   }
-  const pattern = patterns.find((p) => matches(p.program, text));
-  return pattern === undefined ? null : say(`matches the pattern ${JSON.stringify(pattern.source)}`);
+  return null;
 }
 
 const LISTS = { comments: 'comments', comment_patterns: 'patterns', github_review_comment_patterns: 'patterns', body_patterns: 'bodies' };
@@ -54,8 +62,11 @@ const LISTS = { comments: 'comments', comment_patterns: 'patterns', github_revie
 /// What a policy file holds: `{ remote: { repo, path, ref } }` for one that names a policy in
 /// another repository (`path` and `ref` '' where it names none), else `{ comments, patterns,
 /// bodies }` - every text-matching method of the file, wherever it stands, with each
-/// pattern as `{ source, program }`. Throws, saying why, for a file this cannot read.
+/// pattern as `{ source, program }`. Throws, saying why, for a file this cannot read, among
+/// them one of more than 256 KiB.
 export function readPolicy(text) {
+  const bytes = Buffer.byteLength(text);
+  if (bytes > MAX_POLICY) throw new Error(`it is ${bytes} bytes long, more than the ${MAX_POLICY} this reads`);
   const doc = parseYaml(text);
   // go-githubapp reads a file of these members only, `remote` among them, as a reference.
   if (doc instanceof Map && doc.has('remote') && doc.get('remote') !== null && [...doc.keys()].every((k) => ['remote', 'path', 'ref'].includes(k))) {
@@ -102,6 +113,10 @@ function parseYaml(source) {
   // Whether the last line ends in a line break, which a block scalar at the end keeps.
   const broken = lines.at(-1) === '';
   if (broken) lines.pop();
+  // The lines as one text, and where each starts in it, for a flow collection over lines.
+  const whole = lines.join('\n');
+  const starts = [];
+  for (let k = 0, at = 0; k < lines.length; at += lines[k].length + 1, k++) starts.push(at);
   const anchors = new Map();
   let i = 0;
   const fail = (why, at = i) => { throw new Error(`its line ${at + 1} ${why}`); };
@@ -110,6 +125,14 @@ function parseYaml(source) {
   const marker = (line) => /^(---|\.\.\.)([ \t]|$)/.test(line);
   const skip = () => { while (i < lines.length && blank(lines[i])) i++; };
   const seqAt = (line, col) => /^-([ \t]|$)/.test(line.slice(col));
+  // Whether `text` holds a space or a tab at `at`, or ends there. The scanners below pass
+  // over a line once, where a regular expression could pass over it once per column.
+  const gapAt = (text, at) => at === text.length || text[at] === ' ' || text[at] === '\t';
+  const trimEnd = (text) => {
+    let stop = text.length;
+    while (stop > 0 && (text[stop - 1] === ' ' || text[stop - 1] === '\t')) stop--;
+    return text.slice(0, stop);
+  };
   // After a value on its line, only a comment may follow.
   const end = (line, at) => {
     if (!/^([ \t]+#.*|[ \t]*)$/.test(line.slice(at))) fail('holds more than one value');
@@ -119,7 +142,7 @@ function parseYaml(source) {
   function quoted(line, at) {
     const q = line[at];
     let out = '';
-    for (let p = at + 1; p < line.length; p++) {
+    for (let p = at + 1; p < line.length && line[p] !== '\n'; p++) {
       const c = line[p];
       if (q === "'" && c === "'") {
         if (line[p + 1] !== "'") return [out, p + 1];
@@ -158,9 +181,11 @@ function parseYaml(source) {
       return colon ? [key, col + after + colon[0].length] : null;
     }
     if (/^[[\]{},#&*!|>%@`]/.test(text) || /^[-?:]([ \t]|$)/.test(text)) return null;
-    const m = /^(.*?)[ \t]*:(?=[ \t]|$)/.exec(text);
-    if (!m || /[ \t]#/.test(m[1])) return null;
-    return [m[1], col + m[0].length];
+    let colon = text.indexOf(':');
+    while (colon >= 0 && !gapAt(text, colon + 1)) colon = text.indexOf(':', colon + 1);
+    if (colon < 0) return null;
+    const key = trimEnd(text.slice(0, colon));
+    return /[ \t]#/.test(key) ? null : [key, col + colon + 1];
   }
 
   // A node whose lines are indented at least `min`, starting on the next line that holds
@@ -247,7 +272,10 @@ function parseYaml(source) {
       return text;
     }
     if (/^[!%@`&]/.test(c) || /^[-?:]([ \t]|$)/.test(line.slice(at))) fail('holds a kind of YAML this does not read');
-    const text = line.slice(at).replace(/[ \t]+#.*$/, '').replace(/[ \t]+$/, '');
+    let text = line.slice(at);
+    let hash = text.indexOf('#');
+    while (hash >= 0 && !gapAt(text, hash - 1)) hash = text.indexOf('#', hash + 1);
+    text = trimEnd(hash < 0 ? text : text.slice(0, hash));
     if (/:([ \t]|$)/.test(text)) fail('holds more than one value');
     i++;
     return NULLS.has(text) ? null : text;
@@ -301,9 +329,18 @@ function parseYaml(source) {
 
   // A flow collection from column `at`, over as many lines as it takes.
   function flow(at) {
-    const src = lines.slice(i).join('\n');
-    let p = at;
-    const here = () => i + (src.slice(0, p).match(/\n/g)?.length ?? 0);
+    const src = whole;
+    let p = starts[i] + at;
+    // The line `p` stands on.
+    const here = () => {
+      let [lo, hi] = [i, lines.length - 1];
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (starts[mid] <= p) lo = mid;
+        else hi = mid - 1;
+      }
+      return lo;
+    };
     const no = (why) => fail(why, here());
     const gap = () => {
       for (;;) {
@@ -314,10 +351,8 @@ function parseYaml(source) {
     };
     const scalar = () => {
       if (src[p] === '"' || src[p] === "'") {
-        const lineStart = src.lastIndexOf('\n', p - 1) + 1;
-        const lineEnd = src.indexOf('\n', p) === -1 ? src.length : src.indexOf('\n', p);
-        const [text, stop] = quoted(src.slice(lineStart, lineEnd), p - lineStart);
-        p = lineStart + stop;
+        const [text, stop] = quoted(src, p);
+        p = stop;
         return text;
       }
       if (/^[!%@`&|>?]/.test(src[p]) || /^[-:]([ \t\n]|$)/.test(src.slice(p, p + 2))) no('holds a kind of YAML this does not read');
@@ -325,7 +360,7 @@ function parseYaml(source) {
       const m = /^(?:[^,[\]{}\n:#]|:(?![ \t\n]|$)|(?<![ \t])#)+/.exec(src.slice(p));
       if (!m) no('holds a flow collection this does not read');
       p += m[0].length;
-      const text = m[0].replace(/[ \t]+$/, '');
+      const text = trimEnd(m[0]);
       return NULLS.has(text) ? null : text;
     };
     const item = () => {
@@ -375,10 +410,8 @@ function parseYaml(source) {
       return v;
     };
     const v = item();
-    const last = here();
-    const lineStart = src.lastIndexOf('\n', p - 1) + 1;
-    i = last;
-    end(lines[i], p - lineStart);
+    i = here();
+    end(lines[i], p - starts[i]);
     i++;
     return v;
   }
@@ -402,94 +435,28 @@ function parseYaml(source) {
 // ------------------------------------------------------------- Go regular expressions
 
 // A pattern is read in Go's syntax and run as a Pike VM: like Go's regexp, its work grows
-// with the text's length times the pattern's size and no more. A class is a JavaScript
-// RegExp over one character, which holds nothing to backtrack over.
+// with the text's length times the pattern's size and no more. A class is a list of tables
+// of code points (unicode.js), each searched by halves.
 
-// The most one text may cost against a policy's patterns, its length times their steps,
-// about 200 ms of matching; and the most steps one pattern may compile to.
+// The most work one text may cost against a policy's patterns, counted as `matches` does
+// it: about 25 ms on an M4 Pro, and on a laptop i5 under load, the slowest measured, 100 ms
+// (200 ms before the engine is warm). And the most steps one pattern may compile to.
 const BUDGET = 3_000_000;
 const MAX_PROGRAM = 100_000;
 
-const PERL = { d: '0-9', w: '0-9A-Za-z_', s: '\\t\\n\\f\\r ' };
+// Go's Perl and POSIX classes, each as the bounds of its ranges.
+const ascii = (bounds) => Int32Array.from(bounds, (c) => c.charCodeAt(0));
+const PERL = { d: ascii('09'), s: ascii('\t\n\f\r  '), w: ascii('09AZ__az') };
 const POSIX = {
-  alnum: '0-9A-Za-z', alpha: 'A-Za-z', ascii: '\\x00-\\x7f', blank: '\\t ', cntrl: '\\x00-\\x1f\\x7f', digit: '0-9', graph: '!-~',
-  lower: 'a-z', print: ' -~', punct: '!-\\/:-@\\[-`\\{-~', space: '\\t\\n\\v\\f\\r ', upper: 'A-Z', word: '0-9A-Za-z_', xdigit: '0-9A-Fa-f',
+  alnum: ascii('09AZaz'), alpha: ascii('AZaz'), ascii: ascii('\x00\x7f'), blank: ascii('\t\t  '), cntrl: ascii('\x00\x1f\x7f\x7f'),
+  digit: ascii('09'), graph: ascii('!~'), lower: ascii('az'), print: ascii(' ~'), punct: ascii('!/:@[`{~'), space: ascii('\t\r  '),
+  upper: ascii('AZ'), word: ascii('09AZ__az'), xdigit: ascii('09AFaf'),
 };
 const CONTROL = { a: 7, f: 12, t: 9, n: 10, r: 13, v: 11 };
-// Go's names for \p{...} (unicode.Categories, unicode.CategoryAliases, unicode.Scripts).
-const CATEGORIES = [
-  'C Cc Cf Cn Co Cs L Ll Lm Lo Lt Lu M Mc Me Mn N Nd Nl No P Pc Pd Pe Pf Pi Po Ps S Sc Sk',
-  'Sm So Z Zl Zp Zs',
-].join(' ').split(' ');
-const LONG_CATEGORIES = [
-  'Cased_Letter=LC Close_Punctuation=Pe Combining_Mark=M Connector_Punctuation=Pc',
-  'Control=Cc Currency_Symbol=Sc Dash_Punctuation=Pd Decimal_Number=Nd Enclosing_Mark=Me',
-  'Final_Punctuation=Pf Format=Cf Initial_Punctuation=Pi Letter=L Letter_Number=Nl',
-  'Line_Separator=Zl Lowercase_Letter=Ll Mark=M Math_Symbol=Sm Modifier_Letter=Lm',
-  'Modifier_Symbol=Sk Nonspacing_Mark=Mn Number=N Open_Punctuation=Ps Other=C',
-  'Other_Letter=Lo Other_Number=No Other_Punctuation=Po Other_Symbol=So',
-  'Paragraph_Separator=Zp Private_Use=Co Punctuation=P Separator=Z Space_Separator=Zs',
-  'Spacing_Mark=Mc Surrogate=Cs Symbol=S Titlecase_Letter=Lt Unassigned=Cn',
-  'Uppercase_Letter=Lu cntrl=Cc digit=Nd punct=P',
-].join(' ').split(' ');
-const SCRIPTS = [
-  'Adlam Ahom Anatolian_Hieroglyphs Arabic Armenian Avestan Balinese Bamum Bassa_Vah',
-  'Batak Bengali Beria_Erfe Bhaiksuki Bopomofo Brahmi Braille Buginese Buhid',
-  'Canadian_Aboriginal Carian Caucasian_Albanian Chakma Cham Cherokee Chorasmian Common',
-  'Coptic Cuneiform Cypriot Cypro_Minoan Cyrillic Deseret Devanagari Dives_Akuru Dogra',
-  'Duployan Egyptian_Hieroglyphs Elbasan Elymaic Ethiopic Garay Georgian Glagolitic',
-  'Gothic Grantha Greek Gujarati Gunjala_Gondi Gurmukhi Gurung_Khema Han Hangul',
-  'Hanifi_Rohingya Hanunoo Hatran Hebrew Hiragana Imperial_Aramaic Inherited',
-  'Inscriptional_Pahlavi Inscriptional_Parthian Javanese Kaithi Kannada Katakana Kawi',
-  'Kayah_Li Kharoshthi Khitan_Small_Script Khmer Khojki Khudawadi Kirat_Rai Lao Latin',
-  'Lepcha Limbu Linear_A Linear_B Lisu Lycian Lydian Mahajani Makasar Malayalam Mandaic',
-  'Manichaean Marchen Masaram_Gondi Medefaidrin Meetei_Mayek Mende_Kikakui',
-  'Meroitic_Cursive Meroitic_Hieroglyphs Miao Modi Mongolian Mro Multani Myanmar',
-  'Nabataean Nag_Mundari Nandinagari New_Tai_Lue Newa Nko Nushu Nyiakeng_Puachue_Hmong',
-  'Ogham Ol_Chiki Ol_Onal Old_Hungarian Old_Italic Old_North_Arabian Old_Permic',
-  'Old_Persian Old_Sogdian Old_South_Arabian Old_Turkic Old_Uyghur Oriya Osage Osmanya',
-  'Pahawh_Hmong Palmyrene Pau_Cin_Hau Phags_Pa Phoenician Psalter_Pahlavi Rejang Runic',
-  'Samaritan Saurashtra Sharada Shavian Siddham Sidetic SignWriting Sinhala Sogdian',
-  'Sora_Sompeng Soyombo Sundanese Sunuwar Syloti_Nagri Syriac Tagalog Tagbanwa Tai_Le',
-  'Tai_Tham Tai_Viet Tai_Yo Takri Tamil Tangsa Tangut Telugu Thaana Thai Tibetan Tifinagh',
-  'Tirhuta Todhri Tolong_Siki Toto Tulu_Tigalari Ugaritic Vai Vithkuqi Wancho Warang_Citi',
-  'Yezidi Yi Zanabazar_Square',
-].join(' ').split(' ');
-// Each name as the JavaScript class it stands for, keyed as Go looks a name up: "_", "-"
-// and " " dropped, the first letter upper case and the others lower.
-const canonical = (name) => name.replace(/[-_ ]/g, '').replace(/^[a-z]/, (c) => c.toUpperCase()).replace(/(?<!^)[A-Z]/g, (c) => c.toLowerCase());
-const PROPERTIES = new Map();
-for (const [name, body] of [
-  ['Any', '\\u{0}-\\u{10ffff}'], ['Assigned', '\\p{Assigned}'], ['ASCII', '\\u{0}-\\u{7f}'], ['LC', '\\p{LC}'],
-  ...CATEGORIES.map((c) => [c, `\\p{General_Category=${c}}`]),
-  ...SCRIPTS.map((s) => [s, `\\p{Script=${s}}`]),
-]) PROPERTIES.set(canonical(name), body);
-for (const [name, c] of LONG_CATEGORIES.map((pair) => pair.split('='))) PROPERTIES.set(canonical(name), PROPERTIES.get(canonical(c)));
 
 const [CHAR, SET, ANY, ANY_BUT_NL, SPLIT, JMP, ASSERT, MATCH] = [0, 1, 2, 3, 4, 5, 6, 7];
 const [TEXT_START, TEXT_END, LINE_START, LINE_END, BOUNDARY, INSIDE] = [0, 1, 2, 3, 4, 5];
 const WORD = new Uint8Array(128).map((_, c) => /\w/.test(String.fromCharCode(c)));
-const hex = (cp) => `\\u{${cp.toString(16)}}`;
-
-// The characters a class matches: those in `pos` and those outside each of `negs` (bodies
-// of JavaScript classes), each part closed under case folding first when `fold` holds, as
-// Go folds a class before it negates any part of it; all of it negated when `negate` does.
-function charSet(pos, negs, fold, negate) {
-  const parts = negs.map((body) => `[^${body}]`);
-  if (pos !== '') parts.unshift(`[${pos}]`);
-  const re = new RegExp(`^(?:${parts.join('|')})$`, fold ? 'iu' : 'u');
-  const ascii = new Uint8Array(128);
-  const other = new Map();
-  return (cp) => {
-    if (cp < 128) {
-      if (ascii[cp] === 0) ascii[cp] = re.test(String.fromCharCode(cp)) !== negate ? 1 : 2;
-      return ascii[cp] === 1;
-    }
-    let has = other.get(cp);
-    if (has === undefined) other.set(cp, (has = re.test(String.fromCodePoint(cp)) !== negate));
-    return has;
-  };
-}
 
 // `source`, a pattern in Go's regexp syntax, as a program for `matches`: `{ size, op, arg,
 // arg2, sets }`. Throws for a pattern Go would not compile, and for one of more than
@@ -499,9 +466,20 @@ function goPattern(source) {
   let p = 0;
   const no = (why) => { throw new Error(`its pattern ${JSON.stringify(source)} ${why}`); };
   const cp = (k) => s[k].codePointAt(0);
+  // A class is its parts, each `{ table, fold, out }`: the code points of `table`, with
+  // what they fold to when `fold` holds (Go folds each part on its own), or all others
+  // when `out` does; and all of it the other way round when `negate` does. A part's
+  // `depth` is the halvings a search of its table takes.
   const sets = [];
-  const set = (pos, negs, fold, negate) => ({ t: SET, k: sets.push(charSet(pos, negs, fold, negate)) - 1 });
-  const lit = (c, fold) => (fold ? set(hex(c), [], true, false) : { t: CHAR, k: c });
+  const set = (parts, negate) => ({ t: SET, k: sets.push({ parts: parts.map((part) => ({ ...part, depth: 32 - Math.clz32(part.table.length >> 1) })), negate }) - 1 });
+  // One class for each character a literal folds, however often it stands.
+  const folded = new Map();
+  const lit = (c, fold) => {
+    const all = fold ? [c, ...foldsOf(c)] : [c];
+    if (all.length === 1) return { t: CHAR, k: c };
+    if (!folded.has(c)) folded.set(c, set([{ table: tableFrom(all.map((x) => [x, x])), fold: false, out: false }], false));
+    return folded.get(c);
+  };
 
   // The character escaped by the "\\" before `p`, as Go's parseEscape reads it.
   const escaped = () => {
@@ -526,14 +504,14 @@ function goPattern(source) {
   };
 
   // A Perl class (\d, \s, \w, negated in upper case) or a Unicode one (\pL, \p{Name},
-  // negated as \P or with "^" before the name) at `p`, as [its JavaScript class, whether
-  // it is negated], or null for none.
-  const named = () => {
+  // negated as \P or with "^" before the name) at `p`, as the part of a class it is under
+  // the flag `fold`, or null for none.
+  const named = (fold) => {
     const c = s[p + 1];
     if (s[p] !== '\\' || c === undefined) return null;
     if (/^[dswDSW]$/.test(c)) {
       p += 2;
-      return [PERL[c.toLowerCase()], c !== c.toLowerCase()];
+      return { table: PERL[c.toLowerCase()], fold, out: c !== c.toLowerCase() };
     }
     if (c !== 'p' && c !== 'P') return null;
     p += 2;
@@ -545,19 +523,19 @@ function goPattern(source) {
       p = close + 1;
     }
     const negated = name.startsWith('^');
-    return [PROPERTIES.get(canonical(name.slice(negated ? 1 : 0))) ?? no('names a class Go does not know'), (c === 'P') !== negated];
+    const found = unicodeClass(name.slice(negated ? 1 : 0)) ?? no('names a class Go does not know');
+    return { table: found.table, fold: fold && found.fold, out: (c === 'P') !== negated };
   };
 
+  // Where the first ":]" at or after a class's "[:" starts, which Go reads as the end of a
+  // POSIX class's name: -1 for none, -2 before it is first looked for.
+  let posixEnd = -2;
   const charClass = (fold) => {
     p++;
     const negate = s[p] === '^';
     if (negate) p++;
-    let pos = '';
-    const negs = [];
-    const add = ([body, negated]) => {
-      if (negated) negs.push(body);
-      else pos += body;
-    };
+    const ranges = [];
+    const parts = [];
     const one = () => {
       if (p >= s.length) no('has a class it does not close');
       if (s[p] !== '\\') return cp(p++);
@@ -566,19 +544,23 @@ function goPattern(source) {
     };
     for (let first = true; first || s[p] !== ']'; first = false) {
       if (s[p] === '[' && s[p + 1] === ':' && p + 2 < s.length) {
-        let end = p + 2;
-        while (end < s.length && !(s[end] === ':' && s[end + 1] === ']')) end++;
-        if (end < s.length) {
-          const m = /^\[:(\^?)([a-z]+):\]$/.exec(s.slice(p, end + 2).join(''));
-          if (!m || !Object.hasOwn(POSIX, m[2])) no('holds a class name Go does not know');
-          add([POSIX[m[2]], m[1] === '^']);
-          p = end + 2;
+        if (posixEnd !== -1 && posixEnd < p + 2) {
+          posixEnd = p + 2;
+          while (posixEnd < s.length && !(s[posixEnd] === ':' && s[posixEnd + 1] === ']')) posixEnd++;
+          if (posixEnd === s.length) posixEnd = -1;
+        }
+        if (posixEnd !== -1) {
+          const name = s.slice(p + 2, posixEnd).join('');
+          const negated = name.startsWith('^');
+          const table = Object.hasOwn(POSIX, name.slice(negated ? 1 : 0)) ? POSIX[name.slice(negated ? 1 : 0)] : no('holds a class name Go does not know');
+          parts.push({ table, fold, out: negated });
+          p = posixEnd + 2;
           continue;
         }
       }
-      const perl = named();
-      if (perl) {
-        add(perl);
+      const part = named(fold);
+      if (part) {
+        parts.push(part);
         continue;
       }
       const lo = one();
@@ -588,10 +570,11 @@ function goPattern(source) {
         hi = one();
         if (hi < lo) no('holds a range that runs backwards');
       }
-      pos += lo === hi ? hex(lo) : `${hex(lo)}-${hex(hi)}`;
+      ranges.push([lo, hi]);
     }
     p++;
-    return set(pos, negs, fold, negate);
+    parts.unshift({ table: tableFrom(ranges), fold, out: false });
+    return set(parts, negate);
   };
 
   // "{n}", "{n,}" or "{n,m}" at `p` as [n, m (-1 for no bound), its length], or null when
@@ -709,9 +692,9 @@ function goPattern(source) {
         while (p < s.length && !(s[p] === '\\' && s[p + 1] === 'E')) items.push(lit(cp(p++), flags.i));
         p += 2;
       } else if (c === '\\') {
-        const perl = named();
-        if (perl) {
-          items.push(perl[1] ? set('', [perl[0]], flags.i, false) : set(perl[0], [], flags.i, false));
+        const part = named(flags.i);
+        if (part) {
+          items.push(set([part], false));
         } else {
           p++;
           items.push(lit(escaped(), flags.i));
@@ -791,23 +774,49 @@ function goPattern(source) {
   return { size: steps, op, arg, arg2, sets };
 }
 
-// Whether `program` (`goPattern`) matches anywhere in `text`, as Go's MatchString answers.
-// A lone surrogate reads as U+FFFD, as Go decodes one from JSON.
-function matches(program, text) {
-  const { size, op, arg, arg2, sets } = program;
+// `text` as its code points, a lone surrogate read as U+FFFD, as Go decodes one from JSON.
+function codePoints(text) {
   const cps = new Int32Array(text.length);
   let n = 0;
   for (const ch of text) {
     const c = ch.codePointAt(0);
     cps[n++] = c >= 0xd800 && c <= 0xdfff ? 0xfffd : c;
   }
+  return cps.subarray(0, n);
+}
+
+// Whether `program` (`goPattern`) matches anywhere in the text of `cps` (`codePoints`), as
+// Go's MatchString answers; null when that takes more than `work.left`, the work left to
+// spend, which this takes from: one for each step of the program a thread takes and for
+// each halving of a table a class's test makes.
+function matches(program, cps, work) {
+  const { size, op, arg, arg2, sets } = program;
+  const n = cps.length;
+  let left = work.left;
   const word = (c) => WORD[c] === 1;
-  const holds = (k, prev, next) => {
+  const holdsAt = (k, prev, next) => {
     if (k === TEXT_START) return prev === -1;
     if (k === TEXT_END) return next === -1;
     if (k === LINE_START) return prev === -1 || prev === 10;
     if (k === LINE_END) return next === -1 || next === 10;
     return (word(prev) !== word(next)) === (k === BOUNDARY);
+  };
+  // What the character being matched folds to, once a class asks.
+  let folds = null;
+  const inSet = (set, c) => {
+    for (const { table, fold, out, depth } of set.parts) {
+      left -= depth;
+      let found = holds(table, c);
+      if (!found && fold) {
+        folds ??= foldsOf(c);
+        for (let k = 0; k < folds.length && !found; k++) {
+          left -= depth;
+          found = holds(table, folds[k]);
+        }
+      }
+      if (found !== out) return !set.negate;
+    }
+    return set.negate;
   };
   const mark = new Int32Array(size);
   const stack = new Int32Array(size);
@@ -825,6 +834,7 @@ function matches(program, text) {
     visit(start);
     while (sp > 0) {
       const pc = stack[--sp];
+      left--;
       const o = op[pc];
       if (o === MATCH) return -1;
       if (o === JMP) visit(arg[pc]);
@@ -832,7 +842,7 @@ function matches(program, text) {
         visit(arg[pc]);
         visit(arg2[pc]);
       } else if (o === ASSERT) {
-        if (holds(arg[pc], prev, next)) visit(pc + 1);
+        if (holdsAt(arg[pc], prev, next)) visit(pc + 1);
       } else list[len++] = pc;
     }
     return len;
@@ -844,15 +854,19 @@ function matches(program, text) {
     const c = cps[i];
     const next = i + 1 < n ? cps[i + 1] : -1;
     gen++;
+    folds = null;
     let added = 0;
-    for (let k = 0; k < count && added >= 0; k++) {
+    for (let k = 0; k < count && added >= 0 && left >= 0; k++) {
       const pc = now[k];
       const o = op[pc];
-      if (o === CHAR ? arg[pc] === c : o === SET ? sets[arg[pc]](c) : o === ANY || c !== 10) added = follow(then, added, pc + 1, c, next);
+      left--;
+      if (o === CHAR ? arg[pc] === c : o === SET ? inSet(sets[arg[pc]], c) : o === ANY || c !== 10) added = follow(then, added, pc + 1, c, next);
     }
     if (added >= 0) added = follow(then, added, 0, c, next);
+    if (left < 0 && added >= 0) return null;
     [now, then] = [then, now];
     count = added;
   }
+  work.left = left;
   return count < 0;
 }
