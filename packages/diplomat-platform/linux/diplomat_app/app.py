@@ -273,9 +273,20 @@ class DiplomatApp:
     def _pipeline_tick(self) -> None:
         self.store.run_pipeline_sync_async(then=self.pipeline_timer.start)
 
+    def _end(self, signum: int, _frame) -> None:
+        """A newer instance's SIGTERM or a closed terminal's SIGHUP: the sync's core, in a
+        session of its own, is stopped, then the signal ends the app at once."""
+        self.store.stop_pipeline_sync()
+        signal.signal(signum, signal.SIG_DFL)
+        signal.raise_signal(signum)
+
     def exec(self) -> int:
         # Let Ctrl+C in a terminal kill the app cleanly.
         signal.signal(signal.SIGINT, lambda *_: self.quit())
+        # A SIGHUP nohup ignores stays ignored.
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            if signal.getsignal(signum) is signal.SIG_DFL:
+                signal.signal(signum, self._end)
         # A periodic no-op timer lets the Python signal handler run.
         nudge = QTimer()
         nudge.start(250)
