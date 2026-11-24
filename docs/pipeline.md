@@ -380,8 +380,8 @@ QSettings (Linux) under the same keys: `pipelineEnabled`, `pipelineRate`, `pipel
 ## Linear
 
 Linear is read with a personal API key of yours. The key is read on each sync and reaches only
-`curl`, in a config on its stdin (staged in an owner-only temp file, removed when curl exits, though
-a sync killed meanwhile leaves it), never in an argv; no agent shell, nor `gh` or `claude` a sync starts, has `DIPLOMAT_LINEAR_TOKEN` in its
+`curl`, in a config on its stdin (staged in an owner-only temp file, removed
+before curl starts), never in an argv; no agent shell, nor `gh` or `claude` a sync starts, has `DIPLOMAT_LINEAR_TOKEN` in its
 environment, though the Linux app's own `gh` calls inherit one you export. A fix run for a Linear issue gets the issue's text as Diplomat read it, not the key, though it runs
 as you and so could read the key where Diplomat does.
 
