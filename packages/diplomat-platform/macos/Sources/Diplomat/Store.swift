@@ -85,6 +85,9 @@ final class Store: ObservableObject {
     /// Headless only: what `persistJSON` writes in place of UserDefaults, by key, so
     /// records carry from one poll to the next.
     var headlessJSON: [String: Data]?
+    /// Headless only: the `headlessJSON` a Store launches on, read in place of the stored
+    /// asks: a self-test's relaunch.
+    static var headlessLaunchJSON: [String: Data]?
 
     private func storedJSON(forKey key: String) -> Data? {
         if Headless.active, let stored = headlessJSON { return stored[key] }
@@ -836,11 +839,13 @@ final class Store: ObservableObject {
     /// before may have been switched off midway, emitting less than it owes, so its
     /// result withdraws and prunes nothing (`runPipelineSyncOnce`).
     var pipelineEpoch = 0
-    /// A sync begun since launch or the master switch went on was applied: until then
-    /// the asks queued before it may be stale, so none starts (`isPaused`).
-    @Published var pipelineJudged = false {
-        didSet { if pipelineJudged && !oldValue { bringPollForward(capLoad: autoTasksMeasured) } }
-    }
+    /// A sync begun since launch or the master switch went on was applied: until then each
+    /// pipeline ask queued is stale (`pipelineStale`).
+    var pipelineJudged = false
+    /// The keys of the pipeline asks queued before that sync, each until a sync begun since
+    /// judged its item (`pipelineJudgedAsks`): till then it may be stale, so it does not
+    /// start (`isHeld`).
+    @Published var pipelineStale: Set<String> = []
 
     /// Every dispatched agent run the panel draws, in reading order: the sessions this
     /// machine spawned, and any live agent nobody dispatched at all.
@@ -901,7 +906,11 @@ final class Store: ObservableObject {
     /// it into a fix. Losing this list on a restart would silently drop the rest of a
     /// fifty-item sweep, which is exactly the run long enough to be interrupted.
     var requestedWork: [RequestedWork] {
-        didSet { persistJSON(requestedWork, forKey: Keys.requestedWork) }
+        didSet {
+            persistJSON(requestedWork, forKey: Keys.requestedWork)
+            let stale = pipelineStale.intersection(requestedWork.map(\.key))
+            if stale != pipelineStale { pipelineStale = stale }
+        }
     }
 
     /// Queued work whose dispatch is under way: it has left the queue and its spawn
@@ -1205,8 +1214,10 @@ final class Store: ObservableObject {
         queuedTaskOrder = (defaults.stringArray(forKey: Keys.queuedTaskOrder) ?? [])
             .map { PRRef.migrateQueueKey($0, primary: primary) }
         let configured = CoreAssets.repoCoordinates()
-        requestedWork = Store.decodeRequestedWork(defaults.data(forKey: Keys.requestedWork),
+        let launched = Headless.active ? Store.headlessLaunchJSON?[Keys.requestedWork] : nil
+        requestedWork = Store.decodeRequestedWork(launched ?? defaults.data(forKey: Keys.requestedWork),
                                                   configured: "\(configured.owner)/\(configured.repo)")
+        pipelineStale = Set(requestedWork.filter(\.config.isPipeline).map(\.key))
         listedKey = selectedRoot.key
         refreshLocalRepos()
         if hiddenTools.contains(selected.rawValue),
@@ -2391,7 +2402,7 @@ final class Store: ObservableObject {
     /// Only with something the drain may start and a bay to start it in, never sooner
     /// than `earlyPollFloor` after the last poll started, and one waiting covers every
     /// call until it starts.
-    private func bringPollForward(capLoad: Int) {
+    func bringPollForward(capLoad: Int) {
         guard pollsEarly, earlyAutofixPoll == nil, drainHasRoom(capLoad: capLoad) else { return }
         earlyAutofixPoll = Task { [weak self] in
             while let wait = self?.secondsUntilPoll(gap: self?.earlyPollFloor ?? 0), wait > 0 {
@@ -3550,6 +3561,7 @@ final class Store: ObservableObject {
         let known = Set(requestedWork.map(\.key))
         let fresh = asks.filter { !known.contains($0.key) }
         guard !fresh.isEmpty else { return (0, asks.count) }
+        if !pipelineJudged { pipelineStale.formUnion(fresh.filter(\.config.isPipeline).map(\.key)) }
         requestedWork += fresh
         publishRequested(fresh)
         bringPollForward(capLoad: autoTasksMeasured)
@@ -3703,7 +3715,7 @@ final class Store: ObservableObject {
         switch counter {
         case .reviewRequests:        return !reviewRequestsEnabled
         case .myReviews, .conflicts: return !prAutofixEnabled
-        case .pipeline:              return !(pipelineEnabled && pipelineJudged)
+        case .pipeline:              return !pipelineEnabled
         // A review the operator asked for: no monitor owns it, so neither toggle
         // speaks for it. Switching the monitors off says what this machine may go
         // looking for, not that it should stop doing what it was told — for an ask,
@@ -3726,10 +3738,12 @@ final class Store: ObservableObject {
         return queuedTasks.filter { !isHeld($0, owned: owned) }
     }
 
-    /// Paused, unless a Slack ping took it as its ask: then it is asked-for work, which
-    /// switching a monitor off never stops (`isPaused`).
+    /// Paused, or a pipeline ask still stale (`pipelineStale`), unless a Slack ping took it
+    /// as its ask: then it is asked-for work, which switching a monitor off never stops
+    /// (`isPaused`).
     func isHeld(_ task: QueuedAgentTask, owned: Set<String>? = nil) -> Bool {
-        isPaused(task.job.counter) && !(owned ?? commsOwnedKeys).contains(task.id)
+        (isPaused(task.job.counter) || (task.job.counter == .pipeline && pipelineStale.contains(task.id)))
+            && !(owned ?? commsOwnedKeys).contains(task.id)
     }
 
     /// Dispatch one queued task past the capacity check its caller already made, and

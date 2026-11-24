@@ -24,16 +24,18 @@ extension Store {
 
     /// The self-test's stand-in for `PipelineTick.run`; consulted only headless.
     static var pipelineTickOverride: (@MainActor (PipelineSettings) -> PipelineTickResult)?
-    /// Lets a headless sync run the real `PipelineTick.run`: the self-test's live pass,
-    /// whose `gh`, `claude` and Linear are the stubs its environment names.
-    static var pipelineTickLive = false
+    /// Lets a headless sync run the real `PipelineTick.run`, shown each sync's settings
+    /// first: the self-test's live pass, whose `gh`, `claude` and Linear are the stubs its
+    /// environment names.
+    static var pipelineTickLive: (@MainActor (PipelineSettings) -> Void)?
 
     /// The only review a PR gets before the pipeline may merge it.
     static let pipelineReviewDepth = "max"
 
     /// What a sync is run with: the GitHub roots (GitLab ones are not read yet), the Linear
-    /// teams, the switches, and whatever the screen forced that no sync has taken, sorted
-    /// as the Linux store hands its forces on.
+    /// teams, the switches, whatever the screen forced that no sync has taken, sorted
+    /// as the Linux store hands its forces on, and the items asks are held for
+    /// (`pipelineQueued`).
     var pipelineSettings: PipelineSettings {
         let force = PipelineSettings.Force(rate: pipelineForce.rate.sorted(),
                                            fracture: pipelineForce.fracture.sorted())
@@ -46,7 +48,23 @@ extension Store {
             linearKeychainItem: item.isEmpty ? nil : item,
             rate: pipelineRate, fix: pipelineFix, fastTrack: pipelineFastTrack,
             merge: pipelineMerge, fracture: pipelineFracture,
-            force: force.rate.isEmpty && force.fracture.isEmpty ? nil : force)
+            force: force.rate.isEmpty && force.fracture.isEmpty ? nil : force,
+            queued: Store.pipelineQueued(requestedWork, runs: agentRows.filter(Store.blocks).map(\.record),
+                                         attempts: loadPipelineAttempts()))
+    }
+
+    /// `PipelineSettings.queued`: the item of each of the pipeline's `asks`, queued or
+    /// starting, and of each open attempt one of the live `runs` is the run of (as
+    /// `pipelineConcluded` matches them), sorted. Twin of `pipeline.queued`.
+    nonisolated static func pipelineQueued(_ asks: [RequestedWork], runs: [AgentState.RunRecord],
+                                           attempts: [String: ReviewAttempt]) -> [String] {
+        var out = Set(asks.filter(\.config.isPipeline).map(\.url))
+        for run in runs where run.ledgerKey.isEmpty {
+            for key in pipelineOpenKeys(attempts, kind: run.kind, url: run.prURL) {
+                out.insert(String(key.drop { $0 != ":" }.dropFirst()))
+            }
+        }
+        return out.sorted()
     }
 
     /// `control.json` in `PipelineLog.dir`: the switches as they stand, which a running sync
@@ -94,7 +112,10 @@ extension Store {
 
     func pipelineCut(master: Bool = false) {
         pipelineEpoch += 1
-        if master { pipelineJudged = false }
+        if master {
+            pipelineJudged = false
+            pipelineStale = Set(requestedWork.filter(\.config.isPipeline).map(\.key))
+        }
     }
 
     /// A switch flipped on syncs at once.
@@ -110,7 +131,7 @@ extension Store {
     /// the operator's own as the sync does; the forces then wait.
     func runPipelineSyncOnce() async {
         guard pipelineEnabled,
-              !Headless.active || Store.pipelineTickOverride != nil || Store.pipelineTickLive else { return }
+              !Headless.active || Store.pipelineTickOverride != nil || Store.pipelineTickLive != nil else { return }
         guard !pipelineSyncing else {
             pipelineSyncAgain = true
             return
@@ -140,6 +161,7 @@ extension Store {
             if let stub = Store.pipelineTickOverride {
                 result = stub(settings)
             } else {
+                Store.pipelineTickLive?(settings)
                 result = await Task.detached(priority: .utility) {
                     PipelineTick.run(settings: settings)
                 }.value
@@ -197,10 +219,10 @@ extension Store {
     ///
     /// A result that lands after the master switch went off queues and withdraws nothing
     /// (a sync switched off midway emits no effect). Any other first retires the queued asks
-    /// no longer owed (`pipelineWithdrawn`); by the result, lets the asks start
-    /// (`pipelineJudged`) and prunes the attempt records only if it is `judged`: a sync's
-    /// own (`pipelineRan`) begun in this `pipelineEpoch`. `handed` is the roots that sync
-    /// was handed while a root path did not resolve, nil when every one did.
+    /// no longer owed (`pipelineWithdrawn`); by the result, lets each stale ask whose item it
+    /// judged start (`pipelineStale`) and prunes the attempt records only if it is `judged`:
+    /// a sync's own (`pipelineRan`) begun in this `pipelineEpoch`. `handed` is the roots
+    /// that sync was handed while a root path did not resolve, nil when every one did.
     /// A notice is logged when it first appears, and each merge and split the core made
     /// since the previous result once (`Store.pipelineFreshEvents`), whatever the switches.
     /// One dated at the epoch, the core's answer while another sync holds its lock and none
@@ -219,7 +241,15 @@ extension Store {
         if result.at.timeIntervalSince1970 != 0 { pipelineResult = result }
         if pipelineEnabled {
             withdrawPipelineAsks(judged ? result : nil, handed: handed)
-            if judged { pipelineJudged = true }
+            if judged {
+                pipelineJudged = true
+                let released = pipelineStale.intersection(Store.pipelineJudgedAsks(requestedWork, by: result,
+                                                                                    handed: handed))
+                if !released.isEmpty {
+                    pipelineStale.subtract(released)
+                    bringPollForward(capLoad: autoTasksMeasured)
+                }
+            }
         }
         var queued = false
         if pipelineEnabled {
@@ -289,9 +319,9 @@ extension Store {
 
     /// The keys of the pipeline's `asks` no longer owed: one a sync queued while its kind's
     /// switch (`fix`, `fastTrack`) is off; one `result` (a sync's own; nil judges by the
-    /// switches alone) emitted no effect for, in a root it judged in full (`pipelineShort`)
-    /// or of an item it `read`; and a Start fix (`byHand`) in a root judged in full whose
-    /// issue is not `fixable`. Twin of `pipeline.withdrawn`.
+    /// switches alone) emitted no effect for and judged (`pipelineJudgedAsks`); and a Start
+    /// fix (`byHand`) in a root judged in full (`pipelineShort`) whose issue is not
+    /// `fixable`. Twin of `pipeline.withdrawn`.
     nonisolated static func pipelineWithdrawn(_ asks: [RequestedWork], by result: PipelineTickResult?,
                                               handed: Set<String>? = nil, fix: Bool,
                                               fastTrack: Bool) -> [String] {
@@ -300,7 +330,7 @@ extension Store {
             return "fix " + pipelineIdentity(effect.url)
         })
         let fixable = Set((result?.fixable ?? []).map(pipelineIdentity))
-        let read = Set((result?.read ?? []).map(pipelineIdentity))
+        let judged = Set(result.map { pipelineJudgedAsks(asks, by: $0, handed: handed) } ?? [])
         let short = pipelineShort(result?.unread ?? [], handed: handed)
         return asks.filter { ask in
             guard ask.config.isPipeline else { return false }
@@ -308,9 +338,20 @@ extension Store {
             if case .review = ask.config { review = true } else { review = false }
             if !ask.byHand && !(review ? fastTrack : fix) { return true }
             guard result != nil else { return false }
-            let id = pipelineIdentity(ask.url), judged = !short(ask.repo.lowercased())
-            return ask.byHand ? judged && !fixable.contains(id)
-                : !owed.contains((review ? "review " : "fix ") + id) && (judged || read.contains(id))
+            let id = pipelineIdentity(ask.url)
+            return ask.byHand ? !short(ask.repo.lowercased()) && !fixable.contains(id)
+                : !owed.contains((review ? "review " : "fix ") + id) && judged.contains(ask.key)
+        }.map(\.key)
+    }
+
+    /// The keys of the pipeline's `asks` whose item `result` (a sync's own) judged: in a
+    /// root it judged in full (`pipelineShort`), or by reading it. Twin of `pipeline.judged`.
+    nonisolated static func pipelineJudgedAsks(_ asks: [RequestedWork], by result: PipelineTickResult,
+                                               handed: Set<String>? = nil) -> [String] {
+        let read = Set(result.read.map(pipelineIdentity))
+        let short = pipelineShort(result.unread, handed: handed)
+        return asks.filter {
+            $0.config.isPipeline && (!short($0.repo.lowercased()) || read.contains(pipelineIdentity($0.url)))
         }.map(\.key)
     }
 

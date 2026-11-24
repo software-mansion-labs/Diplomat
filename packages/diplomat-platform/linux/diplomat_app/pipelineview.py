@@ -378,14 +378,19 @@ def card_face(item: dict, badge: str | None) -> CardFace:
                     badge=badge, locked=not item.get("writable"), hold=item.get("hold") or None)
 
 
-def _paint_chip(p: QPainter, x: float, y: float, text: str, tint: str, *,
-                right: bool = False) -> float:
-    """``text`` in ``tint`` on a capsule of it, 14px high, from ``x`` (ending there with
-    ``right``). Returns its width."""
+def _chip_font(p: QPainter) -> QFont:
     font = QFont(p.font())
     font.setPixelSize(8)
     font.setBold(True)
-    width = QFontMetricsF(font).horizontalAdvance(text) + 10
+    return font
+
+
+def _paint_chip(p: QPainter, x: float, y: float, text: str, tint: str, *,
+                right: bool = False, pad: float = 10.0) -> float:
+    """``text`` in ``tint`` on a capsule of it ``pad`` wider, 14px high, from ``x`` (ending
+    there with ``right``). Returns its width."""
+    font = _chip_font(p)
+    width = QFontMetricsF(font).horizontalAdvance(text) + pad
     box = QRectF(x - width if right else x, y, width, 14)
     color = QColor(tint)
     fill = QColor(color)
@@ -557,16 +562,23 @@ class GraphCanvas(QWidget):
         for i, line in enumerate(two_lines(face.title, font, right - left)):
             p.drawText(QRectF(left, top + 18 + i * 13, right - left, 13),
                        int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft), line)
-        # The foot: the rating's badges; the stage at the far end, a hold's mark before it.
+        # The foot: the rating's badges, a hold's mark after them, the stage at the far end;
+        # in a wide font the chips give up padding, down to 4px, to keep them apart.
         foot = rect.bottom() - 7 - 14
+        chips = [(f"{letter} {LEVEL_SHORT.get(level or '', '?')}",
+                  LEVEL_TINT.get(level or "", _GREY))
+                 for letter, level in (("R", face.risk), ("C", face.complexity))]
+        stage = (face.stage.upper(), STAGE_TINT.get(face.stage, _GREY))
+        metrics = QFontMetricsF(_chip_font(p))
+        texts = sum(metrics.horizontalAdvance(text) for text, _ in chips + [stage])
+        mark = 12 if face.hold else 0
+        pad = min(10.0, max(4.0, (right - left - 8 - mark - texts) / 3))
         x = left
-        for letter, level in (("R", face.risk), ("C", face.complexity)):
-            x += _paint_chip(p, x, foot, f"{letter} {LEVEL_SHORT.get(level or '', '?')}",
-                             LEVEL_TINT.get(level or "", _GREY)) + 4
-        x = right - _paint_chip(p, right, foot, face.stage.upper(),
-                                STAGE_TINT.get(face.stage, _GREY), right=True)
+        for text, tint in chips:
+            x += _paint_chip(p, x, foot, text, tint, pad=pad) + 4
         if face.hold:
-            _paint_hold(p, QRectF(x - 12, foot + 3, 8, 8), QColor(_ORANGE))
+            _paint_hold(p, QRectF(x, foot + 3, 8, 8), QColor(_ORANGE))
+        _paint_chip(p, right, foot, *stage, right=True, pad=pad)
         p.restore()
 
 

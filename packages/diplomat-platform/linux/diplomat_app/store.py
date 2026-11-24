@@ -486,9 +486,13 @@ class Store(QObject):
         # before may have been switched off midway, emitting less than it owes, so its
         # result withdraws and prunes nothing (:meth:`_apply_pipeline_sync`).
         self._pipeline_epoch = 0
-        # A sync begun since launch or the master switch went on was applied: until
-        # then the asks queued before it may be stale, so none starts (:meth:`is_paused`).
+        # A sync begun since launch or the master switch went on was applied: until then
+        # each pipeline ask queued is stale (:attr:`_pipeline_stale`).
         self._pipeline_judged = False
+        # The keys of the pipeline asks queued before that sync, each until a sync begun
+        # since judged its item (:func:`pipeline.judged`): till then it may be stale, so it
+        # does not start (:meth:`is_held`). Filled once the stored asks can be read.
+        self._pipeline_stale: set[str] = set()
         self._pipeline_synced.connect(self._apply_pipeline_sync)
 
         # Pruned on every start — a Store outlives thousands of polls.
@@ -496,6 +500,7 @@ class Store(QObject):
         self._workers_lock = threading.Lock()
 
         self._settings = app_settings()
+        self._pipeline_stale = {w.key for w in self.requested_work if w.pipeline}
         # The checkouts behind `other_repo_paths`, resolved on first read and again
         # whenever the list is set: each is a `git` call, and the wizards read this on
         # every keystroke.
@@ -987,6 +992,7 @@ class Store(QObject):
         self._settings.setValue(
             "requestedReviews", json.dumps([r.to_json() for r in value])
         )
+        self._pipeline_stale &= {r.key for r in value}
 
     @property
     def auto_approve_enabled(self) -> bool:
@@ -1298,6 +1304,7 @@ class Store(QObject):
             self._pipeline_epoch += 1
             if master:
                 self._pipeline_judged = False
+                self._pipeline_stale = {w.key for w in self.requested_work if w.pipeline}
 
     def pipeline_control(self) -> dict:
         """``control.json``'s switches as they stand (:func:`pipeline.write_control`)."""
@@ -2604,6 +2611,8 @@ class Store(QObject):
                 stored = self.requested_work
                 taken = {r.key for r in stored}
                 fresh = [a for a in fresh if a.key not in taken]
+                if not self._pipeline_judged:
+                    self._pipeline_stale |= {a.key for a in fresh if a.pipeline}
                 self.requested_work = stored + fresh
                 # Under the lock too: queued_tasks is read-modify-written, so a press
                 # publishing outside it can write back a copy older than the other's.
@@ -2941,7 +2950,7 @@ class Store(QObject):
         if counter in ("my_reviews", "conflicts"):
             return not self.pr_autofix_enabled
         if counter == PIPELINE_COUNTER:
-            return not (self.pipeline_enabled and self._pipeline_judged)
+            return not self.pipeline_enabled
         # A review the operator asked for: no monitor owns it, so neither toggle
         # speaks for it. Switching the monitors off says what this machine may go
         # looking for, not that it should stop doing what it was told — for an ask,
@@ -2963,9 +2972,11 @@ class Store(QObject):
 
     def is_held(self, task: autofix.QueuedTask,
                 owned: dict[str, frozenset[str]] | None = None) -> bool:
-        """Paused, unless a Slack ping took it as its ask: then it is asked-for work,
-        which switching a monitor off never stops (:meth:`is_paused`)."""
-        return (self.is_paused(task.job.counter)
+        """Paused, or a pipeline ask still stale (:attr:`_pipeline_stale`), unless a Slack
+        ping took it as its ask: then it is asked-for work, which switching a monitor off
+        never stops (:meth:`is_paused`)."""
+        stale = task.job.counter == PIPELINE_COUNTER and task.id in self._pipeline_stale
+        return ((self.is_paused(task.job.counter) or stale)
                 and task.id not in (self._comms_owned if owned is None else owned))
 
     def _begin_starting(self, entry: autofix.QueuedTask) -> None:
@@ -4567,6 +4578,8 @@ class Store(QObject):
         token_file = os.path.expanduser(appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip())
         with self._pipeline_lock:
             force = {kind: sorted(ids) for kind, ids in self._pipeline_force.items()}
+        runs = [r for r, s in self._agent_tick().rows
+                if not r.released and s.state in agentstate.BLOCKING]
         return {
             "roots": [{"owner": r.owner, "repo": r.repo, "path": r.path,
                        "me": self.known_me(r)}
@@ -4579,6 +4592,8 @@ class Store(QObject):
             "merge": self.pipeline_merge,
             "fracture": self.pipeline_fracture,
             "force": force,
+            "queued": pipeline.queued(self.requested_work, runs,
+                                      self._load_attempts(PIPELINE_ATTEMPTS)),
         }
 
     def pipeline_forced(self, kind: str) -> frozenset[str]:
@@ -4733,9 +4748,13 @@ class Store(QObject):
                         for kind, ids in self._pipeline_force.items()}
                 if self.pipeline_enabled:
                     self._withdraw_pipeline_asks(result if judged else None, plan.get("handed"))
-                    if judged and not self._pipeline_judged:
+                    if judged:
                         self._pipeline_judged = True
-                        self._bring_poll_forward(self._settled_load)
+                        released = self._pipeline_stale & set(pipeline.judged(
+                            self.requested_work, result, handed=plan.get("handed")))
+                        if released:
+                            self._pipeline_stale -= released
+                            self._bring_poll_forward(self._settled_load)
                     self._apply_pipeline_effects(result, time.time(), judged=judged,
                                                  handed=plan.get("handed"))
             self.pipeline_changed.emit()

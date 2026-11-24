@@ -142,7 +142,7 @@ def test_a_sync_is_handed_the_github_roots_the_teams_and_the_switches(pipe, monk
         "linearTeams": [{"key": "ENG", "repo": "o/r"}, {"key": "OPS", "repo": "o/other"}],
         "linearTokenFile": "/home/elsewhere/.diplomat/linear",
         "rate": False, "fix": True, "fastTrack": True, "merge": False, "fracture": False,
-        "force": {"rate": [ISSUE, PR], "fracture": [ISSUE]},
+        "force": {"rate": [ISSUE, PR], "fracture": [ISSUE]}, "queued": [],
     }
 
 
@@ -462,7 +462,6 @@ def test_switched_back_on_no_ask_starts_until_a_sync_begun_since_is_applied(pipe
     _sync(pipe, _result(_fix(), _review()))
     pipe.pipeline_enabled = False
     pipe.pipeline_enabled = True
-    assert pipe.is_paused("pipeline")
     assert (pipe.drainable_tasks, len(pipe.queued_tasks)) == ([], 2)
     polls = []
     monkeypatch.setattr(Store, "_bring_poll_forward", lambda self, load: polls.append(load))
@@ -481,21 +480,104 @@ def test_switched_back_on_no_ask_starts_until_a_sync_begun_since_is_applied(pipe
     # The last result answered again, then a sync begun before the switch went on.
     for _ in range(2):
         pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
-        assert pipe.is_paused("pipeline")
+        assert pipe.drainable_tasks == []
         assert sorted(_keys(pipe)) == ["issues:o/r#12", "review:o/r#7"]
     assert polls == []
     pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
-    assert not pipe.is_paused("pipeline")
     assert [t.id for t in pipe.drainable_tasks] == ["issues:o/r#12"]
     assert len(polls) == 1
     pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
     assert len(polls) == 1
 
 
-def test_a_launch_starts_no_ask_until_its_first_sync_is_applied(pipe):
+def _requeue(st: Store) -> None:
+    st._offer_requested_work()
+    st.commit_queue()
+
+
+def _free(st: Store) -> list[str]:
+    return sorted(t.id for t in st.drainable_tasks)
+
+
+def test_an_old_ask_starts_once_a_sync_begun_since_judged_its_item(pipe):
+    """In a root it read whole, or by reading the item; an ask that sync queued may start."""
+    _sync(pipe, _result(_fix(), _review()))
+    pipe.pipeline_enabled = False
+    pipe.pipeline_enabled = True
+    fresh = _fix(40)
+    _sync(pipe, _result(_fix(), _review(), fresh, unread=("o/r",)))
+    assert sorted(_keys(pipe)) == ["issues:o/r#12", "issues:o/r#40", "review:o/r#7"]
+    assert _free(pipe) == ["issues:o/r#40"]
+    _sync(pipe, _result(_fix(), _review(), fresh, unread=("o/r",), read=(PR,)))
+    assert _free(pipe) == ["issues:o/r#40", "review:o/r#7"]
+    _sync(pipe, _result(_fix(), _review(), fresh))
+    assert _free(pipe) == sorted(_keys(pipe))
+
+
+def test_an_old_ask_withdrawn_then_queued_again_by_a_sync_since_may_start(pipe):
     _sync(pipe, _result(_fix()))
+    pipe.pipeline_enabled = False
+    pipe.pipeline_enabled = True
+    pipe.pipeline_fix = False
+    pipe.pipeline_fix = True
+    pipe._save_attempts(PIPELINE_ATTEMPTS, {})
+    _sync(pipe, _result(_fix(), unread=("o/r",)))
+    assert _free(pipe) == ["issues:o/r#12"]
+
+
+def test_an_ask_a_sync_begun_before_the_switch_queues_waits_too(pipe):
+    pipe.pipeline_enabled = False
+    pipe.pipeline_enabled = True
+    pipe._apply_pipeline_sync({"result": _result(_fix()), "forced": {}, "started": 0,
+                               "epoch": pipe._pipeline_epoch - 1})
+    assert (_keys(pipe), _free(pipe)) == (["issues:o/r#12"], [])
+    _sync(pipe, _result(_fix()))
+    assert _free(pipe) == ["issues:o/r#12"]
+
+
+def test_a_launch_starts_no_old_ask_until_a_sync_judged_its_item(pipe):
+    _sync(pipe, _result(_fix(), _review()))
     again = Store()
-    assert again.pipeline_enabled and again.is_paused("pipeline")
+    _requeue(again)
+    assert again.pipeline_enabled and sorted(_keys(again)) == ["issues:o/r#12", "review:o/r#7"]
+    assert _free(again) == []
+    _sync(again, _result(_fix(), _review(), unread=("o/r",)))
+    assert _free(again) == []
+    _sync(again, _result(_fix(), _review()))
+    assert _free(again) == ["issues:o/r#12", "review:o/r#7"]
+
+
+def test_a_sync_is_told_the_items_asks_are_held_for(pipe, monkeypatch):
+    """Each pipeline ask's, queued or not yet taken by its spawn, and each agent's running
+    an open pipeline attempt: not a monitor's, a released one's or a concluded one's."""
+    from diplomat_runtime import agentstate
+
+    _sync(pipe, _result(_fix(), _linear(), _review()))
+    pipe._request([autofix.RequestedWork(
+        number=13, url="https://github.com/o/r/pull/13", author="",
+        config=review.ReviewConfig(specific_pr="13", me="alice", home=ROOT).prompt_payload(),
+        repo="o/r")])
+    assert pipe.pipeline_settings_payload()["queued"] == sorted([ISSUE, LINEAR, PR])
+    pipe.requested_work = []
+    running, ran = "https://github.com/o/r/issues/30", "https://github.com/o/r/issues/31"
+    pipe._save_attempts(PIPELINE_ATTEMPTS, {f"pipeline-fix:{running}": _attempt(),
+                                            f"pipeline-fix:{ran}": _attempt(concluded=200.0),
+                                            f"pipeline-review:{PR}": _attempt()})
+
+    def row(url, kind, state="running", **fields):
+        return (agentstate.RunRecord(run_id=f"r-{len(rows)}", dispatched_at=0.0, pr_url=url,
+                                     kind=kind, **fields), SimpleNamespace(state=state))
+
+    rows: list = []
+    for args, kw in [((running, autofix.QUEUE_ISSUES_ACTION), {}),
+                     ((ran, autofix.QUEUE_ISSUES_ACTION), {}),
+                     ((PR, autofix.QUEUE_REVIEW_ACTION), {"ledger_key": f"review-reply:{PR}@a"}),
+                     ((PR, autofix.QUEUE_REVIEW_ACTION), {"released": True}),
+                     ((PR, autofix.QUEUE_REVIEW_ACTION), {"state": agentstate.FINISHED}),
+                     (("https://github.com/o/r/issues/32", autofix.QUEUE_ISSUES_ACTION), {})]:
+        rows.append(row(*args, **kw))
+    monkeypatch.setattr(pipe, "_agent_tick", lambda: SimpleNamespace(rows=rows))
+    assert pipe.pipeline_settings_payload()["queued"] == [running]
 
 
 # MARK: - The sync
@@ -936,6 +1018,8 @@ def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
         "force": {"rate": ["a", "b"], "fracture": ["c"]}}) == (
             8 * 1345 + 2 * 1950 + 2 * 14170 + 300 + 3 * 30 + 40)
     assert pipeline.tick_timeout({}) == 5 * 1345 + 1950 + 14170 + 40
+    # A gh call for each item an ask is held for.
+    assert pipeline.tick_timeout({"queued": ["a", "b"]}) == pipeline.tick_timeout({}) + 2 * 65
 
 
 def test_a_syncs_deadline_fits_a_capped_roots_whole_read():
