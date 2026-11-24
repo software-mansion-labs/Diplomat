@@ -201,6 +201,12 @@ export const KEYLESS_WAIT_MS = agreed('DN_KEYLESS_WAIT_MS', 2 * 3600 * 1000);
 export const KEYLESS_WAIT_MAX_MS = agreed('DN_KEYLESS_WAIT_MAX_MS', 24 * 3600 * 1000);
 // How many proofs of work a host works on at a time, each on a thread of its own.
 export const POW_WORKERS = agreed('DN_POW_WORKERS', 2);
+// How often a host asks the hosts it no longer holds a member record of whether they are
+// still in the pool: so that two parts of a pool cut off from each other for longer than
+// a member record is kept become one again once they can reach each other.
+export const SEARCH_INTERVAL_MS = agreed('DN_SEARCH_INTERVAL_MS', 24 * 3600 * 1000);
+// How many such hosts a host keeps asking in a pool, the latest to go kept.
+export const MAX_FORMER = 1024;
 // How often a host looks at everything it holds for something that came due.
 export const TICK_MS = agreed('DN_TICK_MS', 10 * 1000);
 // A host whose clock moved this far between two looks was not running meanwhile - the

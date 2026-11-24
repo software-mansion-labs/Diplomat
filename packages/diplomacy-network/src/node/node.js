@@ -79,7 +79,7 @@ export function createNode({
     /// is not: an answer that comes back to it after that has nothing to change.
     open: (P) => host.pools.get(P.id) === P,
     /// What a pool's document holds beside its records and this host's sequence number.
-    head: (P) => JSON.stringify([P.joining, P.joinFailed, P.invites, P.farewell, P.returning, P.back]),
+    head: (P) => JSON.stringify([P.joining, P.joinFailed, P.invites, P.farewell, P.returning, P.back, P.former]),
     /// Has what a pool's document holds written: the records that changed since it was
     /// last asked, as a line, while nothing else in the document did. Nothing is written
     /// of a pool that is not open.
@@ -93,7 +93,7 @@ export function createNode({
       store.write(poolFile(P.id), {
         toJSON: () => ({
           id: P.id, linked: true, seq: P.seq, joining: P.joining, joinFailed: P.joinFailed, invites: P.invites,
-          returning: P.returning, back: P.back, ...P.farewell,
+          returning: P.returning, back: P.back, former: P.former, ...P.farewell,
           records: P.pool.records(),
         }),
       }, { line: same ? { seq: P.seq, put, drop } : undefined });
