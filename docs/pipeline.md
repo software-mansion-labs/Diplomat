@@ -317,7 +317,7 @@ The header's **Pipeline** button opens it, in both apps.
   `clean`, `rerated`, `cleared`, `merged`, `held`, `fractured`, `child`, `asked`); a sync's errors
   are its notices, under the status line. And its actions:
   - **Open** - the issue or PR in the browser.
-  - **Rate now** (your open PR, or an open issue whose code a sync can read) - rated by a sync
+  - **Rate now** (your open PR, or an open issue whose code a sync can read, neither stop-labelled) - rated by a sync
     started at once, ahead of every limit, even with **Rate issues and PRs** off.
   - **Fracture** (an issue Diplomat may write to, not triaged, stop-labelled, split or being fixed,
     whose code a sync can read) - split the same way, whatever its rating.
