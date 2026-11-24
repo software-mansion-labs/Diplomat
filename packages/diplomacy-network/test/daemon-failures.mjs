@@ -1,7 +1,8 @@
-// What goes wrong around a job, with whole daemons: an executor that dies, one that is
-// restarted under its job, an offer withdrawn while it runs, a network cut and healed, a
-// machine without docker, a requester whose forge credential fails, a job nobody's run
-// stands behind, a word on free slots gone stale, and the network switched off.
+// What goes wrong around a job, with whole daemons: an executor that dies, a job that fails and
+// is claimed again, an executor restarted under its job, an offer withdrawn while it runs, a
+// network cut and healed, a machine without docker, a requester whose forge credential fails, a
+// job nobody's run stands behind, a word on free slots gone stale, and the network switched
+// off.
 // Real daemon processes on scratch directories over the loop transport, with the
 // stand-in docker, forge and agent.
 // Run: node test/daemon-failures.mjs
@@ -100,6 +101,26 @@ try {
     ]);
     await until('the task cancelled for the pool', async () => (await taskOf(c, taskId)).state === 'cancelled');
     await Promise.all([a.kill(), c.kill()]);
+  });
+
+  await check('a claim reads its base\'s policy-bot files once for all the text it sends, and the claim of the next attempt reads them anew', async () => {
+    const [a, b, c] = await pool(['ya', 'yb', 'yc']);
+    const reads = () => bench.forge.log.filter((r) => r.path === '/repos/acme/widgets/contents/.policy.yml?ref=main').length;
+    const before = reads();
+    await b.admit(1);
+    const { taskId } = await a.ok('/offer', review(`${POST}\n${POST}\nwait go\nsay broke\nfail`));
+    const first = await waiting(b, taskId, 'go');
+    assert.deepEqual(b.agent(first.runId).steps.map((s) => s.status), [201, 201]);
+    assert.equal(reads() - before, 1, 'two reviews under one claim');
+    b.release('go');
+    await until('the attempt failed', async () => (await offerOf(a, taskId)).attempt === 2);
+    await c.admit(1);
+    const second = await waiting(c, taskId, 'go');
+    assert.deepEqual(c.agent(second.runId).steps.map((s) => s.status), [201, 201]);
+    assert.equal(reads() - before, 2, 'and once more under the next claim');
+    c.release('go');
+    await until('C\'s run over', async () => (await runOf(c, taskId)).endedAt > 0);
+    await Promise.all([a.kill(), b.kill(), c.kill()]);
   });
 
   await check('a daemon restarted under a job takes the job up again: it is not started twice, it still acts as its requester, and it finishes', async () => {

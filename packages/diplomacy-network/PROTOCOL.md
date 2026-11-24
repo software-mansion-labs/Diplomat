@@ -1512,15 +1512,16 @@ through.
   up, for each character of the text, for each step a thread of the match takes and for
   each halving of a class's table it searches. Text of more characters than the work left
   once the program is set up is refused unread. Each entry started at a character takes
-  work there, so many entries that start at common characters leave room for less text:
-  under 100 rules, each with the methods of policy-bot's README for its own team, a review
-  of plain prose is refused past about 58000 characters. A claim keeps the answer for each
-  base branch it asks about (`refs/heads/<branch>` being the branch), for at most 64 of
-  them, and for each distinct text of the files: it reads at most 8, and a base whose
-  files hold another refuses the text, saying so. A later claim of the task reads the
-  files anew. What a policy-bot server is set to itself (its own default words, another
-  policy path) is not read, nor is a `.github` repository the account does not see (the
-  forge answers it as missing), nor any other bot that counts a comment's text.
+  work there, so many that start at a common letter leave room for tens of thousands of
+  characters, not the 65536 GitHub takes: under 100 rules that each name their own team,
+  the longest plain prose measured to pass was 39000 to 66000 characters, by the pattern.
+  A claim keeps the answer for each base branch it asks about (`refs/heads/<branch>` being
+  the branch), for at most 64 of them, and for each distinct text of the files: it reads
+  at most 8, and a base whose files hold another refuses the text, saying so. A later
+  claim of the task reads the files anew. What a policy-bot server is set to itself (its
+  own default words, another policy path) is not read, nor is a `.github` repository the
+  account does not see (the forge answers it as missing), nor any other bot that counts a
+  comment's text.
 - `{ "graphql": { "forge": "github", "repo": "o/r", "roots": [...], "mutations": [...],
   "item": { "type": "pr", "number": 578 }, "identity": "me" } }` on the GraphQL endpoint
   confines the document, which must be exactly one query or mutation. A query may select
