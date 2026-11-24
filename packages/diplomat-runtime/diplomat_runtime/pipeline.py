@@ -133,8 +133,8 @@ def tick_timeout(settings: dict) -> float:
     may make (``rater.perSync`` ratings, one fracture, and each one the view forced) at
     ``rater.timeoutSecs`` and the five seconds before its SIGKILL, each with the ``gh``
     calls around it, a fracture's for ``fracture.maxChildren`` parts too; each root's
-    whole read (:func:`_read_calls`) and merges; Linear. Never over a day. It bounds a
-    wedged core, not a slow sync, so it is generous."""
+    whole read (:func:`_read_calls`) and merges; a call for each item ``queued`` names;
+    Linear. Never over a day. It bounds a wedged core, not a slow sync, so it is generous."""
     t = tunables()
     rater = t.get("rater") or {}
     force = settings.get("force") or {}
@@ -146,6 +146,7 @@ def tick_timeout(settings: dict) -> float:
     roots = max(1, len(settings.get("roots") or []))
     return min(MAX_SYNC_SECS, claude_calls * per_claude + splits * per_split
                + roots * (_read_calls(t) + _MERGES_PER_ROOT * _GH_CALLS_PER_MERGE) * _GH_CALL_SECS
+               + len(settings.get("queued") or []) * _GH_CALL_SECS
                + (_LINEAR_SECS if settings.get("linearTeams") else 0)
                + _LOOKUP_SECS + _MARGIN_SECS)
 
@@ -374,14 +375,13 @@ def withdrawn(asks: list, result: dict | None, *, fix: bool, fast_track: bool,
               handed: list[str] | None = None) -> list[str]:
     """The keys of the pipeline's ``asks`` (``RequestedWork``) no longer owed: one a sync
     queued while its kind's switch (``fix``, ``fast_track``) is off; one ``result`` (a
-    sync's own; None judges by the switches alone) emitted no effect for, in a root it
-    judged in full (:func:`_short`) or of an item it ``read``; and a Start fix
-    (``by_hand``) in a root judged in full whose issue is not ``fixable``. Twin of
-    ``Store.pipelineWithdrawn``."""
+    sync's own; None judges by the switches alone) emitted no effect for and judged
+    (:func:`judged`); and a Start fix (``by_hand``) in a root judged in full
+    (:func:`_short`) whose issue is not ``fixable``. Twin of ``Store.pipelineWithdrawn``."""
     owed = {(e.get("kind") == "review", identity(str(e.get("url") or "")))
             for e in (result or {}).get("effects") or []}
     fixable = {identity(i) for i in (result or {}).get("fixable") or []}
-    read = {identity(i) for i in (result or {}).get("read") or []}
+    seen = set() if result is None else set(judged(asks, result, handed=handed))
     short = _short(result or {}, handed)
     out = []
     for ask in asks:
@@ -395,10 +395,31 @@ def withdrawn(asks: list, result: dict | None, *, fix: bool, fast_track: bool,
         elif ask.by_hand:
             if not short(ask.repo.lower()) and identity(ask.url) not in fixable:
                 out.append(ask.key)
-        elif ((review, identity(ask.url)) not in owed
-              and (not short(ask.repo.lower()) or identity(ask.url) in read)):
+        elif (review, identity(ask.url)) not in owed and ask.key in seen:
             out.append(ask.key)
     return out
+
+
+def judged(asks: list, result: dict, *, handed: list[str] | None = None) -> list[str]:
+    """The keys of the pipeline's ``asks`` whose item ``result`` (a sync's own) judged: in
+    a root it judged in full (:func:`_short`), or by reading it. Twin of
+    ``Store.pipelineJudgedAsks``."""
+    short = _short(result, handed)
+    read = {identity(i) for i in result.get("read") or []}
+    return [a.key for a in asks
+            if a.pipeline and (not short(a.repo.lower()) or identity(a.url) in read)]
+
+
+def queued(asks: list, runs, attempts: dict) -> list[str]:
+    """``PipelineSettings.queued``: the item of each of the pipeline's ``asks``, queued or
+    starting, and of each open attempt one of the live ``runs`` (``kind``, ``pr_url``,
+    ``ledger_key``) is the run of (as :func:`concluded` matches them), sorted. Twin of
+    ``Store.pipelineQueued``."""
+    out = {a.url for a in asks if a.pipeline}
+    for run in runs:
+        if not run.ledger_key:
+            out.update(k.partition(":")[2] for k in _open_keys(attempts, run.kind, run.pr_url or ""))
+    return sorted(out)
 
 
 def spawned(attempts: dict, kind: str, url: str, now_ts: float) -> dict:
