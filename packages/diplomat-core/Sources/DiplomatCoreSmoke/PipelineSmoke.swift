@@ -4217,6 +4217,14 @@ private func pipelineCoverage9(base: URL, root: PipelineSettings.Root, team: Pip
     // Merge off: the sync's own hold on a cleared PR closing such an issue.
     var heldTwin = twin("ENG-11", of: 27)
     heldTwin.assignee = ("U_ALICE", "Alice")
+    let doneTwin = only([24])
+    doneTwin.tickets = [twin("ENG-11", of: 24)]
+    doneTwin.tickets[0].assignee = ("U_ALICE", "Alice")
+    doneTwin.tickets[0].state = "completed"
+    let dt = sync(doneTwin, PipelineSettings(roots: [root], linearTeams: [team], fix: true, queued: [linearURL("ENG-11")]),
+                  dir("twin-done"), t0)
+    check(fixes(dt) == ["#24"] && stageOf(dt.result, linearURL("ENG-11")).hasPrefix("closed/"),
+          "#24, its Linear issue done: \(fixes(dt)) \(stageOf(dt.result, issueURL(24))) \(stageOf(dt.result, linearURL("ENG-11")))")
     let pages = (0..<12).map { Trackers.Ticket(id: "lin-p\($0)", identifier: "ENG-\(200 + $0)", title: "Paged \($0)",
                                                updated: at("08:00")) }
     let judgedHolds = try [("twin-judged", [heldTwin]), ("cap-judged", pages)].map { name, tickets -> String in
