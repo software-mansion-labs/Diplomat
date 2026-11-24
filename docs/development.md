@@ -305,7 +305,7 @@ Cadences and paths are overridable too, for tuning: `DIPLOMAT_AUTOFIX_SECS`,
 `DIPLOMAT_CONFIG` (where that shared `config.json` lives), and for the
 [Pipeline](pipeline.md) `DIPLOMAT_PIPELINE_SECS` (its sync, 60 seconds to a day),
 `DIPLOMAT_PIPELINE_DIR` (its `~/.diplomat/pipeline`), `DIPLOMAT_LINEAR_API` (Linear's GraphQL
-endpoint) and `DIPLOMAT_LINEAR_TOKEN` (a Linear API key, over the Keychain item or `linearTokenFile`).
+endpoint) and `DIPLOMAT_LINEAR_TOKEN` (a personal Linear API key, over the Linear login).
 
 ## Architecture
 

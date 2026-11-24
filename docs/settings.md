@@ -245,10 +245,9 @@ swaps the panel to a settings screen:
   [Comms → Settings](comms.md#settings).
 - **Pipeline** - the [Pipeline](pipeline.md) (**default off**): the switch, one switch per thing it
   may do (rate, open fix PRs, fast-track your PRs, merge cleared PRs with your admin rights, split
-  big issues), the Linear teams and where the Linear API key is read from. Every one is
-  described in [Pipeline → Settings](pipeline.md#settings). The key's Keychain item (macOS) or
-  file (Linux) is named in `~/.diplomat/config.json` as `linearKeychainItem` or `linearTokenFile`;
-  see [Pipeline → Linear](pipeline.md#linear).
+  big issues), the Linear teams and the Linear login, signed in through the browser. Every one is
+  described in [Pipeline → Settings](pipeline.md#settings), the login in
+  [Pipeline → Linear](pipeline.md#linear).
 - **Update** - pull the checkout, rebuild, and relaunch in place. Shows how many
   commits the checkout is behind *and* ahead of upstream, with a ↻ re-check
   button; the button fetches and **merges** (fast-forward when strictly behind, a
