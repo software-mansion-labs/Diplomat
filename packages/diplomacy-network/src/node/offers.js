@@ -180,6 +180,7 @@ export function createOffers(host) {
     }
     offers[taskId] = O;
     publish(P, O, 'open', record);
+    host.gossip.doubt(P);
     host.poke();
     host.touch();
     return { taskId };

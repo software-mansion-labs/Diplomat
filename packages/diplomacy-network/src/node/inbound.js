@@ -137,10 +137,12 @@ export function createInbound(host) {
     }
     // Only what this host serves is remembered as served: a member's request, and the
     // hello of a host a member invited.
-    if (ts > latest && (checked.member || host.gossip.invited(P, body))) {
+    const served = checked.member || host.gossip.invited(P, body);
+    if (ts > latest && served) {
       latest = ts;
       host.store.write('heard', { ts });
     }
+    if (served) host.gossip.hears(P);
     if (checked.member) host.peers.heard(from);
     const out = await host.handle(P, from, kind, body);
     // What the answer admits to is on disk before the sender can act on it.
