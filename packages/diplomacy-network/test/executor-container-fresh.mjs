@@ -164,14 +164,10 @@ try {
       const c = createContainers({ log: (...a) => said.push(a.join(' ')), imageDir: ${JSON.stringify(imageDir)}, broker: () => ({ port: 1 }) });
       const held = await c.acquire({ pool: { id: 'github.com/o/r' }, peer: 'pk', runId: 'r' });
       fs.writeFileSync(at + '/hold-volume-rm', '');
-      const asked = () => fs.readFileSync(at + '/calls.jsonl', 'utf8').includes('["volume","rm"');
-      const leaving = c.release({ name: held.name, runId: 'r' });
-      for (const end = Date.now() + 60000; !asked();) {
-        if (Date.now() > end) throw new Error('never: the engine asked to remove the volume');
-        await new Promise((r) => setTimeout(r, 20));
-      }
+      // Timed from the release: a stand-in slower to start than the cut-off is cut off
+      // before it writes down that it was asked.
       const from = Date.now();
-      await leaving;
+      await c.release({ name: held.name, runId: 'r' });
       console.log(JSON.stringify({ ms: Date.now() - from, said: said.at(-1), jobs: c.list().map((e) => e.jobs) }));`],
     { env: { ...process.env, DN_BASE_DIR: path.join(dir, 'base'), FAKE_DOCKER_DIR: path.join(dir, 'docker'), DN_CONTAINER_USAGE_TIMEOUT_MS: '300' }, encoding: 'utf8' });
     const { ms, said, jobs } = JSON.parse(out);

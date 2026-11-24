@@ -562,7 +562,9 @@ try {
         dd if=/dev/zero bs=1M count=2 >> "$1/prog" 2>/dev/null
         chmod +x "$1/prog"
         echo "prog $(($(stat -c %b "$1/prog") * 512))"
-        "$1/prog" 60 & rm "$1/prog"
+        "$1/prog" 60 &
+        while [ "$(readlink "/proc/$!/exe")" != "$1/prog" ]; do sleep 0.05; done
+        rm "$1/prog"
         dd if=/dev/zero of="$1/leader" bs=1M count=5 2>/dev/null
         python3 -c 'import ctypes, os, sys, threading, time; f = open(sys.argv[1], "rb"); os.unlink(sys.argv[1]); threading.Thread(target=time.sleep, args=(60,)).start(); ctypes.CDLL(None).pthread_exit(None)' "$1/leader" &
         while ! grep -q "^State:.*Z" "/proc/$!/status" 2>/dev/null || [ -e "$1/leader" ]; do sleep 0.05; done
