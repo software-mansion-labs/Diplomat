@@ -13,6 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GH, gh, ghql, glab } from './lib/captured.mjs';
 import { GHES_HOST, GHES_TOKEN, GITHUB_TOKEN, GITLAB_HOST, GITLAB_TOKEN, git, startFakeForge } from './lib/fake-forge.mjs';
+import { scratchDir } from './lib/scratch.mjs';
 
 async function check(name, fn) {
   await fn();
@@ -46,7 +47,7 @@ if (process.argv[2] === 'live') {
   process.exit(0);
 }
 
-const scratch = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dn-forge-test-'));
+const scratch = scratchDir('dn-forge-test-', fs.realpathSync(os.tmpdir()));
 process.env.TMPDIR = path.join(scratch, 'tmp');
 fs.mkdirSync(process.env.TMPDIR);
 const forge = await startFakeForge();
@@ -1113,4 +1114,3 @@ if (process.env.DN_TEST_GITHUB === '1') {
 stranger.closeAllConnections();
 stranger.close();
 await forge.close();
-fs.rmSync(scratch, { recursive: true, force: true });

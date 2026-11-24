@@ -9,9 +9,9 @@
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
-import os from 'node:os';
 import path from 'node:path';
 import { parseDocument } from '../../src/requester/graphql.js';
+import { scratchDir } from './scratch.mjs';
 
 /// The only credentials this forge accepts; the fake gh and glab print them.
 export const GITHUB_TOKEN = 'ghs_fakeforgetoken0123456789';
@@ -107,7 +107,7 @@ function project(doc, vars, selections, data) {
 /// takes, which a test may add to;
 /// `forge.env` is the environment a test must set before it imports the daemon's sources.
 export async function startFakeForge() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-forge-'));
+  const root = scratchDir('dn-forge-');
   const gitRoot = path.join(root, 'git');
   fs.mkdirSync(gitRoot);
   const log = [];

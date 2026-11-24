@@ -8,13 +8,14 @@ import os from 'node:os';
 import path from 'node:path';
 import { gh, ghql, GH, glab } from './lib/captured.mjs';
 import { GITLAB_HOST, git, packOf, pushBody, startFakeForge } from './lib/fake-forge.mjs';
+import { scratchDir } from './lib/scratch.mjs';
 
 async function check(name, fn) {
   await fn();
   console.log(`PASS ${name}`);
 }
 
-const scratch = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dn-task-'));
+const scratch = scratchDir('dn-task-', fs.realpathSync(os.tmpdir()));
 process.env.TMPDIR = path.join(scratch, 'tmp');
 fs.mkdirSync(process.env.TMPDIR);
 const forge = await startFakeForge();
@@ -926,4 +927,3 @@ await check('CI definitions are out of a push\'s reach: every file of them, unde
 });
 
 await forge.close();
-fs.rmSync(scratch, { recursive: true, force: true });

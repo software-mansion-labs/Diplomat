@@ -5,17 +5,16 @@
 // Run: node test/executor-hop.mjs
 
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import v8 from 'node:v8';
 import vm from 'node:vm';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-hop-'));
+const scratch = scratchDir('dn-hop-');
 Object.assign(process.env, {
   DN_BASE_DIR: path.join(scratch, 'base'), DN_BROKER_BIND: '127.0.0.1', DN_RELAY_HOST: '127.0.0.1',
   DIPLOMAT_CONFIG: path.join(scratch, 'config.json'),
@@ -907,6 +906,5 @@ await check('a job that floods its connections with requests or leaves them unre
 assert.deepEqual(faults.map((e) => String(e?.stack ?? e)), []);
 await broker.stop();
 for (const s of [echo, source, endless, web]) s.close();
-fs.rmSync(scratch, { recursive: true, force: true });
 console.log(`\nall ${checks} checks passed`);
 process.exit(0);
