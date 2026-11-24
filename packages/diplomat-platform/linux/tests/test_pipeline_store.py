@@ -337,6 +337,13 @@ def test_the_ban_is_the_effects_author_not_the_items(pipe):
     assert _keys(pipe) == ["issues:o/r#12"]
 
 
+def test_start_fix_is_banned_by_who_wrote_the_parts_text_not_who_filed_it(pipe):
+    pipe.banned_authors = [bans.BannedAuthor("mallory", "prompt injection")]
+    assert pipe.pipeline_ban(_item(author="alice", splitFrom="mallory")) == (
+        "@mallory is on the prompt-injection ban list")
+    assert pipe.pipeline_ban(_item(author="mallory", splitFrom="alice")) is None
+
+
 def _unreadable_bans() -> None:
     bans.banned_path().parent.mkdir(parents=True, exist_ok=True)
     bans.banned_path().write_text("{", encoding="utf-8")
