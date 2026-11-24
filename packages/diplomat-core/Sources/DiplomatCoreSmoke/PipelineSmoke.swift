@@ -1549,11 +1549,28 @@ func pipelineSmoke() throws {
     check(live.linearKey(PipelineSettings(roots: [])) == "lin_api_from_env")
 }
 
-/// The merges after one a sync could not confirm.
+/// The fix asks a sync may not make, and the merges after one it could not confirm.
 private func pipelineMergeSync(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
                                t0: Date) throws {
     section("pipeline merge sync")
     func dir(_ name: String) -> URL { base.appendingPathComponent("merge-sync-" + name) }
+
+    // #24, a candidate no PR fixes.
+    func asks(_ name: String, _ prepare: (URL) throws -> Void) throws -> [PipelineEffect] {
+        try FileManager.default.createDirectory(at: dir(name), withIntermediateDirectories: true)
+        try prepare(dir(name))
+        return sync(only([24]), PipelineSettings(roots: [root], fix: true), dir(name), t0).result.effects
+    }
+    let asked = try asks("fix") { _ in }
+    let badState = try asks("fix-bad-state") { try Data(#"{"decided": 7}"#.utf8).write(to: $0.appendingPathComponent("state.json")) }
+    let allOff = try asks("fix-all-off") {
+        PipelineControl(enabled: false, rate: true, fix: true, fastTrack: true, merge: true, fracture: true).save(in: $0)
+    }
+    let fixOff = try asks("fix-off") {
+        PipelineControl(enabled: true, rate: true, fix: false, fastTrack: true, merge: true, fracture: true).save(in: $0)
+    }
+    check(asked == [fixFX(24)] && badState.isEmpty && allOff.isEmpty && fixOff.isEmpty,
+          "fix asks, blocked or switched off: \(asked) \(badState) \(allOff) \(fixOff)")
 
     // #13 and #31 cleared, each closing #27, which GitHub closes only at a later read: once
     // #13's merge is asked for, #31 waits, whether or not #13 is seen merged.
