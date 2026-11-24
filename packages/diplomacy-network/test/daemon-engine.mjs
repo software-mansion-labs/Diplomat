@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { POOL, check, createBench, passed, until } from './lib/daemons.mjs';
+import { POOL, check, createBench, passed, sleep, until } from './lib/daemons.mjs';
 
 const bench = await createBench();
 
@@ -20,11 +20,13 @@ const waiting = (m, taskId, file) => until(`${m.name}'s agent to wait for ${file
   const run = await runOf(m, taskId);
   return run && m.agent(run.runId)?.waiting === file ? run : null;
 });
-// A container the stand-in docker holds, set to no longer running.
-const stopped = (m, name) => {
+// A container the stand-in docker holds, set to no longer running: `oom` for one the
+// kernel killed for its memory.
+const stopped = (m, name, oom = false) => {
   const file = path.join(m.dockerDir, 'containers', `${name}.json`);
-  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), running: false }));
+  fs.writeFileSync(file, JSON.stringify({ ...JSON.parse(fs.readFileSync(file, 'utf8')), running: false, oom }));
 };
+const INSIDE = 'the job\'s container stopped before the job finished, its relay running on: it was stopped from inside';
 // A's task once B's run of it has ended and the pool has heard: `attempt` is 2 for an
 // attempt that counted.
 const after = (a, taskId, attempt) => until(`${taskId} back in the pool at attempt ${attempt}`, async () => {
@@ -43,7 +45,7 @@ async function pair(names, env = {}) {
 }
 
 try {
-  await check('an engine that restarts under a running daemon - the job\'s container and its relay stopped - gives the job back at no attempt, and so do a container removed from under its job and an engine that does not answer when the job is found gone; a container stopped from inside, its relay running on, is a failed attempt', async () => {
+  await check('an engine that restarts under a running daemon - the job\'s container and its relay stopped - gives the job back at no attempt, and so do a container removed from under its job and an engine that does not answer when the job is found gone; a container stopped from inside, its relay running on or killed for its memory, is a failed attempt', async () => {
     const [a, b] = await pair(['ra', 'rb']);
     await b.admit(1);
     const one = await a.ok('/offer', review('pr-1', 'wait never\nsay never'));
@@ -64,7 +66,19 @@ try {
     b.killJobs();
     stopped(b, second.container);
     const offer = await after(a, two.taskId, 2);
-    assert.deepEqual([offer.reason, (await runOf(b, two.taskId)).state], ['the job\'s container stopped before the job finished, its relay running on: it was stopped from inside', 'failed']);
+    assert.deepEqual([offer.reason, (await runOf(b, two.taskId)).state], [INSIDE, 'failed']);
+
+    // A relay a job flooded until the kernel killed it, and then the job's own container
+    // stopped from inside: both stopped, as a restart leaves them, but by the job.
+    await b.admit(1);
+    const five = await a.ok('/offer', review('pr-5', 'wait never\nsay never'));
+    const fifth = await waiting(b, five.taskId, 'never');
+    await b.admit(0);
+    b.killJobs();
+    stopped(b, `${fifth.container}-relay`, true);
+    stopped(b, fifth.container);
+    const flooded = await until(`${five.taskId} back in the pool`, async () => ((await offerOf(a, five.taskId)).state === 'pooled' ? offerOf(a, five.taskId) : null));
+    assert.deepEqual([flooded.attempt, flooded.reason, (await runOf(b, five.taskId)).state], [2, INSIDE, 'failed']);
 
     // A container removed from under its job: no job can do that to its own.
     await b.admit(1);
@@ -127,6 +141,31 @@ try {
       fs.rmSync(failing, { force: true });
     }
     b.killJobs();
+    await Promise.all([a.kill(), b.kill()]);
+  });
+
+  await check('a look at the engine that goes unanswered now and then, the looks between answered, never adds up to the wait: no job is given back', async () => {
+    const [a, b] = await pair(['ta', 'tb'], { DN_ENGINE_WAIT_MS: '3000' });
+    await b.admit(1);
+    const one = await a.ok('/offer', review('pr-1', 'wait go\nsay done'));
+    const first = await waiting(b, one.taskId, 'go');
+    const down = path.join(b.dockerDir, 'down');
+    // Two short spells of silence, each under the wait, further apart than it.
+    for (let spell = 0; spell < 2; spell++) {
+      const looks = b.docker('version').length;
+      fs.writeFileSync(down, '');
+      try {
+        await until('looks in the silence', () => b.docker('version').length >= looks + 3);
+        await sleep(1200);
+      } finally {
+        fs.rmSync(down);
+      }
+      await sleep(spell === 0 ? 4000 : 2000);
+    }
+    assert.deepEqual([(await runOf(b, one.taskId)).state, (await offerOf(a, one.taskId)).attempt], ['running', 1]);
+    assert.ok(!b.log().includes(`giving ${first.runId} back`), b.log().slice(-1500));
+    b.release('go');
+    await until('the task done', async () => (await offerOf(a, one.taskId)).state === 'done');
     await Promise.all([a.kill(), b.kill()]);
   });
 
