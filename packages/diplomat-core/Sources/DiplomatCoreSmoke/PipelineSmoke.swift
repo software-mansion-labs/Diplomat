@@ -4811,8 +4811,8 @@ private func pipelinePins10(base: URL, root: PipelineSettings.Root, team: Pipeli
     }
 }
 
-/// A first rating's labels against a push meanwhile, and the fast track against what no read
-/// judged.
+/// A first rating's labels against a push meanwhile and a write lost part-way, and the fast
+/// track against what no read judged.
 private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
                                  t0: Date) throws {
     section("pipeline rating pass 1")
@@ -4837,6 +4837,19 @@ private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: P
     check(p1.writes.isEmpty && p1.result.effects.isEmpty && pushed.prs[0].labels.isEmpty && p2.writes.isEmpty
           && p2.result.notices.contains("#11: the rating kept for it is below what its diff allows now, so it was dropped"),
           "pushed to as it was rated: \(p1.writes) \(p1.result.effects) then \(p2.writes) \(p2.result.notices)")
+
+    // A first rating whose labels went on over two syncs is still its first.
+    for (what, lose) in [("refused", { (t: Trackers) in t.refuseLabels = ["11 complexity:low"] }),
+                         ("lost", { (t: Trackers) in t.labelsLost = ["11 risk:low"] })] {
+        let t = fix()
+        lose(t)
+        let s1 = sync(t, rateTrack, dir("first-" + what), t0)
+        (t.refuseLabels, t.labelsLost) = ([], [])
+        let s2 = sync(t, rateTrack, dir("first-" + what), later(5))
+        check(!s1.writes.contains("+diplomat:fast-track #11") && s2.writes.last == "+diplomat:fast-track #11"
+              && stageOf(s2.result, prURL(11)) == "fast-track/fast" && s2.result.effects == [reviewFX(11, sha("a1"))],
+              "first rating labels \(what) in part: \(s1.writes) then \(s2.writes) \(stageOf(s2.result, prURL(11)))")
+    }
 
     // Closing what no read judged keeps a PR off the fast track: no label, review or re-rate.
     let linear = only([4, 11])
