@@ -88,6 +88,8 @@ final class Store: ObservableObject {
     /// Whether the feed has said the shared config cannot be read, for the current spell
     /// of it.
     var configUnreadableLogged = false
+    /// The configs forgotten as gone the feed has said (`AppConfig.forgottenConfigs`).
+    var configGoneLogged = AppConfig.forgottenConfigs
     /// `AppConfig.settingsUnknown` as the launch and each network cycle since found it
     /// while the switch is on: nothing a setting decides is said to the daemon meanwhile.
     @Published private(set) var networkSettingsUnknown: String
@@ -566,16 +568,25 @@ final class Store: ObservableObject {
     /// file, and another process may have written it. A switch that moved is followed
     /// as one moved here is. A file that is there and cannot be read says nothing - one
     /// read can fall in the middle of a rewrite - so every setting stays as it was last
-    /// read, and the feed says so once for the spell. The first reading after a launch
-    /// that had none takes the cap and the roots' fields too (`knobsReadBlind`).
+    /// read, and the feed says so once for the spell. One that was there and is gone
+    /// keeps them too, unsaid, for `NetworkSettings.configGoneGrace`; after that it is the
+    /// defaults, which the feed says once. The first reading after a launch that had none
+    /// takes the cap and the roots' fields too (`knobsReadBlind`).
     func rereadNetworkSettings() {
         guard writesConfig else { return }
         let unreadable = AppConfig.unreadable
-        if unreadable, !configUnreadableLogged {
+        let gone = AppConfig.forgottenConfigs
+        if gone != configGoneLogged {
+            configGoneLogged = gone
+            AuditLog.log("auto", "warn", AppConfig.goneNote)
+            refreshAudit()
+        }
+        let there = FileManager.default.fileExists(atPath: AppConfig.url.path)
+        if unreadable, there, !configUnreadableLogged {
             AuditLog.log("auto", "warn", AppConfig.unreadableNote)
             refreshAudit()
         }
-        configUnreadableLogged = unreadable
+        configUnreadableLogged = unreadable && there
         let unknown = unreadable && networkEnabled
             ? NetworkSettings.unknown(path: AppConfig.url.path) : ""
         if unknown != networkSettingsUnknown { networkSettingsUnknown = unknown }

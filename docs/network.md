@@ -440,12 +440,16 @@ longer than that reads *the network holds no such offer* when Diplomat is back: 
 priced, and what asked for it is offered again.
 
 A `config.json` that is there and cannot be read as settings switches nothing, and nor does one
-that was there and is gone: an editor that saves by renaming a new file into place, as vim and
-nvim do on Linux, leaves none for a moment. Only a config that was never there - none read by
-this Diplomat, and none named in `network-switch.json` - reads as the defaults. Diplomat keeps
-the switch as it last read it, withdraws and starts nothing on that reading, saves no setting
-over a file that is there, and says so in the feed; a setting saved while the file is gone
-writes it anew. That reading outlives Diplomat, in
+that was there and has been gone for less than five seconds: an editor that saves by renaming a
+new file into place, as vim and nvim do on Linux, leaves none for a moment. Five seconds is as
+long as the daemon reads a config it cannot read before it stops as when switched off. Gone
+longer, the file is forgotten: the settings are the defaults, the network among them switched
+off, `network-switch.json` no longer names it, and the feed says once that it is gone. A config
+that was never there - none read by this Diplomat, and none named in `network-switch.json` - is
+the defaults at once. Meanwhile Diplomat keeps the switch as it last read it, withdraws and
+starts nothing on that reading, saves no setting over a file that is there, and says in the feed
+that such a file cannot be read; a setting saved while the file is gone writes it anew. That
+reading outlives Diplomat, in
 `~/.diplomat/network-switch.json`: a Diplomat that starts on such a file holds the network on
 when the switch was last read as on, and on a machine where it never was the network is off.
 

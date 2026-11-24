@@ -358,6 +358,10 @@ class Store(QObject):
         # Whether the feed has said the shared config cannot be read, for the current
         # spell of it.
         self._config_unreadable_logged = False
+        # The configs forgotten as gone the feed has said (:func:`appconfig.forgotten_configs`).
+        self._config_gone_logged = appconfig.forgotten_configs()
+        # The switch as the views last drew it.
+        self._switch_drawn: bool | None = None
         # Why the network refused each queued job that it refused for a reason of the
         # job's own, by the job's label: what its row says, and what the feed has said.
         self.network_job_refusals: dict[str, str] = {}
@@ -3383,6 +3387,10 @@ class Store(QObject):
         # reading for the verdicts and for what is done about them, so a run that reads
         # finished is priced from the snapshot that said so.
         networked = diplomacynetwork.enabled()
+        if networked != self._switch_drawn:
+            # Moved in the file, not here: Settings and the Network screen draw it again.
+            self._switch_drawn = networked
+            self.network_changed.emit()
         if not networked:
             # One the switch's own turn did not reach: booked as it went off, or left
             # by a Diplomat that quit first.
@@ -3406,10 +3414,16 @@ class Store(QObject):
         return t
 
     def _note_unreadable_config(self) -> None:
-        """Say once per spell that the shared config cannot be read: every setting
-        reads as its default meanwhile, and the switch as it was last read. The panel
-        and the Network screen say so while it lasts, and are redrawn as it turns."""
-        unreadable = appconfig.read_known() is None
+        """Say once per spell that the shared config is there and cannot be read: every
+        setting reads as its default meanwhile, and the switch as it was last read. The
+        panel and the Network screen say so while it lasts, and are redrawn as it turns.
+        Say once that a config gone too long to be one being saved is forgotten."""
+        unreadable = appconfig.read_known() is None and appconfig.path().exists()
+        gone = appconfig.forgotten_configs()
+        if gone != self._config_gone_logged:
+            self._config_gone_logged = gone
+            activity.log("auto", "warn", appconfig.gone_note())
+            self.refresh_activity()
         if unreadable == self._config_unreadable_logged:
             return
         self._config_unreadable_logged = unreadable

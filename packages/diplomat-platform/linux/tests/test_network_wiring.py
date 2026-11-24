@@ -622,18 +622,19 @@ def test_every_settle_asks_the_daemon_and_keeps_what_it_said(store, on, daemon):
     told = []
     store.network_changed.connect(lambda: told.append(1))
     store._settle_agents()
+    first = len(told)
     d.state = {**d.state, "updatedAt": d.state["updatedAt"] + 5}
     store._settle_agents()
     assert [path for _, path, _ in d.got] == ["/state", "/state"]
     assert store.network_answered is True and store.network_state.pid == 7
-    assert len(told) == 1, "its clock moving on is no change to redraw for"
+    assert len(told) == first, "its clock moving on is no change to redraw for"
     d.state = {**d.state, "admit": {"slots": 4}}
     store._settle_agents()
-    assert len(told) == 2 and store.network_state.admit.slots == 4
+    assert len(told) == first + 1 and store.network_state.admit.slots == 4
     d.close()
     store._settle_agents()
     assert store.network_answered is False and store.network_state is None
-    assert len(told) == 3
+    assert len(told) == first + 2
 
 
 # MARK: - the daemon's lifecycle
@@ -2085,6 +2086,48 @@ def test_a_settle_that_reads_the_switch_inside_a_save_withdraws_nothing(
     assert first and d.sent("withdraw") == []
     assert sorted(r.network for r in agentregistry.load()) == ["t1", "t2"]
     assert lines("network-failed") == []
+
+
+def test_a_config_deleted_for_good_is_the_defaults_once_the_daemon_would_take_it_so(
+        store, on, daemon, monkeypatch, installer):
+    """Gone past the grace the daemon also gives a config, it is no save under way: the
+    switch is off as with the defaults, the runs go as on any switch-off, the feed says
+    the file is gone - not that it cannot be read - and Settings draws the switch off."""
+    now = [100.0]
+    monkeypatch.setattr(appconfig, "_clock", lambda: now[0])
+    d = daemon(state=snapshot(offers=[offer("t1", "claimed", executor=PEER)]))
+    book_network_run("t1", 9)
+    assert dn.enabled()
+    store._settle_agents()
+    drawn = []
+    store.network_changed.connect(lambda: drawn.append(dn.enabled()))
+    appconfig.path().unlink()
+    store._settle_agents()
+    now[0] = 104.9
+    store._settle_agents()
+    store._network_cycle_once(104.9)
+    assert dn.enabled() and d.sent("withdraw") == [] and len(agentregistry.load()) == 1
+    assert unreadable_notes() == [] and lines("warn") == [], "a save under way says nothing"
+
+    now[0] = 105.0
+    store._settle_agents()
+    assert not dn.enabled() and not store.network_enabled
+    assert d.sent("withdraw") == [{"taskId": "t1", "reason": "switched off"}]
+    assert agentregistry.load() == []
+    assert lines("network-failed") == [
+        "Auto · Review · #9 - withdrawn: the Diplomacy Network was switched off"]
+    assert lines("warn") == [f"{appconfig.path()} is gone: settings are the defaults"]
+    assert drawn and drawn[-1] is False, "Settings and the Network screen draw it off"
+    assert not dn.switch_record().exists()
+    store._settle_agents()
+    assert len(lines("warn")) == 1, "said once"
+
+    # A Diplomat started later reads the defaults at once.
+    monkeypatch.setattr(appconfig, "_read_paths", set())
+    monkeypatch.setattr(dn, "_switch_read", None)
+    counted = appconfig.unreadable_reads()
+    assert not dn.enabled() and dn.settings_unknown() == ""
+    assert appconfig.unreadable_reads() == counted
 
 
 def test_no_daemon_is_started_while_the_settings_are_unknown(store, linked, installer):

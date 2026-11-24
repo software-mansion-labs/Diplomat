@@ -660,6 +660,13 @@ def test_a_repository_named_by_a_remote_on_another_port_has_no_pool_and_is_named
     ssh = checkout("ssh://git@gitlab.acme.example:2222/p/api.git")
     assert [p["id"] for p in N.pools_listing(ssh, [], [], logins, [])[0]] == [
         "gitlab.acme.example/p/api"]
+    held, said = N.pools_listing(ported, [], ["/src/api-ssh"], logins, [
+        N.Pool("gitlab.acme.example/p/api", path="/src/api-ssh", identity="me")])
+    assert [p["id"] for p in held] == ["gitlab.acme.example/p/api"]
+    assert said[1:] == [
+        "/src/api reaches p/api on port 8443 of gitlab.acme.example, which the "
+        "Diplomacy Network does not: the pool goes by another checkout of it"], (
+        "the pool held for the other checkout, which could not be read")
     elsewhere = [LocalRepo("p", "api", "/src/api-ssh", "gitlab.acme.example")]
     for order in (ported + elsewhere, elsewhere + ported):
         pools, said = N.pools_listing(order, [], [], {}, known)

@@ -78,6 +78,45 @@ def test_a_config_that_was_there_and_is_gone_is_unknown_and_still_written():
     assert appconfig.read_known() == {"autoTaskLimit": 3}, "a setting saved writes it anew"
 
 
+def test_a_config_gone_past_the_grace_is_forgotten(monkeypatch):
+    """Deleted for good, it is the defaults once gone as long as the daemon tolerates,
+    and the switch record no longer vouches for it, so a Diplomat started later reads
+    the defaults at once."""
+    now = [100.0]
+    monkeypatch.setattr(appconfig, "_clock", lambda: now[0])
+    where = appconfig.path()
+    where.parent.mkdir(parents=True, exist_ok=True)
+    where.write_text('{"networkEnabled": true}', encoding="utf-8")
+    record = where.with_name(appconfig.SWITCH_RECORD)
+    record.write_text(json.dumps({"config": str(where), "networkEnabled": True}),
+                      encoding="utf-8")
+    assert appconfig.read_known() == {"networkEnabled": True}
+    where.unlink()
+    forgotten = appconfig.forgotten_configs()
+    for at in (100.0, 104.9):
+        now[0] = at
+        assert appconfig.read_known() is None, f"gone {at - 100:.1f} s: being saved"
+    assert record.exists() and appconfig.forgotten_configs() == forgotten
+    where.write_text('{"networkEnabled": true}', encoding="utf-8")
+    assert appconfig.read_known() == {"networkEnabled": True}
+    where.unlink()
+    now[0] = 106.0
+    assert appconfig.read_known() is None, "back, and gone again: a new grace"
+    now[0] = 111.0
+    counted = appconfig.unreadable_reads()
+    assert appconfig.read_known() == {} and appconfig.read_known() == {}
+    assert appconfig.unreadable_reads() == counted and not record.exists()
+    assert appconfig.forgotten_configs() == forgotten + 1
+    assert appconfig.gone_note() == f"{where} is gone: settings are the defaults"
+    monkeypatch.setattr(appconfig, "_read_paths", set())  # a Diplomat started later
+    assert appconfig.read_known() == {}
+
+    where.write_text("{}", encoding="utf-8")
+    assert appconfig.read_known() == {}
+    where.unlink()
+    assert appconfig.read_known() is None, "there again, and gone again: a new grace"
+
+
 @pytest.mark.parametrize("named, known", [(True, None), (False, {})])
 def test_a_config_the_switch_record_names_was_there(named, known):
     """A Diplomat started inside such a save has read no config yet: the switch record,

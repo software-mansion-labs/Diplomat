@@ -100,24 +100,64 @@ enum AppConfig {
     static func read() -> [String: Any] { parsed() ?? [:] }
 
     /// The whole file, `[:]` when there is none and never was, or nil: one is there and
-    /// cannot be read as a JSON object, or one was there and is gone - an editor that
-    /// saves by renaming a new file into place leaves none for a moment. Nil says
-    /// nothing: a caller that must not take a default for an answer keeps what it last
-    /// read (`unreadable`). Python twin: `appconfig.read_known`.
+    /// cannot be read as a JSON object, or one was there and has been gone for less than
+    /// `NetworkSettings.configGoneGrace` - an editor that saves by renaming a new file
+    /// into place leaves none for a moment. Gone longer, it is forgotten (`forget`) and
+    /// reads as never there. Nil says nothing: a caller that must not take a default for
+    /// an answer keeps what it last read (`unreadable`). Python twin:
+    /// `appconfig.read_known`.
     static func parsed() -> [String: Any]? {
+        let path = url.path
         let (object, absent) = load()
         if let object {
             readPathsLock.lock()
-            readPaths.insert(url.path)
+            readPaths.insert(path)
+            goneSince[path] = nil
             readPathsLock.unlock()
             return object
+        }
+        if absent, wasThere {
+            readPathsLock.lock()
+            let since = goneSince[path] ?? clock()
+            goneSince[path] = since
+            readPathsLock.unlock()
+            if clock() - since >= NetworkSettings.configGoneGrace { forget() }
         }
         return absent && !wasThere ? [:] : nil
     }
 
-    /// The configs this process read, by path.
+    /// The configs this process read, by path, and when each that was there was first
+    /// found gone, on `clock`.
     private static var readPaths: Set<String> = []
+    private static var goneSince: [String: TimeInterval] = [:]
+    private static var forgottenCount = 0
     private static let readPathsLock = NSLock()
+    /// Seconds on a clock that only moves forward; a self-test moves it by hand.
+    static var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+
+    /// How many times a config that was there has been gone past
+    /// `NetworkSettings.configGoneGrace` in this process, and been forgotten.
+    static var forgottenConfigs: Int {
+        readPathsLock.lock()
+        defer { readPathsLock.unlock() }
+        return forgottenCount
+    }
+
+    /// Read `url` as never there from now on: not by this process, and not by the switch
+    /// record, which is removed when it names it.
+    private static func forget() {
+        if switchRecord?["config"] as? String == url.path {
+            do { try FileManager.default.removeItem(at: switchRecordURL) } catch {
+                // A record that stays keeps the config unknown: try again next read.
+                guard (error as? CocoaError)?.code == .fileNoSuchFile else { return }
+            }
+        }
+        readPathsLock.lock()
+        readPaths.remove(url.path)
+        goneSince[url.path] = nil
+        forgottenCount += 1
+        readPathsLock.unlock()
+    }
 
     /// Whether a config was at `url`: this process read one, or the switch record names it.
     private static var wasThere: Bool {
@@ -145,7 +185,10 @@ enum AppConfig {
 
     static var unreadable: Bool { parsed() == nil }
 
-    /// The feed's line for a file that is `unreadable`.
+    /// The feed's line for a config `parsed` forgot.
+    static var goneNote: String { "\(url.path) is gone: settings are the defaults" }
+
+    /// The feed's line for a file that is there and `unreadable`.
     static var unreadableNote: String {
         "\(url.path) cannot be read as settings: nothing is saved over it, and the "
             + "Diplomacy Network switch stays as it was last read"

@@ -333,6 +333,17 @@ func networkSmoke() throws {
           "an ssh port keeps the pool")
     let ssh = PRRef.LocalRepo(owner: "p", repo: "api", path: "/src/api-ssh",
                               host: "gitlab.acme.example")
+    let heldUnread = NetworkPools.listing(
+        roots: ported, others: [], unread: ["/src/api-ssh"],
+        identities: ["gitlab.acme.example": "me"],
+        known: NetworkSnapshot(["pools": [["id": "gitlab.acme.example/p/api",
+                                           "path": "/src/api-ssh", "identity": "me"]]]).pools)
+    check(heldUnread.pools.map(\.id) == ["gitlab.acme.example/p/api"]
+            && heldUnread.unconfirmed.last == "/src/api reaches p/api on port 8443 of "
+                + "gitlab.acme.example, which the Diplomacy Network does not: the pool goes by "
+                + "another checkout of it",
+          "a pool held for its other checkout, which could not be read, keeps that one's: "
+            + "\(heldUnread)")
     for order in [ported + [ssh], [ssh] + ported] {
         let both = NetworkPools.listing(roots: order, others: [], unread: [], identities: [:],
                                         known: labKnown)

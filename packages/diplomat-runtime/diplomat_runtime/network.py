@@ -352,7 +352,6 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
             ported.setdefault(pool, repo)
         elif pool not in listed:
             (nameless if has_rules(repo.host) else unruled).setdefault(pool, repo)
-    kept = listed | set(nameless)
     unread = list(unread)
     for pool in known:
         if pool.id not in listed and (pool.path in unread or pool.id in nameless):
@@ -360,6 +359,7 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
             pools.append({"id": pool.id, "path": pool.path,
                           "forge": "github" if pool.id.startswith(f"{GITHUB}/") else "gitlab",
                           "identity": pool.identity})
+    kept = listed | set(nameless)
     return pools, [*map(unconfirmed_unread, unread),
                    *(unconfirmed_account(r.slug, r.host) for r in nameless.values()),
                    *(unsupported(r.slug, r.host) for r in unruled.values()),

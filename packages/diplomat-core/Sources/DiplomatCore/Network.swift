@@ -20,6 +20,10 @@ public enum NetworkSettings {
     public static let hoursFloor = 12
     /// The most hours either may be. The daemon's `HOURS_CEILING`.
     public static let hoursCeiling = 720
+    /// Seconds a config that was there may be gone and still be one being saved: the
+    /// daemon's own tolerance, `CONFIG_UNREADABLE_POLLS` reads `CONFIG_POLL_MS` apart.
+    /// Python twin: `appconfig.CONFIG_GONE_GRACE_S`.
+    public static let configGoneGrace: TimeInterval = 5
 
     /// A number of hours as the daemon keeps it (its `hoursOf`): rounded to the nearest
     /// whole number, a half going up, and held to the floor and the ceiling. The floor
@@ -407,7 +411,6 @@ public enum NetworkPools {
                 }
             }
         }
-        let kept = listed.union(nameless.map(\.id))
         for pool in known where !listed.contains(pool.id)
             && (unread.contains(pool.path) || nameless.contains { $0.id == pool.id }) {
             listed.insert(pool.id)
@@ -416,6 +419,7 @@ public enum NetworkPools {
                                 ? "github" : "gitlab",
                               identity: pool.identity))
         }
+        let kept = listed.union(nameless.map(\.id))
         return Listing(pools: pools, unconfirmed: unread.map { unconfirmed(unread: $0) }
             + nameless.map { unconfirmed(account: $0.repo.slug, host: $0.repo.host) }
             + unruled.map { unsupported($0.repo.slug, host: $0.repo.host) }

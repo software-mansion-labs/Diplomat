@@ -32,6 +32,7 @@ import errno
 import json
 import math
 import os
+import time
 from pathlib import Path
 
 # The gate's own default + range for the task cap, and the shared atomic writer.
@@ -90,6 +91,10 @@ REMOTE_MACHINE_ARM_BIAS = "remoteMachineArmBias"
 #: Beside the config: the Diplomacy Network switch as the config was last read,
 #: ``{"config": <the config's path>, "networkEnabled": <the switch>}``.
 SWITCH_RECORD = "network-switch.json"
+#: Seconds a config that was there may be gone and still be one being saved: the
+#: Diplomacy Network daemon's own tolerance, ``CONFIG_UNREADABLE_POLLS`` reads
+#: ``CONFIG_POLL_MS`` apart. Twin of ``NetworkSettings.configGoneGrace``.
+CONFIG_GONE_GRACE_S = 5.0
 
 DEFAULT_DEVICE_IDLE_FREE_MINUTES = 5
 MAX_DEVICE_IDLE_FREE_MINUTES = 60
@@ -119,6 +124,10 @@ def read() -> dict:
 _unreadable_reads = 0
 #: The configs this process read, by path.
 _read_paths: set[str] = set()
+#: When each config that was there was first found gone, by path, on :data:`_clock`.
+_gone_since: dict[str, float] = {}
+_forgotten = 0
+_clock = time.monotonic
 
 
 def unreadable_reads() -> int:
@@ -146,27 +155,63 @@ def _was_there(where: Path) -> bool:
             or (read_object(where.with_name(SWITCH_RECORD)) or {}).get("config") == str(where))
 
 
+def forgotten_configs() -> int:
+    """How many times a config that was there has been gone past
+    :data:`CONFIG_GONE_GRACE_S` in this process, and been forgotten."""
+    return _forgotten
+
+
+def _forget(where: Path) -> None:
+    """Read ``where`` as never there from now on: not by this process, and not by the
+    switch record, which is removed when it names it."""
+    global _forgotten
+    record = where.with_name(SWITCH_RECORD)
+    if (read_object(record) or {}).get("config") == str(where):
+        try:
+            record.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            return  # a record that stays keeps the config unknown: try again next read
+    _read_paths.discard(str(where))
+    _gone_since.pop(str(where), None)
+    _forgotten += 1
+
+
 def read_known() -> dict | None:
     """The whole file, ``{}`` when there is none and never was, or ``None``: one is
-    there and cannot be read as a JSON object, or one was there and is gone - an editor
-    that saves by renaming a new file into place leaves none for a moment. ``None`` says
-    nothing: a caller that must not take a default for an answer keeps what it last
-    read, and it counts in :func:`unreadable_reads`."""
+    there and cannot be read as a JSON object, or one was there and has been gone for
+    less than :data:`CONFIG_GONE_GRACE_S` - an editor that saves by renaming a new file
+    into place leaves none for a moment. Gone longer, it is forgotten (:func:`_forget`)
+    and reads as never there. ``None`` says nothing: a caller that must not take a
+    default for an answer keeps what it last read, and it counts in
+    :func:`unreadable_reads`."""
     global _unreadable_reads
+    where = path()
     data, absent = _load()
     if data is not None:
-        _read_paths.add(str(path()))
+        _read_paths.add(str(where))
+        _gone_since.pop(str(where), None)
         return data
-    if absent and not _was_there(path()):
+    if absent and _was_there(where):
+        since = _gone_since.setdefault(str(where), _clock())
+        if _clock() - since >= CONFIG_GONE_GRACE_S:
+            _forget(where)
+    if absent and not _was_there(where):
         return {}
     _unreadable_reads += 1
     return None
 
 
 def unreadable_note() -> str:
-    """The feed's line for a file :func:`read_known` cannot read."""
+    """The feed's line for a file that is there and :func:`read_known` cannot read."""
     return (f"{path()} cannot be read as settings: nothing is saved over it, and the "
             "Diplomacy Network switch stays as it was last read")
+
+
+def gone_note() -> str:
+    """The feed's line for a config :func:`read_known` forgot."""
+    return f"{path()} is gone: settings are the defaults"
 
 
 def _editable() -> dict:

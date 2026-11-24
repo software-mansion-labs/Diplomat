@@ -94,6 +94,7 @@ enum NetworkCommand {
                 } ?? "")
         }
         out["testSettings"] = snapshots.map(\.testSettingsNote)
+        out["configGoneGrace"] = NetworkSettings.configGoneGrace
         out["listing"] = rows("listing").map { row -> [String: Any] in
             let listing = NetworkPools.listing(
                 roots: repos(row["roots"]), others: repos(row["others"]),

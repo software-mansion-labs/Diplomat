@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -21,7 +22,7 @@ import pytest
 
 from pathlib import Path
 
-from diplomat_runtime import autofix, localrepos
+from diplomat_runtime import appconfig, autofix, localrepos
 from diplomat_runtime import network as N
 from diplomat_runtime.prref import LocalRepo
 
@@ -254,6 +255,8 @@ LISTING = [
         # One project cloned over an https port and over ssh, its login unknown.
         ([PORTED, API], [], [], {}),
         ([API, PORTED], [], [], {}),
+        # …and its other checkout unread, the pool held as the daemon has it.
+        ([PORTED], [], ["/src/api"], BOTH),
         ([GHE], [SUB], ["/src/ghe"], {}),
     )]
 
@@ -326,6 +329,20 @@ def _differing(rows: list, swift: list, python: list) -> list:
     return [(row, s, p) for row, s, p in zip(rows, swift, python) if s != p]
 
 
+def test_a_gone_config_is_forgotten_when_the_daemon_takes_it_for_switched_off(twins):
+    """The daemon ends as switched off after CONFIG_UNREADABLE_POLLS reads of a config it
+    cannot read, CONFIG_POLL_MS apart; both front ends read one that was there and is
+    gone as unknown for exactly that long, and as the defaults (the switch off) after."""
+    paths = (Path(__file__).resolve().parents[3] / "diplomacy-network" / "src"
+             / "paths.js").read_text(encoding="utf-8")
+
+    def default(name: str) -> int:
+        return int(re.search(rf"num\('{name}', (\d+)\)", paths).group(1))
+
+    daemon = default("DN_CONFIG_UNREADABLE_POLLS") * default("DN_CONFIG_POLL_MS") / 1000
+    assert appconfig.CONFIG_GONE_GRACE_S == twins[0]["configGoneGrace"] == daemon
+
+
 @pytest.mark.parametrize("member, rows", [
     ("hours", HOURS), ("pools", REMOTES), ("hostedPools", HOSTED_REMOTES),
     ("rules", RULES), ("kinds", KINDS),
@@ -375,9 +392,10 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
     assert any(len(row["pools"]) >= 3 for row in python["listing"])
     ported = [(row, asked) for row, asked in zip(python["listing"], LISTING)
               if PORTED in asked["roots"]]
-    assert len(ported) == 12
+    assert len(ported) == 15
     for row, asked in ported:
-        twin = API in asked["roots"] + asked["others"]
+        held = LAB in [p["id"] for p in row["pools"]]
+        twin = API in asked["roots"] + asked["others"] or held
         said = [line for line in row["unconfirmed"] if "port 8443" in line]
         assert said == [
             "/src/api-8443 reaches platform/api on port 8443 of gitlab.acme.example, which "
@@ -385,11 +403,15 @@ def test_the_fixture_reaches_what_it_claims_to(twins):
             else "platform/api is reached on port 8443 of gitlab.acme.example, and the "
             "Diplomacy Network reaches a forge on 443 only: it has no pool and none of its "
             "jobs is offered"], "one sentence, whichever checkout comes first"
-        if not twin:
-            assert LAB not in [p["id"] for p in row["pools"]], "nor the pool the daemon had"
-        elif not asked["identities"]:
+        if API not in asked["roots"] + asked["others"] and not asked["unread"]:
+            assert not held, "nor the pool the daemon had"
+        elif API in asked["roots"] and not asked["identities"]:
             assert any(line.startswith("The login for platform/api") for line in
                        row["unconfirmed"]), "the ssh checkout keeps the pool as it was"
+    assert sum(row["pools"] != [] and "/src/api" in asked["unread"]
+               and any("not counted" in line or "another checkout" in line
+                       for line in row["unconfirmed"])
+               for row, asked in ported) == 1, "a pool held for an unread path keeps it too"
     assert python["rules"].count(False) >= 10 and python["rules"].count(True) >= 15
     assert sum("has no rules for" in " ".join(row["unconfirmed"])
                for row in python["listing"]) == 6

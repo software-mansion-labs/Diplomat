@@ -2128,13 +2128,48 @@ enum NetworkTest {
         await store.runNetworkCycleOnce()
         await store.settleAgents()
         check("a config renamed away, as an editor that saves by rename leaves it for a "
-                + "moment, says nothing: the switch stays on and nothing is withdrawn",
-              AppConfig.unreadable && store.networkEnabled && unreadableNotes() == 3
+                + "moment, says nothing: the switch stays on, nothing is withdrawn, and the "
+                + "feed does not say it cannot be read",
+              AppConfig.unreadable && store.networkEnabled && unreadableNotes() == 2
                 && store.networkSettingsUnknown == unknown
                 && requests(NetworkRoute.withdraw).count == configWithdrawn
                 && booked("task-cfg") != nil)
         try? FileManager.default.moveItem(at: aside, to: AppConfig.url)
         await store.runNetworkCycleOnce()
+
+        //    Deleted for good, it is the defaults once gone as long as the daemon takes
+        //    to read it as switched off.
+        var uptime: TimeInterval = 1000
+        AppConfig.clock = { uptime }
+        func goneNotes() -> Int { feedDetails("warn").filter { $0 == AppConfig.goneNote }.count }
+        let recordURL = AppConfig.switchRecordURL
+        let withdrawnBeforeGone = requests(NetworkRoute.withdraw).count
+        try? FileManager.default.removeItem(at: AppConfig.url)
+        await store.runNetworkCycleOnce()
+        uptime += NetworkSettings.configGoneGrace - 0.1
+        await store.runNetworkCycleOnce()
+        await store.settleAgents()
+        check("gone for less than the daemon's grace, it is a save under way: the switch "
+                + "stays on, nothing is withdrawn, and the feed says nothing",
+              AppConfig.unreadable && store.networkEnabled && booked("task-cfg") != nil
+                && requests(NetworkRoute.withdraw).count == withdrawnBeforeGone
+                && unreadableNotes() == 2 && goneNotes() == 0)
+        uptime += 0.1
+        await store.runNetworkCycleOnce()
+        await store.networkLifecycle?.value
+        await store.settleAgents()
+        check("gone as long, it is the defaults: the switch off, its runs withdrawn, the "
+                + "record dropped, and the feed says the file is gone",
+              !AppConfig.unreadable && !store.networkEnabled && booked("task-cfg") == nil
+                && requests(NetworkRoute.withdraw).count > withdrawnBeforeGone
+                && !FileManager.default.fileExists(atPath: recordURL.path)
+                && goneNotes() == 1 && unreadableNotes() == 2)
+        await store.runNetworkCycleOnce()
+        check("…once", goneNotes() == 1)
+        AppConfig.clock = { ProcessInfo.processInfo.systemUptime }
+        try? configWhole.write(to: AppConfig.url)
+        await store.runNetworkCycleOnce()
+        await store.networkLifecycle?.value
         try? Data("{\"networkEnabled\": \"true\"}".utf8).write(to: AppConfig.url)
         await store.runNetworkCycleOnce()
         await store.networkLifecycle?.value
