@@ -52,6 +52,7 @@ src/
     broker.js      the proxy every container talks through
     feed.js        what the broker's http parser is handed of a connection: a request at a time
     hop.js         the frames a relay carries each connection to the broker in, and their count
+    outbound.js    what the kernel holds of the connections out to the internet, and its count
     ca.js          the broker's certificate authority and leaf certificates
     llm.js         the model credential the broker adds
     mirror.js      the bare mirror a container clones from
@@ -819,10 +820,31 @@ four things and starts the job:
   and not on the hop. The hop's ends are this machine's sockets (the
   broker's, and on macOS the ones Docker Desktop opens to it; on Linux the relay's too),
   and every byte in them is one of those counted, held by at most two of them at a time:
-  32 MiB of queued bytes at most, under 64 MiB of kernel buffers. A connection out to
-  the internet is sized by TCP: one a job leaves unread, or one to a host that reads
-  nothing, holds what the kernel gives a connection (4 MiB to 6 MiB), on each of the
-  job's connections out.
+  32 MiB of queued bytes at most, under 64 MiB of kernel buffers.
+
+  What the connections out to the internet hold in this machine's kernel - bytes sent
+  and not yet acknowledged by the far host, and bytes come from it that the job has not
+  read - is asked of the kernel every 500 ms while any is open, and not at all while
+  none is (`src/executor/outbound.js`: `/proc/self/net/tcp` and `tcp6` on Linux, one
+  `netstat -an -p tcp` on macOS). The connections out of all jobs may hold 32 MiB,
+  shared equally among the jobs that have any, so that they and the hop hold no more
+  than 64 MiB of queued bytes between them. What a job writes counts at once, by the
+  last poll and what was written since: a job at its share has its writes kept back in
+  the daemon until a poll finds room, 100 ms on at the soonest, so a host that reads
+  nothing holds the job's share and no more. What comes in comes at the speed of the
+  host's link, and a poll that finds the jobs past 32 MiB resets connections until they
+  are within it: of the job that holds the most, the connection that holds the most. A
+  job that comes while the others hold the whole is given its share at once, and the
+  others are past theirs then and lose connections at the next poll, 100 ms on, the
+  whole past by up to that share until then. Between two polls the jobs may be past it
+  by what the link brings in 500 ms: 60 MiB at 1 Gbit/s, and 76 MiB measured with 256
+  downloads left unread and 25 ms to the far host (108 MiB queued at the most, 152 MiB
+  of kernel buffers). A connection closed while the kernel holds bytes of it is counted
+  until they are gone, and a removed job's connections out are reset. A poll costs about
+  6 ms of CPU on Linux with 2,000 connections on the host, and 2 ms, netstat's included,
+  on macOS with 500. A poll that fails or cannot be read stops nothing: it is logged, as
+  is the first that works again, and until then nothing is counted or kept back, and a
+  job may have 32 connections out open, a tunnel or request past them answered 503.
 
   What a job brings about as often as it likes - a tunnel refused, a request that
   failed, an adb request refused - is written to the daemon's log once a minute for

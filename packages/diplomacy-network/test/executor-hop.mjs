@@ -79,9 +79,12 @@ const connect = ({ host }) => (ports[host] ? new Promise((resolve, reject) => {
   s.once('error', reject);
 }) : new Promise(() => {}));
 
-const broker = createBroker({ ca: createCA(), llm: { authorize: async (h) => h, refused: async () => null }, mirrors: { path: () => null },
-  onForge: async () => ({ status: 200, headers: {}, body: '' }), lookup, connect });
-const { port } = await broker.start({ port: 0 });
+const started = async (outbound) => {
+  const made = createBroker({ ca: createCA(), llm: { authorize: async (h) => h, refused: async () => null }, mirrors: { path: () => null },
+    onForge: async () => ({ status: 200, headers: {}, body: '' }), lookup, connect, outbound });
+  return { broker: made, port: (await made.start({ port: 0 })).port };
+};
+let { broker, port } = await started();
 const pool = { id: 'github.com/a/b', forge: 'github', host: 'github.com', owner: 'a', repo: 'b' };
 let runs = 0;
 const addJob = async () => {
@@ -240,6 +243,12 @@ await check('a job with more requests at once than are carried at a time, each w
     broker.removeJob(job.runId);
   }
 });
+
+// The checks from here on leave hundreds of connections out unread or unanswered on
+// purpose: what the kernel holds of those is outbound.js's to bound
+// (executor-outbound.mjs), and here only the hop's count is looked at.
+await broker.stop();
+({ broker, port } = await started({ bytes: Infinity }));
 
 // Each job keeps one connection open from the start, so the hop is shared out by all of them.
 async function seated(jobs, host) {

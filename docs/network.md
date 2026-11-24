@@ -151,8 +151,14 @@ brought, and an older engine takes no job.
   past 64 KiB. On their way to the broker, all jobs' connections together have at most 16 MiB
   in flight (128 KiB each way a connection), under 64 MiB of the host's kernel memory however
   they are used, shared equally among the jobs: a job that keeps more than
-  its share for 2 s while another waits loses its newest connections. A connection out to
-  the internet that a job leaves unread holds what TCP gives one, a few MiB. A container found
+  its share for 2 s while another waits loses its newest connections. What all jobs'
+  connections out to the internet hold in the host's kernel is polled every 500 ms and held
+  to 32 MiB, shared equally: a job at its share has its writes kept back until there is room,
+  and when what jobs leave unread takes them past 32 MiB, the job holding the most loses its
+  fullest connections out until they are within it - past it between polls by what the
+  host's link brings in 500 ms, 60 MiB at 1 Gbit/s, or for 100 ms by the share of a job that
+  has just come. While the kernel cannot be asked, a job may have 32 connections out open.
+  A container found
   holding more disk than that is removed - the count includes files its processes keep open
   after deleting them, where
   the engine lets them be counted - and the jobs in it

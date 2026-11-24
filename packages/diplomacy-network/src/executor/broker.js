@@ -50,6 +50,7 @@ import { createFeeder, edgeAfter, headEnd } from './feed.js';
 import { createHop, PREFACE } from './hop.js';
 import { carriesPlaceholder } from './llm.js';
 import { own } from './own-fault.js';
+import { createOutbound } from './outbound.js';
 import { clip, createSparingLog } from './sparing.js';
 
 /// The model provider's hosts: the ones a job's requests gain this machine's credential on.
@@ -354,14 +355,15 @@ function lowerKeys(headers) {
 /// headers, body })` (body base64) resolves to `{ status, headers, body }` (body base64
 /// or a Buffer). `lookup`, `connect` and `upstreamCa` replace name resolution, the
 /// outgoing TCP connection and the trust roots of the model provider: tests have no
-/// other way to stand in for the internet. `limits` replaces
+/// other way to stand in for the internet. `outbound` is handed to createOutbound
+/// (outbound.js), the count of the kernel memory of the connections out. `limits` replaces
 /// what one job may hold at a time and for how long, and how many connections may be no
 /// job's: `{ connections, requests, upstreams, lookups, bufferBytes, forgeRequests,
 /// strangers, headerMs, bodyMs, idleMs, answerMs, lookupMs }`, by default JOB_REQUESTS,
 /// JOB_UPSTREAMS, JOB_LOOKUPS, STRANGERS and LOOKUP_MS, the JOB_* tunables of paths.js
 /// and, for `answerMs`, FORGE_ANSWER_TIMEOUT_MS.
 export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace = null,
-  lookup = dnsLookup(), connect = systemConnect, upstreamCa = undefined, limits: given = {} } = {}) {
+  lookup = dnsLookup(), connect = systemConnect, upstreamCa = undefined, outbound: outGiven = {}, limits: given = {} } = {}) {
   const limits = {
     connections: JOB_CONNECTIONS, requests: JOB_REQUESTS, upstreams: JOB_UPSTREAMS, lookups: JOB_LOOKUPS, bufferBytes: JOB_BUFFER_BYTES,
     forgeRequests: JOB_FORGE_REQUESTS, strangers: STRANGERS,
@@ -369,6 +371,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   };
   // What a job brings about as often as it likes is written once a minute for each kind.
   const sparing = createSparingLog(log);
+  const outbound = createOutbound({ ...outGiven,
+    say: (job, text) => (job ? sparing(`job ${job.info.runId} reset`, 'broker', job.info.runId, text) : log('broker', text)) });
   const jobs = new Map(); // runId -> job
   const tokens = new Map(); // token -> job
   const contexts = new WeakMap(); // a leaf as its authority hands it out -> SecureContext
@@ -428,6 +432,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   // One resolution per connection, and the connection goes to the address that passed
   // the check: a name that answers differently a moment later gets no second look.
   async function dial(job, host, port) {
+    if (outbound.full(job)) throw new Refusal(503, `this job has ${outbound.fallback} connections out open, the most a job gets while this machine cannot tell what they hold: close some`);
     // The names a container knows this machine by mean nothing to the resolver out
     // here, and the job is owed the reason rather than "does not resolve".
     if (host === normalHost(CONTAINER_HOST) || /(^|\.)docker\.internal$/.test(host)) {
@@ -468,6 +473,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
           return cb(new Error('the job has ended'));
         }
         hold(job, raw);
+        outbound.add(job, raw);
         wrap(raw, opts, cb);
       }).catch(cb);
     };
@@ -939,6 +945,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     // Removing the job closed its connection, and this one goes with it.
     if (socket.destroyed) return upstream.destroy();
     hold(job, upstream);
+    outbound.add(job, upstream);
     socket.on('close', () => upstream.destroy());
     upstream.on('close', () => socket.destroy());
     socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -1299,6 +1306,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     jobs.delete(runId);
     tokens.delete(job.token);
     for (const waiter of job.gate.queue) waiter.drop();
+    outbound.drop(job);
     job.plain.destroy();
     job.model.destroy();
     for (const s of job.sockets) s.destroy();
