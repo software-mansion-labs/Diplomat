@@ -323,7 +323,9 @@ try {
     assert.equal(prompt, fs.readFileSync(path.join(RUNS_DIR, `${R}-1`, 'prompt.txt'), 'utf8'));
     assert.ok(prompt.endsWith('\n\n---\n\nReview the pull request.\n'));
     assert.doesNotMatch(prompt, /\{\{/, 'every blank is filled');
-    for (const said of ['https://github.com/dn-test/alpha.git', '`pr:7`', 'apt-get update && apt-get install -y', 'GNU', '403', '`gh`', 'git fetch origin pull/<n>/head',
+    for (const said of ['https://github.com/dn-test/alpha.git', '`pr:7`', 'apt-get update && apt-get install -y', 'GNU', '403', '`gh`',
+      // The text rule, said before any text is refused, and a reworded retry allowed.
+      'names no account with `@` anywhere in it, code included, says no `bors`, and starts no line with `/` and a word', 'reword it and send the request again', 'git fetch origin pull/<n>/head',
       'Requester Name <requester@example.com>', 'No simulator, emulator or device is offered',
       // What is true of the forge here, and no more: https on 443 only, links to other hosts followed.
       '`github.com` is reached over https on port 443 and no other way: there is no ssh to it', 'that host is reached like any other site',

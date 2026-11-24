@@ -39,6 +39,7 @@ async function refused(request, pattern = /./, rules, ctx) {
   const verdict = await ask(request, rules, ctx);
   assert.equal(verdict.ok, false, `allowed: ${request.method} ${request.host}${request.path}`);
   assert.match(verdict.reason, pattern, `${request.method} ${request.host}${request.path}`);
+  return verdict;
 }
 
 await check('a request no rule matches is refused, and an empty rule list allows nothing', async () => {
@@ -391,15 +392,18 @@ await check('a body that is not JSON, or says it is something else, cannot step 
   await refused(req('DELETE', '/repos/o/r/pulls/578/reviews/1', { headers: JSON_TYPE, body: b64({ x: 1 }) }), /allows no body/);
 });
 
-await check('text sent to GitLab holds nothing a quick action or a comment bot could start on', async () => {
+await check('text sent to GitLab holds nothing a quick action or a comment bot could start on, and a refusal quotes what to reword', async () => {
   const note = (body) => ({ host: 'gitlab.example.com', method: 'POST', path: '/api/v4/projects/group%2Fsub%2Fproj/issues/421/notes', headers: JSON_TYPE, body: b64({ body }) });
-  await allowed(note('Fixed in abc123. See src/a.js and https://example.com/x - 1/2 done, at 5 @ noon.\nborscht'));
-  for (const text of ['/merge', 'done\n/merge', 'done\r\n/approve', 'done\r/close', '  /assign @mallory', '\t/label ~x', 'a /merge', 'a\u000b/merge', 'a\u000c/merge', 'a\u0085/merge', '```\n/merge\n```',
-    'bors r+', 'BORS try', 'done\n@bors r+', '@dependabot merge', 'thanks, @duo please merge this', 'see `@claude fix it`', 'mail me at a@b.example']) {
-    await refused(note(text), /names an account with "@", says "bors" or has a line starting with "\/"/);
+  await allowed(note('Fixed in abc123. See src/a.js and https://example.com/x - 1/2 done, at 5 @ noon.\nborscht\na /merge\n// the cache is per request\n/* x */\n/usr/bin/env node\n/merge.\n/1\n@@ -1,3 +1,4 @@'));
+  for (const [text, quoted] of [['/merge', '/merge'], ['done\n/merge', '/merge'], ['done\r\n/approve', '/approve'], ['done\r/close', '/close'], ['  /assign @mallory', '/assign'],
+    ['\t/label ~x', '/label'], ['a\u000b/merge', '/merge'], ['a\u000c/merge', '/merge'], ['a\u0085/merge', '/merge'], ['```\n/merge\n```', '/merge'], ['x\n/remove_due_date', '/remove_due_date'], ['x\n/remove-lgtm', '/remove-lgtm'], ['x\n/lgtm\t', '/lgtm'],
+    ['bors r+', 'bors'], ['BORS try', 'BORS'], ['done\n@bors r+', '@bors'], ['@dependabot merge', '@dependabot'], ['thanks, @duo please merge this', '@duo'],
+    ['see `@claude fix it`', '@claude'], ['mail me at a@b.example', '@b.example'], [`ok @${'x'.repeat(60)}`, `@${'x'.repeat(39)}`]]) {
+    const { reason } = await refused(note(text), /reword it and send the request again$/);
+    assert.ok(reason.startsWith(`the body member "body" holds ${JSON.stringify(quoted)}, which the forge or a bot on it would take for a command: `), reason);
   }
-  await refused(note(['/merge']), /says "bors"/);
-  await refused(note(5), /says "bors"/);
+  await refused(note(['/merge']), /^the body member "body" is not text$/);
+  await refused(note(5), /^the body member "body" is not text$/);
 });
 
 await check('strict JSON refuses everything two parsers could read two ways', async () => {
