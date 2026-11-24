@@ -2479,8 +2479,7 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
           "a PR closing a Linear issue synced with #27: \(closesSynced.writes) \(stageOf(closesSynced.result, prURL(13)))")
 
     // A ban list that cannot be read holds every item, and the sync takes no step.
-    for (k, text) in [#"{"banned": [{"login": "mallory"}"#, #"{"banned": {"login": "mallory"}}"#, #"{"banned": ["mallory"]}"#]
-        .enumerated() {
+    for (k, text) in [#"{"banned": [{"login": "mallory"}"#, #"{"banned": {"login": "mallory"}}"#].enumerated() {
         try banFile(text)
         let t = fixture()
         try seedRerate(dir("ban-unread-\(k)"), 13, sha("c3"), at: later(-60))

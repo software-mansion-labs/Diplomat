@@ -323,8 +323,9 @@ final class PipelineSync {
 
     /// The prompt-injection ban list the front-ends read: `banned.json` in `$DA_BAN_DIR`,
     /// its `~` read as `PrivateFiles.home`, else in `~/.diplomat/pr-monitor`, as
-    /// `{"banned": [{"login": …}, …]}`, lowercased. Empty when there is no file, or it lists
-    /// no `banned`; nil when it, or any entry's `login`, cannot be read.
+    /// `{"banned": [{"login": …}, …]}`; lowercased, an entry without a string `login`
+    /// skipped. Empty when there is no file, or it lists no `banned`; nil when it cannot be
+    /// read.
     static func bannedLogins() -> Set<String>? {
         let env = ProcessInfo.processInfo.environment["DA_BAN_DIR"] ?? ""
         let file = (env.isEmpty
@@ -335,9 +336,7 @@ final class PipelineSync {
               let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         switch obj["banned"] {
         case nil: return []
-        case let list as [Any]:
-            let logins = list.compactMap { ($0 as? [String: Any])?["login"] as? String }
-            return logins.count == list.count ? Set(logins.map { $0.lowercased() }) : nil
+        case let list as [Any]: return Set(list.compactMap { (($0 as? [String: Any])?["login"] as? String)?.lowercased() })
         default: return nil
         }
     }
