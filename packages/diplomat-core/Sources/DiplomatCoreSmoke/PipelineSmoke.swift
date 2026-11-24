@@ -2757,6 +2757,17 @@ private func pipelineGatePass1(base: URL, root: PipelineSettings.Root, team: Pip
         check(!merged(s) && stageOf(s.result, prURL(13)) == "cleared/fast (\(hold))",
               "#13 \(state), \(commits.map(String.init) ?? "not compared") behind its base: \(s.writes) \(stageOf(s.result, prURL(13)))")
     }
+
+    // A recheck that failed judged no Linear issue it was to read.
+    let blind = only([24])
+    blind.tickets = [.init(id: "lin-9", identifier: "ENG-9", title: "Wrong margin", labels: ["lab-rl", "lab-cl"],
+                           updated: at("10:00"))]
+    blind.onLinear = { if $0 == "Recheck" { blind.linearDown = true } }
+    let bl = sync(blind, PipelineSettings(roots: [root], linearTeams: [team], fix: true), dir("recheck-down"), t0)
+    check(bl.result.effects == [fixFX(24)] && bl.result.unread == ["acme/app"]
+          && bl.result.read.contains(issueURL(24)) && !bl.result.read.contains(linearURL("ENG-9"))
+          && stageOf(bl.result, linearURL("ENG-9")) == "candidate/fast (it could not be read again right before its fix was asked for)",
+          "ENG-9's recheck failed: \(bl.result.effects) \(bl.result.unread) \(bl.result.read)")
 }
 
 /// What a sync does when what it read leaves a doubt: it holds, or leaves the item be.

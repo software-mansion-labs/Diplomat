@@ -140,6 +140,8 @@ final class PipelineSync {
     var partial: [String: String] = [:]
     /// The roots judged on less than all they hold, besides `incomplete` and `partial`.
     var unread: Set<String> = []
+    /// The Linear issues a failed recheck left unjudged.
+    var unrechecked: Set<String> = []
     /// Per root a tracked Linear team maps to, why that team was not read whole: an issue
     /// it missed may be attached to any of the root's issues.
     var linearShort: [String: String] = [:]
@@ -244,7 +246,9 @@ final class PipelineSync {
         let laid = PipelineGraph.layout(items: entries.map(\.item), edges: edges, maxItems: model.maxItems)
         let short = unread.union(incomplete.keys).union(partial.keys)
         let fixable = entries.filter { $0.item.kind == .issue && $0.item.stage == .candidate && $0.item.hold == nil }
-        let judged = entries.filter { $0.root.map { partial[$0.slug] == nil && repos[$0.slug] != nil } ?? false }
+        let judged = entries.filter {
+            !unrechecked.contains($0.id) && $0.root.map { partial[$0.slug] == nil && repos[$0.slug] != nil } ?? false
+        }
         // Without the ban list no item was judged in full.
         let whole = blocked == nil && banned != nil
         let result = PipelineTickResult(at: now, items: laid.items, graph: laid.graph, effects: effects,
@@ -1935,7 +1939,11 @@ final class PipelineSync {
             }
         } catch {
             notice("Linear: the issues a fix was about to be asked for could not be read again: \(error.localizedDescription)")
-            for i in picks { entries[i].item.hold = "it could not be read again right before its fix was asked for" }
+            for i in picks {
+                entries[i].item.hold = "it could not be read again right before its fix was asked for"
+                unrechecked.insert(entries[i].id)
+                if let root = entries[i].root { unread.insert(root.slug) }
+            }
             return
         }
         for i in picks {
