@@ -323,6 +323,18 @@ try {
     assert.equal(alive(pid), false);
   });
 
+  await staged('how far a bootstrap got is reported when tor told it before its events were asked for, and when it tells more in the same read as its answer to how far it got', async () => {
+    for (const stage of ['bootstrap-first', 'phase-at-once']) {
+      const h = host(stage);
+      await begin(h, `${stage},stall:45`);
+      await until(() => h.t.state().detail.endsWith('unreachable'), 5000, `the stall being reported (${stage})`);
+      await sleep(100);
+      assert.deepEqual(h.t.state(), { state: 'bootstrapping', detail: '45% Asking for relay descriptors: Network is unreachable' }, stage);
+      await h.t.stop();
+      assert.equal(await code(h.starting), 'stopped');
+    }
+  });
+
   await staged('a tor that dies while bootstrapping fails the start at once, with its last words', async () => {
     const h = host('die');
     const began = Date.now();
