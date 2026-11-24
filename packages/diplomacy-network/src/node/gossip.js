@@ -11,7 +11,7 @@ import {
   CATCH_UP_MS, HOURS_CEILING, HOURS_FLOOR, INVITE_TTL_SECS, PEER_BACKOFF_MAX_MS, PEER_BACKOFF_MS, PRUNE_INTERVAL_MS, PUSH_REPEAT_MS,
   MEMBER_RETENTION_SECS, RESIGN_INTERVAL_MS, STRANGER_BODY_BYTES, SYNC_INTERVAL_MS,
 } from '../paths.js';
-import { poolFile, readPool } from './store.js';
+import { heardFile, poolFile, readPool } from './store.js';
 
 // Keys per `pull`, and the bytes of records in one `push` or one answer to a `pull`:
 // under the body any sender may send, so gossip never waits its turn at a large one.
@@ -72,7 +72,7 @@ export function createGossip(host) {
   let pruned = 0;
 
   const own = (P) => P.pool.get(memberKey(host.self));
-  const open = (P) => host.pools.get(P.id) === P;
+  const open = (P) => host.open(P);
   const jitter = () => host.random(4).readUInt32BE(0) / 2 ** 32;
 
   // This host's next member record in a pool. `voucher`, when named, replaces the one it
@@ -100,18 +100,23 @@ export function createGossip(host) {
       // seat each was given, by key; and what is kept of the membership it left before
       // this one. `joinFailed` says why the last invite let this host in nowhere, until
       // the next one is pasted. `heard` is when another host of the pool last answered
-      // this one or was served by it. `returning` is true from when this host goes back
+      // this one or was served by it, and `waitedOut` the last such time whose silence
+      // this host waited out alone. `returning` is true from when this host goes back
       // into the pool, or has heard nobody there for longer than a member record is
-      // kept, until a host it asks answers. `back` are the hosts it knew there and may
-      // hold no record of - the ones it left the pool to, and the ones whose records ran
-      // out while it heard nobody - each `{ pk, until }`: asked until it answers, its
-      // record is held, or `until`.
-      joining: null, joinFailed: '', invites: [], farewell: gone(doc), heard: host.now(), returning: false, back: [],
+      // kept, until a host it asks answers or every one it asks has been asked for as
+      // long. `back` are the hosts it asks besides the members it holds - the ones it
+      // left the pool to, the ones whose records ran out while it heard nobody, and, from
+      // when it comes back, every one it holds a record of - each `{ pk, until }`: asked
+      // until it answers, its record is held while this host is not returning, or `until`.
+      joining: null, joinFailed: '', invites: [], farewell: gone(doc), heard: host.now(), waitedOut: null, returning: false, back: [],
       // The members that refused this host's hello and have answered it nothing since.
       refusedBy: new Set(),
       // The member records held at the last step: a pool drops a record that ran out at
       // whatever merge comes first.
       had: [],
+      // Until the heard file exists the first word heard is written at once: a restart
+      // without it reads when this host last signed, which it does alone too.
+      heardKept: false,
       // Since when what this host holds of the pool may be out of date - it started, it
       // slept, its transport came up - or null once a member has said what it holds:
       // until then this host gives none of its offers away and looks after none. `epoch`
@@ -129,9 +134,15 @@ export function createGossip(host) {
       if (typeof doc.joinFailed === 'string') P.joinFailed = doc.joinFailed;
       if (Array.isArray(doc.invites)) P.invites = doc.invites;
       if (Array.isArray(doc.back)) P.back = doc.back.filter((e) => typeof e?.pk === 'string' && Number.isSafeInteger(e.until));
-      // A store written before it kept when another host was last heard: about when
-      // this host last signed, as a host that was there signs every 6 hours.
-      P.heard = Number.isSafeInteger(doc.heard) ? doc.heard : own(P)?.at ?? P.heard;
+      const kept = host.store.read(heardFile(P.id));
+      // Kept in the document by a store before this one, and moved out of it before the
+      // document is written without it; in none before that, it is about when this host
+      // last signed, as a host that was there signs every 6 hours.
+      const heard = [kept?.heard, doc.heard, own(P)?.at].find(Number.isSafeInteger);
+      if (heard !== undefined) P.heard = heard;
+      if (Number.isSafeInteger(kept?.waitedOut)) P.waitedOut = kept.waitedOut;
+      P.heardKept = kept !== null;
+      if (!kept && Number.isSafeInteger(doc.heard)) keepHeard(P);
       P.returning = doc.returning === true;
       // The store holds all of this: nothing is written until something changes.
       P.pool.delta();
@@ -154,9 +165,19 @@ export function createGossip(host) {
   // Silent for longer than a member record is kept, every host this one knows in the
   // pool may have forgotten it: it comes back. True when it did so now.
   function overdue(P, now) {
-    if (P.returning || now - P.heard <= MEMBER_RETENTION_SECS) return false;
-    P.returning = true;
+    if (P.returning || P.waitedOut === P.heard || now - P.heard <= MEMBER_RETENTION_SECS) return false;
+    comeBack(P, []);
     return true;
+  }
+
+  // This host comes back to a pool: it asks `keys` and every host it holds a record of
+  // there for as long as a member record is kept, whatever it holds of them - the records
+  // its voucher leads up through are kept at any age, and say nothing of whether their
+  // hosts are there.
+  function comeBack(P, keys) {
+    const held = P.pool.records().filter((r) => r.type === 'member' && !r.left).map((r) => r.pk);
+    P.returning = true;
+    P.back = backTo(P, [...keys, ...held]);
   }
 
   // `P.back` with each of `keys` it does not name, asked for as long as a member record is kept.
@@ -211,6 +232,7 @@ export function createGossip(host) {
       Object.assign(doc, { away: true, records: P.pool.records().filter((r) => r.type === 'member') });
     }
     host.store.write(poolFile(P.id), doc);
+    if (!stay) host.store.remove(heardFile(P.id));
     tell(P, [...keys, memberKey(host.self)]);
   }
 
@@ -219,14 +241,14 @@ export function createGossip(host) {
     const doc = host.store.read(poolFile(id)) ?? {};
     host.away.delete(id);
     host.store.write(poolFile(id), { id, linked: false, seq: doc.seq, ...gone(doc) });
+    host.store.remove(heardFile(id));
   }
 
   // Back into a pool this host left: its member record is signed again over the voucher
   // it held, and the hosts it left the pool to are asked with the members it holds.
   function rejoin(id) {
     const P = load(host.away.get(id), host.store.read(poolFile(id)) ?? {});
-    P.returning = true;
-    P.back = backTo(P, P.farewell?.leftTo ?? []);
+    comeBack(P, P.farewell?.leftTo ?? []);
     P.farewell = null;
     P.pool.merge(signMember(P), host.now());
     host.away.delete(id);
@@ -287,9 +309,14 @@ export function createGossip(host) {
   function hears(P) {
     const now = host.now();
     doubt(P);
-    if (now - P.heard < HEARD_GRAIN_SECS) return;
+    if ((P.heardKept && now - P.heard < HEARD_GRAIN_SECS) || !open(P)) return;
     P.heard = now;
-    host.save(P);
+    keepHeard(P);
+  }
+
+  function keepHeard(P) {
+    host.store.write(heardFile(P.id), { heard: P.heard, waitedOut: P.waitedOut });
+    P.heardKept = true;
   }
 
   /// This host acts on what it holds of a pool: in one it heard nobody of for long, it
@@ -693,13 +720,17 @@ export function createGossip(host) {
       const cut = lapsed(P, P.had.filter((r) => !P.pool.get(memberKey(r.pk))));
       P.had = P.pool.records().filter((r) => r.type === 'member');
       const held = new Set(P.pool.known(now).map((m) => m.pk));
-      const back = backTo({ ...P, back: P.back.filter((e) => now < e.until && !held.has(e.pk)) }, cut);
-      const moved = cut.length > 0 || back.length !== P.back.length;
+      const kept = P.back.filter((e) => now < e.until && (P.returning || !held.has(e.pk)));
+      const back = backTo({ ...P, back: kept }, cut);
+      const moved = JSON.stringify(back) !== JSON.stringify(P.back);
       P.back = back;
       const came = overdue(P, now);
-      // With nobody left to ask, there is no answer to wait for.
-      const alone = P.returning && others(P).length === 0;
-      if (alone) P.returning = false;
+      // With every key asked in vain for as long, there is no answer to wait for.
+      const alone = P.returning && P.back.length === 0;
+      if (alone) {
+        [P.returning, P.waitedOut] = [false, P.heard];
+        keepHeard(P);
+      }
       if (moved || came || alone) host.save(P);
       const mine = own(P);
       if (now - mine.at >= RESIGN_INTERVAL_MS / 1000 || mine.maxAcceptedH !== hoursOf(host.settings().maximumAcceptedH)) {

@@ -12,7 +12,7 @@ import { createVoucher } from '../../src/core/membership.js';
 import { solve } from '../../src/core/pow.js';
 import { LIMITS, memberRecord } from '../../src/core/records.js';
 import { createNode } from '../../src/node/node.js';
-import { createStore, memoryDisk, readPool } from '../../src/node/store.js';
+import { createStore, heardFile, memoryDisk, readPool } from '../../src/node/store.js';
 import { fakeExecutor, fakeRequester } from './fakes.mjs';
 import { createNet } from './mem-net.mjs';
 
@@ -246,6 +246,8 @@ export function createWorld({ seed = 1, audit = false } = {}) {
     /// The pool's document as a host's store holds it, and the records in it.
     doc: (h) => readPool(createStore({ disk: h.disk }), POOL),
     records: (h) => world.doc(h).records,
+    /// What a host's store holds of when it was last heard in the pool: `{ heard, waitedOut }`.
+    heard: (h) => createStore({ disk: h.disk }).read(heardFile(POOL)),
     /// The claim record a host's store holds for a task - the one `by` made, when a host
     /// is named - or undefined.
     claim: (h, taskId, by) => world.records(h).find((r) => r.type === 'claim' && r.taskId === taskId && (!by || r.executor === by.pk)),

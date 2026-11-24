@@ -91,9 +91,10 @@ closed at every start.
 | `state.json` | the snapshot as the daemon last had it, for a person looking into a daemon that no longer answers: the applets ask the socket |
 | `identity.json` (0600) | the host key |
 | `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it, or at or before the second of the start where that time is ahead of this machine's clock |
+| `heard/<pool hash>.json` (0600) | when another machine of that pool was last heard, to within 10 minutes, and the last such time whose silence this machine waited out alone: a month without a word makes it come back to the pool |
 | `peers.json` (0600) | the machines this host has asked in vain for more than 3 minutes, and since when: after a start a claim round waits 15 s for each of them, not the 90 s and more it gives a machine it has yet to reach |
 | `links.json` (0600) | the linked repositories, as Diplomat last posted them |
-| `pools/<pool hash>.json` (0600) | that pool's records, and when another machine there was last heard, to within 10 minutes; of a pool this machine left, the record that says so and the members it left, which it keeps once it is back until it holds the record of one of them |
+| `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left, which it keeps once it is back until it holds the record of one of them |
 | `pools/<pool hash>.log` (0600) | what changed in that pool since its document was written: the hash of the document it follows, then a line for each change - the records taken in and the keys of the records dropped. Once it is as long as the document, and no shorter than 64 KiB, the document is written whole and the log removed |
 | `locks.json` (0600) | the claim locks this host granted |
 | `keys.json` (0600) | live capabilities this host issued or holds |
@@ -307,9 +308,9 @@ this machine before this one began the pool again, so no machine that came in un
 can let it back in - and is empty once another invite is pasted.
 Its `returning` is true from when this machine joins a pool again after it left it, or
 has heard no other machine there for more than 30 days - off, asleep, with no network,
-or cut off from them - until one of the machines it asks there answers, or it has none
-left to ask (a machine whose record ran out is asked for 30 days): it takes and gives
-none of the pool's jobs until then, and needs no invite.
+or cut off from them - until one of the machines it asks there answers, or it has asked
+each of them for 30 days: it takes and gives none of the pool's jobs until then, and
+needs no invite.
 Its `unseated` is true while every other machine this one asks in the pool has refused it
 as no member (`denied` or `not-member`) and answered it nothing since - a machine that
 does not answer, is busy, or refuses this one's clock or its work leaves it false:

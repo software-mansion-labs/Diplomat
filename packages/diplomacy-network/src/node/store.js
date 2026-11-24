@@ -2,8 +2,9 @@
 //
 //   identity.json           { seed }
 //   heard.json              { ts }: the latest date of a request this host served
+//   heard/<pool hash>.json  { heard, waitedOut }: when another host of that pool was last heard, and the last such time whose silence this host waited out
 //   peers.json              { silent }: the peers this host asks in vain, and has for long, and since when
-//   pools/<pool hash>.json  one pool: its link, this host's own sequence numbers, its records, when another host of it was last heard
+//   pools/<pool hash>.json  one pool: its link, this host's own sequence numbers, its records
 //   pools/<pool hash>.log   what changed in that pool since its document was written
 //   locks.json              the lock table of every pool
 //   keys.json               the keys this host issued and the keys it holds, secrets included
@@ -27,10 +28,15 @@ import { recordKey } from '../core/records.js';
 
 const LOG_FLOOR_BYTES = 64 * 2 ** 10;
 
-/// The file name of a pool's document: a pool id holds slashes, its hash does not.
-export function poolFile(id) {
-  return `pools/${crypto.createHash('sha256').update(id, 'utf8').digest('hex').slice(0, 32)}`;
-}
+// A pool id holds slashes, its hash does not.
+const poolHash = (id) => crypto.createHash('sha256').update(id, 'utf8').digest('hex').slice(0, 32);
+
+/// The file name of a pool's document.
+export const poolFile = (id) => `pools/${poolHash(id)}`;
+
+/// The file name of when this host was last heard in a pool: apart from the pool's
+/// document, so that a word heard does not have the document written whole.
+export const heardFile = (id) => `heard/${poolHash(id)}`;
 
 /// The directory `dir` as a store's disk:
 /// `{ read(name), write(name, text), remove(name), aside(name), append(name, text), appended(name), cut(name) }`,
