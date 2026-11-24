@@ -1,9 +1,9 @@
 import Foundation
 import DiplomatCore
 
-// The pipeline. No call here reaches GitHub, Linear or a real `claude`: `PipelineIO` is
-// handed stubs that keep the trackers' state from one sync to the next and record every
-// write, so each sync is asserted by exactly what it changed.
+// No call here reaches GitHub, Linear or a real `claude`: `PipelineIO` is handed stubs
+// that keep the trackers' state from one sync to the next and record every write, so
+// each sync is asserted by exactly what it changed.
 
 private let smokeKey = "lin_api_smoke_key"
 private let checkout = "/tmp/pipeline-smoke-checkout"
@@ -52,7 +52,6 @@ private final class Trackers {
         var author = "reporter"
         /// Labels past what one read lists.
         var moreLabels = 0
-        /// Its issue type's name.
         var type: String?
     }
     struct PR {
@@ -68,7 +67,6 @@ private final class Trackers {
         var base = "main"
         var headRef: String
         var head: String { didSet { if !heads.contains(oldValue) { heads.append(oldValue) } } }
-        /// The heads it had before.
         var heads: [String] = []
         var files = Trackers.tested
         var ciState: String? = "SUCCESS"
@@ -95,7 +93,6 @@ private final class Trackers {
         var moreThreads = 0
         var moreCommits = 0
         var moreCloses = 0
-        /// Changed files past what one read lists.
         var moreFiles = 0
         var mergeable = "MERGEABLE"
         /// `mergeStateStatus` and `isMergeQueueEnabled`; nil leaves the field out.
@@ -111,14 +108,12 @@ private final class Trackers {
         var messages: [String] = []
         /// Its ready-for-review and convert-to-draft events.
         var readyEvents = 0
-        /// Review-thread comments, and those past what one read lists.
+        /// Review-thread comments.
         var threadNotes: [(login: String, body: String)] = []
         var moreThreadNotes = 0
         /// Every label ever added to it, in any way.
         var history: [String] = []
-        /// Its label events past what one read lists.
         var moreHistory = 0
-        /// Who merged it.
         var mergedBy: String?
     }
     struct Ticket {
@@ -150,7 +145,6 @@ private final class Trackers {
     /// Of `others`, those with more assignees than a read lists.
     var assigneesPast: Set<Int> = []
     var prs: [PR] = []
-    /// Labels the repository has, on an item or not.
     var repoLabels: Set<String> = []
     var tickets: [Ticket] = []
     var labelBook: [(id: String, name: String, team: String?)] = []
@@ -193,14 +187,12 @@ private final class Trackers {
     /// The pages after `Repo`'s fail, or answer with errors.
     var failPages = false
     var pagesPartial = false
-    /// Reading a diff fails.
     var diffFails = false
     /// Label writes GitHub refuses, adding or removing: every one on item `"<n>"`, or
     /// `"<n> <name>"` only.
     var refuseLabels: Set<String> = []
     /// Label adds GitHub makes though the call fails, as `"<n> <name>"`.
     var labelsLost: Set<String> = []
-    /// Creating an issue, and linking one as a sub-issue, fail.
     var failCreate = false
     var failSubIssue = false
     /// Creates GitHub, then Linear, makes all the same though the call fails.
@@ -261,7 +253,6 @@ private final class Trackers {
     var ruleTypes: [String] = []
     var protection: [String: Any] = [:]
     var notAdmin = false
-    /// Commits without a verified signature.
     var unsigned = false
     /// The account `gh` acts as; nil: the `Repo` read names none.
     var viewer: String? = opLogin
@@ -595,7 +586,6 @@ private final class Trackers {
         return n
     }
 
-    /// An open issue as the `Issue` fragment reads it.
     func issueNode(_ i: Issue) -> [String: Any] {
         var n: [String: Any] = ["number": i.number, "id": "I_\(i.number)", "title": i.title, "body": i.body,
                                 "url": issueURL(i.number), "updatedAt": i.updated, "state": "OPEN"]
@@ -608,7 +598,6 @@ private final class Trackers {
         return n
     }
 
-    /// One of `others` as the `Issue` fragment reads it.
     func otherNode(_ c: Int, _ other: (title: String, state: String, repo: String)) -> [String: Any] {
         let assignees = otherAssignees[c] ?? []
         return ["number": c, "id": "I_\(c)", "title": other.title, "body": "", "updatedAt": at("08:00"),
@@ -787,7 +776,6 @@ private final class Trackers {
     }
 }
 
-/// `acme/app` and team ENG as every sync below starts them.
 private func fixture() -> Trackers {
     let t = Trackers()
     t.issues = [
@@ -896,8 +884,7 @@ private func fixture() -> Trackers {
 
 private typealias Synced = (result: PipelineTickResult, writes: [String], claude: [String], events: [PipelineEvent])
 
-/// One sync, and what it did: the writes and `claude` calls it made, and the events it
-/// logged (each sync is run at its own `now`).
+/// One sync and what it did; its events are those at `now`, so give each sync its own.
 private func sync(_ t: Trackers, _ settings: PipelineSettings, _ dir: URL, _ now: Date,
                   key: String? = smokeKey) -> Synced {
     let w = t.writes.count, c = t.claudeCalls.count
@@ -925,13 +912,11 @@ private func seed(_ dir: URL, _ events: PipelineEvent...) throws {
     try lines.write(to: dir.appendingPathComponent("log.jsonl"))
 }
 
-/// `id`'s stage in `r` as `stage/lane (hold)`, or `absent`.
 private func stageOf(_ r: PipelineTickResult, _ id: String) -> String {
     guard let i = item(r, id) else { return "absent" }
     return "\(i.stage.rawValue)/\(i.lane.rawValue)" + (i.hold.map { " (\($0))" } ?? "")
 }
 
-/// The fixture's issues and PRs numbered in `keep`, and no Linear issue.
 private func only(_ keep: Set<Int>) -> Trackers {
     let t = fixture()
     t.issues = t.issues.filter { keep.contains($0.number) }
@@ -942,7 +927,6 @@ private func only(_ keep: Set<Int>) -> Trackers {
 
 private func merged(_ s: Synced) -> Bool { s.writes.contains { $0.hasPrefix("merge ") } }
 
-/// `[label kind]` for each event, the shape the sequences below are asserted in.
 private func trail(_ events: [PipelineEvent], _ r: PipelineTickResult) -> [String] {
     events.map { e in "\(r.items.first { $0.id == e.item }?.label ?? e.item) \(e.kind.rawValue)" }
 }

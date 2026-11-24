@@ -3720,8 +3720,7 @@ let goldenModes: [(String, String)] = [
     ("issues-single-gitlab", { var c = IssueConfig(target: .specific, me: goldenMe, specificIssue: "421")
                                c.home = goldenGitLab
                                return c.buildPrompt() }()),
-    // The pipeline's three: a Linear fix (its text fenced, a fence line in it defanged),
-    // a GitHub fast-track fix, and a fast-track review.
+    // goldenLinear's text carries a fence line, which its golden pins defanged.
     ("issues-linear", IssueConfig(me: goldenMe, linear: goldenLinear, pipeline: true).buildPrompt()),
     ("issues-pipeline", IssueConfig(target: .specific, me: goldenMe, specificIssue: "421",
                                     pipeline: true).buildPrompt()),
