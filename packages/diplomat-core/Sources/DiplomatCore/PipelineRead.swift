@@ -537,7 +537,7 @@ enum PipelineRead {
         var e = PipelineEntry(
             item: PipelineItem(id: linearURL(url), source: .linear, kind: .issue, label: identifier,
                                title: n["title"] as? String ?? "", repo: key, state: done ? "closed" : "open",
-                               author: (n["creator"] as? [String: Any])?["name"] as? String,
+                               author: (n["creator"] as? [String: Any])?["displayName"] as? String,
                                assignees: (assignee?["name"] as? String).map { [$0] } ?? [],
                                writable: unwritable == nil, stage: .unrated, lane: .unrated,
                                updatedAt: date(n["updatedAt"])),

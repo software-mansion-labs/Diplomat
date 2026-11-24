@@ -132,7 +132,8 @@ private final class Trackers {
         var moreLabels = false
         var state = "started"
         var archived = false
-        var creator = (id: "U_REPORTER", name: "Reporter")
+        /// Linear's `name` for it, the full name, is another: `<displayName> Smith`.
+        var creator = (id: "U_REPORTER", displayName: "Reporter")
         var url: String { linearPage(identifier, title) }
     }
     static let tested = [(path: "src/a.swift", add: 3, del: 1, type: "MODIFIED"),
@@ -691,7 +692,7 @@ private final class Trackers {
             var n: [String: Any] = ["id": t.id, "identifier": t.identifier, "title": t.title,
                                     "description": t.description, "url": t.url, "updatedAt": t.updated]
             n["assignee"] = t.assignee.map { ["id": $0.id, "name": $0.name] as Any } ?? NSNull()
-            n["creator"] = ["id": t.creator.id, "name": t.creator.name]
+            n["creator"] = ["id": t.creator.id, "displayName": t.creator.displayName, "name": t.creator.displayName + " Smith"]
             n["archivedAt"] = t.archived ? at("09:00") as Any : NSNull()
             n["labels"] = ["pageInfo": ["hasNextPage": t.moreLabels], "nodes": t.labels.map { ["id": $0, "name": name($0)] }] as [String: Any]
             n["parent"] = t.parent.map { ["url": $0] as Any } ?? NSNull()
@@ -2394,6 +2395,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelineCoverage8(base: base, root: root, team: team, t0: t0)
     try pipelinePins9(base: base, root: root, team: team, t0: t0)
     try pipelinePins10(base: base, root: root, team: team, t0: t0)
+    try pipelineGatePass1(base: base, root: root, team: team, t0: t0)
 }
 
 /// Each part a split files is one its own answer named, and a link to its parent makes a
@@ -2705,6 +2707,36 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
     cased.labelBook = [("lab-RL", "Risk:Low", nil), ("lab-CL", "Complexity:Low", nil)]
     let cs = sync(cased, PipelineSettings(roots: [root], linearTeams: [team], rate: true), dir("label-case"), t0)
     check(cs.writes == ["+Risk:Low ENG-1", "+Complexity:Low ENG-1"], "Linear labels in another case: \(cs.writes)")
+}
+
+/// A banned Linear author, a PR behind its base, a Linear recheck that failed, and failures
+/// whose text would differ at each sync.
+private func pipelineGatePass1(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                               t0: Date) throws {
+    section("pipeline gate pass 1")
+    func dir(_ name: String) -> URL { base.appendingPathComponent("gate1-" + name) }
+    let banDir = dir("bans")
+    try FileManager.default.createDirectory(at: banDir, withIntermediateDirectories: true)
+    let banEnv = ProcessInfo.processInfo.environment["DA_BAN_DIR"]
+    setenv("DA_BAN_DIR", banDir.path, 1)
+    defer { if let banEnv { setenv("DA_BAN_DIR", banEnv, 1) } else { unsetenv("DA_BAN_DIR") } }
+    func ban(_ logins: [String]) throws {
+        try json(["banned": logins.map { ["login": $0] }]).write(to: banDir.appendingPathComponent("banned.json"))
+    }
+
+    try ban(["mallory"])
+    let nick = only([])
+    nick.tickets = [fixture().tickets[0]]
+    nick.tickets[0].creator = ("U_MAL", "mallory")
+    let nk = sync(nick, PipelineSettings(roots: [root], linearTeams: [team], rate: true, fix: true), dir("display-name"), t0)
+    check(nk.claude.isEmpty && nk.writes.isEmpty && nk.result.effects.isEmpty
+          && item(nk.result, linearURL("ENG-1"))?.author == "mallory"
+          && stageOf(nk.result, linearURL("ENG-1")) == "unrated/unrated (@mallory is on the prompt-injection ban list)",
+          "ENG-1 by mallory (Mallory Smith), banned: \(nk.claude) \(nk.writes) \(stageOf(nk.result, linearURL("ENG-1")))")
+    try ban([])
+    let creators = try CoreAssets.graphql("linear").components(separatedBy: "creator {").dropFirst()
+    check(!creators.isEmpty && creators.allSatisfy { $0.prefix { $0 != "}" }.contains("displayName") },
+          "every Linear issue read asks for its creator's display name")
 }
 
 /// What a sync does when what it read leaves a doubt: it holds, or leaves the item be.
