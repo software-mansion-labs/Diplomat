@@ -1,10 +1,10 @@
 # Everything a pipeline sync reads of one repository, each operation named by `gh api
 # graphql -f operationName=<name>`. `Repo` reads the account `gh` acts as, the repository's
-# name as GitHub has it now, its default branch and merge methods, the first page of its open issues and PRs, and its recently
-# merged or closed PRs (`PipelineRead.github` keeps the ones carrying a pipeline label, and
-# the closed issues of this repository they close); `Issues` and `PullRequests` read the
-# next pages, newest created first so an item updated meanwhile keeps its place, each page
-# `$issues` or `$prs` long; `PullRequest` reads one PR
+# name as GitHub has it now, its default branch and merge methods, the first page of its
+# open issues and PRs, and its recently merged or closed PRs (`PipelineRead.github` keeps
+# the ones carrying a pipeline label, and the closed issues of this repository they close);
+# `Issues` and `PullRequests` read the next pages, newest created first so an item updated
+# meanwhile keeps its place, each page `$issues` or `$prs` long; `PullRequest` reads one PR
 # again, with `Gate`, right before Diplomat marks it ready or merges it, and after it merges
 # it, for who merged it; `Item` reads one
 # issue or PR again right before Diplomat writes to it; `Parts` finds the parts of a split
