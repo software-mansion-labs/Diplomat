@@ -51,6 +51,7 @@ src/
   executor/
     broker.js      the proxy every container talks through
     feed.js        what the broker's http parser is handed of a connection: a request at a time
+    hop.js         the frames a relay carries each connection to the broker in, and their count
     ca.js          the broker's certificate authority and leaf certificates
     llm.js         the model credential the broker adds
     mirror.js      the bare mirror a container clones from
@@ -680,10 +681,14 @@ four things and starts the job:
   connections it carries 256 at once and 64 a second from then on, the rest waiting
   their turn in the order they came: each one it carries takes a port of this machine,
   and it is the one place that knows a connection for its container's before anything
-  of it is read. It is the container's only way out. It is not a job container and not a second container
-  for the peer: no job runs in it and nothing of a job is in it; it has no capability,
-  no writable file system and no credential, shares no namespace and no volume with the
-  job container, and it is made and removed with the container it serves.
+  of it is read. It carries each connection to the broker in frames (`src/executor/hop.js`),
+  sending no more of what the job writes than the broker has made room for and telling
+  the broker of each of its bytes the job's socket has taken; its own sockets keep at
+  most 16 KiB unread and 16 KiB unsent each. It is the container's only way out. It is
+  not a job container and not a second container for the peer: no job runs in it and
+  nothing of a job is in it; it has no capability, no writable file system and no
+  credential, shares no namespace and no volume with the job container, and it is made
+  and removed with the container it serves.
 - **The broker.** Every job gets a proxy address carrying its own token. All of the
   container's traffic leaves through it:
   - the forge's API and git push go to the requester as `act` requests. The forge is
@@ -776,8 +781,8 @@ four things and starts the job:
   - 256 requests at a time, those being answered and those waiting their turn
     together, on however few connections it sends them. A job at that share is read
     no further until one of them ends, by its answer or by its time running out: what
-    it sends meanwhile stays in its container, past what this machine's network buffers
-    hold of each connection, and a connection it closes meanwhile is not seen to close. What a tunnel carries is no request, and is read on;
+    it sends meanwhile stays in its container and its relay, past what each connection
+    may have on its way (below), and a connection it closes meanwhile is not seen to close. What a tunnel carries is no request, and is read on;
   - 8 names being resolved at a time, each given 5 s to resolve. The rest wait in the
     order they came, as many of them as the job may have connections, and wait for
     nothing of another job's;
@@ -797,6 +802,23 @@ four things and starts the job:
   comes within `DN_JOB_BODY_MS`. A request's head has `DN_JOB_HEADER_MS` (30 s) to
   arrive, a body read whole `DN_JOB_BODY_MS` (5 min), and a connection nothing moves on
   is closed after `DN_JOB_IDLE_MS` (30 min). Everything else is streamed.
+
+  What the connections of all jobs have on the hop from their relays to the broker is
+  counted at once (`src/executor/hop.js`): room granted to a relay for bytes that have
+  not come, and bytes sent to it that the job's socket has not taken. The jobs'
+  connections together have at most 14 MiB on it, shared equally among the jobs that
+  have connections, and the connections that name no job yet 2 KiB each and 2 MiB
+  together. A job past its share, as one is when another job comes, is given no room
+  until it is within it, and one that stays past it for 2 s while another job waits
+  loses its newest connections until it is. A connection has at most 128 KiB on its way
+  each way, what the broker has read of it and not passed on counted with it; that is in
+  the daemon's memory, not on the hop. The hop's ends are this machine's sockets (the
+  broker's, and on macOS the ones Docker Desktop opens to it; on Linux the relay's too),
+  and every byte in them is one of those counted, held by at most two of them at a time:
+  32 MiB of queued bytes at most, under 64 MiB of kernel buffers. A connection out to
+  the internet is sized by TCP: one a job leaves unread, or one to a host that reads
+  nothing, holds what the kernel gives a connection (4 MiB to 6 MiB), on each of the
+  job's connections out.
 
   What a job brings about as often as it likes - a tunnel refused, a request that
   failed, an adb request refused - is written to the daemon's log once a minute for

@@ -148,8 +148,13 @@ brought, and an older engine takes no job.
   time, 32 connections out for the requests the broker carries itself, 48 MiB of request
   bodies held at a time, and 8 names being resolved at a time; a connection that names no
   running job is answered once, and what it sends after that is dropped, the connection reset
-  past 64 KiB. A container found holding more disk than
-  that is removed - the count includes files its processes keep open after deleting them, where
+  past 64 KiB. On their way to the broker, all jobs' connections together have at most 16 MiB
+  in flight (128 KiB each way a connection), under 64 MiB of the host's kernel memory however
+  they are used, shared equally among the jobs: a job that keeps more than
+  its share for 2 s while another waits loses its newest connections. A connection out to
+  the internet that a job leaves unread holds what TCP gives one, a few MiB. A container found
+  holding more disk than that is removed - the count includes files its processes keep open
+  after deleting them, where
   the engine lets them be counted - and the jobs in it
   end as failed attempts; so is one the engine could not measure three looks running.
 - **Devices stay on the host, and jobs see none of them** until **Let jobs use this machine's

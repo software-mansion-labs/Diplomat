@@ -1,12 +1,13 @@
 // The relay of a job container, run here as the process it is in its container: where
-// it listens, that it carries every connection to the one address it was started with,
-// how many it carries at a time, and how many new ones in a second.
+// it listens, that it carries every connection to the one address it was started with
+// in the hop's frames, how many it carries at a time, and how many new ones in a second.
 // Run: node test/executor-relay.mjs
 
 import assert from 'node:assert/strict';
 import net from 'node:net';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { ACK, ASK, CREDIT, DATA, END, PREFACE, createHop } from '../src/executor/hop.js';
 
 const RELAY = fileURLToPath(new URL('../image/relay.mjs', import.meta.url));
 // What relay.mjs carries: so many at a time, so many at once, so many more a second.
@@ -53,9 +54,13 @@ async function startRelay(target) {
   return { port, relay, said, dial, clients, end };
 }
 
+// A broker's end of the hop: what the relay carries, as the bytes the frames hold.
+const hop = createHop();
+const framed = (fn) => (c) => { c.on('error', () => {}); fn(hop.framed(c), c); };
+
 await check('a relay carries what it is sent to the one address it was started with, whatever a client asks of it', async () => {
   const seen = [];
-  const target = net.createServer((c) => c.on('data', (d) => { seen.push(String(d)); c.write('from the broker'); }).on('error', () => {}));
+  const target = net.createServer(framed((link) => link.on('data', (d) => { seen.push(String(d)); link.write('from the broker'); }).on('error', () => {})));
   await listening(target);
   const r = await startRelay(target);
   try {
@@ -82,7 +87,7 @@ await check('a relay carries what it is sent to the one address it was started w
 await check('a relay carries so many new connections at once and so many more a second, in the order they came, and what it kept back while it was idle is no more than that', async () => {
   // What reaches the broker: the number each connection wrote, in the order they arrived.
   const reached = [];
-  const target = net.createServer((c) => c.once('data', (d) => reached.push(Number(d))).on('error', () => {}));
+  const target = net.createServer(framed((link) => link.once('data', (d) => reached.push(Number(d))).on('error', () => {})));
   await listening(target);
   const r = await startRelay(target);
   // The most that can have been carried since `from`, when `had` could be carried at once.
@@ -163,6 +168,69 @@ await check('a relay carries 1024 connections at a time and drops the next, and 
   assert.equal(await new Promise((resolve) => second.on('close', resolve)), 1);
   assert.match(err, /^relay: listen EADDRINUSE/);
   taken.close();
+});
+
+await check('a relay sends the broker no more of a connection than the broker made room for, asks for room for the rest, and tells the broker what of its bytes the client\'s socket took', async () => {
+  // The frames that reach the broker, read here by hand: [type, length, bytes].
+  const frames = [];
+  let hopEnd = null;
+  const target = net.createServer((c) => {
+    hopEnd = c;
+    c.on('error', () => {});
+    let buf = Buffer.alloc(0);
+    c.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (frames.length === 0) {
+        if (buf.length < PREFACE.length) return;
+        assert.deepEqual(buf.subarray(0, PREFACE.length), PREFACE, 'it opens with the preface');
+        frames.push(['preface']);
+        buf = buf.subarray(PREFACE.length);
+      }
+      while (buf.length >= 5) {
+        const n = buf.readUInt32BE(1);
+        const size = buf[0] === DATA ? 5 + n : 5;
+        if (buf.length < size) return;
+        frames.push([buf[0], n, buf[0] === DATA ? String(buf.subarray(5, size)) : '']);
+        buf = buf.subarray(size);
+      }
+    });
+  });
+  await listening(target);
+  const r = await startRelay(target);
+  const frame = (type, n, payload = Buffer.alloc(0)) => {
+    const head = Buffer.alloc(5);
+    head[0] = type;
+    head.writeUInt32BE(n, 1);
+    hopEnd.write(Buffer.concat([head, payload]));
+  };
+  const sent = (type) => frames.filter((f) => f[0] === type);
+  try {
+    const c = await r.dial();
+    let got = '';
+    let ended = false;
+    c.on('data', (d) => { got += d; });
+    c.on('end', () => { ended = true; });
+    c.write('x'.repeat(5000));
+    await until('the relay to ask for room', () => sent(ASK).length === 1);
+    assert.deepEqual(sent(ASK)[0].slice(0, 2), [ASK, 5000], 'for the 5000 bytes it holds');
+    assert.equal(sent(DATA).length, 0, 'and sends none of them before it has it');
+    frame(CREDIT, 1200);
+    await until('as much as it was given room for', () => sent(DATA).length === 1 && sent(ASK).length === 2);
+    assert.deepEqual(sent(DATA)[0].slice(0, 2), [DATA, 1200]);
+    assert.deepEqual(sent(ASK)[1].slice(0, 2), [ASK, 3800], 'and asks for room for the rest');
+    frame(CREDIT, 3800);
+    await until('the rest', () => sent(DATA).length === 2);
+    assert.equal(sent(DATA).map((f) => f[2]).join(''), 'x'.repeat(5000), 'word for word');
+    frame(DATA, 5, Buffer.from('hello'));
+    await until('the client to have the broker\'s bytes', () => got === 'hello');
+    await until('the broker to be told of them', () => sent(ACK).length === 1);
+    assert.deepEqual(sent(ACK)[0].slice(0, 2), [ACK, 5]);
+    frame(END, 0);
+    await until('the client to see the end of what the broker sends', () => ended);
+    c.end();
+    await until('the broker to be told the client ended', () => sent(END).length === 1);
+    assert.deepEqual(frames.map((f) => f[0]), ['preface', ASK, DATA, ASK, DATA, ACK, END], 'and nothing else');
+  } finally { r.end(); }
 });
 
 console.log(`\nall ${checks} checks passed`);

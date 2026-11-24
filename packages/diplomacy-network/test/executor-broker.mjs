@@ -1595,7 +1595,7 @@ try {
       const held = await b.addJob({ runId: 'held', pool: alpha.pool });
       const free = await b.addJob({ runId: 'free', pool: alpha.pool });
       const load = () => b.load('held');
-      assert.deepEqual(load(), { connections: 0, requests: 0, bytes: 0, forgeRequests: 0, upstreams: 0, waiting: 0 });
+      assert.deepEqual(load(), { connections: 0, requests: 0, bytes: 0, forgeRequests: 0, upstreams: 0, waiting: 0, held: 0 });
       assert.equal(b.load('nobody'), null);
 
       // Connections.
@@ -1628,7 +1628,7 @@ try {
       const post = (j, p, body) => request(j, 'api.github.com', { method: 'POST', path: p, body, headers: { 'content-length': body.length } }).catch((e) => e);
       const first = post(held, '/first', big);
       await waitFor('/first');
-      assert.deepEqual(load(), { connections: 1, requests: 1, bytes: big.length, forgeRequests: 1, upstreams: 0, waiting: 0 });
+      assert.deepEqual(load(), { connections: 1, requests: 1, bytes: big.length, forgeRequests: 1, upstreams: 0, waiting: 0, held: 0 });
       const second = post(held, '/second', big);
       await until(() => load().waiting === 1, 'the second body to wait its turn');
       // One that would fit beside the first does not go ahead of the one that waits.
@@ -1764,7 +1764,7 @@ try {
         await until(() => load().requests === i, `request ${i} to count`);
       }
       await waitFor('/r2');
-      assert.deepEqual(load(), { connections: 4, requests: 4, bytes: 0, forgeRequests: 2, upstreams: 0, waiting: 2 });
+      assert.deepEqual(load(), { connections: 4, requests: 4, bytes: 0, forgeRequests: 2, upstreams: 0, waiting: 2, held: 0 });
       // One more behind the first on its connection, and one behind the request that
       // took the last place, whose connection node starts again by itself: each stays
       // with its sender.
@@ -2007,7 +2007,7 @@ try {
         c.write(proxied(j, `http://h${i}.flood.test/`));
       }
       await until(() => open.size === 2 && b.load('out').waiting === 3, 'two connections out and three requests waiting for one');
-      assert.deepEqual(b.load('out'), { connections: 5, requests: 5, bytes: 0, forgeRequests: 0, upstreams: 2, waiting: 3 });
+      assert.deepEqual(b.load('out'), { connections: 5, requests: 5, bytes: 0, forgeRequests: 0, upstreams: 2, waiting: 3, held: 0 });
       assert.equal((await within(request(j, 'api.github.com', { path: '/meanwhile' }), 'a request that needs no connection out to be answered while none is free')).status, 200);
       assert.equal((await viaProxy(await b.addJob({ runId: 'free', pool: alpha.pool }), 'http://plain.test/free')).status, 200, 'another job has connections out of its own');
       assert.deepEqual([made, most], [2, 2]);
@@ -2413,7 +2413,7 @@ try {
       c.on('error', () => {});
       c.write('POST /chunked HTTP/1.1\r\nHost: api.github.com\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n');
       await until(() => load().requests === 1, 'the chunked request to be read');
-      assert.deepEqual(load(), { connections: 1, requests: 1, bytes: FORGE_BODY_CAP, forgeRequests: 1, upstreams: 0, waiting: 0 });
+      assert.deepEqual(load(), { connections: 1, requests: 1, bytes: FORGE_BODY_CAP, forgeRequests: 1, upstreams: 0, waiting: 0, held: 0 });
       const small = request(j, 'api.github.com', { method: 'POST', path: '/small', body: Buffer.alloc(10, 1), headers: { 'content-length': 10 } });
       await until(() => load().waiting === 1, 'the small body to wait');
       c.write('0\r\n\r\n');
@@ -2431,7 +2431,7 @@ try {
       x.on('error', () => {});
       x.write(['/p1', '/p2', '/p3'].map((p) => `GET ${p} HTTP/1.1\r\nHost: api.github.com\r\n\r\n`).join(''));
       await waitFor('/p3');
-      assert.deepEqual(load(), { connections: 1, requests: 3, bytes: 0, forgeRequests: 3, upstreams: 0, waiting: 0 });
+      assert.deepEqual(load(), { connections: 1, requests: 3, bytes: 0, forgeRequests: 3, upstreams: 0, waiting: 0, held: 0 });
       x.destroy();
       await until(() => load().requests === 0 && load().forgeRequests === 0 && load().connections === 0, 'what the three held to be given back');
       for (const a of pending.splice(0)) a.resolve(okAnswer);

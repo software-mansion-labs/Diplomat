@@ -52,8 +52,12 @@ export const IMAGE_DIR = fileURLToPath(new URL('../../image/', import.meta.url))
 const CAPABILITIES = ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'FSETID', 'SETGID', 'SETUID'];
 
 // A relay runs one small program that needs no privilege, no writable file and no user.
+// Its sockets keep at most 16 KiB unread and 16 KiB unsent each: a job that leaves its
+// connections unread holds that much of the machine's kernel at the relay, which is
+// this machine's own on Linux.
 const RELAY_LIMITS = ['--cap-drop=ALL', '--security-opt', 'no-new-privileges', '--read-only', '--user', '65534:65534',
-  '--pids-limit', '64', '--memory', '256m', '--memory-swap', '256m', '--cpus', '1'];
+  '--pids-limit', '64', '--memory', '256m', '--memory-swap', '256m', '--cpus', '1',
+  '--sysctl', 'net.ipv4.tcp_rmem=4096 16384 16384', '--sysctl', 'net.ipv4.tcp_wmem=4096 16384 16384'];
 
 // What measures or clears a container's files: a throwaway container of the same image
 // with no network and no way to write its own root, and as root with the one or two

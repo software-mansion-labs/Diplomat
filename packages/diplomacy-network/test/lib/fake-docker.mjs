@@ -218,7 +218,7 @@ switch (command) {
 
   case 'create':
   case 'run': {
-    const { opts, rest } = parse(args, ['--name', '--label', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--storage-opt', '--add-host', '-v', '--network', '--network-alias', '--user', '--pid']);
+    const { opts, rest } = parse(args, ['--name', '--label', '--security-opt', '--pids-limit', '--memory', '--memory-swap', '--cpus', '--storage-opt', '--add-host', '-v', '--network', '--network-alias', '--user', '--pid', '--sysctl']);
     const name = opts['--name'][0];
     const networks = opts['--network'] || ['bridge'];
     for (const n of networks) if (n !== 'bridge' && n !== 'none' && !fs.existsSync(file('networks', `${n}.json`))) die(`docker: Error response from daemon: network ${n} not found`, 125);

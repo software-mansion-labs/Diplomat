@@ -29,15 +29,99 @@ if (!own) {
   process.exit(1);
 }
 
+// The hop to the broker carries each connection in frames (src/executor/hop.js says
+// how): the client's bytes go only as far as the broker has made room for them, and
+// the broker is told of each of its bytes once the client's socket has taken it. What
+// waits is kept by the client's own socket.
+const PREFACE = Buffer.from([0, 0x64, 0x6e, 1]);
+const DATA = 0;
+const END = 1;
+const ASK = 2;
+const CREDIT = 3;
+const ACK = 5;
+
 function carry(conn) {
   const up = net.connect({ host, port: Number(hostPort) });
   up.on('error', () => {});
+  const gone = () => { conn.destroy(); up.destroy(); };
   for (const s of [conn, up]) {
-    s.on('close', () => { conn.destroy(); up.destroy(); });
+    s.on('close', gone);
     s.setNoDelay(true);
   }
-  conn.pipe(up);
-  up.pipe(conn);
+  const frame = (type, n, payload) => {
+    const head = Buffer.allocUnsafe(5);
+    head[0] = type;
+    head.writeUInt32BE(n, 1);
+    up.cork();
+    up.write(head);
+    if (payload) up.write(payload);
+    up.uncork();
+  };
+  up.write(PREFACE);
+
+  let credit = 0;
+  let waiting = null; // read from the client, not yet sent
+  let asked = false;
+  let ended = false;
+  const send = () => {
+    while (waiting && credit > 0) {
+      const n = Math.min(credit, waiting.length);
+      frame(DATA, n, waiting.subarray(0, n));
+      credit -= n;
+      waiting = n < waiting.length ? waiting.subarray(n) : null;
+    }
+    if (waiting) {
+      if (!asked) frame(ASK, waiting.length);
+      asked = true;
+    } else if (ended) {
+      ended = false;
+      frame(END, 0);
+    } else conn.resume();
+  };
+  conn.on('data', (chunk) => {
+    conn.pause();
+    waiting = chunk;
+    send();
+  });
+  conn.on('end', () => {
+    ended = true;
+    if (!waiting) send();
+  });
+
+  let passed = 0; // of the broker's bytes, taken by the client's socket and not yet told
+  const told = () => {
+    frame(ACK, passed);
+    passed = 0;
+  };
+  const taken = (n) => () => {
+    if (passed === 0) setImmediate(told);
+    passed += n;
+  };
+  let kept = null;
+  up.on('data', (chunk) => {
+    const buf = kept ? Buffer.concat([kept, chunk]) : chunk;
+    let at = 0;
+    while (buf.length - at >= 5) {
+      const type = buf[at];
+      const n = buf.readUInt32BE(at + 1);
+      if (type === DATA) {
+        if (buf.length - at < 5 + n) break;
+        conn.write(buf.subarray(at + 5, at + 5 + n), taken(n));
+        at += 5 + n;
+        continue;
+      }
+      at += 5;
+      if (type === CREDIT) {
+        credit += n;
+        asked = false;
+        send();
+      } else if (type === END) conn.end();
+      else return gone();
+    }
+    kept = at < buf.length ? buf.subarray(at) : null;
+    return undefined;
+  });
+  conn.resume();
 }
 
 let allowance = BURST;

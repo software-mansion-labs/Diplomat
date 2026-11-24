@@ -413,6 +413,7 @@ try {
       ['network', 'create', '--internal', '--ipv6=false', '-o', 'com.docker.network.bridge.gateway_mode_ipv4=isolated', '--subnet', subnet, ...labels(alpha.pool, PEER_A), name],
       ['create', '--name', `${name}-relay`, '--label', `dn.relay=${name}`, '--label', `dn.broker=host.docker.internal:${port}`, ...labels(alpha.pool, PEER_A),
         '--cap-drop=ALL', '--security-opt', 'no-new-privileges', '--read-only', '--user', '65534:65534', '--pids-limit', '64', '--memory', '256m', '--memory-swap', '256m', '--cpus', '1',
+        '--sysctl', 'net.ipv4.tcp_rmem=4096 16384 16384', '--sysctl', 'net.ipv4.tcp_wmem=4096 16384 16384',
         '--network', name, '--network-alias', '127.0.0.1', '--add-host', 'host.docker.internal:host-gateway',
         imageTag(imageDir), 'node', '/opt/dn/relay.mjs', subnet, port, 'host.docker.internal', port],
       ['network', 'connect', 'bridge', `${name}-relay`],

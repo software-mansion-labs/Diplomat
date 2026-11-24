@@ -1,10 +1,12 @@
 // The proxy every container talks through. One listener per daemon, which a job
 // container reaches through its relay and no other way; a job's proxy URL carries that
-// job's own token, so every request names the job it belongs to. A connection is the
-// job's whose token its first request carries. The broker reads that first head itself,
-// off the socket: a connection that names no admitted job is answered 407 once and read
-// no further, and a CONNECT never reaches node's http parser. The other requests of a
-// job's connection reach the parser through a feed (feed.js), one head at a time.
+// job's own token, so every request names the job it belongs to. The relay carries each
+// connection in frames, which bound what all jobs hold of this machine's socket buffers
+// on the way (hop.js). A connection is the job's whose token its first request carries.
+// The broker reads that first head itself, off the socket: a connection that names no
+// admitted job is answered 407 once and read no further, and a CONNECT never reaches
+// node's http parser. The other requests of a job's connection reach the parser through
+// a feed (feed.js), one head at a time.
 //
 // What a job's request becomes (a host is read without its case and its trailing dot;
 // a CONNECT is the first request of its connection):
@@ -45,6 +47,7 @@ import {
   JOB_MODEL_BYTES, JOB_MODEL_REQUESTS, LOCAL_PORTS_PATH, RELAY_HOST,
 } from '../paths.js';
 import { createFeeder, edgeAfter, headEnd } from './feed.js';
+import { createHop, PREFACE } from './hop.js';
 import { carriesPlaceholder } from './llm.js';
 import { own } from './own-fault.js';
 import { clip, createSparingLog } from './sparing.js';
@@ -513,6 +516,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   // job has as many as it gets.
   function seat(job, socket) {
     if (job.clients.size >= limits.connections) return false;
+    hop.seat(socket, job);
     job.clients.set(socket, null);
     socket.once('close', () => job.clients.delete(socket));
     hold(job, socket);
@@ -822,6 +826,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   // ---- the listener a container sees
 
   const feed = createFeeder();
+  const hop = createHop();
   // The connections that are no job's: those whose first request head has not come, and
   // those refused, which are given a moment to read why. When there are as many as the
   // broker keeps, the one that has waited longest is closed for the next.
@@ -833,7 +838,12 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   // A connection's first request head is read here, off the socket, before node's
   // parser is given a byte of it: a connection that names no admitted job costs one
   // look at one head, one answer and nothing after, whatever it sends and however much.
-  const front = net.createServer({ allowHalfOpen: true, noDelay: true }, (socket) => {
+  // A connection that opens with the hop's PREFACE comes from a job's relay, in frames
+  // (hop.js), and is read from there on as the bytes the frames carry.
+  const front = net.createServer({ allowHalfOpen: true, noDelay: true }, (socket) => arrive(socket, true));
+  front.on('error', (e) => log('broker', `the listener: ${e.message}`));
+
+  function arrive(socket, raw) {
     socket.on('error', () => socket.destroy());
     socket.setTimeout(limits.idleMs, () => socket.destroy());
     if (strangers.size >= limits.strangers) {
@@ -850,6 +860,13 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     let length = 0;
     let edge = 0;
     const more = guard((chunk) => {
+      if (raw && length === 0 && chunk[0] === PREFACE[0]) {
+        socket.off('data', more);
+        strangers.delete(socket);
+        gotHead(socket);
+        socket.setTimeout(0);
+        return arrive(hop.framed(socket, chunk), false);
+      }
       const found = headEnd(chunk, edge);
       const end = found === -1 ? -1 : length + found;
       if ((end === -1 ? length + chunk.length : end) > HEAD_BYTES) return socket.destroy();
@@ -870,8 +887,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       return first(socket, length ? Buffer.concat([kept.subarray(0, length), chunk]) : chunk, end);
     }, socket);
     socket.on('data', more);
-  });
-  front.on('error', (e) => log('broker', `the listener: ${e.message}`));
+  }
 
   // What the broker itself goes by in a first head: the request line, and the token.
   // A CONNECT is answered from here. Any other request is node's to read, the bytes of
@@ -1319,15 +1335,16 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   }
 
   /// What a job holds of the broker now: `{ connections, requests, bytes, forgeRequests,
-  /// upstreams, waiting }` - its container's connections, its requests that have no
+  /// upstreams, waiting, held }` - its container's connections, its requests that have no
   /// answer yet, the bodies read whole, the forge requests in flight, the requests being
-  /// carried upstream, and the requests waiting their turn for any of those three. Null
-  /// for a job that is not admitted.
+  /// carried upstream, the requests waiting their turn for any of those three, and the
+  /// bytes its connections have on the hop from its relay (hop.js). Null for a job that
+  /// is not admitted.
   function load(runId) {
     const job = jobs.get(runId);
     if (!job) return null;
     const { gate } = job;
-    return { connections: job.clients.size, requests: job.asked, bytes: gate.bytes, forgeRequests: gate.slots, upstreams: gate.outs, waiting: gate.queue.size };
+    return { connections: job.clients.size, requests: job.asked, bytes: gate.bytes, forgeRequests: gate.slots, upstreams: gate.outs, waiting: gate.queue.size, held: hop.held(job) };
   }
 
   /// Starts listening, on `port` when given: the port the jobs of an earlier daemon were
