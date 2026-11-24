@@ -357,21 +357,23 @@ it is trimmed, is their name (`atlantis apply`, `terrateam apply`, `digger apply
 that line instead. Through GraphQL, such text is taken only from the request's variables.
 
 policy-bot, a GitHub app that gates merging, counts text as an approval or a disapproval from
-whoever wrote it, so a comment, a review or a note holds none of the words it counts by
-default: `:+1:`, `👍` (in any skin tone), `:-1:` and `👎`. A review is posted with a verdict
-only where the review policy lets it, and otherwise as a comment. On GitHub the machine also
-reads the policy policy-bot would read for a PR: `.policy.yml` on the branch the PR goes into,
-`policy.yml` in the owner's `.github` repository, and the file either of them names in another
-repository in its place. The body of a review or a comment on that PR holds no string of the
-policy's `comments` lists and matches none of its `comment_patterns` and
-`github_review_comment_patterns`, and the description of a draft PR a job opens matches none of
-its `body_patterns`. A policy file the machine cannot read or parse, or one over 256 KiB,
-refuses text on that repository's PRs, and the refusal names the file; so does text whose match
-against the policy's patterns takes more work than about 200 ms of it on a slow machine, which
-the machine counts as it matches, as Go does, in time linear in the text. policy-bot is the one
-such bot the machine reads: what a policy-bot server is set to itself (its own default words,
-another policy path), an owner's `.github` repository the machine's account cannot see, and any
-other bot that takes a comment's text for an approval go unseen.
+whoever wrote it, so a comment, a review or a note holds none of the words it counts by default:
+`:+1:`, `👍` (in any skin tone), `:-1:` and `👎`. A review is posted with a verdict only where the
+review policy lets it, and otherwise as a comment. On GitHub the machine also reads the policy
+policy-bot would read for a PR: `.policy.yml` on the branch the PR goes into, `policy.yml` in
+the owner's `.github` repository, and the file either of them names in another repository in its
+place. The body of a review or a comment on that PR holds no string of the policy's `comments`
+lists and matches none of its `comment_patterns` and `github_review_comment_patterns`, and the
+description of a draft PR a job opens matches none of its `body_patterns`. A policy file the
+machine cannot read or parse, one over 256 KiB, or one past the bounds on what its aliases and
+patterns come to (PROTOCOL.md) refuses text on that repository's PRs, and the refusal names the
+file; so does text whose match against the policy's strings and patterns, all matched together
+in one pass, takes more work than about 200 ms of it on a slow machine, which the machine counts
+as it matches, as Go does, in time linear in the text. One task reads at most 8 different
+policies. policy-bot is the one such bot the machine reads: what a policy-bot server is set to
+itself (its own default words, another policy path), an owner's `.github` repository the
+machine's account cannot see, and any other bot that takes a comment's text for an approval go
+unseen.
 
 Before it allows a push or a write, the machine asks the forge what the rule depends on: where
 the branch is, which branch is the default, which protection rules there are, who opened the

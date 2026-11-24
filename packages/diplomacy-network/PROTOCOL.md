@@ -1489,22 +1489,30 @@ through.
   of an issue and to its assignment alike. An answer that is
   neither an object nor a list of objects is not passed on.
 - `policy` has the forge asked for the policy-bot policy of the pool's repository for a
-  pull request into the base branch, read as policy-bot v1.42.1 reads it: `.policy.yml`
-  at that branch, and `policy.yml` on the default branch of the owner's `.github`
-  repository (where policy-bot looks without the first, or always when its server is so
-  set), each followed once to the file it names with `remote` (and `path`, `ref`) in
-  another repository. The text holds no string of a `comments` list and matches no Go
-  regular expression of `comment_patterns` or `github_review_comment_patterns` (a pull
-  request's body: of `body_patterns`), wherever in the files those lists stand; the
-  patterns are matched as Go matches them, in time linear in the text. A file this cannot
-  read - one of more than 256 KiB (262144 bytes), YAML it does not parse, a pattern Go
-  does not compile or one of more than 100000 compiled steps, a remote file the account
-  does not see - refuses the text and names the file; reading a file and compiling its
-  patterns take time linear in its size. Text is refused too, naming the files, when its
-  check would take more than 3000000 steps of work, at most about 200 ms on a loaded
-  laptop: one for each step of a pattern a thread of the match takes and for each halving
-  of a class's table it searches, counted over all the patterns, a pattern several rules
-  name matched once. A task asks once per base branch. What a policy-bot server is set to
+  pull request into the base branch, read as policy-bot v1.42.1 reads it: `.policy.yml` at
+  that branch, and `policy.yml` on the default branch of the owner's `.github` repository
+  (where policy-bot looks without the first, or always when its server is so set), each
+  followed once to the file it names with `remote` (and `path`, `ref`) in another
+  repository. The text holds no string of a `comments` list and matches no Go regular
+  expression of `comment_patterns` or `github_review_comment_patterns` (a pull request's
+  body: of `body_patterns`), wherever in the files those lists stand; the patterns are
+  matched as Go matches them, in time linear in the text. A file this cannot read - one of
+  more than 256 KiB (262144 bytes), YAML it does not parse or that nests collections more
+  than 100 deep, one of more than 250000 nodes (keys among them) or 4194304 characters
+  with each alias read in as a copy of what it names, a pattern Go does not compile,
+  patterns of more than 100000 compiled steps in all (a class's parts and the tables it
+  builds counted as steps), a remote file the account does not see - refuses the text and
+  names the file. Reading a file and compiling its patterns take time linear in its size,
+  each distinct pattern compiled once, and its distinct strings hold no more characters
+  than it has bytes. Text is refused too, naming the files, when its check would take more
+  than 3000000 steps of work, at most about 200 ms on a loaded laptop. The strings and
+  patterns of both files are matched as one program in one pass over the text, each
+  started only where its match can start, a string or pattern named twice matched once;
+  the work is one for each step of that program to set up, for each step a thread of the
+  match takes and for each halving of a class's table it searches. A task keeps the answer
+  for each base branch it asks about (`refs/heads/<branch>` being the branch), for at most
+  64 of them, and for each distinct text of the files: it reads at most 8, and a base
+  whose files hold another refuses the text, saying so. What a policy-bot server is set to
   itself (its own default words, another policy path) is not read, nor is a `.github`
   repository the account does not see (the forge answers it as missing), nor any other bot
   that counts a comment's text.

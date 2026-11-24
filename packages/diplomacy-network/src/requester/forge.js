@@ -4,6 +4,7 @@
 // file: not in a log line, not in an error, not in what goes back to the executor.
 
 import { execFile } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -132,7 +133,10 @@ function glabConfigToken(host) {
 /// credential is for. A lookup throws when the forge's answer does not settle its question.
 export function createForge({ log = () => {} } = {}) {
   const tokens = new Map(); // "forge host" -> { token, at }
-  const policies = new WeakMap(); // a task's state -> Map(base branch -> what `policy` answered)
+  // A task's state -> { bases: base branch -> what `policy` answered, texts: hash of the
+  // files' text -> the same }.
+  const policies = new WeakMap();
+  const [MAX_POLICIES, MAX_BASES] = [8, 64];
 
   async function token(forge, host) {
     const key = `${forge} ${host}`;
@@ -523,19 +527,32 @@ export function createForge({ log = () => {} } = {}) {
   /// or always when its server says so), each followed to the policy it names in another
   /// repository. Resolves to `{ comments, patterns, bodies, from }` (see `readPolicy`;
   /// `from` names the files), `{ fault }` when one of them cannot be read, or null when
-  /// there is none. One task's state keeps each answer for the rest of the task.
+  /// there is none. One task's state keeps each answer for the rest of the task, one for
+  /// each distinct text of the files, of which it holds at most 8: a base whose files hold
+  /// another is answered with a fault. `refs/heads/<branch>` is the branch.
   async function policy(target, repo, base, state) {
+    const branch = base.startsWith('refs/heads/') ? base.slice('refs/heads/'.length) : base;
     let kept = state && policies.get(state);
-    if (state && !kept) policies.set(state, (kept = new Map()));
-    if (kept?.has(base)) return kept.get(base);
+    if (state && !kept) policies.set(state, (kept = { bases: new Map(), texts: new Map() }));
+    if (kept?.bases.has(branch)) return kept.bases.get(branch);
     const read = (from, text) => {
       try { return readPolicy(text); } catch (err) { throw new Error(`${from} cannot be read here: ${err.message}`); }
     };
+    const keep = (found) => {
+      if (kept && kept.bases.size < MAX_BASES) kept.bases.set(branch, found);
+      return found;
+    };
+    const files = [[repo, '.policy.yml', branch], [`${repo.split('/')[0]}/.github`, 'policy.yml', '']];
+    const texts = [];
+    for (const [of, file, ref] of files) texts.push(await contents(target, of, file, ref));
+    const key = createHash('sha256').update(JSON.stringify(texts)).digest('hex');
+    if (kept?.texts.has(key)) return keep(kept.texts.get(key));
+    if (kept && kept.texts.size >= MAX_POLICIES) return { fault: `this task has had ${MAX_POLICIES} different policies read already, the most one task may` };
     const out = { comments: [], patterns: [], bodies: [], from: [] };
     let found = null;
     try {
-      for (const [of, file, ref] of [[repo, '.policy.yml', base], [`${repo.split('/')[0]}/.github`, 'policy.yml', '']]) {
-        const text = await contents(target, of, file, ref);
+      for (const [k, [of, file]] of files.entries()) {
+        const text = texts[k];
         if (text === null) continue;
         let from = `${of}/${file}`;
         let held = read(from, text);
@@ -550,7 +567,7 @@ export function createForge({ log = () => {} } = {}) {
           // policy-bot follows one reference, and reads a second as a policy it cannot parse.
           if (held.remote) continue;
         }
-        for (const list of ['comments', 'patterns', 'bodies']) out[list].push(...held[list]);
+        for (const list of ['comments', 'patterns', 'bodies']) out[list] = out[list].concat(held[list]);
         out.from.push(from);
         found = out;
       }
@@ -558,8 +575,8 @@ export function createForge({ log = () => {} } = {}) {
       if (err.message.startsWith('forge: ')) throw err;
       found = { fault: err.message };
     }
-    kept?.set(base, found);
-    return found;
+    kept?.texts.set(key, found);
+    return keep(found);
   }
 
   /// A GitLab project's numeric id, which `rulesFor` needs to allow the numeric spelling
