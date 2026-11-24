@@ -133,8 +133,8 @@ function glabConfigToken(host) {
 /// credential is for. A lookup throws when the forge's answer does not settle its question.
 export function createForge({ log = () => {} } = {}) {
   const tokens = new Map(); // "forge host" -> { token, at }
-  // A task's state -> { bases: base branch -> what `policy` answered, texts: hash of the
-  // files' text -> the same }.
+  // A claim -> { bases: base branch -> what `policy` answered, texts: hash of the files'
+  // text -> the same }.
   const policies = new WeakMap();
   const [MAX_POLICIES, MAX_BASES] = [8, 64];
 
@@ -527,13 +527,13 @@ export function createForge({ log = () => {} } = {}) {
   /// or always when its server says so), each followed to the policy it names in another
   /// repository. Resolves to `{ comments, patterns, bodies, from }` (see `readPolicy`;
   /// `from` names the files), `{ fault }` when one of them cannot be read, or null when
-  /// there is none. One task's state keeps each answer for the rest of the task, one for
-  /// each distinct text of the files, of which it holds at most 8: a base whose files hold
-  /// another is answered with a fault. `refs/heads/<branch>` is the branch.
-  async function policy(target, repo, base, state) {
+  /// there is none. A claim keeps each answer for as long as it lasts, one for each distinct
+  /// text of the files, of which it holds at most 8: a base whose files hold another is
+  /// answered with a fault. `refs/heads/<branch>` is the branch.
+  async function policy(target, repo, base, claim) {
     const branch = base.startsWith('refs/heads/') ? base.slice('refs/heads/'.length) : base;
-    let kept = state && policies.get(state);
-    if (state && !kept) policies.set(state, (kept = { bases: new Map(), texts: new Map() }));
+    let kept = claim && policies.get(claim);
+    if (claim && !kept) policies.set(claim, (kept = { bases: new Map(), texts: new Map() }));
     if (kept?.bases.has(branch)) return kept.bases.get(branch);
     const read = (from, text) => {
       try { return readPolicy(text); } catch (err) { throw new Error(`${from} cannot be read here: ${err.message}`); }
@@ -547,7 +547,7 @@ export function createForge({ log = () => {} } = {}) {
     for (const [of, file, ref] of files) texts.push(await contents(target, of, file, ref));
     const key = createHash('sha256').update(JSON.stringify(texts)).digest('hex');
     if (kept?.texts.has(key)) return keep(kept.texts.get(key));
-    if (kept && kept.texts.size >= MAX_POLICIES) return { fault: `this task has had ${MAX_POLICIES} different policies read already, the most one task may` };
+    if (kept && kept.texts.size >= MAX_POLICIES) return { fault: `this claim of the task has had ${MAX_POLICIES} different policies read already, the most one claim may` };
     const out = { comments: [], patterns: [], bodies: [], from: [] };
     let found = null;
     try {
@@ -613,11 +613,12 @@ export function createForge({ log = () => {} } = {}) {
 
   /// What `authorize` needs as its `ctx` for one task: the forge lookups bound to the
   /// pool's repository, the linked `checkout` the push check may read, and the task's
-  /// mutable `state`. `repo` is "owner/name" on GitHub and the project's full path on
-  /// GitLab. The lookups about a repository itself (`repository`, `branch`, `fetch`) take
-  /// another one's name where a check has the forge's word that it is the task account's
-  /// fork of the pool's.
-  function context({ forge, host, repo, checkout, state }) {
+  /// mutable `state`; `claim`, any object, stands for the claim the task is acted on under,
+  /// which keeps what `policy` reads. `repo` is "owner/name" on GitHub and the project's
+  /// full path on GitLab. The lookups about a repository itself (`repository`, `branch`,
+  /// `fetch`) take another one's name where a check has the forge's word that it is the task
+  /// account's fork of the pool's.
+  function context({ forge, host, repo, checkout, state, claim }) {
     const target = { forge, host };
     return {
       checkout,
@@ -632,7 +633,7 @@ export function createForge({ log = () => {} } = {}) {
       repository: (of = repo) => repository(target, of),
       branch: (ref, of = repo) => branch(target, of, ref),
       protects: (ref, of = repo) => protects(target, of, ref),
-      policy: (base) => policy(target, repo, base, state),
+      policy: (base) => policy(target, repo, base, claim),
       fetch: (what) => fetchInto(target, { ...what, repo: what.repo ?? repo }),
     };
   }

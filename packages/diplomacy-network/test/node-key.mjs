@@ -478,6 +478,13 @@ await check('what a task has used belongs to the task: every key issued for it c
   const w = createWorld({ seed: 61 });
   const all = await w.pool(['req', 'e1', 'e2'], { e1: { slots: 1 } });
   const [req, e1, e2] = all;
+  // What the requester keeps for a claim (the policies it read) is not the task's.
+  const claims = [];
+  const { context } = req.requester;
+  req.requester.context = (asked) => {
+    claims.push(asked.claim);
+    return context(asked);
+  };
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.net.until(() => e1.executor.jobOf(taskId), { what: 'the first job' });
   const first = e1.executor.jobOf(taskId);
@@ -500,6 +507,8 @@ await check('what a task has used belongs to the task: every key issued for it c
   assert.deepEqual(asked(), [1, 2, 3], 'the second key does not start from nothing');
   assert.deepEqual(w.stored(req, 'offers')[taskId].used, { asked: 3 }, 'it is kept with the offer');
   assert.deepEqual(Object.keys(key).sort(), ['capability', 'round', 'secret', 'seq'], 'and not with the key');
+  assert.equal(claims.length, 3);
+  assert.ok(claims[0] && claims[1] === claims[0] && claims[2] && claims[2] !== claims[0], 'one claim, then another');
 
   // What the rules counted is on disk before the request leaves: a machine that dies in between forgets nothing.
   const { perform } = req.requester;
