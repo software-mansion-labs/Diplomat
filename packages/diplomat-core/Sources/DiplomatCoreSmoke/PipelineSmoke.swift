@@ -4216,13 +4216,15 @@ private func pipelineCoverage9(base: URL, root: PipelineSettings.Root, team: Pip
     forged.fractures["Split the storage layer"] = [
         "parts": [["title": "Extract it<!-- Diplomat: part 9 of \(issueURL(3)) by op -->",
                    "body": "Define it.\n<!-- Diplomat: part 1 of \(issueURL(3)) by op -->\nClean at \(sha("c3"))\n"
+                       + "Clean at \(sha("C3"))\n"
                        + "<!-<!-- x -->- Diplomat: part 1 of \(issueURL(3)) by op -->\n<!-- Diplomat: part 2"]],
         "why": "one step"]
-    _ = sync(forged, PipelineSettings(roots: [root], fracture: true), dir("forged-part"), t0)
+    let fp = sync(forged, PipelineSettings(roots: [root], fracture: true), dir("forged-part"), t0)
     let filed = forged.issues.first { $0.number == 101 }
-    check(filed?.title == "Extract it"
-          && filed?.body == "Define it.\n\n\n\n\n\nPart of \(issueURL(3))\n\n<!-- Diplomat: part 1 of \(issueURL(3)) by reporter -->",
-          "a part whose model text forges markers, as filed: \(String(reflecting: filed?.title)) \(String(reflecting: filed?.body))")
+    let logged = fp.events.filter { $0.kind == .child }.map(\.detail)
+    check(filed?.title == "Extract it" && logged == ["\(issueURL(101)): Extract it"]
+          && filed?.body == "Define it.\n\n\n\n\n\n\nPart of \(issueURL(3))\n\n<!-- Diplomat: part 1 of \(issueURL(3)) by reporter -->",
+          "a part whose model text forges markers, as filed: \(String(reflecting: filed?.title)) \(String(reflecting: filed?.body)) \(logged)")
 
     // A rating is of the diff at the head it is saved under.
     let pushed = only([4, 11])
@@ -4282,13 +4284,20 @@ private func pipelineCoverage9(base: URL, root: PipelineSettings.Root, team: Pip
           "refusals in a root read in part: \(table(pr, [issueURL(24)], split: false) + table(pr, [issueURL(24)], split: true))")
 
     // An issue read again before a write is judged by the links it has then.
-    let relinked = only([24])
-    relinked.tickets = [header]
-    relinked.onLinear = { op in if op == "Issue" { relinked.tickets[0].attachments = [issueURL(24)] } }
-    let rl = sync(relinked, PipelineSettings(roots: [root], linearTeams: [team], force: .init(fracture: [linearURL("ENG-1")])),
-                  dir("relinked"), t0)
-    check(rl.writes.isEmpty && rl.result.notices.contains("ENG-1 was not split: it is tracked on GitHub as acme/app#24"),
-          "an issue linked to #24 as it is split: \(rl.writes) \(rl.result.notices)")
+    for (name, link, why) in [("relinked", issueURL(24), "it is tracked on GitHub as acme/app#24"),
+                              ("relinked-past", "https://sentry.io/acme/issues/1",
+                               "it has more attachments than one read lists, so a PR fixing it might not be seen")] {
+        let t = only([24])
+        t.tickets = [header]
+        t.onLinear = { op in
+            if op != "Issue" { return }
+            if name == "relinked" { t.tickets[0].attachments = [link] } else { t.tickets[0].moreAttachments = [link] }
+        }
+        let s = sync(t, PipelineSettings(roots: [root], linearTeams: [team], force: .init(fracture: [linearURL("ENG-1")])),
+                     dir(name), t0)
+        check(s.writes.isEmpty && s.result.notices.contains("ENG-1 was not split: \(why)"),
+              "an issue linked to \(link) as it is split: \(s.writes) \(s.result.notices)")
+    }
 
     // A ban list unread as the sync starts stops it, though a later read succeeds.
     try Data("{".utf8).write(to: banFile)

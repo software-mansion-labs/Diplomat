@@ -281,7 +281,8 @@ its commits, its base branch and the checks it requires read only for a PR nothi
 - it would close an issue no read judged: one this sync did not read, more than the closing
   references one read lists, one a closing word names that GitHub does not list among them, or a
   Linear issue of a team not tracked or that could not be read; with Linear teams set, also when
-  Linear cannot say which issues link it or an open GitHub issue it would close;
+  Linear cannot say which issues link it or an open GitHub issue it would close, or one that does is
+  of a team not tracked or could not be read;
 - its rating, or its diff floor, is not low/low;
 - it conflicts with its base or is behind it, or GitHub has not computed whether it can merge;
 - CI was read for an older commit, is still running, or failed; it has no checks (so a repo without

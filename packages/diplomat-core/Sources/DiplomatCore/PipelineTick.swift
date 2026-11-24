@@ -1534,7 +1534,7 @@ final class PipelineSync {
             if let url = child.url {
                 made.append(url)
                 state.splitting[e.id] = made
-                log(e.id, .child, "\(url): \(part.title)")
+                log(e.id, .child, "\(url): \(partTitle(part.title))")
                 persist()
             }
             if let why = child.failure {
@@ -1573,15 +1573,18 @@ final class PipelineSync {
     /// in one call, so a part made by a call that failed is a new child. The model wrote the
     /// part from untrusted text, so it is defanged, stripped of HTML comments and clean
     /// markers, its mentions and references made inert, and cut to the fracture schema's limits.
+    func fromModel(_ text: String) -> String {
+        PipelineRater.inert(CommsText.defang(PipelineRater.unmarked(text, cleanMarker: model.cleanMarker),
+                                             marker: PipelineRater.fence))
+    }
+
+    func partTitle(_ title: String) -> String { String(fromModel(CommsText.oneLine(title)).prefix(200)) }
+
     func createChild(_ i: Int, _ k: Int, _ part: (title: String, body: String)) -> (url: String?, failure: String?) {
         guard recheck(i) else { return (nil, "\(entries[i].item.label) could not be read again, or changed") }
         let e = entries[i]
         if let why = partRefusal(e) { return (nil, why) }
-        func fromModel(_ text: String) -> String {
-            PipelineRater.inert(CommsText.defang(PipelineRater.unmarked(text, cleanMarker: model.cleanMarker),
-                                                 marker: PipelineRater.fence))
-        }
-        let title = String(fromModel(CommsText.oneLine(part.title)).prefix(200))
+        let title = partTitle(part.title)
         let marker = PipelineRead.partMarker(k, of: e.id, by: banDimension(e))
         let body = String(fromModel(part.body).prefix(4000)) + "\n\nPart of \(e.id)\n\n\(marker)"
         func made(_ url: String) {
