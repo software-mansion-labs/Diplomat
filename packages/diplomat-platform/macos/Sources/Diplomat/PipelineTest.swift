@@ -36,8 +36,9 @@ enum PipelineTest {
         defer { AgentProbes.pinDump(nil) }
 
         let store = Store()
-        check("a launch: no pipeline ask queued before it starts until its first sync is applied",
-              !store.pipelineJudged)
+        check("a launch: each pipeline ask stored is stale until a sync judges it",
+              !store.pipelineJudged
+                  && store.pipelineStale == Set(store.requestedWork.filter(\.config.isPipeline).map(\.key)))
         // A headless Store still READS the operator's settings and their stored asks: pin
         // every one an assertion below depends on. Records live in `headlessJSON`.
         store.headlessJSON = [:]
@@ -65,6 +66,7 @@ enum PipelineTest {
               settings.rate && settings.fix && settings.fastTrack && settings.merge && !settings.fracture)
         check("the Linear teams", settings.linearTeams == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r")])
         check("no forces while none is asked for", settings.force == nil)
+        check("no item while no ask is held", settings.queued.isEmpty)
         check("Linear teams: the core's parse, keys in capitals, entries missing a part skipped",
               Store.pipelineTeams("eng=o/r; OPS = o/other\nBAD, =o/x, X=nope, Y=o/, Z=/r, ENG=o/second")
                   == [PipelineSettings.LinearTeam(key: "ENG", repo: "o/r"),
@@ -481,6 +483,42 @@ enum PipelineTest {
         await store.applyPipeline(result([review]), now: now)
         check("an agent on the PR holds its fast-track review", ids().isEmpty && store.loadPipelineAttempts().isEmpty)
         _ = AgentRegistry.save([])
+
+        print("\npipeline: the items a sync is told asks are held for")
+        store.savePipelineAttempts([:])
+        let sweptAsk = Store.RequestedWork(number: 90021, url: "https://github.com/o/r/pull/90021", author: "",
+                                           config: .review(ReviewConfig(target: .specific, me: "latekvo",
+                                                                        specificPR: "90021")), repo: "o/r")
+        store.requestOne(sweptAsk)
+        await store.applyPipeline(result([fix, fixLinear, review]), now: now)
+        if let task = store.queuedTasks.first(where: { $0.id == reviewKey }) { store.beginStarting(task) }
+        check("each pipeline ask's item, queued or starting, and no other ask's",
+              store.pipelineSettings.queued == [issue, linear, pr].sorted())
+        store.endStarting(reviewKey)
+        clearQueue()
+        let running = "https://github.com/o/r/issues/90030", ran = "https://github.com/o/r/issues/90031"
+        let openRecord = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: now, attempts: 1)
+        var concludedRecord = openRecord
+        concludedRecord.concludedAt = now
+        store.savePipelineAttempts(["pipeline-fix:\(running)": openRecord, "pipeline-fix:\(ran)": concludedRecord,
+                                    review.key: openRecord])
+        func run(_ url: String, _ kind: String, ledger: String = "", released: Bool = false,
+                 state: AgentState.RunState = .running) -> Store.AgentRow {
+            var record = AgentState.RunRecord(runID: "r-\(url)-\(ledger)-\(released)-\(state)",
+                                              dispatchedAt: now.timeIntervalSince1970, prURL: url, kind: kind)
+            record.ledgerKey = ledger
+            record.released = released
+            return Store.AgentRow(record: record, state: state, reason: "", window: nil)
+        }
+        store.pinAgentRows([run(running, AgentTaskQueue.issuesAction), run(ran, AgentTaskQueue.issuesAction),
+                            run(pr, AgentTaskQueue.reviewAction, ledger: "review-reply:\(pr)@aaa111"),
+                            run(pr, AgentTaskQueue.reviewAction, released: true),
+                            run(pr, AgentTaskQueue.reviewAction, state: .finished),
+                            run("https://github.com/o/r/issues/90032", AgentTaskQueue.issuesAction)])
+        check("…and of each agent running an open pipeline attempt, no monitor's, released, ended or concluded one's",
+              store.pipelineSettings.queued == [running])
+        store.pinAgentRows([])
+        store.savePipelineAttempts([:])
 
         print("\npipeline: the master switch")
         let sweep = Store.RequestedWork(number: 90020, url: "https://github.com/o/r/pull/90020", author: "",
@@ -907,10 +945,10 @@ enum PipelineTest {
         store.pipelineEnabled = false
         store.pipelineEnabled = true
         check("on again: none of the asks queued before starts until a sync begun since is applied",
-              store.isPaused(.pipeline) && store.drainableTasks.isEmpty && ids().count == 2)
+              store.drainableTasks.isEmpty && ids().count == 2)
         Store.pipelineTickOverride = { _ in PipelineTickResult(at: Date().addingTimeInterval(-60), items: items) }
         await store.runPipelineSyncOnce()
-        check("…nor once the last result is answered again", store.isPaused(.pipeline) && ids().count == 2)
+        check("…nor once the last result is answered again", store.drainableTasks.isEmpty && ids().count == 2)
         Store.pipelineTickOverride = { _ in
             store.pipelineEnabled = false
             store.pipelineEnabled = true
@@ -918,11 +956,11 @@ enum PipelineTest {
         }
         await store.runPipelineSyncOnce()
         check("…nor once one begun before it is, which withdraws nothing",
-              store.isPaused(.pipeline) && ids().sorted() == [fixKey, reviewKey].sorted())
+              store.drainableTasks.isEmpty && ids().sorted() == [fixKey, reviewKey].sorted())
         Store.pipelineTickOverride = { _ in result([fix]) }
         await store.runPipelineSyncOnce()
         check("…which withdraws what it no longer owes, then lets the rest start",
-              !store.isPaused(.pipeline) && ids() == [fixKey] && store.drainableTasks.map(\.id) == [fixKey])
+              ids() == [fixKey] && store.drainableTasks.map(\.id) == [fixKey])
         store.pipelineEnabled = false
         store.pipelineEnabled = true
         // `gh` names no login, so a poll stops at its viewer read: each one it logs is a poll.
@@ -956,6 +994,64 @@ enum PipelineTest {
         store.me = ghLogin
         if let tripwire { setenv("DIPLOMAT_GH", tripwire, 1) } else { unsetenv("DIPLOMAT_GH") }
         clearQueue()
+
+        print("\npipeline: an old ask starts once a sync judged its item")
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix, review]), now: now)
+        store.pipelineEnabled = false
+        store.pipelineEnabled = true
+        let fresh = PipelineEffect.fixIssue(repo: "o/r", number: 90040, url: "https://github.com/o/r/issues/90040",
+                                            author: "bob")
+        func unread(_ effects: [PipelineEffect], read: [String]) -> PipelineTickResult {
+            PipelineTickResult(at: Date(), items: items, effects: effects, unread: ["o/r"], read: read)
+        }
+        let drained = { store.drainableTasks.map(\.id).sorted() }
+        let earlier = PipelineEffect.fixIssue(repo: "o/r", number: 90041, url: "https://github.com/o/r/issues/90041",
+                                              author: "bob")
+        await store.applyPipeline(result([fix, review, earlier]), judged: false, now: now)
+        check("on again, the ask a sync begun before queues waits too",
+              ids().contains("issues:o/r#90041") && drained().isEmpty)
+        await store.applyPipeline(unread([fix, review, earlier, fresh], read: []), now: now)
+        check("…a sync since that read none of o/r: no older ask starts, the one it queued may",
+              ids().sorted() == [fixKey, reviewKey, "issues:o/r#90040", "issues:o/r#90041"].sorted()
+                  && drained() == ["issues:o/r#90040"])
+        await store.applyPipeline(unread([fix, review, earlier, fresh], read: [pr]), now: now)
+        check("…one that read #90011 lets its review start, the fix waiting still",
+              drained() == ["issues:o/r#90040", reviewKey].sorted())
+        await store.applyPipeline(result([fix, review, earlier, fresh]), now: now)
+        check("…and one that read o/r whole lets the rest start", drained() == ids().sorted())
+        let stored = store.requestedWork
+        Store.headlessLaunchJSON = store.headlessJSON
+        let relaunched = Store()
+        Store.headlessLaunchJSON = nil
+        check("a relaunch: each ask stored is stale until a sync judges it",
+              relaunched.requestedWork.map(\.key) == stored.map(\.key)
+                  && relaunched.pipelineStale == Set(stored.map(\.key)) && !relaunched.pipelineJudged)
+        relaunched.headlessJSON = store.headlessJSON
+        relaunched.usernameOverride = "latekvo"
+        relaunched.me = "latekvo"
+        relaunched.queueAutoRun = true
+        relaunched.pinRoots(store.roots)
+        relaunched.pipelineEnabled = true
+        relaunched.pipelineFix = true
+        relaunched.pipelineFastTrack = true
+        relaunched.offerRequestedWork()
+        relaunched.commitQueue()
+        await relaunched.applyPipeline(unread([fix, review, earlier, fresh], read: []), now: now)
+        let heldThen = relaunched.drainableTasks.map(\.id)
+        await relaunched.applyPipeline(result([fix, review, earlier, fresh]), now: now)
+        check("…a sync that read none of o/r starts none of them, one that read it whole all",
+              relaunched.queuedTasks.count == 4 && heldThen.isEmpty
+                  && relaunched.drainableTasks.map(\.id).sorted() == stored.map(\.key).sorted())
+        store.pipelineEnabled = false
+        store.pipelineEnabled = true
+        store.pipelineFix = false
+        store.pipelineFix = true
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(unread([fix], read: []), now: now)
+        check("an old ask withdrawn, then queued again by a sync since: it may start", drained().contains(fixKey))
+        clearQueue()
+        store.savePipelineAttempts([:])
         let lapsed = ReviewAttempt(requestedAt: "fix", lastDispatchedAt: Date().addingTimeInterval(-4 * 3600),
                                    attempts: 2)
         let flips: [(String, ReferenceWritableKeyPath<Store, Bool>)] = [
@@ -1246,6 +1342,7 @@ enum PipelineTest {
         store.pipelineLinearTeamsRaw = "ENG=o/r, OPS=g/third"
         check("a Linear issue's code can be read when its team names a GitHub root; a GitHub item's always",
               store.pipelineRooted(eng) && !store.pipelineRooted(ops) && store.pipelineRooted(items[0]))
+        check("…and Rate now is offered on it only then", store.pipelineCanRate(eng) && !store.pipelineCanRate(ops))
         store.pipelineLinearTeamsRaw = "ENG=o/r"
         var theirPR = item(pr, .pr, author: "carol")
         theirPR.writable = false
@@ -1398,8 +1495,19 @@ enum PipelineTest {
         defer { try? FileManager.default.removeItem(at: banned) }
 
         Store.pipelineTickOverride = nil
-        Store.pipelineTickLive = true
-        defer { Store.pipelineTickLive = false }
+        // Each sync's `queued` beside what is held as it starts: the asks queued or starting,
+        // and each running agent's item whose attempt is open.
+        var told: [(queued: [String], held: [String])] = []
+        var live = store
+        Store.pipelineTickLive = { settings in
+            let open = Set(live.loadPipelineAttempts().filter { $0.value.concludedAt == nil }.keys)
+            let running = live.agentRows.filter { row in
+                row.state == .running && ["pipeline-fix:", "pipeline-review:"].contains { open.contains($0 + row.record.prURL) }
+            }.map(\.record.prURL)
+            let asked = (live.queuedTasks + live.startingTasks).filter { $0.job.counter == .pipeline }.compactMap(\.job.prURL)
+            told.append((settings.queued, Set(asked + running).sorted()))
+        }
+        defer { Store.pipelineTickLive = nil }
         store.usernameOverride = "op"
         store.me = ""
         store.pinRoots([PRRef.LocalRepo(owner: "acme", repo: "app",
@@ -1802,7 +1910,7 @@ enum PipelineTest {
         print("  sync 28 unread: \(store.pipelineResult?.unread ?? []), read \(readNow.count), "
               + "#20, #21 read \(readCapped), queue \(ids())")
         check("sync 28, acme/app read past its cap: #20, read and assigned away, is withdrawn; #21, past the cap, stays",
-              store.pipelineResult?.unread == ["acme/app"] && readCapped == [true, false]
+              store.pipelineResult?.unread == ["acme/app"] && readCapped[0]
                   && !ids().contains(readKey) && ids().contains(pastKey))
         store.pipelineRate = true
 
@@ -1818,6 +1926,89 @@ enum PipelineTest {
                   && item(12, "pull").map(store.pipelineCanRate) == true
                   && item(4, "pull").map(store.pipelineCanRate) == false && twelveMe == "op")
         store.usernameOverride = "op"
+
+        // A relaunch with old asks held, acme/app still read past its cap.
+        let pastURL = "https://github.com/acme/app/issues/21"
+        let oldAsks = store.requestedWork.filter(\.config.isPipeline).map(\.key).sorted()
+        Store.headlessLaunchJSON = store.headlessJSON
+        let reborn = Store()
+        Store.headlessLaunchJSON = nil
+        reborn.headlessJSON = store.headlessJSON
+        reborn.usernameOverride = "op"
+        reborn.me = ""
+        reborn.queueAutoRun = true
+        reborn.pinRoots([PRRef.LocalRepo(owner: "acme", repo: "app", path: checkout)])
+        reborn.pipelineEnabled = true
+        reborn.pipelineRate = true
+        reborn.pipelineFix = true
+        reborn.pipelineFastTrack = true
+        reborn.pipelineMerge = true
+        reborn.pipelineFracture = false
+        reborn.pipelineLinearTeamsRaw = store.pipelineLinearTeamsRaw
+        reborn.offerRequestedWork()
+        reborn.commitQueue()
+        live = reborn
+        check("a relaunch: the asks stored are queued again, none of them free to start before a sync",
+              reborn.queuedTasks.map(\.id).sorted() == oldAsks && oldAsks.contains(pastKey) && reborn.drainableTasks.isEmpty)
+        /// Each of `oldAsks` free to start, and each `reborn`'s last sync judged: in a root it
+        /// read whole, or by reading it.
+        func relaunched() -> (free: [String], judged: [String]) {
+            let unread = Set(reborn.pipelineResult?.unread ?? []), read = Set(reborn.pipelineResult?.read ?? [])
+            let asks = reborn.requestedWork.filter { oldAsks.contains($0.key) }
+            return (reborn.drainableTasks.map(\.id).filter(oldAsks.contains).sorted(),
+                    asks.filter { !unread.contains($0.repo.lowercased()) || read.contains($0.url) }.map(\.key).sorted())
+        }
+        func againSync() async {
+            try? await Task.sleep(nanoseconds: 1_100_000_000)
+            truncate()
+            await reborn.runPipelineSyncOnce()
+        }
+        patch { $0["itemErrors"] = true }
+        await againSync()
+        let after1 = relaunched()
+        print("  relaunched sync 1: unread \(reborn.pipelineResult?.unread ?? []), free \(after1.free), "
+              + "judged \(after1.judged), queue \(reborn.queuedTasks.map(\.id).sorted())")
+        check("…its first sync, #21 left unread past the cap: #21 does not start, each old ask it read may",
+              reborn.pipelineResult?.unread == ["acme/app"] && !after1.free.contains(pastKey) && after1.free == after1.judged
+                  && !after1.free.isEmpty)
+        patch { $0["itemErrors"] = nil }
+        await againSync()
+        let after2 = relaunched()
+        let readPast = reborn.pipelineResult?.read.contains(pastURL) == true
+        print("  relaunched sync 2: #21 read \(readPast), free \(after2.free)")
+        check("…the next, #21 read by id or not: it starts only once read",
+              after2.free == after2.judged && after2.free.contains(pastKey) == readPast)
+        patch { github in
+            github["issues"] = (github["issues"] as? [[String: Any]] ?? []).filter { ($0["number"] as? Int ?? 0) < 1000 }
+        }
+        await againSync()
+        let after3 = relaunched()
+        print("  relaunched sync 3: unread \(reborn.pipelineResult?.unread ?? []), free \(after3.free)")
+        check("…and one that read acme/app whole lets every old ask still queued start",
+              reborn.pipelineResult?.unread == [] && after3.free.contains(pastKey)
+                  && after3.free == reborn.queuedTasks.map(\.id).filter(oldAsks.contains).sorted())
+        live = store
+
+        // #12's review starting, then running: its spawn took the ask, its agent holds the PR.
+        if let task = store.queuedTasks.first(where: { $0.id == twelveKey }) { store.beginStarting(task) }
+        await sync()
+        let whileStarting = told.last
+        store.endStarting(twelveKey)
+        store.requestedWork.removeAll { $0.key == twelveKey }
+        store.pinAgentRows([Store.AgentRow(record: AgentState.RunRecord(runID: "r-run", dispatchedAt: Date().timeIntervalSince1970,
+                                                                        prURL: twelve, kind: AgentTaskQueue.reviewAction),
+                                           state: .running, reason: "", window: nil)])
+        await sync()
+        let whileRunning = told.last
+        print("  syncs 30, 31 told: \(whileStarting?.queued ?? []), \(whileRunning?.queued ?? [])")
+        check("syncs 30 and 31: each is told of #12 while its review is starting, then running, which is not queued again",
+              whileStarting?.queued.contains(twelve) == true
+                  && whileRunning?.queued.contains(twelve) == true && !ids().contains(twelveKey))
+        store.pinAgentRows([])
+
+        print("  told: \(told.map(\.queued))")
+        check("each of the 34 syncs is told exactly the items asks are held for, queued, starting or running",
+              told.count == 34 && told.allSatisfy { $0.queued == $0.held })
         let remaining = ids()
 
         store.pipelineEnabled = false
