@@ -726,7 +726,14 @@ export function proseFault(text) {
   const said = text.slice(found.index + (found[1] ?? '').length).trimStart().match(/^\S{1,40}/)[0];
   return `holds ${JSON.stringify(said)}, which the forge or a bot on it would take for a command: ${REWORD}`;
 }
+/// The line the requester side writes first in each comment, review and note a task
+/// posts. Both forges hide it when they render the text, and a bot that acts on a
+/// comment's first word (Atlantis, Terrateam, Digger) reads it instead of the task's.
+export const COMMENT_MARK = '<!-- sent through the Diplomacy Network -->';
+/// `text` with `COMMENT_MARK` as its first line; empty text stays empty.
+export const marked = (text) => (text === '' ? text : `${COMMENT_MARK}\n${text}`);
 const PROSE = { prose: true };
+const COMMENT = { prose: true, comment: true };
 
 // What each mutation's `input` may hold. A key the table does not name is refused, so a
 // field that changes what the mutation does (an `event`, a second target) cannot ride
@@ -735,7 +742,8 @@ const PROSE = { prose: true };
 //   own       it was written by the identity the task acts as
 //   pending   it is part of a review that has not been submitted
 //   repo      it is the pool's repository
-// `free` is text or layout the task decides, `prose` text that has no `proseFault`. `created` is a branch the task created,
+// `free` is text or layout the task decides, `prose` text that has no `proseFault`, and
+// `comment` prose that is sent `marked`. `created` is a branch the task created,
 // from which it has opened no pull request: "branch", or "account:branch" for one in
 // that account's fork.
 // `assignees` is the issue's whole new assignee list, which may differ from the list the
@@ -746,13 +754,13 @@ const MUTATIONS = {
   github: {
     addPullRequestReviewThread: {
       pullRequestReviewId: { node: REVIEW, item: 'pr', own: true, pending: true, required: true },
-      path: 'free', line: 'free', side: 'free', startLine: 'free', startSide: 'free', body: PROSE, subjectType: 'free',
+      path: 'free', line: 'free', side: 'free', startLine: 'free', startSide: 'free', body: COMMENT, subjectType: 'free',
       clientMutationId: 'free',
     },
     addPullRequestReviewThreadReply: {
       pullRequestReviewThreadId: { node: THREAD, item: 'pr', required: true },
       pullRequestReviewId: { node: REVIEW, item: 'pr', own: true, pending: true },
-      body: PROSE, clientMutationId: 'free',
+      body: COMMENT, clientMutationId: 'free',
     },
     deletePullRequestReviewComment: {
       id: { node: ['PullRequestReviewComment'], item: 'pr', own: true, pending: true, required: true },
@@ -768,7 +776,7 @@ const MUTATIONS = {
     },
     addComment: {
       subjectId: { node: ['Issue'], item: 'issue', required: true },
-      body: PROSE, clientMutationId: 'free',
+      body: COMMENT, clientMutationId: 'free',
     },
     replaceActorsForAssignable: {
       assignableId: { node: ['Issue'], item: 'issue', required: true },
@@ -827,6 +835,10 @@ function checkMutation(doc, op, vars, spec, lookups, effects) {
     } else if (rule.prose) {
       const fault = proseFault(typeof val === 'object' ? val.blockString : val);
       if (fault) refuse(`graphql: "${key}" ${fault}`);
+      if (rule.comment) {
+        const [holder, name] = textHolder(field, key, vars);
+        holder[name] = marked(holder[name]);
+      }
     } else if (val !== rule.equals) {
       refuse(`graphql: ${field.name} needs "${key}" to be ${JSON.stringify(rule.equals)}`);
     }
@@ -837,6 +849,16 @@ function checkMutation(doc, op, vars, spec, lookups, effects) {
   // The payload is a read like any other: it starts on the object the mutation touched.
   if (field.selections) walk(field.selections, 'in', 2, new Set());
   return blanks;
+}
+
+// Where the request's variables hold the text of input member `key`, as [object, name]:
+// the mark is written there, so comment text written into the document is refused.
+function textHolder(field, key, vars) {
+  const input = field.args[0].value;
+  if (input.k === 'var' && Object.hasOwn(vars, input.name)) return [vars[input.name], key];
+  const given = input.k === 'obj' ? input.fields.find((f) => f.name === key).value : undefined;
+  if (given?.k === 'var' && Object.hasOwn(vars, given.name)) return [vars, given.name];
+  return refuse(`graphql: "${key}" is comment text, which is sent in a variable ("${key}: $${key}", and "variables": { "${key}": "..." }), not written in the query`);
 }
 
 /// Whether a resolved node belongs to the task's item: `item` is `{ type: 'pr'|'issue',

@@ -98,9 +98,11 @@
 // - GitLab gets no GraphQL mutation: every write its prompts ask for has a REST route
 //   whose path pins the project and the merge request or issue, and a GitLab global id
 //   cannot be traced back to its merge request in one confined query.
-// - Text the task writes may hold no line starting with "/", "@" or "bors": GitLab runs
-//   such a line as a quick action in the author's name (/merge is one), and comment bots
-//   on GitHub take it for a command from the author (/approve, bors r+, @dependabot merge).
+// - Text the task writes is `prose` (PROTOCOL.md): no "@" before a name, no "bors" and no
+//   line starting with "/" and a word, which GitLab runs as a quick action in the author's
+//   name and bots on either forge take for a command from the author (/merge, bors r+,
+//   @dependabot merge). A comment, a review or a note is sent with a hidden first line
+//   (`COMMENT_MARK`), so a bot that acts on a comment's first word (atlantis apply) does not.
 // - `GET /user` answers with a handful of public members only (`pick`): agents ask it
 //   who they are, and the full answer holds the requester's private profile.
 // - A GitHub Enterprise Server gets github.com's rules on its one host, and one more:
@@ -235,6 +237,7 @@ function pullScope(kind, item, me, options) {
 
 const PULL_KINDS = ['review', 'review-own', 'conflicts'];
 const PROSE = { prose: true };
+const COMMENT = { prose: true, comment: true };
 
 // Whose CI runs a kind reads beside those of the branches the task itself made: the ones
 // of the head branch of a pull request it covers (`head`), or of the default branch
@@ -286,13 +289,13 @@ function github({ kind, options, target, item, me }) {
     graphqlItem = scope;
     if (kind === 'review') {
       const events = options.verdict === true ? ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] : ['COMMENT'];
-      rules.push(api('POST', `${repo}/pulls/${n}/reviews`, { ...asked, body: { commit_id: 'free', body: PROSE, comments: { proseIn: 'body' }, event: { oneOf: events } } }));
-      rules.push(api('POST', `${repo}/pulls/${n}/reviews/*/events`, { ...asked, body: { event: { oneOf: events, required: true }, body: PROSE } }));
+      rules.push(api('POST', `${repo}/pulls/${n}/reviews`, { ...asked, body: { commit_id: 'free', body: COMMENT, comments: { proseIn: 'body', comment: true }, event: { oneOf: events } } }));
+      rules.push(api('POST', `${repo}/pulls/${n}/reviews/*/events`, { ...asked, body: { event: { oneOf: events, required: true }, body: COMMENT } }));
       rules.push(api('DELETE', `${repo}/pulls/${n}/reviews/*`, asked));
       rules.push(api('DELETE', `${repo}/pulls/comments/*`, { comment: { segment: under + 5, repo: target.repo, item: scope, own: true, pending: true, identity: me } }));
       mutations.push('addPullRequestReviewThread', 'addPullRequestReviewThreadReply', 'deletePullRequestReviewComment');
     } else if (kind === 'review-own') {
-      rules.push(api('POST', `${repo}/pulls/${n}/comments/*/replies`, { comment: { segment: under + 6, pullSegment: under + 4, repo: target.repo, item: scope }, body: { body: PROSE } }));
+      rules.push(api('POST', `${repo}/pulls/${n}/comments/*/replies`, { comment: { segment: under + 6, pullSegment: under + 4, repo: target.repo, item: scope }, body: { body: COMMENT } }));
       mutations.push('addPullRequestReviewThreadReply', 'resolveReviewThread');
       if (options.markReady === true) mutations.push('markPullRequestReadyForReview');
     }
@@ -308,7 +311,7 @@ function github({ kind, options, target, item, me }) {
         mutations.push('replaceActorsForAssignable', 'updateIssue');
       }
       if (options.comment !== false) {
-        rules.push(api('POST', `${issue}/comments`, { body: { body: PROSE } }));
+        rules.push(api('POST', `${issue}/comments`, { body: { body: COMMENT } }));
         mutations.push('addComment');
       }
     }
@@ -398,20 +401,20 @@ function gitlab({ kind, options, target, item, me }) {
   if (PULL_KINDS.includes(kind)) {
     if (!scope) return null;
     if (kind === 'review') {
-      each('POST', `${mr}/draft_notes`, { ...asked, body: { note: PROSE, position: 'free', commit_id: 'free', in_reply_to_discussion_id: 'free' } });
-      each('PUT', `${mr}/draft_notes/*`, { ...asked, body: { note: PROSE, position: 'free' } });
+      each('POST', `${mr}/draft_notes`, { ...asked, body: { note: COMMENT, position: 'free', commit_id: 'free', in_reply_to_discussion_id: 'free' } });
+      each('PUT', `${mr}/draft_notes/*`, { ...asked, body: { note: COMMENT, position: 'free' } });
       each('DELETE', `${mr}/draft_notes/*`, asked);
       // glab sends "{}" where a route takes no parameters; `body: {}` allows that and no member.
       each('PUT', `${mr}/draft_notes/*/publish`, { ...asked, body: {} });
       each('POST', `${mr}/draft_notes/bulk_publish`, { ...asked, body: {} });
       // The summary a GitHub review carries in its own body is a note of its own here.
-      each('POST', `${mr}/notes`, { ...asked, body: { body: PROSE } });
+      each('POST', `${mr}/notes`, { ...asked, body: { body: COMMENT } });
       if (options.verdict === true) {
         each('POST', `${mr}/approve`, { ...asked, body: { sha: 'free' } });
         each('POST', `${mr}/unapprove`, { ...asked, body: {} });
       }
     } else if (kind === 'review-own') {
-      each('POST', `${mr}/discussions/*/notes`, { ...asked, body: { body: PROSE } });
+      each('POST', `${mr}/discussions/*/notes`, { ...asked, body: { body: COMMENT } });
       // GitLab reads `resolved` from the query or from the body; one of them must say it.
       each('PUT', `${mr}/discussions/*`, { ...asked, query: { resolved: { equals: 'true', optional: true } }, body: { resolved: { oneOf: [true, 'true'], required: true } } });
       if (options.markReady === true) each('PUT', mr, { ...asked, body: { title: PROSE } });
@@ -422,7 +425,7 @@ function gitlab({ kind, options, target, item, me }) {
     if (item.type === 'issue') {
       const issue = `/issues/${item.number}`;
       if (options.noPRs !== true && options.assign !== false) each('PUT', issue, { body: { assignee_ids: { assignees: item.number, required: true } }, ...ISSUE_BLANK });
-      if (options.comment !== false) each('POST', `${issue}/notes`, { body: { body: PROSE } });
+      if (options.comment !== false) each('POST', `${issue}/notes`, { body: { body: COMMENT } });
     }
     if (options.noPRs !== true) {
       push({ refs: ['refs/heads/**'], create: 1 });

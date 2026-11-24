@@ -8,7 +8,7 @@
 // decides, alone - its pins and deep checks are not retried against a later rule. What
 // matches nothing is refused.
 
-import { checkGraphql, itemMismatch, proseFault, sameButSelf, searchConfined } from './graphql.js';
+import { checkGraphql, itemMismatch, marked, proseFault, sameButSelf, searchConfined } from './graphql.js';
 import { branchLabel, checkAdvertise, checkFork, checkPush, pushReport } from './receivepack.js';
 
 const METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
@@ -289,11 +289,13 @@ async function checkBodyPins(spec, req, ctx, effects, given, fork) {
     if (pin.prefix !== undefined && !(typeof value === 'string' && value.startsWith(pin.prefix))) refuse(`the body member "${key}" must start with "${pin.prefix}"`);
     const fault = pin.prose ? proseFault(value) : null;
     if (fault) refuse(`the body member "${key}" ${fault}`);
+    if (pin.prose && pin.comment) body[key] = marked(value);
     if (pin.proseIn) {
       if (!Array.isArray(value)) refuse(`the body member "${key}" is not a list`);
       value.forEach((item, i) => {
         const fault = proseFault(item?.[pin.proseIn]);
         if (fault) refuse(`the body member "${key}", entry ${i + 1}: its "${pin.proseIn}" ${fault}`);
+        if (pin.comment) item[pin.proseIn] = marked(item[pin.proseIn]);
       });
     }
     if (pin.created) effects.push(pin.created === 'label' ? { head: value } : { pull: value, fork });

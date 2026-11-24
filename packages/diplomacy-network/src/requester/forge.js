@@ -24,6 +24,15 @@ const USER_AGENT = 'diplomacy-network';
 const hostName = (value) => {
   try { return new URL(value.includes('://') ? value : `https://${value}`).host; } catch { return ''; }
 };
+// The host a GITLAB_REPO names, as glab reads one: in a URL (`https://` or `git@host:`), or
+// first of three or more parts when it holds a "." or ":"; '' for a bare GROUP/REPO.
+const repoHost = (value) => {
+  const scp = /^[^@/:]+@([^/:]+):/.exec(value);
+  if (scp) return hostName(scp[1]);
+  if (value.includes('://')) return hostName(value);
+  const [first, ...rest] = value.split('/');
+  return rest.length >= 2 && /[.:]/.test(first) ? hostName(first) : '';
+};
 const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const blanked = (value, names) => {
   if (Array.isArray(value)) return value.map((v) => blanked(v, names));
@@ -136,13 +145,13 @@ export function createForge({ log = () => {} } = {}) {
     } else if (forge === 'gitlab') {
       // glab hands these three to its default host, GITLAB_REPO's and every host its config
       // holds (glab 1.128.0, internal/config); they are taken as the default host's alone, the
-      // one `glab config get host` names. glab's help says GITLAB_URL names a host too, which
-      // its code does not read, so a GITLAB_URL naming another host leaves them nobody's.
+      // one `glab config get host` names, and as nobody's when GITLAB_REPO or GITLAB_URL
+      // (which glab's help says names a host, though its code does not read it) names another.
       const { GITLAB_TOKEN, GITLAB_ACCESS_TOKEN, OAUTH_TOKEN, ...bare } = process.env;
       const glab = async (args, vars) => (await run(GLAB_BIN, args, vars)).stdout.trim();
       const meant = hostName(await glab(['config', 'get', 'host'], process.env));
-      const url = process.env.GITLAB_URL;
-      const env = meant === host && (!url || hostName(url) === meant) ? process.env : bare;
+      const named = [hostName(process.env.GITLAB_URL ?? ''), repoHost(process.env.GITLAB_REPO ?? '')].filter(Boolean);
+      const env = meant === host && named.every((other) => other === meant) ? process.env : bare;
       // glab gives a host it holds nothing for its config's top-level token: one it gives
       // a host that cannot exist too is not taken.
       const ask = (of, vars) => glab(['config', 'get', 'token', '--host', of], vars);
