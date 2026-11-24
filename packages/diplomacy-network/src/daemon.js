@@ -657,12 +657,19 @@ const upkeep = [
   }],
 ];
 
+// A look an earlier sweep is still at is passed over, not begun again beside it: the
+// two would only ask the engine the same, each slowing the other. The other looks go on.
+const looking = new Set();
 async function sweep() {
   for (const [what, look] of upkeep) {
+    if (looking.has(what)) continue;
+    looking.add(what);
     try {
       await look();
     } catch (err) {
       log(`upkeep of ${what} failed: ${err?.stack ?? err}`);
+    } finally {
+      looking.delete(what);
     }
   }
 }

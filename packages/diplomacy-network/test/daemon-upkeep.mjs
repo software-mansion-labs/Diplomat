@@ -1,10 +1,10 @@
 // What the daemon does on its own, with nobody asking: it starts its transport again
-// after a start that failed, sweeps and prunes on its timers, forgets runs and mirrors
-// that are old, keeps its state directory to the operator, survives a fault in an
-// event's handler and gives up on one that keeps coming back, refuses requests while it
-// stops, takes what it made out of docker when the network is switched off, holds what a
-// job says it took of the model to what it carried there for the job, and keeps what a
-// job has spent of the model for the daemon after it.
+// after a start that failed, sweeps and prunes on its timers, never two of one look at
+// once, forgets runs and mirrors that are old, keeps its state directory to the operator,
+// survives a fault in an event's handler and gives up on one that keeps coming back,
+// refuses requests while it stops, takes what it made out of docker when the network is
+// switched off, holds what a job says it took of the model to what it carried there for
+// the job, and keeps what a job has spent of the model for the daemon after it.
 // Real daemon processes on scratch directories, with the stand-in docker, tor, forge
 // and agent.
 // Run: node test/daemon-upkeep.mjs
@@ -214,6 +214,27 @@ try {
     age(mirror, 25);
     await until('the mirror of the pool it left removed', () => !exists(mirror));
     await up.kill();
+  });
+
+  await check('a look of the sweep that the engine keeps waiting is not begun again beside itself while it waits, the sweep\'s other looks go on meanwhile, and it goes on once the engine answers', async () => {
+    const m = await bench.machine('sl', { env: { DN_SWEEP_MS: '200' } }).start();
+    await m.linked();
+    await done(m, await own(m, 'pr-1', 'say done'));
+    const mirror = path.join(m.base, 'mirrors', names(path.join(m.base, 'mirrors'))[0]);
+    await moreSweeps(m);
+    // The engine does not answer the two looks that list the containers.
+    const hold = path.join(m.dockerDir, 'hold-ps');
+    fs.writeFileSync(hold, '');
+    const from = sweeps(m);
+    const aged = Date.now() / 1000 - 3600;
+    fs.lutimesSync(mirror, aged, aged);
+    await until('the mirror of the linked pool touched by a later look', () => fs.statSync(mirror).mtimeMs > aged * 1000 + 1800000);
+    // Many of the sweep's intervals.
+    await moreTicks(m);
+    assert.ok(sweeps(m) <= from + 2, `the containers were listed ${sweeps(m) - from} times while the engine did not answer`);
+    fs.rmSync(hold);
+    await moreSweeps(m);
+    await m.kill();
   });
 
   await check('an exception in an event\'s handler is logged once with its stack and the daemon goes on; the same one five times within a minute ends it with a failure, to be started again', async () => {
