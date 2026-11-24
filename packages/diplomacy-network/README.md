@@ -797,8 +797,9 @@ four things and starts the job:
     and the model's together, whatever number of hosts they name, each down one
     connection out. A connection to the model provider that is kept for the job's
     next request is beside those, and there are never more than 32 of them; a tunnel
-    is one of the job's connections and has one connection out. So a job has at most
-    320 connections out at a time;
+    is one of the job's connections and has one connection out, and keeps its place
+    among them once the job has closed it while that connection out is held for what it
+    was sent (below). So a job has at most 320 connections out at a time;
   - `DN_JOB_BUFFER_BYTES` (48 MiB) of request bodies read whole at a time, which is
     what goes to the requester or through a credential swap;
   - `DN_JOB_FORGE_REQUESTS` (4) forge requests in flight, each holding an answer of at
@@ -813,17 +814,21 @@ four things and starts the job:
   What the connections of all jobs have on the hop from their relays to the broker is
   counted at once (`src/executor/hop.js`): room granted to a relay for bytes that have
   not come, and bytes sent to it that the job's socket has not taken. The jobs'
-  connections together have at most 14 MiB on it, shared equally among the jobs that
-  have connections, and the connections that name no job yet 2 KiB each and 2 MiB
+  connections together have at most 14 MiB on it, shared equally among the jobs this
+  machine runs, and the connections that name no job yet 2 KiB each and 2 MiB
   together. A job past its share, as one is when another job comes, is given no room
-  until it is within it, and one that stays past it for 2 s while another job waits
-  loses the connections that hold the most of it until it is, and none that hold nothing.
+  until it is within it, and one that has been past it for 2 s while another job has
+  waited as long loses the connections that hold the most of it until it is, and none
+  that hold nothing, whatever jobs and connections come and go meanwhile.
   A connection has at most 128 KiB on its way each way, what the broker has read of it
   and not passed on counted with it; that is in the daemon's memory, about as much as it
-  counts however small the frames it came in, and not on the hop. A connection that ends
-  is ended on the hop, and its sockets there closed once the other side has ended too, or
-  5 s on: a socket closed while its far end still sends is reset, and that end loses what
-  it had not read yet. The hop's ends are this machine's sockets (the
+  counts however small the frames it came in, and not on the hop. Each way of a
+  connection ends on its own: the job's end reaches the far host after all the job
+  wrote, and the far host's answer still comes back; the far host's end reaches the job
+  after all it sent, and what the job writes then still goes. Its sockets on the hop are
+  closed once both ways have ended, each at most 5 s after it ended its own side: a
+  socket closed while its far end still sends is reset, and that end loses what it had
+  not read yet. The hop's ends are this machine's sockets (the
   broker's, and on macOS the ones Docker Desktop opens to it; on Linux the relay's too),
   and every byte in them is one of those counted, held by at most two of them at a time:
   32 MiB of queued bytes at most, under 64 MiB of kernel buffers.

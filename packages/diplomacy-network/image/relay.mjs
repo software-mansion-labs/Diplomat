@@ -53,9 +53,13 @@ function carry(conn) {
     s.end();
     setTimeout(() => s.destroy(), LINGER_MS).unref();
   };
-  let clientEnded = false;
+  // Each way ends on its own: the client's end goes to the broker as END once what came
+  // before it is sent, and the broker's to the client as its socket's end. The broker
+  // ends the hop once both ways have. The client's socket closes once both have too,
+  // what it wrote perhaps still waiting for room to be sent; any other close is the
+  // client gone.
   let brokerEnded = false;
-  conn.on('close', () => (clientEnded ? linger(up) : gone()));
+  conn.on('close', () => { if (!conn.readableEnded || !brokerEnded) gone(); });
   up.on('close', () => (brokerEnded ? linger(conn) : gone()));
   for (const s of [conn, up]) s.setNoDelay(true);
   const frame = (type, n, payload) => {
@@ -82,7 +86,6 @@ function carry(conn) {
     if (waiting) frame(ASK, waiting.length);
     else if (ended) {
       ended = false;
-      clientEnded = true;
       frame(END, 0);
     } else conn.resume();
   };
@@ -153,7 +156,7 @@ function admit() {
 }
 
 // Nothing is read of a connection before it is carried.
-const server = net.createServer({ pauseOnConnect: true }, (conn) => {
+const server = net.createServer({ pauseOnConnect: true, allowHalfOpen: true }, (conn) => {
   conn.on('error', () => {});
   waiting.push(conn);
   if (!timer) admit();

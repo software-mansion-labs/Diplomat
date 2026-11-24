@@ -2,7 +2,7 @@
 // are, what the count finds is held to a share each job, kept back as it is written and
 // reset when it comes in past the whole, and polls that fail stop nothing; through the
 // broker, on this machine's kernel, connections out that nobody answers or reads hold no
-// more than the whole.
+// more than the whole, and each way of a tunnel ends on its own.
 // Run: node test/executor-outbound.mjs
 
 import assert from 'node:assert/strict';
@@ -66,11 +66,13 @@ const row = (s, bytes, sending = bytes) => {
   return { ...tuples.get(s), bytes, sending };
 };
 
-await check('the kernel\'s tables are read as Linux and macOS write them: each connection by its addresses and ports with what is queued either way and what to be sent, listening sockets left out, and a table of anything else refused', async () => {
+await check('the kernel\'s tables are read as Linux and macOS write them: each connection by its addresses and ports with what is queued either way and what to be sent, listening sockets and those still connecting left out, and a table of anything else refused', async () => {
   const proc = [
     '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode',
     '   0: 0100007F:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1 0 100 0 0 10 0',
     '   1: 0100007F:D431 22D8B85D:01BB 01 00000010:00000020 00:00000000 00000000  1000        0 2 1 0 20 4 30 10 -1',
+    // Connecting, read as its SYN was answered: 535975187 come in, as Linux 6.18 showed one.
+    '   2: 0100007F:D432 22D8B85D:01BB 02 00000000:1FF25513 01:00000064 00000000  1000        0 5 1 0 20 4 30 10 -1',
   ].join('\n');
   assert.deepEqual(parseProc(proc), [{ local: '127.0.0.1', localPort: 54321, remote: '93.184.216.34', remotePort: 443, bytes: 48, sending: 16 }]);
   const proc6 = [
@@ -219,7 +221,8 @@ await check('the connections a job ended are its own while the kernel has what t
   for (const s of [h1, h2, v1, v2]) row(s, 0);
   const queued = new Map();
   const { outbound, told, after } = counted({ bytes: 3000, held: () => [h1, h2, v1, v2].map((s) => row(s, queued.get(s) ?? 0)) });
-  for (const [job, s] of [[h, h1], [h, h2], [v, v1], [v, v2]]) outbound.add(job, s);
+  // v first: the job reset is the one past its share, not the first that holds any.
+  for (const [job, s] of [[v, v1], [v, v2], [h, h1], [h, h2]]) outbound.add(job, s);
   await after(2);
   for (const s of [h1, h2]) {
     s.write('x');
@@ -297,6 +300,41 @@ await check('a connection out the job ends while the kernel has what it was sent
   assert.match(told.at(-1).text, /is reset: the far host had not taken what it was sent 0\.3 s after the job ended it$/);
   outbound.drop(job);
   quick.drop(job);
+});
+
+await check('a connection out the job ends or closes while the kernel is being asked is judged by the last answer and what was written since, not by the answer still to come: its end waits for a poll that finds what it was sent taken', async () => {
+  const job = {};
+  const [ended, closed] = [await connected(), await connected()];
+  await until('the far ends to be there', () => [ended, closed].every((s) => far.some((f) => f.remotePort === s.localPort)));
+  const answers = [];
+  const outbound = createOutbound({ bytes: 2 ** 20, every: 20, queues: () => new Promise((resolve) => answers.push(resolve)) });
+  outbound.add(job, ended);
+  outbound.add(job, closed);
+  // The nth poll's answer, once it has asked.
+  const answer = async (n, sending) => {
+    await until(`poll ${n}`, () => answers.length >= n);
+    return () => answers[n - 1]([ended, closed].map((s) => row(s, sending, sending)));
+  };
+  (await answer(1, 0))();
+  await new Promise(setImmediate);
+  // Written after the last answer, and ended while the next poll waits for its own.
+  ended.write('x');
+  closed.write('x');
+  const reply = await answer(2, 1);
+  const how = [ended, closed].map(ending);
+  let heard = 0;
+  for (const h of how) h.then(() => { heard++; });
+  ended.end();
+  outbound.close(closed);
+  await sleep(50);
+  assert.equal(heard, 0, 'no end while that poll has not answered');
+  reply();
+  (await answer(3, 1))();
+  await sleep(50);
+  assert.equal(heard, 0, 'nor while the kernel has what they were sent');
+  (await answer(4, 0))();
+  assert.deepEqual(await within(Promise.all(how), 'both to end'), ['end', 'end']);
+  outbound.drop(job);
 });
 
 await check('a connection out over IPv6 is found as netstat prints it, its addresses written otherwise', async () => {
@@ -463,17 +501,30 @@ const source = net.createServer((s) => {
   pump();
 });
 const echo = net.createServer((s) => { s.on('error', () => {}); s.pipe(s); });
-const ports = { '93.184.216.1': await listening(deaf), '93.184.216.2': await listening(source), '93.184.216.3': await listening(echo) };
-const addresses = { 'deaf.test': '93.184.216.1', 'source.test': '93.184.216.2', 'echo.test': '93.184.216.3' };
+// Reads to the job's end, then answers 2 MiB and closes.
+const burst = net.createServer({ allowHalfOpen: true }, (s) => {
+  s.on('error', () => {});
+  s.on('end', () => s.end(Buffer.alloc(2 ** 21, 5))).resume();
+});
+// Ends its side at once, and counts what it is sent until the job ends its own.
+const heardHalfway = [];
+const halfway = net.createServer({ allowHalfOpen: true }, (s) => {
+  s.on('error', () => {});
+  let n = 0;
+  s.on('data', (d) => { n += d.length; }).on('end', () => heardHalfway.push(n));
+  s.end('ready');
+});
+const ports = { '93.184.216.1': await listening(deaf), '93.184.216.2': await listening(source), '93.184.216.3': await listening(echo), '93.184.216.4': await listening(burst), '93.184.216.5': await listening(halfway) };
+const addresses = { 'deaf.test': '93.184.216.1', 'source.test': '93.184.216.2', 'echo.test': '93.184.216.3', 'burst.test': '93.184.216.4', 'halfway.test': '93.184.216.5' };
 const lookup = async (name) => [{ address: addresses[name], family: 4, name }];
 const connect = ({ host }) => new Promise((resolve, reject) => {
   const s = net.connect(ports[host], '127.0.0.1', () => resolve(s));
   s.once('error', reject);
 });
 const logged = [];
-const brokerWith = async (outbound) => {
+const brokerWith = async (outbound, limits) => {
   const broker = createBroker({ ca: createCA(), llm: { authorize: async (h) => h, refused: async () => null }, mirrors: { path: () => null },
-    onForge: async () => ({ status: 200, headers: {}, body: '' }), lookup, connect, outbound, log: (...a) => logged.push(a.join(' ')) });
+    onForge: async () => ({ status: 200, headers: {}, body: '' }), lookup, connect, outbound, limits, log: (...a) => logged.push(a.join(' ')) });
   const { port } = await broker.start({ port: 0 });
   let runs = 0;
   const addJob = async () => {
@@ -493,10 +544,10 @@ const brokerWith = async (outbound) => {
     await new Promise((resolve) => child.stdout.once('data', resolve));
     return { port: at, end };
   };
-  // A tunnel, straight to the broker or through a relay at `via`: resolves to the socket
-  // and the head of the answer.
-  const tunnel = (job, host, via = port) => new Promise((resolve, reject) => {
-    const s = net.connect(via, '127.0.0.1');
+  // A tunnel, straight to the broker or through a relay at `via`: resolves to the socket,
+  // paused, and the head of the answer.
+  const tunnel = (job, host, via = port, allowHalfOpen = false) => new Promise((resolve, reject) => {
+    const s = net.connect({ port: via, host: '127.0.0.1', allowHalfOpen });
     s.on('error', () => {});
     s.write(`CONNECT ${host}:443 HTTP/1.1\r\nHost: ${host}:443\r\nProxy-Authorization: ${job.auth}\r\n\r\n`);
     let head = Buffer.alloc(0);
@@ -676,6 +727,79 @@ await check('a job\'s tunnels that it ends while the kernel has what they sent a
     broker.removeJob(h.runId);
     await until('them to be reset as the job is removed', async () => (await rows()) === 0, 1000);
   } finally {
+    await broker.stop();
+  }
+});
+
+await check('a tunnel a job closed keeps its place among the job\'s connections while its connection out is held for what it was sent: past them, a tunnel is refused until those go', async () => {
+  const linger = 1500;
+  const to = ports[addresses['deaf.test']];
+  // The kernel, but with one more byte to send on every connection to deaf.test, which so
+  // never takes all it was sent.
+  const queues = async () => (await systemQueues()).map((r) => (r.remotePort === to ? { ...r, bytes: r.bytes + 1, sending: r.sending + 1 } : r));
+  const { broker, addJob, tunnel } = await brokerWith({ linger, queues }, { connections: 4 });
+  const t = await addJob();
+  try {
+    const four = [];
+    for (let i = 0; i < 4; i++) four.push((await tunnel(t, 'deaf.test')).s);
+    // Polled, and so found to have what they were sent still to send.
+    await sleep(2 * OUT_POLL_MS);
+    for (const s of four) s.resetAndDestroy();
+    await until('the broker to see them go', () => broker.load(t.runId).connections === 0, 3000);
+    const closed = Date.now();
+    const refused = await tunnel(t, 'deaf.test');
+    assert.match(refused.head, /^HTTP\/1\.1 503 /);
+    const said = await within(new Promise((resolve) => {
+      let body = '';
+      refused.s.on('data', (d) => { body += d; }).on('end', () => resolve(body)).resume();
+    }), 'the refusal');
+    assert.equal(said, 'this job has 4 connections open through the broker, 4 of them tunnels it closed whose far hosts have not yet taken what they were sent, the most a job gets at a time: close some\n');
+    refused.s.destroy();
+    let again;
+    for (;;) {
+      again = await tunnel(t, 'deaf.test');
+      if (again.head.startsWith('HTTP/1.1 200 ')) break;
+      again.s.destroy();
+      await sleep(50);
+    }
+    again.s.destroy();
+    assert.ok(Date.now() - closed >= linger, `a tunnel had its place ${Date.now() - closed} ms after the others closed`);
+  } finally {
+    await broker.stop();
+  }
+});
+
+await check('each way of a tunnel ends on its own, straight to the broker and through a relay: all a far host answers after the job ended its side reaches the job, read late, though the far host closed at once, and all a job writes after its far host ended its side reaches that host, and then the job\'s end', async () => {
+  const { broker, addJob, tunnel, relay } = await brokerWith({});
+  const h = await addJob();
+  const theirs = await relay();
+  try {
+    for (const via of [undefined, theirs.port]) {
+      for (let i = 0; i < 3; i++) {
+        const { s } = await tunnel(h, 'burst.test', via, true);
+        s.end('the question');
+        let got = 0;
+        s.on('data', (d) => { got += d.length; });
+        const ended = new Promise((resolve) => s.once('end', resolve));
+        await sleep(300);
+        s.resume();
+        await within(ended, 'the burst\'s end');
+        assert.equal(got, 2 ** 21, via ? 'through the relay' : 'straight');
+        s.destroy();
+      }
+      const before = heardHalfway.length;
+      const { s } = await tunnel(h, 'halfway.test', via, true);
+      let said = '';
+      s.on('data', (d) => { said += d; });
+      s.resume();
+      await until('the far host\'s end', () => said === 'ready' && s.readableEnded, 3000);
+      s.end(Buffer.alloc(64 * 1024, 1));
+      await until('the far host to hear the job\'s end', () => heardHalfway.length > before, 3000);
+      assert.equal(heardHalfway.at(-1), 64 * 1024, via ? 'through the relay' : 'straight');
+      s.destroy();
+    }
+  } finally {
+    theirs.end();
     await broker.stop();
   }
 });

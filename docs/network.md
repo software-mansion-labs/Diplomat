@@ -164,7 +164,8 @@ brought, and an older engine takes no job.
   fullest connections out until they are within it - past it between polls by what the
   host's link brings in 500 ms, 60 MiB at 1 Gbit/s, or for 100 ms by the share of a job that
   has just come. A connection out a job has ended is its own until the kernel has sent what
-  it holds, and is reset if that takes 30 s. While the kernel cannot be asked, a job may have 32 connections out open.
+  it holds, and is reset if that takes 30 s; a tunnel's keeps its place among the job's 256
+  connections meanwhile. While the kernel cannot be asked, a job may have 32 connections out open.
   A container found
   holding more disk than that is removed - the count includes files its processes keep open
   after deleting them, where
