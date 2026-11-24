@@ -4657,4 +4657,17 @@ private func pipelinePins10(base: URL, root: PipelineSettings.Root, team: Pipeli
                   dir("queued-untracked"), t0)
     check(item(uq.result, linearURL("OPS-1")) == nil && untracked.linearOps == ["Issues"],
           "a queued OPS-1, team OPS untracked: \(stageOf(uq.result, linearURL("OPS-1"))) \(untracked.linearOps)")
+
+    let stacks: [(String, Set<Int>, (Trackers) -> Void)] = [
+        ("fork", [18, 19], { $0.prs[1].base = "patch-1" }),
+        ("unread", [11, 19], { $0.prs[0].headRef = ""; $0.prs[1].base = "" }),
+        ("default", [11, 19], { $0.prs[1].headRef = "main"; $0.prs[1].base = "release" }),
+    ]
+    for (branch, prs, change) in stacks {
+        let t = only(prs)
+        change(t)
+        let edges = sync(t, PipelineSettings(roots: [root]), dir("stack-" + branch), t0).result.graph.edges
+        check(!edges.contains { $0.kind == .stacked },
+              "a PR based on the \(branch) branch: \(edges.map { "\($0.from) \($0.kind.rawValue) \($0.to)" })")
+    }
 }
