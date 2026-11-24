@@ -287,6 +287,12 @@ await check('text policy-bot would count as an approval is refused, by the polic
   forge.pull('o/r', { number: 585, author: 'them', head: 'theirs', base: 'odd' });
   const odd = await authorize(rules('review', 'pr-585'), gh('POST', '/repos/o/r/pulls/585/reviews', { event: 'COMMENT', body: 'fine' }), ctxFor());
   assert.match(odd.reason, /cannot be checked against the pool repository's policy-bot policy, so no text is sent on its pull requests: o\/r\/\.policy\.yml cannot be read here: its line 2 holds a kind of YAML this does not read$/);
+  // So does one larger than this reads, which any branch may hold.
+  git(work, 'checkout', '--quiet', 'odd');
+  const F = commit('large', { '.policy.yml': `comments: [${'x'.repeat(299987)}]\n` });
+  git(work, 'push', '--quiet', bare, `${F}:refs/heads/odd`);
+  const large = await authorize(rules('review', 'pr-585'), gh('POST', '/repos/o/r/pulls/585/reviews', { event: 'COMMENT', body: 'fine' }), ctxFor());
+  assert.match(large.reason, /so no text is sent on its pull requests: o\/r\/\.policy\.yml cannot be read here: it is 300000 bytes long, more than the 262144 this reads$/);
 
   // The owner's shared policy is read beside the repository's own.
   const shared = forge.bare('o/.github', { id: 'R_10' });
