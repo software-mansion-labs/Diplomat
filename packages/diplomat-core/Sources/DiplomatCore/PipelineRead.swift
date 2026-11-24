@@ -676,14 +676,13 @@ enum PipelineRead {
     }
 }
 
-/// Linear's GraphQL API, with the operator's key, read on each sync and never cached. The
-/// transport is `SlackAPI.curl`'s: the key travels only in an owner-only config on curl's
-/// stdin.
+/// Linear's GraphQL API under the operator's `LinearLogin`. The transport is
+/// `SlackAPI.curl`'s: the token travels only in an owner-only config on curl's stdin.
 public struct LinearAPI {
-    /// Overrides the Keychain item and the file; no child Diplomat starts inherits it.
+    /// A personal API key overriding the login; no child Diplomat starts inherits it.
     public static let envVar = "DIPLOMAT_LINEAR_TOKEN"
 
-    let key: String
+    let authorization: String
     let url: URL
     let timeout: TimeInterval
     let transport: SlackAPI.Transport
@@ -702,32 +701,10 @@ public struct LinearAPI {
         }
     }
 
-    /// The operator's own Keychain account is tried first, as an empty same-named item can
-    /// shadow it.
-    static func key(keychainItem: String?, tokenFile: String?) -> String? {
-        if let env = ProcessInfo.processInfo.environment[envVar], !env.isEmpty { return env }
-        func trimmed(_ data: Data) -> String? {
-            let s = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
-            return s.isEmpty ? nil : s
-        }
-#if os(macOS)
-        if let item = keychainItem, !item.isEmpty {
-            let user = ProcessInfo.processInfo.environment["USER"] ?? ""
-            let account = user.isEmpty ? NSUserName() : user
-            for extra in [["-a", account], []] {
-                let args = ["find-generic-password"] + extra + ["-s", item, "-w"]
-                if case .exited(0, let out, _) = CommsClassifier.execute(
-                    "/usr/bin/security", args, input: Data(), timeout: 10), let key = trimmed(out) {
-                    return key
-                }
-            }
-        }
-#endif
-        if let file = tokenFile, !file.isEmpty,
-           let data = FileManager.default.contents(atPath: PrivateFiles.expandingTilde(file)) {
-            return trimmed(data)
-        }
-        return nil
+    /// `DIPLOMAT_LINEAR_API` over `linearAPI`; nil when it is not a URL.
+    static func endpoint(_ model: CoreAssets.PipelineModel) -> URL? {
+        let env = ProcessInfo.processInfo.environment["DIPLOMAT_LINEAR_API"] ?? ""
+        return URL(string: env.isEmpty ? model.linearAPI : env)
     }
 
     func call(_ operation: String, _ variables: [String: Any]) throws -> [String: Any] {
@@ -739,7 +716,7 @@ public struct LinearAPI {
         let answer: (status: Int, headers: [String: String], body: Data)
         do {
             answer = try transport(SlackAPI.Request(
-                url: url, headers: ["Authorization": key, "Content-Type": "application/json"],
+                url: url, headers: ["Authorization": authorization, "Content-Type": "application/json"],
                 body: body, timeout: timeout))
         } catch SlackError.transport(let why) {
             throw Failure.transport(why)

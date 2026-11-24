@@ -360,10 +360,6 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
 
     public var roots: [Root]
     public var linearTeams: [LinearTeam]
-    /// The Keychain item (macOS) or file (Linux) holding the Linear API key: its name, never
-    /// the key. `DIPLOMAT_LINEAR_TOKEN` overrides either.
-    public var linearKeychainItem: String?
-    public var linearTokenFile: String?
     /// Rate items unasked, and write the ratings kept while their labels could not be. It
     /// stops nothing else: a forced rating, and each other switch's steps, go on with it off.
     public var rate: Bool
@@ -380,14 +376,11 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
     /// sync reads even past a cap or once closed, so `read` can take each back.
     public var queued: [String]
 
-    public init(roots: [Root], linearTeams: [LinearTeam] = [], linearKeychainItem: String? = nil,
-                linearTokenFile: String? = nil, rate: Bool = false, fix: Bool = false,
+    public init(roots: [Root], linearTeams: [LinearTeam] = [], rate: Bool = false, fix: Bool = false,
                 fastTrack: Bool = false, merge: Bool = false, fracture: Bool = false,
                 force: Force? = nil, queued: [String] = []) {
         self.roots = roots
         self.linearTeams = linearTeams
-        self.linearKeychainItem = linearKeychainItem
-        self.linearTokenFile = linearTokenFile
         self.rate = rate
         self.fix = fix
         self.fastTrack = fastTrack
@@ -398,7 +391,7 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case roots, linearTeams, linearKeychainItem, linearTokenFile, rate, fix, fastTrack,
+        case roots, linearTeams, rate, fix, fastTrack,
              merge, fracture, force, queued
     }
 
@@ -408,8 +401,6 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
         func on(_ key: CodingKeys) throws -> Bool { try c.decodeIfPresent(Bool.self, forKey: key) ?? false }
         self.init(roots: try c.decodeIfPresent([Root].self, forKey: .roots) ?? [],
                   linearTeams: try c.decodeIfPresent([LinearTeam].self, forKey: .linearTeams) ?? [],
-                  linearKeychainItem: try c.decodeIfPresent(String.self, forKey: .linearKeychainItem),
-                  linearTokenFile: try c.decodeIfPresent(String.self, forKey: .linearTokenFile),
                   rate: try on(.rate), fix: try on(.fix), fastTrack: try on(.fastTrack),
                   merge: try on(.merge), fracture: try on(.fracture),
                   force: try c.decodeIfPresent(Force.self, forKey: .force),

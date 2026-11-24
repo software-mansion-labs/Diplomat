@@ -8,6 +8,18 @@
   "maxLogBytes": 2097152,
   "httpTimeoutSecs": 30,
   "linearAPI": "https://api.linear.app/graphql",
+  "_linearOAuthComment": "Signing in to Linear is OAuth with PKCE and no client secret, for the OAuth application clientID names, whose callback URLs must list redirect at each of ports; the first port free on 127.0.0.1 is used. The browser gets signInSecs to come back. An access token is refreshed once it expires within refreshMarginSecs.",
+  "linearOAuth": {
+    "clientID": "",
+    "authorize": "https://linear.app/oauth/authorize",
+    "token": "https://api.linear.app/oauth/token",
+    "revoke": "https://api.linear.app/oauth/revoke",
+    "scope": "read,write",
+    "redirect": "http://127.0.0.1:{port}/linear/callback",
+    "ports": [29170, 29171, 29172],
+    "signInSecs": 300,
+    "refreshMarginSecs": 600
+  },
   "linearMaxIssues": 300,
   "githubMaxItems": 300,
   "githubPage": { "issues": 100, "prs": 12, "least": 3 },

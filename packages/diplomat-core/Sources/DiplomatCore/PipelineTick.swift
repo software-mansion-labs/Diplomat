@@ -30,16 +30,17 @@ public struct PipelineIO {
     public var gh: ([String]) -> Exit
     public var claude: (_ arguments: [String], _ input: Data, _ cwd: String, _ timeout: TimeInterval) -> Exit
     public var linear: SlackAPI.Transport
-    public var linearKey: (PipelineSettings) -> String?
+    /// A Linear call's `Authorization`, nil when signed out (`LinearLogin.authorization`).
+    public var linearAuth: () throws -> String?
 
     public init(gh: @escaping ([String]) -> Exit,
                 claude: @escaping ([String], Data, String, TimeInterval) -> Exit,
                 linear: @escaping SlackAPI.Transport,
-                linearKey: @escaping (PipelineSettings) -> String?) {
+                linearAuth: @escaping () throws -> String?) {
         self.gh = gh
         self.claude = claude
         self.linear = linear
-        self.linearKey = linearKey
+        self.linearAuth = linearAuth
     }
 
     /// Each child gets `CommsClassifier.childEnvironment`, which holds no token.
@@ -74,7 +75,7 @@ public struct PipelineIO {
                             "claude", timeout)
             },
             linear: SlackAPI.curl,
-            linearKey: { LinearAPI.key(keychainItem: $0.linearKeychainItem, tokenFile: $0.linearTokenFile) })
+            linearAuth: { try LinearLogin.authorization() })
     }
 }
 
@@ -147,7 +148,7 @@ final class PipelineSync {
     /// Per root, the page sizes a read halved after a timeout left, by `graphql` variable.
     var pages: [String: [String: Int]] = [:]
     var linear: LinearAPI?
-    /// The Linear key's user.
+    /// The Linear login's user.
     var linearViewer = ""
     /// Each read Linear issue's index by its identifier, uppercased.
     var linearIssue: [String: Int] = [:]
@@ -509,16 +510,19 @@ final class PipelineSync {
             readAll = false
             mapped("Linear was not read")
         }
-        guard let key = io.linearKey(settings) else {
-            return unreadable("Linear was not read: no API key (\(LinearAPI.envVar), "
-                + (settings.linearKeychainItem.map { "the Keychain item \($0)" }
-                   ?? settings.linearTokenFile.map { "the file \($0)" } ?? "none set") + ")")
+        let auth: String
+        do {
+            guard let a = try io.linearAuth() else {
+                return unreadable("Linear was not read: not signed in to Linear (Settings → Pipeline → Linear login)")
+            }
+            auth = a
+        } catch {
+            return unreadable("Linear was not read: \(error.localizedDescription)")
         }
-        let env = ProcessInfo.processInfo.environment["DIPLOMAT_LINEAR_API"] ?? ""
-        guard let url = URL(string: env.isEmpty ? model.linearAPI : env) else {
-            return unreadable("Linear was not read: \(env) is not a URL")
+        guard let url = LinearAPI.endpoint(model) else {
+            return unreadable("Linear was not read: DIPLOMAT_LINEAR_API is not a URL")
         }
-        let api = LinearAPI(key: key, url: url, timeout: model.httpTimeoutSecs, transport: io.linear)
+        let api = LinearAPI(authorization: auth, url: url, timeout: model.httpTimeoutSecs, transport: io.linear)
         linear = api
         var after: String?
         var read = 0
