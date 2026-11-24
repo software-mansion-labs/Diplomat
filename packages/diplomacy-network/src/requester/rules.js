@@ -102,7 +102,9 @@
 //   line starting with "/" and a word, which GitLab runs as a quick action in the author's
 //   name and bots on either forge take for a command from the author (/merge, bors r+,
 //   @dependabot merge). A comment, a review or a note is sent with a hidden first line
-//   (`COMMENT_MARK`), so a bot that acts on a comment's first word (atlantis apply) does not.
+//   (`COMMENT_MARK`), so a bot that acts on a comment's first word (atlantis apply) does not,
+//   and holds none of policy-bot's default approval words. On GitHub, text on a pull request
+//   is also checked against the repository's policy-bot policy (`policy`).
 // - `GET /user` answers with a handful of public members only (`pick`): agents ask it
 //   who they are, and the full answer holds the requester's private profile.
 // - A GitHub Enterprise Server gets github.com's rules on its one host, and one more:
@@ -257,6 +259,9 @@ function github({ kind, options, target, item, me }) {
   // How many segments of a path stand before "repos".
   const under = at.rest.split('/').length - 1;
   const api = (method, path, more = {}) => ({ host: at.host, method, path, fold: [under + 1, under + 2], ...more });
+  // Text policy-bot reads: a review's body and a comment on the pull request or issue the
+  // path's number names.
+  const READ = { ...COMMENT, policy: { segment: under + 4 } };
   const rules = [];
   const mutations = [];
   let graphqlItem;
@@ -275,7 +280,7 @@ function github({ kind, options, target, item, me }) {
     mutations.push('createPullRequest');
     rules.push(api('POST', `${repo}/pulls`, { body: {
       head: { created: 'label', required: true }, draft: { equals: true, required: true },
-      title: PROSE, body: PROSE, base: 'free', maintainer_can_modify: 'free',
+      title: PROSE, body: { prose: true, policy: { base: 'base' } }, base: 'free', maintainer_can_modify: 'free',
     } }));
   };
 
@@ -289,8 +294,8 @@ function github({ kind, options, target, item, me }) {
     graphqlItem = scope;
     if (kind === 'review') {
       const events = options.verdict === true ? ['COMMENT', 'APPROVE', 'REQUEST_CHANGES'] : ['COMMENT'];
-      rules.push(api('POST', `${repo}/pulls/${n}/reviews`, { ...asked, body: { commit_id: 'free', body: COMMENT, comments: { proseIn: 'body', comment: true }, event: { oneOf: events } } }));
-      rules.push(api('POST', `${repo}/pulls/${n}/reviews/*/events`, { ...asked, body: { event: { oneOf: events, required: true }, body: COMMENT } }));
+      rules.push(api('POST', `${repo}/pulls/${n}/reviews`, { ...asked, body: { commit_id: 'free', body: READ, comments: { proseIn: 'body', comment: true }, event: { oneOf: events } } }));
+      rules.push(api('POST', `${repo}/pulls/${n}/reviews/*/events`, { ...asked, body: { event: { oneOf: events, required: true }, body: READ } }));
       rules.push(api('DELETE', `${repo}/pulls/${n}/reviews/*`, asked));
       rules.push(api('DELETE', `${repo}/pulls/comments/*`, { comment: { segment: under + 5, repo: target.repo, item: scope, own: true, pending: true, identity: me } }));
       mutations.push('addPullRequestReviewThread', 'addPullRequestReviewThreadReply', 'deletePullRequestReviewComment');
@@ -311,7 +316,7 @@ function github({ kind, options, target, item, me }) {
         mutations.push('replaceActorsForAssignable', 'updateIssue');
       }
       if (options.comment !== false) {
-        rules.push(api('POST', `${issue}/comments`, { body: { body: COMMENT } }));
+        rules.push(api('POST', `${issue}/comments`, { body: { body: READ } }));
         mutations.push('addComment');
       }
     }

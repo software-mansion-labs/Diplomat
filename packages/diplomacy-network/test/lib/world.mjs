@@ -40,10 +40,10 @@ export function world({ branches = [] } = {}) {
     I_422: { type: 'Issue', repo: 'o/r', item: 'issue', number: 422, open: true, itemAuthor: 'reporter', author: 'reporter' },
   };
   const pulls = {
-    578: { number: 578, open: true, author: 'them', headRepo: 'o/r', headRepoId: 1, headRef: 'feature' },
-    579: { number: 579, open: true, author: 'Me', headRepo: 'o/r', headRepoId: 1, headRef: 'mine' },
-    580: { number: 580, open: false, author: 'me', headRepo: 'o/r', headRepoId: 1, headRef: 'old' },
-    581: { number: 581, open: true, author: 'me', headRepo: 'me/r', headRepoId: 12, headRef: 'forked' },
+    578: { number: 578, open: true, author: 'them', headRepo: 'o/r', headRepoId: 1, headRef: 'feature', baseRef: 'main' },
+    579: { number: 579, open: true, author: 'Me', headRepo: 'o/r', headRepoId: 1, headRef: 'mine', baseRef: 'main' },
+    580: { number: 580, open: false, author: 'me', headRepo: 'o/r', headRepoId: 1, headRef: 'old', baseRef: 'main' },
+    581: { number: 581, open: true, author: 'me', headRepo: 'me/r', headRepoId: 12, headRef: 'forked', baseRef: 'main' },
   };
   // 14 is this account's and already sent, 15 somebody's and still pending, 16 this account's pending one in another repository.
   const comments = {
@@ -60,6 +60,8 @@ export function world({ branches = [] } = {}) {
   const listed = [];
   return {
     asked, listed, nodes, pulls, repos,
+    // What `policy` answers for a base branch: none, unless a test sets one.
+    policies: {},
     assigned: ['bob'],
     state: { branches: [...branches] },
     async resolveNode(id) { asked.push(id); return nodes[id] ?? null; },
@@ -73,5 +75,6 @@ export function world({ branches = [] } = {}) {
     async assignees() { return this.assigned; },
     async self() { return { id: 7, login: 'me' }; },
     async repository(of = 'o/r') { return repos[of] ?? null; },
+    async policy(base) { return this.policies[base] ?? null; },
   };
 }

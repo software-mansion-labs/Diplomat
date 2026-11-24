@@ -882,6 +882,9 @@ await check('a GitHub Enterprise Server has github.com\'s rules on its one host:
       moved[lookup] = { ...rule[lookup], segment: rule[lookup].segment + 2 };
       if (rule[lookup].pullSegment !== undefined) moved[lookup].pullSegment = rule[lookup].pullSegment + 2;
     }
+    if (rule.body) {
+      moved.body = Object.fromEntries(Object.entries(rule.body).map(([key, pin]) => [key, pin.policy?.segment === undefined ? pin : { ...pin, policy: { segment: pin.policy.segment + 2 } }]));
+    }
     return moved;
   };
   // gh asks the server which version it is before `pr view`, `issue view`, `pr create` and a search.
@@ -1035,7 +1038,42 @@ await check('every member a write takes text in, on either forge, holds nothing 
       if ((member.includes('title') && text.includes('\n')) || (read === at.draftTitle && quoted.startsWith('/'))) continue;
       await refused(rules, write(text), ctx(), new RegExp(`${member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} holds ${JSON.stringify(quoted).replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}, which the forge or a bot on it would take for a command: .*send the request again$`));
     }
+    // policy-bot's own words, anywhere in a comment, count as its writer's approval or disapproval (policy/approval/options.go,
+    // policy/disapproval/disapprove.go, v1.42.1); in a title or a pull request's body it reads none of them.
+    for (const [text, quoted] of [[':+1:', ':+1:'], ['Nice work 👍', '👍'], ['👍🏽', '👍'], ['nope :-1:', ':-1:'], ['👎', '👎']]) {
+      if (!comment) {
+        if (!member.includes('title') || !text.includes('\n')) await allowed(rules, write(text), ctx());
+        continue;
+      }
+      await refused(rules, write(text), ctx(), new RegExp(`^(graphql: )?(the body member )?${member.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} holds ${JSON.stringify(quoted).replace(/[.*+?^${}()|[\]\\/+]/g, '\\$&')}, which policy-bot, a bot that gates merging, counts as an approval or a disapproval from whoever wrote it: .*send the request again$`));
+    }
+    if (comment) await allowed(rules, write('+1, thumbs up'), ctx());
   }
+  // A pull request's body is checked against the policy read for the branch it goes into; a policy that cannot be read
+  // refuses it, saying why.
+  const policed = (policies) => Object.assign(pushed(), { policies });
+  const POLICY = { comments: [], patterns: [], bodies: [{ source: '(?i)^approved', re: /^approved/i }], from: ['o/r/.policy.yml'] };
+  const opened = [
+    (t, base) => gh('POST', '/repos/o/r/pulls', { title: 't', body: t, head: 'fix-421', base, draft: true }),
+    (t, base) => ghql({ ...GH.prCreate, variables: { input: { ...GH.prCreate.variables.input, baseRefName: base, body: t } } }),
+  ];
+  for (const write of opened) {
+    await refused(github('issues'), write('Approved by me', 'main'), policed({ main: POLICY }), /"body" matches the pattern "\(\?i\)\^approved", which the pool repository's policy-bot policy \(o\/r\/\.policy\.yml\) counts as an approval or a disapproval from whoever wrote it: reword it and send the request again$/);
+    await allowed(github('issues'), write('Approved by me', 'dev'), policed({ main: POLICY }));
+    await allowed(github('issues'), write('Not approved', 'main'), policed({ main: POLICY }));
+    await refused(github('issues'), write('fine', 'main'), policed({ main: { fault: 'o/r/.policy.yml cannot be read here: x' } }), /"body" cannot be checked against the pool repository's policy-bot policy, so no text is sent on its pull requests: o\/r\/\.policy\.yml cannot be read here: x$/);
+  }
+  // A comment on a pull request is checked against the policy for its base, and its `comments` and `comment_patterns`;
+  // a comment on an issue is not.
+  const COMMENTS = { comments: ['LGTM'], patterns: [{ source: 'ship', re: /ship/ }], bodies: [{ source: 'x', re: /x/ }], from: ['o/.github/policy.yml'] };
+  await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { body: 'LGTM' }), policed({ main: COMMENTS }), /^the body member "body" holds "LGTM", which the pool repository's policy-bot policy \(o\/\.github\/policy\.yml\) counts/);
+  await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { event: 'COMMENT', body: 'we ship' }), policed({ main: COMMENTS }), /^the body member "body" matches the pattern "ship"/);
+  await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { body: 'fine' }), policed({ main: { fault: 'odd' } }), /cannot be checked against the pool repository's policy-bot policy, so no text is sent on its pull requests: odd$/);
+  await allowed(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { body: 'x marks it' }), policed({ main: COMMENTS }));
+  await allowed(github('issues'), gh('POST', '/repos/o/r/issues/421/comments', { body: 'LGTM' }), policed({ main: COMMENTS }));
+  // Without a verdict the task's review event is COMMENT only, so it never approves.
+  await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { event: 'APPROVE', body: 'fine' }), pushed());
+  await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews/9/events', { event: 'APPROVE' }), pushed());
   // Comment text in GraphQL is sent in a variable, where the mark is written: in the document itself, as a string,
   // a block string or a variable's default, it is refused, after a block string is read for its lines as it stands.
   const inDocument = /"body" is comment text, which is sent in a variable \("body: \$body", and "variables": \{ "body": "\.\.\." \}\), not written in the query$/;
@@ -1052,6 +1090,15 @@ await check('every member a write takes text in, on either forge, holds nothing 
     await refused(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments }), pushed(), /^the body member "comments", entry 1: its "body" is not text$/);
   }
   await allowed(github('review'), gh('POST', '/repos/o/r/pulls/578/reviews', { commit_id: 'abc', comments: [] }), pushed());
+  // Only the document writes a block string: an object in the variables is not text, whatever it holds, and the
+  // refusal names the variable.
+  const reply = (input, type) => `mutation($v: ${type}) { addPullRequestReviewThreadReply(input: ${input}) { clientMutationId } }`;
+  for (const value of [{ blockString: 'x' }, 5, true, ['x']]) {
+    await refused(github('review'), ghql({ query: reply('{ pullRequestReviewThreadId: "PRRT_578", body: $v }', 'String!'), variables: { v: value } }), pushed(), /^graphql: "body" \(\$v\) is not text$/);
+    await refused(github('review'), ghql({ query: reply('$v', 'AddPullRequestReviewThreadReplyInput!'), variables: { v: { pullRequestReviewThreadId: 'PRRT_578', body: value } } }), pushed(), /^graphql: "body" \(\$v\.body\) is not text$/);
+    const title = 'mutation($t: String!) { createPullRequest(input: { repositoryId: "R_1", headRefName: "fix-421", draft: true, baseRefName: "main", title: $t }) { clientMutationId } }';
+    await refused(github('issues'), ghql({ query: title, variables: { t: value } }), pushed(), /^graphql: "title" \(\$t\) is not text$/);
+  }
 });
 
 await check('a mutation the document check does not know never reaches a rule list', async () => {
