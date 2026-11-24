@@ -1512,9 +1512,9 @@ through.
   up, for each character of the text, for each step a thread of the match takes and for
   each halving of a class's table it searches. Text of more characters than the work left
   once the program is set up is refused unread. Each entry started at a character takes
-  work there, so many that start at a common letter leave room for tens of thousands of
-  characters, not the 65536 GitHub takes: under 100 rules that each name their own team,
-  the longest plain prose measured to pass was 39000 to 66000 characters, by the pattern.
+  work there, so many that start at a common letter can leave room for fewer characters
+  than the 65536 GitHub takes: under 100 rules that each name their own team, the longest
+  plain prose measured to pass was as little as 39000 characters, by the pattern.
   A claim keeps the answer for each base branch it asks about (`refs/heads/<branch>` being
   the branch), for at most 64 of them, and for each distinct text of the files: it reads
   at most 8, and a base whose files hold another refuses the text, saying so. A later
