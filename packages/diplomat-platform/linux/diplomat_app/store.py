@@ -2593,9 +2593,16 @@ class Store(QObject):
         queue is keyed by the ask, so two would be one row that dispatches twice (and
         the second dispatch would find the first agent still on it). That makes
         pressing SPAWN twice, or sweeping a scope that overlaps an earlier one,
-        idempotent rather than a way to double up."""
-        known = {r.key for r in self.requested_work}
-        fresh = [a for a in asks if a.key not in known]
+        idempotent rather than a way to double up. Any other ask takes the place of a
+        Pipeline ask nothing has started, which the Pipeline's switches would withdraw or
+        pause."""
+        def fresh_of(candidates: list[autofix.RequestedWork]) -> list[autofix.RequestedWork]:
+            held = {r.key: r.pipeline for r in self.requested_work}
+            starting = {e.id for e in self.starting_tasks}
+            return [a for a in candidates if a.key not in held or (
+                held[a.key] and not a.pipeline and a.key not in starting)]
+
+        fresh = fresh_of(asks)
         if fresh:
             # Assembled BEFORE the asks are stored, so a core binary that cannot build
             # a prompt costs this press an error message rather than a list of asks
@@ -2608,12 +2615,12 @@ class Store(QObject):
                 # sweep of an overlapping scope to have stored its own asks in the
                 # meantime, and appending against the stale set would store those
                 # items twice.
-                stored = self.requested_work
-                taken = {r.key for r in stored}
-                fresh = [a for a in fresh if a.key not in taken]
+                fresh = fresh_of(fresh)
                 if not self._pipeline_judged:
                     self._pipeline_stale |= {a.key for a in fresh if a.pipeline}
-                self.requested_work = stored + fresh
+                taken = {a.key for a in fresh}
+                self.requested_work = [r for r in self.requested_work
+                                       if r.key not in taken] + fresh
                 # Under the lock too: queued_tasks is read-modify-written, so a press
                 # publishing outside it can write back a copy older than the other's.
                 if fresh:

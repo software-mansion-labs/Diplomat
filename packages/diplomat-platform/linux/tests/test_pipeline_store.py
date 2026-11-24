@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from test_autofix import _spawn_recorder, fake_probes, store  # noqa: F401 — fixture
 
-from diplomat_app import bans
+from diplomat_app import bans, issues
 from diplomat_app.store import PIPELINE_ATTEMPTS, Store, app_settings
 from diplomat_runtime import activity, appconfig, autofix, pipeline, promptcore, review
 from diplomat_runtime.prref import LocalRepo, item_key_from_url
@@ -1658,6 +1658,44 @@ def test_only_the_pipelines_asks_are_withdrawn(pipe):
     assert not sweep.pipeline
     assert pipeline.withdrawn([sweep], _result(items=(_item(writable=False),)), fix=False,
                               fast_track=False) == []
+
+
+def _asked(effect: dict) -> autofix.RequestedWork:
+    """The community monitor's fix of the effect's issue, or a Review-PRs sweep's review of
+    its PR."""
+    if effect["kind"] == "review":
+        cfg = review.ReviewConfig(specific_pr="7", me="alice", home=ROOT).prompt_payload()
+        return autofix.RequestedWork(number=7, url=PR, author="", config=cfg, repo="o/r")
+    cfg = issues.IssueConfig(target=issues.Target.CONTRIBUTORS, me="alice", home=ROOT)
+    return autofix.RequestedWork(number=12, url=ISSUE, author="carol",
+                                 config=cfg.for_issue(12).prompt_payload(), repo="o/r")
+
+
+@pytest.mark.parametrize("effect, off", [(_fix(), "pipeline_fix"), (_fix(), "pipeline_enabled"),
+                                         (_fix(), None), (_review(), "pipeline_fast_track")])
+def test_an_ask_someone_else_makes_too_is_theirs(pipe, effect, off):
+    """In the Pipeline's ask's place, where no Pipeline switch or sync withdraws or pauses
+    it, and the Pipeline, finding it queued, asks for no other."""
+    _sync(pipe, _result(effect))
+    other = _asked(effect)
+    assert pipe.request_one(other)
+    _sync(pipe, _result(effect))
+    assert pipe.requested_work == [other]
+    assert [(t.id, t.job.counter) for t in pipe.queued_tasks] == [(other.key, None)]
+    if off:
+        setattr(pipe, off, False)
+    else:
+        _sync(pipe, _result())
+    assert pipe.requested_work == [other]
+    assert [t.id for t in pipe.drainable_tasks] == [other.key]
+
+
+def test_a_starting_pipeline_ask_is_not_taken_over(pipe):
+    _queued_fix(pipe)
+    pipe._begin_starting(pipe.queued_tasks[0])
+    assert not pipe.request_one(_asked(_fix()))
+    assert pipe.queued_tasks == []
+    assert [w.pipeline for w in pipe.requested_work] == [True]
 
 
 def test_a_starting_fix_is_left_to_its_dispatch(pipe):
