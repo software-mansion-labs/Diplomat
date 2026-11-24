@@ -2384,6 +2384,7 @@ class Store(QObject):
                 state=s.state,
                 reason=s.reason,
                 item=item_key_from_url(r.pr_url),
+                released=r.released,
             )
             for r, s in self._agent_tick().rows
             if s.state not in agentstate.ENDED
@@ -4895,9 +4896,9 @@ class Store(QObject):
 
     def pipeline_badges(self) -> dict[str, str]:
         """``agent`` or ``queued`` by item id, for the items something is on now: an
-        agent on the PR, or fixing the issue; work about it waiting in the queue or
-        starting."""
-        rows = self.running_tasks
+        agent on the PR, or fixing the issue, not a released one; work about it
+        waiting in the queue or starting."""
+        rows = [a for a in self.running_tasks if not a.released]
         tasks = self.queued_tasks + self.starting_tasks
         waiting = {e.id for e in tasks}
         # A pipeline task's link names its item as the sync read it, after a rename too.
