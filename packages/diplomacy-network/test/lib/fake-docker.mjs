@@ -74,8 +74,17 @@ function staged(command, args) {
   while (names.some((name) => fs.existsSync(file(`hold-${name}`)))) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
   const f = names.map((name) => file(`fail-${name}`)).find((name) => fs.existsSync(name));
   if (!f) return;
-  const lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean);
-  if (lines.length <= 1) fs.unlinkSync(f); else fs.writeFileSync(f, `${lines.slice(1).join('\n')}\n`);
+  // The line is taken through the open file, never by its name: one the test removed
+  // meanwhile stays removed.
+  let fd;
+  try { fd = fs.openSync(f, 'r+'); } catch { return; }
+  const lines = fs.readFileSync(fd, 'utf8').split('\n').filter(Boolean);
+  if (lines.length <= 1) fs.rmSync(f, { force: true });
+  else {
+    const rest = Buffer.from(`${lines.slice(1).join('\n')}\n`);
+    fs.writeSync(fd, rest, 0, rest.length, 0);
+    fs.ftruncateSync(fd, rest.length);
+  }
   die(lines[0] || `${command} failed`);
 }
 
