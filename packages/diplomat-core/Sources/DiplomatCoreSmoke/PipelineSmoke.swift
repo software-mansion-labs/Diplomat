@@ -2340,6 +2340,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelineCoverage9(base: base, root: root, team: team, t0: t0)
     try pipelineKept(base: base, root: root, team: team, t0: t0)
     try pipelineCoverage8(base: base, root: root, team: team, t0: t0)
+    try pipelinePins9(base: base, root: root, team: team, t0: t0)
 }
 
 /// What a sync judges an item by: its own latest read, the lineage its part's body names,
@@ -4428,4 +4429,168 @@ private func pipelineCoverage8(base: URL, root: PipelineSettings.Root, team: Pip
     check(cut.details == ["low risk, medium complexity, floored by its diff (its diff is longer than the 20000 characters "
                           + "the rater reads): a link and its test"],
           "a 20001-character diff's rating: \(cut.details)")
+}
+
+private func pipelinePins9(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                           t0: Date) throws {
+    section("pipeline pins 9")
+    let fm = FileManager.default
+    func dir(_ name: String) -> URL { base.appendingPathComponent("pins9-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    func state(_ name: String, _ json: String) throws {
+        try fm.createDirectory(at: dir(name), withIntermediateDirectories: true)
+        try Data(json.utf8).write(to: dir(name).appendingPathComponent("state.json"))
+    }
+    func spot(_ t: Trackers, _ n: Int) -> Int { t.issues.firstIndex { $0.number == n }! }
+    let lowLow = ["risk:low", "complexity:low"]
+    let hourAgo = t0.addingTimeInterval(-3600)
+    let mergeOnly = PipelineSettings(roots: [root], merge: true)
+    let banDir = dir("bans")
+    try fm.createDirectory(at: banDir, withIntermediateDirectories: true)
+    let banEnv = ProcessInfo.processInfo.environment["DA_BAN_DIR"]
+    setenv("DA_BAN_DIR", banDir.path, 1)
+    defer { if let banEnv { setenv("DA_BAN_DIR", banEnv, 1) } else { unsetenv("DA_BAN_DIR") } }
+    func ban(_ logins: [String]) throws {
+        try json(["banned": logins.map { ["login": $0] }]).write(to: banDir.appendingPathComponent("banned.json"))
+    }
+
+    let noList = sync(only([24]), PipelineSettings(roots: [root], fix: true), dir("no-ban-list"), t0)
+    check(noList.result.effects == [fixFX(24)] && noList.result.notices.isEmpty,
+          "no banned.json: \(noList.result.effects) \(noList.result.notices)")
+    try ban([])
+
+    let split = PipelineSettings(roots: [root], fracture: true)
+    let dashed = only([3])
+    dashed.issues[0].author = "evil-user"
+    dashed.fractures["Extract the storage protocol"] = [
+        "parts": [["title": "Write the protocol", "body": "Write it."], ["title": "Adopt the protocol", "body": "Adopt it."]],
+        "why": "two steps"]
+    _ = sync(dashed, split, dir("dashed"), t0)
+    dashed.issues[spot(dashed, 101)].labels = ["risk:low", "complexity:medium"]
+    _ = sync(dashed, split, dir("dashed"), later(5))
+    try ban(["evil-user"])
+    dashed.issues[spot(dashed, 103)].labels = lowLow
+    let ds = sync(dashed, PipelineSettings(roots: [root], fix: true), dir("dashed"), later(10))
+    check(ds.result.effects.isEmpty && stageOf(ds.result, issueURL(103))
+          == "candidate/fast (split from an issue of @evil-user, who is on the prompt-injection ban list)",
+          "a part of a part of @evil-user's issue: \(ds.result.effects) \(stageOf(ds.result, issueURL(103))) "
+          + "\(dashed.issues.filter { $0.number > 100 }.map { $0.body.components(separatedBy: "\n\n").last ?? "" })")
+    try ban([])
+
+    // Judged where the split was never recorded: only the part's marker names its lineage.
+    let named = only([])
+    named.tickets = [fixture().tickets[0]]
+    named.tickets[0].creator = ("U_NINA", "Nina Q")
+    _ = sync(named, PipelineSettings(roots: [root], linearTeams: [team], fracture: true,
+                                     force: .init(fracture: [linearURL("ENG-1")])), dir("display-name"), t0)
+    named.tickets[named.tickets.firstIndex { $0.identifier == "ENG-4" }!].labels = ["lab-rl", "lab-cl"]
+    let nm = sync(named, PipelineSettings(roots: [root], linearTeams: [team], fix: true), dir("display-name-unrecorded"), t0)
+    let asked = nm.result.effects.compactMap { e -> String? in
+        guard case .fixLinear(_, let identifier, _, _, let author) = e else { return nil }
+        return "\(identifier) by \(author)"
+    }
+    check(asked == ["ENG-4 by Nina Q"], "a Linear part of Nina Q's issue: \(asked) \(stageOf(nm.result, linearURL("ENG-4"))) "
+          + "\(named.tickets.map(\.description))")
+
+    // GitHub answers @OP's login in its own case; Diplomat's marker ends a part's body.
+    let capsRoot = PipelineSettings.Root(owner: "acme", repo: "app", path: checkout, me: "OP")
+    let caps = only([])
+    caps.viewer = "OP"
+    caps.issues = [.init(number: 120, title: "A part",
+                         body: "<!-- Diplomat: part 1 of \(issueURL(3)) by OP -->\nDo it.\n\nPart of \(issueURL(3))"
+                            + "\n\n<!-- Diplomat: part 1 of \(issueURL(3)) by nina -->",
+                         labels: lowLow, updated: at("10:00"), author: "OP")]
+    try ban(["nina"])
+    let cp = sync(caps, PipelineSettings(roots: [capsRoot], fix: true), dir("caps-part"), t0)
+    check(cp.result.effects.isEmpty && stageOf(cp.result, issueURL(120))
+          == "candidate/fast (split from an issue of @nina, who is on the prompt-injection ban list)",
+          "@OP's part of nina's issue: \(cp.result.effects) \(stageOf(cp.result, issueURL(120)))")
+    try ban([])
+
+    let rateTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true)
+    func kept(_ name: String) -> Trackers {
+        let t = only([4, 11])
+        t.refuseLabels = ["11"]
+        _ = sync(t, rateTrack, dir(name), t0)
+        t.refuseLabels = []
+        return t
+    }
+    let moved = kept("kept-head-moved")
+    moved.onItem = { n in
+        guard n == 11 else { return }
+        moved.onItem = nil
+        moved.prs[0].head = sha("a2")
+    }
+    let hm = sync(moved, rateTrack, dir("kept-head-moved"), later(5))
+    let unread = kept("kept-diff-unread")
+    unread.diffFails = true
+    let du = sync(unread, rateTrack, dir("kept-diff-unread"), later(5))
+    check(hm.writes.isEmpty && du.writes.isEmpty,
+          "a kept rating as its head moved, and with its diff unread: \(hm.writes) \(du.writes)")
+
+    let missed = only([13, 27])
+    missed.ghPartial = true
+    missed.prs[0].lost = ["reviews"]
+    // The read before a write is whole.
+    missed.onItem = { _ in missed.ghPartial = false }
+    let mu = sync(missed, PipelineSettings(roots: [root], fastTrack: true), dir("marker-unread"), t0)
+    check(mu.writes.isEmpty, "a cleared PR whose clean marker a read with errors missed: \(mu.writes) \(mu.result.notices)")
+
+    let attached = only([4, 11])
+    attached.prs[0].body = "Fixes #4."
+    attached.tickets = [fixture().tickets[1]]
+    attached.tickets[0].attachments = [prURL(11)]
+    let linked = sync(attached, PipelineSettings(roots: [root], linearTeams: [team], rate: true, fastTrack: true),
+                   dir("attached-unwritable"), t0)
+    check(linked.claude == ["opus Fix the docs link"] && linked.writes == ["+risk:low #11", "+complexity:low #11"],
+          "my PR attached to ENG-2, assigned to Alice: \(linked.claude) \(linked.writes)")
+
+    let archived = only([13, 27])
+    archived.tickets = [fixture().tickets[0]]
+    archived.tickets[0].labels = ["lab-rl", "lab-cl"]
+    archived.tickets[0].archived = true
+    archived.tickets[0].attachments = [prURL(13)]
+    try seedRerate(dir("archived-attached"), 13, sha("c3"), at: hourAgo)
+    let ar = sync(archived, PipelineSettings(roots: [root], linearTeams: [team], merge: true), dir("archived-attached"), t0)
+    check(!merged(ar) && stageOf(ar.result, prURL(13)) == "cleared/fast (\(PipelineGate.Hold.notAFix.message))",
+          "attached to archived ENG-1: \(ar.writes) \(stageOf(ar.result, prURL(13)))")
+
+    let claimed = only([3])
+    claimed.onClaude = { _ in claimed.issues[0].assignees = ["bob"] }
+    let cl = sync(claimed, split, dir("claim-kept"), t0)
+    check(stageOf(cl.result, issueURL(3)) == "fractured/fractured (it was claimed for a split, which did not happen)",
+          "assigned to @bob while split: \(cl.writes) \(stageOf(cl.result, issueURL(3)))")
+
+    let moving = only([])
+    moving.tickets = [fixture().tickets[0]]
+    moving.onClaude = { _ in
+        moving.tickets[0].identifier = "OPS-1"
+        moving.tickets[0].team = "OPS"
+    }
+    let mv = sync(moving, PipelineSettings(roots: [root], linearTeams: [team], rate: true), dir("moved-team"), t0)
+    check(mv.writes.isEmpty && mv.result.notices == ["ENG-1 was not written to: it could not be read again: it was not found"],
+          "ENG-1 moved to OPS-1 while rated: \(mv.writes) \(mv.result.notices)")
+
+    let rateFix = PipelineSettings(roots: [root], rate: true, fix: true)
+    let assigned = only([1])
+    assigned.ratings["Typo on the login button"]?["risk"] = "medium"
+    assigned.onClaude = { _ in assigned.issues[0].assignees = ["alice"] }
+    _ = sync(assigned, rateFix, dir("assigned-while-rated"), t0)
+    assigned.onClaude = nil
+    assigned.issues[0].assignees = []
+    assigned.issues[0].labels = lowLow
+    let al = sync(assigned, rateFix, dir("assigned-while-rated"), later(5))
+    check(al.writes.isEmpty && al.result.effects == [fixFX(1)],
+          "rated medium as @alice took it, then labelled low/low: \(al.writes) \(al.result.effects)")
+
+    let putBack = only([13, 27])
+    putBack.prs[0].labels.removeAll { $0 == "diplomat:cleared" }
+    try seedRerate(dir("cleared-put-back"), 13, sha("c3"), at: hourAgo)
+    try state("cleared-put-back", #"{"cleared":{"\#(prURL(13))":"\#(sha("c3"))"}}"#)
+    _ = sync(putBack, mergeOnly, dir("cleared-put-back"), t0)
+    putBack.prs[0].labels.append("diplomat:cleared")
+    let pb = sync(putBack, mergeOnly, dir("cleared-put-back"), later(5))
+    check(!merged(pb) && stageOf(pb.result, prURL(13))
+          == "human/human (off the fast track for good: Diplomat took it off the fast track)",
+          "cleared put back on after Diplomat took it off: \(pb.writes) \(stageOf(pb.result, prURL(13)))")
 }
