@@ -118,7 +118,8 @@ public enum PipelineTick {
     /// fixes nor splits its issues, and one read with errors, or whose Linear team was not
     /// read, is read and shown only. Such roots, or all of them when the sync is blocked,
     /// are its `unread`. One sync runs at a time per `dir`: another started meanwhile, or
-    /// one that cannot open the lock, reads nothing and answers the last result with a notice.
+    /// one that cannot open the lock, reads nothing and answers the last result, or before any
+    /// one dated at the epoch, with a notice.
     public static func run(settings: PipelineSettings, now: Date = Date(),
                            dir: URL = PipelineLog.dir, io: PipelineIO = .live) -> PipelineTickResult {
         PrivateFiles.prepare(dir)
@@ -955,7 +956,7 @@ final class PipelineSync {
     func linearJudged(_ pr: PipelineEntry) -> LinearJudged {
         var out = LinearJudged()
         var ids = pr.closesLinear
-        var attachedTo: [(issue: String, ids: [String])] = []
+        var attachedTo: [(issue: String, label: String, ids: [String])] = []
         if !settings.linearTeams.isEmpty {
             /// The open Linear issues an attachment links `url` from, `name` when it is not the PR's.
             func attached(_ url: String, _ name: String) -> [String] {
@@ -979,7 +980,7 @@ final class PipelineSync {
                 }
             }
             for id in attached(pr.id, "it") where !ids.contains(id) { ids.append(id) }
-            for x in pr.closing where open(x) { attachedTo.append((x.id, attached(x.id, x.item.label))) }
+            for x in pr.closing where open(x) { attachedTo.append((x.id, x.item.label, attached(x.id, x.item.label))) }
         }
         let tracked = Set(settings.linearTeams.map { $0.key.uppercased() })
         var read: [String: PipelineEntry?] = [:]
@@ -997,14 +998,22 @@ final class PipelineSync {
                     notice("\(pr.item.label): \(id) could not be read: \(error.localizedDescription)")
                 }
             }
-            if x == nil { out.unjudged.append(id) }
             read[id] = .some(x)
             return x
         }
-        for id in ids { if let x = judged(id), open(x) { out.closing.append(x) } }
+        for id in ids {
+            guard let x = judged(id) else {
+                out.unjudged.append(id)
+                continue
+            }
+            if open(x) { out.closing.append(x) }
+        }
         out.seen = Set(ids)
-        for (issue, found) in attachedTo {
-            let held = found.compactMap(judged).filter(open).lazy
+        for (issue, label, found) in attachedTo {
+            let twins = found.map(judged)
+            let linking = "the Linear issues linking \(label)"
+            if twins.contains(where: { $0 == nil }), !out.unjudged.contains(linking) { out.unjudged.append(linking) }
+            let held = twins.compactMap { $0 }.filter(open).lazy
                 .compactMap { l in self.twinRefusal(l).map { Self.trackedOnLinear(l.item.label, $0) } }.first
             out.twins[PipelineRead.norm(issue)] = .some(held)
         }

@@ -136,4 +136,4 @@ whether you get to see it, and turning both off does not stop the 3-minute GitHu
 poll. **Auto-execute queue** holds every kind at once, the reviews you asked for
 included - which is the one thing no monitor toggle speaks for. The
 [Pipeline](pipeline.md) also holds its own asks while the ban list cannot be read, and after a
-launch until a sync has judged their item.
+launch or the Pipeline going on, until a sync since has judged their item.
