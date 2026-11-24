@@ -9,9 +9,10 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { execFile, execFileSync } from 'node:child_process';
 import { git, packOf, pushBody } from './lib/fake-forge.mjs';
+import { scratchDir } from './lib/scratch.mjs';
 
 // The quarantine is made under the temp directory; a private one shows what is left behind.
-const scratch = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dn-rp-'));
+const scratch = scratchDir('dn-rp-', fs.realpathSync(os.tmpdir()));
 process.env.TMPDIR = path.join(scratch, 'tmp');
 fs.mkdirSync(process.env.TMPDIR);
 process.env.DN_PUSH_MAX_BYTES = String(2 * 2 ** 20);
@@ -941,5 +942,3 @@ await check('the linked checkout is read and never written', async () => {
   assert.equal(snapshot(checkout), checkoutBefore);
   assert.equal(git(checkout, 'status', '--porcelain'), '');
 });
-
-fs.rmSync(scratch, { recursive: true, force: true });

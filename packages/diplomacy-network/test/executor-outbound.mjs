@@ -7,14 +7,14 @@
 
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { scratchDir } from './lib/scratch.mjs';
 const RELAY = fileURLToPath(new URL('../image/relay.mjs', import.meta.url));
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-outbound-'));
+const scratch = scratchDir('dn-outbound-');
 Object.assign(process.env, {
   DN_BASE_DIR: path.join(scratch, 'base'), DN_BROKER_BIND: '127.0.0.1', DN_RELAY_HOST: '127.0.0.1',
   DIPLOMAT_CONFIG: path.join(scratch, 'config.json'),
