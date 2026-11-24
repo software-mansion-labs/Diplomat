@@ -227,7 +227,7 @@ Each child's title and body are the model's, stripped of HTML comments and clean
 and 4000 characters, its mentions, issue references and GitHub links made inert so it notifies and
 links no one, and the body ends with
 `Part of <the parent's URL>`, then a hidden `<!-- Diplomat: part <n> of <the parent's URL> by
-<author> -->`: the parent's author (a part's, its own marker's), whom the ban list checks the part by,
+<author> at <when the model answered> -->`: the parent's author (a part's, its own marker's), whom the ban list checks the part by,
 read only in an issue you opened, which is a part when it carries one or a `Part of` line linking
 the issue it is a sub-issue (Linear: child) of. A part that a failed call made all the same is taken, not filed again: on GitHub the one
 carrying its marker among your 50 newest issues in the repo, looked for before each part is filed

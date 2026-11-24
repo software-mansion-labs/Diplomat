@@ -144,12 +144,13 @@ enum PipelineRead {
                              (flag: "--rebase", setting: "rebaseMergeAllowed", method: "REBASE")]
 
     /// The hidden marker the `k`th part of `parent` ends with, naming `who`, whose text it
-    /// carries.
-    static func partMarker(_ k: Int, of parent: String, by who: String) -> String {
-        "<!-- Diplomat: part \(k) of \(parent) by \(who.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "") -->"
+    /// carries, and when the model `answered`.
+    static func partMarker(_ k: Int, of parent: String, by who: String, at answered: String?) -> String {
+        "<!-- Diplomat: part \(k) of \(parent) by \(who.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "")"
+            + (answered.map { " at \($0)" } ?? "") + " -->"
     }
 
-    private static let marker = try! NSRegularExpression(pattern: #"<!-- Diplomat: part \d+ of \S+ by (\S*) -->"#)
+    private static let marker = try! NSRegularExpression(pattern: #"<!-- Diplomat: part \d+ of \S+ by (\S*)(?: at \S+)? -->"#)
 
     /// Whose text a part's `body` carries, as its marker names it; nil for none.
     static func lineage(_ body: String) -> String? {

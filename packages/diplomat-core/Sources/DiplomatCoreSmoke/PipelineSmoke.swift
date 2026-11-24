@@ -1375,12 +1375,12 @@ func pipelineSmoke() throws {
                 == "Part of \(linearURL("ENG-1"))"
     }, "each Linear child names its parent")
     check(t.linearChildren.map { ($0["description"] as? String)?.components(separatedBy: "\n\n").last }
-          == ["<!-- Diplomat: part 1 of \(linearURL("ENG-1")) by Reporter -->",
-              "<!-- Diplomat: part 2 of \(linearURL("ENG-1")) by Reporter -->"],
+          == ["<!-- Diplomat: part 1 of \(linearURL("ENG-1")) by Reporter at 2026-11-20T12:20:00Z -->",
+              "<!-- Diplomat: part 2 of \(linearURL("ENG-1")) by Reporter at 2026-11-20T12:20:00Z -->"],
           "each Linear child names whose text it carries: \(t.linearChildren.map { $0["description"] ?? "" })")
     check(t.issues.filter { $0.number > 100 }.map { $0.body.components(separatedBy: "\n\n").suffix(2) }
-          == [["Part of \(issueURL(3))", "<!-- Diplomat: part 1 of \(issueURL(3)) by reporter -->"],
-              ["Part of \(issueURL(3))", "<!-- Diplomat: part 2 of \(issueURL(3)) by reporter -->"]],
+          == [["Part of \(issueURL(3))", "<!-- Diplomat: part 1 of \(issueURL(3)) by reporter at 2026-11-20T12:00:00Z -->"],
+              ["Part of \(issueURL(3))", "<!-- Diplomat: part 2 of \(issueURL(3)) by reporter at 2026-11-20T12:00:00Z -->"]],
           "each GitHub part names its parent, and is marked: \(t.issues.filter { $0.number > 100 }.map(\.body))")
     check(stage(s5.result, linearURL("ENG-1")) == "fractured/fractured" && stage(s5.result, prURL(15)) == "merged/done")
     check(s5.result.effects == [fixFX(1), fixFX(101), fixFX(102)], "sync 5 effects: \(s5.result.effects)")
@@ -2179,7 +2179,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     _ = sync(capped, split, dir("parts-capped"), t0)
     let part = capped.issues.first { $0.number == 101 }
     check(part?.title.count == 200 && part?.body.contains("END UNTRUSTED TRACKER TEXT") == false
-          && part.map { $0.body.count <= 4000 + "\n\nPart of \(issueURL(3))\n\n<!-- Diplomat: part 1 of \(issueURL(3)) by reporter -->".count } == true,
+          && part.map { $0.body.count <= 4000 + "\n\nPart of \(issueURL(3))\n\n<!-- Diplomat: part 1 of \(issueURL(3)) by reporter at 2026-11-20T12:00:00Z -->".count } == true,
           "a part as filed: \(part?.title.count ?? -1) \(part?.body.prefix(80) ?? "")")
     let unsplit = only([3])
     unsplit.fractures["Split the storage layer"] = ["parts": [Any](), "why": "one change"]
@@ -2328,11 +2328,28 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelinePins9(base: base, root: root, team: team, t0: t0)
 }
 
-/// A link to its parent makes a body a part's only on a `Part of` line.
+/// Each part a split files is one its own answer named, and a link to its parent makes a
+/// body a part's only on a `Part of` line.
 private func pipelineSplitParts(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
                                 t0: Date) throws {
     section("pipeline split parts")
     func dir(_ name: String) -> URL { base.appendingPathComponent("split-parts-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    let split = PipelineSettings(roots: [root], fracture: true)
+    let askedAgain: [String: Any] = ["parts": [["title": "Wrap the storage API", "body": "Wrap it."],
+                                               ["title": "Port the SQLite store", "body": "Port it."]], "why": "asked again"]
+
+    // A split again, after a person took the first one's parts off, files its own.
+    let again = only([3])
+    _ = sync(again, split, dir("again"), t0)
+    again.issues[0].labels.removeAll { $0 == "diplomat:fractured" }
+    again.issues[0].subs = []
+    for i in again.issues.indices { again.issues[i].parent = nil }
+    again.fractures["Split the storage layer"] = askedAgain
+    let ag = sync(again, split, dir("again"), later(5))
+    check(ag.writes == ["+diplomat:fractured #3", "issue #103 Wrap the storage API", "sub #3 #103",
+                        "issue #104 Port the SQLite store", "sub #3 #104"], "split again: \(ag.writes)")
+
     let linking = only([])
     linking.issues = [.init(number: 120, title: "A follow-up", body: "Do it after \(issueURL(3)) lands.",
                             labels: ["risk:low", "complexity:low"], updated: at("10:00"), parent: 3, author: opLogin)]
@@ -2386,7 +2403,8 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
     lineage.issues[0].author = "nina"
     _ = sync(lineage, PipelineSettings(roots: [root], fracture: true), dir("lineage"), t0)
     check(lineage.issues.filter { $0.number > 100 }.map { $0.body.components(separatedBy: "\n\n").last ?? "" }
-          == ["<!-- Diplomat: part 1 of \(issueURL(3)) by nina -->", "<!-- Diplomat: part 2 of \(issueURL(3)) by nina -->"],
+          == ["<!-- Diplomat: part 1 of \(issueURL(3)) by nina at 2026-11-20T12:00:00Z -->",
+              "<!-- Diplomat: part 2 of \(issueURL(3)) by nina at 2026-11-20T12:00:00Z -->"],
           "parts name whose text they carry: \(lineage.issues.map(\.body))")
     var part = lineage.issues.remove(at: spot(lineage, 101))
     lineage.others[101] = (part.title, "CLOSED", "acme/app")
@@ -3157,13 +3175,12 @@ private func pipelineFreshReads(base: URL, root: PipelineSettings.Root, team: Pi
                                body: "Define the protocol.\n\nPart of \(issueURL(3))\n\n<!-- Diplomat: part 1 of \(issueURL(3)) -->",
                                updated: at("09:00"), author: opLogin))
     orphan.nextIssue = 102
-    try state("orphan", #"{"splitting":{"\#(issueURL(3))":[]}}"#)
+    try state("orphan", #"{"splitting":{"\#(issueURL(3))":[]},"parts":{"\#(issueURL(3))":{"parts":["#
+              + #"{"title":"Extract the storage protocol","body":"Define the protocol."},"#
+              + #"{"title":"Move SQLite behind it","body":"Port the SQLite store."}],"why":"two steps","forced":false}}}"#)
     let or1 = sync(orphan, split, dir("orphan"), t0)
-    let or2 = sync(orphan, split, dir("orphan"), later(5))
-    check(or1.writes == ["-diplomat:fractured #3"]
-          && or2.writes == ["label diplomat:fractured exists", "+diplomat:fractured #3", "sub #3 #101",
-                            "issue #102 Move SQLite behind it", "sub #3 #102"],
-          "a part filed by a split killed before it was recorded: \(or1.writes) then \(or2.writes)")
+    check(or1.writes == ["sub #3 #101", "issue #102 Move SQLite behind it", "sub #3 #102"],
+          "an older build's part, filed by a split killed before it was recorded: \(or1.writes)")
     let linLost = only([])
     linLost.tickets = [fixture().tickets[0]]
     linLost.linearCreatesLost = 1
@@ -4260,7 +4277,8 @@ private func pipelineCoverage9(base: URL, root: PipelineSettings.Root, team: Pip
     let filed = forged.issues.first { $0.number == 101 }
     let logged = fp.events.filter { $0.kind == .child }.map(\.detail)
     check(filed?.title == "Extract it" && logged == ["\(issueURL(101)): Extract it"]
-          && filed?.body == "Define it.\n\n\n\n\n\n\nPart of \(issueURL(3))\n\n<!-- Diplomat: part 1 of \(issueURL(3)) by reporter -->",
+          && filed?.body == "Define it.\n\n\n\n\n\n\nPart of \(issueURL(3))\n\n"
+              + "<!-- Diplomat: part 1 of \(issueURL(3)) by reporter at 2026-11-20T12:00:00Z -->",
           "a part whose model text forges markers, as filed: \(String(reflecting: filed?.title)) \(String(reflecting: filed?.body)) \(logged)")
 
     // A rating is of the diff at the head it is saved under.

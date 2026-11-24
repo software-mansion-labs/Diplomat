@@ -1413,7 +1413,7 @@ final class PipelineSync {
             return release(i, held)
         }
         state.parts[e.id] = PipelineParts(parts: parts.map { .init(title: $0.title, body: $0.body) }, why: why,
-                                          forced: step == .forced)
+                                          forced: step == .forced, at: CommsLog.isoString(now))
         persist()
         file(i, step)
     }
@@ -1482,16 +1482,17 @@ final class PipelineSync {
 
     /// The `k`th part of `entries[i]`: its URL once made, recorded at once, and why it was not
     /// made or not linked. Its body ends with a line naming the parent and a hidden marker
-    /// naming whose text it carries, which every read takes its lineage from. On GitHub the
-    /// marker finds a part an earlier try filed, which is taken rather than filed again;
-    /// Linear files it as the parent's child in one call, so a part a failed call made is
-    /// found among the new children.
+    /// naming the answer and whose text it carries, which every read takes its lineage from.
+    /// On GitHub the marker finds a part an earlier try of the answer filed, which is taken
+    /// rather than filed again; Linear files it as the parent's child in one call, so a part a
+    /// failed call made is found among the new children.
     func createChild(_ i: Int, _ k: Int, _ part: (title: String, body: String)) -> (url: String?, failure: String?) {
         guard recheck(i) else { return (nil, "\(entries[i].item.label) could not be read again, or changed") }
         let e = entries[i]
         if let why = partRefusal(e) { return (nil, why) }
         let title = partTitle(part.title)
-        let marker = PipelineRead.partMarker(k, of: e.id, by: banDimension(e))
+        let answered = state.parts[e.id]?.at
+        let marker = PipelineRead.partMarker(k, of: e.id, by: banDimension(e), at: answered)
         let body = String(fromModel(part.body).prefix(4000)) + "\n\nPart of \(e.id)\n\n\(marker)"
         func made(_ url: String) {
             state.lineage[url] = banDimension(e)
@@ -1501,8 +1502,9 @@ final class PipelineSync {
         switch e.item.source {
         case .github:
             guard let root = e.root, let parent = e.nodeID else { return (nil, "no repository to file it in") }
-            // A part filed before its marker named a lineage ends at the parent's URL.
-            let markers = ["<!-- Diplomat: part \(k) of \(e.id) by ", "<!-- Diplomat: part \(k) of \(e.id) -->"]
+            // An answer saved without `at` was filed under markers naming none, or, older, no lineage.
+            let markers = answered != nil ? [marker]
+                : ["<!-- Diplomat: part \(k) of \(e.id) by ", "<!-- Diplomat: part \(k) of \(e.id) -->"]
             func filed() -> (part: (url: String, node: String, linked: Bool)?, failure: String?) {
                 let r = graphql(root, "Parts", ["-f", "me=\(root.me)"])
                 guard let response = r.response, r.errors.isEmpty else { return (nil, r.why) }
