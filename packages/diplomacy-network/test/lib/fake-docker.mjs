@@ -15,7 +15,8 @@
 // probe container.js measures and clears with: its `du` and its `find -delete` are done
 // here, on the directories its mounts name, and answered the way GNU's are. One put in a
 // container's pid namespace is the probe that counts what that container's processes
-// hold open: it prints `held 0`.
+// hold open: it prints `held 0`. A container whose record a test gives `oom: true` is
+// one the kernel killed for its memory, as `OOMKilled` says, until it is started again.
 //
 // Staged failures, as files in FAKE_DOCKER_DIR:
 //   down             the engine does not answer
@@ -294,6 +295,7 @@ switch (command) {
     const c = container(args[0]);
     if (!c) die(`Error response from daemon: No such container: ${args[0]}`);
     c.running = true;
+    c.oom = false;
     save(c);
     break;
   }
@@ -303,7 +305,7 @@ switch (command) {
     const c = container(rest[0]);
     if (!c) die(`Error response from daemon: No such container: ${rest[0]}`);
     // The mounts are links in the root and count for nothing, as a volume does not count in a writable layer.
-    console.log(JSON.stringify({ State: { Running: c.running }, Config: { Image: c.image, Labels: c.labels }, HostConfig: { NetworkMode: c.networks[0] },
+    console.log(JSON.stringify({ State: { Running: c.running, OOMKilled: c.oom === true }, Config: { Image: c.image, Labels: c.labels }, HostConfig: { NetworkMode: c.networks[0] },
       ...(opts['--size'] ? { SizeRw: measure(c.root).bytes } : {}) }));
     break;
   }
@@ -324,6 +326,7 @@ switch (command) {
     if (!c) die(`Error response from daemon: No such container: ${rest[0]}`);
     killAll(c);
     c.running = true;
+    c.oom = false;
     save(c);
     break;
   }
