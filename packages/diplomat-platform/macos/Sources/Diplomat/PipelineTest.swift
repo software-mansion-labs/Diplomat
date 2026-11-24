@@ -583,9 +583,14 @@ enum PipelineTest {
                   && feed("pipeline-recovered").last == "auto Pipeline syncing again")
         ticks = []
         store.startPipelineMonitor()
+        store.pipelineTimedSyncEnded = Date().addingTimeInterval(-Store.pipelineSyncInterval)
         NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
-        for _ in 0..<250 where ticks.isEmpty { try? await Task.sleep(nanoseconds: 20_000_000) }
-        check("a wake syncs at once", ticks.count == 1)
+        for _ in 0..<250 where store.pipelineSyncWait <= 0 { try? await Task.sleep(nanoseconds: 20_000_000) }
+        check("a wake an interval after the last timed sync syncs at once, the loop's next an interval on",
+              ticks.count == 1 && store.pipelineSyncWait > Store.pipelineSyncInterval - 5)
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        check("…one sooner syncs nothing", ticks.count == 1)
 
         print("\npipeline: Start fix")
         store.pipelineForce = PipelineSettings.Force()

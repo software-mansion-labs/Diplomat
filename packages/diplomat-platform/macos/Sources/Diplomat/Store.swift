@@ -837,6 +837,8 @@ final class Store: ObservableObject {
     /// Driven from `PipelineMonitor.swift`, hence not private.
     var pipelineMonitorTask: Task<Void, Never>?
     var pipelineWakeObserver: NSObjectProtocol?
+    /// When the loop's or a wake's sync last ended (`pipelineSyncWait`).
+    var pipelineTimedSyncEnded: Date?
     var pipelineSyncAgain = false
     /// A sync begun before a bump (`pipelineCut`) may have been switched off midway,
     /// emitting less than it owes, so its result withdraws and prunes nothing.

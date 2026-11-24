@@ -74,22 +74,41 @@ extension Store {
 
     /// Never stopped: a sync with the master switch off returns at once.
     func startPipelineMonitor() {
-        // The loop's sleep pauses while the Mac sleeps; a sync on wake catches up at once.
-        // Headless too, where a sync runs only the self-test's stand-ins.
+        // The loop's sleep pauses while the Mac sleeps: a wake runs the sync it slept through,
+        // in its place. Headless too, where a sync runs only the self-test's stand-ins.
         if pipelineWakeObserver == nil {
             pipelineWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
                 forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
             ) { [weak self] _ in
-                Task { await self?.runPipelineSyncOnce() }
+                Task { @MainActor in
+                    guard let self, !self.pipelineSyncing, self.pipelineSyncWait <= 0 else { return }
+                    await self.runTimedPipelineSync()
+                }
             }
         }
         guard pipelineMonitorTask == nil, !Headless.active else { return }
         pipelineMonitorTask = Task { [weak self] in
             while !Task.isCancelled {
-                await AppLog.timed("pipelineSync", slowAfter: 120) { await self?.runPipelineSyncOnce() }
-                try? await Task.sleep(nanoseconds: UInt64(Store.pipelineSyncInterval * 1_000_000_000))
+                guard let wait = self?.pipelineSyncWait else { return }
+                if wait > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                } else {
+                    await AppLog.timed("pipelineSync", slowAfter: 120) { await self?.runTimedPipelineSync() }
+                }
             }
         }
+    }
+
+    /// Until the loop's next sync: an interval after the last timed one ended, by the clock,
+    /// which runs on while the Mac sleeps.
+    var pipelineSyncWait: TimeInterval {
+        let interval = Store.pipelineSyncInterval
+        return pipelineTimedSyncEnded.map { min(interval, interval + $0.timeIntervalSinceNow) } ?? 0
+    }
+
+    private func runTimedPipelineSync() async {
+        await runPipelineSyncOnce()
+        pipelineTimedSyncEnded = Date()
     }
 
     func pipelineCut(master: Bool = false) {
