@@ -1307,8 +1307,7 @@ final class PipelineSync {
         file(i, step)
     }
 
-    /// Files the parts the model named for `entries[i]`, claimed for them, from the first not
-    /// filed yet.
+    /// Files the parts the model named for `entries[i]`, from the first not filed yet.
     func file(_ i: Int, _ step: Step) {
         let e = entries[i]
         guard let answer = state.parts[e.id] else { return }
