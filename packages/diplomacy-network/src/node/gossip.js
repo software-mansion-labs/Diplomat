@@ -9,7 +9,7 @@ import { MAX_HELLO_CHAIN, MAX_PUSH_RECORDS, Pool } from '../core/pool.js';
 import { LIMITS, checkShape, isObject, memberRecord, shaped } from '../core/records.js';
 import {
   CATCH_UP_MS, HOURS_CEILING, HOURS_FLOOR, INVITE_TTL_SECS, PEER_BACKOFF_MAX_MS, PEER_BACKOFF_MS, PRUNE_INTERVAL_MS, PUSH_REPEAT_MS,
-  RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS, STRANGER_BODY_BYTES, SYNC_INTERVAL_MS,
+  MEMBER_RETENTION_SECS, RESIGN_INTERVAL_MS, STRANGER_BODY_BYTES, SYNC_INTERVAL_MS,
 } from '../paths.js';
 import { poolFile, readPool } from './store.js';
 
@@ -125,21 +125,26 @@ export function createGossip(host) {
       // The store holds all of this: nothing is written until something changes.
       P.pool.delta();
       P.head = host.head(P);
-      // Away for longer than the others keep its record: it is coming back, and asks the
-      // members whose records ran out. One that ran out while this host was there, or
-      // away for less, is of a host that stopped signing.
-      if (own(P) && host.now() - own(P).at > RECORD_RETENTION_SECS) {
+      // Off for longer than the others keep its record. A record that ran out while this
+      // host was there, or away for less, is of a host that stopped signing.
+      if (own(P) && host.now() - own(P).at > MEMBER_RETENTION_SECS) {
         const expired = new Set(refused.filter((r) => r.code === 'expired').map((r) => r.key));
-        P.returning = true;
-        P.back = backTo(P, doc.records.filter((r) => r?.type === 'member' && !r.left && expired.has(memberKey(r.pk))).map((r) => r.pk));
+        comeBack(P, doc.records.filter((r) => r?.type === 'member' && !r.left && expired.has(memberKey(r.pk))).map((r) => r.pk));
       }
     }
     return P;
   }
 
-  // `P.back` with each of `keys` it does not name, asked for as long as a record is kept.
+  // This host comes back to the pool: what it holds of it is no one's but its own until a
+  // host it asks answers, and `keys` are asked besides the members it holds.
+  function comeBack(P, keys) {
+    P.returning = true;
+    P.back = backTo(P, keys);
+  }
+
+  // `P.back` with each of `keys` it does not name, asked for as long as a member record is kept.
   function backTo(P, keys) {
-    const until = host.now() + RECORD_RETENTION_SECS;
+    const until = host.now() + MEMBER_RETENTION_SECS;
     const added = keys.filter((pk) => pk !== host.self && !P.back.some((e) => e.pk === pk)).map((pk) => ({ pk, until }));
     return [...P.back, ...added].sort((x, y) => (x.pk < y.pk ? -1 : x.pk > y.pk ? 1 : 0));
   }
@@ -203,8 +208,7 @@ export function createGossip(host) {
   // it held, and the hosts it left the pool to are asked with the members it holds.
   function rejoin(id) {
     const P = load(host.away.get(id), host.store.read(poolFile(id)) ?? {});
-    P.back = backTo(P, P.farewell?.leftTo ?? []);
-    P.returning = true;
+    comeBack(P, P.farewell?.leftTo ?? []);
     P.farewell = null;
     P.pool.merge(signMember(P), host.now());
     host.away.delete(id);
@@ -481,12 +485,19 @@ export function createGossip(host) {
     }
   }
 
-  /// What this host holds of its pools is as old as the moment it last looked: every
-  /// pool is out of date from now.
-  function woke() {
+  /// What this host holds of its pools is as old as `since`, the moment it last looked
+  /// or could reach anyone: every pool is out of date from now, and one it was away from
+  /// for longer than a member record is kept it comes back to.
+  function woke(since) {
+    const now = host.now();
     for (const P of host.pools.values()) {
-      P.stale = host.now();
+      P.stale = now;
       P.epoch += 1;
+      if (now - since > MEMBER_RETENTION_SECS && !P.returning) {
+        const known = new Set(P.pool.known(now).map((m) => m.pk));
+        comeBack(P, P.pool.records().filter((r) => r.type === 'member' && !r.left && !known.has(r.pk)).map((r) => r.pk));
+        host.save(P);
+      }
     }
   }
 
@@ -510,10 +521,6 @@ export function createGossip(host) {
     // With nobody to ask there was nothing to wait for, and nothing to say of it.
     if (pks.length === 0) {
       P.stale = null;
-      if (P.returning) {
-        P.returning = false;
-        host.save(P);
-      }
       return undefined;
     }
     const asked = pks.map((pk) => meet(P, pk, { fresh: true }).then((heard) => heard && caughtUp(P, epoch))
@@ -647,8 +654,11 @@ export function createGossip(host) {
       redeem(P).catch((err) => host.log(`an invite could not be redeemed: ${err?.stack ?? err}`));
       const held = new Set(P.pool.known(now).map((m) => m.pk));
       const back = P.back.filter((e) => now < e.until && !held.has(e.pk));
-      if (back.length !== P.back.length) {
+      // With nobody left to ask, there is no answer to wait for.
+      const alone = P.returning && others({ ...P, back }).length === 0;
+      if (back.length !== P.back.length || alone) {
         P.back = back;
+        if (alone) P.returning = false;
         host.save(P);
       }
       const mine = own(P);
@@ -660,9 +670,18 @@ export function createGossip(host) {
     if (now - pruned < PRUNE_INTERVAL_MS / 1000) return;
     pruned = now;
     for (const P of host.pools.values()) {
-      const before = P.pool.records().length;
+      const before = P.pool.records();
       P.pool.prune(now);
-      if (P.pool.records().length !== before) host.moved(P);
+      if (P.pool.records().length !== before.length) host.moved(P);
+      // A member whose record ran out while no other answered this host may have been cut
+      // off from it rather than gone: it is asked as one this host is back to.
+      const word = Math.max(0, ...before.filter((r) => r.type === 'member' && r.pk !== host.self).map((r) => host.peers.seen(r.pk).lastSeen));
+      const cut = before.filter((r) => r.type === 'member' && !r.left && r.pk !== host.self && !P.pool.get(memberKey(r.pk))
+        && word < r.at + 2 * RESIGN_INTERVAL_MS / 1000);
+      if (cut.length > 0) {
+        P.back = backTo(P, cut.map((r) => r.pk));
+        host.save(P);
+      }
       if (P.locks.prune(now)) host.saveLocks();
     }
   }

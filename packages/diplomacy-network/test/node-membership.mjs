@@ -728,12 +728,16 @@ await check('a machine back after more than a month whose voucher leads up to a 
   }
 });
 
-await check('a machine that was there all along is coming back to nothing: the last of a pool whose other member stopped for good runs its jobs after a night off across that member\'s last day, and after a restart just past it', async () => {
-  for (const how of ['night', 'restart']) {
+await check('a machine that was there all along is coming back to nothing: the last of a pool whose other member stopped runs its jobs after a weekend off, after a night off across that member\'s last day, and after a restart just past it', async () => {
+  for (const how of ['weekend', 'night', 'restart']) {
     const w = createWorld({ seed: 61 });
     const [r, a] = await w.pool(['r', 'a']);
     w.net.kill('a');
-    if (how === 'night') {
+    if (how === 'weekend') {
+      await w.run(5 * 24 * 3600);
+      w.net.kill('r');
+      await w.run(50 * 3600);
+    } else if (how === 'night') {
       await w.run(30 * 24 * 3600 - 4 * 3600);
       w.net.kill('r');
       await w.run(8 * 3600);
@@ -756,13 +760,13 @@ await check('two machines back after a month that reach each other first go on a
   await w.run(24 * 3600);
   w.net.kill('r');
   await w.run(31 * 24 * 3600);
-  // The two that stayed are off for the night.
+  // The two that stayed are off for a weekend.
   w.net.kill('a');
   w.net.kill('b');
   await w.restart(c);
   await w.run(600);
   await w.restart(m);
-  await w.run(3600);
+  await w.run(50 * 3600);
   const back = (h) => w.doc(h).back.map((e) => e.pk);
   assert.deepEqual([c, m].map((h) => [w.view(h).returning, w.members(h), back(h)]), [
     [false, [c.pk, m.pk].sort(), [a.pk, b.pk].sort()],
@@ -793,11 +797,86 @@ await check('a machine back after a month asks a machine that never answers for 
   await w.net.until(() => !w.view(a).returning, { maxMs: 3600 * 1000, what: 'b answered' });
   await w.run(60);
   assert.deepEqual(w.doc(a).back.map((e) => w.name(e.pk)), ['c']);
-  await w.run(30 * 24 * 3600 + 3600);
-  assert.deepEqual(w.doc(a).back, []);
+  await w.run(2 * 24 * 3600);
+  const day2 = w.net.now();
+  await w.run(24 * 3600);
+  assert.deepEqual([w.doc(a).back.map((e) => w.name(e.pk)), w.net.count({ from: 'a', to: 'c', since: day2 }) > 0], [['c'], true], 'asked on its third day');
+  await w.run(27 * 24 * 3600 + 3600);
+  assert.deepEqual([w.doc(a).back, w.view(a).returning], [[], false]);
   const since = w.net.now();
   await w.run(24 * 3600);
   assert.equal(w.net.count({ from: 'a', to: 'c', since }), 0);
+});
+
+await check('a machine away a month without a restart - asleep, cut off, or with its transport down - asks the machines it knew whose records ran out, and is one pool with them', async () => {
+  for (const how of ['sleep', 'cut', 'down']) {
+    const w = createWorld({ seed: 91 });
+    const [r, a, b, m] = await w.pool(['r', 'a', 'b', 'm']);
+    const cut = (on) => { for (const x of ['r', 'a', 'b']) w.net.cut('m', x, on); };
+    const say = (ready) => {
+      m.transport.host.ready = ready;
+      m.transport.host.watchers.forEach((fn) => fn({ state: ready ? 'ready' : 'starting', detail: '' }));
+    };
+    if (how === 'sleep') w.net.sleep('m');
+    else if (how === 'cut') cut(true);
+    else {
+      cut(true);
+      say(false);
+    }
+    await w.run(24 * 3600);
+    w.net.kill('r');
+    await w.run(31 * 24 * 3600);
+    // A machine that slept or had no network knows it was away; one cut off does not.
+    if (how === 'sleep') {
+      cut(true);
+      w.net.sleep('m', false);
+    } else if (how === 'down') say(true);
+    await w.run(60);
+    assert.equal(w.view(m).returning, how !== 'cut', how);
+    cut(false);
+    const since = w.net.now();
+    await w.net.until(() => [a, b, m].every((h) => w.members(h).length === 3), { maxMs: 30 * 60 * 1000, what: `${how}: m a member again` });
+    await w.agreed([a, b, m]);
+    assert.ok(w.net.count({ from: 'm', to: 'a', since }) > 0, how);
+    assert.deepEqual([w.view(m).returning, w.doc(m).back], [false, []], how);
+    for (const h of [a, b, m]) h.slots = 1;
+    const { taskId } = await m.node.offer(offerArgs('pr-1'));
+    await a.node.offer(offerArgs('pr-1'));
+    await w.net.until(() => [a, b, m].some((h) => h.executor.jobOf(taskId)), { maxMs: 3600 * 1000, what: `${how}: pr-1 running` });
+    await w.run(600);
+    assert.equal([a, b, m].filter((h) => h.executor.jobOf(taskId)).length, 1, how);
+  }
+});
+
+await check('a machine back after a month that nobody answers waits for the machines it asks for 30 days, and then runs its jobs alone', async () => {
+  const w = createWorld({ seed: 72 });
+  const [r] = await w.pool(['r', 'a']);
+  w.net.kill('r');
+  w.net.kill('a');
+  await w.run(31 * 24 * 3600);
+  await w.restart(r);
+  r.slots = 1;
+  const { taskId } = await r.node.offer(offerArgs('pr-1'));
+  await w.run(29 * 24 * 3600);
+  assert.deepEqual([w.view(r).returning, w.doc(r).back.length, r.executor.jobOf(taskId)], [true, 1, undefined]);
+  await w.run(24 * 3600 + 3600);
+  assert.deepEqual([w.view(r).returning, w.doc(r).back, w.doc(r).returning], [false, [], false]);
+  const again = await r.node.offer(offerArgs('pr-2'));
+  await w.net.until(() => r.executor.jobOf(again.taskId), { maxMs: 3600 * 1000, what: 'a job running' });
+});
+
+await check('a back list written as bare keys is read as nothing to ask', async () => {
+  const w = createWorld({ seed: 67 });
+  const [a, b] = await w.pool(['a', 'b']);
+  const nobody = w.add('nobody');
+  w.net.kill('a');
+  const file = [...a.disk.files.keys()].find((name) => name.startsWith('pools/'));
+  const { returning, ...doc } = w.doc(a);
+  assert.equal(returning, false);
+  a.disk.write(file, JSON.stringify({ ...doc, back: [nobody.pk, b.pk] }));
+  await w.restart(a);
+  await w.run(600);
+  assert.deepEqual([w.view(a).returning, w.members(a), w.net.count({ to: 'nobody' })], [false, [a.pk, b.pk].sort(), 0]);
 });
 
 await check('a machine back after a month that was answered is back after a restart, whoever is up: what it was told is on disk at once', async () => {

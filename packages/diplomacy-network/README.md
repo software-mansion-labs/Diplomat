@@ -306,8 +306,10 @@ said, or that the invite ran out unanswered, or that its maker came into the poo
 this machine before this one began the pool again, so no machine that came in under it
 can let it back in - and is empty once another invite is pasted.
 Its `returning` is true from when this machine joins a pool again after it left it, or
-starts after more than 30 days away, until one of the machines it asks there answers: it
-takes and gives none of the pool's jobs until then, and needs no invite.
+finds it was away for more than 30 days - off, asleep, or with no network - until one of
+the machines it asks there answers, or it has none left to ask (a machine whose record
+ran out is asked for 30 days): it takes and gives none of the pool's jobs until then,
+and needs no invite.
 Its `unseated` is true while every other machine this one asks in the pool has refused it
 as no member (`denied` or `not-member`) and answered it nothing since - a machine that
 does not answer, is busy, or refuses this one's clock or its work leaves it false:
