@@ -369,12 +369,18 @@ public enum NetworkPools {
         "\(repo) is reached on port \(port) of \(host), and the Diplomacy Network reaches "
             + "a forge on 443 only: it has no pool and none of its jobs is offered"
     }
+    public static func notCounted(path: String, repo: String, host: String, port: Int) -> String {
+        "\(path) reaches \(repo) on port \(port) of \(host), which the Diplomacy Network "
+            + "does not: the pool goes by another checkout of it"
+    }
 
     /// Every linked repository as a pool: the roots, then what the OTHER REPOS
     /// checkouts name that no root does (`others`). A root or a checkout that was read
     /// and names no forge is no pool, and is in neither list; a repository on a host
-    /// without rules (`hasRules`) is no pool either, and is named, and so is one named by
-    /// a remote on another port than the forge's API (`LocalRepo.webPort`). What could not be
+    /// without rules (`hasRules`) is no pool either, and is named. A repository named by a
+    /// remote on another port than the forge's API (`LocalRepo.webPort`) makes no pool, and
+    /// is named as having none, or as not counted where another checkout of it makes one.
+    /// What could not be
     /// confirmed is said as the daemon last had it (`known`, its snapshot's pools): the
     /// pool at a path that could not be read (`unread`), and the pool of a repository
     /// whose forge login is unknown. The daemon leaves a pool the list omits, so the
@@ -388,15 +394,20 @@ public enum NetworkPools {
         var listed = Set(pools.map(\.id))
         var nameless: [(id: String, repo: PRRef.LocalRepo)] = []
         var unruled: [(id: String, repo: PRRef.LocalRepo)] = []
+        var ported: [(id: String, repo: PRRef.LocalRepo, port: Int)] = []
         for repo in repos {
-            guard let id = NetworkOffer.pool(repoKey: repo.key), !listed.contains(id),
-                  !(nameless + unruled).contains(where: { $0.id == id }) else { continue }
-            if repo.webPort != nil || !hasRules(host: repo.host) {
-                unruled.append((id, repo))
-            } else {
-                nameless.append((id, repo))
+            guard let id = NetworkOffer.pool(repoKey: repo.key) else { continue }
+            if let port = repo.webPort {
+                if !ported.contains(where: { $0.id == id }) { ported.append((id, repo, port)) }
+            } else if !listed.contains(id), !(nameless + unruled).contains(where: { $0.id == id }) {
+                if hasRules(host: repo.host) {
+                    nameless.append((id, repo))
+                } else {
+                    unruled.append((id, repo))
+                }
             }
         }
+        let kept = listed.union(nameless.map(\.id))
         for pool in known where !listed.contains(pool.id)
             && (unread.contains(pool.path) || nameless.contains { $0.id == pool.id }) {
             listed.insert(pool.id)
@@ -407,10 +418,12 @@ public enum NetworkPools {
         }
         return Listing(pools: pools, unconfirmed: unread.map { unconfirmed(unread: $0) }
             + nameless.map { unconfirmed(account: $0.repo.slug, host: $0.repo.host) }
-            + unruled.map { unruled in
-                unruled.repo.webPort.map {
-                    unsupported(unruled.repo.slug, host: unruled.repo.host, port: $0)
-                } ?? unsupported(unruled.repo.slug, host: unruled.repo.host)
+            + unruled.map { unsupported($0.repo.slug, host: $0.repo.host) }
+            + ported.map {
+                kept.contains($0.id)
+                    ? notCounted(path: $0.repo.path, repo: $0.repo.slug, host: $0.repo.host,
+                                 port: $0.port)
+                    : unsupported($0.repo.slug, host: $0.repo.host, port: $0.port)
             })
     }
 

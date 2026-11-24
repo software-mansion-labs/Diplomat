@@ -63,7 +63,7 @@ def switch_record() -> Path:
     while the config cannot be read: ``network-switch.json`` beside the config, holding
     ``{"config": <the config's path>, "networkEnabled": <the switch>}``. The macOS app
     keeps the same file."""
-    return appconfig.path().with_name("network-switch.json")
+    return appconfig.path().with_name(appconfig.SWITCH_RECORD)
 
 
 def _switch_recorded(where: Path) -> bool:
@@ -72,10 +72,11 @@ def _switch_recorded(where: Path) -> bool:
 
 
 def enabled() -> bool:
-    """The switch, as the shared config has it. A config that is there and cannot be
-    read says nothing of it - one read can fall in the middle of a rewrite - so the
-    switch is as it was last read: by this process, else by the Diplomat that last
-    wrote :func:`switch_record`. It is off when none on this machine read it as on."""
+    """The switch, as the shared config has it. A config that cannot be read, or is gone
+    (:func:`appconfig.read_known`), says nothing of it - one read can fall in the middle
+    of a rewrite - so the switch is as it was last read: by this process, else by the
+    Diplomat that last wrote :func:`switch_record`. It is off when none on this machine
+    read it as on."""
     global _switch_read
     where, config = appconfig.path(), appconfig.read_known()
     if config is None:

@@ -660,6 +660,16 @@ def test_a_repository_named_by_a_remote_on_another_port_has_no_pool_and_is_named
     ssh = checkout("ssh://git@gitlab.acme.example:2222/p/api.git")
     assert [p["id"] for p in N.pools_listing(ssh, [], [], logins, [])[0]] == [
         "gitlab.acme.example/p/api"]
+    elsewhere = [LocalRepo("p", "api", "/src/api-ssh", "gitlab.acme.example")]
+    for order in (ported + elsewhere, elsewhere + ported):
+        pools, said = N.pools_listing(order, [], [], {}, known)
+        assert [p["id"] for p in pools] == ["gitlab.acme.example/p/api"], (
+            "cloned over ssh too, its login unknown: the ssh checkout keeps the pool")
+        assert said == [
+            "The login for p/api on gitlab.acme.example is not known yet: its pool stays "
+            "as the daemon last had it until it is",
+            "/src/api reaches p/api on port 8443 of gitlab.acme.example, which the "
+            "Diplomacy Network does not: the pool goes by another checkout of it"]
 
 
 def test_a_join_under_way_and_why_the_last_invite_failed_are_read_of_a_pool():

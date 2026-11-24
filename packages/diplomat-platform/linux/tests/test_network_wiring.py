@@ -1782,13 +1782,14 @@ def test_a_config_that_cannot_be_read_leaves_the_switch_as_it_was(store, on, dae
     store._settle_agents()
     assert dn.enabled() and len(unreadable_notes()) == 2, "an empty file, a second spell"
 
-    # What can be read is believed: a value that is no boolean, and no file, are off.
+    # What can be read is believed: a value that is no boolean is off. A file that was
+    # there and is gone - an editor saving by rename - says nothing.
     appconfig.path().write_text('{"networkEnabled": "true"}', encoding="utf-8")
     assert not dn.enabled()
     appconfig.set_bool(network.ENABLED_KEY, True)
     assert dn.enabled()
     appconfig.path().unlink()
-    assert not dn.enabled()
+    assert dn.enabled() and dn.settings_unknown() == unknown()
 
     # Read on from one file says nothing of another that cannot be read.
     appconfig.set_bool(network.ENABLED_KEY, True)
@@ -1803,6 +1804,14 @@ def break_config() -> str:
     """Leave the config one brace short, and answer what it held."""
     whole = appconfig.path().read_text(encoding="utf-8")
     appconfig.path().write_text(whole.rstrip()[:-1], encoding="utf-8")
+    return whole
+
+
+def move_config_away() -> str:
+    """Rename the config aside, as vim and nvim save it on Linux, and answer what it
+    held."""
+    whole = appconfig.path().read_text(encoding="utf-8")
+    appconfig.path().rename(appconfig.path().with_name("config.json~"))
     return whole
 
 
@@ -2011,16 +2020,19 @@ def test_a_config_that_breaks_while_the_roots_are_read_posts_no_list(
     assert d.sent("pools") == [] and d.sent("admit") == []
 
 
+@pytest.mark.parametrize("spoil", [break_config, move_config_away],
+                         ids=["truncated", "renamed-away"])
 def test_a_read_of_the_config_inside_a_rewrite_of_it_says_nothing_it_read(
-        store, linked, daemon, monkeypatch):
+        store, linked, daemon, monkeypatch, spoil):
     """A writer that truncates and rewrites in place leaves the file unreadable for a
-    moment: a setting read then is its default, however the file reads before and after."""
+    moment, and one that renames a new file into place leaves none: a setting read then
+    is its default, however the file reads before and after."""
     pool = {"id": POOL, "path": linked, "forge": "github", "identity": "alice"}
     d = daemon(state=has_pools((POOL, linked, "alice")))
 
     def inside_a_rewrite(real):
         def read(*args):
-            whole = break_config()
+            whole = spoil()
             try:
                 return real(*args)
             finally:
@@ -2031,6 +2043,10 @@ def test_a_read_of_the_config_inside_a_rewrite_of_it_says_nothing_it_read(
         patch.setattr(review, "roots_linking", inside_a_rewrite(review.roots_linking))
         store._network_cycle_once(1000.0)
     with monkeypatch.context() as patch:
+        # What each "Left" line says became of its path.
+        patch.setattr(store, "_listed_paths", inside_a_rewrite(store._listed_paths))
+        store._network_cycle_once(1001.0)
+    with monkeypatch.context() as patch:
         patch.setattr(store, "_network_admit", inside_a_rewrite(store._network_admit))
         store._network_cycle_once(1002.0)
     assert d.sent("pools") == [] and d.sent("admit") == [], (
@@ -2039,6 +2055,36 @@ def test_a_read_of_the_config_inside_a_rewrite_of_it_says_nothing_it_read(
 
     store._network_cycle_once(1004.0)
     assert d.sent("pools") == [{"pools": [pool]}] and len(d.sent("admit")) == 1
+
+
+@pytest.mark.parametrize("spoil", [break_config, move_config_away],
+                         ids=["truncated", "renamed-away"])
+def test_a_settle_that_reads_the_switch_inside_a_save_withdraws_nothing(
+        store, on, daemon, monkeypatch, spoil):
+    """Read inside a save, the switch is as it was: not off, so no run is withdrawn -
+    not even the one a peer runs."""
+    d = daemon(state=snapshot(offers=[offer("t1", "claimed", executor=PEER),
+                                      offer("t2", "pooled")]))
+    book_network_run("t1", 9)
+    book_network_run("t2", 10)
+    assert dn.enabled()
+    real, first = dn.enabled, []
+
+    def enabled() -> bool:
+        if first:
+            return real()
+        first.append(True)
+        whole = spoil()
+        try:
+            return real()
+        finally:
+            appconfig.path().write_text(whole, encoding="utf-8")
+
+    monkeypatch.setattr(dn, "enabled", enabled)
+    store._settle_agents()
+    assert first and d.sent("withdraw") == []
+    assert sorted(r.network for r in agentregistry.load()) == ["t1", "t2"]
+    assert lines("network-failed") == []
 
 
 def test_no_daemon_is_started_while_the_settings_are_unknown(store, linked, installer):

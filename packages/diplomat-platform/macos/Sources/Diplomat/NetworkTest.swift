@@ -2121,14 +2121,49 @@ enum NetworkTest {
         await store.runNetworkCycleOnce()
         check("an array is no settings either, and a second spell is said again",
               AppConfig.unreadable && store.networkEnabled && unreadableNotes() == 2)
+        try? configWhole.write(to: AppConfig.url)
+        await store.runNetworkCycleOnce()
+        let aside = AppConfig.url.appendingPathExtension("away")
+        try? FileManager.default.moveItem(at: AppConfig.url, to: aside)
+        await store.runNetworkCycleOnce()
+        await store.settleAgents()
+        check("a config renamed away, as an editor that saves by rename leaves it for a "
+                + "moment, says nothing: the switch stays on and nothing is withdrawn",
+              AppConfig.unreadable && store.networkEnabled && unreadableNotes() == 3
+                && store.networkSettingsUnknown == unknown
+                && requests(NetworkRoute.withdraw).count == configWithdrawn
+                && booked("task-cfg") != nil)
+        try? FileManager.default.moveItem(at: aside, to: AppConfig.url)
+        await store.runNetworkCycleOnce()
         try? Data("{\"networkEnabled\": \"true\"}".utf8).write(to: AppConfig.url)
         await store.runNetworkCycleOnce()
         await store.networkLifecycle?.value
         check("what can be read is believed: a value that is no boolean is off",
               !AppConfig.unreadable && !store.networkEnabled)
         try? FileManager.default.removeItem(at: AppConfig.url)
-        check("…and no file is no setting, which a write may follow",
-              !AppConfig.unreadable && AppConfig.setInt(AppConfig.autoTaskLimitKey, limit))
+        check("…and a file that was there and is gone is unknown, which a write may follow",
+              AppConfig.unreadable && AppConfig.setInt(AppConfig.autoTaskLimitKey, limit)
+                && !AppConfig.unreadable)
+        let live = AppConfig.url.path
+        for (named, wasThere) in [(true, true), (false, false)] {
+            let elsewhere = scratch.appendingPathComponent("relaunched-\(named)/config.json")
+            try? FileManager.default.createDirectory(
+                at: elsewhere.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try? JSONSerialization.data(withJSONObject: [
+                "config": named ? elsewhere.path : "/elsewhere/config.json",
+                NetworkSettings.enabledKey: true]).write(to: elsewhere
+                    .deletingLastPathComponent().appendingPathComponent("network-switch.json"))
+            setenv("DIPLOMAT_CONFIG", elsewhere.path, 1)
+            check(named ? "a config none read here that the switch record names was there: "
+                    + "gone, it is unknown" : "…and one it does not name never was",
+                  AppConfig.unreadable == wasThere)
+        }
+        let readHere = scratch.appendingPathComponent("relaunched-false/config.json")
+        try? Data("{}".utf8).write(to: readHere)
+        _ = AppConfig.read()
+        try? FileManager.default.removeItem(at: readHere)
+        check("…but one this Diplomat read was, and gone it is unknown", AppConfig.unreadable)
+        setenv("DIPLOMAT_CONFIG", live, 1)
         check("…and the settings are known again",
               store.networkTrouble == nil && !screenShows(NetworkSettings.unknownNote(unknown)))
 

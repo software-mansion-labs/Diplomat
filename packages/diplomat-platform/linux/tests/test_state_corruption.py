@@ -62,6 +62,35 @@ def test_no_setting_is_written_over_a_config_that_cannot_be_read(body, write):
         "Diplomacy Network switch stays as it was last read")
 
 
+def test_a_config_that_was_there_and_is_gone_is_unknown_and_still_written():
+    """An editor that saves by renaming a new file into place, as vim and nvim do on
+    Linux, leaves none for a moment: neither the defaults nor the switch off."""
+    appconfig.path().parent.mkdir(parents=True, exist_ok=True)
+    appconfig.path().unlink(missing_ok=True)
+    assert appconfig.read_known() == {}, "never there: the defaults"
+    appconfig.path().write_text('{"networkEnabled": true}', encoding="utf-8")
+    assert appconfig.read_known() == {"networkEnabled": True}
+    counted = appconfig.unreadable_reads()
+    appconfig.path().rename(appconfig.path().with_name("config.json~"))
+    assert appconfig.read_known() is None and appconfig.unreadable_reads() == counted + 1
+    assert appconfig.read() == {}
+    appconfig.set_int("autoTaskLimit", 3)
+    assert appconfig.read_known() == {"autoTaskLimit": 3}, "a setting saved writes it anew"
+
+
+@pytest.mark.parametrize("named, known", [(True, None), (False, {})])
+def test_a_config_the_switch_record_names_was_there(named, known):
+    """A Diplomat started inside such a save has read no config yet: the switch record,
+    written as the config was read, tells it one was there."""
+    where = appconfig.path()
+    where.parent.mkdir(parents=True, exist_ok=True)
+    where.unlink(missing_ok=True)
+    where.with_name(appconfig.SWITCH_RECORD).write_text(json.dumps(
+        {"config": str(where) if named else "/elsewhere/config.json",
+         "networkEnabled": True}), encoding="utf-8")
+    assert appconfig.read_known() == known
+
+
 def test_a_config_that_is_not_there_or_reads_is_written():
     appconfig.path().unlink(missing_ok=True)
     assert appconfig.read_known() == {}

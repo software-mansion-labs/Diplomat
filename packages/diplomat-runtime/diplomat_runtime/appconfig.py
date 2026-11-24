@@ -36,7 +36,7 @@ from pathlib import Path
 
 # The gate's own default + range for the task cap, and the shared atomic writer.
 from . import autofix
-from .atomicjson import write_atomic
+from .atomicjson import read_object, write_atomic
 
 # Keys. Kept in sync with Swift's `AppConfig` (diplomat-platform/macos/Sources/Diplomat/AppConfig.swift).
 #: The repo roots, primary first: a JSON array of paths, ``~`` expanded on use.
@@ -87,6 +87,10 @@ REMOTE_MACHINE_EXCLUDE_UNTIL = "remoteMachineExcludeUntil"
 #: machine's spare cores count this much, any other's the rest. Only reorders machines.
 REMOTE_MACHINE_ARM_BIAS = "remoteMachineArmBias"
 
+#: Beside the config: the Diplomacy Network switch as the config was last read,
+#: ``{"config": <the config's path>, "networkEnabled": <the switch>}``.
+SWITCH_RECORD = "network-switch.json"
+
 DEFAULT_DEVICE_IDLE_FREE_MINUTES = 5
 MAX_DEVICE_IDLE_FREE_MINUTES = 60
 DEFAULT_DEVICE_IDLE_LEASED_MINUTES = 30
@@ -113,29 +117,48 @@ def read() -> dict:
 
 
 _unreadable_reads = 0
+#: The configs this process read, by path.
+_read_paths: set[str] = set()
 
 
 def unreadable_reads() -> int:
-    """How many reads in this process found the file there and unreadable. One that
-    moved between two looks at it means a setting read in between was a default, the
-    file being caught in a rewrite, however it reads at either look."""
+    """How many reads in this process found the file unknown (:func:`read_known`). One
+    that moved between two looks at it means a setting read in between was a default,
+    the file being caught in a rewrite, however it reads at either look."""
     return _unreadable_reads
 
 
-def read_known() -> dict | None:
-    """The whole file: ``{}`` when there is none, ``None`` when one is there and cannot
-    be read as a JSON object. That one says nothing: a caller that must not take a
-    default for an answer keeps what it last read, and no setting is written over it
-    (:func:`_editable`), and it counts in :func:`unreadable_reads`."""
-    global _unreadable_reads
+def _load() -> tuple[dict | None, bool]:
+    """The file as a JSON object, else ``None``; and whether there is no file."""
     try:
         data = json.loads(path().read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return {}
+        return None, True
     except (OSError, ValueError):
-        data = None
-    if isinstance(data, dict):
+        return None, False
+    return (data if isinstance(data, dict) else None), False
+
+
+def _was_there(where: Path) -> bool:
+    """Whether a config was at ``where``: this process read one, or the switch record
+    names it."""
+    return (str(where) in _read_paths
+            or (read_object(where.with_name(SWITCH_RECORD)) or {}).get("config") == str(where))
+
+
+def read_known() -> dict | None:
+    """The whole file, ``{}`` when there is none and never was, or ``None``: one is
+    there and cannot be read as a JSON object, or one was there and is gone - an editor
+    that saves by renaming a new file into place leaves none for a moment. ``None`` says
+    nothing: a caller that must not take a default for an answer keeps what it last
+    read, and it counts in :func:`unreadable_reads`."""
+    global _unreadable_reads
+    data, absent = _load()
+    if data is not None:
+        _read_paths.add(str(path()))
         return data
+    if absent and not _was_there(path()):
+        return {}
     _unreadable_reads += 1
     return None
 
@@ -147,14 +170,15 @@ def unreadable_note() -> str:
 
 
 def _editable() -> dict:
-    """The file's keys, for a read-modify-write. Raises ``OSError`` for a file that is
-    there and cannot be parsed: a write would drop every key it holds."""
-    data = read_known()
-    if data is None:
+    """The file's keys, for a read-modify-write: none when there is no file. Raises
+    ``OSError`` for a file that is there and cannot be parsed: a write would drop every
+    key it holds."""
+    data, absent = _load()
+    if data is None and not absent:
         raise OSError(errno.EINVAL,
                       "the settings file cannot be read, and is not written over",
                       str(path()))
-    return data
+    return data or {}
 
 
 def get(key: str, default: str = "") -> str:

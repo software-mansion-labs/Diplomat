@@ -99,16 +99,48 @@ enum AppConfig {
     /// or hand-edited file must degrade to defaults, never break a spawn.
     static func read() -> [String: Any] { parsed() ?? [:] }
 
-    /// The whole file: `[:]` when there is none, nil when one is there and cannot be
-    /// read as a JSON object. That one says nothing: a caller that must not take a
-    /// default for an answer keeps what it last read (`unreadable`), and no setting is
-    /// written over it.
+    /// The whole file, `[:]` when there is none and never was, or nil: one is there and
+    /// cannot be read as a JSON object, or one was there and is gone - an editor that
+    /// saves by renaming a new file into place leaves none for a moment. Nil says
+    /// nothing: a caller that must not take a default for an answer keeps what it last
+    /// read (`unreadable`). Python twin: `appconfig.read_known`.
     static func parsed() -> [String: Any]? {
+        let (object, absent) = load()
+        if let object {
+            readPathsLock.lock()
+            readPaths.insert(url.path)
+            readPathsLock.unlock()
+            return object
+        }
+        return absent && !wasThere ? [:] : nil
+    }
+
+    /// The configs this process read, by path.
+    private static var readPaths: Set<String> = []
+    private static let readPathsLock = NSLock()
+
+    /// Whether a config was at `url`: this process read one, or the switch record names it.
+    private static var wasThere: Bool {
+        readPathsLock.lock()
+        let read = readPaths.contains(url.path)
+        readPathsLock.unlock()
+        return read || switchRecord?["config"] as? String == url.path
+    }
+
+    /// The file as a JSON object, else nil; and whether there is no file.
+    private static func load() -> (object: [String: Any]?, absent: Bool) {
         let data: Data
         do { data = try Data(contentsOf: url) } catch {
-            return (error as? CocoaError)?.code == .fileReadNoSuchFile ? [:] : nil
+            return (nil, (error as? CocoaError)?.code == .fileReadNoSuchFile)
         }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        return ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any], false)
+    }
+
+    /// The file's keys, for a read-modify-write: none when there is no file, nil for a
+    /// file that is there and cannot be parsed, as a write would drop every key it holds.
+    private static func editable() -> [String: Any]? {
+        let (object, absent) = load()
+        return object ?? (absent ? [:] : nil)
     }
 
     static var unreadable: Bool { parsed() == nil }
@@ -140,14 +172,14 @@ enum AppConfig {
     /// returns.
     @discardableResult
     static func set(_ key: String, _ value: String) -> Bool {
-        guard var obj = parsed() else { return false }
+        guard var obj = editable() else { return false }
         if value.isEmpty { obj.removeValue(forKey: key) } else { obj[key] = value }
         return write(obj)
     }
 
     /// `set` for an edit that may touch any keys, such as `MachineExclusions.edits`.
     static func update(_ edit: ([String: Any]) -> [String: Any]) -> Bool {
-        guard let obj = parsed() else { return false }
+        guard let obj = editable() else { return false }
         return write(edit(obj))
     }
 
@@ -168,7 +200,7 @@ enum AppConfig {
     /// can never disagree. An empty list removes both.
     @discardableResult
     static func setRepoRoots(_ paths: [String]) -> Bool {
-        guard var obj = parsed() else { return false }
+        guard var obj = editable() else { return false }
         obj.removeValue(forKey: repoRootKey)
         if paths.isEmpty { obj.removeValue(forKey: repoRootsKey) } else { obj[repoRootsKey] = paths }
         return write(obj)
@@ -195,7 +227,7 @@ enum AppConfig {
     /// `set` for a number, which has no "empty means remove" spelling of its own.
     @discardableResult
     static func setInt(_ key: String, _ value: Int) -> Bool {
-        guard var obj = parsed() else { return false }
+        guard var obj = editable() else { return false }
         obj[key] = value
         return write(obj)
     }
@@ -271,7 +303,7 @@ enum AppConfig {
     /// `set` for a flag.
     @discardableResult
     static func setBool(_ key: String, _ value: Bool) -> Bool {
-        guard var obj = parsed() else { return false }
+        guard var obj = editable() else { return false }
         obj[key] = value
         return write(obj)
     }
@@ -280,7 +312,7 @@ enum AppConfig {
     /// in half-steps).
     @discardableResult
     static func setDouble(_ key: String, _ value: Double) -> Bool {
-        guard var obj = parsed() else { return false }
+        guard var obj = editable() else { return false }
         obj[key] = value
         return write(obj)
     }
@@ -311,10 +343,14 @@ enum AppConfig {
         url.deletingLastPathComponent().appendingPathComponent("network-switch.json")
     }
 
+    private static var switchRecord: [String: Any]? {
+        (try? Data(contentsOf: switchRecordURL))
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+    }
+
     /// Whether `switchRecordURL` has the switch of this config as on.
     static var switchRecorded: Bool {
-        guard let data = try? Data(contentsOf: switchRecordURL),
-              let record = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+        guard let record = switchRecord,
               record["config"] as? String == url.path,
               let on = record[NetworkSettings.enabledKey] as? NSNumber,
               CFGetTypeID(on) == CFBooleanGetTypeID() else { return false }
