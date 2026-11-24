@@ -241,9 +241,9 @@ private final class Trackers {
     var rulesetUnread = false
     var adminChecksUnread = false
     var adminSwitchUnread = false
-    /// The base branch's other ruleset rules, by type; the branch protection settings an
-    /// admin reads, past every one off (NSNull: unread); and the operator not an admin, who
-    /// reads no `branchProtectionRule`, only `refUpdateRule`.
+    /// The base branch's other ruleset rules, by type ("": its type unread); the branch
+    /// protection settings an admin reads, past every one off (NSNull: unread); and the
+    /// operator not an admin, who reads no `branchProtectionRule`, only `refUpdateRule`.
     var ruleTypes: [String] = []
     var protection: [String: Any] = [:]
     var notAdmin = false
@@ -523,7 +523,7 @@ private final class Trackers {
             ["type": "REQUIRED_STATUS_CHECKS",
              "parameters": rulesetUnread ? NSNull() as Any
                 : ["requiredStatusChecks": requiredByRuleset.map { ["context": $0, "integrationId": 15368] }]],
-        ]) + ruleTypes.map { ["type": $0, "parameters": NSNull()] }
+        ]) + ruleTypes.map { $0.isEmpty ? ["parameters": NSNull()] : ["type": $0, "parameters": NSNull()] }
         var rule: [String: Any] = ["requiredStatusCheckContexts": adminChecksUnread ? NSNull() as Any : requiredByAdminRule ?? []]
         if !adminSwitchUnread { rule["requiresStatusChecks"] = true }
         for field in ["lockBranch", "restrictsPushes", "requiresDeployments", "requiresCommitSignatures",
@@ -3030,6 +3030,10 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
             t.ruleTypes = ["REQUIRED_SIGNATURES"]
             t.unsigned = true
         }, unchecked + "REQUIRED_SIGNATURES)"),
+        ("signatures, commits past the page", { t in
+            t.ruleTypes = ["REQUIRED_SIGNATURES"]
+            t.prs[0].moreCommits = 1
+        }, unchecked + "REQUIRED_SIGNATURES)"),
         ("signatures, a rebase", { t in
             t.ruleTypes = ["REQUIRED_SIGNATURES"]
             (t.squashAllowed, t.mergeCommitAllowed, t.rebaseAllowed) = (false, false, true)
@@ -3052,6 +3056,7 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
             t.protection = ["requiresLinearHistory": true]
             (t.squashAllowed, t.mergeCommitAllowed) = (false, true)
         }, unchecked + "requiresLinearHistory)"),
+        ("a rule's type unread", { $0.ruleTypes = [""] }, "cleared/fast (the rules on its base branch could not be read)"),
         ("a protection setting unread", { $0.protection = ["lockBranch": NSNull()] },
          "cleared/fast (the rules on its base branch could not be read)"),
         ("protection read as a non-admin", { t in

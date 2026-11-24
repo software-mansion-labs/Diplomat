@@ -1004,7 +1004,7 @@ final class PipelineSync {
     /// rating backoff.
     func rewrite(_ i: Int) {
         let id = entries[i].id
-        guard let kept = cache[id]?.rating, may(.rate), banHold(entries[i]) == nil else { return }
+        guard let kept = cache[id]?.rating, may(.rate) else { return }
         guard recheck(i) else { return failed(id) }
         guard stops(entries[i]).isEmpty else { return }
         let rating = atLeastLabels(kept, entries[i].labels)

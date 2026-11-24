@@ -23,11 +23,12 @@ Labels, child issues and the merge are done by the sync itself, in code. The fix
 agents, queued like a sweep's asks: behind the [task cap](automation.md#autonomous-monitors), the
 [spending budget](automation.md#the-spending-budget) and the disk floor, each asked for once (a review
 once per head), retried on the monitors' backoff when a run dies, and taken off the queue when a later
-sync no longer owes it - one you started with Start fix only once its issue is no writable candidate, and
-by a sync that could not read its repo in full only if it read that item, never by one that only read and
-showed the repo. An item whose author is on the prompt-injection ban list, and every issue
-Diplomat split from one, is not rated, split or fixed; a Linear issue's author is its creator's
-display name. The activity feed gets a line for each ask
+sync no longer owes it - one you started with Start fix only once a sync that read its repo in full
+finds its issue held or no candidate; any other by a sync that could not read its repo in full only
+if it read that item, never by one that only read and showed the repo. An item whose author is on the
+prompt-injection ban list, as read right before each step, and every issue Diplomat split from one, is
+not rated, labelled, split or fixed, nor a PR closing it reviewed or merged; a Linear issue's author is
+its creator's display name. The activity feed gets a line for each ask
 queued or withdrawn, each merge and split, each new notice, and the sync failing or recovering.
 
 What it does not do:
@@ -71,10 +72,11 @@ An issue labelled `wontfix`, `wont fix`, `won't fix`, `duplicate`, `invalid`, `q
 `enhancement`, `feature`, `feature request`, `improvement`, `discussion`, `proposal` or `rfc` in any
 case, before or after a `prefix:` or `prefix/` and with `-` or `_` for a space (`type: Feature`,
 `kind/feature`, `enhancement: pending triage`, `feature-request`; `pipeline.json` `triageLabels`, on
-Linear too), or of a GitHub issue type other than Bug, is **triaged**: never a `candidate` nor split,
-and once rated its hold is `triaged as <that label or type>`. An issue carrying a
-[stop label](#the-merge) is not split, nor a PR closing it merged; a `candidate` carrying one is held
-`carries the label <label>`, and no fix is asked for it.
+Linear too), of a GitHub issue type other than Bug, or in a Linear triage or duplicate state, is
+**triaged**: never a `candidate` nor split, and its hold is `triaged as <that label, type or state>`.
+Nothing carrying a [stop label](#the-merge), matched the same way, is rated, split, fixed, reviewed or
+merged, nor a PR closing it merged; an issue or fast-track PR carrying one is held
+`carries the label <label>`.
 
 ### The fast track
 
@@ -179,7 +181,8 @@ Diplomat labels, splits, fixes and merges only:
 Each label, part and merge waits on a read of its item made right before it, and is not made if
 that read fails or the item is no longer one of these.
 
-"You" is the [GitHub username](settings.md#settings) Diplomat works as in that root. Everything else
+"You" is the account `gh` acts as in that root, and a notice says so when the
+[GitHub username](settings.md#settings) names another. Everything else
 is read, shown with a lock, and left alone: a rating Diplomat made of it stays on this machine, and
 someone else's PR is rated only by the labels a person put on it. A PR of yours into another branch
 (stacked on another PR) is never fast-tracked.
@@ -227,8 +230,9 @@ Either way, why is its hold. A call that fails, a label the tracker refuses, or 
 nothing takes the label off again, even if a switch went off meanwhile, once a read right before
 shows Diplomat may still write to the issue, and is tried again 1, 2, 4 ... syncs later, a day at
 most. The model's answer is saved before the first part is filed: a sync stopped mid-split (the app
-quit, the sync timed out) after it leaves the next sync filing the rest of those parts, with
-**Split big issues** on or the split forced; one stopped before it, the next sync taking the label off.
+quit, the sync timed out) after it leaves the next sync that reads its code in full filing the rest of
+those parts, with **Split big issues** on or the split forced, each only if the issue may be split now;
+one stopped before it, the next sync taking the label off.
 
 ## The merge
 
@@ -255,10 +259,11 @@ that applies winning:
 - a review is requested;
 - it was turned back into a draft after it was ready for review;
 - a commit authored or committed by anyone but you (GitHub's own committer of a web commit aside), or
-  more commits than one read lists;
+  more commits than one read lists, by the accounts GitHub maps their emails to (whoever wrote them,
+  the head merged is the one the review run found clean and Diplomat rated low/low again);
 - changes requested; an unresolved review thread;
 - a stop label: `do not merge`, `do-not-merge`, `don't merge`, `blocked`, `on hold`, `wip` or
-  `work in progress`, in any case (`pipeline.json` `stopLabels`);
+  `work in progress`, matched as triage labels are (`pipeline.json` `stopLabels`);
 - it lacks either fast-track label, or is off the fast track for good;
 - it closes no open issue, or one that is not a `candidate`, or carries a stop label, as read right
   before the merge;
@@ -272,6 +277,11 @@ that applies winning:
   CI never merges), or every check was skipped;
 - a status check its base branch requires (branch protection or a ruleset) has not succeeded on its
   head, a skipped or never reported one included, or those checks could not be read;
+- its base branch is locked, restricts pushes or requires deployments; requires linear history and the
+  PR merges with a merge commit; requires signatures and the PR rebases or a commit is not signed and
+  verified; has any other ruleset rule but pull request reviews, required status checks,
+  non-fast-forward, deletion and creation; or its rules could not be read (branch protection reads in
+  full only for a repo admin);
 - it is assigned to anyone but you;
 - its repo allows none of squash, merge or rebase.
 
