@@ -13,8 +13,9 @@ import path from 'node:path';
 import tls from 'node:tls';
 import zlib from 'node:zlib';
 import { execFile, execFileSync, spawn } from 'node:child_process';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-broker-'));
+const scratch = scratchDir('dn-broker-');
 const forgeDir = path.join(scratch, 'forge');
 fs.mkdirSync(forgeDir);
 fs.writeFileSync(path.join(scratch, 'gitconfig'), `[user]\n\tname = T\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n[url "${forgeDir}/"]\n\tinsteadOf = https://github.com/\n`);
@@ -2590,6 +2591,5 @@ try {
   await broker.stop().catch(() => {});
   for (const close of closers) close();
   for (const s of [echo, plain, providerTls]) s.closeAllConnections?.();
-  fs.rmSync(scratch, { recursive: true, force: true });
 }
 process.exit();

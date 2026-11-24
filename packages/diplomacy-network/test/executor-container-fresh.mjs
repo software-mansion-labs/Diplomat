@@ -5,12 +5,12 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-fresh-'));
+const scratch = scratchDir('dn-fresh-');
 const FAKE = fileURLToPath(new URL('./lib/fake-docker.mjs', import.meta.url));
 const fakeDir = path.join(scratch, 'docker');
 const imageDir = path.join(scratch, 'image');

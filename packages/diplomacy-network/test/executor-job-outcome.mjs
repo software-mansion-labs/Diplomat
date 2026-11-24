@@ -8,13 +8,13 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { scratchDir } from './lib/scratch.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-jobo-'));
+const scratch = scratchDir('dn-jobo-');
 
 let checks = 0;
 const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };

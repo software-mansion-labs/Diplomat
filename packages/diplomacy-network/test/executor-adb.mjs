@@ -8,11 +8,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import net from 'node:net';
-import os from 'node:os';
-import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import { adbDevices, adbRequest, createAdbFilter } from '../src/executor/adb.js';
 import { fakeAdb } from './lib/daemons.mjs';
+import { scratchDir } from './lib/scratch.mjs';
 
 let checks = 0;
 const check = async (name, fn) => { await fn(); checks++; console.log(`PASS ${name}`); };
@@ -223,7 +222,7 @@ try {
       const { port } = await own.start();
       // The client then tries to start a server of its own at the same address, which the
       // filter holds, and writes its log where TMPDIR says.
-      const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-adb-'));
+      const scratch = scratchDir('dn-adb-');
       const r = await new Promise((resolve) => {
         execFile('adb', ['-H', '127.0.0.1', '-P', String(port), 'devices'], { encoding: 'utf8', timeout: 120000, env: { ...process.env, TMPDIR: scratch } },
           (err, stdout, stderr) => resolve({ code: err ? err.code ?? 1 : 0, said: `${stdout}${stderr}` }));

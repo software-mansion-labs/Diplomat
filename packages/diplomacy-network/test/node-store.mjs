@@ -3,14 +3,14 @@
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { identityFromSeed } from '../src/core/identity.js';
 import { memberRecord } from '../src/core/records.js';
 import { createStore, fileDisk, memoryDisk, poolFile, readPool } from '../src/node/store.js';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = () => fs.mkdtempSync(path.join(os.tmpdir(), 'dn-store-'));
+const scratch = () => scratchDir('dn-store-');
 const mode = (file) => fs.statSync(file).mode & 0o777;
 const tree = (dir) => fs.readdirSync(dir, { recursive: true }).map(String).sort();
 

@@ -6,14 +6,14 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import tls from 'node:tls';
 import { execFileSync } from 'node:child_process';
+import { scratchDir } from './lib/scratch.mjs';
 
 // What is private here is made so by name, whatever mask the daemon was started under.
 process.umask(0o022);
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-ca-'));
+const scratch = scratchDir('dn-ca-');
 process.env.DN_BASE_DIR = path.join(scratch, 'base');
 const { createCA, certHost } = await import('../src/executor/ca.js');
 const { OPENSSL_BIN } = await import('../src/paths.js');

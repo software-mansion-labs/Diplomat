@@ -10,10 +10,10 @@ import dgram from 'node:dgram';
 import fs from 'node:fs';
 import http from 'node:http';
 import net from 'node:net';
-import os from 'node:os';
 import path from 'node:path';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-front-'));
+const scratch = scratchDir('dn-front-');
 Object.assign(process.env, { DN_BASE_DIR: path.join(scratch, 'base'), DN_BROKER_BIND: '127.0.0.1', DN_RELAY_HOST: '127.0.0.1' });
 const { createBroker, dnsLookup, localName, JOB_LOOKUPS, LOOKUP_MS, STRANGERS } = await import('../src/executor/broker.js');
 const { createCA } = await import('../src/executor/ca.js');
@@ -516,5 +516,4 @@ try {
 } finally {
   for (const socket of opened) socket.destroy();
   for (const s of servers) { s.closeAllConnections?.(); s.close(); }
-  fs.rmSync(scratch, { recursive: true, force: true });
 }

@@ -15,13 +15,14 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
+import { scratchDir } from './lib/scratch.mjs';
 
 if (process.env.DN_TEST_DOCKER !== 'real') {
   console.log('SKIP the real-docker suite: set DN_TEST_DOCKER=real to run it');
   process.exit(0);
 }
 
-const scratch = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dn-real-'));
+const scratch = scratchDir('dn-real-', fs.realpathSync(os.tmpdir()));
 const forgeDir = path.join(scratch, 'forge');
 fs.mkdirSync(forgeDir);
 fs.writeFileSync(path.join(scratch, 'gitconfig'), `[user]\n\tname = T\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n[url "${forgeDir}/"]\n\tinsteadOf = https://github.com/\n`);
@@ -699,6 +700,5 @@ exit 0
   for (const n of (await docker(['network', 'ls', '-q', ...mine])).stdout.split('\n').filter(Boolean)) await docker(['network', 'rm', n]);
   for (const i of (await docker(['image', 'ls', ...mine, '--format', '{{.Repository}}:{{.Tag}}'])).stdout.split('\n').filter((i) => i && i !== tag)) await docker(['image', 'rm', i]);
   if (tag && !process.env.DN_TEST_KEEP_IMAGE) await docker(['image', 'rm', tag]);
-  fs.rmSync(scratch, { recursive: true, force: true });
 }
 process.exit(0);

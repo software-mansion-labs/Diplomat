@@ -11,8 +11,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-records-'));
+const scratch = scratchDir('dn-records-');
 const FAKE = fileURLToPath(new URL('./lib/fake-docker.mjs', import.meta.url));
 const fakeDir = path.join(scratch, 'docker');
 const imageDir = path.join(scratch, 'image');
@@ -544,7 +545,7 @@ try {
     let can = process.platform === 'linux' && !!disk && fs.existsSync('/dev/shm') && python;
     try { if (can) inNamespace('setpriv', '--bounding-set=-all', 'true'); } catch { can = false; }
     if (!can) return console.log('INFO held.cjs is not run here: it takes Linux, a pid namespace this user may make, a directory on a disk and python3');
-    const dir = fs.mkdtempSync(path.join(disk, 'dn-held-'));
+    const dir = scratchDir('dn-held-', disk);
     try {
       // The shell is the first process of the namespace, holding: 3 MiB on disk with no
       // name, twice; 2 MiB with a name; 4 MiB in memory with no name; a file of 64 MiB

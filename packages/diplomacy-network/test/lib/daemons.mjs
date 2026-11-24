@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { killDaemonsUnder, onInterrupt } from '../../../daemon-core/src/test-interrupt.js';
 import { GHES_HOST, GHES_TOKEN, GITLAB_HOST, git, startFakeForge } from './fake-forge.mjs';
 import { startFakeModel } from './fake-model.mjs';
+import { scratchDir } from './scratch.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 /// The daemon under test.
@@ -116,7 +117,7 @@ export async function fakeAdb({ version = 41, devices = 'emulator-5554\tdevice\n
 /// The bench: `{ root, forge, model, loopDir, machine(name, options), close() }`.
 export async function createBench() {
   // The real path: a real docker engine is given directories under it to mount.
-  const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'dn-'));
+  const root = scratchDir('dn-', fs.realpathSync(os.tmpdir()));
   const forge = await startFakeForge();
   const model = await startFakeModel(root);
   const loopDir = path.join(root, 'loop');

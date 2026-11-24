@@ -7,11 +7,11 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { scratchDir } from './lib/scratch.mjs';
 
-const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'dn-mirror-'));
+const scratch = scratchDir('dn-mirror-');
 const GIT_LOG = path.join(scratch, 'git.log');
 const HANG = path.join(scratch, 'hang');
 const GIT_ENV = path.join(scratch, 'git.env');
