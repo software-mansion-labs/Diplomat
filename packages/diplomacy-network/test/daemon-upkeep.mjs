@@ -367,7 +367,8 @@ try {
 
   await check('a machine that leaves the network takes its containers, relays, networks and volumes with it, by the daemon\'s own end or by the installer after a daemon that died; a daemon that is only stopped leaves them for the next', async () => {
     const world = (m) => [m.containers().length, names(path.join(m.dockerDir, 'networks')).length, names(path.join(m.dockerDir, 'volumes')).filter((n) => n.endsWith('.labels')).length];
-    const m = await bench.machine('o1').start();
+    // Time enough for the job to be stopped and released on a machine under load.
+    const m = await bench.machine('o1', { env: { DN_SWITCH_OFF_WAIT_MS: '60000' } }).start();
     await m.linked();
     const run = await waiting(m, await own(m, 'pr-1', 'wait never\nsay never'), 'never');
     const agentPid = m.agent(run.runId).pid;
