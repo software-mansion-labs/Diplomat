@@ -67,7 +67,9 @@ private final class Trackers {
         var fork = false
         var base = "main"
         var headRef: String
-        var head: String
+        var head: String { didSet { if !heads.contains(oldValue) { heads.append(oldValue) } } }
+        /// The heads it had before.
+        var heads: [String] = []
         var files = Trackers.tested
         var ciState: String? = "SUCCESS"
         /// The head's check runs' conclusions.
@@ -184,12 +186,14 @@ private final class Trackers {
     var mergedAt: String?
     /// `gh pr merge` exits 0 having merged nothing.
     var mergeIgnored = false
-    /// `gh pr diff` of a PR, by number, where it is not a one-line fix.
+    /// A PR's diff at any head it had, by number, where it is not a one-line fix; at one head,
+    /// by its sha.
     var diffs: [Int: String] = [:]
+    var headDiffs: [String: String] = [:]
     /// The pages after `Repo`'s fail, or answer with errors.
     var failPages = false
     var pagesPartial = false
-    /// `gh pr diff` fails.
+    /// Reading a diff fails.
     var diffFails = false
     /// Label writes GitHub refuses, adding or removing: every one on item `"<n>"`, or
     /// `"<n> <name>"` only.
@@ -387,10 +391,14 @@ private final class Trackers {
             }
             return ok(["data": data])
         }
-        if args.starts(with: ["pr", "diff"]), args.count == 5, args[3] == "-R", args[4] == "acme/app" {
+        if args.count == 4, args[0] == "api", args[1] == "-H", args[2] == "Accept: application/vnd.github.diff",
+           args[3].hasPrefix("repos/acme/app/compare/") {
             if diffFails { return failed("Bad Gateway (HTTP 502)") }
-            let n = number(args[2]) ?? 0
-            return .init(status: 0, stdout: Data((diffs[n] ?? "diff --git a/src/a.swift b/src/a.swift\n+fix\n").utf8))
+            let range = args[3].dropFirst("repos/acme/app/compare/".count).components(separatedBy: "...")
+            guard range.count == 2, let p = prs.first(where: { $0.head == range[1] || $0.heads.contains(range[1]) }),
+                  range[0].removingPercentEncoding == p.base else { return failed("Not Found (HTTP 404)") }
+            return .init(status: 0, stdout: Data((headDiffs[range[1]] ?? diffs[p.number]
+                                                  ?? "diff --git a/src/a.swift b/src/a.swift\n+fix\n").utf8))
         }
         if args.starts(with: ["pr", "ready"]), args.count == 5, args[4] == "acme/app", let n = number(args[2]),
            let i = prs.firstIndex(where: { $0.number == n }) {
@@ -2400,7 +2408,8 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
     let bodies = ["Do it.\n\nPart of \(issueURL(3))", "Do it.\n\nPart of \(issueURL(3))\n\n<!-- Diplomat: part 1 of \(issueURL(3)) -->"]
     for (k, body) in bodies.enumerated() {
         let t = only([])
-        t.issues = [.init(number: 120, title: "A part", body: body, labels: lowLow, updated: at("10:00"), author: opLogin)]
+        t.issues = [.init(number: 120, title: "A part", body: body, labels: lowLow, updated: at("10:00"),
+                          parent: k == 0 ? 3 : nil, author: opLogin)]
         let s = sync(t, PipelineSettings(roots: [root], fix: true), dir("no-lineage-\(k)"), t0)
         check(s.result.effects.isEmpty && stageOf(s.result, issueURL(120)) == "candidate/fast (\(unknown))",
               "a part naming no lineage (\(k)): \(s.result.effects) \(stageOf(s.result, issueURL(120)))")
@@ -2489,7 +2498,7 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
         check(s.claude.isEmpty && s.writes.isEmpty && s.result.effects.isEmpty && !open.isEmpty
               && open.allSatisfy { $0.hold == "the prompt-injection ban list could not be read" }
               && s.result.read.isEmpty && s.result.fixable.isEmpty && s.result.unread == ["acme/app"]
-              && s.result.notices.contains("the prompt-injection ban list could not be read, so every item holds and this sync took no step"),
+              && s.result.notices.contains("the prompt-injection ban list could not be read, so this sync took no step past that"),
               "a ban list not read (\(k)): \(s.claude) \(s.writes) \(open.filter { $0.hold != "the prompt-injection ban list could not be read" }.map(\.label)) \(s.result.notices)")
     }
     try banFile("{}")
@@ -2557,7 +2566,7 @@ private func pipelineJudged(base: URL, root: PipelineSettings.Root, team: Pipeli
     keptRating.prs[0].files = [("src/a.swift", 40, 0, "MODIFIED"), ("tests/aTests.swift", 5, 0, "MODIFIED")]
     let kf = sync(keptRating, rateTrack, dir("kept-floor"), later(5))
     check(kf.writes.isEmpty
-          && kf.result.notices.contains("#11: the rating kept for it is below what its diff allows now, so it is rated again"),
+          && kf.result.notices.contains("#11: the rating kept for it is below what its diff allows now, so it was dropped"),
           "a kept rating under the floor at a new head: \(kf.writes) \(kf.result.notices)")
     let rerated = sync(keptRating, rateTrack, dir("kept-floor"), later(10))
     check(rerated.claude == ["opus Fix the docs link"], "rated again once its kept rating is dropped: \(rerated.claude)")
@@ -2626,7 +2635,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
     let nk = sync(keyless, PipelineSettings(roots: [root], linearTeams: [.init(key: "ENG", repo: "acme/lib")], merge: true),
                   dir("linear-no-key"), t0, key: nil)
     check(!merged(nk) && stageOf(nk.result, prURL(13))
-          == "cleared/fast (would close the Linear issues linking it, which Diplomat did not read or may not write to)",
+          == "cleared/fast (would close the Linear issues linking it, the Linear issues linking #27, which Diplomat did not read or may not write to)",
           "Linear not read: \(stageOf(nk.result, prURL(13)))")
     let (_, unwritable) = try cleared("linear-unwritable", settings: withLinear) { t in
         t.prs[0].body = "Fixes #27. Fixes ENG-2."
@@ -2660,7 +2669,7 @@ private func pipelineFailClosed(base: URL, root: PipelineSettings.Root, team: Pi
           "attachments past the read: \(ct.result.effects) \(stageOf(ct.result, linearURL("ENG-3")))")
     let (_, crowded) = try cleared("linear-attached-more", settings: withLinear) { $0.attachedMore = true }
     check(!merged(crowded) && stageOf(crowded.result, prURL(13))
-          == "cleared/fast (would close the Linear issues linking it, which Diplomat did not read or may not write to)",
+          == "cleared/fast (would close the Linear issues linking it, the Linear issues linking #27, which Diplomat did not read or may not write to)",
           "linked past Linear's answer: \(stageOf(crowded.result, prURL(13)))")
     // Only a PR closing a candidate, and on Linear from its team's own root, is put on
     // the fast track.
@@ -3215,7 +3224,7 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
         try fm.createDirectory(at: dir(name), withIntermediateDirectories: true)
         try Data(json.utf8).write(to: dir(name).appendingPathComponent("state.json"))
     }
-    let linking = "cleared/fast (would close the Linear issues linking it, which Diplomat did not read or may not write to)"
+    let linking = "cleared/fast (would close the Linear issues linking it, the Linear issues linking #27, which Diplomat did not read or may not write to)"
 
     // Cleared only at the head this Diplomat rated low/low again, and still marked clean there at the merge.
     let moved = try cleared("moved") { t in
@@ -3519,7 +3528,7 @@ private func pipelinePinned(base: URL, root: PipelineSettings.Root, team: Pipeli
     let diffCalls = [0.0, 5, 10].map { m -> Int in
         _ = sync(diffless, PipelineSettings(roots: [root], rate: true), dir("diff-fails"), later(m))
         defer { diffless.ghCalls = [] }
-        return diffless.ghCalls.filter { $0.starts(with: ["pr", "diff"]) }.count
+        return diffless.ghCalls.filter { $0.last?.contains("/compare/") == true }.count
     }
     check(diffCalls == [1, 1, 0], "a diff that cannot be read backs off: \(diffCalls)")
 

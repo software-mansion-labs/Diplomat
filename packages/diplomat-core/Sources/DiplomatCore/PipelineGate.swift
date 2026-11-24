@@ -268,7 +268,8 @@ public enum PipelineGate {
         case ciStale
         case ciPending
         case ciFailing(String)
-        /// Everything else lets it merge: it is marked ready, and merged at a later sync.
+        /// No hold above stands: it is marked ready, as CI may skip drafts, and merged at a later
+        /// sync once the holds below, on its CI, do not stand either.
         case draft
         case ciMissing
         case ciSkipped
