@@ -22,8 +22,8 @@ Object.assign(process.env, {
 });
 const { createBroker } = await import('../src/executor/broker.js');
 const { createCA } = await import('../src/executor/ca.js');
-const { ACK, ASK, CREDIT, DATA, END, HOP_JOB_BYTES, HOP_RECLAIM_MS, HOP_STRANGER_BYTES, HOP_STRANGER_WINDOW, HOP_WINDOW, PREFACE, createHop } = await import('../src/executor/hop.js');
-assert.deepEqual([HOP_WINDOW, HOP_STRANGER_WINDOW, HOP_JOB_BYTES, HOP_STRANGER_BYTES, HOP_RECLAIM_MS], [128 * 1024, 2 * 1024, 14 * 2 ** 20, 2 * 2 ** 20, 2000], 'what the README states');
+const { ACK, ASK, CREDIT, DATA, END, HOP_JOB_BYTES, HOP_LINGER_MS, HOP_RECLAIM_MS, HOP_STRANGER_BYTES, HOP_STRANGER_WINDOW, HOP_WINDOW, PREFACE, createHop } = await import('../src/executor/hop.js');
+assert.deepEqual([HOP_WINDOW, HOP_STRANGER_WINDOW, HOP_JOB_BYTES, HOP_STRANGER_BYTES, HOP_RECLAIM_MS, HOP_LINGER_MS], [128 * 1024, 2 * 1024, 14 * 2 ** 20, 2 * 2 ** 20, 2000, 5000], 'what the README states');
 const RELAY = fileURLToPath(new URL('../image/relay.mjs', import.meta.url));
 
 let checks = 0;
@@ -50,7 +50,15 @@ const listening = (server) => new Promise((resolve) => server.listen(0, '127.0.0
 // ---- the internet, by the address each name resolves to
 const block = Buffer.alloc(64 * 1024, 'd');
 const echo = net.createServer((s) => { s.on('error', () => {}); s.pipe(s); });
+// Sends two hop windows and then nothing, never ending: a window, and another once it is
+// passed on. One that sent without end, unread on hundreds of connections, would use up
+// macOS's memory for networking.
 const source = net.createServer((s) => {
+  s.on('error', () => {});
+  s.write(Buffer.alloc(2 * HOP_WINDOW, 'd'));
+});
+// Sends with no end.
+const endless = net.createServer((s) => {
   s.on('error', () => {});
   const pump = () => { while (s.writable && s.write(block)); };
   s.on('drain', pump);
@@ -70,8 +78,8 @@ const web = http.createServer((req, res) => {
     }, 5);
   });
 });
-const ports = { '93.184.216.1': await listening(echo), '93.184.216.2': await listening(source), '93.184.216.4': await listening(web) };
-const addresses = { 'echo.test': '93.184.216.1', 'source.test': '93.184.216.2', 'web.test': '93.184.216.4', 'hang.test': '93.184.216.5' };
+const ports = { '93.184.216.1': await listening(echo), '93.184.216.2': await listening(source), '93.184.216.3': await listening(endless), '93.184.216.4': await listening(web) };
+const addresses = { 'echo.test': '93.184.216.1', 'source.test': '93.184.216.2', 'endless.test': '93.184.216.3', 'web.test': '93.184.216.4', 'hang.test': '93.184.216.5' };
 const lookup = async (name) => [{ address: addresses[name], family: 4, name }];
 // hang.test is reached by no connection that ever opens.
 const connect = ({ host }) => (ports[host] ? new Promise((resolve, reject) => {
@@ -283,7 +291,7 @@ async function settle(links, count) {
 }
 const ofJob = (links, job, count) => links.filter((l) => l.job === job).reduce((sum, l) => sum + count(l), 0);
 
-await check('what a job\'s connections are sent and have not passed on is no more than a window each, a share of the hop each job, and the hop\'s whole for all of them, however many read nothing; jobs past their shares that hold another job back for long lose their newest connections until within them, and lose nothing once no job is held back', async () => {
+await check('what a job\'s connections are sent and have not passed on is no more than a window each, a share of the hop each job, and the hop\'s whole for all of them, however many read nothing; jobs past their shares that hold another job back for long lose their fullest connections until within them, and lose nothing once no job is held back', async () => {
   const jobs = [await addJob(), await addJob(), await addJob()];
   try {
     const links = await seated(jobs, 'source.test');
@@ -304,7 +312,7 @@ await check('what a job\'s connections are sent and have not passed on is no mor
     first.hand.send(ACK, had);
     first.acked = had;
     await until('more for the connection that passed its bytes on', () => got(first) > 0);
-    await sleep(200);
+    await settle(links, got);
     assert.ok(got(first) <= HOP_WINDOW, `${got(first)} more after ${had} were passed on`);
     const mine = ofJob(links, jobs[0], got);
     assert.equal(broker.load(jobs[0].runId).held, mine);
@@ -321,9 +329,9 @@ await check('what a job\'s connections are sent and have not passed on is no mor
     const watch = setInterval(() => { most = Math.max(most, held(jobs)); }, 2);
     const lates = [];
     try {
-      for (let i = 0; i < 24; i++) lates.push(...await seated([late], 'source.test'));
       const since = Date.now();
-      await sleep(HOP_RECLAIM_MS / 2);
+      for (let i = 0; i < 24; i++) lates.push(...await seated([late], 'source.test'));
+      await sleep(since + HOP_RECLAIM_MS / 2 - Date.now());
       assert.equal(ofJob(lates, late, got), 0, 'the late job was sent nothing at first');
       // One of them gives room back: the late job is sent what it waits for, and the jobs
       // past their shares lose nothing, as no job is held back by them any longer.
@@ -332,7 +340,7 @@ await check('what a job\'s connections are sent and have not passed on is no mor
       await sleep(since + HOP_RECLAIM_MS + 500 - Date.now());
       assert.deepEqual([lost(jobs[0]), lost(jobs[2])], [0, 0], 'no job lost a connection while none was held back');
       // That one comes back for its share, and the hop has too little room left for it:
-      // after HOP_RECLAIM_MS the jobs past their shares lose their newest connections until
+      // after HOP_RECLAIM_MS the jobs past their shares lose their fullest connections until
       // they are within them, and it is sent its share.
       const back = Date.now();
       for (let i = 0; i < 40; i++) links.push(...await seated([jobs[1]], 'source.test'));
@@ -343,9 +351,9 @@ await check('what a job\'s connections are sent and have not passed on is no mor
     assert.ok(most <= HOP_JOB_BYTES, `the hop held ${most} bytes at most`);
     for (const job of [jobs[0], jobs[2]]) {
       const mine = links.filter((l) => l.job === job);
-      const gone = mine.findIndex((l) => l.hand.s.destroyed);
-      assert.ok(gone > 0, 'a job past its share lost some of its connections, and not its first');
-      assert.ok(mine.slice(gone).every((l) => l.hand.s.destroyed), 'the ones it lost are its newest');
+      const lost = mine.filter((l) => l.hand.s.destroyed);
+      assert.ok(lost.length > 0 && lost.length < mine.length, 'a job past its share lost some of its connections');
+      assert.ok(lost.every((l) => got(l) > 0), 'each of which held some of it');
       assert.ok(broker.load(job.runId).held <= share, 'and it is within its share');
     }
     for (const l of [...links, ...lates]) l.hand.s.destroy();
@@ -530,6 +538,146 @@ await check('a connection whose frames are broken, or bring more than it was giv
   server.close();
 });
 
+// Links of a hop of their own, each with the relay's end of it held here.
+async function units(options) {
+  const unit = createHop(options);
+  const server = net.createServer({ allowHalfOpen: true });
+  const at = await listening(server);
+  const made = [];
+  const pair = async (job) => {
+    const far = net.connect({ port: at, host: '127.0.0.1', allowHalfOpen: true });
+    far.on('error', () => {});
+    const [near] = await Promise.all([new Promise((r) => server.once('connection', r)), new Promise((r) => far.once('connect', r))]);
+    far.write(PREFACE);
+    const link = unit.framed(near);
+    link.on('error', () => {});
+    if (job) unit.seat(link, job);
+    made.push({ link, far, near });
+    return made.at(-1);
+  };
+  const end = () => {
+    for (const p of made) { p.link.destroy(); p.far.destroy(); p.near.destroy(); }
+    server.close();
+  };
+  return { unit, pair, end };
+}
+
+await check('a job past its share that holds another back loses the connections that hold the most of it, and none that hold nothing', async () => {
+  const window = 8 * 1024;
+  const { unit, pair, end } = await units({ jobBytes: 10 * window, window, reclaimMs: 100 });
+  const [a, b] = [{}, {}];
+  try {
+    // Ten that hold a window each, which the relay never says it passed on, and five
+    // newer ones that hold nothing.
+    const holders = [];
+    for (let i = 0; i < 10; i++) {
+      holders.push(await pair(b));
+      holders.at(-1).link.write(Buffer.alloc(window));
+    }
+    await until('the job to hold the whole', () => unit.held(b) === 10 * window, 3000);
+    const idle = [];
+    for (let i = 0; i < 5; i++) idle.push(await pair(b));
+    const asking = await pair(a);
+    asking.link.write(Buffer.alloc(window));
+    await until('the job held back to be sent what it waits for', () => unit.held(a) === window, 3000);
+    assert.equal(holders.filter((p) => p.link.destroyed).length, 5, 'as many as take it back within its share');
+    assert.ok(idle.every((p) => !p.link.destroyed), 'and none of those that held nothing');
+  } finally { end(); }
+});
+
+await check('a link ended with frames still queued on the hop sends them all, and the hop is closed once the relay has ended its side', async () => {
+  const { pair, end } = await units({ jobBytes: 64 * 2 ** 20, window: 64 * 2 ** 20 });
+  try {
+    const p = await pair({});
+    // The relay reads nothing yet: most of it waits on the broker's side of the hop.
+    p.far.pause();
+    const sent = 16 * 2 ** 20;
+    p.link.write(Buffer.alloc(sent, 7));
+    await until('frames to wait on the hop', () => p.near.writableLength > 0, 3000);
+    p.link.destroy();
+    let got = 0;
+    let ended = false;
+    p.far.on('data', (d) => { got += d.length; });
+    p.far.on('end', () => { ended = true; });
+    p.far.resume();
+    await until('all of it at the relay, and the hop\'s end', () => ended, 10000);
+    const frames = Math.ceil(sent / (64 * 1024));
+    assert.equal(got, sent + 5 * frames, 'every frame came');
+    assert.equal(p.near.destroyed, false, 'the hop is open while the relay has not ended its side');
+    p.far.end();
+    await until('the hop to be closed', () => p.near.destroyed, 3000);
+  } finally { end(); }
+});
+
+await check('a job past its share for less than the reclaim time loses nothing, though another was held back for longer before it came', async () => {
+  const window = 8 * 1024;
+  const reclaimMs = 1000;
+  const { unit, pair, end } = await units({ jobBytes: 10 * window, window, reclaimMs });
+  const [a, b, c] = [{}, {}, {}];
+  try {
+    const all = [];
+    for (let i = 0; i < 5; i++) {
+      all.push(await pair(b));
+      all.at(-1).link.write(Buffer.alloc(window));
+    }
+    // a is within 1 KiB of its share, too little to be given: it is held back with
+    // no job past its share.
+    for (let i = 0; i < 4; i++) {
+      all.push(await pair(a));
+      all.at(-1).link.write(Buffer.alloc(window));
+    }
+    all.push(await pair(a));
+    all.at(-1).link.write(Buffer.alloc(window - 1024));
+    await until('the hop to hold all but 1 KiB of it', () => unit.held().jobs === 10 * window - 1024, 3000);
+    all.push(await pair(a));
+    all.at(-1).link.write(Buffer.alloc(window));
+    await sleep(reclaimMs * 0.8);
+    // c comes, and a and b are past their shares from then on.
+    const since = Date.now();
+    (await pair(c)).link.write(Buffer.alloc(window));
+    await until('a connection of a job past its share to be lost', () => all.some((p) => p.link.destroyed), 3000);
+    assert.ok(Date.now() - since >= reclaimMs * 0.9, `after ${Date.now() - since} ms`);
+  } finally { end(); }
+});
+
+await check('a link ended past its window sends what was on the hop and nothing more, whatever the relay says of it after', async () => {
+  // More than the sockets between take, so that some of it waits on the hop.
+  const window = 8 * 2 ** 20;
+  const { pair, end } = await units({ jobBytes: 64 * 2 ** 20, window });
+  try {
+    const p = await pair({});
+    p.far.pause();
+    p.link.write(Buffer.alloc(4 * window, 7));
+    await until('a window on the hop', () => p.near.writableLength > 0, 3000);
+    p.link.destroy();
+    let got = 0;
+    let ended = false;
+    p.far.on('data', (d) => { got += d.length; });
+    p.far.on('end', () => { ended = true; });
+    p.far.resume();
+    // As a relay that passed it all on would: room for the rest, which is not to come.
+    const ack = Buffer.alloc(5);
+    ack[0] = ACK;
+    ack.writeUInt32BE(window, 1);
+    p.far.write(ack);
+    await until('the window at the relay, and the hop\'s end', () => ended, 10000);
+    assert.equal(got, window + 5 * Math.ceil(window / (64 * 1024)));
+  } finally { end(); }
+});
+
+await check('an ended link whose relay never ends its side has its hop closed after the linger', async () => {
+  const lingerMs = 300;
+  const { pair, end } = await units({ lingerMs });
+  try {
+    const p = await pair({});
+    const since = Date.now();
+    p.link.destroy();
+    await until('the hop to be closed', () => p.near.destroyed, 3000);
+    // A timer counts from the time the event loop last read, a little before it is set.
+    assert.ok(Date.now() - since >= lingerMs * 0.9, `after ${Date.now() - since} ms`);
+  } finally { end(); }
+});
+
 // The bytes in the kernel's queues of the sockets whose one end is the broker's port.
 function queued() {
   let bytes = 0;
@@ -556,7 +704,7 @@ await check('a job that floods its connections with requests or leaves them unre
     // bytes, and 16 connections that pipeline request heads with no end to a host whose
     // way out never opens, so that the job is soon at its share of requests.
     for (let i = 0; i < 16; i++) {
-      const t = await tunnel(relay.port, job, 'source.test');
+      const t = await tunnel(relay.port, job, 'endless.test');
       t.pause();
       flood.push(t);
     }
@@ -586,7 +734,7 @@ await check('a job that floods its connections with requests or leaves them unre
 
 assert.deepEqual(faults.map((e) => String(e?.stack ?? e)), []);
 await broker.stop();
-for (const s of [echo, source, web]) s.close();
+for (const s of [echo, source, endless, web]) s.close();
 fs.rmSync(scratch, { recursive: true, force: true });
 console.log(`\nall ${checks} checks passed`);
 process.exit(0);

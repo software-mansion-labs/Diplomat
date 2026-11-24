@@ -237,4 +237,88 @@ await check('a relay sends the broker no more of a connection than the broker ma
   } finally { r.end(); }
 });
 
+await check('a relay tells the broker of no more of its bytes than the client\'s socket took, and what the broker sent before it ended the hop reaches a client that reads it late, every byte of it and then its end', async () => {
+  let hopEnd = null;
+  let acked = 0;
+  const target = net.createServer({ allowHalfOpen: true }, (c) => {
+    hopEnd = c;
+    c.on('error', () => {});
+    let buf = Buffer.alloc(0);
+    c.on('data', (d) => {
+      buf = Buffer.concat([buf, d]);
+      if (buf.length >= PREFACE.length && buf[0] === PREFACE[0] && buf.subarray(0, PREFACE.length).equals(PREFACE)) buf = buf.subarray(PREFACE.length);
+      while (buf.length >= 5) {
+        const n = buf.readUInt32BE(1);
+        const size = buf[0] === DATA ? 5 + n : 5;
+        if (buf.length < size) return;
+        if (buf[0] === ACK) acked += n;
+        buf = buf.subarray(size);
+      }
+    });
+  });
+  await listening(target);
+  const r = await startRelay(target);
+  try {
+    const c = await r.dial();
+    c.pause();
+    await until('the hop', () => hopEnd);
+    // Sent by hand and all at once, more than the sockets between can hold.
+    const sent = 32 * 2 ** 20;
+    const piece = Buffer.alloc(64 * 1024, 3);
+    const head = Buffer.alloc(5);
+    head[0] = DATA;
+    head.writeUInt32BE(piece.length, 1);
+    for (let n = 0; n < sent; n += piece.length) hopEnd.write(Buffer.concat([head, piece]));
+    let last = -1;
+    for (let still = 0; still < 20; await sleep(25)) {
+      still = acked === last ? still + 1 : 0;
+      last = acked;
+    }
+    assert.ok(acked < sent / 2, `the broker was told of ${acked} of ${sent} bytes the client has not read`);
+    hopEnd.write(Buffer.from([END, 0, 0, 0, 0]));
+    hopEnd.end();
+    await sleep(300);
+    let got = 0;
+    let ended = false;
+    c.on('data', (d) => { got += d.length; });
+    c.on('end', () => { ended = true; });
+    c.resume();
+    await until('the client to have it all and its end', () => ended, 20000);
+    assert.equal(got, sent);
+  } finally { r.end(); }
+});
+
+await check('a client that does not end its side after the broker ended the connection has it closed 5 s on', async () => {
+  let hopEnd = null;
+  const target = net.createServer({ allowHalfOpen: true }, (c) => {
+    hopEnd = c;
+    c.on('error', () => {});
+    c.resume();
+  });
+  await listening(target);
+  const r = await startRelay(target);
+  try {
+    const c = await new Promise((resolve, reject) => {
+      const s = net.connect({ port: r.port, host: '127.0.0.1', allowHalfOpen: true }, () => resolve(s));
+      s.once('error', reject);
+    });
+    r.clients.push(c);
+    await until('the hop', () => hopEnd);
+    let ended = 0;
+    let closed = 0;
+    c.on('end', () => { ended = Date.now(); });
+    c.on('error', () => {});
+    c.on('close', () => { closed = Date.now(); });
+    c.resume();
+    hopEnd.end(Buffer.from([END, 0, 0, 0, 0]));
+    await until('the end at the client', () => ended);
+    // What the client writes shows when the relay has let go of the connection.
+    const ticking = setInterval(() => { if (!c.destroyed) c.write('t'); }, 100);
+    try {
+      await until('the connection to be closed', () => closed, 9000);
+    } finally { clearInterval(ticking); }
+    assert.ok(closed - ended >= 4500, `after ${closed - ended} ms`);
+  } finally { r.end(); }
+});
+
 console.log(`\nall ${checks} checks passed`);

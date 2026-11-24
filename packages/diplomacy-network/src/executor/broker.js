@@ -372,7 +372,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   // What a job brings about as often as it likes is written once a minute for each kind.
   const sparing = createSparingLog(log);
   const outbound = createOutbound({ ...outGiven,
-    say: (job, text) => (job ? sparing(`job ${job.info.runId} reset`, 'broker', job.info.runId, text) : log('broker', text)) });
+    say: (job, text, why) => (job ? sparing(`job ${job.info.runId} reset ${why}`, 'broker', job.info.runId, text) : log('broker', text)) });
   const jobs = new Map(); // runId -> job
   const tokens = new Map(); // token -> job
   const contexts = new WeakMap(); // a leaf as its authority hands it out -> SecureContext
@@ -946,7 +946,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     if (socket.destroyed) return upstream.destroy();
     hold(job, upstream);
     outbound.add(job, upstream);
-    socket.on('close', () => upstream.destroy());
+    socket.on('close', () => outbound.close(upstream));
     upstream.on('close', () => socket.destroy());
     socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
     if (head.length) upstream.write(head);
