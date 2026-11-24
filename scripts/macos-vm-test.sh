@@ -36,12 +36,12 @@ cleanup() {
 trap cleanup EXIT
 
 echo "== host: build the bundle and the helpers"
-# Assembled in the stage dir rather than by build-app.sh, which swaps the bundle the
-# checkout's own LaunchAgents run.
+# Built as build-app.sh builds it, but assembled in the stage dir: build-app.sh swaps
+# the bundle the checkout's own LaunchAgents run.
 MACOS="$ROOT/packages/diplomat-platform/macos"
-(cd "$MACOS" && swift build -c release) >"$OUT/build.log" 2>&1 \
+(cd "$MACOS" && swift build -c release --build-system native) >"$OUT/build.log" 2>&1 \
   || { tail -20 "$OUT/build.log" >&2; exit 1; }
-"$MACOS/install/assemble-app.sh" "$(cd "$MACOS" && swift build -c release --show-bin-path)/Diplomat" \
+"$MACOS/install/assemble-app.sh" "$(cd "$MACOS" && swift build -c release --build-system native --show-bin-path)/Diplomat" \
   "$ROOT/packages/diplomat-core/assets" "$ROOT" "$STAGE/Diplomat.app"
 swiftc -O -o "$STAGE/winlist" "$ROOT/scripts/vm/winlist.swift"
 swiftc -O -o "$CACHE/ocr" "$ROOT/scripts/vm/ocr.swift"
