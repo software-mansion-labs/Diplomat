@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import os
 import DiplomatCore
 
 /// macOS UI mapping for a tool's tint. The catalog (`assets/catalog.json`) carries
@@ -834,6 +835,14 @@ final class Store: ObservableObject {
     @Published var pipelineError: String?
     /// What the screen asked for (Rate now, Fracture) that no sync has taken yet.
     @Published var pipelineForce = PipelineSettings.Force()
+    /// `LinearLogin.saved`, read at launch and after each sign-in and sign-out.
+    @Published var linearLogin: LinearLogin.Saved?
+    @Published var linearSigningIn = false
+    @Published var linearSigningOut = false
+    /// Why the last sign-in or sign-out failed, or why Linear did not revoke the login.
+    @Published var linearLoginNote: String?
+    /// The running sign-in's Cancel.
+    var linearSignInCancel: OSAllocatedUnfairLock<Bool>?
     /// Driven from `PipelineMonitor.swift`, hence not private.
     var pipelineMonitorTask: Task<Void, Never>?
     var pipelineWakeObserver: NSObjectProtocol?
@@ -1246,6 +1255,7 @@ final class Store: ObservableObject {
             refreshComms()
             startCommsMonitor()
             startPipelineMonitor()
+            refreshLinearLogin()
             refreshBanList()
             refreshAudit()
             publishSpawnTerminal()

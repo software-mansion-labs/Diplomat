@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import os
 import DiplomatCore
 
 // MARK: - Pipeline: the sync, on the macOS side
@@ -35,13 +36,11 @@ extension Store {
     var pipelineSettings: PipelineSettings {
         let force = PipelineSettings.Force(rate: pipelineForce.rate.sorted(),
                                            fracture: pipelineForce.fracture.sorted())
-        let item = AppConfig.linearKeychainItem
         return PipelineSettings(
             roots: roots.filter { !$0.isGitLab }.map {
                 PipelineSettings.Root(owner: $0.owner, repo: $0.repo, path: $0.path, me: knownMe(for: $0))
             },
             linearTeams: Store.pipelineTeams(pipelineLinearTeamsRaw),
-            linearKeychainItem: item.isEmpty ? nil : item,
             rate: pipelineRate, fix: pipelineFix, fastTrack: pipelineFastTrack,
             merge: pipelineMerge, fracture: pipelineFracture,
             force: force.rate.isEmpty && force.fracture.isEmpty ? nil : force,
@@ -577,6 +576,62 @@ extension Store {
             Drop this fix from the queue without running it. The pipeline does not ask for it \
             again; Start fix on the Pipeline screen does.
             """
+    }
+
+    // MARK: the Linear login
+
+    /// The self-test's stand-ins for the browser, Diplomat's OAuth application and Linear.
+    static var linearLoginOverride: (open: (URL) -> Bool, oauth: CoreAssets.PipelineModel.LinearOAuth,
+                                     transport: SlackAPI.Transport)?
+
+    func refreshLinearLogin() {
+        linearLogin = LinearLogin.saved()
+    }
+
+    /// Waits off the main actor for the browser to come back, or for Cancel; once signed in,
+    /// syncs as a switch turned on does.
+    func signInToLinear() async {
+        guard !linearSigningIn else { return }
+        let cancel = OSAllocatedUnfairLock(initialState: false)
+        linearSignInCancel = cancel
+        linearSigningIn = true
+        linearLoginNote = nil
+        let stub = Store.linearLoginOverride
+        let answer = await Task.detached(priority: .userInitiated) {
+            Result {
+                try LinearLogin.signIn(oauth: stub?.oauth, open: stub?.open ?? { NSWorkspace.shared.open($0) },
+                                       cancelled: { cancel.withLock { $0 } },
+                                       transport: stub?.transport ?? SlackAPI.curl)
+            }
+        }.value
+        linearSignInCancel = nil
+        linearSigningIn = false
+        refreshLinearLogin()
+        switch answer {
+        case .success: pipelineSwitched(on: pipelineEnabled)
+        case .failure(let error): linearLoginNote = error.localizedDescription
+        }
+    }
+
+    func cancelLinearSignIn() {
+        linearSignInCancel?.withLock { $0 = true }
+    }
+
+    /// Off the main actor: the revocation is a call to Linear.
+    func signOutOfLinear() async {
+        guard !linearSigningOut else { return }
+        linearSigningOut = true
+        linearLoginNote = nil
+        let transport = Store.linearLoginOverride?.transport ?? SlackAPI.curl
+        let answer = await Task.detached(priority: .userInitiated) {
+            Result { try LinearLogin.signOut(transport: transport) }
+        }.value
+        linearSigningOut = false
+        refreshLinearLogin()
+        switch answer {
+        case .success(let warning): linearLoginNote = warning.map { "Signed out, but " + $0 }
+        case .failure(let error): linearLoginNote = error.localizedDescription
+        }
     }
 
     // MARK: the screen's actions
