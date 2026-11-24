@@ -513,6 +513,22 @@ extension Store {
         return out
     }
 
+    /// What the queued row's cancel says of a pipeline ask; nil for any other. Twin of
+    /// `Store.pipeline_cancel_help`.
+    nonisolated static func pipelineCancelHelp(_ job: AgentJob) -> String? {
+        guard job.counter == .pipeline else { return nil }
+        if job.kind == AgentTaskQueue.reviewAction {
+            return """
+                Drop this review from the queue without running it. The pipeline asks for it \
+                again once the PR's head moves.
+                """
+        }
+        return """
+            Drop this fix from the queue without running it. The pipeline does not ask for it \
+            again; Start fix on the Pipeline screen does.
+            """
+    }
+
     // MARK: the screen's actions
 
     func syncPipelineNow() {

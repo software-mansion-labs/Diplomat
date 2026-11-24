@@ -1036,6 +1036,7 @@ private struct QueuedTaskRow: View {
     private var runHelp: String {
         paused ? QueuedTaskRow.pausedHelp : QueuedTaskRow.heldHelp
     }
+    private var cancelTip: String { Store.pipelineCancelHelp(task.job) ?? QueuedTaskRow.cancelHelp }
 
     private var kindIcon: String { DiplomatUI.agentTaskIcon(task.job.kind) }
 
@@ -1077,7 +1078,7 @@ private struct QueuedTaskRow: View {
                         .foregroundStyle(.secondary)
                 }
                 .buttonStyle(.plain)
-                .tooltip(QueuedTaskRow.cancelHelp)
+                .tooltip(cancelTip)
             }
             Button(action: onRun) {
                 Text("execute now")
