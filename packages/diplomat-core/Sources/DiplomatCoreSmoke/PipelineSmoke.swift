@@ -734,7 +734,7 @@ private final class Trackers {
             let linked = tickets.filter { ($0.attachments + $0.moreAttachments).contains(url) }
             return answer(["attachmentsForURL": ["pageInfo": attachedMore.map { ["hasNextPage": $0] as Any } ?? NSNull(),
                                                  "nodes": linked.map {
-                ["issue": ["identifier": $0.identifier, "state": ["type": "started"]]]
+                ["issue": ["identifier": $0.identifier, "state": ["type": $0.state]]]
             }] as [String: Any]])
         case "Labels":
             let name = (v["name"] as? String ?? "").lowercased()
@@ -996,6 +996,11 @@ func pipelineSmoke() throws {
         ("a CMake module", [("cmake/deps.cmake", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
         ("a Bazel build", [("lib/BUILD.bazel", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
         ("pre-commit hooks", [(".pre-commit-config.yaml", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
+        ("tests by name", [("src/a.swift", 1, 0, "MODIFIED"), ("src/a.spec.ts", 30, 0, "MODIFIED"),
+                           ("src/a.test.ts", 30, 0, "MODIFIED"), ("src/a_spec.rb", 30, 0, "MODIFIED"),
+                           ("src/a_test.go", 30, 0, "MODIFIED")], nil, low),
+        ("tests by directory", [("src/a.swift", 1, 0, "MODIFIED"), ("test/a.swift", 30, 0, "MODIFIED"),
+                                ("__tests__/a.js", 30, 0, "MODIFIED"), ("testdata/a.json", 30, 0, "MODIFIED")], nil, low),
         // Test names match in their own case only, and test directories as directories.
         ("a source file named like a test in another case", [("src/Test_util.py", 31, 0, "MODIFIED"), test], nil,
          rating(.low, .medium)),
@@ -2388,6 +2393,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     try pipelineKept(base: base, root: root, team: team, t0: t0)
     try pipelineCoverage8(base: base, root: root, team: team, t0: t0)
     try pipelinePins9(base: base, root: root, team: team, t0: t0)
+    try pipelinePins10(base: base, root: root, team: team, t0: t0)
 }
 
 /// Each part a split files is one its own answer named, and a link to its parent makes a
@@ -4745,4 +4751,56 @@ private func pipelinePins9(base: URL, root: PipelineSettings.Root, team: Pipelin
     check(!merged(pb) && stageOf(pb.result, prURL(13))
           == "human/human (off the fast track for good: Diplomat took it off the fast track)",
           "cleared put back on after Diplomat took it off: \(pb.writes) \(stageOf(pb.result, prURL(13)))")
+}
+
+private func pipelinePins10(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                            t0: Date) throws {
+    section("pipeline pins 10")
+    func dir(_ name: String) -> URL { base.appendingPathComponent("pins10-" + name) }
+    let linearFix = PipelineSettings(roots: [root], linearTeams: [team], fix: true)
+
+    let cased = only([24])
+    cased.tickets = [.init(id: "lin-11", identifier: "ENG-11", title: "Tracks #24", assignee: ("U_ALICE", "Alice"),
+                           updated: at("10:00"), attachments: ["https://github.com/Acme/App/issues/24"])]
+    let cs = sync(cased, linearFix, dir("twin-case"), t0)
+    check(cs.result.effects.isEmpty
+          && stageOf(cs.result, issueURL(24)) == "human/human (it is tracked on Linear as ENG-11: assigned to Alice)",
+          "#24 tracked on Linear by a link to Acme/App: \(cs.result.effects) \(stageOf(cs.result, issueURL(24)))")
+
+    let elsewhere = only([])
+    elsewhere.tickets = [fixture().tickets[2]]
+    elsewhere.tickets[0].attachments = ["https://sentry.io/organizations/acme/issues/1"]
+    let el = sync(elsewhere, linearFix, dir("issue-elsewhere"), t0)
+    check(el.result.effects.map(\.key) == ["pipeline-fix:" + linearURL("ENG-3")]
+          && stageOf(el.result, linearURL("ENG-3")) == "candidate/fast",
+          "ENG-3 linking a Sentry issue: \(el.result.effects) \(stageOf(el.result, linearURL("ENG-3")))")
+
+    for state in ["completed", "canceled"] {
+        let t = only([13, 27])
+        t.tickets = [.init(id: "lin-o3", identifier: "OPS-3", title: "Tracks #27", updated: at("10:00"), team: "OPS",
+                           attachments: [issueURL(27)], state: state)]
+        try seedRerate(dir("twin-" + state), 13, sha("c3"), at: t0.addingTimeInterval(-3600))
+        let s = sync(t, PipelineSettings(roots: [root], linearTeams: [team], merge: true), dir("twin-" + state), t0)
+        check(merged(s), "a PR closing #27, tracked on Linear as \(state) OPS-3: \(stageOf(s.result, prURL(13)))")
+    }
+
+    let untracked = only([])
+    untracked.tickets = [.init(id: "lin-o1", identifier: "OPS-1", title: "Ops typo", updated: at("10:00"), team: "OPS")]
+    let uq = sync(untracked, PipelineSettings(roots: [root], linearTeams: [team], queued: [linearURL("OPS-1")]),
+                  dir("queued-untracked"), t0)
+    check(item(uq.result, linearURL("OPS-1")) == nil && untracked.linearOps == ["Issues"],
+          "a queued OPS-1, team OPS untracked: \(stageOf(uq.result, linearURL("OPS-1"))) \(untracked.linearOps)")
+
+    let stacks: [(String, Set<Int>, (Trackers) -> Void)] = [
+        ("fork", [18, 19], { $0.prs[1].base = "patch-1" }),
+        ("unread", [11, 19], { $0.prs[0].headRef = ""; $0.prs[1].base = "" }),
+        ("default", [11, 19], { $0.prs[1].headRef = "main"; $0.prs[1].base = "release" }),
+    ]
+    for (branch, prs, change) in stacks {
+        let t = only(prs)
+        change(t)
+        let edges = sync(t, PipelineSettings(roots: [root]), dir("stack-" + branch), t0).result.graph.edges
+        check(!edges.contains { $0.kind == .stacked },
+              "a PR based on the \(branch) branch: \(edges.map { "\($0.from) \($0.kind.rawValue) \($0.to)" })")
+    }
 }
