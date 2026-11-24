@@ -34,6 +34,10 @@ const check = async (name, fn) => {
   console.log(`PASS ${name}`);
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A check that leaves more than a few MiB in the kernel on macOS runs on Linux alone, as
+// CI does: macOS shares its memory for networking with everything on the machine, and
+// refuses any program's sockets memory once that is used up.
+const linuxOnly = (name, fn) => (process.platform === 'linux' ? check(name, fn) : console.log(`SKIP on ${process.platform}, run on Linux: ${name}`));
 const until = async (what, met, ms = 10000) => {
   for (const end = Date.now() + ms; !(await met());) {
     if (Date.now() > end) assert.fail(`never: ${what}`);
@@ -494,6 +498,11 @@ await check('polls that fail stop no job and are told of once: what was kept bac
 
 const block = Buffer.alloc(64 * 1024, 'd');
 const deaf = net.createServer({ pauseOnConnect: true }, (s) => { s.on('error', () => {}); });
+// What Linux takes of a connection to deaf.test on the far host's side, about 124 KiB,
+// before what is sent down it waits on the broker's. macOS takes as much as 4 MiB, so
+// uploads that fill the whole on the broker's side there are tens of MiB.
+const TAKEN = 128 * 1024;
+// Sends with no end.
 const source = net.createServer((s) => {
   s.on('error', () => {});
   const pump = () => { while (s.writable && s.write(block)); };
@@ -578,8 +587,8 @@ const outOf = async (host) => {
   return (await systemQueues()).filter((r) => r.remotePort === to).reduce((sum, r) => sum + r.bytes, 0);
 };
 
-await check('jobs that upload to a host that reads nothing, down many tunnels or as plain requests, hold no more of the kernel than their shares and lose no connection for it; once they are removed the kernel holds nothing of them', async () => {
-  const bytes = 2 * 2 ** 20;
+await linuxOnly('jobs that upload to a host that reads nothing, down many tunnels or as plain requests, hold no more of the kernel than their shares and lose no connection for it; once they are removed the kernel holds nothing of them', async () => {
+  const bytes = 2 ** 20;
   const { broker, addJob, tunnel, upload } = await brokerWith({ bytes });
   const [tunnels, plain] = [await addJob(), await addJob()];
   const sending = [];
@@ -588,11 +597,8 @@ await check('jobs that upload to a host that reads nothing, down many tunnels or
     for (let i = 0; i < 32; i++) sending.push(upload(plain, 'deaf.test'));
     // Both jobs' connections out are there before either sends: neither has had the whole.
     await until('the plain requests\' connections out', () => broker.load(plain.runId).upstreams === 32);
-    for (const s of sending) {
-      const pump = () => { while (!s.destroyed && s.write(block)); };
-      s.on('drain', pump);
-      pump();
-    }
+    // Each job twice the whole, past what deaf.test takes.
+    for (const s of sending) s.write(Buffer.alloc(TAKEN + bytes / 16, 'd'));
     let most = 0;
     for (const end = Date.now() + 3000; Date.now() < end; await sleep(20)) most = Math.max(most, await outOf('deaf.test'));
     assert.ok(most > bytes / 2 && most <= bytes, `the connections out held ${most} bytes at most`);
@@ -608,9 +614,11 @@ await check('jobs that upload to a host that reads nothing, down many tunnels or
   }
 });
 
-await check('a job that leaves downloads unread loses its connections out that hold the most until all jobs are within the whole, and a job whose downloads are read loses nothing', async () => {
-  // Little enough that 16 downloads left unread are past it on Linux too, where the
-  // bytes wait mostly on the job's side of the broker.
+// Downloads left unread reach the broker's connections out only once the buffers on the
+// job's side of the broker are full, so source.test sends without end.
+await linuxOnly('a job that leaves downloads unread loses its connections out that hold the most until all jobs are within the whole, and a job whose downloads are read loses nothing', async () => {
+  // Little enough that 16 downloads left unread are past it, though the bytes wait mostly
+  // on the job's side of the broker.
   const bytes = 256 * 1024;
   const { broker, addJob, tunnel } = await brokerWith({ bytes });
   const [greedy, fair] = [await addJob(), await addJob()];
@@ -646,26 +654,23 @@ await check('a job that leaves downloads unread loses its connections out that h
   }
 });
 
-await check('a job that comes while another\'s uploads hold the whole loses nothing for it: the jobs are past the whole by no more than its share, and within it again once a poll has come', async () => {
-  const bytes = 2 * 2 ** 20;
+await linuxOnly('a job that comes while another\'s uploads hold the whole loses nothing for it: the jobs are past the whole by no more than its share, and within it again once a poll has come', async () => {
+  const bytes = 2 ** 20;
   const { broker, addJob, tunnel } = await brokerWith({ bytes });
   const [first, late] = [await addJob(), await addJob()];
   const sending = [];
-  const pump = (s) => {
-    const more = () => { while (!s.destroyed && s.write(block)); };
-    s.on('drain', more);
-    more();
-  };
+  // The first job twice the whole, the late one the whole, past what deaf.test takes.
+  const pump = (s, n) => s.write(Buffer.alloc(TAKEN + n, 'd'));
   let most = 0;
   let watching = true;
   const watch = (async () => { while (watching) { most = Math.max(most, await outOf('deaf.test')); await sleep(10); } })();
   try {
     for (let i = 0; i < 32; i++) sending.push((await tunnel(first, 'deaf.test')).s);
-    sending.forEach(pump);
+    for (const s of sending) pump(s, bytes / 16);
     await until('the first job to hold most of the whole', () => most > bytes * 3 / 4);
     const lates = [];
     for (let i = 0; i < 8; i++) lates.push((await tunnel(late, 'deaf.test')).s);
-    lates.forEach(pump);
+    for (const s of lates) pump(s, bytes / 8);
     await sleep(6 * OUT_POLL_MS);
     assert.equal(broker.load(late.runId).connections, 8, 'the late job lost nothing');
     assert.ok(most <= bytes * 1.5, `the connections out held ${most} bytes at most`);

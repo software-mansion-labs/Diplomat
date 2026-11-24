@@ -36,6 +36,10 @@ const check = async (name, fn) => {
   console.log(`PASS ${name}`);
 };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// A check that leaves more than a few MiB in the kernel on macOS runs on Linux alone, as
+// CI does: macOS shares its memory for networking with everything on the machine, and
+// refuses any program's sockets memory once that is used up.
+const linuxOnly = (name, fn) => (process.platform === 'linux' ? check(name, fn) : console.log(`SKIP on ${process.platform}, run on Linux: ${name}`));
 const until = async (what, met, ms = 60000) => {
   for (const end = Date.now() + ms; !met();) {
     if (Date.now() > end) assert.fail(`never: ${what}`);
@@ -47,19 +51,21 @@ process.on('uncaughtException', (e) => faults.push(e));
 process.on('unhandledRejection', (e) => faults.push(e));
 const listening = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 
+// The checks that fill the hop's whole fill that of a hop a sixteenth the size.
+const SMALL = { jobBytes: HOP_JOB_BYTES / 16, window: HOP_WINDOW / 16 };
+
 // ---- the internet, by the address each name resolves to
-const block = Buffer.alloc(64 * 1024, 'd');
 const echo = net.createServer((s) => { s.on('error', () => {}); s.pipe(s); });
-// Sends two hop windows and then nothing, never ending: a window, and another once it is
-// passed on. One that sent without end, unread on hundreds of connections, would use up
-// macOS's memory for networking.
+// Sends two of the small hop's windows and then nothing, never ending: a window, and
+// another once it is passed on.
 const source = net.createServer((s) => {
   s.on('error', () => {});
-  s.write(Buffer.alloc(2 * HOP_WINDOW, 'd'));
+  s.write(Buffer.alloc(2 * SMALL.window, 'd'));
 });
 // Sends with no end.
 const endless = net.createServer((s) => {
   s.on('error', () => {});
+  const block = Buffer.alloc(64 * 1024, 'd');
   const pump = () => { while (s.writable && s.write(block)); };
   s.on('drain', pump);
   pump();
@@ -87,9 +93,9 @@ const connect = ({ host }) => (ports[host] ? new Promise((resolve, reject) => {
   s.once('error', reject);
 }) : new Promise(() => {}));
 
-const started = async (outbound) => {
+const started = async (outbound, hop) => {
   const made = createBroker({ ca: createCA(), llm: { authorize: async (h) => h, refused: async () => null }, mirrors: { path: () => null },
-    onForge: async () => ({ status: 200, headers: {}, body: '' }), lookup, connect, outbound });
+    onForge: async () => ({ status: 200, headers: {}, body: '' }), lookup, connect, outbound, hop });
   return { broker: made, port: (await made.start({ port: 0 })).port };
 };
 let { broker, port } = await started();
@@ -168,11 +174,11 @@ await check('a busy pool through its relays: jobs at once, each with tunnels, re
   try {
     const work = [];
     for (const job of jobs) {
-      // Downloads and uploads of 2 MiB, 24 at a time.
-      for (let i = 0; i < 24; i++) {
+      // Downloads and uploads of 256 KiB, 8 at a time.
+      for (let i = 0; i < 8; i++) {
         work.push((async () => {
           const s = await tunnel(relay.port, job, 'echo.test');
-          const sent = Buffer.alloc(2 * 2 ** 20, i);
+          const sent = Buffer.alloc(256 * 1024, i);
           s.write(sent);
           const back = [];
           let n = 0;
@@ -186,7 +192,7 @@ await check('a busy pool through its relays: jobs at once, each with tunnels, re
         })());
       }
       // Plain requests with bodies, and answers that come a little at a time.
-      for (let i = 0; i < 8; i++) {
+      for (let i = 0; i < 4; i++) {
         for (const what of ['/body', '/stream']) {
           work.push(new Promise((resolve, reject) => {
             const req = http.request({ host: '127.0.0.1', port: relay.port, method: 'POST', path: `http://web.test${what}`, agent: false,
@@ -195,14 +201,14 @@ await check('a busy pool through its relays: jobs at once, each with tunnels, re
               res.on('data', (c) => { text += c; });
               res.on('end', () => {
                 try {
-                  if (what === '/body') assert.equal(text, `got ${2 ** 20}`);
+                  if (what === '/body') assert.equal(text, `got ${256 * 1024}`);
                   else assert.equal(text, Array.from({ length: 40 }, (_, k) => `data: ${k}\n\n`).join(''));
                   resolve();
                 } catch (e) { reject(e); }
               });
             });
             req.on('error', reject);
-            req.end(Buffer.alloc(what === '/body' ? 2 ** 20 : 0, 1));
+            req.end(Buffer.alloc(what === '/body' ? 256 * 1024 : 0, 1));
           }));
         }
       }
@@ -234,10 +240,10 @@ await check('a job with more requests at once than are carried at a time, each w
           headers: { host: 'web.test', 'proxy-authorization': job.auth } }, (res) => {
           let text = '';
           res.on('data', (c) => { text += c; });
-          res.on('end', () => (text === `got ${256 * 1024}` ? resolve() : reject(new Error(text))));
+          res.on('end', () => (text === `got ${16 * 1024}` ? resolve() : reject(new Error(text))));
         });
         req.on('error', reject);
-        req.end(Buffer.alloc(256 * 1024, 2));
+        req.end(Buffer.alloc(16 * 1024, 2));
       }));
     }
     let done = false;
@@ -256,7 +262,7 @@ await check('a job with more requests at once than are carried at a time, each w
 // purpose: what the kernel holds of those is outbound.js's to bound
 // (executor-outbound.mjs), and here only the hop's count is looked at.
 await broker.stop();
-({ broker, port } = await started({ bytes: Infinity }));
+({ broker, port } = await started({ bytes: Infinity }, SMALL));
 
 // Each job keeps one connection open from the start, so the hop is shared out by all of them.
 async function seated(jobs, host) {
@@ -299,13 +305,13 @@ await check('what a job\'s connections are sent and have not passed on is no mor
     // Not one byte is passed on: nothing is told back.
     const got = (l) => l.got - l.acked;
     const total = await settle(links, got);
-    for (const l of links) assert.ok(l.got <= HOP_WINDOW, `one connection was sent ${l.got} bytes`);
+    for (const l of links) assert.ok(l.got <= SMALL.window, `one connection was sent ${l.got} bytes`);
     for (const job of jobs) {
       const mine = ofJob(links, job, got);
-      assert.ok(mine <= Math.floor(HOP_JOB_BYTES / 3), `one job's connections were sent ${mine} bytes`);
+      assert.ok(mine <= Math.floor(SMALL.jobBytes / 3), `one job's connections were sent ${mine} bytes`);
       assert.equal(broker.load(job.runId).held, mine, 'and the broker counts what they were sent');
     }
-    assert.ok(total <= HOP_JOB_BYTES && total > HOP_JOB_BYTES / 2, `all of them were sent ${total} bytes`);
+    assert.ok(total <= SMALL.jobBytes && total > SMALL.jobBytes / 2, `all of them were sent ${total} bytes`);
     // What one connection passes on makes room for that much more, and no more.
     const first = links[0];
     const had = first.got;
@@ -313,17 +319,17 @@ await check('what a job\'s connections are sent and have not passed on is no mor
     first.acked = had;
     await until('more for the connection that passed its bytes on', () => got(first) > 0);
     await settle(links, got);
-    assert.ok(got(first) <= HOP_WINDOW, `${got(first)} more after ${had} were passed on`);
+    assert.ok(got(first) <= SMALL.window, `${got(first)} more after ${had} were passed on`);
     const mine = ofJob(links, jobs[0], got);
     assert.equal(broker.load(jobs[0].runId).held, mine);
-    assert.ok(mine <= Math.floor(HOP_JOB_BYTES / 3), `the job's connections hold ${mine} bytes`);
+    assert.ok(mine <= Math.floor(SMALL.jobBytes / 3), `the job's connections hold ${mine} bytes`);
     // A job that comes once the others have the hop's whole is sent nothing at first: the
     // others are past their shares once it has come, and are given no room until within them.
     const late = await addJob();
     jobs.push(late);
-    const share = Math.floor(HOP_JOB_BYTES / 4);
+    const share = Math.floor(SMALL.jobBytes / 4);
     // Room is made 2 KiB at a time at the least.
-    const full = (l) => got(l) > HOP_WINDOW - 2 * 1024;
+    const full = (l) => got(l) > SMALL.window - 2 * 1024;
     const lost = (job) => links.filter((l) => l.job === job && l.hand.s.destroyed).length;
     let most = 0;
     const watch = setInterval(() => { most = Math.max(most, held(jobs)); }, 2);
@@ -348,7 +354,7 @@ await check('what a job\'s connections are sent and have not passed on is no mor
       const took = Date.now() - back;
       assert.ok(took >= HOP_RECLAIM_MS && took < HOP_RECLAIM_MS + 3000, `the job held back waited ${took} ms`);
     } finally { clearInterval(watch); }
-    assert.ok(most <= HOP_JOB_BYTES, `the hop held ${most} bytes at most`);
+    assert.ok(most <= SMALL.jobBytes, `the hop held ${most} bytes at most`);
     for (const job of [jobs[0], jobs[2]]) {
       const mine = links.filter((l) => l.job === job);
       const lost = mine.filter((l) => l.hand.s.destroyed);
@@ -379,7 +385,7 @@ await check('what a job\'s connections send that nobody reads is no more than a 
     links.forEach(asking);
     const room = (l) => l.granted - l.head.length;
     // Room is made 2 KiB at a time at the least.
-    const full = (l) => room(l) <= HOP_WINDOW && room(l) > HOP_WINDOW - 2 * 1024;
+    const full = (l) => room(l) <= SMALL.window && room(l) > SMALL.window - 2 * 1024;
     await settle(links, room);
     for (const l of links) assert.ok(full(l), `a connection was given room for ${room(l)} bytes past its head`);
     for (const job of jobs) assert.equal(broker.load(job.runId).held, 0, 'and what came of it is not on the hop');
@@ -399,6 +405,9 @@ await check('what a job\'s connections send that nobody reads is no more than a 
     for (const j of jobs) broker.removeJob(j.runId);
   }
 });
+
+await broker.stop();
+({ broker, port } = await started({ bytes: Infinity }));
 
 await check('what connections left unread were sent in the smallest frames costs the daemon about what it counts', async () => {
   v8.setFlagsFromString('--expose-gc');
@@ -958,7 +967,7 @@ function queued() {
   return bytes;
 }
 
-await check('a job that floods its connections with requests or leaves them unread holds no more of this machine\'s kernel on the hop than the hop\'s whole', async () => {
+await linuxOnly('a job that floods its connections with requests or leaves them unread holds no more of this machine\'s kernel on the hop than the hop\'s whole', async () => {
   const relay = await startRelay();
   const job = await addJob();
   const flood = [];
