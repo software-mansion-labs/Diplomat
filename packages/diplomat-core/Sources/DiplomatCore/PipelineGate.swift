@@ -186,6 +186,13 @@ public enum PipelineGate {
         /// those that succeeded on the head as the ones required of it.
         public var requiredChecks: [String]?
         public var passedChecks: Set<String>
+        /// Its base branch's rules: each active ruleset rule's type, and each branch
+        /// protection setting on, by its GraphQL field; nil when they could not be read.
+        public var baseRules: [String]?
+        /// A commit is not signed and verified, or not read.
+        public var unsignedCommits: Bool
+        /// The `gh pr merge` flag it would merge with.
+        public var mergeFlag: String
 
         /// The fields after `ciState` default to what lets a PR merge.
         public init(state: String, author: String, isCrossRepository: Bool, baseRef: String,
@@ -196,7 +203,8 @@ public enum PipelineGate {
                     foreignCommits: [String] = [], trackLabels: Bool = true, fixesCandidate: Bool = true,
                     closesUnwritable: [String] = [], ciRan: Bool = true, wasReady: Bool = false,
                     mergeState: String = "CLEAN", mergeQueue: Bool = false, stopLabels: [String] = [],
-                    requiredChecks: [String]? = [], passedChecks: Set<String> = []) {
+                    requiredChecks: [String]? = [], passedChecks: Set<String> = [], baseRules: [String]? = [],
+                    unsignedCommits: Bool = false, mergeFlag: String = "--squash") {
             self.state = state
             self.author = author
             self.isCrossRepository = isCrossRepository
@@ -225,6 +233,9 @@ public enum PipelineGate {
             self.stopLabels = stopLabels
             self.requiredChecks = requiredChecks
             self.passedChecks = passedChecks
+            self.baseRules = baseRules
+            self.unsignedCommits = unsignedCommits
+            self.mergeFlag = mergeFlag
         }
     }
 
@@ -235,6 +246,8 @@ public enum PipelineGate {
         case fork
         case notDefaultBase(String)
         case mergeQueue
+        case baseRulesUnread
+        case baseRules([String])
         case human(String)
         case participantsUnseen
         case operatorComment
@@ -270,6 +283,8 @@ public enum PipelineGate {
             case .fork: return "fork"
             case .notDefaultBase: return "base"
             case .mergeQueue: return "merge-queue"
+            case .baseRulesUnread: return "base-rules-unread"
+            case .baseRules: return "base-rules"
             case .human: return "human"
             case .participantsUnseen: return "participants-unseen"
             case .operatorComment: return "operator-comment"
@@ -308,6 +323,10 @@ public enum PipelineGate {
             case .fork: return "comes from a fork"
             case .notDefaultBase(let base): return "targets \(base), not the default branch"
             case .mergeQueue: return "its base branch merges through a merge queue"
+            case .baseRulesUnread: return "the rules on its base branch could not be read"
+            case .baseRules(let rules):
+                return rules.count == 1 ? "its base branch has a rule Diplomat does not check: \(rules[0])"
+                    : "its base branch has rules Diplomat does not check: \(rules.joined(separator: ", "))"
             case .human(let who): return "@\(who.isEmpty ? "ghost" : who) has commented or reviewed"
             case .participantsUnseen: return "has more reviews or comments than one read lists"
             case .operatorComment: return "I commented on or reviewed it myself, not through Diplomat"
@@ -354,6 +373,9 @@ public enum PipelineGate {
         if c.isCrossRepository { return .fork }
         if c.baseRef != c.defaultBranch || c.baseRef.isEmpty { return .notDefaultBase(c.baseRef) }
         if c.mergeQueue { return .mergeQueue }
+        guard let rules = c.baseRules else { return .baseRulesUnread }
+        let unchecked = rules.filter { !checks($0, c) }
+        if !unchecked.isEmpty { return .baseRules(unchecked) }
         if let other = c.participants.first(where: { $0 != nil && $0!.lowercased() != mine }) {
             return .human(other ?? "")
         }
@@ -387,5 +409,17 @@ public enum PipelineGate {
         let missing = required.filter { !c.passedChecks.contains($0) }
         if !missing.isEmpty { return .requiredChecks(missing) }
         return nil
+    }
+
+    /// Whether `hold` checks `rule`, one of `c.baseRules`, or it is the review requirement
+    /// `--admin` exists to skip: every other one `--admin` would bypass too.
+    static func checks(_ rule: String, _ c: Candidate) -> Bool {
+        switch rule {
+        case "PULL_REQUEST", "REQUIRED_STATUS_CHECKS", "NON_FAST_FORWARD", "DELETION", "CREATION": return true
+        case "REQUIRED_LINEAR_HISTORY", "requiresLinearHistory": return c.mergeFlag != "--merge"
+        // GitHub cannot sign the commits a rebase merge makes.
+        case "REQUIRED_SIGNATURES", "requiresCommitSignatures": return c.mergeFlag != "--rebase" && !c.unsignedCommits
+        default: return false
+        }
     }
 }

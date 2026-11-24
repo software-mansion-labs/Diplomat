@@ -3660,6 +3660,7 @@ do {
           "every entry not KEY=owner/repo, as typed: \(parsed.bad)")
     check(PipelineSettings.LinearTeam.parse("").teams.isEmpty && PipelineSettings.LinearTeam.parse(" ,; \n").bad.isEmpty,
           "blank entries are no entries")
+    check(PipelineSettings.LinearTeam.parse("ENG_1=o/r").bad == ["ENG_1=o/r"], "a key is letters and digits only")
 }
 print("pipeline linear teams assertions passed")
 

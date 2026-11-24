@@ -14,6 +14,10 @@ struct PipelineEntry {
         var requiredChecks: [String]? = []
         /// The head's checks that succeeded as ones its base branch requires of it.
         var passedChecks: Set<String> = []
+        /// Its base branch's rules (`baseRules`); nil when they could not be read.
+        var baseRules: [String]? = []
+        /// A commit is not signed and verified, or past the read's page.
+        var unsignedCommits = false
     }
 
     var item: PipelineItem
@@ -32,6 +36,8 @@ struct PipelineEntry {
     var linksPast = false
     /// A GitHub issue's type, nil for none.
     var issueType: String?
+    /// A Linear issue's state when its type is triage or duplicate.
+    var triageState: String?
     /// A PR's: the Linear identifiers its title and body close (`PipelineRead.linearCloses`),
     /// and with `Gate` its commit messages too.
     var closesLinear: [String] = []
@@ -391,8 +397,12 @@ enum PipelineRead {
                 && (committer?["email"] as? String)?.lowercased() == "noreply@github.com"
             note(user("author"))
             if !gitHub { note(user("committer")) }
+            if !bool((commit?["signature"] as? [String: Any])?["isValid"], false) { g.unsignedCommits = true }
         }
-        if total(n, "commits") > commits.count { note("") }
+        if total(n, "commits") > commits.count {
+            note("")
+            g.unsignedCommits = true
+        }
         let rollup = (nodes(n, "gateTip").first?["commit"] as? [String: Any])?["statusCheckRollup"] as? [String: Any]
         for c in nodes(rollup, "contexts") {
             if bool(c["isRequired"], false), (c["conclusion"] ?? c["state"]) as? String == "SUCCESS",
@@ -403,7 +413,35 @@ enum PipelineRead {
             g.ciRan = true
         }
         g.requiredChecks = requiredChecks(n["baseRef"] as? [String: Any])
+        g.baseRules = baseRules(n["baseRef"] as? [String: Any])
         return g
+    }
+
+    /// The branch protection settings `PipelineGate.hold` weighs besides required checks.
+    static let protections = ["lockBranch", "restrictsPushes", "requiresDeployments", "requiresCommitSignatures",
+                              "requiresLinearHistory"]
+
+    /// The rules on `base`, a PR's base branch read with `Gate`: each type of rule its active
+    /// rulesets hold, and each of `protections` its branch protection rule turns on. Nil when
+    /// the branch, its protection rule (which only an admin reads in full) or a ruleset past
+    /// the read's page leaves them unknown.
+    static func baseRules(_ base: [String: Any]?) -> [String]? {
+        guard let base, let rules = base["rules"] as? [String: Any], let ruleNodes = rules["nodes"] as? [[String: Any]],
+              total(base, "rules") <= ruleNodes.count else { return nil }
+        var out: [String] = []
+        for r in ruleNodes {
+            guard let type = r["type"] as? String else { return nil }
+            if !out.contains(type) { out.append(type) }
+        }
+        if let rule = base["branchProtectionRule"] as? [String: Any] {
+            for field in protections {
+                guard let on = rule[field] as? Bool else { return nil }
+                if on { out.append(field) }
+            }
+        } else if base["refUpdateRule"] is [String: Any] {
+            return nil
+        }
+        return out
     }
 
     /// The status checks `base`, a PR's base branch read with `Gate`, requires: its branch
@@ -461,7 +499,9 @@ enum PipelineRead {
         let assignee = n["assignee"] as? [String: Any]
         let labels = nodes(n, "labels")
         let names = labels.compactMap { $0["name"] as? String }
-        let done = ["completed", "canceled"].contains((n["state"] as? [String: Any])?["type"] as? String ?? "")
+        let state = n["state"] as? [String: Any]
+        let type = state?["type"] as? String ?? ""
+        let done = ["completed", "canceled"].contains(type)
         let unwritable = done ? "closed" : labelsCut(n, names)
             ?? (assignee == nil || (assignee?["id"] as? String) == viewer ? nil
                 : "assigned to \(assignee?["name"] as? String ?? "someone else")")
@@ -480,6 +520,7 @@ enum PipelineRead {
         e.links = nodes(n, "attachments").compactMap { $0["url"] as? String }
         e.linksPast = bool(((n["attachments"] as? [String: Any])?["pageInfo"] as? [String: Any])?["hasNextPage"], false)
         e.teamID = team?["id"] as? String
+        if ["triage", "duplicate"].contains(type) { e.triageState = state?["name"] as? String ?? type }
         for l in labels {
             if let name = l["name"] as? String, let id = l["id"] as? String { e.labelIDs[name] = id }
         }
