@@ -20,7 +20,8 @@ from test_autofix import fake_probes
 from diplomat_app import bans, pipelineview
 from diplomat_app.pipelineview import EventRow, PipelineView, two_lines
 from diplomat_app.store import Store
-from diplomat_runtime import autofix, comms
+from diplomat_runtime import autofix, comms, review
+from diplomat_runtime.prref import LocalRepo
 from diplomat_runtime.models import Fmt
 
 pytest.importorskip("PySide6")
@@ -86,7 +87,7 @@ def _result() -> dict:
                       "edges": [{"from": a, "to": b, "kind": k} for a, b, k in edges]},
             "effects": [],
             "events": [{"at": t, "item": i, "kind": k, "detail": d} for t, i, k, d in events],
-            "notices": [], "unread": [], "fixable": [I5]}
+            "notices": [], "unread": [], "fixable": [I5], "read": [it["id"] for it in items]}
 
 
 def _rect(column: int, row: int) -> QRectF:
@@ -198,7 +199,7 @@ def test_a_connector_into_its_own_or_an_earlier_column_goes_round_the_cards(stor
     x, y, z = _url(10), _url(11, "pr"), _url(12, "pr")
     store.pipeline_result = {
         "at": "2026-11-20T10:00:00Z", "effects": [], "events": [], "notices": [],
-        "unread": [], "fixable": [],
+        "unread": [], "fixable": [], "read": [x, y, z],
         "items": [_item(10, stage="fixing", lane="fast"),
                   _item(11, kind="pr", stage="human", lane="human"),
                   _item(12, kind="pr", stage="human", lane="human")],
@@ -402,10 +403,52 @@ def test_the_head_label_is_cut_only_past_the_detail_and_nothing_else_is(store, a
         assert view.detail.width() == port
         [head] = view.detail.findChildren(pipelineview._Head)
         assert head.text() == label and label in head.toolTip()
-        drawn = head.fontMetrics().elidedText(label, Qt.TextElideMode.ElideRight, head.width())
+        drawn = head.fontMetrics().elidedText(label, head.elide, head.width())
         assert (drawn == label) is whole
         [kind] = [w for w in view.detail.findChildren(QLabel) if w.text() == "GitHub PR"]
         assert kind.mapTo(view.detail, kind.rect().topRight()).x() < port
+    finally:
+        view.close()
+
+
+def test_a_label_cut_for_width_keeps_its_number(store, app, monkeypatch):
+    """On the card, the detail's head and its link alike."""
+    import PySide6.QtGui as QtGui
+
+    drawn: list[tuple[str, str]] = []
+
+    class Recording(QtGui.QPainter):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self.on = type(args[0]).__name__ if args else ""
+
+        def drawText(self, *args):  # noqa: N802
+            drawn.extend((self.on, a) for a in args if isinstance(a, str))
+            return super().drawText(*args)
+
+    monkeypatch.setattr(pipelineview, "QPainter", Recording)
+    monkeypatch.setattr(QtGui, "QPainter", Recording)
+    label = "software-mansion/react-native-reanimated#6789"
+    url = "https://github.com/software-mansion/react-native-reanimated/pull/6789"
+    result = _result()
+    result["items"][1] = {**result["items"][1], "label": label, "id": url}
+    for node in result["graph"]["nodes"]:
+        node["id"] = url if node["id"] == P2 else node["id"]
+    for edge in result["graph"]["edges"]:
+        edge.update({k: url for k in ("from", "to") if edge[k] == P2})
+    store.pipeline_result = result
+    view = PipelineView(store)
+    view.resize(1100, 700)
+    view.show()
+    try:
+        app.processEvents()
+        view.canvas.grab()
+        view.select(url)
+        app.processEvents()
+        view.detail.grab()
+        cut = {(on, t[-5:]) for on, t in drawn if "…" in t}
+        assert {(type(view.canvas).__name__, "#6789"), ("_Head", "#6789"),
+                ("_Link", "/6789")} <= cut, drawn
     finally:
         view.close()
 
@@ -591,6 +634,34 @@ def test_rate_now_and_fracture_are_off_for_a_banned_authors_text(store):
         held = (False, f"@{who} is on the prompt-injection ban list")
         assert [(view.buttons[k].isEnabled(), view.buttons[k].toolTip())
                 for k in ("rate", "fracture")] == [held, held]
+
+
+def test_rate_now_and_fracture_are_off_in_a_root_the_last_sync_did_not_read_all_of(store):
+    """A sync may refuse them there."""
+    store.pipeline_result = {**_result(), "unread": ["O/R"]}
+    view = PipelineView(store)
+    view.select(I5)
+    held = (False, "The last sync did not read all of O/R")
+    assert [(view.buttons[k].isEnabled(), view.buttons[k].toolTip())
+            for k in ("rate", "fracture")] == [held, held]
+
+
+def test_a_sync_that_read_no_item_says_what_it_did_not_read(store, monkeypatch):
+    github = [LocalRepo("o", "r", "/src/r")]
+    monkeypatch.setattr(review, "repo_roots", lambda: github)
+    empty = {**_result(), "items": [], "graph": {"nodes": [], "edges": []}, "read": []}
+    store.pipeline_result = {**empty, "unread": ["o/r"]}
+    view = PipelineView(store)
+    assert view.canvas.placeholder == ("The last sync did not read all of o/r, and found no "
+                                       "open issue or PR in what it did.")
+    store.pipeline_result = empty
+    store.pipeline_changed.emit()
+    assert view.canvas.placeholder == "The last sync found no open issue or PR."
+    monkeypatch.setattr(review, "repo_roots", lambda: [LocalRepo("g", "r", "/src/g",
+                                                                 host="gitlab.com")])
+    store.pipeline_changed.emit()
+    assert view.canvas.placeholder == ("GitLab roots are not read, and no GitHub root or "
+                                       "Linear team is set.")
 
 
 def test_a_change_to_the_ban_list_redraws_the_actions(store, monkeypatch):

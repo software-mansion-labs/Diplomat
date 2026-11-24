@@ -43,7 +43,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from diplomat_runtime import comms
+from diplomat_runtime import comms, pipeline, review
 from diplomat_runtime.models import Fmt
 from . import glyphs
 from .store import Store
@@ -550,7 +550,7 @@ class GraphCanvas(QWidget):
         p.setPen(text)
         label_box = QRectF(left + 17, top, max(0.0, x - left - 17), 14)
         p.drawText(label_box, int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft),
-                   QFontMetricsF(font).elidedText(face.label, Qt.TextElideMode.ElideRight,
+                   QFontMetricsF(font).elidedText(face.label, Qt.TextElideMode.ElideMiddle,
                                                   label_box.width()))
         font.setBold(False)
         p.setFont(font)
@@ -597,7 +597,10 @@ class _EdgeKey(QWidget):
 
 
 class _Link(ElidedLabel):
-    """A URL on one line, cut to fit; a click opens it."""
+    """A URL on one line, cut in the middle to fit, keeping its number; a click opens
+    it."""
+
+    elide = Qt.TextElideMode.ElideMiddle
 
     def __init__(self, url: str) -> None:
         super().__init__(url, 9, _BLUE)
@@ -612,8 +615,10 @@ class _Link(ElidedLabel):
 
 
 class _Head(ElidedLabel):
-    """The item's label, cut to fit beside its kind: a root's ``owner/repo#N`` may be
-    wider than the pane, which does not scroll sideways."""
+    """The item's label, cut in the middle to fit beside its kind, keeping ``#N``: a
+    root's ``owner/repo#N`` may be wider than the pane, which does not scroll sideways."""
+
+    elide = Qt.TextElideMode.ElideMiddle
 
     def __init__(self, text: str) -> None:
         super().__init__(text, 11,
@@ -690,6 +695,17 @@ def fracture_refused(item: dict) -> str | None:
     it. Twin of ``PipelineView.fractureRefused``."""
     hold = str(item.get("hold") or "")
     return f"No sync splits an issue {hold}" if hold.startswith("triaged as ") else None
+
+
+def empty_text(unread: list[str], reads: bool) -> str:
+    """What stands in for the graph after a sync that read no item: what it did not read.
+    ``reads``: a GitHub root or a Linear team is set. Twin of ``PipelineView.emptyText``."""
+    if not reads:
+        return "GitLab roots are not read, and no GitHub root or Linear team is set."
+    if unread:
+        return (f"The last sync did not read all of {', '.join(unread)}, and found no open "
+                "issue or PR in what it did.")
+    return "The last sync found no open issue or PR."
 
 
 def can_rate(item: dict, me: str, rooted: bool) -> bool:
@@ -886,8 +902,10 @@ class PipelineView(QWidget):
         edges = (result.get("graph") or {}).get("edges") or []
         faces = {str(n["id"]): card_face(by_id[str(n["id"])], badges.get(str(n["id"])))
                  for n in nodes}
+        teams, _ = pipeline.parse_linear_teams(st.pipeline_linear_teams_raw)
+        reads = bool(teams) or any(not r.is_gitlab for r in review.repo_roots())
         placeholder = ("No sync has run yet." if st.pipeline_result is None
-                       else "The last sync found no open issue or PR." if not items
+                       else empty_text(result.get("unread") or [], reads) if not items
                        else "Nothing in this lane.")
         self.canvas.set_graph(nodes, edges, faces, self.selected, placeholder)
         self._rebuild_detail(by_id.get(self.selected or ""), badges.get(self.selected or ""),
@@ -1009,7 +1027,8 @@ class PipelineView(QWidget):
         nothing. Rate now for an item :func:`can_rate` allows; Fracture for an issue
         :func:`can_fracture` allows and Start fix for a candidate issue
         (:func:`can_start_fix`) whose fix is known, each with nothing on it; neither of
-        the first two for a banned author's text, nor Fracture for a triaged issue
+        the first two for a banned author's text or in a root the last sync did not read
+        all of (``Store.pipeline_unread``), nor Fracture for a triaged issue
         (:func:`fracture_refused`), nor Start fix once a split is asked."""
         st = self.store
         item_id = str(item.get("id") or "")
@@ -1017,6 +1036,8 @@ class PipelineView(QWidget):
         rooted = st.pipeline_rooted(item)
         banned = st.pipeline_banned(item)
         ban = f"@{banned} is on the prompt-injection ban list"
+        unread = st.pipeline_unread(item)
+        partly = f"The last sync did not read all of {unread}" if unread else None
         split_asked = item_id in st.pipeline_forced("fracture")
         self.buttons["open"] = _small_button("Open", lambda: open_url(item_id))
         if can_rate(item, st.effective_me, rooted):
@@ -1024,17 +1045,17 @@ class PipelineView(QWidget):
             btn = _small_button("Rate asked" if asked else "Rate now",
                                 lambda: st.pipeline_force_now("rate", item_id))
             btn.setToolTip(ban if banned
-                           else "Rate it in a sync started now, ahead of every limit")
-            btn.setEnabled(on and not asked and not banned)
+                           else partly or "Rate it in a sync started now, ahead of every limit")
+            btn.setEnabled(on and not asked and not banned and partly is None)
             self.buttons["rate"] = btn
         if can_fracture(item, edges, rooted):
             refused = fracture_refused(item)
             btn = _small_button("Fracture asked" if split_asked else "Fracture",
                                 lambda: st.pipeline_force_now("fracture", item_id))
-            btn.setToolTip(ban if banned else refused or "Split it into low-complexity child "
-                                                         "issues in a sync started now")
+            btn.setToolTip(ban if banned else refused or partly
+                           or "Split it into low-complexity child issues in a sync started now")
             btn.setEnabled(on and not split_asked and badge is None and not banned
-                           and refused is None)
+                           and refused is None and partly is None)
             self.buttons["fracture"] = btn
         if can_start_fix(item):
             known = st.pipeline_fix_effect(item) is not None

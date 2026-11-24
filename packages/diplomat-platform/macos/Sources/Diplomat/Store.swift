@@ -140,7 +140,7 @@ final class Store: ObservableObject {
     /// (`RepoRoots.allResolve`). Never for the stand-in `RepoPaths.roots` answers on the
     /// main thread before the first resolution, which knows only the primary path. While
     /// it is false, a repo missing from `roots` may be one that failed to resolve.
-    private var rootsResolved = false
+    private(set) var rootsResolved = false
     /// Of the same reading: whether the first root is the first path's own repo
     /// (`RepoRoots.primaryResolves`). While not, a reference naming no repo has none to
     /// name, the next path's repo standing first.
@@ -3407,10 +3407,11 @@ final class Store: ObservableObject {
 
         var label: String { label(roots: 1) }
 
-        /// The issue's link a fix records on its run; built from `repo`'s key once its root
-        /// is gone, so the run stays that repo's. A Linear issue's is its own.
+        /// The issue's link a fix records on its run: a pipeline fix's is its effect's, which
+        /// its attempt record is found by; any other's is built from `repo`, by its key once
+        /// its root is gone, so the run stays that repo's.
         func issueLink(in roots: [PRRef.LocalRepo]) -> String {
-            if case .issues(let cfg) = config, let linear = cfg.linear { return linear.url }
+            if config.isPipeline { return url }
             return (roots.first { $0.key == repo } ?? PRRef.repo(ofKey: repo)).webURL(.issues, number: number)
         }
 

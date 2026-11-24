@@ -674,7 +674,7 @@ enum Render {
                       .fixLinear(repo: root.slug, identifier: "ENG-52", url: eng52,
                                  text: "Device list flickers on refresh", author: "")],
             events: events,
-            notices: [notice], fixable: [i1801, eng52])
+            notices: [notice], fixable: [i1801, eng52], read: items.map(\.id))
         // The review the last sync asked for, waiting for a bay; an agent on the Linear fix.
         store.queuedTasks = [Store.QueuedAgentTask(
             id: AgentTaskQueue.key(auditAction: AgentTaskQueue.reviewAction, item: "\(root.key)#1834"),

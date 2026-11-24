@@ -467,6 +467,9 @@ class Store(QObject):
         self.pipeline_syncing = False
         # Over the flags and the force sets below, never over a CLI call.
         self._pipeline_lock = threading.Lock()
+        # Over a control.json write and the switches it reads: the Qt thread's switches and
+        # a sync's worker both write it, so the last write has the latest.
+        self._control_lock = threading.Lock()
         # A sync asked for while one runs (:meth:`run_pipeline_sync_async`).
         self._pipeline_again = False
         # Called once the syncs running end (:meth:`run_pipeline_sync_async`).
@@ -1308,7 +1311,8 @@ class Store(QObject):
         ``Store.writePipelineControl``."""
         if headless.active(os.environ) and not os.environ.get("DIPLOMAT_PIPELINE_DIR"):
             return
-        pipeline.write_control(self.pipeline_control())
+        with self._control_lock:
+            pipeline.write_control(self.pipeline_control())
 
     @property
     def pipeline_linear_teams_raw(self) -> str:
@@ -2657,13 +2661,12 @@ class Store(QObject):
         # PR number, which an issue's would collide with. The assignee claim, which
         # every machine sees, keeps two agents off one issue.
         is_pr = entry.action == autofix.QUEUE_REVIEW_ACTION
-        # Built from the ask's root key, not its url (which may be empty), so the run
-        # stays that root's even once the root is gone. A Linear issue's fix carries
-        # that issue's link, which its attempt record is found by.
-        link = entry.url if is_pr else (
+        # A Pipeline fix carries its effect's url, which its attempt record is found by.
+        # Any other is built from the ask's root key, not its url (which may be empty), so
+        # the run stays that root's even once the root is gone.
+        link = entry.url if is_pr or entry.pipeline else (
             (self._root_named(entry.repo) or repo_of_key(entry.repo)).link(
-                "issues", entry.number) if entry.item
-            else entry.url or None if entry.linear else None)
+                "issues", entry.number) if entry.item else None)
         where = (entry.config.get("home") or {}).get("path") or entry.config.get("checkout")
         task = autofix.QueuedTask(
             id=entry.key,
@@ -4664,6 +4667,8 @@ class Store(QObject):
         if not self.effective_me:
             self.fetch_me()
         settings = self.pipeline_settings_payload()
+        handed = (None if review.roots_complete()
+                  else [f"{r['owner']}/{r['repo']}" for r in settings["roots"]])
         if settings["roots"] and not self.effective_me:
             return {"error": GITHUB_LOGIN_UNKNOWN, "forced": {}}
         # What this launch's first sync is told apart from (:meth:`_apply_pipeline_sync`),
@@ -4681,7 +4686,7 @@ class Store(QObject):
             return {"error": out.get("error") or "the sync did not answer",
                     "forced": settings["force"]}
         return {"result": out, "forced": settings["force"], "started": started,
-                "epoch": epoch}
+                "epoch": epoch, "handed": handed}
 
     def _apply_pipeline_sync(self, plan: dict) -> None:
         """The Qt-thread half of a sync: publish its result, retire the force sets it
@@ -4691,7 +4696,8 @@ class Store(QObject):
         answered the last result again (:func:`pipeline.ran_since`) every force, and
         every ask but one whose switch is off, as does one begun in an earlier
         :attr:`_pipeline_epoch`; one landing after the Pipeline went off every ask
-        (switched off midway, it emits no effect).
+        (switched off midway, it emits no effect). A root a sync was not ``handed`` while
+        a root path did not resolve counts as unread (:func:`pipeline.withdrawn`).
 
         A notice is logged when it first appears, and each merge and split the core
         made since the previous result once (:func:`pipeline.fresh_events`), whatever
@@ -4723,11 +4729,12 @@ class Store(QObject):
                         kind: ids - frozenset(handed.get(kind) or ())
                         for kind, ids in self._pipeline_force.items()}
                 if self.pipeline_enabled:
-                    self._withdraw_pipeline_asks(result if judged else None)
+                    self._withdraw_pipeline_asks(result if judged else None, plan.get("handed"))
                     if judged and not self._pipeline_judged:
                         self._pipeline_judged = True
                         self._bring_poll_forward(self._settled_load)
-                    self._apply_pipeline_effects(result, time.time(), judged=judged)
+                    self._apply_pipeline_effects(result, time.time(), judged=judged,
+                                                 handed=plan.get("handed"))
             self.pipeline_changed.emit()
         finally:
             with self._pipeline_lock:
@@ -4739,9 +4746,10 @@ class Store(QObject):
             for call in then:
                 call()
 
-    def _withdraw_pipeline_asks(self, result: dict | None) -> None:
+    def _withdraw_pipeline_asks(self, result: dict | None,
+                                handed: list[str] | None = None) -> None:
         gone = set(pipeline.withdrawn(self.requested_work, result, fix=self.pipeline_fix,
-                                      fast_track=self.pipeline_fast_track))
+                                      fast_track=self.pipeline_fast_track, handed=handed))
         gone -= {e.id for e in self.starting_tasks}
         roots = len(review.repo_roots())
         for entry in [w for w in self.requested_work if w.key in gone]:
@@ -4763,7 +4771,7 @@ class Store(QObject):
             activity.log("auto", "pipeline-recovered", "Pipeline syncing again")
 
     def _apply_pipeline_effects(self, result: dict, now: float, *,
-                                judged: bool = True) -> None:
+                                judged: bool = True, handed: list[str] | None = None) -> None:
         """Ask for the agent work a sync owes, each effect once per attempt: every sync
         emits it for as long as it is owed, and :func:`autofix.decide` over
         ``pipelineAttempts``, by the effect's ``key`` and ``stamp``, says whether this
@@ -4831,7 +4839,7 @@ class Store(QObject):
         if judged:
             teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
             self._save_attempts(PIPELINE_ATTEMPTS, pipeline.retained(
-                self._load_attempts(PIPELINE_ATTEMPTS), result, now, teams))
+                self._load_attempts(PIPELINE_ATTEMPTS), result, now, teams, handed=handed))
 
     def pipeline_work(self, effect: dict) -> autofix.RequestedWork | None:
         """The ask a ``PipelineEffect`` stands for, in its root's checkout; None when its
@@ -4877,16 +4885,24 @@ class Store(QObject):
             return True
         if work.action == autofix.QUEUE_REVIEW_ACTION:
             return self._in_flight(work.url)
+        return self._pipeline_fix_running(work)
+
+    def _pipeline_fix_running(self, work: autofix.RequestedWork) -> bool:
+        """Whether an agent runs a fix of ``work``'s issue, found by the link its run
+        carries (:meth:`_requested_task`). Twin of ``Store.pipelineFixRunning``."""
         named = work.linear or item_label(work.item or "", len(review.repo_roots()))
-        return self._fix_of(self.running_tasks, work.item, named) is not None
+        return self._fix_of(self.running_tasks, item_key_from_url(work.url), named) is not None
 
     def pipeline_badges(self) -> dict[str, str]:
         """``agent`` or ``queued`` by item id, for the items something is on now: an
         agent on the PR, or fixing the issue; work about it waiting in the queue or
         starting."""
         rows = self.running_tasks
-        waiting = {e.id for e in self.queued_tasks + self.starting_tasks}
-        waiting_items = {autofix.item_of_key(k) for k in waiting}
+        tasks = self.queued_tasks + self.starting_tasks
+        waiting = {e.id for e in tasks}
+        # A pipeline task's link names its item as the sync read it, after a rename too.
+        waiting_items = ({autofix.item_of_key(k) for k in waiting}
+                         | {item_key_from_url(e.job.pr_url or "") for e in tasks})
         roots = len(review.repo_roots())
         badges: dict[str, str] = {}
         for it in (self.pipeline_result or {}).get("items") or []:
@@ -4957,6 +4973,17 @@ class Store(QObject):
         key = str(item.get("repo") or "").lower()
         return any(t["key"].lower() == key and t["repo"].lower() in slugs for t in teams)
 
+    def pipeline_unread(self, item: dict) -> str | None:
+        """``item``'s root as the last sync's ``unread`` names it, a Linear issue's its
+        team's: one it did not read all of, whose items a sync may refuse to rate or
+        split; None for one it did. Twin of ``Store.pipelineUnread``."""
+        root = str(item.get("repo") or "")
+        if item.get("source") == "linear":
+            teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
+            root = next((t["repo"] for t in teams if t["key"] == root.upper()), "")
+        return next((r for r in (self.pipeline_result or {}).get("unread") or []
+                     if root and r.lower() == root.lower()), None)
+
     def pipeline_start_fix(self, item: dict) -> str | None:
         """The screen's "Start fix" for a candidate issue, as the last sync left it: its
         fix queued now, past its attempt record (one cooling down or concluded
@@ -4976,8 +5003,7 @@ class Store(QObject):
             return (f"{effect.get('repo')} is no GitHub repo root here, so there is "
                     f"nowhere to fix it")
         work = dataclasses.replace(work, by_hand=True)
-        named = work.linear or item_label(work.item or "", len(review.repo_roots()))
-        if self._fix_of(self.running_tasks, work.item, named) is not None:
+        if self._pipeline_fix_running(work):
             return "An agent is already fixing it"
         try:
             fresh = self.request_one(work)

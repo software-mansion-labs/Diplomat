@@ -133,6 +133,7 @@ extension Store {
             if hold != nil { return }
             let epoch = pipelineEpoch
             let settings = pipelineSettings
+            let handed = rootsResolved ? nil : Set(settings.roots.map { "\($0.owner)/\($0.repo)".lowercased() })
             writePipelineControl()
             let started = Date()
             let result: PipelineTickResult
@@ -150,7 +151,7 @@ extension Store {
                     rate: pipelineForce.rate.filter { !sent.rate.contains($0) },
                     fracture: pipelineForce.fracture.filter { !sent.fracture.contains($0) })
             }
-            await applyPipeline(result, judged: ran && epoch == pipelineEpoch)
+            await applyPipeline(result, judged: ran && epoch == pipelineEpoch, handed: handed)
         } while pipelineSyncAgain && pipelineEnabled
     }
 
@@ -198,10 +199,12 @@ extension Store {
     /// (a sync switched off midway emits no effect). Any other first retires the queued asks
     /// no longer owed (`pipelineWithdrawn`); by the result, lets the asks start
     /// (`pipelineJudged`) and prunes the attempt records only if it is `judged`: a sync's
-    /// own (`pipelineRan`) begun in this `pipelineEpoch`.
+    /// own (`pipelineRan`) begun in this `pipelineEpoch`. `handed` is the roots that sync
+    /// was handed while a root path did not resolve, nil when every one did.
     /// A notice is logged when it first appears, and each merge and split the core made
     /// since the previous result once (`Store.pipelineFreshEvents`), whatever the switches.
-    func applyPipeline(_ result: PipelineTickResult, judged: Bool = true, now: Date = Date()) async {
+    func applyPipeline(_ result: PipelineTickResult, judged: Bool = true, handed: Set<String>? = nil,
+                       now: Date = Date()) async {
         let previous = pipelineResult
         let seen = Set(previous?.notices ?? [])
         let fresh = result.notices.filter { !seen.contains($0) }
@@ -213,17 +216,14 @@ extension Store {
         }
         pipelineResult = result
         if pipelineEnabled {
-            withdrawPipelineAsks(judged ? result : nil)
+            withdrawPipelineAsks(judged ? result : nil, handed: handed)
             if judged { pipelineJudged = true }
         }
         var queued = false
         if pipelineEnabled {
             let banned = BanList.read()
             for effect in result.effects {
-                switch effect {
-                case .fixIssue, .fixLinear: guard pipelineFix else { continue }
-                case .review: guard pipelineFastTrack else { continue }
-                }
+                guard pipelineAsking(effect) else { continue }
                 guard var ask = pipelineAsk(effect) else { continue }
                 if case .fixLinear = effect, let old = requestedWork.first(where: { $0.key == ask.key }),
                    !startingTasks.contains(where: { $0.id == ask.key }),
@@ -238,6 +238,8 @@ extension Store {
                     continue
                 }
                 let inFlight = await pipelineInFlight(effect, ask: ask)
+                // A switch turned off in that wait withdrew only what was queued by then.
+                guard pipelineEnabled, pipelineAsking(effect) else { continue }
                 // Read after that wait, in which a Cancel, a retirement or Start fix may write a
                 // record; saved before the ask is queued, so a Cancel finds it.
                 var records = loadPipelineAttempts()
@@ -256,16 +258,22 @@ extension Store {
             }
             if judged {
                 savePipelineAttempts(Store.retainedPipelineAttempts(
-                    loadPipelineAttempts(), after: result, teams: Store.pipelineTeams(pipelineLinearTeamsRaw),
-                    now: now))
+                    loadPipelineAttempts(), after: result, handed: handed,
+                    teams: Store.pipelineTeams(pipelineLinearTeamsRaw), now: now))
             }
         }
         if !fresh.isEmpty || !done.isEmpty || queued { refreshAudit() }
     }
 
+    /// The switch `effect`'s kind is asked for under.
+    private func pipelineAsking(_ effect: PipelineEffect) -> Bool {
+        if case .review = effect { return pipelineFastTrack }
+        return pipelineFix
+    }
+
     /// Drops each ask `pipelineWithdrawn` names, unless it is starting.
-    func withdrawPipelineAsks(_ result: PipelineTickResult?) {
-        let gone = Set(Store.pipelineWithdrawn(requestedWork, by: result, fix: pipelineFix,
+    func withdrawPipelineAsks(_ result: PipelineTickResult?, handed: Set<String>? = nil) {
+        let gone = Set(Store.pipelineWithdrawn(requestedWork, by: result, handed: handed, fix: pipelineFix,
                                                fastTrack: pipelineFastTrack))
             .subtracting(startingTasks.map(\.id))
         for entry in requestedWork where gone.contains(entry.key) {
@@ -278,26 +286,38 @@ extension Store {
     }
 
     /// The keys of the pipeline's `asks` no longer owed: one a sync queued while its kind's
-    /// switch (`fix`, `fastTrack`) is off; and in a root `result` (a sync's own; nil judges by
-    /// the switches alone) read in full, not `unread`, one it emitted no effect for, or a
-    /// Start fix (`byHand`) whose issue is not `fixable`. Twin of `pipeline.withdrawn`.
+    /// switch (`fix`, `fastTrack`) is off; one `result` (a sync's own; nil judges by the
+    /// switches alone) emitted no effect for, in a root it judged in full (`pipelineShort`)
+    /// or of an item it `read`; and a Start fix (`byHand`) in a root judged in full whose
+    /// issue is not `fixable`. Twin of `pipeline.withdrawn`.
     nonisolated static func pipelineWithdrawn(_ asks: [RequestedWork], by result: PipelineTickResult?,
-                                              fix: Bool, fastTrack: Bool) -> [String] {
+                                              handed: Set<String>? = nil, fix: Bool,
+                                              fastTrack: Bool) -> [String] {
         let owed = Set((result?.effects ?? []).map { effect -> String in
             if case .review = effect { return "review " + pipelineIdentity(effect.url) }
             return "fix " + pipelineIdentity(effect.url)
         })
         let fixable = Set((result?.fixable ?? []).map(pipelineIdentity))
-        let unread = Set((result?.unread ?? []).map { $0.lowercased() })
+        let read = Set((result?.read ?? []).map(pipelineIdentity))
+        let short = pipelineShort(result?.unread ?? [], handed: handed)
         return asks.filter { ask in
             guard ask.config.isPipeline else { return false }
             let review: Bool
             if case .review = ask.config { review = true } else { review = false }
             if !ask.byHand && !(review ? fastTrack : fix) { return true }
-            guard result != nil, !unread.contains(ask.repo.lowercased()) else { return false }
-            let id = pipelineIdentity(ask.url)
-            return ask.byHand ? !fixable.contains(id) : !owed.contains((review ? "review " : "fix ") + id)
+            guard result != nil else { return false }
+            let id = pipelineIdentity(ask.url), judged = !short(ask.repo.lowercased())
+            return ask.byHand ? judged && !fixable.contains(id)
+                : !owed.contains((review ? "review " : "fix ") + id) && (judged || read.contains(id))
         }.map(\.key)
+    }
+
+    /// Whether a root (lowercased) was judged on less than all it holds: in `unread`, or not
+    /// among the roots `handed` to a sync while a root path did not resolve (nil when every
+    /// one did). Twin of `pipeline._short`.
+    nonisolated static func pipelineShort(_ unread: [String], handed: Set<String>?) -> (String) -> Bool {
+        let unread = Set(unread.map { $0.lowercased() })
+        return { root in unread.contains(root) || handed.map { !$0.contains(root) } == true }
     }
 
     /// `pipeline-fix` for a fix, `pipeline-review` for a fast-track review.
@@ -404,21 +424,25 @@ extension Store {
         return PRRef.splitItemKey(item)?.root.lowercased() ?? ""
     }
 
-    /// The records a sync keeps: each in a root it did not judge in full (`unread`), whose
-    /// effect it may have left out; each while it owes the effect, so its retry ladder and
-    /// its conclusion stand; for the backoff ceiling after its last dispatch, so an effect
-    /// a failed read left out is not taken for a new one when it is back; and a concluded
-    /// one for `pipelineConcludedKeep` after its run concluded, so a fix whose PR was
-    /// closed unmerged is not asked for again. Twin of `pipeline.retained`.
+    /// The records a sync keeps: each it may have left out, in a root it did not judge in
+    /// full (`pipelineShort`) and of an item it did not `read`; each while it owes the
+    /// effect, so its retry ladder and its conclusion stand; for the backoff ceiling after
+    /// its last dispatch, so an effect a failed read left out is not taken for a new one
+    /// when it is back; and a concluded one for `pipelineConcludedKeep` after its run
+    /// concluded, so a fix whose PR was closed unmerged is not asked for again. Twin of
+    /// `pipeline.retained`.
     nonisolated static func retainedPipelineAttempts(_ attempts: [String: ReviewAttempt],
                                                      after result: PipelineTickResult,
+                                                     handed: Set<String>? = nil,
                                                      teams: [PipelineSettings.LinearTeam],
                                                      now: Date) -> [String: ReviewAttempt] {
         let owed = Set(result.effects.map(\.key))
-        let unread = Set(result.unread.map { $0.lowercased() })
+        let short = pipelineShort(result.unread, handed: handed)
+        let read = Set(result.read.map(pipelineIdentity))
         return attempts.filter { key, rec in
             let url = key.firstIndex(of: ":").map { String(key[key.index(after: $0)...]) } ?? ""
-            return owed.contains(key) || unread.contains(pipelineRoot(url, teams: teams))
+            return owed.contains(key)
+                || (short(pipelineRoot(url, teams: teams)) && !read.contains(pipelineIdentity(url)))
                 || now.timeIntervalSince(rec.lastDispatchedAt) < ReviewReconcile.retryMaxBackoff
                 || rec.concludedAt.map { now.timeIntervalSince($0) < pipelineConcludedKeep } == true
         }
@@ -582,6 +606,16 @@ extension Store {
         return Store.pipelineTeams(pipelineLinearTeamsRaw).contains {
             $0.key.lowercased() == item.repo.lowercased() && slugs.contains($0.repo.lowercased())
         }
+    }
+
+    /// `item`'s root as the last sync's `unread` names it, a Linear issue's its team's: one it
+    /// did not read all of, whose items a sync may refuse to rate or split; nil for one it
+    /// did. Twin of `Store.pipeline_unread`.
+    func pipelineUnread(_ item: PipelineItem) -> String? {
+        let root = item.source == .linear
+            ? Store.pipelineTeams(pipelineLinearTeamsRaw).first { $0.key == item.repo.uppercased() }?.repo
+            : item.repo
+        return root.flatMap { root in pipelineResult?.unread.first { $0.lowercased() == root.lowercased() } }
     }
 
     /// Start fix: the issue's fix queued now, as the last sync left it, past its attempt

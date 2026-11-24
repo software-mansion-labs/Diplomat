@@ -25,7 +25,7 @@ from test_autofix import _spawn_recorder, fake_probes, store  # noqa: F401 — f
 from diplomat_app import bans
 from diplomat_app.store import PIPELINE_ATTEMPTS, Store, app_settings
 from diplomat_runtime import activity, appconfig, autofix, pipeline, promptcore, review
-from diplomat_runtime.prref import LocalRepo
+from diplomat_runtime.prref import LocalRepo, item_key_from_url
 
 pytest.importorskip("PySide6")
 from PySide6.QtWidgets import QApplication  # noqa: E402
@@ -68,11 +68,11 @@ def _now_iso() -> str:
 
 
 def _result(*effects: dict, items: tuple = (), at: str | None = None,
-            unread: tuple = (), fixable: tuple = ()) -> dict:
+            unread: tuple = (), fixable: tuple = (), read: tuple = ()) -> dict:
     """Dated now unless ``at`` says otherwise: a sync's result is dated when it began."""
     return {"at": at or _now_iso(), "items": list(items),
             "graph": {"nodes": [], "edges": []}, "effects": list(effects), "events": [],
-            "notices": [], "unread": list(unread), "fixable": list(fixable)}
+            "notices": [], "unread": list(unread), "fixable": list(fixable), "read": list(read)}
 
 
 def _sync(pipe, result: dict) -> None:
@@ -87,6 +87,7 @@ def pipe(store, monkeypatch):  # noqa: F811 — the shared Store fixture
     and fast-track switches."""
     monkeypatch.setattr(review, "repo_roots", lambda: [ROOT])
     monkeypatch.setattr(review, "roots_guessed", lambda: False)
+    monkeypatch.setattr(review, "roots_complete", lambda: True)
     monkeypatch.setattr("diplomat_app.bans.read",
                         lambda: [bans.BannedAuthor("mallory", "prompt injection")])
     store.pipeline_enabled = True
@@ -678,6 +679,16 @@ def test_badges_name_the_items_something_is_on(pipe, monkeypatch):
                                       running["id"]: "agent", PR: "agent"}
 
 
+def test_an_item_is_unread_by_its_root_a_linear_issue_by_its_team(pipe):
+    pipe.pipeline_linear_teams_raw = "ENG=o/r"
+    pipe.pipeline_result = _result(unread=("O/R",))
+    assert pipe.pipeline_unread(_item()) == "O/R"
+    assert pipe.pipeline_unread(_item(LINEAR, source="linear", repo="ENG")) == "O/R"
+    assert pipe.pipeline_unread(_item(LINEAR, source="linear", repo="OPS")) is None
+    pipe.pipeline_result = _result()
+    assert pipe.pipeline_unread(_item()) is None
+
+
 def _start(pipe, item: dict) -> str | None:
     pipe.pipeline_result = pipe.pipeline_result or _result(items=(item,))
     return pipe.pipeline_start_fix(item)
@@ -799,6 +810,49 @@ def test_a_pipeline_run_dates_its_record_when_it_spawns_and_concludes_it_when_it
     pipe.requested_work = []
     pipe.queued_tasks = []
     pipe._apply_pipeline_effects(_result(_fix()), time.time() + 4 * 3600)
+    assert _keys(pipe) == []
+
+
+def _renamed() -> dict:
+    """A fix in a root GitHub answers by its new name, which only the url carries."""
+    url = "https://github.com/o/renamed/issues/12"
+    return {**_fix(), "url": url, "key": f"pipeline-fix:{url}"}
+
+
+def test_a_renamed_roots_fix_runs_on_its_effects_link(pipe, monkeypatch):
+    """Its spawn, its report, the screen's badges and Start fix find it by that link."""
+    from diplomat_runtime import agentregistry
+
+    fix = _renamed()
+    calls = _spawn_recorder(monkeypatch)
+    asked = time.time() - 600
+    pipe.pipeline_result = _result(fix, items=(_item(fix["url"]),))
+    pipe._apply_pipeline_effects(pipe.pipeline_result, asked)
+    [task] = pipe.queued_tasks
+    assert task.job.pr_url == fix["url"]
+    assert pipe.pipeline_badges() == {fix["url"]: "queued"}
+    pipe._execute_queued_task(task)
+    assert len(calls) == 1
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS)[fix["key"]].last_dispatched_at > asked + 500
+    (run,) = agentregistry.load()
+    row = autofix.RunningAgent(pr_number=0, label="Auto · Issues · #12 · quick", kind="issues",
+                               tracked=True, item=item_key_from_url(run.pr_url))
+    with monkeypatch.context() as m:
+        m.setattr(Store, "running_tasks", property(lambda self: [row]))
+        assert pipe.pipeline_badges() == {fix["url"]: "agent"}
+        assert _start(pipe, _item(fix["url"])) == "An agent is already fixing it"
+    fake_probes(monkeypatch, activity={run.run_id: ("idle", time.time() - 5)})
+    pipe._settle_agents()
+    assert agentregistry.load() == [], "the run must retire, or this pins nothing"
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS)[fix["key"]].concluded_at is not None
+
+
+def test_a_renamed_roots_cancelled_fix_is_not_asked_for_again(pipe):
+    fix = _renamed()
+    now = time.time()
+    pipe._apply_pipeline_effects(_result(fix), now)
+    pipe.cancel_requested_work(_keys(pipe)[0])
+    pipe._apply_pipeline_effects(_result(fix), now + autofix.RETRY_MAX_BACKOFF)
     assert _keys(pipe) == []
 
 
@@ -950,11 +1004,11 @@ def test_a_malformed_result_keeps_only_what_it_should_hold(tmp_path, monkeypatch
     _fake_core(tmp_path, monkeypatch, json.dumps({
         "at": "x", "items": [{"id": "a"}, 3], "graph": {"nodes": "no", "edges": [None]},
         "effects": [{"kind": "review"}, "x"], "notices": ["one", 2], "unread": ["o/r", 3],
-        "fixable": [ISSUE, None]}))
+        "fixable": [ISSUE, None], "read": [PR, {}]}))
     assert pipeline.tick({}) == {
         "at": "x", "items": [{"id": "a"}], "graph": {"nodes": [], "edges": []},
         "effects": [{"kind": "review"}], "events": [], "notices": ["one"],
-        "unread": ["o/r"], "fixable": [ISSUE]}
+        "unread": ["o/r"], "fixable": [ISSUE], "read": [PR]}
 
 
 # MARK: - What a running sync reads
@@ -978,6 +1032,27 @@ def test_each_switch_is_written_where_a_running_sync_reads_it(pipe):
     mode = stat.S_IMODE(os.stat(pipeline.pipeline_dir() / "control.json").st_mode)
     assert mode == 0o600
     assert [f.name for f in pipeline.pipeline_dir().iterdir()] == ["control.json"]
+
+
+def test_a_switch_flipped_while_a_sync_writes_the_switches_is_the_one_left(pipe,
+                                                                            monkeypatch):
+    real = pipeline.write_control
+    entered, go = threading.Event(), threading.Event()
+
+    def slow(control):
+        if threading.current_thread() is not threading.main_thread():
+            entered.set()
+            go.wait(5)
+        real(control)
+
+    monkeypatch.setattr(pipeline, "write_control", slow)
+    worker = threading.Thread(target=pipe._write_pipeline_control)
+    worker.start()
+    assert entered.wait(5)
+    threading.Timer(0.3, go.set).start()
+    pipe.pipeline_fix = False
+    worker.join(5)
+    assert _control()["fix"] is False
 
 
 def test_a_sync_writes_the_switches_before_it_starts(pipe, monkeypatch):
@@ -1187,7 +1262,7 @@ def test_the_apps_sync_timer_is_armed_only_once_a_sync_ends(monkeypatch):
 
 
 def test_a_failing_apply_still_re_arms_the_timer(pipe, monkeypatch):
-    def broken(self, result, now, judged):
+    def broken(self, result, now, judged, handed):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(Store, "_apply_pipeline_effects", broken)
@@ -1321,6 +1396,51 @@ def test_nothing_leaves_in_a_root_the_sync_could_not_judge_in_full(pipe):
     assert _keys(pipe) == ["issues:o/r#12"]
 
 
+def test_in_such_a_root_an_ask_for_an_item_it_read_leaves(pipe):
+    """A capped root: the item read and no longer owed goes, the one past the cap stays."""
+    pipe._apply_pipeline_effects(_result(_fix(12), _fix(13)), time.time())
+    _sync(pipe, _result(unread=("O/R",), read=(ISSUE,)))
+    assert _keys(pipe) == ["issues:o/r#13"]
+
+
+def test_a_start_fix_there_stays_though_its_issue_was_read(pipe):
+    pipe.pipeline_result = _result(items=(_item(),))
+    assert _start(pipe, _item()) is None
+    _sync(pipe, _result(unread=("O/R",), read=(ISSUE,)))
+    assert _keys(pipe) == ["issues:o/r#12"]
+
+
+def _else(pipe, monkeypatch) -> dict:
+    """A fix queued in root o/else, whose path then stops resolving."""
+    other = LocalRepo("o", "else", "/src/else")
+    url = "https://github.com/o/else/issues/3"
+    fix = {**_fix(), "repo": "o/else", "number": 3, "url": url, "key": f"pipeline-fix:{url}"}
+    monkeypatch.setattr(review, "repo_roots", lambda: [ROOT, other])
+    pipe._apply_pipeline_effects(_result(fix, _review()), time.time())
+    monkeypatch.setattr(review, "repo_roots", lambda: [ROOT])
+    monkeypatch.setattr(review, "roots_complete", lambda: False)
+    return fix
+
+
+def test_a_root_whose_path_did_not_resolve_keeps_its_asks_as_unread(pipe, monkeypatch):
+    _else(pipe, monkeypatch)
+    monkeypatch.setattr(pipeline, "tick", lambda settings, started=None: _result())
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert _keys(pipe) == ["issues:o/else#3"]
+    monkeypatch.setattr(review, "roots_complete", lambda: True)
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert _keys(pipe) == []
+
+
+def test_a_root_whose_path_did_not_resolve_keeps_its_records(pipe, monkeypatch):
+    fix = _else(pipe, monkeypatch)
+    lapsed = autofix.ReviewAttempt("fix", time.time() - autofix.RETRY_MAX_BACKOFF - 1, 2)
+    pipe._save_attempts(PIPELINE_ATTEMPTS, {fix["key"]: lapsed, f"pipeline-fix:{ISSUE}": lapsed})
+    monkeypatch.setattr(pipeline, "tick", lambda settings, started=None: _result())
+    pipe._apply_pipeline_sync(pipe._pipeline_sync_once())
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS) == {fix["key"]: lapsed}
+
+
 @pytest.mark.parametrize("switch, left", [
     ("pipeline_fix", ["issues:o/r#13", "review:o/r#7"]),
     ("pipeline_fast_track", ["issues:linear:ENG-12", "issues:o/r#12", "issues:o/r#13"]),
@@ -1442,6 +1562,16 @@ def test_a_sync_keeps_the_records_in_a_root_it_could_not_judge_in_full(pipe, tea
     assert pipe._load_attempts(PIPELINE_ATTEMPTS) == {k: lapsed for k in kept}
 
 
+def test_a_sync_prunes_the_records_of_items_it_read_in_such_a_root(pipe):
+    pipe.pipeline_linear_teams_raw = "ENG=o/r"
+    lapsed = autofix.ReviewAttempt("fix", time.time() - autofix.RETRY_MAX_BACKOFF - 1, 2)
+    past = "pipeline-fix:https://github.com/o/r/issues/13"
+    pipe._save_attempts(PIPELINE_ATTEMPTS, {
+        f"pipeline-fix:{ISSUE}": lapsed, f"pipeline-fix:{LINEAR}": lapsed, past: lapsed})
+    _sync(pipe, _result(unread=("O/R",), read=(ISSUE, "https://linear.app/acme/issue/ENG-12")))
+    assert pipe._load_attempts(PIPELINE_ATTEMPTS) == {past: lapsed}
+
+
 @pytest.mark.parametrize("switch", ["pipeline_enabled", "pipeline_fix",
                                     "pipeline_fast_track"])
 def test_a_sync_a_switch_went_off_during_prunes_no_record(pipe, monkeypatch, switch):
@@ -1505,7 +1635,7 @@ def test_a_starting_linear_fix_is_not_queued_again(pipe):
 def test_pipeline_last_before_any_sync_is_no_sync(tmp_path, monkeypatch, pipe):
     _fake_core(tmp_path, monkeypatch, json.dumps({
         "at": "1970-01-01T00:00:00Z", "items": [], "graph": {"nodes": [], "edges": []},
-        "effects": [], "events": [], "notices": [], "unread": [], "fixable": []}))
+        "effects": [], "events": [], "notices": [], "unread": [], "fixable": [], "read": []}))
     assert pipeline.last() is None
     pipe.refresh_pipeline_last()
     assert pipe.pipeline_result is None
