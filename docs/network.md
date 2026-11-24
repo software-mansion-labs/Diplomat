@@ -197,7 +197,9 @@ acted on at its own address, with the login `glab` holds for it. Each address ge
 it holds nothing for, and not `gh`'s `GH_ENTERPRISE_TOKEN` or `GITHUB_ENTERPRISE_TOKEN`, which
 it gives every GitHub Enterprise Server. A `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN` or
 `OAUTH_TOKEN` in the daemon's environment, which `glab` gives every GitLab it holds, goes only
-to the GitLab that `GITLAB_HOST` (or `GITLAB_URI`) names, or to gitlab.com when neither is set.
+to `glab`'s default host, the one `glab config get host` names (from `GITLAB_HOST`,
+`GITLAB_URI`, `GL_HOST` or its config, else gitlab.com), and to no GitLab when a `GITLAB_URL`
+names another.
 The daemon has github.com's rules for a GitHub Enterprise Server as well, at that server's
 address, but Diplomat links only repositories on github.com and on a GitLab, so one on a GitHub
 Enterprise Server has no pool. The network has no rules for an address under `ghe.com` (GitHub
@@ -325,11 +327,16 @@ branches are protected instead, and refuses a new branch beside one of them unde
 (`v2.0` beside `v1.4`). A rule no protected branch matches yet, or one that covers names of
 other shapes, goes unseen then, and a new branch it covers can be made.
 
-The text of a comment, a review, or a PR's or MR's description names no account with `@` and
-says no `bors` anywhere in it, in whatever markdown, and holds no line starting with `/`: GitLab
-runs such a line as a quick action in your name, and bots on either forge read the text as it
+The title of a PR or an MR and the text of a comment, a review, or a PR's or MR's description
+name no account anywhere in them: no `@` before a letter, a digit, `_`, `.` or `-`, so no
+`@Override`, `@types/node` or e-mail address either, in code blocks too. They say no `bors`, in
+any case, and hold no line that starts, after any spaces and tabs, with `/` and a word of
+letters, `_` and `-` that white space or the end of the text follows (`/approve`, `/lgtm`), so a
+line like `// a comment` or `/usr/bin/env node` passes. GitLab runs such a line as a quick
+action in your name, Prow takes it for a command, and bots on either forge read the text as it
 was sent and take a mention anywhere for a command from you (`@bors r+`, `@copilot ...`,
-`@claude ...`, `/approve`).
+`@claude ...`). The job's agent is told the rule, and a refusal names the field and quotes what
+broke it, so the agent rewords the text and sends it again.
 
 Before it allows a push or a write, the machine asks the forge what the rule depends on: where
 the branch is, which branch is the default, which protection rules there are, who opened the

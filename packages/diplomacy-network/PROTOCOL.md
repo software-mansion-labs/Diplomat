@@ -1417,11 +1417,13 @@ through.
 - `"body": { "event": { "oneOf": ["COMMENT"] }, "body": "free" }` pins a JSON body member
   by member. The body is parsed strictly (`application/json`, UTF-8, no duplicate key) and
   a member the rule does not name is refused. A member is `"free"`, or pinned with
-  `equals`, `oneOf`, `prefix`, `prose` (text with no line starting with `/`, which
-  GitLab would run as a quick action, and nowhere in it an `@` before a letter, digit,
-  `_`, `.` or `-`, or the word `bors`, which a bot on either forge reads anywhere in the
-  text as sent, markdown and all), `proseIn` (a list of objects whose member of that name
-  is `prose`),
+  `equals`, `oneOf`, `prefix`, `prose` (text with no line that starts, after any spaces
+  and tabs, with `/` and a word of letters, `_` and `-` that white space or the end
+  follows, which GitLab would run as a quick action and Prow as a command, and nowhere in
+  it an `@` before a letter, digit, `_`, `.` or `-`, or the word `bors` in any case,
+  which a bot on either forge reads anywhere in the text as sent, markdown and all; the
+  refusal names the member and quotes the first such word), `proseIn` (a list of objects
+  whose member of that name is `prose`; the refusal names the entry),
   `created` (a branch this task created, from which it has
   opened no pull request yet; `"created": "label"` reads the member as GitHub's head
   label, which is `branch` for a branch of the pool's repository and `account:branch`

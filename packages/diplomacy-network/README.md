@@ -598,7 +598,8 @@ four things and starts the job:
 - **The image.** One local image, built from `image/Dockerfile` and tagged by the hash of
   that directory. Debian, git, node, python, curl and the handful of tools agents reach
   for; nothing project-specific. `image/preamble.md` tells the agent it is root in a
-  disposable container and may install whatever else it needs.
+  disposable container and may install whatever else it needs, and what text a write in
+  the requester's name may not hold.
 
   The tag names the recipe, not the bytes. Held to a hash are the Debian base image (by
   digest) and the releases of node, gh and glab (by SHA-256, for each architecture).
