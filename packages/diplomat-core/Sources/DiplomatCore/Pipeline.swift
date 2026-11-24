@@ -378,11 +378,14 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
     /// Split writable medium/high-complexity issues into low-complexity children.
     public var fracture: Bool
     public var force: Force?
+    /// The ids of the items the front-end holds a queued pipeline ask for, which a sync reads
+    /// even past a cap or once closed, so `read` can take each back.
+    public var queued: [String]
 
     public init(roots: [Root], linearTeams: [LinearTeam] = [], linearKeychainItem: String? = nil,
                 linearTokenFile: String? = nil, rate: Bool = false, fix: Bool = false,
                 fastTrack: Bool = false, merge: Bool = false, fracture: Bool = false,
-                force: Force? = nil) {
+                force: Force? = nil, queued: [String] = []) {
         self.roots = roots
         self.linearTeams = linearTeams
         self.linearKeychainItem = linearKeychainItem
@@ -393,11 +396,12 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
         self.merge = merge
         self.fracture = fracture
         self.force = force
+        self.queued = queued
     }
 
     private enum CodingKeys: String, CodingKey {
         case roots, linearTeams, linearKeychainItem, linearTokenFile, rate, fix, fastTrack,
-             merge, fracture, force
+             merge, fracture, force, queued
     }
 
     /// A missing field reads as empty, and a missing switch as off.
@@ -410,7 +414,8 @@ public struct PipelineSettings: Codable, Equatable, Sendable {
                   linearTokenFile: try c.decodeIfPresent(String.self, forKey: .linearTokenFile),
                   rate: try on(.rate), fix: try on(.fix), fastTrack: try on(.fastTrack),
                   merge: try on(.merge), fracture: try on(.fracture),
-                  force: try c.decodeIfPresent(Force.self, forKey: .force))
+                  force: try c.decodeIfPresent(Force.self, forKey: .force),
+                  queued: try c.decodeIfPresent([String].self, forKey: .queued) ?? [])
     }
 }
 
