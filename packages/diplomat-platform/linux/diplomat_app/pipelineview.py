@@ -1049,18 +1049,18 @@ class PipelineView(QWidget):
         """Open always; the rest only while the Pipeline is on, which off acts on
         nothing. Rate now for an item :func:`can_rate` allows; Fracture for an issue
         :func:`can_fracture` allows and Start fix for a candidate issue
-        (:func:`can_start_fix`) whose fix is known, each with nothing on it; none for a
-        banned author's text, neither of the first two in a root the last sync did not
-        read all of (``Store.pipeline_unread``), nor Rate now for an item carrying a stop
-        label (:func:`rate_refused`), nor Fracture for an issue triaged or carrying one
-        (:func:`fracture_refused`), nor Start fix once a split is asked. A PR is the
-        operator's by ``gh``'s account, as a sync judges it, not the Settings override's."""
+        (:func:`can_start_fix`) whose fix is known, each with nothing on it; none the
+        ban list holds (``Store.pipeline_ban``), neither of the first two in a root the
+        last sync did not read all of (``Store.pipeline_unread``), nor Rate now for an
+        item carrying a stop label (:func:`rate_refused`), nor Fracture for an issue
+        triaged or carrying one (:func:`fracture_refused`), nor Start fix once a split is
+        asked. A PR is the operator's by ``gh``'s account, as a sync judges it, not the
+        Settings override's."""
         st = self.store
         item_id = str(item.get("id") or "")
         on = st.pipeline_enabled
         rooted = st.pipeline_rooted(item)
-        banned = st.pipeline_banned(item)
-        ban = f"@{banned} is on the prompt-injection ban list"
+        ban = st.pipeline_ban(item)
         unread = st.pipeline_unread(item)
         partly = f"The last sync did not read all of {unread}" if unread else None
         split_asked = item_id in st.pipeline_forced("fracture")
@@ -1071,27 +1071,26 @@ class PipelineView(QWidget):
             btn = _small_button("Rate asked" if asked else "Rate now",
                                 lambda: st.pipeline_force_now("rate", item_id))
             btn.setToolTip(plain_tooltip(
-                ban if banned else stopped or partly
-                or "Rate it in a sync started now, ahead of every limit"))
-            btn.setEnabled(on and not asked and not banned and stopped is None and partly is None)
+                ban or stopped or partly or "Rate it in a sync started now, ahead of every limit"))
+            btn.setEnabled(on and not asked and ban is None and stopped is None and partly is None)
             self.buttons["rate"] = btn
         if can_fracture(item, edges, rooted):
             refused = fracture_refused(item)
             btn = _small_button("Fracture asked" if split_asked else "Fracture",
                                 lambda: st.pipeline_force_now("fracture", item_id))
             btn.setToolTip(plain_tooltip(
-                ban if banned else refused or partly
+                ban or refused or partly
                 or "Split it into low-complexity child issues in a sync started now"))
-            btn.setEnabled(on and not split_asked and badge is None and not banned
+            btn.setEnabled(on and not split_asked and badge is None and ban is None
                            and refused is None and partly is None)
             self.buttons["fracture"] = btn
         if can_start_fix(item):
             known = st.pipeline_fix_effect(item) is not None
             btn = _small_button("Start fix", lambda: self._start_fix(item))
             btn.setToolTip(plain_tooltip(
-                ban if banned else "Queue its fix now, past its retry backoff" if known
-                else st.pipeline_fix_unknown(item)))
-            btn.setEnabled(on and known and badge is None and not split_asked and not banned)
+                ban or ("Queue its fix now, past its retry backoff" if known
+                        else st.pipeline_fix_unknown(item))))
+            btn.setEnabled(on and known and badge is None and not split_asked and ban is None)
             self.buttons["fix"] = btn
         row = QHBoxLayout()
         row.setSpacing(4)

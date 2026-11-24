@@ -293,6 +293,9 @@ class Store(QObject):
         # Live telemetry read from the shared ~/.diplomat files (activity feed + bans).
         self.audit_entries: list = []
         self.banned_authors: list = []
+        # banned.json is present but unreadable, as the last read found it: the Pipeline
+        # then acts on nothing, as its sync does (``PipelineTick.bannedLogins``).
+        self.ban_list_unreadable = False
         # The (login, at) of every ban the last read held; None until the first read,
         # whose bans were there before this launch and are not news.
         self._bans_known: set[tuple[str, str]] | None = None
@@ -2972,11 +2975,13 @@ class Store(QObject):
 
     def is_held(self, task: autofix.QueuedTask,
                 owned: dict[str, frozenset[str]] | None = None) -> bool:
-        """Paused, or a pipeline ask still stale (:attr:`_pipeline_stale`), unless a Slack
-        ping took it as its ask: then it is asked-for work, which switching a monitor off
-        never stops (:meth:`is_paused`)."""
-        stale = task.job.counter == PIPELINE_COUNTER and task.id in self._pipeline_stale
-        return ((self.is_paused(task.job.counter) or stale)
+        """Paused, or a pipeline ask still stale (:attr:`_pipeline_stale`) or held by an
+        unreadable ban list (:attr:`ban_list_unreadable`), unless a Slack ping took it as
+        its ask: then it is asked-for work, which switching a monitor off never stops
+        (:meth:`is_paused`)."""
+        held = task.job.counter == PIPELINE_COUNTER and (
+            self.ban_list_unreadable or task.id in self._pipeline_stale)
+        return ((self.is_paused(task.job.counter) or held)
                 and task.id not in (self._comms_owned if owned is None else owned))
 
     def _begin_starting(self, entry: autofix.QueuedTask) -> None:
@@ -4578,8 +4583,6 @@ class Store(QObject):
         token_file = os.path.expanduser(appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip())
         with self._pipeline_lock:
             force = {kind: sorted(ids) for kind, ids in self._pipeline_force.items()}
-        runs = [r for r, s in self._agent_tick().rows
-                if not r.released and s.state in agentstate.BLOCKING]
         return {
             "roots": [{"owner": r.owner, "repo": r.repo, "path": r.path,
                        "me": self.known_me(r)}
@@ -4592,8 +4595,7 @@ class Store(QObject):
             "merge": self.pipeline_merge,
             "fracture": self.pipeline_fracture,
             "force": force,
-            "queued": pipeline.queued(self.requested_work, runs,
-                                      self._load_attempts(PIPELINE_ATTEMPTS)),
+            "queued": pipeline.queued(self.requested_work, self._load_attempts(PIPELINE_ATTEMPTS)),
         }
 
     def pipeline_forced(self, kind: str) -> frozenset[str]:
@@ -4806,6 +4808,7 @@ class Store(QObject):
         (:meth:`_apply_pipeline_sync`), every one after any other. An ask that could not
         be queued is an attempt too, retried on the same ladder."""
         banned = bans.read()
+        unreadable = bans.unreadable()
         roots = len(review.repo_roots())
         starting = {e.id for e in self.starting_tasks}
         for effect in result.get("effects") or []:
@@ -4842,7 +4845,7 @@ class Store(QObject):
             attempts = self._load_attempts(PIPELINE_ATTEMPTS)
             action, value = autofix.decide(
                 attempts.get(key), stamp, in_flight,
-                bool(work.author) and bans.is_banned(work.author, banned), now)
+                unreadable or (bool(work.author) and bans.is_banned(work.author, banned)), now)
             if action != "dispatch":
                 continue
             attempt = int(value)
@@ -4979,12 +4982,16 @@ class Store(QObject):
             return str(item["hold"])
         return "Diplomat has this Linear issue's text only while Open fix PRs is on"
 
-    def pipeline_banned(self, item: dict) -> str | None:
-        """Who of the ban list wrote the text ``item`` carries (``splitFrom``, else its
-        author), whose item a sync neither rates nor splits; None for none. Twin of
-        ``Store.pipelineBanned``."""
+    def pipeline_ban(self, item: dict) -> str | None:
+        """Why a sync neither rates nor splits ``item``, nor the queue runs its fix, by
+        the ban list: it cannot be read, or names who wrote the text ``item`` carries
+        (``splitFrom``, else its author); None for neither. Twin of
+        ``Store.pipelineBan``."""
+        if self.ban_list_unreadable:
+            return "The prompt-injection ban list could not be read"
         who = str(item.get("splitFrom") or item.get("author") or "")
-        return who if who and bans.is_banned(who, self.banned_authors) else None
+        return (f"@{who} is on the prompt-injection ban list"
+                if who and bans.is_banned(who, self.banned_authors) else None)
 
     def pipeline_rooted(self, item: dict) -> bool:
         """Whether a sync can read ``item``'s code: a Linear issue only when its team
@@ -5343,13 +5350,15 @@ class Store(QObject):
 
         new_audit = activity.read()
         new_bans = bans.read()
+        unreadable = bans.unreadable()
         self._notice_new_bans(new_bans)
         bans_changed = new_bans != self.banned_authors
         if new_audit != self.audit_entries or bans_changed:
             self.audit_entries = new_audit
             self.banned_authors = new_bans
             self.activity_changed.emit()
-        if bans_changed:
+        if bans_changed or unreadable != self.ban_list_unreadable:
+            self.ban_list_unreadable = unreadable
             self.pipeline_changed.emit()
 
     def unban_async(self, login: str) -> None:

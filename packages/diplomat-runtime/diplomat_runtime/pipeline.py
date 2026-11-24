@@ -410,16 +410,11 @@ def judged(asks: list, result: dict, *, handed: list[str] | None = None) -> list
             if a.pipeline and (not short(a.repo.lower()) or identity(a.url) in read)]
 
 
-def queued(asks: list, runs, attempts: dict) -> list[str]:
+def queued(asks: list, attempts: dict) -> list[str]:
     """``PipelineSettings.queued``: the item of each of the pipeline's ``asks``, queued or
-    starting, and of each open attempt one of the live ``runs`` (``kind``, ``pr_url``,
-    ``ledger_key``) is the run of (as :func:`concluded` matches them), sorted. Twin of
-    ``Store.pipelineQueued``."""
-    out = {a.url for a in asks if a.pipeline}
-    for run in runs:
-        if not run.ledger_key:
-            out.update(k.partition(":")[2] for k in _open_keys(attempts, run.kind, run.pr_url or ""))
-    return sorted(out)
+    starting, and of each of its ``attempts`` records, which a sync that reads the item
+    lets :func:`retained` prune, sorted. Twin of ``Store.pipelineQueued``."""
+    return sorted({a.url for a in asks if a.pipeline} | {k.partition(":")[2] for k in attempts})
 
 
 def spawned(attempts: dict, kind: str, url: str, now_ts: float) -> dict:
