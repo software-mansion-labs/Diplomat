@@ -996,6 +996,11 @@ func pipelineSmoke() throws {
         ("a CMake module", [("cmake/deps.cmake", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
         ("a Bazel build", [("lib/BUILD.bazel", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
         ("pre-commit hooks", [(".pre-commit-config.yaml", 1, 1, "MODIFIED"), test], nil, rating(.high, .low)),
+        ("tests by name", [("src/a.swift", 1, 0, "MODIFIED"), ("src/a.spec.ts", 30, 0, "MODIFIED"),
+                           ("src/a.test.ts", 30, 0, "MODIFIED"), ("src/a_spec.rb", 30, 0, "MODIFIED"),
+                           ("src/a_test.go", 30, 0, "MODIFIED")], nil, low),
+        ("tests by directory", [("src/a.swift", 1, 0, "MODIFIED"), ("test/a.swift", 30, 0, "MODIFIED"),
+                                ("__tests__/a.js", 30, 0, "MODIFIED"), ("testdata/a.json", 30, 0, "MODIFIED")], nil, low),
         // Test names match in their own case only, and test directories as directories.
         ("a source file named like a test in another case", [("src/Test_util.py", 31, 0, "MODIFIED"), test], nil,
          rating(.low, .medium)),
