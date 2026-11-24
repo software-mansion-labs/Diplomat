@@ -172,6 +172,17 @@ def test_a_sign_in_the_core_refuses_says_why(linear, monkeypatch):
     assert _Linear.seen == []
 
 
+def test_the_browser_is_the_first_of_browser_s_commands_that_starts(linear, tmp_path, monkeypatch):
+    assets = os.environ["DIPLOMAT_CORE"]
+    model = json.loads(open(f"{assets}/pipeline.json").read())
+    model["linearOAuth"]["signInSecs"] = 5
+    with open(f"{assets}/pipeline.json", "w") as fh:
+        json.dump(model, fh)
+    _browser(tmp_path, monkeypatch, '[ "$1" = --new-window ] || exit 1; curl -sL -o /dev/null "$2" &')
+    monkeypatch.setenv("BROWSER", f"no-such-browser:{tmp_path / 'browser'} --new-window '%s'")
+    assert pipeline.linear_login() == (ME, "")
+
+
 def test_the_settings_row_signs_in_and_out_through_the_core(linear, make_view, monkeypatch):
     view, synced = _pipeline_view(make_view, monkeypatch, pipeline_enabled=True)
     row, button = view._pipeline_login_row, view._linear_button
