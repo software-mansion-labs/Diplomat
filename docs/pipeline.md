@@ -27,7 +27,9 @@ once per head, a new head's no sooner than an hour after the last one was queued
 retried on the monitors' backoff when a run dies, and taken off the queue when a later
 sync no longer owes it - one you started with Start fix only once a sync that read its repo in full
 finds its issue held or no candidate; any other by a sync that could not read its repo in full only
-if it read that item, never by one that only read and showed the repo. An item whose author is on the
+if it read that item, never by one that only read and showed the repo. One a sweep, Slack or the
+new-community-issue monitor asks for too is theirs, which nothing of the pipeline's holds or withdraws.
+An item whose author is on the
 prompt-injection ban list, as read right before each step, and every issue Diplomat split from one, is
 not rated, labelled, split or fixed, nor a PR closing it reviewed or merged; a Linear issue's author is
 its creator's display name. Nor is a part whose parent's author is unknown, nor, with a notice, any
