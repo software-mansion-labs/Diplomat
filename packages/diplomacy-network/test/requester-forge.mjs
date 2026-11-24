@@ -149,7 +149,7 @@ forge.node('PRR_mine', { __typename: 'PullRequestReview', state: 'PENDING', auth
 forge.node('PRRC_1', { __typename: 'PullRequestReviewComment', state: 'SUBMITTED', author: { login: 'them' }, pullRequest: pr579 });
 forge.data.comments[13] = 'PRRC_1';
 
-const ctxFor = (state = {}) => client.context({ ...GITHUB, repo: 'o/r', checkout, state });
+const ctxFor = (state = {}, claim = state) => client.context({ ...GITHUB, repo: 'o/r', checkout, state, claim });
 const seen = (from = 0) => forge.log.slice(from);
 async function perform(ruleList, request, ctx = ctxFor(), target = GITHUB) {
   const verdict = await authorize(ruleList, request, ctx);
@@ -232,7 +232,7 @@ await check('text policy-bot would count as an approval is refused, by the polic
     assert.match(verdict.reason, said);
   }
   for (const text of ['looks fine', 'shipits', 'lgtm', 'ſhip it, then']) assert.equal((await review(text, state)).ok, true, text);
-  // The task read the policy once; another task reads it again.
+  // The claim read the policy once; another reads it again.
   const reads = (from) => seen(from).filter((r) => r.path.includes('/contents/')).map((r) => r.path);
   assert.deepEqual(reads(before), ['/repos/o/r/contents/.policy.yml?ref=release', '/repos/o/.github/contents/policy.yml']);
   const again = forge.log.length;
@@ -268,7 +268,7 @@ await check('text policy-bot would count as an approval is refused, by the polic
   git(there, 'push', '--quiet', 'origin', 'HEAD:main');
   assert.match((await far('so :shipit:')).reason, /holds ":shipit:", which the pool repository's policy-bot policy \(o\/policies\/shared\/p\.yml\) counts/);
   assert.equal((await far('fine')).ok, true);
-  // One task's pull requests into two bases are each checked against their own base's policy.
+  // One claim's pull requests into two bases are each checked against their own base's policy.
   const both = {};
   assert.equal((await far('LGTM', both)).ok, true);
   assert.match((await review('LGTM', both)).reason, said);
@@ -294,13 +294,13 @@ await check('text policy-bot would count as an approval is refused, by the polic
   const large = await authorize(rules('review', 'pr-585'), gh('POST', '/repos/o/r/pulls/585/reviews', { event: 'COMMENT', body: 'fine' }), ctxFor());
   assert.match(large.reason, /so no text is sent on its pull requests: o\/r\/\.policy\.yml cannot be read here: it is 300000 bytes long, more than the 262144 this reads$/);
 
-  // A task keeps what it read for a base, refs/heads/<branch> being the branch, and for the
+  // A claim keeps what it read for a base, refs/heads/<branch> being the branch, and for the
   // text of its files: it reads at most 8 different policies, and another base whose files
   // hold one of them, as a commit of its branch does, is answered with it.
   const task = {};
-  const into = (number, base, body, state = task) => {
+  const into = (number, base, body, state = task, claim = state) => {
     forge.pull('o/r', { number, author: 'them', head: 'theirs', base });
-    return authorize(rules('review', `pr-${number}`), gh('POST', `/repos/o/r/pulls/${number}/reviews`, { event: 'COMMENT', body }), ctxFor(state));
+    return authorize(rules('review', `pr-${number}`), gh('POST', `/repos/o/r/pulls/${number}/reviews`, { event: 'COMMENT', body }), ctxFor(state, claim));
   };
   assert.match((await into(590, 'release', 'LGTM')).reason, said);
   const spelled = forge.log.length;
@@ -312,8 +312,12 @@ await check('text policy-bot would count as an approval is refused, by the polic
     git(work, 'push', '--quiet', bare, `${X}:refs/heads/cap${k}`);
     const answer = await into(592 + k, `cap${k}`, `say word ${k}`);
     if (k < 7) assert.match(answer.reason, new RegExp(`holds "word ${k}", which the pool repository's policy-bot policy`), k);
-    else assert.match(answer.reason, /so no text is sent on its pull requests: this task has had 8 different policies read already, the most one task may$/);
+    else assert.match(answer.reason, /so no text is sent on its pull requests: this claim of the task has had 8 different policies read already, the most one claim may$/);
   }
+  // A later claim of the task, which carries on with what the task has used, reads them anew.
+  const later = {};
+  assert.match((await into(603, 'cap7', 'say word 7', task, later)).reason, /holds "word 7", which the pool repository's policy-bot policy/);
+  assert.equal((await into(604, 'release', 'fine', task, later)).ok, true);
   const bySha = forge.log.length;
   assert.match((await into(600, C, 'LGTM')).reason, said);
   assert.deepEqual(reads(bySha), [`/repos/o/r/contents/.policy.yml?ref=${C}`, '/repos/o/.github/contents/policy.yml']);
@@ -346,7 +350,7 @@ await check('text policy-bot would count as an approval is refused, by the polic
   // The rest of the file's world is as it was.
   git(work, 'checkout', '--quiet', 'main');
   git(work, 'push', '--quiet', bare, ':refs/heads/release', ':refs/heads/far', ':refs/heads/odd', ':refs/heads/near', ...Array.from({ length: 8 }, (_, k) => `:refs/heads/cap${k}`));
-  for (const n of [583, 584, 585, 586, ...Array.from({ length: 13 }, (_, k) => 590 + k), ...Array.from({ length: 65 }, (_, k) => 700 + k)]) {
+  for (const n of [583, 584, 585, 586, ...Array.from({ length: 15 }, (_, k) => 590 + k), ...Array.from({ length: 65 }, (_, k) => 700 + k)]) {
     delete forge.data.repos['o/r'].pulls[n];
     delete forge.data.nodes[`PR_${n}`];
   }

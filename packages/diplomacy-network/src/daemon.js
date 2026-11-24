@@ -215,8 +215,8 @@ async function ruleTarget(link) {
 
 const requester = {
   rulesFor: async ({ pool: link, ...task }) => rulesFor({ ...task, pool: await ruleTarget(link) }),
-  context: ({ pool: link, state }) => forge.context({
-    forge: link.forge, host: hostOf(link.id), repo: repoOf(link.id), checkout: link.path, state,
+  context: ({ pool: link, ...rest }) => forge.context({
+    ...rest, forge: link.forge, host: hostOf(link.id), repo: repoOf(link.id), checkout: link.path,
   }),
   authorize,
   conclude,

@@ -43,7 +43,9 @@ export async function textFault(ctx, base, text, kind) {
 
 function policyFault(text, kind, policy) {
   const union = unionOf(policy, kind);
-  const found = search(union, codePoints(text), BUDGET);
+  // Each character costs one: more than the budget leaves past setup are refused unread.
+  const cps = codePoints(text, BUDGET - union.size);
+  const found = cps && search(union, cps, BUDGET);
   if (found === null) return `is too long for this to check in time against the patterns of the pool repository's policy-bot policy (${policy.from.join(', ')}): shorten it and send the request again`;
   return found < 0 ? null : `${union.said[found]}, which the pool repository's policy-bot policy (${policy.from.join(', ')}) counts as an approval or a disapproval from whoever wrote it: reword it and send the request again`;
 }
@@ -466,9 +468,10 @@ function parseYaml(source) {
 // with the text's length times the pattern's size and no more. A class is a list of tables
 // of code points (unicode.js), each searched by halves.
 
-// The most work one text may cost against a policy, counted as `search` does it: about
-// 25 ms on an M4 Pro, and on a laptop i5 under load, the slowest measured, 100 ms (200 ms
-// before the engine is warm). And the most steps one pattern may compile to.
+// The most work one text may cost against a policy, counted as `search` does it: a check that
+// spends it, its program's setup included, takes at most about 40 ms on an M4 Pro, and 200 ms
+// on a laptop i5 at a load of 25 to 35, the slowest measured. And the most steps one pattern
+// may compile to.
 const BUDGET = 3_000_000;
 const MAX_PROGRAM = 100_000;
 
@@ -786,20 +789,37 @@ function goPattern(source) {
     } else if (node.t === 'rep') {
       const [sub] = node.subs;
       const { min, max } = node;
-      for (let k = 0; k < (max < 0 && min > 0 ? min - 1 : min); k++) emit(sub);
+      // `sub` is compiled once and copied: a repetition costs its steps, though what it
+      // repeats may compile to none.
+      let first = -1;
+      let length = 0;
+      const copy = () => {
+        if (first < 0) {
+          first = at;
+          emit(sub);
+          length = at - first;
+          return;
+        }
+        const by = at - first;
+        for (let pc = first; pc < first + length; pc++) {
+          const o = op[pc];
+          push(o, o === SPLIT || o === JMP ? arg[pc] + by : arg[pc], o === SPLIT ? arg2[pc] + by : 0);
+        }
+      };
+      for (let k = 0; k < (max < 0 && min > 0 ? min - 1 : min); k++) copy();
       if (max < 0 && min > 0) {
         const start = at;
-        emit(sub);
+        copy();
         push(SPLIT, start, at + 1);
       } else if (max < 0) {
         const split = push(SPLIT, at + 1);
-        emit(sub);
+        copy();
         push(JMP, split);
         arg2[split] = at;
       } else {
         for (let k = min; k < max; k++) {
           const split = push(SPLIT, at + 1);
-          emit(sub);
+          copy();
           arg2[split] = at;
         }
       }
@@ -812,12 +832,15 @@ function goPattern(source) {
   return { size: steps, op, arg, arg2, sets, cost: steps + held };
 }
 
-// `text` as its code points, a lone surrogate read as U+FFFD, as Go decodes one from JSON.
-function codePoints(text) {
-  const cps = new Int32Array(text.length);
+// `text` as its code points, a lone surrogate read as U+FFFD, as Go decodes one from JSON;
+// null when it has more than `most`.
+function codePoints(text, most = text.length) {
+  const cps = new Int32Array(Math.min(text.length, most));
   let n = 0;
-  for (const ch of text) {
-    const c = ch.codePointAt(0);
+  for (let k = 0; k < text.length; k++) {
+    if (n === most) return null;
+    const c = text.codePointAt(k);
+    if (c > 0xffff) k++;
     cps[n++] = c >= 0xd800 && c <= 0xdfff ? 0xfffd : c;
   }
   return cps.subarray(0, n);
@@ -867,13 +890,20 @@ function unionOf(policy, kind) {
   // nor is negated, and it starts everywhere.
   const mark = new Int32Array(size);
   const stack = new Int32Array(size);
+  const seen = new Int32Array(128);
+  const chars = new Int32Array(128);
   starts.forEach((start, k) => {
-    const chars = new Set();
-    let [everywhere, wide, text, line, sp] = [false, false, false, false, 0];
+    let [everywhere, wide, text, line, sp, n] = [false, false, false, false, 0, 0];
     const visit = (pc) => {
       if (mark[pc] !== k + 1) {
         mark[pc] = k + 1;
         stack[sp++] = pc;
+      }
+    };
+    const add = (c) => {
+      if (seen[c] !== k + 1) {
+        seen[c] = k + 1;
+        chars[n++] = c;
       }
     };
     visit(start);
@@ -887,15 +917,15 @@ function unionOf(policy, kind) {
       } else if (o === ASSERT && arg[pc] === TEXT_START) text = true;
       else if (o === ASSERT && arg[pc] === LINE_START) line = true;
       else if (o === ASSERT) visit(pc + 1);
-      else if (o === CHAR && arg[pc] < 128) chars.add(arg[pc]);
+      else if (o === CHAR && arg[pc] < 128) add(arg[pc]);
       else if (o === CHAR) wide = true;
       else if (o !== SET) everywhere = true;
       else {
-        const { parts: [part, ...rest], negate } = sets[arg[pc]];
-        if (rest.length > 0 || negate || part.fold || part.out) everywhere = true;
-        const { table } = part;
+        const { parts, negate } = sets[arg[pc]];
+        const [{ table, fold, out }] = parts;
+        if (parts.length > 1 || negate || fold || out) everywhere = true;
         for (let r = 0; r < table.length && table[r] < 128; r += 2) {
-          for (let c = table[r]; c <= Math.min(table[r + 1], 127); c++) chars.add(c);
+          for (let c = table[r]; c <= Math.min(table[r + 1], 127); c++) add(c);
         }
         if (table.length > 0 && table[table.length - 1] >= 128) wide = true;
       }
@@ -904,7 +934,7 @@ function unionOf(policy, kind) {
     if (line) union.lines.push(start);
     if (everywhere) union.any.push(start);
     else {
-      for (const c of chars) union.ascii[c].push(start);
+      for (let j = 0; j < n; j++) union.ascii[chars[j]].push(start);
       if (wide) union.other.push(start);
     }
   });
@@ -913,8 +943,8 @@ function unionOf(policy, kind) {
 
 // Which entry of `union` (`unionOf`) matches anywhere in the text of `cps` (`codePoints`),
 // as Go's MatchString answers for each, or -1 for none; null when that takes more than
-// `budget` work: one for each step of the program to set up, for each step a thread takes
-// and for each halving of a table a class's test makes.
+// `budget` work: one for each step of the program to set up, for each character of the
+// text, for each step a thread takes and for each halving of a table a class's test makes.
 function search(union, cps, budget) {
   const { size, op, arg, arg2, sets, any, ascii, other, texts, lines } = union;
   const n = cps.length;
@@ -980,13 +1010,15 @@ function search(union, cps, budget) {
   };
   // Adds to `list` the threads of every entry whose match can start between `prev` and
   // `next`.
-  const enter = (list, len, prev, next) => {
-    const all = [any, prev === -1 ? texts : [], prev === -1 || prev === 10 ? lines : []];
-    if (next >= 0) all.push(next < 128 ? ascii[next] : other);
-    for (const starts of all) {
-      for (let k = 0; k < starts.length && len >= 0; k++) len = follow(list, len, starts[k], prev, next);
-    }
+  const from = (starts, list, len, prev, next) => {
+    for (let k = 0; k < starts.length && len >= 0; k++) len = follow(list, len, starts[k], prev, next);
     return len;
+  };
+  const enter = (list, len, prev, next) => {
+    len = from(any, list, len, prev, next);
+    if (prev === -1) len = from(texts, list, len, prev, next);
+    if (prev === -1 || prev === 10) len = from(lines, list, len, prev, next);
+    return next < 0 ? len : from(next < 128 ? ascii[next] : other, list, len, prev, next);
   };
   let now = new Int32Array(size);
   let then = new Int32Array(size);
@@ -996,6 +1028,7 @@ function search(union, cps, budget) {
     const next = i + 1 < n ? cps[i + 1] : -1;
     gen++;
     folds = null;
+    left--;
     let added = 0;
     for (let k = 0; k < count && added >= 0 && left >= 0; k++) {
       const pc = now[k];

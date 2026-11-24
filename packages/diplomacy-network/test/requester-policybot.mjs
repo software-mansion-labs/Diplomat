@@ -41,6 +41,8 @@ await check('a pattern matches what Go\'s regexp matches', async () => {
     ['^x{1$', [['x', false], ['x{1', true]]],
     ['^a+b', [['b', false], ['ab', true]]],
     ['^a?b$', [['aab', false], ['ab', true], ['b', true]]],
+    ['^(?:a|b){2}$', [['aa', true], ['ab', true], ['ba', true], ['bb', true], ['a', false], ['aab', false]]],
+    ['^(?:ab?|c){2,3}$', [['abc', true], ['cab', true], ['abcab', true], ['c', false], ['abbc', false], ['acac', false]]],
     ['(?i)[^\\P{Lu}]', [['A', true], ['a', true], ['1', false], ['\u01c5', true]]],
     ['[^\\P{Lu}]', [['A', true], ['a', false]]],
     ['(?i)\\P{Lu}', [['A', false], ['a', false], ['1', true]]],
@@ -162,8 +164,8 @@ await check('a check counts the work it does, and text that takes more than its 
   const fault = (yaml, text) => onTime(() => textFault(asked(policyOf(yaml)), 'main', text, 'comment'));
   const tooLong = /^is too long for this to check in time against the patterns of the pool repository's policy-bot policy \(o\/r\/\.policy\.yml\): shorten it and send the request again$/;
   const [dotStar, words] = ['(?i).*lgtm', '(?i)(\\w+\\s?)+:\\s*approved'];
-  // On 2^17 a's the first takes 1,048,587 of the budget's 3,000,000 steps and the second
-  // 2,097,165: each is checked alone, and not both, the work of every pattern counting
+  // On 2^17 a's the first takes 1,179,659 of the budget's 3,000,000 steps and the second
+  // 2,228,237: each is checked alone, and not both, the work of every pattern counting
   // against the one budget; a pattern named twice is matched once.
   const as = 'a'.repeat(2 ** 17);
   assert.equal(await fault(commentPatterns(dotStar), as), null);
@@ -182,12 +184,24 @@ await check('a check counts the work it does, and text that takes more than its 
   // So is each search for what a character folds to: "k" folds to two others, each looked
   // for in each of a thousand parts, 18,000 steps a character of which its own take 6,000.
   assert.match(await fault(commentPatterns(`(?i)[${'\\p{Greek}'.repeat(1000)}]`), 'k'.repeat(300)), tooLong);
+  // Each character costs one more, where no entry starts too: 4 million characters that start
+  // none are refused, under the README's own patterns or under none at all.
+  const plain = 'xyz '.repeat(10 ** 6);
+  for (const yaml of [commentPatterns('^Signed-off by \\s+$', '(?i)^/approve\\b'), 'approval_rules: []\n']) {
+    assert.match(await fault(yaml, plain), tooLong);
+    assert.equal(await fault(yaml, plain.slice(0, 65536)), null);
+  }
+  // A text of more characters than the budget leaves past its program's setup is refused
+  // unread, whatever it holds: "LGTM" is a program of 5 steps.
+  const lgtm = (n) => `LGTM${'x'.repeat(n - 4)}`;
+  assert.match(await fault('comments: [LGTM]\n', lgtm(2999995)), /^holds "LGTM"/);
+  assert.match(await fault('comments: [LGTM]\n', lgtm(2999996)), tooLong);
   // The longest text GitHub takes is checked, with a match only where Go finds one.
   const longest = 'word '.repeat(13107);
   assert.equal(await fault(commentPatterns(dotStar, words), longest), null);
   assert.match(await fault(commentPatterns(dotStar, words), `${longest.slice(10)}x: approved`), /^matches the pattern "\(\?i\)\(\\\\w\+\\\\s\?\)\+:\\\\s\*approved"/);
-  // So is a review that long under a policy of 100 rules, each with the methods of
-  // policy-bot's README for its own team: an entry starts only where its match can.
+  // So is a review that long, a third of it code, under a policy of 100 rules, each with the
+  // methods of policy-bot's README for its own team: an entry starts only where its match can.
   const rules = Array.from({ length: 100 }, (_, k) => [
     `- name: team-${k}`,
     '  options:',
@@ -200,18 +214,27 @@ await check('a check counts the work it does, and text that takes more than its 
   const review = prose.repeat(Math.ceil(65536 / prose.length)).slice(0, 65536);
   assert.equal(await fault(`approval_rules:\n${rules.join('\n')}\n`, review), null);
   assert.match(await fault(`approval_rules:\n${rules.join('\n')}\n`, `${review.slice(0, -40)}\nteam-57 LGTM`), /^matches the pattern "\\\\b\(\?i\)team-57\\\\s\*lgtm\\\\b"/);
+  // Plain prose starts 100 of them at each "t", and is refused past 58,720 characters.
+  const [plainProse] = prose.split('```');
+  const plainReview = (n) => plainProse.repeat(Math.ceil(n / plainProse.length)).slice(0, n);
+  assert.equal(await fault(`approval_rules:\n${rules.join('\n')}\n`, plainReview(58720)), null);
+  assert.match(await fault(`approval_rules:\n${rules.join('\n')}\n`, plainReview(58721)), tooLong);
   // The text of `comments` counts too: 2,000 strings that start with "a", each started at
   // every "a" of the text.
   const strings = `comments: [${Array.from({ length: 2000 }, (_, k) => `a${k}`).join(', ')}]\n`;
   assert.match(await fault(strings, 'a'.repeat(1500)), tooLong);
   assert.equal(await fault(strings, 'b'.repeat(100000)), null);
+  // And 2,000 patterns of a line's start are started at a line's start alone.
+  const lines = commentPatterns(...Array.from({ length: 2000 }, (_, k) => `(?m)^a${k}`));
+  assert.equal(await fault(lines, `${'b'.repeat(999)}\n`.repeat(100)), null);
+  assert.match(await fault(lines, `${'b'.repeat(999)}\na0`), /^matches the pattern "\(\?m\)\^a0"/);
   // And so does setting up the policy's program, one step for each of its steps: a pattern of
-  // 73,002 steps that no "a" starts puts 370,000 of them over the budget, which the first
-  // pattern alone takes 2,960,011 of.
+  // 73,002 steps that no "a" starts puts 330,000 of them over the budget, which the first
+  // pattern alone takes 2,970,011 of.
   const alpha = Array.from({ length: 25 }, (_, k) => String.fromCharCode(97 + k)).join('|');
-  assert.equal(await fault(commentPatterns(dotStar), 'a'.repeat(370000)), null);
-  assert.match(await fault(commentPatterns(dotStar, `z(?:${alpha}){1000}`), 'a'.repeat(370000)), tooLong);
-  assert.equal(await fault(commentPatterns(dotStar, `z(?:${alpha}){1000}`), 'a'.repeat(365000)), null);
+  assert.equal(await fault(commentPatterns(dotStar), 'a'.repeat(330000)), null);
+  assert.match(await fault(commentPatterns(dotStar, `z(?:${alpha}){1000}`), 'a'.repeat(330000)), tooLong);
+  assert.equal(await fault(commentPatterns(dotStar, `z(?:${alpha}){1000}`), 'a'.repeat(325000)), null);
 });
 
 await check('a policy of at most 256 KiB is read, and its patterns compiled, in time linear in it, within bounds on what its aliases and patterns come to', async () => {
@@ -243,6 +266,13 @@ await check('a policy of at most 256 KiB is read, and its patterns compiled, in 
   assert.throws(() => readPolicy(classes(12500)), /^Error: its patterns compile to more than the 100000 steps in all this matches$/);
   // A policy of 30,000 of them is over the cap.
   assert.throws(() => readPolicy(classes(30000)), /^Error: it is 480028 bytes long/);
+  // A repetition costs the steps it compiles to, though what it repeats is mostly groups that
+  // compile to none: 64,000 empty groups repeated a thousand times, in each of the 8 policies
+  // a claim may read.
+  const empty = `body_patterns: ['${`((?:${'(?:)'.repeat(200)}){1000})`.repeat(320)}']\n`;
+  await onTime(async () => {
+    for (let k = 0; k < 8; k++) assert.equal(readPolicy(empty).bodies.length, 1);
+  });
   // A "(?i)" literal is one class for each character, however often it stands: 99,990 k's
   // compile to 99,991 steps and one class of a part and a table of 6 bounds.
   assert.equal(readPolicy(commentPatterns(`(?i)${'k'.repeat(99990)}`)).patterns.length, 1);

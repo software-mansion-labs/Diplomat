@@ -1503,19 +1503,24 @@ through.
   patterns of more than 100000 compiled steps in all (a class's parts and the tables it
   builds counted as steps), a remote file the account does not see - refuses the text and
   names the file. Reading a file and compiling its patterns take time linear in its size,
-  each distinct pattern compiled once, and its distinct strings hold no more characters
-  than it has bytes. Text is refused too, naming the files, when its check would take more
-  than 3000000 steps of work, at most about 200 ms on a loaded laptop. The strings and
-  patterns of both files are matched as one program in one pass over the text, each
-  started only where its match can start, a string or pattern named twice matched once;
-  the work is one for each step of that program to set up, for each step a thread of the
-  match takes and for each halving of a class's table it searches. A task keeps the answer
-  for each base branch it asks about (`refs/heads/<branch>` being the branch), for at most
-  64 of them, and for each distinct text of the files: it reads at most 8, and a base
-  whose files hold another refuses the text, saying so. What a policy-bot server is set to
-  itself (its own default words, another policy path) is not read, nor is a `.github`
-  repository the account does not see (the forge answers it as missing), nor any other bot
-  that counts a comment's text.
+  each distinct pattern compiled once and what a repetition repeats once, and its distinct
+  strings hold no more characters than it has bytes. Text is refused too, naming the
+  files, when its check would take more than 3000000 steps of work, at most about 200 ms
+  on a loaded laptop. The strings and patterns of both files are matched as one program in
+  one pass over the text, each started only where its match can start, a string or
+  pattern named twice matched once; the work is one for each step of that program to set
+  up, for each character of the text, for each step a thread of the match takes and for
+  each halving of a class's table it searches. Text of more characters than the work left
+  once the program is set up is refused unread. Each entry started at a character takes
+  work there, so many entries that start at common characters leave room for less text:
+  under 100 rules, each with the methods of policy-bot's README for its own team, a review
+  of plain prose is refused past about 58000 characters. A claim keeps the answer for each
+  base branch it asks about (`refs/heads/<branch>` being the branch), for at most 64 of
+  them, and for each distinct text of the files: it reads at most 8, and a base whose
+  files hold another refuses the text, saying so. A later claim of the task reads the
+  files anew. What a policy-bot server is set to itself (its own default words, another
+  policy path) is not read, nor is a `.github` repository the account does not see (the
+  forge answers it as missing), nor any other bot that counts a comment's text.
 - `{ "graphql": { "forge": "github", "repo": "o/r", "roots": [...], "mutations": [...],
   "item": { "type": "pr", "number": 578 }, "identity": "me" } }` on the GraphQL endpoint
   confines the document, which must be exactly one query or mutation. A query may select

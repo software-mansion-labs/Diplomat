@@ -30,7 +30,7 @@ export function fakeRequester({ kinds = ['review', 'fix'] } = {}) {
       if (!kinds.includes(kind)) return null;
       return [{ host: 'api.github.com', method: 'GET', path: `/repos/o/r/${item}/**`, as: identity, forge }];
     },
-    context: ({ pool, task, state }) => ({ pool, task, state }),
+    context: ({ pool, task, state, claim }) => ({ pool, task, state, claim }),
     authorize(rules, request, context) {
       context.state.asked = (context.state.asked ?? 0) + 1;
       const refusal = refusals.find((r) => request.path.includes(r.part));

@@ -342,8 +342,9 @@ export function createOffers(host) {
         // The number is used, on disk, before anything is done under it.
         host.store.flush();
         // What the task has used of its allowances is the offer's: a key issued for a
-        // later attempt goes on from where the last one stopped.
-        const context = await host.requester.context({ pool: P.link, task: specOf(O), state: (O.used ??= {}) });
+        // later attempt goes on from where the last one stopped. The policies it read are
+        // the claim's, and the key stands for it.
+        const context = await host.requester.context({ pool: P.link, task: specOf(O), state: (O.used ??= {}), claim: K });
         const verdict = await host.requester.authorize(rules, body.request, context);
         save();
         const request = verdict?.ok === true ? verdict.request ?? body.request : null;

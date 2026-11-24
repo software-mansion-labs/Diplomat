@@ -369,11 +369,13 @@ machine cannot read or parse, one over 256 KiB, or one past the bounds on what i
 patterns come to (PROTOCOL.md) refuses text on that repository's PRs, and the refusal names the
 file; so does text whose match against the policy's strings and patterns, all matched together
 in one pass, takes more work than about 200 ms of it on a slow machine, which the machine counts
-as it matches, as Go does, in time linear in the text. One task reads at most 8 different
-policies. policy-bot is the one such bot the machine reads: what a policy-bot server is set to
-itself (its own default words, another policy path), an owner's `.github` repository the
-machine's account cannot see, and any other bot that takes a comment's text for an approval go
-unseen.
+as it matches, as Go does, in time linear in the text: a text of more than 3 million characters
+is past it under any policy, and under 100 rules that each name their own team's words, so is a
+review of about 58,000 characters of prose. One claim of a task reads at most 8 different
+policies, and a later claim reads them anew. policy-bot is the one such bot the machine reads:
+what a policy-bot server is set to itself (its own default words, another policy path), an
+owner's `.github` repository the machine's account cannot see, and any other bot that takes a
+comment's text for an approval go unseen.
 
 Before it allows a push or a write, the machine asks the forge what the rule depends on: where
 the branch is, which branch is the default, which protection rules there are, who opened the
