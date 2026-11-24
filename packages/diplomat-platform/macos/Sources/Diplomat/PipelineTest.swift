@@ -1228,12 +1228,19 @@ enum PipelineTest {
         // An unreadable list, as the core's sync reads it: everything holds.
         let queuedFix = store.queuedTasks.first { $0.id == "issues:o/r#90030" }
         let ranBefore = queuedFix.map { store.isHeld($0) } == false
+        let sweepTask = Store.QueuedAgentTask(
+            id: "review:o/r#90021",
+            job: Store.AgentJob(kind: AgentTaskQueue.reviewAction, auditAction: AgentTaskQueue.reviewAction,
+                                label: "", prompt: "", prURL: "https://github.com/o/r/pull/90021",
+                                prNumber: 90021, authorLogin: nil, counter: nil),
+            attemptNumber: 1)
         try? Data("{".utf8).write(to: banDir.appendingPathComponent("banned.json"))
         store.refreshBanList()
         check("an unreadable ban list holds each pipeline ask queued, and every item's Rate now, Fracture and Start fix",
               ranBefore && queuedFix.map { store.isHeld($0) } == true
                   && store.pipelineBanUnread == "The prompt-injection ban list could not be read"
                   && store.pipelineBan(item(issue, .issue, author: "carol")) == "The prompt-injection ban list could not be read")
+        check("…but no other work", !store.isHeld(sweepTask))
         clearQueue()
         store.savePipelineAttempts([:])
         await store.applyPipeline(result([fix]), now: now)

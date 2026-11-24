@@ -369,12 +369,16 @@ def test_an_unreadable_ban_list_asks_for_nothing(pipe):
 
 def test_an_unreadable_ban_list_holds_each_pipeline_ask_and_every_item(pipe):
     unread = "The prompt-injection ban list could not be read"
+    asked = autofix.QueuedTask("review:o/r#8", autofix.AgentJob(
+        kind="review", audit_action="review", label="", prompt="",
+        pr_url="https://github.com/o/r/pull/8", pr_number=8), 1)
     _sync(pipe, _result(_fix()))
     assert [t.id for t in pipe.drainable_tasks] == ["issues:o/r#12"]
     _unreadable_bans()
     pipe.refresh_activity()
     assert pipe.drainable_tasks == []
     assert (pipe.pipeline_ban_unread(), pipe.pipeline_ban(_item())) == (unread, unread)
+    assert not pipe.is_held(asked)
     bans.banned_path().unlink()
     pipe.refresh_activity()
     assert [t.id for t in pipe.drainable_tasks] == ["issues:o/r#12"]
