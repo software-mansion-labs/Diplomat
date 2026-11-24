@@ -1442,10 +1442,12 @@ enum PipelineTest {
     /// its `queuedErrors` is, a `Queued` read fails. The
     /// state's `later` holds low/low #7 and op's draft PR #3 fixing it, likewise clean, and
     /// its `more` low/low #8 and #9, its `extra` low/low #10 and #11, its `review` low/low #13
-    /// and op's PR #12 fixing it, fast-tracked with no clean marker. While its `holdReads` is
+    /// and op's PR #12 fixing it, fast-tracked with no clean marker, its `twins` low/low #30
+    /// labelled `wip`, low/low #31 and high/high #32. While its `holdReads` is
     /// above 0, a `Repo` read writes its ordinal to `<dir>/held` and waits for `<dir>/go` to
     /// say the same. `acme/web`, checked out at `<dir>/checkout-web`, is empty.
-    /// `<dir>/linear-state.json`'s `later` adds Linear's low/low ENG-2, its `extra` ENG-3; its
+    /// `<dir>/linear-state.json`'s `later` adds Linear's low/low ENG-2, its `extra` ENG-3, its
+    /// `twins` ENG-4, triaged and attached to #31, and ENG-5, attached to #32; its
     /// `done` names the issues Linear no longer lists, its `text` an issue's edited text.
     @MainActor
     private static func live(_ store: Store, harness: URL, check: (String, Bool) -> Void) async {
@@ -1456,7 +1458,7 @@ enum PipelineTest {
         }
         func ghWrites() -> [String] {
             log("gh.log").compactMap { $0 as? [String] }
-                .filter { !$0.starts(with: ["api", "graphql"]) && !$0.starts(with: ["pr", "diff"]) }
+                .filter { $0.first != "api" || $0.contains("-X") }
                 .map { $0.joined(separator: " ") }
         }
         func linearWrites() -> [String] {
@@ -2037,6 +2039,50 @@ enum PipelineTest {
         print("  told: \(told.map(\.queued))")
         check("each of the 34 syncs is told exactly the items asks and attempt records are held for",
               told.count == 34 && told.allSatisfy { $0.queued == $0.held })
+
+        store.pipelineLinearTeamsRaw = "ENG=acme/app"
+        patch { github in
+            let twins = github["twins"] as? [String: Any] ?? [:]
+            github["issues"] = (github["issues"] as? [Any] ?? []) + (twins["issues"] as? [Any] ?? [])
+        }
+        try? Data(#"{"later": true, "done": ["ENG-2"], "extra": true, "text": {"ENG-3": "\#(edited)"}, "twins": true}"#.utf8)
+            .write(to: linearState)
+        await sync()
+        /// `it`'s detail as the screen builds it: whether Rate now and Fracture are offered,
+        /// enabled, and their tooltips.
+        func actions(_ it: PipelineItem?) -> [String] {
+            guard let it, let result = store.pipelineResult else { return ["(not read)"] }
+            let d = PipelineDetail(item: it, events: [], badge: store.pipelineBadges[Store.pipelineIdentity(it.id)],
+                                   enabled: store.pipelineEnabled, forcedRate: store.pipelineForce.rate.contains(it.id),
+                                   forcedFracture: store.pipelineForce.fracture.contains(it.id), ban: store.pipelineBan(it),
+                                   banUnread: store.pipelineBanUnread, canRate: store.pipelineCanRate(it),
+                                   canFracture: PipelineView.canFracture(it, edges: result.graph.edges,
+                                                                         rooted: store.pipelineRooted(it)),
+                                   canStartFix: store.pipelineFixEffect(for: it) != nil,
+                                   fixUnknown: store.pipelineFixUnknown(it), error: nil,
+                                   rate: {}, fracture: {}, startFix: {}, close: {})
+            return [d.canRate ? "Rate now \(d.rateEnabled ? "on" : "off"): \(d.rateTip)" : "no Rate now",
+                    d.canFracture ? "Fracture \(d.fractureEnabled ? "on" : "off"): \(d.fractureTip)" : "no Fracture"]
+        }
+        func linear(_ key: String) -> PipelineItem? {
+            store.pipelineResult?.items.first { $0.id == "https://linear.app/acme/issue/\(key)" }
+        }
+        let rateOn = "Rate now on: Rate it in a sync started now, ahead of every limit"
+        let splitOn = "Fracture on: Split it into low-complexity child issues in a sync started now"
+        let twin4 = "it is tracked on Linear as ENG-4: triaged as Triage"
+        let twinned = [item(30), item(31), linear("ENG-4"), linear("ENG-5"), item(32)]
+        let shownNow = twinned.map(actions)
+        print("  sync 32 #30, #31, ENG-4, ENG-5, #32: \(shownNow), holds \(twinned.map { $0?.hold ?? "-" })")
+        check("sync 32, #30 labelled wip: Rate now and Fracture are off, saying the core's refusal",
+              shownNow[0] == ["Rate now off: it carries the label wip", "Fracture off: it carries the label wip"])
+        check("…#31, its Linear twin ENG-4 triaged: held for it, Fracture off saying so, Rate now on",
+              item(31)?.hold == twin4 && shownNow[1] == [rateOn, "Fracture off: \(twin4)"])
+        check("…ENG-4 itself: Fracture off, triaged, Rate now on",
+              shownNow[2] == [rateOn, "Fracture off: triaged as Triage"])
+        check("…ENG-5, tracked on GitHub as #32: Fracture off saying so, Rate now on",
+              shownNow[3] == [rateOn, "Fracture off: it is tracked on GitHub as acme/app#32"])
+        check("…and #32, its twin holding nothing, high/high: both on",
+              item(32)?.hold == nil && shownNow[4] == [rateOn, splitOn])
         let remaining = ids()
 
         store.pipelineEnabled = false
