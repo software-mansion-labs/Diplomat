@@ -132,8 +132,8 @@ class ReviewConfig(PRSweepConfig):
     # Submit an automatic verdict at the selected review depth.
     automatic_verdict: bool = False
 
-    # One own PR on the Pipeline's fast track: reviewed until clean, then given the
-    # clean-marker review the Pipeline merges on, never marked ready.
+    # A Pipeline fast-track PR: reviewed until clean, then given the clean marker the
+    # Pipeline merges on, never marked ready.
     fast_track: bool = False
 
     def __post_init__(self) -> None:
@@ -505,8 +505,7 @@ def stage_opencode_session(prompt_file: str, checkout: str | None = None) -> str
     return session_id
 
 
-#: The secrets an agent never holds: the Slack token and the Pipeline's Linear key, whose
-#: environment overrides the applet may have inherited.
+#: Secrets the applet's environment may carry that an agent must never hold.
 SECRET_ENVS = (comms.TOKEN_ENV, pipeline.TOKEN_ENV)
 
 
@@ -608,10 +607,9 @@ def shell_command(prompt_file: str, done_path: str | None = None,
     exiting, so between them one covers the run that ends and the other the run that
     goes back to its prompt.
 
-    The Slack token and the Linear key (:data:`SECRET_ENVS`) are unset right after the
-    ``cd``, and again inside the inner shell, whose rc may export them: an agent reading
-    untrusted Slack or Linear text must never hold either, whatever environment its
-    terminal or tmux server has.
+    The :data:`SECRET_ENVS` are unset right after the ``cd``, and again inside the inner
+    shell, whose rc may export them: an agent reading untrusted Slack or Linear text must
+    never hold them, whatever environment its terminal or tmux server has.
 
     When the operator configured an agent token, everything after that ``unset`` runs
     behind :func:`token_export`, whose export the agent inherits.
@@ -819,8 +817,8 @@ def spawn_env() -> dict:
     already-running server, with the server's environment. Anything the agent itself
     must see belongs in the command (:func:`runner.agent_command`), not here.
 
-    The Slack token and the Linear key are dropped too, so a tmux server this launch
-    starts never holds them.
+    The :data:`SECRET_ENVS` are dropped too, so a tmux server this launch starts never
+    holds them.
     """
     return {k: v for k, v in os.environ.items()
             if k not in ("TMUX", "TMUX_PANE", *SECRET_ENVS)}

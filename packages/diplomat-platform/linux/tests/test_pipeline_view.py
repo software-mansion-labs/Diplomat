@@ -1,8 +1,5 @@
-"""The Pipeline screen and its ⊶ header button, built offscreen.
-
-``Store.pipeline_result`` is the core's ``PipelineTickResult`` as ``pipeline.tick`` and
-``pipeline.last`` hand it over, so here it is a literal: what is pinned is how the
-screen draws one, not how a sync makes it.
+"""The Pipeline screen and its ⊶ header button, built offscreen from a literal
+``PipelineTickResult``: what is pinned is how the screen draws one, not how a sync makes it.
 """
 
 from __future__ import annotations
@@ -55,9 +52,8 @@ def _item(n: int, *, kind: str = "issue", stage: str, lane: str, writable: bool 
 
 
 def _result() -> dict:
-    """Four groups: an issue with a PR fixing it, a PR stacked on that one and fixing
-    the issue too; a fractured parent with two children; an issue someone else holds;
-    a closed issue and the merged PR that closed it."""
+    """Four groups: issue #1, fixed by PR #2 and by #3 stacked on it; #4 fractured into #5
+    and #6; someone else's #7; closed #8 and #9, the merged PR that closed it."""
     items = [
         _item(1, stage="fixing", lane="fast", rating=LOW, ratedBy="label"),
         _item(2, kind="pr", stage="fast-track", lane="fast", rating=LOW, ratedBy="label",
@@ -116,7 +112,6 @@ def store(app, monkeypatch):
 
 
 def _fixing(monkeypatch, n: int) -> None:
-    """An agent fixing issue ``n``."""
     row = autofix.RunningAgent(pr_number=0, label=f"Auto · Issues · #{n} · quick",
                                kind="issues", tracked=True, item=f"o/r#{n}")
     monkeypatch.setattr(Store, "running_tasks", property(lambda self: [row]))
@@ -171,9 +166,7 @@ def test_each_edge_is_one_connector_from_a_right_side_to_a_left_side(store):
 
 
 def test_connectors_sharing_a_side_take_their_own_places_on_it(store):
-    """#1 leaves to #2 beside it and to #3 two columns on, which runs along the gap under
-    its row: #2 takes the upper place on #1's side, #3 the lower. #3 is reached from #2
-    beside it and from that gap below: #2's comes in above."""
+    """In the order they head off or come in from."""
     view = PipelineView(store)
     drawn = {(c.source, c.target): c for c in view.canvas.connectors}
     upper, lower, middle = 12 + 88 / 3, 12 + 88 * 2 / 3, 12 + 44
@@ -186,7 +179,6 @@ def test_connectors_sharing_a_side_take_their_own_places_on_it(store):
 
 
 def _crossings(canvas) -> list[tuple[str, str, str]]:
-    """(source, target, card) for every connector passing through a card's inside."""
     hits = []
     for c in canvas.connectors:
         points = [c.path.pointAtPercent(i / 400) for i in range(401)]
@@ -204,9 +196,7 @@ def test_no_connector_crosses_a_card(store):
 
 
 def test_a_connector_into_its_own_or_an_earlier_column_goes_round_the_cards(store):
-    """A cycle is the one way the layout puts a target in its source's column or before
-    it: such a connector still leaves a right side and arrives at a left one, around
-    every card."""
+    """Only a cycle puts a target in or before its source's column."""
     x, y, z = _url(10), _url(11, "pr"), _url(12, "pr")
     store.pipeline_result = {
         "at": "2026-11-20T10:00:00Z", "effects": [], "events": [], "notices": [],
@@ -908,8 +898,7 @@ def test_off_the_asks_are_disabled_and_open_is_not(store):
 
 
 def test_the_status_line_counts_and_says_when(store):
-    """The clock today; the date with it on any other day, so an old result does not
-    read as today's."""
+    """The date too on any other day, so an old result does not read as today's."""
     view = PipelineView(store)
     at = comms.parse_iso("2026-11-20T10:06:00Z").astimezone().strftime("%b %d %H:%M")
     assert view.status.text() == f"9 items · 4 fast · last sync {at}"
@@ -1007,7 +996,6 @@ def test_sync_now_leaves_nothing_to_call_after_the_sync(store, monkeypatch):
 
 
 def _row_of(layout, widget):
-    """The layout under ``layout`` that holds ``widget`` itself."""
     for i in range(layout.count()):
         item = layout.itemAt(i)
         if item.widget() is widget:
@@ -1089,8 +1077,7 @@ def test_the_render_fixture_covers_every_stage_lane_edge_and_event_kind():
 @pytest.mark.skipif(not os.environ.get("DIPLOMAT_CORE_BIN"), reason="DIPLOMAT_CORE_BIN not set")
 @pytest.mark.parametrize("mode", ["pipeline", "settings"])
 def test_the_render_mode_draws_through_the_entry_point(tmp_path, mode):
-    """The pipeline fixture goes through the real ``diplomat-core pipeline-last``; the
-    settings one switches the Pipeline on."""
+    """The pipeline fixture goes through the real ``diplomat-core pipeline-last``."""
     home = tmp_path / "home"
     home.mkdir()
     out = tmp_path / f"{mode}.png"

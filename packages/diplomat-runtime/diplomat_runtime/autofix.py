@@ -763,17 +763,13 @@ def queue_key(audit_action: str, item: str) -> str:
     (a conflict *and* an unaddressed review); they are two tasks, and the one that
     dispatches first makes the other read as in-flight rather than overwriting it. It
     is also what keeps the two numbering spaces apart: issue #421 and PR #421 are
-    unrelated pieces of work, and only the verb says which one a key names.
-
-    An ask about no item is keyed by what names it instead
-    (:attr:`RequestedWork.key`)."""
+    unrelated pieces of work, and only the verb says which one a key names."""
     return f"{audit_action}:{item}"
 
 
 def linear_item(identifier: str) -> str:
-    """A Linear issue's item (``linear:ENG-12``): a space of its own, so its fix's queue
-    key (``issues:linear:ENG-12``) is no GitHub item's, whatever the numbers. Twin of
-    ``Store.linearItem``."""
+    """``linear:ENG-12``: a space of its own, so a Linear fix's queue key is no GitHub
+    item's. Twin of ``Store.linearItem``."""
     return "linear:" + identifier
 
 
@@ -1015,8 +1011,7 @@ class RequestedWork:
     """
 
     #: The PR number, or the issue number — two numbering spaces, told apart by the
-    #: verb in :attr:`key` and nowhere else. 0 for a Linear issue's fix, which
-    #: :attr:`key` names by its identifier.
+    #: verb in :attr:`key` and nowhere else. 0 for a Linear issue's fix.
     number: int
     url: str
     #: Whose PR / issue — the pipeline's ban dimension. Empty where the sweep names
@@ -1032,16 +1027,14 @@ class RequestedWork:
 
     @property
     def linear(self) -> str:
-        """The identifier (``ENG-12``) of the Linear issue a fix works in place of a
-        GitHub one (``IssueConfig.linear``), or ""."""
+        """The identifier (``ENG-12``) of the Linear issue a fix works on, or ""."""
         issue = self.config.get("linear")
         return str(issue.get("identifier") or "") if isinstance(issue, dict) else ""
 
     @property
     def pipeline(self) -> bool:
-        """Asked for by the Pipeline: a fix of a fast-track candidate or of a Linear
-        issue, or a fast-track review, which its master switch pauses
-        (``Store.is_paused``). Twin of ``RequestedConfig.isPipeline``."""
+        """Asked for by the Pipeline, so its master switch pauses it (``Store.is_paused``).
+        Twin of ``RequestedConfig.isPipeline``."""
         return bool(self.config.get("pipeline") or self.config.get("fastTrack")
                     or self.linear)
 
@@ -1066,8 +1059,7 @@ class RequestedWork:
         """This ask's identity everywhere it has one: the queued task's id, the row the
         panel draws it as, and what ``_forget_requested`` drops it by. An
         investigation keeps its Slack ts, being about no repo; a Linear issue's fix its
-        :func:`linear_item`, which no item key or ts can be, so it never names the
-        GitHub issue of the same number in its repo."""
+        :func:`linear_item`."""
         return queue_key(self.action, self.item
                          or (linear_item(self.linear) if self.linear else str(self.number)))
 

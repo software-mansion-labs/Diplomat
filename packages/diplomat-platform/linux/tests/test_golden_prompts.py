@@ -98,8 +98,7 @@ GOLDEN_MODES: dict[str, object] = {
     "comms-classifier-multi": lambda: _CorePayload(
         kind="comms-classifier", repos=["software-mansion/argent", "latekvo/diplomat"],
         login=ME),
-    # The pipeline's three: main.swift's goldenLinear fix, a GitHub fast-track fix, and a
-    # fast-track review.
+    # Pipeline: main.swift's goldenLinear fix, a GitHub fast-track fix and review.
     "issues-linear": lambda: _CorePayload(
         kind="issues", me=ME, pipeline=True,
         linear={

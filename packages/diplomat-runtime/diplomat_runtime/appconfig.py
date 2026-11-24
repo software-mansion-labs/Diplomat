@@ -13,8 +13,7 @@ binary as well, which is a separate process.
 Two more sit with them without needing to: how long a run may go on before the
 resolver calls it over, which belongs beside the cap it hands bays back to and is
 read by the ``DIPLOMAT_AGENTS`` dump, a front-end-free path with no store of its own;
-and where the Pipeline's Linear key is read from, which belongs beside where the
-agent's token is.
+and the Pipeline's Linear key file, beside the agent's token file.
 The device-allocator daemon, a Node process, reads four more: the terminal spawns
 resolve to (published rather than set here), to open its repair agents in, the two
 idle limits after which it takes a device back from its agent or shuts down one no
@@ -63,9 +62,8 @@ AGENT_MODEL = "agentModel"
 #: enters this file — see :func:`review.token_export`.
 AGENT_TOKEN_KEYCHAIN_ITEM = "agentTokenKeychainItem"
 AGENT_TOKEN_FILE = "agentTokenFile"
-#: Where the Pipeline's Linear API key is read from on Linux, by name only: a file path
-#: (``~`` allowed) handed to ``diplomat-core pipeline-tick``, which reads it. The key
-#: itself never enters this file.
+#: The file ``diplomat-core pipeline-tick`` reads the Pipeline's Linear key from on Linux
+#: (``~`` allowed). The key itself never enters this file.
 LINEAR_TOKEN_FILE = "linearTokenFile"
 #: The terminal this front-end's spawns resolve to, published for the device-allocator
 #: daemon to open its repair agents in (``device-allocator/src/terminal.js``). Written,

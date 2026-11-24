@@ -1,8 +1,5 @@
-"""The Pipeline in the Linux Store: its settings, the sync it runs, and what a sync's
-effects do to the queue.
-
-The sync is the core's (``diplomat-core pipeline-tick``); here its answer is a literal,
-or a stand-in core that records what it was handed.
+"""The Pipeline in the Linux Store. Its sync is ``diplomat-core pipeline-tick``'s, here a
+literal answer or a stand-in core that records what it was handed.
 """
 
 from __future__ import annotations
@@ -69,7 +66,6 @@ def _now_iso() -> str:
 
 def _result(*effects: dict, items: tuple = (), at: str | None = None,
             unread: tuple = (), fixable: tuple = (), read: tuple = ()) -> dict:
-    """Dated now unless ``at`` says otherwise: a sync's result is dated when it began."""
     return {"at": at or _now_iso(), "items": list(items),
             "graph": {"nodes": [], "edges": []}, "effects": list(effects), "events": [],
             "notices": [], "unread": list(unread), "fixable": list(fixable), "read": list(read)}
@@ -83,8 +79,6 @@ def _sync(pipe, result: dict) -> None:
 
 @pytest.fixture
 def pipe(store, monkeypatch):  # noqa: F811 — the shared Store fixture
-    """The store with one GitHub root, mallory banned, and the Pipeline on with its fix
-    and fast-track switches."""
     monkeypatch.setattr(review, "repo_roots", lambda: [ROOT])
     monkeypatch.setattr(review, "roots_guessed", lambda: False)
     monkeypatch.setattr(review, "roots_complete", lambda: True)
@@ -196,8 +190,7 @@ def test_a_fast_track_effect_is_a_review_of_my_pr(pipe):
 
 
 def test_a_linear_fix_is_the_pipelines_work_whatever_its_flags(pipe):
-    """The master switch pauses it (``Store.is_paused``), as ``isPipeline`` does on
-    macOS for any fix carrying a Linear issue."""
+    """The master switch pauses it (``Store.is_paused``), as ``isPipeline`` does on macOS."""
     cfg = {"kind": "issues", "linear": {"identifier": "ENG-12", "url": LINEAR, "text": ""}}
     work = autofix.RequestedWork(number=0, url=LINEAR, author="", config=cfg, repo="o/r")
     assert work.pipeline
@@ -304,8 +297,7 @@ def test_a_cancel_concludes_only_its_own_asks_record():
 
 
 def test_work_already_queued_is_not_asked_for_again(pipe):
-    """A row the operator re-ordered keeps its place: the next sync's same effect is
-    in flight, not a second ask."""
+    """So a row the operator re-ordered keeps its place."""
     now = time.time()
     pipe._apply_pipeline_effects(_result(_fix()), now)
     pipe._apply_pipeline_effects(_result(_fix()), now + autofix.RETRY_MAX_BACKOFF)
@@ -334,8 +326,8 @@ def test_a_banned_authors_issue_is_not_asked_for(pipe):
 
 
 def test_the_ban_is_the_effects_author_not_the_items(pipe):
-    """A part Diplomat split off a banned author's issue is filed by the operator; the
-    core names the root's author on its fix, and that is the one the ban list checks."""
+    """A part split off a banned author's issue is filed by the operator; its fix names
+    the root's author."""
     child = _item(author="alice")
     pipe._apply_pipeline_effects(_result(_fix(author="mallory"), items=(child,)),
                                  time.time())
@@ -588,8 +580,7 @@ def test_a_launch_starts_no_old_ask_until_a_sync_judged_its_item(pipe):
 
 
 def test_a_sync_is_told_the_items_asks_and_attempt_records_are_held_for(pipe):
-    """Each pipeline ask's, queued or not yet taken by its spawn, and each attempt record's,
-    open or concluded."""
+    """An ask queued or not yet spawned, and a record open or concluded."""
     _sync(pipe, _result(_fix(), _linear(), _review()))
     pipe._request([autofix.RequestedWork(
         number=13, url="https://github.com/o/r/pull/13", author="",
@@ -878,8 +869,7 @@ def test_start_fix_asks_under_the_author_the_sync_named(pipe):
 
 
 def test_start_fix_refuses_a_held_part_and_asks_one_it_emitted_nothing_for_as_its_roots(pipe):
-    """A part split off mallory's issue, filed by the operator: held, Start fix says the
-    hold; unheld with no emitted fix, the fix built from its link is mallory's."""
+    """A part split off mallory's issue, filed by the operator."""
     held = _item(author="alice", splitFrom="mallory",
                  hold="split from an issue of @mallory, who is on the prompt-injection ban list")
     pipe.pipeline_result = _result(items=(held,))
@@ -1062,14 +1052,12 @@ def test_the_linear_teams_line_is_read_entry_by_entry():
 
 
 def test_a_linear_team_is_ascii_and_trimmed_of_ascii_space_only():
-    """``PipelineSettings.LinearTeam.parse``'s rule; test_pipeline_teams_parity.py pins
-    the two against each other."""
+    """``PipelineSettings.LinearTeam.parse``'s rule, pinned to it in test_pipeline_teams_parity.py."""
     assert pipeline.parse_linear_teams("\u00a0ENG=o/r, x=o/\u00f1, \u00c4=o/r, ok=o/r\r") == (
         [{"key": "OK", "repo": "o/r"}], ["\u00a0ENG=o/r", "x=o/\u00f1", "\u00c4=o/r"])
 
 
 def _fake_core(tmp_path, monkeypatch, answer: str, status: int = 0):
-    """A ``diplomat-core`` that keeps its argv and stdin and answers ``answer``."""
     (tmp_path / "answer").write_text(answer)
     core = tmp_path / "diplomat-core"
     core.write_text(f"#!/bin/sh\nprintf '%s' \"$*\" > {tmp_path}/argv\n"
@@ -1205,9 +1193,8 @@ def test_an_unwritable_control_file_is_no_raise(pipe, tmp_path, monkeypatch):
 
 
 def _core_that_waits(tmp_path, monkeypatch):
-    """A ``diplomat-core`` that starts a child in a process group of its own, as
-    Foundation's ``Process`` starts ``gh`` and ``claude``, and waits on it. The child
-    notes both pids."""
+    """A ``diplomat-core`` whose child has a process group of its own, as Foundation's
+    ``Process`` starts ``gh`` and ``claude``."""
     child = ("import os, sys, time; os.setpgid(0, 0); "
              "open(sys.argv[1], 'w').write(f'{os.getppid()} {os.getpid()}'); time.sleep(300)")
     core = tmp_path / "diplomat-core"
@@ -1394,7 +1381,6 @@ def test_a_failing_apply_still_re_arms_the_timer(pipe, monkeypatch):
 
 
 def test_a_follow_up_sync_stops_once_the_pipeline_is_off(pipe, monkeypatch):
-    """Asked for while one ran, then the master switch went off: no second sync."""
     entered, gate = threading.Event(), threading.Event()
     ticks = []
 
@@ -1473,7 +1459,6 @@ def test_a_queued_fix_leaves_when_its_issue_is_no_writable_candidate(pipe, now):
 @pytest.mark.parametrize("fix, now", [
     # Open fix PRs switched off.
     (False, _item()),
-    # A hold.
     (True, _item(hold="the author is banned")),
 ])
 def test_a_queued_fix_leaves_once_the_sync_emits_none(pipe, fix, now):
@@ -1530,7 +1515,6 @@ def test_a_start_fix_there_stays_though_its_issue_was_read(pipe):
 
 
 def _else(pipe, monkeypatch) -> dict:
-    """A fix queued in root o/else, whose path then stops resolving."""
     other = LocalRepo("o", "else", "/src/else")
     url = "https://github.com/o/else/issues/3"
     fix = {**_fix(), "repo": "o/else", "number": 3, "url": url, "key": f"pipeline-fix:{url}"}
@@ -1566,7 +1550,7 @@ def test_a_root_whose_path_did_not_resolve_keeps_its_records(pipe, monkeypatch):
 ])
 def test_a_switch_turned_off_withdraws_what_syncs_queued_for_it_at_once(pipe, monkeypatch,
                                                                         switch, left):
-    """No sync needed; a Start fix stays."""
+    """A Start fix stays."""
     syncs = []
     monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: syncs.append(1))
     _sync(pipe, _result(_fix(), _linear(), _review()))

@@ -155,9 +155,8 @@ class DiplomatApp:
         self.store.start_background(self._load_comms, name="comms-feed")
         QTimer.singleShot(10000, self.store.run_comms_poll_async)
 
-        # The Pipeline: a sync no-ops while it is off, and the period runs from the end
-        # of one, as on macOS. The last sync's result loads up front, so its screen
-        # opens on it.
+        # The Pipeline: a sync no-ops while it is off; the period runs from the end of one,
+        # as on macOS.
         self.pipeline_timer = QTimer()
         self.pipeline_timer.setSingleShot(True)
         self.pipeline_timer.setInterval(int(pipeline.sync_secs() * 1000))

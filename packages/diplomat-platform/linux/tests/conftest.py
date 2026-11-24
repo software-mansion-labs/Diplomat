@@ -365,10 +365,8 @@ def isolated_comms_dir(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolated_pipeline_dir(tmp_path, monkeypatch):
-    """Redirect ``~/.diplomat/pipeline`` to a per-test temp dir: the real one holds the
-    operator's last sync and the ratings Diplomat may not write, which ``pipeline-last``
-    would hand a test. ``DIPLOMAT_LINEAR_TOKEN`` is dropped, so no test reaches the
-    operator's Linear."""
+    """Keeps the operator's last sync, which ``pipeline-last`` would hand a test, and their
+    Linear out of every test."""
     monkeypatch.setenv("DIPLOMAT_PIPELINE_DIR", str(tmp_path / "pipeline"))
     monkeypatch.delenv("DIPLOMAT_LINEAR_TOKEN", raising=False)
     yield

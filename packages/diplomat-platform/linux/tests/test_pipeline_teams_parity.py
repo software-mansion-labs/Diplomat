@@ -1,9 +1,5 @@
-"""Cross-platform parity for the Pipeline's Linear teams setting.
-
-``PipelineSettings.LinearTeam.parse`` (diplomat-core/Sources/DiplomatCore/Pipeline.swift)
-reads the Settings line on macOS, :func:`pipeline.parse_linear_teams` on Linux: which teams
-a sync tracks, and which entries Settings reports it cannot read. Each fixture line goes
-through both, the Swift one through ``diplomat-core pipeline-teams``.
+"""Linear teams setting parity: :func:`pipeline.parse_linear_teams` against its Swift twin,
+``PipelineSettings.LinearTeam.parse``, which ``diplomat-core pipeline-teams`` answers with.
 """
 
 from __future__ import annotations
