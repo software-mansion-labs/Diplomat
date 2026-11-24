@@ -3497,6 +3497,7 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
     let gone = """
         {"rerated": {"\(prURL(10))": {"\(sha("10"))": {"risk": "low", "complexity": "low"}}},
          "cleared": {"\(prURL(10))": "\(sha("10"))"},
+         "parts": {"\(prURL(10))": {"parts": [], "why": "", "forced": false}},
          "asked": {"pipeline-review:\(prURL(10))": "\(sha("10"))", "pipeline-fix:\(issueURL(77))": "fix"},
          "holds": {"\(issueURL(77))": "x y"}, "clean": {"\(issueURL(77))": "abc"},
          "decided": ["\(issueURL(77))"],
@@ -3512,7 +3513,7 @@ private func pipelineKept(base: URL, root: PipelineSettings.Root, team: Pipeline
         let s = saved(name)
         func keys(_ field: String) -> [String] { ((s[field] as? [String: Any]) ?? [:]).keys.sorted() }
         let logOnce = key == nil ? [issueURL(77)] : []
-        check(keys("rerated").isEmpty && keys("cleared").isEmpty
+        check(keys("rerated").isEmpty && keys("cleared").isEmpty && keys("parts").isEmpty
               && keys("asked").filter { $0.hasSuffix("/pull/10") || $0.hasSuffix("/issues/77") } == logOnce.map { "pipeline-fix:" + $0 }
               && keys("holds").filter { $0 == issueURL(77) } == logOnce && keys("clean").filter { $0 == issueURL(77) } == logOnce
               && (s["decided"] as? [String]) == [issueURL(77)] && saved(name, "ratings.json").isEmpty,
