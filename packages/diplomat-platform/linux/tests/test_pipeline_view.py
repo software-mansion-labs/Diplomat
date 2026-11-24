@@ -304,6 +304,51 @@ def test_the_painted_cards_show_the_dimming_and_the_lock(store):
     assert lock(I6) != mid
 
 
+@pytest.mark.parametrize("family", ["DejaVu Sans", None])
+def test_a_held_cards_mark_sits_right_after_its_rating_chips(store, monkeypatch, family):
+    """In a wide font as well: the chips give up padding before anything touches."""
+    from PySide6.QtGui import QFontInfo, QPainter
+
+    font = QFont(family) if family else QFont()
+    if family and QFontInfo(font).family() != family:
+        pytest.skip(f"{family} is not installed")
+    boxes: list[tuple[float, float, str]] = []
+    chip, hold = pipelineview._paint_chip, pipelineview._paint_hold
+
+    def chip_spy(p, x, y, text, tint, **kw):
+        width = chip(p, x, y, text, tint, **kw)
+        boxes.append((x - width, x, text) if kw.get("right") else (x, x + width, text))
+        return width
+
+    def hold_spy(p, box, color):
+        boxes.append((box.left(), box.right(), "hold"))
+        hold(p, box, color)
+
+    monkeypatch.setattr(pipelineview, "_paint_chip", chip_spy)
+    monkeypatch.setattr(pipelineview, "_paint_hold", hold_spy)
+    canvas = pipelineview.GraphCanvas()
+    rect = pipelineview.card_rect(0, 0)
+    image = QImage(int(rect.right()) + 10, int(rect.bottom()) + 10, QImage.Format.Format_ARGB32)
+    levels = [*pipelineview.LEVEL_SHORT, None]
+    for stage in pipelineview.STAGE_TINT:
+        for risk in levels:
+            for complexity in levels:
+                boxes.clear()
+                face = pipelineview.CardFace(glyph="⊙", label="#1", title="t", risk=risk,
+                                             complexity=complexity, stage=stage, lane="fast",
+                                             badge=None, locked=False, hold="on hold")
+                p = QPainter(image)
+                p.setFont(font)
+                canvas._paint_card(p, rect, face, False)
+                p.end()
+                boxes.sort()
+                edges = [rect.left() + 10, *(e for box in boxes for e in box[:2]),
+                         rect.right() - 8]
+                assert [b[2] for b in boxes][2:] == ["hold", stage.upper()], boxes
+                assert boxes[2][0] == boxes[1][1] + 4, boxes
+                assert edges == sorted(edges), (stage, risk, complexity, boxes)
+
+
 def test_badges_follow_the_queue(store, monkeypatch):
     view = PipelineView(store)
     assert {i: f.badge for i, f in view.canvas.faces.items() if f.badge} == {}
@@ -744,15 +789,17 @@ def test_rate_now_and_fracture_are_off_for_an_item_held_for_a_stop_label(store):
     result = _result()
     result["items"][4] = {**result["items"][4], "hold": "carries the label wip"}
     result["items"][1] = {**result["items"][1], "hold": "carries the label wip"}
-    store.pipeline_result = {**result, "unread": ["o/r"]}
-    view = PipelineView(store)
     rated = (False, "No sync rates an item that carries the label wip")
-    view.select(I5)
-    assert [(view.buttons[k].isEnabled(), _tip(view.buttons[k]))
-            for k in ("rate", "fracture")] == [
-        rated, (False, "No sync splits an issue that carries the label wip")]
-    view.select(P2)
-    assert (view.buttons["rate"].isEnabled(), _tip(view.buttons["rate"])) == rated
+    # Read in part, and read whole: the label alone turns Rate now off.
+    for unread in (["o/r"], []):
+        store.pipeline_result = {**result, "unread": unread}
+        view = PipelineView(store)
+        view.select(I5)
+        assert [(view.buttons[k].isEnabled(), _tip(view.buttons[k]))
+                for k in ("rate", "fracture")] == [
+            rated, (False, "No sync splits an issue that carries the label wip")]
+        view.select(P2)
+        assert (view.buttons["rate"].isEnabled(), _tip(view.buttons["rate"])) == rated
     assert pipelineview.rate_refused({"hold": "triaged as enhancement"}) is None
 
 
