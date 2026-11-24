@@ -68,9 +68,10 @@ const countingGh = path.join(scratch, 'gh');
 fs.writeFileSync(countingGh, `#!/bin/sh\necho call >> "${ghCalls}"\nfor t in "$GH_ENTERPRISE_TOKEN" "$GITHUB_ENTERPRISE_TOKEN"; do [ -n "$t" ] && [ "$4" != github.com ] && echo "$t" && exit 0; done\nexec "${forge.env.DN_GH}" "$@"\n`, { mode: 0o755 });
 // glab as glab 1.128.0 answers: a host's own token, and for a host it holds nothing for, the
 // config file's top-level one. A keyring holds the token of one more host. A token in
-// GITLAB_TOKEN, GITLAB_ACCESS_TOKEN or OAUTH_TOKEN, set here, it hands every real host.
+// GITLAB_TOKEN, GITLAB_ACCESS_TOKEN or OAUTH_TOKEN, set here, it hands every real host. Its
+// default host is the first of GITLAB_HOST, GITLAB_URI and GL_HOST, else gitlab.com.
 const realGlab = path.join(scratch, 'glab-cli');
-fs.writeFileSync(realGlab, `#!/bin/sh\nfor t in "$GITLAB_TOKEN" "$GITLAB_ACCESS_TOKEN" "$OAUTH_TOKEN"; do [ -n "$t" ] && [ "$5" != host.invalid ] && echo "$t" && exit 0; done\n[ "$5" = gitlab.keyring.example ] && echo glpat-from-the-keyring && exit 0\n"${forge.env.DN_GLAB}" "$@" && exit 0\necho glpat-top-level-decoy\n`, { mode: 0o755 });
+fs.writeFileSync(realGlab, `#!/bin/sh\nif [ "$3" = host ]; then for h in "$GITLAB_HOST" "$GITLAB_URI" "$GL_HOST" gitlab.com; do [ -n "$h" ] && echo "$h" && exit 0; done; fi\nfor t in "$GITLAB_TOKEN" "$GITLAB_ACCESS_TOKEN" "$OAUTH_TOKEN"; do [ -n "$t" ] && [ "$5" != host.invalid ] && echo "$t" && exit 0; done\n[ "$5" = gitlab.keyring.example ] && echo glpat-from-the-keyring && exit 0\n"${forge.env.DN_GLAB}" "$@" && exit 0\necho glpat-top-level-decoy\n`, { mode: 0o755 });
 const CONFIG_TOKEN = 'glpat-kept-in-the-config-file';
 fs.mkdirSync(path.join(scratch, 'glab'));
 fs.writeFileSync(path.join(scratch, 'glab', 'config.yml'), `git_protocol: ssh\ntoken: glpat-top-level-decoy\nhosts:\n    other.example:\n        token: glpat-another-hosts\n    gitlab.file.example:\n        api_protocol: https\n        token: !!null ${CONFIG_TOKEN}\n        user: me\nlast: x\n`);
@@ -86,6 +87,7 @@ Object.assign(process.env, forge.env, {
   GLAB_CONFIG_DIR: path.join(scratch, 'glab'),
   DN_FORGE_ORIGINS: JSON.stringify({ ...JSON.parse(forge.env.DN_FORGE_ORIGINS), 'gitlab.file.example': strangerOrigin, 'gitlab.dead.example': 'http://127.0.0.1:9',
     'gitlab.other.example': strangerOrigin, 'gitlab.keyring.example': strangerOrigin, 'gitlab.shell.example': strangerOrigin, 'ghes.other.example': strangerOrigin,
+    ...Object.fromEntries(['bare', 'uri', 'gl', 'second', 'url-a', 'url-c'].map((n) => [`gitlab.${n}.example`, strangerOrigin])),
     'gitlab.port.example:8443': strangerOrigin, 'gitlab.quoted.example:8443': strangerOrigin }),
   DN_FORGE_RESPONSE_MAX_BYTES: String(11 * 2 ** 20),
   DN_FORGE_TIMEOUT_MS: '1500',
@@ -329,6 +331,33 @@ await check('the token is read from gh once, kept briefly, and appears in no log
   await failing(perform(glRules('gitlab.dead.example'), request('gitlab.dead.example'), {}, { forge: 'gitlab', host: 'gitlab.dead.example' }), /no gitlab credential for gitlab\.dead\.example/);
   fs.writeFileSync(path.join(scratch, 'glab', 'config.yml'), 'hosts:\n    gitlab.dead.example:\n        token: "glpat-for-a-dead-host"\n');
   await failing(perform(glRules('gitlab.dead.example'), request('gitlab.dead.example'), {}, { forge: 'gitlab', host: 'gitlab.dead.example' }), /unreachable/);
+
+  // The token is the host's that glab calls its default, by whichever variable; a GITLAB_URL
+  // naming another host makes it nobody's.
+  const shell = { GITLAB_HOST: process.env.GITLAB_HOST };
+  const named = async (vars, host, token) => {
+    for (const name of ['GITLAB_HOST', 'GITLAB_URI', 'GL_HOST', 'GITLAB_URL']) delete process.env[name];
+    Object.assign(process.env, vars);
+    const at = strangers.length;
+    const sent = perform(glRules(host), request(host), {}, { forge: 'gitlab', host });
+    if (token) {
+      await sent;
+      assert.equal(strangers[at].headers.authorization, `Bearer ${token}`, JSON.stringify(vars));
+    } else {
+      await failing(sent, new RegExp(`no gitlab credential for ${host.replaceAll('.', '\\.')}`));
+    }
+  };
+  try {
+    await named({ GITLAB_HOST: 'gitlab.bare.example' }, 'gitlab.bare.example', 'glpat-from-the-shell');
+    await named({ GITLAB_URI: 'https://gitlab.uri.example' }, 'gitlab.uri.example', 'glpat-from-the-shell');
+    await named({ GL_HOST: 'gitlab.gl.example' }, 'gitlab.gl.example', 'glpat-from-the-shell');
+    await named({ GITLAB_HOST: 'gitlab.first.example', GL_HOST: 'gitlab.second.example' }, 'gitlab.second.example', null);
+    await named({ GITLAB_HOST: 'gitlab.url-a.example', GITLAB_URL: 'https://gitlab.url-b.example' }, 'gitlab.url-a.example', null);
+    await named({ GITLAB_HOST: 'gitlab.url-c.example', GITLAB_URL: 'https://gitlab.url-c.example/api' }, 'gitlab.url-c.example', 'glpat-from-the-shell');
+  } finally {
+    for (const name of ['GITLAB_URI', 'GL_HOST', 'GITLAB_URL']) delete process.env[name];
+    Object.assign(process.env, shell);
+  }
 
   const secrets = [GITHUB_TOKEN, GITLAB_TOKEN, CONFIG_TOKEN, 'glpat-for-a-dead-host', 'glpat-from-the-keyring', 'glpat-top-level-decoy', 'glpat-from-the-shell', 'ghp_any_enterprise_host', 'ghp_any_enterprise_host_too', Buffer.from(`x-access-token:${GITHUB_TOKEN}`).toString('base64'), Buffer.from(`oauth2:${GITLAB_TOKEN}`).toString('base64')];
   assert.ok(logLines.length > 10 && errors.length > 10);
