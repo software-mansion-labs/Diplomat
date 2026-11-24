@@ -202,7 +202,7 @@ it gives every GitHub Enterprise Server. A `GITLAB_TOKEN`, `GITLAB_ACCESS_TOKEN`
 `OAUTH_TOKEN` in the daemon's environment, which `glab` gives every GitLab it holds, goes only
 to `glab`'s default host, the one `glab config get host` names (from `GITLAB_HOST`,
 `GITLAB_URI`, `GL_HOST` or its config, else gitlab.com), and to no GitLab when a `GITLAB_URL`
-names another.
+or a `GITLAB_REPO` names another.
 The daemon has github.com's rules for a GitHub Enterprise Server as well, at that server's
 address, but Diplomat links only repositories on github.com and on a GitLab, so one on a GitHub
 Enterprise Server has no pool. The network has no rules for an address under `ghe.com` (GitHub
@@ -339,7 +339,11 @@ line like `// a comment` or `/usr/bin/env node` passes. GitLab runs such a line 
 action in your name, Prow takes it for a command, and bots on either forge read the text as it
 was sent and take a mention anywhere for a command from you (`@bors r+`, `@copilot ...`,
 `@claude ...`). The job's agent is told the rule, and a refusal names the field and quotes what
-broke it, so the agent rewords the text and sends it again.
+broke it, so the agent rewords the text and sends it again. A comment, a review or a note is
+posted with `<!-- sent through the Diplomacy Network -->` as its first line, which both forges
+hide when they show it: Atlantis, Terrateam and Digger act on a comment whose first word, once
+it is trimmed, is their name (`atlantis apply`, `terrateam apply`, `digger apply`), and read
+that line instead. Through GraphQL, such text is taken only from the request's variables.
 
 Before it allows a push or a write, the machine asks the forge what the rule depends on: where
 the branch is, which branch is the default, which protection rules there are, who opened the

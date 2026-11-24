@@ -1432,7 +1432,11 @@ through.
   it an `@` before a letter, digit, `_`, `.` or `-`, or the word `bors` in any case,
   which a bot on either forge reads anywhere in the text as sent, markdown and all; the
   refusal names the member and quotes the first such word), `proseIn` (a list of objects
-  whose member of that name is `prose`; the refusal names the entry),
+  whose member of that name is `prose`; the refusal names the entry), `comment` beside
+  either (the text is a comment, a review or a note, and is sent with
+  `<!-- sent through the Diplomacy Network -->` and a line break before it, unless it is
+  empty: Atlantis, Terrateam and Digger act on a comment whose first word, trimmed, is their
+  name, and both forges hide the line when they show the text),
   `created` (a branch this task created, from which it has
   opened no pull request yet; `"created": "label"` reads the member as GitHub's head
   label, which is `branch` for a branch of the pool's repository and `account:branch`
@@ -1497,7 +1501,9 @@ through.
   `troubleshootJobWithAi`. Of a branch's protection one scalar is read, whether its
   checks must be up to date. A mutation must be a single field
   from the list, its input may hold only the members the reader's table names, and every
-  object it addresses is resolved on the forge and must belong to the task's own item.
+  object it addresses is resolved on the forge and must belong to the task's own item. The
+  text of a comment is taken only from the request's variables, where the `comment` line
+  is written; one in the document itself is refused.
 - `{ "git": "receive-pack", "repo": "o/r", "refs": ["refs/heads/**"], "create": 1,
   "denyPaths": [".github/workflows/**"] }` on the two smart-HTTP push endpoints of a
   repository confines a push. Without `fork` the repository is `repo`, the pool's own,
