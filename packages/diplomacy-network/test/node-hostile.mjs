@@ -349,9 +349,14 @@ await check('a claim dated back to lapse as it lands, or whose executor never as
   const grab = async (who, dated = 0, then = async () => {}) => {
     const now = w.net.now();
     const round = b64u(Buffer.from([0, 0, 0, 0, 0, 0, 1, rounds += 1]));
-    // It stays a member: its record is signed again as the hours go by.
+    // It stays a member: its record is signed again as the hours go by. And it says it
+    // holds the host's state: after hours with no word from any member, the host holds
+    // the pool out of date until one does.
     const mine = w.records(v).find((r) => r.type === 'member' && r.pk === who.pk);
-    if (now - mine.at > 3600) await say(w, who, v, 'push', { records: [memberRecord(who.id, { ...mine, seq: mine.seq + 1, at: now })] }, { effort: 4096 });
+    if (now - mine.at > 3600) {
+      await say(w, who, v, 'push', { records: [memberRecord(who.id, { ...mine, seq: mine.seq + 1, at: now })] }, { effort: 4096 });
+      await say(w, who, v, 'sync', { asOf: now, hash: w.view(v).hash }, { effort: 4096 });
+    }
     const { grant } = (await say(w, who, v, 'lock', { taskId, round, asOf: now, hash: w.view(v).hash }, { effort: 4096 })).body;
     if (!grant?.offer) {
       await say(w, who, v, 'unlock', { taskId, round }, { effort: 4096 });

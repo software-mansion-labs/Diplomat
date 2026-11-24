@@ -3,7 +3,7 @@
 //   identity.json           { seed }
 //   heard.json              { ts }: the latest date of a request this host served
 //   peers.json              { silent }: the peers this host asks in vain, and has for long, and since when
-//   pools/<pool hash>.json  one pool: its link, this host's own sequence numbers, its records
+//   pools/<pool hash>.json  one pool: its link, this host's own sequence numbers, its records, when another host of it was last heard
 //   pools/<pool hash>.log   what changed in that pool since its document was written
 //   locks.json              the lock table of every pool
 //   keys.json               the keys this host issued and the keys it holds, secrets included

@@ -76,7 +76,7 @@ export function createNode({
       toJSON: () => ({ ...host.heldLocks, ...Object.fromEntries([...host.pools.values()].map((P) => [P.id, P.locks.entries()])) }),
     }),
     /// What a pool's document holds beside its records and this host's sequence number.
-    head: (P) => JSON.stringify([P.joining, P.joinFailed, P.invites, P.farewell, P.returning, P.back]),
+    head: (P) => JSON.stringify([P.joining, P.joinFailed, P.invites, P.farewell, P.heard, P.returning, P.back]),
     /// Has what a pool's document holds written: the records that changed since it was
     /// last asked, as a line, while nothing else in the document did.
     save: (P) => {
@@ -87,7 +87,8 @@ export function createNode({
       P.head = head;
       store.write(poolFile(P.id), {
         toJSON: () => ({
-          id: P.id, linked: true, seq: P.seq, joining: P.joining, joinFailed: P.joinFailed, invites: P.invites, returning: P.returning, back: P.back, ...P.farewell,
+          id: P.id, linked: true, seq: P.seq, joining: P.joining, joinFailed: P.joinFailed, invites: P.invites, heard: P.heard,
+          returning: P.returning, back: P.back, ...P.farewell,
           records: P.pool.records(),
         }),
       }, { line: same ? { seq: P.seq, put, drop } : undefined });
@@ -178,7 +179,7 @@ export function createNode({
   /// by an old state and may come before the step does.
   host.look = () => {
     const now = host.now();
-    if (now - looked > WAKE_GAP_MS / 1000) host.gossip.woke(looked);
+    if (now - looked > WAKE_GAP_MS / 1000) host.gossip.woke();
     looked = now;
   };
 
@@ -269,15 +270,11 @@ export function createNode({
       started = true;
       transport.onRequest(inbound.receive);
       transport.limitFor(inbound.limit);
-      // Since when the transport could reach nobody, or null while it is up.
-      let down = null;
       transport.onState(({ state }) => {
         try {
           host.touch();
-          if (state !== 'ready') down ??= host.now();
-          else if (started) {
-            host.gossip.woke(down ?? host.now());
-            down = null;
+          if (state === 'ready' && started) {
+            host.gossip.woke();
             host.poke();
           }
         } catch (err) {
