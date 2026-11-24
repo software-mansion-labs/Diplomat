@@ -4204,6 +4204,20 @@ private func pipelineCoverage9(base: URL, root: PipelineSettings.Root, team: Pip
           "a PR closing #27, tracked on Linear: \(stageOf(assigned.result, prURL(13))) "
           + "\(stageOf(assignedLate.result, prURL(13))) \(stageOf(untracked.result, prURL(13))) "
           + stageOf(untroubled.result, prURL(13)))
+    // #24 closed only by the read after Linear's: its Linear issues were not looked up.
+    let closedLate = try cleared("twin-closed-late") { t in
+        t.issues.append(fixture().issues.first { $0.number == 24 }!)
+        t.tickets[0] = twin("OPS-3", of: 24)
+        t.tickets[0].team = "OPS"
+        var rereads = 0
+        t.onReread = { _ in
+            rereads += 1
+            if rereads == 2 { t.prs[0].closes = [27, 24] }
+        }
+    }
+    check(!merged(closedLate) && stageOf(closedLate.result, prURL(13))
+            == "cleared/fast (would close the Linear issues linking #24, which Diplomat did not read or may not write to)",
+          "a PR closing #24 too by its last read: \(stageOf(closedLate.result, prURL(13)))")
     let crowded = only([3, 24])
     crowded.tickets = (0..<302).map { .init(id: "lin-c\($0)", identifier: "ENG-\(100 + $0)", title: "Crowded \($0)",
                                             updated: at("08:00")) }
