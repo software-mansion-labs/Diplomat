@@ -85,8 +85,7 @@ final class Store: ObservableObject {
     /// Headless only: what `persistJSON` writes in place of UserDefaults, by key, so
     /// records carry from one poll to the next.
     var headlessJSON: [String: Data]?
-    /// Headless only: the `headlessJSON` a Store launches on, read in place of the stored
-    /// asks: a self-test's relaunch.
+    /// Headless only: a self-test relaunch's `headlessJSON`, read in place of the stored asks.
     static var headlessLaunchJSON: [String: Data]?
 
     private func storedJSON(forKey key: String) -> Data? {
@@ -770,8 +769,8 @@ final class Store: ObservableObject {
 
     // MARK: Pipeline settings, under the Linux store's key strings
 
-    /// The master switch, off by default: off, nothing is read, rated, labelled or merged,
-    /// and queued pipeline work waits (`AutoCounter.pipeline`).
+    /// The master switch: off, nothing is read, rated, labelled or merged, and queued
+    /// pipeline work waits (`AutoCounter.pipeline`).
     @Published var pipelineEnabled: Bool {
         didSet {
             if pipelineEnabled != oldValue { pipelineCut(master: true) }
@@ -780,8 +779,8 @@ final class Store: ObservableObject {
             pipelineSwitched(on: pipelineEnabled && !oldValue)
         }
     }
-    /// `PipelineSettings.rate`, `.fix`, `.fastTrack`, `.merge`, `.fracture`; each off by
-    /// default, and moot while `pipelineEnabled` is off.
+    /// `PipelineSettings.rate`, `.fix`, `.fastTrack`, `.merge`, `.fracture`; moot while
+    /// `pipelineEnabled` is off.
     @Published var pipelineRate: Bool {
         didSet {
             persist(pipelineRate, forKey: Keys.pipelineRate)
@@ -839,9 +838,8 @@ final class Store: ObservableObject {
     var pipelineMonitorTask: Task<Void, Never>?
     var pipelineWakeObserver: NSObjectProtocol?
     var pipelineSyncAgain = false
-    /// Bumped as the master switch flips or Fix / Fast track goes off: a sync begun
-    /// before may have been switched off midway, emitting less than it owes, so its
-    /// result withdraws and prunes nothing (`runPipelineSyncOnce`).
+    /// A sync begun before a bump (`pipelineCut`) may have been switched off midway,
+    /// emitting less than it owes, so its result withdraws and prunes nothing.
     var pipelineEpoch = 0
     /// A sync begun since launch or the master switch went on was applied: until then each
     /// pipeline ask queued is stale (`pipelineStale`).
@@ -3979,8 +3977,7 @@ final class Store: ObservableObject {
         var item: String? { prNumber == nil ? nil : prURL.flatMap(PRRef.itemKey(url:)) }
     }
 
-    /// `pipeline` is the pipeline's asks: owned by its master switch rather than by a
-    /// monitor, and tallied nowhere.
+    /// `pipeline`: owned by its master switch rather than by a monitor, and tallied nowhere.
     enum AutoCounter { case reviewRequests, myReviews, conflicts, pipeline }
 
     /// What to do about a dispatch the ban gate refused. A monitor's find comes back by

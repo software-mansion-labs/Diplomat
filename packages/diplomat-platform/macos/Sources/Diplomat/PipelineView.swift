@@ -2,22 +2,18 @@ import SwiftUI
 import AppKit
 import DiplomatCore
 
-/// The Pipeline screen: every open issue and PR the last sync read, as cards on the grid
-/// `PipelineGraph` lays them on, joined by what links them; a lane filter; and the
-/// selected card's rating, hold, traversal and actions.
+/// The Pipeline screen: the last sync's open issues and PRs as cards on `PipelineGraph`'s
+/// grid, a lane filter, and the selected card's detail.
 ///
-/// Draws `store.pipelineResult` (the core's `PipelineTickResult`, which the Linux twin
-/// draws too). The switches are in Settings; the agent work the pipeline asks for is
-/// managed from the Agent-tasks list like any other ask.
+/// Draws `store.pipelineResult`, as the Linux twin does. The switches are in Settings; the
+/// agent work the pipeline asks for is managed from the Agent-tasks list like any other ask.
 struct PipelineView: View {
     @EnvironmentObject var store: Store
     @Binding var isPresented: Bool
 
     /// nil shows every group.
     @State private var lane: PipelineLane?
-    /// The selected card's item id.
     @State private var selected: String?
-    /// Why the selected card's last action was refused.
     @State private var actionError: String?
 
     static let detailWidth: CGFloat = 290
@@ -66,9 +62,7 @@ struct PipelineView: View {
         .task { await store.loadPipelineLast() }
     }
 
-    /// What stands in for the graph while there is none to draw: after a sync, what it did
-    /// not read. `reads`: a GitHub root or a Linear team is set. Twin of
-    /// `pipelineview.empty_text`.
+    /// `reads`: a GitHub root or a Linear team is set. Twin of `pipelineview.empty_text`.
     static func emptyText(enabled: Bool, synced: Bool, unread: [String] = [], reads: Bool = true) -> String {
         if !enabled {
             return "The pipeline is off. Switched on in Settings, it rates every open issue and your own PRs, "
@@ -112,7 +106,6 @@ struct PipelineView: View {
         }
     }
 
-    /// The header button's glyph and this screen's.
     static let symbol = "point.3.connected.trianglepath.dotted"
 
     private func statusLine(_ result: PipelineTickResult?) -> some View {
@@ -170,27 +163,22 @@ struct PipelineView: View {
         }
     }
 
-    /// In the order the chips read: where work is moving, where it waits on a person, then
-    /// what is not sorted yet, what was split, and what is over.
     static let lanes: [PipelineLane] = [.fast, .human, .unrated, .fractured, .done]
 
-    /// A writable open issue not split yet: not `fractured`, with no child, and no PR
-    /// fixing it (`fixing`), whose code a sync can read (`rooted`, `Store.pipelineRooted`).
-    /// Twin of `pipelineview.can_fracture`.
+    /// A writable open issue not split yet, with no PR fixing it, whose code a sync can read
+    /// (`Store.pipelineRooted`). Twin of `pipelineview.can_fracture`.
     static func canFracture(_ item: PipelineItem, edges: [PipelineGraph.Edge], rooted: Bool) -> Bool {
         item.kind == .issue && item.writable && rooted && [.unrated, .human, .candidate].contains(item.stage)
             && !edges.contains { $0.kind == .child && $0.from == item.id }
     }
 
-    /// An open item a sync rates when asked: a PR only when it is `me`'s, an issue only
-    /// when its code can be read (`rooted`). Twin of `pipelineview.can_rate`.
+    /// Whether a sync would rate `item` when asked. Twin of `pipelineview.can_rate`.
     static func canRate(_ item: PipelineItem, me: String, rooted: Bool) -> Bool {
         guard item.state == "open" || item.state == "draft" else { return false }
         if item.kind == .pr { return !me.isEmpty && item.author?.lowercased() == me.lowercased() }
         return rooted
     }
 
-    /// A candidate issue: low/low, writable, no open PR fixing it.
     static func canStartFix(_ item: PipelineItem) -> Bool {
         item.kind == .issue && item.stage == .candidate && item.writable
     }
@@ -239,7 +227,6 @@ struct PipelineView: View {
                 .overlay(alignment: .topLeading) { canvas }
                 .clipped()
         } else if layout.size.height <= PipelineView.viewport {
-            // Scrolls only a graph too wide for the screen.
             ViewThatFits(in: .horizontal) {
                 canvas
                 ScrollView(.horizontal) { canvas }
@@ -295,9 +282,9 @@ struct PipelineView: View {
 
 // MARK: - Layout
 
-/// Where `PipelineView` draws each card and connector: `PipelineGraph`'s columns as they
-/// are, its rows packed per connected group, groups one below another in the order of
-/// their first row. A lane filter keeps every group with a card in that lane, whole.
+/// `PipelineGraph`'s columns as they are, its rows packed per connected group, groups one
+/// below another in the order of their first row. A lane filter keeps every group with a
+/// card in that lane, whole.
 struct PipelineLayout {
     struct Card {
         let item: PipelineItem
@@ -453,7 +440,6 @@ struct PipelineLayout {
 
 // MARK: - Canvas
 
-/// The cards at their frames over the connectors.
 private struct PipelineCanvas: View {
     let layout: PipelineLayout
     let badges: [String: Store.PipelineBadge]
@@ -558,16 +544,12 @@ struct PipelineDetail: View {
     let enabled: Bool
     let forcedRate: Bool
     let forcedFracture: Bool
-    /// Why, by the ban list, the queue would refuse to run its fix (`Store.pipelineBan`).
     let ban: String?
-    /// Why, by the ban list as it reads now, a sync would rate and split nothing
-    /// (`Store.pipelineBanUnread`).
     let banUnread: String?
     let canRate: Bool
     let canFracture: Bool
     /// The fix effect is known: a Linear issue's text comes only with a sync's.
     let canStartFix: Bool
-    /// Why it is not (`Store.pipelineFixUnknown`).
     let fixUnknown: String
     let error: String?
     let rate: () -> Void
@@ -949,7 +931,6 @@ enum PipelineTint {
         s == .linear ? .indigo : .primary
     }
 
-    /// A GitHub issue's or PR's glyph; a Linear issue's letter.
     static func glyph(_ item: PipelineItem) -> String {
         if item.source == .linear { return "l.square.fill" }
         return item.kind == .pr ? "arrow.triangle.pull" : "smallcircle.filled.circle"
@@ -970,7 +951,7 @@ enum PipelineTint {
     }
 
     /// `By @bob · assigned to @carol`, a Linear name as it is. Twin of `pipelineview`'s WHO
-    /// people line.
+    /// line.
     static func people(_ item: PipelineItem) -> String {
         func who(_ name: String) -> String { item.source == .linear ? name : "@\(name)" }
         var parts = item.author.flatMap { $0.isEmpty ? nil : ["by \(who($0))"] } ?? []
@@ -989,7 +970,6 @@ enum PipelineTint {
     /// A hold as the card's tooltip and the detail pane say it, as on Linux.
     static func held(_ hold: String) -> String { "Held: \(hold)" }
 
-    /// The time today; with its date on any other day.
     static func syncTime(_ date: Date, now: Date = Date()) -> String {
         guard !Calendar.current.isDate(date, inSameDayAs: now) else { return Fmt.clock(date) }
         let f = DateFormatter()

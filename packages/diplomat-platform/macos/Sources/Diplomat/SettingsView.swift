@@ -1113,7 +1113,6 @@ struct SettingsView: View {
         }
     }
 
-    /// The parsed teams, or in red the entries that are not `KEY=owner/repo`.
     private var linearTeamsRow: some View {
         let parsed = PipelineSettings.LinearTeam.parse(store.pipelineLinearTeamsRaw)
         return SettingRow(title: "Linear teams",
