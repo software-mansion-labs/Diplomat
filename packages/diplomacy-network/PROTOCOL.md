@@ -1406,9 +1406,11 @@ through.
 - `"body": { "event": { "oneOf": ["COMMENT"] }, "body": "free" }` pins a JSON body member
   by member. The body is parsed strictly (`application/json`, UTF-8, no duplicate key) and
   a member the rule does not name is refused. A member is `"free"`, or pinned with
-  `equals`, `oneOf`, `prefix`, `prose` (text with no line starting with `/`, `@` or
-  `bors`, which GitLab would run as a quick action and a bot on either forge would take
-  for a command), `proseIn` (a list of objects whose member of that name is `prose`),
+  `equals`, `oneOf`, `prefix`, `prose` (text with no line starting with `/`, which
+  GitLab would run as a quick action, and nowhere in it an `@` before a letter, digit,
+  `_`, `.` or `-`, or the word `bors`, which a bot on either forge reads anywhere in the
+  text as sent, markdown and all), `proseIn` (a list of objects whose member of that name
+  is `prose`),
   `created` (a branch this task created, from which it has
   opened no pull request yet; `"created": "label"` reads the member as GitHub's head
   label, which is `branch` for a branch of the pool's repository and `account:branch`
@@ -1435,7 +1437,8 @@ through.
   `pick` lists the members of the forge's JSON answer an executor
   gets back - of each entry, when the answer is a list - and `blank` the members that
   come back as null wherever they stand in it: on GitLab, the address of whoever wrote
-  an issue in through the Service Desk (`service_desk_reply_to`). An answer that is
+  an issue in through the Service Desk (`service_desk_reply_to`), in the answer to a read
+  of an issue and to its assignment alike. An answer that is
   neither an object nor a list of objects is not passed on.
 - `{ "graphql": { "forge": "github", "repo": "o/r", "roots": [...], "mutations": [...],
   "item": { "type": "pr", "number": 578 }, "identity": "me" } }` on the GraphQL endpoint
@@ -1492,7 +1495,12 @@ through.
   cover: on GitHub an active ruleset's rule or a branch protection rule's pattern, on
   GitLab a protected branch's name or wildcard. Every page of those rules is read, and a
   pattern is matched wider than either forge matches it - without regard to case, with
-  `*` across `/`. The forge is asked where each ref is: a creation
+  `*` across `/`. To an account that is no admin of the repository (`viewerPermission`)
+  GitHub answers its branch protection rules as none; for such an account the branches
+  the forge lists as protected stand in for them, and a new ref is refused that lies
+  beside one of them under the same `/`, or differs from one only in its runs of digits.
+  A rule hidden that way which no protected branch shows is not seen. The forge is asked
+  where each ref is: a creation
   must be of a name the forge has no branch of, an update must start from the branch's
   current value and be a fast-forward of it, proven by indexing the pack in a quarantine.
   No pushed commit may add, change or delete a path under `denyPaths` - compared without
