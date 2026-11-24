@@ -1159,7 +1159,7 @@ final class PipelineSync {
         // Saved before the labels it leads to: a sync stopped there does not ask again.
         record(i, rating, why, detail, head: head, again: again, unwritten: allowed)
         guard allowed else { return }
-        guard recheck(i) else {
+        guard recheck(i), entries[i].item.headSha == e.item.headSha else {
             guard entries[i].item.writable else {
                 cache[e.id]?.unwritten = nil
                 cache[e.id]?.updatedAt = entries[i].item.updatedAt

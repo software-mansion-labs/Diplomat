@@ -1528,6 +1528,7 @@ func pipelineSmoke() throws {
 
     try pipelineGuards(base: base, root: root, team: team, t0: t0)
     try pipelineMergeSync(base: base, root: root, team: team, t0: t0)
+    try pipelineRatingPass1(base: base, root: root, team: team, t0: t0)
 
     // The real gh and claude get neither token, and claude runs in the checkout.
     let stubs = base.appendingPathComponent("live-checkout")
@@ -4803,4 +4804,31 @@ private func pipelinePins10(base: URL, root: PipelineSettings.Root, team: Pipeli
         check(!edges.contains { $0.kind == .stacked },
               "a PR based on the \(branch) branch: \(edges.map { "\($0.from) \($0.kind.rawValue) \($0.to)" })")
     }
+}
+
+/// A first rating's labels against a push meanwhile.
+private func pipelineRatingPass1(base: URL, root: PipelineSettings.Root, team: PipelineSettings.LinearTeam,
+                                 t0: Date) throws {
+    section("pipeline rating pass 1")
+    func dir(_ name: String) -> URL { base.appendingPathComponent("rating1-" + name) }
+    func later(_ minutes: Double) -> Date { t0.addingTimeInterval(minutes * 60) }
+    let rateTrack = PipelineSettings(roots: [root], rate: true, fastTrack: true)
+    func fix() -> Trackers {
+        let t = only([4, 11])
+        t.prs[0].body = "Fixes #4."
+        return t
+    }
+
+    // Pushed to, past its floor, as it is rated: no label at a head whose diff was not rated.
+    let pushed = fix()
+    pushed.onClaude = { _ in
+        pushed.onClaude = nil
+        pushed.prs[0].head = sha("a2")
+        pushed.prs[0].files.append(("package.json", 1, 1, "MODIFIED"))
+    }
+    let p1 = sync(pushed, rateTrack, dir("pushed"), t0)
+    let p2 = sync(pushed, rateTrack, dir("pushed"), later(5))
+    check(p1.writes.isEmpty && p1.result.effects.isEmpty && pushed.prs[0].labels.isEmpty && p2.writes.isEmpty
+          && p2.result.notices.contains("#11: the rating kept for it is below what its diff allows now, so it was dropped"),
+          "pushed to as it was rated: \(p1.writes) \(p1.result.effects) then \(p2.writes) \(p2.result.notices)")
 }
