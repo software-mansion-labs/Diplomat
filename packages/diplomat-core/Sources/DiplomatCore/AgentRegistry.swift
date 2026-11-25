@@ -422,8 +422,8 @@ public enum AgentRegistry {
         return (try? data.write(to: runsPath(), options: .atomic)) != nil
     }
 
-    /// `network` only for a run the network carries, so a local run's record is the
-    /// one an applet without the network writes.
+    /// `network` only when set, so a local run's record is what an applet without the
+    /// network writes.
     private static func encode(_ r: AgentState.RunRecord) -> [String: Any] {
         var out: [String: Any] = [
             "runId": r.runID, "dispatchedAt": r.dispatchedAt,

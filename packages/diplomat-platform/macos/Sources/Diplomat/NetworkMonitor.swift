@@ -1,45 +1,31 @@
 import Foundation
 import DiplomatCore
 
-/// What `Store.runNetworkCycleOnce` remembers between cycles.
 struct NetworkCycle {
-    /// How often `admit` is said again unchanged. The daemon takes nothing once it has
-    /// not heard for 120 s.
+    /// The daemon takes nothing once `admit` is 120 s old.
     static let admitEvery: TimeInterval = 60
-    /// The wait before a silent daemon is started again: doubled per attempt between
-    /// these.
     static let firstStartDelay: TimeInterval = 15
     static let longestStartDelay: TimeInterval = 600
 
-    /// The daemon the posts below went to, as its pid and start time. Another one has
-    /// heard none of them.
+    /// pid + start time of the daemon that heard the posts below; a new one hears them again.
     var daemon = ""
     var pools: [NetworkPools.Pool]?
-    /// The list the daemon refused, its sentence, and when: said again as it is only
-    /// as often as `admit` is.
     var poolsRefused: [NetworkPools.Pool]?
     var poolsRefusal = ""
     var poolsRefusedAt: TimeInterval = 0
     var admit: NetworkAdmit.Answer?
     var admitAt: TimeInterval = 0
-    /// When the logins `pools` lacks were last asked after.
     var identitiesAskedAt: TimeInterval = 0
     var startAfter: TimeInterval = 0
     var startDelay: TimeInterval = 0
-    /// Whether the feed has said a start failed, for the current silence.
     var startFailureLogged = false
-    /// A cycle is in flight: the poll does not start a second beside it.
     var running = false
 }
 
-/// The Diplomacy Network's lifecycle, its per-cycle posts and the Network screen's
-/// actions. The dispatch gate, the tick's evidence and a run's retirement are in
-/// `Store.swift`, beside the local paths they stand in for.
+/// The dispatch gate, tick evidence and run retirement live in `Store.swift`.
 extension Store {
     // MARK: lifecycle
 
-    /// The switch moved: start the daemon, or retire the runs the network carried and
-    /// stop it.
     func networkSwitched() {
         networkCycle = NetworkCycle()
         networkUnavailableLogged = false
@@ -62,7 +48,7 @@ extension Store {
                 await runNetworkCycleOnce()
             } else {
                 await whileNetworkBusy {
-                    // While the daemon is still there to hear a withdrawal.
+                    // Before the stop: a withdrawal needs the daemon.
                     await self.settleAgents()
                     await self.withdrawOffering(offering)
                     let result = await Task.detached(priority: .userInitiated) {
@@ -81,8 +67,6 @@ extension Store {
         networkBusy = false
     }
 
-    /// Run the installer's start, and say how it went. A failed start is said once for a
-    /// silence when the cycle asked (`quietly`), every time when the operator did.
     @discardableResult
     private func startNetworkDaemon(source: String, restart: Bool = false,
                                     quietly: Bool = false) async -> Bool {
@@ -100,8 +84,8 @@ extension Store {
         return ok
     }
 
-    /// The Network screen's Start and Restart. Nothing while `networkSettingsUnknown`: a
-    /// daemon started on a config it cannot read switches itself off.
+    /// Not while `networkSettingsUnknown`: a daemon started on an unreadable config
+    /// switches itself off.
     func startNetworkDaemon(restart: Bool) async {
         guard networkEnabled, !networkBusy, networkSettingsUnknown.isEmpty else { return }
         await whileNetworkBusy {
@@ -110,8 +94,6 @@ extension Store {
         await runNetworkCycleOnce()
     }
 
-    /// End the mesh node an earlier Diplomat left running and remove its directory,
-    /// whatever the switch says.
     func retireLegacyMeshNode() async {
         let line = await Task.detached(priority: .utility) {
             let retired = DiplomacyNetwork.retireLegacyMeshNode()
@@ -125,11 +107,6 @@ extension Store {
 
     // MARK: one cycle
 
-    /// One round with the daemon while the switch is on: read its snapshot, start it when
-    /// it is silent, and tell it which pools this machine is in and how many more tasks
-    /// it takes. `pools` is said when it changed and `admit` also once a minute; a
-    /// daemon that started since is told both again. Neither is said, and no daemon is
-    /// started, while `networkSettingsUnknown`.
     func runNetworkCycleOnce(now: TimeInterval = Date().timeIntervalSince1970) async {
         rereadNetworkSettings()
         guard networkEnabled, !networkCycle.running else { return }
@@ -159,8 +136,6 @@ extension Store {
         await settleOffering(snapshot)
     }
 
-    /// Start a daemon that is not answering, no sooner than its backoff allows. While
-    /// the settings are unknown nothing is tried, and the backoff waits as it is.
     private func reviveNetworkDaemon(now: TimeInterval) async {
         guard DiplomacyNetwork.drivesDaemon, !networkBusy, now >= networkCycle.startAfter,
               networkSettingsUnknown.isEmpty else { return }
@@ -173,10 +148,8 @@ extension Store {
         }
     }
 
-    /// Say this machine's pools when they changed, and publish what of them could not
-    /// be confirmed and a refusal of the list (`networkPoolsHeld`). The OTHER REPOS
-    /// checkouts are read again first: one that could not be read may be back, and one
-    /// may have gained a remote.
+    /// Local repos are re-read first: an unreadable one may be back, or one may have
+    /// gained a remote.
     private func postNetworkPools(_ snapshot: NetworkSnapshot, now: TimeInterval) async {
         await rereadLocalRepos()
         guard !rootsReadBlind else { return }
@@ -220,8 +193,6 @@ extension Store {
         if networkPoolsHeld != held { networkPoolsHeld = held }
     }
 
-    /// The free bays of the cap less what runs here for the network and for this
-    /// machine's own queue, or none for the reason the local gate would hold a job.
     private func postNetworkAdmit(_ snapshot: NetworkSnapshot, now: TimeInterval) async {
         let (limit, load, autoRun) = (autoTaskLimit, autoTasksMeasured, queueAutoRun)
         let answer = await Task.detached(priority: .utility) {
@@ -231,7 +202,7 @@ extension Store {
                 affordable: !AutoBudget.enabled || AutoBudget.decide().affordable,
                 autoRun: autoRun)
         }.value
-        // The budget's knobs were read for it: from defaults, had the config broken.
+        // An unreadable config left the budget above on defaults.
         guard answer != networkCycle.admit
                 || now - networkCycle.admitAt >= NetworkCycle.admitEvery,
               !AppConfig.unreadable else { return }
@@ -247,8 +218,6 @@ extension Store {
 
     // MARK: runs
 
-    /// Withdraw the offer of a run the operator removed, while the network still holds
-    /// it.
     func withdrawForgotten(_ record: AgentState.RunRecord) async {
         let snapshot = await Task.detached(priority: .utility) { DiplomacyNetwork.state() }.value
         let evidence = AgentState.Evidence(network: NetworkEvidence.tasks(snapshot))
@@ -258,9 +227,7 @@ extension Store {
                        source: "panel")
     }
 
-    /// Withdraw each offer of `tasks` the network still carries: they carried asks the
-    /// pipeline no longer owes. Its run is retired as the offer ends. Twin of
-    /// `Store._withdraw_unowed_async`.
+    /// Twin of `Store._withdraw_unowed_async`.
     func withdrawUnowed(_ tasks: Set<String>) async {
         let snapshot = await Task.detached(priority: .utility) { DiplomacyNetwork.state() }.value
         let evidence = AgentState.Evidence(network: NetworkEvidence.tasks(snapshot))
@@ -271,9 +238,6 @@ extension Store {
         }
     }
 
-    /// The switch went off over jobs whose offer was never definitely answered: withdraw
-    /// each one the daemon turns out to hold, and say of every other that it was not
-    /// offered.
     private func withdrawOffering(_ offering: [OfferingJob]) async {
         guard !offering.isEmpty else { return }
         let snapshot = await Task.detached(priority: .utility) { DiplomacyNetwork.state() }.value
@@ -309,10 +273,8 @@ extension Store {
         return reply
     }
 
-    /// Stop one task of a pool: its run, when this machine is the one running it, else
-    /// the offer this machine made of it. A run that is not there to stop is said to be
-    /// so in the pool's card, and nothing is withdrawn in its place: the button said
-    /// the job goes back to the pool.
+    /// A run already gone is reported, not withdrawn instead: the button promised the
+    /// job goes back to the pool.
     func stopNetworkTask(_ task: NetworkSnapshot.Task, pool: String) async {
         if task.executorHere {
             await stopRun(of: task, pool: pool)
@@ -326,8 +288,7 @@ extension Store {
     }
 
     private func stopRun(of task: NetworkSnapshot.Task, pool: String) async {
-        // Asked afresh: the published snapshot may be a tick old, and a run that ended
-        // since is not there to stop.
+        // The published snapshot may be a tick old.
         let fresh = await Task.detached(priority: .userInitiated) { DiplomacyNetwork.state() }.value
         guard let run = fresh?.runs.first(where: {
             $0.taskId == task.taskId && NetworkAdmit.live.contains($0.state)
@@ -349,7 +310,6 @@ extension Store {
 
     // MARK: pools
 
-    /// An invite to `pool`, or nil with the refusal kept for the screen.
     func networkInvite(pool: String) async -> String? {
         let body = NetworkRoute.inviteBody(pool: pool)
         let reply = await Task.detached(priority: .userInitiated) {
@@ -366,8 +326,7 @@ extension Store {
         return invite
     }
 
-    /// Join the pool an invite is to. False with the refusal kept for `card`, the panel
-    /// the invite was pasted into.
+    /// `card`: the panel the invite was pasted into, which shows a refusal.
     func joinNetworkPool(invite: String, card: String) async -> Bool {
         let body = NetworkRoute.joinBody(invite: invite)
         let reply = await Task.detached(priority: .userInitiated) {
@@ -382,7 +341,6 @@ extension Store {
         return true
     }
 
-    /// Go back into a pool this machine left.
     func rejoinNetworkPool(_ pool: String) async {
         let body = NetworkRoute.joinBody(pool: pool)
         let reply = await Task.detached(priority: .userInitiated) {
@@ -407,8 +365,7 @@ extension Store {
         await runNetworkCycleOnce()
     }
 
-    /// Keep what an action was refused with under the panel it was made in (a pool's id,
-    /// or "" before any pool), or clear what the last one there was.
+    /// `pool` is a pool id, or "" for the panel shown before any pool.
     private func noteNetworkReply(_ reply: DiplomacyNetwork.Reply, about pool: String) {
         switch reply {
         case .ok: networkRefusals[pool] = nil
@@ -419,7 +376,6 @@ extension Store {
 
     // MARK: wizards
 
-    /// What a wizard says between its button and the dispatch's answer.
     func dispatchingText(terminal: String) -> String {
         networkEnabled ? NetworkText.offering : "Launching \(terminal)…"
     }

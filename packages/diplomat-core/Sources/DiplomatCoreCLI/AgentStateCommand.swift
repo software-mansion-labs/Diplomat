@@ -27,9 +27,9 @@ import Foundation
 ///                 "liveAgents": {"status": "present", "value": {"o/r#404": "pts/3"}}, … },
 ///   "networkSnapshot": { "offers": [ {"taskId": …, "state": "claimed", …} ], … } }
 /// ```
-/// `networkSnapshot`, when the key is there, is the network daemon's answer as it gave
-/// it - `null` for none - and takes the place of `evidence.network`, so the snapshot
-/// decoder and the evidence built from it are diffed too.
+/// `networkSnapshot`, when present, is the daemon's raw answer (`null` for none) and
+/// replaces `evidence.network`, so the snapshot decoder and the evidence built from it
+/// are diffed too.
 /// Output: the resolved rows in display order, every record's verdict whether drawn or
 /// not, every projection, and the records as the pipeline left them - so a stillness
 /// clock written by the wrong step is a diff.

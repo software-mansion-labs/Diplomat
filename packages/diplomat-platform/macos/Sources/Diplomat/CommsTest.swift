@@ -1620,9 +1620,8 @@ enum CommsTest {
     }
 }
 
-/// A stand-in daemon on a unix socket, for this self-test's allocator and
-/// `NetworkTest`'s network daemon: it answers each request with what `respond` returns,
-/// or, not `answering`, accepts none and so answers nothing.
+/// A stand-in daemon on a unix socket, also `NetworkTest`'s: it answers each request with
+/// what `respond` returns, or, not `answering`, accepts none and so answers nothing.
 final class FakeDaemon: @unchecked Sendable {
     private let fd: Int32
     private let path: String

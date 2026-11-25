@@ -205,8 +205,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in let ok = await PipelineTest.run(); exit(ok ? 0 : 1) }
         }
         // Diplomacy Network self-test: the Store's cycle, gate and run handling against a
-        // stand-in daemon on a scratch socket, with a stand-in installer and process
-        // table. It offers jobs and opens no terminal. Exit code = pass/fail.
+        // stand-in daemon, installer and process table. Opens no terminal. Exit code =
+        // pass/fail.
         if env["DIPLOMAT_NETWORK_TEST"] == "1" {
             Task { @MainActor in exit(await NetworkTest.run() ? 0 : 1) }
         }
@@ -425,8 +425,8 @@ enum SingleInstance {
         return env
     }
 
-    /// A live process's argv, element by element as it was started; nil when the kernel
-    /// withholds it (another user's process, a platform binary's) or the process is gone.
+    /// nil when the kernel withholds it (another user's process, a platform binary's) or
+    /// the process is gone.
     static func arguments(of pid: pid_t) -> [String]? { procArgs(of: pid)?.argv }
 
     private static func procArgs(of pid: pid_t) -> (argv: [String], environment: [String])? {

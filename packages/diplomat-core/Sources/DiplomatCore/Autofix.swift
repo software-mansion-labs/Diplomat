@@ -181,14 +181,12 @@ public enum AgentDispatchGate {
     /// its bay or budget, and a freed bay frees no space, so it is the hold the feed
     /// should name.
     ///
-    /// Capacity arrives as its two halves: `atCapacity` is this device running its cap,
-    /// `paused` is the operator holding the work (a paused item, or the queue's auto-run
-    /// off). Either one is `.atCapacity`.
+    /// `paused` is the operator holding the work (a paused item, or auto-run off), and
+    /// reads as `.atCapacity`.
     ///
-    /// With `network` on the job is offered to a pool and some other machine may run
-    /// it, so nothing about this device as an executor is asked: its disk, its cap and
-    /// its budget reach the daemon through `NetworkAdmit` instead. `paused` still
-    /// holds, being a statement about the work and not about the machine.
+    /// With `network` another machine may run the job, so this device's disk, cap and
+    /// budget are not asked (they reach the daemon through `NetworkAdmit`); `paused`
+    /// still holds, being about the work and not the machine.
     public static func decide(source: Source, banned: Bool, agentOnPR: Bool,
                               atCapacity: Bool,
                               unaffordable: Bool = false,
@@ -337,8 +335,7 @@ public enum AgentDispatchGate {
     /// which it meant.
     public static let unitPct = "pct"
     public static let unitUsd = "usd"
-    /// All of a rate-limit window, in `unitPct`: the most one task can be asked to fit
-    /// inside.
+    /// All of a rate-limit window, in `unitPct`.
     public static let wholeWindowPct = 100.0
 
     /// The configured confidence, snapped to a level `budgetConfidenceZ` has a
@@ -439,9 +436,8 @@ public enum AgentDispatchGate {
     /// priced a task yet.
     ///
     /// So does a rate limit whose task is priced above the whole window
-    /// (`wholeWindowPct`). No window could ever cover that, so held to it nothing would
-    /// start until the counts behind the price left the ledger's lookback, and one
-    /// count far beyond what a task can spend is all it takes to put the price there.
+    /// (`wholeWindowPct`): no window could cover it, so one outlier count in the ledger
+    /// would hold all work until it left the lookback.
     ///
     /// A ceiling with **no reading at all** is skipped, and a call where none has one
     /// is affordable. That is deliberate: a usage probe can be switched off

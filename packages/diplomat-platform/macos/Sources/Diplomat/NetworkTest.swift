@@ -3,19 +3,10 @@ import AppKit
 import SwiftUI
 import DiplomatCore
 
-/// `DIPLOMAT_NETWORK_TEST=1`: the app's half of the Diplomacy Network (the core's is
-/// pinned in `DiplomatCoreSmoke`): what the Store posts to the daemon each cycle, that a
-/// job dispatched with the switch on is offered and never spawned, how an offered run
-/// is drawn, withdrawn, priced and retired, what the switch going off does to the runs
-/// the network still carries, and that the launch sweep ends the retired mesh node and
-/// nothing else.
-///
-/// The daemon is a `FakeDaemon` on a scratch socket (`DN_BASE_DIR`), the installer and
-/// the process table are stand-ins, and the feed, the run book and the shared config
-/// are scratch. It opens no terminal: a dispatch that reached one would be refused and
-/// counted (`AgentSpawner.refusedTerminals`), which is what the zero-spawn checks read.
+/// `DIPLOMAT_NETWORK_TEST=1`: the app's half of the Diplomacy Network (the core's is in
+/// `DiplomatCoreSmoke`). A dispatch that reached a terminal is refused and counted
+/// (`AgentSpawner.refusedTerminals`), which is what the zero-spawn checks read.
 enum NetworkTest {
-    /// What the stand-in daemon answers with, changed between checks.
     private final class Script: @unchecked Sendable {
         private let lock = NSLock()
         private var snapshot: [String: Any] = [:]
@@ -29,20 +20,16 @@ enum NetworkTest {
             snapshot = doc
         }
 
-        /// How many requests `route` has had.
         func count(_ route: String) -> Int {
             lock.lock(); defer { lock.unlock() }
             return asked[route] ?? 0
         }
 
-        /// Answer `route` with this status and error until cleared with nil.
         func refuse(_ route: String, _ answer: (Int, String)?) {
             lock.lock(); defer { lock.unlock() }
             refusals[route] = answer
         }
 
-        /// Answer the offers about `item` with this status and error until cleared with
-        /// nil.
         func refuseOffer(item: String, _ answer: (Int, String)?) {
             lock.lock(); defer { lock.unlock() }
             refusedItems[item] = answer
@@ -67,7 +54,6 @@ enum NetworkTest {
         }
     }
 
-    /// Records what a stand-in was asked.
     private final class Calls<T>: @unchecked Sendable {
         private let lock = NSLock()
         private var items: [T] = []
@@ -89,7 +75,7 @@ enum NetworkTest {
             if !ok { pass = false }
         }
 
-        // Short, because a unix socket path has about a hundred bytes.
+        // Short: a unix socket path has about a hundred bytes.
         let scratch = FileManager.default.temporaryDirectory
             .appendingPathComponent("dn-\(getpid())")
         try? FileManager.default.removeItem(at: scratch)
@@ -108,8 +94,7 @@ enum NetworkTest {
         setenv(DiskFloor.envOverride, "0", 1)
         AgentProbes.pinDump(.present(""))
         defer { AgentProbes.pinDump(nil) }
-        // A `gh` that answers nothing and notes what it was asked: a retired review run
-        // has its review checked on GitHub.
+        // A retired review run asks `gh` about its review.
         let ghLog = scratch.appendingPathComponent("gh.log")
         let gh = scratch.appendingPathComponent("gh")
         try? "#!/bin/sh\necho \"$*\" >> '\(ghLog.path)'\nexit 1\n"
@@ -141,9 +126,6 @@ enum NetworkTest {
 
         // MARK: the launch sweep
 
-        // 1. The node the mesh directory's state.json names is ended while its argv is
-        //    `-m szpontnet`, each a whole element, and the directory goes once it has
-        //    quit. No other process is signalled, whatever its argv.
         let own = Int(getpid())
         let argvs: [Int: [String]] = [
             1: ["python3", "-m", "szpontnet"],
@@ -155,7 +137,7 @@ enum NetworkTest {
             4006: ["/bin/zsh", "-c", "python3 -m szpontnet"],
             4007: ["python3", "-m", "szpontnet"],
             own: ["python3", "-m", "szpontnet"],
-            // No pid a process can have, whatever answers for it.
+            // Bait for the malformed pids below.
             0: ["python3", "-m", "szpontnet"], -1: ["python3", "-m", "szpontnet"],
             7: ["python3", "-m", "szpontnet"],
             2_147_483_648: ["python3", "-m", "szpontnet"],
@@ -253,8 +235,6 @@ enum NetworkTest {
         check("once it has quit, the directory goes",
               !meshThere() && feedDetails(NetworkAudit.stop).last
                 == "Removed \(meshDir.path), the retired mesh's state and keys")
-        //    A directory that is a link loses the link: what it leads to is not
-        //    Diplomat's to delete, and the feed says which of the two went.
         let behind = scratch.appendingPathComponent("mesh-elsewhere")
         DiplomacyNetwork.terminate = { ended.add($0); return true }
         for (pid, node, signalled) in [
@@ -323,7 +303,7 @@ enum NetworkTest {
         let socket = DiplomacyNetwork.package.socketPath
         var daemon = FakeDaemon(path: socket, answering: true) { script.respond($0, $1) }
         check("the stand-in daemon listens on the scratch socket", daemon != nil)
-        // Every request since the test began: a daemon stood up again starts a new list.
+        // A restarted FakeDaemon starts a new request list.
         var earlier: [(String, [String: Any])] = []
         func requests(_ route: String) -> [[String: Any]] {
             (earlier + (daemon?.requests ?? [])).filter { $0.0 == route }.map(\.1)
@@ -339,11 +319,8 @@ enum NetworkTest {
         defer { daemon?.stop() }
 
         let installer = Calls<String>()
-        // The withdrawals the daemon had heard each time it was told to stop.
         let withdrawnAtStop = Calls<Int>()
-        // The offers and runs the next stop finds left in the store.
         let leftInStore = Calls<(Int, Int)>()
-        // What the installer answers as its error, with no daemon running; "" for none.
         let installerError = Calls<String>()
         DiplomacyNetwork.installerForSelfTest = { verb in
             installer.add(verb)
@@ -361,13 +338,11 @@ enum NetworkTest {
         }
         defer { DiplomacyNetwork.installerForSelfTest = nil }
 
-        // 2. Off, nothing is asked of the daemon, by the cycle or by a tick.
         await store.runNetworkCycleOnce()
         await store.settleAgents()
         check("with the switch off the daemon is asked nothing",
               (daemon?.requests ?? []).isEmpty && store.networkAnswered == nil)
 
-        // 3. Switching on writes the key, runs the installer's start and says so.
         store.networkEnabled = true
         await store.networkLifecycle?.value
         check("switching on saves networkEnabled to config.json",
@@ -378,8 +353,6 @@ enum NetworkTest {
         check("…and the daemon's snapshot is published",
               store.networkAnswered == true && store.networkState?.pk == here)
 
-        // 4. `pools` says every linked repository; one that cannot be confirmed holds
-        //    back its own pool alone, which stays as the daemon has it.
         func postedPools() -> [String] {
             ((requests(NetworkRoute.pools).last?["pools"] as? [[String: String]]) ?? [])
                 .map { $0["id"] ?? "" }
@@ -423,8 +396,6 @@ enum NetworkTest {
                 + "is asked after",
               poolsPosted() == 2 && store.networkCycle.identitiesAskedAt == 0)
 
-        //    A root that cannot be read keeps its pool as the daemon has it; one that
-        //    was read and names no forge is no pool. Neither holds another pool back.
         let labPool = "gitlab.example.com/acme/api"
         store.pinRoots([root, lab], linked: [lab], unread: [root.path])
         await store.runNetworkCycleOnce()
@@ -441,9 +412,6 @@ enum NetworkTest {
         store.pinRoots([root, lab])
         await store.runNetworkCycleOnce()
 
-        //    An OTHER REPOS checkout that cannot be read keeps the pool the daemon has
-        //    for it until it can be, or is taken off the list; one that names no forge
-        //    is left out.
         func git(_ arguments: String...) {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
@@ -512,8 +480,6 @@ enum NetworkTest {
                     "Left github.com/acme/tool: \(gone) is no longer listed in Settings"))
         script.set(snapshot())
 
-        //    A list the daemon refuses is said once, shown, and sent again as it is no
-        //    more often than admit; one it did not settle is sent on the next cycle.
         git("-C", bare, "remote", "set-url", "origin", "https://github.com/acme/scratch.git")
         let refusedAt = Date().timeIntervalSince1970
         let unavailableBefore = feedDetails(NetworkAudit.unavailable).count
@@ -546,8 +512,6 @@ enum NetworkTest {
         store.localRepoPaths = []
         await store.runNetworkCycleOnce()
 
-        // 5. `admit` is the cap less what runs here, said again when it changes and
-        //    once a minute, and withheld for the reasons the local gate holds a job.
         func lastAdmit() -> [String: Any] { requests(NetworkRoute.admit).last ?? [:] }
         func admitIs(_ slots: Int, _ reason: String? = nil) -> Bool {
             lastAdmit()["slots"] as? Int == slots && lastAdmit()["reason"] as? String == reason
@@ -581,7 +545,6 @@ enum NetworkTest {
         await store.runNetworkCycleOnce(now: t0 + 205)
         check("…and the cap is admitted again once neither holds", admitIs(3))
 
-        // 6. A daemon that started since has heard neither.
         daemonPid = 701
         script.set(snapshot())
         let (poolsBefore, admitsBefore) = (requests(NetworkRoute.pools).count,
@@ -617,7 +580,6 @@ enum NetworkTest {
         }
         let refusedBefore = AgentSpawner.refusedTerminals
 
-        // 7. One offer, no spawn, and a run booked under the offer's task id.
         let offered = await store.dispatchAgent(job(90210), source: .auto)
         let body = requests(NetworkRoute.offer).last ?? [:]
         check("an automatic job with the switch on is offered", isOffered(offered))
@@ -645,9 +607,7 @@ enum NetworkTest {
               await store.dispatchAgent(job(90210), source: .auto) == .inFlight
                 && requests(NetworkRoute.offer).count == 1)
 
-        // 8. The row follows the daemon's word on the offer. A row has every member the
-        //    daemon's `rows()` lists (`packages/diplomacy-network/src/node/offers.js`),
-        //    `executorHere` being whether the executor is this machine.
+        // Every member of the daemon's `rows()` (`packages/diplomacy-network/src/node/offers.js`).
         func offerRow(_ task: String, _ state: String, executor: String = "",
                       reason: String = "", outcome: [String: Any]? = nil,
                       kind: String = NetworkOffer.kindReview, item: String = "") -> [String: Any] {
@@ -672,8 +632,7 @@ enum NetworkTest {
         check("a run the network carries holds no bay of the local cap",
               store.autoTasksMeasured == 0)
 
-        // 9. A daemon that does not answer is no evidence: the run stays, past the grace
-        //    an offer the pool never took is given.
+        // Aged past an untaken offer's grace: only the silent daemon keeps the run.
         _ = AgentRegistry.update { book in
             book.map { r in
                 var r = r
@@ -689,8 +648,6 @@ enum NetworkTest {
         check("…and the screen is told the daemon is not answering",
               store.networkAnswered == false && store.networkState == nil)
 
-        // 10. Daemon down: an automatic job is staged back, a panel job gets the
-        //     sentence, and neither starts an agent here.
         let offersBefore = requests(NetworkRoute.offer).count
         let spells = feedDetails(NetworkAudit.unavailable).count
         let down = await store.dispatchAgent(job(90211), source: .auto)
@@ -712,8 +669,7 @@ enum NetworkTest {
               AgentSpawner.refusedTerminals == refusedBefore
                 && AgentRegistry.load().count == 1
                 && requests(NetworkRoute.offer).count == offersBefore)
-        //     Known silent, an automatic job is not offered at all, whatever stands on
-        //     the socket by then: the cycle is what finds the daemon back.
+        // Only the cycle finds the daemon back, whatever stands on the socket meanwhile.
         startDaemon()
         let unseen = await store.dispatchAgent(job(90216), source: .auto)
         check("automatic work is not offered while the daemon is known silent",
@@ -741,7 +697,6 @@ enum NetworkTest {
         stopDaemon()
         store.queuedTasks = []
 
-        // 11. A silent daemon is started again, each try waiting longer.
         let t1 = Date().timeIntervalSince1970 + 1000
         func starts() -> Int { installer.all.filter { $0 == "--start-daemon" }.count }
         let startsBefore = starts()
@@ -759,7 +714,6 @@ enum NetworkTest {
         check("the failed starts are logged once for the silence",
               feedDetails(NetworkAudit.start).count == failuresBefore + 1)
 
-        // 12. The daemon back, a 4xx is the sentence it gave.
         daemonPid = 702
         script.set(snapshot(offers: [offerRow("task-1", "claimed", executor: away)]))
         startDaemon()
@@ -776,8 +730,6 @@ enum NetworkTest {
                                counter: nil, directory: root.path), source: .panel)
                 == .networkRefused("the network runs no sweep jobs"))
 
-        // 13. Finished elsewhere: retired, logged, priced once under the foreign runner,
-        //     and not withdrawn.
         script.set(snapshot(offers: [offerRow("task-1", "done", executor: away, outcome: [
             "ok": true, "summary": "reviewed", "usd": 1.25, "tokens": 42_000,
             "runner": "claude", "model": "claude-opus-4",
@@ -804,8 +756,6 @@ enum NetworkTest {
         check("a review the network finished is checked on GitHub like a local one",
               ghAsked("-f owner=o -f name=r -f me=LatekVO -F number=90210"))
 
-        // 14. Finished here: the outcome's own runner. Failed: logged as failed, and an
-        //     outcome that spent nothing closes no entry.
         check("a second job is offered", isOffered(await store.dispatchAgent(job(90220), source: .auto)))
         script.set(snapshot(offers: [offerRow("task-2", "done", executor: here, outcome: [
             "ok": true, "summary": "", "usd": 0.5, "tokens": 9000, "runner": "claude", "model": "m",
@@ -830,7 +780,6 @@ enum NetworkTest {
               feedDetails(NetworkAudit.failed).first?
                 .hasSuffix("refused by the network: the container exited 137") == true)
 
-        // 15. A merged PR: withdrawn once, then forgotten.
         check("a fourth job is offered", isOffered(await store.dispatchAgent(job(90230), source: .auto)))
         script.set(snapshot(offers: [offerRow("task-4", "claimed", executor: away)]))
         await store.settleAgents()
@@ -844,8 +793,6 @@ enum NetworkTest {
         check("…and leaves the book", booked("task-4") == nil)
         store.pinMergedPRs([])
 
-        // 16. Forgetting a run the pool still holds withdraws it; stopping a task goes
-        //     to its run when this machine has it, else to the offer.
         check("a fifth job is offered", isOffered(await store.dispatchAgent(job(90240), source: .auto)))
         script.set(snapshot(offers: [offerRow("task-5", "pooled")]))
         await store.settleAgents()
@@ -913,7 +860,6 @@ enum NetworkTest {
         script.set(snapshot())
         await store.settleAgents()
 
-        // 17. What holds a network job: a pause. Not a full local cap, not a low disk.
         store.queueAutoRun = false
         setenv(DiskFloor.envOverride, "99999999999999999999", 1)
         let offersHeld = requests(NetworkRoute.offer).count
@@ -938,7 +884,6 @@ enum NetworkTest {
               isOffered(await store.dispatchAgent(job(90252), source: .auto)))
         store.autoTaskLimit = 3
 
-        // 18. The four options are the prompt's own, in both polarities.
         func options(_ verb: String, _ allows: Store.AgentJob.Allows, _ n: Int,
                      prompt: String) async -> [String: Bool]? {
             let j = Store.AgentJob(kind: verb, auditAction: verb, label: "\(verb) · #\(n)",
@@ -1001,7 +946,6 @@ enum NetworkTest {
                 && prs.buildPrompt() != noPRs.buildPrompt()
                 && writes.buildPrompt() != reads.buildPrompt())
 
-        // 19. No path past the gate reaches a terminal while the switch is on.
         var thrown: Error?
         do {
             _ = try await store.spawnTracked(kind: "review", label: "x", prURL: nil, prNumber: nil,
@@ -1012,7 +956,6 @@ enum NetworkTest {
                   if case .network = $0 { return true } else { return false }
               } == true && AgentSpawner.refusedTerminals == refusedBefore)
 
-        // 20. The screen's pool actions.
         check("an invite is asked of the pool and handed back",
               await store.networkInvite(pool: "github.com/o/r") == "dn-invite-1"
                 && requests(NetworkRoute.invite).last?["pool"] as? String == "github.com/o/r"
@@ -1129,7 +1072,6 @@ enum NetworkTest {
                 && seatCards.count == 4
                 && NetworkText.poolNotes(seatCards[2]).map(\.warns) == [true])
 
-        // 21. The hours are kept inside the daemon's range.
         store.networkRequiredMinimumH = 5
         store.networkMaximumAcceptedH = 9999
         check("the hours settings are clamped and saved",
@@ -1155,8 +1097,6 @@ enum NetworkTest {
               !store.networkDevices && !AppConfig.networkDevices
                 && AppConfig.read()[NetworkSettings.devicesKey] == nil)
 
-        //     The screen itself, in a window never ordered on screen: typing goes through
-        //     each field's editor. It asks the daemon nothing of its own here.
         var noPools = snapshot()
         noPools["pools"] = [[String: Any]]()
         script.set(noPools)
@@ -1239,8 +1179,6 @@ enum NetworkTest {
                 + " While it is on, no agent starts in a terminal on this machine. The pools "
                 + "and the hours a job may take are on the Network screen.")
 
-        // 22. An offer whose run cannot be booked is withdrawn, and says why. Every
-        //     network verb has its row symbol.
         let unbookable = scratch.appendingPathComponent("not-a-directory")
         FileManager.default.createFile(atPath: unbookable.path, contents: nil)
         setenv("DIPLOMAT_AGENTS_DIR", unbookable.appendingPathComponent("agents").path, 1)
@@ -1260,9 +1198,6 @@ enum NetworkTest {
                     .allSatisfy { AuditRow.icon(for: $0) == "exclamationmark.triangle.fill" }
                 && AuditRow.icon(for: "network-unheard-of") == "circle.fill")
 
-        // 23. Off again: what the network still carries is withdrawn and retired as
-        //     failed before the daemon is stopped, and what it had finished is retired on
-        //     its outcome.
         _ = AgentRegistry.forget(Set(AgentRegistry.load().map(\.runID)))
         func taskOf(_ n: Int) -> String {
             AgentRegistry.load().first { $0.prNumber == n }?.network ?? "no run for #\(n)"
@@ -1279,7 +1214,6 @@ enum NetworkTest {
         check("three runs are booked and listed",
               AgentRegistry.load().count == 3 && row(pooledTask) != nil
                 && row(claimedTask) != nil && row(doneTask) != nil)
-        // A ping that took a run's start, as Comms logs it.
         func ping(_ n: Int, startedBy task: String) -> String {
             let ts = "17000\(n).000100"
             let m = CommsMessage(id: "D0ALICE:\(ts)", channelID: "D0ALICE", channelName: "U0ALICE",
@@ -1293,7 +1227,6 @@ enum NetworkTest {
         let askPooled = ping(90260, startedBy: pooledTask)
         let askDone = ping(90262, startedBy: doneTask)
         store.refreshComms()
-        // Each run answers a review request, as the monitor's attempt records have it.
         func reviewAsks() -> [String: ReviewAttempt] {
             store.headlessJSON?["reviewReqAttempts"]
                 .flatMap { try? JSONDecoder().decode([String: ReviewAttempt].self, from: $0) } ?? [:]
@@ -1304,7 +1237,7 @@ enum NetworkTest {
                 ("o/r#\($0)", ReviewAttempt(requestedAt: "2026-01-01T00:00:00Z",
                                             lastDispatchedAt: Date(), attempts: 1))
             }))
-        // The third finishes unseen: the settle the switch takes is the one that finds it.
+        // The third finishes unseen: only the switch-off settle finds it.
         script.set(snapshot(offers: [
             offerRow(pooledTask, "pooled"), offerRow(claimedTask, "claimed", executor: away),
             offerRow(doneTask, "done", executor: away, outcome: [
@@ -1364,8 +1297,6 @@ enum NetworkTest {
                 && AgentSpawner.refusedTerminals == refusedBefore + 1
                 && requests(NetworkRoute.offer).count == offersOff)
 
-        // 24. A network run found in the book while the switch is off is withdrawn and
-        //     leaves it at the next settle; with none there the daemon is asked nothing.
         func bookByHand(_ n: Int, task: String) {
             let at = Date().timeIntervalSince1970
             AgentRegistry.createRun(
@@ -1414,8 +1345,6 @@ enum NetworkTest {
         check("…after which the daemon is asked nothing, the switch being off",
               asked() == askedBefore && store.networkState == nil)
 
-        // 25. On again, a task the switch retired is announced afresh; and a daemon that
-        //     does not answer as the switch goes off holds nothing back.
         store.networkEnabled = true
         await store.networkLifecycle?.value
         bookByHand(90274, task: claimedTask)
@@ -1469,8 +1398,6 @@ enum NetworkTest {
         for (answer, line) in stopAnswers {
             check("a stop that answers \(answer) is said as \(line)", stopped(answer) == line)
         }
-        // The installer's own sentences: it starts no daemon while the network is off,
-        // and a stop that could not remove a directory left no daemon all the same.
         let startOff = "the network is switched off in Diplomat's settings: no daemon was started"
         let stopLeft = "/h/ca and /h/runs could not be removed. The next --stop-daemon tries again."
         installerError.add(startOff)
@@ -1492,11 +1419,6 @@ enum NetworkTest {
                 && installer.all.filter { $0 == "--stop-daemon" }.count == stopsBeforeLeft + 1)
         installerError.add("")
 
-        // 26. An ask is answered by work that ran, not by its offer. Offered, it stands
-        //     marked and is not offered twice; its run finishing forgets it, and so does
-        //     the operator taking the offer back, and the network giving it up with its
-        //     attempts used; one whose offer ended unrun - its pool closed, or withdrawn
-        //     as the switch goes off - is as it was, for the next drain.
         startDaemon()
         script.set(snapshot())
         store.networkEnabled = true
@@ -1609,10 +1531,6 @@ enum NetworkTest {
                 && requests(NetworkRoute.offer).count == offersAsked
                 && store.requestedWork.map(\.number) == [90280, 90281])
 
-        // 26b. The Pipeline's asks the network carries. A Linear fix whose text changed is
-        //      not queued again while its offer stands: a second offer would be a second
-        //      fix. An ask the pipeline no longer owes takes back its offer, if the network
-        //      still holds it.
         store.queuedTasks = []
         store.requestedWork = []
         store.networkEnabled = true
@@ -1677,8 +1595,6 @@ enum NetworkTest {
         store.networkEnabled = false
         await store.networkLifecycle?.value
 
-        // 27. The settings are the shared file's: written there by another process, they
-        //     are followed on the next cycle, the switch as one moved here is.
         store.queuedTasks = []
         store.requestedWork = []
         script.set(snapshot())
@@ -1705,8 +1621,6 @@ enum NetworkTest {
         check("…none of them written back",
               AppConfig.read()[NetworkSettings.requiredMinimumHKey] as? Double == 35.5)
 
-        // 28. Devices: the setting is the daemon's `networkDevices`, and the snapshot's
-        //     word on them is drawn as it changes.
         store.networkDevices = false
         let devicesOff = AppConfig.read()[NetworkSettings.devicesKey] as? Bool
         store.networkDevices = true
@@ -1735,7 +1649,6 @@ enum NetworkTest {
                     + "machine is in: switch it on only when you trust all their machines with "
                     + "that. Either way it applies to jobs started afterwards.")
 
-        // 29. What the screen's buttons say they do.
         check("a restart is said to leave the jobs running",
               NetworkText.restartHelp == "Stop the running daemon and start this checkout's. "
                 + "Jobs running in containers here keep running, and the daemon that starts "
@@ -1749,8 +1662,6 @@ enum NetworkTest {
         }
         script.set(snapshot())
 
-        // 30. A job in a directory that is no linked repository's is offered nowhere; one
-        //     that names no directory works in the primary root.
         func audit(in directory: String?) -> Store.AgentJob {
             Store.AgentJob(kind: "audit", auditAction: "audit", label: "Audit", prompt: "audit it",
                            prURL: nil, prNumber: nil, authorLogin: nil, counter: nil,
@@ -1766,8 +1677,6 @@ enum NetworkTest {
               isOffered(await store.dispatchAgent(audit(in: nil), source: .panel))
                 && requests(NetworkRoute.offer).last?["pool"] as? String == "github.com/o/r")
 
-        //     A linked repository on a host the network has no rules for has no pool, the
-        //     screen is told why, and none of its jobs is offered.
         let cloud = PRRef.LocalRepo(owner: "acme", repo: "cloud",
                                     path: scratch.appendingPathComponent("cloud").path,
                                     host: "acme.ghe.com")
@@ -1789,8 +1698,6 @@ enum NetworkTest {
         await store.runNetworkCycleOnce()
         check("…and off the list it is named no more", store.networkPoolsHeld.isEmpty)
 
-        // 31. A request body is not an argument of curl: one longer than an argument list
-        //     may be arrives whole.
         let long = String(repeating: "x", count: 1_200_000)
         let longReply = await Task.detached {
             DiplomacyNetwork.post(NetworkRoute.offer, ["pool": "p", "prompt": long])
@@ -1801,8 +1708,6 @@ enum NetworkTest {
               tookLong && (requests(NetworkRoute.offer).last?["prompt"] as? String)?.count
                 == long.count)
 
-        // 32. A job is this machine's when the ended offer says its executor is, and no
-        //     one's here when the attempts ran out with nobody holding it.
         check("an offer row has the members the daemon lists",
               Set(offerRow("t", "pooled").keys) == [
                 "taskId", "pool", "kind", "item", "title", "state", "executor", "executorHere",
@@ -1824,8 +1729,6 @@ enum NetworkTest {
         check("an outcome nobody held when the attempts ran out is not this machine's",
               await runnerBooked(90298, "failed", executor: "") == DiplomacyNetwork.foreignRunner)
 
-        // 33. A merged run's withdrawal is final only on a definite answer: a 5xx is
-        //     asked again, a refusal is not.
         var merging = ""
         if case .offered(let task) = await store.dispatchAgent(job(90299), source: .auto) {
             merging = task
@@ -1857,9 +1760,6 @@ enum NetworkTest {
         script.refuse(NetworkRoute.withdraw, nil)
         store.pinMergedPRs([])
 
-        // 34. An offer of the operator's the daemon gave no definite answer to is kept:
-        //     booked when the snapshot lists it, offered again when it does not, dropped
-        //     with the sentence when refused, withdrawn when the switch goes off.
         func item(_ n: Int) -> String {
             NetworkOffer.item(kind: NetworkOffer.kindReview, number: n, prompt: "review \(n)")
         }
@@ -1907,7 +1807,6 @@ enum NetworkTest {
         _ = await store.dispatchAgent(job(90306), source: .panel)
         script.refuse(NetworkRoute.offer, nil)
         script.set(snapshot(offers: [offerRow("task-off", "pooled", item: item(90305))]))
-        // Switched off by another process: followed, and the offer it held withdrawn.
         storeRaw(NetworkSettings.enabledKey, false)
         await store.runNetworkCycleOnce()
         await store.networkLifecycle?.value
@@ -1922,9 +1821,6 @@ enum NetworkTest {
               feedDetails(NetworkAudit.unavailable).last
                 == "Review-req · #90306 was not offered: \(DiplomacyNetwork.switchedOff)")
 
-        // 35. A job the daemon refuses for a reason of the job's own waits on its row
-        //     with the reason, said once, and the queue goes on past it; a daemon that
-        //     takes no job stops the queue and marks no row.
         store.networkEnabled = true
         await store.networkLifecycle?.value
         script.set(snapshot())
@@ -1993,7 +1889,7 @@ enum NetworkTest {
         await store.drainQueuedTasks(snaps: [], closed: [])
         store.commitQueue()
         let waiting = store.networkJobRefusals
-        // A cycle that offers the job no more: its row goes.
+        // The next cycle no longer offers the job.
         store.commitQueue()
         check("a row that left the queue takes its reason with it",
               waiting == ["Review-req · #90405": noRules] && store.queuedTasks.isEmpty
@@ -2020,9 +1916,6 @@ enum NetworkTest {
         store.commitQueue()
         store.queuedTasks = []
 
-        // 37. What of the network does not work here is the panel's line: nothing while
-        //     it is off or coming up, each failed service with the daemon's detail, and a
-        //     daemon that does not answer.
         check("switched off, the panel says nothing of the network", store.networkTrouble == nil)
         script.set(snapshot())
         store.networkEnabled = true
@@ -2046,7 +1939,6 @@ enum NetworkTest {
         await store.networkLifecycle?.value
         check("…and switched off again, nothing is", store.networkTrouble == nil)
 
-        // 41. A restart asked for while the daemon is being started or stopped is dropped.
         store.networkEnabled = true
         await store.networkLifecycle?.value
         let installsBefore = installer.all.count
@@ -2059,8 +1951,6 @@ enum NetworkTest {
         check("…and one asked for after it runs",
               installer.all.count == installsBefore + 1)
 
-        // 42. A socket nothing listens on was not reached, which an offer may rely on:
-        //     no answer from a daemon that was reached leaves the offer in doubt.
         stopDaemon()
         let staleSocket = FakeDaemon.stale(path: socket)
         let unheard = await Task.detached {
@@ -2072,7 +1962,6 @@ enum NetworkTest {
         check("a request to a socket file nothing listens on was not delivered",
               staleSocket && notReached)
 
-        // 43. A pass begun before the switch went off says nothing of the daemon as it is.
         script.set(snapshot(offers: [offerRow("task-stale", "claimed", executor: away)]))
         bookByHand(90430, task: "task-stale")
         let claimedBefore = feedDetails(NetworkAudit.claimed).count
@@ -2085,15 +1974,12 @@ enum NetworkTest {
                 && store.networkState == nil && store.networkAnswered == nil
                 && feedDetails(NetworkAudit.claimed).count == claimedBefore)
 
-        // 39. The hours say when they leave this machine none of its own jobs.
         check("hours that leave this machine none of its own jobs say so",
               NetworkText.hoursNote(required: 48, accepted: 48) == nil
                 && NetworkText.hoursNote(required: 72, accepted: 48)
                     == "This machine takes none of its own jobs: one may take 72 h, and the "
                         + "longest job it takes is 48 h.")
 
-        // 40. A git call that hangs is ended at its budget, and reads as a checkout git
-        //     failed on.
         let realGit = LocalRepos.gitCall
         let hung = scratch.appendingPathComponent("hung-git")
         try? Data("#!/bin/sh\nexec sleep 30\n".utf8).write(to: hung)
@@ -2108,9 +1994,6 @@ enum NetworkTest {
         check("…and the real one still reads the checkout",
               LocalRepos.readRemotes(of: bare)?.contains("github.com/acme/") == true)
 
-        // 38. A config that is there and cannot be read says nothing: the switch stays
-        //     as it was last read, nothing is withdrawn, retired or started on it, and
-        //     no setting is written over the file.
         script.set(snapshot(offers: [offerRow("task-cfg", "pooled")]))
         store.networkEnabled = true
         await store.networkLifecycle?.value
@@ -2205,8 +2088,6 @@ enum NetworkTest {
         try? FileManager.default.moveItem(at: aside, to: AppConfig.url)
         await store.runNetworkCycleOnce()
 
-        //    Deleted for good, it is the defaults once gone as long as the daemon takes
-        //    to read it as switched off.
         check("the grace runs on uptime, which no wall-clock step moves",
               abs(AppConfig.clock() - ProcessInfo.processInfo.systemUptime) < 1)
         var uptime: TimeInterval = 1000
@@ -2272,9 +2153,6 @@ enum NetworkTest {
         check("…and the settings are known again",
               store.networkTrouble == nil && !screenShows(NetworkSettings.unknownNote(unknown)))
 
-        // 44. The switch is on record beside the config as each reading had it: a
-        //     Diplomat that starts while the config cannot be read takes that for the
-        //     switch, starts no agent in a terminal and takes no offer back.
         let switchRecord = AppConfig.url.deletingLastPathComponent()
             .appendingPathComponent("network-switch.json")
         func isRecorded(_ on: Bool) -> Bool {
@@ -2352,8 +2230,6 @@ enum NetworkTest {
               fresh.networkEnabled && isRecorded(true)
                 && (try? Data(contentsOf: AppConfig.url)) == launchWhole.dropLast(3))
 
-        // 45. Read again, the roots are the config's own and not the default root's:
-        //     the pools list is said from them, through the real reading of the roots.
         func linkedPosted() -> Bool {
             requests(NetworkRoute.pools).last?["pools"] as? [[String: String]]
                 == [["id": "github.com/o/linked", "path": linked, "forge": "github",
@@ -2372,9 +2248,6 @@ enum NetworkTest {
         check("…the cap being the file's and not a default's, as the roots Settings shows are",
               fresh.autoTaskLimit == 5 && fresh.repoRootPaths == [linked]
                 && requests(NetworkRoute.admit).last?["slots"] as? Int == 5)
-        //     One that breaks while Diplomat runs: the roots read meanwhile are the
-        //     default root's, and no list of them is posted - on the timer, with the
-        //     screen open, or after a restart of the daemon.
         let saidWhileRead = saidOf()
         func linkedLeft() -> Int {
             feedDetails(NetworkAudit.leave).filter { $0.contains("o/linked") }.count
@@ -2411,7 +2284,7 @@ enum NetworkTest {
         check("…and is on the first cycle once the config reads, no wait run up meanwhile",
               starts() == startsWhileUnknown + 1)
         startDaemon()
-        //     One that breaks while the roots are read, by the git that reads them.
+        // A git that breaks the config as it reads the roots.
         let breaker = scratch.appendingPathComponent("git-breaks-config")
         try? Data("#!/bin/sh\nprintf '{' > '\(AppConfig.url.path)'\nexec \(realGit.path) \"$@\"\n".utf8)
             .write(to: breaker)
@@ -2429,8 +2302,6 @@ enum NetworkTest {
               saidOf()[0] == saidWhileRead[0] + 1 && linkedPosted()
                 && requests(NetworkRoute.admit).last?["slots"] as? Int == 5
                 && linkedLeft() == leftWhileRead)
-        //     One that breaks with the roots as they were last read, under a daemon
-        //     that started since and has heard nothing: it is told nothing either.
         let saidRead = saidOf()
         try? launchWhole.dropLast(3).write(to: AppConfig.url)
         daemonPid += 1
@@ -2445,8 +2316,6 @@ enum NetworkTest {
               saidOf()[0] == saidRead[0] + 1 && saidOf()[1] == saidRead[1] + 1
                 && linkedPosted())
 
-        // 46. With no switch on record a config that cannot be read is no network at
-        //     all: a job starts in a terminal, and the daemon is asked nothing.
         fresh.networkEnabled = false
         await fresh.networkLifecycle?.value
         check("switched off, the record says so", isRecorded(false))

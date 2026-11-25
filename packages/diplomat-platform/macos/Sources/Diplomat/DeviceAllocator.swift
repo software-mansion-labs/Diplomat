@@ -230,8 +230,7 @@ struct AllocatorInstall: Decodable, Equatable {
     /// What went wrong, when the installer says (a restart whose old daemon never exited,
     /// a start beside a daemon that does not answer).
     var error: String?
-    /// The offers and runs a Diplomacy Network `--stop-daemon` ended in the store its
-    /// daemon had left them in.
+    /// What a Diplomacy Network `--stop-daemon` ended in the store its daemon left.
     var endedOffers = 0
     var endedRuns = 0
 

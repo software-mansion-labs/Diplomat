@@ -384,7 +384,7 @@ struct SettingsCard<Content: View>: View {
                     .font(.system(size: 9, weight: .bold)).foregroundStyle(tint)
                     .frame(width: 17, height: 17)
                     .background(RoundedRectangle(cornerRadius: 5).fill(tint.opacity(0.16)))
-                // A pool's card is titled by its id, which an invite can name.
+                // Verbatim: a pool's id, the title here, comes from an invite.
                 Text(verbatim: title).font(.system(size: 10, weight: .heavy)).kerning(0.6)
                     .foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 6)

@@ -467,7 +467,7 @@ struct ContentView: View {
         /// key, so the row keeps its identity across the change and animates into
         /// its new place instead of one row vanishing as another appears.
         case starting(Store.QueuedAgentTask)
-        /// A job of the operator's whose offer to the network is not answered yet.
+        /// A job whose offer the network has not answered yet.
         case offering(Store.OfferingJob)
         /// An empty slot of the device's cap. Carries its position only, which is all
         /// that distinguishes one from another.
@@ -536,8 +536,7 @@ struct ContentView: View {
                           expanded: $tasksExpanded,
                           icon: "antenna.radiowaves.left.and.right",
                           caption: caption.isEmpty ? nil : caption)
-            // Above the fold of the section: with the network on, every row below waits
-            // on what this line says does not work.
+            // First: with the network on, every row below waits on what this says is broken.
             if let trouble = store.networkTrouble {
                 NetworkTroubleRow(text: trouble) {
                     withAnimation(.easeInOut(duration: 0.15)) { screen = .network }
@@ -593,8 +592,7 @@ struct ContentView: View {
     private func agentTaskTint(_ kind: String) -> Color { DiplomatUI.agentTaskTint(kind) }
 
     /// Click a row: focus its window. If focus fails the window is gone and the row is
-    /// dismissed by the store - nothing more to do here. A run the network carries has no
-    /// window on this machine, and opens the Network screen, where its task is.
+    /// dismissed by the store - nothing more to do here.
     private func activate(_ row: Store.AgentRow) {
         guard row.record.runsHere else {
             withAnimation(.easeInOut(duration: 0.15)) { screen = .network }
@@ -953,8 +951,8 @@ private struct AgentRunRow: View {
         HStack(spacing: 3) {
             AgentTaskStatusLabel(status: row.status)
             // WHY nothing is known: what to go and fix, a revoked automation permission
-            // say, is named only there. A run the network carries always says where it
-            // is, there being no window to look in, and how long since it was offered.
+            // say, is named only there. A network run always says where it is: it has no
+            // window here to look in.
             if !row.reason.isEmpty {
                 if !row.record.runsHere {
                     TimelineView(.periodic(from: Date(), by: 30)) { ctx in
@@ -1024,8 +1022,7 @@ private struct AgentTaskStatusLabel: View {
     }
 }
 
-/// One line that says the Diplomacy Network does not work here, and opens its screen.
-/// The text is drawn as it is: part of it is the daemon's.
+/// Drawn verbatim: part of the text is the daemon's.
 private struct NetworkTroubleRow: View {
     let text: String
     let open: () -> Void
@@ -1089,8 +1086,7 @@ private struct QueuedTaskRow: View {
     /// Its monitor is switched off, so nothing will start this by itself. Worth
     /// saying on the row: "queued" otherwise promises a start that is never coming.
     let paused: Bool
-    /// Why the Diplomacy Network refused this job, when it refused it for a reason of
-    /// the job's own.
+    /// The network's refusal, when its reason is the job's own.
     let refusal: String?
     let onRun: () -> Void
     /// False for a monitor's row: dropping one would put it straight back on the next
@@ -1237,8 +1233,6 @@ private struct StartingTaskRow: View {
     }
 }
 
-/// A job of the operator's whose offer the Diplomacy Network has not answered: the
-/// starting row, saying where it is.
 private struct OfferingTaskRow: View {
     let held: Store.OfferingJob
     let tint: Color

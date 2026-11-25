@@ -108,12 +108,9 @@ enum AppConfig {
     /// or hand-edited file must degrade to defaults, never break a spawn.
     static func read() -> [String: Any] { parsed() ?? [:] }
 
-    /// The whole file, `[:]` when there is none and never was, or nil: one is there and
-    /// cannot be read as a JSON object, or one was there and has been gone for less than
-    /// `NetworkSettings.configGoneGrace` - an editor that saves by renaming a new file
-    /// into place leaves none for a moment. Gone longer, it is forgotten (`forget`) and
-    /// reads as never there. Nil says nothing: a caller that must not take a default for
-    /// an answer keeps what it last read (`unreadable`). Python twin:
+    /// `[:]` when no file ever was. Nil when one is there but is no JSON object, or went
+    /// missing less than `NetworkSettings.configGoneGrace` ago (an editor saving by rename
+    /// leaves none for a moment); nil means keep what was last read. Python twin:
     /// `appconfig.read_known`.
     static func parsed() -> [String: Any]? {
         let path = url.path
@@ -135,29 +132,23 @@ enum AppConfig {
         return absent && !wasThere ? [:] : nil
     }
 
-    /// The configs this process read, by path, and when each that was there was first
-    /// found gone, on `clock`.
     private static var readPaths: Set<String> = []
     private static var goneSince: [String: TimeInterval] = [:]
     private static var forgottenCount = 0
     private static let readPathsLock = NSLock()
-    /// Seconds on a clock that only moves forward; a self-test moves it by hand.
+    /// Monotonic; a self-test moves it by hand.
     static var clock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
 
-    /// How many times a config that was there has been gone past
-    /// `NetworkSettings.configGoneGrace` in this process, and been forgotten.
     static var forgottenConfigs: Int {
         readPathsLock.lock()
         defer { readPathsLock.unlock() }
         return forgottenCount
     }
 
-    /// Read `url` as never there from now on: not by this process, and not by the switch
-    /// record, which is removed when it names it.
     private static func forget() {
         if switchRecord?["config"] as? String == url.path {
             do { try FileManager.default.removeItem(at: switchRecordURL) } catch {
-                // A record that stays keeps the config unknown: try again next read.
+                // A record left behind keeps the config unknown: retry next read.
                 guard (error as? CocoaError)?.code == .fileNoSuchFile else { return }
             }
         }
@@ -168,7 +159,6 @@ enum AppConfig {
         readPathsLock.unlock()
     }
 
-    /// Whether a config was at `url`: this process read one, or the switch record names it.
     private static var wasThere: Bool {
         readPathsLock.lock()
         let read = readPaths.contains(url.path)
@@ -176,7 +166,6 @@ enum AppConfig {
         return read || switchRecord?["config"] as? String == url.path
     }
 
-    /// The file as a JSON object, else nil; and whether there is no file.
     private static func load() -> (object: [String: Any]?, absent: Bool) {
         let data: Data
         do { data = try Data(contentsOf: url) } catch {
@@ -185,8 +174,6 @@ enum AppConfig {
         return ((try? JSONSerialization.jsonObject(with: data)) as? [String: Any], false)
     }
 
-    /// The file's keys, for a read-modify-write: none when there is no file, nil for a
-    /// file that is there and cannot be parsed, as a write would drop every key it holds.
     private static func editable() -> [String: Any]? {
         let (object, absent) = load()
         return object ?? (absent ? [:] : nil)
@@ -194,10 +181,8 @@ enum AppConfig {
 
     static var unreadable: Bool { parsed() == nil }
 
-    /// The feed's line for a config `parsed` forgot.
     static var goneNote: String { "\(url.path) is gone: settings are the defaults" }
 
-    /// The feed's line for a file that is there and `unreadable`.
     static var unreadableNote: String {
         "\(url.path) cannot be read as settings: nothing is saved over it, and the "
             + "Diplomacy Network switch stays as it was last read"
@@ -218,10 +203,9 @@ enum AppConfig {
 
     /// Read-modify-write, atomically (Foundation writes to a temp file and renames), so a
     /// process reading concurrently never sees a torn file. Keys the file already holds
-    /// survive the write. A file that is there and cannot be parsed is not written
-    /// over, by this or any setter here: a write would drop every key it holds. Never
-    /// throws into the UI: that file, like an unwritable HOME, is the `false` it
-    /// returns.
+    /// survive the write; no setter here writes over an unparseable file, which would
+    /// lose them. Never throws into the UI: that file, like an unwritable HOME, returns
+    /// `false`.
     @discardableResult
     static func set(_ key: String, _ value: String) -> Bool {
         guard var obj = editable() else { return false }
@@ -383,13 +367,10 @@ enum AppConfig {
     /// afford it.
     static var autoBudgetGate: Bool { bool(autoBudgetGateKey, fallback: true) }
 
-    /// Whether every job is offered to the Diplomacy Network instead of spawned here. Its
-    /// daemon reads the same key, and exits while it is not `true`.
+    /// The daemon reads this key too, and exits unless it is `true`.
     static var networkEnabled: Bool { bool(NetworkSettings.enabledKey, fallback: false) }
 
-    /// Where the switch is kept as the config last read it, for a Diplomat that starts
-    /// while the config cannot be read: `network-switch.json` beside the config, holding
-    /// `{"config": <the config's path>, "networkEnabled": <the switch>}`. The Linux
+    /// The switch as last read, for a start while the config is unreadable. The Linux
     /// applet keeps the same file.
     static var switchRecordURL: URL {
         url.deletingLastPathComponent().appendingPathComponent("network-switch.json")
@@ -400,7 +381,6 @@ enum AppConfig {
             .flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
     }
 
-    /// Whether `switchRecordURL` has the switch of this config as on.
     static var switchRecorded: Bool {
         guard let record = switchRecord,
               record["config"] as? String == url.path,
@@ -409,7 +389,6 @@ enum AppConfig {
         return on.boolValue
     }
 
-    /// Keep `on` in `switchRecordURL`, atomically.
     static func recordSwitch(_ on: Bool) {
         let data = try? JSONSerialization.data(
             withJSONObject: ["config": url.path, NetworkSettings.enabledKey: on],
@@ -417,22 +396,17 @@ enum AppConfig {
         try? data?.write(to: switchRecordURL, options: .atomic)
     }
 
-    /// The switch as the config has it, and as `switchRecorded` has it while the config
-    /// cannot be read.
     static var networkEnabledLastRead: Bool { unreadable ? switchRecorded : networkEnabled }
 
-    /// `NetworkSettings.unknown` while the config is `unreadable`, else "".
     static var settingsUnknown: String {
         unreadable ? NetworkSettings.unknown(path: url.path) : ""
     }
 
-    /// One of the network's two hour settings, as its daemon reads it.
     static func networkHours(_ key: String) -> Int {
         NetworkSettings.hours(json: read()[key])
     }
 
-    /// Whether a job running on this machine may reach its adb server. The daemon reads
-    /// the same key for each job it starts.
+    /// Whether a job here may reach its adb server; the daemon reads this key per job.
     static var networkDevices: Bool { bool(NetworkSettings.devicesKey, fallback: false) }
 
     /// How sure the gate must be that a task fits before it starts one, as a

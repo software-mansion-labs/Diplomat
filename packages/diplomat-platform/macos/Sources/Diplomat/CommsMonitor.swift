@@ -699,8 +699,8 @@ extension Store {
     ///
     /// A started run whose label no agent row wears any more, and which is not waiting to
     /// run again, has finished: its pings record `finished`, once. One the tick calls
-    /// FAILED never ran instead, and one of `spent` (label to reason), which the network
-    /// gave up with its attempts used, finishes saying so.
+    /// FAILED never ran instead; one in `spent` (label to reason), given up by the network
+    /// with its attempts used, finishes saying so.
     func noteCommsRuns(neverRan: [String: String] = [:], spent: [String: String] = [:]) {
         if let reading = commsLogRead {
             guard !neverRan.isEmpty || !spent.isEmpty else { return }

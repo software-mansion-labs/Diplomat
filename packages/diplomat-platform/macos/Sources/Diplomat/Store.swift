@@ -58,48 +58,43 @@ final class Store: ObservableObject {
     /// Whether the last exclusion change failed to reach config.json.
     @Published private(set) var machineExclusionFailed = false
 
-    /// The Diplomacy Network daemon's last answer to `GET /state`; nil while it does not
-    /// answer, or the switch is off.
+    /// The daemon's last `GET /state` answer; nil while it does not answer, or the switch
+    /// is off.
     @Published var networkState: NetworkSnapshot?
-    /// Whether the daemon answered when it was last asked; nil until it has been.
+    /// nil until the daemon has been asked.
     @Published var networkAnswered: Bool?
     /// `allocatorBusy` for the network daemon's start, restart and stop.
     @Published var networkBusy = false
-    /// What the daemon refused the Network screen's last action with, by the pool panel
-    /// it was made in ("" for the one shown before any pool).
+    /// The daemon's refusal of the Network screen's last action, by pool panel ("" for
+    /// the panel shown before any pool).
     @Published var networkRefusals: [String: String] = [:]
-    /// What of this machine's pools could not be confirmed (`NetworkPools.listing`), and
-    /// the daemon's refusal of the list, a line each; "" for neither.
+    /// The pools that could not be confirmed (`NetworkPools.listing`) and the daemon's
+    /// refusal of the list, a line each; "" for neither.
     @Published var networkPoolsHeld = ""
-    /// The operator's jobs whose offer the daemon was sent and gave no definite answer
-    /// to (`settleOffering`).
+    /// The operator's jobs whose offer got no definite answer (`settleOffering`).
     @Published var networkOffering: [OfferingJob] = []
-    /// What `runNetworkCycleOnce` last posted and when, the daemon it posted to, and when
-    /// it may next start one that is not answering.
     var networkCycle = NetworkCycle()
-    /// The start or stop the switch last asked for; the next one waits for it, so a
-    /// switch flipped twice leaves the daemon as the second flip says.
+    /// The switch's last start or stop; the next awaits it, so two quick flips leave the
+    /// daemon as the second says.
     var networkLifecycle: Task<Void, Never>?
-    /// The offers whose claim the activity feed has named.
+    /// The offers whose claim the feed has logged.
     var networkClaimsLogged: Set<String> = []
-    /// Whether the feed has said the network is refusing automatic work, for the current
-    /// spell of it.
+    /// Once per spell of the network refusing automatic work.
     var networkUnavailableLogged = false
-    /// Whether the feed has said the shared config cannot be read, for the current spell
-    /// of it.
+    /// Once per spell of the shared config being unreadable.
     var configUnreadableLogged = false
-    /// The configs forgotten as gone the feed has said (`AppConfig.forgottenConfigs`).
+    /// `AppConfig.forgottenConfigs` as the feed last logged it.
     var configGoneLogged = AppConfig.forgottenConfigs
-    /// `AppConfig.settingsUnknown` as the launch and each network cycle since found it
-    /// while the switch is on: nothing a setting decides is said to the daemon meanwhile.
+    /// `AppConfig.settingsUnknown` while the switch is on: nothing a setting decides is
+    /// said to the daemon meanwhile.
     @Published private(set) var networkSettingsUnknown: String
-    /// The switch as last held against `AppConfig.switchRecordURL`.
+    /// The switch as last reconciled with `AppConfig.switchRecordURL`.
     private var switchNoted: Bool?
-    /// Whether the cap and the roots' fields are still those of a launch that could not
-    /// read the config: a default each.
+    /// The cap and the roots' fields are still the defaults of a launch that could not
+    /// read the config.
     private var knobsReadBlind = AppConfig.unreadable
-    /// Why the network refused each queued job that it refused for a reason of the job's
-    /// own, by the job's label: what its row says, and what the feed has said.
+    /// Per queued job's label, why the network refused it for a reason of its own: what
+    /// its row says, and what the feed has said.
     @Published var networkJobRefusals: [String: String] = [:]
 
     // MARK: persisted settings
@@ -202,8 +197,8 @@ final class Store: ObservableObject {
     private var rootsLinked: [PRRef.LocalRepo] = []
     private var rootPathsUnread = RepoPaths.rootPaths.map(RepoRoots.expand)
     private var rootsPinned = false
-    /// Whether that reading fell while the config could not be read: its paths are then
-    /// the default root's, and a pools list made of them would close every pool.
+    /// The last reading fell while the config was unreadable: its paths are the default
+    /// root's, and a pools list made of them would close every pool.
     private(set) var rootsReadBlind = AppConfig.unreadable
 
     /// Re-resolve the roots off the main actor, and follow a change with the panel.
@@ -500,9 +495,8 @@ final class Store: ObservableObject {
     }
 
     /// Whether every job is offered to its repository's pool on the Diplomacy Network
-    /// instead of spawned here (Settings → DIPLOMACY NETWORK). In the shared file because
-    /// the network's daemon reads it too, and exits while it is off; written before the
-    /// daemon is started or stopped for that reason.
+    /// instead of spawned here (Settings → DIPLOMACY NETWORK). In the shared file, written
+    /// before the daemon is started or stopped: the daemon reads it, and exits while off.
     @Published var networkEnabled: Bool {
         didSet {
             guard networkEnabled != oldValue, !readingConfig else { return }
@@ -518,9 +512,8 @@ final class Store: ObservableObject {
         }
     }
 
-    /// Keep the switch, as the config was just read or written to have it, in
-    /// `AppConfig.switchRecordURL` when that says otherwise. A record the disk refuses
-    /// is the record's loss alone.
+    /// Mirror the switch into `AppConfig.switchRecordURL` when that differs. A failed
+    /// write there costs only the record.
     private func recordNetworkSwitch() {
         guard writesConfig, switchNoted != networkEnabled else { return }
         switchNoted = networkEnabled
@@ -567,13 +560,11 @@ final class Store: ObservableObject {
     }
 
     /// Take the network's settings as the shared file has them: the daemon acts on the
-    /// file, and another process may have written it. A switch that moved is followed
-    /// as one moved here is. A file that is there and cannot be read says nothing - one
-    /// read can fall in the middle of a rewrite - so every setting stays as it was last
-    /// read, and the feed says so once for the spell. One that was there and is gone
-    /// keeps them too, unsaid, for `NetworkSettings.configGoneGrace`; after that it is the
-    /// defaults, which the feed says once. The first reading after a launch that had none
-    /// takes the cap and the roots' fields too (`knobsReadBlind`).
+    /// file, and another process may have written it. A file there but unreadable (a read
+    /// can land mid-rewrite) keeps every setting as last read, said once per spell; one
+    /// gone keeps them silently for `NetworkSettings.configGoneGrace`, then defaults,
+    /// said once. The first good read after a blind launch also takes the cap and roots
+    /// (`knobsReadBlind`).
     func rereadNetworkSettings() {
         guard writesConfig else { return }
         let unreadable = AppConfig.unreadable
@@ -1915,8 +1906,7 @@ final class Store: ObservableObject {
                       ledgerKey: String = "", directory: String? = nil,
                       terminal preferred: SpawnTerminal,
                       restoreFocusTo restoreBID: String? = nil) async throws -> SpawnTerminal {
-        // `dispatchAgent` offers every job to the network before it gets here; this holds
-        // for a caller that does not go through it.
+        // Backstop for a caller that bypasses `dispatchAgent`'s network offer.
         guard !networkEnabled else { throw AgentSpawner.SpawnError.network }
         let now = Date().timeIntervalSince1970
         guard let record = AgentRegistry.createRun(
@@ -1991,9 +1981,8 @@ final class Store: ObservableObject {
     /// Priced on the way out: this is the one way a run leaves the book without being
     /// retired, and retirement is what would otherwise close its ledger entry.
     ///
-    /// A run the network carries is withdrawn from its pool instead, while the network
-    /// still holds it: forgotten here alone, some machine would start on work nobody is
-    /// waiting for.
+    /// A run the network carries is also withdrawn from its pool: forgotten here alone,
+    /// some machine would start on work nobody is waiting for.
     func forgetRun(_ runID: String) {
         let records = AgentRegistry.load().filter { $0.runID == runID }
         let priced = Store.pricingInputs(records.filter(\.runsHere))
@@ -2018,8 +2007,7 @@ final class Store: ObservableObject {
         var windows: [String: AgentWindows.Handle]
         /// The 2.x sessions a TUI in the same pass's process table is attached to.
         var attached: Observation<[String]>
-        /// Whether the pass asked the Diplomacy Network daemon for its snapshot, and the
-        /// snapshot when it answered.
+        /// Whether the pass asked the network daemon, and its snapshot if it answered.
         var networkAsked = false
         var network: NetworkSnapshot?
     }
@@ -2045,11 +2033,10 @@ final class Store: ObservableObject {
     /// The probes shell out, run AppleScript and dial sockets, so the whole pass is done
     /// off the main actor.
     ///
-    /// The network daemon is asked in the pass itself, while the switch is on, and never
-    /// answered for from an earlier pass: a snapshot older than an offer names no such
-    /// task, which past the grace is the verdict that ends its run. With the switch off
-    /// it is asked only while the book still holds a run the network carried, which
-    /// that pass withdraws and retires (`retireNetworkRuns`).
+    /// The network daemon is asked within the pass, never answered for from an earlier
+    /// one: a snapshot older than an offer lacks its task, which past the grace ends the
+    /// run. With the switch off it is asked only while the book still holds a network
+    /// run, for `retireNetworkRuns` to withdraw.
     func agentTick() async -> AgentPass {
         let limit = autoTaskLimit
         let roots = roots
@@ -2217,10 +2204,9 @@ final class Store: ObservableObject {
     /// interrupted (`OpenCodeProbe.interrupts`): its turn outlives the TUI, and would go on
     /// spending tokens after the ledger has closed its entry.
     ///
-    /// A run the network carried has no window, session or transcript here: its offer is
-    /// withdrawn first when its PR merged under it, and it is priced from the outcome its
-    /// executor reported (`settleNetworkLedger`). One whose withdrawal no daemon answered
-    /// is kept, and withdrawn again next tick.
+    /// A network run has no window, session or transcript here: a merged PR withdraws its
+    /// offer first (retried next tick while no daemon answers), and it is priced from its
+    /// executor's outcome (`settleNetworkLedger`).
     private func retireFinished(_ pass: AgentPass) async {
         let t = pass.tick
         let unwithdrawn = await withdrawMerged(t.withdrawable)
@@ -2282,8 +2268,8 @@ final class Store: ObservableObject {
         await settleLedger(priced)
     }
 
-    /// The feed's verb for a run leaving the book. A PR that merged retires its run under
-    /// the same verb wherever the run was.
+    /// The feed's verb for a run leaving the book. A merged PR's run is "retire" wherever
+    /// it ran.
     private static func retireVerb(_ r: AgentState.RunRecord,
                                    _ state: AgentState.RunState?) -> String {
         if r.runsHere { return state == .failed ? "spawn-failed" : "retire" }
@@ -2307,14 +2293,12 @@ final class Store: ObservableObject {
         }
     }
 
-    /// The panel's line on what of the network does not work on this machine, or nil.
     var networkTrouble: String? {
         let line = NetworkTrouble.line(answered: networkAnswered, snapshot: networkState,
                                        unknown: networkSettingsUnknown)
         return line.isEmpty ? nil : line
     }
 
-    /// Publish what the daemon just answered, or that it did not.
     func noteNetworkState(_ snapshot: NetworkSnapshot?) {
         let answered = snapshot != nil
         if networkAnswered != answered {
@@ -2323,17 +2307,16 @@ final class Store: ObservableObject {
             // Work held while the daemon was silent has somewhere to go again.
             if back { bringPollForward(capLoad: autoTasksMeasured) }
         }
-        // Its clock moves on every write, which is no change to redraw the panel for.
+        // Its clock ticks on every write; that alone is no reason to redraw.
         let same = snapshot.map { $0.saysTheSame(as: networkState) } ?? (networkState == nil)
         if !same { networkState = snapshot }
     }
 
-    /// Every linked repository as a pool, with the login each is worked as, and what
-    /// could not be confirmed, which stays as the daemon has it (`known`:
-    /// `NetworkPools.listing`). A listed path with no checkout read for it yet counts as
-    /// unread.
+    /// Every linked repository as a pool, with the login each is worked as; what could
+    /// not be confirmed stays as the daemon has it (`known`: `NetworkPools.listing`). A
+    /// listed path with no checkout read yet counts as unread.
     ///
-    /// GitHub's login is `gh`'s own and not the username override: the agents act as it.
+    /// GitHub's login is `gh`'s own, not the username override: the agents act as it.
     func networkPools(known: [NetworkSnapshot.Pool]) -> NetworkPools.Listing {
         let unread = rootPathsUnread + localRepoPaths.filter { path in
             !localRepoCheckouts.contains { $0.path == path && $0.read }
@@ -2398,10 +2381,10 @@ final class Store: ObservableObject {
         return unanswered
     }
 
-    /// With the switch off nothing carries a network run: each one the book still holds
-    /// once `retireFinished` has retired what the network was finished with leaves it
-    /// as failed, so its PR or issue is free for a local run at once. A daemon that
-    /// answered this pass is told to withdraw each first; a silent one is not waited on.
+    /// With the switch off nothing carries a network run: each one left after
+    /// `retireFinished` leaves the book as failed, freeing its PR or issue for a local
+    /// run at once. A daemon that answered this pass is told to withdraw each first; a
+    /// silent one is not waited on.
     private func retireNetworkRuns(_ pass: AgentPass) async {
         guard pass.tick.records.contains(where: { !$0.runsHere }) else { return }
         let left = AgentRegistry.load().filter { !$0.runsHere }
@@ -2427,13 +2410,11 @@ final class Store: ObservableObject {
                                            uniquingKeysWith: { first, _ in first }))
     }
 
-    /// Close the ledger entries of runs the network carried, each from the outcome its
-    /// executor reported: what it spent, on which model.
+    /// Close the ledger entries of network runs from the outcome each executor reported.
     ///
     /// A task another machine ran drew on that machine's account, so it is filed under
-    /// `DiplomacyNetwork.foreignRunner` and counts against no window here; one this
-    /// machine ran keeps the runner its outcome names. An offer with no outcome, or one
-    /// that spent nothing, leaves its entry open like a run whose agent never answered.
+    /// `DiplomacyNetwork.foreignRunner` and counts against no window here. An offer with
+    /// no outcome, or one that spent nothing, leaves its entry open.
     private func settleNetworkLedger(_ runs: [AgentState.RunRecord],
                                      snapshot: NetworkSnapshot?) {
         let tasks = NetworkEvidence.tasks(snapshot).value ?? [:]
@@ -3623,7 +3604,6 @@ final class Store: ObservableObject {
         forgetJobRefusals { waiting.contains($0) }
     }
 
-    /// Drop the refusals of the jobs whose label `keep` does not hold.
     func forgetJobRefusals(keeping keep: (String) -> Bool) {
         let kept = networkJobRefusals.filter { keep($0.key) }
         if kept != networkJobRefusals { networkJobRefusals = kept }
@@ -3728,8 +3708,7 @@ final class Store: ObservableObject {
             // same disk, or offered to the same silent daemon, and get the same answer,
             // and the dispatch has already re-staged this one for the commit at the end
             // of the cycle. Draining on would cost a round of refusals to no end. A
-            // daemon that refused this job for a reason of the job's own is asked about
-            // the next.
+            // refusal for the job's own reason moves on to the next.
             case .unaffordable, .lowDisk, .networkDown: return
             default: break
             }
@@ -3836,8 +3815,7 @@ final class Store: ObservableObject {
         /// is about, whose root the ask runs in; "" for an investigation stored before asks
         /// named one, which runs in the primary root.
         var repo: String
-        /// The Diplomacy Network task this ask is offered as, "" while no offer carries
-        /// it. An offer is not a start: the ask stands until the work has run.
+        /// The network task this ask is offered as; "" while no offer carries it.
         var offered = ""
         /// Queued by the Pipeline screen's Start fix, not by a sync (`pipelineWithdrawn`).
         var byHand = false
@@ -4098,12 +4076,9 @@ final class Store: ObservableObject {
     /// which this says in the feed. While a root path fails to resolve (`rootsResolved`)
     /// its repo may be that one, so the ask is kept and skipped instead.
     ///
-    /// An ask the Diplomacy Network carries (`RequestedWork.offered`) is left out for as
-    /// long as the book holds the run of its offer. Once that run has left the book
-    /// without having run - withdrawn, unknown to the daemon, the switch turned off -
-    /// the ask is as it was before the offer, and is offered again here. One the network
-    /// gave up with its attempts used ends the ask, as a run in a terminal that came to
-    /// nothing does.
+    /// An ask the network carries (`RequestedWork.offered`) is skipped while the book
+    /// holds its offer's run. Once that run leaves without having run (withdrawn, unknown
+    /// to the daemon, the switch turned off) the ask is offered again here.
     ///
     /// Not private: the queue self-test commits a cycle directly, which is the only way
     /// to exercise the offer without a live GitHub fetch.
@@ -4138,10 +4113,8 @@ final class Store: ObservableObject {
     /// no budget left and a terminal that failed to open are all reasons to try again
     /// next poll, which is exactly what staying in the list means.
     ///
-    /// An offer to the Diplomacy Network is not a start. The ask stays, marked with the
-    /// task that carries it, until that run finishes (`retireFinished`) or the operator
-    /// takes the offer back (`forgetOffered`); a run that leaves the book any other way
-    /// leaves the ask to be offered again (`offerRequestedWork`).
+    /// An offer to the network is not a start: the ask stays, marked with its task, until
+    /// `forgetOffered` drops it or `offerRequestedWork` offers it again.
     private func settleRequested(_ entry: QueuedAgentTask, _ outcome: DispatchOutcome) {
         guard entry.job.requested else { return }
         switch outcome {
@@ -4161,14 +4134,14 @@ final class Store: ObservableObject {
         requestedWork.removeAll { $0.key == key }
     }
 
-    /// Note the network task that carries the ask `key`, or with "" that none does.
+    /// `task` "" marks that no offer carries the ask.
     private func markOffered(_ key: String, task: String) {
         guard let at = requestedWork.firstIndex(where: { $0.key == key }) else { return }
         requestedWork[at].offered = task
     }
 
-    /// Drop the ask the network carried as `task`: its run finished, or the operator
-    /// took the offer back.
+    /// Drop the ask the network carried as `task`: its run is over, or the operator
+    /// forgot it.
     func forgetOffered(_ task: String) {
         guard !task.isEmpty else { return }
         requestedWork.removeAll { $0.offered == task }
@@ -4458,21 +4431,16 @@ final class Store: ObservableObject {
         /// The checkout the agent works in: its repo root, or the checkout of a repo
         /// listed under Settings → OTHER REPOS. nil is the primary root.
         var directory: String?
-        /// What `prompt` was built to let the agent do, read off the config that built
-        /// it. An offer to the network states it beside the prompt (`NetworkOffer.from`).
+        /// What `prompt` was built to let the agent do. An offer to the network states it
+        /// beside the prompt (`NetworkOffer.from`).
         var allows = Allows()
 
-        /// The four things a job's kind may or may not do, and whose PR a review is of.
         struct Allows: Equatable {
             /// A review of the operator's own PR: fixes go on its branch.
             var ownPR = false
-            /// A review may approve or request changes.
             var verdict = false
-            /// Work on the operator's own PR may mark it ready for review.
             var markReady = false
-            /// An issue fix opens no PR.
             var noPRs = false
-            /// An audit only reads.
             var readOnly = false
 
             init() {}
@@ -4533,17 +4501,15 @@ final class Store: ObservableObject {
         case unaffordable
         case lowDisk
         case failed(String)
-        /// The job went into its repository's pool on the Diplomacy Network, where some
-        /// machine of the pool runs it, as this task.
+        /// The job went into its repository's pool on the Diplomacy Network as this task.
         case offered(task: String)
-        /// The offer was sent and the daemon gave no definite answer: the job is kept
-        /// (`networkOffering`) until a later cycle books or drops it.
+        /// An operator's job whose offer got no definite answer: kept (`networkOffering`)
+        /// until a later cycle books or drops it.
         case offering
-        /// The daemon refused this job for a reason of the job's own, or no offer could
-        /// be made of it: a sentence fit to show the operator.
+        /// The daemon refused this job for a reason of its own, or no offer could be made
+        /// of it. Both network cases carry a sentence fit to show the operator.
         case networkRefused(String)
-        /// No daemon took the offer - it did not answer, or is stopping - and none
-        /// takes any job while that lasts: a sentence fit to show the operator.
+        /// No daemon took the offer, and none takes any job while that lasts.
         case networkDown(String)
         /// An agent launched, here or through the network: the signal to record the
         /// attempt and start the retry backoff. `.failed` deliberately does NOT count (a
@@ -4738,22 +4704,19 @@ final class Store: ObservableObject {
     /// a pid and a window.
     ///
     /// A job the network does not take starts no agent here either. Automatic work is
-    /// staged back as held work is and offered again next cycle. A refusal of the job's
-    /// own is said once for the job, in the feed and on its row (`networkJobRefusals`);
-    /// a daemon that takes no job has one feed line for the spell. A job the operator
-    /// started is answered with the sentence.
+    /// staged back and offered again next cycle; a refusal of the job's own is said once
+    /// for the job, in the feed and on its row (`networkJobRefusals`), a daemon that takes
+    /// no job once per spell. A job the operator started is answered with the sentence.
     ///
-    /// An offer the daemon was sent and gave no definite answer to may be in the pool.
-    /// Automatic work is offered again from the queue, which the daemon answers with the
-    /// task it holds; a job the operator started is kept in `networkOffering`.
+    /// An offer with no definite answer may be in the pool. Automatic work is offered
+    /// again from the queue, which the daemon answers with the task it holds; the
+    /// operator's job is kept in `networkOffering`.
     ///
-    /// While the daemon is known not to answer (`networkAnswered`) automatic work is not
-    /// offered at all: each offer would wait out its timeout, and it is the network cycle
-    /// that finds the daemon back. What the operator starts asks.
+    /// While the daemon is known silent (`networkAnswered`) automatic work is not offered:
+    /// each offer would wait out its timeout, and the network cycle finds the daemon back.
     ///
-    /// While the config cannot be read (`AppConfig.settingsUnknown`) nothing is offered,
-    /// whoever started it: the job and the pool it would go into come of settings that
-    /// each read as a default.
+    /// While the config is unreadable (`AppConfig.settingsUnknown`) nothing is offered:
+    /// the job and its pool would come of settings read as defaults.
     private func offerToNetwork(_ job: AgentJob, source: AgentDispatchGate.Source,
                                 attemptNumber: Int, forced: Bool,
                                 rowLabel: String) async -> DispatchOutcome {
@@ -4824,7 +4787,6 @@ final class Store: ObservableObject {
         return own ? .networkRefused(refusal) : .networkDown(refusal)
     }
 
-    /// A job of the operator's whose offer was sent and not definitely answered.
     struct OfferingJob: Identifiable, Equatable {
         let job: AgentJob
         let source: AgentDispatchGate.Source
@@ -4834,7 +4796,6 @@ final class Store: ObservableObject {
         /// What the daemon names its task by.
         var id: String { "\(offer.pool) \(offer.kind) \(offer.item)" }
 
-        /// The task the daemon holds for it, when the snapshot lists one.
         func task(in snapshot: NetworkSnapshot?) -> String? {
             NetworkEvidence.openTask(pool: offer.pool, kind: offer.kind, item: offer.item,
                                      in: snapshot)
@@ -4842,9 +4803,8 @@ final class Store: ObservableObject {
     }
 
     /// Settle each job in `networkOffering` against a daemon that answers: book the task
-    /// the snapshot holds for it, else make the offer again, which the daemon answers
-    /// with the task it already has when the first one reached it. A refusal drops the
-    /// job with the sentence; no definite answer keeps it for the next cycle.
+    /// the snapshot holds for it, else offer again (answered with the existing task if
+    /// the first offer arrived). A refusal drops the job; no definite answer keeps it.
     func settleOffering(_ snapshot: NetworkSnapshot) async {
         for held in networkOffering {
             var task = held.task(in: snapshot)

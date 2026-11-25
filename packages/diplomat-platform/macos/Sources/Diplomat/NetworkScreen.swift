@@ -2,18 +2,15 @@ import SwiftUI
 import AppKit
 import DiplomatCore
 
-/// The Network screen: the Diplomacy Network daemon's status, the hours this machine
-/// asks for and takes, and one panel per pool it is in.
 struct NetworkScreen: View {
     @EnvironmentObject var store: Store
     @Binding var isPresented: Bool
-    /// Polls while on screen; off in a render, whose seeded state a real read would
-    /// overwrite.
+    /// Off in a render: a real read would overwrite the seeded state.
     var live: Bool = !Headless.isRender
 
     @Environment(\.renderNow) private var renderNow
     @State private var onScreen = false
-    /// Ticks with the snapshot poll, so the ages on screen keep moving.
+    /// Keeps the on-screen ages moving.
     @State private var tick = Date()
 
     private var now: Date { renderNow ?? tick }
@@ -248,7 +245,7 @@ struct NetworkScreen: View {
                           _ value: Binding<Int>) -> some View {
         SettingRow(title: title, summary: summary) {
             HStack(spacing: 6) {
-                // Any whole hour can be typed; the setting keeps it inside the range.
+                // Unclamped here: the setting keeps it inside the range.
                 TextField(title, value: value, format: .number.grouping(.never))
                     .labelsHidden().textFieldStyle(.roundedBorder).controlSize(.small)
                     .font(.system(size: 10, weight: .bold).monospacedDigit())
@@ -296,7 +293,7 @@ struct NetworkScreen: View {
                         } else if snap.pools.isEmpty {
                             note(NetworkText.noPools)
                         }
-                        // No pool panel offers "Join…": none yet, or each one left.
+                        // No pool panel to offer "Join…": none yet, or each one left.
                         if nowhere {
                             NetworkJoinRow(card: "")
                             if let refusal = store.networkRefusals[""] { note(refusal, tint: .red) }
@@ -329,7 +326,6 @@ struct NetworkScreen: View {
     }
 }
 
-/// The Diplomacy Network's switch, as Settings and the Network screen both show it.
 struct NetworkSwitchRow: View {
     @EnvironmentObject var store: Store
     var summary = NetworkText.explanation
@@ -344,8 +340,7 @@ struct NetworkSwitchRow: View {
     }
 }
 
-/// Paste an invite and join the pool it is to. `card` is the pool panel it sits in ("" for
-/// the one shown before any pool), which is where a refusal is shown.
+/// `card`: the pool panel it sits in ("" before any pool), where a refusal shows.
 struct NetworkJoinRow: View {
     @EnvironmentObject var store: Store
     let card: String
@@ -380,8 +375,6 @@ struct NetworkJoinRow: View {
     }
 }
 
-/// One pool: who is in it, what it holds, and the invite, join and leave actions. A
-/// pool this machine left shows that, and the way back in.
 struct NetworkPoolPanel: View {
     @EnvironmentObject var store: Store
     let pool: NetworkSnapshot.Pool
@@ -474,7 +467,7 @@ struct NetworkPoolPanel: View {
         let stop = NetworkText.stopButton(t)
         return VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
-                // Another machine's words: drawn as they are, on one line.
+                // Another machine's text: verbatim, never markdown.
                 Text(verbatim: t.title.isEmpty ? t.item : t.title).font(.system(size: 10))
                     .lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 4)

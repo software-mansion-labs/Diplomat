@@ -25,9 +25,7 @@ public enum NetworkSettings {
     /// Python twin: `appconfig.CONFIG_GONE_GRACE_S`.
     public static let configGoneGrace: TimeInterval = 5
 
-    /// A number of hours as the daemon keeps it (its `hoursOf`): rounded to the nearest
-    /// whole number, a half going up, and held to the floor and the ceiling. The floor
-    /// when it is no finite number.
+    /// A number of hours as the daemon keeps it (its `hoursOf`).
     public static func hours(_ stored: Double?) -> Int {
         guard let v = stored, v.isFinite else { return hoursFloor }
         return Int(min(max((v + 0.5).rounded(.down), Double(hoursFloor)), Double(hoursCeiling)))
@@ -44,14 +42,10 @@ public enum NetworkSettings {
             + "and nothing is offered"
     }
 
-    /// A stored hours value, as `JSONSerialization` or `JSONInput` reads one, as the
-    /// daemon reads it: `hours` of its JavaScript number.
+    /// A stored hours value as the daemon reads it: `hours` of its JavaScript number.
     public static func hours(json stored: Any?) -> Int { hours(jsNumber(stored)) }
 
-    /// JavaScript's `Number()` of a JSON value: a number is itself, `true` is 1, `false`
-    /// and `null` are 0, a string is the number it spells (a blank one is 0) and an
-    /// array is its members joined by commas, read as that string. Anything else, and a
-    /// value that is absent, is NaN.
+    /// JavaScript's `Number()` of a JSON value.
     static func jsNumber(_ value: Any?) -> Double {
         switch value {
         case let flag as JSONInput.Flag: return flag.on ? 1 : 0
@@ -211,7 +205,6 @@ public enum NetworkOffer {
 
     public enum Decision: Equatable {
         case offer(Offer)
-        /// Why the job cannot be offered.
         case refused(String)
     }
 
@@ -253,9 +246,7 @@ public enum NetworkOffer {
                             prompt: prompt, now: source == .panel || forced))
     }
 
-    /// The daemon's kind for an audit verb, or `nil` for a verb it has none for. A
-    /// review of the operator's own PR is its own kind, and a reply to reviews is
-    /// always one.
+    /// The daemon's kind for an audit verb, or `nil` for a verb it has none for.
     public static func kind(verb: String, ownPR: Bool) -> String? {
         switch verb {
         case "review-req", "review", "comms-review": return ownPR ? kindReviewOwn : kindReview
@@ -333,8 +324,8 @@ public enum NetworkPools {
 
     /// One pool per root, the first root winning an id. `identities` maps a forge host
     /// to the login work is done as there; a root on a host with none is left out, a
-    /// task id being built on that login, and so is one on a host the network has no
-    /// rules for (`hasRules`).
+    /// task id being built on that login, and so is one reached on another port
+    /// (`webPort`) or on a host the network has no rules for (`hasRules`).
     public static func linked(roots: [PRRef.LocalRepo],
                               identities: [String: String]) -> [Pool] {
         var seen = Set<String>()
@@ -381,17 +372,14 @@ public enum NetworkPools {
     }
 
     /// Every linked repository as a pool: the roots, then what the OTHER REPOS
-    /// checkouts name that no root does (`others`). A root or a checkout that was read
-    /// and names no forge is no pool, and is in neither list; a repository on a host
-    /// without rules (`hasRules`) is no pool either, and is named. A repository named by a
-    /// remote on another port than the forge's API (`LocalRepo.webPort`) makes no pool, and
-    /// is named as having none, or as not counted where another checkout of it makes one.
-    /// What could not be
-    /// confirmed is said as the daemon last had it (`known`, its snapshot's pools): the
-    /// pool at a path that could not be read (`unread`), and the pool of a repository
-    /// whose forge login is unknown. The daemon leaves a pool the list omits, so the
-    /// list is never cut short by what is unknown, and a repository taken out of
-    /// Settings leaves its pool whatever else cannot be read.
+    /// checkouts name that no root does (`others`). A repository on a host without
+    /// rules (`hasRules`) is no pool, and is named; so is one a remote names on another
+    /// port (`LocalRepo.webPort`), or it is named as not counted where another checkout
+    /// of it makes the pool. What could not be confirmed - the pool at an unread path
+    /// (`unread`), or of a repository whose forge login is unknown - is said as the
+    /// daemon last had it (`known`). The daemon leaves a pool the list omits, so the
+    /// unknown never cuts the list short, and a repository taken out of Settings
+    /// leaves its pool whatever else cannot be read.
     public static func listing(roots: [PRRef.LocalRepo], others: [PRRef.LocalRepo],
                                unread: [String], identities: [String: String],
                                known: [NetworkSnapshot.Pool]) -> Listing {
@@ -464,9 +452,6 @@ public enum NetworkAdmit {
         }
     }
 
-    /// The free bays of the cap, or none while the disk is low, the budget is spent or
-    /// the operator has automatic work off - the first of those that holds is the
-    /// reason given.
     public static func slots(limit: Int, running: Int, lowDisk: Bool, affordable: Bool,
                              autoRun: Bool) -> Answer {
         if lowDisk { return Answer(slots: 0, reason: disk) }
@@ -540,18 +525,16 @@ public struct NetworkSnapshot: Equatable {
         /// Whether an invite pasted here waits for the machine that made it: this machine
         /// is the pool's only member meanwhile.
         public let joining: Bool
-        /// Why the last invite let this machine in nowhere, in the daemon's words; "" for
-        /// none.
+        /// Why the last invite let this machine in nowhere; "" for none.
         public let joinFailed: String
-        /// Whether this machine, back in the pool, waits for a machine it knew there to
-        /// answer it, taking and offering none of the pool's jobs meanwhile: after a Rejoin, or
-        /// once the other members' records ran out while it was away.
+        /// Whether this machine, back in the pool, waits for a member it knew to answer,
+        /// taking and offering nothing meanwhile: after a Rejoin, or once the others'
+        /// records ran out while it was away.
         public let returning: Bool
         /// Whether every other machine this one asks refused it as no member, none
         /// answering since: it needs an invite.
         public let unseated: Bool
-        /// Why this machine takes none of the pool's jobs, in the daemon's sentence; ""
-        /// while it takes them.
+        /// Why this machine takes none of the pool's jobs; "" while it takes them.
         public let notTaking: String
         public let members: [Member]
         public let tasks: [Task]
@@ -577,8 +560,8 @@ public struct NetworkSnapshot: Equatable {
         public let tokens: Double?
         public let runner: String
         public let model: String
-        /// Whether the executor lowered the tokens or the cost the job named to what
-        /// it measured itself.
+        /// Whether the executor lowered the job's reported tokens or cost to what it
+        /// measured.
         public let capped: Bool
     }
 
@@ -603,8 +586,7 @@ public struct NetworkSnapshot: Equatable {
         public let refused: Int
         public let outcome: Outcome?
         public let endedAt: Double?
-        /// Why this machine does not take this job of its own while it is `pooled`, in
-        /// the daemon's sentence; "" for a job it is free to take.
+        /// Why this machine does not take its own `pooled` job; "" when it may.
         public let notTaking: String
     }
 
@@ -821,8 +803,7 @@ public enum NetworkEvidence {
         return said == pool.notTaking ? "" : said
     }
 
-    /// The task the daemon holds for an offer of `item` as `kind` to `pool`: its open
-    /// offer of the three, which is what it names a task by. Nil when the snapshot
+    /// The task of the open offer of `item` as `kind` to `pool`; nil when the snapshot
     /// lists none.
     public static func openTask(pool: String, kind: String, item: String,
                                 in snapshot: NetworkSnapshot?) -> String? {

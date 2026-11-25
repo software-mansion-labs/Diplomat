@@ -366,21 +366,18 @@ enum Render {
             let _ = seedMachinesScreen(s, store: store)
             ContentView(showMachines: true).environment(\.renderNow, machinesNow)
         case "network-panel":
-            // The whole panel over what "network-screen-failed" seeds: the task list
-            // says what of the network does not work.
+            // The whole panel over the "network-screen-failed" seed.
             let _ = seedNetworkScreen("network-screen-failed", store: store)
             let _ = seedAutofix(store)
             ContentView().frame(height: 580)
         case let s where s.hasPrefix("network-screen"):
-            // Inside the panel, so the header's button is in the shot. Plain: a daemon
-            // with every service ready, three pools (one of them left), members seen,
-            // unseen and unreachable,
-            // a task in each state, and two runs on this machine, one of them of a job
-            // offered here. "-starting": the transport bootstrapping, the image building,
-            // no pools yet. "-failed": the daemon up with no tor and no docker to use.
-            // "-down": the daemon asked, and not answering. "-off": the switch off.
-            // "-unsaved": the plain screen over a change config.json refused, the hours
-            // set so that this machine takes none of its own jobs.
+            // Inside the panel, so the header's button is in the shot. Plain: every service
+            // ready, three pools (one left), members seen, unseen and unreachable, a task in
+            // each state, two runs here (one of a job offered here). "-starting": tor
+            // bootstrapping, image building, no pools. "-failed": no tor, no docker.
+            // "-down": the daemon not answering. "-off": the switch off. "-unsaved": plain,
+            // over a refused config.json change, hours set so this machine takes none of
+            // its own jobs.
             let _ = seedNetworkScreen(s, store: store)
             ContentView(showNetwork: true).environment(\.renderNow, machinesNow)
         case let s where s.hasPrefix("devices"):
@@ -1301,9 +1298,7 @@ enum Render {
         return true
     }
 
-    /// `DIPLOMAT_RENDER=network-screen[-starting|-failed|-down|-unsaved|-off]`: see the mode's
-    /// case. The snapshot
-    /// goes through the reader the daemon's answer does; no daemon is asked.
+    /// The snapshot goes through the parser the daemon's answer does; no daemon is asked.
     @MainActor
     @discardableResult
     static func seedNetworkScreen(_ mode: String, store: Store) -> Bool {
@@ -1336,8 +1331,7 @@ enum Render {
         func at(_ secsAgo: Double) -> String {
             MachinesSnapshot.isoString(Date(timeIntervalSince1970: now - secsAgo))
         }
-        // Through the daemon's own JSON: the core reads a flag only where the document
-        // held a JSON boolean.
+        // Via JSON: the core reads a flag only from a JSON boolean.
         func snapshot(_ doc: [String: Any]) -> NetworkSnapshot? {
             NetworkSnapshot.parse(try? JSONSerialization.data(withJSONObject: doc))
         }

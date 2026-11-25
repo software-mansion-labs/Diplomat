@@ -29,8 +29,7 @@ public enum AuditCategory: String, CaseIterable, Sendable {
     case bans
     /// The Slack watcher: pings, triage outcomes, poll health.
     case comms
-    /// The Diplomacy Network: offers and what became of them, pools joined and left,
-    /// the daemon starting and stopping.
+    /// The Diplomacy Network: offers and their outcomes, pools joined and left, the daemon.
     case network
     /// Everything else: device kills/repairs, allocator install, poll + spawn health.
     case system

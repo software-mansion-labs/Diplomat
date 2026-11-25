@@ -13,10 +13,8 @@ struct NodePackage {
     let dirEnv: String
     /// Relocates its state directory, as the package's own `src/paths.js` does.
     let baseEnv: String
-    /// Its state directory under `~/.diplomat`; nil is `name`.
     var stateDir: String?
-    /// The path under `node_modules` that says its dependencies are fetched; nil for a
-    /// package with none.
+    /// A path under `node_modules` that proves the deps are fetched; nil: it has none.
     var depsMarker: String? = "@modelcontextprotocol/sdk"
 
     static let deviceAllocator = NodePackage(name: "device-allocator",
@@ -70,8 +68,8 @@ struct NodePackage {
     /// cannot speak to a unix socket. Blocking for up to `timeoutSecs`, so off the main
     /// actor; each call is its own curl, so a long one holds up no other.
     ///
-    /// The body goes to curl on its stdin: an argument is listed by `ps` to every user
-    /// of the machine, and a prompt can be longer than an argument list may be.
+    /// The body goes on curl's stdin: `ps` shows arguments to every user, and a prompt
+    /// can outgrow the argument-list limit.
     func send(_ endpoint: String, body: [String: Any] = [:], timeoutSecs: Int) -> Sent {
         guard let data = try? JSONSerialization.data(withJSONObject: body),
               let (exit, raw) = curl(endpoint, timeoutSecs: timeoutSecs, request: [
@@ -84,8 +82,7 @@ struct NodePackage {
         return .reply(reply)
     }
 
-    /// GET `endpoint`: the body of a 2xx answer as the daemon wrote it, or nil when there
-    /// was none. Blocking, like `send`.
+    /// The body of a 2xx answer, else nil. Blocking, like `send`.
     func get(_ endpoint: String, timeoutSecs: Int) -> Data? {
         guard let (exit, raw) = curl(endpoint, timeoutSecs: timeoutSecs, request: ["-X", "GET"]),
               exit == 0, let (code, body) = Self.splitReply(raw), (200..<300).contains(code)
@@ -93,8 +90,6 @@ struct NodePackage {
         return body
     }
 
-    /// One request to the daemon: curl's exit status and output, or nil when there is no
-    /// socket or no curl. `body` is what curl reads on its stdin.
     private func curl(_ endpoint: String, timeoutSecs: Int, request: [String],
                       body: Data? = nil) -> (exit: Int32, out: Data)? {
         guard FileManager.default.fileExists(atPath: socketPath) else { return nil }
@@ -111,11 +106,9 @@ struct NodePackage {
         do { try p.run() } catch { return nil }
         if let body {
             let writer = input.fileHandleForWriting
-            // A curl that exited without reading is an error to this write, not a
-            // SIGPIPE to the app.
+            // A curl that exited unread fails this write instead of SIGPIPE-ing the app.
             _ = fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1)
-            // Off this thread: a body larger than the pipe holds would otherwise wait
-            // here on a curl that is not reading.
+            // Off this thread: a body past the pipe's capacity would block here.
             DispatchQueue.global(qos: .userInitiated).async {
                 try? writer.write(contentsOf: body)
                 try? writer.close()
@@ -186,9 +179,7 @@ struct NodePackage {
         return depsInstalled
     }
 
-    /// How long an installer is waited for before it is killed, which leaves no answer.
-    /// The Diplomacy Network's answers within `INSTALLER_ANSWER_MS` (its `src/paths.js`),
-    /// which has to stay under this.
+    /// The Diplomacy Network's `INSTALLER_ANSWER_MS` (its `src/paths.js`) must stay under this.
     static let installerTimeout: TimeInterval = 90
 
     func runInstaller(_ arg: String) -> AllocatorInstall {

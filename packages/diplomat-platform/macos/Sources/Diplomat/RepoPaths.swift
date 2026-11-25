@@ -128,11 +128,11 @@ enum RepoPaths {
         let primaryResolved: Bool
         /// None of several paths resolved, the one root a guess (`RepoRoots.guessed`).
         let guessed: Bool
-        /// The roots a path's own remote names: none while no path resolved, the one
-        /// root then standing in for the configured repo.
+        /// `roots` a path's own remote names: empty when no path resolved, the one root
+        /// then a stand-in for the configured repo.
         let linked: [PRRef.LocalRepo]
-        /// The paths, `~` expanded, that could not be read: missing, or `git` failing
-        /// on one. A path that was read and has no GitHub or GitLab remote is not one.
+        /// Expanded paths missing or failing `git`; one read with no GitHub or GitLab
+        /// remote is not among them.
         let unread: [String]
 
         /// `gitlabHosts`: the hosts glab is configured for (`GLab.configuredHosts`).

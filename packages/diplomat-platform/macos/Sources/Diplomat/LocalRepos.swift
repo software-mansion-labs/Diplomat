@@ -7,7 +7,7 @@ enum LocalRepos {
     struct Checkout: Equatable {
         /// As entered; `~` is expanded only for the lookup and the spawn.
         let path: String
-        /// False for a path that could not be read: missing, or `git` failing on it.
+        /// False when missing or `git` failed on it.
         var read = true
         /// Its GitHub and GitLab remotes (`LocalRepo.entries`), Settings naming it by the
         /// first. Empty for a path that is no checkout or has neither: listed, but no link
@@ -32,9 +32,7 @@ enum LocalRepos {
         }
     }
 
-    /// The remotes of the checkout at `path` as `git config` prints them: "" for one
-    /// with no remote (`git config --get-regexp` exits 1 on no match), nil for one `git`
-    /// failed on.
+    /// "" for no remote (`--get-regexp` exits 1 on no match), nil when `git` failed.
     static func readRemotes(of path: String) -> String? {
         guard let ran = git(remoteQuery(path)), ran.status == 0 || ran.status == 1 else {
             return nil
@@ -46,13 +44,11 @@ enum LocalRepos {
         ["-C", path, "config", "--local", "--get-regexp", #"^remote\..*\.url$"#]
     }
 
-    /// The `git` that is run and how long one call may take (the Linux twin's budget),
-    /// behind a seam a self-test fills: a path that hangs - a dead network mount - must
-    /// not hold the cycle that reads the checkouts.
+    /// A self-test seam. The timeout (the Linux twin's budget) keeps a hanging path - a
+    /// dead network mount - from holding the cycle that reads the checkouts.
     static var gitCall: (path: String, timeout: TimeInterval) = ("/usr/bin/git", 5)
 
-    /// nil for a call that could not start or outlived the budget, which is ended. The
-    /// wait is for the exit, before the read: what is asked for prints a few lines.
+    /// Exit is awaited before the read: the output is a few lines, under a pipe's buffer.
     private static func git(_ arguments: [String]) -> (status: Int32, out: String)? {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: gitCall.path)

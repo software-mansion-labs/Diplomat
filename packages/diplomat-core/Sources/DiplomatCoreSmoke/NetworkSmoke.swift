@@ -83,7 +83,7 @@ func networkSmoke() throws {
                 check(got == want, "network gate \(source.rawValue) banned=\(banned) "
                       + "onPR=\(onPR) outside=\(outside) full=\(full) paused=\(paused) "
                       + "disk=\(disk) broke=\(broke): \(got)")
-                // Off the network the two halves of capacity are one hold.
+                // Off the network, `paused` holds like a full cap.
                 let split = Gate.decide(source: source, banned: banned, agentOnPR: onPR,
                                         atCapacity: full, unaffordable: broke,
                                         outsideAllowlist: outside, lowDisk: disk,
@@ -387,8 +387,7 @@ func networkSmoke() throws {
           && NetworkSettings.maximumAcceptedHKey == "networkMaximumAcceptedH"
           && NetworkSettings.devicesKey == "networkDevices")
     // Stored values and the hours the daemon's `hoursOf` makes of each: the same
-    // document `test_network.py` reads. The daemon's own test sets 48, 100000, 1 and
-    // "many".
+    // document `test_network.py` reads.
     let stored = """
     {"rows": [[null, 12], [11, 12], [12, 12], [48, 48], [48.0, 48], [13.5, 14], [15.5, 16],
      [12.5, 13], [14.5, 15],
