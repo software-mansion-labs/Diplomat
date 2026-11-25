@@ -510,19 +510,19 @@ final class PipelineSync {
             readAll = false
             mapped("Linear was not read")
         }
-        let auth: String
+        let signedOut = "not signed in to Linear (Settings → Pipeline → Linear login)"
         do {
-            guard let a = try io.linearAuth() else {
-                return unreadable("Linear was not read: not signed in to Linear (Settings → Pipeline → Linear login)")
-            }
-            auth = a
+            guard try io.linearAuth() != nil else { return unreadable("Linear was not read: \(signedOut)") }
         } catch {
             return unreadable("Linear was not read: \(error.localizedDescription)")
         }
         guard let url = LinearAPI.endpoint(model) else {
             return unreadable("Linear was not read: DIPLOMAT_LINEAR_API is not a URL")
         }
-        let api = LinearAPI(authorization: auth, url: url, timeout: model.httpTimeoutSecs, transport: io.linear)
+        let api = LinearAPI(authorization: { [io] in
+            guard let auth = try io.linearAuth() else { throw LinearAPI.Failure.api(signedOut) }
+            return auth
+        }, url: url, timeout: model.httpTimeoutSecs, transport: io.linear)
         linear = api
         var after: String?
         var read = 0

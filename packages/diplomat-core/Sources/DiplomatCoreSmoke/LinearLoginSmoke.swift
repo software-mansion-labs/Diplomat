@@ -65,6 +65,38 @@ private func occupy(_ port: UInt16) -> Int32 {
     return fd
 }
 
+/// A client of 127.0.0.1:`port` that never finishes a request: it sends nothing, or a byte
+/// every 0.3s (`trickle`), and hangs up after `secs`.
+private func stall(_ port: UInt16, trickle: Bool, secs: Double) {
+    Thread.detachNewThread {
+#if canImport(Glibc)
+        let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        let flags = Int32(MSG_NOSIGNAL)
+#else
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        let flags: Int32 = 0
+#endif
+        var addr = sockaddr_in()
+#if canImport(Darwin)
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+#endif
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr.s_addr = in_addr_t(0x7f00_0001).bigEndian
+        _ = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        let end = Date().addingTimeInterval(secs)
+        while Date() < end {
+            if trickle { _ = send(fd, "G", 1, flags) }
+            usleep(300_000)
+        }
+        close(fd)
+    }
+}
+
 /// Plays the browser: each of `visits` (a query string, or a path starting with `/`) is
 /// fetched in order from the redirect the consent page names, `{state}` its state.
 private final class Browser {
@@ -83,9 +115,11 @@ private final class Browser {
         let redirect = authorize["redirect_uri"] ?? ""
         let base = redirect.components(separatedBy: "/linear/")[0]
         let script = visits.map { visit -> String in
-            let target = visit.hasPrefix("/") ? base + visit : redirect + "?" + visit
+            let post = visit.hasPrefix("POST ")
+            let query = post ? String(visit.dropFirst(5)) : visit
+            let target = query.hasPrefix("/") ? base + query : redirect + "?" + query
             let url = target.replacingOccurrences(of: "{state}", with: authorize["state"] ?? "")
-            return "curl -sS -m 30 -w ' %{http_code}' '\(url)' | tr -d '\\n'; echo"
+            return "curl -sS -m 30\(post ? " -X POST" : "") -w ' %{http_code}' '\(url)' | tr -d '\\n'; echo"
         }.joined(separator: "; ")
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
@@ -138,12 +172,13 @@ func linearLoginSmoke() throws {
     // ---- Signing in: the consent page, a stray request and a forged state, then the code ----
     let dir = freshDir()
     let linear = FakeLinear()
-    let browser = Browser(["/favicon.ico", "code=forged&state=not-it", "code=c1&state={state}"])
+    let browser = Browser(["/favicon.ico", "code=forged&state=not-it", "POST code=c0&state={state}",
+                           "code=c1&state={state}"])
     let started = Date()
     let login = try LinearLogin.signIn(in: dir, oauth: oauth(), open: browser.open, transport: linear.transport)
     let pages = browser.pages()
-    check(pages.count == 3 && pages[0].hasSuffix(" 404") && pages[1].hasSuffix(" 400")
-          && pages[2].contains("signed in to Linear as Ada (Acme)") && pages[2].hasSuffix(" 200"),
+    check(pages.count == 4 && pages[0].hasSuffix(" 404") && pages[1].hasSuffix(" 400") && pages[2].hasSuffix(" 000")
+          && pages[3].contains("signed in to Linear as Ada (Acme)") && pages[3].hasSuffix(" 200"),
           "the browser saw: \(pages)")
     let page = browser.authorize
     check(browser.opened == 1 && page["client_id"] == "smoke-client" && page["response_type"] == "code"
@@ -171,6 +206,8 @@ func linearLoginSmoke() throws {
     check(mode == 0o600 && kept?.accessToken == "acc1" && kept?.refreshToken == "ref1" && kept?.user == "Ada"
           && kept?.organization == "Acme" && kept?.expiresAt.map { abs($0.timeIntervalSince(login.expiresAt!)) < 1 } == true,
           "saved owner-only: \(String(describing: mode)) \(String(describing: kept))")
+    let dirMode = (try? FileManager.default.attributesOfItem(atPath: dir.path)[.posixPermissions] as? Int) ?? nil
+    check(dirMode == 0o700, "in a directory only its owner opens: \(String(describing: dirMode))")
 
     // ---- A port taken: the next one listed ----
     let held = occupy(39170)
@@ -186,11 +223,11 @@ func linearLoginSmoke() throws {
 
     // ---- Each way a sign-in ends without a login ----
     let declinedDir = freshDir()
-    let declined = Browser(["error=access_denied&error_description=The%20user%20said%20no&state={state}"])
+    let declined = Browser(["error=access_denied&error_description=The%20user%20said%20%3Cno%3E&state={state}"])
     let declinedFake = FakeLinear()
     check(failure { try LinearLogin.signIn(in: declinedDir, oauth: oauth(), open: declined.open,
-                                           transport: declinedFake.transport) } == .declined("The user said no"))
-    check(declined.pages().first?.contains("declined: The user said no") == true && declinedFake.requests.isEmpty
+                                           transport: declinedFake.transport) } == .declined("The user said <no>"))
+    check(declined.pages().first?.contains("declined: The user said &lt;no&gt;") == true && declinedFake.requests.isEmpty
           && LinearLogin.saved(in: declinedDir) == nil, "declined: nothing asked, nothing saved")
 
     let refusedDir = freshDir()
@@ -201,6 +238,18 @@ func linearLoginSmoke() throws {
                                            transport: refusedFake.transport) } == .refused("invalid_grant: code expired"))
     check(refused.pages().first?.hasSuffix(" 400") == true && LinearLogin.saved(in: refusedDir) == nil,
           "a refused code: nothing saved")
+
+    let codeless = Browser(["state={state}"])
+    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: codeless.open,
+                                           transport: FakeLinear().transport) } == .refused("no code came back"))
+    _ = codeless.pages()
+    let failedFake = FakeLinear()
+    failedFake.token = (500, ["access_token": "acc1"])
+    let failed = Browser(["code=c5&state={state}"])
+    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: failed.open,
+                                           transport: failedFake.transport) } == .refused("HTTP 500"),
+          "a token in an answer that is not a 200 is none")
+    _ = failed.pages()
 
     let unreachedDir = freshDir()
     let unreachedFake = FakeLinear()
@@ -224,6 +273,20 @@ func linearLoginSmoke() throws {
           "the page handed over: \(String(describing: handed))")
     check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { _ in }, cancelled: { true }) }
           == .cancelled)
+    var cancelAt = Date().addingTimeInterval(0.5)
+    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { _ in },
+                                           cancelled: { Date() > cancelAt }) } == .cancelled
+          && Date().timeIntervalSince(cancelAt) < 1, "a Cancel is heard within a quarter second or so")
+    for trickle in [false, true] {
+        cancelAt = Date().addingTimeInterval(0.5)
+        check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { url in
+            let redirect = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                .first { $0.name == "redirect_uri" }?.value ?? ""
+            stall(UInt16(URLComponents(string: redirect)?.port ?? 0), trickle: trickle, secs: 6)
+        }, cancelled: { Date() > cancelAt }) } == .cancelled && Date().timeIntervalSince(cancelAt) < 3.5,
+              "a client \(trickle ? "trickling bytes" : "sending nothing") holds a Cancel up "
+                  + "\(Date().timeIntervalSince(cancelAt))s")
+    }
     var asked = false
     check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(client: ""), open: { _ in asked = true }) }
           == .noClient && !asked, "no client ID: no page opened")
@@ -255,6 +318,11 @@ func linearLoginSmoke() throws {
           && rotated?.expiresAt.map { $0 > now.addingTimeInterval(86000) } == true, "rotated and saved: \(String(describing: rotated))")
 
     try saveLogin(authDir, expires: now.addingTimeInterval(300))
+    auth.token = (200, ["access_token": "acc3", "expires_in": 86399])
+    _ = try LinearLogin.authorization(in: authDir, now: now, transport: auth.transport)
+    check(LinearLogin.saved(in: authDir)?.refreshToken == "ref1", "a refresh that names no new refresh token keeps the last")
+
+    try saveLogin(authDir, expires: now.addingTimeInterval(300))
     auth.tokenFails = true
     check((try LinearLogin.authorization(in: authDir, now: now, transport: auth.transport)) == "Bearer acc1"
           && LinearLogin.saved(in: authDir)?.refreshToken == "ref1", "a failed refresh keeps a token not yet expired")
@@ -264,7 +332,7 @@ func linearLoginSmoke() throws {
     auth.tokenFails = false
     auth.token = (400, ["error": "invalid_grant"])
     check(failure { try LinearLogin.authorization(in: authDir, now: now, transport: auth.transport) } == .expired
-          && LinearLogin.saved(in: authDir) == nil, "a login Linear no longer accepts is forgotten")
+          && LinearLogin.saved(in: authDir) == nil, "a login whose refresh Linear refuses is forgotten")
     try saveLogin(authDir, expires: now.addingTimeInterval(-60), refresh: nil)
     check(failure { try LinearLogin.authorization(in: authDir, now: now, transport: auth.transport) } == .expired,
           "expired with nothing to refresh it with")
@@ -284,6 +352,13 @@ func linearLoginSmoke() throws {
     out.revokeStatus = 400
     check((try LinearLogin.signOut(in: outDir, transport: out.transport)) == "Linear answered HTTP 400 to the revocation"
           && LinearLogin.saved(in: outDir) == nil, "forgotten though Linear did not revoke it")
+    out.requests = []
+    out.revokeStatus = 200
+    try saveLogin(outDir, expires: now.addingTimeInterval(3600), refresh: nil)
+    _ = try LinearLogin.signOut(in: outDir, transport: out.transport)
+    let revokeAccess = out.at("/oauth/revoke").map(form)
+    check(revokeAccess.count == 1 && revokeAccess[0]["token"] == "acc1" && revokeAccess[0]["token_type_hint"] == "access_token",
+          "no refresh token: the access token is revoked: \(revokeAccess)")
     out.requests = []
     check((try LinearLogin.signOut(in: outDir, transport: out.transport)) == nil && out.requests.isEmpty,
           "nothing saved: nothing to revoke")

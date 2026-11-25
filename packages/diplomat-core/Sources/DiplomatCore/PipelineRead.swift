@@ -682,7 +682,8 @@ public struct LinearAPI {
     /// A personal API key overriding the login; no child Diplomat starts inherits it.
     public static let envVar = "DIPLOMAT_LINEAR_TOKEN"
 
-    let authorization: String
+    /// Asked before each call, so a long sync refreshes the login as it nears its expiry.
+    let authorization: () throws -> String
     let url: URL
     let timeout: TimeInterval
     let transport: SlackAPI.Transport
@@ -713,10 +714,11 @@ public struct LinearAPI {
         let body = try JSONSerialization.data(
             withJSONObject: ["query": query, "operationName": operation, "variables": variables],
             options: [.sortedKeys])
+        let auth = try authorization()
         let answer: (status: Int, headers: [String: String], body: Data)
         do {
             answer = try transport(SlackAPI.Request(
-                url: url, headers: ["Authorization": authorization, "Content-Type": "application/json"],
+                url: url, headers: ["Authorization": auth, "Content-Type": "application/json"],
                 body: body, timeout: timeout))
         } catch SlackError.transport(let why) {
             throw Failure.transport(why)

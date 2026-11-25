@@ -104,9 +104,10 @@ public enum LinearLogin {
         let model = try config()
         let oauth = given ?? model.linearOAuth
         guard !oauth.clientID.isEmpty else { throw Failure.noClient }
-        guard let listener = oauth.ports.lazy.compactMap({ Listener(port: UInt16(clamping: $0)) }).first else {
-            throw Failure.noPort(oauth.ports)
-        }
+        // A loop: `lazy.compactMap(…).first` binds the port it finds twice.
+        var bound: Listener?
+        for port in oauth.ports where bound == nil { bound = Listener(port: UInt16(clamping: port)) }
+        guard let listener = bound else { throw Failure.noPort(oauth.ports) }
         let redirect = oauth.redirect.replacingOccurrences(of: "{port}", with: String(listener.port))
         let verifier = randomToken()
         let state = randomToken()
@@ -223,7 +224,7 @@ public enum LinearLogin {
     static func whoami(_ authorization: String, model: CoreAssets.PipelineModel,
                        transport: @escaping SlackAPI.Transport) throws -> (user: String, organization: String) {
         guard let url = LinearAPI.endpoint(model) else { throw Failure.transport("the Linear API is not a URL") }
-        let data = try LinearAPI(authorization: authorization, url: url, timeout: model.httpTimeoutSecs,
+        let data = try LinearAPI(authorization: { authorization }, url: url, timeout: model.httpTimeoutSecs,
                                  transport: transport).call("Viewer", [:])
         let user = (data["viewer"] as? [String: Any])?["name"] as? String ?? ""
         return (user, (data["organization"] as? [String: Any])?["name"] as? String ?? "")
@@ -374,9 +375,9 @@ public enum LinearLogin {
                 guard poll(&p, 1, Int32(min(left, 0.25) * 1000) + 1) > 0 else { continue }
                 let client = accept(fd, nil, nil)
                 guard client >= 0 else { continue }
-                // A browser's speculative connection, which may send nothing, holds the wait
-                // up no longer.
-                var tv = timeval(tv_sec: 2, tv_usec: 0)
+                // A connection with no head within 2s (a browser's speculative one, which may
+                // send nothing, or a trickle) is dropped, so the wait still ends and hears Cancel.
+                var tv = timeval(tv_sec: 1, tv_usec: 0)
                 setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
 #if canImport(Darwin)
                 var one: Int32 = 1
@@ -384,7 +385,8 @@ public enum LinearLogin {
 #endif
                 var head = Data()
                 var chunk = [UInt8](repeating: 0, count: 4096)
-                while head.count < 16384, head.range(of: Data("\r\n\r\n".utf8)) == nil {
+                let giveUp = Date().addingTimeInterval(2)
+                while head.count < 16384, Date() < giveUp, head.range(of: Data("\r\n\r\n".utf8)) == nil {
                     let n = read(client, &chunk, chunk.count)
                     guard n > 0 else { break }
                     head.append(contentsOf: chunk[0..<n])

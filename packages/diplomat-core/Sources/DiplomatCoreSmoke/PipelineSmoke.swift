@@ -1507,6 +1507,20 @@ func pipelineSmoke() throws {
     check(keyless.linearOps.isEmpty && nokey.result.items.contains { $0.id == prURL(11) }
           && nokey.result.unread == ["acme/app"], "no login: \(nokey.result.unread)")
 
+    // A long sync asks for the token before each Linear call, so a refresh reaches the rest.
+    let rotating = fixture()
+    var issued = 0
+    var rotatingIO = rotating.io()
+    rotatingIO.linearAuth = {
+        issued += 1
+        return "Bearer t\(issued)"
+    }
+    _ = PipelineTick.run(settings: PipelineSettings(roots: [root], linearTeams: [team]), now: t0,
+                         dir: base.appendingPathComponent("rotating"), io: rotatingIO)
+    check(rotating.linearOps.count > 1 && rotating.authorizations.count == rotating.linearOps.count
+          && issued == rotating.linearOps.count + 1,
+          "each Linear call asks for the token: \(issued) asked, \(rotating.authorizations.count) sent")
+
     // One sync at a time per directory: one started meanwhile reads nothing.
     let busy = fixture()
     let busyDir = base.appendingPathComponent("busy")
