@@ -8,7 +8,7 @@ import { createInvite, createVoucher, inviteToken, parseInvite, verifyInvite, ve
 import { MAX_HELLO_CHAIN, MAX_PUSH_RECORDS, Pool } from '../core/pool.js';
 import { LIMITS, checkShape, isObject, memberRecord, shaped } from '../core/records.js';
 import {
-  CATCH_UP_MS, HOURS_CEILING, HOURS_FLOOR, INVITE_TTL_SECS, MAX_FORMER, PEER_BACKOFF_MAX_MS, PEER_BACKOFF_MS, PRUNE_INTERVAL_MS,
+  CATCH_UP_MS, CLOCK_SKEW_SECS, HOURS_CEILING, HOURS_FLOOR, INVITE_TTL_SECS, MAX_FORMER, PEER_BACKOFF_MAX_MS, PEER_BACKOFF_MS, PRUNE_INTERVAL_MS,
   PUSH_REPEAT_MS, MEMBER_RETENTION_SECS, RESIGN_INTERVAL_MS, SEARCH_INTERVAL_MS, STRANGER_BODY_BYTES, SYNC_INTERVAL_MS, WAKE_GAP_MS,
 } from '../paths.js';
 import { asksFile, heardFile, poolFile, readPool } from './store.js';
@@ -154,7 +154,8 @@ export function createGossip(host) {
       // What the store holds was let in once. A clock that woke up behind those records
       // must not make them the future, and this host a stranger to its own pool.
       const { refused } = P.pool.merge(doc.records, doc.records.reduce((latest, r) => (Number.isSafeInteger(r?.at) ? Math.max(latest, r.at) : latest), host.now()));
-      if (isObject(doc.joining)) P.joining = doc.joining;
+      // A store before this one kept the invite's own time, however far ahead.
+      if (isObject(doc.joining)) P.joining = { ...doc.joining, exp: Math.min(doc.joining.exp, host.now() + INVITE_TTL_SECS) };
       if (typeof doc.joinFailed === 'string') P.joinFailed = doc.joinFailed;
       if (Array.isArray(doc.invites)) P.invites = doc.invites;
       const kept = host.store.read(heardFile(P.id));
@@ -946,13 +947,15 @@ export function createGossip(host) {
     if (!host.pools.has(parsed.pool) && !host.away.has(parsed.pool)) throw noPool(parsed.pool);
     const verdict = verifyInvite(parsed, { pool: parsed.pool, now: host.now() });
     if (!verdict.ok) throw new Error(UNUSABLE[verdict.code]);
+    // Else its maker keeps this host joining, and paying it, for as long as it likes.
+    if (parsed.exp > host.now() + INVITE_TTL_SECS + CLOCK_SKEW_SECS) throw new Error('That invite says it is good for longer than a day, and no machine makes one for longer: ask for a new one.');
     if (parsed.by === host.self) throw new Error('That invite was made on this machine: it lets another machine in, not this one.');
     const linked = host.pools.get(parsed.pool);
     if (linked && under(linked, parsed.by, host.self)) {
       throw new Error(`The machine that made that invite came into the pool ${parsed.pool} through this one, which is in it already: an invite takes a machine in under its maker. To move this machine, use an invite of a machine that did not come in through it.`);
     }
     const P = linked ?? rejoin(parsed.pool);
-    P.joining = { invite: token, by: parsed.by, exp: parsed.exp };
+    P.joining = { invite: token, by: parsed.by, exp: Math.min(parsed.exp, host.now() + INVITE_TTL_SECS) };
     P.joinFailed = '';
     P.farewell = null;
     host.save(P);

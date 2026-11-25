@@ -32,7 +32,7 @@ import { rulesFor } from './requester/rules.js';
 import { createTransport } from './transport/index.js';
 import {
   ADB_SERVER, BASE_DIR, CLAUDE_BIN, CONFIG_PATH, CONFIG_POLL_MS, CONFIG_UNREADABLE_POLLS, CONTAINER_DISK_BYTES, DISCOVERY_PATH,
-  DOCKER_BIN, ENGINE_WAIT_MS, EXECUTOR_CHECK_MS, EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GH_BIN, GIT_BIN, GLAB_BIN, HOURS_FLOOR,
+  DOCKER_BIN, ENGINE_WAIT_MS, EXECUTOR_CHECK_MS, EXECUTOR_RETRY_MS, FAULT_REPEATS, FAULT_WINDOW_MS, FORWARDS, GH_BIN, GIT_BIN, GLAB_BIN, HOURS_FLOOR, INVITE_TTL_SECS,
   JOBS_PATH, JOBS_WRITE_MS, LOG_PATH, MIRROR_KEEP_MS, NOT_BOUNDS, OPENSSL_BIN, POOL_RETRY_MAX_MS, POOL_RETRY_MS, RECONCILE_MS, RUN_KEEP_MS,
   SECURITY_BIN, SOCKET_BODY_CHARS, SOCKET_PATH, STATE_PATH, STATE_WRITE_MS, SWEEP_MS, SWITCH_OFF_WAIT_MS, TEST_FAULTS_PATH, TEST_KNOBS,
   TOOL_PATH, TOR_BIN, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS, locate,
@@ -772,7 +772,7 @@ const SHAPES = {
     base: optional(text(300)), now: optional(flag),
   },
   withdraw: { taskId: text(600), reason: optional(text(1000, 0)) },
-  invite: { pool: POOL, ttlSecs: optional(whole(60, 366 * 24 * 3600)) },
+  invite: { pool: POOL, ttlSecs: optional(whole(60, INVITE_TTL_SECS)) },
   join: { invite: optional(text(4096)), pool: optional(POOL) },
   leave: { pool: POOL },
   stopRun: { runId: text(64) },

@@ -152,6 +152,17 @@ await check('the keys of one member take an even share of the search\'s, or one 
   assert.deepEqual([s.pay('k6', T, 11, T, { member: false, search: true }), s.pay('k7', T, 21, T, of('z', 6)), s.pay('k7', T, 20, T, of('z', 6))], [false, false, true]);
 });
 
+await check('a member\'s one request at the most past the search\'s share is paid only while the whole hour has room for it', () => {
+  const s = new Spending({ peer: 100, all: 150, floor: 10, floorAfter: 3600, search: 60 }, 20);
+  const T = 50000;
+  const of = (key) => ({ member: false, search: true, share: { key, of: 8 } });
+  // The search's 60 taken by three members' keys, 70 of the whole by members.
+  assert.deepEqual(['a', 'b', 'c'].map((key) => s.pay(`k${key}`, T, 20, T, of(key))), [true, true, true]);
+  assert.deepEqual([s.pay('m1', T, 50, T), s.pay('m2', T, 20, T)], [true, true]);
+  // 20 of the whole left: one member's request at the most past the search's share, and no second.
+  assert.deepEqual([s.pay('kd', T, 20, T, of('d')), s.pay('ke', T, 20, T, of('e'))], [true, false]);
+});
+
 await check('proofs are worked on by so many threads at a time and no more, the cheapest waiting first; one that fails holds no thread', async () => {
   const going = new Map();
   const order = [];
