@@ -1,6 +1,4 @@
-"""Diplomat's side of the Diplomacy Network daemon (``packages/diplomacy-network``):
-what a job is offered as, what this machine admits, and what the daemon's snapshot
-says.
+"""Diplomat's side of the Diplomacy Network daemon (``packages/diplomacy-network``).
 
 Swift twin: ``DiplomatCore/Network.swift``, decision for decision.
 """
@@ -30,10 +28,10 @@ MAXIMUM_ACCEPTED_H_KEY = "networkMaximumAcceptedH"
 #: Whether a job running on this machine may reach its adb server. Off unless ``true``.
 DEVICES_KEY = "networkDevices"
 
-#: The fewest hours a task may ask for or a member may accept, and the default of both.
-#: The daemon's ``HOURS_FLOOR``.
+#: The daemon's ``HOURS_FLOOR``: the fewest hours a task may ask or a member accept,
+#: and the default of both.
 HOURS_FLOOR = 12
-#: The most hours either may be. The daemon's ``HOURS_CEILING``.
+#: The daemon's ``HOURS_CEILING``.
 HOURS_CEILING = 720
 
 
@@ -58,10 +56,7 @@ def _js_string(value: Any) -> str:
 
 
 def js_number(value: Any) -> float:
-    """JavaScript's ``Number()`` of a JSON value: a number is itself, ``true`` is 1,
-    ``false`` and ``null`` are 0, a string is the number it spells (a blank one is 0)
-    and an array is its members joined by commas, read as that string. Anything else
-    is NaN."""
+    """JavaScript's ``Number()`` of a JSON value."""
     if isinstance(value, list):
         value = _js_string(value)
     if value is None:
@@ -83,10 +78,7 @@ def js_number(value: Any) -> float:
 
 
 def hours(stored: Any) -> int:
-    """A stored hours value as the daemon reads it (its ``hoursOf``): the value's
-    JavaScript number (:func:`js_number`) rounded to the nearest whole number, a half
-    going up, and held to the floor and the ceiling. The floor when that is no finite
-    number."""
+    """A stored hours value as the daemon's ``hoursOf`` reads it."""
     v = js_number(stored)
     if not math.isfinite(v):
         return HOURS_FLOOR
@@ -95,7 +87,6 @@ def hours(stored: Any) -> int:
 
 # MARK: - Routes
 
-#: The daemon's local-socket routes, by the name a daemon client posts to.
 ROUTE_HEALTH = "health"
 ROUTE_STATE = "state"
 ROUTE_POOLS = "pools"
@@ -123,7 +114,6 @@ def withdraw_body(task: str, reason: str) -> dict:
 
 
 def invite_body(pool: str, ttl_secs: int | None = None) -> dict:
-    """``ttl_secs`` absent leaves the invite's life to the daemon."""
     return {"pool": pool} if ttl_secs is None else {"pool": pool, "ttlSecs": ttl_secs}
 
 
@@ -140,7 +130,6 @@ def stop_run_body(run: str) -> dict:
     return {"runId": run}
 
 
-#: The activity verbs of the ``network`` audit category.
 AUDIT_OFFER = "network-offer"
 AUDIT_CLAIMED = "network-claimed"
 AUDIT_DONE = "network-done"
@@ -174,7 +163,6 @@ class Offer:
 
     pool: str
     kind: str
-    #: The kind's own option alone; empty for a kind that has none.
     options: dict[str, bool]
     item: str
     title: str
@@ -196,15 +184,11 @@ def offer_for(verb: str, own_pr: bool, number: int | None, repo_key: str, label:
               mark_ready: bool = False, no_prs: bool = False,
               read_only: bool = False) -> Offer | str:
     """The offer for one job, from the audit verb it is logged under; or, as a string,
-    why the job cannot be offered.
+    why it cannot be offered.
 
-    The four option inputs are what the job's own prompt was built to allow: whether a
-    review may approve or request changes, whether work on the operator's own PR may
-    mark it ready, whether an issue fix opens no PRs, and whether an audit only reads.
-    Each reaches the offer under the one kind it belongs to.
-
-    A job the operator started, or forced past a hold, is theirs to run at once
-    (``now``).
+    The option flags are what the job's prompt was built to allow; each reaches the
+    offer only under its own kind. A job the operator started, or forced past a hold,
+    runs at once (``now``).
     """
     kind = kind_for(verb, own_pr)
     if kind is None:
@@ -226,9 +210,6 @@ def offer_for(verb: str, own_pr: bool, number: int | None, repo_key: str, label:
 
 
 def kind_for(verb: str, own_pr: bool) -> str | None:
-    """The daemon's kind for an audit verb, or ``None`` for a verb it has none for. A
-    review of the operator's own PR is its own kind, and a reply to reviews is always
-    one."""
     if verb in ("review-req", "review", "comms-review"):
         return KIND_REVIEW_OWN if own_pr else KIND_REVIEW
     return {"review-reply": KIND_REVIEW_OWN, "conflicts": KIND_CONFLICTS,
@@ -238,8 +219,7 @@ def kind_for(verb: str, own_pr: bool) -> str | None:
 
 
 def pool_for(repo_key: str) -> str | None:
-    """The pool a repository key (:attr:`prref.LocalRepo.key`) names: the forge's host
-    and the project path, lowercase. ``None`` for a key that names no repository."""
+    """A two-part key (:attr:`prref.LocalRepo.key`) is github.com's."""
     key = repo_key.lower()
     parts = key.split("/")
     if len(parts) < 2 or not all(parts):
@@ -247,16 +227,15 @@ def pool_for(repo_key: str) -> str | None:
     return f"{GITHUB}/{key}" if len(parts) == 2 else key
 
 
-#: GitHub's own names. On each but github.com itself, and on every name under one,
-#: ``gh`` looks for the API on another name again.
+#: ``gh`` finds the API of these hosts, and of any host under them, on another name -
+#: github.com itself aside.
 _GITHUB_NAMES = (GITHUB, "ghe.com", "github.localhost")
 
 
 def has_rules(host: str) -> bool:
-    """Whether the daemon's requester has rules for a repository on ``host`` (its
-    ``githubApi``): for github.com and for every host that is none of GitHub's own
-    names - not for a subdomain of github.com, nor for ghe.com, github.localhost or
-    anything under them. A port after the name is not part of it."""
+    """Twin of the daemon's ``githubApi`` (requester/rules.js) being non-null:
+    github.com, and every host neither one of nor under :data:`_GITHUB_NAMES`. A
+    ``:port`` is ignored."""
     if host == GITHUB:
         return True
     name, colon, port = host.rpartition(":")
@@ -270,8 +249,6 @@ def no_rules(host: str) -> str:
 
 
 def item_for(kind: str, number: int | None, prompt: str) -> str:
-    """What the task is pinned to: the pull request or issue the kind works on, else a
-    name for this prompt alone."""
     if number is not None:
         if kind == KIND_ISSUES:
             return f"issue-{number}"
@@ -281,10 +258,9 @@ def item_for(kind: str, number: int | None, prompt: str) -> str:
 
 
 def linked_pools(roots: Iterable[LocalRepo], identities: Mapping[str, str]) -> list[dict]:
-    """The repositories this machine links to pools, one per root, the first root
-    winning an id. ``identities`` maps a forge host to the login work is done as there;
-    a root on a host with none is left out, a task id being built on that login, and
-    so is one on a host the network has no rules for (:func:`has_rules`)."""
+    """One pool per root, the first root winning an id. A root is left out without a
+    login on its host (``identities``: host to login; a task id is built on it), with a
+    ``web_port``, or on a host without rules (:func:`has_rules`)."""
     out: dict[str, dict] = {}
     for root in roots:
         identity = identities.get(root.host, "").strip().lower()
@@ -324,22 +300,17 @@ def not_counted(path: str, repo: str, host: str, port: int) -> str:
 def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
                   unread: Iterable[str], identities: Mapping[str, str],
                   known: Iterable["Pool"]) -> tuple[list[dict], list[str]]:
-    """What ``POST /pools`` is to say, and a sentence for each repository that has no
-    pool of its own making: one that could not be confirmed, and one on a host the
-    network has no rules for.
+    """What ``POST /pools`` says, and a sentence for each repository without a pool of
+    its own making.
 
-    Every linked repository is a pool: the roots, then what the Other repos checkouts
-    name that no root does (``others``). A root or a checkout that was read and names no
-    forge is no pool, and is in neither list; a repository on a host without rules
-    (:func:`has_rules`) is no pool either, and is named. A repository named by a remote on
-    another port than the forge's API (:attr:`LocalRepo.web_port`) makes no pool, and is
-    named as having none, or as not counted where another checkout of it makes one. What
-    could not be confirmed is said as the daemon last had it (``known``, its snapshot's
-    pools): the pool at a path that could not be read (``unread``), and the pool of a
-    repository whose forge login is unknown.
-    The daemon leaves a pool the list omits, so the list is never cut short by what is
-    unknown, and a repository taken out of Settings leaves its pool whatever else
-    cannot be read."""
+    Every linked repository is a pool: the roots, then what ``others`` (the Other repos
+    checkouts) name that no root does. One on a host without rules (:func:`has_rules`),
+    or reached on a port other than the forge API's (:attr:`LocalRepo.web_port`), makes
+    none and is named - as not counted where another checkout of it makes one. What
+    cannot be confirmed (the pool at an ``unread`` path, or of a repository whose login
+    is unknown) is said as the daemon last had it (``known``). The daemon leaves a pool
+    the list omits, so the list is never cut short by what is unknown, and a repository
+    taken out of Settings still leaves its pool."""
     repos = [*roots, *others]
     pools = linked_pools(repos, identities)
     listed = {pool["id"] for pool in pools}
@@ -371,7 +342,6 @@ def pools_listing(roots: Iterable[LocalRepo], others: Iterable[LocalRepo],
 
 
 def pools_body(pools: list[dict]) -> dict:
-    """The body of ``POST /pools``."""
     return {"pools": pools}
 
 
@@ -390,7 +360,7 @@ class Admit:
     """How many more tasks this machine takes now: the body of ``POST /admit``."""
 
     slots: int
-    #: Why it is zero when something other than a full cap makes it so; else "".
+    #: Why it is zero, when not for a full cap.
     reason: str = ""
 
     @property
@@ -401,9 +371,6 @@ class Admit:
 
 def admit(limit: int, running: int, low_disk: bool, affordable: bool,
           auto_run: bool) -> Admit:
-    """The free bays of the cap, or none while the disk is low, the budget is spent or
-    the operator has automatic work off - the first of those that holds is the reason
-    given."""
     if low_disk:
         return Admit(0, ADMIT_DISK)
     if not affordable:
@@ -414,7 +381,6 @@ def admit(limit: int, running: int, low_disk: bool, affordable: bool,
 
 
 def running(snapshot: "Snapshot | None") -> int:
-    """The runs this machine is executing for the network."""
     return sum(r.state in LIVE_RUN_STATES for r in snapshot.runs) if snapshot else 0
 
 
@@ -477,23 +443,21 @@ class Pool:
     hash: str = ""
     members: tuple[Member, ...] = ()
     tasks: tuple[PoolTask, ...] = ()
-    #: Whether this machine left the pool: it takes and offers nothing there.
+    #: This machine left the pool: it takes and offers nothing there.
     left: bool = False
-    #: Whether an invite pasted here waits for the machine that made it: this machine
-    #: is the pool's only member meanwhile.
+    #: An invite pasted here waits for its maker; this machine is the only member
+    #: meanwhile.
     joining: bool = False
-    #: Why the last invite let this machine in nowhere, in the daemon's words; "" for
-    #: none.
+    #: Why the last invite let this machine in nowhere, in the daemon's words.
     join_failed: str = ""
-    #: Whether this machine, back in the pool, waits for a machine it knew there to
-    #: answer it, taking and offering none of the pool's jobs meanwhile: after a Rejoin, or
-    #: once the other members' records ran out while it was away.
+    #: Back in the pool (after a Rejoin, or the other members' records ran out while it
+    #: was away), waiting for a machine it knew there to answer; it takes and offers
+    #: nothing meanwhile.
     returning: bool = False
-    #: Whether every other machine this one asks refused it as no member, none
-    #: answering since: it needs an invite.
+    #: Every other machine asked refused it as no member, none answering since: it
+    #: needs an invite.
     unseated: bool = False
-    #: Why this machine takes none of the pool's jobs, in the daemon's sentence; ""
-    #: while it takes them.
+    #: Why this machine takes none of the pool's jobs, in the daemon's words.
     not_taking: str = ""
 
 
@@ -540,14 +504,14 @@ class OfferState:
     item: str = ""
     title: str = ""
     #: How the last attempt of a ``failed`` offer ended, or why a ``cancelled`` one was
-    #: withdrawn; "" when the daemon gave none.
+    #: withdrawn.
     reason: str = ""
     #: The daemon's own word on whether the executor is this machine; ``None`` when the
     #: document gave none.
     executor_here: bool | None = None
     offered_at: float | None = None
-    #: Why this machine does not take this job of its own while it is ``pooled``, in
-    #: the daemon's sentence; "" for a job it is free to take.
+    #: Why this machine does not take this ``pooled`` job of its own, in the daemon's
+    #: words.
     not_taking: str = ""
 
 
@@ -593,7 +557,6 @@ class Snapshot:
 
     @property
     def test_settings_note(self) -> str:
-        """The Network screen's line for a daemon with :attr:`test_settings`, else ""."""
         if not self.test_settings:
             return ""
         return ("The daemon runs with settings only a test gives it, and is not one for "
@@ -601,8 +564,6 @@ class Snapshot:
 
     @staticmethod
     def parse(text: str | bytes | None) -> "Snapshot | None":
-        """The daemon's answer, or ``None`` when there was none or it is not a JSON
-        object."""
         if text is None:
             return None
         try:
@@ -646,8 +607,8 @@ class Snapshot:
         )
 
 
-#: The states of a service that end what it is for until the operator acts. The
-#: Network screen draws them red, and the panel says so (:func:`trouble`).
+#: Service states that last until the operator acts: drawn red, and said by
+#: :func:`trouble`.
 TROUBLE_STATES = frozenset({"failed", "missing", "down"})
 
 
@@ -659,17 +620,14 @@ def settings_unknown(path: object) -> str:
 
 
 def unknown_note(unknown: str) -> str:
-    """The Network screen's line while :func:`settings_unknown`."""
     return (f"{unknown}: until it can be, this machine's pools stay as the daemon has "
             "them and nothing is offered")
 
 
 def trouble(answered: bool | None, snapshot: Snapshot | None, unknown: str = "") -> str:
-    """The panel's one line on what of the network does not work on this machine:
-    ``unknown`` (:func:`settings_unknown`), else a daemon that was asked and did not
-    answer, else each of the transport, docker and the model credential that is in a
-    :data:`TROUBLE_STATES` state, with the daemon's detail. "" while nothing is wrong,
-    the daemon has not been asked, or a service is still coming up."""
+    """The panel's one line on what of the network does not work here; "" while nothing
+    is wrong, the daemon has not been asked (``answered`` None), or a service is still
+    coming up."""
     if unknown:
         return f"Diplomacy Network: {unknown}"
     if answered is False:
@@ -688,9 +646,8 @@ _UTC_TIME = re.compile(
 
 
 def local_times(sentence: str) -> str:
-    """``sentence`` with each UTC time the daemon wrote in it, as in ``…until
-    2026-11-17T10:30:56.000Z``, as this machine's clock reads it: ``…until 11:30``. A
-    time that clock cannot read is left as written."""
+    """``sentence`` with each UTC time the daemon wrote (``…until
+    2026-11-17T10:30:56.000Z``) as this machine's clock reads it (``…until 11:30``)."""
     def clock(found: re.Match) -> str:
         try:
             at = datetime.strptime(found[0][:19] + "+0000", "%Y-%m-%dT%H:%M:%S%z")
@@ -759,13 +716,10 @@ NO_OFFERS = "the snapshot lists no offers"
 
 
 def tasks(snapshot: Snapshot | None) -> Observation:
-    """What a snapshot says of this machine's own offers, as the agent-state resolver
-    reads it (:attr:`agentstate.Evidence.network`): task id → its offer.
-
-    Whether a task runs here is the offer's own word where the daemon gives it. Where
-    it gives none, a task runs here when one of this machine's live runs is for it,
-    when its pool lists this machine as its executor, or when its executor is this
-    machine's own key."""
+    """This machine's own offers by task id, as the agent-state resolver reads them
+    (:attr:`agentstate.Evidence.network`). A task runs here by the offer's own word;
+    lacking it, when a live run here is for it, its pool names this machine its
+    executor, or its executor is this machine's key."""
     if snapshot is None:
         return Observation.unavailable(UNANSWERED)
     if snapshot.offers is None:
@@ -783,10 +737,9 @@ def tasks(snapshot: Snapshot | None) -> Observation:
 
 
 def not_taking(task: str, pool: Pool, snapshot: Snapshot | None) -> str:
-    """Why this machine does not take the job it offered as ``task`` while that waits
-    in ``pool``, where the reason is the job's own: "" for a job it is free to take, and
-    for one held back by what holds every job of the pool back (:attr:`Pool.not_taking`),
-    which the pool says once."""
+    """Why this machine does not take its own pooled offer ``task``; "" when it is free
+    to, or when the reason is the pool's (:attr:`Pool.not_taking`), which the pool says
+    once."""
     offers = (snapshot.offers if snapshot else None) or ()
     said = next((o.not_taking for o in offers
                  if o.task_id == task and o.state == NET_POOLED), "")
@@ -794,9 +747,8 @@ def not_taking(task: str, pool: Pool, snapshot: Snapshot | None) -> str:
 
 
 def open_task(pool: str, kind: str, item: str, snapshot: Snapshot | None) -> str | None:
-    """The task the daemon holds for an offer of ``item`` as ``kind`` to ``pool``: its
-    open offer of the three, which is what it names a task by. None when the snapshot
-    lists none."""
+    """The task of the daemon's open offer of ``item`` as ``kind`` to ``pool``: the
+    triple names a task."""
     if snapshot is None or snapshot.offers is None:
         return None
     return next((o.task_id for o in snapshot.offers
