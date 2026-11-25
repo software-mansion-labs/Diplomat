@@ -49,8 +49,7 @@ class SpawnWizard(QWidget):
     #: because that is the only one Qt lets touch the status line.
     _swept = Signal(int, int, str)
 
-    #: The verdict of a job offered to the Diplomacy Network, from the worker that
-    #: asked the daemon.
+    #: A network offer's verdict, emitted from the worker thread that made it.
     _offered = Signal(object)
 
     #: The nouns a sweep's status line is written out of: one item it covers ("PR" /

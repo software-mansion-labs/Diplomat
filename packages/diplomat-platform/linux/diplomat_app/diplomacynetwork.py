@@ -1,10 +1,7 @@
-"""Bridge to the Diplomacy Network daemon + installer, for the gate every job passes
-while the network is switched on, and for the Network screen.
-
-The applet *drives* the Node installer (``diplomacy-network/src/install.js``) to start
-and stop the daemon, *asks* the daemon's socket (``packages/diplomacy-network``'s
-README, "Local socket"), and writes the settings the daemon re-reads from the shared
-config. What to send and how to read the answers is :mod:`diplomat_runtime.network`.
+"""Bridge to the Diplomacy Network: drives the Node installer (``src/install.js``) to
+start and stop the daemon, asks the daemon's socket (the package README, "Local
+socket"), and writes the settings the daemon re-reads from the shared config. What to
+send and how to read the answers is :mod:`diplomat_runtime.network`.
 """
 
 from __future__ import annotations
@@ -36,12 +33,11 @@ def package_available() -> bool:
 
 
 def ready() -> bool:
-    """Whether the installer can be run at all: the package and a node to run it."""
     return package_available() and da.resolve_node() is not None
 
 
 def base_dir() -> Path:
-    """The daemon's directory, relocated by ``DN_BASE_DIR`` as in ``src/paths.js``."""
+    """Mirrors ``src/paths.js``'s ``BASE_DIR``."""
     env = os.environ.get("DN_BASE_DIR")
     if env:
         return Path(env).expanduser()
@@ -54,15 +50,14 @@ def socket_path() -> Path:
 
 # MARK: settings
 
-#: The config the switch was last read from, and what it said.
+#: (config path, switch) as last read.
 _switch_read: tuple[Path, bool] | None = None
 
 
 def switch_record() -> Path:
-    """Where the switch is kept as the config last read it, for a Diplomat that starts
-    while the config cannot be read: ``network-switch.json`` beside the config, holding
-    ``{"config": <the config's path>, "networkEnabled": <the switch>}``. The macOS app
-    keeps the same file."""
+    """The switch as last read, for a Diplomat that starts while the config cannot be
+    read: ``{"config": <its path>, "networkEnabled": <switch>}`` beside the config. The
+    macOS app keeps the same file."""
     return appconfig.path().with_name(appconfig.SWITCH_RECORD)
 
 
@@ -72,11 +67,10 @@ def _switch_recorded(where: Path) -> bool:
 
 
 def enabled() -> bool:
-    """The switch, as the shared config has it. A config that cannot be read, or is gone
-    (:func:`appconfig.read_known`), says nothing of it - one read can fall in the middle
-    of a rewrite - so the switch is as it was last read: by this process, else by the
-    Diplomat that last wrote :func:`switch_record`. It is off when none on this machine
-    read it as on."""
+    """The shared config's switch. A config that cannot be read or is gone
+    (:func:`appconfig.read_known`) - one read can land mid-rewrite - leaves it as last
+    read: by this process, else by the Diplomat that last wrote :func:`switch_record`;
+    off when none read it on."""
     global _switch_read
     where, config = appconfig.path(), appconfig.read_known()
     if config is None:
@@ -144,8 +138,7 @@ def stop_daemon() -> dict | None:
 
 
 def ended_note(result: Mapping[str, Any] | None) -> str:
-    """What a stop's feed line adds when the installer ended offers or runs the daemon
-    had left in its store; empty for none."""
+    """A stop's feed-line suffix for the offers and runs the installer ended."""
     ended = (result or {}).get("ended")
     said = []
     for key, verb, noun in (("offers", "cancelling", "offer"), ("runs", "ending", "run")):
@@ -159,18 +152,14 @@ def ended_note(result: Mapping[str, Any] | None) -> str:
 
 #: Every route answers from memory; an offer also signs and stores a record.
 SEND_TIMEOUT_SECS = 15
-#: The snapshot is asked for on every agent tick, so a daemon that is slow to give it
-#: is read as one that did not.
+#: Asked on every agent tick, so a slow answer counts as none.
 STATE_TIMEOUT_SECS = 3
 
 _GETS = frozenset({network.ROUTE_HEALTH, network.ROUTE_STATE})
 
-#: Why nothing can be said of a network run, as the sentences that take it start.
 NOT_ANSWERING = "the Diplomacy Network daemon is not answering"
-#: What a Stop says of a run the daemon no longer lists as going.
 RUN_ENDED = "That job's run on this machine has already ended."
 SWITCHED_OFF = "the Diplomacy Network is switched off"
-#: What a join by invite waits for, as the feed's line and the pool's card end.
 SEATED_LATER = "the machine that made the invite seats this one once it is reached"
 
 
@@ -202,7 +191,6 @@ def definite(reply: da.DaemonReply | str) -> bool:
 
 
 def state() -> network.Snapshot | None:
-    """The daemon's snapshot, or None when it gave none."""
     reply = send(network.ROUTE_STATE, timeout_secs=STATE_TIMEOUT_SECS)
     if not isinstance(reply, da.DaemonReply) or not reply.ok:
         return None
@@ -211,17 +199,15 @@ def state() -> network.Snapshot | None:
 
 # MARK: a job's offer
 
-#: The dispatch verdict for a job the network did not take.
 VERDICT_REFUSED = "network_refused"
 
-#: The runner a completion is recorded under when another machine ran the task: not a
-#: runner of this machine's, so its tokens count against no limit read here.
+#: The runner of a completion another machine ran: not one of this machine's, so its
+#: tokens count against no limit read here.
 RUNNER_ELSEWHERE = "network"
 
 
 class Offered(str):
-    """The dispatch verdict of a started job (``"spawned"``) for one the network took,
-    carrying the task it is offered as."""
+    """``"spawned"``, for a job the network took, carrying the task it is offered as."""
 
     task: str
 
@@ -231,16 +217,15 @@ class Offered(str):
         return self
 
 
-#: The dispatch verdict for a job of the operator's whose offer the daemon was sent and
-#: gave no definite answer to: kept, and settled on a later cycle.
+#: An operator's job whose offer got no definite answer: kept, and settled on a later
+#: cycle.
 VERDICT_OFFERING = "network_offering"
 
 
 class Refused(str):
-    """:data:`VERDICT_REFUSED`, carrying the words that say why. ``own`` says the
-    refusal is of this one job - the daemon's definite answer to its offer, or an offer
-    that could not be made of it - where a daemon that did not answer, or is stopping,
-    takes no job at all."""
+    """:data:`VERDICT_REFUSED`, carrying the words that say why. ``own``: the refusal is
+    of this job alone (the daemon's definite answer, or an offer that could not be made
+    of it), not of a daemon that did not answer or is stopping and so takes no job."""
 
     sentence: str
     own: bool
@@ -298,13 +283,11 @@ def _terminate(pid: int) -> None:
 
 def retire_legacy_node() -> tuple[int | None, Path | None, bool]:
     """End the mesh node an earlier Diplomat ran and remove its directory, keys
-    included. That node is the pid the directory's ``state.json`` names - a JSON integer
-    from 1 to 2^31 - 1, the pids a process can have - while that pid is a ``python -m
-    szpontnet`` of this user: a node kept anywhere else is its operator's own program.
-    One still running after ``LEGACY_EXIT_SECS`` keeps the directory. A directory that
-    is a link loses the link alone: what it leads to was put there by its operator.
-    Returns the pid asked to quit and the directory removed, each None when there was
-    none, and whether that directory is a link. Blocking."""
+    included. The node is the pid ``state.json`` names, only while that pid is a
+    ``python -m szpontnet`` of this user: anything else is its operator's own program.
+    One still running after ``LEGACY_EXIT_SECS`` keeps the directory. A linked directory
+    loses the link alone: its target is the operator's. Returns the pid asked to quit
+    and the directory removed (each None for none), and whether it is a link. Blocking."""
     where = legacy_dir()
     if not where.is_dir():
         return None, None, False
@@ -352,14 +335,12 @@ def legacy_retired_line(asked: int | None, removed: Path | None, link: bool,
 
 # MARK: display
 
-#: The switch, and what it does, wherever it is drawn.
 SWITCH_TITLE = "Offer every job to the Diplomacy Network"
 EXPLANATION = ("Every job is offered to a shared pool per repository and runs in a "
                "docker container, possibly on another machine in the pool.")
 
 
 def short_key(pk: str) -> str:
-    """A member's key as the screens and the run rows name it."""
     return pk[:8]
 
 

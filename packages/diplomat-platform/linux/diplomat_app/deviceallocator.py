@@ -299,7 +299,6 @@ class RemoteStatus:
 class DaemonReply:
     status: int
     json: object = None
-    #: The body as it was sent, for a reader that parses it itself.
     raw: bytes = field(default=b"", compare=False, repr=False)
 
     @property
@@ -487,9 +486,8 @@ def devices_reply(reply: DaemonReply | None) -> RemoteReply:
     ))
 
 
-# How long an installer is waited for before it is killed, which leaves no answer. The
-# Diplomacy Network's answers within INSTALLER_ANSWER_MS (its src/paths.js), which has to
-# stay under this.
+# A killed installer leaves no answer: the Diplomacy Network's INSTALLER_ANSWER_MS (its
+# src/paths.js) must stay under this.
 INSTALLER_TIMEOUT_SECS = 90
 
 

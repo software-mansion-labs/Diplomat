@@ -1,7 +1,4 @@
-"""The Network screen, twin of the macOS one (``NetworkScreen.swift``): the Diplomacy
-Network daemon's status, the hours this machine asks for and takes, and one panel per
-pool it is in.
-"""
+"""The Network screen, twin of macOS ``NetworkScreen.swift``."""
 
 from __future__ import annotations
 
@@ -45,7 +42,6 @@ from .widgets import (
 _TEAL = "#30B0C7"
 _GREEN, _ORANGE, _RED, _GREY = rm.GREEN, rm.AMBER, rm.RED, rm.GREY
 
-#: What one press of an hours stepper moves it by.
 HOURS_STEP = 12
 
 OFF_NOTE = "Off: every job runs in a terminal on this machine."
@@ -61,8 +57,6 @@ ACCEPTED_SUMMARY = "A job that may take longer is left to the other machines of 
 
 
 def hours_note(required: int, accepted: int) -> str:
-    """What the two hours say together when a job of this machine's own may take longer
-    than the longest job it takes, else ""."""
     if required <= accepted:
         return ""
     return (f"This machine takes none of its own jobs: one may take {required} h, and "
@@ -85,7 +79,6 @@ INVITE_PLACEHOLDER = "Paste an invite"
 INVITE_COPIED = "Invite copied. Send it to the machine that should join."
 STOP_RUN_HELP = "Stop this job's run on this machine. It goes back to the pool."
 WITHDRAW_HELP = "Withdraw this job from the pool."
-#: The snapshot's services, each a chip of the status card.
 SERVICES = ("transport", "docker", "model", "devices")
 LEFT_NOTE = "left - this machine takes and offers nothing here"
 
@@ -116,13 +109,10 @@ def service_tint(state: str) -> str:
 
 
 def stop_button(task: network.PoolTask) -> tuple[str, str]:
-    """The button that ends a pool's task from here, and its tooltip: the run, when
-    this machine is running it, else the offer this machine made of it."""
     return ("Stop", STOP_RUN_HELP) if task.executor_here else ("Withdraw", WITHDRAW_HELP)
 
 
 def counts(snapshot: network.Snapshot) -> str:
-    """The pools this machine is in and the tasks they hold; one it left is not counted."""
     joined = [p for p in snapshot.pools if not p.left]
     pools, tasks = len(joined), sum(len(p.tasks) for p in joined)
     return (f"{pools} pool{'' if pools == 1 else 's'} · "
@@ -130,13 +120,12 @@ def counts(snapshot: network.Snapshot) -> str:
 
 
 def task_state(state: str) -> str:
-    """A pool task's state as the screen words it."""
     return {"available": "in the pool", "claimed": "running"}.get(state, state)
 
 
 def ending(task: str, snapshot: network.Snapshot | None) -> str | None:
-    """How the offer this machine made of ``task`` ended, in the words its run's row
-    has, where the daemon gave a reason; None for any other task."""
+    """How this machine's offer of ``task`` ended, worded as its run's row, when the
+    daemon gave a reason; else None."""
     offers = network.tasks(snapshot)
     offer = offers.value.get(task) if offers.ok else None
     if (offer is None or not offer.reason
@@ -146,46 +135,35 @@ def ending(task: str, snapshot: network.Snapshot | None) -> str | None:
 
 
 def pool_joining(pool: network.Pool) -> str:
-    """A pool card's line while an invite pasted here waits for its maker, else ""."""
     return f"Joining: {dn.SEATED_LATER}" if pool.joining else ""
 
 
 def pool_returning(pool: network.Pool) -> str:
-    """A pool card's line while this machine, back in the pool, waits to be let back in,
-    else "". Once every machine it asked refused it, :func:`pool_unseated` says so
-    instead."""
     return ("Returning: waiting for a machine this one knew here to let it back in; until "
             "one does, it takes and offers none of this pool's jobs"
             if pool.returning and not pool.unseated else "")
 
 
 def pool_unseated(pool: network.Pool) -> str:
-    """A pool card's line once every machine this one asked refused it as no member,
-    else ""."""
     return ("No seat here: every machine this one asked refused it as no member, and it "
             "needs an invite again" if pool.unseated else "")
 
 
 def pool_join_failed(pool: network.Pool) -> str:
-    """A pool card's line on why the last invite let this machine in nowhere, else ""."""
     return f"The last invite came to nothing: {pool.join_failed}" if pool.join_failed else ""
 
 
 def pool_held(pool: network.Pool) -> str:
-    """A pool card's line on why this machine takes none of its jobs, else ""."""
     return (f"This machine takes none of this pool's jobs: {pool.not_taking}"
             if pool.not_taking else "")
 
 
 def task_held(task: str, pool: network.Pool, snapshot: network.Snapshot | None) -> str:
-    """A task row's line on why this machine does not take that job of its own, where
-    the pool's card does not say it already (:func:`network.not_taking`), else ""."""
     why = network.not_taking(task, pool, snapshot)
     return f"This machine is not taking this job: {why}" if why else ""
 
 
 def place(task: network.PoolTask) -> str:
-    """Where a pool's task is and until when: "on this machine · lease to 14:05"."""
     parts = []
     if task.offered_here:
         parts.append("offered here")
@@ -213,9 +191,8 @@ def _button(title: str, tint: str, tip: str = "") -> QPushButton:
 # MARK: - joining a pool
 
 class JoinRow(QWidget):
-    """Paste an invite and join the pool it is to. ``card`` is the pool panel it sits
-    in ("" for the one shown before any pool), which is where a refusal is shown; ``ui``
-    is that panel's state, which outlives the row."""
+    """Paste an invite and join its pool. ``card``: the pool panel it sits in, where a
+    refusal shows ("" before any pool); ``ui``: that panel's state, outliving the row."""
 
     def __init__(self, store: Store, card: str, ui: dict, parent: QWidget) -> None:
         super().__init__(parent)
@@ -256,10 +233,9 @@ class JoinRow(QWidget):
 # MARK: - one pool
 
 class PoolPanel(QWidget):
-    """One pool: who is in it, what it holds, and the invite, join and leave actions.
-    A pool this machine left says so and offers only the way back in. ``ui`` is what
-    the operator has open in it, kept by the screen across a redraw; ``ages`` takes
-    the lines that say how long ago something was, for the screen to keep current."""
+    """One pool's members, tasks and actions. ``ui``: what the operator has open in it,
+    kept by the screen across a redraw; ``ages`` collects the "how long ago" lines for
+    the screen to keep current."""
 
     def __init__(self, pool: network.Pool, *, store: Store, ui: dict, refusal: str,
                  ages: list) -> None:
@@ -384,7 +360,7 @@ class PoolPanel(QWidget):
         col.setSpacing(2)
         head = QHBoxLayout()
         head.setSpacing(6)
-        # Another machine's words: drawn as they are, on one line.
+        # Another machine's words: plain, one line.
         head.addWidget(ElidedLabel(
             t.title or t.item, 10,
             self.palette().color(QPalette.ColorRole.WindowText).name(),
@@ -451,8 +427,7 @@ class NetworkView(QWidget):
         self.clock: Callable[[], float] = time.time
         self._ages: list[tuple[Callable[[str], None], Callable[[float], str]]] = []
         self._pool_ages: list[tuple[Callable[[str], None], Callable[[float], str]]] = []
-        #: What the operator has open in each pool's panel, by pool id ("" for the
-        #: panel shown before any pool).
+        #: Each pool panel's open state, by pool id ("" for the one before any pool).
         self._ui: dict[str, dict] = {}
         self.panels: list[PoolPanel] = []
         self.first_join: JoinRow | None = None
@@ -642,8 +617,7 @@ class NetworkView(QWidget):
         self.hours_note.setVisible(bool(note))
 
     def _on_switch(self, on: bool) -> None:
-        # The switch following the setting is no change to make: its signal stays
-        # connected because it is also what moves the knob.
+        # _refresh_status's setChecked lands here too, as no change to make.
         if on == self.store.network_enabled:
             return
         if not self._save(lambda: self.store.set_network_enabled(on)):
@@ -658,7 +632,7 @@ class NetworkView(QWidget):
         self._sync_hours_note()
 
     def _on_devices(self, on: bool) -> None:
-        # Following the setting is no change to make, as for the switch above.
+        # _sync_settings's setChecked lands here too, as no change to make.
         if on != dn.devices() and not self._save(lambda: dn.set_devices(on)):
             self.devices.setChecked(dn.devices())
 

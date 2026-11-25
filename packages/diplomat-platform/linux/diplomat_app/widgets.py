@@ -161,11 +161,10 @@ class ElidedLabel(QLabel):
 
     Custom-painted so the grid never miscomputes a wrapped height (which made
     rows overlap); font size + colour are explicit because QPainter.drawText
-    ignores the stylesheet pen. The text is painted as it is, never read as HTML,
-    and however long it is the label asks for no width.
+    ignores the stylesheet pen. The text is painted plain, never as HTML, and asks for
+    no width however long it is.
     """
 
-    #: How a subclass elides by default; ``mode`` overrides it for one label.
     elide = Qt.TextElideMode.ElideRight
 
     def __init__(self, text: str, font_px: int, color: str,
@@ -187,7 +186,6 @@ class ElidedLabel(QLabel):
         self.update()
 
     def elided(self) -> str:
-        """The text as it is painted at the width the label has."""
         return self.fontMetrics().elidedText(self._full, self._mode, self.width())
 
     def paintEvent(self, event) -> None:  # noqa: N802
@@ -411,8 +409,7 @@ class SectionHeader(ClickableFrame):
 
 
 class NoticeRow(ClickableFrame):
-    """One line that says something does not work, and opens the screen that shows
-    it. The text is painted as it is: part of it may be a daemon's."""
+    """One line saying something does not work; it opens the screen that shows it."""
 
     def __init__(self, text: str) -> None:
         super().__init__()
@@ -553,7 +550,6 @@ class QueuedTaskRow(QFrame):
         status.setStyleSheet(muted(9))
         col.addWidget(status)
         if refusal:
-            # The daemon's own sentence: painted as it is, and shown whole on hover.
             self.refusal = ElidedLabel(f"not offered: {refusal}", 9, "#FF9500")
             self.refusal.setToolTip(plain_tooltip(refusal))
             col.addWidget(self.refusal)
@@ -710,11 +706,10 @@ class RunningTaskRow(QFrame):
 
 
 class NetworkTaskRow(ClickableFrame):
-    """A job the Diplomacy Network carries: offered to a pool, and run in a container
-    on whichever machine claimed it. There is no window to look at, so the row opens
-    the Network screen, where its task is."""
+    """A Diplomacy Network job: offered to a pool, run in a container on whichever
+    machine claimed it. It has no window, so the row opens the Network screen."""
 
-    #: Carries the run the row stands for.
+    #: Carries the run id.
     forget_requested = Signal(str)
 
     _HELP = "Open the Network screen."
@@ -775,8 +770,6 @@ class StartingTaskRow(QFrame):
         "already, like any automatic agent."
     )
 
-    #: The same row for a job of the operator's whose offer to the Diplomacy Network
-    #: is not answered yet.
     OFFERING_HELP = ("The daemon has not answered this job's offer. Diplomat asks it "
                      "again until it does.")
 
@@ -983,7 +976,6 @@ def hline() -> QFrame:
     return line
 
 
-#: The wizard status line while its job is being offered to the Diplomacy Network.
 OFFERING_TEXT = "Offering to the pool…"
 
 
@@ -991,8 +983,8 @@ def dispatch_status_text(verdict: str, terminal_title: str, *,
                          network: bool = False) -> str:
     """The wizard status line for one ``Store.dispatch_agent`` verdict - shared by
     all four wizards so refusals read identically everywhere (macOS twin:
-    ``statusText(for:terminal:)``). ``network`` is whether the job went to the
-    Diplomacy Network, which opens no terminal."""
+    ``statusText(for:terminal:)``). ``network``: the job went to the Diplomacy Network,
+    which opens no terminal."""
     from datetime import datetime
 
     from diplomat_runtime import autofix
@@ -1449,8 +1441,8 @@ def settings_card(glyph: str, title: str, tint: str, *,
     """One block of Settings: a tinted glyph, a caps title, a state pill, and the
     rows under them on a soft card.
 
-    ``foreign_title`` is for a title this program did not write (a pool's id, which
-    an invite can name): it is cut in the middle to the room the card has.
+    ``foreign_title``: a title this program did not write (a pool id an invite named),
+    elided in the middle to fit.
 
     Returns the host, the layout to add rows to, and the pill — which starts empty
     and hidden, so a card with nothing to report simply has none.

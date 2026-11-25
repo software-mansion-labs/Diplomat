@@ -1679,8 +1679,7 @@ class SettingsView(QWidget):
         self._network_pill.set_state("on" if on else "off", _GREEN if on else _GREY)
 
     def _on_network_toggled(self, on: bool) -> None:
-        # The switch following the setting is no change to make: its signal stays
-        # connected because it is also what moves the knob.
+        # _refresh_network_ui's setChecked lands here too, as no change to make.
         if on != self.store.network_enabled:
             self._save(lambda: self.store.set_network_enabled(on))
         self._refresh_network_ui()

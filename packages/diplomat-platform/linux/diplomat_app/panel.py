@@ -203,9 +203,7 @@ def _running_detail(agent: autofix.RunningAgent) -> str:
 
 
 def _network_detail(agent: NetworkRun) -> str:
-    """The status line under a run the Diplomacy Network carries: where the daemon
-    says it is ("in the pool", "running on this machine"), and how long since it was
-    offered. The resolver's reason is that line already."""
+    """The daemon's word for where a network run is, and how long since its offer."""
     age = Fmt.duration(time.time() - agent.started_at)
     return agent.reason if age == "just now" else f"{agent.reason} · offered {age} ago"
 
@@ -805,8 +803,7 @@ class Panel(QWidget):
                                expanded=self._tasks_expanded)
         header.clicked.connect(self._toggle_tasks)
         self.tasks_col.addWidget(header)
-        # Above the fold of the section: with the network on, every row below waits
-        # on what this line says does not work.
+        # Drawn even when folded: every row below waits on this trouble.
         trouble = self.store.network_trouble
         if trouble:
             notice = NoticeRow(trouble)
