@@ -390,19 +390,11 @@ consent page in the browser, which hands the login back on `127.0.0.1` (the firs
 29170 to 29172). While it waits, up to 5 minutes, **Copy link** copies the page for any browser and
 **Cancel** gives up. The login is kept in `~/.diplomat/pipeline/linear-login.json` and refreshed by the
 sync; it reaches only `curl`, in a config on its stdin (staged in an owner-only temp file, removed
-<<<<<<< HEAD
-when curl exits, though a sync or sign-in killed meanwhile leaves it), never in an argv. No agent shell, nor
-`gh` or `claude` a sync starts, has it or `DIPLOMAT_LINEAR_TOKEN` in its environment, though the
-Linux app's own `gh` calls inherit one you export. A fix run for a Linear issue gets the issue's
-text as Diplomat read it, not the login, though it runs as you and so could read the login where
-Diplomat does. **Sign out** forgets it and asks Linear to revoke it.
-=======
 before curl starts), never in an argv. No agent shell, nor `gh` or `claude` a sync starts, has it or
 `DIPLOMAT_LINEAR_TOKEN` in its environment, though the Linux app's own `gh` calls inherit one you
 export. A fix run for a Linear issue gets the issue's text as Diplomat read it, not the login,
 though it runs as you and so could read the login where Diplomat does. **Sign out** forgets it and
 asks Linear to revoke it.
->>>>>>> origin/main
 
 1. **Sign in** under **Linear login**, to the workspace of the teams you track. Its user is "you" on
    Linear: an issue assigned to them is one Diplomat may write to.
