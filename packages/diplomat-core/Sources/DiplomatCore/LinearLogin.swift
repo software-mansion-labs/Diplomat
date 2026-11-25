@@ -86,7 +86,6 @@ public enum LinearLogin {
                     login.refreshToken = t.refresh ?? refresh
                     login.expiresAt = t.expires
                     try save(login, in: dir)
-                    refreshFailed = nil
                 } catch Failure.expired {
                     unlink(file(in: dir).path)
                     throw Failure.expired
