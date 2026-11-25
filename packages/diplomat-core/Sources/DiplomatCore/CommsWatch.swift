@@ -243,11 +243,11 @@ public enum CommsClassifier {
             buf.baseAddress.flatMap { mkdtemp($0) }.map { String(cString: $0) }
         }
         guard let dir = made else { return .failedToStart("could not stage its stdin") }
-        defer { try? fm.removeItem(atPath: dir) }
-        let inPath = dir + "/in", outPath = dir + "/out", errPath = dir + "/err"
-        guard let stdin = privateFile(inPath, input),
-              let stdout = privateFile(outPath, Data()),
-              let stderr = privateFile(errPath, Data()) else {
+        let stdin = privateFile(dir + "/in", input), stdout = privateFile(dir + "/out", Data()),
+            stderr = privateFile(dir + "/err", Data())
+        // Gone before the child starts, which needs only the handles, so no kill leaves them.
+        try? fm.removeItem(atPath: dir)
+        guard let stdin, let stdout, let stderr else {
             return .failedToStart("could not stage its stdin")
         }
         defer {
@@ -274,9 +274,10 @@ public enum CommsClassifier {
             GH.stop(proc)
             return .timedOut
         }
-        return .exited(proc.terminationStatus,
-                       (try? Data(contentsOf: URL(fileURLWithPath: outPath))) ?? Data(),
-                       (try? Data(contentsOf: URL(fileURLWithPath: errPath))) ?? Data())
+        try? stdout.seek(toOffset: 0)
+        try? stderr.seek(toOffset: 0)
+        return .exited(proc.terminationStatus, (try? stdout.readToEnd()) ?? Data(),
+                       (try? stderr.readToEnd()) ?? Data())
     }
 
     private static func privateFile(_ path: String, _ contents: Data) -> FileHandle? {

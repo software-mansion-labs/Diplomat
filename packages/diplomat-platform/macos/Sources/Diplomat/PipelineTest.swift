@@ -927,6 +927,38 @@ enum PipelineTest {
         store.pipelineFastTrack = true
         clearQueue()
         store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix, review]), now: now)
+        let order = ids()
+        var contributors = IssueConfig(target: .contributors, me: "latekvo")
+        contributors.home = store.roots[0]
+        let community = Store.RequestedWork(number: 90010, url: issue, author: "bob",
+                                            config: .issues(contributors.forIssue(90010)), repo: "o/r")
+        let sweptReview = Store.RequestedWork(number: 90011, url: pr, author: "",
+                                              config: .review(ReviewConfig(target: .specific, me: "latekvo",
+                                                                           specificPR: "90011")), repo: "o/r")
+        check("the community monitor's fix and a sweep's review take the place of the pipeline's asks",
+              store.requestOne(community) && store.requestOne(sweptReview) && ids() == order
+                  && store.requestedWork == [community, sweptReview]
+                  && store.queuedTasks.map(\.job.counter) == [nil, nil])
+        await store.applyPipeline(result([fix, review]), now: now)
+        check("…the pipeline, finding them queued, asks for no other", store.requestedWork == [community, sweptReview])
+        store.pipelineEnabled = false
+        check("…its master switch off pauses neither", Set(store.drainableTasks.map(\.id)) == Set(order))
+        store.pipelineEnabled = true
+        await store.applyPipeline(result([]), now: now)
+        store.pipelineFix = false
+        store.pipelineFastTrack = false
+        check("…nor do a sync owing neither or its switches withdraw them", store.requestedWork == [community, sweptReview])
+        store.pipelineFix = true
+        store.pipelineFastTrack = true
+        clearQueue()
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix]), now: now)
+        if let task = store.queuedTasks.first { store.beginStarting(task) }
+        check("one starting stays the pipeline's", !store.requestOne(community) && store.queuedTasks.isEmpty)
+        store.endStarting(fixKey)
+        clearQueue()
+        store.savePipelineAttempts([:])
         check("a result dated in the second its sync began is that sync's",
               Store.pipelineRan(PipelineTickResult(at: Date(timeIntervalSince1970: 100)),
                                 started: Date(timeIntervalSince1970: 100.7))

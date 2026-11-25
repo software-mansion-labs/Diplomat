@@ -27,7 +27,9 @@ once per head, a new head's no sooner than an hour after the last one was queued
 retried on the monitors' backoff when a run dies, and taken off the queue when a later
 sync no longer owes it - one you started with Start fix only once a sync that read its repo in full
 finds its issue held or no candidate; any other by a sync that could not read its repo in full only
-if it read that item, never by one that only read and showed the repo. An item whose author is on the
+if it read that item, never by one that only read and showed the repo. One a sweep, Slack or the
+new-community-issue monitor asks for too is theirs, which nothing of the pipeline's holds or withdraws.
+An item whose author is on the
 prompt-injection ban list, as read right before each step, and every issue Diplomat split from one, is
 not rated, labelled, split or fixed, nor a PR closing it reviewed or merged; a Linear issue's author is
 its creator's display name. Nor is a part whose parent's author is unknown, nor, with a notice, any
@@ -97,7 +99,7 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
    `Fixes ENG-12` in its PR's description.
 2. The PR is rated on its own (**Rate issues and PRs**), from its text and diff, never below its
    [diff floor](#the-diff-floor). Every open PR of yours is rated, not only the ones Diplomat opened.
-3. Low/low at its first rating (its timeline shows no rating or fast-track label ever on it) and
+3. Low/low at its first rating (its timeline showed no rating or fast-track label before it) and
    closing only `candidate` issues (the fast track is for the fixes the pipeline asks for), it is
    labelled `diplomat:fast-track` (**Fast-track my PRs**); a PR rated while that is off, rated
    anything else, or that the label could not be put on stays a person's, the last with a hold
@@ -287,7 +289,8 @@ its commits, its base branch and the checks it requires read only for a PR nothi
   Linear cannot say which issues link it or an open GitHub issue it would close, or one that does is
   of a team not tracked or could not be read;
 - its rating, or its diff floor, is not low/low;
-- it conflicts with its base or is behind it, or GitHub has not computed whether it can merge;
+- it conflicts with its base, is behind it or could not be compared with it, or GitHub has not computed
+  whether it can merge;
 - CI was read for an older commit, is still running, or failed; it has no checks (so a repo without
   CI never merges), or every check was skipped;
 - a status check its base branch requires (branch protection or a ruleset) has not succeeded on its
@@ -380,8 +383,8 @@ QSettings (Linux) under the same keys: `pipelineEnabled`, `pipelineRate`, `pipel
 ## Linear
 
 Linear is read with a personal API key of yours. The key is read on each sync and reaches only
-`curl`, in a config on its stdin (staged in an owner-only temp file, removed when curl exits, though
-a sync killed meanwhile leaves it), never in an argv; no agent shell, nor `gh` or `claude` a sync starts, has `DIPLOMAT_LINEAR_TOKEN` in its
+`curl`, in a config on its stdin (staged in an owner-only temp file, removed
+before curl starts), never in an argv; no agent shell, nor `gh` or `claude` a sync starts, has `DIPLOMAT_LINEAR_TOKEN` in its
 environment, though the Linux app's own `gh` calls inherit one you export. A fix run for a Linear issue gets the issue's text as Diplomat read it, not the key, though it runs
 as you and so could read the key where Diplomat does.
 

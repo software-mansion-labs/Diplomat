@@ -140,6 +140,8 @@ final class PipelineSync {
     var partial: [String: String] = [:]
     /// The roots judged on less than all they hold, besides `incomplete` and `partial`.
     var unread: Set<String> = []
+    /// The Linear issues a failed recheck left unjudged.
+    var unrechecked: Set<String> = []
     /// Per root a tracked Linear team maps to, why that team was not read whole: an issue
     /// it missed may be attached to any of the root's issues.
     var linearShort: [String: String] = [:]
@@ -244,7 +246,9 @@ final class PipelineSync {
         let laid = PipelineGraph.layout(items: entries.map(\.item), edges: edges, maxItems: model.maxItems)
         let short = unread.union(incomplete.keys).union(partial.keys)
         let fixable = entries.filter { $0.item.kind == .issue && $0.item.stage == .candidate && $0.item.hold == nil }
-        let judged = entries.filter { $0.root.map { partial[$0.slug] == nil && repos[$0.slug] != nil } ?? false }
+        let judged = entries.filter {
+            !unrechecked.contains($0.id) && $0.root.map { partial[$0.slug] == nil && repos[$0.slug] != nil } ?? false
+        }
         // Without the ban list no item was judged in full.
         let whole = blocked == nil && banned != nil
         let result = PipelineTickResult(at: now, items: laid.items, graph: laid.graph, effects: effects,
@@ -362,7 +366,12 @@ final class PipelineSync {
             let out = io.gh(args + sized.flatMap { ["-F", "\($0)=\(page[$0] ?? least)"] })
             let response = (try? JSONSerialization.jsonObject(with: out.stdout)) as? [String: Any]
             let raw = response?["errors"] as? [[String: Any]] ?? []
-            let errors = raw.compactMap { $0["message"] as? String }
+            // Stripped of GitHub's time and request id, a lasting failure reads the same at each sync.
+            let errors = raw.compactMap {
+                ($0["message"] as? String)?.replacingOccurrences(
+                    of: #" on \d{4}-\d\d-\d\dT[\d:]+Z|\s*Please include `[^`]*` when reporting this issue\."#, with: "",
+                    options: .regularExpression)
+            }
             let read = (response?["data"] as? [String: Any])?["repository"] is [String: Any]
             if out.ok && read && raw.isEmpty { return (response, [], "") }
             if Self.overloaded(out, raw), sized.contains(where: { page[$0, default: least] > least }) {
@@ -870,6 +879,11 @@ final class PipelineSync {
             + pr.closesLinear.filter { linearIssue[$0] == nil }
     }
 
+    /// The merge gate's hold on what `pr` would close, as this sync read it.
+    func closesHold(_ pr: PipelineEntry) -> PipelineGate.Hold? {
+        PipelineGate.closes(fixesCandidate(pr), closesUnwritable(pr))
+    }
+
     /// What a cleared PR about to merge would close on Linear, read right before: the open
     /// issues it closes, what no read judged, each identifier looked at, and for each GitHub
     /// issue it closes, by `norm`ed URL, why an open Linear issue attached to it holds it (nil
@@ -998,7 +1012,7 @@ final class PipelineSync {
               let head = e.item.headSha, !head.isEmpty, e.item.cleanAt == head, rerates[e.id]?[head] == nil,
               e.item.ratedBy == "label", let r = e.item.rating, r.atLeast(e.item.floor ?? r).isFastTrack,
               offTrack(e) == nil else { return false }
-        return fixesCandidate(e)
+        return closesHold(e) == nil
     }
 
     /// `cleared`, with a clean marker at its head, at which this Diplomat rated it low/low
@@ -1092,7 +1106,7 @@ final class PipelineSync {
                 return persist()
             }
         }
-        let before = entries[i].labeled
+        if unworn(entries[i].labeled) { cache[id]?.first = true }
         writeRating(i, rating, .rate)
         guard labelRating(entries[i].labels) == rating else { return failed(id) }
         cache[id]?.rating = rating
@@ -1101,7 +1115,7 @@ final class PipelineSync {
         entries[i].item.rating = rating
         entries[i].item.ratedBy = "label"
         persist()
-        trackFirst(i, rating, before: before)
+        trackFirst(i, rating)
     }
 
     /// `e`'s three-dot diff against its base, as `gh pr diff` reads it but pinned to `head`;
@@ -1159,7 +1173,7 @@ final class PipelineSync {
         // Saved before the labels it leads to: a sync stopped there does not ask again.
         record(i, rating, why, detail, head: head, again: again, unwritten: allowed)
         guard allowed else { return }
-        guard recheck(i) else {
+        guard recheck(i), entries[i].item.headSha == e.item.headSha else {
             guard entries[i].item.writable else {
                 cache[e.id]?.unwritten = nil
                 cache[e.id]?.updatedAt = entries[i].item.updatedAt
@@ -1174,7 +1188,7 @@ final class PipelineSync {
             rating = atLeastLabels(rating, entries[i].labels)
             record(i, rating, why, describe(rating) + ", as labelled meanwhile", head: head, again: again, unwritten: true)
         }
-        let before = entries[i].labeled
+        if unworn(entries[i].labeled) { cache[e.id]?.first = true }
         writeRating(i, rating, step)
         guard labelRating(entries[i].labels) == rating else {
             notice("\(e.item.label): its rating labels could not be written, so the rating is kept here")
@@ -1183,7 +1197,7 @@ final class PipelineSync {
         cache[e.id]?.unwritten = nil
         entries[i].item.ratedBy = "label"
         persist()
-        trackFirst(i, rating, before: before)
+        trackFirst(i, rating)
     }
 
     func record(_ i: Int, _ rating: PipelineRating, _ why: String, _ detail: String, head: String?, again: Bool,
@@ -1202,16 +1216,20 @@ final class PipelineSync {
         persist()
     }
 
-    /// Puts `fastTrack` on a PR rated low/low that fixes candidates at its first rating only:
-    /// one that ever wore (`before`) a rating or fast-track label is a person's. One it could
-    /// not be put on is recorded.
-    func trackFirst(_ i: Int, _ rating: PipelineRating, before: Set<String>?) {
-        let e = entries[i]
+    /// Whether `labeled`, a PR's timeline, shows no rating or fast-track label ever on it.
+    func unworn(_ labeled: Set<String>?) -> Bool {
         let history = PipelineLevel.allCases.flatMap { [model.labels.risk[$0], model.labels.complexity[$0]] }
             + [model.labels.fastTrack]
-        guard e.item.kind == .pr, settings.fastTrack, rating.isFastTrack,
-              before?.isDisjoint(with: history.map { $0.lowercased() }) == true,
-              fixesCandidate(e) else { return }
+        return labeled?.isDisjoint(with: history.map { $0.lowercased() }) == true
+    }
+
+    /// Puts `fastTrack` on a PR rated low/low that closes only candidates, at its first rating
+    /// only: one that wore a rating or fast-track label before (no `first` kept) is a person's.
+    /// One it could not be put on is recorded.
+    func trackFirst(_ i: Int, _ rating: PipelineRating) {
+        let e = entries[i]
+        guard e.item.kind == .pr, settings.fastTrack, rating.isFastTrack, cache[e.id]?.first == true,
+              closesHold(e) == nil else { return }
         if add(i, model.labels.fastTrack, .fastTrack) {
             log(e.id, .fastTrack, "+\(model.labels.fastTrack): rated \(describe(rating))")
         } else if !state.untracked.contains(e.id) {
@@ -1278,11 +1296,16 @@ final class PipelineSync {
             let e = entries[i]
             guard own(e), open(e), has(e, model.labels.fastTrack), has(e, model.labels.cleared),
                   partial[e.item.repo] == nil, let head = e.item.headSha, e.item.cleanAt != head,
-                  offTrack(e) == nil, recheck(i), takeOff(i, model.labels.cleared, .fastTrack) == true else { continue }
+                  offTrack(e) == nil, recheck(i) else { continue }
+            let off = takeOff(i, model.labels.cleared, .fastTrack)
+            guard off != false else { continue }
+            // Also when gh failed: GitHub may have taken it off all the same.
             state.cleared[e.id] = nil
-            log(e.id, .labelled, "-\(model.labels.cleared): " + (e.item.cleanAt == nil
-                ? "no clean marker names its head \(head.prefix(7))"
-                : "the head moved to \(head.prefix(7)), past its clean marker"))
+            if off == true {
+                log(e.id, .labelled, "-\(model.labels.cleared): " + (e.item.cleanAt == nil
+                    ? "no clean marker names its head \(head.prefix(7))"
+                    : "the head moved to \(head.prefix(7)), past its clean marker"))
+            }
             persist()
         }
     }
@@ -1631,12 +1654,12 @@ final class PipelineSync {
                 }
                 // `merge` logs what it does with a draft.
                 if code == PipelineGate.Hold.draft.code { holdCodes[e.id] = code } else { noteHold(i, code, hold) }
-            } else if fixesCandidate(e) {
+            } else if let h = closesHold(e) {
+                stage = .human
+                hold = "off the fast track: it " + h.message
+            } else {
                 stage = atHead ? .clean : .fastTrack
                 hold = e.unwritable.map { "on the fast track, but \($0)" }
-            } else {
-                stage = .human
-                hold = "off the fast track: it " + PipelineGate.Hold.notAFix.message
             }
             if atHead && state.clean[e.id] != head && [.clean, .cleared].contains(stage) {
                 log(e.id, .clean, "clean marker at \(head.prefix(7))")
@@ -1751,7 +1774,7 @@ final class PipelineSync {
             foreignCommits: e.gate?.foreignCommits ?? [],
             trackLabels: has(e, model.labels.fastTrack) && has(e, model.labels.cleared),
             fixesCandidate: fixes, closesUnwritable: unjudged, ciRan: e.gate?.ciRan ?? true,
-            wasReady: e.readied, mergeState: e.mergeState, mergeQueue: e.mergeQueue,
+            wasReady: e.readied, mergeState: e.mergeState, behindBy: e.gate.map(\.behindBy) ?? 0, mergeQueue: e.mergeQueue,
             stopLabels: stops(e),
             requiredChecks: e.gate.map(\.requiredChecks) ?? [], passedChecks: e.gate?.passedChecks ?? [],
             baseRules: e.gate.map(\.baseRules) ?? [], unsignedCommits: e.gate?.unsignedCommits ?? false,
@@ -1769,7 +1792,7 @@ final class PipelineSync {
     /// when it could not be read whole.
     func reread(_ e: PipelineEntry, _ outcome: String = "was not merged") -> PipelineEntry? {
         guard let root = e.root, let n = e.number else { return nil }
-        let r = graphql(root, "PullRequest", ["-F", "number=\(n)"])
+        let r = graphql(root, "PullRequest", ["-F", "number=\(n)", "-f", "head=\(e.item.headSha ?? "")"])
         guard let response = r.response, r.errors.isEmpty,
               var fresh = PipelineRead.pullRequest(response, root: root, label: e.item.label,
                                                    roots: roots, model: model)
@@ -1891,8 +1914,8 @@ final class PipelineSync {
                                           author: banDimension(e)))
                 }
             case (.pr, .fastTrack, _) where review:
-                guard fixesCandidate(e) else {
-                    entries[i].item.hold = "off the fast track: it " + PipelineGate.Hold.notAFix.message
+                if let h = closesHold(e) {
+                    entries[i].item.hold = "off the fast track: it " + h.message
                     continue
                 }
                 if let root = e.root, let n = e.number, let head = e.item.headSha {
@@ -1935,7 +1958,11 @@ final class PipelineSync {
             }
         } catch {
             notice("Linear: the issues a fix was about to be asked for could not be read again: \(error.localizedDescription)")
-            for i in picks { entries[i].item.hold = "it could not be read again right before its fix was asked for" }
+            for i in picks {
+                entries[i].item.hold = "it could not be read again right before its fix was asked for"
+                unrechecked.insert(entries[i].id)
+                if let root = entries[i].root { unread.insert(root.slug) }
+            }
             return
         }
         for i in picks {
