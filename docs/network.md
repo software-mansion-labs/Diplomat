@@ -60,14 +60,16 @@ it is asleep or offline none of its unclaimed jobs can be taken, a job of its th
 loses its forge access at once and is stopped ten minutes after its lease ends, and after a day
 away its offers are cancelled. A machine with jobs out has to stay awake.
 
-- **Joining.** The first machine to link a repository has a pool of one. Another machine joins by
-  an **invite**: **Copy invite** on the pool's card, sent to the other operator by any means,
-  pasted into **Join...** there. An invite is good for a day, and the machine that made it has
-  to be reachable when it is used: it is the one that seats the newcomer. Until it has, the
-  pool's card says *Joining* and shows this machine alone in it. An invite that let this
-  machine in nowhere - its maker refused it, or it ran out before the maker answered - is said
-  on the card with the reason, until another is pasted. A machine can seat 15 others, and so
-  can each of those the first machine seated, which makes 241 machines the most a pool holds.
+- **Joining.** The first machine to link a repository has a pool of one. Another machine joins
+  by an **invite**: **Copy invite** on the pool's card, sent to the other operator by any means,
+  pasted into **Join...** there. An invite is good for a day - from when it is made, and from
+  when it is pasted, whatever it says: one that says it is good for longer is refused when
+  pasted, and the reason is shown - and the machine that made it has to be reachable when it is
+  used: it is the one that seats the newcomer. Until it has, the pool's card says *Joining* and
+  shows this machine alone in it. An invite that let this machine in nowhere - its maker refused
+  it, or it ran out before the maker answered - is said on the card with the reason, until
+  another is pasted. A machine can seat 15 others, and so can each of those the first machine
+  seated, which makes 241 machines the most a pool holds.
 - **Leaving.** **Leave** stops this machine taking the pool's jobs and offering to it. It stays
   left until **Rejoin**. Leaving a pool or removing its repository holds even when an answer
   from the pool arrives after it. A machine it left that asks it about the pool within a month
