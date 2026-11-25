@@ -1,6 +1,6 @@
-"""The Pipeline screen: ``Store.pipeline_result`` as a graph of cards, and the selected
-card's detail. The layout, stages and lanes are the core's, drawn as they come. The macOS
-twin is ``PipelineView.swift``.
+"""The Pipeline screen: ``Store.pipeline_result`` of the root the header picked as a graph of
+cards, and the selected card's detail. The layout, stages and lanes are the core's, drawn as
+they come. The macOS twin is ``PipelineView.swift``.
 """
 
 from __future__ import annotations
@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 
 from diplomat_runtime import comms, pipeline, review
 from diplomat_runtime.models import Fmt
+from diplomat_runtime.prref import root_label
 from . import glyphs
 from .store import Store
 from .widgets import ElidedLabel, GlyphLabel, ToggleChip, _draw_glyph, muted, plain_tooltip, tint_bg
@@ -223,6 +224,34 @@ def shown_nodes(result: dict, lane: str) -> list[dict]:
         nodes = [n for n in nodes if group[str(n["id"])] in kept]
     rows = {r: i for i, r in enumerate(sorted({int(n.get("row") or 0) for n in nodes}))}
     return [{**n, "row": rows[int(n.get("row") or 0)]} for n in nodes]
+
+
+def in_root(result: dict, root: str, roots: set[str], teams: list[dict]) -> dict:
+    """``result`` cut to what picking ``root`` (a ``LocalRepo.key``) shows: each group with a
+    card in it, a Linear issue's being its team's repo, or with none in any of ``roots``,
+    whole. Twin of ``PipelineView.inRoot``."""
+    graph = result.get("graph") or {}
+    nodes, edges = graph.get("nodes") or [], graph.get("edges") or []
+    group = groups(nodes, edges)
+    picked: set[str] = set()
+    rooted: set[str] = set()
+    for item in result.get("items") or []:
+        at = str(item.get("repo") or "").lower()
+        if item.get("source") == "linear":
+            at = next((t["repo"].lower() for t in teams if t["key"].lower() == at), "")
+        item_id = str(item.get("id"))
+        if at == root:
+            picked.add(group.get(item_id, item_id))
+        if at in roots:
+            rooted.add(group.get(item_id, item_id))
+
+    def shown(item_id: str) -> bool:
+        return group.get(item_id, item_id) in picked or group.get(item_id, item_id) not in rooted
+
+    return {**result,
+            "items": [i for i in result.get("items") or [] if shown(str(i.get("id")))],
+            "graph": {**graph, "nodes": [n for n in nodes if shown(str(n.get("id")))],
+                      "edges": [e for e in edges if all(map(shown, _ends(e)))]}}
 
 
 def lane_counts(items: list[dict]) -> dict[str, int]:
@@ -702,15 +731,18 @@ def can_fracture(item: dict, edges: list[dict], rooted: bool) -> bool:
             and not any(e.get("kind") == "child" and _ends(e)[0] == item_id for e in edges))
 
 
-def empty_text(unread: list[str], reads: bool) -> str:
-    """The placeholder after a sync that read no item. ``reads``: a GitHub root or a Linear
-    team is set. Twin of ``PipelineView.emptyText``."""
+def empty_text(repo: str, gitlab: bool, unread: bool, reads: bool) -> str:
+    """The placeholder after a sync that read no item the picked root shows. ``repo``: its
+    label; ``unread``: the sync read it in part; ``reads``: a GitHub root or a Linear team
+    is set. Twin of ``PipelineView.emptyText``."""
     if not reads:
         return "GitLab roots are not read, and no GitHub root or Linear team is set."
+    if gitlab:
+        return f"{repo} is a GitLab root, and GitLab roots are not read."
     if unread:
-        return (f"The last sync did not read all of {', '.join(unread)}, and found no open "
-                "issue or PR in what it did.")
-    return "The last sync found no open issue or PR."
+        return (f"The last sync did not read all of {repo}, and found no open issue or PR in "
+                "what it did.")
+    return f"The last sync found no open issue or PR in {repo}."
 
 
 def can_rate(item: dict, me: str, rooted: bool) -> bool:
@@ -781,6 +813,7 @@ class PipelineView(QWidget):
 
         store.pipeline_changed.connect(self.rebuild)
         store.tasks_changed.connect(self.rebuild)
+        store.selected_repo_changed.connect(self.rebuild)
         self.rebuild()
 
     def _build_header(self) -> QHBoxLayout:
@@ -858,11 +891,10 @@ class PipelineView(QWidget):
 
     # MARK: rebuild
 
-    def _status_text(self) -> str:
+    def _status_text(self, result: dict | None) -> str:
         st = self.store
         if not st.pipeline_enabled:
             return "Off - turn the Pipeline on in Settings."
-        result = st.pipeline_result
         items = (result or {}).get("items") or []
         fast = sum(1 for i in items if i.get("lane") == "fast")
         parts = [f"{len(items)} item{'' if len(items) == 1 else 's'}", f"{fast} fast"]
@@ -876,10 +908,15 @@ class PipelineView(QWidget):
 
     def rebuild(self) -> None:
         st = self.store
-        result = st.pipeline_result or {}
+        teams, _ = pipeline.parse_linear_teams(st.pipeline_linear_teams_raw)
+        roots = review.repo_roots()
+        picked = st.selected_repo
+        shown = None if st.pipeline_result is None else in_root(
+            st.pipeline_result, picked.key, {r.key for r in roots}, teams)
+        result = shown or {}
         items = result.get("items") or []
         by_id = {str(i.get("id")): i for i in items}
-        self.status.setText(self._status_text())
+        self.status.setText(self._status_text(shown))
         self.sync_btn.setEnabled(st.pipeline_enabled and not st.pipeline_syncing)
         error = st.pipeline_error if st.pipeline_enabled else None
         self.error_banner.setVisible(bool(error))
@@ -899,11 +936,11 @@ class PipelineView(QWidget):
         edges = (result.get("graph") or {}).get("edges") or []
         faces = {str(n["id"]): card_face(by_id[str(n["id"])], badges.get(str(n["id"])))
                  for n in nodes}
-        teams, _ = pipeline.parse_linear_teams(st.pipeline_linear_teams_raw)
-        reads = bool(teams) or any(not r.is_gitlab for r in review.repo_roots())
-        placeholder = ("No sync has run yet." if st.pipeline_result is None
-                       else empty_text(result.get("unread") or [], reads) if not items
-                       else "Nothing in this lane.")
+        reads = bool(teams) or any(not r.is_gitlab for r in roots)
+        unread = picked.key in {str(u).lower() for u in result.get("unread") or []}
+        placeholder = ("No sync has run yet." if shown is None
+                       else empty_text(root_label(picked, roots), picked.is_gitlab, unread, reads)
+                       if not items else "Nothing in this lane.")
         self.canvas.set_graph(nodes, edges, faces, self.selected, placeholder)
         self._rebuild_detail(by_id.get(self.selected or ""), badges.get(self.selected or ""),
                              result, edges)

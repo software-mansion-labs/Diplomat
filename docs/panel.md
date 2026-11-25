@@ -30,7 +30,8 @@ as you type. Launch with `DIPLOMAT_PREFILL=<n>` to open pre-focused on a number.
 
 With more than one [repo root](settings.md#settings), the header's repo name is a
 picker: it chooses the repo the right column works on (the tool lists and their counts,
-the reverse lookup, the wizards' bare numbers and sweeps, Merge and Resolve conflicts),
+the reverse lookup, the wizards' bare numbers and sweeps, Merge and Resolve conflicts)
+and the [Pipeline screen](pipeline.md#the-pipeline-screen) shows,
 and is remembered across launches. Each repo's lists are cached, so a switch shows the
 last fetch at once and refreshes it. The left column and every automatic job cover all
 the roots whichever is picked.

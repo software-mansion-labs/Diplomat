@@ -178,7 +178,7 @@ struct ContentView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
-            .tooltip("The repo the lists, search and wizards work on")
+            .tooltip("The repo the lists, search, wizards and Pipeline screen work on")
         } else {
             Text(current).font(.caption2).foregroundStyle(.secondary)
         }
