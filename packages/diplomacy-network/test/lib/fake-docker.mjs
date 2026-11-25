@@ -1,22 +1,18 @@
 #!/usr/bin/env node
-// A stand-in for the docker CLI, for tests that must not need an engine. It keeps its
-// world under FAKE_DOCKER_DIR and implements exactly the subcommands src/executor calls.
-// A "container" is a directory: its volume is <root>/work, its bind mounts are links,
-// and what is exec'd in it runs on this host with DN_ROOT=<root>, with the container's
-// paths in the arguments translated and with shims for the tools only a container has
-// (flock, update-ca-certificates). What is named there by its full path is the image's
-// own, and <root> holds the two that are: /bin/sh, dash where the host has one, and
-// /usr/bin/setsid. What is put in a session of its own there is what `restart` and `rm`
-// kill.
-// FAKE_DOCKER_PATH is put in front of PATH for what is exec'd, which is where a test
-// keeps its own `claude`. A network is a record that a container must name to be made
-// and that cannot be removed from under one; nothing is isolated, and the command a
-// container was made with (a relay's) is recorded and not run. A `run --rm` is the
-// probe container.js measures and clears with: its `du` and its `find -delete` are done
-// here, on the directories its mounts name, and answered the way GNU's are. One put in a
-// container's pid namespace is the probe that counts what that container's processes
-// hold open: it prints `held 0`. A container whose record a test gives `oom: true` is
-// one the kernel killed for its memory, as `OOMKilled` says, until it is started again.
+// A stand-in for the docker CLI, for tests that must not need an engine: its world is
+// under FAKE_DOCKER_DIR and it implements exactly the subcommands src/executor calls. A
+// container is a directory <root>: its volume is <root>/work, its bind mounts are links,
+// and what is exec'd in it runs on this host with DN_ROOT=<root>, container paths in the
+// arguments translated, and shims for tools only a container has (flock,
+// update-ca-certificates). <root> holds the two tools named by full path: /bin/sh (dash
+// where the host has one) and /usr/bin/setsid, whose sessions `restart` and `rm` kill.
+// FAKE_DOCKER_PATH goes in front of PATH for what is exec'd (where a test keeps its own
+// `claude`). A network is a record a container must name to be made and that cannot be
+// removed from under one; nothing is isolated, and a container's command (a relay's) is
+// recorded, not run. A `run --rm` is container.js's probe: its `du` and `find -delete`
+// are done here on the mounted directories, answered as GNU's are; one in a container's
+// pid namespace prints `held 0`. A container whose record has `oom: true` reads as
+// OOMKilled until started again.
 //
 // Staged failures, as files in FAKE_DOCKER_DIR:
 //   down             the engine does not answer

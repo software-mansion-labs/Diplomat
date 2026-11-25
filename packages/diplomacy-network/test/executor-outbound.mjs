@@ -1,8 +1,8 @@
-// The broker's connections out (outbound.js): the kernel's tables are read as they
-// are, what the count finds is held to a share each job, kept back as it is written and
-// reset when it comes in past the whole, and polls that fail stop nothing; through the
-// broker, on this machine's kernel, connections out that nobody answers or reads hold no
-// more than the whole, and each way of a tunnel ends on its own.
+// The broker's connections out (outbound.js): kernel tables parsed as they are, the count
+// held to a share per job (writes kept back, incoming past the whole reset), failing polls
+// stopping nothing; and through the broker on this machine's kernel, connections out
+// nobody answers or reads holding no more than the whole, each way of a tunnel ending on
+// its own.
 // Run: node test/executor-outbound.mjs
 
 import assert from 'node:assert/strict';

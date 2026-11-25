@@ -1,18 +1,13 @@
-// The host's adb server as a job is given it. The server does far more than talk to
-// devices: asked, it opens TCP connections from this machine (`host:connect`), listens on
-// this machine's ports (`host:forward`), pairs, and exits (`host:kill`), and a device
-// asked for `reverse:` is given a way to this machine's ports. So a job's forward does
-// not lead to the server but to this filter in front of it, which reads each connection's
-// requests in adb's own framing (four hex digits of length, then the request) and passes
-// on only these:
+// A job's adb forward leads to this filter, not to the host's adb server, which does far
+// more than talk to devices: it opens TCP connections (`host:connect`), listens on ports
+// (`host:forward`), pairs, exits (`host:kill`), and `reverse:` gives a device a way to
+// this machine's ports. Only these pass:
 //   host:version, host:devices, host:devices-l, host:features, host:host-features
 //   host-serial:<serial>:get-state | get-serialno | get-devpath | features
-//   host:transport:<serial>, host:tport:serial:<serial>, and after either the one
-//   request to the device itself (shell:, exec:, sync:, ...)
-// Anything else is answered `FAIL` with the reason and never reaches the server. That
-// includes, after a switch to a device, `reverse:` and every `host` request: the server
-// reads the request behind a switch the way it read the first. And it includes whatever
-// follows one of the first two lines on the same connection.
+//   host:transport:<serial>, host:tport:serial:<serial>, then one request to the device
+//   itself (shell:, exec:, sync:, ...)
+// Anything else gets FAIL: that includes `reverse:` and any `host` request after a switch
+// (the server parses those as it does a first request), and anything after a query.
 
 import net from 'node:net';
 import { createSparingLog } from './sparing.js';
@@ -22,24 +17,18 @@ const QUERY = new RegExp(`^(?:host:(?:version|devices|devices-l|features|host-fe
 const DEVICE = new RegExp(`^host:(?:transport|tport:serial):${SERIAL}$`);
 const NOT_THE_DEVICES = /^(?:host[-:]|reverse:)/;
 
-// An adb client whose version is not the server's opens with a request to stop the
-// server, to start one of its own in its place.
+// An adb client of another version than the server's opens with host:kill, to replace it.
 const KILL_WHY = ' (adb asks for this when its version is not the server\'s: this machine\'s adb server is not replaced, so use an adb of the server\'s version)';
 
-// A request or an answer in adb's framing, as the bytes that go on the wire. `text`
-// holds one byte a character, as a request read off a connection does.
+// `text` is latin1, so its length is its byte count.
 const frame = (text) => Buffer.from(`${text.length.toString(16).padStart(4, '0')}${text}`, 'latin1');
 
-/// What a connection's first request is to the filter: `query` (answered by the server,
-/// and the connection's last), `device` (a switch to one device, after which one more
-/// request is passed on) or null (refused).
 export function adbRequest(service) {
   return QUERY.test(service) ? 'query' : DEVICE.test(service) ? 'device' : null;
 }
 
-/// The serials of the devices the adb server at `target` (`{ host, port }`) lists as
-/// ready for use, or null when no adb server answers there. Asked in adb's own words:
-/// some other listener on that port is nothing to hand a job.
+/// null unless an adb server answers at `target`: another listener there is nothing to
+/// hand a job.
 export function adbDevices(target) {
   return new Promise((resolve) => {
     if (!target) return resolve(null);
@@ -55,7 +44,6 @@ export function adbDevices(target) {
       const size = /^OKAY[0-9A-Fa-f]{4}/.test(said) ? parseInt(said.slice(4, 8), 16) : NaN;
       if (Number.isNaN(size)) return done(null);
       if (said.length < 8 + size) return undefined;
-      // One device a line: its serial, a tab, its state.
       const lines = said.slice(8, 8 + size).split('\n').map((line) => line.split('\t'));
       return done(lines.filter(([, state]) => state === 'device').map(([serial]) => serial));
     });
@@ -66,13 +54,12 @@ export function adbDevices(target) {
 
 function serve(client, target, sparing) {
   let pending = Buffer.alloc(0);
-  let stage = 'first'; // then `device` after a switch to one, `query` after a query
+  let stage = 'first';
   let server = null;
   client.on('error', () => {});
   client.on('close', () => server?.destroy());
 
-  // One whole request off the front of what was read: null while it is not all there,
-  // false when what is there is not adb's framing.
+  // null: not all read yet; false: not adb's framing.
   const next = () => {
     if (pending.length < 4) return null;
     const head = pending.subarray(0, 4).toString('latin1');
@@ -84,12 +71,10 @@ function serve(client, target, sparing) {
     return service;
   };
   const refuse = (service) => {
-    // A job's own words, cut short and made printable for the log.
     const what = service === false ? 'a request that is not in adb\'s framing' : service.slice(0, 60).replace(/[^\x20-\x7e]/g, '?');
     sparing('refused', 'adb', `refused a job: ${what}`);
     client.off('data', read);
     client.end(Buffer.concat([Buffer.from('FAIL'), frame(`not offered to a task on this machine: ${what}${service === 'host:kill' && stage === 'first' ? KILL_WHY : ''}`)]));
-    // A client that never closes its side is not waited for.
     client.setTimeout(5000, () => client.destroy());
     server?.destroy();
   };
@@ -99,7 +84,6 @@ function serve(client, target, sparing) {
     for (;;) {
       const service = next();
       if (service === null) return undefined;
-      // Behind a switch, the device's own services; behind a query, nothing.
       const kind = service === false ? null : stage === 'first' ? adbRequest(service) : stage === 'device' && !NOT_THE_DEVICES.test(service) ? 'open' : null;
       if (!kind) return refuse(service);
       if (!server) {
@@ -110,7 +94,6 @@ function serve(client, target, sparing) {
       }
       server.write(frame(service));
       if (kind === 'open') {
-        // The device's own service from here on: whatever follows is its stream.
         client.off('data', read);
         if (pending.length > 0) server.write(pending);
         client.pipe(server);
@@ -122,10 +105,6 @@ function serve(client, target, sparing) {
   client.on('data', read);
 }
 
-/// The filter in front of the adb server at `target` (`{ host, port }`). `start()`
-/// resolves to where it listens on this machine's loopback, `{ host, port }`, the same
-/// place every time; `stop()` ends it and every connection through it. What it refuses
-/// is written to `log` once a minute, with the number of refusals since.
 export function createAdbFilter({ target, log = () => {}, now = Date.now }) {
   const sparing = createSparingLog(log, { now });
   const sockets = new Set();

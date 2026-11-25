@@ -1,7 +1,6 @@
-// The relay of a job container, run here as the process it is in its container: where
-// it listens, that it carries every connection to the one address it was started with
-// in the hop's frames, each way's end on its own, how many it carries at a time, and how
-// many new ones in a second.
+// The relay, run as the process it is in its container: where it listens, every
+// connection carried in the hop's frames to the one address it was started with, each
+// way's end on its own, and how many it carries at a time and newly each second.
 // Run: node test/executor-relay.mjs
 
 import assert from 'node:assert/strict';

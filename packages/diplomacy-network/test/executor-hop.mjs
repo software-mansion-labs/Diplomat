@@ -1,7 +1,6 @@
-// The hop between a job's relay and the broker (hop.js): a busy pool's connections carry
-// what they carry through the real relay, and what every job's connections together
-// have on the hop is bounded however they are used, counted here frame by frame from a
-// relay's side and measured in this machine's kernel.
+// The hop between a job's relay and the broker (hop.js): a busy pool's traffic carried
+// through the real relay, and what all jobs' connections have on the hop bounded however
+// they are used, counted frame by frame from a relay's side and measured in the kernel.
 // Run: node test/executor-hop.mjs
 
 import assert from 'node:assert/strict';
