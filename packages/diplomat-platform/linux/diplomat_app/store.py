@@ -4660,8 +4660,8 @@ class Store(QObject):
         self.start_background(work, name="pipeline-sync")
 
     def stop_pipeline_sync(self) -> None:
-        """At quit: no sync or Linear sign-in starts again, and the running sync's core is
-        stopped with what it runs (:func:`promptcore.stop`), the sign-in's alone
+        """At quit: no sync or Linear sign-in starts again, the running sync's core is
+        stopped with what it runs (:func:`promptcore.stop`), and the sign-in cancelled
         (:meth:`stop_linear_login`)."""
         with self._pipeline_lock:
             self._pipeline_stopped = True
@@ -4670,30 +4670,31 @@ class Store(QObject):
             promptcore.stop(proc)
         self.stop_linear_login()
 
-    def linear_login(self, cancelled: Callable[[], bool]) -> tuple[dict | None, str]:
-        """:func:`pipeline.linear_login`, off the Qt thread, until
-        :meth:`stop_linear_login`. Its core is killed as it starts once ``cancelled()``,
-        or after quit."""
+    def linear_login(self, cancelled: Callable[[], bool],
+                     page: Callable[[str], None]) -> tuple[dict | None, str]:
+        """:func:`pipeline.linear_login`, off the Qt thread. :meth:`stop_linear_login`
+        cancels it, as does ``cancelled()`` answering true as its core starts, or a quit."""
         def started(proc: subprocess.Popen) -> None:
             with self._pipeline_lock:
                 self._linear_login_proc = proc
                 stopped = self._pipeline_stopped
             if stopped or cancelled():
-                proc.kill()
+                proc.terminate()
 
         try:
-            return pipeline.linear_login(started)
+            return pipeline.linear_login(started, page)
         finally:
             with self._pipeline_lock:
                 self._linear_login_proc = None
 
     def stop_linear_login(self) -> None:
-        """Kills the sign-in's core alone, not with :func:`promptcore.stop`: a browser it
-        started may share its session."""
+        """SIGTERM to the sign-in's core alone, which cancels its wait for the browser.
+        One past the wait finishes and saves its login: killed mid-exchange, it would
+        leave Linear a grant nothing saved."""
         with self._pipeline_lock:
             proc = self._linear_login_proc
         if proc is not None:
-            proc.kill()
+            proc.terminate()
 
     def _pipeline_started(self, proc: subprocess.Popen) -> None:
         with self._pipeline_lock:

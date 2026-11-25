@@ -257,9 +257,9 @@ def linear_login(started: Callable | None = None,
                  page: Callable[[str], None] | None = None) -> tuple[dict | None, str]:
     """``({"user", "organization"}, "")`` once signed in to Linear in the browser, else
     ``(None, why not)``. ``page`` is handed Linear's consent page to open, ``started``
-    the core's process, whose death abandons the sign-in. Bounded by ``signInSecs`` and
-    three Linear calls: the code's exchange, who the token is, and a sync's refresh
-    holding the login's lock. Never raises."""
+    the core's process, whose SIGTERM cancels a sign-in still waiting for the browser.
+    Bounded by ``signInSecs`` and three Linear calls: the code's exchange, who the token
+    is, and a sync's refresh holding the login's lock. Never raises."""
     def line(text: str) -> None:
         with contextlib.suppress(ValueError, AttributeError):
             url = json.loads(text).get("url")

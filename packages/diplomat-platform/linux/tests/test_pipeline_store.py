@@ -1034,11 +1034,11 @@ def test_a_syncs_deadline_grows_with_what_it_may_do(monkeypatch):
                         lambda: {"rater": {"perSync": 4, "timeoutSecs": 300}})
     # 4 ratings, a fracture and the 3 forced: 8 claude calls at 300 + 5 + 16 gh calls of
     # 65; each of the 2 splits 6 parts of 5 gh calls; 2 roots of 218 gh calls (below);
-    # Linear's 300 and its 3 re-reads of 30; the lookups and the margin.
+    # Linear's 300, its 3 re-reads of 30 and the login's refresh; the lookups and the margin.
     assert pipeline.tick_timeout({
         "roots": [{}, {}], "linearTeams": [{}],
         "force": {"rate": ["a", "b"], "fracture": ["c"]}}) == (
-            8 * 1345 + 2 * 1950 + 2 * 14170 + 300 + 3 * 30 + 40)
+            8 * 1345 + 2 * 1950 + 2 * 14170 + 300 + 4 * 30 + 40)
     assert pipeline.tick_timeout({}) == 5 * 1345 + 1950 + 14170 + 40
     # A gh call for each item an ask is held for.
     assert pipeline.tick_timeout({"queued": ["a", "b"]}) == pipeline.tick_timeout({}) + 2 * 65
@@ -1125,6 +1125,35 @@ def test_a_core_past_its_deadline_is_an_error_at_once(tmp_path, monkeypatch):
     assert time.monotonic() - began < 10
 
 
+def _script_core(tmp_path, monkeypatch, body: str) -> None:
+    core = tmp_path / "diplomat-core"
+    core.write_text(f"#!/bin/sh\n{body}\n")
+    core.chmod(0o755)
+    monkeypatch.setenv("DIPLOMAT_CORE_BIN", str(core))
+
+
+def test_each_line_of_the_core_is_handed_over_as_it_comes(tmp_path, monkeypatch):
+    """The core prints its second line only once its first was handed over."""
+    gate = tmp_path / "gate"
+    _script_core(tmp_path, monkeypatch,
+                 f"echo first\nwhile [ ! -e {gate} ]; do sleep 0.05; done\necho second")
+    lines = []
+    out = promptcore.cli(["x"], timeout=10, line=lambda text: (lines.append(text), gate.touch()))
+    assert lines == ["first\n", "second\n"]
+    assert out == "first\nsecond\n"
+
+
+def test_a_core_past_its_deadline_is_killed_while_its_lines_are_read(tmp_path, monkeypatch):
+    _script_core(tmp_path, monkeypatch, "echo first\nsleep 30")
+    lines, procs = [], []
+    began = time.monotonic()
+    with pytest.raises(RuntimeError, match="^diplomat-core x did not answer within 1s$"):
+        promptcore.cli(["x"], timeout=1, started=procs.append, line=lines.append)
+    assert time.monotonic() - began < 10
+    assert lines == ["first\n"]
+    assert procs[0].returncode == -signal.SIGKILL
+
+
 @pytest.mark.parametrize("call, answer, status, expected", [
     ("linear_login", {"ok": True, "user": "Ada", "organization": "Ours"}, 0,
      ({"user": "Ada", "organization": "Ours"}, "")),
@@ -1157,15 +1186,16 @@ def test_the_linear_login_calls_answer_what_the_core_said(tmp_path, monkeypatch,
 
 
 def test_each_linear_login_call_outlasts_the_bounds_the_core_holds_it_to(monkeypatch):
-    """A sign-in killed after the browser came back loses it: the browser's start,
-    ``signInSecs``, then the code's exchange, who the token is, and a sync's refresh
-    holding the login's lock. A sign-out waits on that refresh and the revocation."""
+    """A sign-in killed after the browser came back loses it: ``signInSecs``, then the
+    code's exchange, who the token is, and a sync's refresh holding the login's lock. A
+    sign-out waits on that refresh and the revocation."""
     t = pipeline.tunables()
     call = t["httpTimeoutSecs"] + 5
     seen = []
 
     class Proc:
         returncode = 0
+        stdout = ()
 
         def __init__(self, argv, **kw):
             self.verb = argv[1]
@@ -1179,7 +1209,7 @@ def test_each_linear_login_call_outlasts_the_bounds_the_core_holds_it_to(monkeyp
     pipeline.linear_login()
     pipeline.linear_logout()
     pipeline.linear_whoami()
-    assert seen == [("linear-login", 10 + t["linearOAuth"]["signInSecs"] + 3 * call + 30),
+    assert seen == [("linear-login", t["linearOAuth"]["signInSecs"] + 3 * call + 30),
                     ("linear-logout", 2 * call + 30), ("linear-whoami", 10)]
 
 
