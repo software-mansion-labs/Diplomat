@@ -70,15 +70,12 @@ def released(**kw) -> A.RunRecord:
     return rec(**base)
 
 
-#: The task id the network fixtures offer PR #337 under.
 TASK = "github.com/o/r#review:pr-337@octocat"
 
-#: A machine's key, as an offer names its executor.
 PEER = "eeeeffff00001111"
 
 
 def net(**kw) -> A.RunRecord:
-    """:func:`rec`'s run offered to the network instead of spawned: no pid, no tty."""
     base = dict(run_id="n1", pid=None, tty="", network=TASK)
     base.update(kw)
     return rec(**base)
@@ -87,11 +84,9 @@ def net(**kw) -> A.RunRecord:
 def offer(state: str, executor: str = "", here: bool = False,
           ok: bool = False, reason: str = "", not_taking: str = "",
           capped: bool = False) -> dict[str, A.NetworkTask]:
-    """A snapshot's word on :data:`TASK` alone."""
     return {TASK: A.NetworkTask(state, executor, here, ok, reason, not_taking, capped)}
 
 
-#: The network's evidence when its daemon did not answer.
 NO_DAEMON = A.Observation.unavailable("the daemon did not answer")
 
 
@@ -1557,9 +1552,7 @@ def _net_tick(network, *, record=None, merged=None, live=None) -> A.Tick:
 
 
 def test_a_network_run_holds_no_bay_and_adopts_no_tty_but_takes_its_pr():
-    """A claimed network run on #337 while the process table shows an agent on that
-    PR: the run adopts nothing, holds no bay and gets no second row."""
-    t = _net_tick(offer("claimed"), live={337: "pts/9"})
+    t =_net_tick(offer("claimed"), live={337: "pts/9"})
     assert [(r.run_id, r.tty) for r in t.records] == [("n1", "")]
     assert (t.cap_load, t.free_slots) == (set(), 2)
     assert t.in_flight(item(337))
@@ -1589,8 +1582,7 @@ def test_an_unanswered_daemon_keeps_the_pr_taken_and_retires_nothing():
 
 
 def test_nothing_is_released_for_a_network_run():
-    """A finished network run beside a live agent on its PR: that agent was never the
-    run's."""
+    """A live agent on a network run's PR was never that run's."""
     t = _net_tick(offer("done", ok=True), live={337: "pts/9"})
     assert [r.run_id for r in t.records] == ["n1"]
     assert [r.run_id for r in t.retirable] == ["n1"]

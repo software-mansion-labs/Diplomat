@@ -1,7 +1,6 @@
-"""The Network screen in each state a render seeds (in pools, not asked yet, daemon not
-answering, switched off), its actions as they reach the store and the daemon, and the
-three other places the Diplomacy Network shows: the panel's header button and task rows,
-the switch in Settings, and a wizard's start.
+"""The Network screen in each state a render seeds, its actions as they reach the store
+and the daemon, and the other places the Diplomacy Network shows: the panel's header
+button and task rows, the switch in Settings, and a wizard's start.
 """
 
 from __future__ import annotations
@@ -660,7 +659,6 @@ def test_a_title_or_pool_id_from_elsewhere_is_drawn_as_it_is_and_takes_no_width(
 
 
 def _left(pool: network.Pool) -> network.Pool:
-    """``pool`` as the snapshot lists it once this machine has left it."""
     return dataclasses.replace(pool, left=True)
 
 

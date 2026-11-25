@@ -402,13 +402,12 @@ def isolated_remote_machines(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def isolated_diplomacy_network(tmp_path, monkeypatch):
-    """Point the Diplomacy Network daemon's directory (its socket) at an empty dir, and
-    its package at one that is not there: a test that flips the switch otherwise asks
-    the operator's daemon, and runs the installer that starts it (tor and docker
-    with it). A test that wants an answer serves one on a socket in ``DN_BASE_DIR`` and
-    stubs ``deviceallocator.run_installer``. The retired mesh node's directory is an
-    empty one too, and its signal raises: a launch removes that directory, keys
-    included, and ends the node it names."""
+    """Point the daemon's directory (its socket) at an empty dir and its package at a
+    missing one: otherwise a test that flips the switch asks the operator's daemon and
+    runs its installer (tor and docker with it). A test that wants an answer serves one
+    on a socket in ``DN_BASE_DIR`` and stubs ``deviceallocator.run_installer``. The
+    retired mesh node's directory is empty too, and its signal raises: a launch removes
+    that directory, keys included, and ends the node it names."""
     from diplomat_app import diplomacynetwork
 
     def no_signal(pid):
