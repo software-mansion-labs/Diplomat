@@ -83,21 +83,23 @@ away its offers are cancelled. A machine with jobs out has to stay awake.
   twice. A machine tells how long it was away by when it last heard another machine of the pool,
   so a month away counts the same whether it was switched off, asleep, without a network or cut
   off from the others. Only machines of the pool, or one this machine has just let in with a
-  valid invite, count as having been heard. A machine that heard nobody for less - asleep
-  overnight, off for a weekend - is not coming back, but after six hours of silence each job it
-  offers waits up to three minutes for one of the others to answer before it is taken. If every
-  other machine it asks stays silent through a month of its running online, it stops waiting and
-  runs the pool's jobs alone, and still asks each of them once a day whether it is in the pool,
-  so it is one pool with them again within about a day of reaching one. The last machine of a
-  pool whose others stopped for good cannot tell them from machines it is cut off from: a month
-  after it last heard them it comes back too, and asks every machine it knew there, its own
-  inviter included, for a further month of its running online, taking none of the pool's jobs;
-  if none answers, it runs them alone, founder or not - removing the repository and adding it
-  again ends the wait sooner. If all the others are gone for good, removing the repository and
-  adding it again starts a pool of one. Removing a repository and adding it again starts another
-  pool of one on this machine. The pool it was in goes on without it and takes it back by no
-  invite of a machine that came in under it; if this machine started that pool, that is every
-  machine there, and they join the new pool instead, each by an invite from this one.
+  valid invite, count as having been heard: a dropped machine that answers counts only once it
+  holds a seat again. A machine that heard nobody for less - asleep overnight, off for a weekend
+  - is not coming back, but after six hours of silence each job it offers waits up to three
+  minutes for one of the others to answer before it is taken. If every other machine it asks
+  stays silent through a month of its running online, it stops waiting and runs the pool's jobs
+  alone, and still asks each of them whose record ran out once a day whether it is in the pool -
+  the day it is next due is kept across restarts, so a machine that runs only hours at a time
+  asks too - so it is one pool with them again within about a day of reaching one. The last
+  machine of a pool whose others stopped for good cannot tell them from machines it is cut off
+  from: a month after it last heard them it comes back too, and asks every machine it knew
+  there, its own inviter included, for a further month of its running online, taking none of the
+  pool's jobs; if none answers, it runs them alone, founder or not - removing the repository and
+  adding it again ends the wait sooner. If all the others are gone for good, removing the
+  repository and adding it again starts a pool of one. Removing a repository and adding it again
+  starts another pool of one on this machine. The pool it was in goes on without it and takes it
+  back by no invite of a machine that came in under it; if this machine started that pool, that
+  is every machine there, and they join the new pool instead, each by an invite from this one.
 - **Reaching each other.** A machine is reachable only as a Tor onion service whose address is
   its own public key, so there are no ports to open and no addresses to exchange. A first
   connection between two machines can take minutes; later ones take about a second.
@@ -555,10 +557,12 @@ the network off, the daemon does not start and says so.
   request, so its jobs stand still or stop (see Pools).
 - **A split pool can run a job twice.** When two machines that both offered the same job lose
   sight of each other, each side can hand it to an executor of its own until they meet again.
-  Each machine also asks the last 1,024 machines it dropped from the pool, once a day, whether
-  they are still in it, so two parts cut off for longer than a month are one pool again within
-  about a day of reaching each other, whether or not the machine that started the pool is still
-  there.
+  Each machine also asks the last 1,024 machines whose records ran out in its store, each once a
+  day and across restarts, whether they are still in it, spending at most an eighth of its
+  hourly proof of work on that, so two parts cut off for longer than a month are one pool again
+  within about a day of reaching each other, even when their machines run only hours at a time,
+  whether or not the machine that started the pool is still there. A key that lost its seat to
+  another is not asked.
 - **Pools are small.** A pool's whole state travels in one message; it is built for the handful
   of machines and the tens of open jobs a team has, not for thousands.
 - **macOS and Xcode toolchains** are not in a Linux container. A job that must build for Apple
