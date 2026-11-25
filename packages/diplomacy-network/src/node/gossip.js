@@ -25,6 +25,11 @@ const MAX_INDEX_PAGES = 128;
 const HEARD_GRAIN_SECS = 10 * 60;
 // The most hosts a host asks in a pool besides its members: one for every seat there.
 const MAX_BACK = LIMITS.members;
+// The search asks one key no sooner than this after another, and no key is due later
+// than MOST_DUE_SECS on: the first `due` is half an interval on, the next up to one and
+// a half.
+const SEARCH_GAP_SECS = SEARCH_INTERVAL_MS / 1000 / MAX_FORMER;
+const MOST_DUE_SECS = 1.5 * SEARCH_INTERVAL_MS / 1000;
 // Why an invite that parses lets nobody in, by `verifyInvite`'s code.
 const UNUSABLE = {
   'bad-invite': 'That invite is not signed by the machine it names: ask for a new one.',
@@ -116,14 +121,17 @@ export function createGossip(host) {
       // nobody, and, from when it comes back, every one it holds a record of - each
       // `{ pk, from }`, `from` the `online` it was first asked at: asked until it answers,
       // its record is held while this host is not returning, or it has been asked for as
-      // long as a member record is kept. `former` are the members whose records ran out
-      // here, the latest last, each `{ pk, due }`: asked about once in SEARCH_INTERVAL_MS,
-      // from `due` on, whether it is still in the pool, and no two of them sooner than
-      // `searchAt` after each other. `asksKept` is the `[back, former]` the store holds,
-      // `duesMoved` whether a `due` moved since, and `duesKept` when one was last written.
+      // long as a member record is kept. `met` are the members this host heard from
+      // themselves - a request of theirs, or a hello it let in - while their records were
+      // fresh, and `metMoved` whether one was added since they were written. `former` are
+      // those of them whose records ran out here, the latest last, each `{ pk, due, by }`,
+      // `by` the member that seated it: asked about once in SEARCH_INTERVAL_MS, from `due`
+      // on, whether it is still in the pool, and no two of them sooner than `searchAt`
+      // after each other. `asksKept` is the `[back, former]` the store holds, `duesMoved`
+      // whether a `due` moved since, and `duesKept` when one was last written.
       joining: null, joinFailed: '', invites: [], farewell: gone(doc), heard: host.now(), waitedOut: null, online: 0,
-      onlineKept: 0, stepped: host.now(), returning: false, back: [], former: [], searchAt: host.now(), asksKept: null,
-      duesMoved: false, duesKept: host.now(),
+      onlineKept: 0, stepped: host.now(), returning: false, back: [], met: new Set(), metMoved: false, former: [],
+      searchAt: host.now(), asksKept: null, duesMoved: false, duesKept: host.now(),
       // The members that refused this host's hello and have answered it nothing since.
       refusedBy: new Set(),
       // Until the heard file exists the first word heard is written at once: a restart
@@ -157,9 +165,12 @@ export function createGossip(host) {
         P.back = was.back.filter((e) => typeof e?.pk === 'string').map((e) => ({ pk: e.pk, from: Number.isSafeInteger(e.from) ? e.from : P.online })).slice(0, MAX_BACK);
       }
       if (Array.isArray(was.former)) {
-        P.former = was.former.map((e) => (typeof e === 'string' ? { pk: e, due: host.now() } : e))
-          .filter((e) => typeof e?.pk === 'string' && Number.isSafeInteger(e.due)).slice(-MAX_FORMER);
+        P.former = fit(was.former.map((e) => (typeof e === 'string' ? { pk: e, due: host.now() } : e))
+          .filter((e) => typeof e?.pk === 'string' && Number.isSafeInteger(e.due))
+          .map((e) => ({ pk: e.pk, due: e.due, by: typeof e.by === 'string' ? e.by : e.pk })));
       }
+      // A store before this one kept no `met`: every member it held counts.
+      P.met = new Set(Array.isArray(kept?.met) ? kept.met : doc.records.filter((r) => r?.type === 'member').map((r) => r.pk));
       if (asks) P.asksKept = [P.back, P.former];
       // Kept in the document by a store before this one, and moved out of it before the
       // document is written without it; in none before that, it is about when this host
@@ -217,34 +228,61 @@ export function createGossip(host) {
     return back.sort((x, y) => y.from - x.from).slice(0, MAX_BACK).sort((x, y) => (x.pk < y.pk ? -1 : x.pk > y.pk ? 1 : 0));
   }
 
-  // `P.former` with the members among `records` that left nothing to say they left, each
-  // first asked half an interval on.
+  // `P.former` with the members among `records` this host met that left nothing to say
+  // they left, each first asked half an interval on.
   function formerWith(P, records) {
-    const keys = new Set(records.filter((r) => !r.left && r.pk !== host.self).map((r) => r.pk));
-    if (keys.size === 0) return P.former;
+    const added = new Map(records.filter((r) => !r.left && P.met.has(r.pk)).map((r) => [r.pk, r.voucher?.by ?? r.pk]));
+    if (added.size === 0) return P.former;
     const due = host.now() + SEARCH_INTERVAL_MS / 2000;
-    return [...P.former.filter((e) => !keys.has(e.pk)), ...[...keys].map((pk) => ({ pk, due }))].slice(-MAX_FORMER);
+    return fit([...P.former.filter((e) => !added.has(e.pk)), ...[...added].map(([pk, by]) => ({ pk, due, by }))]);
+  }
+
+  // `former` with the latest LIMITS.invitees of each member that seated them - as many as
+  // it has seats - and of those the latest MAX_FORMER, the earliest going first of the
+  // members that seated more than their share: no member's keys push out another's.
+  function fit(former) {
+    const count = new Map();
+    const kept = former.toReversed().filter((e) => count.set(e.by, (count.get(e.by) ?? 0) + 1).get(e.by) <= LIMITS.invitees).reverse();
+    count.clear();
+    for (const e of kept) count.set(e.by, (count.get(e.by) ?? 0) + 1);
+    while (kept.length > MAX_FORMER) {
+      const [e] = kept.splice(kept.findIndex((x) => count.get(x.by) > MAX_FORMER / count.size), 1);
+      if (count.get(e.by) === 1) count.delete(e.by);
+      else count.set(e.by, count.get(e.by) - 1);
+    }
+    return kept;
+  }
+
+  // `P.met` without the keys this host holds no member record of - by the records, not
+  // the roster: a key leaves the roster before its record runs out into `former`.
+  function pruneMet(P) {
+    const held = new Set(P.pool.records().filter((r) => r.type === 'member').map((r) => r.pk));
+    for (const pk of P.met) if (!held.has(pk)) P.met.delete(pk);
   }
 
   // Asks the host of `P.former` due the longest that this one holds no record of again
-  // whether it is still in the pool, and the next no sooner than the interval allows each
-  // of MAX_FORMER: however many are due, there is no burst of proofs of work.
+  // whether it is still in the pool, and the next no sooner than SEARCH_GAP_SECS on:
+  // however many are due, there is no burst of proofs of work. A `due` further on than
+  // any is set - put there by a clock that ran ahead - is the furthest.
   function search(P, now) {
+    for (const e of P.former) {
+      if (e.due > now + MOST_DUE_SECS) [e.due, P.duesMoved] = [now + MOST_DUE_SECS, true];
+    }
     const due = P.former.filter((e) => e.due <= now && !P.pool.get(memberKey(e.pk)));
     if (due.length === 0) return;
     const next = due.reduce((x, y) => (y.due < x.due ? y : x));
     next.due = now + Math.round((SEARCH_INTERVAL_MS / 1000) * (0.5 + jitter()));
     P.duesMoved = true;
-    P.searchAt = now + SEARCH_INTERVAL_MS / 1000 / MAX_FORMER;
-    meet(P, next.pk, { fresh: true, search: true }).catch((err) => host.log(`a search failed: ${err?.stack ?? err}`));
+    P.searchAt = now + SEARCH_GAP_SECS;
+    meet(P, next.pk, { fresh: true }).catch((err) => host.log(`a search failed: ${err?.stack ?? err}`));
   }
 
   // Writes what this host asks in a pool when it changed - or, when only a `due` moved,
-  // once the last write is HEARD_GRAIN_SECS old: a restart asks a key again that much
-  // sooner at most.
+  // once the last write is HEARD_GRAIN_SECS away by the clock, either way: a restart asks
+  // a key again that much sooner at most.
   function keepAsks(P) {
     const [back, former] = P.asksKept;
-    if (back === P.back && former === P.former && !(P.duesMoved && host.now() - P.duesKept >= HEARD_GRAIN_SECS)) return;
+    if (back === P.back && former === P.former && !(P.duesMoved && Math.abs(host.now() - P.duesKept) >= HEARD_GRAIN_SECS)) return;
     host.store.write(asksFile(P.id), { back: P.back, former: P.former });
     [P.asksKept, P.duesMoved, P.duesKept] = [[P.back, P.former], false, host.now()];
   }
@@ -308,7 +346,6 @@ export function createGossip(host) {
     const doc = host.store.read(poolFile(id)) ?? {};
     host.away.delete(id);
     host.store.write(poolFile(id), { id, linked: false, seq: doc.seq, ...gone(doc) });
-    host.store.remove(asksFile(id));
     host.store.remove(heardFile(id));
   }
 
@@ -376,20 +413,28 @@ export function createGossip(host) {
     P.epoch += 1;
   }
 
-  /// Another host of a pool answered this one or was served by it. The first word after
-  /// a silence that may have been a cut makes the pool out of date: this host may hold
-  /// none of what came meanwhile.
-  function hears(P) {
+  /// Another host of a pool answered this one or was served by it: `from`, a member that
+  /// asked or a host its hello let in. The first word after a silence that may have been a
+  /// cut makes the pool out of date: this host may hold none of what came meanwhile.
+  function hears(P, from) {
     const now = host.now();
     doubt(P);
-    if ((P.heardKept && now - P.heard < HEARD_GRAIN_SECS) || !open(P)) return;
+    if (!open(P)) return;
+    // A host that is there signs every RESIGN_INTERVAL_MS: one whose record was signed to
+    // run out as it speaks is no host this host met.
+    const record = !P.met.has(from) && P.pool.known(now).find((m) => m.pk === from);
+    if (record && now - record.at < 2 * RESIGN_INTERVAL_MS / 1000) {
+      P.met.add(from);
+      P.metMoved = true;
+    }
+    if (P.heardKept && now - P.heard < HEARD_GRAIN_SECS) return;
     P.heard = now;
     keepHeard(P);
   }
 
   function keepHeard(P) {
-    host.store.write(heardFile(P.id), { heard: P.heard, waitedOut: P.waitedOut, online: P.online });
-    [P.heardKept, P.onlineKept] = [true, P.online];
+    host.store.write(heardFile(P.id), { heard: P.heard, waitedOut: P.waitedOut, online: P.online, met: [...P.met] });
+    [P.heardKept, P.onlineKept, P.metMoved] = [true, P.online, false];
   }
 
   /// This host acts on what it holds of a pool: in one it heard nobody of for long, it
@@ -799,16 +844,18 @@ export function createGossip(host) {
       // A longer gap is time the host was not running.
       if (up) P.online += Math.max(0, Math.min(now - P.stepped, WAKE_GAP_MS / 1000));
       P.stepped = now;
+      P.searchAt = Math.min(P.searchAt, now + SEARCH_GAP_SECS);
       if (up && now >= P.searchAt) search(P, now);
       const dropped = ranOut(P.pool.gone().filter((d) => d.record.type === 'member'));
       const cut = lapsed(P, dropped);
       const former = formerWith(P, dropped);
       const held = new Set(members(P));
+      pruneMet(P);
       const kept = P.back.filter((e) => P.online - e.from < MEMBER_RETENTION_SECS && (P.returning || !held.has(e.pk)));
       const back = backTo({ ...P, back: kept }, cut);
       const moved = JSON.stringify(back) !== JSON.stringify(P.back) || former !== P.former;
       if (moved) [P.back, P.former] = [back, former];
-      if (P.back.length > 0 && P.online - P.onlineKept >= HEARD_GRAIN_SECS) keepHeard(P);
+      if (P.metMoved || (P.back.length > 0 && P.online - P.onlineKept >= HEARD_GRAIN_SECS)) keepHeard(P);
       const came = overdue(P, now);
       // With every key asked in vain for as long, there is no answer to wait for.
       const alone = P.returning && P.back.length === 0;

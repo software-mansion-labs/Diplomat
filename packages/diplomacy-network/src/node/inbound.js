@@ -143,12 +143,12 @@ export function createInbound(host) {
       host.store.write('heard', { ts });
     }
     if (checked.member) {
-      host.gossip.hears(P);
+      host.gossip.hears(P, from);
       host.peers.heard(from);
     }
     const out = await host.handle(P, from, kind, body);
     // A host that is no member is heard once its hello let it in.
-    if (!checked.member && !out.error) host.gossip.hears(P);
+    if (!checked.member && !out.error) host.gossip.hears(P, from);
     // What the answer admits to is on disk before the sender can act on it.
     host.store.flush();
     if (!out.error) return reply({ effort, body: out.body });

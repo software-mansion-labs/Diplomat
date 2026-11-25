@@ -236,9 +236,11 @@ price, whatever the others took. So the members that ask for the most make a hos
 keep it from asking the members it knew before them. The floors of 240 peers add at most
 1 006 632 960 hashes to such an hour, 17 minutes of a core, and that only when every one
 of them is asked for its whole. A peer the host holds no member record of gets no floor:
-what the host asks it is paid out of the four times. Of those, the requests of the search
-(section 5) take at most an eighth together, 16384 << 13 = 134 217 728 hashes an hour,
-and a key that asks the search for more work is asked nothing more by it that day. A host
+every request to it - the search's hello (section 5) and the pulls and syncs after an
+answer, what a host that comes back asks the keys it is back to, an invite redeemed - is
+paid out of an eighth of the four times, 16384 << 13 = 134 217 728 hashes an hour for all
+of them together, until its member record is held. Such a request is sent once: a peer
+that asks for more work is paid it by the next request, not by this one again. A host
 knows a peer from the first request to it or from it since the host started. A request a
 host does not pay for was not answered: a claim round goes on without that member as
 without one that is silent (section 7).
@@ -502,13 +504,19 @@ came back is back, alone, and does not come back again until it has heard anothe
 the pool once more.
 
 A host never stops looking for its pool. It keeps the keys of the members whose records
-ran out in its store - that left no record saying they left - up to the 1,024 that went
-last, each with when it is next due, on disk beside the keys above so that a restart
-keeps it. While its transport is up it greets the one due the longest that it holds no
-record of again, then the next no sooner than 24 hours / 1,024 (84 s) later: each is
-first due 12 hours after its record ran out, and then a day after it was last greeted,
-give or take half a day, whether the host ran meanwhile or not. Two parts of a pool cut
-off from each other for longer than a record is kept, each with nobody left that the
+ran out in its store that it heard from themselves - a request of theirs as members, or a
+hello it let in, while their records were at most 12 hours old - and that left no record
+saying they left: a key a member seated with a record dated to run out at once is no
+host's. Of the keys one member seated it keeps the 15 that went last, as many as that
+member has seats, and of all of them the 1,024 that went last, the earliest going first
+of the members with more than an even share: no member's keys push out another's. It
+keeps them, each with when it is next due, on disk beside the keys above so that a
+restart keeps it. While its transport is up it greets the one due the longest that it
+holds no record of again, then the next no sooner than 24 hours / 1,024 (84 s) later:
+each is first due 12 hours after its record ran out, and then a day after it was last
+greeted, give or take half a day, whether the host ran meanwhile or not - none later
+than a day and a half on, whatever its clock read when it set that. Two parts of a pool
+cut off from each other for longer than a record is kept, each with nobody left that the
 other holds, are one pool again within about a day of reaching each other, though their
 hosts run for only hours at a time: the hello of either is let in by a voucher the other
 holds, and the two merge as any two members do. The one greeted counts as the pool heard,
@@ -1223,7 +1231,8 @@ Nothing in a record hides any of this.
   running with its transport up or until it answers: a pool whose other members are all
   gone costs it those requests, and it takes and gives no job until the 30 days are over.
   After them it greets each of those whose records ran out once a day, for as long as it
-  is in the pool, at most an eighth of its hour of work. Its operator, knowing the others
+  is in the pool. What it asks keys it holds no member record of comes out of an eighth
+  of its hour of work. Its operator, knowing the others
   gone, unlinks the repository and links it again sooner, which begins a pool of one. A
   host whose every other member stopped signing hears nobody, as a host cut off from them
   does: each job it offers after 6 hours of that waits 180 s for an answer, and after 30

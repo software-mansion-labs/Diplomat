@@ -2,8 +2,8 @@
 //
 //   identity.json           { seed }
 //   heard.json              { ts }: the latest date of a request this host served
-//   heard/<pool hash>.json  { heard, waitedOut, online }: when another host of that pool was last heard, the last such time whose silence this host waited out, and how long it ran there with its transport up
-//   asks/<pool hash>.json   { back, former }: the hosts of that pool it asks besides the members it holds, and the members whose records ran out, each with when it is next asked whether it is still there
+//   heard/<pool hash>.json  { heard, waitedOut, online, met }: when another host of that pool was last heard, the last such time whose silence this host waited out, how long it ran there with its transport up, and the members it heard from themselves
+//   asks/<pool hash>.json   { back, former }: the hosts of that pool it asks besides the members it holds, and the members it met whose records ran out, each with when it is next asked whether it is still there and the member that seated it
 //   peers.json              { silent }: the peers this host asks in vain, and has for long, and since when
 //   pools/<pool hash>.json  one pool: its link, this host's own sequence numbers, its records
 //   pools/<pool hash>.log   what changed in that pool since its document was written
