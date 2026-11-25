@@ -13,7 +13,7 @@ import { Spending } from '../core/pow.js';
 import { isBytes } from '../core/records.js';
 import {
   MAX_ACT_BODY_BYTES, MAX_BODY_BYTES, PEER_BACKOFF_MAX_MS, PEER_BACKOFF_MS, PEER_QUIET_MS, POW, POW_HOURLY, RECORD_RETENTION_SECS,
-  REQUEST_TIMEOUT_MS, STRANGER_BODY_BYTES,
+  REQUEST_TIMEOUT_MS, SEARCH_INTERVAL_MS, STRANGER_BODY_BYTES,
 } from '../paths.js';
 
 // Past the last doubling no honest target asks for more, so nobody is paid more.
@@ -27,8 +27,11 @@ const INSATIABLE = { ok: false, code: 'effort', detail: 'the peer keeps asking f
 /// The peers of `host`: `{ ask, patience, heard, seen }`.
 export function createPeers(host) {
   const peers = new Map(); // pk -> { since, seen, heard, failures, until, skew }
-  const spending = new Spending(POW_HOURLY);
-  const owed = new Map(); // "pk pool" -> the effort that peer last asked of this host there
+  const spending = new Spending(POW_HOURLY, MOST_OWED);
+  // "pk pool" -> `{ effort, at }`: the effort that peer last asked of this host there, and
+  // when. A day on it is asked at the base price again: a price that it cannot pay never
+  // keeps a peer from being asked.
+  const owed = new Map();
   const lanes = new Map(); // pk -> the last large request sent to it
   // pk -> when a peer that had not answered for long was first found so, and has not
   // answered since: on disk, so a host that starts again does not wait for it as for one
@@ -63,10 +66,11 @@ export function createPeers(host) {
 
   // Sends a request once, at the effort the peer last asked for. AGAIN when the peer
   // wants it sent once more: for more work, or because it could not serve it this time.
-  async function once(p, pool, to, kind, body, { timeoutMs, maxResponseBytes, ticket, member, search }, first) {
+  async function once(p, pool, to, kind, body, { timeoutMs, maxResponseBytes, ticket, member, search, share }, first) {
     const key = `${to} ${pool}`;
-    const effort = owed.get(key) ?? (kind === 'hello' ? POW.strangerBase : POW.memberBase);
-    if (!spending.pay(to, p.since, effort, host.now(), { member, search })) return { ok: false, lost: 'budget' };
+    const last = owed.get(key);
+    const effort = last && host.now() - last.at < SEARCH_INTERVAL_MS / 1000 ? last.effort : kind === 'hello' ? POW.strangerBase : POW.memberBase;
+    if (!spending.pay(to, p.since, effort, host.now(), { member, search, share })) return { ok: false, lost: 'budget' };
     // Whatever this request tells the peer is on disk before the peer hears it.
     host.store.flush();
     let request;
@@ -91,9 +95,9 @@ export function createPeers(host) {
     const skew = answer.code === 'stale';
     if (p.failures > 0 || p.seen === 0 || p.skew !== skew) host.touch();
     Object.assign(p, { seen: host.now(), failures: 0, until: 0, skew });
-    owed.set(key, Math.min(answer.effort, MOST_OWED));
+    owed.set(key, { effort: Math.min(answer.effort, MOST_OWED), at: host.now() });
     if (answer.ok) return { ok: true, body: answer.body };
-    if (answer.code === 'effort' && answer.effort <= MOST_OWED) return search ? { ok: false, lost: 'budget' } : AGAIN;
+    if (answer.code === 'effort' && answer.effort <= MOST_OWED) return member ? AGAIN : { ok: false, lost: 'budget' };
     // The transport sent these bytes twice and the first copy was carried out. Every
     // kind but `act` is asked again and answers the same; an `act` was performed.
     if (answer.code === 'replay') return kind === 'act' ? { ok: false, lost: 'replay' } : AGAIN;
@@ -121,7 +125,7 @@ export function createPeers(host) {
   async function exchangeLarge(p, pool, to, kind, body, size, options) {
     const bytes = Math.min(size + 1024, kind === 'act' ? MAX_ACT_BODY_BYTES : MAX_BODY_BYTES);
     for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
-      const place = await exchange(p, pool, to, 'reserve', { kind, bytes }, { timeoutMs: options.timeoutMs, member: options.member, search: options.search });
+      const place = await exchange(p, pool, to, 'reserve', { kind, bytes }, { timeoutMs: options.timeoutMs, member: options.member, search: options.search, share: options.share });
       if (!place.ok) return place.code === 'busy' ? { ok: false, lost: 'no-place' } : place;
       if (!isBytes(place.body.ticket, 16)) return lost(to, 'protocol');
       const answer = await once(p, pool, to, kind, body, { ...options, ticket: place.body.ticket }, attempt === 0);
@@ -135,18 +139,16 @@ export function createPeers(host) {
   /// the transport's code, `offline` while the transport is not ready, `backoff` while
   /// gossip leaves the peer alone, `budget` when the peer asks for more work than this
   /// host has left to do this hour, for that peer or for all of them, or than it does at
-  /// once for a search, `no-place` when it has no place for a large body, or `replay` for
-  /// an `act` whose answer was lost. `fresh` asks regardless of the backoff. In a linked
-  /// pool, a request to a key this host holds no member record of is a search's: paid out
-  /// of the search's share of the hour, and not sent again for more work - the next
-  /// request pays what it asked.
+  /// once for a request to a key it holds no member record of, `no-place` when it has no
+  /// place for a large body, or `replay` for an `act` whose answer was lost. `fresh` asks
+  /// regardless of the backoff. What a request is paid out of is the gossip's `standing`
+  /// of `to`; one to a key that is not a member of a pool this host is in is not sent
+  /// again for more work - the next request pays what it asked.
   async function ask(pool, to, kind, body, { fresh = false, timeoutMs = REQUEST_TIMEOUT_MS, maxResponseBytes } = {}) {
     const p = peer(to);
     if (host.transport.state().state !== 'ready') return { ok: false, lost: 'offline' };
     if (!fresh && host.now() < p.until) return { ok: false, lost: 'backoff' };
-    const P = host.pools.get(pool);
-    const member = Boolean(P) && host.gossip.member(P, to);
-    const options = { timeoutMs, maxResponseBytes, member, search: Boolean(P) && !member };
+    const options = { timeoutMs, maxResponseBytes, ...host.gossip.standing(pool, to) };
     const size = Buffer.byteLength(JSON.stringify(body));
     if (size < STRANGER_BODY_BYTES - 1024) return exchange(p, pool, to, kind, body, options);
     // A target gives a member one place for a large body at a time: such requests go out

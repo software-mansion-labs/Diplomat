@@ -30,6 +30,9 @@ const MAX_BACK = LIMITS.members;
 // a half.
 const SEARCH_GAP_SECS = SEARCH_INTERVAL_MS / 1000 / MAX_FORMER;
 const MOST_DUE_SECS = 1.5 * SEARCH_INTERVAL_MS / 1000;
+// A key this host left a pool to is pushed the record saying so no sooner than this
+// after the last time.
+const FAREWELL_GAP_SECS = 24 * 3600;
 // Why an invite that parses lets nobody in, by `verifyInvite`'s code.
 const UNUSABLE = {
   'bad-invite': 'That invite is not signed by the machine it names: ask for a new one.',
@@ -308,13 +311,14 @@ export function createGossip(host) {
 
   /// Pushes the records under `keys` now, whatever the backoff, to every host this one
   /// asks - to one it holds no member record of, the member records among them alone;
-  /// settles once each of them has answered or failed to.
+  /// settles, with `[pk, answer]` of each it pushed to, once each has answered or failed to.
   function tell(P, keys) {
     const records = P.pool.records(keys);
     const theirs = new Set(members(P));
-    return Promise.all(others(P).map((pk) => {
-      const told = theirs.has(pk) ? records : records.filter((r) => r.type === 'member');
-      return told.length > 0 && host.peers.ask(P.id, pk, 'push', { records: told }, { fresh: true }).catch(() => {});
+    return Promise.all(others(P).map(async (pk) => {
+      const pushed = theirs.has(pk) ? records : records.filter((r) => r.type === 'member');
+      if (pushed.length === 0) return null;
+      return [pk, await host.peers.ask(P.id, pk, 'push', { records: pushed }, { fresh: true }).catch(() => null)];
     }));
   }
 
@@ -338,7 +342,11 @@ export function createGossip(host) {
     host.store.write(poolFile(P.id), doc);
     host.store.remove(asksFile(P.id));
     if (!stay) host.store.remove(heardFile(P.id));
-    tell(P, [...keys, memberKey(host.self)]);
+    // That push is the day's farewell of each key it reached.
+    for (const pk of leftTo) told.set(`${P.id} ${pk}`, host.now() + FAREWELL_GAP_SECS);
+    tell(P, [...keys, memberKey(host.self)]).then((answers) => {
+      for (const [pk, answer] of answers.filter(Boolean)) if (!answer || (answer.lost && answer.lost !== 'budget')) told.delete(`${P.id} ${pk}`);
+    });
   }
 
   /// A pool this host left is no longer linked either: linked again it is a pool of its own.
@@ -363,16 +371,17 @@ export function createGossip(host) {
   }
 
   /// A host this one does not take for a member asked about a pool. When this host left
-  /// that pool while the asker was a member of it, the asker may not have heard, and is
-  /// sent the record that says so. Nobody else is sent anything: a key this host never
-  /// knew as a member is neither dialled nor worked for.
+  /// that pool while the asker was a member of it, no longer ago than a member record is
+  /// kept, the asker may not have heard, and is sent the record that says so - once a day
+  /// at most. Nobody else is sent anything: a key this host never knew as a member is
+  /// neither dialled nor worked for.
   function farewell(pool, to) {
     const P = host.pools.get(pool);
     const was = P ? P.farewell : gone(host.store.read(poolFile(pool)) ?? {});
     const key = `${pool} ${to}`;
     const now = host.now();
-    if (!was?.leftTo.includes(to) || (told.get(key) ?? 0) > now) return;
-    told.set(key, now + PEER_BACKOFF_MAX_MS / 1000);
+    if (!was?.leftTo.includes(to) || now >= was.left.at + MEMBER_RETENTION_SECS || (told.get(key) ?? 0) > now) return;
+    told.set(key, now + FAREWELL_GAP_SECS);
     host.peers.ask(pool, to, 'push', { records: [was.left] }, { fresh: true }).catch(() => {});
   }
 
@@ -387,9 +396,30 @@ export function createGossip(host) {
       && P.pool.vouched(record.voucher.by, host.now()) && verifyVoucher(record);
   }
 
-  /// Does this host hold a member record of `pk` in a pool, of a member that has not left:
-  /// one that signs its record, or one that stopped?
+  // Does this host hold a member record of `pk` in a pool, of a member that has not left:
+  // one that signs its record, or one that stopped?
   const member = (P, pk) => P.pool.known(host.now()).some((m) => m.pk === pk);
+
+  /// What a request to `to` about `pool` is paid out of: `member` for a key this host holds
+  /// a member record of in a pool it is in. Otherwise it is paid out of the whole hour and
+  /// sent once when it goes to the member whose invite this host redeems, or to a key it is
+  /// back to while returning; anything else - every request about a pool it left among
+  /// them - is a search's, and one to a key in `former` takes no more of the search's share
+  /// than the others of the member that seated it: `share` that member, `of` how many
+  /// members seated the keys of `former`, in every pool.
+  function standing(pool, to) {
+    const P = host.pools.get(pool);
+    if (!P) return { member: false, search: true };
+    if (member(P, to)) return { member: true, search: false };
+    if (P.joining?.by === to || (P.returning && P.back.some((e) => e.pk === to))) return { member: false, search: false };
+    const seat = P.former.find((e) => e.pk === to);
+    if (!seat) return { member: false, search: true };
+    // Keys with no seater but themselves - a pool's first member, and every key of a store
+    // that kept no seater - take one share between them, or each would bring its own.
+    const seater = (Q, e) => (e.by === e.pk ? Q.id : `${Q.id} ${e.by}`);
+    const seaters = new Set([...host.pools.values()].flatMap((Q) => Q.former.map((e) => seater(Q, e))));
+    return { member: false, search: true, share: { key: seater(P, seat), of: seaters.size } };
+  }
 
   // The other hosts this one holds such a record of in a pool: the ones its records go to.
   const members = (P) => P.pool.known(host.now()).map((m) => m.pk).filter((pk) => pk !== host.self);
@@ -967,7 +997,7 @@ export function createGossip(host) {
 
   return {
     link, unlink, forget, tell, noPool, farewell, invited, send, syncWith, woke, hears, doubt, spread, deliver, start, stop, step,
-    invite, join, unseated, returning, member,
+    invite, join, unseated, returning, standing,
     handlers,
   };
 }

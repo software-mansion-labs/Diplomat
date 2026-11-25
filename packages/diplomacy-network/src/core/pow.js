@@ -80,30 +80,41 @@ export function solveAsync(c, effort, { signal } = {}) {
 /// What a host paid its peers in the last hour, in hashes expected, and whether it pays
 /// more: `peer` is the most for one peer, `all` the most for all of them together,
 /// `floor` what a member known for `floorAfter` seconds is paid whatever the others took,
-/// and `search` the most for the requests of a search together, out of `all`.
+/// and `search` the most for the requests of a search together, out of `all`. `top` is
+/// the most one request may cost.
 export class Spending {
   #limits;
+  #top;
   #all = { paid: [], spent: 0 };
   #search = { paid: [], spent: 0 };
   #peers = new Map();
+  #shares = new Map();
 
-  constructor(limits) {
+  constructor(limits, top = 0) {
     this.#limits = limits;
+    this.#top = top;
   }
 
   /// Takes `effort` for the peer `pk`, known since `since`, out of this hour at `now`;
   /// false, with nothing taken, when that much is not left. `member` says whether the
-  /// peer is one the floor is for, `search` whether the request is a search's.
-  pay(pk, since, effort, now, { member = true, search = false } = {}) {
+  /// peer is one the floor is for, `search` whether the request is a search's, and
+  /// `share`, `{ key, of }`, that it takes no more than `search` over `of` - or one
+  /// request at `top`, if that is more - together with the other requests of that `key`:
+  /// as much of that one request as `search` has no room for is paid all the same, so
+  /// each `key` can be asked for the most in an hour.
+  pay(pk, since, effort, now, { member = true, search = false, share = null } = {}) {
     if (!this.#peers.has(pk)) this.#peers.set(pk, { paid: [], spent: 0 });
     const one = this.#peers.get(pk);
-    const purses = search ? [one, this.#all, this.#search] : [one, this.#all];
+    if (search && share && !this.#shares.has(share.key)) this.#shares.set(share.key, { paid: [], spent: 0 });
+    const part = search && share ? this.#shares.get(share.key) : null;
+    const purses = [one, this.#all, ...(search ? [this.#search] : []), ...(part ? [part] : [])];
     for (const purse of purses) {
       while (purse.paid.length > 0 && purse.paid[0][0] <= now - 3600) purse.spent -= purse.paid.shift()[1];
     }
     const { peer, all, floor, floorAfter } = this.#limits;
     if (one.spent + effort > peer) return false;
-    if (search && this.#search.spent + effort > this.#limits.search) return false;
+    const over = search && this.#search.spent + effort > this.#limits.search;
+    if (part ? part.spent + effort > Math.max(this.#limits.search / share.of, this.#top) || (over && part.spent + effort > this.#top) : over) return false;
     const anyway = member && now - since >= floorAfter && one.spent + effort <= floor;
     if (!anyway && this.#all.spent + effort > all) return false;
     for (const purse of purses) {

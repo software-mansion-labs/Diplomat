@@ -65,6 +65,91 @@ await check('a host that left a pool tells the members it left, and dials, pushe
   assert.deepEqual([[...new Set(to)], to.length <= 2, a.solved.length - solved], [['push c'], true, to.length]);
 });
 
+await check('a host whose repository is unlinked pays the keys it left out of the search\'s eighth of its hour, sends nothing to them again for more work, tells each of them it left once a day at most, and nothing once a month is over, however often they ask', async () => {
+  const w = createWorld({ seed: 73 });
+  const [a, b] = await w.pool(['a', 'b']);
+  // Members of the pool until b leaves; from then on they ask the most work for anything.
+  let hostile = false;
+  const xs = [];
+  for (let i = 0; i < 4; i += 1) {
+    const x = await w.intruder(`x${i}`, a);
+    answering(x, () => (hostile ? { error: { code: 'effort', detail: '' }, effort: MOST } : { body: { index: {}, accepted: [], refused: [] } }));
+    xs.push(x);
+  }
+  await w.run(3600);
+  const paid = [];
+  const sent = new Map();
+  w.net.tap(({ from, to, body }) => {
+    if (from !== 'b' || !to?.startsWith('x')) return;
+    const request = JSON.parse(body.toString('utf8'));
+    paid.push([w.net.now(), request.pow.effort]);
+    sent.set(to, [...(sent.get(to) ?? []), [w.net.now(), request.kind]]);
+  });
+  const left = w.net.now();
+  b.node.setPools([]);
+  hostile = true;
+  // Each of them asks b about the pool every 10 minutes, for the most work it is asked.
+  const ask = async (x) => {
+    let effort = POW.strangerBase;
+    for (let i = 0; i < 8; i += 1) {
+      const answer = await w.request(x, b, 'sync', { asOf: w.net.now(), hash: 'x' }, { effort });
+      if (answer.code !== 'effort') return;
+      effort = answer.effort;
+    }
+  };
+  for (let tick = 0; tick < 26 * 6; tick += 1) {
+    for (const x of xs) await ask(x);
+    await w.run(600);
+  }
+  const hour = Math.max(...paid.map(([at]) => sum(paid.filter(([t]) => t >= at && t < at + 3600).map(([, e]) => e))));
+  assert.ok(hour <= POW_HOURLY.search, `${hour / HOURLY_ALL} of an hour's work paid them in an hour`);
+  // The push as it left, and no more than one a day later.
+  const pushes = () => xs.map((x) => (sent.get(x.name) ?? []).map(([at, kind]) => [at - left, kind]));
+  assert.deepEqual(pushes().map((list) => [list[0][0] < 60, list.length <= 2, list.every(([at, kind], i) => kind === 'push' && (i === 0 || at >= 24 * 3600))]), xs.map(() => [true, true, true]), JSON.stringify(pushes()));
+  const before = pushes().flat().length;
+  w.net.kill('a');
+  await w.run(30 * 24 * 3600);
+  for (let tick = 0; tick < 6 * 6; tick += 1) {
+    for (const x of xs) await ask(x);
+    await w.run(600);
+  }
+  assert.equal(pushes().flat().length, before, 'nothing once a month is over');
+});
+
+await check('the push of a host leaving its pool, to members that last asked it the most work, takes no more than the search\'s eighth of its hour', async () => {
+  const w = createWorld({ seed: 74 });
+  const [a, b] = await w.pool(['a', 'b']);
+  // Members that answer each host's first request after `pricey` with the most work, and
+  // that host nothing from then on.
+  let pricey = false;
+  const xs = [];
+  for (let i = 0; i < 4; i += 1) {
+    const x = await w.intruder(`x${i}`, a);
+    const asked = new Set();
+    x.transport.onRequest(async (bytes) => {
+      const request = JSON.parse(bytes.toString('utf8'));
+      if (asked.has(request.from)) return new Promise(() => {});
+      if (pricey) asked.add(request.from);
+      const says = pricey ? { error: { code: 'effort', detail: '' }, effort: MOST } : { body: { index: {}, accepted: [], refused: [] }, effort: POW.memberBase };
+      return canon(buildResponse(x.id, { re: requestDigest(request), ...says }));
+    });
+    xs.push(x);
+  }
+  await w.run(3600);
+  pricey = true;
+  await w.run(600);
+  // Offline for longer than an hour, b keeps the price and has paid nobody since.
+  b.transport.host.ready = false;
+  await w.run(2 * 3600);
+  b.transport.host.ready = true;
+  b.transport.host.watchers.forEach((fn) => fn({ state: 'ready', detail: '' }));
+  const paid = [];
+  w.net.tap(({ from, to, body }) => from === 'b' && to?.startsWith('x') && paid.push(JSON.parse(body.toString('utf8')).pow.effort));
+  b.node.setPools([]);
+  await w.run(600);
+  assert.ok(paid.length > 0 && sum(paid) <= POW_HOURLY.search, `${paid.length} pushes, ${sum(paid) / HOURLY_ALL} of an hour's work`);
+});
+
 await check('a host pays a peer no more than an honest target can ask, asks no more of one that asks for more, and works for one peer no more in an hour than it says', async () => {
   const w = createWorld({ seed: 72 });
   const [a] = await w.pool(['a']);

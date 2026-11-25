@@ -217,13 +217,14 @@ but `act` answers the same when asked again, and an `act` is carried out once fo
 
 ### What a sender pays
 
-A sender pays what the target's last answer asked for. It never pays more than the most
-the table above lets a target ask - 16384 << 12 = 262144 << 8 = 67 108 864 - and a target
-that asks for more is not sent that request again. A request refused for `effort` is sent
-again at the price asked, at most three times. A member whose own volume has taken its
-price above what a stranger owes, and that has lost count of it - it started again in
-that minute - is quoted the stranger's price, pays too little again, and after the third
-time leaves that request; a minute later its price has fallen.
+A sender pays what the target's last answer asked for, for a day: past that it pays the
+base price again. It never pays more than the most the table above lets a target ask -
+16384 << 12 = 262144 << 8 = 67 108 864 - and a target that asks for more is not sent that
+request again. A request to a member refused for `effort` is sent again at the price
+asked, at most three times; one to any other key, never (section 3). A member whose own
+volume has taken its price above what a stranger owes, and that has lost count of it - it
+started again in that minute - is quoted the stranger's price, pays too little again, and
+after the third time leaves that request; a minute later its price has fallen.
 
 For one peer a host does at most 16384 << 14 = 268 435 456 hashes of work in any hour:
 four requests at the highest price, or 16384 at a member's base. For all its peers
@@ -235,12 +236,21 @@ price, whatever the others took. So the members that ask for the most make a hos
 1 073 741 824 hashes an hour between them, however many keys they have seated, and cannot
 keep it from asking the members it knew before them. The floors of 240 peers add at most
 1 006 632 960 hashes to such an hour, 17 minutes of a core, and that only when every one
-of them is asked for its whole. A peer the host holds no member record of gets no floor:
-every request to it - the search's hello (section 5) and the pulls and syncs after an
-answer, what a host that comes back asks the keys it is back to, an invite redeemed - is
-paid out of an eighth of the four times, 16384 << 13 = 134 217 728 hashes an hour for all
-of them together, until its member record is held. Such a request is sent once: a peer
-that asks for more work is paid it by the next request, not by this one again. A host
+of them is asked for its whole. A peer the host holds no member record of in a pool it is
+in gets no floor, and a request to it is sent once: a peer that asks for more work is paid
+it by the next request, not by this one again. What the host asks the member whose invite
+it redeems, and what it asks the keys it is back to while it comes back, is paid out of the
+four times. Every other such request - the search's hello (section 5) and the pulls and
+syncs after an answer, and whatever it sends about a pool it left - is paid out of an
+eighth of the four times, 16384 << 13 = 134 217 728 hashes an hour for all of them
+together, until its member record is held. The keys it looks for that one member seated
+take no more of that eighth in an hour than an even share among the members that seated
+the keys it looks for, or one request at the highest price if that is more - paid even
+when the eighth has no room for it, so that each such member's keys can be asked
+whatever the others took. The pool's first member, and the keys a store kept with no
+member that seated them, count as one such member between them: past the eighth, a host
+pays at most one request at the highest price an hour for each, 17 for a pool - the 16
+keys that can seat another, and that one - and never more than the four times. A host
 knows a peer from the first request to it or from it since the host started. A request a
 host does not pay for was not answered: a claim round goes on without that member as
 without one that is silent (section 7).
@@ -522,7 +532,10 @@ hosts run for only hours at a time: the hello of either is let in by a voucher t
 holds, and the two merge as any two members do. The one greeted counts as the pool heard,
 and is pushed what the greeter holds, only once its member record is held. A pool none of
 whose former members is there costs each host a hello a day for each of them, and at most
-an eighth of its hour of work (section 3).
+an eighth of its hour of work and one request at the highest price an hour for each
+member that seated them (section 3); the keys one member seated, no more of that eighth
+than an even share among the members that seated the keys it looks for, or that one
+request if that is more, the keys seated by none counting as one member's.
 
 A host that every other host it asks in a pool has refused as no member - its seat was
 given away, the member that gave it began another membership, or a move of the members
@@ -651,8 +664,9 @@ the pool that reaches it after that changes nothing it keeps, nor anything of a 
 links again under the same id meanwhile. The locks it
 granted bind it for their 120 s all the same, should it join again before. It
 keeps the `left` record, and the keys of the members it left, for as long as it is not a
-member again: one of those keys that asks it about the pool has not heard, and is pushed
-that record, at most once in 10 minutes. Nobody else is sent anything. A host dials,
+member again: one of those keys that asks it about the pool within 30 days of its leaving
+has not heard, and is pushed that record - at most once a day, the push as it left counting
+for a key it reached. Nobody else is sent anything. A host dials,
 solves a proof of work for only the keys a pool's own records name as its members,
 and, for up to 30 days, for the keys of the members it left and of the members whose
 records ran out in its store while it heard nobody (section 5), until each has answered
@@ -1231,8 +1245,10 @@ Nothing in a record hides any of this.
   running with its transport up or until it answers: a pool whose other members are all
   gone costs it those requests, and it takes and gives no job until the 30 days are over.
   After them it greets each of those whose records ran out once a day, for as long as it
-  is in the pool. What it asks keys it holds no member record of comes out of an eighth
-  of its hour of work. Its operator, knowing the others
+  is in the pool. What it asks the keys it is back to while it comes back is sent once
+  each and comes out of its whole hour of work; what it asks the others it holds no
+  member record of, out of an eighth of it and one request at the highest price an hour
+  for each member that seated them. Its operator, knowing the others
   gone, unlinks the repository and links it again sooner, which begins a pool of one. A
   host whose every other member stopped signing hears nobody, as a host cut off from them
   does: each job it offers after 6 hours of that waits 180 s for an answer, and after 30

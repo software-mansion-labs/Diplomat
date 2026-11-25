@@ -127,8 +127,11 @@ export const POW = {
 // for `floorAfter` seconds, whatever the others took: 256 requests at the base price.
 // The keys a member seats are new to every host, so they take from the whole and leave
 // the floors to the peers a host knew before them. A peer a host holds no member record
-// of gets no floor, and every request to one - the search's (PROTOCOL.md section 5) and
-// any other - takes no more than `search` of the whole, an eighth, together.
+// of in a pool it is in gets no floor, and every request to one - the search's
+// (PROTOCOL.md section 5), any about a pool the host left, and any other but an invite
+// redeemed and the asks of a host coming back - takes no more than `search` of the whole,
+// an eighth, together: past it, one request at the most a target may ask an hour for each
+// member that seated keys the search looks for, and one for the keys seated by none.
 export const POW_HOURLY = {
   peer: POW.memberBase * 2 ** 14, all: POW.memberBase * 2 ** 16, floor: POW.memberBase * 2 ** 8, floorAfter: 3600, search: POW.memberBase * 2 ** 13,
 };

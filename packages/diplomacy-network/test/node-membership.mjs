@@ -1767,6 +1767,153 @@ const goneFor = (w, names) => names.map((name) => {
   return s;
 });
 
+// `n` keys a machine looks for, each answering every request with pages of keys it lacks
+// and the most work for the next: each greeting of one takes the whole of the search's
+// eighth for an hour.
+function draining(w, n) {
+  const most = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
+  const lacked = Array.from({ length: 1500 }, () => `member/${w.stranger('lacked').pk}`).sort();
+  const page = (after) => ({ index: Object.fromEntries(lacked.filter((k) => k > after).slice(0, 100).map((k) => [k, [[w.net.now() - 60], b64u(w.net.rnd.bytes(32))]])), more: true });
+  return Array.from({ length: n }, (_, i) => {
+    const s = w.stranger(`k${i}`);
+    s.transport.onRequest(async (buf) => {
+      const request = JSON.parse(buf.toString('utf8'));
+      const body = request.kind === 'hello' ? page('') : request.kind === 'sync' ? { hash: b64u(w.net.rnd.bytes(32)), ...page(request.body.after ?? '') } : { records: [] };
+      return canon(buildResponse(s.id, { re: requestDigest(request), body, effort: most }));
+    });
+    return s;
+  });
+}
+const spread = (w, keys, by) => keys.map((s) => ({ pk: s.pk, by, due: w.net.now() + Math.floor(w.net.rnd.next() * 24 * 3600) }));
+
+await check('a machine whose search keys of one member take the whole of the search\'s eighth redeems an invite into another pool at once', async () => {
+  const w = createWorld({ seed: 23 });
+  const [a] = await w.pool(['a', 'b']);
+  const link = { id: 'github.com/acme/gadgets', path: '/repos/gadgets', forge: 'github', identity: 'Octocat' };
+  const z = w.add('z', { pools: [link] });
+  await w.start(z);
+  await asking(w, a, { former: spread(w, draining(w, LIMITS.invitees), 'x') });
+  await w.run(2 * 24 * 3600);
+  const { pools } = a;
+  const took = [];
+  for (let trial = 0; trial < 8; trial += 1) {
+    const { invite } = z.node.invite({ pool: link.id });
+    a.node.setPools([...pools, link]);
+    const start = w.net.now();
+    await a.node.join({ invite });
+    const joined = () => a.node.snapshot().pools.find((p) => p.id === link.id)?.members.some((m) => m.pk === z.pk);
+    await w.net.until(joined, { maxMs: 2 * 3600 * 1000, what: 'a in the other pool' });
+    took.push(w.net.now() - start);
+    a.node.setPools(pools);
+    await w.run(3 * 3600);
+  }
+  assert.ok(took.every((secs) => secs <= 60), `took ${took.join(' ')} s`);
+});
+
+await check('a machine coming back to its pool pays a key it is back to out of the whole of its hour, each request once, and out of the search\'s eighth once it is back', async () => {
+  const w = createWorld({ seed: 37 });
+  const [a] = await w.pool(['a', 'b']);
+  w.net.kill('b');
+  // A key that asks the most work there is for anything: what a pays it in an hour is
+  // whatever is left of the purse it is paid out of.
+  const most = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
+  const k = w.stranger('kb');
+  k.transport.onRequest(async (buf) => {
+    const request = JSON.parse(buf.toString('utf8'));
+    return canon(buildResponse(k.id, { re: requestDigest(request), error: { code: 'effort', detail: '' }, effort: most }));
+  });
+  w.net.kill('a');
+  a.disk.write(poolFile(POOL), JSON.stringify({ ...w.doc(a), returning: true }));
+  await asking(w, a, { back: [{ pk: k.pk, from: 0 }] });
+  const sent = [];
+  w.net.tap(({ from, to }) => from === 'a' && to === 'kb' && sent.push(w.net.ms()));
+  await w.run(3600);
+  const since = w.net.now();
+  await w.run(3600);
+  // Each sent once: the next request pays what it asked.
+  const again = sent.filter((ms, i) => i > 0 && ms - sent[i - 1] < 1000).length;
+  assert.deepEqual([w.view(a).returning, w.net.count({ from: 'a', to: 'kb', since }) > POW_HOURLY.search / most, again], [true, true, 0]);
+  // Back in, it pays a key it still asks out of the eighth.
+  w.net.kill('a');
+  a.disk.write(poolFile(POOL), JSON.stringify({ ...w.doc(a), returning: false }));
+  await w.restart(a);
+  await w.run(3600);
+  const after = w.net.now();
+  await w.run(3600);
+  assert.deepEqual([w.view(a).returning, w.asks(a).back.length, w.net.count({ from: 'a', to: 'kb', since: after }) <= POW_HOURLY.search / most], [false, 1, true]);
+});
+
+await check('the keys one member seated take no more of the search\'s eighth than an even share: the machine still asks the keys another seated', async () => {
+  const w = createWorld({ seed: 29 });
+  const [a] = await w.pool(['a', 'b']);
+  const gone = goneFor(w, ['y0', 'y1', 'y2', 'y3', 'y4']);
+  const paid = [];
+  w.net.tap(({ from, to, body }) => from === 'a' && /^k\d/.test(to ?? '') && paid.push([w.net.now(), JSON.parse(body.toString('utf8')).pow.effort]));
+  await asking(w, a, { former: [...spread(w, draining(w, LIMITS.invitees), 'x'), ...spread(w, gone, 'y')] });
+  // A turn of a key moves when it is next due: each turn of y's keys is a hello sent.
+  const since = w.net.now();
+  const turns = new Map(gone.map((s) => [s.pk, 0]));
+  let dues = new Map();
+  for (let t = 0; t < 4.5 * 24 * 6; t += 1) {
+    await w.run(600);
+    const now = new Map(w.asks(a).former.filter((e) => e.by === 'y').map((e) => [e.pk, e.due]));
+    for (const [pk, due] of now) if (dues.has(pk) && dues.get(pk) !== due) turns.set(pk, turns.get(pk) + 1);
+    dues = now;
+  }
+  const hellos = gone.map((s) => w.net.count({ from: 'a', to: s.name, kind: 'hello', since }));
+  assert.deepEqual(hellos, [...turns.values()]);
+  // Two members seated them: x's share is half the eighth, or one request at the most.
+  const most = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
+  const hour = Math.max(...paid.map(([at]) => paid.filter(([t]) => t >= at && t < at + 3600).reduce((x, [, e]) => x + e, 0)));
+  assert.ok(hour <= Math.max(POW_HOURLY.search / 2, most), `${hour / POW_HOURLY.search} of the eighth paid x's keys in an hour`);
+});
+
+await check('a key that asks the most work there is is still asked each time it is due, though four members seated the keys a machine looks for', async () => {
+  const w = createWorld({ seed: 41 });
+  const [a] = await w.pool(['a', 'b']);
+  const most = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
+  const t = w.stranger('t');
+  t.transport.onRequest(async (buf) => {
+    const request = JSON.parse(buf.toString('utf8'));
+    return canon(buildResponse(t.id, { re: requestDigest(request), body: { index: {}, more: false }, effort: most }));
+  });
+  const others = goneFor(w, ['x1', 'x2', 'x3']);
+  await asking(w, a, { former: [{ pk: t.pk, by: 'y', due: w.net.now() }, ...others.map((s, i) => ({ pk: s.pk, by: `x${i + 1}`, due: w.net.now() + 3600 }))] });
+  const since = w.net.now();
+  let turns = 0;
+  let due = null;
+  for (let i = 0; i < 4.5 * 24 * 6; i += 1) {
+    await w.run(600);
+    const now = w.asks(a).former.find((e) => e.pk === t.pk).due;
+    if (due !== null && now !== due) turns += 1;
+    due = now;
+  }
+  const hellos = w.net.count({ from: 'a', to: 't', kind: 'hello', since });
+  assert.ok(turns >= 3 && hellos === turns + 1, `${hellos} hellos in ${turns} turns and the first`);
+});
+
+await check('a key that asked the most work once is asked at the base price a day later', async () => {
+  const w = createWorld({ seed: 43 });
+  const [a] = await w.pool(['a', 'b']);
+  const most = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
+  const k = w.stranger('kb');
+  // It answers once, and is silent from then on.
+  let answered = false;
+  k.transport.onRequest(async (buf) => {
+    const request = JSON.parse(buf.toString('utf8'));
+    if (answered) return new Promise(() => {});
+    answered = true;
+    return canon(buildResponse(k.id, { re: requestDigest(request), error: { code: 'effort', detail: '' }, effort: most }));
+  });
+  const paid = [];
+  w.net.tap(({ from, to, body }) => from === 'a' && to === 'kb' && paid.push([w.net.now(), JSON.parse(body.toString('utf8')).pow.effort]));
+  await asking(w, a, { back: [{ pk: k.pk, from: 0 }] });
+  await w.run(26 * 3600);
+  const [first] = paid;
+  const late = paid.filter(([at]) => at - first[0] > 24 * 3600 + 60).map(([, effort]) => effort);
+  assert.deepEqual([paid.some(([, effort]) => effort === most), late.length > 0 && late.every((effort) => effort < most)], [true, true]);
+});
+
 await check('a clock that ran days ahead for a while puts off no member a machine looks for past a day and a half: it asks them once a day as before', async () => {
   const w = createWorld({ seed: 13 });
   const [a] = await w.pool(['a', 'b']);
