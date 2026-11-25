@@ -238,14 +238,13 @@ def _machines_history(now: float, until: float) -> dict:
 def _network_screen_fixture(store: Store, mode: str) -> None:
     """Plain: the daemon up, taking two more tasks, in two pools - one shared with a
     reachable and an unreachable machine and holding a task in each state, one of this
-    machine alone. ``-starting``: switched on, the daemon not asked yet. ``-failed``:
-    the daemon up with no tor and no docker to use. ``-down``: asked, and not
-    answering. ``-unsaved``: the plain screen over a change the config refused, the
-    hours set so that this machine takes none of its own jobs. ``-off``: switched off.
+    machine alone. ``-starting``: the daemon not asked yet. ``-failed``: no tor and no
+    docker. ``-down``: the daemon not answering. ``-unsaved``: the plain screen over a
+    change the config refused (hours under which this machine takes none of its own
+    jobs). ``-off``: switched off.
 
-    The switch and the devices setting are the shared config's, which a render never
-    writes, so they are set on the module that reads them. So is the daemon's answer:
-    the panel's own tick asks for it, and what is drawn is what is seeded here."""
+    A render never writes the shared config, so the switch, the devices setting and
+    the daemon's answer are patched onto the module that reads them."""
     from diplomat_runtime import activity, network
     from . import diplomacynetwork as dn
 
@@ -1198,8 +1197,7 @@ def run(what: str, out: str) -> int:
         panel.pipeline_view.select(selected)
         _show_whole(app, panel, panel.pipeline_view.graph_scroll)
     else:  # panel; comms-panel: the same, its ✉ header button showing a count;
-        # network-panel: the same over what "network-screen-failed" seeds, the task
-        # list saying what of the network does not work
+        # network-panel: the same, its task list showing the network's trouble
         if what == "network-panel":
             _network_screen_fixture(store, "network-screen-failed")
         _device_fixture(store)

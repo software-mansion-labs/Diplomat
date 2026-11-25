@@ -3,11 +3,7 @@
 ``network.py`` and the core's ``Network.swift`` answer the same questions on every
 cycle and every draw, so neither can delegate to the other, and each side's own tests
 pin it against its own expectations only. This file runs one fixture through both
-(``diplomat-core network``) and demands the same answers: the hours a stored value
-reads as, the pool a git remote names, the hosts the requester has rules for, the kind
-and the body an offer is made as, the task a snapshot holds for an offer, the pools
-list, why a job of this machine's own waits, the clock time a sentence of the daemon's
-names, and the panel's line on what of the network does not work.
+(``diplomat-core network``) and demands the same answers.
 """
 
 from __future__ import annotations

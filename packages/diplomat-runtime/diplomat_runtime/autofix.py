@@ -496,10 +496,9 @@ def dispatch_decide(
     cap, ``paused`` is the operator holding the work (a paused item, or the queue's
     auto-run off). Either one is ``at_capacity``.
 
-    With ``network`` on the job is offered to a pool and some other machine may run
-    it, so nothing about this device as an executor is asked: its disk, its cap and
-    its budget reach the daemon through :func:`network.admit` instead. ``paused``
-    still holds, being a statement about the work and not about the machine."""
+    With ``network`` on another machine may run the job, so this device's disk, cap
+    and budget are not asked: they reach the daemon through :func:`network.admit`.
+    ``paused`` still holds: it is about the work, not the machine."""
     if banned:
         return VERDICT_BANNED
     if outside_allowlist:
@@ -702,9 +701,9 @@ def budget_decide(windows: list[tuple[str, float | None, float | None]],
     a task yet.
 
     So does a rate limit whose task is priced above the whole window
-    (:data:`WHOLE_WINDOW_PCT`). No window could ever cover that, so held to it nothing
-    would start until the counts behind the price left the ledger's lookback, and one
-    count far beyond what a task can spend is all it takes to put the price there.
+    (:data:`WHOLE_WINDOW_PCT`): no window could cover it, so nothing would start until
+    the counts behind the price left the ledger's lookback, and one outlier count is
+    enough to put it there.
 
     A ceiling with **no reading at all** is skipped, and a call where none has one is
     affordable. That is deliberate: a usage probe can be switched off
@@ -997,11 +996,10 @@ class AgentJob:
     # None is whichever root is primary at spawn time, so a monitor job, which can wait
     # in the queue past a change of primary, names its root's path.
     checkout: str | None = None
-    # What the job's own prompt was built to allow, for the offer that carries it on
-    # the Diplomacy Network (:func:`network.offer_for`): whether the PR is the
-    # operator's own, whether a review may approve or request changes, whether work on
-    # their own PR may mark it ready, and whether an issue fix or an audit opens PRs.
-    # Each is off unless the config behind the prompt granted it.
+    # What the job's prompt allows, for its Diplomacy Network offer
+    # (:func:`network.offer_for`): the PR is the operator's own, a review may approve or
+    # request changes, work on their own PR may mark it ready, an issue fix or an audit
+    # opens PRs. Each is off unless the config behind the prompt granted it.
     own_pr: bool = False
     verdict: bool = False
     mark_ready: bool = False

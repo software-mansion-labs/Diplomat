@@ -236,7 +236,7 @@ def test_a_paused_monitors_row_says_nothing_will_start_it(panel):
 
 
 def test_a_row_the_network_refused_says_why(panel):
-    """The daemon's sentence is a peer's rules as likely as not: painted as it is."""
+    """The daemon's sentence may quote a peer's rules: painted plain."""
     task = _queued(512)
     panel.store.queued_tasks = [task, _queued(513)]
     panel.store.network_job_refusals = {task.job.label: "That pool's rules name no <b>review</b>."}
@@ -248,8 +248,6 @@ def test_a_row_the_network_refused_says_why(panel):
 
 
 def test_the_list_says_what_of_the_network_does_not_work(panel):
-    """One line under the header, the daemon's detail painted as it is, opening the
-    Network screen; gone with the trouble, and drawn while the list is folded."""
     from diplomat_runtime import appconfig, network
 
     from diplomat_app.widgets import NoticeRow

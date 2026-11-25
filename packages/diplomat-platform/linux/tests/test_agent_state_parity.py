@@ -532,13 +532,11 @@ def test_a_case_the_two_disagree_on_would_actually_fail(mixed_results):
 # snapshot as each side DECODES it, the evidence each builds from it, and the
 # projections over a book that holds local and network runs together.
 
-#: A second and third task, beside :data:`TASK`.
 ISSUE_TASK = "github.com/o/r#issues:issue-9@octocat"
 AUDIT_TASK = "github.com/o/r#audit:job-0b77ab9a731995c3@octocat"
 POOLED_TASK = "github.com/o/r#conflicts:pr-5@octocat"
 #: This machine's own key in :func:`_snapshot`.
 SELF = "aaaabbbbccccdddd"
-#: Why :func:`_snapshot`'s pooled offer is not taken by the machine that made it.
 HOURS_SHORT = "this machine takes jobs of at most 12 h and this one needs 24"
 
 

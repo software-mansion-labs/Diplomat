@@ -83,8 +83,7 @@ def apiwatch_poll_secs() -> float:
     return max(5.0, secs)
 
 
-#: Cadence of the Diplomacy Network cycle. The daemon takes no task once the admit it
-#: was last sent is two minutes old.
+#: Under two minutes: the daemon takes no task once its last admit is that old.
 NETWORK_CYCLE_SECS = 30
 
 
@@ -179,8 +178,7 @@ class DiplomatApp:
         self.store.ensure_allocator_installed_async()
         self.store.publish_spawn_terminal()
 
-        # The Diplomacy Network: its daemon is brought up at launch while the switch is
-        # on, and each cycle after that no-ops while it is off.
+        # The network cycle always runs; it no-ops while the switch is off.
         self.store.retire_legacy_node_async()
         if self.store.network_enabled:
             self.store.start_network_async()

@@ -421,10 +421,9 @@ class RunRecord:
     #: does not re-book it as untracked. It holds no bay and blocks no dispatch; it is
     #: kept for the stillness backstop and until its agent leaves.
     released: bool = False
-    #: The task id of the offer that carries this run on the Diplomacy Network; ``None``
-    #: for a run this device spawned itself. Such a run has no pid, tty or window here:
-    #: whichever machine claimed the task runs it in a container, and what became of it
-    #: is the daemon's to say (:attr:`Evidence.network`).
+    #: The task id of the Diplomacy Network offer carrying this run; ``None`` for a run
+    #: spawned here. Such a run has no pid, tty or window here: the daemon says what
+    #: became of it (:attr:`Evidence.network`).
     network: str | None = None
 
     @property
@@ -436,13 +435,12 @@ class RunRecord:
 
     @property
     def runs_here(self) -> bool:
-        """Whether this device spawned the run's agent itself, so that its process,
-        screen and window are evidence about it."""
+        """Whether its process, screen and window here are evidence about it."""
         return self.network is None
 
     def to_json(self) -> dict:
-        """``network`` only for a run the network carries, so a local run's record is
-        the one an applet without the network writes."""
+        """Omits ``network`` for a local run, so its record is what an applet without the
+        network writes."""
         return {
             **({} if self.network is None else {"network": self.network}),
             "runId": self.run_id, "dispatchedAt": self.dispatched_at,
@@ -484,7 +482,6 @@ NET_CLAIMED = "claimed"
 NET_DONE = "done"
 NET_FAILED = "failed"
 NET_CANCELLED = "cancelled"
-#: The states in which the network is finished with a task.
 NET_OVER = frozenset({NET_DONE, NET_FAILED, NET_CANCELLED})
 
 
@@ -492,18 +489,17 @@ NET_OVER = frozenset({NET_DONE, NET_FAILED, NET_CANCELLED})
 class NetworkTask:
     """What the daemon says became of one offered task (:func:`network.tasks`)."""
 
-    #: One of the ``NET_*`` constants, as the snapshot spells it.
+    #: A ``NET_*`` constant.
     state: str
     #: The key of the machine that claimed it; "" while nobody has.
     executor: str = ""
     executor_here: bool = False
     #: Whether the executor reported the work done and well. Only read of ``done``.
     ok: bool = False
-    #: The daemon's sentence on a ``failed`` or ``cancelled`` offer; "" when it gave
-    #: none.
+    #: The daemon's sentence on a ``failed`` or ``cancelled`` offer, or "".
     reason: str = ""
-    #: The daemon's sentence on why this machine does not take a ``pooled`` offer of
-    #: its own; "" for one it is free to take.
+    #: The daemon's sentence on why this machine does not take its own ``pooled``
+    #: offer, or "".
     not_taking: str = ""
     #: Whether the executor lowered what the job said it used to what it measured.
     capped: bool = False
@@ -570,10 +566,9 @@ class Evidence:
     #: limit this applet can read, which is an ordinary machine and not a broken probe.
     tokens_left: Observation = field(
         default_factory=lambda: Observation.unavailable("not probed"))
-    #: Task id → what the daemon's snapshot says of that offer. UNAVAILABLE when the
-    #: daemon did not answer, which is never the same as a snapshot naming no offers:
-    #: the first says nothing about any run, the second says every task it does not
-    #: name is gone.
+    #: Task id → the daemon's word on that offer. UNAVAILABLE when the daemon did not
+    #: answer: never the same as a snapshot naming no offers, which says every task it
+    #: does not name is gone.
     network: Observation = field(
         default_factory=lambda: Observation.unavailable("not probed"))
 
@@ -673,9 +668,8 @@ class Resolution:
     #: whether the agent finished what it set out to do. A run the network carried is
     #: reported when its executor's outcome says it went well.
     reported: bool = False
-    #: Whether the network gave this run's offer up with its attempts used: the work
-    #: was taken as often as an offer allows and never went well. Every other failed
-    #: network run never ran: withdrawn, refused, or unknown to the daemon.
+    #: Whether the network gave this run's offer up with its attempts used. Every other
+    #: failed network run never ran: withdrawn, refused, or unknown to the daemon.
     spent: bool = False
 
     @property
@@ -926,17 +920,12 @@ def deadline_applies(record: RunRecord) -> bool:
 
 
 def network_verdict(task: str, network: Observation, age: float) -> tuple[str, str]:
-    """The state of a run the network carries, and the one line that says where it is.
+    """The state of a run the network carries, and the line saying where it is.
 
-    The daemon's word on the offer is the whole of the evidence, so each state it names
-    is an answer and its silence is not one: a snapshot that could not be read leaves
-    the run UNKNOWN. A task the snapshot does not name is given :data:`SPAWN_GRACE` to
-    appear, the wait a spawn's pid file gets, since the offer and the snapshot are
-    written at different instants; past it the offer never reached the pool. An offer
-    the network gave up on, or one that was withdrawn, is followed by the daemon's
-    reason where it gave one; one this machine does not take while it waits, by the
-    daemon's sentence on why; and a job that ended, by a word on a cost its executor
-    capped.
+    The daemon's word is the whole of the evidence: an unread snapshot leaves the run
+    UNKNOWN. A task the snapshot does not name gets :data:`SPAWN_GRACE` to appear, since
+    the offer and the snapshot are written at different instants; past it the offer
+    never reached the pool.
     """
     if not network.ok:
         return UNKNOWN, f"the network could not be asked: {network.reason or 'unavailable'}"
@@ -1501,8 +1490,6 @@ def withdrawable(records: list[RunRecord], states: dict[str, Resolution],
 
 
 def withdraw_on_forget(record: RunRecord, evidence: Evidence) -> str | None:
-    """The task to withdraw when this run is forgotten on the operator's word, or
-    ``None`` when the network holds nothing of it."""
     return record.network if _outstanding(record, evidence) else None
 
 

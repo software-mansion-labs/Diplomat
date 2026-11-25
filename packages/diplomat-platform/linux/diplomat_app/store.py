@@ -185,8 +185,8 @@ class _InstallerGate:
 
 @dataclass(frozen=True)
 class NetworkRun(autofix.RunningAgent):
-    """A run the Diplomacy Network carries, as the panel draws it: with the run its
-    row's controls act on, and the task the daemon knows it by."""
+    """A network run as the panel draws it, with the run its row acts on and the
+    daemon's task id."""
 
     run_id: str = ""
     task: str = ""
@@ -196,19 +196,17 @@ class NetworkRun(autofix.RunningAgent):
 class _NetworkCycle:
     """What the network cycle remembers between turns (macOS twin: ``NetworkCycle``)."""
 
-    #: The daemon the posts below went to, as its pid and start time. Another one has
-    #: heard none of them.
+    #: The daemon (pid and start time) the posts below went to; a new one heard none.
     daemon: str = ""
     pools: list[dict] | None = None
-    #: The list the daemon refused, its sentence, and when: said again as it is only
-    #: as often as ``admit`` is.
+    #: The refused list, its sentence and when: re-said unchanged only as often as
+    #: ``admit``.
     pools_refused: list[dict] | None = None
     pools_refusal: str = ""
     pools_refused_at: float = 0.0
     admit: network.Admit | None = None
     admit_at: float = 0.0
-    #: When a daemon that is not answering may next be started, and the wait before
-    #: the start after that.
+    #: When a silent daemon may next be started, and the backoff after that.
     start_after: float = 0.0
     start_delay: float = 0.0
     #: Whether the feed has said a start failed, for the current silence.
@@ -217,8 +215,8 @@ class _NetworkCycle:
 
 @dataclass(frozen=True)
 class NetworkOffering:
-    """A job of the operator's whose offer the daemon was sent and gave no definite
-    answer to (macOS twin: ``Store.OfferingJob``)."""
+    """An operator's job whose offer got no definite answer (macOS twin:
+    ``Store.OfferingJob``)."""
 
     job: autofix.AgentJob
     source: str
@@ -261,13 +259,13 @@ class Store(QObject):
     # a scan started or ended.
     machines_changed = Signal()
     machines_install_changed = Signal()
-    #: The Diplomacy Network's switch, daemon or snapshot moved, or what the daemon
-    #: refused an action of its screen with.
+    #: The network's switch, daemon or snapshot moved, or the daemon refused a screen
+    #: action.
     network_changed = Signal()
     #: An invite the daemon made: the pool, and the invite for the clipboard.
     network_invited = Signal(str, str)
-    #: A join the daemon answered, by the panel the invite was pasted into, and
-    #: whether it took it.
+    #: A join the daemon answered: the panel the invite was pasted into, and whether
+    #: it took it.
     network_joined = Signal(str, bool)
     # Emitted when the activity feed (audit.jsonl) or ban list snapshot changes.
     activity_changed = Signal()
@@ -345,8 +343,8 @@ class Store(QObject):
         self.network_state: network.Snapshot | None = None
         # Whether the daemon answered when it was last asked; None until it has been.
         self.network_answered: bool | None = None
-        # What the daemon refused the Network screen's last action with, by the pool
-        # panel it was made in ("" for the one shown before any pool).
+        # The daemon's refusal of the Network screen's last action, by pool panel ("" for
+        # the one before any pool).
         self.network_refusals: dict[str, str] = {}
         # What of this machine's pools could not be confirmed (network.pools_listing),
         # and the daemon's refusal of the list, a line each; "" for neither.
@@ -363,18 +361,16 @@ class Store(QObject):
         self._network_login_asked: dict[str, float] = {}
         # The offers whose claim the activity feed has named.
         self._network_claims_logged: set[str] = set()
-        # Whether the feed has said the network is refusing automatic work, for the
-        # current spell of it.
+        # The feed has said the network refuses automatic work, this spell.
         self._network_unavailable_logged = False
-        # Whether the feed has said the shared config cannot be read, for the current
-        # spell of it.
+        # The feed has said the shared config cannot be read, this spell.
         self._config_unreadable_logged = False
         # The configs forgotten as gone the feed has said (:func:`appconfig.forgotten_configs`).
         self._config_gone_logged = appconfig.forgotten_configs()
         # The switch as the views last drew it.
         self._switch_drawn: bool | None = None
-        # Why the network refused each queued job that it refused for a reason of the
-        # job's own, by the job's label: what its row says, and what the feed has said.
+        # By job label: why the network refused a queued job for a reason of its own,
+        # as its row and the feed say it.
         self.network_job_refusals: dict[str, str] = {}
         # The Devices screen's two remote-pool calls. Here, not on the screen: a
         # sign-in runs for up to ten minutes and must outlive the screen being closed.
@@ -1611,8 +1607,7 @@ class Store(QObject):
             self.run_autofix_poll_async()
 
     def _drain_has_room(self, load: int) -> bool:
-        # With the network on the room is the pool's, which has it whenever its daemon
-        # answers and the settings can be read.
+        # With the network on, the room is the pool's, not this device's cap.
         room = (self.network_answered is not False
                 and not diplomacynetwork.settings_unknown()
                 if diplomacynetwork.enabled() else load < self.auto_task_limit)
@@ -2043,13 +2038,12 @@ class Store(QObject):
         register it. Returns the verdict: ``"spawned"``, an ``autofix.VERDICT_*``
         refusal, or ``"failed"`` (spawn error). Twin of Store.dispatchAgent (macOS).
 
-        With the Diplomacy Network switched on, proceeding is an offer to the job's
-        pool instead of a spawn (:meth:`_offer_tracked`), booked and counted the same
-        and still answered ``"spawned"`` (a :class:`diplomacynetwork.Offered`, naming its
-        task); a job the network did not take comes back as a
-        :class:`diplomacynetwork.Refused`. Of the holds below only a paused monitor
-        or queue then applies: the cap, the disk and the budget are the claiming
-        machine's (:func:`network.admit`).
+        With the Diplomacy Network on, proceeding is an offer to the job's pool
+        (:meth:`_offer_tracked`), booked and counted as a spawn and answered with a
+        :class:`diplomacynetwork.Offered` (``"spawned"``) or a
+        :class:`diplomacynetwork.Refused`. Only a paused monitor or queue then holds it:
+        the cap, the disk and the budget are the claiming machine's
+        (:func:`network.admit`).
 
         In-flight evidence is the tracked list OR a live ``claude`` visible in
         ``ps`` - the ground-truth floor that also catches agents whose local
@@ -2102,10 +2096,8 @@ class Store(QObject):
             # with a link and no number is a PR of another checkout, which the dedup
             # does not cover.
             agent_on_pr = item is not None and self._in_flight(job.pr_url or "")
-            # With the Diplomacy Network on the job is offered to a pool, and the
-            # machine that claims it answers for its own disk, cap and budget
-            # (:func:`network.admit`): the gate holds it for none of the three, and
-            # the disk and the budget are not read for it here.
+            # Networked, the claiming machine answers for its own disk, cap and budget,
+            # so neither disk nor budget is read here.
             networked = diplomacynetwork.enabled()
             # The disk first: it outranks every other hold on auto work. Measured on
             # the fullest of the volumes an agent fills: the repo roots (its
@@ -2208,8 +2200,7 @@ class Store(QObject):
             # and pricing follows the ledger key.
             started = "spawned"
             if networked:
-                # The whole of what a dispatch does while the network is on: nothing
-                # below this branch starts an agent on this machine, whatever the
+                # Networked, nothing starts an agent on this machine, whatever the
                 # daemon answers.
                 started = self._offer_tracked(job, source, attempt, forced, row_label)
                 if not isinstance(started, diplomacynetwork.Offered):
@@ -2253,8 +2244,7 @@ class Store(QObject):
 
     @staticmethod
     def _lowest_disk() -> diskfloor.Reading | None:
-        """The fullest of the volumes an agent fills: the repo roots (its worktree) and
-        ~/.diplomat (the tool caches). None with no floor set."""
+        """None with no floor set."""
         return diskfloor.lowest([*(r.path for r in review.repo_roots()),
                                  str(Path.home() / ".diplomat")])
 
@@ -2406,8 +2396,8 @@ class Store(QObject):
         ``checkout`` is where the agent works when that is not the repo root
         (:attr:`autofix.AgentJob.checkout`).
 
-        Refused while the Diplomacy Network is on: every job then runs in a container
-        the network starts, and this is the one road to an agent on this machine.
+        Refused while the Diplomacy Network is on: this is the one road to an agent on
+        this machine.
         """
         if diplomacynetwork.enabled():
             raise review.SpawnError("the Diplomacy Network is on, so no agent starts "
@@ -2453,9 +2443,8 @@ class Store(QObject):
             raise
 
     def _offer_target(self, job: autofix.AgentJob) -> tuple[str, int | None]:
-        """The repository a job works in, as a :attr:`LocalRepo.key` ("" when nothing
-        names one), and the PR or issue it is about. Its link names both; a job with no
-        link works in the checkout it would be spawned into."""
+        """The job's repository (a :attr:`LocalRepo.key`, "" for none) and PR or issue:
+        from its link, else the checkout it would be spawned into."""
         linked = split_item_key(item_key_from_url(job.pr_url or "") or "")
         if linked is not None:
             return linked[0], job.pr_number if job.pr_number is not None else linked[1]
@@ -2464,31 +2453,25 @@ class Store(QObject):
 
     def _offer_tracked(self, job: autofix.AgentJob, source: str, attempt: int,
                        forced: bool, row_label: str) -> str:
-        """Offer a job to its repository's pool and book the run the network carries
-        for it. The verdict the dispatch answers with: a
-        :class:`diplomacynetwork.Offered` once it is offered and booked.
+        """Offer a job to its repository's pool and book its run, with the daemon's task
+        id (:attr:`agentstate.RunRecord.network`) where a spawn has a pid and a window;
+        a :class:`diplomacynetwork.Offered` once booked.
 
-        The run is booked as a spawned one is, with the task id the daemon's snapshot
-        is asked about (:attr:`agentstate.RunRecord.network`) where a spawn has a pid
-        and a window.
-
-        A job the network did not take is never started here in its place: an
-        automatic one goes back to the queue for the next cycle, and one the operator
-        started answers with the words that say why
+        A job the network did not take never starts here instead: automatic work goes
+        back to the queue, an operator's job answers why
         (:class:`diplomacynetwork.Refused`).
 
-        An offer the daemon was sent and did not settle may be in the pool. Automatic
-        work is offered again from the queue, which the daemon answers with the task
-        it holds; a job the operator started is kept in :attr:`network_offering`
+        An offer sent and not settled may be in the pool. Automatic work is offered
+        again from the queue (the daemon answers with the task it holds); an operator's
+        job is kept in :attr:`network_offering`
         (:data:`diplomacynetwork.VERDICT_OFFERING`).
 
-        While the daemon is known not to answer (:attr:`network_answered`) automatic
-        work is not offered at all: each offer would wait out its timeout, and it is
-        the network cycle that finds the daemon back. What the operator starts asks.
+        While the daemon is known silent (:attr:`network_answered`) automatic work is
+        not offered, as each offer would wait out its timeout; the network cycle finds
+        the daemon back. The operator's still asks.
 
-        While the config cannot be read (:func:`diplomacynetwork.settings_unknown`)
-        nothing is offered, whoever started it: the job and the pool it would go into
-        come of settings that each read as a default.
+        While :func:`diplomacynetwork.settings_unknown` nothing is offered: the job and
+        its pool would come of default settings.
         """
         unknown = diplomacynetwork.settings_unknown()
         if unknown:
@@ -2518,8 +2501,7 @@ class Store(QObject):
                 own=diplomacynetwork.definite(reply) and not reply.ok)
         self._network_unavailable_logged = False
         self._forget_job_refusals(lambda label: label != job.label)
-        # The daemon answers an offer still open with the task it already has: the
-        # run booked for it is this job's.
+        # An offer still open is answered with its existing task: that run is this job's.
         if any(r.network == task for r in agentregistry.load()):
             if source == autofix.SOURCE_PANEL:
                 activity.log(source, "in-flight",
@@ -2541,7 +2523,6 @@ class Store(QObject):
 
     def _book_offer(self, job: autofix.AgentJob, task: str, pool: str, source: str,
                     row_label: str) -> str:
-        """Book the run of an offer the pool took as ``task``."""
         now = time.time()
         try:
             agentregistry.create_run(
@@ -2564,11 +2545,10 @@ class Store(QObject):
         return diplomacynetwork.Offered(task)
 
     def _settle_offering(self, snapshot: network.Snapshot) -> None:
-        """Settle each job in :attr:`network_offering` against a daemon that answers:
-        book the task the snapshot holds for it, else make the offer again, which the
-        daemon answers with the task it already has when the first one reached it. A
-        refusal drops the job with the sentence; an answer that settles nothing keeps
-        it for the next cycle."""
+        """Settle each :attr:`network_offering` job against an answering daemon: book
+        the task the snapshot holds for it, else offer again (answered with the task
+        held, if the first offer reached it). A refusal drops the job; no definite
+        answer keeps it for the next cycle."""
         for held in list(self.network_offering):
             task, why = network.open_task(*held.key, snapshot), ""
             if task is None:
@@ -2591,9 +2571,8 @@ class Store(QObject):
             self.tasks_changed.emit()
 
     def _withdraw_offering(self) -> None:
-        """The switch went off over jobs whose offer was never settled: withdraw each
-        one the daemon turns out to hold, say of every other that it was not offered,
-        and keep none."""
+        """The switch went off over unsettled offers: withdraw each the daemon holds, say
+        the rest were not offered, keep none."""
         with self._network_offering_lock:
             held, self.network_offering = self.network_offering, []
         if not held:
@@ -2611,10 +2590,9 @@ class Store(QObject):
 
     def _network_refused(self, job: autofix.AgentJob, source: str, attempt: int,
                          why: str, own: bool = False) -> diplomacynetwork.Refused:
-        """A job the network did not take. Automatic work waits in the queue. A
-        refusal of the job's ``own`` is said once for the job, in the feed and on its
-        row (:attr:`network_job_refusals`); one that holds every job has one feed line
-        for the spell of it: until an offer goes through, or the switch moves."""
+        """Automatic work waits in the queue. An ``own`` refusal is said once per job, in
+        the feed and on its row (:attr:`network_job_refusals`); one holding every job
+        gets one feed line per spell: until an offer goes through, or the switch moves."""
         if source == autofix.SOURCE_AUTO:
             self._stage_queued(job, attempt)
             if own:
@@ -2637,7 +2615,6 @@ class Store(QObject):
         return diplomacynetwork.Refused(why, own)
 
     def _forget_job_refusals(self, keep) -> None:
-        """Drop the refusals of the jobs whose label ``keep`` does not hold."""
         self.network_job_refusals = {
             label: why for label, why in self.network_job_refusals.items() if keep(label)}
 
@@ -2707,8 +2684,6 @@ class Store(QObject):
 
         Runs that are over are left out (:data:`agentstate.ENDED`), so the list starts
         at *awaiting input*.
-
-        A run the Diplomacy Network carries is a :class:`NetworkRun`.
         """
         return [
             (autofix.RunningAgent if r.network is None else NetworkRun)(
@@ -3056,11 +3031,10 @@ class Store(QObject):
         the drain finds its PR closed (:meth:`_drain_queued_tasks`).
 
         An ask the Diplomacy Network carries (:attr:`autofix.RequestedWork.offered`) is
-        left out for as long as the book holds the run of its offer. Once that run has
-        left the book without having run - withdrawn, unknown to the daemon, the switch
-        turned off - the ask is as it was before the offer, and is offered again here.
-        One the network gave up with its attempts used ends the ask, as a run in a
-        terminal that came to nothing does.
+        left out while the book holds its offer's run. A run that left the book without
+        running (withdrawn, unknown to the daemon, the switch off) leaves the ask to be
+        offered again here; one the network gave up with its attempts used ends the
+        ask, as a terminal run that came to nothing does.
 
         An ask whose prompt will not assemble is skipped rather than allowed to end
         the cycle. The press assembles every prompt before storing anything, but the
@@ -3124,11 +3098,10 @@ class Store(QObject):
         it: the allowlist answers for the review monitor's own finds, and an ask is not
         one (``AgentJob.counter``).
 
-        An offer to the Diplomacy Network is not a start. The ask stays, marked with
-        the task that carries it, until that run finishes (:meth:`_retire_finished`) or
-        the operator takes the offer back (:meth:`_forget_offered`); a run that leaves
-        the book any other way leaves the ask to be offered again
-        (:meth:`_offer_requested_work`)."""
+        An offer to the Diplomacy Network is not a start: the ask stays, marked with its
+        task, until that run finishes (:meth:`_retire_finished`) or the operator takes
+        the offer back (:meth:`_forget_offered`); a run leaving the book any other way
+        leaves the ask to be offered again (:meth:`_offer_requested_work`)."""
         if not entry.job.requested:
             return
         if isinstance(verdict, diplomacynetwork.Offered):
@@ -3137,16 +3110,13 @@ class Store(QObject):
             self._forget_requested(entry.id)
 
     def _mark_offered(self, key: str, task: str) -> None:
-        """Note the network task that carries the ask ``key``, or with "" that none
-        does."""
+        """Mark the ask ``key`` as carried by network ``task`` ("" for none)."""
         with self._requested_lock:
             self.requested_work = [
                 dataclasses.replace(r, offered=task) if r.key == key else r
                 for r in self.requested_work]
 
     def _forget_offered(self, task: str) -> None:
-        """Drop the ask the network carried as ``task``: its run finished, or the
-        operator took the offer back."""
         for ask in self.requested_work:
             if task and ask.offered == task:
                 self._forget_requested(ask.key)
@@ -3297,9 +3267,8 @@ class Store(QObject):
             # refusals to no end. The same holds for a disk below its floor.
             if verdict in (autofix.VERDICT_UNAFFORDABLE, autofix.VERDICT_LOW_DISK):
                 return
-            # A daemon that did not answer, or is stopping, takes none of the rest
-            # either. One that refused this job for a reason of the job's own is asked
-            # about the next.
+            # A silent or stopping daemon takes none of the rest; a refusal of this
+            # job's own leaves the next to be asked.
             if verdict == diplomacynetwork.VERDICT_REFUSED and not verdict.own:
                 return
 
@@ -3545,17 +3514,15 @@ class Store(QObject):
 
     @staticmethod
     def _network_evidence(snapshot: network.Snapshot | None) -> agentstate.Observation:
-        """What ``snapshot`` says of this machine's offers. With the switch off nothing
-        asks the daemon, and that is what the evidence says."""
+        """With the switch off nothing asks the daemon, and the evidence says so."""
         if not diplomacynetwork.enabled():
             return agentstate.Observation.unavailable(diplomacynetwork.SWITCHED_OFF)
         return network.tasks(snapshot)
 
     def _tick_with(self, seen: agentstate.Observation,
                    records: list[agentstate.RunRecord] | None = None) -> agentstate.Tick:
-        """:meth:`_agent_tick` against one reading of the network daemon, for a caller
-        that goes on to act on what that same reading said. ``records`` is the book as
-        that caller read it before it asked the daemon."""
+        """:meth:`_agent_tick` against one daemon reading, for a caller that acts on that
+        same reading. ``records``: the book as that caller read it before asking."""
         now = time.time()
         if records is None:
             records = agentregistry.adopt_pids(agentregistry.load())
@@ -3606,10 +3573,10 @@ class Store(QObject):
         return t
 
     def _note_unreadable_config(self) -> None:
-        """Say once per spell that the shared config is there and cannot be read: every
-        setting reads as its default meanwhile, and the switch as it was last read. The
-        panel and the Network screen say so while it lasts, and are redrawn as it turns.
-        Say once that a config gone too long to be one being saved is forgotten."""
+        """Say once per spell that the shared config exists and cannot be read (every
+        setting reads as its default, the switch as last read), and redraw the panel and
+        the Network screen as it turns. Say once that a config gone too long to be mid-save
+        is forgotten."""
         unreadable = appconfig.read_known() is None and appconfig.path().exists()
         gone = appconfig.forgotten_configs()
         if gone != self._config_gone_logged:
@@ -3774,10 +3741,9 @@ class Store(QObject):
         return True
 
     def _note_network_state(self, snapshot: network.Snapshot | None) -> None:
-        """Keep what the daemon just answered, or that it did not."""
         answered = snapshot is not None
         back = self.network_answered is False and answered
-        # Its clock moves on every write, which is no change to redraw the screen for.
+        # updated_at moves on every write: no change to redraw for.
         same = answered == self.network_answered and (
             snapshot == self.network_state if snapshot is None or self.network_state is None
             else dataclasses.replace(snapshot, updated_at=None)
@@ -3791,7 +3757,6 @@ class Store(QObject):
             self._bring_poll_forward(self._settled_load)
 
     def _note_network_claims(self, t: agentstate.Tick) -> None:
-        """One feed line the first time an offer is seen claimed."""
         logged = False
         for r, s in t.rows:
             if (r.network is None or s.state != agentstate.RUNNING
@@ -3804,11 +3769,10 @@ class Store(QObject):
             self.refresh_activity()
 
     def _withdraw_merged(self, t: agentstate.Tick) -> set[str]:
-        """Take back each offer whose PR merged while the network still carried it
-        (:func:`agentstate.withdrawable`), and return the runs whose withdrawal the
-        daemon did not settle (:func:`diplomacynetwork.definite`). Those stay booked,
-        so a later tick asks again: a task left in a pool is an agent started on work
-        nobody wants."""
+        """Withdraw each offer whose PR merged while the network carried it
+        (:func:`agentstate.withdrawable`); return the runs whose withdrawal was not
+        settled (:func:`diplomacynetwork.definite`). Those stay booked for a later tick
+        to ask again: a task left in a pool is an agent started on work nobody wants."""
         unanswered: set[str] = set()
         for r in t.withdrawable:
             reply = diplomacynetwork.send(
@@ -3828,15 +3792,12 @@ class Store(QObject):
 
     def _record_network_outcomes(self, gone: list[agentstate.RunRecord],
                                  snapshot: network.Snapshot | None, now: float) -> bool:
-        """Record what each retired network run cost, from the outcome its offer ended
-        with, and say whether any was recorded. An offer with no outcome, or one that
-        spent nothing, leaves its ledger entry open like a run whose agent never
-        answered.
+        """Record what each retired network run cost, from its offer's outcome; say
+        whether any was. An offer with no outcome, or that spent nothing, leaves its
+        ledger entry open, like a run whose agent never answered.
 
-        The runner is the outcome's own when this machine ran the task. Run elsewhere,
-        it is :data:`diplomacynetwork.RUNNER_ELSEWHERE`: the tokens came out of another
-        account's limits, so they are kept per task and counted against no limit read
-        here (:attr:`telemetry.Task.anthropic`)."""
+        Run elsewhere, the runner is :data:`diplomacynetwork.RUNNER_ELSEWHERE`: those
+        tokens came out of another account's limits (:attr:`telemetry.Task.anthropic`)."""
         seen = network.tasks(snapshot)
         if not seen.ok:
             return False
@@ -3895,10 +3856,10 @@ class Store(QObject):
         An automatic run its own runner reported done has its window closed as it
         retires (:meth:`_close_finished_windows`), and retires whether or not it closed.
 
-        A run the Diplomacy Network carried has no window, session or transcript here:
-        it is priced from ``snapshot``, the daemon's reading its verdict came from
-        (:meth:`_record_network_outcomes`). ``unwithdrawn`` are the merged ones whose
-        offer could not be taken back (:meth:`_withdraw_merged`), which stay booked.
+        A network run has no window, session or transcript here: it is priced from
+        ``snapshot``, the reading its verdict came from (:meth:`_record_network_outcomes`).
+        ``unwithdrawn``: merged runs whose offer could not be taken back
+        (:meth:`_withdraw_merged`); they stay booked.
         """
         refused = self._reap_wedged_windows(t) | unwithdrawn
         gone = [r for r in t.retirable if r.run_id not in refused]
@@ -5917,15 +5878,13 @@ class Store(QObject):
 
     # MARK: the Diplomacy Network
     #
-    # What is sent and how the answers read is the core's (:mod:`network`). Here the
-    # daemon is kept up while the switch is on and told which repositories this machine
-    # links to pools and how many tasks it takes.
+    # What is sent and how answers read is :mod:`network`'s. Here the daemon is kept up
+    # while the switch is on, and told this machine's pools and how many tasks it takes.
 
-    #: How often ``admit`` is said again unchanged. The daemon takes nothing once it
-    #: has not heard for 120 s.
+    #: How often an unchanged ``admit`` is said again: the daemon takes nothing after
+    #: 120 s unheard.
     NETWORK_ADMIT_EVERY = 60.0
-    #: The wait before a silent daemon is started again: doubled per attempt between
-    #: these.
+    #: A silent daemon's restart backoff, doubled per attempt between these.
     NETWORK_FIRST_START_DELAY = 15.0
     NETWORK_LONGEST_START_DELAY = 600.0
 
@@ -5935,7 +5894,6 @@ class Store(QObject):
 
     @property
     def network_trouble(self) -> str:
-        """The panel's line on what of the network does not work (:func:`network.trouble`)."""
         return network.trouble(self.network_answered, self.network_state,
                                diplomacynetwork.settings_unknown())
 
@@ -5981,7 +5939,7 @@ class Store(QObject):
             self._start_network_daemon(autofix.SOURCE_PANEL)
             self._network_cycle()
             return
-        # While the daemon is still up to be told.
+        # Before the stop, while the daemon can still be told.
         with self._settle_lock:
             self._drop_switched_off_runs()
         self.tasks_changed.emit()
@@ -5993,7 +5951,6 @@ class Store(QObject):
 
     def _log_network_daemon(self, source: str, action: str, did: str,
                             result: dict | None, *, ok: bool, note: str = "") -> None:
-        """One feed line for an installer action, with what it really did."""
         error = (result.get("error") if result is not None
                  else "the installer could not be run")
         ok = ok and not error
@@ -6003,9 +5960,8 @@ class Store(QObject):
 
     def _start_network_daemon(self, source: str, *, restart: bool = False,
                               quietly: bool = False) -> None:
-        """Run the installer's start, and say how it went. A failed start is said once
-        for a silence when the cycle asked (``quietly``), every time when the operator
-        did. The daemon's package has no dependency to fetch first."""
+        """A failed start is said once per silence when the cycle asked (``quietly``),
+        every time when the operator did."""
         result = (diplomacynetwork.restart_daemon() if restart
                   else diplomacynetwork.start_daemon())
         ok = (result is not None and not result.get("error")
@@ -6031,16 +5987,13 @@ class Store(QObject):
                               name="network-start")
 
     def start_network_daemon_async(self) -> None:
-        """The Network screen's Start."""
         self.start_network_async(source=autofix.SOURCE_PANEL)
 
     def restart_network_async(self) -> None:
-        """The Network screen's Restart."""
         self.start_network_async(restart=True, source=autofix.SOURCE_PANEL)
 
     def retire_legacy_node_async(self) -> None:
-        """End the mesh node an earlier Diplomat left running and remove its
-        directory, whatever the switch says."""
+        """Retire the mesh node an earlier Diplomat left, whatever the switch says."""
         def work() -> None:
             asked, removed, link = diplomacynetwork.retire_legacy_node()
             line = diplomacynetwork.legacy_retired_line(
@@ -6055,7 +6008,6 @@ class Store(QObject):
             self.start_background(self._network_cycle, name="network-cycle")
 
     def _network_cycle(self) -> None:
-        """One turn with the daemon, unless one is under way."""
         if not self._network_cycle_lock.acquire(blocking=False):
             return
         try:
@@ -6064,13 +6016,12 @@ class Store(QObject):
             self._network_cycle_lock.release()
 
     def _network_cycle_once(self, now: float) -> None:
-        """One round with the daemon while the switch is on: read its snapshot, start
-        it when it is silent, and tell it which pools this machine is in and how many
-        more tasks it takes. ``pools`` is said when it changed and ``admit`` also once
-        a minute; a daemon that started since is told both again. Neither is said, and
-        no daemon is started, while :func:`diplomacynetwork.settings_unknown`; nor
-        anything read from the config while one read of it failed
-        (:func:`appconfig.unreadable_reads`)."""
+        """Read the daemon's snapshot, start it when silent, and tell it this machine's
+        pools and how many more tasks it takes. ``pools`` is said when it changed,
+        ``admit`` also once a minute, and both again to a daemon that started since.
+        Neither is said, and no daemon started, while
+        :func:`diplomacynetwork.settings_unknown`; nor anything read from the config
+        while one read of it failed (:func:`appconfig.unreadable_reads`)."""
         if not diplomacynetwork.enabled():
             return
         snapshot = diplomacynetwork.state()
@@ -6125,8 +6076,8 @@ class Store(QObject):
         self.refresh_auto_task_count()
 
     def _revive_network_daemon(self, now: float) -> None:
-        """Start a daemon that is not answering, no sooner than its backoff allows.
-        While the settings are unknown nothing is tried, and the backoff waits as it is."""
+        """Start a silent daemon once its backoff allows; while the settings are unknown
+        nothing is tried and the backoff stays as it is."""
         memo = self._network_memo
         if now < memo.start_after or diplomacynetwork.settings_unknown():
             return
@@ -6139,11 +6090,10 @@ class Store(QObject):
         self._network_daemon_turn(start, wait=False)
 
     def _network_login(self, repo: LocalRepo, now: float) -> str:
-        """The login work is done as on ``repo``'s forge host, or "" while it is not
-        known: gh's own on GitHub (never the username override, which says whose PRs
-        the lists show), which the poll reads, and glab's on a GitLab host. A GitLab
-        one that is unknown is asked for here, a host no root is on being read by
-        nothing else, but not on every cycle."""
+        """The login work is done as on ``repo``'s host, "" while unknown: gh's own on
+        GitHub (as the poll reads it; never the username override, which only says
+        whose PRs the lists show), glab's on GitLab. An unknown GitLab login is asked
+        for here, as nothing else reads a host no root is on, but not every cycle."""
         if not repo.is_gitlab:
             return self.me
         known = self.known_me(repo)
@@ -6177,15 +6127,13 @@ class Store(QObject):
         return network.pools_listing(roots, others, unread, identities, snapshot.pools)
 
     def _listed_paths(self) -> set[str]:
-        """The repo roots and the Other repos checkouts, ``~`` expanded."""
         return {os.path.expanduser(p)
                 for p in (*review.repo_root_paths(), *self.other_repo_paths)}
 
     def _log_pools_left(self, snapshot: network.Snapshot, pools: list[dict],
                         listed: set[str]) -> None:
-        """Say in the feed which pools the daemon had that the list it just took
-        omits, each with what became of its path, ``listed`` (:meth:`_listed_paths`)
-        or not."""
+        """Log each pool the daemon had that ``pools`` omits, and what became of its
+        path."""
         said = {pool["id"] for pool in pools}
         left = [pool for pool in snapshot.pools if pool.id not in said]
         for pool in left:
@@ -6212,7 +6160,6 @@ class Store(QObject):
 
     def _withdraw(self, task: str, reason: str, label: str,
                   source: str) -> deviceallocator.DaemonReply | str:
-        """Take one offer back, and say in the feed whether the daemon did."""
         reply = diplomacynetwork.send(network.ROUTE_WITHDRAW,
                                       network.withdraw_body(task, reason))
         why = diplomacynetwork.refusal(reply)
@@ -6223,12 +6170,11 @@ class Store(QObject):
         return reply
 
     def _drop_switched_off_runs(self) -> None:
-        """With the switch off: take back every offer the network still carries and
-        drop its run as failed, so the PR or issue it was about is free for an agent
-        of this machine. A run that had ended, or whose PR merged, is settled as it
-        would have been. A daemon that gave its snapshot is told to withdraw each
-        first; a silent one is not waited on, and a run is dropped whatever the
-        daemon answers. A step of a settle, under its lock."""
+        """With the switch off: withdraw every offer the network still carries and drop
+        its run as failed, freeing its PR or issue for an agent of this machine. A run
+        that had ended, or whose PR merged, is settled as it would have been. A silent
+        daemon is not told, and a run is dropped whatever the daemon answers. A step of
+        a settle, under its lock."""
         self._withdraw_offering()
         if not any(r.network is not None for r in agentregistry.load()):
             return
@@ -6250,10 +6196,9 @@ class Store(QObject):
             self._note_comms_runs({r.label: why for r in left})
 
     def forget_network_run_async(self, run_id: str) -> None:
-        """Drop a run the network carries on the operator's word, withdrawing its
-        offer first while the network still holds it
-        (:func:`agentstate.withdraw_on_forget`): forgotten here alone, some machine
-        would start on work nobody is waiting for. The run is dropped whatever the
+        """Drop a network run on the operator's word, first withdrawing its offer while
+        the network holds it (:func:`agentstate.withdraw_on_forget`): forgotten here
+        alone, some machine would start on work nobody waits for. Dropped whatever the
         daemon answers."""
         def work() -> None:
             record = next((r for r in agentregistry.load()
@@ -6276,10 +6221,9 @@ class Store(QObject):
         self.start_background(work, name="network-forget")
 
     def stop_network_task_async(self, task: network.PoolTask, pool: str) -> None:
-        """Stop one task of a pool: its run, when this machine is the one running it,
-        else the offer this machine made of it. A run that is not there to stop is
-        said to be so in the pool's card, and nothing is withdrawn in its place: the
-        button said the job goes back to the pool."""
+        """Stop a pool task: its run when this machine runs it, else this machine's
+        offer. A run not there to stop is said so on the pool's card, and nothing is
+        withdrawn instead: the button said the job goes back to the pool."""
         def work() -> None:
             title = task.title or task.item
             if not task.executor_here:
@@ -6290,8 +6234,7 @@ class Store(QObject):
                 self._note_network_reply(reply, pool)
                 self.refresh_auto_task_count()
                 return
-            # Asked afresh: the snapshot kept may be a tick old, and a run that ended
-            # since is not there to stop.
+            # Asked afresh: a run that ended since the kept snapshot is not there to stop.
             fresh = diplomacynetwork.state()
             run = next((r for r in (fresh.runs if fresh else ())
                         if r.task_id == task.task_id
@@ -6315,9 +6258,8 @@ class Store(QObject):
 
     def _note_network_reply(self, reply: deviceallocator.DaemonReply | str,
                             card: str) -> str | None:
-        """Keep what an action was refused with under the panel it was made in (a
-        pool's id, or "" before any pool), or clear what the last one there was.
-        Returns the refusal."""
+        """Keep an action's refusal under its panel (a pool id, "" before any pool), or
+        clear it; return it."""
         why = diplomacynetwork.refusal(reply)
         self._set_network_refusal(card, why)
         return why
@@ -6353,7 +6295,6 @@ class Store(QObject):
         self._network_join(network.join_body(invite), card)
 
     def network_rejoin_async(self, pool: str) -> None:
-        """Go back into a pool this machine left."""
         self._network_join(network.join_body(pool=pool), pool, rejoined=pool)
 
     def _network_join(self, body: dict, card: str, *, rejoined: str = "") -> None:

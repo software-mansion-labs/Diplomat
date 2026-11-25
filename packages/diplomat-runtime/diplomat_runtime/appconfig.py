@@ -92,8 +92,7 @@ REMOTE_MACHINE_EXCLUDE_UNTIL = "remoteMachineExcludeUntil"
 #: machine's spare cores count this much, any other's the rest. Only reorders machines.
 REMOTE_MACHINE_ARM_BIAS = "remoteMachineArmBias"
 
-#: Beside the config: the Diplomacy Network switch as the config was last read,
-#: ``{"config": <the config's path>, "networkEnabled": <the switch>}``.
+#: Beside the config: the Diplomacy Network switch as the config was last read.
 SWITCH_RECORD = "network-switch.json"
 #: Seconds a config that was there may be gone and still be one being saved: the
 #: Diplomacy Network daemon's own tolerance, ``CONFIG_UNREADABLE_POLLS`` reads
@@ -126,9 +125,8 @@ def read() -> dict:
 
 
 _unreadable_reads = 0
-#: The configs this process read, by path.
 _read_paths: set[str] = set()
-#: When each config that was there was first found gone, by path, on :data:`_clock`.
+#: Path → when a config that was there was first found gone, on :data:`_clock`.
 _gone_since: dict[str, float] = {}
 _forgotten = 0
 _clock = time.monotonic
@@ -153,21 +151,16 @@ def _load() -> tuple[dict | None, bool]:
 
 
 def _was_there(where: Path) -> bool:
-    """Whether a config was at ``where``: this process read one, or the switch record
-    names it."""
     return (str(where) in _read_paths
             or (read_object(where.with_name(SWITCH_RECORD)) or {}).get("config") == str(where))
 
 
 def forgotten_configs() -> int:
-    """How many times a config that was there has been gone past
-    :data:`CONFIG_GONE_GRACE_S` in this process, and been forgotten."""
     return _forgotten
 
 
 def _forget(where: Path) -> None:
-    """Read ``where`` as never there from now on: not by this process, and not by the
-    switch record, which is removed when it names it."""
+    """From now on ``where`` reads as never there."""
     global _forgotten
     record = where.with_name(SWITCH_RECORD)
     if (read_object(record) or {}).get("config") == str(where):
@@ -186,10 +179,9 @@ def read_known() -> dict | None:
     """The whole file, ``{}`` when there is none and never was, or ``None``: one is
     there and cannot be read as a JSON object, or one was there and has been gone for
     less than :data:`CONFIG_GONE_GRACE_S` - an editor that saves by renaming a new file
-    into place leaves none for a moment. Gone longer, it is forgotten (:func:`_forget`)
-    and reads as never there. ``None`` says nothing: a caller that must not take a
-    default for an answer keeps what it last read, and it counts in
-    :func:`unreadable_reads`."""
+    into place leaves none for a moment. Gone longer, it reads as never there. ``None``
+    says nothing: a caller that must not take a default for an answer keeps what it
+    last read."""
     global _unreadable_reads
     where = path()
     data, absent = _load()
@@ -208,20 +200,17 @@ def read_known() -> dict | None:
 
 
 def unreadable_note() -> str:
-    """The feed's line for a file that is there and :func:`read_known` cannot read."""
     return (f"{path()} cannot be read as settings: nothing is saved over it, and the "
             "Diplomacy Network switch stays as it was last read")
 
 
 def gone_note() -> str:
-    """The feed's line for a config :func:`read_known` forgot."""
     return f"{path()} is gone: settings are the defaults"
 
 
 def _editable() -> dict:
-    """The file's keys, for a read-modify-write: none when there is no file. Raises
-    ``OSError`` for a file that is there and cannot be parsed: a write would drop every
-    key it holds."""
+    """The file's keys, for a read-modify-write. Raises ``OSError`` for a file that is
+    there and cannot be parsed: a write would drop every key it holds."""
     data, absent = _load()
     if data is None and not absent:
         raise OSError(errno.EINVAL,
