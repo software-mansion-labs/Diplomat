@@ -328,9 +328,9 @@ func linearLoginSmoke() throws {
     check((try LinearLogin.authorization(in: authDir, now: now, transport: auth.transport)) == "Bearer acc1"
           && LinearLogin.saved(in: authDir)?.refreshToken == "ref1", "a failed refresh keeps a token not yet expired")
     let tried = auth.at("/oauth/token").count
-    _ = try LinearLogin.authorization(in: authDir, now: now.addingTimeInterval(30), transport: auth.transport)
+    _ = try LinearLogin.authorization(in: authDir, now: now.addingTimeInterval(59), transport: auth.transport)
     check(auth.at("/oauth/token").count == tried, "…and is not tried again within a minute")
-    _ = try LinearLogin.authorization(in: authDir, now: now.addingTimeInterval(61), transport: auth.transport)
+    _ = try LinearLogin.authorization(in: authDir, now: now.addingTimeInterval(60), transport: auth.transport)
     check(auth.at("/oauth/token").count == tried + 1, "…but is once it has passed")
     try saveLogin(authDir, expires: now.addingTimeInterval(-60))
     check(failure { try LinearLogin.authorization(in: authDir, now: now, transport: auth.transport) }

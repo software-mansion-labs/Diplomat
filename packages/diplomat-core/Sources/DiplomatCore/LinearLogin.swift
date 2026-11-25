@@ -60,12 +60,14 @@ public enum LinearLogin {
         return try? CommsLog.decoder.decode(Saved.self, from: data)
     }
 
-    /// When a refresh last failed with its token still good; none is tried again for a minute.
+    /// When the last refresh that failed with its token still good began; until a minute
+    /// later, only an expired token is refreshed.
     private static var refreshFailed: Date?
 
     /// The `Authorization` a Linear call carries: the override's key as is, else the saved
-    /// token, refreshed first once it expires within `refreshMarginSecs`. Nil when signed out;
-    /// a login that can no longer be refreshed is forgotten.
+    /// token, refreshed first once it expires within `refreshMarginSecs`, though while it is
+    /// still good, a minute after a refresh that failed. Nil when signed out; a login that can no
+    /// longer be refreshed is forgotten.
     public static func authorization(in dir: URL = PipelineLog.dir, now: Date = Date(),
                                      transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> String? {
         if let env = ProcessInfo.processInfo.environment[LinearAPI.envVar], !env.isEmpty { return env }
