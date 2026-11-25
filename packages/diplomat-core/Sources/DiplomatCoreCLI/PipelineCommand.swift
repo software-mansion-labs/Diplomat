@@ -1,6 +1,9 @@
 import DiplomatCore
 import Foundation
 
+/// Set by `linear-login`'s SIGTERM.
+private var linearLoginTerminated: sig_atomic_t = 0
+
 /// The Linux front-end's whole reach into the pipeline, so it has one implementation.
 ///
 ///   pipeline-tick  stdin = PipelineSettings JSON. One sync (`PipelineTick.run`) with the
@@ -14,8 +17,9 @@ import Foundation
 ///                  so the Linux twin of the parse is tested against this one.
 ///   linear-login   no stdin. `LinearLogin.signIn`; stdout = {"url": <Linear's consent
 ///                  page, for the caller to open>} once listening, then {"ok": true,
-///                  "user", "organization"} or {"ok": false, "error"}. Exits 0 either way;
-///                  killing it abandons the sign-in.
+///                  "user", "organization"} or {"ok": false, "error"}. Exits 0 either way.
+///                  SIGTERM, or its parent's exit, cancels a sign-in still waiting for the
+///                  browser; one past it ends as it would have.
 ///   linear-logout  no stdin. `LinearLogin.signOut`; stdout = {"ok": true, "warning":
 ///                  <why Linear did not revoke it>|null} or {"ok": false, "error"}.
 ///   linear-whoami  no stdin. stdout = {"user", "organization"} of the saved login, or {}.
@@ -47,9 +51,12 @@ enum PipelineCommand {
     }
 
     static func login() {
+        let parent = getppid()
+        signal(SIGTERM) { _ in linearLoginTerminated = 1 }
         let answer: [String: Any]
         do {
-            let me = try LinearLogin.signIn(open: { emitObject(["url": $0.absoluteString]) })
+            let me = try LinearLogin.signIn(open: { emitObject(["url": $0.absoluteString]) },
+                                            cancelled: { linearLoginTerminated != 0 || getppid() != parent })
             answer = ["ok": true, "user": me.user, "organization": me.organization]
         } catch {
             answer = ["ok": false, "error": error.localizedDescription]
