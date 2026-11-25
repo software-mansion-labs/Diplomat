@@ -1,7 +1,3 @@
-// A host killed and started again, at each moment where what it had promised matters:
-// holding a lock it granted, in the middle of its own claim round, with a run going, and
-// as the requester of a task whose key is out. Its disk is all it has left.
-
 import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
@@ -23,7 +19,7 @@ await check('a host that granted a lock still holds it after a restart: nobody e
   const granted = await lock(a, 'AAAAAAAAAAA');
   assert.equal(granted.body.grant.executor, a.pk);
   await w.restart(req);
-  // A request made by hand is not sent again: it is dated after the last one req served before it went down.
+  // So the next hand-made request is dated after the last one req served before going down.
   await w.run(1);
   assert.equal(req.node.snapshot().offers[0].taskId, taskId, 'its offers are its own again');
   assert.deepEqual((await lock(b, 'BBBBBBBBBBA')).body, { challenge: { reason: 'locked', holder: a.pk } });
@@ -132,12 +128,11 @@ await check('a host that comes back takes up the pools it was linked to before a
   await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
   const job = exe.executor.jobOf(taskId);
   const act = async (leaf) => (await w.wait(exe.node.actFor(job.runId)(get('pr-1', leaf)))).status;
-  // Both daemons come back, and nobody names their pools: the list is in the store.
+  // Nobody names their pools: the list is in the store.
   for (const h of all) await w.restart(h, { named: false });
   assert.deepEqual([w.members(req).length, w.members(exe).length], [2, 2]);
   assert.deepEqual([w.runOf(exe, taskId).state, w.offerRow(req, taskId).state], ['running', 'claimed']);
   assert.equal(await act('a'), 200);
-  // One comes back without the list: half a minute passes before its pools are named.
   w.net.kill('exe');
   exe.disk.remove('links');
   await w.restart(exe, { gapSecs: 30 });
@@ -265,7 +260,6 @@ await check('a store that could not be written at one step is written at the nex
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
   await w.run(1);
-  // The disk is full for one write.
   const write = req.disk.write;
   let failed = 0;
   req.disk.write = (name, text) => {
@@ -276,7 +270,7 @@ await check('a store that could not be written at one step is written at the nex
   await w.run(15);
   assert.equal(failed, 1);
   assert.ok(req.log.some((line) => line.includes('the store could not be written')));
-  // It still looks after its offer: the lease of the run is extended when it comes due.
+  // The lease is still extended when it comes due.
   await w.run(LEASE_SECS);
   assert.ok(w.claim(req, taskId).seq >= 1);
 });
@@ -287,8 +281,7 @@ await check('what a member answers after a pool was closed is not taken into it'
   w.net.kill('a');
   await b.node.offer(offerArgs('pr-1'));
   await w.run(200);
-  // Back up, it asks b for what it missed, and its pool is closed while the answer is on
-  // its way - unheard, so that b still answers.
+  // Its pool is closed while the answer to its pull is on the way - unheard, so b still answers.
   let pulling = false;
   w.net.tap(({ from, kind }) => {
     if (pulling || from !== 'a' || kind !== 'pull') return;
@@ -311,7 +304,7 @@ await check('a host that starts again knows which members had long been silent w
   const [req, exe, zzz] = await w.pool(['req', 'exe', 'zzz'], { exe: { slots: 1 } });
   const silent = () => w.stored(exe, 'peers')?.silent;
   let n = 0;
-  // How long the round of a task offered now takes the executor, in seconds, and who it counts absent.
+  // `[seconds the executor's round took, absent]` for a freshly offered task.
   const round = async () => {
     n += 1;
     const { taskId } = await req.node.offer(offerArgs(`pr-${n}`));
@@ -337,9 +330,8 @@ await check('a host that starts again knows which members had long been silent w
   assert.ok(took >= short && took <= short + 2, `${took} s for a member known to be silent`);
   assert.deepEqual(absent, [zzz.pk]);
 
-  // The member answers again: nothing is held against it. Then its machine goes down,
-  // and one request to it fails: that is not being silent for long. To the host that
-  // starts again it is a member never reached, asked for as long as such a one.
+  // Answering again clears the mark. One failed request after it dies is no long silence,
+  // so after a restart it is a member never reached and gets the long timeout.
   w.net.sleep('zzz', false);
   await w.net.until(() => Object.keys(silent()).length === 0, { what: 'the mark gone' });
   await w.agreed([req, exe, zzz]);
@@ -352,8 +344,8 @@ await check('a host that starts again knows which members had long been silent w
   assert.ok(took >= long, `${took} s for a member never reached`);
   assert.deepEqual(absent, [zzz.pk]);
 
-  // A silence that began longer ago than a record lives says nothing: such a member
-  // is no member, or has become one again.
+  // A silence older than RECORD_RETENTION_SECS says nothing: such a member is gone or has
+  // joined again.
   for (const [age, fits] of [[RECORD_RETENTION_SECS, (s) => s >= long], [RECORD_RETENTION_SECS - 60, (s) => s <= short + 2]]) {
     await w.run(PEER_QUIET_MS / 1000 + 300);
     exe.disk.write('peers', JSON.stringify({ silent: { [zzz.pk]: w.net.now() - age } }));

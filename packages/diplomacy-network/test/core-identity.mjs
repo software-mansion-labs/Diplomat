@@ -1,5 +1,3 @@
-// Canonical form and identity: the bytes two hosts must agree on before anything else.
-
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { b64u, canon, hash, parseCanon, tagged, u32be, u64be, unb64u } from '../src/core/canon.js';
@@ -74,8 +72,7 @@ check('a signature binds the tag, the signer and every member but sig', () => {
 check('a point of small order is no public key, with either sign bit, and a key one byte from such a point is', () => {
   const small = ['00'.repeat(32), `01${'00'.repeat(31)}`, '26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05',
     'c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a', `ec${'ff'.repeat(30)}7f`, `ed${'ff'.repeat(30)}7f`, `ee${'ff'.repeat(30)}7f`];
-  // Whether such a signature verifies is the crypto library's affair, and differs between
-  // its versions; that the key is refused is not.
+  // Whether such a signature verifies differs between crypto library versions; the refusal does not.
   for (const hex of small) {
     for (const sign of [0, 0x80]) {
       const bytes = Buffer.from(hex, 'hex');

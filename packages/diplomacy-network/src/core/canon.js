@@ -1,11 +1,8 @@
-// Canonical JSON, hashes and byte helpers (PROTOCOL.md section 2). Two hosts must turn
-// the same value into the same bytes, so anything JSON would let them write differently
-// is refused here.
+// Canonical JSON (PROTOCOL.md section 2): two hosts must turn one value into the same bytes.
 
 import crypto from 'node:crypto';
 
-/// The canonical bytes of a JSON value: keys sorted by code unit, no whitespace, integers
-/// only. Throws on a float, an unsafe integer, null, undefined or any non-plain object.
+/// Throws on a float, an unsafe integer, null, undefined or any non-plain object.
 export function canon(value) {
   return Buffer.from(write(value), 'utf8');
 }
@@ -25,9 +22,7 @@ function write(v) {
   throw new TypeError(`not a canonical value: ${v === null ? 'null' : typeof v}`);
 }
 
-/// The value `bytes` are the canonical form of, or null when they are the canonical form
-/// of nothing: not JSON, or JSON written any other way - a key given twice, a float,
-/// whitespace, keys out of order.
+/// Null unless `bytes` are exactly canonical: a duplicate key, whitespace or key order fails.
 export function parseCanon(bytes) {
   try {
     const value = JSON.parse(bytes.toString('utf8'));
@@ -37,7 +32,6 @@ export function parseCanon(bytes) {
   }
 }
 
-/// SHA-256 of the concatenated parts; a part that is not a Buffer is canonicalised.
 export function hash(...parts) {
   const h = crypto.createHash('sha256');
   for (const p of parts) h.update(Buffer.isBuffer(p) ? p : canon(p));
@@ -48,8 +42,7 @@ export function b64u(buf) {
   return Buffer.from(buf).toString('base64url');
 }
 
-/// The bytes of an unpadded base64url string, or null when it is not one: Buffer.from
-/// would silently skip the characters it does not know.
+/// Strict unpadded base64url, else null: Buffer.from silently skips unknown characters.
 export function unb64u(str) {
   if (typeof str !== 'string' || !/^[A-Za-z0-9_-]*$/.test(str)) return null;
   const buf = Buffer.from(str, 'base64url');
@@ -68,7 +61,6 @@ export function u64be(n) {
   return b;
 }
 
-/// `tag || 0x00 || rest...`, the prefix every domain-separated hash and signature starts with.
 export function tagged(tag, ...rest) {
   return Buffer.concat([Buffer.from(tag, 'ascii'), Buffer.from([0]), ...rest]);
 }

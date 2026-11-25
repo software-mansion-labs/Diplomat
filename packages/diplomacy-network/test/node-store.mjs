@@ -1,6 +1,3 @@
-// The store on a real directory: what reaches the disk and when, who may read it, and
-// what a host does with a file it cannot parse.
-
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -44,7 +41,6 @@ await check('nothing is on disk before a flush; a flush writes each changed docu
     store.flush();
     assert.deepEqual(tree(dir), ['pools', `${poolFile(POOL)}.json`]);
 
-    // A file that does not parse is kept beside its name and read as empty.
     fs.writeFileSync(path.join(dir, 'offers.json'), '{"offers":{"a":');
     const log = [];
     const again = createStore({ dir, log: (line) => log.push(line) });
@@ -100,7 +96,7 @@ await check('what changed in a document is written as a line after it, and the d
     assert.deepEqual(did.splice(0), [`write ${name}`, `cut ${name}`]);
     assert.deepEqual([fs.existsSync(log), written()], [false, []]);
 
-    // The log grows as long as the document was - a short document's to 64 KiB.
+    // The log may grow as long as the document, or to 64 KiB for a short one.
     const line = { pad: 'y'.repeat(30000) };
     for (const [value, fit] of [[doc, 3], [{ id: POOL }, 2]]) {
       store.write(name, value);
@@ -117,7 +113,6 @@ await check('what changed in a document is written as a line after it, and the d
       assert.deepEqual(written(), []);
     }
 
-    // What a reader makes of a log some host left behind.
     store.write(name, doc);
     store.write(name, doc, { line: { n: 5 } });
     store.flush();
@@ -233,7 +228,6 @@ await check('a host on a real directory comes back as itself; with a file it can
     assert.equal(req.node.pk, req.pk);
     assert.deepEqual([w.offerRow(req, taskId).state, w.task(req, taskId).executor, w.members(req).length], ['claimed', exe.pk, 2]);
 
-    // Its offers file is cut short, as a full disk leaves it.
     w.net.kill('req');
     fs.writeFileSync(path.join(dir, 'offers.json'), '{"offers":');
     await w.restart(req);

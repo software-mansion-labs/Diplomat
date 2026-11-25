@@ -1,14 +1,10 @@
-// A network in memory for the node's tests: transports that carry bytes between hosts
-// of one process, and the one virtual clock they all live by. Delay, loss and duplication
-// are drawn from a seed; pairs of hosts can be cut apart and a host taken down, put to
-// sleep or killed.
-// Nothing here waits on real time: `run` carries out what is due, in order.
+// An in-memory network on one seeded virtual clock: nothing waits on real time, `run`
+// carries out what is due, in order.
 
 import { onionAddress } from '../../src/core/identity.js';
 
 export const T0 = 1794000000;
 
-/// A seeded generator: `next()` in [0, 1), `int(n)`, `chance(p)`, `bytes(n)`.
 export function prng(seed) {
   let a = seed >>> 0;
   const next = () => {
@@ -28,7 +24,6 @@ export function prng(seed) {
 
 const failure = (code) => Object.assign(new Error(code), { code });
 
-// The kind an envelope names, or null for bytes that are no envelope.
 function kindOf(body) {
   try {
     return JSON.parse(body.toString('utf8')).kind ?? null;
@@ -37,13 +32,12 @@ function kindOf(body) {
   }
 }
 
-/// The network. `sent` lists every request a host made, as `{ at, from, to, kind, bytes }`.
 export function createNet({ seed = 1 } = {}) {
   const rnd = prng(seed);
-  const queue = []; // a heap of { t, n, fn, owner, cancelled }
-  const hosts = new Map(); // name -> host
+  const queue = []; // min-heap on (t, n)
+  const hosts = new Map();
   const byPk = new Map();
-  const cuts = new Set(); // "a|b" for every pair that cannot reach each other
+  const cuts = new Set();
   const faults = { minMs: 5, maxMs: 40, drop: 0, duplicate: 0 };
   const sent = [];
   const taps = [];
@@ -82,10 +76,9 @@ export function createNet({ seed = 1 } = {}) {
   const pair = (a, b) => [a, b].sort().join('|');
   const delay = () => faults.minMs + rnd.int(faults.maxMs - faults.minMs + 1);
   const linked = (a, b) => b && b.up && !b.dead && !b.asleep && b.ready && !a.dead && !a.asleep && !cuts.has(pair(a.name, b.name));
-  // Everything a promise chain can do without a timer has happened once this resolves.
+  // Resolves once every timer-free promise continuation has run.
   const settled = () => new Promise((resolve) => { setImmediate(resolve); });
 
-  /// Carries out everything due in the next `forMs` of virtual time.
   async function run(forMs) {
     const until = ms + forMs;
     while (queue.length > 0 && queue[0].t <= until) {
@@ -104,7 +97,6 @@ export function createNet({ seed = 1 } = {}) {
     await settled();
   }
 
-  /// Runs until `test()` holds, looking every `stepMs`; throws when `maxMs` pass first.
   async function until(test, { maxMs = 10 * 60 * 1000, stepMs = 250, what = 'the awaited state' } = {}) {
     const end = ms + maxMs;
     await settled();
@@ -114,7 +106,7 @@ export function createNet({ seed = 1 } = {}) {
     }
   }
 
-  /// The clock of one host: its timers die with it.
+  /// A host's clock; its timers die with it.
   function clock(name) {
     return {
       now,
@@ -125,7 +117,7 @@ export function createNet({ seed = 1 } = {}) {
     };
   }
 
-  /// A transport for the host `name` whose key is `pk`, replacing any that name had.
+  /// Replaces any transport `name` had.
   function transport(name, pk) {
     const host = {
       name, pk, up: true, dead: false, asleep: false, late: [], ready: false, stopped: false, startDelayMs: 0,
@@ -140,7 +132,7 @@ export function createNet({ seed = 1 } = {}) {
       return new Promise((resolve, reject) => {
         let open = true;
         const settle = (fn, value) => {
-          // An answer that comes to a machine asleep is lost: its connections are gone.
+          // A sleeping machine's connections are gone, so its answers are lost.
           if (!open || host.dead || host.asleep) return false;
           open = false;
           fn(value);
@@ -158,8 +150,7 @@ export function createNet({ seed = 1 } = {}) {
         // A host that is down refuses quickly; one behind a cut, or a lost request, is silence.
         if (target && !cuts.has(pair(name, target.name)) && !(target.up && !target.dead && target.ready)) return fail('unreachable', Math.min(3000, timeoutMs));
         if (!linked(host, target) || rnd.chance(faults.drop)) return undefined;
-        // A duplicate is what the real transport does when a kept connection turns out
-        // dead: the same bytes go out again, and only the second copy's answer comes back.
+        // As the real transport resends on a dead kept connection: only the second copy's answer returns.
         const copies = rnd.chance(faults.duplicate) ? 2 : 1;
         let sentAt = 0;
         for (let copy = 0; copy < copies; copy += 1) {
@@ -213,22 +204,18 @@ export function createNet({ seed = 1 } = {}) {
 
   return {
     rnd, sent, faults, now, run, until, clock, transport, settled,
-    /// How many timers of a host are waiting to fire.
     timers: (name) => queue.filter((event) => !event.cancelled && event.owner === hosts.get(name)).length,
-    /// Calls `fn({ from, to, headers, kind, body })` for every request a host makes. A
-    /// function it returns is called with what the target made of each copy that reached
-    /// it - the bytes of its answer, or the transport's code for none - heard or not.
-    /// `{ answered, reached }` in its place: `answered` is that function, and `reached`
-    /// is called with the answer the asking host got.
+    /// `fn({ from, to, headers, kind, body })` sees every request. It may return a function
+    /// called with each delivered copy's answer (bytes, or a transport code), or
+    /// `{ answered, reached }` where `reached` gets the answer the asker received.
     tap: (fn) => taps.push(fn),
-    /// Milliseconds of virtual time since the network began.
+    /// Virtual ms since the network began.
     ms: () => ms,
-    /// Cuts two hosts apart, or joins them again.
     cut(a, b, on = true) {
       if (on) cuts.add(pair(a, b));
       else cuts.delete(pair(a, b));
     },
-    /// Splits the hosts into the given groups of names: only hosts of one group reach each other.
+    /// Only hosts in one group reach each other; clears any other cut.
     split(...groups) {
       cuts.clear();
       const all = groups.flat();
@@ -239,24 +226,23 @@ export function createNet({ seed = 1 } = {}) {
       }
     },
     heal: () => cuts.clear(),
-    /// Takes a host off the network or puts it back; it keeps running either way.
+    /// Off the network, but still running.
     down(name, off = true) {
       hosts.get(name).up = !off;
     },
-    /// Puts a machine to sleep, or wakes it: asleep, its process stands still - nothing
-    /// reaches it, no answer comes to it, and its timers wait - while its clock goes on.
-    /// The timers that came due meanwhile fire `timersInMs` after it wakes.
+    /// Asleep, nothing reaches it, no answer comes to it and its timers wait while its
+    /// clock goes on; timers due meanwhile fire `timersInMs` after it wakes.
     sleep(name, on = true, { timersInMs = 0 } = {}) {
       const host = hosts.get(name);
       host.asleep = on;
       if (on) return;
       for (const event of host.late.splice(0)) at(timersInMs, () => event.cancelled || event.fn(), host);
     },
-    /// Ends a host's process: its timers never fire and nothing it awaits ever arrives.
+    /// Its timers never fire and nothing it awaits arrives.
     kill(name) {
       hosts.get(name).dead = true;
     },
-    /// How many requests of `kind` the host `from` made to `to` since virtual second `since`.
+    /// `since` is in virtual seconds.
     count: ({ from, to, kind, since = 0 }) => sent.filter((s) => s.at >= since && (!from || s.from === from)
       && (!to || s.to === to) && (!kind || s.kind === kind)).length,
   };

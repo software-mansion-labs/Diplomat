@@ -1,7 +1,3 @@
-// Leases as whole hosts keep them: a long run extended two hours at a time, a host that
-// dies without a word, a run that outlives its deadline, and an offer that gives up
-// after its third failed attempt.
-
 import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
@@ -47,7 +43,7 @@ await check('a host that dies holding a claim loses it when the lease and its gr
     const runner = alive.find((h) => h.executor.jobOf(taskId));
     await w.run(30);
     const claim = w.claim(req, taskId, runner);
-    // Each executor's first claim of the task, and one more time the requester gave its offer.
+    // Each executor claims once (gen 0); the requester's backing gen counts the attempts.
     assert.deepEqual([claim.gen, backing(claim, req.pk).gen, w.offerRow(req, taskId).attempt], [0, attempt, attempt]);
     assert.ok(w.stored(req, 'keys').issued[taskId], 'a key is out');
     w.net.kill(runner.name);
@@ -129,12 +125,12 @@ await check('a machine alone in its pool uses the three attempts of its offer: i
     ended.push(w.net.now());
   }
   await w.net.until(() => w.offerRow(solo, taskId).state === 'failed', { what: 'the offer failed' });
-  // A host looks at what it may take every ten seconds.
+  // Slack for one TICK_MS between looks.
   const waits = [began[1] - ended[0], began[2] - ended[1]];
   assert.deepEqual(waits.map((s, i) => s >= GIVE_UP_WAIT_MS / 1000 * 2 ** i && s <= GIVE_UP_WAIT_MS / 1000 * 2 ** i + 15), [true, true], `${waits}`);
   assert.deepEqual([GIVE_UP_WAIT_MS, w.offerRow(solo, taskId).reason, w.task(solo, taskId).state], [2 * 60 * 1000, 'no luck 3', 'cancelled']);
   await w.run(60);
-  // The task offered again is another offer: nothing of the one before is held against it.
+  // An offer made again starts its give-up waits over.
   await solo.node.offer(offerArgs('pr-1'));
   await w.net.until(() => solo.executor.jobOf(taskId), { maxMs: 20 * 1000, what: 'a job of the offer made again' });
   solo.executor.end(solo.executor.jobOf(taskId).runId, { ok: false });
@@ -188,7 +184,7 @@ await check('the row of a job of this machine\'s own says what keeps the machine
   await w.run(HOUR);
   assert.deepEqual([flags(taskId), flags(long.taskId), solo.executor.started.length], [['pooled', 0, true, false], ['pooled', 0, false, true], 1]);
   assert.equal('log' in solo.node.snapshot().runs[0], false, 'a run\'s row names no file');
-  // A job another machine holds is kept from this one by nothing its row would say.
+  // Once another machine runs it, the row shows no `leftUntil`.
   const v = createWorld({ seed: 70 });
   const [a, b] = await v.pool(['a', 'b'], { a: { slots: 1 } });
   a.executor.failStart = 'local';
@@ -249,7 +245,7 @@ await check('a lease is extended for a run that is going, never for a claim whos
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
   const claim = w.claim(req, taskId);
-  // The requester's own pings do not get through; one made by hand arrives the moment the job dies.
+  // The requester's own pings are cut off; a hand-made one arrives as the job dies.
   w.net.cut('req', 'exe');
   await w.run(claim.leaseUntil - 300 - w.net.now());
   w.net.heal();
@@ -271,7 +267,6 @@ await check('a run that never gets its key gives its claim back before its first
   assert.deepEqual([w.claim(req, taskId).state, w.runOf(exe, taskId).state], ['held', 'preparing']);
   assert.ok(w.net.count({ from: 'exe', to: 'req', kind: 'key', since: claimedAt }) > 200, 'asked every half minute, whatever the last answer was');
   assert.equal(w.net.count({ from: 'req', to: 'exe', kind: 'ping', since: claimedAt }), 0, 'asked for no lease: it has no key of this host\'s');
-  // A lease asked for all the same is not given: there is no job.
   const answer = await w.request(req, exe, 'ping', { ping: buildPing(req.id, w.claim(req, taskId), w.net.now()) });
   assert.deepEqual([answer.ok, answer.code, answer.detail], [false, 'denied', 'no run']);
   await w.run(130);

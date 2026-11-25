@@ -1,9 +1,8 @@
-// Claiming (PROTOCOL.md section 7): which task a host with a free slot goes for, and the
-// round it drives to get it - the ClaimRound machine says what to send and when a claim
-// holds; this file sends it, feeds the answers back and never decides a claim itself.
+// Claiming (PROTOCOL.md section 7). ClaimRound decides when a claim holds; this file only
+// sends what it says and feeds the answers back.
 //
-// Whatever goes wrong inside a round ends that round and nothing else: it is taken off
-// the table, its locks are given back, and the task is tried again later.
+// Whatever goes wrong inside a round ends that round and nothing else: its locks are given
+// back and the task is tried again later.
 
 import { b64u } from '../core/canon.js';
 import { ClaimRound, buildClaim, rankDelay } from '../core/claims.js';
@@ -18,7 +17,6 @@ const ROUND_TICK_MS = 5000;
 const MAX_WEIGH_MS = 60 * 1000;
 const FAILED_RETRY_MS = 10 * RETRY_MS;
 
-/// The claiming of `host`.
 export function createClaiming(host) {
   const rounds = new Map(); // taskId -> { P, taskId, round, snapshot, started, offered, waited, own, timer }
   const waiting = new Map(); // taskId -> the timer of the wait before a round
@@ -29,25 +27,23 @@ export function createClaiming(host) {
   const sleep = (ms) => new Promise((resolve) => { host.clock.setTimeout(resolve, ms); });
   const live = (run) => rounds.get(run.taskId) === run;
 
-  /// Diplomat's word on how many more tasks this machine takes.
+  /// Diplomat's count of how many more tasks this machine takes.
   function admit({ slots, reason = '' }) {
     admitted = { slots: Math.max(0, Math.floor(Number(slots)) || 0), at: host.now(), reason: String(reason) };
     host.poke();
     host.touch();
   }
 
-  // The slots Diplomat last stated, for as long as that statement is trusted.
   function slots() {
     return host.now() - admitted.at <= ADMIT_TTL_MS / 1000 ? admitted.slots : 0;
   }
 
-  // What this host took against that word: the runs begun since, every run before them
-  // being in Diplomat's own count, and the tasks it is going for.
+  // Runs begun before Diplomat's count are in it.
   const took = () => host.runs.since(admitted.at - ADMIT_LAG_SECS);
   const taken = () => took() + rounds.size + waiting.size;
 
-  /// Starts toward the available tasks this host may take, oldest offer first, while a
-  /// slot is free. A task this host offered to be done at once needs no slot.
+  /// Oldest offer first, while a slot is free. A task this host offered to be done at once
+  /// needs no slot.
   function step() {
     if (host.transport.state().state !== 'ready') return;
     const now = host.now();
@@ -57,12 +53,10 @@ export function createClaiming(host) {
     const open = [];
     for (const P of host.pools.values()) {
       const me = P.pool.member(host.self, now);
-      // Where the smallest claim there is would not fit beside what this host has in the
-      // pool, it goes for nothing.
+      // Not even the smallest claim fits beside what this host has in the pool.
       if (!me || !P.pool.room({ type: 'claim', taskId: '', executor: host.self })) continue;
       for (const task of P.pool.tasks(now)) {
-        // The hours of a task are those of the offers this host may take: an offer of
-        // more than it accepts is not its to weigh.
+        // A task's hours are those of the offers this host may take.
         const mine = task.offers.filter((o) => !o.claim && eligible(me.maxAcceptedH, o.hours));
         if (mine.length > 0) open.push({ P, task: { ...task, hours: Math.max(...mine.map((o) => o.hours)) } });
       }
@@ -77,17 +71,15 @@ export function createClaiming(host) {
       if (!own && taken() >= slots()) continue;
       const verdict = weighed(P, task);
       if (verdict === null) continue;
-      // A run that holds another offer of the task takes this one in too: it is given
-      // the time to.
+      // A run that holds another offer of the task takes this one in too: give it time to.
       const delay = (task.state === 'claimed' ? JOIN_WAIT_MS : 0) + (own ? 0 : rankDelay(taskId, host.self, RANK_DELAY_MS) + verdict);
       waiting.set(taskId, host.clock.setTimeout(() => begin(P, taskId, own, delay), delay));
     }
   }
 
-  // What this host's executor makes of a task: null when it does not take it, else how
-  // many more milliseconds this host waits before it goes for it. The executor weighs the
-  // task against what this machine has, and neither that nor the wait is sent to anyone;
-  // a member that watches when this host claims can still tell that it waited.
+  // null when the executor does not take the task, else how many more ms to wait before
+  // going for it. Neither is sent, but a member watching when this host claims can still
+  // tell that it waited.
   function weighed(P, task) {
     try {
       const { taskId, kind, item, title, identity, hours, offeredBy } = task;
@@ -128,15 +120,12 @@ export function createClaiming(host) {
     tick();
   }
 
-  // What a round asks for on the state this host holds now.
   function rebased(run) {
     const now = host.now();
     run.snapshot = run.P.pool.claimSnapshot(run.taskId, now);
     return run.round.rebase(run.snapshot, now);
   }
 
-  // Carries out what `next` makes a round ask for. Whatever throws on the way ends that
-  // round.
   function drive(run, next) {
     try {
       carry(run, next());
@@ -145,8 +134,8 @@ export function createClaiming(host) {
     }
   }
 
-  // A round that threw is over, whatever state it was left in: its task is left alone
-  // for a while, and every member it may hold a lock of is told to drop it.
+  // Whatever state the round was left in, every member it may hold a lock of is told to
+  // drop it.
   function giveUp(run, err) {
     host.log(`a claim round failed: ${err?.stack ?? err}`);
     if (!live(run)) return;
@@ -156,7 +145,6 @@ export function createClaiming(host) {
     host.poke();
   }
 
-  // One `sync` or `lock` of a round, and what its answer means to the round.
   async function put(run, action) {
     const { P, round } = run;
     for (;;) {
@@ -173,16 +161,14 @@ export function createClaiming(host) {
         carry(run, round.abort('offline'));
         return;
       }
-      // An answer, even a refusal, is a member that is there: it must agree and grant.
-      // One whose clock is too far from this host's can agree to nothing either of them
-      // would take from the other: it is as good as silent.
+      // Any answer, even a refusal, is a member that is there. One whose clock is too far
+      // off can agree to nothing the other would take: it is as good as silent.
       if (!silent && answer.code !== 'stale') {
         const heard = action.do === 'sync' ? round.onSync : round.onLock;
         carry(run, heard.call(round, action.to, action.wave, answer.ok ? answer.body : null, now));
         return;
       }
-      // A member this host has never reached may only be slow to dial: it is asked again
-      // for a while before the round goes on without it.
+      // A member never reached may only be slow to dial: ask again for a while.
       const patient = silent && wait === 'patient' && round.wave === action.wave
         && now * 1000 < run.started * 1000 + ROUND_PATIENCE_MS;
       if (!patient) {
@@ -220,8 +206,7 @@ export function createClaiming(host) {
     host.gossip.send(P, to, 'unlock', body, { fresh: true, timeoutMs: PROBE_TIMEOUT_MS }).catch(() => {});
   }
 
-  // Where the time of a round went, for the log: seconds and counts, and nothing of what
-  // any member said.
+  // For the log: seconds and counts, nothing of what any member said.
   function spent(run) {
     const { round, snapshot, started, offered, waited } = run;
     return `begun ${started - offered} s after the offer, after a wait of ${waited} ms, over in ${host.now() - started} s: `
@@ -244,14 +229,13 @@ export function createClaiming(host) {
 
   function commit(run, { gen, grants, absent, own }) {
     const { P, taskId, round } = run;
-    // A round that is not committed after all gives the locks it was granted back.
     const drop = (reason) => {
       for (const grant of grants) unlock(P, grant.by, { taskId, round: round.round });
       standDown(run, reason);
     };
-    // The word on slots may have changed, or gone stale, while the round ran.
+    // The slot count may have changed, or gone stale, while the round ran.
     if (!run.own && took() >= slots()) return drop('no slot left');
-    // This host's own offer of the task, when it has one, is the claim's by its own word.
+    // This host's own offer, if any, joins the claim on its own word.
     const mine = own ? host.offers.nextGen(taskId, host.self) : null;
     if (mine === null && !grants.some((grant) => grant.offer)) return drop('no host gives it its offer');
     const claim = buildClaim(host.id, {
@@ -275,14 +259,14 @@ export function createClaiming(host) {
     }
   }
 
-  /// Gives up every round in a pool. Nothing is signed for it.
+  /// Gives up every round in a pool, signing nothing.
   function closing(P) {
     for (const run of [...rounds.values()]) {
       if (run.P === P) drive(run, () => run.round.abort('closed'));
     }
   }
 
-  /// Gives up every round, saying nothing: the host is stopping.
+  /// Drops every round silently: the host is stopping.
   function stop() {
     for (const timer of waiting.values()) host.clock.clearTimeout(timer);
     for (const run of rounds.values()) host.clock.clearTimeout(run.timer);

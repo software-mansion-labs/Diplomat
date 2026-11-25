@@ -1,11 +1,6 @@
-// Three days in the life of a pool: members stay members by signing their records again,
-// what ended stays ended, and a host cut off for longer than a record lives brings
-// nothing back with it.
-
 import assert from 'node:assert/strict';
 
-// Three days of a sync every minute would be most of this suite's time; every ten
-// minutes shows the same thing.
+// A sync every ten minutes, not every one, keeps three virtual days cheap.
 process.env.DN_SYNC_INTERVAL_MS ??= '600000';
 const { POOL, check, createWorld } = await import('./lib/hosts.mjs');
 const { PEER_QUIET_MS, PUSH_REPEAT_MS, RECORD_RETENTION_SECS, RESIGN_INTERVAL_MS } = await import('../src/paths.js');
@@ -19,11 +14,10 @@ await check('over three days every member signs its record again and again, and 
   const [req, exe, idle, away] = all;
   const done = await req.node.offer(offerArgs('pr-1'));
   const dropped = await req.node.offer(offerArgs('pr-2'));
-  // A third task nobody takes stays offered for as long as its host is there to sign for it.
+  // Nobody takes pr-4; it stays offered while its host signs it again.
   for (const h of all) h.executor.takes = (task) => task.item !== 'pr-4';
   const kept = await req.node.offer(offerArgs('pr-4'));
   await w.agreed(all, 30 * 60 * 1000);
-  // One host loses the network while both tasks are open, and keeps what it knew.
   w.net.split(['req', 'exe', 'idle'], ['away']);
   await w.net.until(() => exe.executor.jobOf(done.taskId), { maxMs: 30 * 60 * 1000, what: 'a job' });
   exe.executor.end(exe.executor.jobOf(done.taskId).runId);
@@ -45,7 +39,7 @@ await check('over three days every member signs its record again and again, and 
     for (const h of [req, exe, idle]) never(h);
     assert.ok(w.net.now() - offered().at <= 2 * RESIGN_INTERVAL_MS / 1000, `the open offer was last signed ${(w.net.now() - offered().at) / HOUR} h ago`);
     if (hour === 30) {
-      // Back after thirty hours: its open offers of both tasks are older than a record lives.
+      // After 30 h, what `away` holds of both tasks is older than RECORD_RETENTION_SECS.
       assert.equal(w.members(req).length, 3, 'a host silent for a day is no member until it signs again');
       w.net.heal();
       away.slots = 1;
@@ -64,13 +58,11 @@ await check('over three days every member signs its record again and again, and 
   assert.deepEqual(w.view(req).tasks.map((t) => t.taskId), [kept.taskId], 'the ended tasks are gone from the pool, not back in it');
   assert.deepEqual(req.node.snapshot().offers.map((o) => o.taskId), [kept.taskId], 'and from the list of offers, a day after they ended');
   assert.deepEqual(all.map((h) => w.task(h, kept.taskId).state), ['available', 'available', 'available', 'available'], 'the open one is as open as on its first day');
-  // The pool is as alive as on its first day.
   const fresh = await req.node.offer(offerArgs('pr-3'));
   await w.net.until(() => [exe, away].some((h) => h.executor.jobOf(fresh.taskId)), { maxMs: 30 * 60 * 1000, what: 'a job for a task offered on the fourth day' });
 });
 
-// A pool of the hosts `names`, the first of them `a`, and `pushed(to, since)`: how many
-// milliseconds after `since` each push of `a` to that host left.
+// `pushed(to, since)`: the ms after `since` at which each push of `a` to `to` left.
 async function pushing(seed, names) {
   const w = createWorld({ seed });
   const all = await w.pool(names);
@@ -86,7 +78,7 @@ const [SECOND, THIRD, FOURTH] = PUSH_REPEAT_MS.map((_, i) => PUSH_REPEAT_MS.slic
 await check('a host pushes its own offer again to a member that has not said it holds it - after 2 s, 5 s more and 15 s more - and then leaves it to the sync', async () => {
   assert.deepEqual(PUSH_REPEAT_MS, [2000, 5000, 15000]);
   {
-    // One member hears nothing of this host, the other answers the first push.
+    // b hears nothing of `a`; c answers the first push.
     const { w, all: [a, b], pushed } = await pushing(105, ['a', 'b', 'c']);
     w.net.cut('a', 'b');
     const since = w.net.ms();
@@ -108,9 +100,8 @@ await check('a host pushes its own offer again to a member that has not said it 
     assert.deepEqual(pushed('b', since), [0, SECOND, 3000 + SECOND, 3000 + THIRD, 3000 + FOURTH]);
   }
   {
-    // A link that takes a second and a half each way, and a second offer before the
-    // first push is acknowledged: that acknowledgement is for the first offer alone.
-    // The second goes out when its turn comes, and again two seconds after it was made.
+    // 1.5 s each way, and a second offer before the first push is acknowledged: that ack
+    // covers the first offer alone, so the second goes out at its turn and SECOND after it was made.
     const { w, all: [a, b], pushed } = await pushing(113, ['a', 'b']);
     Object.assign(w.net.faults, { minMs: 1500, maxMs: 1500 });
     const since = w.net.ms();
@@ -121,7 +112,7 @@ await check('a host pushes its own offer again to a member that has not said it 
     assert.deepEqual([pushed('b', since), Boolean(w.task(b, taskId))], [[0, 3000, 1200 + SECOND], true]);
   }
   {
-    // The host leaves the pool a second after its offer: it says so once, and pushes no more.
+    // Leaving a second after its offer, it says so once and pushes no more.
     const { w, all: [a], pushed } = await pushing(111, ['a', 'b']);
     w.net.cut('a', 'b');
     const since = w.net.ms();
@@ -133,7 +124,7 @@ await check('a host pushes its own offer again to a member that has not said it 
     assert.deepEqual(pushed('b', since), [0, 1000]);
   }
   {
-    // The first push is lost on the way, and nothing after it.
+    // Only the first push is lost.
     const { w, all: [a, b], pushed } = await pushing(106, ['a', 'b']);
     w.net.faults.drop = 1;
     const since = w.net.ms();
@@ -144,8 +135,8 @@ await check('a host pushes its own offer again to a member that has not said it 
     assert.ok(w.task(b, taskId), 'the member holds the offer two seconds on, not a sync later');
     await w.run(40);
     assert.deepEqual(pushed('b', since), [0, SECOND], 'what was acknowledged is pushed no more');
-    // An offer that ends is told the same way. Its first push waits its turn behind the
-    // push that was lost, which is still unanswered: the one after goes out beside it.
+    // An ended offer is pushed the same way; its first push waits behind the lost, still
+    // unanswered one, so the next goes out beside it.
     const ended = w.net.ms();
     await a.node.withdraw({ taskId, reason: 'not wanted' });
     await w.run(2.5);
@@ -174,8 +165,7 @@ await check('a member that shows by its own sync that it holds what this host ho
     assert.deepEqual(pushed('b', since), [0]);
   }
   {
-    // The member asks while it holds another state than this host: that says nothing of
-    // what it holds, and the push goes out again.
+    // A sync from a member holding another state says nothing of what it holds, so the push repeats.
     const { w, all: [a, b], pushed } = await pushing(112, ['a', 'b']);
     w.net.cut('a', 'b');
     await b.node.offer(offerArgs('pr-2'));
@@ -189,8 +179,8 @@ await check('a member that shows by its own sync that it holds what this host ho
     assert.deepEqual([pushed('b', since), Boolean(w.task(b, taskId))], [[0, SECOND], true]);
   }
   {
-    // A member that is down refuses at once, and is left alone for five seconds, then
-    // ten: the push that falls into that time is not sent.
+    // A member that is down refuses at once and is left alone 5 s, then 10 s; a push due
+    // meanwhile is not sent.
     const { w, all: [a], pushed } = await pushing(108, ['a', 'b']);
     w.net.kill('b');
     const since = w.net.ms();
@@ -199,8 +189,7 @@ await check('a member that shows by its own sync that it holds what this host ho
     assert.deepEqual(pushed('b', since), [0, SECOND, FOURTH]);
   }
   {
-    // A member asleep for longer than this host takes to call one quiet gets the one
-    // push every member gets.
+    // A member asleep past PEER_QUIET_MS still gets the one push every member gets.
     const { w, all: [a], pushed } = await pushing(109, ['a', 'b', 'c']);
     w.net.sleep('c');
     let asked = 0;
@@ -208,7 +197,7 @@ await check('a member that shows by its own sync that it holds what this host ho
       if (from === 'a' && to === 'c') asked = w.net.ms();
     });
     await w.run(PEER_QUIET_MS / 1000 + 600);
-    // No request to it is on its way, and the time this host leaves it alone is over.
+    // Until nothing to it is in flight and its back-off is over.
     await w.net.until(() => w.net.ms() - asked > 5 * 60 * 1000, { maxMs: 3600 * 1000, what: 'five minutes in which the sleeper is not asked' });
     const since = w.net.ms();
     await a.node.offer(offerArgs('pr-1'));

@@ -1,7 +1,3 @@
-// Claiming: what a member answers a lock with, what a claimant does with each answer,
-// what makes a committed claim hold for every host, and which claim holds a host's offer.
-// Run: node test/core-claims.mjs
-
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { b64u, unb64u } from '../src/core/canon.js';
@@ -23,7 +19,7 @@ function check(name, fn) {
 const TASK = `${POOL}#review:pr-578@octocat`;
 const HASH = b64u(Buffer.alloc(32, 7));
 
-// Three hosts, the first offering the task. `hosts[i].id.pk` is in no particular order.
+// The first offers the task. `hosts[i].id.pk` is in no particular order.
 function trio(now = T0) {
   const hosts = club(3, now);
   hosts.forEach((h) => h.pool.merge(offer(hosts[0].id), now));
@@ -38,7 +34,7 @@ const resign = (id, claim, over) => {
   const { sig: _, ...fields } = { ...claim, ...over };
   return signRecord(id, fields);
 };
-// The executors of two hosts, better-ranked first.
+// Better-ranked first.
 const ranked = (a, b) => (outranks(TASK, a.id.pk, b.id.pk) ? [a, b] : [b, a]);
 
 check('rank is the hash the protocol writes down, and lower wins', () => {
@@ -130,7 +126,7 @@ check('a host backs a claim only with an offer that is free and whose hours the 
   assert.deepEqual(at(n).offer, { at: T0 + 10, gen: 1, hours: 12 });
   assert.equal(at(x).offer, undefined, 'the executor of that claim is a member like any other');
   assert.equal(m.pool.task(TASK, T0 + 10).offers.find((o) => o.host === m.id.pk).claim, claim);
-  // A host that will not give its offer - it has none open behind the record - backs nothing.
+  // A host that will not give its offer (`nextGen` null) backs nothing.
   const unwilling = new LockTable().answer({
     pool: n.pool, identity: n.id, from: y.id.pk, body: lockBody(n.pool, { asOf: T0 + 10, round: roundId(2) }), now: T0 + 10, nextGen: () => null,
   }).body.grant;
@@ -614,8 +610,8 @@ check('any set of versions of a claim has one that wins, whatever order they mee
 });
 
 check('an offer is held by the claim its host gave it to last, between two it gave the same by the better-ranked executor, and by no claim its host did not back', () => {
-  // Two sides of a partition each claim the task without the other's member, and the
-  // host that offers it counts the same for both.
+  // Two sides of a partition each claim the task without the other's member; the offering
+  // host gives both the same `gen`.
   const hosts = trio();
   const [m, p, q] = hosts;
   const [best, worst] = ranked(p, q);
@@ -638,7 +634,7 @@ check('an offer is held by the claim its host gave it to last, between two it ga
   assert.ok(compareBacked(m.id.pk, losing, winning) > 0);
 
   // The worse-ranked claim ends; the host gives its offer again, and that claim holds it
-  // over the other one, which is still held.
+  // over the other, still held, one.
   const pool = clone(m.pool);
   const ended = endClaim(worst.id, losing, 'released', T0 + 10);
   pool.merge(ended, T0 + 10);
@@ -654,14 +650,13 @@ check('an offer is held by the claim its host gave it to last, between two it ga
     assert.ok(compareBacked(m.id.pk, next, winning) < 0, 'whatever the ranks');
   }
 
-  // That claim ends too: the offer is free, and the claim it was given to before, held
-  // still, does not take it back.
+  // That claim ends too: the offer is free, and the still-held earlier claim does not take it back.
   const over = clone(m.pool);
   over.merge([winning, next, endClaim(worst.id, next, 'released', T0 + 13)], T0 + 13);
   assert.deepEqual([over.task(TASK, T0 + 13).state, over.task(TASK, T0 + 13).free, over.get(keyOf(winning)).state], ['available', [m.id.pk], 'held']);
 
-  // A member that offers the task too backs a claim of its own, at whatever numbers it
-  // likes: that claim holds its own offer and nothing of the other host's.
+  // A member that offers the task too backs its own claim at whatever numbers it likes:
+  // that claim holds its own offer and nothing of the other host's.
   const fresh = clone(m.pool);
   const own = { at: T0 + 20, gen: 2 ** 40, hours: 12 };
   const selfMade = buildClaim(worst.id, { pool: POOL, taskId: TASK, round: roundId(6), gen: 2 ** 40, grants: [], absent: [m.id.pk, best.id.pk].sort(), offer: own, now: T0 + 20 });

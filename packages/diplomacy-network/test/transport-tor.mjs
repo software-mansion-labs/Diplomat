@@ -1,11 +1,6 @@
-// The transport over tor: two hosts that reach each other through their onion services,
-// and what the transport does with a tor that stalls, dies, lies or is left behind.
-//
 // Runs against test/lib/fake-tor.mjs. `DN_TEST_TOR=real` runs the end-to-end cases on the
-// real `tor` binary and the Tor network instead (minutes, not seconds) and skips the
-// cases only the stand-in can stage. `DN_TEST_TOR_SEED=<dir>` keeps tor's cached
-// directory documents there between real runs, which saves the first host a cold
-// bootstrap.
+// real tor and Tor network (minutes) and skips the staged ones; `DN_TEST_TOR_SEED=<dir>`
+// keeps tor's cached directory there between real runs, sparing a cold bootstrap.
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -63,7 +58,6 @@ async function check(name, fn) {
   console.log(`PASS ${name}`);
 }
 
-// A case only the stand-in can stage.
 async function staged(name, fn) {
   if (REAL) console.log(`SKIP ${name} (staged by the stand-in tor only)`);
   else await check(name, fn);
@@ -86,7 +80,7 @@ async function until(probe, ms, what) {
   }
 }
 
-// A mutated transport hangs where a correct one answers; a test must fail then, not wait.
+// A broken transport hangs where a correct one answers; fail instead of waiting.
 function within(ms, promise, what) {
   let timer;
   const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} took over ${ms} ms`)), ms); });
@@ -111,9 +105,8 @@ function host(name, { tune, identity = generateIdentity() } = {}) {
   return h;
 }
 
-// Starts a host with the stand-in told to stage `stage`, and returns once tor is spawned
-// (the stage is read then, and the host reports bootstrapping after). The start itself
-// may never settle; its promise is `h.starting`.
+// Returns once tor is spawned, which is when the stand-in reads `stage`. The start may
+// never settle; its promise is `h.starting`.
 async function begin(h, stage = '') {
   process.env.FAKE_TOR_STAGE = stage;
   h.starting = h.t.start();
@@ -122,8 +115,7 @@ async function begin(h, stage = '') {
   delete process.env.FAKE_TOR_STAGE;
 }
 
-// A real tor with an empty data directory downloads the whole network directory first;
-// one that finds another's cached copy is up in seconds.
+// Another real tor's cached directory spares a full download.
 function seed(from, to) {
   if (!fs.existsSync(from)) return;
   fs.mkdirSync(to, { recursive: true });
@@ -140,9 +132,8 @@ async function started(name, { stage, tune, seedFrom } = {}) {
   return h;
 }
 
-// A request that is repeated until the peer answers. Over the real network a service
-// published a moment ago is unreachable at first, and each failure must be one of the
-// two answers the node is told to expect.
+// A fresh onion service is unreachable at first over the real network; each failure must
+// still be one the node expects.
 async function reach(from, to, body, budgetMs) {
   const deadline = Date.now() + budgetMs;
   for (let attempt = 1; ; attempt++) {
@@ -160,8 +151,7 @@ async function reach(from, to, body, budgetMs) {
   }
 }
 
-// A separate process that starts a transport on `dir` and then idles, as a daemon would:
-// what it prints first is "started" or "failed <why>".
+// A daemon-like process: prints "started" or "failed <why>" first, then idles.
 const DAEMON = `
   import { createTransport } from ${JSON.stringify(INDEX)};
   import { generateIdentity } from ${JSON.stringify(new URL('../src/core/identity.js', import.meta.url).href)};
@@ -353,7 +343,7 @@ try {
     await begin(dying, 'die-slowly');
     await assert.rejects(dying.starting, /^Error: tor exited \(code 1\): The stand-in was told to die here\.$/);
     assert.match(dying.t.state().detail, /^tor exited \(code 1\)/);
-    // The connection of a tor that is gone closes after it: nothing waits on that.
+    // Its control connection closes after the exit; nothing may wait on that.
     await sleep(100);
     assert.equal(timers(), before, 'no timer is left of a tor that exited');
 
@@ -367,7 +357,6 @@ try {
   await staged('a tor that cannot be run fails the start', async () => {
     const child = daemon(path.join(tmp, 'nobin'), { DN_TOR: path.join(tmp, 'no-such-tor') });
     assert.match(await child.said(), /^failed cannot run .*no-such-tor: it is not installed where this machine's tools are looked for \(DN_TOR names it by hand\)/);
-    // Nothing of the failed start holds that process open.
     await until(() => child.exitCode !== null, 3000, 'the daemon exiting by itself');
   });
 
@@ -532,7 +521,7 @@ try {
     fs.writeFileSync(path.join(dir, 'control.port'), 'PORT=127.0.0.1:1\n');
     fs.writeFileSync(path.join(dir, 'control_auth_cookie'), Buffer.alloc(32));
     fs.writeFileSync(path.join(dir, 'lock'), '999999');
-    // A pid file naming a live process that is no tor of this directory: this test.
+    // A live pid that is no tor of this directory: this test's own.
     fs.writeFileSync(path.join(dir, 'tor.pid'), String(process.pid));
     const h = await started('stale');
     assert.notEqual(h.torPid(), process.pid);
@@ -561,8 +550,8 @@ try {
   cleanup();
 }
 
-// Every transport is stopped: a timer, socket or child any of them left would keep this
-// process alive, and the watchdog below says so instead of letting the run hang.
+// A timer, socket or child a stopped transport left would keep the process alive; fail
+// instead of hanging.
 setTimeout(() => {
   console.error('FAIL something a stopped transport left keeps the event loop alive:', process.getActiveResourcesInfo());
   process.exit(1);

@@ -1,25 +1,21 @@
 // What a host keeps across restarts, as JSON documents under one directory:
 //
 //   identity.json           { seed }
-//   heard.json              { ts }: the latest date of a request this host served
-//   heard/<pool hash>.json  { heard, waitedOut, online, met }: when another host of that pool was last heard, the last such time whose silence this host waited out, how long it ran there with its transport up, and the members it heard from themselves
-//   asks/<pool hash>.json   { back, former }: the hosts of that pool it asks besides the members it holds, and the members it met whose records ran out, each with when it is next asked whether it is still there and the member that seated it
-//   peers.json              { silent }: the peers this host asks in vain, and has for long, and since when
+//   heard.json              { ts }: the latest request this host served
+//   heard/<pool hash>.json  { heard, waitedOut, online, met }: when another host of the pool was last heard, the last such time whose silence it waited out, how long it ran there with its transport up, the members it heard from themselves
+//   asks/<pool hash>.json   { back, former }: the hosts it asks besides the members it holds, and met members whose records ran out, each with its next ask and the member that seated it
+//   peers.json              { silent }: peers long asked in vain, and since when
 //   pools/<pool hash>.json  one pool: its link, this host's own sequence numbers, its records
-//   pools/<pool hash>.log   what changed in that pool since its document was written
-//   locks.json              the lock table of every pool
-//   keys.json               the keys this host issued and the keys it holds, secrets included
-//   offers.json             the private half of every offer: the prompt, the counters, the outcome
-//   runs.json               the runs, and the tasks this host will not take again
+//   pools/<pool hash>.log   changes since that document was written
+//   locks.json              every pool's lock table
+//   keys.json               keys issued and held, secrets included
+//   offers.json             each offer's private half: prompt, counters, outcome
+//   runs.json               runs, and tasks this host will not take again
 //
-// A document is written whole, to a temporary file renamed into place, readable by its
-// owner only. Nothing reaches the disk before `flush`: the node changes documents as
-// often as it likes and flushes once before anything it does can be seen from outside.
-// A pool's document is as large as its pool, and a change of one record is written as a
-// line after it: the first line of the log names the document it follows, by its hash,
-// and each line after that is one change. The document is written whole again, and the
-// log removed, once the lines have grown as long as the document was, and no shorter
-// than LOG_FLOOR_BYTES.
+// Nothing reaches disk before `flush`, which the node calls before anything it did can be
+// seen from outside. A pool's log starts with the hash of the document it follows, then
+// one change per line; the document is rewritten whole and the log removed once the log
+// is as long as the document, and no shorter than LOG_FLOOR_BYTES.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -32,22 +28,16 @@ const LOG_FLOOR_BYTES = 64 * 2 ** 10;
 // A pool id holds slashes, its hash does not.
 const poolHash = (id) => crypto.createHash('sha256').update(id, 'utf8').digest('hex').slice(0, 32);
 
-/// The file name of a pool's document.
 export const poolFile = (id) => `pools/${poolHash(id)}`;
 
-/// The file name of when this host was last heard in a pool: apart from the pool's
-/// document, so that a word heard does not have the document written whole.
+/// Apart from the pool's document, so a word heard does not rewrite it whole.
 export const heardFile = (id) => `heard/${poolHash(id)}`;
 
-/// The file name of the hosts this host asks in a pool besides its members: apart from
-/// the pool's document, so that it is written only when they change.
+/// Apart from the pool's document, so it is written only when the asks change.
 export const asksFile = (id) => `asks/${poolHash(id)}`;
 
-/// The directory `dir` as a store's disk:
-/// `{ read(name), write(name, text), remove(name), aside(name), append(name, text), appended(name), cut(name) }`,
-/// names without their `.json`. `read` answers null for a file that is not there. The
-/// last three are the log of a document: text added to its end, all of it or null, and
-/// its removal.
+/// Names omit `.json`; `read` answers null for a missing file. `append`, `appended` and
+/// `cut` are a document's log: add to its end, all of it or null, remove it.
 export function fileDisk(dir) {
   const file = (name) => path.join(dir, `${name}.json`);
   const logFile = (name) => path.join(dir, `${name}.log`);
@@ -66,7 +56,7 @@ export function fileDisk(dir) {
       const bytes = Buffer.from(added, 'utf8');
       const fd = fs.openSync(logFile(name), 'a', 0o600);
       try {
-        // A write may take less than it was given, and say so only by its count.
+        // writeSync may write short.
         for (let at = 0; at < bytes.length;) {
           const n = fs.writeSync(fd, bytes, at, bytes.length - at);
           if (n <= 0) throw new Error(`${name}.log took no more of a line`);
@@ -95,7 +85,7 @@ export function fileDisk(dir) {
   };
 }
 
-/// A disk held in memory, for tests that restart a host thousands of times.
+/// For tests that restart a host thousands of times.
 export function memoryDisk() {
   const files = new Map();
   const logs = new Map();
@@ -116,27 +106,22 @@ export function memoryDisk() {
   };
 }
 
-// A document rests on the ones before it here - a run on the key it holds, a key and a
-// lock on a pool's records - and is written after them, so a host that dies between two
-// writes of one flush finds nothing that rests on what never reached the disk.
+// A document rests on the ones before it (a run on its key, a key and a lock on a pool's
+// records) and is flushed after them, so a crash mid-flush leaves nothing resting on what
+// never reached disk.
 const ORDER = ['identity', 'heard', 'asks', 'peers', 'links', 'pools', 'locks', 'keys', 'offers', 'runs'];
 const rank = (name) => ORDER.indexOf(name.split('/')[0]);
 
-/// The store over `dir` (or over `disk`): `{ read(name), lines(name), write(name, value, { line }), remove(name), flush() }`.
-/// `read` answers the stored value or null; a document that does not parse is moved
-/// aside, logged, and read as null. `write` only remembers the value: `flush` writes
-/// every value remembered since the last one, each file replaced atomically, in the
-/// order the documents rest on one another. A write may give the `line` that says all
-/// the value differs by from the one written before: where nothing else was written of
-/// the document since, the flush adds the line to the document's log in place of
-/// writing the document, and `lines` answers the lines that follow the document as it
-/// is on disk.
+/// A document that does not parse is moved aside, logged and read as null. `write` only
+/// remembers: `flush` writes it, atomically, in ORDER. A write's `line` is all the value
+/// differs by from the one before: if nothing else of the document was written since,
+/// flush appends it to the log instead. `lines` answers the log lines after the document
+/// on disk.
 export function createStore({ dir, disk = fileDisk(dir), log = () => {} }) {
-  // name -> { value, lines }: the value to write, undefined to remove the file, and the
-  // lines that say as much, or null when only the whole document does.
+  // name -> { value, lines }: undefined value removes the file; null lines: write it whole.
   const dirty = new Map();
   // name -> { tag, room, begun }: a document this store wrote whole, what its log may
-  // still grow by, and whether the log has its first line.
+  // still grow by, whether the log has its first line.
   const logs = new Map();
   const tagOf = (text) => crypto.createHash('sha256').update(text, 'utf8').digest('hex');
 
@@ -155,10 +140,9 @@ export function createStore({ dir, disk = fileDisk(dir), log = () => {} }) {
     lines(name) {
       const [text, added] = dirty.has(name) ? [null, null] : [disk.read(name), disk.appended(name)];
       if (text === null || added === null) return [];
-      // A log that follows another document was left by a host that died between the
-      // write of this one and the log's removal. What comes after the last line feed is
-      // a line the host died writing. Each line rests on the ones before it: the lines
-      // after one that does not parse are not taken in.
+      // A log following another document is from a host that died between writing this one
+      // and removing the log. Text after the last line feed is a line it died writing. Each
+      // line rests on those before, so reading stops at the first that does not parse.
       const [tag, ...lines] = added.split('\n').slice(0, -1);
       if (tag !== tagOf(text)) return [];
       const read = [];
@@ -184,7 +168,7 @@ export function createStore({ dir, disk = fileDisk(dir), log = () => {} }) {
       for (const [name, held] of [...dirty].sort(([a], [b]) => rank(a) - rank(b))) {
         const kept = logs.get(name);
         const added = held.lines?.map((line) => `${JSON.stringify(line)}\n`).join('');
-        // Whatever fails from here on, the document is written whole the next time: an
+        // Any failure from here on leaves the document to be written whole next time: an
         // append may have written half a line.
         logs.delete(name);
         held.lines = null;
@@ -197,7 +181,7 @@ export function createStore({ dir, disk = fileDisk(dir), log = () => {} }) {
         } else {
           const text = `${JSON.stringify(held.value)}\n`;
           disk.write(name, text);
-          // A log may be there from a life of the host before this one.
+          // A log may be left from an earlier life of the host.
           if (kept?.begun !== false) disk.cut(name);
           logs.set(name, { tag: tagOf(text), room: Math.max(text.length, LOG_FLOOR_BYTES), begun: false });
         }
@@ -207,9 +191,8 @@ export function createStore({ dir, disk = fileDisk(dir), log = () => {} }) {
   };
 }
 
-/// A pool's document as `store` holds it, the lines of its log taken in: each line is
-/// `{ seq, put, drop }`, the host's sequence number, the records taken in and the keys
-/// of the records dropped. Null when the store holds none.
+/// The document with its log applied. A line is `{ seq, put, drop }`: the host's sequence
+/// number, records put, keys of records dropped.
 export function readPool(store, id) {
   const doc = store.read(poolFile(id));
   const lines = store.lines(poolFile(id));

@@ -1,13 +1,5 @@
-// Five to seven hosts and a seeded run of everything that can happen to them at once:
-// offers, runs that finish, fail or vanish, requests under keys, withdrawals, restarts,
-// hosts that leave the pool and come back, hosts switched off, machines that sleep
-// while another offers what they offer, a member that answers nobody, pushes records no
-// host may take, makes members of keys of its own in every way it can think of, offers
-// what the others offer and says a run of its own did their job, asks for locks dated
-// ahead and for places it sends no body to, a key nobody knows, hosts off the network,
-// cuts, lost and repeated requests, and hours passing. After
-// every step what must always hold is checked; at the end the network is mended and
-// everything offered must have ended, on every host alike.
+// Seeded soak of 5-7 hosts and a hostile node-less member: `look()` checks what must always
+// hold after every step, and once the network is mended every offer must end on every host.
 //
 //   DN_SOAK_SEEDS  how many seeds to run (default 4)     DN_SOAK_STEPS  steps per seed (default 120)
 //   DN_SOAK_SEED   the first seed (default 1); a failure prints the seed to run again
@@ -38,39 +30,35 @@ async function soak(seed) {
   const names = Array.from({ length: 5 + dice.int(3) }, (_, i) => `h${i + 1}`);
   const all = await w.pool(names, Object.fromEntries(names.map((name, i) => [name, { slots: i < 2 ? 1 + dice.int(2) : dice.int(3) }])));
   const tally = { steps: 0, offers: 0, acts: {}, jobs: 0, restarts: 0, left: 0, slept: 0, hostile: 0, rival: 0, resent: 0 };
-  // A member with no node behind it, let in by the first host: every round counts it
-  // absent. What it pushes is signed by it: records no host may take, keys of its own in
-  // the seats it has to give, and offers of what the others offer, with claims of its
-  // own behind them, which are its to make and nothing to any other offer.
+  // No node behind it, so every round counts it absent.
   const evil = await w.intruder('evil', all[0]);
   const evilJoined = w.net.now();
   const { voucher } = evil.member;
   let evilSeq = 0;
   const evilRecord = (now) => memberRecord(evil.id, { pool: POOL, seq: evilSeq += 1, at: Math.max(now, voucher.at), era: 0, maxAcceptedH: 12, voucher });
-  const puppets = []; // the keys it gave a seat of its own
-  const tickets = new WeakMap(); // a node -> when it gave the member with no node a place for a large body
+  const puppets = [];
+  const tickets = new WeakMap(); // node (not host: a restart is a new one) -> when it gave evil a large-body place
   const trail = [];
   const broken = [];
   const atOnce = new Set(); // tasks offered to run at once, which take no slot
-  const given = new Map(); // "host|task|at|gen" -> the "executor|round" that host gave that offer to
-  const claimed = new Set(); // "task|executor" of every claim a host held
-  const rival = new Map(); // taskId -> { createdAt, seq, state, hours } of the offer the member with no node made of it
-  const handed = new Map(); // taskId -> the digest of a job a host was handed for it
-  const elsewhere = new Set(); // "host|task|offeredAt" of every offer that ended by a run for another host's offer
-  const boasted = new Set(); // taskId of every job the member with no node said a run of its own did
-  const performed = new Map(); // "path body" of a write -> how often a requester carried it out
-  const sendings = []; // { keyId, met } of every `act` sent: what its sender was told of it
-  const secrets = new Map(); // "requester|task|round" -> secret
-  const holders = new Map(); // keyId -> the one host seen holding it
-  const used = new Map(); // "keyId|seq" -> the mac of the act request sent under it
-  const last = new Map(); // "requester|keyId" -> the highest seq its store has held
+  const given = new Map();
+  const claimed = new Set();
+  const rival = new Map();
+  const handed = new Map();
+  const elsewhere = new Set();
+  const boasted = new Set(); // tasks evil said its own run did
+  const performed = new Map();
+  const sendings = [];
+  const secrets = new Map();
+  const holders = new Map();
+  const used = new Map();
+  const last = new Map();
   let items = 0;
 
   w.net.tap(({ from, kind, body }) => {
     if (kind !== 'act') return undefined;
     const { keyId, seq, mac } = JSON.parse(body.toString('utf8')).body;
-    // A request refused before anything was done for it goes out again as it is: a
-    // number is never given to another request.
+    // A seq may go out again with the same mac, never with another request.
     if ((used.get(`${keyId}|${seq}`) ?? mac) !== mac) broken.push(`${from} sent two requests as number ${seq} under one key`);
     tally.resent += used.has(`${keyId}|${seq}`) ? 1 : 0;
     used.set(`${keyId}|${seq}`, mac);
@@ -92,25 +80,24 @@ async function soak(seed) {
     };
   }
 
-  // A machine asleep stands still: nothing is asked of its node, and no job of its ends.
+  // An asleep machine stands still: nothing is asked of its node, and no job of its ends.
   const awake = (h) => !h.transport.host.asleep;
   const jobs = (h) => [...h.executor.jobs.values()].filter((job) => job.alive).map((job) => job.args);
   const everyJob = () => all.filter(awake).flatMap((h) => jobs(h).map((job) => ({ h, job })));
   const openOffers = () => all.flatMap((h) => h.node.snapshot().offers.filter((o) => !ENDED.includes(o.state)).map((o) => ({ h, o })));
   const away = () => all.filter((h) => awake(h) && w.view(h).left);
   const here = () => all.filter((h) => awake(h) && !w.view(h).left);
-  // The job every offer of an item is for: the hosts offer it in the same words.
+  // Every host offers an item in the same words, so twin offers are one job.
   const offerOf = (item, now = false) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p', now });
 
-  // What holds at every moment, whatever the network does.
   function look() {
     assert.deepEqual(broken, []);
     for (const h of all) {
       assert.deepEqual(h.log.filter((line) => /step failed|could not be served/.test(line)), [], `${h.name} threw`);
       const taking = jobs(h).filter((job) => !atOnce.has(job.task.taskId)).length;
       assert.ok(taking <= h.slots, `${h.name} runs ${taking} jobs on ${h.slots} slots`);
-      // Whoever had a seat has it: no record of another member's making takes it away.
-      // The member with no node has the seats it was given to give, and no more.
+      // No record of another member's making takes a seat away, and evil seats only the keys
+      // it may.
       if (!w.view(h).left) {
         const seated = w.records(h).filter((r) => r.type === 'member');
         for (const g of [...all, evil]) assert.ok(seated.some((r) => r.pk === g.pk), `${h.name} holds no seat for ${g.name}`);
@@ -121,7 +108,7 @@ async function soak(seed) {
       for (const record of w.records(h)) {
         if (record.type !== 'claim') continue;
         claimed.add(`${record.taskId}|${record.executor}`);
-        // A host gives an offer to one claim at a time, each time as the next number.
+        // A host gives an offer to one claim at a time, each time as the next gen.
         for (const pk of backers(record).filter((by) => by !== evil.pk)) {
           const { at, gen } = backing(record, pk);
           const [id, to] = [`${pk}|${record.taskId}|${at}|${gen}`, `${record.executor}|${record.round}`];
@@ -129,9 +116,8 @@ async function soak(seed) {
           given.set(id, to);
         }
       }
-      // The member with no node is given no offer of another host. All it can do to one
-      // is say that a run for its own offer did the very job: that offer then ends
-      // unrun, and says whose word that was.
+      // evil is given no other host's offer; it can only say its own run did the job, which ends
+      // that offer unrun (ELSEWHERE), backed by evil alone.
       for (const o of h.node.snapshot().offers) {
         assert.ok(o.state !== 'done' || o.outcome?.ok === true, `${o.item} is done without an outcome`);
         const done = o.state === 'done' && o.outcome.summary === ELSEWHERE;
@@ -140,7 +126,7 @@ async function soak(seed) {
           assert.ok(done && boasted.has(o.taskId), `${h.name} gave ${o.item} to a machine that never asked for it`);
           assert.deepEqual(o.backedBy, [evil.pk], `${h.name} names other hosts behind a run only its machine speaks of`);
         } else if (done) {
-          // The run of a host that is there was given an offer by every host it names.
+          // Every host named behind the run gave it its offer.
           const gave = (pk) => [...given].some(([id, to]) => id.startsWith(`${pk}|${o.taskId}|`) && to.startsWith(`${o.executor}|`));
           assert.ok(o.backedBy.length > 0 && o.backedBy.every(gave), `${h.name} ended ${o.item} by a run of ${w.name(o.executor)} that ${o.backedBy.filter((pk) => !gave(pk)).map(w.name)} gave no offer to`);
         }
@@ -173,13 +159,12 @@ async function soak(seed) {
       tally.acts[answer.status] = (tally.acts[answer.status] ?? 0) + 1;
       if (![200, 403, 502, 503, 504].includes(answer.status)) broken.push(`an act answered ${answer.status}`);
       if (answer.status === 200 && !claimed.has(`${taskId}|${h.pk}`)) broken.push(`${h.name} was served for ${taskId} without a claim of it anywhere`);
-      // A write is carried out once at most: once when the job is told it was, never
-      // when the job is told it was not.
+      // A write is carried out at most once: exactly once if told 200, never if told 503.
       const times = performed.get(`${request.path} ${request.body}`) ?? 0;
       if (write && (times > 1 || (answer.status === 200 && times !== 1) || (answer.status === 503 && times !== 0))) {
         broken.push(`${h.name} was told ${answer.status} of a write carried out ${times} times`);
       }
-      // Told each time that nothing was done for it, a request is not left in doubt.
+      // A request told 'unserved' on every send must not end in doubt (504).
       const mine = sendings.slice(from).filter((s) => s.keyId === keyId);
       if (answer.status === 504 && mine.length > 0 && mine.every((s) => s.met === 'unserved')) {
         broken.push(`${h.name} left in doubt a request its requester did nothing for`);
@@ -206,8 +191,8 @@ async function soak(seed) {
       return one ? `${one.h.name} ${one.job.task.item}` : 'no job';
     }],
     [4, 'act after a restart', async () => {
-      // The host a job has its key from starts again having served a request dated
-      // later than now: what the job sends next is dated before that start.
+      // The job's key host restarts having served a request dated ahead, so the job's next act
+      // is dated before that start.
       const one = pick(everyJob());
       const from = one && all.find((x) => x.pk === w.stored(one.h, 'keys')?.held?.[one.job.task.taskId]?.host);
       if (!from || from === one.h || !awake(from)) return 'no job with a key from another host that is awake';
@@ -260,8 +245,7 @@ async function soak(seed) {
       return h?.name ?? 'nobody is away';
     }],
     [5, 'sleep', async () => {
-      // More often than not another machine offers what the one that goes to sleep
-      // offers: the machines of one operator find the same work.
+      // Often another machine offers the sleeper's work too, as one operator's machines would.
       const up = all.filter(awake);
       if (up.length <= all.length - 2) return 'two are asleep';
       const h = pick(up);
@@ -296,9 +280,6 @@ async function soak(seed) {
       await say('hello', { member });
       const resigned = (fields) => ({ ...fields, sig: sign(evil.id, 'dn1/rec', fields) });
       const { sig: _, ...mine } = member;
-      // Members of its own making: a key under the voucher that names its own, under an
-      // invite, in a seat it has not got, under a voucher of a membership it never had,
-      // under one dated after the record, and under a key that has a seat of its own.
       const puppet = w.stranger('puppet');
       const made = (fields) => {
         const record = { type: 'member', pool: POOL, pk: puppet.pk, seq: 0, at: now, era: 0, maxAcceptedH: 12, left: false, ...fields };
@@ -313,7 +294,6 @@ async function soak(seed) {
         made({ voucher: seatOf(evil.id, { at: now + 1 }) }), made({ voucher: seatOf(w.stranger('nobody').id) }),
         made({ voucher: seatOf(puppet.id) }),
       ];
-      // A claim of a task its maker offers nothing of, and the claim of another, released.
       const held = pick(w.records(h).filter((r) => r.type === 'claim' && r.executor !== evil.pk && !rival.has(r.taskId)));
       if (held) {
         const { sig: __, ...theirs } = held;
@@ -326,7 +306,6 @@ async function soak(seed) {
         );
       }
       const record = pick(junk);
-      // One time in five the bytes are not the canonical form of the request either.
       const respelled = dice.chance(0.2);
       const answer = await say('push', { records: [record] }, respelled ? { bytes: (sent) => Buffer.concat([sent, Buffer.from(' ')]) } : {});
       if (answer.ok && answer.body.accepted.length > 0) broken.push(`${h.name} took a record no host may take: ${JSON.stringify(record).slice(0, 300)}`);
@@ -335,10 +314,6 @@ async function soak(seed) {
       return `${h.name} ${answer.ok ? `refused it: ${answer.body.refused[0]?.code}` : answer.code ?? answer.response?.error?.code}`;
     }],
     [6, 'grasp', async () => {
-      // The member with no node asks a host for its lock on a task, as of a time up to
-      // 300 s ahead, and gives it back; takes a place for a large body and sends none;
-      // and a key nobody knows asks with no work done, of this pool and of one that is
-      // nobody's.
       const h = pick(all);
       const now = w.net.now();
       const say = (from, kind, body, options) => w.request(from, h, kind, body, { effort: 128, ...options }).catch(() => ({ ok: false, code: 'no answer' }));
@@ -353,8 +328,7 @@ async function soak(seed) {
         if (grant) await say(evil, 'unlock', { taskId: one.o.taskId, round });
         said.push(grant ? `a lock${grant.offer ? ' with the offer' : ''}` : `no lock: ${lock.code}`);
       }
-      // A key that leaves its tickets unused gets fewer all the time, however often it
-      // asks: 7 in the first hour.
+      // A key that leaves its tickets unused gets fewer all the time, however often it asks.
       const { node } = h;
       if (!tickets.has(node)) tickets.set(node, []);
       for (let n = 0; n < 6 && h.node === node; n += 1) {
@@ -364,7 +338,7 @@ async function soak(seed) {
       const recent = tickets.get(node).filter((at) => at > w.net.now() - 3600).length;
       if (recent > 8) broken.push(`${h.name} gave the member with no node ${recent} places in an hour, none of them used`);
       said.push(`${recent} places this hour`);
-      // What a request that is not authenticated is told says nothing of the pools linked.
+      // An unauthenticated request's answer must not reveal which pools are linked.
       const nobody = w.stranger('nobody');
       const asked = { asOf: now, hash: w.view(all[0]).hash };
       const here = await say(nobody, 'sync', asked, { effort: 1 });
@@ -376,9 +350,7 @@ async function soak(seed) {
       return `${h.name}: ${said.join(', ')}`;
     }],
     [4, 'puppet', async () => {
-      // The member with no node gives a seat of its own to a key of its making, and tries
-      // a seat under that key for another: the first is its to give, whoever held it
-      // before, and the second is nobody's.
+      // evil may give a seat of its own to a key, whoever held it before; that key may seat nobody.
       const h = pick(all);
       const now = w.net.now();
       const say = (kind, body) => w.request(evil, h, kind, body, { effort: 128 }).catch(() => ({ ok: false, code: 'no answer' }));
@@ -393,9 +365,6 @@ async function soak(seed) {
       return `${h.name} ${answer.ok ? `took ${answer.body.accepted.length}` : answer.code}`;
     }],
     [6, 'rival', async () => {
-      // The member with no node offers what another host offers, for any hours, backs a
-      // claim of its own with that offer as any number, and signs the offer done or
-      // cancelled.
       const one = pick(openOffers());
       if (!one) return 'no offer';
       const now = w.net.now();
@@ -414,7 +383,6 @@ async function soak(seed) {
         pool: POOL, taskId, round: 'AAAAAAAAAAA', gen: pick([0, 1, LIMITS.time]), grants: [], absent: [], now, offer: { at: mine.createdAt, gen, hours: mine.hours },
       });
       const member = evilRecord(now);
-      // One time in two it says its run did the very job the others offer.
       const job = specDigest({ taskId, kind: 'review', item, title: `Review ${item}`, identity: taskId.slice(taskId.lastIndexOf('@') + 1), prompt: 'p', options: {} });
       assert.equal(handed.get(taskId) ?? job, job, 'the job it names is the one the others hand out');
       const ran = dice.chance(0.5);
@@ -463,8 +431,6 @@ async function soak(seed) {
       look();
     }
 
-    // The network is whole again, every machine is awake and has room: everything offered
-    // comes to an end.
     w.net.heal();
     Object.assign(w.net.faults, { drop: 0, duplicate: 0 });
     for (const h of all) {
@@ -473,8 +439,7 @@ async function soak(seed) {
       h.slots = Math.max(h.slots, 2);
       if (w.view(h).left) await h.node.join({ pool: POOL });
     }
-    // The member with no node takes back what it still offers, and says once more how its
-    // other offers ended: nobody may have heard it the first time.
+    // evil cancels what it still offers and repeats how the rest ended: nobody may have heard.
     for (const [taskId, mine] of rival) {
       const now = w.net.now();
       const [, item] = /:(.*)@/.exec(taskId);
@@ -483,7 +448,7 @@ async function soak(seed) {
         minRequiredH: mine.hours, createdAt: mine.createdAt, state: mine.state === 'open' ? 'cancelled' : mine.state,
       });
       const member = evilRecord(now);
-      // Every host is told: one that has only just joined again may not take its word yet.
+      // Tell every host: one that has only just joined again may not take its word yet.
       for (const h of all) {
         const say = (kind, body) => w.request(evil, h, kind, body, { effort: 128 }).catch(() => ({ ok: false }));
         await say('hello', { member });
@@ -491,8 +456,7 @@ async function soak(seed) {
       }
     }
     trail.push(`${w.net.now()} mended`);
-    // A job that ended is not over while its machine holds the claim: it may still be
-    // telling how the run went.
+    // A job that ended is not over while its machine holds the claim: it may still be reporting.
     const claiming = () => all.some((h) => w.records(h).some((r) => r.type === 'claim' && r.executor === h.pk && isActive(r, w.net.now())));
     const settled = () => openOffers().length === 0 && everyJob().length === 0 && !claiming()
       && new Set(all.map((h) => w.view(h).hash)).size === 1;

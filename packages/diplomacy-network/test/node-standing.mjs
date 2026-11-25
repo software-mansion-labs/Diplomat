@@ -1,6 +1,4 @@
-// What gives a claim standing (PROTOCOL.md section 7), tried by a member that means harm
-// against the host that offers a task and against a bystander alike; what a round does
-// with a member it cannot agree with; and how long a host waits before it goes for a task.
+// Claim standing (PROTOCOL.md section 7) against a member that means harm.
 
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
@@ -18,7 +16,7 @@ const verdict = (answer) => [answer.body.accepted, answer.body.refused.map((r) =
 const failures = (hosts) => hosts.flatMap((h) => h.log.filter((line) => /failed|could not be served/.test(line)));
 const locksOf = (w, h) => Object.values(w.stored(h, 'locks') ?? {}).flat().map(([taskId]) => taskId);
 const claimKey = (taskId, by) => `claim/${taskId}/${by.pk}`;
-// What names the job of an offer a host made, as that host works it out.
+// The spec digest of `h`'s own offer, from its private half.
 function jobOf(w, h, taskId) {
   const { kind, item, title, identity, prompt, options } = w.stored(h, 'offers')[taskId];
   return specDigest({ taskId, kind, item, title, identity, prompt, options });
@@ -54,7 +52,7 @@ await check('a member that offers a task another host offers too backs a claim o
   const { sig: _, offer: __, ...bare } = forged;
   const { sig: ___, ...released } = { ...held, seq: held.seq + 1, at: now, state: 'released' };
   for (const h of all) {
-    // While it offers nothing, nothing backs its claim; and no lock is to be had on a task no offer of which is free.
+    // With no offer of its own nothing backs its claim, and no offer is free to lock.
     assert.deepEqual(await push(h, forged), [[], ['no-offer']], h.name);
     assert.deepEqual(await push(h, { ...bare, sig: sign(evil.id, 'dn1/rec', bare) }), [[], ['bad-claim']], 'a claim that says nobody backs it');
     assert.deepEqual(await push(h, { ...released, sig: sign(evil.id, 'dn1/rec', released) }), [[], ['bad-signature']], 'the standing claim, released by another hand');
@@ -62,8 +60,7 @@ await check('a member that offers a task another host offers too backs a claim o
   }
   assert.match(said(await w.request(evil, req, 'done', { taskId, round: held.round, spec: w.spec(exe, taskId), outcome: OUTCOME })), /^denied/, 'nor is the outcome its to report');
 
-  // It offers the task itself. The host whose offer is claimed consents to its claim as
-  // any member does, and gives it nothing of its own offer.
+  // Once it offers too, every host grants it as any member, req giving nothing of its own offer.
   for (const h of all) assert.deepEqual(await push(h, mine({})), [[`offer/${taskId}/${evil.pk}`], []]);
   for (const h of all) {
     const { grant } = await lock(h);
@@ -82,7 +79,7 @@ await check('a member that offers a task another host offers too backs a claim o
   };
   stands();
 
-  // It signs its own offer done, then cancelled: that ends its own offer and no other.
+  // Its own done and cancelled end its own offer and no other.
   for (const [seq, state] of [[1, 'done'], [2, 'cancelled']]) {
     for (const h of all) assert.deepEqual(await push(h, mine({ seq, at: now + seq, state })), [[`offer/${taskId}/${evil.pk}`], []]);
     await w.run(60);
@@ -96,8 +93,7 @@ await check('a member that offers a task another host offers too backs a claim o
   assert.deepEqual([w.offerRow(req, taskId).outcome.summary, w.offerRow(req, taskId).attempt], ['all done', 1]);
   assert.deepEqual(failures(all), []);
 
-  // An offer of more hours than an honest host accepts, made first, keeps nobody from the
-  // other host's offer of the task.
+  // Its 720-hour offer, made first, keeps nobody from req's offer.
   const at = w.net.now();
   const second = taskId.replace('pr-1', 'pr-2');
   for (const h of all) await push(h, mine({ item: 'pr-2', at, createdAt: at }));
@@ -112,7 +108,7 @@ await check('a claim round that throws - before it began, on its timer, on an an
   const [req, exe, by] = all;
   free(exe);
   const broke = [];
-  // `hold` is what a host takes its own lock with, on the timer that begins a round.
+  // `hold` takes the host's own lock, on the timer that begins a round.
   for (const method of ['hold', 'tick', 'onSync', 'onLock', 'rebase']) {
     const { prototype } = method === 'hold' ? LockTable : ClaimRound;
     const real = prototype[method];
@@ -122,7 +118,7 @@ await check('a claim round that throws - before it began, on its timer, on an an
       thrown = true;
       throw new TypeError(`${method} broke`);
     };
-    // A round that waits for a member is one whose timer comes due.
+    // `tick` fires only while a round waits for a member.
     if (method === 'tick') w.net.cut('exe', 'by');
     const { taskId } = await req.node.offer(offerArgs(`pr-${method.toLowerCase()}`));
     await w.net.until(() => thrown, { what: `${method} called` });
@@ -149,8 +145,7 @@ await check('what fails on a timer after it had waited for something ends nothin
       return fn();
     };
   };
-  // The round is told to look at its state again, which it does on a timer, after it
-  // waited; there the round breaks, and so does giving it up.
+  // A resync runs on a timer after the round waited; there `rebase` breaks, and so does `release`.
   let broken = false;
   once(ClaimRound.prototype, 'onSync', () => {
     once(ClaimRound.prototype, 'rebase', () => {
@@ -210,7 +205,7 @@ await check('the hours of a claim are those of the offers that back it: a host b
     assert.deepEqual(verdict(await w.request(evil, h, 'push', { records: [{ ...fields, sig: sign(evil.id, 'dn1/rec', fields) }] })), [[], ['bad-claim']], h.name);
     assert.equal(w.task(h, taskId).state, 'available');
   }
-  // For the hours it is backed for the claim holds, and its deadline is the offer's.
+  // Claiming the hours it is backed for holds, with the offer's deadline.
   assert.deepEqual(verdict(await w.request(evil, req, 'push', { records: [claim] })), [[claimKey(taskId, evil)], []]);
   const row = w.task(req, taskId);
   assert.deepEqual([row.executor, row.deadline - row.claimedAt], [evil.pk, 12 * 3600]);
@@ -231,8 +226,8 @@ await check('the hours of a claim are those of the offers that back it: a host b
   const ended = w.offerRow(req, idle.taskId);
   assert.deepEqual([ended.state, ended.executor, ended.executorHere], ['cancelled', '', false]);
 
-  // An offer keeps the executor that reported it done, also when its host first saw the
-  // claim after the run was over - and only for the job the offer is.
+  // An offer keeps the executor that reported it done, even when its host saw the claim only
+  // after the run - and only for its own job.
   const quick = await req.node.offer(offerArgs('pr-3'));
   await w.agreed(all);
   const at = w.net.now();
@@ -255,7 +250,6 @@ await check('an outcome reported for an offer that was withdrawn ends no later o
   free(exe);
   await w.net.until(() => exe.executor.jobOf(taskId), { what: 'the task run' });
   const first = w.claim(req, taskId);
-  // The executor hears nothing of what the requester does next.
   w.net.cut('req', 'exe');
   await req.node.withdraw({ taskId, reason: 'changed' });
   const again = await req.node.offer(offerArgs('pr-1'));
@@ -266,8 +260,6 @@ await check('an outcome reported for an offer that was withdrawn ends no later o
   const late = await w.request(exe, req, 'done', { taskId, round: first.round, spec: w.spec(exe, taskId), outcome: OUTCOME });
   assert.deepEqual([late.ok, late.body], [true, {}], 'heard, and no more');
   assert.deepEqual([w.offerRow(req, taskId).state, w.offerRow(req, taskId).outcome ?? null], ['pooled', null]);
-  // The executor learns that its claim holds no offer: it stops that run, gives the
-  // claim back and goes for the task as it is offered.
   await w.net.until(() => exe.executor.jobOf(taskId) && exe.executor.jobOf(taskId).runId !== old, { what: 'the task claimed for the offer made since' });
   assert.deepEqual(exe.executor.stopped, [{ runId: old, reason: 'the offer it ran for is no longer its claim\'s' }]);
   assert.deepEqual([w.offerRow(req, taskId).state, w.offerRow(req, taskId).outcome ?? null, w.net.count({ from: 'req', kind: 'ping' })], ['claimed', null, 0]);
@@ -284,7 +276,6 @@ await check('a claim a host made of its own task is no claim of an offer it made
   await w.net.until(() => req.executor.jobOf(taskId), { what: 'the task run by its own host' });
   await w.run(5);
   const old = req.executor.jobOf(taskId).runId;
-  // Withdrawn and offered again before the run has heard of either.
   await req.node.withdraw({ taskId, reason: 'changed' });
   await req.node.offer(mine('pr-1'));
   req.executor.end(old, { summary: 'the old work' });
@@ -350,7 +341,7 @@ await check('a host waits as long as its executor weighs a task before it goes f
   };
   const one = await taken('pr-1');
   assert.deepEqual([one.by, one.after < 15, weighed.includes(one.taskId)], ['fast', true, true]);
-  // The wait over, the task is no longer there to go for: no round is begun for it.
+  // After the wait the task is gone, so no round begins.
   await w.run(45);
   assert.deepEqual([w.net.count({ from: 'slow', kind: 'lock' }), slow.log.filter((line) => line.includes('stood down'))], [0, []]);
 
@@ -360,7 +351,7 @@ await check('a host waits as long as its executor weighs a task before it goes f
   slow.executor.end(slow.executor.jobOf(two.taskId).runId);
   await w.net.until(() => w.offerRow(req, two.taskId).state === 'done', { what: 'the offer done' });
 
-  // No wait is longer than a minute, and a task this host offered to run at once waits for nothing.
+  // Waits are capped at MAX_WEIGH_MS, and a task this host offered `now` waits for nothing.
   slow.wait = 3600 * 1000;
   const three = await taken('pr-3');
   assert.deepEqual([three.by, three.after >= 60, three.after < 80], ['slow', true, true], `after ${three.after} s`);
@@ -378,17 +369,17 @@ await check('a host that gave its offer to a claim holds the lock until it holds
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.agreed(all);
   const now = w.net.now();
-  // A member that offers the task too and runs it by a claim of its own.
+  // evil offers the task too and claims it with no grants yet.
   const offer = offerRecord(evil.id, {
     pool: POOL, kind: 'review', item: 'pr-1', identity: taskId.split('@')[1], seq: 0, at: now, title: 'Mine', minRequiredH: 12, createdAt: now, state: 'open',
   });
   const claim = buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, grants: [], absent: [by.pk, req.pk].sort(), now, offer: { at: now, gen: 1, hours: 12 } });
   for (const h of all) assert.deepEqual(verdict(await w.request(evil, h, 'push', { records: [offer, claim] })), [[`offer/${taskId}/${evil.pk}`, claimKey(taskId, evil)], []]);
   const lock = async (from, round) => (await w.request(from, req, 'lock', { taskId, round, asOf: w.net.now(), hash: w.view(req).hash }, { effort: 4096 })).body;
-  // It asks the other host for its offer, for the claim it holds.
+  // It asks req to give its offer to that claim.
   const { grant } = await lock(evil, ROUND);
   assert.deepEqual([grant.offer.gen, grant.offer.hours, locksOf(w, req)], [1, 12, [taskId]]);
-  // The pool moves on, and the claim that round made is there without the grant.
+  // The pool moves on while the claim still lacks req's grant.
   await req.node.offer(offerArgs('pr-2'));
   await w.run(5);
   assert.deepEqual(locksOf(w, req), [taskId]);

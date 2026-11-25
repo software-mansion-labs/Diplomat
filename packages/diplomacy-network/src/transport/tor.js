@@ -1,14 +1,10 @@
-// The transport over Tor. One `tor` process belongs to the daemon: it is started here,
-// told over its control port to serve this host's onion service (whose key is the host
-// key), asked for a SOCKS connection per peer, started again when it dies, and ended with
-// the transport.
+// One `tor` per daemon, serving this host's onion service (whose key is the host key),
+// started again when it dies and ended with the transport.
 //
-// What the network makes slow is never treated as a failure here. Bootstrap takes as long
-// as it takes. The first connection to a peer takes seconds when every circuit tor builds
-// for it comes up and minutes when one hangs, since a tor that has yet to learn how long a
-// circuit takes gives each a hundred seconds. A dial tor cannot complete is `unreachable`
-// or `timeout`, an answer like any other, and tor carries on with the same circuits for
-// the dial after it.
+// Network slowness is never a failure here. Bootstrap takes as long as it takes. A first
+// connection to a peer takes minutes when a circuit hangs, since a tor that has yet to
+// learn how long a circuit takes gives each a hundred seconds. A dial tor cannot complete
+// is `unreachable` or `timeout`, an answer like any other.
 
 import { execFileSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
@@ -18,16 +14,16 @@ import { torSecretKey } from '../core/identity.js';
 import { TOR_BIN } from '../paths.js';
 import { fail } from './http.js';
 
-/// The tunables of the tor transport, each overridable through a transport's `tune` option.
+/// Each overridable through a transport's `tune` option.
 export const TOR_TUNING = {
-  // How long one SOCKS connection attempt may take; tor's own limit is two minutes.
+  // One SOCKS connection attempt; tor's own limit is two minutes.
   dialTimeoutMs: 60 * 1000,
   // Publishing counts as ready after this long with no upload confirmed: tor does not
   // always report one, and the service may be reachable all the same.
   publishGraceMs: 120 * 1000,
   // From SIGTERM to SIGKILL.
   stopGraceMs: 10 * 1000,
-  // The wait before a tor that died is started again, doubling per failed start.
+  // Before a dead tor is started again, doubling per failed start.
   restartMinMs: 2000,
   restartMaxMs: 60 * 1000,
   // How long a tor whose control connection closed is given to exit before the
@@ -81,11 +77,9 @@ function pump(stream, onLine) {
   });
 }
 
-// A control connection: `send(command, read)` resolves with the reply's lines or rejects
-// with tor's refusal, every asynchronous event goes to `onEvent`, and `onClose` hears the
-// connection end, whether or not anything was being asked on it. `read` gets the reply's
-// lines in order with the events; whoever awaits the reply runs after every event read
-// with it.
+// `send(command, read)` resolves with the reply's lines or rejects with tor's refusal.
+// `read` gets the lines in order with the events, so whoever awaits the reply runs after
+// every event read with it. `onClose` hears the end whether or not anything was asked.
 function openControl(port, onEvent, onClose) {
   return new Promise((resolve, reject) => {
     const socket = net.connect({ host: '127.0.0.1', port });
@@ -129,7 +123,6 @@ function openControl(port, onEvent, onClose) {
   });
 }
 
-/// The tor half of a transport: `{ start(port), dial(onion), stop() }`.
 export function torDriver({ identity, address, dir, log, tune, setState }) {
   const t = { ...TOR_TUNING, ...tune };
   const serviceId = address.slice(0, -'.onion'.length);
@@ -141,16 +134,16 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
   };
   const dialing = new Set(); // sockets in their SOCKS handshake
   let localPort = 0;
-  let run = null; // the tor process of the moment
+  let run = null; // the current tor
   let abortLaunch = null;
   let stopping = false;
   let publishTimer = null;
   let restartTimer = null;
   let restartDelay = t.restartMinMs;
 
-  // The tor a run of this daemon that died left behind, when it is still there. tor ends
-  // with its owner, but only once it has been told who that is and has looked; until
-  // then it holds the data directory's lock and a second tor refuses to start.
+  // The tor a dead run of this daemon left behind. tor ends with its owner only once told
+  // who that is and has looked; until then it holds the data directory's lock and a second
+  // tor refuses to start.
   function orphan() {
     let pid;
     try { pid = Number(fs.readFileSync(files.pid, 'utf8')); } catch { return 0; }
@@ -172,8 +165,8 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
     clearTimeout(kill);
   }
 
-  // Starts tor and brings it to the point where the onion service is added. Rejects when
-  // tor exits on the way, refuses a command, or the transport stops; tor is gone by then.
+  // Up to the onion service being added. Rejects, with tor gone, when tor exits on the
+  // way, refuses a command, or the transport stops.
   async function launch() {
     if (stopping) throw fail('stopped', 'the transport stopped');
     setState('starting', 'launching tor');
@@ -219,8 +212,8 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
       'ClientOnly 1',
       'AvoidDiskWrites 1',
       'Log notice stdout',
-      // tor checks on this pid and exits once it is gone, so a daemon that is killed
-      // leaves no tor behind even before it has taken ownership over the control port.
+      // tor exits once this pid is gone, so a killed daemon leaves no tor even before
+      // TAKEOWNERSHIP.
       `__OwningControllerProcess ${process.pid}`,
       '',
     ].join('\n'));
@@ -318,8 +311,8 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
         `ADD_ONION ${torSecretKey(identity)} Flags=DiscardPK Port=80,127.0.0.1:${localPort}`,
       ));
       const published = /ServiceID=(\S+)/.exec(added.join('\n'))?.[1];
-      // The address is what peers derive from the public key; a service under any other
-      // one would be a host nobody can reach while it believes it is up.
+      // Peers derive the address from the public key; under any other the host would be
+      // unreachable while believing it is up.
       if (published !== serviceId) throw new Error(`tor published ${published}.onion, which is not this host's ${address}`);
       tor.launched = true;
       setState('publishing', 'waiting for the descriptor upload');
@@ -331,8 +324,7 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
       // line ran.
       if (uploaded) confirmed();
     } catch (err) {
-      // The close of a dying tor's connection can be seen before its exit, which says
-      // why: the launch is cancelled for the one or the other, and that is the reason.
+      // A dying tor's control close can be seen before its exit, which says why.
       const why = err.message === CONTROL_LOST ? await aborted.catch((seen) => seen) : err;
       await end(tor);
       throw why;
@@ -354,23 +346,21 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
   }
 
   return {
-    /// Resolves with the onion service added to a bootstrapped tor. Rejects when tor
-    /// cannot be brought there; once it has resolved, a tor that dies is started again.
+    /// Once it has resolved, a tor that dies is started again.
     async start(port) {
       localPort = port;
       await launch();
     },
 
-    /// A connection to `onion`'s port 80 through tor. A SOCKS username of its own gives
-    /// every peer its own circuits. That tor reports the connection made says nothing
-    /// yet: a circuit can die before a byte crosses it, so only an answer is a success.
+    /// The onion is also the SOCKS username, giving every peer its own circuits. A
+    /// connection tor reports made says nothing yet: a circuit can die before a byte
+    /// crosses it, so only an answer is a success.
     dial(onion) {
       return new Promise((resolve, reject) => {
         const tor = run;
         if (!tor?.launched) return reject(fail('unreachable', 'tor is not running'));
         const socket = net.connect({ host: '127.0.0.1', port: tor.socksPort });
         dialing.add(socket);
-        // The onion address is both the host to connect to and the SOCKS username.
         const name = Buffer.from(onion);
         const password = Buffer.from('dn1');
         let buffered = Buffer.alloc(0);
@@ -426,7 +416,6 @@ export function torDriver({ identity, address, dir, log, tune, setState }) {
       });
     },
 
-    /// Ends tor: SIGTERM, then SIGKILL after the grace. Resolves once it has exited.
     async stop() {
       stopping = true;
       clearTimeout(restartTimer);

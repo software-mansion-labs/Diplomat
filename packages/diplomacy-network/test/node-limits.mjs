@@ -1,7 +1,3 @@
-// What a host does for whom, and how much of it: whom it dials and works for, what it
-// pays a peer, how many members a pool holds and how much one member may put in it, which
-// bytes are a request, and what a host keeps across a death in the middle of a write.
-
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { forgeRequest } from './lib/fakes.mjs';
@@ -21,8 +17,8 @@ const failures = (hosts) => hosts.flatMap((h) => h.log.filter((line) => /failed|
 const sum = (list) => list.reduce((total, n) => total + n, 0);
 const refused = (answer) => [answer.ok, answer.code, answer.detail];
 
-// Makes a member without a node answer: `respond(request)` is `{ body }` or `{ error }`,
-// with the `effort` it asks for next, or raw bytes to send as they are.
+// Answers for a node-less member: `respond(request)` returns `{ body }` or `{ error }`, with
+// the `effort` it asks for next, or a Buffer sent as it is.
 function answering(member, respond) {
   member.transport.onRequest(async (bytes) => {
     const request = JSON.parse(bytes.toString('utf8'));
@@ -35,14 +31,13 @@ function answering(member, respond) {
 await check('a host that left a pool tells the members it left, and dials, pushes to and solves for nobody else; an outsider is told one thing whatever the pool', async () => {
   const w = createWorld({ seed: 71 });
   const [a, b, c] = await w.pool(['a', 'b', 'c']);
-  // One member does not hear that the host leaves.
   w.net.split(['a', 'b'], ['c']);
   a.node.leave({ pool: POOL });
   await w.net.until(() => w.members(b).length === 2, { what: 'the member that hears it' });
   const mallory = w.stranger('mallory');
   const to = [];
   w.net.tap(({ from, to: name, kind }) => from === 'a' && to.push(`${kind} ${name}`));
-  // Whatever the stranger is sent it would answer with a demand for the most work there is.
+  // Bait: anything sent to mallory would be answered with a demand for the most work.
   answering(mallory, () => ({ error: { code: 'effort', detail: '' }, effort: MOST }));
   const solved = a.solved.length;
   const asked = async (host, pool) => refused(await w.request(mallory, host, 'sync', { asOf: w.net.now(), hash: w.view(b).hash }, { effort: POW.strangerBase * 4, pool }));
@@ -55,9 +50,8 @@ await check('a host that left a pool tells the members it left, and dials, pushe
   assert.deepEqual(await asked(b, 'github.com/acme/never-linked'), [false, 'not-member', '']);
   assert.deepEqual([to, a.solved.length - solved], [[], 0], 'the stranger is sent nothing, and nothing is solved for it');
 
-  // The member that did not hear asks, and is sent the farewell: once, however often it
-  // asks - and a second time when the member, which by then no longer takes the host for
-  // one, wants a stranger's price for it.
+  // c is sent the farewell once however often it asks, and once more when c, no longer
+  // taking a for a member, wants a stranger's price for it.
   w.net.heal();
   for (let i = 0; i < 3; i += 1) assert.deepEqual(refused(await w.request(c, a, 'sync', { asOf: w.net.now(), hash: w.view(c).hash }, { effort: POW.strangerBase * 8 })), [false, 'not-member', '']);
   await w.net.until(() => w.members(c).length === 2, { what: 'the member that missed it hearing it' });
@@ -68,7 +62,6 @@ await check('a host that left a pool tells the members it left, and dials, pushe
 await check('a host whose repository is unlinked pays the keys it left out of the search\'s eighth of its hour, sends nothing to them again for more work, tells each of them it left once a day at most, and nothing once a month is over, however often they ask', async () => {
   const w = createWorld({ seed: 73 });
   const [a, b] = await w.pool(['a', 'b']);
-  // Members of the pool until b leaves; from then on they ask the most work for anything.
   let hostile = false;
   const xs = [];
   for (let i = 0; i < 4; i += 1) {
@@ -88,7 +81,7 @@ await check('a host whose repository is unlinked pays the keys it left out of th
   const left = w.net.now();
   b.node.setPools([]);
   hostile = true;
-  // Each of them asks b about the pool every 10 minutes, for the most work it is asked.
+  // Every 10 minutes each asks b, paying whatever b demands.
   const ask = async (x) => {
     let effort = POW.strangerBase;
     for (let i = 0; i < 8; i += 1) {
@@ -103,7 +96,7 @@ await check('a host whose repository is unlinked pays the keys it left out of th
   }
   const hour = Math.max(...paid.map(([at]) => sum(paid.filter(([t]) => t >= at && t < at + 3600).map(([, e]) => e))));
   assert.ok(hour <= POW_HOURLY.search, `${hour / HOURLY_ALL} of an hour's work paid them in an hour`);
-  // The push as it left, and no more than one a day later.
+  // One push on leaving, then at most one a day.
   const pushes = () => xs.map((x) => (sent.get(x.name) ?? []).map(([at, kind]) => [at - left, kind]));
   assert.deepEqual(pushes().map((list) => [list[0][0] < 60, list.length <= 2, list.every(([at, kind], i) => kind === 'push' && (i === 0 || at >= 24 * 3600))]), xs.map(() => [true, true, true]), JSON.stringify(pushes()));
   const before = pushes().flat().length;
@@ -119,8 +112,7 @@ await check('a host whose repository is unlinked pays the keys it left out of th
 await check('the push of a host leaving its pool, to members that last asked it the most work, takes no more than the search\'s eighth of its hour', async () => {
   const w = createWorld({ seed: 74 });
   const [a, b] = await w.pool(['a', 'b']);
-  // Members that answer each host's first request after `pricey` with the most work, and
-  // that host nothing from then on.
+  // Once `pricey`, each demands the most work of a sender once, then never answers it again.
   let pricey = false;
   const xs = [];
   for (let i = 0; i < 4; i += 1) {
@@ -138,7 +130,7 @@ await check('the push of a host leaving its pool, to members that last asked it 
   await w.run(3600);
   pricey = true;
   await w.run(600);
-  // Offline for longer than an hour, b keeps the price and has paid nobody since.
+  // Offline over an hour: b keeps the price and has paid nobody since.
   b.transport.host.ready = false;
   await w.run(2 * 3600);
   b.transport.host.ready = true;
@@ -161,13 +153,11 @@ await check('a host pays a peer no more than an honest target can ask, asks no m
     got.push({ ms: w.net.ms(), effort: request.pow.effort });
     return { error: { code: 'effort', detail: '' }, effort: demand };
   });
-  // Asked for more than any honest target asks, the host does not send the request again, and never pays more than the most.
   await w.run(600);
   assert.ok(got.length >= 3, 'the peer was asked');
   assert.equal(Math.max(...a.solved), MOST, 'paid the most an honest target asks, and no more');
   assert.equal(got.findIndex((g, i) => i > 0 && g.ms - got[i - 1].ms < 1000), -1, 'what it was refused it did not send again at once');
 
-  // Asked for the most every time, it pays it until what it does for one peer in an hour is done.
   demand = MOST;
   await w.run(3600);
   const paid = [];
@@ -186,7 +176,6 @@ await check('a host works for all its peers together no more in an hour than it 
   const w = createWorld({ seed: 75 });
   const [a, b] = await w.pool(['a', 'b']);
   await w.run(3700);
-  // Twelve keys in a's seats, each asking the most for every request.
   const { all, records } = w.crowd(a, 12, 1);
   for (const m of all) answering(m, () => ({ error: { code: 'effort', detail: '' }, effort: MOST }));
   assert.deepEqual((await w.request(b, a, 'push', { records }, { effort: POW.memberBase * 4 })).body.refused, []);
@@ -200,7 +189,6 @@ await check('a host works for all its peers together no more in an hour than it 
     assert.ok(w.net.count({ from: 'a', to: 'b', kind: 'sync', since }) >= 30, 'the member it knows is asked through the hour');
   }
   assert.deepEqual(paid.map((n) => n <= HOURLY_ALL + HOURLY_FLOOR && n > HOURLY_ALL - MOST), [true, true], `paid ${paid} an hour, of ${HOURLY_ALL}`);
-  // Its own round does not wait on the keys it cannot pay: they are absent, and b is asked.
   const since = w.net.now();
   const { taskId } = await a.node.offer({ ...offerArgs('pr-1'), now: true });
   await w.net.until(() => a.executor.jobOf(taskId), { what: 'its own task claimed' });
@@ -212,7 +200,7 @@ await check('a host works for all its peers together no more in an hour than it 
 await check('a host pays the hosts it asks that it holds no member record of out of the work it does for all its peers: past it, none of them is paid', async () => {
   const w = createWorld({ seed: 77 });
   const [a, b] = await w.pool(['a', 'b']);
-  // Each asks for twice what it was paid, a price inside the floor of a member known for an hour.
+  // Each asks twice what it was paid, a price inside the floor of a member known for an hour.
   const keys = Array.from({ length: 200 }, (_, i) => w.stranger(`k${i}`)).map((s) => {
     answering(s, (request) => ({ error: { code: 'effort', detail: '' }, effort: request.pow.effort * 2 }));
     return s.pk;
@@ -225,7 +213,7 @@ await check('a host pays the hosts it asks that it holds no member record of out
     if (from === 'a') paid.push([w.net.now(), JSON.parse(body.toString('utf8')).pow.effort]);
   });
   await w.run(4 * 3600);
-  // b is the one member a has known for an hour.
+  // b is the one member a has known for an hour, hence the floor.
   const hour = Math.max(...paid.map(([at]) => sum(paid.filter(([t]) => t >= at && t < at + 3600).map(([, e]) => e))));
   assert.ok(hour <= HOURLY_ALL + HOURLY_FLOOR, `paid ${hour} in an hour, of ${HOURLY_ALL}`);
 });
@@ -234,7 +222,7 @@ await check('a member that asks for more work whatever it is paid stops a round 
   const w = createWorld({ seed: 76 });
   const [a, b] = await w.pool(['a', 'b']);
   const { all, records } = w.crowd(a, 2, 1);
-  // They ask for a little more than they were paid, each time: members that are there, and do not grant.
+  // Until `most`, each asks a little more than it was paid: present, but never granting.
   let most = false;
   for (const m of all) answering(m, (request) => ({ error: { code: 'effort', detail: '' }, effort: most ? MOST : request.pow.effort + POW.memberBase }));
   assert.deepEqual((await w.request(b, a, 'push', { records }, { effort: POW.memberBase * 4 })).body.refused, []);
@@ -259,8 +247,8 @@ await check('a pool holds 241 members, 15 under each of the first 16: the next h
   const push = async (pushed) => (await w.request(evil, a, 'push', { records: pushed }, { effort: POW.memberBase * 4 })).body;
   for (let i = 1; i < records.length; i += 32) assert.deepEqual((await push(records.slice(i, i + 32))).refused, []);
   assert.equal(w.members(a).length, LIMITS.members);
-  // Nobody is seated beside them: not under a member two vouchers from the first, and
-  // not in a seat that is held, by a voucher older than its holder's.
+  // No seat under a member two vouchers from the first, nor in a held seat by a voucher older
+  // than its holder's.
   const puppet = (by, seat, at) => {
     const id = w.stranger('puppet');
     return memberRecord(id.id, { pool: POOL, seq: 0, at: now, era: 0, maxAcceptedH: 12, voucher: createVoucher(by, { pool: POOL, era: 0, pk: id.pk, seat, at }) });
@@ -271,7 +259,7 @@ await check('a pool holds 241 members, 15 under each of the first 16: the next h
   assert.deepEqual(refused(await w.request(late, a, 'hello', { member: lates }, { effort: POW.strangerBase * 4 })), [false, 'denied', 'no-seat']);
   assert.equal(w.members(a).length, LIMITS.members);
   assert.throws(() => a.node.invite({ pool: POOL }), /Every one of the 15 machines this one may invite/);
-  // Everyone but this host is absent, and the claim that says so is one a record can hold.
+  // A claim naming 240 absent members still fits a record.
   const { taskId } = await a.node.offer({ ...offerArgs('pr-1'), now: true });
   await w.net.until(() => a.executor.jobOf(taskId), { what: 'its own task claimed' });
   assert.equal(w.claim(a, taskId).absent.length, LIMITS.members - 1);
@@ -291,7 +279,6 @@ await check('one member has 64 offers live in a pool, the same ones on every hos
   const push = async (to, records) => {
     for (let i = 0; i < records.length; i += 50) await w.request(evil, to, 'push', { records: records.slice(i, i + 50) }, { effort: POW.memberBase * 4 });
   };
-  // Each host hears of them in another order.
   await push(a, offers);
   await push(b, offers.toReversed());
   const held = (h) => w.records(h).filter((r) => r.type === 'offer' && r.host === evil.pk).map((r) => r.item).sort();
@@ -306,7 +293,6 @@ await check('one member has 64 offers live in a pool, the same ones on every hos
   await assert.rejects(a.node.offer(offerArgs('pr-one-more')), /as many offers and claims in the pool .* as one member may/);
   await w.agreed(all);
   assert.equal(w.view(b).tasks.length, 2 * LIMITS.offers);
-  // One that ends makes room.
   await a.node.withdraw({ taskId: w.offerRow(a, a.node.snapshot().offers[0].taskId).taskId, reason: 'done with' });
   await w.run(1);
   assert.deepEqual(failures(all), []);
@@ -343,7 +329,6 @@ await check("a member's push costs a host's disk the length of what it brought: 
   await push(Array.from({ length: 60 }, (_, i) => offerRecord(evil.id, {
     pool: POOL, kind: 'review', item: `pr-${i}`, identity: 'octocat', seq: 0, at: now, title: 'x'.repeat(300), minRequiredH: 12, createdAt: now,
   })));
-  // It signs its member record again and again: each version is one short line.
   Object.assign(did, { whole: 0, wholeBytes: 0, lines: 0, lineBytes: 0, others: new Set() });
   const versions = 400;
   for (let seq = 1; seq <= versions; seq += 1) await push([memberRecord(evil.id, { ...evil.member, seq, at: now })]);
@@ -354,12 +339,11 @@ await check("a member's push costs a host's disk the length of what it brought: 
   assert.ok(did.whole >= 2 && did.whole <= did.lineBytes / 2 ** 16 + 1, `whole ${did.whole} times for ${did.lineBytes} bytes of lines: once for every 64 KiB of them`);
   assert.deepEqual([...did.others].filter((name) => name !== 'heard'), [], 'and no other document of the host is written for it');
 
-  // A hello that brings nothing the host does not hold writes nothing of the pool.
   const before = did.lines + did.whole;
   const hello = await w.request(evil, h, 'hello', { member: memberRecord(evil.id, { ...evil.member, seq: versions, at: now }) }, { effort: MOST });
   assert.deepEqual([hello.ok, did.lines + did.whole], [true, before]);
 
-  // Killed the moment the last push was answered, it starts with nobody to ask.
+  // Killed the moment the last push was answered, with a down too: h restarts from its disk alone.
   const held = w.view(h);
   w.net.kill('a');
   w.net.kill('h');
@@ -368,7 +352,7 @@ await check("a member's push costs a host's disk the length of what it brought: 
   assert.deepEqual([w.view(h).hash, w.view(h).tasks.length, w.members(h)], [held.hash, 60, held.members.map((m) => m.pk).sort()]);
   assert.equal(w.records(h).find((r) => r.type === 'member' && r.pk === evil.pk).seq, versions);
   assert.equal(did.lines + did.whole, written, 'and writes nothing of a pool it holds as its store does');
-  // A day on, what the store holds has run out: its first change writes the document without it.
+  // A day on, the records have run out: the first change writes the document without them.
   w.net.kill('h');
   await w.run(25 * 3600);
   await w.restart(h);
@@ -404,7 +388,7 @@ await check('a claim that would not fit beside what its host has in the pool is 
   await w.net.until(() => a.transport.host.ready, { what: 'its transport' });
   const evil = await w.intruder('evil', a);
   const now = w.net.now();
-  // 200 members that never answer: every claim of the host lists them all as absent.
+  // 200 silent members: every claim lists them all as absent.
   const puppets = w.crowd(a, 200, 1).records;
   for (let i = 0; i < puppets.length; i += 40) await w.request(evil, a, 'push', { records: puppets.slice(i, i + 40) }, { effort: POW.memberBase * 4 });
   assert.equal(w.members(a).length, 202);
@@ -453,8 +437,7 @@ await check('only the canonical bytes of a request are a request, and only the c
     assert.equal(answer.response.error?.code, 'bad-request', what);
   }
 
-  // A member that answers in another spelling has not answered.
-  // What was refused counts against strangers for a minute.
+  // The refusals above count against strangers for a minute.
   await w.run(61);
   const loose = await w.intruder('loose', a);
   answering(loose, (request) => Buffer.from(JSON.stringify(buildResponse(loose.id, {
@@ -494,7 +477,6 @@ await check('what a host served before it went down it does not serve after: the
   assert.equal((await w.request(b, a, 'sync', body(), { ts: first.request.ts })).code, 'busy', 'nor another request of that second');
   await w.run(2);
   assert.equal((await w.request(b, a, 'sync', body())).ok, true, 'a request made since is served');
-  // What is on disk is the latest date served, in whatever order the requests came.
   await w.run(10);
   const latest = w.net.now();
   assert.equal((await w.request(b, a, 'sync', body(), { ts: latest })).ok, true);
@@ -506,12 +488,12 @@ await check('what a host served before it went down it does not serve after: the
   await w.agreed([a, b]);
   assert.equal(w.view(a).members.find((m) => m.pk === b.pk).reachable, true);
 
-  // A node that is told so sends its request again, once and soon - an `act` too, under
-  // the number it had: what was dated before the start was not carried out.
+  // A node told so resends once and soon - an `act` under the same seq, since it was not
+  // carried out.
   b.slots = 1;
   b.node.admit({ slots: 1 });
   await w.net.until(() => b.executor.jobOf(taskId), { what: 'the job' });
-  // The host goes down in the second of the last request it served, and is back within it.
+  // a restarts within the second of the last request it served.
   const downAt = async () => {
     await w.net.until(() => w.net.ms() % 1000 < 100, { stepMs: 10, what: 'a second that has just begun' });
     const floor = w.net.now();
@@ -532,17 +514,15 @@ await check('what a host served before it went down it does not serve after: the
   w.net.tap(({ kind, body }) => kind === 'act' && seqs.push(JSON.parse(body.toString('utf8')).body.seq));
   assert.deepEqual([(await write(1)).status, seqs, performed()], [200, [0, 0], 1]);
 
-  // A sender whose clock is behind the host's dates what it sends before that second for
-  // as long as it is behind. Refused so again, and under every number the run tries, the
-  // request was still not carried out: the job is told so.
+  // With b's clock behind, every try is dated before a's start and refused, so the job is
+  // told the request was not carried out.
   await downAt();
   b.skew = -40;
   assert.deepEqual([(await write(2)).status, performed()], [503, 1]);
   assert.deepEqual(seqs.slice(2), [1, 1, 2, 2, 3, 3]);
   b.skew = 0;
 
-  // A request the host failed at may have been carried out all the same: that `act` is
-  // sent once.
+  // A failure after the forge was asked may have been carried out, so that `act` is sent once.
   await w.run(2);
   const store = a.disk.write.bind(a.disk);
   a.disk.write = (...args) => {
@@ -564,9 +544,8 @@ await check('the second a host serves nothing up to after a start is that of the
   const s = w.stranger('s');
   const quiet = () => w.net.until(() => w.stored(a, 'heard').ts < w.net.now() - 1, { stepMs: 100, what: 'two seconds in which the host served nothing' });
 
-  // Requests dated as far ahead as a clock may be, from a key that is nobody's: refused
-  // as any outsider's is, and on disk the host's last served second is what it was.
-  // The newcomer's two hellos were a stranger's, and count for a minute.
+  // The joining hellos counted as a stranger's for a minute. Requests dated as far ahead as
+  // a clock may be, from outsiders, must leave the last served second as it was.
   await w.run(61);
   await quiet();
   const before = w.stored(a, 'heard').ts;
@@ -577,11 +556,10 @@ await check('the second a host serves nothing up to after a start is that of the
   assert.deepEqual(refused(await w.request(b, a, 'sync', body(), { effort: 128, pool: 'github.com/o/elsewhere', ts: ahead })), [false, 'not-member', '']);
   assert.equal(w.stored(a, 'heard').ts, before);
   await w.restart(a);
-  // A member whose clock is a second behind is served at once.
   assert.equal((await w.request(b, a, 'sync', body(), { ts: w.net.now() - 1 })).ok, true, 'served after the start');
 
-  // A member's request dated ahead is served, and on disk under its date. After a start
-  // the host goes by its own clock: what is dated after the start is served.
+  // A member's request dated ahead is stored under its date, but after a start the host goes
+  // by its own clock.
   await quiet();
   const fast = w.net.now() + 58;
   assert.equal((await w.request(b, a, 'sync', body(), { ts: fast })).ok, true);
@@ -592,7 +570,6 @@ await check('the second a host serves nothing up to after a start is that of the
   await w.net.until(() => w.net.now() > started, { stepMs: 10, what: 'the next second' });
   assert.deepEqual([(await w.request(b, a, 'sync', body())).ok, w.net.now() < fast], [true, true], 'served long before the date that member gave');
 
-  // The newcomer a member invited is served its hello, and that counts as any request served.
   await quiet();
   const hello = await w.request(s, a, 'hello', a.node.invite({ pool: POOL }), { effort: 128 });
   assert.deepEqual([hello.ok, w.stored(a, 'heard').ts], [true, hello.request.ts]);
@@ -604,7 +581,6 @@ await check('a host that dies between writing its key and writing its run starts
   const [req, exe] = await w.pool(['req', 'exe']);
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.agreed([req, exe]);
-  // A process that died starts nothing.
   const start = exe.executor.start.bind(exe.executor);
   exe.executor.start = (args) => {
     if (exe.transport.host.dead) throw new Error('the process is gone');
@@ -637,8 +613,7 @@ await check('a request too large to send unasked is sent through a place the hos
   const act = exe.node.actFor(exe.executor.jobOf(taskId).runId);
   const small = await w.wait(act(forgeRequest('GET', '/repos/o/r/pr-1/files')));
   assert.deepEqual([small.status, sent.splice(0)], [200, ['act']], 'a small one needs none');
-  // Two runs of this host write to one requester at once: each waits its turn for the
-  // one place that requester keeps for this host.
+  // Two runs share the one place the requester keeps for this host, so they take turns.
   const pack = (n) => forgeRequest('POST', `/repos/o/r/pr-${n}/pack`, { pack: 'x'.repeat(100000) });
   const both = await w.wait(Promise.all([act(pack(1)), exe.node.actFor(exe.executor.jobOf(other.taskId).runId)(pack(2))]));
   assert.deepEqual(both.map((answer) => answer.status), [200, 200]);
@@ -649,7 +624,6 @@ await check('a request too large to send unasked is sent through a place the hos
 await check('what the store lost of a pool the host left, and what a member answers a pull with, never throws', async () => {
   const w = createWorld({ seed: 80 });
   const [a, b] = await w.pool(['a', 'b']);
-  // A member whose answers are signed and say nothing a host can use.
   const odd = await w.intruder('odd', a);
   const mine = new Pool({ id: POOL, self: odd.pk });
   const now = w.net.now();
@@ -666,14 +640,12 @@ await check('what the store lost of a pool the host left, and what a member answ
   });
   await w.net.until(() => pulls >= 2 * junk.length, { maxMs: 60 * 60 * 1000, what: 'every answer tried' });
   assert.deepEqual(failures([a, b]), []);
-  // Whatever a pull was answered with, the member is still pushed what it lacks.
   junk.splice(0, junk.length, [7]);
   w.net.cut('b', 'odd');
   const { taskId } = await b.node.offer(offerArgs('pr-1'));
   await w.net.until(() => pushed.some((r) => r.type === 'offer' && r.taskId === taskId), { maxMs: 60 * 60 * 1000, what: 'the push that follows a pull' });
   w.net.heal();
 
-  // The pool's file goes missing while the host is away from the pool.
   a.node.leave({ pool: POOL });
   a.disk.remove(poolFile(POOL));
   await a.node.join({ pool: POOL });
@@ -690,7 +662,7 @@ await check('the largest job a host lets itself offer reaches its executor, in a
   const [req, exe] = await w.pool(['req', 'exe'], { exe: { slots: 1 } });
   let answer = 0;
   w.net.tap(({ from, kind }) => (from === 'exe' && kind === 'key' ? { reached: (out) => { answer = out.length; } } : undefined));
-  // What a spec comes to beside its prompt.
+  // Measure what a spec comes to beside its prompt.
   const first = await req.node.offer(offerArgs('pr-1'));
   await w.net.until(() => exe.executor.jobOf(first.taskId), { what: 'a job' });
   const job = exe.executor.jobOf(first.taskId);

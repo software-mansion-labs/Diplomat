@@ -1,7 +1,3 @@
-// The request and response envelopes (PROTOCOL.md sections 3 and 4): building a request
-// with its proof of work, the checks a target runs on one, cheapest first, and the signed
-// answer bound to the request it answers.
-
 import { b64u, hash, unb64u } from './canon.js';
 import { sign, validPk, verify } from './identity.js';
 import { challenge, check, epochAcceptable, epochOf, solveAsync, validEffort } from './pow.js';
@@ -10,8 +6,7 @@ import { CLOCK_SKEW_SECS, MAX_ACT_BODY_BYTES, MAX_BODY_BYTES } from '../paths.js
 
 export const KINDS = ['hello', 'sync', 'pull', 'push', 'lock', 'unlock', 'ping', 'key', 'act', 'done', 'reserve'];
 export const CODES = ['effort', 'stale', 'replay', 'not-member', 'bad-request', 'denied', 'busy'];
-/// The detail of the `busy` refusal of a request dated no later than the last one its
-/// target served before it started: nothing was done for that request.
+/// The `busy` detail promising nothing was done, so the sender may resend even an `act`.
 export const UNSERVED = 'dated before this host last started: send it again';
 const MAX_DETAIL = 200;
 
@@ -22,8 +17,6 @@ const REQUEST = {
   sig: (v) => isBytes(v, 64),
 };
 
-// The challenge an envelope's proof of work answers, or null when its core has no
-// canonical form.
 function challengeOf({ v, pool, kind, from, to, ts, body }, { epoch, nonce, effort }) {
   try {
     const coreHash = hash({ v, pool, kind, from, to, ts, body });
@@ -33,8 +26,7 @@ function challengeOf({ v, pool, kind, from, to, ts, body }, { epoch, nonce, effo
   }
 }
 
-/// `H(canon(request))` in base64url, which a response names its request by, or null when
-/// the request has no canonical form.
+/// The `re` a response names its request by.
 export function requestDigest(request) {
   try {
     return b64u(hash(request));
@@ -43,12 +35,9 @@ export function requestDigest(request) {
   }
 }
 
-// What a request that is not authenticated is refused with.
 const UNPAID = 'the work or the signature of this request does not hold';
 
-/// A signed request envelope from `identity` to `to`, its proof of work solved at
-/// `effort`. `nonce` is 16 fresh random bytes; `solver(challenge, effort)` returns the
-/// 8-byte counter or a promise of it. Throws when a part is malformed.
+/// `solver(challenge, effort)` returns the 8-byte counter, or a promise of it.
 export async function buildRequest(identity, { pool, kind, to, ts, body, nonce, effort }, solver = solveAsync) {
   const core = { v: 1, pool, kind, from: identity.pk, to, ts, body };
   const pow = { epoch: epochOf(ts), nonce: b64u(nonce ?? ''), effort, counter: b64u(Buffer.alloc(8)) };
@@ -58,13 +47,12 @@ export async function buildRequest(identity, { pool, kind, to, ts, body, nonce, 
   return { ...envelope, sig: sign(identity, 'dn1/req', envelope) };
 }
 
-/// The `(from, nonce)` pairs a target accepted, kept for as long as their epoch stays
-/// acceptable: three epochs at most. A request outlives its `ts` by the clock tolerance
-/// only, so no pair is forgotten while its request could still be accepted.
+/// Accepted `(from, nonce)` pairs, forgotten with their epoch: a request is accepted only
+/// within clock skew of its `ts`, so no pair is forgotten while it could still replay.
 export class ReplayMemory {
-  #epochs = new Map(); // epoch -> Set of "from nonce"
+  #epochs = new Map();
 
-  /// Has this pair been accepted before? When not, it is remembered under `epoch`.
+  /// Also remembers the pair when it is new.
   seen(from, nonce, epoch, now) {
     for (const old of this.#epochs.keys()) {
       if (!epochAcceptable(old, now)) this.#epochs.delete(old);
@@ -78,7 +66,6 @@ export class ReplayMemory {
     return false;
   }
 
-  /// How many pairs are remembered.
   get size() {
     let n = 0;
     for (const pairs of this.#epochs.values()) n += pairs.size;
@@ -86,28 +73,14 @@ export class ReplayMemory {
   }
 }
 
-/// Checks a request a target received, cheapest check first, stopping at the first that
-/// fails: shape and size, `to`, `ts`, the epoch, the effort owed, the solution, the
-/// signature, the replay memory. Answers `{ ok: true, request, member, re, effort }`, or
-/// `{ ok: false, code, detail, re, effort }` with `bad-request`, `stale`, `effort` or
-/// `replay`. `effort` is what the sender's next request owes; `re` is null when the
-/// request has no canonical form.
+/// Checks run cheapest first (PROTOCOL.md section 3, Verification order). Until work and
+/// signature hold, neither the refusal nor what the target does depends on the key named:
+/// bad work and a bad signature are refused alike at a stranger's price, the signature is checked
+/// for any work at `meter.least`, and membership is asked only once the signature holds.
 ///
-/// A request is authenticated once its work and its signature hold. Until then its
-/// refusal says nothing of who it names: too little work, work that does not solve its
-/// challenge and a signature that is not its sender's are refused alike, and every
-/// refusal quotes what a stranger owes. Nor does what is done for it: the signature is
-/// checked for any work that holds at the least a request can owe, and whether the key
-/// is a member is asked only once the signature is that key's.
-///
-/// `self` is the target's key, `size` the request's length in bytes as received,
-/// `isMember(pool, pk)` whether the target accepts that key in that pool. `meter` and
-/// `replay` are the target's own and are updated: an authenticated request counts toward
-/// its sender, and any other whose work holds at a stranger's price toward the
-/// strangers, whatever key and pool it names. Nothing else counts: work that was not
-/// done raises nobody's price, and work under a member's name is not that member's until
-/// the signature says so. `tally`, when given, has its `signatures` raised by one for a
-/// request that got as far as its signature check.
+/// `size` is the length in bytes as received. `meter` and `replay` are updated: an
+/// authenticated request counts toward its sender, any other whose work holds at a
+/// stranger's price toward the strangers. `tally.signatures` counts signature checks.
 export function verifyRequest(request, { self, now, size, meter, replay, isMember, tally }) {
   const re = requestDigest(request);
   const refuse = (code, detail) => ({ ok: false, code, detail, re, effort: meter.required(null, false, now) });
@@ -138,8 +111,7 @@ const ERROR = {
   detail: (v) => typeof v === 'string' && v.length <= MAX_DETAIL,
 };
 
-/// A signed response to the request named by `re`: `body` for an answer, or
-/// `error: { code, detail }` for a refusal. `effort` is what the sender's next request owes.
+/// `effort`: what the sender's next request owes.
 export function buildResponse(identity, { re, body, error, effort }) {
   const response = error
     ? { v: 1, ok: false, re, error: { code: error.code, detail: String(error.detail ?? '').slice(0, MAX_DETAIL) }, effort }
@@ -147,9 +119,6 @@ export function buildResponse(identity, { re, body, error, effort }) {
   return { ...response, sig: sign(identity, 'dn1/res', response) };
 }
 
-/// What `from` answered `request` with: `{ ok: true, body, effort }` or
-/// `{ ok: false, code, detail, effort }`. Null when the response is malformed, not signed
-/// by `from`, or answers another request.
 export function verifyResponse(response, { request, from }) {
   const answer = shaped(response, { ...RESPONSE, ok: (v) => v === true, body: isObject });
   const refusal = shaped(response, { ...RESPONSE, ok: (v) => v === false, error: (e) => shaped(e, ERROR) });

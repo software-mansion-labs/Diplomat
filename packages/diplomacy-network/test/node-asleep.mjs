@@ -1,9 +1,3 @@
-// A machine that was not there for a while - asleep, switched off, without a network -
-// and what it makes of its own offers once it is back: a job that was run for another
-// machine's offer of it is not run a second time, nothing is counted against an offer by
-// a state that is hours old, no offer is given away before the pool was asked what the
-// machine missed, and an offer nobody could have signed for a day is over.
-
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { b64u, canon } from '../src/core/canon.js';
@@ -19,25 +13,21 @@ const started = (all) => all.reduce((sum, h) => sum + h.executor.started.length,
 const failures = (all) => all.flatMap((h) => h.log.filter((line) => /could not be served|step failed|round failed|could not be caught up/.test(line)));
 const roundId = (n) => b64u(Buffer.alloc(8, n));
 const NOTHING_BOOKED = { ok: true, summary: ELSEWHERE, usd: 0, tokens: 0, runner: '', model: '' };
-// The record of the offer `by` made of a task, as `at` holds it.
 const offerOf = (w, at, taskId, by) => w.records(at).find((r) => r.type === 'offer' && r.taskId === taskId && r.host === by.pk);
-// How many tasks a machine runs at a time, said to its node at once.
 function slots(h, n = 1) {
   h.slots = n;
   h.node.admit({ slots: n });
 }
-// Ends the job a host runs for a task, with the prompt it was given as its summary.
+// Reports the job's prompt as its summary, so an outcome names its job.
 function finish(h, taskId, outcome = {}) {
   const job = h.executor.jobOf(taskId);
   h.executor.end(job.runId, { summary: job.spec.prompt, ...outcome });
 }
-// One request of a member with no node behind it, and what the host made of it.
 const lock = async (w, from, to, taskId, round) => (await w.request(from, to, 'lock', { taskId, round, asOf: w.net.now(), hash: w.view(to).hash })).body;
 const unlock = (w, from, to, taskId, round) => w.request(from, to, 'unlock', { taskId, round });
 
-// A laptop `l` and a desktop `d` that offer one task, and `e`, which runs it; `more` are
-// further machines. The laptop offers first and sleeps before anyone has a slot for it:
-// the run is the desktop's offer's alone.
+// `l` and `d` offer one task that `e` runs; `l` sleeps before anyone has a slot, so the
+// run is `d`'s offer's alone.
 async function asleep(seed, { laptop = offerArgs('pr-1'), desktop = offerArgs('pr-1'), more = [] } = {}) {
   const w = createWorld({ seed });
   const all = await w.pool(['l', 'd', 'e', ...more]);
@@ -51,7 +41,6 @@ async function asleep(seed, { laptop = offerArgs('pr-1'), desktop = offerArgs('p
   assert.deepEqual(backers(w.claim(d, taskId)), [d.pk], 'the run is the desktop\'s offer\'s alone');
   return { w, all, l, d, e, taskId };
 }
-// Ends that run well and waits for its claim to say so.
 async function ran(w, d, e, taskId) {
   finish(e, taskId);
   await w.net.until(() => w.offerRow(d, taskId).state === 'done' && w.claim(d, taskId).state === 'completed', { what: 'the run over' });
@@ -62,7 +51,6 @@ await check('a machine that slept while its job was run for another machine\'s o
   const job = w.spec(e, taskId);
   await ran(w, d, e, taskId);
   assert.equal(w.claim(d, taskId).spec, job, 'the claim names the job that was run');
-  // The laptop's offer is open in the pool all the while, and nobody can be given it.
   await w.run(2 * HOUR);
   assert.deepEqual([started(all), w.task(d, taskId).state, w.task(d, taskId).offeredBy], [1, 'available', [l.pk]]);
   w.net.sleep('l', false);
@@ -87,7 +75,7 @@ await check('a machine that gave its offer to a run and slept through its end wa
   assert.deepEqual(backers(w.claim(d, taskId)).sort(), [d.pk, l.pk].sort());
   w.net.sleep('l');
   finish(e, taskId);
-  // The run goes on telling the laptop until its lease is about to end.
+  // The run keeps telling the laptop until its lease nearly ends.
   await w.net.until(() => w.claim(d, taskId).state === 'completed', { maxMs: 3 * HOUR * 1000, what: 'the claim completed' });
   await w.run(HOUR);
   w.net.sleep('l', false);
@@ -109,7 +97,7 @@ await check('a machine that slept through two leases of a run that goes on count
     slots(e);
     await w.net.until(() => e.executor.jobOf(taskId), { what: 'a job' });
     assert.deepEqual(backers(w.claim(a, taskId)).sort(), [a.pk, b.pk].sort(), `${away}: the run has both offers`);
-    // The machine the run has its key from stays, and keeps the lease; the other goes.
+    // The host the run has its key from stays, to keep the lease.
     const [stays, goes] = w.stored(e, 'keys').held[taskId].host === a.pk ? [a, b] : [b, a];
     const { leaseUntil } = w.claim(goes, taskId);
     if (away === 'asleep') w.net.sleep(goes.name);
@@ -117,7 +105,7 @@ await check('a machine that slept through two leases of a run that goes on count
     await w.run(3 * HOUR);
     assert.ok(w.claim(stays, taskId).leaseUntil > leaseUntil && e.executor.jobOf(taskId), `${away}: the lease was kept`);
     if (away === 'asleep') w.net.sleep(goes.name, false);
-    // Longer than a host waits for an answer before it goes by what it holds.
+    // Past CATCH_UP_MS, after which a host goes by what it holds.
     else await w.restart(goes, { transportMs: CATCH_UP_MS + 2 * 60 * 1000 });
     await w.net.until(() => w.claim(goes, taskId).leaseUntil > leaseUntil, { what: 'the machine caught up' });
     await w.run(60);
@@ -293,7 +281,7 @@ await check('a machine that wakes gives none of its offers away before the pool 
     await unlock(w, evil, l, taskId, roundId(1));
     w.net.sleep('l');
     await w.run(2 * HOUR);
-    // The lock is there in 20 ms, and the first answer to what the laptop asks in 40.
+    // The lock lands in 20 ms, before any answer to the laptop's own asks (40 ms).
     Object.assign(w.net.faults, { minMs: 20, maxMs: 20 });
     const since = w.net.now();
     w.net.sleep('l', false, { timersInMs });
@@ -322,8 +310,8 @@ await check('a member that is asleep keeps no returning machine waiting: one ans
   assert.equal((await lock(w, evil, l, taskId, roundId(1))).grant.offer.gen, 1, 'two seconds after it woke, with one member of three asleep');
   await unlock(w, evil, l, taskId, roundId(1));
 
-  // It sleeps, and the pool gets a record it lacks. Awake, it is told so in 40 ms and
-  // asks for the record - and sleeps again before the record is there.
+  // The pool gains a record while it sleeps; awake, it asks for it and sleeps again
+  // before the record arrives.
   w.net.sleep('l');
   await d.node.offer(offerArgs('pr-2'));
   await w.run(HOUR);
@@ -353,7 +341,7 @@ await check('a member that tells a returning machine the very state the machine 
   await w.agreed(all);
   for (const name of ['l', 'd']) w.net.sleep(name);
   await w.run(2 * HOUR);
-  // Nobody answers what the machine asks: the one member awake has no node.
+  // The only member awake is node-less, so nobody answers the machine.
   w.net.sleep('l', false);
   await w.run(5);
   const given = async (n) => {
@@ -380,8 +368,7 @@ await check('a member that answers a returning machine late and a page at a time
   await w.agreed(all);
   for (const name of ['l', 'd']) w.net.sleep(name);
   await w.run(2 * HOUR);
-  // The one member awake answers every sync 55 s late with one more page of an index
-  // that never ends, and every pull 55 s late with nothing.
+  // Every answer comes 55 s late, and the sync pages never end.
   const clock = w.net.clock('evil');
   const keys = Array.from({ length: 200 }, (_, i) => `member/${w.stranger(`nobody${i}`).pk}`).sort();
   const asked = [];
@@ -451,7 +438,7 @@ await check('the record of a run and a lock that reach a host in one instant: th
   assert.deepEqual([w.offerRow(l, taskId).state, w.claim(l, taskId)], ['pooled', undefined], 'the laptop heard of none of it');
   w.net.heal();
   Object.assign(w.net.faults, { minMs: 20, maxMs: 20 });
-  // What the desktop holds and the laptop lacks, and a lock on the state both then hold.
+  // The lock names the state the laptop holds once the push lands.
   const records = [offerOf(w, d, taskId, d), w.claim(d, taskId)];
   const pushed = w.request(d, l, 'push', { records }, { drive: false });
   const locked = w.request(evil, l, 'lock', { taskId, round: roundId(1), asOf: w.net.now(), hash: w.view(d).hash }, { drive: false });
@@ -462,7 +449,7 @@ await check('the record of a run and a lock that reach a host in one instant: th
 });
 
 await check('a machine that wakes with every member awake goes for its own task as soon as its turn comes, with one asleep runs it without waiting for the sleeper\'s time to answer, and with nobody to answer goes on by what it holds after a while', async () => {
-  // Awake, the others answer in a moment, and what is left is the wait of its rank.
+  // With the others awake, only its rank delay is left to wait.
   const turn = (taskId, l) => rankDelay(taskId, l.pk, RANK_DELAY_MS) + 2000;
   for (const [seed, awake, atLeast, most, asked] of [[125, ['d', 'e'], 0, turn, 4], [115, ['e'], 0, () => REQUEST_TIMEOUT_MS / 2, 6], [116, [], CATCH_UP_MS, () => CATCH_UP_MS + 60000, 10]]) {
     const w = createWorld({ seed });
@@ -480,7 +467,7 @@ await check('a machine that wakes with every member awake goes for its own task 
     await w.net.until(() => l.executor.jobOf(taskId), { stepMs: 100, what: 'its own task run' });
     const waited = w.net.ms() - woke;
     assert.ok(waited >= atLeast && waited <= most(taskId, l), `with ${awake.length} of two members awake it ran its task after ${waited} ms`);
-    // One question at a time: a member that says nothing is asked again when its time is up, and by the rounds for the task.
+    // One sync at a time: a silent member is asked again only when that times out, and by the task's rounds.
     assert.ok(w.net.count({ from: 'l', to: 'd', kind: 'sync', since }) <= asked, `it asked the member that says nothing ${w.net.count({ from: 'l', to: 'd', kind: 'sync', since })} times`);
     assert.deepEqual([w.offerRow(l, taskId).executorHere, failures(all)], [true, []]);
   }
@@ -494,7 +481,7 @@ await check('a machine that wakes to members that say nothing asks them again: i
   await w.agreed(all);
   for (const name of ['l', 'e']) w.net.sleep(name);
   await w.run(HOUR);
-  // The one member awake holds what the machine does not, and is out of its reach.
+  // The only member awake holds a record `l` lacks, and is cut off from it.
   await d.node.offer(offerArgs('pr-2'));
   w.net.cut('l', 'd');
   const upToDate = () => l.log.filter((line) => line.includes(' is up to date '));
@@ -522,7 +509,7 @@ await check('a machine that wakes asks the members it had given up on for a whil
   await w.net.until(() => e.executor.jobOf(taskId), { what: 'a job' });
   await ran(w, d, e, taskId);
   slots(e, 0);
-  // Nobody has answered the laptop for so long that it asks only every ten minutes.
+  // An hour of silence backs the laptop off to PEER_BACKOFF_MAX_MS.
   await w.run(HOUR);
   w.net.sleep('l');
   w.net.heal();

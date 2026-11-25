@@ -1,8 +1,5 @@
-// A host's transport: how it is reached and how it reaches the others, as one object the
-// node is written against. Two kinds carry it - tor (the real one) and loop (loopback TCP
-// through a directory, for tests) - and each supplies only what differs: how a host
-// becomes reachable and how a peer is dialled. The framing, the limits and the failure
-// codes are the same for both.
+// The tor and loop drivers supply only how a host becomes reachable and how a peer is
+// dialled; framing, limits and failure codes are shared.
 
 import { onionAddress } from '../core/identity.js';
 import { LOOP_DIR, REQUEST_TIMEOUT_MS, TOR_DIR, TRANSPORT } from '../paths.js';
@@ -10,12 +7,8 @@ import { DEFAULT_LIMIT, createClient, createServer } from './http.js';
 import { loopDriver } from './loop.js';
 import { torDriver } from './tor.js';
 
-/// The transport of the host `identity`, not yet started. `kind` is 'tor' or 'loop'; `dir`
-/// is tor's data directory or the loop directory; `tune` overrides HTTP_TUNING and
+/// `dir` is tor's data directory or the loop directory; `tune` overrides HTTP_TUNING and
 /// TOR_TUNING. A transport starts once: after `stop()` a new one is created.
-///
-/// `request` rejects with an Error whose `code` is `unreachable`, `timeout`, `too-large`,
-/// `http-<status>`, `protocol` or `stopped`.
 export function createTransport({ kind = TRANSPORT, identity, dir, log = () => {}, tune = {} }) {
   const address = onionAddress(identity.pk);
   // Loopback TCP stands in for Tor in tests alone: whoever reads the state is told so.
@@ -60,10 +53,8 @@ export function createTransport({ kind = TRANSPORT, identity, dir, log = () => {
     onRequest: server.onRequest,
     limitFor: server.limitFor,
 
-    /// Resolves once the host listens locally and can dial peers; with tor that is after
-    /// bootstrap, however long the network makes that take, and before the onion service
-    /// is known to be reachable. Rejects, with everything torn down, when that cannot
-    /// happen.
+    /// With tor, resolves after bootstrap however long that takes, before the onion service
+    /// is known to be reachable. Rejects, with everything torn down, when that cannot happen.
     async start() {
       if (phase !== 'new') throw new Error('a transport starts once');
       phase = 'started';
@@ -75,9 +66,8 @@ export function createTransport({ kind = TRANSPORT, identity, dir, log = () => {
       }
     },
 
-    /// The peer's answer to `body`, or a rejection with one of the failure codes. A
-    /// request is sent once; the one exception is a kept connection found dead before any
-    /// byte of an answer, where the same bytes go out again on a new one.
+    /// Rejects with a TransportError code. Sent once, except on a kept connection found
+    /// dead before any byte of an answer.
     async request(pk, body, { timeoutMs = REQUEST_TIMEOUT_MS, maxResponseBytes = DEFAULT_LIMIT, headers } = {}) {
       if (!Buffer.isBuffer(body)) throw new TypeError('a request body is a Buffer');
       const onion = onionAddress(pk);
@@ -88,8 +78,7 @@ export function createTransport({ kind = TRANSPORT, identity, dir, log = () => {
       return answer;
     },
 
-    /// Ends everything the transport owns: requests in flight reject with `stopped`, the
-    /// listener and every connection close, tor exits.
+    /// Requests in flight reject with `stopped`, every connection closes, tor exits.
     async stop() {
       await shutdown('stopped');
     },

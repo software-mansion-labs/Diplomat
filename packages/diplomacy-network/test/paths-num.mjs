@@ -1,7 +1,3 @@
-// What a tunable is when its variable is set: the number it says, zero included, and
-// the default for anything that is no number of zero or more.
-// Run: node test/paths-num.mjs
-
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -9,7 +5,6 @@ import { fileURLToPath } from 'node:url';
 
 const paths = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src', 'paths.js');
 
-// The tunables as a process started with `env` reads them.
 function tunables(env) {
   const out = execFileSync(process.execPath, ['--input-type=module', '-e',
     `const p = await import(${JSON.stringify(paths)}); console.log(JSON.stringify([p.DEVICE_WAIT_MS, p.JOB_MODEL_REQUESTS, p.JOB_FORGE_REQUESTS]));`],

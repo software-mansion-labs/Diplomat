@@ -1,7 +1,6 @@
-// The transport on plain loopback TCP, for tests and simulations. A directory stands in
-// for the network: a host publishes `<onion>.addr` holding its `127.0.0.1:<port>`, and a
-// dial resolves its target there. The same directory carries the faults, as files a test
-// in any process writes and removes:
+// For tests and simulations. A directory stands in for the network: a host publishes
+// `<onion>.addr` holding its `127.0.0.1:<port>`. The same directory carries the faults, as
+// files a test in any process writes and removes:
 //
 //   <onion>.down     that host refuses every request
 //   <a>--<b>.cut     the two hosts cannot reach each other, in either direction
@@ -16,8 +15,6 @@ import net from 'node:net';
 import path from 'node:path';
 import { fail } from './http.js';
 
-/// Sets and clears the fault files of a loop directory: `down(onion, on)`,
-/// `cut(a, b, on)`, `delay(ms, onion?)` with 0 clearing it.
 export function loopFaults(dir) {
   const set = (name, text) => {
     fs.mkdirSync(dir, { recursive: true });
@@ -34,8 +31,6 @@ export function loopFaults(dir) {
   };
 }
 
-/// The loopback half of a transport: `{ start(port), dial(onion), hold(onion, deadline),
-/// check(onion), stop() }`.
 export function loopDriver({ address, dir, setState }) {
   const own = path.join(dir, `${address}.addr`);
   const holds = new Set(); // each pending delay's cancel function
@@ -81,8 +76,8 @@ export function loopDriver({ address, dir, setState }) {
       });
     },
 
-    /// Applies the faults a request to `onion` meets on its way out: refuses it, or keeps
-    /// it for the delay, failing with `timeout` when that passes the deadline.
+    /// Refuses the request, or keeps it for the delay, failing with `timeout` when that
+    /// passes the deadline.
     hold(onion, deadline) {
       check(onion);
       const wait = millis('delay') + millis(`${onion}.delay`);
@@ -102,8 +97,8 @@ export function loopDriver({ address, dir, setState }) {
       });
     },
 
-    /// Throws `unreachable` when a fault stands between this host and `onion`. Asked again
-    /// once the answer is in: a link cut while the peer was working loses the answer.
+    /// Also asked once the answer is in: a link cut while the peer was working loses the
+    /// answer.
     check,
 
     async stop() {

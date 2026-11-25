@@ -1,31 +1,27 @@
 // The framing both transports share (PROTOCOL.md section 1): one request is one HTTP/1.1
-// `POST /dn1` with a body in and a body out. Bodies are opaque bytes here. The server half
-// is what a stranger on the network reaches first, so everything it does before the
+// `POST /dn1`. The server half is what a stranger reaches first, so everything before the
 // request handler runs is bounded: header size, body size, time and connections.
 
 import http from 'node:http';
 
 const REQUEST_PATH = '/dn1';
 
-/// The body limit of a request no `limitFor` callback decided about.
 export const DEFAULT_LIMIT = 1 << 20;
 
-/// The tunables of the framing, each overridable through a transport's `tune` option.
+/// Each overridable through a transport's `tune` option.
 export const HTTP_TUNING = {
   maxHeaderBytes: 8192,
-  // A connection has this long to deliver a request's headers.
   headersTimeoutMs: 20 * 1000,
   // A body has bodyBaseMs plus its declared length at bodyBytesPerSec to arrive.
   bodyBaseMs: 20 * 1000,
   bodyBytesPerSec: 32 * 1024,
   maxConnections: 256,
-  // How long the server keeps an idle connection, and how long a client does. The client
-  // gives up first by a wide margin, so it does not write into a connection the server is
-  // closing.
+  // The client gives up first by a wide margin, so it does not write into a connection the
+  // server is closing.
   serverIdleMs: 5 * 60 * 1000,
   clientIdleMs: 2 * 60 * 1000,
-  // How many requests are with one peer at a time, each on a connection of its own; the
-  // rest wait their turn, inside their own timeouts.
+  // Requests with one peer at a time, each on its own connection; the rest wait their
+  // turn, inside their own timeouts.
   maxSocketsPerPeer: 8,
   // A body above this is announced with `Expect: 100-continue` and sent only once the
   // server agrees to read it, so a refusal costs neither side the transfer.
@@ -41,14 +37,11 @@ export class TransportError extends Error {
   }
 }
 
-/// A TransportError, for `throw fail('unreachable', 'why')`.
 export function fail(code, detail) {
   return new TransportError(code, detail);
 }
 
-/// The inbound half: an HTTP server on a loopback port of its own choosing that answers
-/// nothing but `POST /dn1`. `{ listen, onRequest, limitFor, close }`. `limitFor(fn)`:
-/// `fn(headers)` answers the most bytes of that request's body to read, as a number or as
+/// `limitFor(fn)`: `fn(headers)` answers the most body bytes to read, as a number or as
 /// `{ bytes, release }`; `release` is then called exactly once, when the request it sized
 /// is over - answered, refused, timed out or abandoned.
 export function createServer({ log, tune }) {
@@ -91,8 +84,6 @@ export function createServer({ log, tune }) {
       return refuse(500);
     }
     const { bytes: allowed, release } = typeof says === 'number' ? { bytes: says } : says;
-    // What the limit callback set aside for this request is given back once: after the
-    // request was answered, or when it ended without its body ever reaching the handler.
     let held = typeof release === 'function';
     const free = () => {
       if (!held) return;
@@ -133,7 +124,6 @@ export function createServer({ log, tune }) {
   }
 
   return {
-    /// Binds 127.0.0.1 on a free port and resolves with it.
     listen() {
       return new Promise((resolve, reject) => {
         server.once('error', reject);
@@ -145,7 +135,6 @@ export function createServer({ log, tune }) {
     },
     onRequest(fn) { handler = fn; },
     limitFor(fn) { limit = fn; },
-    /// Closes the listener and every connection, answered or not.
     close() {
       return new Promise((resolve) => {
         if (!server.listening) return resolve();
@@ -156,8 +145,7 @@ export function createServer({ log, tune }) {
   };
 }
 
-// Connections come from the transport's `dial`, which may take a minute over Tor; the
-// pooling, the reuse and the idle expiry are node's own.
+// `dial` may take a minute over Tor; pooling, reuse and idle expiry are node's own.
 class DialAgent extends http.Agent {
   constructor(dial, options) {
     super(options);
@@ -169,12 +157,11 @@ class DialAgent extends http.Agent {
   }
 }
 
-// What a request on a reused connection ends with when the connection turned out dead
-// before a single byte of an answer.
+// A reused connection found dead before a single byte of an answer.
 const STALE = Symbol('stale connection');
 
-/// The outbound half: `request(host, body, { deadline, maxResponseBytes, headers })` over
-/// connections `dial(host)` opens, one kept alive per host. `{ request, close }`.
+/// `request(host, body, { deadline, maxResponseBytes, headers })`, one connection kept
+/// alive per host.
 export function createClient({ dial, tune }) {
   const t = { ...HTTP_TUNING, ...tune };
   const agent = new DialAgent(dial, { keepAlive: true, maxFreeSockets: 1, timeout: t.clientIdleMs });
@@ -284,9 +271,8 @@ export function createClient({ dial, tune }) {
   }
 
   return {
-    /// The answer's body. A connection kept from an earlier request can be dead without
-    /// anyone having noticed (a circuit that went away); the request is then sent once
-    /// more on a new connection. Nothing else is ever retried here.
+    /// A kept-alive connection can be dead unnoticed (a circuit went away); the request is
+    /// then sent once more on a new connection. Nothing else is ever retried here.
     async request(host, body, options) {
       try {
         return await attempt(host, body, options);

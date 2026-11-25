@@ -1,7 +1,3 @@
-// A member that means harm, and bytes that mean nothing: every request here is built by
-// hand with a member's real key. Whatever arrives, the host answers with a signed
-// response, holds the state it held, and goes on serving the others.
-
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { b64u, canon, hash } from '../src/core/canon.js';
@@ -18,8 +14,8 @@ import { POW } from '../src/paths.js';
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 const ROUND = 'AAAAAAAAAAA';
 
-// What `to` said to a request made by hand: the refusal's code and detail, or 'ok'. A
-// sender past its allowance waits a minute instead of paying more.
+// Adds `said`: 'code: detail' or 'ok'. Without a set effort, a sender past its allowance
+// waits a minute instead of paying more.
 async function say(w, from, to, kind, body, options = {}) {
   for (;;) {
     const answer = await w.request(from, to, kind, body, options);
@@ -60,11 +56,9 @@ await check('every kind of request, with a body of every wrong shape, gets a sig
       seen.set(`${kind} ${code}`, (seen.get(`${kind} ${code}`) ?? 0) + 1);
     }
   }
-  // What a wrong body may be answered with as if it were fine: nothing was asked of the host.
   const fine = [...seen].filter(([k]) => k.endsWith(' ok')).map(([k, n]) => `${k} ${n}`);
   assert.deepEqual(fine, ['push ok 1', 'unlock ok 1'], 'a push of records none of which holds, an unlock of a lock nobody has');
 
-  // Envelopes that are not envelopes, and ones changed after they were signed.
   const envelopes = [
     { bytes: Buffer.alloc(0) }, { bytes: Buffer.from('null') }, { bytes: Buffer.from('[]') }, { bytes: Buffer.from('"x"') },
     { bytes: Buffer.from('{}') }, { bytes: Buffer.from([0xff, 0xfe, 0x00, 0x7b]) }, { bytes: Buffer.from('{"v":1,"kind":"sync"') },
@@ -81,7 +75,6 @@ await check('every kind of request, with a body of every wrong shape, gets a sig
 
   assert.deepEqual(req.log.filter((line) => /could not be served|step failed/.test(line)), [], 'nothing threw');
   assert.equal(w.view(req).hash, before, 'and nothing changed');
-  // The host serves the others as before.
   a.slots = 1;
   a.node.admit({ slots: 1 });
   await w.net.until(() => a.executor.jobOf(taskId), { what: 'the task claimed by an honest member' });
@@ -103,11 +96,10 @@ await check('records that do not hold are refused one by one, each for its reaso
   const grantOf = async (round) => (await say(w, evil, a, 'lock', { taskId, round, asOf: now, hash: before })).body.grant;
   const granted = await grantOf(ROUND);
   assert.equal(granted.executor, evil.pk);
-  // A claim that says its maker offers the task itself, which no record of the pool bears out.
+  // `backed` says evil offers the task too, which no record of the pool bears out.
   const backed = { at: now, gen: 1, hours: 12 };
   const claim = (fields) => buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, grants: [], absent: [], now, offer: backed, ...fields });
   const forgedGrant = { ...granted, by: req.pk };
-  // A record signed with `id`'s key whatever host it names.
   const resign = ({ sig: _, ...fields }, id, change) => ({ ...fields, ...change, sig: sign(id, 'dn1/rec', { ...fields, ...change }) });
   const cases = [
     ['an offer of another pool', offer(evil.id, { pool: 'github.com/acme/other' }), 'wrong-pool'],
@@ -139,7 +131,6 @@ await check('a claim made behind every member\'s back is no claim: no host takes
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.agreed(all);
   const now = w.net.now();
-  // Nobody was asked: the claim calls every other member absent, which is its maker's word alone.
   const claim = buildClaim(evil.id, { pool: POOL, taskId, round: ROUND, gen: 0, grants: [], absent: [req.pk, a.pk].sort(), now, offer: { at: now, gen: 1, hours: 12 } });
   for (const h of [req, a]) {
     const pushed = await say(w, evil, h, 'push', { records: [claim] });
@@ -161,13 +152,12 @@ await check('a claim made behind every member\'s back is no claim: no host takes
   assert.equal(w.offerRow(req, taskId).attempt, 1, 'what it did cost the offer nothing');
   await w.agreed(all);
 
-  // A ping from a host that does not offer the task moves no lease.
   const ping = async (from, signer, at) => (await say(w, from, a, 'ping', { ping: buildPing(signer.id, real, at) })).said;
   assert.equal(await ping(evil, evil, real.leaseUntil - 300), 'denied: not-offering');
   assert.equal(await ping(evil, req, real.leaseUntil - 300), 'denied: not a ping for a claim of this host');
   assert.equal(await ping(req, req, real.leaseUntil - 300), 'denied: stale', 'nor does one dated far from now');
   assert.equal(w.claim(a, taskId).seq, 0);
-  // A lock is its holder's to give back, nobody else's.
+  // Only a lock's holder can give it back, though evil's unlock is answered ok.
   const second = await req.node.offer(offerArgs('pr-2'));
   await w.agreed(all);
   const lock = (from) => say(w, from, req, 'lock', { taskId: second.taskId, round: ROUND, asOf: w.net.now(), hash: w.view(req).hash });
@@ -183,7 +173,7 @@ await check('an answer that is signed but names another request is no answer', a
   const [req, a] = all;
   const evil = await w.intruder('evil', req);
   await w.net.until(() => w.members(a).length === 3, { what: 'the intruder a member for everyone' });
-  // Whatever it is asked, it agrees and grants - in a response that answers something else.
+  // Agrees to everything, in responses bound to another request.
   let answered = 0;
   evil.transport.onRequest(async (bytes) => {
     const { kind, body, from } = JSON.parse(bytes.toString('utf8'));
@@ -208,7 +198,7 @@ await check('a member whose index has one page after another is asked for so man
   const [a] = await w.pool(['a', 'b']);
   const evil = await w.intruder('evil', a);
   const taskId = buildTaskId({ pool: POOL, kind: 'review', item: 'pr-1', identity: 'octocat' });
-  // Each page names one record more, of one host more, that it never hands over.
+  // Each page names one more record, of one more host, that it never hands over.
   const letters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
   const keys = [...letters].flatMap((x) => [...letters].map((y) => `offer/${taskId}/${x}${y}${'Q'.repeat(41)}`));
   const chains = [];
@@ -229,9 +219,8 @@ await check('a member whose index has one page after another is asked for so man
   assert.deepEqual(a.log.filter((line) => /could not be served|step failed|failed:/.test(line)), []);
 });
 
-// Makes a member with no node answer as one that agrees would: it confirms every state
-// and grants every lock - backing the claim with what `backing()` gives, when it gives
-// anything - and says of the rest what `says(kind, body, from)` returns.
+// A node-less member that confirms every state, grants every lock (with `backing()`'s offer,
+// if any) and answers the rest with `says(kind, body, from)`.
 function serving(evil, { backing = () => null, says = () => null } = {}) {
   evil.transport.onRequest(async (bytes) => {
     const request = JSON.parse(bytes.toString('utf8'));
@@ -275,7 +264,6 @@ await check('a key that names no job starts none: the run goes on asking', async
     await w.run(60);
     assert.deepEqual([exe.executor.started.length, w.runOf(exe, TASK).state], [0, 'preparing'], JSON.stringify(named));
   }
-  // The same key with a job to name is a key.
   spec = { spec: { prompt: 'do it' } };
   await w.net.until(() => exe.executor.jobOf(TASK), { what: 'a job' });
   assert.equal(exe.executor.jobOf(TASK).peer, evil.pk);
@@ -295,8 +283,8 @@ await check('a run takes into its claim the offer it asked a host for, and no ot
   exe.slots = 1;
   exe.node.admit({ slots: 1 });
   await w.net.until(() => exe.executor.jobOf(taskId), { what: 'a job' });
-  // The member offers the task too, for 12 hours, and backs the claim for 720, then
-  // with an offer it made at another time.
+  // evil offers the task for 12 hours, then backs the claim with 720, then with an offer of
+  // another date.
   const now = w.net.now();
   for (const h of all) await w.request(evil, h, 'push', { records: [offerOf(evil, now)] });
   for (const wrong of [{ at: now, gen: 1, hours: 720 }, { at: now - 1, gen: 1, hours: 12 }]) {
@@ -319,8 +307,7 @@ await check('a host that gives its offer under a number it had passed gives noth
   const evil = await w.intruder('evil', exe);
   await w.net.until(() => all.every((h) => w.members(h).length === 3), { what: 'the intruder a member for everyone' });
   const now = w.net.now();
-  // The member gave its offer a fifth time, to a claim of its own that ended, and gives it
-  // to the next claim as the first.
+  // evil gave its offer as gen 5 to its own ended claim, then gives it to the next as gen 1.
   const own = buildClaim(evil.id, { pool: POOL, taskId: TASK, round: 'AAAAAAAAAAE', gen: 0, grants: [], absent: [by.pk, exe.pk].sort(), now, offer: { at: now, gen: 5, hours: 12 } });
   for (const h of all) await w.request(evil, h, 'push', { records: [offerOf(evil, now), endClaim(evil.id, own, 'released', now)] });
   serving(evil, { backing: () => ({ at: now, gen: 1, hours: 12 }) });
@@ -337,21 +324,19 @@ await check('a claim dated back to lapse as it lands, or whose executor never as
   const [v] = await w.pool(['v']);
   await w.net.until(() => v.transport.host.ready, { what: 'its transport' });
   const [evil, other] = [await w.intruder('evil', v), await w.intruder('other', v)];
-  // A key of the member's own in one of its seats.
   const puppet = w.stranger('puppet');
   const seat = createVoucher(evil.id, { pool: POOL, era: 0, pk: puppet.pk, seat: 0, at: w.net.now() });
   const seated = memberRecord(puppet.id, { pool: POOL, seq: 0, at: w.net.now(), era: 0, maxAcceptedH: 12, voucher: seat });
   assert.deepEqual((await say(w, evil, v, 'push', { records: [seated] }, { effort: 4096 })).body.refused, []);
   const { taskId } = await v.node.offer(offerArgs('pr-1'));
   let rounds = 0;
-  // A lock the host really gives `who`, and a claim of `who`'s own making on it, dated
-  // `dated` s from the lock: what the host made of it.
+  // Takes a real lock for `who`, pushes `who`'s own claim on it dated `dated` s from the lock,
+  // and returns what the host made of it.
   const grab = async (who, dated = 0, then = async () => {}) => {
     const now = w.net.now();
     const round = b64u(Buffer.from([0, 0, 0, 0, 0, 0, 1, rounds += 1]));
-    // It stays a member: its record is signed again as the hours go by. And it says it
-    // holds the host's state: after hours with no word from any member, the host holds
-    // the pool out of date until one does.
+    // Re-sign hourly to stay a member, and sync: after hours with no word from any member,
+    // the host holds the pool out of date until one speaks.
     const mine = w.records(v).find((r) => r.type === 'member' && r.pk === who.pk);
     if (now - mine.at > 3600) {
       await say(w, who, v, 'push', { records: [memberRecord(who.id, { ...mine, seq: mine.seq + 1, at: now })] }, { effort: 4096 });
@@ -376,8 +361,8 @@ await check('a claim dated back to lapse as it lands, or whose executor never as
   const key = async (round) => assert.equal((await say(w, evil, v, 'key', { taskId, round }, { effort: 4096 })).said, 'ok');
   assert.equal(await grab(evil, 121), 'bad-grant', 'dated after its grant ran out');
   await w.run(121);
-  // A claim dated two hours back, its key asked for, to lapse as it lands: no attempt
-  // of the offer's, which is not that member's again for 2 hours, nor a key's it seated.
+  // Dated two hours back with its key asked for, it lapses as it lands: no attempt, and
+  // neither evil nor a key it seated gets the offer for 2 hours.
   assert.equal(await grab(evil, -7780, key), 'held');
   assert.deepEqual([await lapse(), row()], [0, ['pooled', 1]]);
   assert.deepEqual([await grab(evil), await grab(puppet)], ['not given', 'not given']);
@@ -388,8 +373,8 @@ await check('a claim dated back to lapse as it lands, or whose executor never as
     }
     return null;
   };
-  // One never asked for its key holds the offer for a lease and its grace, unasked for
-  // more, and costs it nothing either: the wait is 4 hours then, and anyone else's none.
+  // A claim that never asks for its key holds the offer for a lease and its grace, unpinged,
+  // at no attempt; the wait doubles to 4 hours, for evil's seats only.
   assert.equal(await hoursTo(puppet, 4), 2);
   assert.deepEqual([row(), await lapse(), row()], [['claimed', 1], 13, ['pooled', 1]]);
   assert.deepEqual([w.net.count({ from: 'v', to: 'evil', kind: 'ping' }) > 0, w.net.count({ from: 'v', to: 'puppet', kind: 'ping' })], [true, 0], 'a claim that never asked for its key is asked for no lease');
@@ -397,7 +382,7 @@ await check('a claim dated back to lapse as it lands, or whose executor never as
   assert.deepEqual([await grab(evil), await grab(other)], ['not given', 'held']);
   await lapse();
   assert.deepEqual([row(), await hoursTo(evil, 3)], [['pooled', 1], 0]);
-  // With the key in hand the same lapse is an attempt of the offer's.
+  // With the key asked for, the same lapse is an attempt.
   await lapse();
   await w.run(9 * 3600);
   assert.equal(await grab(evil, 0, key), 'held');
@@ -409,8 +394,8 @@ await check('a claim dated back to lapse as it lands, or whose executor never as
   assert.equal(await hoursTo(evil, 20), 16);
   await lapse();
   assert.equal(await hoursTo(evil, 40), 24);
-  // A run that says it failed is one attempt, however often it says so, and though its
-  // claim then holds the offer until it lapses.
+  // A failed run is one attempt however often it says so, though its claim holds the offer
+  // until it lapses.
   await lapse();
   const told = (body) => say(w, other, v, 'done', body, { effort: 4096 });
   const report = async (round) => {
@@ -422,7 +407,7 @@ await check('a claim dated back to lapse as it lands, or whose executor never as
   assert.equal(await grab(other, 0, report), 'held');
   await w.run(3 * 3600);
   assert.deepEqual([row(), w.offerRow(v, taskId).reason], [['pooled', 3], 'it broke']);
-  // What a run reports of an offer its host took back changes nothing of that offer.
+  // A report on an offer its host withdrew changes nothing of it.
   let late = null;
   assert.equal(await grab(other, 0, async (round) => {
     const { body } = await say(w, other, v, 'key', { taskId, round }, { effort: 4096 });
@@ -471,7 +456,7 @@ await check('a member that answers a pull with more records than were asked for 
   const [l, d] = await w.pool(['l', 'd']);
   const evil = await w.intruder('evil', l);
   await w.net.until(() => [l, d].every((h) => w.members(h).includes(evil.pk)), { what: 'the member known' });
-  // Its index names one key it seated; its answer to the pull of that key brings three.
+  // Its index names one seated key; its answer to the pull of it brings three.
   const { all: made, records } = w.crowd(evil, 3);
   const held = new Pool({ id: POOL, self: evil.pk });
   held.merge([...w.records(d).filter((r) => r.type === 'member'), records[0]], w.net.now());

@@ -1,7 +1,3 @@
-// The proof of work: what a solution is bound to, what solving and checking cost, and
-// how the effort a sender owes follows the requests it sends.
-// Run: node test/core-pow.mjs
-
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { POW, POW_HOURLY } from '../src/paths.js';
@@ -117,10 +113,10 @@ await check('a host pays one peer so much in an hour and all of them together so
   const pay = (pk, effort, at, since = T) => s.pay(pk, since, effort, at);
   assert.deepEqual([pay('a', 60, T), pay('a', 41, T + 1), pay('a', 40, T + 2)], [true, false, true]);
   assert.deepEqual([pay('b', 100, T + 3), pay('c', 51, T + 4), pay('c', 50, T + 4), pay('d', 1, T + 5)], [true, false, true, false]);
-  // All of it is spent: a peer known for an hour is paid 10 beyond it, a second less no peer.
+  // `all` is spent: a peer known for an hour is paid its floor of 10, one known a second less nothing.
   assert.deepEqual([pay('young', 1, T + 6, T - 3593), pay('old', 11, T + 6, T - 3594), pay('old', 10, T + 6, T - 3594), pay('old', 1, T + 7, T - 3594)],
     [false, false, true, false]);
-  // What was paid counts for an hour to the second, for the peer as for all.
+  // A payment counts for exactly an hour, for the peer as for `all`.
   assert.deepEqual([pay('a', 1, T + 3599), pay('d', 51, T + 3600), pay('d', 50, T + 3600), pay('a', 1, T + 3600)], [false, false, true, false]);
   assert.deepEqual([pay('a', 41, T + 3602), pay('a', 40, T + 3602)], [false, true]);
 });
@@ -131,11 +127,11 @@ await check('the search is paid out of the purse of all peers, and of its own sh
   const pay = (pk, effort, at, options) => s.pay(pk, T - 3600, effort, at, options);
   const search = { member: false, search: true };
   assert.deepEqual([pay('k1', 20, T, search), pay('k2', 11, T, search), pay('k2', 10, T, search)], [true, false, true]);
-  // The search's 30 count toward all of it: 220 are left.
+  // The search's 30 count toward `all`: 220 are left.
   assert.deepEqual([pay('a', 100, T), pay('b', 100, T), pay('c', 21, T), pay('c', 20, T)], [true, true, false, true]);
-  // All of it is spent: a member known for an hour is paid its floor, a key that is no member nothing.
+  // `all` is spent: a member known for an hour is paid its floor, a non-member nothing.
   assert.deepEqual([pay('x', 5, T + 1, { member: false }), pay('y', 5, T + 1)], [false, true]);
-  // The share counts for an hour to the second; with all of it free again, it is what the search may take.
+  // The search's share frees exactly an hour on, back to its whole 30.
   assert.deepEqual([pay('k3', 1, T + 3599, search), pay('k3', 31, T + 3600, search), pay('k3', 30, T + 3600, search)], [false, false, true]);
 });
 
@@ -145,10 +141,10 @@ await check('the keys of one member take an even share of the search\'s, or one 
   const of = (key, n) => ({ member: false, search: true, share: { key, of: n } });
   // Two members: 30 each.
   assert.deepEqual([s.pay('k1', T, 25, T, of('x', 2)), s.pay('k2', T, 6, T, of('x', 2)), s.pay('k3', T, 5, T, of('x', 2))], [true, false, true]);
-  // Six members: 10 each, but a request at the most, 20, is paid all the same, and no more.
+  // Six members: 10 each, but one request at `top`, 20, is paid all the same, and no more.
   assert.deepEqual([s.pay('k4', T, 20, T, of('y', 6)), s.pay('k5', T, 1, T, of('y', 6))], [true, false]);
-  // 10 of the search's 60 left: a request past them is not paid, but a member's keys are
-  // still paid their one request at the most.
+  // 10 of the search's 60 left: a request past them is not paid, but a member's keys still
+  // get their one request at `top`.
   assert.deepEqual([s.pay('k6', T, 11, T, { member: false, search: true }), s.pay('k7', T, 21, T, of('z', 6)), s.pay('k7', T, 20, T, of('z', 6))], [false, false, true]);
 });
 
@@ -159,7 +155,7 @@ await check('a member\'s one request at the most past the search\'s share is pai
   // The search's 60 taken by three members' keys, 70 of the whole by members.
   assert.deepEqual(['a', 'b', 'c'].map((key) => s.pay(`k${key}`, T, 20, T, of(key))), [true, true, true]);
   assert.deepEqual([s.pay('m1', T, 50, T), s.pay('m2', T, 20, T)], [true, true]);
-  // 20 of the whole left: one member's request at the most past the search's share, and no second.
+  // 20 of `all` left: one request at `top` past the search's share, and no second.
   assert.deepEqual([s.pay('kd', T, 20, T, of('d')), s.pay('ke', T, 20, T, of('e'))], [true, false]);
 });
 

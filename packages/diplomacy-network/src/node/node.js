@@ -1,10 +1,5 @@
-// A host on the network, as one object: the pools it linked, what it offers them, what
-// it runs for them. Everything it touches outside itself is handed to it - the store,
-// the transport, the clock, the randomness, the requester and the executor - so the same
-// host runs over Tor against a forge and a docker engine, or in memory under a test.
-//
-// One rule holds throughout: whatever the host is about to show the outside - a request,
-// an answer, a job started, a forge call - rests only on state the store already holds.
+// Invariant: whatever the host shows the outside (a request, an answer, a job started, a
+// forge call) rests only on state the store already holds.
 
 import { b64u } from '../core/canon.js';
 import { identityFromSeed } from '../core/identity.js';
@@ -23,8 +18,7 @@ const CHANGE_DELAY_MS = 100;
 const OFF = 'the network was switched off';
 const CLOSED = 'the pool was closed';
 
-// `clock` with every timer's work fenced in: a callback that throws, or whose promise
-// rejects, would end the process, so it is logged and the host goes on.
+// A timer callback that throws or rejects would end the process; log it instead.
 function fenced(clock, log) {
   const failed = (err) => log(`what a timer started failed: ${err?.stack ?? err}`);
   return {
@@ -40,18 +34,11 @@ function fenced(clock, log) {
   };
 }
 
-/// The host. `store` is `createStore`'s; `transport` carries requests to and from other
-/// hosts; `clock` is `{ now(), setTimeout, clearTimeout }` with `now` in Unix seconds;
-/// `random(n)` answers n random bytes; `requester` knows the rules and the forge, and is
-/// told (`conclude(request)`) of every request it allowed that got no answer from it;
-/// `executor` runs jobs, says whether it takes a task (`wouldTake(task)`) and may say how
-/// many more milliseconds this host waits before it goes for one (`weigh(task)`); a
-/// `start` that throws is a failed attempt of the offer, but for an error named
-/// `OwnFault` - no job ran, for a fault of this machine's own - whose claim is given
-/// back at no attempt lost;
-/// `settings()` answers `{ requiredMinimumH, maximumAcceptedH }`;
-/// `solve(challenge, effort)` finds a proof of work, by default on one of POW_WORKERS
-/// threads.
+/// `clock.now()` is Unix seconds. `requester.conclude(request)` hears of every request it
+/// allowed that got no answer from it. `executor.weigh(task)` may add milliseconds this
+/// host waits before going for a task. An executor `start` that throws is a failed
+/// attempt of the offer, except an error named `OwnFault` (a local fault, no job ran),
+/// whose claim is given back at no attempt lost.
 export function createNode({
   store, transport, clock: timers, random, log = () => {}, requester, executor, settings, solve = solverPool(POW_WORKERS),
 }) {
@@ -67,22 +54,18 @@ export function createNode({
     id, self: id.pk, store, transport, clock, random, log, requester, executor, settings, solve, keys,
     now: () => clock.now(),
     pools: new Map(), // pool id -> { id, link, pool, locks, seq, joining, invites, farewell, returning, back, former, stale, epoch, catching, head }
-    away: new Map(), // pool id -> the link of a pool that is linked and that this host left
-    // pool id -> the locks of a pool this host is not in now: one read from the store and
-    // not linked yet, or one it left.
+    away: new Map(), // pool id -> link of a linked pool this host left
+    // pool id -> locks of a pool this host is not in: stored but not linked yet, or left.
     heldLocks: store.read('locks') ?? {},
     saveKeys: () => store.write('keys', keys),
     saveLocks: () => store.write('locks', {
       toJSON: () => ({ ...host.heldLocks, ...Object.fromEntries([...host.pools.values()].map((P) => [P.id, P.locks.entries()])) }),
     }),
-    /// Is `P` the pool this host is in under its id? One it left, or linked again since,
-    /// is not: an answer that comes back to it after that has nothing to change.
+    /// False once `P` was left or relinked, so a late answer to it changes nothing.
     open: (P) => host.pools.get(P.id) === P,
-    /// What a pool's document holds beside its records and this host's sequence number.
     head: (P) => JSON.stringify([P.joining, P.joinFailed, P.invites, P.farewell, P.returning]),
-    /// Has what a pool's document holds written: the records that changed since it was
-    /// last asked, as a line, while nothing else in the document did. Nothing is written
-    /// of a pool that is not open.
+    /// Writes only the changed records, as a log line, while nothing else in the document
+    /// changed; otherwise the whole document.
     save: (P) => {
       if (!host.open(P)) return;
       const head = host.head(P);
@@ -101,16 +84,14 @@ export function createNode({
   };
   const watchers = [];
   let started = false;
-  // Until the pools were named once, in this life of the host or one before it, a pool
-  // the store knows and this object does not is a pool not linked yet, not a pool that
-  // was closed: nothing is ended over it.
+  // Until setPools has run once (in any life of the host), a stored pool not listed is
+  // not linked yet rather than closed: nothing is ended over it.
   const links = store.read('links');
   let linked = Array.isArray(links?.pools);
   let [poked, touched, ticking] = [null, null, null];
   let looked = clock.now();
   host.running = () => started;
 
-  /// Tells the watchers, once for everything that changes in a short while.
   host.touch = () => {
     touched ??= clock.setTimeout(() => {
       touched = null;
@@ -124,16 +105,13 @@ export function createNode({
     }, CHANGE_DELAY_MS);
   };
 
-  /// Looks soon at everything the host holds for something that came due.
   host.poke = () => {
     if (started) poked ??= clock.setTimeout(step, 0);
   };
 
-  /// A pool's records changed: the store, the locks and the rounds that rest on them follow.
   host.moved = (P) => {
     P.seq = Math.max(P.seq, P.pool.get(`member/${host.self}`)?.seq ?? -1);
-    // A lock was granted for a claim to carry the grant; once the claim held does, it
-    // has done its work.
+    // A lock exists so a claim carries its grant; once the held claim does, release it.
     let released = false;
     for (const [taskId, lock] of P.locks.entries()) {
       const claim = P.pool.get(claimKey(taskId, lock.executor));
@@ -148,7 +126,6 @@ export function createNode({
     host.touch();
   };
 
-  /// Takes records into a pool; answers as `Pool.merge` does.
   host.take = (P, records) => {
     const result = P.pool.merge(records, host.now());
     if (result.fresh.length > 0) host.moved(P);
@@ -179,16 +156,15 @@ export function createNode({
     },
   };
 
-  /// Notices a machine that slept: a clock that jumped between two looks. What it holds of
-  /// its pools is out of date from then on. A step looks, and so does whatever may not go
-  /// by an old state and may come before the step does.
+  /// Detects a machine that slept (a clock jump between looks), after which its pool state
+  /// is stale. Call it before anything that must not act on old state ahead of a step.
   host.look = () => {
     const now = host.now();
     if (now - looked > WAKE_GAP_MS / 1000) host.gossip.woke();
     looked = now;
   };
 
-  /// What this host answers `from` for a request of `kind` in a pool: `{ body }` or `{ error, detail }`.
+  /// Answers `{ body }` or `{ error, detail }`.
   host.handle = async (P, from, kind, body) => handlers[kind](P, from, body);
 
   function step() {
@@ -205,13 +181,13 @@ export function createNode({
     try {
       store.flush();
     } catch (err) {
-      // What could not be written stays to be written: the next step tries again.
+      // Unwritten documents stay dirty; the next step retries.
       log(`the store could not be written: ${err?.message ?? err}`);
     }
   }
 
-  // Leaves a pool: its runs stop, its claims are given back, its offers are cancelled,
-  // and the members are told all of it once. A pool that `stay`s linked is away.
+  // Ends this host's runs, claims and offers in a pool and tells the members once; with
+  // `stay` the pool stays linked, as away.
   function close(P, stay) {
     host.claiming.closing(P);
     host.gossip.unlink(P, [...host.runs.closing(P, CLOSED), ...host.offers.closing(P, CLOSED)], stay);
@@ -233,9 +209,8 @@ export function createNode({
   function poolRow(P, now) {
     const members = P.pool.members(now);
     const skewed = (pk) => host.peers.seen(pk).skew;
-    // Why nobody takes an available task: `clock` when this host's clock is too far from
-    // the clock of every host a claim of it needs - the hosts offering it, or every other
-    // member when this host offers it.
+    // 'clock' when this host's clock is skewed from every host a claim needs: the
+    // offerers, or every other member when this host offers it.
     const blocked = (t) => {
       const needed = t.offeredBy.includes(host.self) ? members.map((m) => m.pk).filter((pk) => pk !== host.self) : t.offeredBy;
       return t.state === 'available' && needed.length > 0 && needed.every(skewed) ? 'clock' : '';
@@ -249,9 +224,8 @@ export function createNode({
           ? { lastSeen: now, reachable: transport.state().state === 'ready', skew: false } : host.peers.seen(m.pk)),
       })),
       tasks: P.pool.tasks(now).map((t) => {
-        // One row a task: where several claims hold offers of it, this host's own is the
-        // one shown, else the one that holds this host's offer, else the one that holds
-        // the most.
+        // Of several claims, show this host's own, else the one holding this host's offer,
+        // else the one holding the most offers.
         const claim = t.offers.find((o) => o.claim?.executor === host.self)?.claim
           ?? t.offers.find((o) => o.host === host.self)?.claim ?? t.claim;
         return {
@@ -265,11 +239,9 @@ export function createNode({
   }
 
   return {
-    /// This host's public key.
     pk: id.pk,
 
-    /// Begins serving requests and looking after what the host holds. The transport is
-    /// started in the background: over Tor that takes minutes, and nothing here waits.
+    /// Not awaited: the transport starts in the background (over Tor it takes minutes).
     async start() {
       if (started) return;
       started = true;
@@ -299,13 +271,11 @@ export function createNode({
       Promise.resolve().then(() => transport.start()).catch((err) => log(`the transport did not start: ${err?.message ?? err}`));
     },
 
-    /// Stops serving. Runs are left going: the host takes them up when it starts again.
+    /// Runs keep going; the host takes them up when it starts again.
     stop,
 
-    /// The network is switched off: every offer of this host that has not ended is
-    /// cancelled, every run is stopped and its claim given back, the members are told,
-    /// and the host stops - once they have heard and the jobs are stopped, or after
-    /// `waitMs`. It stays a member of its pools.
+    /// Cancels open offers, stops every run and gives back its claim, tells the members,
+    /// then stops once they heard and the jobs stopped, or after `waitMs`. Membership stays.
     async switchOff({ waitMs = SWITCH_OFF_WAIT_MS } = {}) {
       if (!started) return;
       const told = [...host.pools.values()].map((P) => {
@@ -320,10 +290,8 @@ export function createNode({
       await stop();
     },
 
-    /// Every pool this machine is linked to, each `{ id, path, forge, identity }`; the
-    /// list is kept across a restart. A pool no longer listed is closed: its runs stop,
-    /// its offers are cancelled, the members are told, and listed again it is a pool of
-    /// this host's own. A pool this host left stays left for as long as it is listed.
+    /// `list` of `{ id, path, forge, identity }`, persisted. A pool dropped from it is
+    /// closed; listed again it is this host's own. A left pool stays left while listed.
     setPools(list) {
       for (const info of list) {
         if (!validPool(info?.id)) throw new Error(`"${info?.id}" is not a pool id.`);
@@ -350,8 +318,7 @@ export function createNode({
       host.touch();
     },
 
-    /// Leaves a pool that stays linked: this host is no member of it, and nothing of the
-    /// pool reaches it, until it joins again.
+    /// The pool stays linked, but nothing of it reaches this host until it joins again.
     leave({ pool }) {
       if (host.away.has(pool)) return;
       const P = host.pools.get(pool);
@@ -362,7 +329,7 @@ export function createNode({
 
     admit: host.claiming.admit,
 
-    /// `{ invite }`: a token another host joins the pool by, good for `ttlSecs`.
+    /// `{ invite }`: a join token valid for `ttlSecs`.
     invite(args) {
       const out = host.gossip.invite(args);
       store.flush();
@@ -378,7 +345,7 @@ export function createNode({
       return result;
     }])),
 
-    /// Everything the applets show, every time in Unix seconds.
+    /// Everything the applets show; times in Unix seconds.
     snapshot() {
       const now = host.now();
       return {
@@ -398,12 +365,12 @@ export function createNode({
       };
     },
 
-    /// Calls `fn` after the snapshot changed, once for a burst of changes.
+    /// Once per burst of snapshot changes.
     onChange(fn) {
       watchers.push(fn);
     },
 
-    /// `{ requests, signatures }`: the requests received and the signatures checked for them.
+    /// `{ requests, signatures }`: requests received and signatures checked.
     stats: () => ({ ...inbound.tally }),
   };
 }

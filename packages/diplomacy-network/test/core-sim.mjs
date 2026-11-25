@@ -1,6 +1,6 @@
-// The protocol core as a network: 2 to 7 hosts built from nothing but src/core, on a
-// transport that delays, reorders, duplicates and drops what they send, partitions them
-// and crashes them. Every schedule is drawn from one seed and must keep five invariants:
+// 2 to 7 hosts built from src/core alone, on a transport that delays, reorders, duplicates
+// and drops messages and partitions and crashes hosts. Each schedule comes from one seed
+// and must keep five invariants:
 //
 // (a) hosts that reach each other agree, once quiet, on the claim that holds each offer;
 // (b) after a partition heals and sync runs, every host holds the same state, and the
@@ -9,9 +9,8 @@
 // (d) a lapsed claim frees its task for every host at the same second;
 // (e) every round ends, and in a calm network none ends by timing out.
 //
-// Run: node test/core-sim.mjs
-//   DN_SIM_SCHEDULES=20000   more schedules than the default
-//   DN_SIM_SEED=1234         one schedule, the one a failure names
+// DN_SIM_SCHEDULES=20000   more schedules than the default
+// DN_SIM_SEED=1234         one schedule, the one a failure names
 
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -51,7 +50,6 @@ const claimKey = (taskId, executor) => `claim/${taskId}/${executor}`;
 // The conflict rules of PROTOCOL.md section 7, written out apart from the code under test.
 const rankOf = (taskId, pk) => crypto.createHash('sha256')
   .update(Buffer.concat([Buffer.from(`dn1/rank\0${taskId}\0`), Buffer.from(pk, 'base64url')])).digest('hex');
-// What `host` backs a claim with, or null.
 const backedBy = (claim, host) => (claim.executor === host ? claim.offer : claim.grants.find((g) => g.by === host)?.offer) ?? null;
 const backersOf = (claim) => [claim.executor, ...claim.grants.map((g) => g.by)].filter((pk) => backedBy(claim, pk));
 // Negative when claim `a` holds the offer of `host`, which backs both, over claim `b`.
@@ -66,11 +64,9 @@ function newer(a, b) {
   if (a.round !== b.round) return a.round < b.round ? -1 : 1;
   return b.seq - a.seq;
 }
-// When a held claim stops holding an offer of `hours`.
 const heldTill = (claim, hours) => Math.min(claim.leaseUntil, claim.claimedAt + hours * 3600) + GRACE;
 
-// One host: a pool, a lock table and the claim rounds it runs, wired to the world's
-// transport the way a daemon would wire them to Tor.
+// Wired to the world's transport the way a daemon is wired to Tor.
 class Host {
   constructor(world, index, accepts) {
     this.world = world;
@@ -101,7 +97,7 @@ class Host {
     return this.world.now;
   }
 
-  // Runs `fn` after `delay` ms unless this host crashed in between.
+  // Skipped if this host crashed in between.
   later(delay, fn) {
     const { life } = this;
     this.world.at(delay, () => {
@@ -113,12 +109,11 @@ class Host {
     return this.pool.members(this.now).map((m) => m.pk).filter((pk) => pk !== this.pk);
   }
 
-  // Every host it keeps in touch with: the members, and those that stopped signing.
   known() {
     return this.pool.known(this.now).map((m) => m.pk).filter((pk) => pk !== this.pk);
   }
 
-  // Signs its member record and its open offers again, as a daemon does on a timer.
+  // As a daemon does on a timer.
   resign() {
     if (!this.up || !this.joined) return;
     const { now } = this;
@@ -137,8 +132,7 @@ class Host {
     return (this.pool.task(taskId, this.now)?.offers ?? []).some((o) => o.claim?.executor === this.pk);
   }
 
-  // The count its next backing of a claim carries, as a daemon keeps it on disk; null
-  // when it has no offer of the task open.
+  // A daemon keeps this count on disk; null without an open offer of the task.
   nextGen(taskId) {
     const mine = this.pool.get(`offer/${taskId}/${this.pk}`);
     if (mine?.state !== 'open') return null;
@@ -154,7 +148,6 @@ class Host {
     for (const pk of this.others()) this.send(pk, 'push', { records });
   }
 
-  // Takes records into its own pool, then lets everything that rests on the state catch up.
   take(records) {
     const result = this.pool.merge(records, this.now);
     this.changed();
@@ -222,7 +215,6 @@ class Host {
     });
   }
 
-  // Introduces itself to a member and pulls what that member holds.
   greet(pk, done) {
     this.send(pk, 'hello', { member: this.record }, (result) => {
       const index = result?.body?.index;
@@ -275,7 +267,6 @@ class Host {
     this.push([record]);
   }
 
-  // Marks its own offer of a task done.
   close(taskId) {
     const { sig: _, ...held } = this.pool.get(`offer/${taskId}/${this.pk}`);
     const record = offerRecord(this.id, { ...held, seq: held.seq + 1, at: this.now, state: 'done' });
@@ -398,8 +389,7 @@ class Host {
     this.push([claim]);
   }
 
-  // A requester asks the executor of the claim that holds its offer for its next lease
-  // and spreads the answer.
+  // Asks the executor of the claim holding this host's offer for its next lease.
   ping(taskId) {
     const claim = this.pool.task(taskId, this.now)?.offers.find((o) => o.host === this.pk)?.claim;
     if (!claim) return;
@@ -423,7 +413,6 @@ class Host {
     return { body: { claim: next } };
   }
 
-  // The executor gives its claim up, or reports its task finished.
   finish(taskId, state) {
     const ended = endClaim(this.id, this.pool.get(claimKey(taskId, this.pk)), state, this.now, b64u(Buffer.alloc(32, 7)));
     assert.deepEqual(this.take(ended).refused, []);
@@ -431,7 +420,6 @@ class Host {
   }
 }
 
-// The hosts, the clock they share and everything in flight between them.
 class World {
   constructor(seed, sealed = false) {
     this.rnd = prng(seed);
@@ -470,7 +458,7 @@ class World {
     this.queue.splice(i, 0, event);
   }
 
-  // Carries out everything due up to `until` ms, or everything there is.
+  // `until` is in ms.
   async run(until = Infinity) {
     while (this.queue.length > 0 && this.queue[0].t <= until) {
       const event = this.queue.shift();
@@ -482,7 +470,6 @@ class World {
     if (until !== Infinity) this.ms = until;
   }
 
-  // Moves the clock on while nothing is in flight.
   jump(now) {
     assert.equal(this.queue.length, 0);
     assert.ok(now >= this.now);
@@ -512,7 +499,7 @@ class World {
     host.runs.clear();
   }
 
-  // Back up with what a daemon keeps on disk: its records and its locks.
+  // Keeps what a daemon keeps on disk: its records and its locks.
   restart(host) {
     if (host.up) return;
     host.up = true;
@@ -520,14 +507,13 @@ class World {
     if (host.inviter) host.join(host.inviter);
   }
 
-  // One leg of a journey: lost, or late by a random delay.
   hop(fn) {
     if (this.rnd.chance(this.net.drop)) return;
     this.at(5 + this.rnd.int(this.net.slow), fn);
   }
 
-  // Sends a request and calls `reply` once: with `{ body }` or `{ error }` when an answer
-  // arrives in time, with null when none does. A sender that crashed hears nothing.
+  // `reply` is called once: `{ body }`, `{ error }`, or null on timeout. A crashed sender
+  // hears nothing.
   request(src, dst, kind, body, reply) {
     const { life } = src;
     let open = true;
@@ -552,8 +538,7 @@ class World {
     if (this.rnd.chance(this.net.dup)) this.hop(arrive);
   }
 
-  // The same journey inside signed envelopes, each with its proof of work. A copy of a
-  // request on the wire is a replay, and must never reach a handler twice.
+  // A duplicated request on the wire is a replay and must never reach a handler twice.
   seal(src, dst, kind, body, settle, tries) {
     this.at(0, async () => {
       if (!src.up) return;
@@ -597,7 +582,6 @@ class World {
     });
   }
 
-  // Every host syncs with a random member every so often, for as long as the world is busy.
   gossip() {
     this.busy = true;
     const era = ++this.era;
@@ -616,7 +600,7 @@ class World {
     return this.hosts.filter((h) => h.up && h.joined);
   }
 
-  // The live hosts in groups that can reach each other and take each other's requests.
+  // Live hosts grouped by who can reach and accept each other.
   clusters() {
     const { now } = this;
     const left = new Set(this.live());
@@ -644,9 +628,8 @@ class World {
     return this.clusters().every((cluster) => new Set(cluster.map((h) => h.pool.stateHash(this.now))).size === 1);
   }
 
-  // Brings the world to rest: the faults stop, whatever is in flight lands, and the hosts
-  // sync until those that reach each other hold the same state. Partitions and crashed
-  // hosts stay as they are.
+  // Faults stop and hosts sync until those that reach each other agree. Partitions and
+  // crashed hosts stay as they are.
   async settle() {
     const { net } = this;
     this.net = CALM;
@@ -667,7 +650,7 @@ class World {
     this.net = net;
   }
 
-  // The invariants that hold whenever the world is at rest.
+  // The invariants that hold at rest.
   inspect(tasks, tally) {
     const { now } = this;
     for (const run of this.rounds) {
@@ -702,7 +685,6 @@ class World {
   }
 }
 
-// Every claim record any host holds.
 const heldClaims = (world) => world.hosts.flatMap((h) => h.pool.records().filter((r) => r.type === 'claim'));
 
 // One whole schedule: hosts join, offer and race for tasks while the network misbehaves;
@@ -939,7 +921,6 @@ async function schedule(seed, tally) {
   return world;
 }
 
-// A calm world of `n` hosts that know each other, the first of which offers one task.
 async function calmWorld(n, item, offerers = [0]) {
   const world = new World(1);
   for (let i = 0; i < n; i++) world.add(24);
@@ -958,8 +939,6 @@ const tally = {
   replays: 0, efforts: 0, midRound: 0, splits: 0, siblings: 0, twice: 0,
 };
 
-// A worker thread runs its share of the seeds and reports what they exercised, or the
-// first seed that failed.
 if (!isMainThread) {
   let seed;
   try {
@@ -1193,8 +1172,8 @@ if (isMainThread) {
     }
     console.log(`${tally.schedules} schedules in ${((Date.now() - started) / 1000).toFixed(1)} s: ${tally.e} rounds, ${tally.timeouts} of them timed out, ${tally.splits} partitions`);
 
-    // Every schedule held every invariant, or the run stopped above. What is left to
-    // show is that the schedules reached each of them: a run long enough must have.
+    // Every schedule held every invariant, or the run stopped above; show that the
+    // schedules reached each of them.
     const shown = (name, counts) => check(`${name} [${Object.entries(counts).map(([what, k]) => `${k} ${what}`).join(', ')}]`, () => {
       for (const [what, k] of Object.entries(counts)) assert.ok(k > 0 || count < 500, `no schedule reached: ${what}`);
     });

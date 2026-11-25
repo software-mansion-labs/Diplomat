@@ -1,7 +1,3 @@
-// Acting as the requester: the capability, and the MAC and sequence number on each
-// request made under it.
-// Run: node test/core-capability.mjs
-
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { b64u, canon, hash } from '../src/core/canon.js';
@@ -131,7 +127,6 @@ check('an outcome is reported by the executor of the claim the offering host hol
   const outcome = wireOutcome({ ok: true, summary: 'reviewed', usd: 0.4215, tokens: 91234.2, runner: 'claude', model: 'opus' });
   assert.deepEqual(outcome, { ok: true, summary: 'reviewed', microUsd: 421500, tokens: 91234, runner: 'claude', model: 'opus' });
   assert.doesNotThrow(() => canon(outcome));
-  // An outcome of which the executor lowered a figure says so, and no other says anything of it.
   const lowered = wireOutcome({ ok: true, summary: 'reviewed', usd: 0.1, tokens: 10, runner: 'claude', model: 'opus', capped: true });
   assert.deepEqual(lowered, { ok: true, summary: 'reviewed', microUsd: 100000, tokens: 10, runner: 'claude', model: 'opus', capped: true });
   for (const capped of [false, undefined, 1, 'true']) assert.equal('capped' in wireOutcome({ ok: true, capped }), false, String(capped));

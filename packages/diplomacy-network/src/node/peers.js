@@ -1,11 +1,7 @@
-// The outbound half of a host: one function that sends a request to a peer and says what
-// came of it, and what the host remembers about each peer between requests - the effort
-// it last demanded, what was paid it this hour, when it last answered, and how long
-// gossip leaves it alone. Which peers it had asked in vain for long is all of that a
-// restart keeps.
+// Of what a host remembers per peer, only which peers were long silent survives a restart.
 //
-// "No answer" is never evidence that a peer is gone: a first circuit to an onion service
-// routinely takes minutes, and an answer can be lost after the request was carried out.
+// "No answer" is never evidence that a peer is gone: a first onion circuit can take
+// minutes, and an answer can be lost after the request was carried out.
 
 import { canon, parseCanon } from '../core/canon.js';
 import { UNSERVED, buildRequest, verifyResponse } from '../core/envelope.js';
@@ -20,22 +16,20 @@ import {
 const MOST_OWED = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
 const ATTEMPTS = 4;
 const BUSY_RETRY_MS = 1500;
-// What one sending of a request comes to when the peer wants it sent once more.
 const AGAIN = Symbol('again');
 const INSATIABLE = { ok: false, code: 'effort', detail: 'the peer keeps asking for more work' };
 
-/// The peers of `host`: `{ ask, patience, heard, seen }`.
 export function createPeers(host) {
   const peers = new Map(); // pk -> { since, seen, heard, failures, until, skew }
   const spending = new Spending(POW_HOURLY, MOST_OWED);
-  // "pk pool" -> `{ effort, at }`: the effort that peer last asked of this host there, and
-  // when. A day on it is asked at the base price again: a price that it cannot pay never
-  // keeps a peer from being asked.
+  // "pk pool" -> `{ effort, at }`: what that peer last asked of this host there. After
+  // SEARCH_INTERVAL_MS the base price applies again, so a price it cannot pay never keeps
+  // a peer from being asked.
   const owed = new Map();
   const lanes = new Map(); // pk -> the last large request sent to it
-  // pk -> when a peer that had not answered for long was first found so, and has not
-  // answered since: on disk, so a host that starts again does not wait for it as for one
-  // it has yet to reach. A peer silent for longer than a record lives is no member.
+  // pk -> when a peer was first found long silent. On disk, so a restarted host does not
+  // wait for it as for one it has yet to reach. One silent longer than a record lives is
+  // no member.
   const silent = new Map(Object.entries(host.store.read('peers')?.silent ?? {})
     .filter(([, at]) => at > host.now() - RECORD_RETENTION_SECS));
   const keep = () => host.store.write('peers', { silent: Object.fromEntries(silent) });
@@ -64,14 +58,14 @@ export function createPeers(host) {
     return { ok: false, lost: code };
   }
 
-  // Sends a request once, at the effort the peer last asked for. AGAIN when the peer
-  // wants it sent once more: for more work, or because it could not serve it this time.
+  // At the effort the peer last asked for. AGAIN when the peer wants it sent once more:
+  // for more work, or because it could not serve it this time.
   async function once(p, pool, to, kind, body, { timeoutMs, maxResponseBytes, ticket, member, search, share }, first) {
     const key = `${to} ${pool}`;
     const last = owed.get(key);
     const effort = last && host.now() - last.at < SEARCH_INTERVAL_MS / 1000 ? last.effort : kind === 'hello' ? POW.strangerBase : POW.memberBase;
     if (!spending.pay(to, p.since, effort, host.now(), { member, search, share })) return { ok: false, lost: 'budget' };
-    // Whatever this request tells the peer is on disk before the peer hears it.
+    // What this request tells the peer is on disk before the peer hears it.
     host.store.flush();
     let request;
     try {
@@ -84,8 +78,7 @@ export function createPeers(host) {
       const raw = await host.transport.request(to, canon(request), {
         timeoutMs, maxResponseBytes, headers: ticket ? { 'dn-ticket': ticket } : {},
       });
-      // Only an answer signed by the peer, in its canonical form and naming this very
-      // request, is one.
+      // Only a canonical answer signed by the peer and naming this request counts.
       answer = verifyResponse(parseCanon(raw), { request, from: to });
     } catch (err) {
       return lost(to, typeof err?.code === 'string' ? err.code : 'protocol');
@@ -98,13 +91,12 @@ export function createPeers(host) {
     owed.set(key, { effort: Math.min(answer.effort, MOST_OWED), at: host.now() });
     if (answer.ok) return { ok: true, body: answer.body };
     if (answer.code === 'effort' && answer.effort <= MOST_OWED) return member ? AGAIN : { ok: false, lost: 'budget' };
-    // The transport sent these bytes twice and the first copy was carried out. Every
-    // kind but `act` is asked again and answers the same; an `act` was performed.
+    // The transport delivered it twice and the first copy was carried out: any kind but
+    // `act` answers the same when asked again; an `act` was performed.
     if (answer.code === 'replay') return kind === 'act' ? { ok: false, lost: 'replay' } : AGAIN;
     if (answer.code === 'busy' && first && (kind !== 'act' || answer.detail === UNSERVED)) {
-      // The peer could not serve it this once: it has only just started, or it has no
-      // place free. An `act` is asked again only where the peer did nothing for it: one
-      // it failed at may have been performed.
+      // Just started, or no place free. An `act` is retried only if the peer did nothing
+      // for it: one it failed at may have been performed.
       await sleep(BUSY_RETRY_MS);
       return AGAIN;
     }
@@ -119,9 +111,8 @@ export function createPeers(host) {
     return INSATIABLE;
   }
 
-  // A body above what anyone may send unasked needs a place at the target, asked for
-  // first and good for one sending: every time the request goes out it has a ticket of
-  // its own.
+  // A body above what anyone may send unasked needs a place reserved at the target first;
+  // each ticket is good for one sending.
   async function exchangeLarge(p, pool, to, kind, body, size, options) {
     const bytes = Math.min(size + 1024, kind === 'act' ? MAX_ACT_BODY_BYTES : MAX_BODY_BYTES);
     for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
@@ -134,16 +125,13 @@ export function createPeers(host) {
     return INSATIABLE;
   }
 
-  /// Sends one request and answers `{ ok: true, body }`, `{ ok: false, code, detail }` for
-  /// a refusal the peer signed, or `{ ok: false, lost }` when no answer came: `lost` is
-  /// the transport's code, `offline` while the transport is not ready, `backoff` while
-  /// gossip leaves the peer alone, `budget` when the peer asks for more work than this
-  /// host has left to do this hour, for that peer or for all of them, or than it does at
-  /// once for a request to a key it holds no member record of, `no-place` when it has no
-  /// place for a large body, or `replay` for an `act` whose answer was lost. `fresh` asks
-  /// regardless of the backoff. What a request is paid out of is the gossip's `standing`
-  /// of `to`; one to a key that is not a member of a pool this host is in is not sent
-  /// again for more work - the next request pays what it asked.
+  /// Answers `{ ok: true, body }`, `{ ok: false, code, detail }` for a refusal the peer
+  /// signed, or `{ ok: false, lost }` when no answer came: the transport's code, `offline`,
+  /// `backoff` (ignored when `fresh`), `budget` (the peer asks more work than this host has
+  /// left this hour for it or for all, or than it does at once for a key with no member
+  /// record), `no-place` for a large body, or `replay` for an `act` whose answer was lost.
+  /// Paid per the gossip's `standing` of `to`; a request to a non-member is not resent for
+  /// more work - the next request pays what it asked.
   async function ask(pool, to, kind, body, { fresh = false, timeoutMs = REQUEST_TIMEOUT_MS, maxResponseBytes } = {}) {
     const p = peer(to);
     if (host.transport.state().state !== 'ready') return { ok: false, lost: 'offline' };
@@ -151,8 +139,7 @@ export function createPeers(host) {
     const options = { timeoutMs, maxResponseBytes, ...host.gossip.standing(pool, to) };
     const size = Buffer.byteLength(JSON.stringify(body));
     if (size < STRANGER_BODY_BYTES - 1024) return exchange(p, pool, to, kind, body, options);
-    // A target gives a member one place for a large body at a time: such requests go out
-    // one after another.
+    // A target gives a member one large-body place at a time, so these go out in turn.
     const turn = (lanes.get(to) ?? Promise.resolve()).then(() => exchangeLarge(p, pool, to, kind, body, size, options));
     const settled = turn.catch(() => {});
     lanes.set(to, settled);
@@ -160,24 +147,21 @@ export function createPeers(host) {
     return turn;
   }
 
-  /// How long a claim round waits for a member: `normal` for one that answered lately,
-  /// `patient` for one never reached and known only for a short while, else `short` -
-  /// one that has not answered for long, in this life of the host or by the end of the
-  /// last.
+  /// A claim round's wait for a member: `normal` if it answered lately, `patient` if never
+  /// reached and known only briefly, else `short` (long silent, in this life of the host or
+  /// by the end of the last).
   function patience(pk) {
     const p = peer(pk);
     if (quiet(p) || silent.has(pk)) return 'short';
     return p.seen > 0 ? 'normal' : 'patient';
   }
 
-  /// A request this host accepted came from that peer.
   function heard(pk) {
     peer(pk).heard = host.now();
   }
 
-  /// `{ lastSeen, reachable, skew }` of a peer: when it last answered or asked (0 for
-  /// never), whether the last request to it was answered, and whether that answer said
-  /// its clock and this host's are too far apart for either to take the other's requests.
+  /// `lastSeen`: when it last answered or asked (0 for never); `reachable`: the last request
+  /// to it was answered; `skew`: that answer said the two clocks are too far apart.
   function seen(pk) {
     const p = peers.get(pk);
     return {

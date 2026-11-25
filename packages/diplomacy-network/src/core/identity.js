@@ -1,10 +1,9 @@
-// A host's identity: one Ed25519 key pair that is also its onion service key, so the
-// onion address is a function of the public key (PROTOCOL.md section 1).
+// One Ed25519 key is both a host's identity and its onion service key (PROTOCOL.md section 1).
 
 import crypto from 'node:crypto';
 import { b64u, canon, tagged, unb64u } from './canon.js';
 
-// The fixed DER prefixes Node wraps a raw Ed25519 key in.
+// DER prefixes that wrap a raw Ed25519 key.
 const PKCS8_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 
@@ -16,17 +15,15 @@ function publicKey(pkBytes) {
   return crypto.createPublicKey({ key: Buffer.concat([SPKI_PREFIX, pkBytes]), format: 'der', type: 'spki' });
 }
 
-// Parsing a key costs as much as signing with it, and a host signs every request and
-// every answer with the one identity it holds.
-const parsed = new WeakMap(); // identity -> its private key object
+// Parsing a key costs as much as signing with it, and every request and answer is signed.
+const parsed = new WeakMap();
 
-/// `{ pk, seed }`, both base64url: the public key and the 32-byte private seed.
+/// `{ pk, seed }`, both base64url.
 export function generateIdentity() {
   const seed = crypto.randomBytes(32);
   return identityFromSeed(seed);
 }
 
-/// The identity a stored seed stands for, or null when the seed is not 32 bytes.
 export function identityFromSeed(seed) {
   const bytes = Buffer.isBuffer(seed) ? seed : unb64u(seed);
   if (!bytes || bytes.length !== 32) return null;
@@ -34,9 +31,7 @@ export function identityFromSeed(seed) {
   return { pk: b64u(pk), seed: b64u(bytes) };
 }
 
-// The points of small order, as bytes with the sign bit cleared. Where the crypto library
-// takes one for a key, a signature with R the identity and S zero verifies under it for
-// messages nobody signed.
+// Small-order points, sign bit cleared. As a key, one verifies R = identity, S = 0 for any message.
 const SMALL_ORDER = [
   '00'.repeat(32),
   `01${'00'.repeat(31)}`,
@@ -47,7 +42,6 @@ const SMALL_ORDER = [
   `ee${'ff'.repeat(30)}7f`,
 ];
 
-/// Is this a well-formed public key: 32 bytes, base64url, and no point of small order?
 export function validPk(pk) {
   const bytes = unb64u(pk);
   if (bytes?.length !== 32) return false;
@@ -55,15 +49,12 @@ export function validPk(pk) {
   return !SMALL_ORDER.includes(bytes.toString('hex'));
 }
 
-/// The base64url signature of `tag || 0x00 || canon(object without "sig")`.
 export function sign(identity, tag, object) {
   const { sig: _, ...rest } = object;
   if (!parsed.has(identity)) parsed.set(identity, privateKey(unb64u(identity.seed)));
   return b64u(crypto.sign(null, tagged(tag, canon(rest)), parsed.get(identity)));
 }
 
-/// Does `object.sig` (or `sig`, when given) sign the object under `tag` for `pk`? False
-/// for any malformed input rather than a throw.
 export function verify(pk, tag, object, sig = object?.sig) {
   try {
     const pkBytes = unb64u(pk);
@@ -94,7 +85,6 @@ function base32(buf) {
   return out;
 }
 
-/// The v3 onion address ("<56 chars>.onion") of a public key.
 export function onionAddress(pk) {
   const key = unb64u(pk);
   if (key?.length !== 32) throw new TypeError('not a public key');
@@ -104,8 +94,7 @@ export function onionAddress(pk) {
   return `${base32(Buffer.concat([key, checksum, version]))}.onion`;
 }
 
-/// The key as tor's ADD_ONION takes it: "ED25519-V3:" plus the base64 of the 64-byte
-/// expanded secret key (the clamped SHA-512 of the seed).
+/// ADD_ONION's key: the 64-byte expanded secret key (clamped SHA-512 of the seed).
 export function torSecretKey(identity) {
   const h = crypto.createHash('sha512').update(unb64u(identity.seed)).digest();
   h[0] &= 248;

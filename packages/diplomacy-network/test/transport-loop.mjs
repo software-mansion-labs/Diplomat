@@ -1,6 +1,4 @@
-// The loopback transport, and through it the POST /dn1 framing both transports share:
-// what a request and its answer are, how each failure is named, what the fault files do
-// to a link, and what the listener refuses before a request handler ever runs.
+// The loopback transport, and through it the POST /dn1 framing both transports share.
 
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -47,7 +45,7 @@ async function until(probe, ms, what) {
   }
 }
 
-// A mutated transport hangs where a correct one answers; a test must fail then, not wait.
+// A broken transport hangs where a correct one answers; fail instead of waiting.
 function within(ms, promise, what) {
   let timer;
   const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} took over ${ms} ms`)), ms); });
@@ -56,7 +54,6 @@ function within(ms, promise, what) {
 
 const code = (promise) => promise.then(() => 'resolved', (err) => err.code ?? `uncoded: ${err.message}`);
 
-// A started host that echoes. `handled` counts the requests its handler saw.
 async function host({ tune } = {}) {
   const identity = generateIdentity();
   const h = { identity, pk: identity.pk, logs: [], handled: 0 };
@@ -72,8 +69,7 @@ async function host({ tune } = {}) {
   return h;
 }
 
-// Speaks to a host's listener in raw bytes and resolves with what came back: when the
-// host closed the connection, or after `settleMs` with the connection still open.
+// Resolves when the host closes the connection, or after `settleMs` with it still open.
 function raw(h, bytes, settleMs = 3000) {
   return new Promise((resolve) => {
     const socket = net.connect({ host: '127.0.0.1', port: h.port });
@@ -94,7 +90,6 @@ function raw(h, bytes, settleMs = 3000) {
 
 const post = (body, extra = '') => `POST /dn1 HTTP/1.1\r\nhost: x\r\ncontent-length: ${Buffer.byteLength(body)}\r\n${extra}\r\n${body}`;
 
-// A connection that made one request and stays open, as a client keeping it alive does.
 function keptOpen(h) {
   return new Promise((resolve) => {
     const socket = net.connect({ host: '127.0.0.1', port: h.port });
@@ -106,8 +101,7 @@ function keptOpen(h) {
   });
 }
 
-// Stands between the directory and a host: counts the connections made to the host and
-// the bytes sent to it.
+// A counting proxy the directory points at in place of `h`.
 async function proxied(h) {
   const p = { connections: 0, open: 0, bytesIn: 0 };
   const server = net.createServer((client) => {
@@ -130,8 +124,8 @@ async function proxied(h) {
   return p;
 }
 
-// A peer that is no transport at all: `script({ conn, nth, body, socket, answer })` is
-// called for the nth request on the conn-th connection and decides what goes back.
+// A raw peer: `script({ conn, nth, body, socket, answer })` decides what goes back for the
+// nth request on connection `conn`.
 async function scripted(script) {
   const pk = generateIdentity().pk;
   const peer = { pk, connections: 0, requests: [] };
@@ -217,8 +211,7 @@ try {
     assert.equal(p.connections, 3);
     assert.equal((await few.t.request(a.pk, say('another peer'))).toString(), 'another peer');
 
-    // A request whose time is up while it waits never reaches the peer; one that waits
-    // long enough does.
+    // A request that times out while queued never reaches the peer; a patient one does.
     const releases = [];
     c.serve((body) => new Promise((resolve) => { releases.push(() => resolve(body)); }));
     const held = [0, 1, 2].map((i) => few.t.request(c.pk, say(`held ${i}`)));
@@ -232,8 +225,8 @@ try {
     releases[3]();
     assert.equal((await patient).toString(), 'patient');
 
-    // Two are still with the peer; a third takes the last turn, a fourth waits, and a
-    // fifth is made in the same breath as the stop.
+    // Two are still with the peer; a third takes the last turn, a fourth waits, a fifth
+    // races the stop.
     const third = code(few.t.request(c.pk, say('third')));
     await until(() => releases.length === 5, 2000, 'the last turn being taken');
     const waiting = code(few.t.request(c.pk, say('waiting')));
@@ -258,7 +251,7 @@ try {
     assert.equal((await quick.t.request(c.pk, say('two'))).toString(), 'two');
     assert.equal(p.connections, 2);
 
-    // The listener's idle time is the tuned one plus the second node adds to it.
+    // Node adds keepAliveTimeoutBuffer (1 s) to the listener's idle time.
     const brief = await host({ tune: { serverIdleMs: 150 } });
     const kept = await keptOpen(brief);
     const from = Date.now();
@@ -267,8 +260,8 @@ try {
   });
 
   await check('a kept connection that died unnoticed is replaced within the same request', async () => {
-    // The first connection answers once and is then dropped on its next request without
-    // a byte, as a circuit that went away does; any other connection answers.
+    // Connection 1 answers once, then drops its next request without a byte, as a dead
+    // circuit does.
     const peer = await scripted(({ conn, nth, body, socket, answer }) => {
       if (conn === 1 && nth === 2) socket.destroy();
       else answer(`${body} on connection ${conn}`);
@@ -627,8 +620,7 @@ try {
   cleanup();
 }
 
-// Every transport is stopped: a timer or socket any of them left would keep this process
-// alive, and the watchdog below says so instead of letting the run hang.
+// A timer or socket a stopped transport left would keep the process alive; fail instead of hanging.
 setTimeout(() => {
   console.error('FAIL something a stopped transport left keeps the event loop alive:', process.getActiveResourcesInfo());
   process.exit(1);

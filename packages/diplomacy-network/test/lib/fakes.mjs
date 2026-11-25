@@ -1,10 +1,7 @@
-// Stand-ins for the two things a node is handed and never looks inside: the requester,
-// which knows the rules and the forge, and the executor, which runs jobs. Both record
-// what the node asked of them, in order.
+// Fake requester and executor; both record what the node asked of them, in order.
 
 const b64 = (value) => Buffer.from(JSON.stringify(value)).toString('base64');
 
-/// A forge request as a job makes it.
 export function forgeRequest(method, path, body = null) {
   return {
     host: 'api.github.com', method, path, headers: body ? { 'content-type': 'application/json' } : {},
@@ -12,11 +9,9 @@ export function forgeRequest(method, path, body = null) {
   };
 }
 
-/// A requester with rules for the kinds in `kinds`: a task may reach what lies under its
-/// own item, and what is performed is the request with the requester's name put on it.
-/// `calls` lists every `authorize` and `perform` as `{ op, path, ... }`, and `unsent` the
-/// path of every allowed request it was told got no answer; `refuse(part, reason)` makes
-/// it refuse every request whose path holds `part`; `broken` makes the forge unreachable.
+/// A task may reach what lies under its own item. `unsent` holds the path of each allowed
+/// request it was told got no answer; `refuse(part, reason)` refuses every path holding
+/// `part`; `broken` makes the forge unreachable.
 export function fakeRequester({ kinds = ['review', 'fix'] } = {}) {
   const refusals = [];
   return {
@@ -51,12 +46,11 @@ export function fakeRequester({ kinds = ['review', 'fix'] } = {}) {
   };
 }
 
-/// An executor whose jobs run until the test ends them: `end(runId, outcome)` reports an
-/// outcome, `die(runId)` makes a job vanish without a word. `takes(task)` decides what it
-/// would take. `started` and `stopped` list what the node asked for.
+/// Jobs run until the test ends them: `end(runId, outcome)` reports an outcome,
+/// `die(runId)` makes a job vanish without a word.
 export function fakeExecutor() {
   let report = () => {};
-  const jobs = new Map(); // runId -> { args, alive }
+  const jobs = new Map();
   return {
     jobs,
     started: [],
@@ -91,7 +85,6 @@ export function fakeExecutor() {
     die(runId) {
       jobs.get(runId).alive = false;
     },
-    /// The job of the one run going for a task, or undefined.
     jobOf(taskId) {
       return [...jobs.values()].find((job) => job.alive && job.args.task.taskId === taskId)?.args;
     },

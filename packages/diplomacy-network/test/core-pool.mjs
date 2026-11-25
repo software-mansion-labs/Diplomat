@@ -1,8 +1,3 @@
-// Records, membership and the pool: what is taken in, what is refused and why, and that
-// two hosts holding the same records agree on the hash, the members and every task
-// whatever order the records arrived in.
-// Run: node test/core-pool.mjs
-
 import assert from 'node:assert/strict';
 import { b64u, canon, hash } from '../src/core/canon.js';
 import { buildClaim, buildGrant } from '../src/core/claims.js';
@@ -184,8 +179,8 @@ check('a host accepts the keys seated under the member its own vouchers lead up 
   assert.deepEqual(seating(ben.pk, [records[2]]), new Map([[ben.pk, 0]]), 'before it holds its inviter\'s record');
   assert.deepEqual(seating(root.pk, [records[0], records[2]]), new Map([[root.pk, 0]]), 'a link is missing');
   assert.deepEqual(seating(root.pk, []), new Map([[root.pk, 0]]));
-  // A voucher is good for the membership of its signer it was signed in: one that began
-  // again seats none of those it let in before, and those it lets in now it seats.
+  // A voucher holds only in its signer's era: a signer that began again seats only those it
+  // let in since.
   const again = [member(root, { seq: 5, era: 5 }), records[1], records[2], member(cat, { voucher: seat(root, { n: 1, era: 5 }) })];
   assert.deepEqual(seating(root.pk, again), new Map([[root.pk, 0], [cat.pk, 1]]));
   assert.deepEqual(seating(ann.pk, again), new Map([[ann.pk, 0], [ben.pk, 1]]));
@@ -221,8 +216,8 @@ check('the members a host ends with do not depend on the order their records arr
   let hashes = new Set();
   for (let i = 0; i < 30; i++) {
     const pool = poolOf(root, [chain[0]]);
-    // One at a time a record may be refused for want of its inviter, so keep offering
-    // them, as a sync would, until nothing more gets in.
+    // One at a time a record may be refused for want of its inviter, so offer them again,
+    // as a sync would.
     for (let pass = 0; pass < 4; pass++) for (const record of rng.shuffle(chain)) pool.merge(record, T0);
     assert.deepEqual(pool.members(T0).map((m) => m.pk), expected);
     hashes.add(pool.stateHash(T0));
@@ -295,8 +290,8 @@ check('a member that stops signing its record is no member after a day, and keep
   assert.deepEqual(pool.merge(back, T0 + 9 * DAY).refused, [], 'signed again it is a member again, with no new invite');
   assert.deepEqual(pool.members(T0 + 9 * DAY).map((m) => m.pk), [root.pk, ann.pk].sort());
   assert.ok(pool.answerHello({ member: back }, ann.pk, T0 + 9 * DAY).body);
-  // Silent for thirty days it is forgotten. Its voucher holds still: a record it signs
-  // now is taken, the one it signed then is not.
+  // Silent for thirty days it is forgotten. Its voucher still holds: a record it signs now
+  // is taken, the one it signed then is not.
   const [gone, fresh] = [T0 + 9 * DAY + MONTH, member(ann, { voucher: seat(root), seq: 2, at: T0 + 9 * DAY + MONTH + 400 })];
   pool.merge(signed(3, gone + 300), gone + 300);
   assert.equal(pool.get(`member/${ann.pk}`), null);
@@ -372,8 +367,7 @@ check('every version of an offer is dropped a day after it was signed, for every
   for (const asOf of [T0 + 70, T0 + 50 + DAY - 1, T0 + 50 + DAY, T0 + 60 + DAY - 1, T0 + 60 + DAY, T0 + 70 + DAY - 1, T0 + 70 + DAY]) {
     assert.equal(a.pool.stateHash(asOf), b.pool.stateHash(asOf), `asOf ${asOf}`);
   }
-  // Both member records were signed at T0: they stay in the state, their hosts are
-  // members for a day.
+  // Both member records were signed at T0: they stay in the state, their hosts members for a day.
   assert.equal(Object.keys(a.pool.index(T0 + 50 + DAY - 1)).length, 5);
   assert.equal(Object.keys(a.pool.index(T0 + 50 + DAY)).length, 4);
   assert.equal(Object.keys(a.pool.index(T0 + 60 + DAY)).length, 3);
@@ -446,8 +440,8 @@ check('a finished task does not come back: the version that ended it outlives ev
   for (const h of [a, b]) assert.deepEqual(h.pool.merge(done, done.at).refused, []);
   const stale = late.pool.get(recordKey(done));
   assert.deepEqual([stale.seq, stale.state], [4, 'open']);
-  // Whenever the straggler pushes what it holds, the task stays finished: the done
-  // version wins while it is held, and once it is dropped every open version is too old.
+  // The done version wins while it is held, and once it is dropped every open version is
+  // too old.
   const dropped = done.at + DAY + 300;
   for (const now of [done.at + 1, dropped - 1, dropped, dropped + 1, dropped + 5 * DAY]) {
     stamp(b, now, now);
@@ -473,7 +467,6 @@ check('an offer is ended by its own host alone: done or cancelled by one of two 
     assert.deepEqual([left.state, left.offeredBy, left.free, left.claim], ['claimed', [b.id.pk], [], claim], state);
     assert.deepEqual(left.offers, [{ host: b.id.pk, hours: 12, createdAt: T0, claim }]);
     assert.equal(c.pool.get(recordKey(claim)), claim);
-    // The claim ends: the offer still open is free for the next one.
     give(endClaim(c.id, claim, 'completed', T0 + 600, b64u(Buffer.alloc(32, 7))), T0 + 600);
     const free = c.pool.task(TASK, T0 + 600);
     assert.deepEqual([free.state, free.free, free.claim], ['available', [b.id.pk], null]);
@@ -596,7 +589,6 @@ check('an index too long for one answer travels a page at a time: each page says
   assert.equal(b.pool.reconcile({}, T0, { more: true }), null);
   assert.equal(b.pool.reconcile(pages[0].index, T0, { after: Object.keys(pages[0].index).at(-1), more: true }), null);
 
-  // A newcomer is answered the first page.
   const newcomer = ident(40);
   const answer = a.pool.answerHello({ member: member(newcomer, { voucher: seat(hosts[5].id) }) }, newcomer.pk, T0);
   assert.deepEqual([answer.body, answer.body.more], [a.pool.indexPage(T0), true]);
@@ -777,7 +769,7 @@ check('one member makes no members but in its own seats: a voucher lets in the o
   const pool = poolOf(root, records);
   const now = T0 + 100;
   const puppets = Array.from({ length: 256 }, (_, i) => ident(1000 + i));
-  // A record in the form of the build before this one, carrying an invite of the root's that ran out.
+  // An obsolete member record shape, carrying an expired invite of the root's.
   const token = invite(root, { exp: T0 + 50 });
   const old = puppets.map((id) => resign(id, {
     type: 'member', pool: POOL, pk: id.pk, seq: 0, at: now, joinedAt: 0, maxAcceptedH: 12, left: false, voucher: { invite: token },
@@ -890,7 +882,7 @@ check('a claim is a record only while a host that backs it offers the task, and 
       { host: x.id.pk, hours: 12, createdAt: T0, claim: honest }, { host: y.id.pk, hours: 720, createdAt: now, claim: own },
     ].sort((p, q) => (p.host < q.host ? -1 : 1)));
     assert.deepEqual([task.state, task.free, h.pool.get(recordKey(honest))], ['claimed', [], honest]);
-    // Its own offer ended, its claim is no record any more a day later; the other is untouched.
+    // Its own offer ended; the other is untouched.
     assert.deepEqual(codes(h.pool.merge(offer(y.id, { seq: 1, at: now + 1, createdAt: now, minRequiredH: 720, state: 'done' }), now + 1)), []);
     const after = h.pool.task(TASK, now + 1);
     assert.deepEqual([after.state, after.claim, after.offers], ['claimed', honest, [{ host: x.id.pk, hours: 12, createdAt: T0, claim: honest }]]);

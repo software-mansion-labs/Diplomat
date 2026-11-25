@@ -1,8 +1,4 @@
-// The settings that bound how long or how much something of this machine's may take,
-// where what holds the bound reads zero as none: zero is not taken, and is named for the
-// daemon to say so. And the figures the protocol fixes: one that is set off its default
-// is named as a test's, whichever it is.
-// Run: node test/paths-bounds.mjs
+// What holds these bounds reads zero as none, so zero is not taken and is named instead.
 
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -17,11 +13,10 @@ const BOUNDS = {
   KEYCHAIN_TIMEOUT_MS: 30000, JOB_IDLE_MS: 1800000, CONTAINER_PIDS: 4096,
 };
 const names = Object.keys(BOUNDS);
-// What a container gets of this machine's memory and processors, in docker's words.
+// In docker's units.
 const AMOUNTS = { CONTAINER_MEMORY: '8g', CONTAINER_CPUS: '4' };
 
-// The bounds `names`, and the settings named as asking for none, as a process started
-// with the variable of each set to `value` reads them.
+// `[bounds, NOT_BOUNDS]` as a process with each `DN_<name>` set to `value` reads them.
 function read(value, names = Object.keys(BOUNDS)) {
   const set = value === undefined ? {} : Object.fromEntries(names.map((name) => [`DN_${name}`, value]));
   const out = execFileSync(process.execPath, ['--input-type=module', '-e',
@@ -56,7 +51,6 @@ check('an amount docker reads is given to it as it was said, unit and all; one t
   for (const value of ['', 'lots', '-1', '-2g']) assert.deepEqual(read(value, amounts), [Object.values(AMOUNTS), []], JSON.stringify(value));
 });
 
-// What a process started with `env` names as a test's settings.
 function knobs(env) {
   const out = execFileSync(process.execPath, ['--input-type=module', '-e', `const p = await import(${JSON.stringify(paths)}); console.log(JSON.stringify(p.TEST_KNOBS));`],
     { env: { PATH: process.env.PATH, DN_BASE_DIR: path.join(os.tmpdir(), 'dn-paths-bounds'), ...env }, encoding: 'utf8' });

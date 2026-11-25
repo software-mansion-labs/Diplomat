@@ -1,8 +1,3 @@
-// A pool at its caps - as many members as it holds but for the seats its newcomer has to
-// give, each with as many offers and as many claims as one member may have live - is
-// still a pool a host can join: it takes in every record, and no answer on the way is
-// larger than a response may be.
-
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { canon } from '../src/core/canon.js';
@@ -18,8 +13,8 @@ await check('a host joins a pool that is as full as a pool gets and holds what e
   const a = w.add('a');
   await w.start(a);
   const now = w.net.now();
-  // Every member but the two hosts, a seat of the first left free for the second: each
-  // offers all it may, and claims all it may of what the next one offers.
+  // Everyone but `a` and `b`, one of `a`'s seats left for `b`; each offers all it may and
+  // claims all it may of the next one's offers.
   const { all: others, records } = w.crowd(a, LIMITS.members - 2 - LIMITS.invitees, 1);
   others.forEach((m, i) => {
     const taker = others[(i + 1) % others.length];
@@ -61,8 +56,7 @@ await check('a host joins a pool that is as full as a pool gets and holds what e
   assert.deepEqual([...new Set([...size('hello'), ...size('sync')])], ['a page']);
   assert.ok(pages >= Math.floor(whole / INDEX_PAGE_BYTES), `the index took ${pages + 1} pages`);
 
-  // Each host signs a record the other does not hear of: what tells them so is an index
-  // neither could send whole.
+  // Each signs a record the other misses; the index that reveals it is too big to send whole.
   w.net.cut('a', 'b');
   const one = await a.node.offer({ pool: POOL, kind: 'review', item: 'pr-1', title: 'Review pr-1', prompt: 'p' });
   const other = await b.node.offer({ pool: POOL, kind: 'review', item: 'pr-2', title: 'Review pr-2', prompt: 'p' });

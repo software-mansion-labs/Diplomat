@@ -1,8 +1,3 @@
-// One task offered by several hosts - the machines of one operator that all find the
-// same pull request. One run does for every offer it can be given, a host that offers
-// the task later is taken into the run that is going, and what a host does with its own
-// offer is nothing to the offer of another.
-
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
 import { backers } from '../src/core/records.js';
@@ -12,12 +7,12 @@ const offerArgs = (item, more = {}) => ({ pool: POOL, kind: 'review', item, titl
 const started = (all) => all.reduce((sum, h) => sum + h.executor.started.length, 0);
 const runner = (all, taskId) => all.find((h) => h.executor.jobOf(taskId));
 const failures = (all) => all.flatMap((h) => h.log.filter((line) => /could not be served|step failed|round failed/.test(line)));
-// Ends the job a host runs for a task, with the prompt it was given as its summary.
+// Reports the job's prompt as its summary, so an outcome names its job.
 function finish(h, taskId) {
   const job = h.executor.jobOf(taskId);
   h.executor.end(job.runId, { summary: job.spec.prompt });
 }
-// Hosts of one pool, each with the hours it requires and accepts.
+// `w.pool` with per-host `requires` and `accepts` hours.
 async function poolOf(w, hosts) {
   const all = Object.entries(hosts).map(([name, { slots = 0, requires = 12, accepts = 12 }]) => {
     const h = w.add(name, { slots });
@@ -42,7 +37,6 @@ await check('a host that offers a task while it runs is taken into that run, who
     await w.net.until(() => runner(all, taskId), { what: 'a job' });
     const by = runner(all, taskId);
     runners.add(by.name);
-    // The second machine finds the pull request most of a minute later.
     await w.run(40);
     assert.equal((await b.node.offer(offerArgs('pr-1', { now }))).taskId, taskId);
     await w.run(600);
@@ -120,11 +114,10 @@ await check('a host that offers a task of another host and gives its own offer t
     assert.deepEqual(backers(w.claim(a, taskId)).sort(), [a.pk, m.pk].sort());
     const first = e.executor.jobOf(taskId);
     keyFrom.add(w.name(first.peer));
-    // Which of them it asks first is the run's own draw: no host arranges to be the one.
+    // The run's own `pick` draws whom it asks first, so no host can arrange to be it.
     assert.equal(first.peer, [a.pk, m.pk].sort()[w.stored(e, 'runs').runs[first.runId].pick % 2], `seed ${seed}`);
     assert.equal(w.net.count({ from: 'e', kind: 'key' }), 1);
     finish(e, taskId);
-    // Whichever job the run did, the other is still to do: the same machine takes it next.
     await w.net.until(() => e.executor.jobOf(taskId) && e.executor.jobOf(taskId).runId !== first.runId, { what: 'the other job' });
     assert.notEqual(e.executor.jobOf(taskId).peer, first.peer);
     const mine = w.offerRow(a, taskId);
@@ -169,7 +162,6 @@ await check('a run that outlasts the hours of one of the offers it holds goes on
     assert.deepEqual([w.offerRow(b, taskId).state, w.offerRow(b, taskId).attempt, w.offerRow(b, taskId).reason], ['pooled', 2, 'not finished in the hours this machine gives it']);
     assert.deepEqual([e.executor.stopped, w.offerRow(a, taskId).state, w.offerRow(a, taskId).executor], [[], 'claimed', e.pk]);
     assert.deepEqual([w.task(f, taskId).state, w.task(f, taskId).executor], ['claimed', e.pk]);
-    // Another machine takes the offer that is free again.
     f.slots = 1;
     f.node.admit({ slots: 1 });
     await w.net.until(() => f.executor.jobOf(taskId), { what: 'a second job' });

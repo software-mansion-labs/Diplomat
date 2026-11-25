@@ -1,7 +1,4 @@
-// Acting as the requester (PROTOCOL.md section 9): the capability a requester hands the
-// executor of its task, and the MAC and sequence number on every request made under it.
-// Whether a rule covers a request is decided where the rules are written and read:
-// src/requester/.
+// Whether a rule covers a request is decided in src/requester/.
 
 import crypto from 'node:crypto';
 import { b64u, canon, hash, unb64u } from './canon.js';
@@ -16,12 +13,11 @@ const HOST = /^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$/;
 const METHOD = /^[A-Z]{1,16}$/;
 const HEADER_NAME = /^[a-z0-9-]{1,64}$/;
 const PRINTABLE = /^[\x20-\x7e]*$/;
-// A path and its query: visible ASCII, and no fragment, which never reaches a forge.
+// Visible ASCII but `#`: a fragment never reaches a forge.
 const URL_CHARS = /^[\x21\x22\x24-\x7e]+$/;
 const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
-// A rule as a capability carries it: something with a canonical form that names the
-// host, method and path it is about. The rest of its shape belongs to its reader.
+// The rest of a rule's shape belongs to its reader.
 function ruleShaped(rule) {
   if (!isObject(rule) || ![rule.host, rule.method, rule.path].every((v) => typeof v === 'string')) return false;
   try {
@@ -41,8 +37,6 @@ const FORGE_REQUEST = {
   body: (v) => typeof v === 'string' && BASE64.test(v),
 };
 
-/// Is this a well-formed forge request: `{ host, method, path, headers, body }`, the body
-/// in padded base64?
 export function validForgeRequest(request) {
   return shaped(request, FORGE_REQUEST);
 }
@@ -53,22 +47,15 @@ const CAPABILITY = {
   sig: (v) => isBytes(v, 64),
 };
 
-/// When a capability for this claim expires, issued by the host that backs it with
-/// `backed`: when the claim stops holding that host's offer.
 export function capabilityExp(claim, backed) {
   return heldUntil(claim, backed);
 }
 
-/// A capability signed by the issuing host: `executor` may make the requests `rules`
-/// cover for `taskId` until `exp`. `keyId` is 16 random bytes.
 export function buildCapability(identity, { keyId, pool, taskId, executor, rules, exp }) {
   const capability = { keyId: b64u(keyId), pool, taskId, executor, host: identity.pk, rules, exp };
   return { ...capability, sig: sign(identity, 'dn1/cap', capability) };
 }
 
-/// `{ ok: true }` for a well-formed capability signed by its host, carrying every member
-/// of `expect` as given and unexpired at `now`; otherwise `{ ok: false, code }` with
-/// `bad-capability` or `expired`.
 export function verifyCapability(capability, expect, now) {
   const fine = shaped(capability, CAPABILITY) && parseTaskId(capability.taskId).pool === capability.pool
     && Object.keys(expect).every((k) => capability[k] === expect[k]) && verify(capability.host, 'dn1/cap', capability);
@@ -76,44 +63,36 @@ export function verifyCapability(capability, expect, now) {
   return now < capability.exp ? { ok: true } : { ok: false, code: 'expired' };
 }
 
-/// `HMAC-SHA256(secret, canon(value))` in base64url. `secret` is the 32 raw bytes.
+/// `secret`: 32 raw bytes.
 export function macOf(secret, value) {
   return b64u(crypto.createHmac('sha256', secret).update(canon(value)).digest());
 }
 
-/// The MAC of an `act` request: over `{ keyId, seq, request }`.
 export function actMac(secret, { keyId, seq, request }) {
   return macOf(secret, { keyId, seq, request });
 }
 
-/// The last sequence number used under each key. A number is new only when it is
-/// greater than every one before it.
 export class SeqTracker {
-  #last = new Map(); // keyId -> seq
+  #last = new Map();
 
-  /// A tracker holding `entries`, as `entries()` returned them.
   constructor(entries = []) {
     this.#last = new Map(entries);
   }
 
-  /// `[keyId, seq]` for every key, to store or restore.
   entries() {
     return [...this.#last];
   }
 
-  /// Is `seq` greater than every number used under `keyId`?
   isNew(keyId, seq) {
     return seq > (this.#last.get(keyId) ?? -1);
   }
 
-  /// Uses `seq` under `keyId`. False, with nothing changed, when it is not new.
   use(keyId, seq) {
     if (!this.isNew(keyId, seq)) return false;
     this.#last.set(keyId, seq);
     return true;
   }
 
-  /// Forgets a key: it is revoked or expired.
   forget(keyId) {
     this.#last.delete(keyId);
   }
@@ -124,13 +103,8 @@ const ACT = {
   mac: (v) => isBytes(v, 32),
 };
 
-/// The issuing host's checks on the body of an `act` request from `from`, in order: the
-/// sender is the capability's executor and names its key and task; the key is unexpired
-/// at `now`; `seq` is new; the MAC matches. Answers `{ ok: true }`, or
-/// `{ ok: false, code, detail }` with `bad-request` or `denied`. `seqs` is the host's
-/// SeqTracker: a request whose MAC matched has used its number, whatever the rules then
-/// say of it. Whether the key is revoked, the claim still active and the request covered
-/// by a rule is the caller's to check.
+/// A matching MAC uses up `seq`, whatever the rules then say. Revocation, the claim being
+/// active and rule coverage are the caller's to check.
 export function checkAct(body, { capability, secret, seqs, from, now }) {
   if (!shaped(body, ACT)) return { ok: false, code: 'bad-request', detail: 'not an act body' };
   const deny = (detail) => ({ ok: false, code: 'denied', detail });
@@ -156,9 +130,6 @@ const DONE = {
   outcome: (v) => shaped(v, OUTCOME, { capped: (c) => typeof c === 'boolean' }),
 };
 
-/// What names the job a host hands out with a key, to the executor that ran it and to
-/// every host that offers the task: the base64url hash of the spec, or null for a spec
-/// that has no canonical form.
 export function specDigest(spec) {
   try {
     return b64u(hash(spec));
@@ -167,9 +138,7 @@ export function specDigest(spec) {
   }
 }
 
-/// The outcome of a run as a `done` request carries it: whole numbers only, the cost in
-/// millionths of a dollar, every text cut to what the request allows, and `capped: true`
-/// for one whose executor lowered the tokens or the cost its job named.
+/// `capped`: the executor lowered the tokens or cost its job reported.
 export function wireOutcome({ ok, summary, usd, tokens, runner, model, capped } = {}) {
   const whole = (v) => (Number.isFinite(v) && v > 0 ? Math.min(Math.round(v), Number.MAX_SAFE_INTEGER) : 0);
   const cut = (v, max) => String(v ?? '').toWellFormed().slice(0, max);
@@ -179,12 +148,7 @@ export function wireOutcome({ ok, summary, usd, tokens, runner, model, capped } 
   };
 }
 
-/// An offering host's checks on the body of a `done` request from `from`, the verified
-/// sender of its envelope: the body is well-formed, and `from` speaks for the round it
-/// names by `claim`, the claim record this host holds of the task by that executor (or
-/// null). No key and no MAC is involved: an offering host that issued no key must be
-/// able to check it too.
-/// Answers `{ ok: true }`, or `{ ok: false, code, detail }` with `bad-request` or `denied`.
+/// No key or MAC: an offering host that issued no key must be able to check it too.
 export function checkDone(body, { claim, from, now }) {
   if (!shaped(body, DONE)) return { ok: false, code: 'bad-request', detail: 'not a done body' };
   if (claim?.taskId !== body.taskId || !speaksFor(claim, { from, round: body.round, now })) {

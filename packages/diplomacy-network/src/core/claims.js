@@ -1,7 +1,3 @@
-// Claiming a task (PROTOCOL.md section 7): the rank that settles every tie, the locks a
-// member grants, the round a claimant runs to collect them, and which of two versions of
-// a claim wins.
-
 import { hash, tagged, unb64u } from './canon.js';
 import { sign, validPk, verify } from './identity.js';
 import { leaseAt, verifyLease } from './lease.js';
@@ -10,42 +6,34 @@ import {
 } from './records.js';
 import { CLOCK_SKEW_SECS, GRANT_TTL_SECS, ROUND_TIMEOUT_MS } from '../paths.js';
 
-/// `rank(taskId, executor)`: 32 bytes every host computes alike. Lower wins.
+/// Lower wins.
 export function rank(taskId, executor) {
   return hash(tagged('dn1/rank', Buffer.from(taskId, 'utf8'), Buffer.from([0]), unb64u(executor)));
 }
 
-/// Does executor `a` rank better than executor `b` on this task?
 export function outranks(taskId, a, b) {
   return Buffer.compare(rank(taskId, a), rank(taskId, b)) < 0;
 }
 
-/// How long a host waits before it starts to claim a task: its rank's share of `max`.
 export function rankDelay(taskId, executor, max) {
   return Math.floor((rank(taskId, executor).readUInt32BE(0) / 2 ** 32) * max);
 }
 
-/// A member's signed consent to `executor` claiming `taskId` in `round`, on the state
-/// `hash`, until `exp`. With `offer` - `{ at, gen, hours }` - the member backs the claim:
-/// the offer of the task it made at `at` is the claim's, as the `gen`th it gave that
-/// offer to, for `hours`.
+/// With `offer`, the member also backs the claim.
 export function buildGrant(identity, { pool, taskId, executor, round, hash: stateHash, exp, offer }) {
   const grant = { pool, taskId, executor, round, hash: stateHash, by: identity.pk, exp, ...(offer ? { offer } : {}) };
   return { ...grant, sig: sign(identity, 'dn1/grant', grant) };
 }
 
-/// Is this a grant signed by the member it names, with every member of `expect` as given?
 export function verifyGrant(grant, expect) {
   return grantShaped(grant) && Object.keys(expect).every((k) => grant[k] === expect[k])
     && verify(grant.by, 'dn1/grant', grant);
 }
 
-// The hours of a claim: the longest any host backs it for.
 const hoursOf = (claim) => Math.max(...backers(claim).map((pk) => backing(claim, pk).hours));
 
-/// A committed claim: the executor's signed record of a round every present member
-/// granted, as the `gen`th claim of the task this executor made. `offer`, when given, is
-/// what the executor backs it with as a host that offers the task itself.
+/// `gen`: this is the executor's `gen`th claim of the task. `offer`: the executor's own
+/// backing, when it offers the task too.
 export function buildClaim(identity, { pool, taskId, round, gen, grants, absent, offer, now }) {
   const fields = {
     type: 'claim', pool, taskId, executor: identity.pk, round, gen, seq: 0, state: 'held', at: now, claimedAt: now,
@@ -55,9 +43,7 @@ export function buildClaim(identity, { pool, taskId, round, gen, grants, absent,
   return signRecord(identity, { ...fields, ...leaseAt(now, hours, 0), hours });
 }
 
-/// The held claim with one more host backing it - a member, by the `grant` it gave for
-/// the claim's round, or the executor, by the `offer` it backs it with: the same version
-/// of the claim, and its hours the longest any host now backs it for.
+/// Adds a backer to the same version: `seq` stays.
 export function joinClaim(identity, claim, { grant, offer }) {
   const { sig: _, ...fields } = claim;
   const next = grant ? {
@@ -69,13 +55,7 @@ export function joinClaim(identity, claim, { grant, offer }) {
   return signRecord(identity, { ...next, hours, ...leaseAt(claim.claimedAt, hours, claim.seq) });
 }
 
-/// Null when a well-shaped claim holds for every host alike: its grants are from distinct
-/// members other than the executor and the absent, each signed, bound to this task,
-/// executor and round, and not expired when the claim was made; a host backs it, and its
-/// hours are the longest any does for; it names the job that was run when it is
-/// `completed` and at no other time; and its lease is the one its times dictate.
-/// Otherwise `bad-claim`, `bad-grant`, `bad-lease` or `bad-ping`. Whether a host that
-/// backs it offers the task is the pool's to say.
+/// The checks every host makes alike; whether a backer offers the task is the pool's to check.
 export function verifyClaim(claim) {
   const signers = claim.grants.map((g) => g.by);
   if (!isAscending(signers, validPk)) return 'bad-claim';
@@ -90,23 +70,16 @@ export function verifyClaim(claim) {
   return verifyLease(claim);
 }
 
-/// What orders a claim among the versions of its key: `[gen, round, seq, backers]`, the
-/// last being how many hosts back it.
 export function claimPrecedence(claim) {
   return [claim.gen, claim.round, claim.seq, backers(claim).length];
 }
 
-/// Is this shaped like a claim's precedence?
 export function precedenceShaped(p) {
   return Array.isArray(p) && p.length === 4 && isTime(p[0]) && isBytes(p[1], 8) && isTime(p[2])
     && Number.isSafeInteger(p[3]) && p[3] >= 0 && p[3] <= LIMITS.list + 1;
 }
 
-/// Which of two versions of one executor's claim of one task wins, each given as its
-/// precedence and its base64url record hash: negative when the first does, positive when
-/// the second does, zero for the same record. The later `gen` wins; then the lower
-/// round, the higher `seq`, the more backers, the lower hash. Every pair is ordered, and
-/// the order is transitive.
+/// Negative when the first wins; a total order.
 export function compareClaims([genA, roundA, seqA, backersA], hashA, [genB, roundB, seqB, backersB], hashB) {
   if (genA !== genB) return genB - genA;
   if (roundA !== roundB) return roundA < roundB ? -1 : 1;
@@ -115,9 +88,7 @@ export function compareClaims([genA, roundA, seqA, backersA], hashA, [genB, roun
   return Buffer.compare(unb64u(hashA), unb64u(hashB));
 }
 
-/// Which of two claims holds the offer of `host`, which backs both: negative when `a`
-/// does, positive when `b` does. The one the host gave its offer to later - the higher
-/// `gen` of its backing - and, between two it gave the same, the better-ranked executor.
+/// Negative when `a` holds the offer of `host`, which backs both.
 export function compareBacked(host, a, b) {
   const [genA, genB] = [backing(a, host).gen, backing(b, host).gen];
   return genA !== genB ? genB - genA : Buffer.compare(rank(a.taskId, a.executor), rank(b.taskId, b.executor));
@@ -128,34 +99,27 @@ const LOCK = {
 };
 const UNLOCK = { taskId: LOCK.taskId, round: LOCK.round };
 
-/// The locks one member holds in one pool: at most one executor per task, each until its
-/// grant expires, the executor unlocks, or the claim is committed. A host's own claim
-/// round holds its task here too, until the round's deadline, which is how it refuses a
-/// rival's lock. A lock whose grant backs the claim keeps what it backs it with, `at` and
-/// `gen`: asked again in the same round, the member gives its offer the same time over.
+/// A host's own claim round holds its task here too, which is how it refuses a rival's
+/// lock. A backing lock keeps `at` and `gen`, so asked again in the same round the member
+/// gives the same backing.
 export class LockTable {
   #locks = new Map(); // taskId -> { executor, round, exp, at?, gen? }
 
-  /// A table holding `entries`, as `entries()` returned them.
   constructor(entries = []) {
     for (const [taskId, lock] of entries) this.#locks.set(taskId, { ...lock });
   }
 
-  /// `[taskId, lock]` for every lock held, to store or restore.
   entries() {
     return [...this.#locks].map(([taskId, lock]) => [taskId, { ...lock }]);
   }
 
-  /// The lock on a task that is live at `now`, or null. A lock is live through its `exp`:
-  /// the claim it was granted for may be made at that very second.
+  /// Live through `exp`: the claim may be made at that very second.
   holder(taskId, now) {
     const lock = this.#locks.get(taskId);
     if (lock && lock.exp < now) this.#locks.delete(taskId);
     return this.#locks.get(taskId) ?? null;
   }
 
-  /// Takes the lock on a task for `executor` until `exp`. False, with nothing changed,
-  /// when another executor holds it at `now`.
   hold(taskId, executor, round, exp, now) {
     const lock = this.holder(taskId, now);
     if (lock && lock.executor !== executor) return false;
@@ -163,7 +127,6 @@ export class LockTable {
     return true;
   }
 
-  /// Drops every lock that is no longer live at `now`; true when there was one.
   prune(now) {
     const before = this.#locks.size;
     for (const [taskId, lock] of this.#locks) {
@@ -172,20 +135,14 @@ export class LockTable {
     return this.#locks.size !== before;
   }
 
-  /// Drops the lock on a task when `executor` holds it for `round`: the executor unlocked,
-  /// or its claim of that round was committed. Answers whether a lock was dropped.
   release(taskId, executor, round) {
     const lock = this.#locks.get(taskId);
     return lock?.executor === executor && lock.round === round && this.#locks.delete(taskId);
   }
 
-  /// A member's answer to a `lock` request from `from`: `{ body }` holding `{ grant }`,
-  /// `{ challenge: { reason, holder? } }` or `{ stale: true }`, or `{ error }` with
-  /// `bad-request`, `stale` (an `asOf` too far from `now`) or `not-member`. `pool` is the
-  /// member's own Pool and `identity` signs the grant. The grant backs the claim when the
-  /// member offers the task itself, no claim holds that offer, and the claimant accepts
-  /// its hours: `nextGen()` then answers how many times the member has given that offer
-  /// away with this one, or null when it will not give it.
+  /// The grant backs the claim when this member offers the task, no claim holds that offer
+  /// and the claimant accepts its hours; `nextGen()` then gives the backing's `gen`, or null
+  /// to withhold it.
   answer({ pool, identity, from, body, now, nextGen }) {
     if (!shaped(body, LOCK) || parseTaskId(body.taskId).pool !== pool.id) return { error: 'bad-request' };
     if (Math.abs(body.asOf - now) > CLOCK_SKEW_SECS) return { error: 'stale' };
@@ -195,7 +152,7 @@ export class LockTable {
     const task = pool.task(body.taskId, now);
     if (!task || task.free.length === 0) return { body: { challenge: { reason: 'unavailable' } } };
     const before = this.holder(body.taskId, now);
-    // The lock binds by this member's clock, whatever time the claimant says it is.
+    // By this member's clock, whatever time the claimant says it is.
     if (!this.hold(body.taskId, from, body.round, now + GRANT_TTL_SECS, now)) {
       return { body: { challenge: { reason: 'locked', holder: before.executor } } };
     }
@@ -210,8 +167,6 @@ export class LockTable {
     return { body: { grant } };
   }
 
-  /// A member's answer to an `unlock` request from `from`: `{ body: {} }`, the lock
-  /// dropped when `from` holds it for that round, or `{ error: 'bad-request' }`.
   unlock({ from, body }) {
     if (!shaped(body, UNLOCK)) return { error: 'bad-request' };
     this.release(body.taskId, from, body.round);
@@ -223,23 +178,20 @@ const CHALLENGE = {
   reason: (v) => ['unavailable', 'locked'].includes(v),
 };
 
-/// One attempt by `self` to claim a task, as a state machine. It does nothing by itself:
-/// each method takes what happened and returns the actions to carry out, in order:
+/// One attempt by `self` to claim a task, as a state machine that does nothing itself:
+/// each method returns the actions to carry out, in order:
 ///
-/// - `{ do: 'sync', to, wave, body, retry? }` and `{ do: 'lock', to, wave, body, retry? }` -
-///   send that request and feed the answer to `onSync` / `onLock`, or call `noAnswer`
-///   when there is none. `retry` marks a repeat the caller should pace.
-/// - `{ do: 'resync', with }` - reconcile records with that member (`with` null: with
-///   nobody, the grants are simply too old), then `rebase` on a fresh snapshot.
+/// - `{ do: 'sync' | 'lock', to, wave, body, retry? }` - send it and feed the answer to
+///   `onSync` / `onLock`, or call `noAnswer`. `retry` marks a repeat the caller should pace.
+/// - `{ do: 'resync', with }` - reconcile records with that member (null: the grants are
+///   just too old), then `rebase` on a fresh snapshot.
 /// - `{ do: 'unlock', to, body }` - send it; the answer does not matter.
-/// - `{ do: 'commit', gen, grants, absent, own }` - sign the claim with `buildClaim` at the
-///   same `now` and push it; `own` is `{ at, hours }` of the claimant's own offer of the
-///   task when the claim takes it too, else null. The round is over.
-/// - `{ do: 'stand-down', reason }` - the round is over without a claim: `unavailable`,
-///   `hours`, `outranked`, `no-requester` or `timeout`.
+/// - `{ do: 'commit', gen, grants, absent, own }` - `buildClaim` at the same `now` and push
+///   it; `own` is `{ at, hours }` of the claimant's own offer when the claim takes it, else null.
+/// - `{ do: 'stand-down', reason }`.
 ///
 /// A member is absent once a request to it went unanswered and it has answered nothing in
-/// this round; one that has answered anything is present and must grant.
+/// this round; one that has answered anything must grant.
 export class ClaimRound {
   #members = new Map(); // pk -> { heard, absent, agreed, asked, locked, grant }
   #snapshot = null;
@@ -255,23 +207,19 @@ export class ClaimRound {
     this.reason = null;
   }
 
-  /// Is the round over, committed or stood down?
   get over() {
     return this.phase === 'committed' || this.phase === 'stood-down';
   }
 
-  /// The members that have answered in this round.
   get present() {
     return [...this.#members].filter(([, m]) => m.heard).map(([pk]) => pk).sort();
   }
 
-  /// The members written off as absent in this round.
   get absent() {
     return [...this.#members].filter(([, m]) => m.absent).map(([pk]) => pk).sort();
   }
 
-  /// Starts a wave on `snapshot`, the claimant's own view of the task as
-  /// `Pool.claimSnapshot` gives it: every member is asked to confirm the state again.
+  /// `snapshot`: from `Pool.claimSnapshot`.
   rebase(snapshot, now) {
     if (this.over) return [];
     if (!snapshot.available) return this.#standDown('unavailable');
@@ -295,8 +243,7 @@ export class ClaimRound {
     return [...actions, ...this.#advance(now)];
   }
 
-  /// A member's answer to a `sync` of this round. One to an earlier wave decides nothing,
-  /// but its member is present all the same.
+  /// An earlier wave's answer decides nothing but still makes its member present.
   onSync(from, wave, body, now) {
     const [m, back] = this.#hear(from);
     if (!m) return [];
@@ -310,7 +257,6 @@ export class ClaimRound {
     return this.#advance(now);
   }
 
-  /// A member's answer to this wave's `lock`.
   onLock(from, wave, body, now) {
     const [m] = this.#hear(from);
     if (!m || wave !== this.wave || !m.asked) return [];
@@ -318,7 +264,7 @@ export class ClaimRound {
     if (shaped(body, { grant: grantShaped })) {
       const { offer } = body.grant;
       const asked = s.backers[from];
-      // A member backs the claim with the offer the claimant saw it hold, or not at all.
+      // Only with the offer the claimant saw it hold.
       const fine = (!offer || (asked !== undefined && offer.at === asked.at && offer.hours === asked.hours))
         && verifyGrant(body.grant, {
           pool: s.pool, taskId: this.taskId, executor: this.self, round: this.round, hash: s.hash, by: from,
@@ -341,7 +287,6 @@ export class ClaimRound {
     return [this.#lock(from, true)];
   }
 
-  /// A request of this wave to `from` got no answer.
   noAnswer(from, wave, now) {
     const m = this.#current(from, wave);
     if (!m) return [];
@@ -354,15 +299,12 @@ export class ClaimRound {
     return [];
   }
 
-  /// Time passed. Stands the round down at its deadline, and asks for a fresh snapshot
-  /// once this wave's grants can no longer be committed.
   tick(now) {
     if (this.over || this.phase === 'new') return [];
     if (now >= this.deadline) return this.#standDown('timeout');
     return this.#tooOld(now) ? this.#restate() : [];
   }
 
-  /// Gives the round up for the caller's own reason.
   abort(reason) {
     return this.over ? [] : this.#standDown(reason);
   }
@@ -371,8 +313,7 @@ export class ClaimRound {
     return this.over || wave !== this.wave ? null : this.#members.get(from) ?? null;
   }
 
-  // The member an answer came from, present whichever wave it answered, and whether it
-  // had been written off.
+  // `[member, wasAbsent]`; present whichever wave it answered.
   #hear(from) {
     const m = this.over ? null : this.#members.get(from) ?? null;
     if (!m) return [null, false];

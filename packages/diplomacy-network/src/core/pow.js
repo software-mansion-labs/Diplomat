@@ -1,7 +1,3 @@
-// The proof of work every request carries (PROTOCOL.md section 3): the seed and the
-// challenge a solution is bound to, solving and checking it, and the meter that decides
-// how much work a sender owes.
-
 import crypto from 'node:crypto';
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads';
 import { hash, tagged, u32be, u64be } from './canon.js';
@@ -9,28 +5,24 @@ import { POW } from '../paths.js';
 
 export const MAX_EFFORT = 0xffffffff;
 
-/// Is this an effort a request may state: an integer from 1 to 2^32 - 1?
 export function validEffort(effort) {
   return Number.isInteger(effort) && effort >= 1 && effort <= MAX_EFFORT;
 }
 
-/// The epoch a time falls in.
 export function epochOf(ts) {
   return Math.floor(ts / POW.epochSecs);
 }
 
-/// Does a target whose clock reads `now` accept this epoch: its own or one directly beside it?
 export function epochAcceptable(epoch, now) {
   return Math.abs(epoch - epochOf(now)) <= 1;
 }
 
-/// `seed(to, epoch)`: 32 bytes anyone can compute. `to` is the target's raw key.
+/// `to` is a raw key.
 export function seed(to, epoch) {
   return hash(tagged('dn1/seed', to, u64be(epoch)));
 }
 
-/// The challenge a solution answers. `to` and `from` are raw keys, `nonce` the 16 random
-/// bytes of the request, `coreHash` the hash of the envelope's core.
+/// `to` and `from` are raw keys.
 export function challenge({ to, from, epoch, nonce, effort, coreHash }) {
   return hash(tagged('dn1/pow', seed(to, epoch), to, from, nonce, u32be(effort), coreHash));
 }
@@ -38,9 +30,7 @@ export function challenge({ to, from, epoch, nonce, effort, coreHash }) {
 // R * effort <= 0xFFFFFFFF, without the 64-bit product.
 const limit = (effort) => Math.floor(MAX_EFFORT / effort);
 
-/// Tries the counters `from`, `from + 1`, ... for at most `budget` of them and returns
-/// `{ counter, next }`: the 8-byte solution, or null when the budget ran out, and the
-/// counter to go on from.
+/// `counter` is null when `budget` ran out; `next` is the counter to go on from.
 export function solve(c, effort, { from = 0, budget = Infinity } = {}) {
   const max = limit(effort);
   const input = Buffer.concat([c, Buffer.alloc(8)]);
@@ -55,8 +45,7 @@ export function solve(c, effort, { from = 0, budget = Infinity } = {}) {
   return { counter: null, next: end };
 }
 
-/// The 8-byte solution, found on a worker thread so the caller's event loop keeps
-/// turning. Aborting `signal` stops the search and rejects with the signal's reason.
+/// On a worker thread, so the caller's event loop keeps turning.
 export function solveAsync(c, effort, { signal } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
@@ -77,11 +66,9 @@ export function solveAsync(c, effort, { signal } = {}) {
   });
 }
 
-/// What a host paid its peers in the last hour, in hashes expected, and whether it pays
-/// more: `peer` is the most for one peer, `all` the most for all of them together,
-/// `floor` what a member known for `floorAfter` seconds is paid whatever the others took,
-/// and `search` the most for the requests of a search together, out of `all`. `top` is
-/// the most one request may cost.
+/// Hourly spend on peers' proofs, in expected hashes. Limits: `peer` per peer, `all` in
+/// total, `search` for search requests (within `all`), and `floor` per member known for
+/// `floorAfter` seconds whatever `all` says. `top` is the most one request may cost.
 export class Spending {
   #limits;
   #top;
@@ -95,13 +82,9 @@ export class Spending {
     this.#top = top;
   }
 
-  /// Takes `effort` for the peer `pk`, known since `since`, out of this hour at `now`;
-  /// false, with nothing taken, when that much is not left. `member` says whether the
-  /// peer is one the floor is for, `search` whether the request is a search's, and
-  /// `share`, `{ key, of }`, that it takes no more than `search` over `of` - or one
-  /// request at `top`, if that is more - together with the other requests of that `key`:
-  /// as much of that one request as `search` has no room for is paid all the same, so
-  /// each `key` can be asked for the most in an hour.
+  /// False, taking nothing, when `effort` does not fit. `share: { key, of }` caps a search's
+  /// requests per `key` at `search / of`, or `top` if more, and pays one request up to `top`
+  /// per key even when `search` is spent, so each key can be asked at least once an hour.
   pay(pk, since, effort, now, { member = true, search = false, share = null } = {}) {
     if (!this.#peers.has(pk)) this.#peers.set(pk, { paid: [], spent: 0 });
     const one = this.#peers.get(pk);
@@ -125,9 +108,8 @@ export class Spending {
   }
 }
 
-/// A `solve(c, effort, { signal })` that works on at most `workers` proofs at a time,
-/// each on a thread of its own, and takes the cheapest of those waiting first: a proof
-/// at the highest price keeps no cheap one waiting longer than the ones already begun.
+/// At most `workers` proofs at a time, cheapest waiting first: a costly proof keeps no
+/// cheap one waiting longer than the ones already begun.
 export function solverPool(workers, run = solveAsync) {
   const waiting = [];
   let running = 0;
@@ -153,18 +135,16 @@ if (!isMainThread && workerData?.dn1pow) {
   parentPort.postMessage(solve(Buffer.from(c), effort).counter);
 }
 
-/// Does `counter` solve the challenge at `effort`?
 export function check(c, effort, counter) {
   if (!validEffort(effort) || !Buffer.isBuffer(counter) || counter.length !== 8) return false;
   return crypto.hash('blake2b512', Buffer.concat([c, counter]), 'buffer').readUInt32BE(0) <= limit(effort);
 }
 
-/// How much work each sender owes one target. A member has a window of its own; every
-/// stranger shares one.
+/// Each member has a window of its own; all strangers share one.
 export class EffortMeter {
   #tiers;
   #windowSecs;
-  #members = new Map(); // pk -> the times of its requests inside the window, oldest first
+  #members = new Map(); // pk -> request times, oldest first
   #strangers = [];
 
   constructor({ memberBase, memberAllow, memberCap, strangerBase, strangerAllow, strangerCap, windowSecs } = POW) {
@@ -186,14 +166,10 @@ export class EffortMeter {
     return this.#members.get(sender);
   }
 
-  /// The least a request can owe: the lower of the two base prices.
   get least() {
     return Math.min(this.#tiers.member.base, this.#tiers.stranger.base);
   }
 
-  /// The effort a request from `sender` owes at `now`, that request counted:
-  /// `BASE << min(CAP, max(0, ceil(log2(n / ALLOW))))`. `member` says whether the sender
-  /// is a member of the request's pool here.
   required(sender, member, now) {
     const { base, allow, cap } = this.#tiers[member ? 'member' : 'stranger'];
     const times = this.#times(sender, member);
@@ -204,13 +180,11 @@ export class EffortMeter {
     return base * 2 ** doublings;
   }
 
-  /// Counts a request toward its sender: a member's toward that member, any other toward
-  /// the strangers.
   count(sender, member, now) {
     const { allow, cap } = this.#tiers[member ? 'member' : 'stranger'];
     const times = this.#times(sender, member);
     times.push(now);
-    // Past the last doubling one more request changes nothing, so nothing older is kept.
+    // Past the last doubling more requests change nothing, so no more are kept.
     if (times.length > Math.max(1, allow * 2 ** (cap - 1))) times.shift();
   }
 }

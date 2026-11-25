@@ -1,7 +1,3 @@
-// Claiming, as whole hosts do it: one task and several free hosts, a host that claims
-// its own task at once, a member that is down, the slots Diplomat states, the hours a
-// host accepts, and the locks a claimant gives back when it stands down.
-
 import assert from 'node:assert/strict';
 import { forgeRequest } from './lib/fakes.mjs';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
@@ -29,7 +25,6 @@ await check('one task and three free hosts: one commits with every member\'s gra
     assert.ok(w.net.count({ from: winner.name, to: h.name, kind: 'sync', since }) >= 1, `${h.name} was asked to confirm the state`);
     assert.ok(w.net.count({ from: winner.name, to: h.name, kind: 'lock', since }) >= 1, `${h.name} was asked for its lock`);
   }
-  // The next two tasks go to the two hosts that stood down; a fourth finds nobody free.
   const more = [];
   for (const item of ['pr-2', 'pr-3', 'pr-4']) more.push((await req.node.offer(offerArgs(item))).taskId);
   await w.net.until(() => free.every((h) => h.executor.started.length === 1), { what: 'every free host running one task' });
@@ -62,14 +57,13 @@ await check('a task offered to run at once is claimed by its own host with no sl
   assert.deepEqual(req.requester.calls.map((c) => c.op), ['authorize', 'perform']);
   assert.deepEqual([w.task(req, taskId).executorHere, w.offerRow(req, taskId).executorHere], [true, true]);
 
-  // With b down, the next such task is claimed without it, and the claim says so.
   w.net.down('b');
   const second = await req.node.offer(offerArgs('pr-2', { now: true }));
   await w.net.until(() => req.executor.jobOf(second.taskId), { what: 'the second task running' });
   const without = w.claim(a, second.taskId);
   assert.deepEqual([signers(without), without.absent], [[a.pk], [b.pk]]);
   assert.ok(w.net.count({ from: 'req', to: 'b', kind: 'sync', since: without.claimedAt - 120 }) >= 1, 'the member that is down was asked in this very round');
-  // A task not marked so waits for a slot like any other.
+  // Without `now`, a task waits for a slot.
   const third = await req.node.offer(offerArgs('pr-3'));
   await w.run(120);
   assert.equal(w.task(req, third.taskId).state, 'available');
@@ -95,7 +89,6 @@ await check('a host claims only on a fresh word about its slots, and never more 
   await w.run(300);
   assert.equal(exe.executor.started.length, 2);
   assert.deepEqual(tasks.map((t) => w.task(req, t).state), ['claimed', 'claimed', 'available']);
-  // What the executor would not take is left alone.
   exe.executor.takes = (task) => task.item !== 'pr-3';
   exe.executor.end(exe.executor.jobOf(tasks[0]).runId);
   await w.net.until(() => w.task(req, tasks[0]).state === 'done', { what: 'the first task done' });
@@ -130,7 +123,7 @@ await check('a task that needs 24 hours is taken only by a host that accepts 24'
   await w.net.until(() => long.executor.jobOf(taskId), { what: 'the 24-hour host running it' });
   const claim = w.claim(req, taskId);
   assert.deepEqual([claim.hours, claim.deadline - claim.claimedAt], [24, 24 * 3600]);
-  // A setting that changes is a member record signed again.
+  // A changed setting re-signs the member record.
   short.settings.maximumAcceptedH = 48;
   await w.net.until(() => w.view(req).members.find((m) => m.pk === short.pk).maxAcceptedH === 48, { what: 'the new hours known' });
 });
@@ -142,11 +135,11 @@ await check('a claimant that stands down gives back the locks it was granted', a
   const { taskId } = await req.node.offer(offerArgs('pr-1'));
   await w.agreed(all);
   const [better, worse] = outranks(taskId, x.pk, y.pk) ? [x, y] : [y, x];
-  // The better-ranked host holds q's lock, by a request made by hand; its node sits idle.
+  // `better` holds q's lock by a hand-made request; its node stays idle.
   const lock = (round) => ({ taskId, round, asOf: w.net.now(), hash: w.view(better).hash });
   const held = await w.request(better, q, 'lock', lock('AAAAAAAAAAA'));
   assert.equal(held.body.grant.executor, better.pk);
-  // The worse-ranked one goes for the task: req grants it, q names the holder, it stands down.
+  // `worse` goes for it: req grants, q names the holder, it stands down.
   worse.slots = 1;
   worse.node.admit({ slots: 1 });
   await w.net.until(() => worse.log.some((line) => line.includes('stood down: outranked')), { what: 'the worse-ranked host standing down' });
@@ -162,8 +155,8 @@ await check('a host commits only with a slot still free, and counts nobody absen
   const w = createWorld({ seed: 36 });
   const all = await w.pool(['req', 'exe', 'slow'], { exe: { slots: 1 } });
   const [req, exe] = all;
-  // The word on slots is taken back while the round waits for a member that says nothing.
-  // Once every host has asked the others what it missed, the next sync is a round's.
+  // Past the catch-up syncs, the next sync is a round's; slots are withdrawn while it
+  // waits on a silent member.
   await w.run(2);
   w.net.cut('exe', 'slow');
   let since = w.net.now();
@@ -178,7 +171,7 @@ await check('a host commits only with a slot still free, and counts nobody absen
   assert.ok(w.net.count({ from: 'exe', to: 'req', kind: 'unlock', since }) >= 1, 'the lock it was granted is given back');
   w.net.heal();
 
-  // Its transport loses its footing in the middle of a round: what was never sent is no silence of a member's.
+  // The transport drops mid-round: an unsent request is no member's silence.
   exe.slots = 1;
   exe.node.admit({ slots: 1 });
   since = w.net.now();
@@ -196,17 +189,16 @@ await check('a host commits only with a slot still free, and counts nobody absen
 await check('the word on slots is how many more: runs begun before it are not counted twice, one begun as it was said is', async () => {
   const w = createWorld({ seed: 37 });
   const [req, exe] = await w.pool(['req', 'exe']);
-  // The machine runs two at a time, and Diplomat says how many more it takes.
   exe.node.admit({ slots: 1 });
   const first = await req.node.offer(offerArgs('pr-1'));
   await w.net.until(() => w.runOf(exe, first.taskId), { what: 'the first run' });
-  // A word three seconds later may have been counted before that run was there to see.
+  // Within ADMIT_LAG_SECS a word may predate the run, so the run counts against it.
   await w.run(3);
   exe.node.admit({ slots: 1 });
   const second = await req.node.offer(offerArgs('pr-2'));
   await w.run(40);
   assert.equal(w.task(req, second.taskId).state, 'available', 'one more was allowed, and one was taken');
-  // A later word counted the run itself: one more means one more.
+  // A later word counts the run itself.
   exe.node.admit({ slots: 1 });
   await w.net.until(() => w.runOf(exe, second.taskId), { maxMs: 30000, what: 'the second run' });
   await w.run(100);
@@ -219,15 +211,14 @@ await check('a host says in one line of its log where the time of each round wen
   const w = createWorld({ seed: 39 });
   const all = await w.pool(['req', 'exe', 'idle', 'zzz']);
   const [req, exe, idle] = all;
-  // One member sleeps, for long enough that the others give it a short time to answer.
+  // Asleep long enough to be given only PROBE_TIMEOUT_MS to answer.
   w.net.sleep('zzz');
   await w.run(600);
   const first = await req.node.offer(offerArgs('pr-1'));
   const second = await req.node.offer(offerArgs('pr-2'));
   await w.agreed([req, exe, idle]);
   const about = (taskId) => exe.log.filter((line) => line.includes(` of ${taskId} `));
-  // A host says once that it is up to date, each time it had to ask what it missed: one
-  // that came back to a pool with members in it, not one that began a pool alone.
+  // Logged once per catch-up, so never by the host that began the pool alone.
   const upToDate = (h) => h.log.filter((line) => line.includes(' is up to date '));
   await w.restart(idle);
   await w.agreed([req, exe, idle]);
@@ -251,15 +242,13 @@ await check('a host says in one line of its log where the time of each round wen
   const [started] = numbers(lines[2], /^job of \S+ started (\d+) s after its claim$/);
   assert.ok(keyed <= 1 && started >= keyed && started <= 1, lines.slice(1).join(' | '));
 
-  // The host that offers the second task is gone when the round for it comes: the one
-  // member that answers has no offer to give.
+  // With the offerer asleep, the one member that answers has no offer to give.
   w.net.sleep('req');
   exe.slots = 2;
   exe.node.admit({ slots: 1 });
   await w.net.until(() => about(second.taskId).length > 0, { what: 'a round for the second task' });
   const [, , gone] = numbers(about(second.taskId)[0], /^claim of \S+ stood down: no-requester - begun (\d+) s after the offer, after a wait of (\d+) ms, over in (\d+) s: 3 members asked, 1 answered, 2 absent$/);
   assert.ok(gone >= REQUEST_TIMEOUT_MS / 1000 && gone <= REQUEST_TIMEOUT_MS / 1000 + 2, about(second.taskId)[0]);
-  // A member that stays tells it the state it holds, time and again.
   await w.run(200);
   assert.equal(exe.log.filter((line) => line.includes(' is up to date ')).length, back.length, 'a host that stayed says nothing more of being up to date');
 });

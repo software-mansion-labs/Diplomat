@@ -1,7 +1,3 @@
-// Hours, leases and the heartbeat: when a claim is active, how a ping moves its lease on,
-// what an extension must carry to hold for every host, and what a lapse does to the task.
-// Run: node test/core-lease.mjs
-
 import assert from 'node:assert/strict';
 import { b64u } from '../src/core/canon.js';
 import { verifyClaim } from '../src/core/claims.js';
@@ -91,7 +87,6 @@ check('a claim is active while held and less than ten minutes past its lease', (
   assert.equal(isActive(released, T0 + 51), false);
   assert.deepEqual([released.seq, released.state, released.at, released.leaseUntil, released.ping], [1, 'released', T0 + 50, claim.leaseUntil, undefined]);
   assert.equal(verifyClaim(released), null);
-  // A completed claim names the job its run did, and only a completed one does.
   const completed = endClaim(executor, claim, 'completed', T0 + 50, JOB);
   assert.deepEqual([completed.spec, released.spec, verifyClaim(completed)], [JOB, undefined, null]);
   assert.equal(verifyClaim(resign(executor, released, { state: 'completed' })), 'bad-claim', 'completed, and no job named');
@@ -192,7 +187,7 @@ check('a claim whose times are not the ones its start, hours and seq dictate is 
     'a longer first lease': [resign(executor, claim, { leaseUntil: claim.leaseUntil + 1 }), 'bad-lease'],
     'a shorter first lease': [resign(executor, claim, { leaseUntil: claim.leaseUntil - 1 }), 'bad-lease'],
     'a later deadline': [resign(executor, claim, { deadline: claim.deadline + 3600 }), 'bad-lease'],
-    // Its hours are the ones its backers give it: a pool refuses it for them first.
+    // Its hours come from its backers, so a pool refuses it for them (`bad-claim`) first.
     'more hours than its deadline': [resign(executor, claim, { hours: 13 }), 'bad-lease', 'bad-claim'],
     'a lease two leases on': [resign(executor, next, { leaseUntil: next.leaseUntil + LEASE }), 'bad-lease'],
     'a first claim carrying a ping': [resign(executor, claim, { ping }), 'bad-ping'],
@@ -208,7 +203,7 @@ check('a claim whose times are not the ones its start, hours and seq dictate is 
   };
   for (const [what, [record, code, merged = code]] of Object.entries(bad)) {
     assert.equal(verifyLease(record), code, what);
-    // A host that holds no claim for the task yet, so nothing but the record decides.
+    // A host with no claim for the task yet, so only the record decides.
     const [blank] = club(3, T0, () => ({ maxAcceptedH: 48 }));
     blank.pool.merge(offer(hosts[0].id), T0);
     assert.deepEqual(blank.pool.merge(record, due).refused, [{ key: keyOf(claim), code: merged }], what);
