@@ -125,6 +125,20 @@ await check('a host pays one peer so much in an hour and all of them together so
   assert.deepEqual([pay('a', 41, T + 3602), pay('a', 40, T + 3602)], [false, true]);
 });
 
+await check('the search is paid out of the purse of all peers, and of its own share of it; a peer that is no member is paid no floor', () => {
+  const s = new Spending({ peer: 100, all: 250, floor: 10, floorAfter: 3600, search: 30 });
+  const T = 50000;
+  const pay = (pk, effort, at, options) => s.pay(pk, T - 3600, effort, at, options);
+  const search = { member: false, search: true };
+  assert.deepEqual([pay('k1', 20, T, search), pay('k2', 11, T, search), pay('k2', 10, T, search)], [true, false, true]);
+  // The search's 30 count toward all of it: 220 are left.
+  assert.deepEqual([pay('a', 100, T), pay('b', 100, T), pay('c', 21, T), pay('c', 20, T)], [true, true, false, true]);
+  // All of it is spent: a member known for an hour is paid its floor, a key that is no member nothing.
+  assert.deepEqual([pay('x', 5, T + 1, { member: false }), pay('y', 5, T + 1)], [false, true]);
+  // The share counts for an hour to the second; with all of it free again, it is what the search may take.
+  assert.deepEqual([pay('k3', 1, T + 3599, search), pay('k3', 31, T + 3600, search), pay('k3', 30, T + 3600, search)], [false, false, true]);
+});
+
 await check('proofs are worked on by so many threads at a time and no more, the cheapest waiting first; one that fails holds no thread', async () => {
   const going = new Map();
   const order = [];
@@ -228,5 +242,5 @@ await check('the defaults are the protocol table', () => {
   assert.equal(meter.required('alice', true, 0), 16384 * 2 ** 12);
   for (let i = 0; i < 2000; i++) meter.count('eve', false, 0);
   assert.equal(meter.required('eve', false, 0), 262144 * 2 ** 8);
-  assert.deepEqual(POW_HOURLY, { peer: 268435456, all: 1073741824, floor: 4194304, floorAfter: 3600 });
+  assert.deepEqual(POW_HOURLY, { peer: 268435456, all: 1073741824, floor: 4194304, floorAfter: 3600, search: 134217728 });
 });

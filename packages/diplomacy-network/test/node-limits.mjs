@@ -10,7 +10,7 @@ import { buildResponse, requestDigest } from '../src/core/envelope.js';
 import { createVoucher } from '../src/core/membership.js';
 import { Pool } from '../src/core/pool.js';
 import { LIMITS, memberRecord, offerRecord } from '../src/core/records.js';
-import { memoryDisk, poolFile } from '../src/node/store.js';
+import { asksFile, memoryDisk, poolFile } from '../src/node/store.js';
 import { MAX_BODY_BYTES, POW, POW_HOURLY, STRANGER_BODY_BYTES } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
@@ -122,6 +122,27 @@ await check('a host works for all its peers together no more in an hour than it 
   const claim = w.claim(a, taskId);
   assert.deepEqual([w.net.now() - since < 40, claim.grants.map((g) => g.by), claim.absent.length], [true, [b.pk], 12]);
   assert.deepEqual(failures([a]), []);
+});
+
+await check('a host pays the hosts it asks that it holds no member record of out of the work it does for all its peers: past it, none of them is paid', async () => {
+  const w = createWorld({ seed: 77 });
+  const [a, b] = await w.pool(['a', 'b']);
+  // Each asks for twice what it was paid, a price inside the floor of a member known for an hour.
+  const keys = Array.from({ length: 200 }, (_, i) => w.stranger(`k${i}`)).map((s) => {
+    answering(s, (request) => ({ error: { code: 'effort', detail: '' }, effort: request.pow.effort * 2 }));
+    return s.pk;
+  });
+  w.net.kill('a');
+  a.disk.write(asksFile(POOL), JSON.stringify({ back: keys.map((pk) => ({ pk, from: w.heard(a)?.online ?? 0 })), former: [] }));
+  await w.restart(a);
+  const paid = [];
+  w.net.tap(({ from, body }) => {
+    if (from === 'a') paid.push([w.net.now(), JSON.parse(body.toString('utf8')).pow.effort]);
+  });
+  await w.run(4 * 3600);
+  // b is the one member a has known for an hour.
+  const hour = Math.max(...paid.map(([at]) => sum(paid.filter(([t]) => t >= at && t < at + 3600).map(([, e]) => e))));
+  assert.ok(hour <= HOURLY_ALL + HOURLY_FLOOR, `paid ${hour} in an hour, of ${HOURLY_ALL}`);
 });
 
 await check('a member that asks for more work whatever it is paid stops a round like one that does not grant, until this host has done for it what it does for one peer in an hour: then the round goes on without it', async () => {

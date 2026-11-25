@@ -4,12 +4,13 @@
 
 import assert from 'node:assert/strict';
 import { POOL, check, createWorld } from './lib/hosts.mjs';
-import { UNSERVED } from '../src/core/envelope.js';
+import { canon } from '../src/core/canon.js';
+import { UNSERVED, buildResponse, requestDigest } from '../src/core/envelope.js';
 import { sign } from '../src/core/identity.js';
 import { createInvite, createVoucher, inviteToken } from '../src/core/membership.js';
 import { LIMITS, memberRecord } from '../src/core/records.js';
-import { heardFile, poolFile } from '../src/node/store.js';
-import { STRANGER_BODY_BYTES } from '../src/paths.js';
+import { asksFile, heardFile, poolFile } from '../src/node/store.js';
+import { POW, POW_HOURLY, STRANGER_BODY_BYTES } from '../src/paths.js';
 
 const offerArgs = (item) => ({ pool: POOL, kind: 'review', item, title: `Review ${item}`, prompt: 'p' });
 
@@ -640,7 +641,7 @@ await check('a machine that goes back into a pool it left more than a month befo
   const [a, b, c] = all;
   const row = (h) => {
     const { left, joining, joinFailed, returning, unseated } = w.view(h);
-    return [left, joining, joinFailed, returning, unseated, w.members(h).length, w.doc(h).back.length];
+    return [left, joining, joinFailed, returning, unseated, w.members(h).length, w.asks(h).back.length];
   };
   c.node.leave({ pool: POOL });
   await w.run(31 * 24 * 3600);
@@ -658,14 +659,14 @@ await check('a machine that goes back into a pool it left more than a month befo
   w.net.kill('c');
   const others = [b.pk, c.pk].sort();
   assert.deepEqual(await a.node.join({ pool: POOL }), { pool: POOL });
-  assert.deepEqual([row(a), w.doc(a).back.map((e) => e.pk)], [[false, false, '', true, false, 1, 2], others]);
+  assert.deepEqual([row(a), w.asks(a).back.map((e) => e.pk)], [[false, false, '', true, false, 1, 2], others]);
   await w.run(600);
   const since = w.net.now();
   await w.run(1800);
   assert.deepEqual([w.net.count({ from: 'a', since }), w.net.count({ from: 'a', kind: 'hello', since })], [6, 6]);
   await w.restart(a);
   await w.run(60);
-  assert.deepEqual([row(a), w.doc(a).back.map((e) => e.pk)], [[false, false, '', true, false, 1, 2], others], 'started again');
+  assert.deepEqual([row(a), w.asks(a).back.map((e) => e.pk)], [[false, false, '', true, false, 1, 2], others], 'started again');
   a.node.leave({ pool: POOL });
   assert.deepEqual([...w.stored(a, poolFile(POOL)).leftTo].sort(), others, 'what it leaves once more, it leaves to them');
   await w.run(60);
@@ -769,16 +770,16 @@ await check('a machine that heard nobody of its pool for less than a month is no
       await torUp(w, r);
     }
     await w.run(600);
-    assert.deepEqual([w.view(r).returning, w.doc(r).back, w.members(r)], [false, [], [r.pk]], how);
+    assert.deepEqual([w.view(r).returning, w.asks(r).back, w.members(r)], [false, [], [r.pk]], how);
     r.slots = 1;
     const { taskId } = await r.node.offer(offerArgs('pr-1'));
     await w.net.until(() => r.executor.jobOf(taskId), { maxMs: 3600 * 1000, what: `${how}: its job running` });
     assert.equal(w.net.count({ from: 'r', to: 'a', kind: 'hello' }), 0, `${how}: the machine that stopped is not asked as one whose record ran out`);
     if (how !== 'off') continue;
     await w.run(22 * 24 * 3600);
-    assert.deepEqual([w.view(r).returning, w.doc(r).back.map((e) => e.pk)], [false, []], 'a day short of a month');
+    assert.deepEqual([w.view(r).returning, w.asks(r).back.map((e) => e.pk)], [false, []], 'a day short of a month');
     await w.run(2 * 24 * 3600);
-    assert.deepEqual([w.view(r).returning, w.doc(r).back.map((e) => e.pk)], [true, [a.pk]], 'a month of silence');
+    assert.deepEqual([w.view(r).returning, w.asks(r).back.map((e) => e.pk)], [true, [a.pk]], 'a month of silence');
   }
 });
 
@@ -797,7 +798,7 @@ await check('two machines back after a month that reach each other first go on a
   await w.run(600);
   await w.restart(m);
   await w.run(50 * 3600);
-  const back = (h) => w.doc(h).back.map((e) => e.pk);
+  const back = (h) => w.asks(h).back.map((e) => e.pk);
   assert.deepEqual([c, m].map((h) => [w.view(h).returning, w.members(h), back(h)]), [
     [false, [c.pk, m.pk].sort(), [a.pk, b.pk].sort()],
     [false, [c.pk, m.pk].sort(), [a.pk, b.pk].sort()],
@@ -826,13 +827,13 @@ await check('a machine back after a month asks a machine that never answers for 
   await w.restart(b);
   await w.net.until(() => !w.view(a).returning, { maxMs: 3600 * 1000, what: 'b answered' });
   await w.run(60);
-  assert.deepEqual(w.doc(a).back.map((e) => w.name(e.pk)), ['c']);
+  assert.deepEqual(w.asks(a).back.map((e) => w.name(e.pk)), ['c']);
   await w.run(2 * 24 * 3600);
   const day2 = w.net.now();
   await w.run(24 * 3600);
-  assert.deepEqual([w.doc(a).back.map((e) => w.name(e.pk)), w.net.count({ from: 'a', to: 'c', since: day2 }) > 0], [['c'], true], 'asked on its third day');
+  assert.deepEqual([w.asks(a).back.map((e) => w.name(e.pk)), w.net.count({ from: 'a', to: 'c', since: day2 }) > 0], [['c'], true], 'asked on its third day');
   await w.run(27 * 24 * 3600 + 3600);
-  assert.deepEqual([w.doc(a).back, w.view(a).returning], [[], false]);
+  assert.deepEqual([w.asks(a).back, w.view(a).returning], [[], false]);
   const since = w.net.now();
   await w.run(2 * 24 * 3600);
   const asked = w.net.count({ from: 'a', to: 'c', since });
@@ -859,13 +860,13 @@ await check('a machine that heard nobody of its pool for a month - asleep, cut o
     const woken = w.net.now();
     await w.run(60);
     // r is asked too: m keeps the record of the member that seated it, whatever its age.
-    if (how !== 'woke') assert.deepEqual([w.view(m).returning, w.doc(m).back.map((e) => w.name(e.pk)).sort()], [true, ['a', 'b', 'r']], how);
+    if (how !== 'woke') assert.deepEqual([w.view(m).returning, w.asks(m).back.map((e) => w.name(e.pk)).sort()], [true, ['a', 'b', 'r']], how);
     cut(false);
     const since = how === 'woke' ? woken : w.net.now();
     await w.net.until(() => [a, b, m].every((h) => w.members(h).length === 3), { maxMs: 30 * 60 * 1000, what: `${how}: m a member again` });
     await w.agreed([a, b, m]);
     assert.ok(w.net.count({ from: 'm', to: 'a', since }) > 0, how);
-    assert.deepEqual([w.view(m).returning, w.doc(m).back], [false, []], how);
+    assert.deepEqual([w.view(m).returning, w.asks(m).back], [false, []], how);
     for (const h of [a, b, m]) h.slots = 1;
     const { taskId } = await m.node.offer(offerArgs('pr-1'));
     await a.node.offer(offerArgs('pr-1'));
@@ -936,7 +937,7 @@ await check('a machine that restarts while the other members it hears are off ta
   w.net.kill('y');
   await w.restart(h);
   await w.run(1.5 * 24 * 3600);
-  assert.deepEqual([w.doc(h).back, w.view(h).returning], [[], false]);
+  assert.deepEqual([w.asks(h).back, w.view(h).returning], [[], false]);
   await w.restart(y);
   const since = w.net.now();
   await w.run(24 * 3600);
@@ -956,7 +957,7 @@ await check('a store that keeps when another member was last heard in the pool d
     const doc = w.doc(r);
     r.disk.write(poolFile(POOL), JSON.stringify(kept === 'document' ? { ...doc, heard: w.net.now() - 24 * 3600 } : doc));
     await w.restart(r);
-    assert.deepEqual([w.view(r).returning, w.doc(r).back.map((e) => e.pk)], kept === 'document' ? [false, []] : [true, [a.pk]], kept);
+    assert.deepEqual([w.view(r).returning, w.asks(r).back.map((e) => e.pk)], kept === 'document' ? [false, []] : [true, [a.pk]], kept);
     await w.run(60);
     // Read from the document, it is kept apart from it before the document is written again.
     assert.equal(w.heard(r)?.heard ?? null, kept === 'document' ? w.net.now() - 60 - 24 * 3600 : null, kept);
@@ -1121,7 +1122,7 @@ await check('a machine back after a month counts its month of asking only while 
     if (how === 'rejoin') await m.node.join({ pool: POOL });
     else await w.restart(m);
     await w.run(3600);
-    assert.deepEqual([w.view(m).returning, w.doc(m).back.map((e) => w.name(e.pk)).sort()], [true, ['a', 'b', 'r']], `${how}: back an hour`);
+    assert.deepEqual([w.view(m).returning, w.asks(m).back.map((e) => w.name(e.pk)).sort()], [true, ['a', 'b', 'r']], `${how}: back an hour`);
     if (how === 'asleep') w.net.sleep('m');
     else if (how === 'down') torDown(m);
     else w.net.kill('m');
@@ -1135,7 +1136,7 @@ await check('a machine back after a month counts its month of asking only while 
     else if (how === 'down') await torUp(w, m);
     else await w.restart(m);
     await w.run(3600);
-    assert.deepEqual([w.view(m).returning, w.doc(m).back.map((e) => w.name(e.pk)).sort()], [true, ['a', 'b', 'r']], `${how}: up again`);
+    assert.deepEqual([w.view(m).returning, w.asks(m).back.map((e) => w.name(e.pk)).sort()], [true, ['a', 'b', 'r']], `${how}: up again`);
     cut(false);
     await w.net.until(() => [m, a].every((h) => w.members(h).length === 3), { maxMs: 30 * 60 * 1000, what: `${how}: one pool` });
     for (const h of [a, b, m]) h.slots = 1;
@@ -1158,7 +1159,7 @@ await check('two parts of a pool cut off from each other for longer than a month
   w.net.kill('r');
   // r carried each part's records to the other until it stopped: they run out on day 40.
   await w.run(32 * day);
-  assert.deepEqual([a, m].map((h) => [w.members(h), w.doc(h).back].map((x) => x.length)), [[2, 0], [2, 0]]);
+  assert.deepEqual([a, m].map((h) => [w.members(h), w.asks(h).back].map((x) => x.length)), [[2, 0], [2, 0]]);
   await w.restart(a);
   const since = w.net.now();
   await w.run(10 * day);
@@ -1186,9 +1187,9 @@ await check('a machine back after a month that nobody answers waits for the mach
   r.slots = 1;
   const { taskId } = await r.node.offer(offerArgs('pr-1'));
   await w.run(29 * 24 * 3600);
-  assert.deepEqual([w.view(r).returning, w.doc(r).back.length, r.executor.jobOf(taskId)], [true, 1, undefined]);
+  assert.deepEqual([w.view(r).returning, w.asks(r).back.length, r.executor.jobOf(taskId)], [true, 1, undefined]);
   await w.run(24 * 3600 + 3600);
-  assert.deepEqual([w.view(r).returning, w.doc(r).back, w.doc(r).returning], [false, [], false]);
+  assert.deepEqual([w.view(r).returning, w.asks(r).back, w.doc(r).returning], [false, [], false]);
   const again = await r.node.offer(offerArgs('pr-2'));
   await w.net.until(() => r.executor.jobOf(again.taskId), { maxMs: 3600 * 1000, what: 'a job running' });
 });
@@ -1207,8 +1208,12 @@ await check('a machine asks the last 1,024 members whose records it dropped whet
     return real(pk, ...rest);
   };
   const kept = dropped.slice(-1024);
-  const searched = () => log.filter((pk) => kept.includes(pk));
-  await w.run(12 * 3600);
+  // All are due at once, and asked one every 84 s.
+  const start = w.net.now();
+  await w.run(2 * 3600);
+  const burst = w.net.count({ from: 'a', kind: 'hello', since: start });
+  assert.ok(burst > 60 && burst < 100, `${burst} hellos in the first two hours`);
+  await w.run(10 * 3600);
   const since = w.net.now();
   await w.run(2 * 3600);
   const hellos = w.net.count({ from: 'a', kind: 'hello', since });
@@ -1216,19 +1221,23 @@ await check('a machine asks the last 1,024 members whose records it dropped whet
   await w.run(46 * 3600);
   const asked = new Set(log);
   assert.deepEqual([kept.filter((pk) => !asked.has(pk)).length, dropped.slice(0, -1024).filter((pk) => asked.has(pk)).length], [0, 0]);
-  // Twelve hours without its transport skip nobody's turn.
-  const last = searched().at(-1);
+  // Twelve hours without its transport skip nobody's turn: the first asked after them was
+  // due at their start.
+  const down = w.net.now();
   torDown(a);
   await w.run(12 * 3600);
+  const due = new Map(w.asks(a).former.map((e) => [e.pk, e.due]));
+  const upAt = log.length;
   await torUp(w, a);
   await w.run(3600);
-  assert.equal(searched()[searched().lastIndexOf(last) + 1], kept[(kept.indexOf(last) + 1) % kept.length]);
+  const first = log.slice(upAt).find((pk) => kept.includes(pk));
+  assert.ok(due.get(first) < down + 3600, `the first asked was due ${(due.get(first) - down) / 3600} h in`);
   // One more dropped, the earliest of them goes.
   w.net.kill('b');
   w.net.kill('a');
   await w.run(31 * 24 * 3600);
   await w.restart(a);
-  assert.deepEqual([w.doc(a).former.length, w.doc(a).former.at(-1), w.doc(a).former[0]], [1024, b.pk, dropped.at(-1023)]);
+  assert.deepEqual([w.asks(a).former.length, w.asks(a).former.at(-1).pk, w.asks(a).former[0].pk], [1024, b.pk, dropped.at(-1023)]);
 });
 
 await check('a machine asks no member whose record it dropped once it holds a record of it again: one that left is asked nothing', async () => {
@@ -1245,6 +1254,237 @@ await check('a machine asks no member whose record it dropped once it holds a re
   assert.equal(w.net.count({ from: 'a', to: 'x', since }), 0);
 });
 
+await check('a member that fills its seats with new keys again and again leaves no host anything to ask of them once their seats went to the next: nobody keeps their keys, works for them or writes a pool larger for them, and a machine that joins after is served as any', async () => {
+  const w = createWorld({ seed: 3 });
+  const [r, a, b] = await w.pool(['r', 'a', 'b']);
+  const m = await w.intruder('m', r);
+  await w.run(120);
+  let [written, asked] = [0, 0];
+  const write = a.disk.write.bind(a.disk);
+  a.disk.write = (name, text) => {
+    written += text.length;
+    asked += name.startsWith('asks/');
+    return write(name, text);
+  };
+  const seated = new Set();
+  for (let round = 0; round < 69; round += 1) {
+    const now = w.net.now();
+    const records = Array.from({ length: LIMITS.invitees }, (_, seat) => {
+      const s = w.stranger(`s${round}-${seat}`);
+      s.transport.host.ready = false;
+      seated.add(s.pk);
+      return memberRecord(s.id, { pool: POOL, seq: 0, at: now, era: 0, maxAcceptedH: 12, voucher: createVoucher(m.id, { pool: POOL, era: 0, pk: s.pk, seat, at: now }) });
+    });
+    for (const h of [a, b, r]) {
+      let answer = await w.request(m, h, 'push', { records }, { effort: POW.memberBase });
+      for (let i = 0; i < 6 && answer.code === 'effort'; i += 1) answer = await w.request(m, h, 'push', { records }, { effort: answer.effort });
+    }
+    await w.run(15);
+  }
+  const { back, former } = w.asks(a);
+  assert.deepEqual([...back, ...former].filter((e) => seated.has(e.pk)).length, 0);
+  assert.ok(written < 512 * 1024, `${written} bytes written in 17 minutes`);
+  assert.equal(asked, 0, 'what a asks is not written again unchanged');
+  await w.run(3600);
+  const paid = a.solved.length;
+  await w.run(3600);
+  const hour = a.solved.slice(paid).reduce((x, y) => x + y, 0);
+  assert.ok(hour <= POW_HOURLY.search, `${hour / POW_HOURLY.all} of an hour's work paid in an hour`);
+  const n = w.add('n', { slots: 0 });
+  await w.start(n);
+  await n.node.join(r.node.invite({ pool: POOL }));
+  const since = w.net.now();
+  await w.run(3600);
+  assert.ok(w.net.count({ from: 'a', to: 'n', since }) >= 30, `a asked the newcomer ${w.net.count({ from: 'a', to: 'n', since })} times in its first hour`);
+});
+
+await check('the search pays at most an eighth of a host\'s hour of work, and a key that asks it for more work is asked nothing more that day', async () => {
+  const w = createWorld({ seed: 11 });
+  const [a] = await w.pool(['a', 'b']);
+  const most = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
+  const asked = new Map();
+  const paid = [];
+  w.net.tap(({ from, to, body }) => {
+    if (from === 'a' && to?.startsWith('k')) paid.push([w.net.now(), JSON.parse(body.toString('utf8')).pow.effort]);
+  });
+  const keys = Array.from({ length: 200 }, (_, i) => {
+    const s = w.stranger(`k${i}`);
+    s.transport.onRequest(async (buf) => {
+      const request = JSON.parse(buf.toString('utf8'));
+      asked.set(s.pk, (asked.get(s.pk) ?? 0) + 1);
+      return canon(buildResponse(s.id, { re: requestDigest(request), error: { code: 'effort', detail: 'more' }, effort: most }));
+    });
+    return s.pk;
+  });
+  w.net.kill('a');
+  a.disk.write(poolFile(POOL), JSON.stringify({ ...w.doc(a), former: keys }));
+  await w.restart(a);
+  await w.run(30 * 3600);
+  const hour = Math.max(...paid.map(([at]) => paid.filter(([t]) => t >= at && t < at + 3600).reduce((x, [, e]) => x + e, 0)));
+  assert.ok(hour <= POW_HOURLY.search, `${hour / POW_HOURLY.all} of an hour's work paid for the search in an hour`);
+  assert.ok(Math.max(...asked.values()) <= 2, `a key was asked ${Math.max(...asked.values())} times in 30 hours`);
+});
+
+await check('two parts of a pool cut off from each other for longer than a month, their machines up for 10 hours a day, are one pool again within about a day of reaching each other', async () => {
+  const w = createWorld({ seed: 5 });
+  const hosts = await w.pool(['r', 'a', 'b', 'c', 'm']);
+  const [r, a, b, c, m] = hosts;
+  const cut = (on) => { for (const x of ['a', 'b']) for (const y of ['c', 'm']) w.net.cut(x, y, on); };
+  cut(true);
+  await w.run(10 * 24 * 3600);
+  w.net.kill('r');
+  await w.run(30 * 24 * 3600);
+  cut(false);
+  const live = [a, b, c, m];
+  for (let day = 0; day < 2; day += 1) {
+    for (const h of live) await w.restart(h);
+    await w.run(10 * 3600);
+    for (const h of live) w.net.kill(h.name);
+    await w.run(14 * 3600);
+  }
+  for (const h of live) await w.restart(h);
+  await w.run(600);
+  for (const h of live) assert.deepEqual(w.members(h).map((pk) => w.name(pk)).sort().join(), 'a,b,c,m', h.name);
+  for (const h of live) h.slots = 1;
+  const { taskId } = await m.node.offer(offerArgs('pr-1'));
+  await w.run(1);
+  await a.node.offer(offerArgs('pr-1'));
+  await w.run(2 * 3600);
+  assert.equal(live.filter((h) => h.executor.jobOf(taskId)).length, 1);
+});
+
+await check('a key whose record ran out that answers a machine\'s search counts for no machine of the pool until it holds a seat: cut off from the others, the machine still comes back after a month, and the key is pushed none of its offers or claims', async () => {
+  const w = createWorld({ seed: 4 });
+  const [r, a, b] = await w.pool(['r', 'a', 'b']);
+  for (const h of [r, a, b]) h.slots = 4;
+  const m = await w.intruder('m', r);
+  await w.run(31 * 24 * 3600);
+  assert.deepEqual(w.asks(a).former.map((e) => e.pk), [m.pk]);
+  const pushed = [];
+  m.transport.onRequest(async (buf) => {
+    const request = JSON.parse(buf.toString('utf8'));
+    pushed.push(...(request.body?.records ?? []).map((x) => x.type));
+    return canon(buildResponse(m.id, { re: requestDigest(request), body: { index: {} }, effort: POW.strangerBase }));
+  });
+  for (const x of ['r', 'b']) w.net.cut('a', x, true);
+  await w.run(31 * 24 * 3600);
+  const { taskId } = await a.node.offer(offerArgs('pr-1'));
+  await w.run(1);
+  await r.node.offer(offerArgs('pr-1'));
+  await w.run(2 * 3600);
+  const ran = [r, a, b].filter((h) => h.executor.jobOf(taskId)).map((h) => h.name);
+  assert.deepEqual([w.view(a).returning, ran.length, ran.includes('a')], [true, 1, false]);
+  assert.deepEqual(pushed.filter((type) => type !== 'member'), []);
+});
+
+await check('a machine asks at most 241 machines besides the members whose records it holds: of more, the ones it began asking last', async () => {
+  const w = createWorld({ seed: 43 });
+  const [a, b, c] = await w.pool(['a', 'b', 'c']);
+  for (const h of [a, b, c]) w.net.kill(h.name);
+  await w.run(31 * 24 * 3600);
+  const online = w.heard(a)?.online ?? 0;
+  const keys = Array.from({ length: LIMITS.members }, (_, i) => w.stranger(`k${i}`).pk);
+  a.disk.write(asksFile(POOL), JSON.stringify({ back: keys.map((pk) => ({ pk, from: online - 1 })), former: [] }));
+  await w.restart(a);
+  await w.run(1);
+  const back = w.asks(a).back.map((e) => e.pk);
+  assert.deepEqual([back.length, back.includes(b.pk), back.includes(c.pk)], [LIMITS.members, true, true]);
+});
+
+await check('a machine that starts with a record in its store whose seat another holds does not look for its key', async () => {
+  const w = createWorld({ seed: 41 });
+  const [a] = await w.pool(['a', 'b']);
+  const m = await w.intruder('m', a);
+  const seated = (name) => {
+    const s = w.stranger(name);
+    const now = w.net.now();
+    return memberRecord(s.id, { pool: POOL, seq: 0, at: now, era: 0, maxAcceptedH: 12, voucher: createVoucher(m.id, { pool: POOL, era: 0, pk: s.pk, seat: 0, at: now }) });
+  };
+  const first = seated('s1');
+  assert.deepEqual((await w.request(m, a, 'push', { records: [first] }, { effort: 2 ** 16 })).body.refused, []);
+  await w.run(60);
+  w.net.kill('a');
+  const doc = w.doc(a);
+  const second = seated('s2');
+  a.disk.write(poolFile(POOL), JSON.stringify({ ...doc, records: [...doc.records, second] }));
+  await w.restart(a);
+  await w.run(1);
+  const keys = [first.pk, second.pk];
+  const { back, former } = w.asks(a);
+  assert.deepEqual([[...back, ...former].filter((e) => keys.includes(e.pk)), w.members(a).filter((pk) => keys.includes(pk))], [[], [second.pk]]);
+});
+
+await check('a machine back after a month pushes a machine it asks that it holds no member record of its own member records alone', async () => {
+  const w = createWorld({ seed: 6 });
+  const [r, a, b] = await w.pool(['r', 'a', 'b']);
+  a.slots = 1;
+  // One that answers what it is asked, and one that answers nothing.
+  const [m, n] = [await w.intruder('m', r), await w.intruder('n', r)];
+  const pushed = [];
+  for (const x of [m, n]) {
+    x.transport.onRequest(async (buf) => {
+      const request = JSON.parse(buf.toString('utf8'));
+      pushed.push(...(request.body?.records ?? []));
+      if (x === n) throw new Error('n answers nothing');
+      return canon(buildResponse(x.id, { re: requestDigest(request), body: { index: {}, accepted: [], refused: [] }, effort: POW.memberBase }));
+    });
+  }
+  await w.run(60);
+  for (const x of ['r', 'b', 'm', 'n']) w.net.cut('a', x, true);
+  await w.run(31 * 24 * 3600);
+  assert.deepEqual([w.view(a).returning, [m.pk, n.pk].filter((pk) => w.asks(a).back.some((e) => e.pk === pk)).length], [true, 2]);
+  for (const x of ['m', 'n']) w.net.cut('a', x, false);
+  await a.node.offer(offerArgs('pr-1'));
+  await w.run(3600);
+  a.node.leave({ pool: POOL });
+  await w.run(600);
+  assert.deepEqual([pushed.filter((x) => x.type !== 'member'), pushed.some((x) => x.pk === a.pk && x.left)], [[], true]);
+});
+
+await check('a machine restarted every two hours greets a key whose record ran out about once a day, as one that runs on', async () => {
+  const w = createWorld({ seed: 23 });
+  const [a, , x] = await w.pool(['a', 'b', 'x']);
+  w.net.kill('x');
+  const killed = w.net.now();
+  // It is first greeted half a day after its record ran out.
+  await w.net.until(() => w.asks(a).former.length > 0, { maxMs: 40 * 24 * 3600 * 1000, stepMs: 10000, what: 'x dropped' });
+  assert.deepEqual(w.asks(a).former.map((e) => [e.pk, e.due - w.net.now() > 12 * 3600 - 20]), [[x.pk, true]]);
+  await w.run(killed + 40 * 24 * 3600 - w.net.now());
+  const since = w.net.now();
+  for (let i = 0; i < 24; i += 1) {
+    await w.run(2 * 3600 - 60);
+    w.net.kill('a');
+    await w.run(60);
+    await w.restart(a);
+  }
+  const hellos = w.net.count({ from: 'a', to: 'x', kind: 'hello', since });
+  assert.ok(hellos >= 1 && hellos <= 3, `${hellos} hellos in 2 days`);
+});
+
+await check('a member whose record saying it left runs out is not looked for', async () => {
+  const w = createWorld({ seed: 21 });
+  const [a, , x] = await w.pool(['a', 'b', 'x']);
+  x.node.leave({ pool: POOL });
+  await w.run(29 * 24 * 3600);
+  const since = w.net.now();
+  await w.run(6 * 24 * 3600);
+  assert.deepEqual([w.asks(a).former, w.net.count({ from: 'a', to: 'x', since })], [[], 0]);
+});
+
+await check('a clock set back while a machine comes back takes nothing off the month it asks for', async () => {
+  const w = createWorld({ seed: 72 });
+  const [r] = await w.pool(['r', 'a']);
+  w.net.kill('r');
+  w.net.kill('a');
+  await w.run(31 * 24 * 3600);
+  await w.restart(r);
+  await w.run(24 * 3600);
+  assert.equal(w.view(r).returning, true);
+  r.skew = -10 * 24 * 3600;
+  await w.run(31 * 24 * 3600);
+  assert.equal(w.view(r).returning, false);
+});
+
 await check('a back list a store before this one kept with when each was asked until is asked for a month afresh, run out or not', async () => {
   const w = createWorld({ seed: 69 });
   const [a, b] = await w.pool(['a', 'b']);
@@ -1253,7 +1493,7 @@ await check('a back list a store before this one kept with when each was asked u
   a.disk.write(poolFile(POOL), JSON.stringify({ ...w.doc(a), returning: true, back: [{ pk: b.pk, until: w.net.now() - 3600 }] }));
   await w.restart(a);
   await w.run(29 * 24 * 3600);
-  assert.deepEqual([w.view(a).returning, w.doc(a).back.map((e) => e.pk)], [true, [b.pk]]);
+  assert.deepEqual([w.view(a).returning, w.asks(a).back.map((e) => e.pk)], [true, [b.pk]]);
   await w.run(2 * 24 * 3600);
   assert.equal(w.view(a).returning, false);
 });
@@ -1279,11 +1519,11 @@ await check('a machine back after a month that was answered is back after a rest
   w.net.kill('a');
   await w.run(31 * 24 * 3600);
   await w.restart(r);
-  assert.deepEqual([w.doc(r).returning, w.doc(r).back.map((e) => e.pk)], [true, [a.pk]], 'it is coming back, and asks a');
+  assert.deepEqual([w.doc(r).returning, w.asks(r).back.map((e) => e.pk)], [true, [a.pk]], 'it is coming back, and asks a');
   await w.restart(a);
   await w.net.until(() => !w.view(r).returning && !w.view(a).returning, { maxMs: 3600 * 1000, what: 'both answered' });
   await w.run(60);
-  assert.deepEqual([w.doc(r).returning, w.doc(r).back], [false, []]);
+  assert.deepEqual([w.doc(r).returning, w.asks(r).back], [false, []]);
   w.net.kill('a');
   await w.run(600);
   await w.restart(r);

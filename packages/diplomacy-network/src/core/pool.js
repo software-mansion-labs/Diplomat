@@ -119,6 +119,7 @@ export class Pool {
   #settled = null;
   #tasks = null; // { settled, now, rows }: the tasks last worked out
   #moved = { put: new Set(), drop: new Set() }; // the keys taken in and dropped since `delta` was asked
+  #gone = []; // { record, code }: the records held that were dropped since `gone` was asked, and why
 
   constructor({ id, self }) {
     this.id = id;
@@ -186,7 +187,11 @@ export class Pool {
       }
     }
     const { put, drop } = this.#moved;
-    for (const key of this.#entries.keys()) if (!settled.live.has(key)) drop.add(key);
+    for (const [key, entry] of this.#entries) {
+      if (settled.live.has(key)) continue;
+      drop.add(key);
+      this.#gone.push({ record: entry.record, code: settled.dead.get(key) });
+    }
     for (const key of fresh) {
       put.add(key);
       drop.delete(key);
@@ -229,6 +234,15 @@ export class Pool {
     const { put, drop } = this.#moved;
     this.#moved = { put: new Set(), drop: new Set() };
     return { put: this.records([...put]), drop: [...drop].sort() };
+  }
+
+  /// The records held that were dropped since this was last asked, each `{ record, code }`
+  /// with the code `merge` would have refused it with: `expired` for one past its
+  /// retention, `no-seat` or `not-member` for one that holds no seat any more.
+  gone() {
+    const gone = this.#gone;
+    this.#gone = [];
+    return gone;
   }
 
   /// The record held under `key`, or null.

@@ -3,8 +3,9 @@
 //   identity.json           { seed }
 //   heard.json              { ts }: the latest date of a request this host served
 //   heard/<pool hash>.json  { heard, waitedOut, online }: when another host of that pool was last heard, the last such time whose silence this host waited out, and how long it ran there with its transport up
+//   asks/<pool hash>.json   { back, former }: the hosts of that pool it asks besides the members it holds, and the members whose records ran out, each with when it is next asked whether it is still there
 //   peers.json              { silent }: the peers this host asks in vain, and has for long, and since when
-//   pools/<pool hash>.json  one pool: its link, this host's own sequence numbers, its records, the keys it asks
+//   pools/<pool hash>.json  one pool: its link, this host's own sequence numbers, its records
 //   pools/<pool hash>.log   what changed in that pool since its document was written
 //   locks.json              the lock table of every pool
 //   keys.json               the keys this host issued and the keys it holds, secrets included
@@ -37,6 +38,10 @@ export const poolFile = (id) => `pools/${poolHash(id)}`;
 /// The file name of when this host was last heard in a pool: apart from the pool's
 /// document, so that a word heard does not have the document written whole.
 export const heardFile = (id) => `heard/${poolHash(id)}`;
+
+/// The file name of the hosts this host asks in a pool besides its members: apart from
+/// the pool's document, so that it is written only when they change.
+export const asksFile = (id) => `asks/${poolHash(id)}`;
 
 /// The directory `dir` as a store's disk:
 /// `{ read(name), write(name, text), remove(name), aside(name), append(name, text), appended(name), cut(name) }`,
@@ -114,7 +119,7 @@ export function memoryDisk() {
 // A document rests on the ones before it here - a run on the key it holds, a key and a
 // lock on a pool's records - and is written after them, so a host that dies between two
 // writes of one flush finds nothing that rests on what never reached the disk.
-const ORDER = ['identity', 'heard', 'peers', 'links', 'pools', 'locks', 'keys', 'offers', 'runs'];
+const ORDER = ['identity', 'heard', 'asks', 'peers', 'links', 'pools', 'locks', 'keys', 'offers', 'runs'];
 const rank = (name) => ORDER.indexOf(name.split('/')[0]);
 
 /// The store over `dir` (or over `disk`): `{ read(name), lines(name), write(name, value, { line }), remove(name), flush() }`.

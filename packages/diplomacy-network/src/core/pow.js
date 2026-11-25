@@ -78,11 +78,13 @@ export function solveAsync(c, effort, { signal } = {}) {
 }
 
 /// What a host paid its peers in the last hour, in hashes expected, and whether it pays
-/// more: `peer` is the most for one peer, `all` the most for all of them together, and
-/// `floor` what a peer known for `floorAfter` seconds is paid whatever the others took.
+/// more: `peer` is the most for one peer, `all` the most for all of them together,
+/// `floor` what a member known for `floorAfter` seconds is paid whatever the others took,
+/// and `search` the most for the requests of a search together, out of `all`.
 export class Spending {
   #limits;
   #all = { paid: [], spent: 0 };
+  #search = { paid: [], spent: 0 };
   #peers = new Map();
 
   constructor(limits) {
@@ -90,18 +92,21 @@ export class Spending {
   }
 
   /// Takes `effort` for the peer `pk`, known since `since`, out of this hour at `now`;
-  /// false, with nothing taken, when that much is not left.
-  pay(pk, since, effort, now) {
+  /// false, with nothing taken, when that much is not left. `member` says whether the
+  /// peer is one the floor is for, `search` whether the request is a search's.
+  pay(pk, since, effort, now, { member = true, search = false } = {}) {
     if (!this.#peers.has(pk)) this.#peers.set(pk, { paid: [], spent: 0 });
     const one = this.#peers.get(pk);
-    for (const purse of [one, this.#all]) {
+    const purses = search ? [one, this.#all, this.#search] : [one, this.#all];
+    for (const purse of purses) {
       while (purse.paid.length > 0 && purse.paid[0][0] <= now - 3600) purse.spent -= purse.paid.shift()[1];
     }
     const { peer, all, floor, floorAfter } = this.#limits;
     if (one.spent + effort > peer) return false;
-    const anyway = now - since >= floorAfter && one.spent + effort <= floor;
+    if (search && this.#search.spent + effort > this.#limits.search) return false;
+    const anyway = member && now - since >= floorAfter && one.spent + effort <= floor;
     if (!anyway && this.#all.spent + effort > all) return false;
-    for (const purse of [one, this.#all]) {
+    for (const purse of purses) {
       purse.paid.push([now, effort]);
       purse.spent += effort;
     }

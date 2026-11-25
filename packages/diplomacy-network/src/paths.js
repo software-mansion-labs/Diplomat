@@ -126,8 +126,12 @@ export const POW = {
 // them together four times that. And what it does all the same for a peer it has known
 // for `floorAfter` seconds, whatever the others took: 256 requests at the base price.
 // The keys a member seats are new to every host, so they take from the whole and leave
-// the floors to the peers a host knew before them.
-export const POW_HOURLY = { peer: POW.memberBase * 2 ** 14, all: POW.memberBase * 2 ** 16, floor: POW.memberBase * 2 ** 8, floorAfter: 3600 };
+// the floors to the peers a host knew before them. A host it holds no member record of
+// gets no floor; and what a host asks the members whose records ran out (PROTOCOL.md
+// section 5) takes no more than `search` of the whole, an eighth.
+export const POW_HOURLY = {
+  peer: POW.memberBase * 2 ** 14, all: POW.memberBase * 2 ** 16, floor: POW.memberBase * 2 ** 8, floorAfter: 3600, search: POW.memberBase * 2 ** 13,
+};
 export const CLOCK_SKEW_SECS = 300;
 // The largest request body, and the larger one an `act` request may carry. A sender that
 // is not a member of the request's pool gets the stranger's cap.

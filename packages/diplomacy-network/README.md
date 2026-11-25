@@ -91,10 +91,11 @@ closed at every start.
 | `state.json` | the snapshot as the daemon last had it, for a person looking into a daemon that no longer answers: the applets ask the socket |
 | `identity.json` (0600) | the host key |
 | `heard.json` (0600) | the time of the latest request this host served: after a start it serves nothing dated at or before it, or at or before the second of the start where that time is ahead of this machine's clock |
+| `asks/<pool hash>.json` (0600) | the machines of that pool it asks besides the members whose records it holds - at most 241 - and the last 1,024 members whose records ran out, each with when it is next asked whether it is still in the pool |
 | `heard/<pool hash>.json` (0600) | when another machine of that pool was last heard, to within 10 minutes, and the last such time whose silence this machine waited out alone: a month without a word makes it come back to the pool; and how long it has run in the pool with its transport up, which the month of asking it waits when it comes back is counted in |
 | `peers.json` (0600) | the machines this host has asked in vain for more than 3 minutes, and since when: after a start a claim round waits 15 s for each of them, not the 90 s and more it gives a machine it has yet to reach |
 | `links.json` (0600) | the linked repositories, as Diplomat last posted them |
-| `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left, which it keeps once it is back until it holds the record of one of them; and the keys of the last 1,024 members whose records it dropped, each asked once a day whether it is still in the pool |
+| `pools/<pool hash>.json` (0600) | that pool's records; of a pool this machine left, the record that says so and the members it left, which it keeps once it is back until it holds the record of one of them |
 | `pools/<pool hash>.log` (0600) | what changed in that pool since its document was written: the hash of the document it follows, then a line for each change - the records taken in and the keys of the records dropped. Once it is as long as the document, and no shorter than 64 KiB, the document is written whole and the log removed |
 | `locks.json` (0600) | the claim locks this host granted |
 | `keys.json` (0600) | live capabilities this host issued or holds |
