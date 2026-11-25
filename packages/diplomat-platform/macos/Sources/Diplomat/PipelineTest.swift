@@ -927,6 +927,38 @@ enum PipelineTest {
         store.pipelineFastTrack = true
         clearQueue()
         store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix, review]), now: now)
+        let order = ids()
+        var contributors = IssueConfig(target: .contributors, me: "latekvo")
+        contributors.home = store.roots[0]
+        let community = Store.RequestedWork(number: 90010, url: issue, author: "bob",
+                                            config: .issues(contributors.forIssue(90010)), repo: "o/r")
+        let sweptReview = Store.RequestedWork(number: 90011, url: pr, author: "",
+                                              config: .review(ReviewConfig(target: .specific, me: "latekvo",
+                                                                           specificPR: "90011")), repo: "o/r")
+        check("the community monitor's fix and a sweep's review take the place of the pipeline's asks",
+              store.requestOne(community) && store.requestOne(sweptReview) && ids() == order
+                  && store.requestedWork == [community, sweptReview]
+                  && store.queuedTasks.map(\.job.counter) == [nil, nil])
+        await store.applyPipeline(result([fix, review]), now: now)
+        check("…the pipeline, finding them queued, asks for no other", store.requestedWork == [community, sweptReview])
+        store.pipelineEnabled = false
+        check("…its master switch off pauses neither", Set(store.drainableTasks.map(\.id)) == Set(order))
+        store.pipelineEnabled = true
+        await store.applyPipeline(result([]), now: now)
+        store.pipelineFix = false
+        store.pipelineFastTrack = false
+        check("…nor do a sync owing neither or its switches withdraw them", store.requestedWork == [community, sweptReview])
+        store.pipelineFix = true
+        store.pipelineFastTrack = true
+        clearQueue()
+        store.savePipelineAttempts([:])
+        await store.applyPipeline(result([fix]), now: now)
+        if let task = store.queuedTasks.first { store.beginStarting(task) }
+        check("one starting stays the pipeline's", !store.requestOne(community) && store.queuedTasks.isEmpty)
+        store.endStarting(fixKey)
+        clearQueue()
+        store.savePipelineAttempts([:])
         check("a result dated in the second its sync began is that sync's",
               Store.pipelineRan(PipelineTickResult(at: Date(timeIntervalSince1970: 100)),
                                 started: Date(timeIntervalSince1970: 100.7))
@@ -1357,6 +1389,47 @@ enum PipelineTest {
               rows.map(\.item.id) == [newer, older, fixer, child] && rows.map(\.frame) == frames)
         check("a lane keeps each group with any member in it, whole",
               Set(PipelineLayout.make(laneResult, lane: .done).cards.map(\.item.id)) == [issue, pr])
+
+        // o/r#90050 is fixed by a PR of o/web; OPS's team names no root.
+        let mine = "https://github.com/o/r/issues/90050", crossFix = "https://github.com/o/web/pull/90051"
+        let webIssue = "https://github.com/o/web/issues/90052", webFix = "https://github.com/o/web/pull/90053"
+        let engIssue = "https://linear.app/acme/issue/ENG-90054", opsIssue = "https://linear.app/acme/issue/OPS-90055"
+        func inRepo(_ id: String, _ repo: String, _ source: PipelineSource = .github) -> PipelineItem {
+            var it = item(id, id.contains("/pull/") ? .pr : .issue, source: source, author: "bob")
+            it.repo = repo
+            return it
+        }
+        let (keptRoots, keptResult, keptTeams) = (store.roots, store.pipelineResult, store.pipelineLinearTeamsRaw)
+        store.pinRoots(keptRoots + [PRRef.LocalRepo(owner: "o", repo: "web", path: scratch.path)])
+        store.pipelineLinearTeamsRaw = "ENG=O/Web, OPS=g/fourth"
+        store.pipelineResult = PipelineTickResult(
+            at: Date(),
+            items: [inRepo(mine, "o/r"), inRepo(crossFix, "o/web"), inRepo(webIssue, "o/web"),
+                    inRepo(webFix, "o/web"), inRepo(engIssue, "ENG", .linear), inRepo(opsIssue, "OPS", .linear)],
+            graph: PipelineGraph(nodes: [.init(id: mine, column: 0, row: 0), .init(id: crossFix, column: 1, row: 0),
+                                         .init(id: webIssue, column: 0, row: 1), .init(id: webFix, column: 1, row: 1),
+                                         .init(id: engIssue, column: 0, row: 2), .init(id: opsIssue, column: 0, row: 3)],
+                                 edges: [.init(from: mine, to: crossFix, kind: .fixes),
+                                         .init(from: webIssue, to: webFix, kind: .fixes)]),
+            notices: ["o/web: a page timed out"])
+        func shown() -> [String] { store.pipelineShown?.items.map(\.id) ?? [] }
+        store.selectedRepo = "o/r"
+        check("the screen shows the picked root's groups whole and those in no root, no other root's",
+              shown() == [mine, crossFix, opsIssue]
+                  && store.pipelineShown?.graph.nodes.map(\.id) == [mine, crossFix, opsIssue]
+                  && store.pipelineShown?.graph.edges == [.init(from: mine, to: crossFix, kind: .fixes)]
+                  && store.pipelineShown?.notices == ["o/web: a page timed out"])
+        store.selectedRepo = "o/web"
+        check("…a Linear issue in the root its team names",
+              shown() == [mine, crossFix, webIssue, webFix, engIssue, opsIssue])
+        store.selectedRepo = "gitlab.com/g/third"
+        check("…and on a GitLab root, which no sync reads, only those in no root",
+              shown() == [opsIssue]
+                  && PipelineLayout.make(store.pipelineShown!, lane: nil).cards.map(\.item.id) == [opsIssue])
+        store.selectedRepo = ""
+        store.pinRoots(keptRoots)
+        store.pipelineLinearTeamsRaw = keptTeams
+        store.pipelineResult = keptResult
         var eng = items[2]
         eng.repo = "ENG"
         var ops = items[2]
@@ -1412,15 +1485,18 @@ enum PipelineTest {
               PipelineTint.hover(heldBy).components(separatedBy: "\n")
                   .contains("Held: @carol is on the prompt-injection ban list"))
         store.pipelineResult = nil
-        check("a sync that read nothing says what it did not read",
-              PipelineView.emptyText(enabled: true, synced: true, unread: ["o/r", "o/web"])
-                  == "The last sync did not read all of o/r, o/web, and found no open issue or PR in what it did."
-                  && PipelineView.emptyText(enabled: true, synced: true, reads: false)
-                  == "GitLab roots are not read, and no GitHub root or Linear team is set.")
-        check("…and that it found nothing",
-              PipelineView.emptyText(enabled: true, synced: true) == "The last sync found no open issue or PR."
-                  && PipelineView.emptyText(enabled: true, synced: false).hasPrefix("Nothing read yet")
-                  && PipelineView.emptyText(enabled: false, synced: true).hasPrefix(
+        check("a sync that read nothing of the picked root says what it did not read",
+              PipelineView.emptyText(enabled: true, synced: true, repo: "o/r", unread: true)
+                  == "The last sync did not read all of o/r, and found no open issue or PR in what it did."
+                  && PipelineView.emptyText(enabled: true, synced: true, repo: "g/r", gitLab: true, reads: false)
+                  == "GitLab roots are not read, and no GitHub root or Linear team is set."
+                  && PipelineView.emptyText(enabled: true, synced: true, repo: "gitlab.com/o/r", gitLab: true)
+                  == "gitlab.com/o/r is a GitLab root, and GitLab roots are not read.")
+        check("…and that it found nothing there",
+              PipelineView.emptyText(enabled: true, synced: true, repo: "o/r")
+                  == "The last sync found no open issue or PR in o/r."
+                  && PipelineView.emptyText(enabled: true, synced: false, repo: "o/r").hasPrefix("Nothing read yet")
+                  && PipelineView.emptyText(enabled: false, synced: true, repo: "o/r").hasPrefix(
                       "The pipeline is off. Switched on in Settings, it rates every open issue and your own PRs,"))
         let cal = Calendar.current
         let synced = cal.date(from: DateComponents(year: 2026, month: 11, day: 20, hour: 12, minute: 5))!

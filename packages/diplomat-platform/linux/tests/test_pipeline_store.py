@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from test_autofix import _spawn_recorder, fake_probes, store  # noqa: F401 — fixture
 
-from diplomat_app import bans
+from diplomat_app import bans, issues
 from diplomat_app.store import PIPELINE_ATTEMPTS, Store, app_settings
 from diplomat_runtime import activity, autofix, pipeline, promptcore, review
 from diplomat_runtime.prref import LocalRepo, item_key_from_url
@@ -1183,6 +1183,19 @@ def test_each_linear_login_call_outlasts_the_bounds_the_core_holds_it_to(monkeyp
                     ("linear-logout", 2 * call + 30), ("linear-whoami", 10)]
 
 
+def test_only_a_core_handed_started_leaves_the_apps_process_group(tmp_path, monkeypatch):
+    """Which a terminal's Ctrl+C reaches: a Comms core ends there with the app, and the
+    sync's and the Linear sign-in's, in sessions of their own, by
+    :meth:`Store.stop_pipeline_sync`."""
+    core = tmp_path / "diplomat-core"
+    core.write_text(f"#!/bin/sh\nexec '{sys.executable}' -c 'import os; print(os.getpgrp())'\n")
+    core.chmod(0o755)
+    monkeypatch.setenv("DIPLOMAT_CORE_BIN", str(core))
+    assert int(promptcore.cli(["comms-tick"])) == os.getpgrp()
+    started = []
+    assert int(promptcore.cli(["pipeline-tick"], started=started.append)) == started[0].pid
+
+
 def test_a_malformed_result_keeps_only_what_it_should_hold(tmp_path, monkeypatch):
     _fake_core(tmp_path, monkeypatch, json.dumps({
         "at": "x", "items": [{"id": "a"}, 3], "graph": {"nodes": "no", "edges": [None]},
@@ -1339,7 +1352,8 @@ def test_a_core_past_its_deadline_is_ended_with_what_it_started(tmp_path, monkey
     pids_file = _core_that_waits(tmp_path, monkeypatch)
     monkeypatch.setattr(pipeline, "tick_timeout", lambda settings: 2)
     done = []
-    worker = threading.Thread(target=lambda: done.append(pipeline.tick({})), daemon=True)
+    worker = threading.Thread(target=lambda: done.append(pipeline.tick({}, lambda proc: None)),
+                              daemon=True)
     worker.start()
     core, child = _pids(pids_file)
     try:
@@ -1709,6 +1723,44 @@ def test_only_the_pipelines_asks_are_withdrawn(pipe):
     assert not sweep.pipeline
     assert pipeline.withdrawn([sweep], _result(items=(_item(writable=False),)), fix=False,
                               fast_track=False) == []
+
+
+def _asked(effect: dict) -> autofix.RequestedWork:
+    """The community monitor's fix of the effect's issue, or a Review-PRs sweep's review of
+    its PR."""
+    if effect["kind"] == "review":
+        cfg = review.ReviewConfig(specific_pr="7", me="alice", home=ROOT).prompt_payload()
+        return autofix.RequestedWork(number=7, url=PR, author="", config=cfg, repo="o/r")
+    cfg = issues.IssueConfig(target=issues.Target.CONTRIBUTORS, me="alice", home=ROOT)
+    return autofix.RequestedWork(number=12, url=ISSUE, author="carol",
+                                 config=cfg.for_issue(12).prompt_payload(), repo="o/r")
+
+
+@pytest.mark.parametrize("effect, off", [(_fix(), "pipeline_fix"), (_fix(), "pipeline_enabled"),
+                                         (_fix(), None), (_review(), "pipeline_fast_track")])
+def test_an_ask_someone_else_makes_too_is_theirs(pipe, effect, off):
+    """In the Pipeline's ask's place, where no Pipeline switch or sync withdraws or pauses
+    it, and the Pipeline, finding it queued, asks for no other."""
+    _sync(pipe, _result(effect))
+    other = _asked(effect)
+    assert pipe.request_one(other)
+    _sync(pipe, _result(effect))
+    assert pipe.requested_work == [other]
+    assert [(t.id, t.job.counter) for t in pipe.queued_tasks] == [(other.key, None)]
+    if off:
+        setattr(pipe, off, False)
+    else:
+        _sync(pipe, _result())
+    assert pipe.requested_work == [other]
+    assert [t.id for t in pipe.drainable_tasks] == [other.key]
+
+
+def test_a_starting_pipeline_ask_is_not_taken_over(pipe):
+    _queued_fix(pipe)
+    pipe._begin_starting(pipe.queued_tasks[0])
+    assert not pipe.request_one(_asked(_fix()))
+    assert pipe.queued_tasks == []
+    assert [w.pipeline for w in pipe.requested_work] == [True]
 
 
 def test_a_starting_fix_is_left_to_its_dispatch(pipe):

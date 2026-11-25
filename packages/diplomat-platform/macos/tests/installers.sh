@@ -36,6 +36,7 @@ echo "open $*" >> "$SCRATCH/calls"
 EOF
 cat > "$SCRATCH/bin/swift" <<'EOF'
 #!/bin/sh
+echo "swift $*" >> "$SCRATCH/calls"
 case "$*" in *--show-bin-path*) echo "$SCRATCH/build" ;; esac
 EOF
 cat > "$SCRATCH/bin/rm" <<'EOF'
@@ -61,6 +62,9 @@ echo "installers: what a login install writes"
 check "install-autostart.sh runs to the end past a copy it cannot remove" run install-autostart.sh
 check "…and says so" grep -q "delete it by hand" "$SCRATCH/out"
 check "build-app.sh writes the bundle the agents name" test -x "$BIN"
+check "…with the native build system, which stamps the binary with its real SDK" \
+  bash -c 'n=$(grep -c "^swift build " "$1"); [ "$n" -gt 0 ] && [ "$n" = "$(grep -c "^swift build .*--build-system native" "$1")" ]' \
+  _ "$SCRATCH/calls"
 check "the login agent starts the bundle beside the package" \
   grep -qF "<string>$BIN</string>" "$AGENTS/com.ignacy.diplomat.plist"
 check "the login agent marks its start unattended, so it opens no window" \

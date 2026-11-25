@@ -257,6 +257,74 @@ def test_an_empty_lane_says_so(store):
     assert view.canvas.placeholder == "Nothing in this lane."
 
 
+WEB = "https://github.com/o/web"
+MINE, CROSS_FIX, WEB_ISSUE, WEB_FIX = (f"{H}/issues/50", f"{WEB}/pull/51", f"{WEB}/issues/52",
+                                       f"{WEB}/pull/53")
+ENG, OPS = "https://linear.app/acme/issue/ENG-54", "https://linear.app/acme/issue/OPS-55"
+GITLAB = LocalRepo("g", "third", "/src/third", host="gitlab.com")
+
+
+def _roots_result() -> dict:
+    """o/r#50 is fixed by a PR of o/web; OPS's team names no root."""
+    def item(item_id: str, repo: str, source: str = "github") -> dict:
+        return {"id": item_id, "source": source, "kind": "pr" if "/pull/" in item_id else "issue",
+                "label": item_id.rsplit("/", 1)[-1], "title": item_id, "repo": repo,
+                "state": "open", "assignees": [], "writable": True, "stage": "unrated",
+                "lane": "unrated"}
+
+    nodes = [(MINE, 0, 0), (CROSS_FIX, 1, 0), (WEB_ISSUE, 0, 1), (WEB_FIX, 1, 1), (ENG, 0, 2),
+             (OPS, 0, 3)]
+    return {**_result(),
+            "items": [item(MINE, "o/r"), item(CROSS_FIX, "o/web"), item(WEB_ISSUE, "o/web"),
+                      item(WEB_FIX, "o/web"), item(ENG, "ENG", "linear"),
+                      item(OPS, "OPS", "linear")],
+            "graph": {"nodes": [{"id": i, "column": c, "row": r} for i, c, r in nodes],
+                      "edges": [{"from": MINE, "to": CROSS_FIX, "kind": "fixes"},
+                                {"from": WEB_ISSUE, "to": WEB_FIX, "kind": "fixes"}]},
+            "notices": ["o/web: a page timed out"], "fixable": [], "read": []}
+
+
+@pytest.fixture
+def two_roots(store, monkeypatch):
+    roots = [LocalRepo("o", "r", "/src/r"), LocalRepo("o", "web", "/src/web"), GITLAB]
+    monkeypatch.setattr(review, "repo_roots", lambda: roots)
+    store.pipeline_linear_teams_raw = "ENG=O/Web, OPS=g/fourth"
+    store.pipeline_result = _roots_result()
+    return store
+
+
+def test_the_picked_root_shows_its_groups_whole_and_those_in_no_root(two_roots):
+    store = two_roots
+    store.select_repo("o/r")
+    view = PipelineView(store)
+    assert view.canvas.cards == {MINE: _rect(0, 0), CROSS_FIX: _rect(1, 0), OPS: _rect(0, 1)}
+    assert {(c.source, c.target) for c in view.canvas.connectors} == {(MINE, CROSS_FIX)}
+    assert view.lane_chips["all"].text() == "All 3"
+    assert view.status.text().startswith("3 items · 0 fast · ")
+    assert view.notices_banner.text() == "⚠ o/web: a page timed out"
+    # A pick while the screen is open redraws it.
+    store.select_repo("o/web")
+    assert set(view.canvas.cards) == {MINE, CROSS_FIX, WEB_ISSUE, WEB_FIX, ENG, OPS}
+    assert view.lane_chips["all"].text() == "All 6"
+    store.select_repo(GITLAB.key)
+    assert view.canvas.cards == {OPS: _rect(0, 0)}
+
+
+def test_a_pick_with_nothing_to_show_says_what_the_sync_did_with_it(two_roots):
+    store = two_roots
+    store.pipeline_result = {**_roots_result(),
+                             "items": [i for i in _roots_result()["items"] if i["id"] == WEB_ISSUE]}
+    store.select_repo("o/r")
+    view = PipelineView(store)
+    assert view.canvas.placeholder == "The last sync found no open issue or PR in o/r."
+    store.pipeline_result = {**store.pipeline_result, "unread": ["O/R"]}
+    store.pipeline_changed.emit()
+    assert view.canvas.placeholder == ("The last sync did not read all of o/r, and found no "
+                                       "open issue or PR in what it did.")
+    store.select_repo(GITLAB.key)
+    assert view.canvas.placeholder == "g/third is a GitLab root, and GitLab roots are not read."
+
+
 # MARK: cards
 
 
@@ -802,7 +870,7 @@ def test_a_sync_that_read_no_item_says_what_it_did_not_read(store, monkeypatch):
                                        "open issue or PR in what it did.")
     store.pipeline_result = empty
     store.pipeline_changed.emit()
-    assert view.canvas.placeholder == "The last sync found no open issue or PR."
+    assert view.canvas.placeholder == "The last sync found no open issue or PR in o/r."
     monkeypatch.setattr(review, "repo_roots", lambda: [LocalRepo("g", "r", "/src/g",
                                                                  host="gitlab.com")])
     store.pipeline_changed.emit()
@@ -811,11 +879,13 @@ def test_a_sync_that_read_no_item_says_what_it_did_not_read(store, monkeypatch):
 
 
 def test_the_empty_graphs_text_wraps_inside_the_canvas(store, app, monkeypatch):
-    monkeypatch.setattr(review, "repo_roots", lambda: [LocalRepo("o", "r", "/src/r")])
+    root = LocalRepo("software-mansion-labs", "react-native-shared-element-transitions-for-the-"
+                     "new-architecture-and-fabric-renderer", "/src/r")
+    monkeypatch.setattr(review, "repo_roots", lambda: [root])
     store.pipeline_result = {**_result(), "items": [], "graph": {"nodes": [], "edges": []},
-                             "read": [], "unread": [f"o/repository-{n}" for n in range(16)]}
+                             "read": [], "unread": [root.slug]}
     view = PipelineView(store)
-    view.resize(1100, 700)
+    view.resize(700, 700)
     view.show()
     try:
         for _ in range(3):

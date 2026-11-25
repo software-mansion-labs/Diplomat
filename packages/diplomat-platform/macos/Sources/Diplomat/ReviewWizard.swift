@@ -903,8 +903,8 @@ struct ReviewWizardView: View {
         .animation(.easeInOut(duration: 0.22), value: specificAuthor)
         .animation(.easeInOut(duration: 0.22), value: includeDrafts)
         .animation(.easeInOut(duration: 0.22), value: includeReady)
-        .onChange(of: specificPR) { _ in refreshAuthor() }
-        .onChange(of: target) { _ in refreshAuthor() }
+        .onChange(of: specificPR) { refreshAuthor() }
+        .onChange(of: target) { refreshAuthor() }
     }
 
     /// The author being reviewed IF they're banned for prompt injection — nil otherwise.

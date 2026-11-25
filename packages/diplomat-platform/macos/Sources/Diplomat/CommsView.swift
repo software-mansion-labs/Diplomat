@@ -55,7 +55,7 @@ struct CommsView: View {
             if openedSeenAt == nil { openedSeenAt = store.commsSeenAt }
             store.markCommsSeen()
         }
-        .onChange(of: store.commsItems) { _ in store.markCommsSeen() }
+        .onChange(of: store.commsItems) { store.markCommsSeen() }
     }
 
     // MARK: - Header and status

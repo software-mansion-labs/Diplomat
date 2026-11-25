@@ -686,6 +686,15 @@ extension Store {
             ? "@\(who) is on the prompt-injection ban list" : nil
     }
 
+    /// `pipelineResult` as the Pipeline screen shows it, cut to the picked root
+    /// (`PipelineView.inRoot`).
+    var pipelineShown: PipelineTickResult? {
+        pipelineResult.map {
+            PipelineView.inRoot($0, root: selectedRoot.key, roots: Set(roots.map(\.key)),
+                                teams: Store.pipelineTeams(pipelineLinearTeamsRaw))
+        }
+    }
+
     /// Whether a sync can read `item`'s code: a Linear issue only when its team names a
     /// GitHub root (`PipelineRead.linear`'s match). Twin of `Store.pipeline_rooted`.
     func pipelineRooted(_ item: PipelineItem) -> Bool {
