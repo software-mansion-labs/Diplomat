@@ -1587,18 +1587,24 @@ enum PipelineTest {
         var waiting = ""
         var cleared = false
         var again = 0.0
+        var lateOpened = true
         let started = Date()
-        await signIn(StubBrowser(code: nil)) {
+        store.linearLoginNote = "an earlier sign-in's failure"
+        await signIn(StubBrowser(code: nil), page: true) {
             waiting = summary()
             cleared = store.linearLoginNote == nil
             let second = Date()
             await store.signInToLinear()
             again = Date().timeIntervalSince(second)
             store.cancelLinearSignIn()
+            let late = URL(string: "https://linear.invalid/late")!
+            store.openLinearPage(late)
+            lateOpened = store.linearSignInPage?.url == late
         }
-        check("signing in: the row waits for the browser, the last note cleared",
+        check("signing in: the row waits for the browser it opened, the last note cleared",
               waiting == "Waiting for the browser…" && cleared)
         check("…a second Sign in… meanwhile starts none", again < 1)
+        check("…a page handed over once cancelled is not opened", !lateOpened)
         check("Cancel: the sign-in stops at once, and nothing is said to have failed",
               Date().timeIntervalSince(started) < 5 && !store.linearSigningIn && store.linearLogin == nil
                   && store.linearSignInPage == nil && summary() == "Not signed in")

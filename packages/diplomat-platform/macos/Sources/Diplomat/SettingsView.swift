@@ -1116,8 +1116,9 @@ struct SettingsView: View {
         Group {
             if store.linearSigningIn {
                 HStack(spacing: 6) {
-                    Button("Copy link") { store.copyLinearPage() }.disabled(store.linearSignInPage == nil)
-                    Button("Cancel") { store.cancelLinearSignIn() }
+                    Button("Copy link") { store.copyLinearPage() }
+                        .disabled(store.linearSignInPage == nil || store.linearSignIn == nil)
+                    Button("Cancel") { store.cancelLinearSignIn() }.disabled(store.linearSignIn == nil)
                 }
             } else if store.linearLogin != nil {
                 Button {

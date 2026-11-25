@@ -163,9 +163,9 @@ extension Store {
                     PipelineTick.run(settings: settings)
                 }.value
             }
-            // The sync forgets a login whose refresh Linear refuses; an action under way reads
+            // The sync forgets a login whose refresh Linear refuses; a sign-out under way reads
             // it once it ends.
-            if !linearSigningIn && !linearSigningOut { refreshLinearLogin() }
+            if !linearSigningOut { refreshLinearLogin() }
             let ran = Store.pipelineRan(result, started: started)
             // Taken by this sync; what was forced during it waits for the next.
             if ran, let sent = settings.force {
@@ -619,7 +619,7 @@ extension Store {
     }
 
     func openLinearPage(_ url: URL) {
-        guard linearSigningIn else { return }
+        guard linearSignIn != nil else { return }
         linearSignInPage = (url, Store.linearLoginOverride?.open(url) ?? NSWorkspace.shared.open(url))
     }
 
@@ -631,6 +631,7 @@ extension Store {
 
     func cancelLinearSignIn() {
         linearSignIn?.cancel()
+        linearSignIn = nil
     }
 
     /// Off the main actor: the revocation is a call to Linear.

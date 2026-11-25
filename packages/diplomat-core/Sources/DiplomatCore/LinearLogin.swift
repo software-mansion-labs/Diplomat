@@ -124,6 +124,7 @@ public enum LinearLogin {
             URLQueryItem(name: "prompt", value: "consent"),
         ]
         guard let url = page?.url else { throw Failure.file("linearOAuth.authorize is not a URL: \(oauth.authorize)") }
+        guard !cancelled() else { throw Failure.cancelled }
         open(url)
         let path = URLComponents(string: redirect)?.path ?? ""
         let deadline = Date().addingTimeInterval(oauth.signInSecs)

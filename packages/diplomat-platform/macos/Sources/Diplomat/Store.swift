@@ -843,8 +843,8 @@ final class Store: ObservableObject {
     @Published var linearSignInPage: (url: URL, opened: Bool)?
     /// Why the last sign-in or sign-out failed, or why Linear did not revoke the login.
     @Published var linearLoginNote: String?
-    /// The running sign-in, which Cancel cancels.
-    var linearSignIn: Task<Result<LinearLogin.Saved, Error>, Never>?
+    /// The running sign-in, until it ends or Cancel cancels it.
+    @Published var linearSignIn: Task<Result<LinearLogin.Saved, Error>, Never>?
     /// Driven from `PipelineMonitor.swift`, hence not private.
     var pipelineMonitorTask: Task<Void, Never>?
     var pipelineWakeObserver: NSObjectProtocol?

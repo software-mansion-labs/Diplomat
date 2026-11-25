@@ -271,8 +271,9 @@ func linearLoginSmoke() throws {
     check(Date().timeIntervalSince(quick) < 5, "signInSecs bounds the wait")
     check(handed?.absoluteString.hasPrefix("https://linear.test/oauth/authorize?client_id=smoke-client") == true,
           "the page handed over: \(String(describing: handed))")
-    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { _ in }, cancelled: { true }) }
-          == .cancelled)
+    var handedCancelled = false
+    check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { _ in handedCancelled = true }, cancelled: { true }) }
+          == .cancelled && !handedCancelled, "cancelled before it waits: no page handed over")
     var cancelAt = Date().addingTimeInterval(0.5)
     check(failure { try LinearLogin.signIn(in: freshDir(), oauth: oauth(), open: { _ in },
                                            cancelled: { Date() > cancelAt }) } == .cancelled

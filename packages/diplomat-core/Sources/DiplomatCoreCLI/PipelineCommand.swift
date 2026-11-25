@@ -76,7 +76,6 @@ enum PipelineCommand {
         emitObject(LinearLogin.saved().map { ["user": $0.user, "organization": $0.organization] } ?? [:])
     }
 
-    /// Launched, and not seen failing within ten seconds; a browser that stays up is left running.
     private static func emitObject(_ answer: [String: Any]) {
         guard var data = try? JSONSerialization.data(withJSONObject: answer, options: [.sortedKeys]) else {
             die("could not encode the answer", 1)
