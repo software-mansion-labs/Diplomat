@@ -1543,7 +1543,7 @@ class SettingsView(QWidget):
             self.store.run_pipeline_sync_async()
 
     def _on_pipeline_sync_applied(self) -> None:
-        # A sync forgets the login once Linear refuses its refresh. An action under way
+        # A sync forgets a login it can no longer refresh. An action under way
         # reads it once answered.
         if not self._linear_signing_in and self._linear_button.isEnabled():
             self._linear_me = pipeline.linear_whoami()
