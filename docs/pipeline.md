@@ -382,7 +382,8 @@ QSettings (Linux) under the same keys: `pipelineEnabled`, `pipelineRate`, `pipel
 
 Linear is read and written as you, through Diplomat's Linear app. **Sign in…** opens Linear's
 consent page in the browser, which hands the login back on `127.0.0.1` (the first free of ports
-29170 to 29172). The login is kept in `~/.diplomat/pipeline/linear-login.json` and refreshed by the
+29170 to 29172). While it waits, up to 5 minutes, **Copy link** copies the page for any browser and
+**Cancel** gives up. The login is kept in `~/.diplomat/pipeline/linear-login.json` and refreshed by the
 sync; it reaches only `curl`, in a config on its stdin (staged in an owner-only temp file, removed
 when curl exits, though a sync or sign-in killed meanwhile leaves it), never in an argv. No agent shell, nor
 `gh` or `claude` a sync starts, has it or `DIPLOMAT_LINEAR_TOKEN` in its environment, though the
