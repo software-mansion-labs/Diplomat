@@ -163,7 +163,7 @@ extension Store {
                     PipelineTick.run(settings: settings)
                 }.value
             }
-            // The sync forgets a login whose refresh Linear refuses; a sign-out under way reads
+            // The sync forgets a login it can no longer refresh; a sign-out under way reads
             // it once it ends.
             if !linearSigningOut { refreshLinearLogin() }
             let ran = Store.pipelineRan(result, started: started)

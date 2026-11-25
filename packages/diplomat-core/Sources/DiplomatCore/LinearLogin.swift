@@ -60,9 +60,12 @@ public enum LinearLogin {
         return try? CommsLog.decoder.decode(Saved.self, from: data)
     }
 
+    /// When a refresh last failed with its token still good; none is tried again for a minute.
+    private static var refreshFailed: Date?
+
     /// The `Authorization` a Linear call carries: the override's key as is, else the saved
     /// token, refreshed first once it expires within `refreshMarginSecs`. Nil when signed out;
-    /// a login whose refresh Linear refuses is forgotten.
+    /// a login that can no longer be refreshed is forgotten.
     public static func authorization(in dir: URL = PipelineLog.dir, now: Date = Date(),
                                      transport: @escaping SlackAPI.Transport = SlackAPI.curl) throws -> String? {
         if let env = ProcessInfo.processInfo.environment[LinearAPI.envVar], !env.isEmpty { return env }
@@ -71,7 +74,9 @@ public enum LinearLogin {
         let oauth = model.linearOAuth
         guard let answer = try PrivateFiles.locked(lock(in: dir), { () throws -> String? in
             guard var login = saved(in: dir) else { return nil }
-            if let expires = login.expiresAt, expires <= now.addingTimeInterval(oauth.refreshMarginSecs) {
+            let retry = refreshFailed.map { now.timeIntervalSince($0) >= 60 } ?? true
+            if let expires = login.expiresAt, expires <= now.addingTimeInterval(oauth.refreshMarginSecs),
+               expires <= now || retry {
                 do {
                     guard let refresh = login.refreshToken else { throw Failure.expired }
                     let t = try tokens([("grant_type", "refresh_token"), ("refresh_token", refresh),
@@ -81,11 +86,12 @@ public enum LinearLogin {
                     login.refreshToken = t.refresh ?? refresh
                     login.expiresAt = t.expires
                     try save(login, in: dir)
+                    refreshFailed = nil
                 } catch Failure.expired {
                     unlink(file(in: dir).path)
                     throw Failure.expired
                 } catch where expires > now {
-                    // Still good for now: the next read refreshes it.
+                    refreshFailed = now
                 }
             }
             return "Bearer " + login.accessToken
@@ -376,7 +382,7 @@ public enum LinearLogin {
                 guard poll(&p, 1, Int32(min(left, 0.25) * 1000) + 1) > 0 else { continue }
                 let client = accept(fd, nil, nil)
                 guard client >= 0 else { continue }
-                // A connection with no head within 2s (a browser's speculative one, which may
+                // A connection with no head within 3s (a browser's speculative one, which may
                 // send nothing, or a trickle) is dropped, so the wait still ends and hears Cancel.
                 var tv = timeval(tv_sec: 1, tv_usec: 0)
                 setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
