@@ -62,7 +62,7 @@ struct PipelineView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .onChange(of: selected) { _ in actionError = nil }
+        .onChange(of: selected) { actionError = nil }
         .task { await store.loadPipelineLast() }
     }
 

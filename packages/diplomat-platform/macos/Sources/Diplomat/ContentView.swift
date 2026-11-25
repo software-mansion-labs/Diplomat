@@ -102,7 +102,7 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: MainWindow.didClose)) { _ in
             if screen == .settings { screen = .main }
         }
-        .onChange(of: store.bannedAuthors) { bans in
+        .onChange(of: store.bannedAuthors) { _, bans in
             // The pending "Unban @X?" confirmation must not outlive the ban itself
             // (un-banned elsewhere / list rewritten) — a stale login would open the
             // confirm unprompted if that author were ever re-banned.

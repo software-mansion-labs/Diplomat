@@ -10,14 +10,14 @@
 #   KEEP_VM=1 scripts/macos-vm-test.sh  leave the VM running afterwards
 #
 # DIPLOMAT_VM names the VM (default diplomat-ui-test), cloned on first use from
-# DIPLOMAT_VM_IMAGE (default ghcr.io/cirruslabs/macos-sequoia-base:latest, ~25 GB).
+# DIPLOMAT_VM_IMAGE (default ghcr.io/cirruslabs/macos-tahoe-base:latest, ~27 GB).
 # TART is the tart binary (default: tart on PATH). Screenshots land in
 # DIPLOMAT_VM_OUT (default a fresh temp dir), named after the check that took them.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TART="${TART:-$(command -v tart || true)}"
 VM="${DIPLOMAT_VM:-diplomat-ui-test}"
-IMAGE="${DIPLOMAT_VM_IMAGE:-ghcr.io/cirruslabs/macos-sequoia-base:latest}"
+IMAGE="${DIPLOMAT_VM_IMAGE:-ghcr.io/cirruslabs/macos-tahoe-base:latest}"
 OUT="${DIPLOMAT_VM_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/diplomat-vm.XXXXXX")}"
 CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/diplomat-vm"
 [ -x "$TART" ] || { echo "tart not found: https://tart.run (or set TART=)" >&2; exit 2; }
