@@ -2,7 +2,7 @@
 
 ![The Diplomat panel](https://github.com/user-attachments/assets/bffd7a4b-2859-48ee-bffb-9da8221a4b02)
 
-Installs and starts **[Diplomat](https://github.com/latekvo/Diplomat)** (Szpont Yon),
+Installs and starts **[Diplomat](https://github.com/software-mansion-labs/Diplomat)** (Szpont Yon),
 a desktop app that runs coding agents against a GitHub repo: it
 reviews PRs, fixes your own, resolves conflicts, and gives each agent its own
 device.
@@ -41,7 +41,7 @@ may have work in it. `DIPLOMAT_REPO_URL` clones from a fork.
 
 ## PyPI
 
-[`pip install szpont`](https://github.com/latekvo/Diplomat/tree/main/packages/szpont)
+[`pip install szpont`](https://github.com/software-mansion-labs/Diplomat/tree/main/packages/szpont)
 installs the same launcher, written separately in Python.
 `test/parity-with-python.mjs` runs both against every machine in
 `test/scenarios.mjs` and fails if their plans differ.

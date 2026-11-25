@@ -37,7 +37,7 @@ from typing import Mapping, Sequence
 
 __version__ = "0.155.0"
 
-DEFAULT_REPO_URL = "https://github.com/latekvo/Diplomat.git"
+DEFAULT_REPO_URL = "https://github.com/software-mansion-labs/Diplomat.git"
 SUPPORTED = ("darwin", "linux")
 MIN_PYTHON = (3, 10)
 

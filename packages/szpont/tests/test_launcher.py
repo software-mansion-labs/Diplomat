@@ -82,6 +82,18 @@ def test_every_szpont_carries_the_same_version():
     assert re.search(r"^export const VERSION = '(.+)';$", js, re.M).group(1) == launcher.__version__
 
 
+def test_both_launchers_clone_the_repo_both_packages_name():
+    """Moving the repo in the metadata alone leaves fresh installs on the old one."""
+    pyproject = (PKG_DIR / "pyproject.toml").read_text(encoding="utf-8")
+    npm = json.loads((PKG_DIR.parent / "szpont-npm" / "package.json").read_text(encoding="utf-8"))
+    js = (PKG_DIR.parent / "szpont-npm" / "src" / "launcher.js").read_text(encoding="utf-8")
+
+    homepage = re.search(r'^Homepage = "(.+)"$', pyproject, re.M).group(1)
+    assert launcher.DEFAULT_REPO_URL == f"{homepage}.git"
+    assert npm["repository"]["url"] == f"git+{launcher.DEFAULT_REPO_URL}"
+    assert re.search(r"^export const DEFAULT_REPO_URL = '(.+)';$", js, re.M).group(1) == launcher.DEFAULT_REPO_URL
+
+
 # --- what gets the checkout ------------------------------------------------
 
 

@@ -20,7 +20,7 @@ const READY = {
   checkout: '/home/u/.diplomat/checkout',
   checkout_state: 'checkout',
   managed: true,
-  repo_url: 'https://github.com/latekvo/Diplomat.git',
+  repo_url: 'https://github.com/software-mansion-labs/Diplomat.git',
   update: true,
   git: true,
   swift: true,

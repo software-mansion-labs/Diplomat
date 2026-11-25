@@ -29,7 +29,7 @@ ok('a missing checkout is cloned, built and opened',
   JSON.stringify(ids(fresh)) === JSON.stringify(['clone', 'build', 'launch']));
 ok('the clone names the repo and where it goes',
   step(fresh, 'clone').cmd.join(' ') ===
-    'git clone https://github.com/latekvo/Diplomat.git /home/u/.diplomat/checkout');
+    'git clone https://github.com/software-mansion-labs/Diplomat.git /home/u/.diplomat/checkout');
 ok('the bundle is built by the checkout\'s own script, from its own directory',
   step(fresh, 'build').cmd[0] === `${MACOS}/install/build-app.sh` && step(fresh, 'build').cwd === MACOS);
 // -n: a bundle rebuilt under a running instance is started, and the app's
