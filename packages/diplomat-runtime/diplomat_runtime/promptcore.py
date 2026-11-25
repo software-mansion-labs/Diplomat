@@ -51,8 +51,9 @@ def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
         line: Callable[[str], None] | None = None) -> str:
     """``diplomat-core <args>``'s stdout, with ``stdin`` handed over as JSON; or
     :class:`RuntimeError` saying why not (:class:`CoreBinaryMissing` when there is no
-    binary). ``started`` is handed the process, to :func:`stop` it sooner; ``line``, each
-    line of stdout as it comes."""
+    binary). ``started`` is handed the process, to :func:`stop` it sooner; only such a
+    core leaves the caller's process group, which a terminal's Ctrl+C reaches. ``line`` is
+    handed each line of stdout as it comes."""
     env = dict(os.environ)
     env.setdefault("DIPLOMAT_CORE", str(core.assets_dir()))
     try:
@@ -60,7 +61,7 @@ def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
             [core_bin(), *args],
             stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
-            start_new_session=True,
+            start_new_session=started is not None,
         )
     except OSError as exc:
         raise RuntimeError(f"diplomat-core could not be run: {exc}") from exc
@@ -83,7 +84,10 @@ def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
         out, err = proc.communicate(None if stdin is None else json.dumps(stdin),
                                     timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        stop(proc)
+        if started is None:
+            proc.kill()
+        else:
+            stop(proc)
         proc.wait()
         raise RuntimeError(f"diplomat-core {args[0]} did not answer within "
                            f"{int(timeout)}s") from exc
@@ -96,7 +100,7 @@ def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
 
 
 def stop(proc: subprocess.Popen) -> None:
-    """SIGKILL to the session ``proc`` (from :func:`cli`) leads, not just its group:
+    """SIGKILL to the session ``proc`` (:func:`cli`'s ``started``) leads, not just its group:
     Foundation's ``Process`` starts each of the core's children (``gh``, ``claude``) in a
     process group of its own."""
     with contextlib.suppress(OSError):

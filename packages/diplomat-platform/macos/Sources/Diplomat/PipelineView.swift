@@ -2,10 +2,10 @@ import SwiftUI
 import AppKit
 import DiplomatCore
 
-/// The Pipeline screen: the last sync's open issues and PRs as cards on `PipelineGraph`'s
-/// grid, a lane filter, and the selected card's detail.
+/// The Pipeline screen: the last sync's open issues and PRs of the root the header picked
+/// as cards on `PipelineGraph`'s grid, a lane filter, and the selected card's detail.
 ///
-/// Draws `store.pipelineResult`, as the Linux twin does. The switches are in Settings; the
+/// Draws `store.pipelineShown`, as the Linux twin does. The switches are in Settings; the
 /// agent work the pipeline asks for is managed from the Agent-tasks list like any other ask.
 struct PipelineView: View {
     @EnvironmentObject var store: Store
@@ -26,7 +26,8 @@ struct PipelineView: View {
     }
 
     var body: some View {
-        let result = store.pipelineResult
+        let picked = store.selectedRoot
+        let result = store.pipelineShown
         return VStack(alignment: .leading, spacing: 8) {
             header(result)
             statusLine(result)
@@ -50,7 +51,10 @@ struct PipelineView: View {
                 }
             } else {
                 Text(PipelineView.emptyText(enabled: store.pipelineEnabled, synced: result != nil,
-                                            unread: result?.unread ?? [], reads: reads))
+                                            repo: PRRef.rootLabel(picked, roots: store.roots),
+                                            gitLab: picked.isGitLab,
+                                            unread: result?.unread.contains { $0.lowercased() == picked.key } == true,
+                                            reads: reads))
                     .font(.system(size: 11)).foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .cardChrome(padding: 6)
@@ -58,12 +62,14 @@ struct PipelineView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
-        .onChange(of: selected) { _ in actionError = nil }
+        .onChange(of: selected) { actionError = nil }
         .task { await store.loadPipelineLast() }
     }
 
-    /// `reads`: a GitHub root or a Linear team is set. Twin of `pipelineview.empty_text`.
-    static func emptyText(enabled: Bool, synced: Bool, unread: [String] = [], reads: Bool = true) -> String {
+    /// `repo`: the picked root's label; `unread`: the last sync read it in part; `reads`: a
+    /// GitHub root or a Linear team is set. Twin of `pipelineview.empty_text`.
+    static func emptyText(enabled: Bool, synced: Bool, repo: String, gitLab: Bool = false,
+                          unread: Bool = false, reads: Bool = true) -> String {
         if !enabled {
             return "The pipeline is off. Switched on in Settings, it rates every open issue and your own PRs, "
                 + "sends the low-risk, low-complexity ones down the fast track and shows them here."
@@ -73,11 +79,35 @@ struct PipelineView: View {
                 + "and the tracked Linear teams here."
         }
         if !reads { return "GitLab roots are not read, and no GitHub root or Linear team is set." }
-        if !unread.isEmpty {
-            return "The last sync did not read all of \(unread.joined(separator: ", ")), and found no open "
-                + "issue or PR in what it did."
+        if gitLab { return "\(repo) is a GitLab root, and GitLab roots are not read." }
+        if unread {
+            return "The last sync did not read all of \(repo), and found no open issue or PR in what it did."
         }
-        return "The last sync found no open issue or PR."
+        return "The last sync found no open issue or PR in \(repo)."
+    }
+
+    /// `result` cut to what picking `root` (a `LocalRepo.key`) shows: each group with a card
+    /// in it, a Linear issue's being its team's repo, or with none in any of `roots`, whole.
+    /// Twin of `pipelineview.in_root`.
+    static func inRoot(_ result: PipelineTickResult, root: String, roots: Set<String>,
+                       teams: [PipelineSettings.LinearTeam]) -> PipelineTickResult {
+        let group = PipelineLayout.groups(result.graph.nodes, result.graph.edges)
+        var picked = Set<String>(), rooted = Set<String>()
+        for item in result.items {
+            let at = item.source == .linear
+                ? teams.first { $0.key.lowercased() == item.repo.lowercased() }?.repo.lowercased() ?? ""
+                : item.repo.lowercased()
+            if at == root { picked.insert(group[item.id] ?? item.id) }
+            if roots.contains(at) { rooted.insert(group[item.id] ?? item.id) }
+        }
+        func shown(_ id: String) -> Bool {
+            picked.contains(group[id] ?? id) || !rooted.contains(group[id] ?? id)
+        }
+        var out = result
+        out.items = result.items.filter { shown($0.id) }
+        out.graph.nodes = result.graph.nodes.filter { shown($0.id) }
+        out.graph.edges = result.graph.edges.filter { shown($0.from) && shown($0.to) }
+        return out
     }
 
     private var reads: Bool {
@@ -315,21 +345,28 @@ struct PipelineLayout {
     /// The radius a connector turns at.
     static let corner: CGFloat = 6
 
-    static func make(_ result: PipelineTickResult, lane: PipelineLane?) -> PipelineLayout {
-        let items = Dictionary(result.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
-        let nodes = result.graph.nodes.filter { items[$0.id] != nil }
+    /// Each node's id -> a representative id of its connected component. Twin of
+    /// `pipelineview.groups`.
+    static func groups(_ nodes: [PipelineGraph.Node], _ edges: [PipelineGraph.Edge]) -> [String: String] {
         var parent = Dictionary(nodes.map { ($0.id, $0.id) }, uniquingKeysWith: { first, _ in first })
         func find(_ id: String) -> String {
             var root = id
             while let up = parent[root], up != root { root = up }
             return root
         }
-        let edges = result.graph.edges.filter { parent[$0.from] != nil && parent[$0.to] != nil }
-        for edge in edges {
+        for edge in edges where parent[edge.from] != nil && parent[edge.to] != nil {
             let a = find(edge.from), b = find(edge.to)
             if a != b { parent[max(a, b)] = min(a, b) }
         }
-        let groups = Dictionary(grouping: nodes, by: { find($0.id) }).values
+        return Dictionary(uniqueKeysWithValues: parent.keys.map { ($0, find($0)) })
+    }
+
+    static func make(_ result: PipelineTickResult, lane: PipelineLane?) -> PipelineLayout {
+        let items = Dictionary(result.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let nodes = result.graph.nodes.filter { items[$0.id] != nil }
+        let group = PipelineLayout.groups(nodes, result.graph.edges)
+        let edges = result.graph.edges.filter { group[$0.from] != nil && group[$0.to] != nil }
+        let groups = Dictionary(grouping: nodes, by: { group[$0.id] ?? $0.id }).values
             .sorted { a, b in
                 let ka = (a.map(\.row).min() ?? 0, a.map(\.column).min() ?? 0)
                 let kb = (b.map(\.row).min() ?? 0, b.map(\.column).min() ?? 0)

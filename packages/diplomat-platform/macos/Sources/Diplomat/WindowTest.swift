@@ -1,13 +1,15 @@
 import AppKit
 import SwiftUI
+import DiplomatCore
 
 /// Self-test for the app window - `DIPLOMAT_WINDOW_TEST=1`.
 ///
 /// What a launch decides before anything is on screen: an unattended start is read off
 /// the environment and removed from it, and the window is a regular one that a close
-/// keeps for the next open; its tooltips are AppKit's; and an older login agent gets
-/// the unattended mark, on a scratch plist. Orders no window in, so it takes no focus; showing,
-/// reopening and focus are checked by `scripts/macos-vm-test.sh` in a VM.
+/// keeps for the next open; its tooltips are AppKit's; its scroll views keep to their
+/// top-left; and an older login agent gets the unattended mark, on a scratch plist.
+/// Orders no window in, so it takes no focus; showing, reopening and focus are checked
+/// by `scripts/macos-vm-test.sh` in a VM.
 ///
 ///     DIPLOMAT_WINDOW_TEST=1 swift run Diplomat
 @MainActor
@@ -97,6 +99,50 @@ enum WindowTest {
         check("a headless window records no frame in the live app's defaults",
               w.frameAutosaveName.isEmpty, "got \(w.frameAutosaveName)")
 
+        print("scroll views: each keeps to its content's top-left")
+        let wide = Store()
+        // One chain five columns wide over 40 lone issues: wider and taller than the graph's viewport.
+        let ids = (0..<45).map { "https://github.com/o/r/issues/\($0)" }
+        let items: [PipelineItem] = ids.map { id in
+            PipelineItem(id: id, source: .github, kind: .issue, label: "#1", title: "Issue", repo: "o/r",
+                         state: "open", writable: true, stage: .unrated, lane: .unrated)
+        }
+        let nodes: [PipelineGraph.Node] = ids.indices.map { i in
+            PipelineGraph.Node(id: ids[i], column: i < 5 ? i : 0, row: i < 5 ? 0 : i - 4)
+        }
+        let edges: [PipelineGraph.Edge] = (1..<5).map { i in
+            PipelineGraph.Edge(from: ids[i - 1], to: ids[i], kind: .stacked)
+        }
+        wide.pipelineResult = PipelineTickResult(at: Date(), items: items,
+                                                 graph: PipelineGraph(nodes: nodes, edges: edges))
+        let pipeline = MainWindow(store: wide, screen: .pipeline).window
+        pipeline.setContentSize(NSSize(width: MainRoot.width - 300, height: 500))
+        pipeline.contentView?.layoutSubtreeIfNeeded()
+        let scrolling = scrollViews(in: pipeline.contentView).filter {
+            let doc = $0.documentView?.frame.size ?? .zero, clip = $0.contentView.bounds.size
+            return doc.width > clip.width || doc.height > clip.height
+        }
+        check("in a window narrower than the panel, the page and the Pipeline graph both scroll",
+              scrolling.count == 2, "\(scrolling.count) scroll")
+        check("…and both open at their content's top-left",
+              scrolling.allSatisfy { $0.contentView.bounds.origin == .zero },
+              "\(scrolling.map(\.contentView.bounds.origin))")
+        pipeline.close()
+        let busy = Store()
+        let panel = MainWindow(store: busy).window
+        panel.setContentSize(NSSize(width: MainRoot.width - 300, height: 500))
+        panel.contentView?.layoutSubtreeIfNeeded()
+        busy.auditEntries = (0..<300).map {
+            AuditEntry(at: "2026-11-24T12:00:00Z", source: "auto", action: "poll", detail: "entry \($0)")
+        }
+        panel.contentView?.layoutSubtreeIfNeeded()
+        let page = scrollViews(in: panel.contentView).first
+        check("…and the page stays there as its activity feed loads in",
+              page?.contentView.bounds.origin == .zero
+                  && (page?.documentView?.frame.height ?? 0) > (page?.contentView.bounds.height ?? .infinity),
+              "\(page.map { "\($0.contentView.bounds.origin) of \($0.documentView?.frame.size ?? .zero)" } ?? "no scroll view")")
+        panel.close()
+
         print("login agent: an older plist is marked unattended")
         let fm = FileManager.default
         let scratch = fm.temporaryDirectory.appendingPathComponent("diplomat-window-\(getpid())")
@@ -135,6 +181,11 @@ enum WindowTest {
         if failures.isEmpty { print("window: all passed") }
         else { print("window: FAILED \(failures.count): \(failures.joined(separator: "; "))") }
         return failures.isEmpty
+    }
+
+    private static func scrollViews(in view: NSView?) -> [NSScrollView] {
+        guard let view else { return [] }
+        return [view as? NSScrollView].compactMap { $0 } + view.subviews.flatMap(scrollViews)
     }
 
     private static func toolTips(in view: NSView?) -> Set<String> {

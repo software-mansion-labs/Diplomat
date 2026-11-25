@@ -145,6 +145,9 @@ struct MainRoot: View {
                 }
             }
         }
+        // Else the page drifts down when content grows after the first layout: the
+        // activity feed loading in, a screen switch.
+        .defaultScrollAnchor(.topLeading)
     }
 
     private var panel: ContentView {

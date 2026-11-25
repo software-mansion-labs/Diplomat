@@ -182,8 +182,8 @@ final class Store: ObservableObject {
         showSelectedRepo()
     }
 
-    /// The root the panel's right column works on, as its `LocalRepo.key`. One that is
-    /// not among the roots reads as the primary (`selectedRoot`).
+    /// The root the panel's right column and the Pipeline screen work on, as its
+    /// `LocalRepo.key`. One that is not among the roots reads as the primary (`selectedRoot`).
     @Published var selectedRepo: String {
         didSet {
             persist(selectedRepo, forKey: Keys.selectedRepo)
@@ -3575,13 +3575,19 @@ final class Store: ObservableObject {
     /// queue is keyed by the ask, so two would be one row that dispatches twice (and
     /// the second dispatch would find the first agent still on it). That makes
     /// pressing SPAWN twice, or sweeping a scope that overlaps an earlier one,
-    /// idempotent rather than a way to double up.
+    /// idempotent rather than a way to double up. Any other ask takes the place of a
+    /// Pipeline ask nothing has started, which the Pipeline's switches would withdraw or
+    /// pause.
     private func request(_ asks: [RequestedWork]) -> (queued: Int, already: Int) {
-        let known = Set(requestedWork.map(\.key))
-        let fresh = asks.filter { !known.contains($0.key) }
+        let starting = Set(startingTasks.map(\.id))
+        let fresh = asks.filter { ask in
+            guard let held = requestedWork.first(where: { $0.key == ask.key }) else { return true }
+            return held.config.isPipeline && !ask.config.isPipeline && !starting.contains(ask.key)
+        }
         guard !fresh.isEmpty else { return (0, asks.count) }
         if !pipelineJudged { pipelineStale.formUnion(fresh.filter(\.config.isPipeline).map(\.key)) }
-        requestedWork += fresh
+        let taken = Set(fresh.map(\.key))
+        requestedWork = requestedWork.filter { !taken.contains($0.key) } + fresh
         publishRequested(fresh)
         bringPollForward(capLoad: autoTasksMeasured)
         return (fresh.count, asks.count - fresh.count)
@@ -3646,7 +3652,7 @@ final class Store: ObservableObject {
         let tasks = queuedTasks + entries.compactMap(requestedTask)
         let ordered = AgentTaskQueue.order(offered: tasks.map(\.id), saved: queuedTaskOrder)
         queuedTaskOrder = ordered
-        queuedTasks = ordered.compactMap { id in tasks.first { $0.id == id } }
+        queuedTasks = ordered.compactMap { id in tasks.last { $0.id == id } }
     }
 
     /// Offer every ask nothing has started, alongside the monitors' own finds.

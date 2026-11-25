@@ -37,6 +37,7 @@ fragment PR on PullRequest {
 # another app's check of its name.
 fragment Gate on PullRequest {
   baseRef {
+    compare(headRef: $head) { behindBy }
     branchProtectionRule {
       requiresStatusChecks requiredStatusCheckContexts
       lockBranch restrictsPushes requiresDeployments requiresCommitSignatures requiresLinearHistory
@@ -124,7 +125,7 @@ query PullRequests($owner: String!, $name: String!, $after: String!, $prs: Int!)
   }
 }
 
-query PullRequest($owner: String!, $name: String!, $number: Int!) {
+query PullRequest($owner: String!, $name: String!, $number: Int!, $head: String!) {
   repository(owner: $owner, name: $name) {
     defaultBranchRef { name }
     pullRequest(number: $number) { ...PR ...Gate mergedBy { login } }

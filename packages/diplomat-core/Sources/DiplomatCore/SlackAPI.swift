@@ -674,10 +674,12 @@ public struct SlackAPI {
                                        timeout: request.timeout + 5) {
         case .failedToStart(let why):
             throw SlackError.transport(why)
-        case .timedOut:
+        case .timedOut, .exited(28, _, _):
             throw SlackError.transport("timed out after \(Int(request.timeout))s")
         case .exited(let code, _, let err) where code != 0:
+            // Stripped of how long the connect took, a lasting failure reads the same at each try.
             let why = String(decoding: err, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: #" after \d+ ms"#, with: "", options: .regularExpression)
             throw SlackError.transport(why.isEmpty ? "curl exited \(code)" : why)
         case .exited(_, let out, _):
             return try parse(curlOutput: out)

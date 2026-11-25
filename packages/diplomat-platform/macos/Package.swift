@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "Diplomat",
-    platforms: [.macOS(.v13)],
+    platforms: [.macOS("26.0")],
     dependencies: [
         // The shared core, from its own package in this monorepo.
         .package(path: "../../diplomat-core"),

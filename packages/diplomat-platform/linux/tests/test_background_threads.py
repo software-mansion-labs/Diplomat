@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import ast
 import os
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from diplomat_app.store import Store
 
@@ -160,6 +163,49 @@ def test_a_quit_stops_the_pipeline_sync_before_it_waits(monkeypatch):
     monkeypatch.setattr(SingleInstance, "release", staticmethod(lambda: None))
     app.quit()
     assert calls == ["stop", "wait", "quit"]
+
+
+_ENDED = '''\
+import os
+import signal
+import sys
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
+
+from diplomat_app import selfupdate
+from diplomat_app.app import DiplomatApp, SingleInstance
+
+signum = getattr(signal, sys.argv[1])
+signal.signal(signum, signal.SIG_IGN if sys.argv[2] == "ignored" else signal.SIG_DFL)
+app = DiplomatApp.__new__(DiplomatApp)
+app.app = QApplication([])
+app.store = type("_Store", (), {"stop_pipeline_sync": lambda self: print("stop", flush=True)})()
+selfupdate.mark_operator_quit = lambda: print("marked", flush=True)
+SingleInstance.release = staticmethod(lambda: print("released", flush=True))
+QTimer.singleShot(0, lambda: os.kill(os.getpid(), signum))
+QTimer.singleShot(1000, app.app.quit)
+app.exec()
+print("ran on", flush=True)
+'''
+
+
+@pytest.mark.parametrize("name, disposition, code, said", [
+    ("SIGTERM", "default", -signal.SIGTERM, "stop\n"),
+    ("SIGHUP", "default", -signal.SIGHUP, "stop\n"),
+    ("SIGHUP", "ignored", 0, "ran on\n"),
+])
+def test_a_newer_instance_or_a_closed_terminal_stops_the_pipeline_sync(tmp_path, name,
+                                                                      disposition, code, said):
+    """A newer instance's SIGTERM, or a closed terminal's SIGHUP, would otherwise leave the
+    sync's core running on in a session of its own. Neither is the operator's quit, and
+    under ``nohup`` a SIGHUP stays ignored."""
+    env = {**os.environ, "PYTHONPATH": str(_LINUX_DIR), "HOME": str(tmp_path),
+           "QT_QPA_PLATFORM": "offscreen"}
+    done = subprocess.run([sys.executable, "-c", _ENDED, name, disposition],
+                          cwd=str(_LINUX_DIR), env=env, capture_output=True, text=True,
+                          timeout=60)
+    assert (done.returncode, done.stdout) == (code, said), done.stderr[-2000:]
 
 
 # ---- and the abort it exists to prevent ------------------------------------

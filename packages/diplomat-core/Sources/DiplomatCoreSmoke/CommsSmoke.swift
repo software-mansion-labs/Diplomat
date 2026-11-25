@@ -212,7 +212,7 @@ private final class StubSlack {
 
 /// HTTP/1.1 on 127.0.0.1, one connection at a time, each answered and closed: the stub
 /// behind a real curl or URLSession.
-private final class Loopback {
+final class Loopback {
     let url: URL
 
     init?(_ handle: @escaping (_ headers: [String: String], _ body: Data)
@@ -1391,13 +1391,15 @@ private func stagingSmoke() throws {
     let dir = scratchDir("staging")
     defer { try? FileManager.default.removeItem(at: dir) }
     let listing = dir.appendingPathComponent("ls"), stub = dir.appendingPathComponent("stub")
-    // Lists the directory behind the child's stdin while it runs.
+    // While it runs: the directory behind the child's stdin, whether it is still there,
+    // and its stdin's, stdout's (as fd 5) and stderr's modes.
     try """
     #!/bin/sh
     if [ -e /proc/self/fd/0 ]; then in=$(readlink /proc/self/fd/0)
     else in=$(lsof -a -p $$ -d 0 -Fn | sed -n 's/^n//p'); fi
     d=$(dirname "$in")
-    { echo "$d"; ls -ld "$d"; ls -l "$d"; } > '\(listing.path)'
+    exec 5>&1
+    { echo "$d"; ls -d "$d" 2>/dev/null; ls -lL /dev/fd/0 /dev/fd/2 /dev/fd/5; } > '\(listing.path)'
     echo err >&2
     printf '%s' '{"decisions":[{"message":1,"action":"none","number":0,"summary":"","reason":"listed"}]}'
     """.write(to: stub, atomically: true, encoding: .utf8)
@@ -1408,14 +1410,9 @@ private func stagingSmoke() throws {
     let answer = CommsClassifier.run(CommsBatch(messages: [message]), settings: CommsSettings(),
                                      binary: stub.path)[0]
     let ls = lsLines(listing)
-    let files = ls.dropFirst(3).map { line in
-        (String(line.prefix(10)), line.split(separator: " ").last.map(String.init) ?? "")
-    }
-    check(answer.reason == "listed" && ls.count == 6
-          && ls[1].hasPrefix("drwx------") && files.map(\.1) == ["err", "in", "out"]
-          && files.allSatisfy { $0.0 == "-rw-------" },
-          "the child's stdin, stdout and stderr are 0600 files in a 0700 directory of their own: \(ls)")
-    check(!ls.isEmpty && !FileManager.default.fileExists(atPath: ls[0]), "…removed once it is done")
+    check(answer.reason == "listed" && ls.count == 4 && ls[0].contains("/diplomat-comms-")
+          && ls.dropFirst().allSatisfy { $0.hasPrefix("-rw-------") },
+          "the child's stdin, stdout and stderr are 0600 files, gone from disk while it runs: \(ls)")
 }
 
 private func undeliveredSmoke() {
@@ -1751,7 +1748,7 @@ private func slackTokenSmoke() throws {
     }
 }
 
-private let hasCurl = ["/usr/bin/curl", "/bin/curl"].contains { FileManager.default.isExecutableFile(atPath: $0) }
+let hasCurl = ["/usr/bin/curl", "/bin/curl"].contains { FileManager.default.isExecutableFile(atPath: $0) }
 
 /// Through the live transport (URLSession on macOS, curl elsewhere) to the stub on loopback.
 private func signInSmoke() throws {

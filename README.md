@@ -86,7 +86,7 @@ make, and for following your provider's terms.
 npx szpont                       # or:  pip install szpont && szpont
 ```
 
-macOS 13+ and Linux. It clones Diplomat into `~/.diplomat/checkout`, builds it, starts it, and
+macOS 26+ and Linux. It clones Diplomat into `~/.diplomat/checkout`, builds it, starts it, and
 updates it in place. You need git, a Swift toolchain (Xcode on macOS,
 [swiftly](https://swift.org/install) on Linux), python3 on Linux, and a logged-in
 [`gh`](https://cli.github.com). A GitLab repo root also needs [`glab`](https://gitlab.com/gitlab-org/cli)
