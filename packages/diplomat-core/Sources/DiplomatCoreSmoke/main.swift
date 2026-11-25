@@ -3669,6 +3669,9 @@ print("comms assertions passed")
 try pipelineSmoke()
 print("pipeline assertions passed")
 
+try linearLoginSmoke()
+print("linear login assertions passed")
+
 // The Settings line both front-ends parse (Linux through `diplomat-core pipeline-teams`).
 section("pipeline linear teams")
 do {

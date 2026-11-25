@@ -23,6 +23,12 @@ query Issues($teams: [String!], $after: String) {
   }
 }
 
+# Who a new login is.
+query Viewer {
+  viewer { id name }
+  organization { name }
+}
+
 # `$id` may be an identifier; archived issues are returned too. ~60.
 query Issue($id: String!) {
   issue(id: $id) {

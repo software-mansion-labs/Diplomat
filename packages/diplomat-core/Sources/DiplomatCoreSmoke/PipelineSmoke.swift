@@ -269,7 +269,7 @@ private final class Trackers {
 
     func io(key: String? = smokeKey) -> PipelineIO {
         PipelineIO(gh: { self.gh($0) }, claude: { self.claude($0, $1, $2, $3) },
-                   linear: { try self.linear($0) }, linearKey: { _ in key })
+                   linear: { try self.linear($0) }, linearAuth: { key })
     }
 
     // MARK: gh
@@ -1427,8 +1427,8 @@ func pipelineSmoke() throws {
     check(s7.result.effects == s5.result.effects, "sync 7 effects: \(s7.result.effects)")
     every.rate = true
 
-    check(Set(t.authorizations) == [smokeKey], "Linear is sent the bare key: \(t.authorizations)")
-    check(!t.handed.contains { $0.contains(smokeKey) }, "the Linear key never reaches gh or claude")
+    check(Set(t.authorizations) == [smokeKey], "Linear is sent linearAuth's answer as is: \(t.authorizations)")
+    check(!t.handed.contains { $0.contains(smokeKey) }, "the Linear token never reaches gh or claude")
     check(t.claudeFaults.isEmpty, "claude sandbox: \(t.claudeFaults)")
     let stdin1 = t.handed.first { $0.contains("| Typo on the login button") } ?? ""
     check(stdin1.components(separatedBy: "\n").filter { $0.contains("END UNTRUSTED TRACKER TEXT") }.count == 1,
@@ -1503,11 +1503,11 @@ func pipelineSmoke() throws {
     check(stage(w3.result, issueURL(3)) == "candidate/fast" && w3.result.effects.contains(fixFX(3)),
           "relabelled low: \(stage(w3.result, issueURL(3))) \(w3.result.effects)")
 
-    // No Linear key: a notice, and GitHub is still synced.
+    // Not signed in to Linear: a notice, and GitHub is still synced.
     let keyless = fixture()
     let nokey = sync(keyless, PipelineSettings(roots: [root], linearTeams: [team]), base.appendingPathComponent("nokey"),
                      t0, key: nil)
-    check(nokey.result.notices == ["Linear was not read: no API key (DIPLOMAT_LINEAR_TOKEN, none set)"],
+    check(nokey.result.notices == ["Linear was not read: not signed in to Linear (Settings → Pipeline → Linear login)"],
           "no key: \(nokey.result.notices)")
     check(keyless.linearOps.isEmpty && nokey.result.items.contains { $0.id == prURL(11) }
           && nokey.result.unread == ["acme/app"], "no key: \(nokey.result.unread)")
@@ -1557,7 +1557,7 @@ func pipelineSmoke() throws {
     check(claudeOut.ok && !claudeEnv.contains("lin_api_from_env"), "claude's environment holds the Linear key")
     check(claudeEnv.components(separatedBy: "\n").first?.hasSuffix("/live-checkout") == true,
           "claude runs in the root's checkout: \(claudeEnv.prefix(200))")
-    check(live.linearKey(PipelineSettings(roots: [])) == "lin_api_from_env")
+    check((try? live.linearAuth()) == "lin_api_from_env", "the override is sent as is")
 }
 
 /// The fix asks a sync may not make, and the merges after one it could not confirm.
@@ -1970,7 +1970,7 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(!forgot.contains("/999") && forgot.contains(issueURL(1)), "unseen for 92 days: \(forgot)")
 
     // The ban list, read from $HOME as the front-ends read it, as are the directory and
-    // the key file.
+    // the Linear login in it.
     let home = dir("home")
     let env = ["HOME", "DA_BAN_DIR", "DIPLOMAT_PIPELINE_DIR", LinearAPI.envVar]
     let saved = env.map { ($0, ProcessInfo.processInfo.environment[$0]) }
@@ -1980,9 +1980,10 @@ private func pipelineGuards(base: URL, root: PipelineSettings.Root, team: Pipeli
     check(PipelineLog.dir.path == home.appendingPathComponent(".diplomat/pipeline").path,
           "the pipeline's directory is under $HOME: \(PipelineLog.dir.path)")
     try fm.createDirectory(at: home, withIntermediateDirectories: true)
-    try Data(" lin_api_from_home\n".utf8).write(to: home.appendingPathComponent("lin.key"))
-    check(PipelineIO.live.linearKey(PipelineSettings(roots: [], linearTokenFile: "~/lin.key")) == "lin_api_from_home",
-          "the key file's ~ is $HOME")
+    try fm.createDirectory(at: PipelineLog.dir, withIntermediateDirectories: true)
+    try Data(#"{"accessToken":"from_home","user":"Ada","organization":"Acme"}"#.utf8)
+        .write(to: PipelineLog.dir.appendingPathComponent("linear-login.json"))
+    check((try? PipelineIO.live.linearAuth()) == "Bearer from_home", "the Linear login is read under $HOME")
     let banDir = home.appendingPathComponent(".diplomat/pr-monitor")
     try fm.createDirectory(at: banDir, withIntermediateDirectories: true)
     func ban(_ logins: [String]) throws {

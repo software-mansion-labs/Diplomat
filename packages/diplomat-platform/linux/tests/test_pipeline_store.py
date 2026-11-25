@@ -21,7 +21,7 @@ from test_autofix import _spawn_recorder, fake_probes, store  # noqa: F401 — f
 
 from diplomat_app import bans, issues
 from diplomat_app.store import PIPELINE_ATTEMPTS, Store, app_settings
-from diplomat_runtime import activity, appconfig, autofix, pipeline, promptcore, review
+from diplomat_runtime import activity, autofix, pipeline, promptcore, review
 from diplomat_runtime.prref import LocalRepo, item_key_from_url
 
 pytest.importorskip("PySide6")
@@ -126,22 +126,15 @@ def test_a_sync_is_handed_the_github_roots_the_teams_and_the_switches(pipe, monk
     monkeypatch.setattr(review, "repo_roots", lambda: [ROOT, LAB])
     monkeypatch.setattr(Store, "run_pipeline_sync_async", lambda self: None)
     pipe.pipeline_linear_teams_raw = "eng = o/r; OPS=o/other, nonsense"
-    appconfig.set_value(appconfig.LINEAR_TOKEN_FILE, " ~/.diplomat/linear ")
-    monkeypatch.setenv("HOME", "/home/elsewhere")
     pipe.pipeline_force_now("rate", ISSUE)
     pipe.pipeline_force_now("rate", PR)
     pipe.pipeline_force_now("fracture", ISSUE)
     assert pipe.pipeline_settings_payload() == {
         "roots": [{"owner": "o", "repo": "r", "path": "/src/r", "me": "alice"}],
         "linearTeams": [{"key": "ENG", "repo": "o/r"}, {"key": "OPS", "repo": "o/other"}],
-        "linearTokenFile": "/home/elsewhere/.diplomat/linear",
         "rate": False, "fix": True, "fastTrack": True, "merge": False, "fracture": False,
         "force": {"rate": [ISSUE, PR], "fracture": [ISSUE]}, "queued": [],
     }
-
-
-def test_no_token_file_is_handed_on_when_none_is_named(pipe):
-    assert "linearTokenFile" not in pipe.pipeline_settings_payload()
 
 
 # MARK: - Effects to asks
@@ -1132,9 +1125,68 @@ def test_a_core_past_its_deadline_is_an_error_at_once(tmp_path, monkeypatch):
     assert time.monotonic() - began < 10
 
 
-def test_only_the_syncs_core_leaves_the_apps_process_group(tmp_path, monkeypatch):
+@pytest.mark.parametrize("call, answer, status, expected", [
+    ("linear_login", {"ok": True, "user": "Ada", "organization": "Ours"}, 0,
+     ({"user": "Ada", "organization": "Ours"}, "")),
+    ("linear_login", {"ok": False, "error": "Linear sign-in was cancelled"}, 0,
+     (None, "Linear sign-in was cancelled")),
+    ("linear_login", {"ok": False}, 0, (None, "Linear sign-in did not say why it failed")),
+    ("linear_login", '["ok"]', 0,
+     (None, "diplomat-core linear-login answered something that is not an answer")),
+    ("linear_login", "{}", 3, (None, "diplomat-core linear-login failed: it failed")),
+    ("linear_logout", {"ok": True, "warning": None}, 0, (True, "")),
+    ("linear_logout", {"ok": True, "warning": "Linear answered HTTP 500 to the revocation"},
+     0, (True, "Linear answered HTTP 500 to the revocation")),
+    ("linear_logout", {"ok": False, "error": "it could not be removed"}, 0,
+     (False, "it could not be removed")),
+    ("linear_logout", "not json", 0,
+     (False, "diplomat-core linear-logout answered something that is not an answer")),
+    ("linear_logout", "{}", 1, (False, "diplomat-core linear-logout failed: it failed")),
+    ("linear_whoami", {"user": "Ada", "organization": "Ours"}, 0,
+     {"user": "Ada", "organization": "Ours"}),
+    ("linear_whoami", {"user": "", "organization": ""}, 0, {"user": "", "organization": ""}),
+    ("linear_whoami", {}, 0, None),
+    ("linear_whoami", '{"user": "Ada"}', 1, None),
+])
+def test_the_linear_login_calls_answer_what_the_core_said(tmp_path, monkeypatch, call,
+                                                          answer, status, expected):
+    _fake_core(tmp_path, monkeypatch,
+               answer if isinstance(answer, str) else json.dumps(answer), status)
+    assert getattr(pipeline, call)() == expected
+    assert (tmp_path / "argv").read_text() == call.replace("_", "-")
+
+
+def test_each_linear_login_call_outlasts_the_bounds_the_core_holds_it_to(monkeypatch):
+    """A sign-in killed after the browser came back loses it: the browser's start,
+    ``signInSecs``, then the code's exchange, who the token is, and a sync's refresh
+    holding the login's lock. A sign-out waits on that refresh and the revocation."""
+    t = pipeline.tunables()
+    call = t["httpTimeoutSecs"] + 5
+    seen = []
+
+    class Proc:
+        returncode = 0
+
+        def __init__(self, argv, **kw):
+            self.verb = argv[1]
+
+        def communicate(self, input=None, timeout=None):
+            seen.append((self.verb, timeout))
+            return "{}", ""
+
+    monkeypatch.setattr("diplomat_runtime.promptcore.core_bin", lambda: "/bin/core")
+    monkeypatch.setattr("subprocess.Popen", Proc)
+    pipeline.linear_login()
+    pipeline.linear_logout()
+    pipeline.linear_whoami()
+    assert seen == [("linear-login", 10 + t["linearOAuth"]["signInSecs"] + 3 * call + 30),
+                    ("linear-logout", 2 * call + 30), ("linear-whoami", 10)]
+
+
+def test_only_a_core_handed_started_leaves_the_apps_process_group(tmp_path, monkeypatch):
     """Which a terminal's Ctrl+C reaches: a Comms core ends there with the app, and the
-    sync's, in a session of its own, by :func:`promptcore.stop`."""
+    sync's and the Linear sign-in's, in sessions of their own, by
+    :meth:`Store.stop_pipeline_sync`."""
     core = tmp_path / "diplomat-core"
     core.write_text(f"#!/bin/sh\nexec '{sys.executable}' -c 'import os; print(os.getpgrp())'\n")
     core.chmod(0o755)

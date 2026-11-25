@@ -47,7 +47,7 @@ What it does not do:
   merge uses your [admin rights](#the-merge);
 - fast-track a PR of yours that closes no issue or one that is not a `candidate`, that was rated while
   **Fast-track my PRs** was off, or that a person took a fast-track label off;
-- comment on, assign or close a Linear issue, or hand its key to an agent;
+- comment on, assign or close a Linear issue, or hand its login to an agent;
 - read GitLab roots.
 
 ## Stages
@@ -93,7 +93,7 @@ a Linear team was not read whole, no issue in the repo it maps to is fixed, spli
    is on the fast track: the smallest fix, a regression test that fails on the base branch, and the
    closing reference kept so the PR links to the issue. The run first reads the issue again and
    stops if it is closed, assigned to someone else, or an open PR already fixes it. A Linear
-   issue's run is not given the Linear key, so the sync reads the issue again right before asking, and holds
+   issue's run is not given the Linear login, so the sync reads the issue again right before asking, and holds
    it if it is no longer a candidate or its links changed; the run gets its text as that read found
    it, checks only for an open PR naming it, works in the root its team names and puts
    `Fixes ENG-12` in its PR's description.
@@ -184,7 +184,7 @@ puts a PR whose floor is not low/low on the fast track nor merges it, whatever i
 Diplomat labels, splits, fixes and merges only:
 
 - a GitHub issue with no assignee, or assigned to you alone;
-- a Linear issue with no assignee, or assigned to the Linear key's user;
+- a Linear issue with no assignee, or assigned to the Linear login's user;
 - your own PR, from a branch of the repository itself (not a fork), into its default branch, with no
   assignee or assigned to you alone.
 
@@ -318,7 +318,7 @@ team's repo, and each group with no card in any root, whole.
 - **Status line** - when the last sync ran (on macOS also what it reads, how often, and which
   switches are off), and **Sync now** to run one at once. Under it, why no sync can run, if none
   can (no repo root resolves, the GitHub login is unknown), and the last sync's notices: a source
-  that could not be read, a rating that failed, no Linear key.
+  that could not be read, a rating that failed, no Linear login.
 - **Lanes** - **All**, **Fast**, **Human**, **Unrated**, **Fractured** and **Done**, with their
   counts. A lane shows every group with a card in it, whole.
 - **The graph** - each connected group below the one before (on macOS on a band of its own, with a
@@ -375,7 +375,8 @@ running, which reads the switches again (`control.json`) before every step it ta
   them: each Linear team key (ASCII letters and digits, read in capitals as Linear spells it) and the
   GitHub repo root its issues are fixed in. An entry that is not `KEY=owner/repo` is listed in red
   and not tracked; a team named twice keeps its first repo. Blank = GitHub only.
-- **Linear API key** - where the key is read from; see [Linear](#linear).
+- **Linear login** - who Diplomat is signed in to Linear as, with **Sign in…** and **Sign out**; see
+  [Linear](#linear).
 
 The whole fast track, issue to merge, takes **Rate issues and PRs**, **Open fix PRs**,
 **Fast-track my PRs** and **Merge cleared PRs**. The switches are in UserDefaults (macOS) and
@@ -384,38 +385,29 @@ QSettings (Linux) under the same keys: `pipelineEnabled`, `pipelineRate`, `pipel
 
 ## Linear
 
-Linear is read with a personal API key of yours. The key is read on each sync and reaches only
-`curl`, in a config on its stdin (staged in an owner-only temp file, removed
-before curl starts), never in an argv; no agent shell, nor `gh` or `claude` a sync starts, has `DIPLOMAT_LINEAR_TOKEN` in its
-environment, though the Linux app's own `gh` calls inherit one you export. A fix run for a Linear issue gets the issue's text as Diplomat read it, not the key, though it runs
-as you and so could read the key where Diplomat does.
+Linear is read and written as you, through Diplomat's Linear app. **Sign in…** opens Linear's
+consent page in the browser, which hands the login back on `127.0.0.1` (the first free of ports
+29170 to 29172). The login is kept in `~/.diplomat/pipeline/linear-login.json` and refreshed by the
+sync; it reaches only `curl`, in a config on its stdin (staged in an owner-only temp file, removed
+before curl starts), never in an argv. No agent shell, nor `gh` or `claude` a sync starts, has it or
+`DIPLOMAT_LINEAR_TOKEN` in its environment, though the Linux app's own `gh` calls inherit one you
+export. A fix run for a Linear issue gets the issue's text as Diplomat read it, not the login,
+though it runs as you and so could read the login where Diplomat does. **Sign out** forgets it and
+asks Linear to revoke it.
 
-1. **Mint** a personal API key in Linear's
-   [Security & access](https://linear.app/settings/account/security) settings. Diplomat reads the
-   tracked teams' issues and writes labels and child issues there, so the key needs read and write
-   access to those teams. Its user is "you" on Linear: an issue assigned to them is one Diplomat may
-   write to.
-2. **Store** it where only you can read it. On macOS, in the login Keychain (`-w` last makes
-   `security` prompt for it, so it stays out of your shell history):
-   ```bash
-   security add-generic-password -a "$USER" -s diplomat-linear -w
-   ```
-   On Linux, in a file only you can read:
-   ```bash
-   (umask 077; read -rs t; printf '%s\n' "$t" > ~/.diplomat/linear-token)
-   ```
-3. **Name** it in `~/.diplomat/config.json` - the name, never the key, since that file is
-   world-readable. `"linearKeychainItem": "diplomat-linear"` on macOS (`plutil -replace
-   linearKeychainItem -string diplomat-linear ~/.diplomat/config.json`), `"linearTokenFile":
-   "~/.diplomat/linear-token"` on Linux.
-4. **Map** each team under **Linear teams**: `ENG=owner/repo`, the key as Linear spells it and a
+1. **Sign in** under **Linear login**, to the workspace of the teams you track. Its user is "you" on
+   Linear: an issue assigned to them is one Diplomat may write to.
+2. **Map** each team under **Linear teams**: `ENG=owner/repo`, the key as Linear spells it and a
    GitHub repo root. A team whose repo is no root here is read and shown, but its issues are neither
    rated, split nor fixed.
 
-`DIPLOMAT_LINEAR_TOKEN` wins over both. The Keychain item is looked up under your account first,
-then under any; whitespace around the key is dropped. With teams set and no key, Linear is skipped
-with a notice and GitHub still syncs, but a root a team maps to is only read and shown, and no PR is
-merged.
+The app is an OAuth application a Linear workspace admin registers once, with the callback URLs
+`http://127.0.0.1:29170/linear/callback`, `…:29171/…` and `…:29172/…`; its client ID is
+`linearOAuth.clientID` in `assets/pipeline.json`, and only its own workspace can sign in to it
+unless it is made public. `DIPLOMAT_LINEAR_TOKEN`, a personal API key, wins over the login. With
+teams set and no login, or one Linear no longer accepts (its refresh unused for 30 days, or
+revoked), Linear is skipped with a notice and GitHub still syncs, but a root a team maps to is only
+read and shown, and no PR is merged.
 
 A sync reads the tracked teams' issues in any state but completed or canceled. A PR closes a Linear
 issue when one of the issue's attachments links it, or when its title or body names the issue right
@@ -445,6 +437,7 @@ labels are the state; this is what a sync needs besides:
   cannot be read leaves every sync reading and showing only, with a notice.
 - `control.json` - the switches as the app has them, rewritten whenever one changes and before
   each sync.
+- `linear-login.json` - the [Linear login](#linear): its tokens, and who it is.
 
 The fix and review asks' attempt records are the app's own (`pipelineAttempts`): a run that reported
 back (a PR, a clean marker or nothing) concludes its ask, which is not made again while syncs owe it,

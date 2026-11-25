@@ -19,6 +19,9 @@ import Foundation
 //   diplomat-core pipeline-tick     < settings.json  # one pipeline sync (see PipelineCommand)
 //   diplomat-core pipeline-last                      # the last pipeline sync's result
 //   diplomat-core pipeline-teams    < {"raw": line}  # the Linear teams setting parsed
+//   diplomat-core linear-login                       # sign in to Linear in the browser
+//   diplomat-core linear-logout                      # forget and revoke that login
+//   diplomat-core linear-whoami                      # who the saved Linear login is
 //   diplomat-core opencode-session-model             # what an unpinned 2.x spawn names
 //
 // build-prompt: the JSON config's "kind" field ("review" | "conflicts" | "audit" |
@@ -82,12 +85,14 @@ let args = CommandLine.arguments
 guard args.count >= 2,
       ["build-prompt", "tool-data", "telemetry", "agent-state", "agent-registry",
        "comms-tick", "comms-auth", "comms-feed", "comms-effect", "pipeline-tick", "pipeline-last",
-       "pipeline-teams", "opencode-session-model"].contains(args[1]) else {
+       "pipeline-teams", "linear-login", "linear-logout", "linear-whoami",
+       "opencode-session-model"].contains(args[1]) else {
     die("usage: diplomat-core (build-prompt | tool-data | telemetry | agent-state"
         + " | agent-registry | comms-tick | comms-effect | pipeline-tick | pipeline-teams)  (JSON on stdin)"
         + "\n       diplomat-core comms-feed [--limit N]"
         + "\n       diplomat-core comms-auth"
         + "\n       diplomat-core pipeline-last"
+        + "\n       diplomat-core linear-login | linear-logout | linear-whoami"
         + "\n       diplomat-core opencode-session-model", 1)
 }
 
@@ -98,6 +103,18 @@ if args[1] == "pipeline-last" {
 }
 if args[1] == "comms-feed" {
     CommsCommand.feed(Array(args.dropFirst(2)))
+    exit(0)
+}
+if args[1] == "linear-login" {
+    PipelineCommand.login()
+    exit(0)
+}
+if args[1] == "linear-logout" {
+    PipelineCommand.logout()
+    exit(0)
+}
+if args[1] == "linear-whoami" {
+    PipelineCommand.whoami()
     exit(0)
 }
 if args[1] == "comms-auth" {

@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from collections.abc import Callable
 from pathlib import Path
 
 from diplomat_runtime import (
@@ -239,6 +240,8 @@ class Store(QObject):
     pipeline_changed = Signal()
     # A Pipeline sync's answer, handed to the Qt thread, where the queue is changed.
     _pipeline_synced = Signal(object)
+    # Emitted once the Qt thread has applied a sync's answer.
+    pipeline_sync_applied = Signal()
     # Emitted when the repo roots or the other checkouts listed in Settings change, so
     # the wizards re-judge a link they are already holding and the header re-lists.
     local_repos_changed = Signal()
@@ -480,6 +483,8 @@ class Store(QObject):
         # (:meth:`stop_pipeline_sync`).
         self._pipeline_proc: subprocess.Popen | None = None
         self._pipeline_stopped = False
+        # The running Linear sign-in's core (:meth:`linear_login`).
+        self._linear_login_proc: subprocess.Popen | None = None
         # Item ids the screen asked to rate or fracture ahead of every limit, until a
         # sync that was handed them answers.
         self._pipeline_force: dict[str, frozenset[str]] = {"rate": frozenset(),
@@ -4581,7 +4586,6 @@ class Store(QObject):
     def pipeline_settings_payload(self) -> dict:
         """The ``PipelineSettings`` JSON a sync is handed; the Pipeline skips GitLab roots."""
         teams, _ = pipeline.parse_linear_teams(self.pipeline_linear_teams_raw)
-        token_file = os.path.expanduser(appconfig.get(appconfig.LINEAR_TOKEN_FILE).strip())
         with self._pipeline_lock:
             force = {kind: sorted(ids) for kind, ids in self._pipeline_force.items()}
         return {
@@ -4589,7 +4593,6 @@ class Store(QObject):
                        "me": self.known_me(r)}
                       for r in review.repo_roots() if not r.is_gitlab],
             "linearTeams": teams,
-            **({"linearTokenFile": token_file} if token_file else {}),
             "rate": self.pipeline_rate,
             "fix": self.pipeline_fix,
             "fastTrack": self.pipeline_fast_track,
@@ -4657,13 +4660,40 @@ class Store(QObject):
         self.start_background(work, name="pipeline-sync")
 
     def stop_pipeline_sync(self) -> None:
-        """At quit: no sync starts again, and the running one's core is stopped with
-        what it runs (:func:`promptcore.stop`)."""
+        """At quit: no sync or Linear sign-in starts again, and the running sync's core is
+        stopped with what it runs (:func:`promptcore.stop`), the sign-in's alone
+        (:meth:`stop_linear_login`)."""
         with self._pipeline_lock:
             self._pipeline_stopped = True
             proc = self._pipeline_proc
         if proc is not None:
             promptcore.stop(proc)
+        self.stop_linear_login()
+
+    def linear_login(self, cancelled: Callable[[], bool]) -> tuple[dict | None, str]:
+        """:func:`pipeline.linear_login`, off the Qt thread, until
+        :meth:`stop_linear_login`. Its core is killed as it starts once ``cancelled()``,
+        or after quit."""
+        def started(proc: subprocess.Popen) -> None:
+            with self._pipeline_lock:
+                self._linear_login_proc = proc
+                stopped = self._pipeline_stopped
+            if stopped or cancelled():
+                proc.kill()
+
+        try:
+            return pipeline.linear_login(started)
+        finally:
+            with self._pipeline_lock:
+                self._linear_login_proc = None
+
+    def stop_linear_login(self) -> None:
+        """Kills the sign-in's core alone, not with :func:`promptcore.stop`: a browser it
+        started may share its session."""
+        with self._pipeline_lock:
+            proc = self._linear_login_proc
+        if proc is not None:
+            proc.kill()
 
     def _pipeline_started(self, proc: subprocess.Popen) -> None:
         with self._pipeline_lock:
@@ -4781,6 +4811,7 @@ class Store(QObject):
                     self._apply_pipeline_effects(result, time.time(), judged=judged,
                                                  handed=plan.get("handed"))
             self.pipeline_changed.emit()
+            self.pipeline_sync_applied.emit()
         finally:
             with self._pipeline_lock:
                 then = [] if self.pipeline_syncing else self._pipeline_then

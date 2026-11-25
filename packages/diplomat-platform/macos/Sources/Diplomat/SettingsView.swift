@@ -1105,12 +1105,33 @@ struct SettingsView: View {
                 switchControl("Split big issues", $store.pipelineFracture)
             }
             linearTeamsRow
-            SettingRow(title: "Linear API key",
-                       summary: SettingsView.linearKeySummary,
-                       detail: SettingsView.linearKeyDetail) {
-                EmptyView()
+            SettingRow(title: "Linear login", summary: SettingsView.linearLoginSummary(store),
+                       detail: SettingsView.linearLoginDetail) {
+                linearLoginButton
             }
         }
+    }
+
+    private var linearLoginButton: some View {
+        Group {
+            if store.linearSigningIn {
+                Button("Cancel") { store.cancelLinearSignIn() }
+            } else if store.linearLogin != nil {
+                Button {
+                    Task { await store.signOutOfLinear() }
+                } label: {
+                    if store.linearSigningOut {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Text("Sign out")
+                    }
+                }
+                .disabled(store.linearSigningOut)
+            } else {
+                Button("Sign in…") { Task { await store.signInToLinear() } }
+            }
+        }
+        .controlSize(.small)
     }
 
     private var linearTeamsRow: some View {
@@ -1137,14 +1158,14 @@ struct SettingsView: View {
         return parsed.teams.map { "\($0.key) → \($0.repo)" }.joined(separator: " · ")
     }
 
-    private static var linearKeySummary: String {
+    static func linearLoginSummary(_ store: Store) -> String {
         if ProcessInfo.processInfo.environment[LinearAPI.envVar]?.isEmpty == false {
-            return "$\(LinearAPI.envVar), which wins over the Keychain item"
+            return "$\(LinearAPI.envVar), which wins over the login"
         }
-        let item = AppConfig.linearKeychainItem
-        return item.isEmpty
-            ? "No Keychain item: \(AppConfig.linearKeychainItemKey) in ~/.diplomat/config.json names it"
-            : "The login Keychain's \"\(item)\" item"
+        if store.linearSigningIn { return "Waiting for the browser…" }
+        if let note = store.linearLoginNote { return note }
+        guard let login = store.linearLogin else { return "Not signed in" }
+        return "Signed in as \(login.user) (\(login.organization))"
     }
 
     private static let pipelineDetail = """
@@ -1192,12 +1213,14 @@ struct SettingsView: View {
         its rating.
         """
 
-    private static let linearKeyDetail = """
-        Read on each sync from the login Keychain with security find-generic-password and \
-        staged in an owner-only temp file for each Linear call, never handed to an agent: \
-        a fix gets the issue's text as Diplomat read it. $DIPLOMAT_LINEAR_TOKEN wins over \
-        it. Without a key, the teams set here are skipped with a notice and GitHub still \
-        syncs, but no PR is merged.
+    static let linearLoginDetail = """
+        Signs in through the browser to Diplomat's Linear app, which reads the tracked teams' \
+        issues and writes labels and child issues as you. The login is kept in \
+        ~/.diplomat/pipeline/linear-login.json, readable by you alone, refreshed by the sync, \
+        and never handed to an agent: a fix gets the issue's text as Diplomat read it. Sign \
+        out forgets it and asks Linear to revoke it. $DIPLOMAT_LINEAR_TOKEN, a personal API \
+        key, wins over it. Without a login, the teams set here are skipped with a notice and \
+        GitHub still syncs, but no PR is merged.
         """
 
     // MARK: Tool visibility
