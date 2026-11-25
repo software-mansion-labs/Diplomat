@@ -74,9 +74,10 @@ def cli(args: list[str], *, stdin: object = None, timeout: float = 30,
         pipe, proc.stdout = proc.stdout, None
 
         def read() -> None:
-            for text in pipe:
-                lines.append(text)
-                line(text)
+            with pipe:
+                for text in pipe:
+                    lines.append(text)
+                    line(text)
 
         reader = threading.Thread(target=read, name=f"diplomat-core {args[0]}", daemon=True)
         reader.start()

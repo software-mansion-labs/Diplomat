@@ -1143,6 +1143,16 @@ def test_each_line_of_the_core_is_handed_over_as_it_comes(tmp_path, monkeypatch)
     assert out == "first\nsecond\n"
 
 
+def test_a_long_answer_reaches_the_line_hook_whole(tmp_path, monkeypatch):
+    """communicate() takes none of stdout from the hook."""
+    _script_core(tmp_path, monkeypatch, "seq 1 50000")
+    lines = []
+    out = promptcore.cli(["x"], timeout=20, line=lines.append)
+    whole = "".join(f"{n}\n" for n in range(1, 50001))
+    assert out == whole
+    assert "".join(lines) == whole
+
+
 def test_a_core_past_its_deadline_is_killed_while_its_lines_are_read(tmp_path, monkeypatch):
     _script_core(tmp_path, monkeypatch, "echo first\nsleep 30")
     lines, procs = [], []

@@ -613,7 +613,7 @@ extension Store {
         refreshLinearLogin()
         switch answer {
         case .success: if pipelineEnabled { Task { await runPipelineSyncOnce() } }
-        case .failure(LinearLogin.Failure.cancelled): break
+        case .failure where signIn.isCancelled: break
         case .failure(let error): linearLoginNote = error.localizedDescription
         }
     }

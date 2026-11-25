@@ -1663,6 +1663,19 @@ enum PipelineTest {
               signedIn && store.linearLogin == nil && !FileManager.default.fileExists(atPath: file)
                   && summary() == "Signed out, but Linear answered HTTP 503 to the revocation")
 
+        let exchanging = DispatchSemaphore(value: 0)
+        Store.linearLoginOverride = (open: StubBrowser(code: "c").open, oauth: oauth(secs: 10), transport: { request in
+            guard request.url.absoluteString.hasSuffix("/oauth/token") else { return try linear(token: granted)(request) }
+            exchanging.signal()
+            Thread.sleep(forTimeInterval: 0.5)
+            return (400, [:], Data(#"{"error": "invalid_grant"}"#.utf8))
+        })
+        await underWay({ await store.signInToLinear() }, busy: { exchanging.wait(timeout: .now()) == .success }) {
+            store.cancelLinearSignIn()
+        }
+        check("Cancel once the browser is back: Linear then refusing the code says nothing",
+              store.linearLoginNote == nil && summary() == "Not signed in")
+
         let pasteboard = NSPasteboard(name: NSPasteboard.Name("diplomat-selftest-\(getpid())"))
         defer { pasteboard.releaseGlobally() }
         let byHand = StubBrowser(code: "c")
