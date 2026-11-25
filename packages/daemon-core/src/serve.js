@@ -102,8 +102,8 @@ export function listenSingleton({ server, socketPath, log, onListening }) {
       }
       try { fs.unlinkSync(socketPath); } catch {}
       takeoverLock = lockFd;
-      // `onListening` is still registered from the listen that failed, so it is not
-      // passed again: it runs once, after the lock is released.
+      // `onListening` is still registered by the failed listen; prepended, the release
+      // runs before it.
       server.prependOnceListener('listening', () => {
         releaseTakeoverLock(lockPath, takeoverLock);
         takeoverLock = null;
@@ -116,11 +116,9 @@ export function listenSingleton({ server, socketPath, log, onListening }) {
   server.listen(socketPath, onListening);
 }
 
-/// Takes the socket of a state dir no daemon serves, for something that changes the dir
-/// in a daemon's place: resolves to a function that gives the socket up again, or to null
-/// when a daemon serves it or is taking it. Held, it answers every request 503 and keeps
-/// the startup lock, so a daemon that starts finds nobody to defer to and nothing to
-/// take over, and exits.
+/// Holds the socket while something changes a state dir in a daemon's place: it answers
+/// 503 and keeps the startup lock, so a daemon starting meanwhile exits. Resolves to a
+/// release function, or null when a daemon serves or is taking the socket.
 export async function holdSocket(socketPath) {
   const lockPath = `${socketPath}.lock`;
   const lock = acquireTakeoverLock(lockPath);
@@ -134,8 +132,8 @@ export async function holdSocket(socketPath) {
     server.listen(socketPath, () => resolve(null));
   });
   let failed = await listen();
-  // A file nobody answers on is what a dead daemon left: removed under the lock, as a
-  // daemon's start removes it. A daemon that bound it since is deferred to.
+  // A socket nobody answers on is a dead daemon's: removed under the lock, as a
+  // daemon's start does.
   if (failed?.code === 'EADDRINUSE' && !(await socketHealthy(socketPath))) {
     try { fs.unlinkSync(socketPath); } catch {}
     failed = await listen();
@@ -158,9 +156,8 @@ export async function holdSocket(socketPath) {
 export const NO_ROUTE = Symbol('no route');
 
 /// Reads a JSON request body and answers with handle(route, body)'s result, or the
-/// statusCode/message of what it throws. `route` is "METHOD /path". `notJson` is the
-/// error a body that does not parse is answered with. A body of more than `maxBody`
-/// characters is read to its end, kept no part of, and answered 413 with `tooLarge`.
+/// statusCode/message of what it throws. `route` is "METHOD /path". A body over `maxBody`
+/// characters is drained unkept and answered 413 `tooLarge`.
 export function jsonServer(handle, { notJson = 'invalid json', maxBody = 1_000_000, tooLarge = 'request body too large' } = {}) {
   return http.createServer((req, res) => {
     const send = (code, obj) => {

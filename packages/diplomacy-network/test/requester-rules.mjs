@@ -43,8 +43,6 @@ async function refused(rules, request, ctx = world(), pattern = /./) {
   assert.match(verdict.reason, pattern, label(request));
 }
 
-// What every kind reads: gh's own queries, the repository's code, and what every pull
-// request and issue of it says.
 const READS = [
   ...['prViewAuthor', 'prViewDefault', 'prViewCommits', 'prProjectItems', 'prViewReviews', 'prViewMergeable', 'typeFields', 'prChecks', 'prList', 'prSearch', 'prStatus',
     'issueView', 'issueList', 'userCurrent', 'repositoryInfo', 'repoView'].map((name) => ghql(GH[name])),
@@ -68,7 +66,6 @@ const READS = [
   gh('GET', '/user'),
 ];
 
-// What no kind may do, whatever its options.
 const NEVER = [
   // another repository, another host
   gh('GET', '/repos/o/other/pulls/578'), gh('GET', '/repos/victim/r/pulls/578'), gh('GET', '/repos/o/r-private'), gh('GET', '/repositories/1'),
@@ -181,10 +178,9 @@ await check('every kind reads what the real tools read, in the pool\'s repositor
   await refused(github('investigate'), gh('GET', '/repos/o/r/compare/main...victim:main'), world(), /names another repository/);
 });
 
-// The rest of an item, for the task whose item it is.
 const pullInFull = (n) => [`pulls/${n}/files?per_page=100`, `pulls/${n}/commits`, `pulls/${n}/requested_reviewers`, `issues/${n}/events`, `issues/${n}/labels`].map((tail) => gh('GET', `/repos/o/r/${tail}`));
 const issueInFull = (n) => [`issues/${n}/events`, `issues/${n}/labels`, `issues/${n}/reactions`].map((tail) => gh('GET', `/repos/o/r/${tail}`));
-// What no kind reads: no captured query of gh asks for any of it.
+// No captured gh query asks for any of these.
 const UNREAD = ['actions/runs', 'actions/runs?exclude_pull_requests=true&per_page=2', 'actions/runs?branch=feature', 'actions/workflows?page=1&per_page=100', 'actions/workflows/ci.yml/runs',
   'actions/artifacts', 'actions/artifacts/5/zip', 'actions/runs/7/artifacts', 'actions/caches', 'releases', 'releases/latest', 'releases/5/assets', 'releases/assets/5', 'releases/tags/v1',
   'deployments', 'deployments/5/statuses', 'environments', 'events', 'issues/events', 'traffic/views', 'traffic/clones', 'contributors', 'stats/contributors', 'stats/commit_activity',
@@ -509,7 +505,6 @@ await check('GitLab: every kind reads what glab reads, in the pool\'s project on
   // A job reads in full whichever merge request the forge says it covers.
   for (const request of mrInFull(6)) await allowed(gitlab('review', {}, 'job-all'), request, glWorld());
   for (const request of mrInFull(5)) await refused(gitlab('review', {}, 'job-all'), request, glWorld(), /#5 was opened by me/);
-  // What no kind reads.
   const unread = ['repository/compare%2Fx', 'repository/contributors', 'repository/archive', 'repository/archive.tar.gz?sha=main', 'repository/changelog?version=1.0.0', 'repository/merge_base',
     'repository/submodules/x', 'releases', 'releases/v1', 'releases/v1/assets/links', 'labels', 'milestones', 'milestones/1/issues', 'deployments', 'environments', 'events', 'members', 'users',
     'languages', 'statistics', 'packages', 'snippets', 'wikis', 'merge_requests/6/changes', 'merge_requests/6/commits', 'merge_requests/6/pipelines', 'merge_requests/6/approvals',
@@ -739,7 +734,6 @@ function respelled(segment) {
   return [...out];
 }
 
-// Every rule list the catalogue can write for the two test pools.
 function everyRuleList() {
   const lists = [];
   const options = [{}, { verdict: true, markReady: true }, { noPRs: true }, { readOnly: true }, { author: 'them' }];
@@ -916,7 +910,6 @@ await check('a GitHub Enterprise Server has github.com\'s rules on its one host:
     assert.ok(rules.length > 0 && rules.every((rule) => rule.host === host), host);
   }
 
-  // Request by request, the verdicts of github.com.
   const pushed = () => world({ branches: ['refs/heads/fix-421'] });
   for (const kind of KINDS) {
     const rules = ghes(kind);

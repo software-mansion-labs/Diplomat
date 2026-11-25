@@ -1,16 +1,8 @@
-// The Diplomacy Network daemon: one per machine, started by Diplomat while the network
-// is switched on. It is the node (src/node) over the real store and transport, with the
-// requester side (src/requester) and the executor side (src/executor) plugged into it,
-// behind a unix socket the applets talk to (README.md, "Local socket"):
-//   GET  /health, GET /state
-//   POST /pools, /admit, /offer, /withdraw, /invite, /join, /leave, /stop-run
-//
-// It reads Diplomat's config.json every CONFIG_POLL_MS: the two hour settings reach the
-// node at once, `networkDevices` decides what the jobs started from then on are given
-// of this machine's devices, and `networkEnabled` anything but true switches the node
-// off - offers cancelled, runs stopped, pools told, its containers removed - and ends
-// the process. SIGTERM, SIGINT and SIGHUP end it with its runs left going: the next
-// daemon takes them up from jobs.json.
+// The Diplomacy Network daemon, one per machine while the network is on: the node
+// (src/node) with the requester and executor sides, behind the applets' unix socket
+// (README.md, "Local socket"). `networkEnabled` anything but true in Diplomat's config
+// switches the node off and ends the process; SIGTERM, SIGINT and SIGHUP end it with
+// its runs left going, for the next daemon to take up from jobs.json.
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -46,10 +38,9 @@ import {
   TOOL_PATH, TOR_BIN, TRANSPORT_RETRY_MAX_MS, TRANSPORT_RETRY_MS, locate,
 } from './paths.js';
 
-// Prompts of private repositories, tokens and keys lie under the state directory, and
-// some of it is written by git, tor and openssl: whatever this process or a tool it
-// runs creates is the operator's alone, and so is a directory an earlier daemon made
-// before that held.
+// The state dir holds private prompts, tokens and keys, some written by git, tor and
+// openssl: whatever this process or its tools create is the operator's alone, and so is
+// a dir an older daemon made.
 process.umask(0o077);
 fs.mkdirSync(BASE_DIR, { recursive: true });
 fs.chmodSync(BASE_DIR, 0o700);
@@ -57,7 +48,7 @@ try { fs.chmodSync(LOG_PATH, 0o600); } catch {}
 
 const log = openLog(LOG_PATH);
 const startedAt = Math.floor(Date.now() / 1000);
-// Every tool is run by its name on this PATH, and inherits it for its own helpers.
+// Tools run by name on this PATH, and pass it to their own helpers.
 process.env.PATH = TOOL_PATH;
 
 let store = null;
@@ -65,12 +56,11 @@ let node = null;
 let ending = false;
 const timers = [];
 
-// A fault by its message and the place it was thrown from.
+// A fault is its message and where it was thrown.
 const faultOf = (err) => String(err?.stack ?? err).split('\n').slice(0, 2).join('\n');
 
-// Does `fn` every `ms`. Work that fails is a fault like any other, and one that fails
-// the same way FAULT_REPEATS times in a row ends the daemon however seldom its timer
-// fires: within FAULT_WINDOW_MS a slow timer never comes round that often.
+// A failure is a fault (onFault). `row` lets a slow timer that fails the same way
+// FAULT_REPEATS times running end the daemon: it never repeats within FAULT_WINDOW_MS.
 function every(ms, fn) {
   let last = '';
   let row = 0;
@@ -90,20 +80,18 @@ function every(ms, fn) {
 
 const TOOLS = {
   tor: TOR_BIN, docker: DOCKER_BIN, git: GIT_BIN, gh: GH_BIN, glab: GLAB_BIN, openssl: OPENSSL_BIN, claude: CLAUDE_BIN,
-  // The Keychain, which holds the model credential.
+  // The Keychain, for the model credential.
   ...(process.platform === 'darwin' ? { security: SECURITY_BIN } : {}),
 };
 const located = new Map(); // a tool -> where it was last found, or null
 const nowhere = (bin) => (bin.includes('/') ? `not at ${bin}` : `in none of ${TOOL_PATH}`);
 
-// Says where each tool is, and again when that changes: one installed while the daemon
-// runs is found by whatever runs it next.
 function lookForTools() {
   for (const [tool, bin] of Object.entries(TOOLS)) {
     const at = locate(bin);
     if (located.get(tool) === at) continue;
     located.set(tool, at);
-    // One named by hand is said to be: a stand-in has whatever the daemon gives the tool.
+    // Said, since a stand-in gets whatever the daemon gives the tool.
     const named = bin === tool ? '' : `, which DN_${tool.toUpperCase()} names`;
     log(at ? `${tool} is ${at}${named}` : `${tool} is ${nowhere(bin)}`);
   }
@@ -112,7 +100,6 @@ function lookForTools() {
 // ---- Diplomat's settings
 
 let hours = { requiredMinimumH: HOURS_FLOOR, maximumAcceptedH: HOURS_FLOOR };
-// `networkDevices`: whether a job is given anything of this machine's devices.
 let devicesOn = false;
 let unreadable = 0;
 
@@ -120,14 +107,13 @@ function pollConfig() {
   const config = readConfig();
   if (!config) {
     unreadable += 1;
-    // One read can fall in the middle of a rewrite; only a file that stays unreadable
-    // says anything.
+    // A read can land mid-rewrite; only a file that stays unreadable counts.
     log(`${CONFIG_PATH} could not be read (${unreadable} of ${CONFIG_UNREADABLE_POLLS})`);
     if (unreadable >= CONFIG_UNREADABLE_POLLS) end({ off: true, why: `${CONFIG_PATH} could not be read ${unreadable} times in a row: the network counts as switched off` });
     return;
   }
   unreadable = 0;
-  // The node holds each to the range the protocol allows.
+  // The node clamps both to the protocol's range.
   hours = { requiredMinimumH: config.networkRequiredMinimumH, maximumAcceptedH: config.networkMaximumAcceptedH };
   if ((config.networkDevices === true) !== devicesOn) {
     devicesOn = !devicesOn;
@@ -139,11 +125,9 @@ function pollConfig() {
 
 // ---- the transport
 
-// A transport starts once, and one whose start failed is over: tor is not installed yet,
-// or its data directory is held. The node is given this instead, the transport of the
-// moment behind one face: a start that failed is followed by a new transport, the waits
-// between them doubling up to TRANSPORT_RETRY_MAX_MS, and the state the node shows is
-// `failed` with the reason during a wait and what the new transport says from its start.
+// A transport whose start failed (tor missing, its data dir held) cannot start again, so
+// the node gets this one face over a fresh transport per try, the waits doubling up to
+// TRANSPORT_RETRY_MAX_MS.
 function lastingTransport(make) {
   const watchers = [];
   const halted = new AbortController();
@@ -196,8 +180,8 @@ let links = new Map(); // pool id -> { id, path, forge, identity }, as Diplomat 
 const hostOf = (id) => id.split('/')[0];
 const repoOf = (id) => id.split('/').slice(1).join('/');
 
-// What `rulesFor` is told of a pool: on GitLab its numeric id too, asked of the forge
-// once, since the forge's own clients spell a project either way.
+// On GitLab `rulesFor` also gets the numeric project id, asked once: the forge's own
+// clients name a project either way.
 async function ruleTarget(link) {
   if (link.forge !== 'gitlab') return link.id;
   if (!projectIds.has(link.id)) {
@@ -223,7 +207,6 @@ const requester = {
   perform: forge.perform,
 };
 
-// Who a task's commits are authored as: the operator, as the linked checkout's git has it.
 async function authorOf(checkout) {
   const ask = (key) => new Promise((resolve) => {
     execFile(GIT_BIN, ['-C', checkout, 'config', '--get', key], { encoding: 'utf8', timeout: 10000 }, (err, stdout) => resolve(err ? '' : stdout.trim()));
@@ -238,25 +221,21 @@ async function authorOf(checkout) {
 const ca = createCA({ log });
 const llm = createLLM({ log });
 const mirrors = createMirrors({ log });
-// A job's forge request goes out through its own run's key, and through no other's.
 const broker = createBroker({ log, ca, llm, mirrors, onForge: (job, request) => node.actFor(job.runId)(request) });
 const containers = createContainers({ log, broker: () => broker.address() });
 
 const jobs = new Map(); // run id -> { container, pool, peer, token, generation, pid, forwards, spent, release, stopping, ended, verdict, gone }
-// Until the jobs an earlier daemon left were looked at, a run this daemon holds no job
-// for may still be running: nothing can be said of it, and no job is started, since
-// what stands under a container's name is removed for the first job this daemon counts
-// in it. A start waits for the first look at the image and the model credential too.
+// Until an earlier daemon's jobs are taken up, a run with no job here may still be
+// running, and no job may start: the first job counted in a container removes what
+// stands under its name. A start also waits for the first image and credential check.
 let takenUp = false;
 const lookedAt = Promise.withResolvers();
 let report = () => {};
 
-// jobs.json as it stands on disk. It is written when a job comes or goes, and every
-// JOBS_WRITE_MS while what a job has spent of the model moves: the daemon after this one
-// counts on from there, a few seconds short at most, for a job that is being stopped
-// too. A job leaves the file only after the node's word on how its run ended is on
-// disk: the store is flushed first, and while that fails the file stays as it was, for
-// the daemon after this one to ask after the job.
+// jobs.json as last written, on every job change and every JOBS_WRITE_MS while model
+// spend moves: the next daemon counts on from it. The store is flushed first, so a job
+// leaves the file only once its run's end is on disk; while that fails the file stays,
+// for the next daemon to ask after the job.
 let savedJobs = '';
 const saveJobs = () => {
   const kept = Object.fromEntries([...jobs].map(([runId, { container, pool, peer, token, generation, pid, forwards }]) => [
@@ -273,25 +252,22 @@ const saveJobs = () => {
   }
 };
 
-// What the broker carried to the model for a job, or null: its count while the job is
-// admitted there, the last one seen once it is not. job.js holds the job's own figures
-// to it.
+// The broker's model spend for a job (the last seen once it left the broker), or null.
+// job.js caps the job's own figures at it.
 function spentOf(runId) {
   const job = jobs.get(runId);
   if (job) job.spent = broker.spent(runId) ?? job.spent;
   return job?.spent ?? null;
 }
 
-// The pool as the executor's parts name it.
 function poolOf(link) {
   const parts = link.id.split('/');
   return { id: link.id, forge: link.forge, host: parts[0], owner: parts.slice(1, -1).join('/'), repo: parts.at(-1) };
 }
 
-// The adb server as jobs reach it: through the filter, never at its own address.
+// Jobs reach the adb server only through this filter.
 const adb = createAdbFilter({ target: ADB_SERVER, log });
-// The devices the adb server lists as ready while jobs are given this machine's
-// devices; null while they are not, or no adb server answers.
+// Null while devices are off or no adb server answers.
 let attached = null;
 
 async function lookForAdb() {
@@ -299,17 +275,13 @@ async function lookForAdb() {
   return attached !== null;
 }
 
-// The snapshot's `devices`: `off` until the operator opts in, then `ready` while an adb
-// server answers and `none` while none does.
 function devicesState() {
   if (!devicesOn) return { state: 'off', detail: '' };
   if (attached !== null) return { state: 'ready', detail: '' };
   return { state: 'none', detail: ADB_SERVER ? `no adb server answers at ${ADB_SERVER.host}:${ADB_SERVER.port}` : 'DN_ADB_SERVER names no address on this machine' };
 }
 
-// The forwards one job is given while the operator offers this machine's devices: the
-// adb server, filtered, while it answers, and whatever DN_FORWARDS names. `only` holds a
-// job taken up after a restart to the forwards it was started with.
+// `only`: the forwards a job taken up after a restart was started with.
 async function openForwards(runId, only = null) {
   if (!devicesOn) return [];
   const wanted = (name) => only === null || only.includes(name);
@@ -318,8 +290,8 @@ async function openForwards(runId, only = null) {
   return forwards;
 }
 
-// The job is watched to its end; the node hears how it ended before anything of it is
-// taken down, so it never sees a job that is neither alive nor reported.
+// The node hears of the end before anything is taken down, so it never sees a job that
+// is neither alive nor reported.
 function follow(runId) {
   jobs.get(runId).gone = watch({ runId })
     .catch((err) => ({ ok: false, summary: `the run could not be watched: ${err?.message ?? err}` }))
@@ -329,8 +301,7 @@ function follow(runId) {
 async function settle(runId, ended) {
   const job = jobs.get(runId);
   if (!job) return;
-  // A job this machine ended for a fault of its own making is a failed attempt, in the
-  // machine's words.
+  // Ended by this machine for the job's own doing: a failed attempt, in its words.
   let outcome = job.verdict ? { ...ended, ok: false, state: 'failed', summary: job.verdict } : ended;
   const by = !job.verdict && ended.summary === VANISHED ? await containers.endedBy(job.container).catch(() => null) : undefined;
   if (by === 'job' || by === '') outcome = { ...ended, summary: INSIDE[by] };
@@ -350,28 +321,23 @@ async function settle(runId, ended) {
   saveJobs();
 }
 
-// How many jobs are being started: each may make a container yet.
+// Starts in flight: each may yet make a container.
 let starting = 0;
 
-// The pools a job could not be started in: pool id -> { why, until, row, path }. While
-// `why` says something this machine takes no job of the pool; `row` counts the failures
-// since a job of the pool was last started, and `path` is the checkout they were met with.
+// Pools a job could not start in: id -> { why, until, row, path }. No job is taken while
+// `why` is set; `row` counts failures since the last start, `path` the checkout they met.
 const stuck = new Map();
 
-// Leaves a pool alone for a while: POOL_RETRY_MS after the first failure, twice as long
-// after each one in a row, POOL_RETRY_MAX_MS at most.
 function leaveAlone({ id, path: checkout }, why) {
   const row = (stuck.get(id)?.row ?? 0) + 1;
   const wait = Math.min(POOL_RETRY_MAX_MS, POOL_RETRY_MS * 2 ** (row - 1));
   log(`taking no job of ${id} for ${Math.round(wait / 1000)} s: ${why}`);
-  // Counted from when it was said.
   stuck.set(id, { why, until: Date.now() + wait, row, path: checkout });
 }
 
 // A pool whose wait is over is taken from again once its mirror can be made, the one
-// part of a start that needs no job; whatever else stood in the way shows at the next
-// job, which is given back like the last. Nothing is held against a pool that is linked
-// no longer, or to another checkout.
+// part of a start that needs no job. Nothing is held against a pool unlinked or linked
+// to another checkout.
 async function retryPools() {
   for (const [id, held] of stuck) {
     const link = links.get(id);
@@ -380,7 +346,7 @@ async function retryPools() {
       continue;
     }
     if (held.until > Date.now()) continue;
-    // Not looked at again by the next pass while this one is at it.
+    // Skipped by an overlapping pass.
     held.until = Infinity;
     try {
       await mirrors.ensureMirror({ pool: poolOf(link), checkout: link.path });
@@ -396,10 +362,10 @@ async function startRun({ runId, pool: link, peer, spec }) {
   if (typeof spec?.prompt !== 'string' || typeof spec.name !== 'string' || typeof spec.email !== 'string') {
     throw new Error('the task names no prompt or no author for its commits');
   }
-  // A daemon on its way out makes no container and starts no job: one that is switched
-  // off has listed what it removes by then, or is about to.
+  // An ending daemon makes no container: a switched-off one has listed, or is about to
+  // list, what it removes.
   const unlessEnding = () => { if (ending) throw new OwnFault('this machine is stopping'); };
-  // Not counted as being started while it waits: a daemon that ends first never gets to it.
+  // Uncounted while it waits: if the daemon ends first, this never resolves.
   await lookedAt.promise;
   starting += 1;
   const pool = poolOf(link);
@@ -420,13 +386,13 @@ async function startRun({ runId, pool: link, peer, spec }) {
     });
     saveJobs();
     const started = await startJob({ run: { runId, pool }, container, spec, proxy, env: llm.env(), forwards, spent: () => spentOf(runId) });
-    // The daemon after this one stops the job by this group, and by nothing the job can write.
+    // The next daemon stops the job by this group, which the job cannot rewrite.
     jobs.get(runId).pid = started.pid;
     saveJobs();
     log(`${runId} started in ${container.name} for ${peer}${forwards.length > 0 ? `, with ${forwards.map((f) => f.name).join(', ')} forwarded` : ''}`);
     stuck.delete(pool.id);
     follow(runId);
-    // Where the job's stream is kept is not said: what stands there is the job's to write.
+    // The stream's path is not returned: what stands there is the job's to write.
     return { container: container.name };
   } catch (err) {
     broker.removeJob(runId);
@@ -434,9 +400,8 @@ async function startRun({ runId, pool: link, peer, spec }) {
     if (container) await containers.release({ name: container.name, runId }).catch(() => {});
     jobs.delete(runId);
     saveJobs();
-    // An OwnFault: no job ran, and why not is this machine's own affair. The node gives
-    // such a run back at no attempt; any other failure it counts as one, since the
-    // requester's jobs may have brought it about.
+    // The node gives an OwnFault's run back at no attempt; any other failure counts as
+    // one, since the requester's jobs may have caused it.
     if (err instanceof OwnFault && !ending) leaveAlone(link, err.message);
     log(`${runId} could not be started: ${err?.message ?? err}`);
     throw err;
@@ -445,21 +410,20 @@ async function startRun({ runId, pool: link, peer, spec }) {
   }
 }
 
-// Stops a job and does not give up: the node asks once, and a job that outlived its run
-// would go on spending the requester's key and this machine's model. Its way out is
-// closed before anything is asked of its container, so one that is slow to die, or
-// will not, does neither from that moment.
+// Retries until the job is stopped: the node asks once, and a job outliving its run
+// would go on spending the requester's key and this machine's model. Its broker access
+// goes first, so one slow to die spends nothing meanwhile.
 function stopRun(runId, reason) {
   const job = jobs.get(runId);
   if (!job) return Promise.resolve();
   job.stopping ??= (async () => {
     log(`stopping ${runId}: ${reason}`);
-    // What was carried to the model for it is kept: its outcome is read after this.
+    // Kept for the outcome, read after this.
     spentOf(runId);
     broker.removeJob(runId);
     while (jobs.has(runId)) {
       try {
-        // Null for a job that was never started or has ended: `settle` clears it away.
+        // Null: never started, or ended; `settle` clears it away.
         if ((await stopJob({ runId }, containers)) === null) return;
       } catch (err) {
         log(`${runId} could not be stopped: ${err?.message ?? err}`);
@@ -470,7 +434,6 @@ function stopRun(runId, reason) {
   return job.stopping;
 }
 
-// Why this machine can run no job of the pool `id` right now, '' when it can.
 function unable(id) {
   const docker = containers.dockerState();
   if (docker.state !== 'ready') return `docker is ${docker.state}: ${docker.detail}`;
@@ -483,10 +446,9 @@ function unable(id) {
 }
 
 const executor = {
-  // Only what can run right now is claimed: a claim this machine cannot serve keeps the
-  // task from every machine that could.
+  // A claim this machine cannot serve keeps the task from every machine that could.
   wouldTake: (task) => !ending && unable(task.pool) === '',
-  // A task on an Android project is left a while to a machine with a device to give.
+  // Android tasks are left a while to machines with a device.
   weigh: createWeighing({ checkoutOf: (pool) => links.get(pool)?.path ?? null, hasDevice: () => (attached?.length ?? 0) > 0 }),
   start: startRun,
   stop: stopRun,
@@ -498,11 +460,10 @@ const OUTGREW = 'the container outgrew its disk allowance';
 const UNMEASURED = 'the container could not be measured against its disk allowance';
 
 const NO_RUN = 'no run of this host stands behind it';
-// A job that ends by itself writes its exit code in `done`. One whose processes went
-// without it is the machine's doing when the engine says so (`containers.endedBy`): a job
-// is root in its container and can stop it, but not its relay, which a restart of the
-// engine or of the machine stops with it. That is given back; the job's doing is a
-// failed attempt.
+// A job that went without writing `done` was ended by the machine only when
+// `containers.endedBy` says the engine did: a job is root in its container and can stop
+// it, but not its relay, which only an engine or machine restart stops too. The
+// machine's doing is given back; the job's is a failed attempt.
 const GONE = 'its container and the container\'s relay were gone or stopped when this daemon started, as a restart of the machine or of its docker engine leaves them, and the job had not finished';
 const ENGINE_ENDED = 'the docker engine stopped its container and the container\'s relay under the job, as a restart of the engine or of the machine does';
 const UNTAKEN = 'its container runs but could not be taken up by this daemon';
@@ -513,9 +474,7 @@ const INSIDE = {
 const MUTE = 'the docker engine did not answer when its container was looked at, and nothing can be said of the job in it';
 const silent = (when) => `the docker engine did not answer for ${Math.round(ENGINE_WAIT_MS / 1000)} s ${when}, and nothing can be said of the job in it`;
 
-// A job this daemon can no longer serve is given back: the node stops it for that
-// reason and releases its claim, which costs its requester no attempt. One the node
-// holds no run for is stopped here.
+// Costs the requester no attempt. A job the node holds no run for is stopped here.
 function giveBack(runId, why) {
   log(`giving ${runId} back: ${why}`);
   node.stopRun({ runId, reason: why }).catch(() => stopRun(runId, why));
@@ -525,17 +484,10 @@ const engineAnswers = async () => (await docker(['version', '--format', '{{.Serv
 
 const stands = (runId) => node.snapshot().runs.some((run) => run.runId === runId && run.endedAt === 0);
 
-// Takes up the jobs the daemon before this one left running: each is watched from here
-// on and, while its run stands, admitted to the broker under the token and CA it was
-// started with; one whose run was ended meanwhile is stopped and admitted to nothing.
-// One that ended meanwhile is reported, and so is one that finished by itself (`done`)
-// with nobody watching. One whose container cannot be taken up is a failed attempt
-// when it was stopped from inside, and is given back when the engine ended it (GONE),
-// or when the engine did not answer for ENGINE_WAIT_MS (`answers` false) and nothing
-// can be said of it: what is still there of it is stopped by `reconcile` once the
-// engine answers. A run the node calls running whose
-// job is on no list is asked after too: its outcome is on disk if it ended under a
-// daemon that did not live to tell the node.
+// Takes up the previous daemon's jobs. With `answers` false (the engine silent for
+// ENGINE_WAIT_MS) an unfinished one is given back, and `reconcile` stops what is left
+// once the engine answers. A running run on no list is asked after too: it may have
+// ended under a daemon that died before telling the node.
 async function takeUp(kept, answers) {
   const moved = broker.address().port !== kept.port;
   for (const [runId, was] of Object.entries(kept.jobs ?? {})) {
@@ -562,7 +514,7 @@ async function takeUp(kept, answers) {
         continue;
       }
       if (!was.pid) {
-        // Its process group was never heard: nothing to watch it by, so it is ended.
+        // No process group recorded: nothing to watch it by.
         log(`${runId} was being started when the daemon before this one went: stopping what there is of it in ${container.name}`);
         if (attachJob({ runId, container })) await stopJob({ runId }, containers);
         await containers.release({ name: container.name, runId });
@@ -579,7 +531,7 @@ async function takeUp(kept, answers) {
         continue;
       }
       if (moved) {
-        // The job's proxy address leads to a port this daemon could not have again.
+        // Its proxy address names a port this daemon could not get again.
         giveBack(runId, 'the broker could not listen where this job reaches it');
         continue;
       }
@@ -599,20 +551,17 @@ async function takeUp(kept, answers) {
   saveJobs();
 }
 
-// A job the node holds no live run for is stopped: its run was stopped while a stop
-// could not go through, or the node's own record of it was lost. So is a job this
-// daemon holds no record of at all, which jobs.json lost leaves behind: it runs on in
-// its container with a proxy token nobody takes. Its stop asks the engine until it
-// answers, so it is begun only once the engine has answered here. While there is a job,
-// the engine is asked whether it answers, one look at a time: after ENGINE_WAIT_MS of
-// looks it did not answer, every job is given back, as a daemon that starts does.
+// Stops jobs the node holds no live run for (a stop that failed, a lost record) and
+// strays no record holds (a lost jobs.json). A stray's stop retries until the engine
+// answers, so it begins only once it has. An engine silent for ENGINE_WAIT_MS while
+// there are jobs gets them all given back, as at startup.
 let reconciling = false;
 let silentSince = 0;
 async function reconcile() {
   if (!takenUp || reconciling) return;
   const going = new Set(node.snapshot().runs.filter((run) => run.endedAt === 0).map((run) => run.runId));
   for (const [runId, job] of jobs) {
-    // One that ended is only being taken down.
+    // Ended: only being taken down.
     if (!going.has(runId) && !job.ended) stopRun(runId, NO_RUN);
   }
   const strays = unended().filter(({ runId }) => !jobs.has(runId));
@@ -646,11 +595,9 @@ async function checkExecutor() {
   await Promise.all([containers.ensureImage().catch(() => {}), llm.load().catch(() => {}), lookForAdb()]);
 }
 
-// A container that holds more of this machine's disk than a container gets goes, and its
-// jobs with it: each is a failed attempt, since whichever of them filled it would fill
-// the next one too. So does one the engine has not measured for several looks running
-// (`bytes` null): what cannot be measured is held to no allowance. One with a job still
-// being started is looked at again next time.
+// Each job of an evicted container is a failed attempt: whichever filled it would fill
+// the next one too. An unmeasurable one (`bytes` null) goes too, or it would be held to
+// no allowance. One with a job still starting waits for the next look.
 async function evict({ name, bytes, jobs: counted }) {
   const held = counted.map((runId) => jobs.get(runId));
   if (held.some((job) => !job?.gone)) return;
@@ -666,14 +613,8 @@ async function evict({ name, bytes, jobs: counted }) {
   await containers.discard(name);
 }
 
-// What is not kept for ever, looked at every SWEEP_MS, each on its own: a container
-// over its disk allowance or not to be measured, what container.js's sweep takes - what
-// is left under a container's name that no job is in, and the images no job is started
-// in - every certificate authority but the one each set of hosts is given next (a job
-// is answered from the one it was started under, so none goes while a job runs), a leaf
-// certificate past its end, the directory and the outcome of a run RUN_KEEP_MS after it
-// ended, and the mirror of a pool that has not been linked, or has been left, for
-// MIRROR_KEEP_MS.
+// Every SWEEP_MS. CAs are pruned only with no job running: a job is answered from the
+// one it was started under.
 const upkeep = [
   ['containers over their disk allowance', async () => { for (const over of await containers.overQuota()) await evict(over); }],
   ['what containers left behind', () => containers.sweep()],
@@ -689,8 +630,7 @@ const upkeep = [
   }],
 ];
 
-// A look an earlier sweep is still at is passed over, not begun again beside it: the
-// two would only ask the engine the same, each slowing the other. The other looks go on.
+// A look an earlier sweep is still at is skipped: two would only slow each other.
 const looking = new Set();
 async function sweep() {
   for (const [what, look] of upkeep) {
@@ -706,10 +646,9 @@ async function sweep() {
   }
 }
 
-// The broker, then the jobs left from before, which wait for neither the image nor the
-// model credential: a build takes minutes and a login is renewed in its own time, and a
-// job that runs asks the broker meanwhile. On Linux the broker listens on docker's
-// bridge, so it waits for the engine.
+// Leftover jobs are taken up without waiting for the image or credential: a build takes
+// minutes, and a running job needs the broker meanwhile. On Linux the broker listens on
+// docker's bridge, so it waits for the engine.
 async function startExecutor() {
   const kept = readJson(JOBS_PATH) ?? {};
   const leftJobs = Object.keys(kept.jobs ?? {}).length > 0;
@@ -719,13 +658,12 @@ async function startExecutor() {
       await broker.start(told ? { port: kept.port } : {});
     } catch (err) {
       log(`the broker is not listening: ${err?.message ?? err}`);
-      // Somebody else has the port the jobs were told: another serves the next ones.
+      // Their port is taken: any serves new jobs, and takeUp gives the old ones back.
       if (err?.code === 'EADDRINUSE' && told) kept.port = 0;
       else await delay(EXECUTOR_RETRY_MS);
     }
   }
-  // An engine that does not answer says nothing about the jobs in it: it is asked
-  // again, for ENGINE_WAIT_MS.
+  // A silent engine says nothing of its jobs: ask again for up to ENGINE_WAIT_MS.
   let checked = null;
   let answers = true;
   for (const from = Date.now(); !ending; await delay(EXECUTOR_RETRY_MS)) {
@@ -746,10 +684,8 @@ async function startExecutor() {
 
 // ---- the snapshot
 
-// The node's snapshot with the executor's side of it: the engine, the credential, the
-// devices, and `notTaking` - of a pool, why this machine takes none of its jobs; of a job
-// of this machine's own that waits in the pool, why this machine does not take it.
-// `daemon.testSettings` is what it was given that only a test sets, none on the network.
+// `notTaking`: of a pool, why this machine takes none of its jobs; of an own offer
+// still pooled, why this machine does not take it.
 function snapshot() {
   const { updatedAt, identity, transport, admit, pools, runs, offers } = node.snapshot();
   const down = transport.state === 'ready' ? '' : `the transport is ${transport.state}: ${transport.detail}`;
@@ -775,8 +711,7 @@ let writing = null;
 let written = 0;
 let shown = '';
 
-// Replaced whole, and not forced to the disk: nothing but a person looking into a daemon
-// that no longer answers reads the file.
+// Not fsynced: only a person looking into a daemon that stopped answering reads it.
 function writeState() {
   writing = null;
   written = Date.now();
@@ -790,13 +725,11 @@ function writeState() {
   }
 }
 
-// The snapshot file follows every change, a second behind at most.
 function touch() {
   writing ??= setTimeout(writeState, Math.max(0, written + STATE_WRITE_MS - Date.now()));
 }
 
-// The engine, the credential, the devices and what is held against a pool change
-// without the node's knowing.
+// These change without the node knowing.
 function watchExecutor() {
   const now = JSON.stringify([containers.dockerState(), llm.state(), devicesState(), [...stuck].map(([id, held]) => [id, held.why])]);
   if (now !== shown) touch();
@@ -818,7 +751,7 @@ const flag = [(v) => typeof v === 'boolean', 'true or false'];
 const plainObject = [(v) => v !== null && typeof v === 'object' && !Array.isArray(v), 'an object'];
 const optional = ([check, what]) => [(v) => v === undefined || check(v), what];
 
-// The members of `body` a route reads, each checked; any other member is ignored.
+// Members not in `shape` are ignored.
 function read(body, shape, what = 'The request body') {
   if (!plainObject[0](body)) throw new Refusal(400, `${what} must be a JSON object.`);
   const out = {};
@@ -834,7 +767,7 @@ const SHAPES = {
   pool: { id: POOL, path: text(4096), forge: [(v) => v === 'github' || v === 'gitlab', '"github" or "gitlab"'], identity: text(255, 0) },
   admit: { slots: whole(0, 1000), reason: optional(text(200, 0)) },
   offer: {
-    // How long a prompt may be is the node's to say: it measures the task as it is sent.
+    // The node bounds the prompt: it measures the task as sent.
     pool: POOL, kind: text(64), item: text(200), title: text(1000, 0), prompt: [(v) => typeof v === 'string', 'text'], options: optional(plainObject),
     base: optional(text(300)), now: optional(flag),
   },
@@ -845,8 +778,8 @@ const SHAPES = {
   stopRun: { runId: text(64) },
 };
 
-// What the node refuses, it refuses with a plain Error whose message is a sentence for
-// the operator; anything else it throws is a fault, and is answered and logged as one.
+// The node refuses with a plain Error whose message is for the operator; anything else
+// it throws is a fault.
 async function asked(fn) {
   try {
     return await fn();
@@ -874,8 +807,7 @@ const routes = {
     return { ok: true };
   },
 
-  // Answered once the offer is signed and in this machine's store; the pool hears of it
-  // in the background.
+  // Answered once the offer is signed and stored; the pool hears of it in the background.
   'POST /offer': async (body) => {
     const offer = read(body, SHAPES.offer);
     const link = links.get(offer.pool);
@@ -883,8 +815,7 @@ const routes = {
     return asked(() => node.offer({ ...offer, author }));
   },
 
-  // The applets withdraw whenever a task of theirs ends, and may say it twice: a task
-  // this machine has no open offer of is as withdrawn as it can be.
+  // Idempotent: the applets withdraw whenever a task of theirs ends, maybe twice.
   'POST /withdraw': async (body) => {
     const { taskId, reason } = read(body, SHAPES.withdraw);
     const open = node.snapshot().offers.some((offer) => offer.taskId === taskId && ['pooled', 'claimed'].includes(offer.state));
@@ -924,8 +855,7 @@ const server = jsonServer(async (route, body) => {
 
 // ---- the process
 
-// Whether the socket and daemon.json are this daemon's still: not once daemon.json
-// names a daemon that took them over.
+// False once daemon.json names a daemon that took the socket over.
 function owned() {
   const owner = readJson(DISCOVERY_PATH)?.pid;
   return !owner || owner === process.pid;
@@ -939,28 +869,24 @@ function bye(code) {
   process.exit(code);
 }
 
-// Removes everything this daemon made in docker. Null once it is gone, else why it may
-// not be: the engine said so, did not answer in SWITCH_OFF_WAIT_MS, or a job was still
-// being started, whose container the engine may make after it listed what there was.
+// Null once all this daemon made in docker is gone, else why it may not be. A job still
+// being started may make its container after the engine listed what there was.
 async function clearDocker() {
   const late = delay(SWITCH_OFF_WAIT_MS, `the docker engine did not answer within ${SWITCH_OFF_WAIT_MS / 1000} s`);
   const left = await Promise.race([containers.removeAll().then(() => null, (err) => String(err?.message ?? err)), late]);
   return left ?? (starting > 0 ? 'a job was still being started' : null);
 }
 
-// Ends the daemon. Switched `off`, the node first cancels what this machine offered,
-// stops what it runs and tells its pools, everything this daemon made in docker is
-// removed, and with that gone what the machine has no further use for (OFF_REMOVES);
-// otherwise the runs are left going for the next daemon. Either way the transport
-// stops, and with it tor. The exit is 1 for a switch-off that left something of that
-// behind, in docker or on disk.
+// `off`: the node cancels offers, stops runs and tells pools, then docker and
+// OFF_REMOVES are cleared, exiting 1 if any of it is left. Otherwise the runs are left
+// going for the next daemon.
 async function end({ off, why }) {
   if (ending) return;
   ending = true;
   log(`ending: ${why}`);
   for (const timer of timers) clearInterval(timer);
   clearTimeout(writing);
-  // Closing the server removes the socket's file, whoever listens there by now.
+  // Closing removes the socket file even if another daemon listens there now.
   if (owned()) server.close();
   try {
     await (off ? node?.switchOff() : node?.stop());
@@ -969,11 +895,10 @@ async function end({ off, why }) {
   }
   let left = null;
   let kept = '';
-  // When the engine's time is up, for what it made and the run records it is asked to remove.
+  // The engine's deadline, for its containers and then the run records.
   let by = 0;
   if (off) {
-    // The jobs the node stopped, taken down before the broker goes, and the jobs being
-    // started, which find the daemon ending and make nothing.
+    // Stopped jobs come down before the broker goes; starts in flight see `ending`.
     const gone = (async () => { while (jobs.size > 0 || starting > 0) await delay(100); })();
     await Promise.race([gone, delay(SWITCH_OFF_WAIT_MS)]);
     // A job that outlived its stop goes with its container here.
@@ -990,13 +915,10 @@ async function end({ off, why }) {
   bye(left === null && kept === '' ? 0 : 1);
 }
 
-// An exception nobody caught, thrown by some event's handler or by a timer's work (`row`
-// is how many times in a row that work has failed this way): logged with its stack, and
-// the daemon goes on serving - the jobs it watches are worth more than the one event.
-// The same fault FAULT_REPEATS times, within FAULT_WINDOW_MS or in a row, is one it does
-// not get past: it exits, its jobs left going for the daemon after it. Diplomat, which
-// asks for the snapshot while the network is on, starts that one when nothing answers.
-const faults = new Map(); // a fault -> when it was thrown, of late
+// An uncaught fault is survived: the jobs watched are worth more than one event. The same
+// fault FAULT_REPEATS times, within FAULT_WINDOW_MS or `row` in a row, exits with the
+// jobs left going; Diplomat starts a new daemon when nothing answers.
+const faults = new Map(); // a fault -> its recent throw times
 function onFault(err, row = 0) {
   log(`uncaught: ${String(err?.stack ?? err)}`);
   const now = Date.now();
@@ -1010,20 +932,18 @@ function onFault(err, row = 0) {
 
 let signalled = false;
 function onSignal(signal) {
-  // Only a second signal cuts an end short: the first may find the daemon already
-  // switching off, and that must be let finish.
+  // Only a second signal cuts an end short: the first may land mid switch-off, which must
+  // finish.
   if (signalled) {
     log(`${signal} again: exiting at once`);
     bye(1);
   }
   signalled = true;
-  // An applet that switches the network off writes the setting and then stops the
-  // daemon: the setting says which of the two ends this is.
+  // An applet switching the network off writes the setting, then stops the daemon.
   const config = readConfig();
   end({ off: config !== null && config.networkEnabled !== true, why: signal });
 }
 
-// Builds the daemon behind its socket.
 function setUp() {
   try { fs.chmodSync(SOCKET_PATH, 0o600); } catch {}
   atomicWrite(DISCOVERY_PATH, {
@@ -1041,7 +961,7 @@ function setUp() {
     store.write('identity', { seed: identity.seed });
     store.flush();
   }
-  // As the node reads it: a file that holds no list is one Diplomat has yet to post.
+  // No list: Diplomat has yet to post one.
   const kept = store.read('links')?.pools;
   links = new Map((Array.isArray(kept) ? kept : []).map((pool) => [pool.id, pool]));
   node = createNode({
@@ -1051,8 +971,7 @@ function setUp() {
     settings: () => hours,
   });
   node.onChange(touch);
-  // The transport comes up in the background: over Tor that takes minutes, and the
-  // socket answers meanwhile.
+  // In the background: over Tor that takes minutes, and the socket answers meanwhile.
   node.start().catch((err) => log(`the node did not start: ${err?.stack ?? err}`));
   startExecutor().catch((err) => log(`the executor side did not start: ${err?.stack ?? err}`));
   lookForTools();
@@ -1060,9 +979,8 @@ function setUp() {
   pollConfig();
   every(CONFIG_POLL_MS, pollConfig);
   every(STATE_WRITE_MS, watchExecutor);
-  // A test's way to a fault: each line of this file is thrown once - one that begins
-  // `timer ` by a timer's work, one that begins `promise ` in a promise nobody waits for,
-  // any other by an event's handler.
+  // Test faults: each line is thrown once, by a timer's work (`timer `), in an unawaited
+  // promise (`promise `), or else by an event handler.
   if (TEST_FAULTS_PATH) {
     const next = (kind) => {
       let lines = [];
@@ -1078,8 +996,7 @@ function setUp() {
   touch();
 }
 
-// A daemon that could not be built is none: it leaves no socket to answer for it, and
-// whoever started it hears why.
+// A daemon that could not be built leaves no socket answering, and its starter hears why.
 function onListening() {
   try {
     setUp();
@@ -1099,7 +1016,7 @@ async function start() {
   for (const file of [DISCOVERY_PATH, STATE_PATH, JOBS_PATH]) sweepDeadTmp(file);
   listenSingleton({ server, socketPath: SOCKET_PATH, log, onListening });
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => onSignal(signal));
-  // A promise nobody waited for must not take the daemon and its runs' watch down.
+  // An unhandled rejection must not take the daemon and its runs' watch down.
   process.on('unhandledRejection', (err) => log(`unhandled: ${err?.stack ?? err}`));
   process.on('uncaughtException', (err) => onFault(err));
 }

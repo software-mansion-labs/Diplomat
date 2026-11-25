@@ -1,37 +1,26 @@
-// The push check for git smart HTTP (PROTOCOL.md section 10). A push is one opaque POST:
-// a list of ref commands followed by a pack. A rule on its URL says nothing about which
-// branch moves or how, so the command list is read here and every command must pass:
-// the ref is one the rule covers, it is not deleted, and it is either a creation the rule
-// permits or a fast-forward.
+// The push check for git smart HTTP (PROTOCOL.md section 10). A push is one opaque POST,
+// ref commands then a pack, so a rule on its URL says nothing about which branch moves or
+// how: every command must name a ref the rule covers, delete nothing, and be a creation
+// the rule permits or a fast-forward.
 //
-// "Fast-forward" is proven, not taken from the executor: the pack is indexed into a
-// quarantine repository that borrows the linked checkout's objects read-only, and git is
-// asked whether the ref's old value is an ancestor of the new one. The old value must be
-// what the forge says the branch holds now - a creation, a name the forge has no branch
-// of - and the forge itself rejects a push whose old id is not the ref's current value,
-// so there is no way to rewrite history or to take over a branch that exists.
+// A fast-forward is proven, not taken from the executor: the pack is indexed into a
+// quarantine repository borrowing the linked checkout's objects read-only, and git is
+// asked whether the old value is an ancestor of the new. The old value must be what the
+// forge says the branch holds now (for a creation, a name it has no branch of), and the
+// forge rejects a push whose old id is stale, so no history is rewritten and no existing
+// branch taken over. The default branch and protected branches are never pushed. The
+// pack is measured before git reads it: a few kilobytes can unfold to any size. Commits
+// at the pack's boundary that a stale checkout lacks are fetched by id.
 //
-// The forge is also asked which branch is the default and whether a branch is protected:
-// neither is ever pushed. And the pack is measured before git reads it, because a pack of
-// a few kilobytes can unfold to any size.
+// Under a rule with `fork` the push may go to the task account's own fork instead (the
+// forge says whose a repository is and what it forks); the same checks hold against the
+// fork's default branch and protection.
 //
-// The pack usually stops at commits the forge already has (the pack's boundary), and a
-// stale checkout may not have them. They are fetched into the quarantine by id, so git
-// sees a whole graph.
-//
-// A push goes to the pool's repository, or under a rule with `fork` to the fork of it
-// that the task's account holds itself: the forge is asked whose the repository at the
-// path is and what it is a fork of. There the same checks hold, against the fork's own
-// default branch and protection, and the head branch of a pull request is one whose head
-// the forge places in that fork.
-//
-// `denyPaths` keeps a push from writing CI definitions. Every pushed commit that no
-// branch of the forge holds is compared with its parents: a path under `denyPaths` - in
-// any letter case - may only hold what one of the parents holds there, which lets a merge
-// bring the base branch's workflow files along and stops a commit from writing, changing
-// or deleting one. The commits the push builds on must then be the forge's own: reachable
-// from a branch of the repository pushed to (for a fork, of the pool's repository too),
-// not merely fetchable by id - a forge that shares objects between forks hands out
+// `denyPaths` keeps a push from writing CI definitions: in each pushed commit no branch of
+// the forge holds, a path under it (in any case) may only hold what one of the parents
+// holds there, which lets a merge bring the base branch's along. Those parents must be
+// reachable from a branch of the repository pushed to (for a fork, of the pool's too),
+// not merely fetchable by id: a forge that shares objects between forks hands out
 // commits no branch of this repository holds.
 
 import { spawn } from 'node:child_process';
@@ -133,10 +122,8 @@ export function parseReceivePack(body) {
   return { commands, caps, options, format, pack };
 }
 
-/// What the forge said it did with a push, read from its answer to git-receive-pack:
-/// `{ ok, ng }`, the refs it reports as updated and as declined. Null for an answer that
-/// is not a report this reader can follow to its end. The report comes as pkt-lines, or
-/// inside band 1 of a side-band when the push asked for one.
+/// The forge's report on a push: `{ ok, ng }`, the refs it updated and declined, as
+/// pkt-lines or inside side-band 1. Null for an answer this cannot follow to its end.
 export function pushReport(body) {
   try {
     let lines = [];
@@ -200,10 +187,9 @@ function repoOf(segments) {
 
 const lower = (s) => String(s ?? '').toLowerCase();
 
-// What the forge says of the repository at `asked`, which must be the fork of `repo` that
-// the account `owner` holds itself. Whose a repository is and what it is a fork of are
-// the forge's word, never the path's. Every other case gets one refusal, a name that
-// stands for nothing included, so it does not tell which repositories the account has.
+// Whose a repository is and what it forks are the forge's word, never the path's. Every
+// other case gets one refusal, a nonexistent name included, so it does not tell which
+// repositories the account has.
 async function ownFork(asked, owner, repo, ctx) {
   if (typeof ctx.repository !== 'function') refuse('nothing here can ask the forge about its branches');
   // A name spelled with an escape is not asked about: the forge would read another one.
@@ -219,11 +205,9 @@ export function checkFork(asked, owner, repo, ctx = {}) {
   return verdict(async () => ({ ok: true, fork: await ownFork(asked, owner, repo, ctx) }));
 }
 
-// Where a push goes and which pull requests' head branches it may move there, as the
-// forge reports them now. The place is the pool's repository, or under a rule with `fork`
-// the task account's own fork of it (returned as `fork`). `heads` is for a rule scoped to
-// pull requests (`head`): the head branches that live in that place. `refs` null means
-// "any" - a question only the advertisement asks, before a ref is named.
+// Where a push goes (the pool's repository, or the account's `fork`) and, for a rule
+// scoped to PRs (`head`), the head branches that live there, as the forge reports them
+// now. `refs` null means "any": only the advertisement asks, before a ref is named.
 async function destination(rule, segments, ctx, refs) {
   const asked = repoOf(segments);
   if (rule.fork === undefined && asked !== lower(rule.repo)) refuse('this is not the pool\'s repository');
@@ -249,10 +233,8 @@ async function destination(rule, segments, ctx, refs) {
   return { fork, heads };
 }
 
-/// The check for `GET .../info/refs?service=git-receive-pack`, the ref advertisement a
-/// push starts with: the repository must be the pool's - or, under a rule with `fork`,
-/// the task account's own fork of it - and for a rule scoped to pull requests one of
-/// them must have its head branch there.
+/// The check for the ref advertisement a push starts with: the repository must be the
+/// pool's or its `fork`, and for a rule scoped to PRs one must have its head there.
 export function checkAdvertise(rule, segments, ctx = {}) {
   return verdict(async () => {
     await destination(rule, segments, ctx, null);
@@ -457,23 +439,12 @@ async function prove(deny, push, ctx, fork) {
 /// "<repository>:<ref>" for one in a fork, so the two are never taken for each other.
 export const branchLabel = (ref, fork) => (fork === undefined ? ref : `${lower(fork)}:${ref}`);
 
-/// The check for `POST .../git-receive-pack`. `rule` is the matched rule (`refs`, `create`,
-/// `head`, `fork`, `denyPaths`, `repo`), `segments` the request path's parts and `body`
-/// the request body. Resolves to `{ ok: true, created }` - the branches the push would
-/// create, each as `{ branch, sha }` with its `branchLabel` and the commit it would be at,
-/// for the caller to count against `create` - or `{ ok: false, reason }`. The push goes
-/// to the pool's repository, or under a rule with `fork` (an account) to that account's
-/// own fork of it. A ref may be created when `create` is positive and `refs` covers it,
-/// and updated when it is the head branch `head` names or one of `ctx.state.branches`,
-/// the branches the forge accepted from this task. The default branch, a branch the
-/// forge reports as protected and a new name a protection rule would cover are never
-/// moved or created. `ctx.checkout` is the linked checkout whose objects the proof may
-/// read, `ctx.fetch({ env, repo, wants | into })` fetches from the forge into the
-/// quarantine, `ctx.repository(repo)` answers `{ id, name, owner, parent, defaultBranch,
-/// ciPaths }` (null for none), `ctx.branch(ref, repo)` the forge's `{ sha, protected }`
-/// of a branch (null for none) and `ctx.protects(ref, repo)` whether a protection rule
-/// would cover a branch of that name; `repo` left out is the pool's repository. A lookup
-/// that throws has not answered, and its error is the caller's to turn into a refusal.
+/// The check for `POST .../git-receive-pack`. Resolves to `{ ok: true, created }` - each
+/// branch the push would create as `{ branch, sha }` (its `branchLabel` and commit), for
+/// the caller to count against `create` - or `{ ok: false, reason }`. A ref may be
+/// created when `create` is positive and `refs` covers it, and updated when it is the
+/// head branch `head` names or one of `ctx.state.branches` (those the forge accepted from
+/// this task). A lookup that throws is the caller's to turn into a refusal.
 export function checkPush(rule, segments, body, ctx = {}) {
   return verdict(async () => {
     if (body.length > PUSH_MAX_BYTES) refuse('the push is larger than a task may send');

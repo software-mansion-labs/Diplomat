@@ -1,162 +1,114 @@
-// The rule catalogue (PROTOCOL.md section 10): for one task, the exact list of forge
-// requests its executor may have this machine make. A task gets what its kind needs on
-// its own item and nothing else; a kind or forge without an entry gets no rules at all and
-// can be offered by nobody.
+// The rule catalogue (PROTOCOL.md section 10): for one task, the exact forge requests its
+// executor may have this machine make. A kind or forge without an entry gets no rules,
+// so can be offered by nobody.
 //
-// What each kind may write. Every kind also gets the reads below, confined to the pool's
-// repository. "its PR" is the task's item `pr-<n>`; "its issue" is `issue-<n>`.
+// Writes per kind; every kind also gets the reads below, confined to the pool's
+// repository. "its PR" is the item `pr-<n>`, "its issue" `issue-<n>`.
 //
 //   kind        options          writes
 //   ----------  ---------------  ---------------------------------------------------------
 //   review      -                on its PR: open, fill, submit (COMMENT only) and delete
 //                                its own pending review; reply inside review threads;
 //                                delete its own still-pending review comments. No push.
-//               verdict          the same, and the review may be submitted as APPROVE or
-//                                REQUEST_CHANGES (GitLab: approve, unapprove).
-//                                GitLab spells a review as draft notes published together
-//                                and one summary note on the merge request.
-//   review-own  -                on its PR: reply in review threads, resolve them, push
-//                                fast-forward commits to the PR's head branch.
-//               markReady        the same, and the PR may be marked ready for review.
+//               verdict          also APPROVE or REQUEST_CHANGES (GitLab: approve,
+//                                unapprove). A GitLab review is draft notes published
+//                                together plus one summary note.
+//   review-own  -                on its PR: reply in and resolve review threads; push
+//                                fast-forward commits to its head branch.
+//               markReady        also mark the PR ready for review.
 //   conflicts   -                push fast-forward commits to its PR's head branch.
-//   issues      -                on its issue: assign and unassign the task's own account,
+//   issues      -                on its issue: assign and unassign the task's account,
 //                                comment; push ONE new branch and fast-forward it; open
-//                                one draft pull request from that branch.
+//                                one draft PR from it.
 //               assign: false    no assignment.        comment: false    no comment.
-//               noPRs            the comment only: no assignment, no push, no pull request.
+//               noPRs            the comment only.
 //   audit       -                push up to AUDIT_BRANCHES new branches and fast-forward
-//                                them; open one draft pull request from each.
+//                                them; open one draft PR from each.
 //               readOnly         nothing.
 //   investigate -                nothing.
 //
-// A push goes to the pool's repository or to the task account's own fork of it - the
-// fork holds the head branch of a pull request opened from it, and a new branch may be
-// made in either. "One new branch" is counted for the task, across every key issued for
-// it and across both places (`authorize` keeps the count in the task's state). No push
-// moves or creates the default branch of the repository it goes to, or a branch the forge
-// reports as protected there, whatever the rule covers.
+// A push goes to the pool's repository or the task account's own fork of it. "One new
+// branch" counts across every key of the task and both places (`authorize` keeps the
+// count). No push moves or creates the default branch, or a branch the forge reports as
+// protected, whatever the rule covers.
 //
-// An item `job-<id>` is work not tied to one number. What that does to each kind:
-//
-//   review      every open PR NOT opened by the task's account (opened by
-//               `options.author` when the job names one). The number in a path becomes "*"
-//               and the forge is asked who opened that PR before anything is sent.
-//   review-own  every open PR opened by the task's account, checked the same way; a push
-//               must go to the head branch of such a PR.
-//   conflicts   every open PR opened by `options.author`, or by the task's account when
-//               the job names nobody: a push must go to the head branch of such a PR.
-//   issues      the issue-pinned writes (assignment, comment) are omitted; the one branch
-//               and its draft pull request stay. Diplomat makes one job per issue, so a
-//               job without a number has no issue of its own to write on.
-//   audit, investigate   unchanged: neither is about one number.
+// An item `job-<id>` is not tied to one number:
+//   review      every open PR NOT opened by the task's account (or opened by
+//               `options.author`, if named). The path's number becomes "*" and the forge
+//               is asked who opened the PR before anything is sent.
+//   review-own  every open PR opened by the task's account, checked the same way.
+//   conflicts   every open PR opened by `options.author`, else by the task's account.
+//   issues      no assignment or comment (Diplomat makes one job per issue, so a job has
+//               no issue of its own); the branch and its draft PR stay.
+//   audit, investigate   unchanged.
 //
 // Judgement calls:
-// - Reads are listed by what a kind's work needs, not by what is harmless. Every kind
-//   reads the repository's code - files, refs, commits, a compare, the statuses and check
-//   results recorded on a commit - and, as context, what every pull request and issue of
-//   the repository says and what was said on it. A task reads the lists the forge keeps
-//   of an item - a pull request's files and commits, an issue's events - for its own item
-//   only: the PR or issue it is pinned to, or for a job a PR the forge says it covers. A
-//   PR's diff is no such list: it is repository code, which every kind reads as a compare
-//   and, on GitHub, as the PR itself in diff or patch form (`gh pr diff`). A CI run, its
-//   jobs and logs are read when the forge says the run is of a branch the task made, of
-//   the head branch of such a PR, or - audit and investigate, whose subject is the
-//   repository as it stands - of the default branch. Nothing else is listed: no list of
-//   runs, artifacts, releases, deployments, events, contributors, archives, labels,
-//   milestones, and none of the repository's settings.
-// - A read stays in the pool's repository. Inside the listed sub-trees, the routes whose
-//   answer is another repository's are refused by rules of their own (`deny`), a compare
-//   takes two refs of this repository, and a route that takes query parameters names
-//   them, since one more could point it elsewhere. What the forge serves under the
-//   repository's own paths by object id - on GitHub, the commits of its forks - no rule
-//   can tell apart.
-// - The answer about the repository itself, and about a branch, goes out cut to what a
-//   job needs (`pick`): the whole answer holds a clone token or a runner registration
-//   token, the requester's permissions and the protection settings. A GraphQL document
-//   reads the same of the repository (`repoLeaves` in graphql.js), and on GitHub the
-//   requester's access level, which `gh pr create` asks for. From the repository it goes
-//   on to what every kind reads and to nothing else (`repo` there); below that it is
-//   checked by field name, the same for every pull request and issue.
-// - A push is addressed by the pull request, not by a branch name: the head branch is
-//   whatever the forge says that PR's head is when the push arrives, in the repository
-//   the forge says holds it.
-// - The only other repository a push reaches is the fork of the pool's repository that
-//   the task's account holds itself (`fork`): the path names that account as the owner,
-//   and the forge is asked whose the repository is and what it is a fork of. A fork held
-//   by anybody else, by an organisation or a group, a fork of a fork and the account's
-//   other repositories are out of reach, and nothing of a fork is read through the API.
-// - A draft opened from a branch in the fork is still a pull request of the pool's
-//   repository: GitHub takes the head as "account:branch", GitLab opens the merge
-//   request on the fork's project with the pool's project as its pinned target.
+// - Reads are listed by what a kind's work needs, not by what is harmless. An item's
+//   lists (a PR's files and commits, an issue's events) are read for the task's own item
+//   only; a PR's diff is repository code, which every kind reads. A CI run is read only
+//   when the forge says it is of a branch the task made, of such a PR's head, or (audit,
+//   investigate) of the default branch.
+// - Reads stay in the pool's repository: routes under its paths whose answer is another
+//   repository's are refused (`deny`), and a route with query parameters names them, as
+//   one more could point it elsewhere. What GitHub serves by object id under the
+//   repository's paths (its forks' commits) no rule can tell apart.
+// - The repository's and a branch's answers are cut (`pick`): whole, they hold a clone or
+//   runner registration token, the requester's permissions and protection settings.
+//   GraphQL is cut the same way (`repoLeaves` in graphql.js).
+// - A push is addressed by the PR: its head branch is whatever the forge says when the
+//   push arrives.
+// - The only other repository a push reaches is the fork the task's account holds itself
+//   (`fork`): the forge is asked whose it is and what it forks. No fork is read through
+//   the API.
 // - A pushed commit may not change CI definitions (`denyPaths`) from what one of its
-//   parents holds. A merge can so bring a definition in as any branch of the repository
-//   has it, which is what merging the base branch does. What a definition runs or
+//   parents holds, so a merge can bring one in as any branch has it. What a definition
 //   includes from elsewhere in the repository is a file like any other.
-// - A review is written through the review lifecycle the review prompt prescribes; the
-//   one-call shortcuts (GraphQL addPullRequestReview, a top-level PR comment) are not
-//   listed, and a `review` task's replies are made inside review threads only.
-// - GitLab gets no GraphQL mutation: every write its prompts ask for has a REST route
-//   whose path pins the project and the merge request or issue, and a GitLab global id
-//   cannot be traced back to its merge request in one confined query.
-// - Text the task writes is `prose` (PROTOCOL.md): no "@" before a name, no "bors" and no
-//   line starting with "/" and a word, which GitLab runs as a quick action in the author's
-//   name and bots on either forge take for a command from the author (/merge, bors r+,
-//   @dependabot merge). A comment, a review or a note is sent with a hidden first line
-//   (`COMMENT_MARK`), so a bot that acts on a comment's first word (atlantis apply) does not,
-//   and holds none of policy-bot's default approval words. On GitHub, text on a pull request
-//   is also checked against the repository's policy-bot policy (`policy`).
-// - `GET /user` answers with a handful of public members only (`pick`): agents ask it
-//   who they are, and the full answer holds the requester's private profile.
-// - A GitHub Enterprise Server gets github.com's rules on its one host, and one more:
-//   `GET /meta`, cut to the server's version. gh 2.101.0 asks for it before `pr view`,
-//   `issue view`, `pr create` and a search, and gives the search up without an answer.
+// - Reviews go through the lifecycle the review prompt prescribes; the one-call shortcuts
+//   (GraphQL addPullRequestReview, a top-level PR comment) are not listed.
+// - GitLab gets no GraphQL mutation: each write has a REST route pinning the project and
+//   item, and a GitLab global id cannot be traced to its merge request in one confined
+//   query.
+// - Written text is `prose` (PROTOCOL.md) and goes out under a hidden first line
+//   (`COMMENT_MARK`), so a bot acting on a comment's first word does not; on GitHub, PR
+//   text is also checked against the repository's policy-bot policy (`policy`).
+// - `GET /user` is cut (`pick`): agents ask who they are, and the full answer holds the
+//   requester's private profile.
+// - A GitHub Enterprise Server also gets `GET /meta`, cut to its version: gh 2.101.0 asks
+//   for it before `pr view`, `issue view`, `pr create` and a search.
 
 import { knownMutations } from './graphql.js';
 
-/// How many branches an `audit` task may create.
 export const AUDIT_BRANCHES = 24;
 
 const GITHUB_COM = 'github.com';
 
-/// Where a GitHub host serves its API, as gh reaches it: github.com on a host of its own,
-/// a GitHub Enterprise Server under /api/v3 and /api/graphql of the host it serves git
-/// on. Null for a host whose API gh looks for on another name again: a subdomain of
-/// github.com or of ghe.com, and github.localhost.
+/// Where gh reaches a GitHub host's API. Null for a host whose API gh looks for on yet
+/// another name: a subdomain of github.com or ghe.com, and github.localhost.
 export function githubApi(host) {
   if (host === GITHUB_COM) return { host: 'api.github.com', rest: '', graphql: '/graphql' };
   if (/(^|\.)(github\.com|ghe\.com|github\.localhost)$/.test(host.replace(/:[0-9]*$/, ''))) return null;
   return { host, rest: '/api/v3', graphql: '/api/graphql' };
 }
 
-// What every kind reads of a GitHub repository's code: files, refs and commits, with what
-// is recorded on a commit - its comments, statuses and check results.
 const GITHUB_CODE = [
   'contents/**', 'git/**', 'commits/**', 'tags', 'readme/**', 'license',
   'check-runs/*', 'check-runs/*/annotations', 'check-suites/*', 'check-suites/*/check-runs',
 ];
-// And of every pull request and issue in it, as context: what it says and what was said
-// on it.
 const GITHUB_CONTEXT = [
   'pulls', 'pulls/comments', 'pulls/comments/*', 'pulls/*', 'pulls/*/comments', 'pulls/*/reviews', 'pulls/*/reviews/*',
   'pulls/*/reviews/*/comments', 'issues', 'issues/comments', 'issues/comments/*', 'issues/*', 'issues/*/comments',
 ];
-// The rest of a pull request and of an issue, read by the task whose item it is. A pull
-// request is an issue as well.
+// Read by the task whose item it is only. A pull request is an issue as well.
 const GITHUB_PULL = ['files', 'commits', 'requested_reviewers', 'merge'];
 const GITHUB_ISSUE = ['events', 'labels', 'reactions'];
-// A CI run, its jobs and their logs, named by the id of the run or of a job: read when
-// the forge says the run is of a branch the task works on (`run`).
+// Each path with whether its id is a run's or a job's.
 const GITHUB_RUNS = [
   ['actions/runs/*', 'run'], ['actions/runs/*/jobs', 'run'], ['actions/runs/*/logs', 'run'], ['actions/runs/*/attempts/*', 'run'],
   ['actions/runs/*/attempts/*/jobs', 'run'], ['actions/runs/*/attempts/*/logs', 'run'], ['actions/jobs/*', 'job'], ['actions/jobs/*/logs', 'job'],
 ];
-// Reads no kind is given, refused with the reason: an issue's timeline, sub-issues, parent
-// and dependencies carry the issues and pull requests of other repositories that refer
-// to it.
 const GITHUB_ELSEWHERE = ['issues/*/timeline', 'issues/*/sub_issues', 'issues/*/parent', 'issues/*/dependencies/**'];
 const GITHUB_ELSEWHERE_WHY = 'this answer holds issues and pull requests of other repositories';
-// What a task is told of the repository itself: not the clone token, the requester's
-// permissions on it, its security settings or the repository it was forked from.
+// Not the clone token, the requester's permissions, security settings or the parent.
 const GITHUB_REPO_PICK = [
   'id', 'node_id', 'name', 'full_name', 'owner', 'private', 'visibility', 'fork', 'archived', 'disabled', 'is_template',
   'html_url', 'url', 'clone_url', 'ssh_url', 'git_url', 'description', 'homepage', 'default_branch', 'language', 'topics',
@@ -165,8 +117,8 @@ const GITHUB_REPO_PICK = [
 ];
 // A branch without its protection settings.
 const GITHUB_BRANCH_PICK = ['name', 'commit', 'protected'];
-// The same lists for GitLab. A branch's or a tag's name is one segment there, its slashes
-// encoded; "**" after it gives the path that name would be with them decoded a rule too.
+// GitLab encodes a ref name's slashes into one segment; "**" after it also covers the
+// path with them decoded.
 const GITLAB_CODE = ['repository/files/**', 'repository/tree', 'repository/blobs/**', 'repository/commits/**', 'repository/tags/**'];
 const GITLAB_CONTEXT = [
   'merge_requests', 'merge_requests/*', 'merge_requests/*/notes', 'merge_requests/*/notes/*', 'merge_requests/*/discussions',
@@ -175,17 +127,14 @@ const GITLAB_CONTEXT = [
 const GITLAB_PULL = ['versions', 'versions/*', 'changes', 'diffs', 'raw_diffs', 'commits', 'pipelines', 'approvals', 'draft_notes', 'draft_notes/*', 'award_emoji'];
 const GITLAB_ISSUE = ['resource_label_events', 'resource_state_events', 'award_emoji'];
 const GITLAB_RUNS = [['pipelines/*', 'run'], ['pipelines/*/jobs', 'run'], ['jobs/*', 'job'], ['jobs/*/trace', 'job']];
-// Reads no kind is given, refused with the reason: answers that hold other projects'
-// issues and merge requests, the address a person posted from, and a GET that writes a ref.
 const GITLAB_DENIED = [
   [['merge_requests/*/closes_issues', 'merge_requests/*/related_issues', 'merge_requests/*/blocks', 'merge_requests/*/blockees',
     'issues/*/links', 'issues/*/related_merge_requests', 'issues/*/closed_by'], 'this answer holds issues and merge requests of other projects'],
   [['issues/*/user_agent_detail'], 'this answer holds the address a person posted from'],
   [['merge_requests/*/merge_ref'], 'this read writes a ref on the forge'],
 ];
-// What a task is told of the project itself: not its runners' registration token, its
-// import URL (which may carry a credential), its service desk address, the requester's
-// permissions on it or the project it was forked from.
+// Not the runners' registration token, the import URL (it may carry a credential), the
+// service desk address, the requester's permissions or the parent.
 const GITLAB_PROJECT_PICK = [
   'id', 'name', 'name_with_namespace', 'path', 'path_with_namespace', 'description', 'default_branch', 'visibility', 'web_url',
   'ssh_url_to_repo', 'http_url_to_repo', 'readme_url', 'topics', 'namespace', 'archived', 'empty_repo', 'created_at',
@@ -193,11 +142,10 @@ const GITLAB_PROJECT_PICK = [
   'remove_source_branch_after_merge', 'only_allow_merge_if_pipeline_succeeds', 'only_allow_merge_if_all_discussions_are_resolved',
   'license', 'license_url',
 ];
-// An issue as GitLab answers it, to a read or to a write, carries the address of whoever
-// wrote it in through the Service Desk: that member is let out as null.
+// A GitLab issue, read or written, carries its Service Desk writer's address.
 const ISSUE_BLANK = { blank: ['service_desk_reply_to'] };
 const GITLAB_BLANK = { issues: ISSUE_BLANK, 'issues/*': ISSUE_BLANK };
-// A GitLab branch without who may push to it or merge into it, the requester included.
+// Without who may push to it or merge into it.
 const GITLAB_BRANCH_PICK = ['name', 'commit', 'merged', 'protected', 'default', 'web_url'];
 const GITHUB_ROOTS = ['repository', 'viewer', 'rateLimit', '__type', 'search', 'node'];
 const GITLAB_ROOTS = ['project', 'currentUser'];
@@ -212,8 +160,7 @@ function parsePool(forge, pool) {
   return { host, repo: parts.join('/'), parts, projectId };
 }
 
-// The largest number a pull request or an issue can have: GitHub's GraphQL takes the
-// number as an `Int`, which is 32 bits wide.
+// GitHub's GraphQL takes the number as a 32-bit `Int`.
 const MAX_ITEM_NUMBER = 2 ** 31 - 1;
 
 function parseItem(item) {
@@ -225,8 +172,7 @@ function parseItem(item) {
 const without = (object, key) => Object.fromEntries(Object.entries(object).filter(([k]) => k !== key));
 const login = (v) => (typeof v === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/.test(v) ? v.toLowerCase() : null);
 
-// Which pull requests a PR-shaped kind covers: one number, or every open one by (or not
-// by) an author. Null when the task's item gives it nothing to stand on.
+// One number, or every open PR by (or not by) an author; null when the item gives none.
 function pullScope(kind, item, me, options) {
   if (item.type === 'pr') return { type: 'pr', number: item.number };
   if (item.type !== 'job') return null;
@@ -241,9 +187,8 @@ const PULL_KINDS = ['review', 'review-own', 'conflicts'];
 const PROSE = { prose: true };
 const COMMENT = { prose: true, comment: true };
 
-// Whose CI runs a kind reads beside those of the branches the task itself made: the ones
-// of the head branch of a pull request it covers (`head`), or of the default branch
-// (`base`). Null for a task that has no branch to watch.
+// CI runs read beside the task's own branches': a covered PR's head (`head`) or the
+// default branch (`base`). Null for a task with no branch to watch.
 function runScope(kind, options, who) {
   if (who) return { head: who };
   if (kind === 'issues') return options.noPRs === true ? null : {};
@@ -259,16 +204,14 @@ function github({ kind, options, target, item, me }) {
   // How many segments of a path stand before "repos".
   const under = at.rest.split('/').length - 1;
   const api = (method, path, more = {}) => ({ host: at.host, method, path, fold: [under + 1, under + 2], ...more });
-  // Text policy-bot reads: a review's body and a comment on the pull request or issue the
-  // path's number names.
+  // Text policy-bot reads, on the PR or issue the path's number names.
   const READ = { ...COMMENT, policy: { segment: under + 4 } };
   const rules = [];
   const mutations = [];
   let graphqlItem;
 
-  // Smart HTTP addresses a repository with or without ".git". After the pool's own come
-  // the task account's repositories, whatever their names: the push check lets through
-  // the one the forge calls that account's fork of the pool's (`fork`).
+  // Smart HTTP takes a repository with or without ".git". `/${me}/*` is any repository of
+  // the account; the push check lets through only its fork of the pool's (`fork`).
   const push = (more) => {
     for (const [base, fold, where] of [[`/${owner}/${name}.git`, [0, 1], {}], [`/${owner}/${name}`, [0, 1], {}], [`/${me}/*`, [0], { fork: me }]]) {
       rules.push({ host: target.host, method: 'GET', path: `${base}/info/refs`, fold, query: { service: { equals: 'git-receive-pack' } }, git: 'receive-pack', repo: target.repo, ...where, ...more });
@@ -349,7 +292,6 @@ function github({ kind, options, target, item, me }) {
   if (runs) for (const [tree, what] of GITHUB_RUNS) rules.push(api('GET', `${repo}/${tree}`, { run: { segment: under + 5, what, repo: target.repo, ...runs } }));
   rules.push({ host: at.host, method: 'GET', path: `${at.rest}/user`, pick: ['login', 'id', 'node_id', 'type', 'name', 'html_url'] });
   if (target.host !== GITHUB_COM) rules.push({ host: at.host, method: 'GET', path: `${at.rest}/meta`, pick: ['installed_version'] });
-  // A search takes its query and how the answer is paged and ordered.
   rules.push({ host: at.host, method: 'GET', path: `${at.rest}/search/issues`, query: {
     q: { search: target.repo }, advanced_search: 'free', page: 'free', per_page: 'free', sort: 'free', order: 'free',
   } });
@@ -362,8 +304,7 @@ function github({ kind, options, target, item, me }) {
 // ------------------------------------------------------------------------ GitLab
 
 function gitlab({ kind, options, target, item, me }) {
-  // glab names a project by its URL-encoded path; a script that read a project's id from
-  // an answer uses the number. Both spell the same project.
+  // glab names a project by its encoded path; a script that read its id uses the number.
   const projects = [{ base: `/api/v4/projects/${encodeURIComponent(target.repo)}`, fold: [3] }];
   if (target.projectId !== null) projects.push({ base: `/api/v4/projects/${target.projectId}`, fold: [] });
   const rules = [];
@@ -371,8 +312,8 @@ function gitlab({ kind, options, target, item, me }) {
     for (const { base, fold } of projects) rules.push({ host: target.host, method, path: `${base}${tail}`, fold, ...more });
   };
   const gitFold = target.parts.map((_, i) => i);
-  // After the pool's own project come the projects in the task account's own namespace:
-  // the push check lets through the one the forge calls a fork of the pool's (`fork`).
+  // `/${me}/*` is any project of the account; the push check lets through only its fork
+  // of the pool's (`fork`).
   const push = (more) => {
     for (const [base, fold, where] of [[`/${target.repo}.git`, gitFold, {}], [`/${target.repo}`, gitFold, {}], [`/${me}/*`, [0], { fork: me }]]) {
       rules.push({ host: target.host, method: 'GET', path: `${base}/info/refs`, fold, query: { service: { equals: 'git-receive-pack' } }, git: 'receive-pack', repo: target.repo, ...where, ...more });
@@ -380,19 +321,18 @@ function gitlab({ kind, options, target, item, me }) {
       rules.push({ host: target.host, method: 'POST', path: `${base}/git-receive-pack`, fold, git: 'receive-pack', repo: target.repo, denyPaths: ['.gitlab-ci.yml', '.gitlab/ci/**'], ...where, ...more });
     }
   };
-  // A merge request is a draft by its title, and nothing else in the body may point it
-  // at another project or merge it. A label is made by naming it, replaces another of its
-  // scope and can start a pipeline: glab sends the empty list, as gh sends none.
+  // A merge request is a draft by its title; nothing else in the body may retarget or
+  // merge it. No labels: naming one makes it, replaces another of its scope and can start
+  // a pipeline. glab sends the empty list.
   const draft = {
     source_branch: { created: true, required: true }, title: { prefix: 'Draft:', prose: true, required: true },
     target_branch: 'free', description: PROSE, labels: { equals: '' }, remove_source_branch: 'free', squash: 'free', allow_collaboration: 'free',
   };
   const draftMerges = () => {
-    // glab names the target project in every merge request it opens; it may only be the pool's own.
+    // glab names the target project in every merge request; only the pool's may be named.
     each('POST', '/merge_requests', { body: { ...draft, ...(target.projectId === null ? {} : { target_project_id: { equals: target.projectId } }) } });
-    // A merge request from a fork is opened on the fork's project and must name the
-    // pool's as its target: `project` has the forge asked whether the project in the
-    // path is the task account's own fork of the pool's.
+    // One from a fork is opened on the fork's project, targeting the pool's: `project`
+    // asks the forge whether the path's project is the account's own fork of the pool's.
     if (target.projectId !== null) {
       rules.push({ host: target.host, method: 'POST', path: '/api/v4/projects/*/merge_requests', project: { segment: 3, owner: me, repo: target.repo },
         body: { ...draft, target_project_id: { equals: target.projectId, required: true } } });
@@ -460,14 +400,9 @@ function gitlab({ kind, options, target, item, me }) {
   return rules;
 }
 
-/// The exact rules of one task, or null for a forge, kind, item or identity the catalogue
-/// has no entry for. `forge` is "github" or "gitlab"; `kind` one of review, review-own,
-/// conflicts, issues, audit, investigate; `pool` the pool id (`github.com/owner/repo`, or
-/// the same under the host of a GitHub Enterprise Server or a GitLab), or
-/// `{ id, projectId }` to also allow a GitLab project's numeric spelling; `item` is
-/// `pr-<n>` or `issue-<n>` with a number up to 2147483647, or `job-<id>`; `identity` the
-/// forge login the task acts as.
-/// `options`: verdict, markReady, noPRs, assign, comment, readOnly, author.
+/// The exact rules of one task, or null when the catalogue has no entry for it. `pool`
+/// is the pool id, or `{ id, projectId }` to also allow a GitLab project's numeric
+/// spelling; `identity` is the forge login the task acts as.
 export function rulesFor({ forge, kind, options = {}, pool, item, identity }) {
   const target = parsePool(forge, pool);
   const parsed = parseItem(item);

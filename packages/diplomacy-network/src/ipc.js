@@ -1,6 +1,3 @@
-// The client the applets' helpers and the tests use to start the daemon and talk to it
-// over its unix socket.
-
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createDaemonClient } from '../../daemon-core/src/ipc.js';

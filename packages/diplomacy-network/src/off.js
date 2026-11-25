@@ -1,7 +1,3 @@
-// What the daemon and the installer both do: read the network's switch in Diplomat's
-// config, remove what a machine that is switched off keeps nothing of, and find a job
-// that finished while no daemon watched it.
-
 import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -10,18 +6,15 @@ import { unended } from './executor/job.js';
 import { readOwn } from './executor/result.js';
 import { CONFIG_PATH, OFF_REMOVES, RUNS_DIR } from './paths.js';
 
-/// Diplomat's config as an object, or null while it cannot be read as one. Only a config
-/// that can be read says that the network is off.
+/// Null while unreadable, which does not mean the network is off.
 export function readConfig() {
   const config = readJson(CONFIG_PATH);
   return config !== null && typeof config === 'object' && !Array.isArray(config) ? config : null;
 }
 
-/// Removes what OFF_REMOVES names, each whatever becomes of the others, once nothing of
-/// this machine's is left in docker. A job can leave among its run records what this
-/// user may not delete: those go through `containers.eraseAll()`, container.js's, which
-/// is given `withinMs`. Resolves to '' once all of it is gone, else to a sentence that
-/// names what is left.
+/// Call once docker holds nothing of this machine's. Run records this user may not
+/// delete go through `containers.eraseAll()`, given `withinMs`. Resolves to '' once all
+/// is gone, else to a sentence naming what is left.
 export async function clearAway(containers, withinMs) {
   const stays = (dir) => {
     try {
@@ -41,11 +34,9 @@ export async function clearAway(containers, withinMs) {
   return `${left.join(' and ')} could not be removed${records}. The next --stop-daemon tries again.`;
 }
 
-/// Of a run whose job ended by itself with no daemon watching it - its runner wrote its
-/// exit code in `done`, which it does last - the run as `attachJob` takes it, `{ runId,
-/// container }`, for `watch` or `readFinished` to read the outcome from what the job
-/// left. Null for a job that wrote none, one whose outcome is on record and one this
-/// process watches.
+/// A run whose job ended with no daemon watching (its runner writes the exit code to
+/// `done` last), as `attachJob` takes it. Null if it wrote none, its outcome is on
+/// record, or this process watches it.
 export async function finishedLeft(runId) {
   const left = unended().find((run) => run.runId === runId);
   const done = left ? await readOwn(path.join(left.container.runsDir, runId), 'done', 32) : null;

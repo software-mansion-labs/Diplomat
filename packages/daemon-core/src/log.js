@@ -1,13 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-/// What a log holds before it starts again: with the copy set aside, a log takes twice
-/// this on disk at most.
+/// With its `.1` copy, a log takes at most twice this on disk.
 export const LOG_MAX_BYTES = 16 * 1024 * 1024;
 
-/// A line log, appended to by however many processes. One that has reached `maxBytes` is
-/// copied to `<log>.1` over the copy before it and emptied in place, so a descriptor open
-/// on it - a daemon's stderr - goes on writing to the log, and its mode stays.
+/// A line log any number of processes append to. At `maxBytes` it is copied to
+/// `<log>.1` and truncated in place, so a descriptor open on it (a daemon's stderr) keeps
+/// writing to the log, and its mode stays.
 export function createLog(logPath, maxBytes = LOG_MAX_BYTES) {
   try { fs.mkdirSync(path.dirname(logPath), { recursive: true }); } catch {}
   return function log(...args) {
@@ -15,7 +14,7 @@ export function createLog(logPath, maxBytes = LOG_MAX_BYTES) {
     const line = `[${new Date().toISOString()}] ${parts.join(' ')}\n`;
     try {
       if (fs.statSync(logPath).size >= maxBytes) {
-        // Emptied whether or not the copy could be made: the bound comes first.
+        // Even when the copy failed: the bound comes first.
         try { fs.copyFileSync(logPath, `${logPath}.1`); } catch {}
         fs.truncateSync(logPath);
       }
