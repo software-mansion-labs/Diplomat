@@ -11,9 +11,11 @@ cd "$PKG_DIR"
 
 APP_NAME="Diplomat"
 echo "Building release…"
-swift build -c release
+# Native: the default (swiftbuild) stamps the binary with the deployment target as its
+# SDK, so macOS gives it macOS 13 behaviour - SwiftUI opening the empty Settings scene.
+swift build -c release --build-system native
 
-BIN="$(swift build -c release --show-bin-path)/$APP_NAME"
+BIN="$(swift build -c release --build-system native --show-bin-path)/$APP_NAME"
 APP="$APP_NAME.app"
 "$PKG_DIR/install/assemble-app.sh" "$BIN" "$PKG_DIR/../../diplomat-core/assets" \
   "$(cd "$PKG_DIR/../../.." && pwd)" "$PKG_DIR/$APP"
