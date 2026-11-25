@@ -1,7 +1,6 @@
-// Performs an authorised request on the forge with this machine's own credential
-// (PROTOCOL.md section 9), and answers the questions the deep checks ask the forge. The
-// credential is read from gh or glab, added here and nowhere else, and never leaves this
-// file: not in a log line, not in an error, not in what goes back to the executor.
+// Performs authorised requests with this machine's forge credential (PROTOCOL.md section
+// 9) and answers the deep checks' questions. The credential, read from gh or glab, never
+// leaves this file: not in a log line, an error, or what goes back to the executor.
 
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -13,9 +12,8 @@ import { readPolicy } from './policybot.js';
 import { githubApi } from './rules.js';
 import { FORGE_ORIGINS, FORGE_RESPONSE_MAX_BYTES, FORGE_TIMEOUT_MS, GH_BIN, GIT_BIN, GIT_TIMEOUT_MS, GLAB_BIN, TOKEN_TTL_MS } from '../paths.js';
 
-// What an executor may say to the forge about its request. Everything else is dropped:
-// its authorization and cookies, the host, hop-by-hop headers, and the override headers
-// some servers take a different method from.
+// Every other request header is dropped: authorization, cookies, the host, hop-by-hop
+// headers, and the method-override headers some servers obey.
 const REQUEST_HEADERS = new Set(['accept', 'content-type', 'content-encoding', 'git-protocol', 'x-github-api-version', 'if-none-match']);
 const RESPONSE_HEADERS = new Set([
   'content-type', 'link', 'etag', 'location', 'retry-after', 'x-github-request-id',
@@ -56,7 +54,6 @@ const NODE_QUERY = `query($id: ID!) { node(id: $id) { __typename
 
 const PROTECTION_QUERY = `query($owner: String!, $name: String!, $after: String) { repository(owner: $owner, name: $name) {
   viewerPermission branchProtectionRules(first: 100, after: $after) { nodes { pattern } pageInfo { hasNextPage endCursor } } } }`;
-// How many pages of protection rules are read before the answer counts as not given.
 const PROTECTION_PAGES = 10;
 
 // Whether a classic GitHub rule that covers the protected branch `held` would likely cover
@@ -94,7 +91,7 @@ function run(bin, args, env) {
   });
 }
 
-// The token glab keeps for a host in its config file, for a glab that will not print it.
+// For a glab that will not print the token it keeps for a host.
 function glabConfigToken(host) {
   const dirs = [
     process.env.GLAB_CONFIG_DIR,
@@ -126,15 +123,12 @@ function glabConfigToken(host) {
   return '';
 }
 
-/// The requester's side of the forge. `log` receives one line per request made, never a
-/// credential. Returns `{ perform, context, resolveNode, pull, pullsByHead, comment, ciRun,
-/// assignees, self, repository, branch, protects, projectId, fetchInto }`; every function but `perform` and
-/// `context` takes `{ forge, host }` first - "github" or "gitlab", and the host the
-/// credential is for. A lookup throws when the forge's answer does not settle its question.
+/// Every function but `perform` and `context` takes `{ forge, host }` first, the host
+/// naming the credential. A lookup throws when the forge's answer does not settle its
+/// question.
 export function createForge({ log = () => {} } = {}) {
   const tokens = new Map(); // "forge host" -> { token, at }
-  // A claim -> { bases: base branch -> what `policy` answered, texts: hash of the files'
-  // text -> the same }.
+  // claim -> { bases: base branch -> `policy`'s answer, texts: hash of the files -> same }
   const policies = new WeakMap();
   const [MAX_POLICIES, MAX_BASES] = [8, 64];
 
@@ -170,7 +164,6 @@ export function createForge({ log = () => {} } = {}) {
   }
 
   const origin = (host) => (typeof FORGE_ORIGINS[host] === 'string' ? FORGE_ORIGINS[host].replace(/\/$/, '') : `https://${host}`);
-  // Where a forge serves its API beside git on `host`: GitLab under /api of that host.
   // Null for a GitHub this cannot ask.
   const apiOf = ({ forge, host }) => (forge === 'github' ? githubApi(host) : { host, rest: '/api' });
   // Smart HTTP takes a basic credential; both forges' APIs take a bearer one.
@@ -216,11 +209,9 @@ export function createForge({ log = () => {} } = {}) {
     return { status: res.status, headers: res.headers, body: Buffer.concat(chunks) };
   }
 
-  /// Sends a request `authorize` allowed and resolves to `{ status, headers, body }`, the
-  /// body base64 and the headers cut to what an executor may see. `host` names the
-  /// credential: the host of the pool's forge. Throws for a request `authorize` did
-  /// not return, a host that is not the forge's, and a forge that cannot be reached.
-  /// Whatever the outcome, the task's state is told what became of the request.
+  /// Sends a request `authorize` allowed; resolves to `{ status, headers, body }`, body
+  /// base64 and headers cut to what an executor may see. Whatever the outcome, the task's
+  /// state is told what became of the request.
   async function perform(request, { forge, host }) {
     if (!authorized(request)) throw new Error('forge: perform was given a request authorize did not allow');
     let res;
@@ -235,8 +226,8 @@ export function createForge({ log = () => {} } = {}) {
     }
     let { status, body } = res;
     if ((request.pick || request.blank) && status >= 200 && status < 300) {
-      // The rule lets only some members of this answer out, or of each entry of a list
-      // (`pick`), and the members named in `blank` out as null wherever they stand.
+      // `pick` applies to the answer or each entry of a list; `blank` members become null
+      // wherever they stand.
       let whole;
       try { whole = JSON.parse(body.toString('utf8')); } catch {}
       const cut = (object) => Object.fromEntries(request.pick.filter((k) => Object.hasOwn(object, k)).map((k) => [k, object[k]]));
@@ -252,8 +243,8 @@ export function createForge({ log = () => {} } = {}) {
     return { status, headers, body: body.toString('base64') };
   }
 
-  // One request of this file's own, outside any task's rules: every caller builds its
-  // path from values it has already confined. GitHub's GraphQL stands beside its REST.
+  // Outside any task's rules: every caller builds its path from values it has already
+  // confined.
   async function api(target, method, apiPath, json) {
     const at = apiOf(target);
     if (!at) throw new Error(`forge: ${target.host} is not a GitHub host this can ask`);
@@ -271,17 +262,15 @@ export function createForge({ log = () => {} } = {}) {
   const project = (repo) => `/v4/projects/${encodeURIComponent(repo)}`;
   const str = (v) => (typeof v === 'string' ? v : '');
 
-  // A lookup answers three ways and the three are never mixed: what the forge holds, null
-  // when the forge itself says there is no such thing, and a throw for every other answer.
-  // A rate limit, an outage and a page from a proxy say nothing about what exists, and an
-  // executor can bring the first one about.
+  // A lookup answers what the forge holds, null when the forge itself says there is no
+  // such thing, and throws on any other answer: a rate limit, an outage or a proxy's page
+  // says nothing about what exists, and an executor can bring the first about.
   const unknown = (what, res) => { throw new Error(`forge: the forge did not say ${what} (it answered ${res.status})`); };
   const missing = (res, wording = /not found$/i) => res.status === 404 && typeof res.json?.message === 'string' && wording.test(res.json.message);
 
-  /// What a GitHub node id stands for: `{ type, repo, item: "pr"|"issue", number, open,
-  /// itemAuthor, author, pending }` for something in a repository, `{ type, login }` for an
-  /// account, or null when the forge shows nothing for the id (and on GitLab, whose ids
-  /// this cannot resolve).
+  /// `{ type, repo, item: "pr"|"issue", number, open, itemAuthor, author, pending }` for
+  /// something in a repository, `{ type, login }` for an account, or null when the forge
+  /// shows nothing for the id (always on GitLab, whose ids this cannot resolve).
   async function resolveNode(target, id) {
     if (target.forge !== 'github' || typeof id !== 'string') return null;
     const res = await api(target, 'POST', '/graphql', { query: NODE_QUERY, variables: { id } });
@@ -319,10 +308,9 @@ export function createForge({ log = () => {} } = {}) {
   // A merge request names the project its source branch is in by id alone: a fork's has no name here.
   const gitlabPull = (repo, m) => ({ number: m.iid, open: m.state === 'opened', author: str(m.author?.username), headRepo: m.source_project_id === m.target_project_id ? repo : '', headRepoId: id(m.source_project_id), headRef: str(m.source_branch), baseRef: str(m.target_branch), draft: m.draft === true });
 
-  /// A pull or merge request of `repo` by number: `{ number, open, author, headRepo,
-  /// headRepoId, headRef, baseRef, draft }`, or null when the forge has none of that
-  /// number. `headRepoId` is the forge's id of the repository the head branch is in, null
-  /// when that repository is gone.
+  /// `{ number, open, author, headRepo, headRepoId, headRef, baseRef, draft }`, or null
+  /// when the forge has none of that number. `headRepoId` is null when the head's
+  /// repository is gone.
   async function pull(target, repo, number) {
     const github = target.forge === 'github';
     const res = await api(target, 'GET', github ? `/repos/${repo}/pulls/${number}` : `${project(repo)}/merge_requests/${number}`);
@@ -331,11 +319,9 @@ export function createForge({ log = () => {} } = {}) {
     return github ? githubPull(res.json) : gitlabPull(repo, res.json);
   }
 
-  /// The open pull or merge requests of `repo` whose head branch is named `ref` (every open
-  /// one, up to a page of 100, when `ref` is not given), shaped as `pull`; with `ever`, the
-  /// closed and merged ones as well. GitHub lists those whose head is in a repository of
-  /// `owner`, the account `repo` belongs to unless another is given; GitLab lists them
-  /// whichever project the branch is in.
+  /// Open requests whose head branch is `ref` (with no `ref`, the first 100 open ones),
+  /// shaped as `pull`; `ever` adds closed and merged ones. GitHub lists only heads in a
+  /// repository of `owner`; GitLab lists them whichever project the branch is in.
   async function pullsByHead(target, repo, ref, owner = repo.split('/')[0], ever = false) {
     const github = target.forge === 'github';
     const filter = ref === undefined ? '' : github ? `&head=${encodeURIComponent(`${owner}:${ref}`)}` : `&source_branch=${encodeURIComponent(ref)}`;
@@ -345,12 +331,10 @@ export function createForge({ log = () => {} } = {}) {
     return res.json.map((p) => (github ? githubPull(p) : gitlabPull(repo, p)));
   }
 
-  /// The branch a CI run of `repo` ran for, by the id of the run (on GitLab, the pipeline)
-  /// or of one of its jobs - `what` is "run" or "job": `{ repo, ref }`, the repository the
-  /// branch is in and its ref, or null when the forge has no such run or it ran for a tag.
-  /// A pipeline for a merge request ran for that merge request's source branch, and the
-  /// answer names the merge request as `pull`. GitHub names a tag's run by the tag alone,
-  /// so such a run reads as one of a branch so named.
+  /// The branch a CI run (`what` "run") or job ran for: `{ repo, ref }`, or null when the
+  /// forge has no such run or it ran for a tag. A merge request pipeline ran for its source
+  /// branch and also names the merge request as `pull`. GitHub names a tag's run by the tag
+  /// alone, so it reads as a run of a branch so named.
   async function ciRun(target, repo, what, id) {
     const github = target.forge === 'github';
     const said = `what CI ${what} ${id} ran for`;
@@ -408,13 +392,10 @@ export function createForge({ log = () => {} } = {}) {
     return { id: me.id, login };
   }
 
-  /// What the forge says of the repository `repo` names (on GitLab a project's path or
-  /// its numeric id): `{ id, name, owner, parent, defaultBranch, ciPaths }`, or null when
-  /// the forge shows no such repository. `name` is its full path as the forge spells it,
-  /// `owner` the account or group it belongs to and `parent` the repository it is a fork
-  /// of, "" for none. `ciPaths` lists where a GitLab project is set to read its CI
-  /// configuration from, when that is a file of its own repository; GitHub reads its
-  /// workflows from one fixed directory.
+  /// `{ id, name, owner, parent, defaultBranch, ciPaths }`, or null when the forge shows no
+  /// such repository (on GitLab `repo` may be a numeric id). `name` is the forge's
+  /// spelling of its full path; `parent` is "" for no fork. `ciPaths` is where a GitLab
+  /// project reads its CI configuration, when that is a file of its own repository.
   async function repository(target, repo) {
     const github = target.forge === 'github';
     const res = await api(target, 'GET', github ? `/repos/${repo}` : project(repo));
@@ -521,15 +502,12 @@ export function createForge({ log = () => {} } = {}) {
     return Buffer.from(res.json.content, 'base64').toString('utf8');
   }
 
-  /// What policy-bot would count as an approval in text on `repo` for a pull request into
-  /// `base`, from the files it reads a policy from: `.policy.yml` on `base`, and `policy.yml`
-  /// of the owner's `.github` repository (which policy-bot reads when the first is missing,
-  /// or always when its server says so), each followed to the policy it names in another
-  /// repository. Resolves to `{ comments, patterns, bodies, from }` (see `readPolicy`;
-  /// `from` names the files), `{ fault }` when one of them cannot be read, or null when
-  /// there is none. A claim keeps each answer for as long as it lasts, one for each distinct
-  /// text of the files, of which it holds at most 8: a base whose files hold another is
-  /// answered with a fault. `refs/heads/<branch>` is the branch.
+  /// What policy-bot would count as an approval in text on a pull request into `base`,
+  /// from `.policy.yml` on `base` and the owner's `.github` `policy.yml` (read when the
+  /// first is missing, or always if its server says so), each followed to a policy it
+  /// names elsewhere. Resolves to `{ comments, patterns, bodies, from }` (`readPolicy`),
+  /// `{ fault }` when a file cannot be read, or null when there is none. A claim keeps an
+  /// answer per distinct text of the files, at most 8: a base with a ninth gets a fault.
   async function policy(target, repo, base, claim) {
     const branch = base.startsWith('refs/heads/') ? base.slice('refs/heads/'.length) : base;
     let kept = claim && policies.get(claim);
@@ -579,17 +557,15 @@ export function createForge({ log = () => {} } = {}) {
     return keep(found);
   }
 
-  /// A GitLab project's numeric id, which `rulesFor` needs to allow the numeric spelling
-  /// of its paths; null on GitHub or when the project is not shown.
+  /// Null on GitHub or when the project is not shown.
   async function projectId(target, repo) {
     if (target.forge !== 'gitlab') return null;
     const res = await api(target, 'GET', project(repo));
     return res.status === 200 && Number.isInteger(res.json?.id) ? res.json.id : null;
   }
 
-  /// Fetches from `repo` on the forge into the repository `env` points git at (the push
-  /// check's quarantine): the commits in `wants` by id, or with `into` every branch, as
-  /// refs under that name. Resolves to whether git succeeded.
+  /// Fetches into the repository `env` points git at (the push check's quarantine): the
+  /// commits in `wants`, or with `into` every branch, as refs under that name.
   async function fetchInto(target, { repo, env, wants = [], into }) {
     if (!into && (wants.length === 0 || wants.some((oid) => !/^[0-9a-f]{40,64}$/.test(oid)))) return false;
     if (!apiOf(target) || !/^[A-Za-z0-9._/-]+$/.test(repo)) return false;
@@ -611,13 +587,10 @@ export function createForge({ log = () => {} } = {}) {
     return r.ok;
   }
 
-  /// What `authorize` needs as its `ctx` for one task: the forge lookups bound to the
-  /// pool's repository, the linked `checkout` the push check may read, and the task's
-  /// mutable `state`; `claim`, any object, stands for the claim the task is acted on under,
-  /// which keeps what `policy` reads. `repo` is "owner/name" on GitHub and the project's
-  /// full path on GitLab. The lookups about a repository itself (`repository`, `branch`,
-  /// `fetch`) take another one's name where a check has the forge's word that it is the task
-  /// account's fork of the pool's.
+  /// `authorize`'s `ctx` for one task: lookups bound to the pool's repository, the linked
+  /// `checkout` the push check may read, and the task's mutable `state`. `claim`, any
+  /// object, keys what `policy` keeps. The lookups about a repository itself take another
+  /// one's name where the forge said it is the task account's fork of the pool's.
   function context({ forge, host, repo, checkout, state, claim }) {
     const target = { forge, host };
     return {

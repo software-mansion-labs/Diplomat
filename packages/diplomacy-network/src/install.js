@@ -1,19 +1,14 @@
 #!/usr/bin/env node
-// What the applets run to start and stop the daemon. Each flag prints one JSON object:
-//   node src/install.js --check          -> { installed, daemonRunning, pid }
-//   node src/install.js --start-daemon   -> { ok, daemonRunning, pid, error? }; with the
-//                                           network switched off in Diplomat's config
-//                                           none is started, and `error` says so
-//   node src/install.js --restart-daemon -> the same, after replacing a running daemon
-//   node src/install.js --stop-daemon    -> the same, once the daemon is gone; with the
-//                                           network switched off in Diplomat's config,
-//                                           also `ended: { offers, runs }`, what was
-//                                           left for this to end as a switch-off does,
-//                                           and what the daemon made in docker is gone
-//                                           too, and with it what OFF_REMOVES names
-// Nothing is installed anywhere: `installed` is true wherever this file runs, and is in
-// the answer because the applets read every installer's `--check` alike. Every flag is
-// answered within INSTALLER_ANSWER_MS.
+// What the applets run. Each flag prints one JSON object within INSTALLER_ANSWER_MS:
+//   --check          -> { installed, daemonRunning, pid }
+//   --start-daemon   -> { ok, daemonRunning, pid, error? }; none is started while the
+//                       network is off in Diplomat's config
+//   --restart-daemon -> the same, after replacing a running daemon
+//   --stop-daemon    -> the same, once the daemon is gone; while the network is off, also
+//                       `ended: { offers, runs }` (what this ended in the daemon's
+//                       place), and docker and OFF_REMOVES are cleared
+// `installed` is always true (nothing is installed): the applets read every
+// installer's `--check` alike.
 
 import fs from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -31,7 +26,7 @@ import {
   BASE_DIR, DISCOVERY_PATH, EXECUTOR_RETRY_MS, INSTALLER_ANSWER_MS, JOBS_PATH, LOG_PATH, SOCKET_PATH, STOP_WAIT_MS, TOOL_PATH,
 } from './paths.js';
 
-// docker is looked for where the daemon looks for it.
+// Find docker where the daemon does.
 process.env.PATH = TOOL_PATH;
 
 const answerBy = Date.now() + INSTALLER_ANSWER_MS;
@@ -39,17 +34,14 @@ const { startDaemon, stopDaemon } = daemonControl({ client, discoveryPath: DISCO
 
 const running = async () => (await client.daemonHealth())?.pid ?? null;
 
-// An error message, or null once a daemon answers. With the network switched off none is
-// started: a daemon that starts then switches itself off and goes, and would be waited
-// for as one that is slow to answer.
+// An error message, or null once a daemon answers. None is started while the network is
+// off: it would switch itself off and exit, and be waited for as a slow start.
 async function start() {
   const config = readConfig();
   if (config && config.networkEnabled !== true) return 'the network is switched off in Diplomat\'s settings: no daemon was started';
   const { error } = await startDaemon();
   if (!error) return null;
-  // Only a start that ran out of time is waited for, for the time there is left: a
-  // daemon that was slow to answer is still the daemon that was started. One that
-  // failed has said why.
+  // A start that timed out may only be slow: wait out the time left.
   if (!error.endsWith('daemon failed to start')) return error;
   for (; Date.now() < answerBy; await delay(250)) {
     if (await running()) return null;
@@ -57,26 +49,21 @@ async function start() {
   return error;
 }
 
-// An error message, or null once no daemon is left. The daemon ends by itself: a
-// switched-off one tells its pools first, so it is given STOP_WAIT_MS.
+// An error message, or null once no daemon is left. A switched-off daemon tells its
+// pools before it exits, hence STOP_WAIT_MS.
 async function stop() {
   const pid = await stopDaemon();
   for (const deadline = Date.now() + STOP_WAIT_MS; pid && pidAlive(pid) && Date.now() < deadline;) await delay(100);
   return pid && pidAlive(pid) ? `the daemon (pid ${pid}) did not exit within ${STOP_WAIT_MS / 1000} s` : null;
 }
 
-// What a switch-off found left to end with no daemon running: `{ offers, runs }`.
 let ended = null;
 
-// A daemon that was not running when the network was switched off cancelled nothing it
-// offered and gave back nothing it ran: switched on again it would offer work Diplomat
-// has since started elsewhere. That is ended here, in its store, which is this
-// process's for as long as it holds the daemon's socket; while a daemon has the socket
-// or is taking it, the ending is that daemon's. A run whose job ended with no daemon
-// left to tell the node, under one that died or under none, ends as that job did. An
-// error message, or null.
+// A daemon not running at switch-off ended none of its offers and runs: switched on
+// again it would offer work Diplomat has since started elsewhere. So they are ended here,
+// in its store, while this holds its socket; a daemon that has the socket ends them
+// itself. An error message, or null.
 async function endStored() {
-  // No daemon ever ran here: there is no store.
   if (!fs.existsSync(BASE_DIR)) return null;
   let release = null;
   try {
@@ -84,10 +71,8 @@ async function endStored() {
     if (!release) return null;
     const log = openLog(LOG_PATH);
     const kept = readJson(JOBS_PATH)?.jobs ?? {};
-    // A job that finished with no daemon watching has its outcome read from what it left,
-    // its share of the model as jobs.json last had it, and the engine is asked nothing:
-    // whatever the job left running goes with its container. One that cannot be read is
-    // stopped and given back like the rest.
+    // A job that finished unwatched ends with the outcome it left and the model spend
+    // jobs.json last had; one that cannot be read is stopped and given back.
     const outcomeOf = async (runId) => {
       const ended = readOutcome(runId);
       if (ended) return ended;
@@ -106,13 +91,10 @@ async function endStored() {
   }
 }
 
-// A daemon that is switched off ends what it offered and ran, removes what it made in
-// docker, and then what OFF_REMOVES names. One that was not there to be stopped, was
-// killed past its end or found the engine down left some of that standing, so it is
-// done here again, the engine asked again until the answer is due: an engine that is
-// starting takes a while to answer. A store that could not be ended in keeps nothing in
-// docker standing, and is the error once docker is clear. Like the daemon, this takes
-// only a config it can read for the network being off.
+// Redoes a switched-off daemon's cleanup (its store, docker, then OFF_REMOVES), which a
+// daemon that was absent, killed or engine-less left undone. The engine is retried until
+// the answer is due, as a starting one is slow. A store that could not be ended does not
+// stop docker being cleared; it is the error after.
 async function stopForGood() {
   const error = await stop();
   const config = readConfig();
@@ -120,7 +102,7 @@ async function stopForGood() {
   const unended = await endStored();
   const containers = createContainers();
   const late = delay(Math.max(0, answerBy - Date.now()), 'the docker engine did not answer in time');
-  // What the engine last said outlives an asking that the answer's time cut short.
+  // So an attempt the deadline cut short still reports the engine's last error.
   let said = null;
   for (;;) {
     const left = await Promise.race([containers.removeAll().then(() => null, (err) => { said = String(err?.message ?? err); return said; }), late]);
@@ -154,6 +136,5 @@ if (Object.hasOwn(actions, flag)) {
   const pid = await running();
   out = { installed: true, daemonRunning: pid !== null, pid };
 }
-// The answer ends the process: a docker that was asked and has not answered must not
-// keep it past the time the applets wait.
+// Exit: a docker call still pending must not outlive the applets' wait.
 process.stdout.write(`${JSON.stringify(out, null, 2)}\n`, () => process.exit(0));

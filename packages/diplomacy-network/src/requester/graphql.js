@@ -1,35 +1,31 @@
-// The GraphQL document check (PROTOCOL.md section 10). A GraphQL endpoint is one URL
-// behind which the whole forge is reachable, so a rule on it says nothing until the
-// document itself is read: which root fields it selects, which repository they name, and
-// how far its selections walk from there.
+// The GraphQL document check (PROTOCOL.md section 10). One GraphQL URL reaches the whole
+// forge, so a rule on it means nothing until the document is read: its root fields, the
+// repository they name, and how far its selections walk.
 //
-// A forge's graph has no walls. From the pool's own repository a query can step to its
-// owner, from the owner to every other repository the requester's token can see; from an
-// issue to whatever cross-referenced it. A list of allowed root fields does not confine
-// that, and there is no schema here to type-check against, so the reader tracks a
-// CONTEXT instead - what kind of thing the selection is standing on - and every field that
-// has a selection set must be one the context's table names, with the context it leads to:
+// A forge's graph has no walls: from the pool's repository a query can step to its owner,
+// and from there to every repository the token can see. With no schema to type-check
+// against, the reader tracks a CONTEXT - what kind of thing a selection stands on - and
+// every field with a selection set must be one the context's table names, with the
+// context it leads to:
 //
 //   in       the pool's repository and everything inside it; any scalar may be read
-//   actor    a user, bot, team or organisation: a short list of scalars, and the account
-//            or organisation it belongs to, reached without an argument
-//   foreign  something that may live in another repository (a fork, a cross-referenced
-//            issue, a project): a short list of identifying scalars
-//   event    a timeline entry: its own scalars, its actors, and the things it points at as
-//            `foreign`, because a "referenced" event's commit can sit in another repository
-//   protection  a branch's protection rule: the one scalar the gh CLI reads of it
+//   actor    a user, bot, team or organisation: a few scalars, and the account or
+//            organisation it belongs to, reached without an argument
+//   foreign  what may live in another repository (a fork, a cross-referenced issue, a
+//            project): a few identifying scalars
+//   event    a timeline entry: its own scalars, its actors, and what it points at as
+//            `foreign` (a "referenced" event's commit can sit in another repository)
+//   protection  a branch's protection rule: the one scalar gh reads of it
 //   plain    scalars only
-//   schema   type introspection, which the gh CLI runs before most commands
+//   schema   type introspection, which gh runs before most commands
 //
-// The safety of `in` is an induction: a field mapped to `in` must return an object of the
-// same repository on every type that can be reached in `in`. A field that breaks it on any
-// such type is mapped to a stricter context, which over-restricts and is always safe. A
-// scalar is told from an object by syntax: a field without a selection set that is really
-// an object is a validation error at the forge and returns nothing.
+// `in` is safe by induction: a field mapped to `in` must return an object of the same
+// repository on every type reachable in `in`; one that breaks this on any type is mapped
+// stricter. A scalar is told from an object by syntax: an object selected without a
+// selection set is a validation error at the forge and returns nothing.
 //
-// Fragments are resolved, not refused: every query the gh CLI sends uses them. Directives
-// are parsed and ignored, so `@include(if: $x)` hides nothing. A field is known by its
-// name; an alias is only a label on the response.
+// Fragments are resolved (gh uses them in every query); directives are ignored, so
+// `@include(if: $x)` hides nothing; an alias is only a label on the response.
 
 import { approvalFault, textFault } from './policybot.js';
 
@@ -339,24 +335,20 @@ function table(groups) {
 const WRAPPERS = { nodes: 'same', edges: 'same', node: 'same', pageInfo: 'plain' };
 const SCHEMA_FIELDS = table({ schema: 'fields inputFields enumValues args type ofType possibleTypes interfaces' });
 
-// A forge's tables. A field with a selection set leads from one context to the next (`repo`,
-// `in`, `actor`, `foreign`, `event`, by the context it is selected in); `repo` is the pool's
-// repository itself, from which a document goes on to its code, its pull requests and its
-// issues, the twins of the reads rules.js gives every kind. A scalar is read from an
-// allow-list on an account, a commit's author line, a foreign object and a branch's
-// protection, and freely on what is in the pool's repository, but for `repoLeaves` and `own`:
-//   repoLeaves  the scalars read of the repository itself: what the REST answer about it
-//               holds (the repository `pick` of rules.js), under the names GraphQL has
-//   own         the names not read inside the repository: they tell of the account asking -
-//               what it may do there, its addresses, what it watches
-//   blank       the names read and answered as null: a person's address
-//   args        the arguments a field may take: paging, ordering and filters over what
-//               the object it is selected on holds
-//   members     the members an object given as an argument may hold, at any depth
-//   ids         the arguments that name an object by its node id, which must turn out to
-//               be in the pool's repository
-// An argument or a member in no list could name another repository, or an object by an id
-// nothing here can place, or filter by what the account asking watches or reacted to.
+// A field with a selection set leads from one context to the next (`repo`, `in`, `actor`,
+// `foreign`, `event`: the context it is selected in); `repo` is the pool's repository
+// itself, from which a document reaches what rules.js lets every kind read. Scalars are
+// allow-listed on an account, a commit's author line, a foreign object and a branch's
+// protection, and free inside the pool's repository but for `repoLeaves` and `own`:
+//   repoLeaves  the repository's own scalars: its REST `pick` in rules.js, by GraphQL names
+//   own         names not read inside the repository: they tell of the account asking
+//   blank       names answered as null: a person's address
+//   args        a field's allowed arguments: paging, ordering and filters over what the
+//               object holds
+//   members     what an object given as an argument may hold, at any depth
+//   ids         arguments naming a node id, which must be in the pool's repository
+// An argument or member in no list could name another repository, an id nothing here can
+// place, or filter by what the account asking watches or reacted to.
 const FORGES = {
   github: {
     actorLeaves: set('__typename id databaseId login name url avatarUrl resourcePath date slug isViewer totalCount'),
@@ -481,14 +473,12 @@ const OWNER_QUALIFIER = /^-?(repo|org|user|owner|enterprise):/i;
 // (`label:"good first issue"`), with any parentheses around it.
 const SEARCH_TERM = /\s*(?:(\(*)(-?(?:[\w.-]+:)?)"([^"\\]*)"(\)*)|([^\s"]+))(?=\s|$)/y;
 
-/// Whether a forge search string can only return things in `repo` ("owner/name"): it must
-/// carry `repo:owner/name` as a plain term of its own, the qualifier in lower case and the
-/// name in any, and nothing that widens it - no
-/// other repository, organisation or user qualifier, no top-level OR, no negation of the
-/// term. A quote may only wrap a whole term or a qualifier's whole value, and what it
-/// wraps holds no qualifier: where a quote opens mid-word, this reader and the forge's
-/// need not agree on where the phrase ends, and a qualifier could hide in the difference.
-/// Returns null when confined, else the reason.
+/// Null when a search string can only return things in `repo` ("owner/name"), else the
+/// reason. It must carry `repo:owner/name` as a plain term (qualifier in lower case, name
+/// in any) and nothing that widens it: no other repository, organisation or user
+/// qualifier, top-level OR or negation of the term. A quote may only wrap a whole term or
+/// a qualifier's whole value, holding no qualifier: where one opens mid-word, this reader
+/// and the forge's may disagree on where the phrase ends, and a qualifier could hide there.
 export function searchConfined(q, repo) {
   if (typeof q !== 'string') return 'the search query is not a string';
   // Terms are told apart by the plain space alone: any other separator is one the forge
@@ -712,18 +702,15 @@ function checkQuery(doc, op, vars, spec, lookups) {
 
 // ---------------------------------------------------------------------- mutations
 
-// What a forge or a bot on it takes for a command: a line that starts with "/" and a word
-// of letters, "_" and "-" before white space or the end (GitLab's quick actions, Prow's
-// "/approve"), and anywhere in the text an account named with "@" or the word "bors" -
-// homu acts on any line naming it, claude-code-action on "@claude" anywhere, Copilot on
-// "@copilot" in any comment. Bots read the text as it was sent, so no markdown hides one.
-// Text posted in the requester's name is otherwise a way to do anything such a command
-// can, and a task has no one to call on.
+// What a forge or a bot takes for a command: a line starting with "/" and a word (GitLab's
+// quick actions, Prow's "/approve"), and anywhere an "@" mention (claude-code-action,
+// Copilot) or "bors" (homu acts on any line naming it). Bots read the text as sent, so no
+// markdown hides one. Posted in the requester's name, such text could do anything the
+// command can.
 const COMMAND = /(^|[\r\n\v\f\u0085\u2028\u2029])[ \t]*\/[a-z][a-z_-]*(?=\s|$)|@[\p{L}\p{N}_.-]|\bbors\b/iu;
 const REWORD = 'text in the requester\'s name names no account with "@" anywhere in it, code included (write "the Override annotation", '
   + '"types/node", no e-mail address), says no "bors" and starts no line with "/" and a word; reword it and send the request again';
-/// Why `text` may not be written in the requester's name - what in it a forge or a bot
-/// would take for a command, quoted, and how to reword it - or null when it may.
+/// Why `text` may not be written in the requester's name, or null when it may.
 export function proseFault(text) {
   if (typeof text !== 'string') return 'is not text';
   const found = COMMAND.exec(text);
@@ -731,30 +718,26 @@ export function proseFault(text) {
   const said = text.slice(found.index + (found[1] ?? '').length).trimStart().match(/^\S{1,40}/)[0];
   return `holds ${JSON.stringify(said)}, which the forge or a bot on it would take for a command: ${REWORD}`;
 }
-/// The line the requester side writes first in each comment, review and note a task
-/// posts. Both forges hide it when they render the text, and a bot that acts on a
-/// comment's first word (Atlantis, Terrateam, Digger) reads it instead of the task's.
+/// The first line of every comment, review and note a task posts. Both forges hide it
+/// when rendering, and a bot acting on a comment's first word (Atlantis, Terrateam,
+/// Digger) reads it instead of the task's.
 export const COMMENT_MARK = '<!-- sent through the Diplomacy Network -->';
-/// `text` with `COMMENT_MARK` as its first line; empty text stays empty.
 export const marked = (text) => (text === '' ? text : `${COMMENT_MARK}\n${text}`);
 const PROSE = { prose: true };
 const COMMENT = { prose: true, comment: true };
 
-// What each mutation's `input` may hold. A key the table does not name is refused, so a
-// field that changes what the mutation does (an `event`, a second target) cannot ride
-// along. `node` values are opaque ids the forge is asked about before anything is sent:
-//   item      the object belongs to the task's own pull request or issue
-//   own       it was written by the identity the task acts as
-//   pending   it is part of a review that has not been submitted
-//   repo      it is the pool's repository
-// `free` is text or layout the task decides, `prose` text that has no `proseFault`, and
-// `comment` prose that is sent `marked` and holds no `approvalFault`. `policy` prose is a
-// pull request's body, checked against the policy for the base branch the input member
-// `base` names (`textFault`). `created` is a branch the task created,
-// from which it has opened no pull request: "branch", or "account:branch" for one in
-// that account's fork.
-// `assignees` is the issue's whole new assignee list, which may differ from the list the
-// forge holds only by the task's own account.
+// What each mutation's `input` may hold; an unnamed key is refused, so nothing that
+// changes what the mutation does (an `event`, a second target) rides along. `node` ids
+// are resolved before anything is sent, and must be:
+//   item      of the task's own pull request or issue
+//   own       written by the identity the task acts as
+//   pending   in a review not yet submitted
+//   repo      the pool's repository
+// `prose` has no `proseFault`; `comment` prose is sent `marked` and has no
+// `approvalFault`; `policy` prose is checked against the policy for the base branch the
+// member `base` names. `created` is a branch the task created and opened no PR from
+// ("branch", or "account:branch" in that account's fork). `assignees` is the whole new
+// list, which may differ from the forge's only by the task's own account.
 const THREAD = ['PullRequestReviewThread'];
 const REVIEW = ['PullRequestReview'];
 const MUTATIONS = {
@@ -806,8 +789,7 @@ const MUTATIONS = {
   gitlab: {},
 };
 
-/// The mutation names the check knows how to confine on a forge; the catalogue may list
-/// no others.
+/// The catalogue may list no mutation but these.
 export function knownMutations(forge) {
   return Object.keys(MUTATIONS[forge] || {});
 }
@@ -873,9 +855,9 @@ function inVariables(field, key, vars) {
   return null;
 }
 
-/// Whether a resolved node belongs to the task's item: `item` is `{ type: 'pr'|'issue',
-/// number }` for one pull request or issue, or `{ type, author?, notAuthor? }` for every
-/// open one written (or not written) by a login. Returns null when it does, else the reason.
+/// Null when a resolved node belongs to the task's item, else the reason. `item` is
+/// `{ type, number }`, or `{ type, author?, notAuthor? }` for every open one by (or not
+/// by) a login.
 export function itemMismatch(item, node) {
   if (!item) return 'this task has no pull request or issue of its own';
   if (node.item !== item.type) return `it is not part of ${item.type === 'pr' ? 'a pull request' : 'an issue'}`;
@@ -887,9 +869,8 @@ export function itemMismatch(item, node) {
   return null;
 }
 
-/// Whether an issue's new assignee list holds the same accounts as the one the forge
-/// holds, `self` aside. The lists are logins or account ids: a login's case and an
-/// account named twice change nothing.
+/// Whether two assignee lists (logins or account ids) differ only by `self`, ignoring case
+/// and repeats.
 export function sameButSelf(held, wanted, self) {
   const key = (account) => String(account).toLowerCase();
   const others = (list) => JSON.stringify([...new Set(list.map(key))].filter((account) => account !== key(self)).sort());
@@ -926,12 +907,10 @@ async function settle(lookups, spec, ctx) {
   }
 }
 
-/// Checks one GraphQL request body against a rule's `graphql` member: `spec` is `{ forge,
-/// repo, roots, mutations, item, identity }` and `payload` the parsed JSON body. Resolves
-/// to `{ ok: true, effects, blank? }` - `effects` lists what the request would use up, such
-/// as a pull request opened from a pushed branch, and `blank` the names of the answer's
-/// members to hand back as null - or `{ ok: false, reason }`. Node ids are
-/// resolved through `ctx.resolveNode(id)` before the answer is given.
+/// Checks a parsed GraphQL body against a rule's `graphql` member. Resolves to `{ ok:
+/// true, effects, blank? }` - `effects` what the request would use up (a PR opened from a
+/// pushed branch), `blank` the answer's members to hand back as null - or `{ ok: false,
+/// reason }`.
 export async function checkGraphql(spec, payload, ctx = {}) {
   try {
     if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) refuse('graphql: the body is not one request object');

@@ -1,12 +1,10 @@
 // Decides whether one forge request from an executor is inside its task's rules
-// (PROTOCOL.md sections 9 and 10). The executor is not trusted: everything here assumes
-// the request was written by someone trying to reach past the rules.
+// (PROTOCOL.md sections 9 and 10). Everything here assumes the request was written to
+// reach past the rules.
 //
-// A request is first brought to one spelling, and refused when it has more than one
-// reading: the forge, a proxy in front of it and this file must all see the same path,
-// the same query and the same body. Then the first rule whose host, method and path match
-// decides, alone - its pins and deep checks are not retried against a later rule. What
-// matches nothing is refused.
+// A request with more than one reading is refused: the forge, a proxy in front of it and
+// this file must all see the same path, query and body. The first rule whose host, method
+// and path match decides alone; its checks are not retried against a later rule.
 
 import { checkGraphql, itemMismatch, marked, proseFault, sameButSelf, searchConfined } from './graphql.js';
 import { approvalFault, textFault } from './policybot.js';
@@ -24,13 +22,12 @@ const DENIED_QUERY = new Set(['sudo', 'private_token', 'access_token', 'job_toke
 const JSON_TYPE = /^application\/json\s*(;\s*charset=utf-8\s*)?$/i;
 const RECEIVE_PACK_TYPE = 'application/x-git-receive-pack-request';
 const MAX_PATH = 8192;
-// The members of a rule that decides by its path and nothing else.
 const BY_PATH_ALONE = new Set(['host', 'method', 'path', 'fold']);
 const MAX_JSON_DEPTH = 64;
 
 const approved = new WeakSet();
 
-/// Whether `request` is an object `authorize` returned as allowed. `forge.perform` sends
+/// Whether `request` is the very object `authorize` allowed; `forge.perform` sends
 /// nothing else.
 export function authorized(request) {
   return approved.has(request);
@@ -126,11 +123,10 @@ export function parseStrictJson(buffer) {
 
 // ------------------------------------------------------------------ normalisation
 
-// Percent-decodes one path segment or query component, refusing an escape that is
-// malformed or that hides a byte with a meaning of its own in a path. A path may not
-// escape what needs no escape either: a forge's router reads "%63ompare" as "compare", so
-// with such escapes refused a route's name has the one spelling the rules are written in.
-// `name` is set for a segment in which GitLab defines an encoded slash and dot.
+// Refuses an escape that is malformed or hides a byte meaningful in a path, and in a path
+// an escape of what needs none: a router reads "%63ompare" as "compare", and a route must
+// have the one spelling the rules are written in. `name`: a segment in which GitLab
+// defines an encoded slash and dot.
 const NEEDS_NO_ESCAPE = /[A-Za-z0-9_~-]/;
 function decode(raw, { plus, name }) {
   const bytes = [];
@@ -165,10 +161,10 @@ function normalise(request) {
   const rawQuery = cut === -1 ? null : path.slice(cut + 1);
   if (!PATH_CHARS.test(rawPath)) refuse('the path holds a character that must be encoded, a fragment or a ";"');
   const raw = rawPath.slice(1).split('/');
-  // GitLab takes a name as one segment, its slashes encoded, and glab encodes the name's
-  // dots as well: the project's path after /api/v4/projects/, and in a read under it a
-  // file's path, a branch's or a tag's name. GitLab's router matches the route before it
-  // decodes a slash, so that one separates nothing; an encoded dot it reads as a dot.
+  // GitLab takes a name as one segment, its slashes encoded (glab encodes its dots too):
+  // the project's path after /api/v4/projects/, and in a read under it a file's path or a
+  // ref's name. Its router matches the route before it decodes a slash; an encoded dot it
+  // reads as a dot.
   const gitlabProject = raw[0] === 'api' && raw[1] === 'v4' && raw[2] === 'projects';
   const read = (i) => gitlabProject && i > 3 && method.toUpperCase() === 'GET';
   const decoded = raw.map((segment, i) => {
@@ -178,7 +174,7 @@ function normalise(request) {
     return parts.join('/');
   });
   const segments = raw.map((segment) => segment.replace(/%2e/gi, '.'));
-  // The path as whatever decodes a slash before routing it would cut it up.
+  // The path as a proxy that decodes slashes before routing would cut it up.
   const apart = segments.flatMap((segment, i) => (read(i) ? segment.split(/%2f/i) : [segment]));
 
   const query = [];
@@ -210,13 +206,11 @@ function normalise(request) {
 
 // ----------------------------------------------------------------------- matching
 
-// A rule's path against a request's: literal segments, "*" for exactly one, a trailing
-// "**" for any remainder. `fold` lists the segments compared without regard to case - the
-// ones that name the repository, which both forges resolve that way; any other literal
-// must equal the segment as sent, an encoded dot read as a dot. `loose` is the widest
-// reading a forge's router could give the path: no literal's case counts, and a segment
-// may carry an extension ("compare.json"), which GitLab's router takes off as the
-// answer's format.
+// "*" matches one segment, a trailing "**" the rest. `fold` segments (the repository's,
+// which both forges resolve case-insensitively) ignore case; any other literal must equal
+// the segment, an encoded dot read as a dot. `loose` is the widest reading a forge's
+// router could give the path: no case, and an extension allowed ("compare.json", which
+// GitLab's router takes off as the answer's format).
 function pathMatches(rule, segments, loose) {
   const pattern = rule.path.slice(1).split('/');
   const fold = rule.fold || [];
@@ -237,8 +231,7 @@ const sameJson = (a, b, fold) => {
   return a !== undefined && text(a) === text(b);
 };
 
-// Checks the query against the rule's pins and returns the names of the pinned
-// parameters the request gave.
+// Returns the names of the pinned parameters the request gave.
 function checkQuery(rule, req) {
   const pins = rule.query || {};
   const seen = new Set();
@@ -247,10 +240,9 @@ function checkQuery(rule, req) {
     if (DENIED_QUERY.has(base.toLowerCase())) refuse(`the query parameter "${base}" is never allowed`);
     const pin = Object.hasOwn(pins, base) ? pins[base] : undefined;
     if (pin === undefined) {
-      // A forge may read a write's parameters from the query as readily as from the
-      // body, so on a write an unnamed parameter would step around every body pin. A read
-      // whose rule names its parameters takes those alone: one more can point it at
-      // another repository.
+      // A forge reads a write's parameters from the query as readily as from the body,
+      // so an unnamed one would step around every body pin. A read whose rule names its
+      // parameters takes those alone: one more can point it at another repository.
       if (req.method !== 'GET' || rule.query) refuse(`the query parameter "${base}" is not part of this rule`);
       continue;
     }
@@ -275,9 +267,9 @@ function jsonBody(req) {
   try { return parseStrictJson(req.body); } catch (err) { return refuse(`the body is not strict JSON: ${err.message}`); }
 }
 
-// `given` names the pinned query parameters the request carries: a forge reads a member
-// from either place, so a required one may come as the parameter of the same name.
-// `fork` is the fork the request's path names, when its rule has one checked.
+// `given`: the pinned query parameters the request carries; a forge reads a member from
+// either place, so a required one may come as one. `fork`: the fork the path names, when
+// its rule checks one.
 async function checkBodyPins(spec, req, ctx, effects, given, fork) {
   const body = req.body.length === 0 ? Object.create(null) : jsonBody(req);
   if (body === null || typeof body !== 'object' || Array.isArray(body)) refuse('the body is not a JSON object');
@@ -337,8 +329,7 @@ function numberAt(req, index) {
 
 const lower = (s) => String(s ?? '').toLowerCase();
 
-// A pull request named by number in the path, for a task that covers every open one by
-// (or not by) some author instead of one number.
+// For a task that covers every open PR by (or not by) some author, not one number.
 async function checkPull(spec, req, ctx) {
   if (typeof ctx.pull !== 'function') refuse('nothing here can look a pull request up');
   const number = numberAt(req, spec.segment);
@@ -349,8 +340,6 @@ async function checkPull(spec, req, ctx) {
   if (spec.notAuthor !== undefined && lower(pull.author) === spec.notAuthor) refuse(`#${number} was opened by ${spec.notAuthor}`);
 }
 
-// A review comment named by id in the path: the forge is asked which pull request it is
-// on, who wrote it and whether its review is still pending.
 async function checkComment(spec, req, ctx) {
   if (typeof ctx.comment !== 'function') refuse('nothing here can look a comment up');
   const id = numberAt(req, spec.segment);
@@ -364,8 +353,6 @@ async function checkComment(spec, req, ctx) {
   if (spec.pending && comment.pending !== true) refuse(`comment ${id} is not part of a pending review`);
 }
 
-// A CI run named in the path by its id or by the id of one of its jobs: the forge is
-// asked which branch it ran for, and that must be a branch this task works on.
 async function checkRun(spec, req, ctx) {
   if (typeof ctx.run !== 'function') refuse('nothing here can look a CI run up');
   const id = numberAt(req, spec.segment);
@@ -385,8 +372,6 @@ async function checkRun(spec, req, ctx) {
   refuse(`CI ${spec.what} ${id} ran for a branch this task does not work on`);
 }
 
-// A project named in the path that must be the task account's own fork of the pool's;
-// returns its name.
 async function checkProject(spec, req, ctx) {
   const verdict = await checkFork(req.decoded[spec.segment], spec.owner, spec.repo, ctx);
   if (!verdict.ok) refuse(verdict.reason);
@@ -405,9 +390,9 @@ async function checkProject(spec, req, ctx) {
 const pending = new WeakMap(); // an approved request -> what it holds of the task's state
 const flying = new WeakMap(); // a task's state -> what the requests not yet concluded hold of it
 
-// The name in `branches` of the branch a pull request would be opened from. GitHub's
-// `head` is "branch", or "account:branch" for a branch of that account's fork of the
-// repository; elsewhere the branch comes plain, beside the fork it is in.
+// The `branches` label of the branch a PR would be opened from. GitHub's `head` is
+// "branch", or "account:branch" for that account's fork; elsewhere the branch comes
+// plain, beside its fork.
 function headLabel(effect, branches) {
   if (effect.head === undefined) return typeof effect.pull === 'string' ? branchLabel(`refs/heads/${effect.pull}`, effect.fork) : undefined;
   const parts = typeof effect.head === 'string' ? effect.head.split(':') : [];
@@ -418,7 +403,6 @@ function headLabel(effect, branches) {
 
 const drop = (list, items) => { for (const item of items) if (list.includes(item)) list.splice(list.indexOf(item), 1); };
 
-// The task's state with every member there, or null where the caller gave none.
 function stateOf(ctx) {
   const { state } = ctx;
   if (!state || typeof state !== 'object') return null;
@@ -427,12 +411,10 @@ function stateOf(ctx) {
   return state;
 }
 
-// A creation whose answer never came may have happened, and the forge knows. It is asked
-// once the request is over, before the task's next push or pull request is judged. A
-// branch the forge does not have is given back to the allowance, one it has at the commit
-// that was sent is the task's own, one it has at another commit stays counted. A pull
-// request the forge shows from the branch, open or not, is the task's one (`pulls` set),
-// and none shown gives it back.
+// A creation whose answer never came may have happened: once the request is over, the
+// forge is asked before the task's next push or PR is judged. A branch it lacks goes back
+// to the allowance, one at the sent commit is the task's own, one at another commit stays
+// counted. A PR shown from the branch, open or not, is the task's one; none gives it back.
 async function recall(ctx, pulls) {
   const state = stateOf(ctx);
   if (!state) return;
@@ -490,12 +472,10 @@ function settle(rule, effects, ctx) {
 }
 
 /// Tells the task's state what became of a request `authorize` allowed: `answer` is the
-/// forge's `{ status, body }` (`body` a Buffer), or undefined when no answer came or the
-/// request was never sent. A branch is the task's own once the forge's report says "ok"
-/// for it, a pull request its one once the forge answers that it opened it; what the forge
-/// refused is given back to the allowance. Anything else stays counted, and not owned,
-/// until the forge is asked what became of it. Every allowed request is concluded: one
-/// that is not counts as still on its way.
+/// forge's `{ status, body }` (`body` a Buffer), or undefined when none came or it was
+/// never sent. What the forge refused goes back to the allowance; anything not plainly
+/// accepted stays counted, unowned, until the forge is asked. An allowed request never
+/// concluded counts as still on its way.
 export function conclude(request, answer) {
   const held = pending.get(request);
   if (!held) return;
@@ -530,8 +510,8 @@ export function conclude(request, answer) {
   }
 }
 
-// A lookup that fails has answered nothing, and nothing is never permission: its failure
-// is the refusal, with the lookup's own words as the reason.
+// A failed lookup answered nothing, and nothing is never permission: its failure is the
+// refusal.
 function asking(ctx) {
   const out = {};
   for (const [key, value] of Object.entries(ctx)) {
@@ -552,15 +532,11 @@ function asking(ctx) {
 }
 
 /// Decides one request against a task's rules. `request` is `{ host, method, path,
-/// headers, body }` as the executor sent it (path with its query, body base64). `given`
-/// carries what the deep checks ask the forge and the machine: `resolveNode(id)`,
-/// `pull(number)`, `pullsByHead(ref, owner, ever)`, `comment(id)`, `assignees(number)`, `self()`,
-/// `repository(repo)`, `branch(ref, repo)`, `protects(ref, repo)`, `policy(base)`, `fetch`,
-/// `checkout` and the task's mutable `state` (`forge.context()` builds one). A lookup that throws
-/// refuses the request.
+/// headers, body }` as the executor sent it (path with its query, body base64). `given` is
+/// what `forge.context()` builds: the deep checks' lookups and the task's mutable `state`.
 /// Resolves to `{ ok: true, rule, request }` - `request` is the one to perform, in the
 /// single spelling that was checked - or `{ ok: false, reason }`. What an allowed request
-/// would use up is counted in `state` at once; `conclude` settles it with the forge's answer.
+/// would use up is counted in `state` at once; `conclude` settles it.
 export async function authorize(rules, request, given = {}) {
   try {
     const ctx = asking(given);

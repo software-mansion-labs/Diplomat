@@ -1,21 +1,16 @@
 // What policy-bot (palantir/policy-bot, read at v1.42.1), a GitHub App that gates merging,
-// takes from text for an approval. Its rules count whoever wrote a matching pull request
-// comment or COMMENT review as approving (or disapproving, or taking a disapproval back),
-// and a pull request's author by its body: a `comments` string anywhere in the text, a
-// `comment_patterns` or `github_review_comment_patterns` match, a `body_patterns` match of
-// the body (policy/common/methods.go). Unless a policy says otherwise the strings are
-// ":+1:" and "👍" for an approval and ":-1:" and "👎" for a disapproval (approval/options.go,
-// disapproval/disapprove.go). Text in the requester's name is checked against both. A
+// takes from text for an approval: whoever wrote a PR comment or COMMENT review holding a
+// `comments` string or matching `comment_patterns` or `github_review_comment_patterns`
+// approves (or disapproves, or takes a disapproval back), and so does a PR's author whose
+// body matches `body_patterns` (policy/common/methods.go). The default strings are ":+1:"
+// and "👍" to approve, ":-1:" and "👎" to disapprove (approval/options.go,
+// disapproval/disapprove.go). Text in the requester's name is checked against both; a
 // server's own settings and other bots that read comments are not seen.
 //
-// A policy is a YAML file of at most 256 KiB, read here by a reader of its own: block and
-// flow collections, the three scalar styles, block scalars, anchors and aliases. Its
-// patterns are Go regular expressions, matched by an engine of their own that reads Go's
-// syntax and takes time linear in the text, as Go's does; a policy's strings and patterns
-// are matched as one program, in one pass. Reading and compiling take time linear in the
-// file, within bounds on what its aliases and its patterns come to. What either cannot read
-// is a policy this cannot check text against, and text is refused on its repository; so is
-// text that takes too long to check.
+// A policy (YAML, at most 256 KiB) is read by a reader of its own, and its Go regular
+// expressions run on an engine of its own, linear in the text as Go's is; a policy's
+// strings and patterns run as one program in one pass. A policy either cannot read, and
+// text that takes too long to check, gets the text refused on its repository.
 
 import { foldsOf, holds, tableFrom, unicodeClass } from './unicode.js';
 
@@ -29,9 +24,9 @@ export function approvalFault(text) {
   return word === undefined ? null : `holds ${JSON.stringify(word)}, which policy-bot, a bot that gates merging, counts as an approval or a disapproval from whoever wrote it: text in the requester's name holds no ":+1:", "👍", ":-1:" or "👎" (say it in words); reword it and send the request again`;
 }
 
-/// Why `text` may not go on a pull request into the branch `base` under the pool
-/// repository's policy, which `ctx.policy(base)` reads (`forge.context()`), or null when it
-/// may. `kind` is "comment" for a comment or a review, "body" for the body it opens with.
+/// Why `text` may not go on a pull request into `base` under the pool repository's policy
+/// (`ctx.policy`), or null when it may. `kind` is "comment" for a comment or a review,
+/// "body" for the body a PR opens with.
 export async function textFault(ctx, base, text, kind) {
   if (typeof ctx.policy !== 'function') return 'cannot be checked: nothing here reads the pool repository\'s policy-bot policy';
   if (typeof base !== 'string' || base === '') return 'cannot be checked against policy-bot: the pull request names no base branch';
@@ -51,20 +46,18 @@ function policyFault(text, kind, policy) {
 }
 
 const LISTS = { comments: 'comments', comment_patterns: 'patterns', github_review_comment_patterns: 'patterns', body_patterns: 'bodies' };
-// The most a policy file may hold once its aliases are read in, each alias as a copy of what
-// it names: nodes, a key among them, and characters of its scalars. No file without aliases
-// comes near either.
+// Bounds once aliases are read in, each as a copy of what it names; no file without
+// aliases comes near either.
 const MAX_NODES = 250_000;
 const MAX_TEXT = 16 * MAX_POLICY;
-// The most its distinct patterns may compile to in all (`goPattern`'s `cost`). Its distinct
-// strings hold no more characters in all than it has bytes.
+// For all distinct patterns together (`goPattern`'s `cost`). Distinct strings cannot hold
+// more characters than the file has bytes.
 const MAX_STEPS = 100_000;
 
-/// What a policy file holds: `{ remote: { repo, path, ref } }` for one that names a policy in
-/// another repository (`path` and `ref` '' where it names none), else `{ comments, patterns,
-/// bodies }` - every text-matching method of the file, wherever it stands, with each
-/// pattern as `{ source, program }`, each text and pattern once. Throws, saying why, for a
-/// file this cannot read, among them one larger than the bounds above.
+/// `{ remote: { repo, path, ref } }` for a file naming a policy in another repository
+/// (`path` and `ref` '' where unnamed), else `{ comments, patterns, bodies }`: every
+/// text-matching method in the file, each once, patterns as `{ source, program }`. Throws,
+/// saying why, for a file this cannot read or past the bounds above.
 export function readPolicy(text) {
   const bytes = Buffer.byteLength(text);
   if (bytes > MAX_POLICY) throw new Error(`it is ${bytes} bytes long, more than the ${MAX_POLICY} this reads`);
@@ -157,7 +150,6 @@ function parseYaml(source) {
     while (stop > 0 && (text[stop - 1] === ' ' || text[stop - 1] === '\t')) stop--;
     return text.slice(0, stop);
   };
-  // After a value on its line, only a comment may follow.
   const end = (line, at) => {
     if (!/^([ \t]+#.*|[ \t]*)$/.test(line.slice(at))) fail('holds more than one value');
   };
@@ -359,7 +351,6 @@ function parseYaml(source) {
   function flow(at) {
     const src = whole;
     let p = starts[i] + at;
-    // The line `p` stands on.
     const here = () => {
       let [lo, hi] = [i, lines.length - 1];
       while (lo < hi) {
