@@ -1,7 +1,7 @@
-"""The Diplomacy Network in the applet: what each monitor cycle tells the daemon, the
-dispatch gate that offers a job where a spawn would be, and what becomes of the run
-the network then carries. Against a fake daemon - a real HTTP server on a unix socket in
-a scratch dir - and the spawn seam, which nothing here may reach.
+"""The Diplomacy Network in the applet: what each cycle tells the daemon, the gate that
+offers a job instead of spawning it, and the runs the network carries. Against a fake
+daemon (a real HTTP server on a unix socket) and the spawn seam, which nothing here may
+reach.
 """
 
 from __future__ import annotations
@@ -98,7 +98,6 @@ class FakeDaemon:
         threading.Thread(target=self.server.serve_forever, args=(0.01,), daemon=True).start()
 
     def sent(self, route: str) -> list:
-        """The bodies posted to ``route``, in order."""
         return [body for method, path, body in self.got
                 if method == "POST" and path == f"/{route}"]
 
@@ -122,9 +121,8 @@ def offer(task="t1", state="pooled", **extra) -> dict:
 
 def daemon_row(task="t1", state="pooled", *, executor="", outcome=None, reason="",
                kind="review", item="pr-9") -> dict:
-    """An offer with every member the daemon's snapshot gives it (``rows()`` in its
-    ``src/node/offers.js``): times in whole seconds, ``endedAt`` 0 while it is open,
-    ``executorHere`` from the executor alone."""
+    """An offer with every member the daemon gives it (``rows()`` in its
+    ``src/node/offers.js``)."""
     now = int(time.time())
     ended = state in (agentstate.NET_DONE, agentstate.NET_FAILED, agentstate.NET_CANCELLED)
     return {"taskId": task, "pool": POOL, "kind": kind, "item": item,
@@ -135,7 +133,6 @@ def daemon_row(task="t1", state="pooled", *, executor="", outcome=None, reason="
 
 
 def spent(ok=True, tokens=500) -> dict:
-    """An outcome as the daemon keeps it."""
     return {"ok": ok, "summary": "reviewed", "usd": 0.42, "tokens": tokens,
             "runner": "claude", "model": "opus"}
 
@@ -157,7 +154,6 @@ def daemon(monkeypatch):
 
 @pytest.fixture
 def on(monkeypatch):
-    """The switch on, the fixture root resolved, and no host disk or budget read."""
     appconfig.set_bool(network.ENABLED_KEY, True)
     monkeypatch.setattr(review, "roots_guessed", lambda: False)
     monkeypatch.setattr(review, "roots_complete", lambda: True)
@@ -170,7 +166,7 @@ def takes_offers(task="t1"):
 
 
 def job(number=9, **fields) -> autofix.AgentJob:
-    """A find of the review monitor: automatic work a refusal queues."""
+    """A review-monitor find: automatic, so a refusal queues it."""
     return dataclasses.replace(
         _job(number, counter="review_requests", action="review-req"), **fields)
 
@@ -211,7 +207,6 @@ TOOL_POOL = {"id": "github.com/acme/tool", "path": "/src/tool", "forge": "github
 
 
 def has_pools(*pools) -> dict:
-    """A snapshot of a daemon holding these pools, each ``(id, path, identity)``."""
     return snapshot(pools=[{"id": i, "path": path, "identity": who} for i, path, who in pools])
 
 
@@ -350,7 +345,7 @@ REAL_LINKING = review.roots_linking
 
 @pytest.fixture
 def root_paths(monkeypatch):
-    """The roots read for real, from the paths the test lists."""
+    """The roots read for real, from the list returned."""
     paths: list[str] = []
     monkeypatch.setattr(review, "repo_root_paths", lambda: paths)
     monkeypatch.setattr(review, "_roots_cache", None)
@@ -407,7 +402,6 @@ def test_a_root_git_fails_on_is_unread(store, on, daemon, root_paths, tmp_path):
 
 
 def _checkout(path, remote="") -> str:
-    """A git checkout at ``path``, with ``remote`` as its origin when given."""
     subprocess.run(["git", "init", "-q", str(path)], check=True)
     if remote:
         subprocess.run(["git", "-C", str(path), "remote", "add", "origin", remote], check=True)
@@ -582,7 +576,6 @@ def test_nothing_asks_the_daemon_with_the_switch_off(store, daemon, monkeypatch)
 
 
 def switch_off_while_asked(monkeypatch) -> None:
-    """The daemon's snapshot is read, and the switch goes off before it is back."""
     state = dn.state
 
     def asked():
@@ -641,8 +634,6 @@ def test_every_settle_asks_the_daemon_and_keeps_what_it_said(store, on, daemon):
 
 @pytest.fixture
 def installer(monkeypatch):
-    """The installer's runs, recorded: each answers a daemon that is then up, or down
-    after a stop."""
     ran = []
 
     def run(script, arg):
@@ -720,8 +711,8 @@ def test_a_stop_with_no_daemon_answering_runs_the_installer_and_says_what_it_end
     assert lines("network-stop") == [line]
 
 
-#: What the daemon's installer answers a start with while the network is off, and a
-#: stop that could not remove what a machine switched off keeps nothing of.
+#: The installer's answers to a start while the network is off, and to a stop that left
+#: records behind.
 START_OFF = ("the network is switched off in Diplomat's settings: no daemon was started")
 STOP_LEFT = ("/h/.diplomat/network/ca and /h/.diplomat/network/runs could not be removed: "
              "a job left among its records what this user may not delete, and no docker "
@@ -948,8 +939,7 @@ def test_the_run_reads_where_it_is_as_the_snapshot_moves_and_is_priced_once(
     (agentstate.NET_DONE, ME, True, "claude", True),
     (agentstate.NET_DONE, PEER, True, dn.RUNNER_ELSEWHERE, False),
     (agentstate.NET_FAILED, ME, False, "claude", True),
-    # Its attempts ran out with nobody holding it: the last outcome is no run of this
-    # machine's.
+    # Attempts ran out with nobody holding it: the last outcome is no run of this machine's.
     (agentstate.NET_FAILED, "", False, dn.RUNNER_ELSEWHERE, False)])
 def test_an_ended_offer_is_booked_to_the_machine_its_row_names(
         store, on, daemon, state, executor, ok, runner, counted):
@@ -1224,8 +1214,6 @@ NO_RULES = "That pool's rules name no review."
 
 
 def _refuses(*items):
-    """An ``/offer`` route refusing the jobs about ``items`` for a reason of their own,
-    and taking every other."""
     def answer(body):
         if body["item"] in items:
             return 409, {"error": NO_RULES}
@@ -1360,7 +1348,6 @@ def test_an_offer_with_no_task_books_nothing(store, on, daemon, monkeypatch, ans
 # MARK: - an offer the daemon did not settle
 
 def lose_offer_replies(monkeypatch) -> None:
-    """Every offer reaches the daemon, and its reply is lost on the way back."""
     send = dn.send
 
     def lost(route, body=None, **kw):
@@ -1536,8 +1523,7 @@ def test_a_paused_item_is_held_and_a_full_cap_a_low_disk_and_a_spent_budget_are_
     d = daemon({"/offer": lambda body: (200, {"taskId": body["item"]})})
     calls = _spawn_recorder(monkeypatch)
 
-    # Each of the three holds a local dispatch; none is this machine's to answer for a
-    # job another machine may take.
+    # Each of the three holds a local dispatch, never a job another machine may take.
     read = []
     monkeypatch.setattr("diplomat_app.store.diskfloor.lowest", lambda paths: (
         read.append("disk"), SimpleNamespace(low=True, path="/", free=0, floor=1))[1])
@@ -1792,7 +1778,7 @@ def test_a_config_that_cannot_be_read_leaves_the_switch_as_it_was(store, on, dae
     appconfig.path().unlink()
     assert dn.enabled() and dn.settings_unknown() == unknown()
 
-    # Read on from one file says nothing of another that cannot be read.
+    # Read on from one config says nothing of another that cannot be read.
     appconfig.set_bool(network.ENABLED_KEY, True)
     assert dn.enabled()
     other = tmp_path / "other.json"
@@ -1802,15 +1788,13 @@ def test_a_config_that_cannot_be_read_leaves_the_switch_as_it_was(store, on, dae
 
 
 def break_config() -> str:
-    """Leave the config one brace short, and answer what it held."""
     whole = appconfig.path().read_text(encoding="utf-8")
     appconfig.path().write_text(whole.rstrip()[:-1], encoding="utf-8")
     return whole
 
 
 def move_config_away() -> str:
-    """Rename the config aside, as vim and nvim save it on Linux, and answer what it
-    held."""
+    """Rename the config aside, as vim and nvim save it on Linux."""
     whole = appconfig.path().read_text(encoding="utf-8")
     appconfig.path().rename(appconfig.path().with_name("config.json~"))
     return whole
@@ -1822,9 +1806,8 @@ def unknown() -> str:
 
 @pytest.fixture
 def relaunched(on, monkeypatch):
-    """A Diplomat that read the switch as on and quit, and the config it left broken
-    for the next one to start on: named before ``store``, the store is that next one.
-    Gives what the config held."""
+    """A Diplomat that read the switch on and quit, leaving the config broken. Name it
+    before ``store``: the store is the next Diplomat to start."""
     assert dn.enabled()
     whole = break_config()
     monkeypatch.setattr(dn, "_switch_read", None)
@@ -1881,8 +1864,8 @@ def test_a_diplomat_that_starts_on_a_config_it_cannot_read_keeps_the_switch_last
 
 @pytest.fixture
 def never_on(monkeypatch):
-    """A config that cannot be read on a machine no Diplomat ever read the switch as on
-    on, for the store named after it to start on."""
+    """A broken config where no Diplomat ever read the switch on. Name it before
+    ``store``."""
     appconfig.path().write_text('{"networkEnabled": true', encoding="utf-8")
     monkeypatch.setattr(dn, "_switch_read", None)
 
@@ -1959,9 +1942,8 @@ def test_a_record_that_will_not_save_costs_the_record_not_the_reading(monkeypatc
 
 @pytest.fixture
 def linked(tmp_path, monkeypatch):
-    """The switch on and one root in Settings: a checkout of github.com/o/r, resolved
-    by the real reading of the roots. Where no Settings list a root, the default one
-    is a checkout of another repository. Gives the root's path."""
+    """The switch on and one root in Settings, a checkout of github.com/o/r read for
+    real. The default root, used when Settings list none, is another repository's."""
     root = _checkout(tmp_path / "r", "https://github.com/o/r.git")
     default = _checkout(tmp_path / "default", "https://github.com/o/default.git")
     appconfig.set_repo_roots([root])
@@ -2044,7 +2026,7 @@ def test_a_read_of_the_config_inside_a_rewrite_of_it_says_nothing_it_read(
         patch.setattr(review, "roots_linking", inside_a_rewrite(review.roots_linking))
         store._network_cycle_once(1000.0)
     with monkeypatch.context() as patch:
-        # What each "Left" line says became of its path.
+        # The read the "Left" lines judge each path by.
         patch.setattr(store, "_listed_paths", inside_a_rewrite(store._listed_paths))
         store._network_cycle_once(1001.0)
     with monkeypatch.context() as patch:
@@ -2367,7 +2349,6 @@ def test_a_run_still_booked_with_the_switch_off_is_dropped_by_the_next_settle(st
 # MARK: - an ask is answered by work that ran, not by its offer
 
 def names_tasks():
-    """A daemon that names each offer's task after its item."""
     return {"/offer": lambda body: (200, {"taskId": "t-" + body["item"]})}
 
 
@@ -2376,7 +2357,6 @@ def asks(store) -> list[tuple[int, str]]:
 
 
 def swept(store, d, monkeypatch) -> None:
-    """A sweep of PRs #1 and #2, each offered by one poll and left in the pool."""
     store.request_review_sweep(_sweep(store))
     d.state = snapshot(offers=[offer("t-pr-1"), offer("t-pr-2")])
     _poll(store, monkeypatch)
@@ -2505,7 +2485,7 @@ ISSUE = "https://github.com/o/r/issues/12"
 
 
 def numbers_tasks():
-    """A daemon that makes a new task of every offer, as it does of one naming no PR."""
+    """A new task per offer, as the daemon makes of one naming no PR."""
     made = iter(range(1, 100))
     return {"/offer": lambda body: (200, {"taskId": f"t{next(made)}"})}
 
@@ -2521,7 +2501,6 @@ def pipeline_fix() -> dict:
 
 
 def pipeline_sync(store, *effects) -> None:
-    """A sync's own result that judged every root in full."""
     store._apply_pipeline_sync({"result": {
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "items": [],
         "graph": {"nodes": [], "edges": []}, "effects": list(effects), "events": [],
@@ -2690,7 +2669,6 @@ def mesh(monkeypatch):
         (world.dir / "state.json").write_text(json.dumps({"pid": pid}))
 
     def linked(pid):
-        """The directory as a link to one kept elsewhere, whose state names ``pid``."""
         behind = world.dir.with_name("mesh-elsewhere")
         behind.mkdir()
         (behind / "device.key").write_text("secret")
@@ -2837,9 +2815,9 @@ def test_a_container_is_told_by_its_cgroup(monkeypatch, tmp_path, cgroup, inside
 
 
 def test_an_agent_in_a_container_is_no_agent_of_this_machine(monkeypatch, tmp_path):
-    """The host's ``ps`` lists a container's processes beside its own. A job of the
-    network that names its PR in its argv would be found as an untracked agent and hold
-    a bay of the cap for work already counted as a network run."""
+    """The host's ``ps`` lists a container's processes too: a network job naming its PR
+    would be found as an untracked agent and hold a bay for work counted as a network
+    run."""
     _fake_cgroups(monkeypatch, tmp_path, {
         100: "0::/user.slice/user-1000.slice/session-3.scope\n",
         200: "0::/system.slice/docker-" + "ab12" * 16 + ".scope\n"})
