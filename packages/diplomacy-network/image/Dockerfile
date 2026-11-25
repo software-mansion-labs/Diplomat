@@ -1,6 +1,6 @@
-# The one image every Diplomacy Network job runs in: Debian with the tools agents reach
-# for and nothing project-specific. Everything else is installed by the agent, at run
-# time, through the broker. The tag is the hash of this directory (src/executor/container.js).
+# The one image every Diplomacy Network job runs in; anything project-specific the agent
+# installs at run time through the broker. The tag is the hash of this directory
+# (src/executor/container.js).
 
 ARG BASE=debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 FROM ${BASE}
@@ -17,8 +17,8 @@ ARG GLAB_SHA256_ARM64=062d53acb0f2cbcc79a014600df1aa0fb440bb3a08a5d4900d3b49b553
 ARG GLAB_SHA256_AMD64=ce06313b2075af25180cd195ab3496d42bc5857c85a1c12ba996838dfe9d822c
 ARG CLAUDE_CODE_VERSION=2.1.325
 
-# pip refuses to touch Debian's own site-packages without this; in a disposable
-# container that refusal protects nothing.
+# Without PIP_BREAK_SYSTEM_PACKAGES pip refuses Debian's site-packages, which protects
+# nothing in a disposable container.
 ENV DEBIAN_FRONTEND=noninteractive \
     LANG=C.UTF-8 \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
@@ -30,7 +30,6 @@ RUN apt-get update \
       procps lsof zsh tmux python3 python3-pip python3-venv build-essential android-tools-adb \
  && rm -rf /var/lib/apt/lists/*
 
-# Node, gh and glab from their own releases, each checked against the hash pinned above.
 # Node's headers are left out: node-gyp fetches its own.
 RUN set -eu; arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
@@ -54,7 +53,6 @@ RUN set -eu; arch="$(dpkg --print-architecture)"; \
     npm cache clean --force; rm -rf /root/.npm /tmp/*; \
     node --version; npm --version; corepack --version; gh --version; glab --version; claude --version
 
-# What the relay beside each job container runs (src/executor/container.js).
 COPY relay.mjs /opt/dn/relay.mjs
 
 WORKDIR /work

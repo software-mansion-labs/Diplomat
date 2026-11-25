@@ -231,7 +231,7 @@ try {
     assert.notEqual(renewed.id, first.id);
     assert.deepEqual(renewed.hosts, [...HOSTS].sort());
     assert.ok(createCA({ dir }).kept(first.id), 'the old generation is still there for the jobs started under it');
-    // What an earlier version left beside the generations goes too.
+    // A stray file beside the generations goes too.
     fs.writeFileSync(path.join(dir, 'current'), `${first.id}\n`);
     const fresh = createCA({ dir });
     fresh.prune();

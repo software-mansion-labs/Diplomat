@@ -1,9 +1,6 @@
-// Inside a job's container: one loopback listener per forward the job was given. A
-// connection to it becomes a CONNECT to <name>.forward.dn through the broker under the
-// job's own token, which is what makes a forward this job's and no other container's.
-// The listeners' addresses are written to <env file> as the variables a tool reads:
-// `adb` as ADB_SERVER_SOCKET, anything else as DN_FORWARD_<NAME>=host:port. The device
-// allocator and the tool-server are to be offered to a job through here.
+// Inside a job's container: one loopback listener per forward, each connection a CONNECT
+// to <name>.forward.dn through the broker under the job's own token - the token is what
+// keeps a forward this job's and no other container's.
 // usage: node forward.mjs <env file> <name>...   with DN_PROXY in the environment
 
 import fs from 'node:fs';

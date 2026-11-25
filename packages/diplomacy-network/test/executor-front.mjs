@@ -1,8 +1,8 @@
-// The broker before a request is any job's work: a connection's first request head, read
-// off the socket; the one answer a connection without a live token gets; the connections
-// that are no job's; and the names a job asks for - the ones refused unasked, how many
-// are asked at a time and for how long, and the resolver that asks them. Against an
-// internet that is a table in this file and a name server on a local UDP port.
+// The broker before a request is any job's: the first head read off the socket, the one
+// answer a connection without a live token gets, the connections that are no job's, and
+// a job's name lookups (refused unasked, how many at a time and for how long, the
+// resolver). Against an internet that is a table here and a name server on a local UDP
+// port.
 // Run: node test/executor-front.mjs
 
 import assert from 'node:assert/strict';

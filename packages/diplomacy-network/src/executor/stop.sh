@@ -1,7 +1,7 @@
 #!/bin/sh
-# One job's processes, asked after or ended, with every other job in the container left
-# alone. The host never runs this from a file: a job can write wherever its container
-# can, so job.js puts this text on the command line of the container's /bin/sh.
+# Query or end one job's processes, leaving every other job in the container alone. Never
+# run from a file - a job can write wherever its container can - so job.js passes this
+# text to the container's /bin/sh.
 #   /bin/sh -c <this text> sh up <run id> <group>     prints `up` while the runner's
 #                                                     process group exists, `gone` otherwise
 #   /bin/sh -c <this text> sh left <run id> <group>   the same, of anything of the job at all
@@ -9,13 +9,12 @@
 #                                                     TERM, the grace, KILL, and the job's
 #                                                     work tree removed
 #
-# The job's process group covers what the agent started the ordinary way. Whatever left
-# that group (a daemon the agent launched) still carries DN_RUN_ID in its environment,
-# which is how it is found. A group of 0 is a job whose group the host does not hold:
-# it is known by its run id alone.
+# Processes that left the job's group (a daemon the agent launched) are found by the
+# DN_RUN_ID in their environment. Group 0: the host does not know the group, so only the
+# run id finds the job.
 
-# tr, grep, sleep and rm where the image put them, not where the container's PATH comes
-# to a name first. Root in the container can still replace them there.
+# The image's tools, not whatever a job put first on the container's PATH (root in the
+# container can still replace these).
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 
 verb="$1"

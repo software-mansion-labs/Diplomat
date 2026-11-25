@@ -1,8 +1,7 @@
-// What is held of the disk under a container's name against the stand-in docker, the run
-// records above all, which outlive the container: counted with or without one, removed
-// run by run and whole, and never reported gone while they are there. And what a
-// container's processes hold open under no name, counted by the real held.cjs where
-// this machine gives a pid namespace to run it in.
+// Disk held under a container's name, against the stand-in docker: run records above all,
+// which outlive the container - counted with or without one, removed run by run and whole,
+// never reported gone while there - and unlinked-but-open files, counted by the real
+// held.cjs where this machine gives a pid namespace to run it in.
 // Run: node test/executor-container-records.mjs
 
 import assert from 'node:assert/strict';

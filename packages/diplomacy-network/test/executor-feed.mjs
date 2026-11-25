@@ -1,8 +1,6 @@
-// The feed between a connection and node's http parser: where a request head ends,
-// that the parser is handed one head at a time whatever the bytes and however they
-// arrive and no more than one in a turn of the event loop, that a stopped feed hands
-// nothing on whoever resumes it, and that all feeds together use a bounded slice of each
-// turn.
+// The feed between a connection and node's http parser: where a head ends, one head at a
+// time and at most one per turn however the bytes arrive, a stopped feed handing nothing
+// on whoever resumes it, and all feeds sharing a bounded slice of each turn.
 // Run: node test/executor-feed.mjs
 
 import assert from 'node:assert/strict';
@@ -122,8 +120,8 @@ await check('a stopped feed hands nothing on, whoever resumes it, and a started 
   out.start();
   await settle();
   assert.equal(got.length, 2, 'starting a feed does not undo its reader\'s pause');
-  // A stream that is resumed flows at once and says so a tick later: a stopped feed
-  // does not flow at all, and takes the resume as a wish.
+  // A resumed stream flows at once and says so a tick later: a stopped feed does not flow
+  // at all, and only records the resume.
   out.stop();
   out.resume();
   out.stop();
@@ -134,7 +132,7 @@ await check('a stopped feed hands nothing on, whoever resumes it, and a started 
   await until(() => got.length === 4, 'the feed to flow, as its reader asked, once it is started');
   await settle();
   assert.equal(got.length, 4, 'stopped over the fourth piece, it has handed on no fifth');
-  // A reader that pauses it while it is stopped has withdrawn the wish.
+  // Pausing while stopped withdraws it.
   out.resume();
   out.pause();
   out.start();
@@ -202,7 +200,6 @@ await check('node is handed one request at a time: a connection stopped or close
   assert.deepEqual(seen, ['/0', '/1'], 'nothing is read after the request that was called the last');
   assert.deepEqual([...answered.matchAll(/HTTP\/1\.1 (\d{3})/g)].map((m) => m[1]), ['200', '407'], 'and its answer goes out behind the one before it');
 
-  // Closed.
   seen.length = 0;
   c = await open();
   const closed = once(c.near, 'close', 'the connection to be closed with its feed');
@@ -292,7 +289,6 @@ await check('a feed is a connection to node\'s server: answers go out in order, 
   assert.deepEqual(batches, [['a head\r\n\r\n', 'and its body']]);
   corked.destroy();
 
-  // The time a connection may stay silent.
   const quiet = await pair();
   const timed = feed(quiet.far);
   let fired = 0;
@@ -327,9 +323,8 @@ await check('the feeds of one feeder hand over what fits a slice of a turn, and 
   const most = Math.max(...perTurn.filter((n) => n !== undefined));
   assert.ok(most <= 10, `${most} pieces were handed over in one turn of a feeder whose slice is ten looks at the clock`);
   assert.ok(perTurn.filter((n) => n !== undefined).length >= 15, 'so 150 pieces took fifteen turns or more');
-  // Bytes in which no head ends are handed over in pieces of FEED_PIECE_BYTES, as many as
-  // fit the slice. A piece is what the parser is given in one call: 4 KiB, however it is
-  // set, is the most this check takes.
+  // Bytes in which no head ends go in FEED_PIECE_BYTES pieces, as many as fit the slice;
+  // this check takes no more than 4 KiB a piece, however it is set.
   assert.equal(FEED_PIECE_BYTES, 4096);
   await until(() => turn >= 200, 'the turns to be counted out');
   perTurn.length = 0;

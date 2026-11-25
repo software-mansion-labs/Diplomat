@@ -1,44 +1,34 @@
-// The connections the broker opens out to the internet for its jobs. Their socket
-// buffers are this machine's kernel memory: what a far host has not acknowledged yet,
-// and what came from it that the job has not read. Node can neither limit those buffers
-// nor say how full they are, so the kernel is asked: on Linux /proc/self/net/tcp and
-// tcp6, on macOS one netstat process, every OUT_POLL_MS while any such connection is
-// open. Of what the poll finds, all jobs together may hold OUT_BYTES, shared out
-// equally among the jobs that have connections out.
+// The broker's connections out to the internet for its jobs. Their socket buffers are
+// kernel memory node can neither cap nor measure, so the kernel is polled (/proc/self/net
+// tcp and tcp6 on Linux, one netstat on macOS) every OUT_POLL_MS while any are open; all
+// jobs together may hold OUT_BYTES, shared equally among the jobs with connections out.
 //
-// What a job sends goes into the kernel as fast as this machine can copy it, so it is
-// counted as it is written: a job whose connections out hold its share, by the last
-// poll and what was written since, has its writes kept back in node until a poll finds
-// room. What comes in comes at the speed of the host's link, and a poll that finds all
-// jobs past OUT_BYTES resets connections until they are within it: of the job furthest
-// past its share, as one is when another job comes, the connection that holds the
-// most; a job within its share loses none.
+// Writes enter the kernel as fast as this machine copies, so they are counted as written:
+// a job at its share (by the last poll plus writes since) has its writes corked until a
+// poll finds room. Incoming bytes come at the link's speed, and a poll that finds all jobs
+// past OUT_BYTES resets the fullest connection of the job furthest past its share until
+// within it; a job within its share loses none.
 //
-// A socket closed while the kernel still has bytes of it to send would keep them, with
-// no process left to count or reset it, for minutes. So a connection out is reset as it
-// is closed if the kernel may have any, by the last poll and what was written since;
-// one the job closes or ends is kept open instead until a poll finds its bytes taken,
-// counted as the job's, and reset once it is OUT_LINGER_MS past its end. Its shutdown
-// waits for that too: a shutdown waits for room in the kernel's buffer, and a socket
-// whose shutdown is under way cannot be reset (libuv refuses, and node never closes it).
+// A closed socket whose bytes the kernel still holds keeps them for minutes with nothing
+// left to count or reset it. So a connection out is reset on close if the kernel may hold
+// any; one the job ends is kept open, counted as the job's, until a poll finds its bytes
+// taken, and reset OUT_LINGER_MS past its end. Its shutdown waits too: a shutdown waits for
+// kernel buffer room, and a socket mid-shutdown cannot be reset (libuv refuses, and node
+// never closes it).
 
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import { execFile } from 'node:child_process';
 
-/// What the connections out of all jobs may have queued in the kernel at once, either way.
 export const OUT_BYTES = 32 * 1024 * 1024;
-/// How often the kernel is asked while connections are open, and how soon after the
-/// last time once a job's writes are kept back.
 export const OUT_POLL_MS = 500;
+/// The soonest next poll once a job's writes are held.
 export const OUT_SOONEST_MS = 100;
-/// How many connections out a job may have open while the kernel cannot be asked.
+/// Connections out a job may have open while the kernel cannot be read.
 export const OUT_FALLBACK = 32;
-/// How long a connection out the job ended is kept for the far host to take what it was sent.
 export const OUT_LINGER_MS = 30000;
 
-/// An address as it is compared: IPv4 dotted, IPv6 as its eight groups in hex, without
-/// leading zeros, "::" or a zone.
+/// For comparison: IPv6 as eight hex groups without leading zeros, "::" or a zone.
 export function plainAddress(address) {
   if (!address.includes(':')) return address;
   let text = address.toLowerCase();
@@ -64,10 +54,8 @@ function procAddress(hex) {
   return groups.join(':');
 }
 
-/// The connections in the text of /proc/net/tcp or tcp6, but those listening or not yet
-/// connected: `{ local, localPort, remote, remotePort, bytes, sending }`, `bytes` what is
-/// queued either way and `sending` what is queued to be sent. Throws on text that is not
-/// such a table.
+/// /proc/net/tcp{,6} rows but listening and SYN_SENT ones; `bytes` is queued either way,
+/// `sending` outbound only.
 export function parseProc(text) {
   const lines = text.split('\n');
   if (!/^\s*sl\s+local_address\s+rem(?:ote)?_address\s+st\s+tx_queue\s+rx_queue/.test(lines[0])) throw new Error('not a table of TCP sockets');
@@ -76,8 +64,8 @@ export function parseProc(text) {
     if (!line.trim()) continue;
     const m = /^\s*\d+:\s+([0-9A-F]+):([0-9A-F]{4})\s+([0-9A-F]+):([0-9A-F]{4})\s+([0-9A-F]{2})\s+([0-9A-F]{8}):([0-9A-F]{8})\s/.exec(line);
     if (!m) throw new Error(`not a TCP socket: ${line.slice(0, 120)}`);
-    // One whose SYN is answered as the table is read can show the far end's sequence
-    // number as what it has come in (SYN_SENT, 02).
+    // SYN_SENT (02): one answered as the table is read can show the far end's sequence
+    // number as its receive queue.
     if (m[5] === '0A' || m[5] === '02') continue;
     rows.push({
       local: procAddress(m[1]), localPort: parseInt(m[2], 16), remote: procAddress(m[3]), remotePort: parseInt(m[4], 16),
@@ -87,9 +75,7 @@ export function parseProc(text) {
   return rows;
 }
 
-/// The connections in what `netstat -anl -p tcp` prints on macOS, as parseProc has them:
-/// a socket with no far end (`*.*`), one listening among them, is none. Throws on text
-/// that is not such a table.
+/// macOS `netstat -anl -p tcp` as parseProc's rows; sockets with no far end are skipped.
 export function parseNetstat(text) {
   const lines = text.split('\n');
   const header = lines.findIndex((l) => /^Proto\s+Recv-Q\s+Send-Q\s+Local Address\s+Foreign Address/.test(l));
@@ -125,7 +111,6 @@ async function procTable(name) {
   }
 }
 
-/// The connections of this machine as the kernel has them, by `parseProc`.
 export async function systemQueues() {
   if (process.platform === 'linux') return [...await procTable('tcp'), ...await procTable('tcp6')];
   if (process.platform === 'darwin') {
@@ -136,20 +121,15 @@ export async function systemQueues() {
   throw new Error(`the kernel's socket queues cannot be read on ${process.platform}`);
 }
 
-/// `createOutbound()` makes the count of the connections out of all jobs. `add(job, raw)`
-/// counts `raw`, a connected TCP socket, as the job's; what TLS over it writes is not seen
-/// as it is written, only in the polls; `over(raw, secure)` has the TLS socket over it
-/// shut down as `raw` is. `close(raw)` ends a connection the job is done with, and
-/// `lingering(job)` is how many of those are still open, held for what they were sent.
-/// `full(job)` is true while polls fail and the job has `fallback` connections out
-/// open. `drop(job)` resets the job's connections and forgets them. `say(job, text, why)` is
-/// told of each connection reset, `why` 'ended' or 'full' as the reset is for a connection
-/// past the linger or past the whole, and with `job` null of polls that fail and work again.
-/// `queues` replaces `systemQueues`.
+/// `add(job, raw)` counts a connected socket as the job's; what TLS over it writes shows
+/// only in polls, and `over(raw, secure)` defers the TLS socket's shutdown as raw's is.
+/// `full(job)`: polls fail and the job has `fallback` open. `say(job, text, why)` hears of
+/// each reset (`why` 'ended' past the linger, 'full' past the total) and, with `job` null,
+/// of polls failing and recovering.
 export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest = OUT_SOONEST_MS, fallback = OUT_FALLBACK,
   linger = OUT_LINGER_MS, queues = systemQueues, say = () => {} } = {}) {
-  const jobs = new Map(); // job -> { job, entries, est, queued }
-  const entryOf = new WeakMap(); // socket -> its entry
+  const jobs = new Map();
+  const entryOf = new WeakMap();
   let timer = null;
   let due = 0;
   let polling = false;
@@ -157,14 +137,13 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
   let last = 0;
 
   const share = () => Math.floor(bytes / jobs.size);
-  // Whether the kernel may have bytes of the connection to send: by the last poll that
-  // answered, or written since that poll began.
+  // By the last poll that answered, or written since it began.
   const sending = (entry) => entry.sending > 0 || entry.raw.bytesWritten > entry.sentAt;
   const to = (entry) => `a connection out of this job to ${entry.remoteText}:${entry.remotePort}`;
-  // One whose shutdown has begun, with nothing to send or while polls fail, is closed.
+  // A socket mid-shutdown cannot be reset, only closed.
   const reset = (entry) => (entry.shut ? entry.raw.destroy() : entry.raw.resetAndDestroy());
 
-  // What the job ended or closed while the kernel had bytes of it to send, once they are
+  // A connection the job ended or closed while the kernel held its bytes, once they are
   // taken or can no longer be told.
   function settle(entry) {
     entry.closing = 0;
@@ -173,8 +152,7 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     return undefined;
   }
 
-  // The shutdown that ends a stream's writing, held while the kernel may have bytes of
-  // the connection to send.
+  // Holds the stream's shutdown while the kernel may have bytes of it to send.
   function deferShutdown(stream, entry) {
     const final = stream._final;
     stream._final = function shutting(cb) {
@@ -207,8 +185,8 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     schedule(Math.max(0, last + soonest - Date.now()));
   }
 
-  // Lets as many of the job's kept-back connections go as what each kept back fits in
-  // its share, counted as written; one at the least once the job holds nothing.
+  // Uncorks what fits in the share, counted as written; at least one once the job holds
+  // nothing.
   function release(state, limit) {
     for (const entry of state.entries) {
       if (!entry.corked) continue;
@@ -220,8 +198,7 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
     }
   }
 
-  // A connection that closed holds nothing: it was reset if the kernel might have had
-  // any of it to send.
+  // A closed connection holds nothing: it was reset if the kernel might have held any.
   function forget(entry) {
     entry.state.entries.delete(entry);
     if (entry.state.entries.size === 0 && jobs.get(entry.state.job) === entry.state) jobs.delete(entry.state.job);
@@ -230,10 +207,9 @@ export function createOutbound({ bytes = OUT_BYTES, every = OUT_POLL_MS, soonest
   async function poll() {
     timer = null;
     polling = true;
-    // What is written from here on is not in what the kernel is about to say, and
-    // neither is what node is still handing it, which goes in as the kernel has room
-    // whether or not the connection is kept back; what node keeps back is counted as it
-    // is let go, which ending the socket does too.
+    // The kernel's answer will not include what is written from here on, nor what node is
+    // still handing it (which goes in as the kernel has room, corked or not); what node
+    // keeps back is counted when let go, as ending the socket does too.
     for (const state of jobs.values()) {
       for (const entry of state.entries) {
         if (!entry.raw.writableCorked) entry.kept = 0;

@@ -1,8 +1,6 @@
-// What is read back of a run's directory, all of which its job can write. A file is
-// read by a bounded piece from its end. The agent's log is the one piece of any size,
-// and every shape its last megabytes can have is the job's to choose: a thread of its
-// own reads and parses it, and hands back five members it made itself, each of a kind
-// and a size that is checked there. The daemon's thread sees nothing else of the log.
+// Reading back a run's directory, all of which its job can write. The agent's log is the
+// one large input and its shape is the job's to choose, so a worker thread parses its
+// tail and hands back only five members it built and checked itself.
 
 import { once } from 'node:events';
 import fs from 'node:fs';
@@ -10,25 +8,19 @@ import { Worker, isMainThread, parentPort, workerData } from 'node:worker_thread
 
 const TAIL_BYTES = 4 * 2 ** 20;
 const SUMMARY_CAP = 4000;
-// The most a model's name is carried in (capability.js cuts a label there too).
+// capability.js cuts a label at this length too.
 const MODEL_CAP = 100;
-// A line is parsed with fewer commas and opening brackets outside its strings than
-// this, so with no more values. The agent's own result line has some dozens, and a few
-// more for each model and each refused tool call. Parsed, a value takes many times the
-// bytes it was written in, and 4 MiB can be written as two million of them.
+// A line with this many values or more is not parsed: a parsed value takes many times its
+// written bytes, and 4 MiB can hold two million. A real result line has some dozens.
 const VALUES = 100000;
 const { O_RDONLY, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK } = fs.constants;
 
-/// A count or a sum: anything but a positive number is none.
 export const figure = (v) => (Number.isFinite(v) && v > 0 ? v : 0);
 
-/// The last `tail` bytes of the file `name` in the run directory `runDir`, as text, or
-/// null. The directory is opened where the host put it, and only as a directory; the
-/// file is named through that descriptor (by /proc on Linux, by the directory's own
-/// number on a Mac), so a link put in the directory's place between the two leads
-/// nowhere. The open does not wait for the writer a pipe in the file's place never has,
-/// and the read is at a place and by a length, which a pipe, a device or a directory
-/// has not to give.
+/// The last `tail` bytes of `name` in `runDir`, or null. The file is opened through a
+/// descriptor on the directory (/proc on Linux, /.vol on a Mac), so a link swapped in for
+/// the directory leads nowhere; O_NONBLOCK keeps a FIFO from hanging the open, and the
+/// positioned read fails on a pipe, device or directory.
 export async function readOwn(runDir, name, tail) {
   let dir = null;
   let file = null;
@@ -47,8 +39,8 @@ export async function readOwn(runDir, name, tail) {
   }
 }
 
-// Whether `line` has `most` or more commas and opening brackets outside its strings.
-// In JSON every value but the first comes after one of them.
+// Counts commas and opening brackets outside strings: in JSON every value but the first
+// follows one.
 function crowded(line, most) {
   let seen = 0;
   let quoted = false;
@@ -65,14 +57,10 @@ function crowded(line, most) {
 
 const plain = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
 
-// How the agent writes that an event is its result. Only a line with these words is
-// parsed: a line that fails to parse costs far more than one that parses, and 4 MiB
-// hold four million lines but a quarter of a million of these.
+// Only lines with this are parsed: a failed parse costs far more than a good one, and
+// 4 MiB holds four million lines but a quarter of a million of these.
 const MARK = '"type":"result"';
 
-// The last line of `log` that is a result event, as `readResult` resolves it, or null.
-// Every member is the job's to shape: `modelUsage` counts when it is an object, and a
-// member of it that is none counts for nothing.
 function resultIn(log) {
   let event = null;
   for (let end = log.length; end > 0 && !event;) {
@@ -98,14 +86,8 @@ function resultIn(log) {
   };
 }
 
-/// The result the agent left in the log of the run directory `runDir`, or null when the
-/// last 4 MiB of the log hold none; a line with 100000 commas and opening brackets
-/// outside its strings, or more, is none. Resolves to `{ failed, summary, usd, tokens,
-/// model }`: whether the agent called it an error, its closing words cut at 4000
-/// characters, the cost and the tokens it named (0 for a figure that is no positive
-/// number), and the model most of the cost was named for, cut at 100 characters. Read
-/// and made out on a thread of its own, so the caller's loop turns meanwhile whatever
-/// the log holds; rejects when that thread fails.
+/// The agent's last result event in the run's log, or null. On a worker, so the caller's
+/// loop turns whatever the log holds.
 export async function readResult(runDir) {
   const [result] = await once(new Worker(new URL(import.meta.url), { workerData: { dnResult: runDir } }), 'message');
   return result;

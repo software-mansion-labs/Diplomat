@@ -1,18 +1,14 @@
-// What the processes of this pid namespace hold of the disk in files that have no name
-// left: a file its writer unlinked and keeps open is in no directory for `du` to find,
-// and its blocks stay taken until the last descriptor on it is closed. container.js puts
-// this text on the command line of a node beside a job container, in that container's
-// pid namespace. It prints `held <bytes>`, or `blind` where a process's descriptors are
-// not this one's to read.
+// Disk held by this pid namespace's processes in unlinked-but-open files, which `du`
+// cannot see. container.js runs this text via `node -e` in a job container's pid
+// namespace, so it must stay self-contained. Prints `held <bytes>`, or `blind` when some
+// process's descriptors are not ours to read.
 //
-// Counted is what a descriptor of any of a process's threads or a running program names:
-// a process whose first thread ended shows its descriptors only under the others, and a
-// thread can hold a table of its own. What only a mapping holds, or a descriptor on its
-// way through a unix socket, is in neither place.
+// Every thread's fd table is read: a process whose first thread ended shows its
+// descriptors only under the others, and a thread can have a table of its own. Files held
+// only by a mapping or by a descriptor in flight over a unix socket are missed.
 const fs = require('node:fs');
 
-// tmpfs (shared memory and memfd among it), ramfs and hugetlbfs hold memory, which the
-// container's memory limit bounds.
+// tmpfs (incl. shm and memfd), ramfs, hugetlbfs: memory, bounded by the memory limit.
 const MEMORY = new Set([0x01021994, 0x858458f6, 0x958458f6]);
 const DENIED = new Set(['EACCES', 'EPERM']);
 const seen = new Set();
@@ -20,8 +16,7 @@ let bytes = 0;
 let blind = false;
 for (const pid of fs.readdirSync('/proc').filter((name) => /^\d+$/.test(name))) {
   const open = [`/proc/${pid}/exe`];
-  // A process or a thread that ended meanwhile holds nothing; one that may not be read
-  // is known by its program.
+  // An ended process holds nothing; an unreadable one is caught as blind by its exe.
   let tasks = [];
   try { tasks = fs.readdirSync(`/proc/${pid}/task`); } catch {}
   for (const tid of tasks) {

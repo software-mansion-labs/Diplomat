@@ -1,11 +1,9 @@
-// What a job can make of its run directory, and what the host then does with it: a
-// pipe, a socket, a directory or a link where a file is expected, a file of any size or
-// one that grows, a result line of any shape, a figure of any size - and the remains of
-// a run that will not go - and what the host puts there, and takes for a start, a run
-// or an end. The docker here answers `exec` and nothing else: a start with a process
-// group, a question after a job with what the test wrote for that run, and either with
-// what a script the test wrote for it does (<run id>.start, <run id>.sh); and `version`.
-// With a file `down` it answers nothing at all.
+// What a job can make of its run directory and what the host does with it: a pipe,
+// socket, directory or link where a file is expected, a file of any size or one that
+// grows, a result line of any shape, a figure of any size, the remains of a run that will
+// not go. The docker here answers `version` and `exec`: a start with a process group, a
+// question after a job with what the test wrote for that run, or what the test's script
+// for it does (<run id>.start, <run id>.sh). With a file `down` it answers nothing.
 // Run: node test/executor-job-files.mjs
 
 import assert from 'node:assert/strict';

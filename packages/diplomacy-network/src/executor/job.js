@@ -1,6 +1,3 @@
-// One run: its directory, its prompt, the agent started headless inside the container,
-// and the outcome read back when it ends.
-//
 // A run's directory is <container's runs dir>/<run id> on the host and
 // /dn/runs/<run id> in the container (RUNS_DIR/<run id> is a link to it):
 //   prompt.txt  the container preamble, then the requester's prompt
@@ -11,13 +8,10 @@
 //   setup.log   everything before the agent started
 //   log.jsonl   the agent's event stream; stderr.log
 //   done        the agent's exit code, written last
-// The container can write all of it, and put anything else in its place. So the host
-// fills it in before the container can see it, writes nothing into it afterwards, runs
-// nothing from it once the job is up, and reads back only what is a plain file in the
-// directory that stands where the host put it, as result.js reads: a bounded piece of
-// it, and of the log, the one large piece, only what a thread of its own made out. The
-// outcome made of that is kept beside the run directories, in
-// RUNS_DIR/<run id>.outcome.json, where no container can write.
+// The container can write or replace all of it, so the host fills it in before the
+// container sees it, writes nothing into it afterwards, runs nothing from it once the job
+// is up, and reads it back only through result.js. The outcome is kept where no container
+// can write: RUNS_DIR/<run id>.outcome.json.
 
 import fs from 'node:fs';
 import { execFile } from 'node:child_process';
@@ -30,36 +24,28 @@ import { figure, readOwn, readResult } from './result.js';
 import { clip } from './sparing.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-// What asks after a job's processes and ends them, as text for the container's sh.
 const STOP = fs.readFileSync(path.join(HERE, 'stop.sh'), 'utf8');
-// The runner in a session of its own, which says its process group from inside it, so
-// the group is there by the time it is named, and then becomes the runner. The host has
-// the group from its own command, before the job has run anything. The run's id is in
-// the runner's environment from its first moment: stop.sh finds a job's processes by it.
-// sh and setsid are named where the image put them, not found through the container's
-// PATH; root in the container can still replace them there (README, Stopping a job).
+// The runner in its own session echoes its process group from inside it, so the host has
+// the group before the job runs anything, then execs the runner. DN_RUN_ID is set from the
+// first moment: stop.sh finds a job's processes by it. sh and setsid by absolute path, not
+// the container's PATH (root there can still replace them; README, Stopping a job).
 // DN_ROOT is unset in a container (runner.sh).
 const START = 's="${DN_ROOT:-}/bin/sh"; echo "$(DN_RUN_ID="$2" "${DN_ROOT:-}/usr/bin/setsid" "$s" -c \'echo "$$"; exec "$0" "$1" < /dev/null > /dev/null 2>&1\' "$s" "$1" &)"';
-/// What a job that ended with its container says of it.
 export const CUT = 'the container was restarted to stop another job';
-/// What a job whose processes went without its writing `done` says of it.
 export const VANISHED = 'the job\'s process disappeared without finishing: its container was removed or the docker engine restarted';
-// What a job that is given `adb` is told of it: executor/adb.js stands between.
 const ADB_SAID = ' `adb devices` lists what is attached to the host, and a device is named by its serial (`adb -s <serial>` or `ANDROID_SERIAL`). `adb connect`, `forward`, `reverse`, `pair` and `kill-server` are refused by the host: do not retry them.';
-// The dearest a token is sold at: USD 80 a million, the output of the top model in its
-// fast mode as priced in November 2026.
+// The dearest token price: USD 80 a million, the top model's fast-mode output as priced
+// in November 2026.
 const USD_PER_BYTE = 80 / 1e6;
-// How many characters of what a command run in a container writes are heard out: a
-// process group, or a word of stop.sh's, is a line, and what goes on past this is the
-// job's doing.
+// A process group or a word of stop.sh's is a line; output past this is the job's doing.
 const HEARD = 64 * 1024;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const quote = (v) => `'${String(v).replace(/'/g, "'\\''")}'`;
 
-const live = new Map(); // run id -> job
+const live = new Map();
 
-// One thing at a time is done to the files of a run id: a run started while an older
-// one of its id is being forgotten waits for that, and is not forgotten in its turn.
+// One operation at a time per run id: a run started while an older one of its id is being
+// forgotten waits for that, and is not forgotten in its turn.
 const turns = new Map();
 function inTurn(runId, fn) {
   const run = (turns.get(runId) ?? Promise.resolve()).then(fn);
@@ -68,9 +54,8 @@ function inTurn(runId, fn) {
   return run;
 }
 
-// A tree the container wrote, removed by rm(1): it descends by descriptor, so a link put
-// in the tree while it is walked is unlinked and never followed, and however long the
-// tree takes, this thread does not wait on it. True once nothing stands at `dir`.
+// rm(1) descends by descriptor, so a link planted in the container-written tree while it
+// is walked is unlinked, never followed; and this thread does not wait on a large tree.
 async function removed(dir) {
   await new Promise((resolve) => { execFile('/bin/rm', ['-rf', '--', dir], () => resolve()); });
   return fs.promises.lstat(dir).then(() => false, () => true);
@@ -78,15 +63,13 @@ async function removed(dir) {
 
 const outcomePath = (runId) => path.join(RUNS_DIR, `${runId}.outcome.json`);
 
-/// The outcome of a run that ended, as `watch` resolved it, or null: what a daemon that
-/// was not there when the run ended still has to report.
+/// For a daemon that was not there when the run ended.
 export function readOutcome(runId) {
   return /^[A-Za-z0-9_-]{1,64}$/.test(runId) ? readJson(outcomePath(runId)) : null;
 }
 
-/// The runs that were given a directory, have no outcome on record and are not known
-/// here: `[{ runId, container: { name, runsDir } }]`, each as `attachJob` takes it. A job
-/// that still runs with nobody watching it is among them.
+/// Runs with a directory, no outcome on record and not known here (perhaps still running
+/// unwatched), each as `attachJob` takes it.
 export function unended() {
   let names = new Set();
   try { names = new Set(fs.readdirSync(RUNS_DIR)); } catch {}
@@ -94,20 +77,15 @@ export function unended() {
   for (const runId of names) {
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(runId) || live.has(runId) || names.has(`${runId}.outcome.json`)) continue;
     let runsDir;
-    // RUNS_DIR/<run id> is the link `startJob` made to <container's runs dir>/<run id>.
     try { runsDir = path.dirname(path.resolve(RUNS_DIR, fs.readlinkSync(path.join(RUNS_DIR, runId)))); } catch { continue; }
     out.push({ runId, container: { name: path.basename(runsDir), runsDir } });
   }
   return out;
 }
 
-/// Removes what is left of every run that ended, or was last heard of, more than
-/// `olderThanMs` ago: its directory, then the link to it and its outcome. A run that is
-/// watched here stays. A directory this user cannot remove - what root made in it, on an
-/// engine that runs containers as root - is given to `containers.erase(container,
-/// runId)`, container.js's, which resolves to whether it is gone; one that still stands
-/// keeps its link and its outcome, and is met again by the next call. Resolves to the
-/// ids of the runs nothing is left of, and never rejects.
+/// A directory this user cannot remove (root made it, on an engine that runs containers as
+/// root) goes to `containers.erase`; one that still stands keeps its link and outcome for
+/// the next call. Never rejects.
 export async function forgetRuns({ olderThanMs, containers = null }) {
   const names = await fs.promises.readdir(RUNS_DIR).catch(() => []);
   const gone = [];
@@ -132,8 +110,6 @@ export async function forgetRuns({ olderThanMs, containers = null }) {
   return gone;
 }
 
-/// The job's prompt: image/preamble.md filled in for this pool and task, a rule, and the
-/// requester's prompt.
 export function renderPrompt({ pool, spec, forwards = [] }) {
   const gitlab = pool.forge === 'gitlab';
   const values = {
@@ -167,28 +143,18 @@ async function parseOutcome(job, exit) {
   return { ...outcome, ...named, ok: exit === 0 && !failed };
 }
 
-// What a job says it took of the model is its own word, and this machine's budget is
-// counted from it; what the broker carried to the model for the job, in the requests the
-// provider took and its answers to them, is the host's own measure. Every token crossed
-// the broker as a byte or more of those, so neither figure stands above what that
-// traffic could have held, and a job the provider took nothing from took nothing of it. An outcome of which a figure was
-// lowered says so, as `capped`.
+// A job's token and cost figures are its own word, and this machine's budget counts from
+// them. Every token crossed the broker as at least a byte of the provider traffic the host
+// measured, so both are capped by it; a lowered outcome says `capped`.
 function capOutcome(outcome, taken) {
   const bytes = figure(taken?.bytes);
   const [tokens, usd] = [Math.min(outcome.tokens, bytes), Math.min(outcome.usd, bytes * USD_PER_BYTE)];
   return tokens < outcome.tokens || usd < outcome.usd ? { ...outcome, tokens, usd, capped: true } : outcome;
 }
 
-/// Starts a job in `container` (`{ name, runsDir }` from container.js). `run` is
-/// `{ runId, pool: { id, forge, host, owner, repo } }`, `spec` the requester's
-/// `{ prompt, item, base, name, email }`, `proxy` the broker's `{ proxyUrl, caCertPath }`,
-/// `env` whatever else the job's environment carries (the model placeholder), and
-/// `forwards` the broker forwards opened for it (`{ name }` each). `spent()` answers
-/// with `{ bytes }`, what the model provider took of this run and answered through the
-/// broker, and null counts as nothing taken: the run's outcome names no more of the
-/// model than that.
-/// Left out, the outcome's figures are the job's own. Resolves to `{ dir, log, pid }`
-/// once the runner is alive, `pid` its process group.
+/// `spent()` is the host's `{ bytes }` of this run's provider traffic (null: none), which
+/// caps the outcome; without it the job's own figures stand. Resolves once the runner is
+/// alive, `pid` its process group.
 export async function startJob(asked) {
   const { runId } = asked.run;
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(runId)) throw new Error(`not a run id: ${runId}`);
@@ -199,15 +165,13 @@ async function begin({ run, container, spec, proxy, env = {}, forwards = [], spe
   const { runId, pool } = run;
   if (live.has(runId)) throw new Error(`run ${runId} is already started`);
   const dir = path.join(container.runsDir, runId);
-  // Filled in beside the mounted directories and moved in whole: a write into a
-  // directory the container already sees could be led through a link it planted there
-  // to any file of this machine.
+  // Staged outside the mounts and moved in whole: a write into a directory the container
+  // already sees could follow a link it planted to any file on this machine.
   const staging = path.join(RUNS_DIR, '.staging', runId);
   fs.rmSync(staging, { recursive: true, force: true });
   fs.mkdirSync(staging, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(staging, 'prompt.txt'), renderPrompt({ pool, spec, forwards }), { mode: 0o600 });
-  // A copy keeps the mode of what it copies, and each of these is handed to an
-  // interpreter by root in the container: the operator's own 0600 serves.
+  // A copy keeps its source's mode; root in the container reads these, so 0600 serves.
   for (const [from, name] of [[proxy.caCertPath, 'ca.crt'], [path.join(HERE, 'runner.sh'), 'run.sh'], [path.join(HERE, 'forward.mjs'), 'forward.mjs']]) {
     fs.copyFileSync(from, path.join(staging, name));
     fs.chmodSync(path.join(staging, name), 0o600);
@@ -219,13 +183,12 @@ async function begin({ run, container, spec, proxy, env = {}, forwards = [], spe
     DN_BASE: spec.base || '',
     DN_GIT_NAME: spec.name,
     DN_GIT_EMAIL: spec.email,
-    // Each forge client is pointed at the pool's own host.
     ...(pool.forge === 'gitlab' ? { GITLAB_HOST: pool.host } : pool.host !== 'github.com' ? { GH_HOST: pool.host } : {}),
     ...env,
     ...(forwards.length > 0 ? { DN_FORWARDS: forwards.map((f) => f.name).join(' ') } : {}),
   };
-  // In a file and not on docker's command line, where any user of this machine could
-  // read the token off the process list.
+  // Not on docker's command line, where any user of this machine could read the token off
+  // the process list.
   fs.writeFileSync(path.join(staging, 'env.sh'), Object.entries(vars).map(([k, v]) => `export ${k}=${quote(v)}\n`).join(''), { mode: 0o600 });
   await removed(dir);
   try { fs.renameSync(staging, dir); } catch (e) {
@@ -244,18 +207,14 @@ async function begin({ run, container, spec, proxy, env = {}, forwards = [], spe
   return { dir, log: path.join(dir, 'log.jsonl'), pid };
 }
 
-/// Takes up a run that a daemon before this one started in `container` (`{ name,
-/// runsDir }`): `watch` and `stopJob` know it from here on. `pid` is the process group
-/// `startJob` resolved to, as the host kept it. A job nobody kept the group of is known
-/// by the run id its processes carry and by nothing it wrote itself, which is enough to
-/// stop it. `spent` is as `startJob` takes it. False for what is no run id, a group that
-/// is none, or a run with neither a group nor a directory among the container's.
+/// Takes up a run an earlier daemon started. A job whose group nobody kept is still found
+/// by the run id its processes carry, which is enough to stop it. False for a bad run id
+/// or group, or a run with neither a group nor a directory.
 export function attachJob({ runId, container, pid = null, spent = null }) {
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(runId) || (pid !== null && !groupOf(pid))) return false;
   if (live.has(runId)) return true;
   const dir = path.join(container.runsDir, runId);
-  // Not there, or not to be looked for: root in a container can close the directory
-  // that holds its runs to this user.
+  // Root in a container can close its runs directory to this user.
   try {
     if (pid === null && !fs.lstatSync(dir).isDirectory()) return false;
   } catch { return false; }
@@ -266,15 +225,14 @@ export function attachJob({ runId, container, pid = null, spent = null }) {
   return true;
 }
 
-// A process group as a number, or 0: 1 and below name every process of the container,
-// or the asking shell's own group.
+// 0 for 1 and below: those name every process of the container, or the asking shell's
+// own group.
 function groupOf(value) {
   const n = Number(String(value ?? '').trim());
   return Number.isSafeInteger(n) && n > 1 ? n : 0;
 }
 
-// Whether the engine answers, asked once at a time for all the jobs being stopped. An
-// answer that it does not comes DOWN_MS after the look, to every stop that waited on it.
+// One look shared by every job being stopped; a "no" comes DOWN_MS after the look.
 const DOWN_MS = 10 * JOB_POLL_MS;
 let looking = null;
 function engineAnswers() {
@@ -284,13 +242,9 @@ function engineAnswers() {
   return looking;
 }
 
-// stop.sh in the job's container, by one of its verbs.
 const ask = (job, verb, more, timeout) => docker(['exec', job.container, '/bin/sh', '-c', STOP, 'sh', verb, job.runId, String(job.pid), ...more], { timeout, maxBuffer: HEARD });
 
-// Whether the job still runs - its process group for `up`, anything of it for `left` -
-// as the container says in so many words: true, false, or null when nothing was said,
-// by an engine that did not answer, a container in which nothing could be run, or one
-// that wrote on past what is heard out.
+// null when nothing was said: no engine answer, nothing could run, or output past HEARD.
 async function alive(job, verb = 'up') {
   const r = await ask(job, verb, [], 20000);
   const said = r.code === 0 ? r.stdout.trim() : '';
@@ -298,8 +252,8 @@ async function alive(job, verb = 'up') {
   return said === 'gone' || /No such container|is not running/i.test(r.stderr) ? false : null;
 }
 
-// The job's container restarted, which ends every process in it: true once the engine
-// has done it. The other jobs in it end with it, and are not judged while it is asked.
+// Restarts the job's container: the other jobs in it end too, and are not judged while
+// the restart is under way.
 async function cut(job, restart) {
   const others = [...live.values()].filter((other) => other !== job && other.container === job.container);
   for (const other of others) other.cutting = true;
@@ -311,13 +265,11 @@ async function cut(job, restart) {
   return done;
 }
 
-// The exit code the runner left in `done`, or null while that holds none.
 async function exited(job) {
   const done = await readOwn(job.dir, 'done', 32) ?? '';
   return /^\d+\s*$/.test(done) ? Number(done) : null;
 }
 
-// The run's outcome, once it has one: it ended, was stopped, was cut or vanished.
 async function ending(job) {
   let checked = Date.now();
   let unknown = 0;
@@ -335,8 +287,8 @@ async function ending(job) {
       const up = await alive(job);
       // A stop or a restart that began while the container was asked is why it is gone.
       if (job.stopping || job.cutting || job.cut) continue;
-      // Nothing said by an engine that does not answer `docker version` either is the
-      // engine's silence, which says nothing of the job.
+      // Silence from an engine that does not answer `docker version` either says nothing
+      // of the job.
       if (up === null && !(await engineAnswers())) continue;
       unknown = up === null ? unknown + 1 : 0;
       // A runner that is gone has either just written `done` (the next pass reads it)
@@ -344,7 +296,7 @@ async function ending(job) {
       if ((up === false && await exited(job) === null) || unknown >= 3) state = 'vanished';
     } else await sleep(JOB_POLL_MS);
   }
-  // Whatever the agent left running goes with it, and so does its work tree.
+  // Whatever the agent left running goes, and its work tree.
   await ask(job, 'stop', ['0'], 30000);
   const read = await parseOutcome(job, exit);
   const outcome = job.spent ? capOutcome(read, job.spent()) : read;
@@ -355,7 +307,6 @@ async function ending(job) {
   return outcome;
 }
 
-// A run leaves here with an outcome whatever became of reading it.
 async function follow(job) {
   const outcome = await ending(job).catch((e) => ({
     ok: false, summary: `how the run ended could not be read: ${e?.message ?? e}`, usd: 0, tokens: 0, model: '', runner: 'claude', exit: null, state: 'failed',
@@ -366,12 +317,7 @@ async function follow(job) {
   return outcome;
 }
 
-/// Resolves when the run ends, to `{ ok, summary, usd, tokens, model, runner, exit,
-/// state }`: `state` is `finished`, `failed` or `stopped`; `exit` is null when the agent
-/// never reported one. A job that named more tokens or a higher cost than the model
-/// traffic the host measured for it could hold has the host's bound for that figure, and
-/// `capped: true` beside it. A run whose process is gone without a `done` file is a
-/// failure. The same object is kept on disk for `readOutcome`.
+/// Resolves when the run ends; `exit` is null when the agent reported none.
 export function watch(run) {
   const job = live.get(run.runId);
   if (!job) return Promise.reject(new Error(`run ${run.runId} is not running`));
@@ -379,9 +325,7 @@ export function watch(run) {
   return job.watching;
 }
 
-/// How a job that wrote its exit code in `done` ended, read from its directory in
-/// `container` (`{ runsDir }`) as `watch` reads it, with nothing asked of the engine;
-/// `spent` is as `startJob` takes it. Null for a job whose `done` holds none.
+/// The outcome of a job whose `done` holds an exit code, asking nothing of the engine.
 export async function readFinished({ runId, container, spent = null }) {
   const job = { dir: path.join(container.runsDir, runId) };
   const exit = await exited(job);
@@ -391,22 +335,18 @@ export async function readFinished({ runId, container, spent = null }) {
   return { ...outcome, state: outcome.ok ? 'finished' : 'failed' };
 }
 
-/// Kills that run's processes, and only that run's, and marks it stopped; resolves to
-/// its outcome once they are gone, however long the engine takes to say so: an engine
-/// that does not answer `docker version` is asked nothing else, and is looked at again
-/// every 10 polls. A job that is not gone JOB_STOP_BOUND_MS after the engine first
-/// answered for it ends with its container, which
-/// is restarted by `containers.restart`, the container module's: every other job in it
-/// then ends as failed, with `CUT` for its summary.
+/// Kills that run's processes and only those, resolving to its outcome once they are gone
+/// however long the engine takes. A job not gone JOB_STOP_BOUND_MS after the engine first
+/// answered ends with its container (`containers.restart`), and every other job in it
+/// fails with `CUT`.
 export async function stopJob(run, containers) {
   const job = live.get(run.runId);
   if (!job) return null;
   job.stopping = true;
   const grace = String(Math.ceil(JOB_STOP_GRACE_MS / 1000));
-  // Stopped is what the container says is left of the job, not what was asked of it. One
-  // that says nothing - no process left to give for the asking - or in which the job
-  // outlives the kill has no other end than its own. An engine that does not answer
-  // restarts nothing either, and is looked at until it does.
+  // Stopped means the container says nothing of the job is left. One that says nothing,
+  // or where the job outlives the kill, ends only by the restart; an engine that does not
+  // answer restarts nothing either, and is looked at until it does.
   for (let from = null; ;) {
     if (!(await engineAnswers())) continue;
     from ??= Date.now();

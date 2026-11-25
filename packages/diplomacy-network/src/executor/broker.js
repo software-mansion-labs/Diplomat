@@ -1,12 +1,9 @@
-// The proxy every container talks through. One listener per daemon, which a job
-// container reaches through its relay and no other way; a job's proxy URL carries that
-// job's own token, so every request names the job it belongs to. The relay carries each
-// connection in frames, which bound what all jobs hold of this machine's socket buffers
-// on the way (hop.js). A connection is the job's whose token its first request carries.
-// The broker reads that first head itself, off the socket: a connection that names no
-// admitted job is answered 407 once and read no further, and a CONNECT never reaches
-// node's http parser. The other requests of a job's connection reach the parser through
-// a feed (feed.js), one head at a time.
+// The proxy every container talks through: one listener per daemon, reached only through
+// a job container's relay, in frames (hop.js). A connection is the job's whose token its
+// first request carries. The broker reads that head itself, off the socket: a connection
+// naming no admitted job is answered 407 once and read no further, and a CONNECT never
+// reaches node's http parser. Later requests reach the parser through a feed (feed.js),
+// one head at a time.
 //
 // What a job's request becomes (a host is read without its case and its trailing dot;
 // a CONNECT is the first request of its connection):
@@ -27,10 +24,9 @@
 //
 // Everything a job sends is hostile. No handler lets an exception out (it would end the
 // daemon for every peer), no upstream connection serves two jobs, and what one job may
-// hold of this process at a time is bounded: connections, requests, connections out,
-// names being resolved, request bodies read whole, forge requests in flight, and the
-// time a request may take to arrive. So is what is no job's: the connections whose
-// first head has not come, or was refused.
+// hold of this process is bounded: connections, requests, connections out, lookups,
+// bodies read whole, forge requests in flight, and a request's time to arrive. So is
+// what is no job's: connections whose first head has not come, or was refused.
 
 import crypto from 'node:crypto';
 import dns from 'node:dns';
@@ -53,65 +49,53 @@ import { own } from './own-fault.js';
 import { createOutbound } from './outbound.js';
 import { clip, createSparingLog } from './sparing.js';
 
-/// The model provider's hosts: the ones a job's requests gain this machine's credential on.
 export const MODEL_HOSTS = ['api.anthropic.com'];
 
-/// The most requests one job has in the broker at a time, those being answered and
-/// those waiting their turn together, on however many connections it sends them.
+/// Per job across all its connections, answered and queued together.
 export const JOB_REQUESTS = 256;
 
-/// The most requests of one job the broker carries upstream itself at a time, each
-/// down a connection out: its plain http requests and its requests to the model
-/// provider together. A tunnel has a connection out of its own.
+/// Per job: plain http and model requests carried upstream at once. A tunnel has a
+/// connection out of its own.
 export const JOB_UPSTREAMS = 32;
 
-/// The most names one job has asked of DNS at a time; a connection that needs another
-/// waits for one of them.
+/// Per job; a connection that needs another waits.
 export const JOB_LOOKUPS = 8;
 
-/// How long a name may take to resolve.
 export const LOOKUP_MS = 5000;
 
-/// The most connections the broker keeps that are no job's: those whose first request
-/// has not come, and those refused and given a moment to read why.
+/// Connections that are no job's: first request not yet come, or refused and given a
+/// moment to read why.
 export const STRANGERS = 1024;
 
-// The longest request head a connection's first may be: what node's own parser takes.
+// What node's own parser takes.
 const HEAD_BYTES = http.maxHeaderSize;
 
-// Where the credential goes: inference and nothing else. The provider's other paths
-// (the account's profile, its usage, its files) answer a subscriber's token too, and no
-// job has a use for them.
+// The credential goes to inference only: the provider's other paths (the account's
+// profile, usage, files) answer a subscriber's token too, and no job needs them.
 const MODEL_PATHS = /^\/v1\/messages(\/count_tokens)?$/;
 
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization',
   'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
 
-// What of the provider's answer a client has a use for: the body's description, the
-// request's id for a bug report, and what tells it when to try again. The rest names the
-// account behind this machine's credential (its organisation, how much of its allowance
-// is left) or the provider's insides.
+// Every other answer header names the account behind this machine's credential (its
+// organisation, its allowance left) or the provider's insides.
 const MODEL_ANSWER_HEADERS = /^(content-type|content-encoding|content-length|cache-control|request-id|retry-after|x-should-retry)$/;
 
-// An answer given before its request was read to the end: the rest of the request is
-// read and thrown away this long and this far, so a client that is still sending reads
-// the answer and not a reset connection.
+// After an early answer the rest of the request is read and dropped this long and this
+// far, so a client still sending reads the answer and not a reset connection.
 const LINGER_MS = 10 * 1000;
 const LINGER_BYTES = 2 * FORGE_BODY_CAP;
 
-// What of a refused connection is read and dropped after its answer; past it the
-// connection is reset. Bytes left unread wait in this machine's network memory.
+// Read and dropped after a refusal; past it the connection is reset. Bytes left unread
+// wait in this machine's network memory.
 const REFUSED_BYTES = 64 * 1024;
 
-// The pieces a streamed body is written on in.
 const CARRY_BYTES = 16 * 1024;
 
 const FRAMING = 'the broker carries a request body by its Content-Length or as Transfer-Encoding: chunked, one of the two and nothing else';
 
-/// A host as every decision here reads it: an address, without brackets, or a name in
-/// lowercase without the one trailing dot of a fully qualified name. '' for anything
-/// else: a name is labels of letters, digits, hyphens and underscores, none empty and
-/// none over 63 characters, 253 characters in all.
+/// A host as every decision here reads it: an address without brackets, or a lowercase
+/// name without its trailing dot; '' for anything else.
 export function normalHost(host) {
   const text = String(host ?? '').toLowerCase();
   const bare = text.replace(/^\[(.*)\]$/, '$1');
@@ -120,20 +104,17 @@ export function normalHost(host) {
   return name.length <= 253 && /^[a-z0-9_-]{1,63}(\.[a-z0-9_-]{1,63})*$/.test(name) ? name : '';
 }
 
-/// The hosts a pool's forge is spoken to on: the ones whose requests go to the requester.
-/// For github.com that is every host that takes a login or serves repositories over git
-/// (gists are repositories). Its download hosts (codeload.github.com,
-/// raw.githubusercontent.com, objects.githubusercontent.com) are not among them: what
-/// they serve is public, or behind a short-lived link the requester's own answer
-/// redirected to, and no credential in a container opens anything more. A GitLab host
-/// serves all of it under its one name.
+/// Hosts whose requests go to the requester. For github.com, every host that takes a login
+/// or serves repositories over git (gists are repositories); not its download hosts, which
+/// serve what is public or behind a short-lived link the requester's own answer redirected
+/// to. A GitLab host serves all of it under its one name.
 export function forgeHosts(pool) {
   if (pool.forge === 'github' && pool.host === 'github.com') return ['github.com', 'api.github.com', 'uploads.github.com', 'gist.github.com'];
   return [pool.host];
 }
 
-/// The hosts a pool's forge serves git over ssh on beside its own port 22: refused, since
-/// they carry repositories around the requester and no container holds a key for them.
+/// A forge's other ssh hosts, refused: they carry repositories around the requester, and
+/// no container holds a key for them.
 export function forgeSshHosts(pool) {
   if (pool.host === 'github.com') return ['ssh.github.com'];
   if (pool.host === 'gitlab.com') return ['altssh.gitlab.com'];
@@ -162,7 +143,7 @@ function bytes6(s) {
   return out;
 }
 
-// The address as bytes (4 or 16), or null when it is not one. A zone (`%en0`) is not part of it.
+// A zone (`%en0`) is dropped.
 function addressBytes(address) {
   const bare = String(address ?? '').replace(/%.*$/, '');
   const family = net.isIP(bare);
@@ -178,10 +159,9 @@ function within(address, prefix, bits) {
   return true;
 }
 
-// Everything that is not the public internet: this machine, private and link-local
-// space, carrier-grade NAT (where overlay networks live), multicast, reserved space, and
-// the IPv6 ranges that carry an IPv4 address inside them (6to4, Teredo, IPv4-compatible
-// and IPv4-translated addresses, the local NAT64 prefix).
+// Not the public internet: loopback, private and link-local space, carrier-grade NAT
+// (where overlay networks live), multicast, reserved space, and the IPv6 ranges that carry
+// an IPv4 address inside (6to4, Teredo, IPv4-compatible and -translated, local NAT64).
 const RANGES = [
   ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8], ['169.254.0.0', 16],
   ['172.16.0.0', 12], ['192.0.0.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15], ['224.0.0.0', 4],
@@ -206,12 +186,10 @@ function prefixBits(entry, length) {
   return bits;
 }
 
-/// Whether the broker refuses to connect a job to `address`: this machine, anything on a
-/// network one of its interfaces is on (its LAN, the docker bridge, a neighbour on its
-/// public prefix), or any other address that is not the public internet. `interfaces` is
-/// read anew at every call, so a network joined a moment ago counts. A publicly
-/// addressed range this machine reaches by a route alone (behind a VPN, on another
-/// subnet of its site) is on no interface, and is not refused.
+/// Refuses anything on a network one of this machine's interfaces is on (its LAN, the
+/// docker bridge, a neighbour on its public prefix), read anew each call, and anything not
+/// public. A public range reached by a route alone (behind a VPN, another subnet of its
+/// site) is on no interface, and is not refused.
 export function deniedAddress(address, interfaces = os.networkInterfaces()) {
   const bytes = addressBytes(address);
   if (!bytes) return true;
@@ -227,9 +205,8 @@ export function deniedAddress(address, interfaces = os.networkInterfaces()) {
   }));
 }
 
-/// The address the broker listens on: where a relay's `host-gateway` leads. Docker
-/// Desktop carries it to the host's loopback; on Linux it is the default bridge's
-/// gateway address, so that one address is bound and never every interface.
+/// Where a relay's `host-gateway` leads: Docker Desktop carries it to the host's loopback;
+/// on Linux it is the default bridge's gateway, so one address is bound, never all.
 export async function brokerBindAddress({ platform = process.platform, override = BROKER_BIND, bridgeGateway = dockerBridgeGateway } = {}) {
   if (override) return override;
   if (platform !== 'linux') return '127.0.0.1';
@@ -245,11 +222,9 @@ function localPortRange() {
   try { return fs.readFileSync(LOCAL_PORTS_PATH, 'utf8'); } catch { return null; }
 }
 
-/// A port for a listener that has to be had again after a restart: one no outgoing
-/// connection is dealt, or 0 for the system's pick. Linux deals outgoing connections
-/// the ports of one range, and a port so dealt cannot be listened on while its
-/// connection lasts, nor for a minute after. `range` is that range as the kernel states
-/// it ("first last"), null where the system states none; the port is below its first.
+/// A port a listener can have again after a restart, or 0 for the system's pick: one below
+/// the ephemeral `range` ("first last"), since a port dealt to an outgoing connection
+/// cannot be listened on while it lasts, nor for a minute after.
 export function quietPort({ range = localPortRange(), pick = crypto.randomInt } = {}) {
   const first = Number(String(range).trim().split(/\s+/)[0]);
   return first >= QUIET_PORTS_FROM + 1000 ? pick(QUIET_PORTS_FROM, first) : 0;
@@ -264,23 +239,18 @@ function dockerBridgeGateway() {
   });
 }
 
-// The names no public name server answers for: a single label, and the names set aside
-// for a machine's own use or its network's. Whether one resolves is the word of this
-// machine's local name services (its hosts file, mDNS, its search domains), which take
-// seconds to say no and say what is on the network around it.
+// Names no public name server answers for. Only this machine's local name services (hosts
+// file, mDNS, search domains) would, taking seconds to say no and telling what is on the
+// network around it.
 const LOCAL_NAMES = /(^|\.)(localhost|local|internal|intranet|private|corp|home|lan|home\.arpa)$/;
 
-/// Whether the broker refuses `host`, a name as normalHost gives it, without asking any
-/// resolver: it cannot be a name of the public internet.
+/// Refused without asking any resolver: it cannot be a public internet name.
 export function localName(host) {
   return !host.includes('.') || LOCAL_NAMES.test(host);
 }
 
-/// A lookup that asks DNS and nothing else of this machine: not its hosts file, not
-/// mDNS, and not getaddrinfo, whose calls wait their turn for the few threads the
-/// daemon reads its own files on, so that one slow name holds up the next. `lookup(host)`
-/// resolves to `[{ address, family }]`, IPv4 first. `servers` replaces the name servers
-/// of the system.
+/// DNS only: not the hosts file, not mDNS, and not getaddrinfo, whose calls queue for the
+/// few threads the daemon reads its own files on, so one slow name holds up the next.
 export function dnsLookup({ servers = null } = {}) {
   const resolver = new dns.promises.Resolver({ timeout: LOOKUP_MS / 2, tries: 2 });
   if (servers) resolver.setServers(servers);
@@ -314,8 +284,7 @@ class Refusal extends Error {
 
 const pkt = (s) => (s.length + 4).toString(16).padStart(4, '0') + s;
 
-// The headers that travel on: not the hop-by-hop ones, and not the ones the sender's
-// Connection header names as its own connection's affair.
+// Drops hop-by-hop headers and those the sender's Connection header names.
 function carried(pairs) {
   const own = new Set(HOP_BY_HOP);
   for (const [name, value] of pairs) {
@@ -334,8 +303,7 @@ function rawPairs(res) {
   return pairs;
 }
 
-// An upstream's answer headers for the job: the length is stated once, as the parser
-// that read the answer understood it.
+// The length is stated once, as the parser that read the answer understood it.
 function answerPairs(upRes) {
   const out = carried(rawPairs(upRes)).filter(([name]) => name.toLowerCase() !== 'content-length');
   const length = upRes.headers['content-length'];
@@ -350,19 +318,9 @@ function lowerKeys(headers) {
   return out;
 }
 
-/// The broker. `ca` is ca.js's authority, `llm` llm.js's credential, `mirrors` answers
-/// `path(pool)` with the bare mirror to serve, and `onForge(job, { host, method, path,
-/// headers, body })` (body base64) resolves to `{ status, headers, body }` (body base64
-/// or a Buffer). `lookup`, `connect` and `upstreamCa` replace name resolution, the
-/// outgoing TCP connection and the trust roots of the model provider: tests have no
-/// other way to stand in for the internet. `outbound` is handed to createOutbound
-/// (outbound.js), the count of the kernel memory of the connections out, and `hop` to
-/// createHop (hop.js), the count of what is on the hop from the relays. `limits` replaces
-/// what one job may hold at a time and for how long, and how many connections may be no
-/// job's: `{ connections, requests, upstreams, lookups, bufferBytes, forgeRequests,
-/// strangers, headerMs, bodyMs, idleMs, answerMs, lookupMs }`, by default JOB_REQUESTS,
-/// JOB_UPSTREAMS, JOB_LOOKUPS, STRANGERS and LOOKUP_MS, the JOB_* tunables of paths.js
-/// and, for `answerMs`, FORGE_ANSWER_TIMEOUT_MS.
+/// `onForge(job, { host, method, path, headers, body })` (body base64) resolves to
+/// `{ status, headers, body }` (body base64 or a Buffer). `lookup`, `connect` and
+/// `upstreamCa` let tests stand in for the internet.
 export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace = null,
   lookup = dnsLookup(), connect = systemConnect, upstreamCa = undefined, outbound: outGiven = {}, hop: hopGiven = {}, limits: given = {} } = {}) {
   const limits = {
@@ -370,27 +328,25 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     forgeRequests: JOB_FORGE_REQUESTS, strangers: STRANGERS,
     headerMs: JOB_HEADER_MS, bodyMs: JOB_BODY_MS, idleMs: JOB_IDLE_MS, answerMs: FORGE_ANSWER_TIMEOUT_MS, lookupMs: LOOKUP_MS, ...given,
   };
-  // What a job brings about as often as it likes is written once a minute for each kind.
   const sparing = createSparingLog(log);
   const outbound = createOutbound({ ...outGiven,
     say: (job, text, why) => (job ? sparing(`job ${job.info.runId} reset ${why}`, 'broker', job.info.runId, text) : log('broker', text)) });
-  const jobs = new Map(); // runId -> job
-  const tokens = new Map(); // token -> job
-  const contexts = new WeakMap(); // a leaf as its authority hands it out -> SecureContext
+  const jobs = new Map();
+  const tokens = new Map();
+  const contexts = new WeakMap(); // leaf object -> SecureContext
   const spendHeard = new Set();
-  let listening = null; // { host, port }
+  let listening = null;
 
   const NOT_HERE = 'A job reaches the internet and nothing on its executor\'s machine or network.';
   const live = (job) => jobs.get(job.info.runId) === job;
 
-  // An exception that leaves an event handler ends the daemon, and every peer's jobs
-  // with it. Whatever a handler throws or rejects with ends the connections it was
-  // working on and nothing else.
+  // An exception out of an event handler would end the daemon and every peer's jobs: what
+  // a handler throws or rejects with ends only the connections it was working on.
   const guard = (fn, ...held) => (...args) => {
     const drop = (e) => {
       const fault = String(e?.stack ?? e);
-      // Told of by where it was thrown, which is what follows its message in the stack:
-      // one that repeats keeps no other out of the log, and a message has no say in it.
+      // Rate-limited by where it was thrown (what follows the message in the stack), so
+      // one that repeats keeps no other out of the log and a message has no say in it.
       const message = String(e?.message ?? e);
       const thrown = fault.slice(fault.indexOf(message) + message.length).split('\n')[1];
       sparing(`fault ${thrown}`, 'broker', `a connection is dropped on a fault of the broker's own: ${fault.slice(0, 4000)}`);
@@ -404,11 +360,9 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     } catch (e) { drop(e); }
   };
 
-  // What a name resolves to, asked for a job: no more of its names are asked at a time
-  // than its share, the rest wait in the order they came, and an answer is waited for no
-  // longer than lookupMs. A job's lookups wait for nothing of another job's. The line
-  // is no longer than the job may have connections: a request whose sender went leaves
-  // its name in it until its turn.
+  // A job's lookups beyond its share queue in order and wait for no other job's. The queue
+  // is capped at the job's connection limit: a request whose sender went keeps its place
+  // until its turn.
   async function resolve(job, host) {
     if (job.looking < limits.lookups) job.looking += 1;
     else if (job.lookTurns.length >= limits.connections) throw new Error(`${job.lookTurns.length} names of this job wait to be resolved already`);
@@ -423,7 +377,6 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       ]);
     } finally {
       clearTimeout(timer);
-      // The place goes to whoever waited longest, or is given back.
       const next = job.lookTurns.shift();
       if (next) next();
       else job.looking -= 1;
@@ -460,9 +413,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     throw new Refusal(502, `could not connect to ${host}:${port} (${last.code || last.message})`);
   }
 
-  // A job's own upstream connections: never lent to another job, and closed with it.
-  // One request goes down each, and a request takes its place among the job's
-  // connections out before it is given one.
+  // A job's upstream connections are never lent to another job, and close with it.
   function agentFor(job, wrap, kept) {
     const agent = new http.Agent(kept);
     agent.createConnection = (opts, cb) => {
@@ -492,7 +443,6 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     });
   };
 
-  // The job a Proxy-Authorization header's value names, or null.
   function jobBy(authorization) {
     const m = /^Basic\s+(\S+)$/i.exec(authorization || '');
     if (!m) return null;
@@ -509,10 +459,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     socket.once('close', () => job.sockets.delete(socket));
   }
 
-  // `requests` is the feed the requests that come down `client` are read from: its own
-  // bytes, or those of the terminated connection inside it. While the job is at its
-  // share of requests the feed is stopped, from the first when the job is at its share
-  // by then.
+  // `requests` is the feed of `client`'s own bytes, or of the terminated connection inside
+  // it; stopped while the job is at its share of requests, from the start if need be.
   function reads(job, client, requests) {
     job.clients.set(client, requests);
     // Each request it has here watches it close, some from several places.
@@ -520,9 +468,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     if (job.stopped) requests.stop();
   }
 
-  // A place among the job's connections for one of its container's, or false when the
-  // job has as many as it gets. A tunnel it closed keeps its place while its connection
-  // out is held for what it was sent.
+  // A tunnel the job closed keeps its place while its connection out lingers.
   function seat(job, socket) {
     if (job.clients.size + outbound.lingering(job) >= limits.connections) return false;
     hop.seat(socket, job);
@@ -536,9 +482,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     return `this job has ${limits.connections} connections open through the broker${kept ? `, ${kept} of them tunnels it closed whose far hosts have not yet taken what they were sent` : ''}, the most a job gets at a time: close some`;
   };
 
-  // Written whole, and the connection closed once the client has had a moment to read
-  // it. What the client sends meanwhile is read and dropped; one that sends more than
-  // REFUSED_BYTES is closed under what it sends, which resets it.
+  // Closed once the client has had a moment to read it; what it sends meanwhile is dropped,
+  // and past REFUSED_BYTES the connection is reset.
   function sayAndClose(socket, text) {
     socket.end(text);
     let dropped = 0;
@@ -594,11 +539,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   const sendJson = (res, status, obj, extra) => send(res, status, 'application/json; charset=utf-8', Buffer.from(JSON.stringify(obj)), extra);
   const sendText = (res, status, text) => send(res, status, 'text/plain; charset=utf-8', Buffer.from(`${text}\n`));
 
-  // A response is over when it closes or when its connection does: one that waits
-  // behind an earlier answer on the same connection is not told that the connection
-  // went. `fn` is called once: a connection that closes under the answer being written
-  // closes that answer too, in the same breath. Returns the function that ends the
-  // watching.
+  // Watches the connection too: a response queued behind an earlier answer is not told
+  // its connection went. `fn` is called once, though both close together.
   function over(res, fn) {
     const { socket } = res.req;
     let told = false;
@@ -622,12 +564,11 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
 
   // ---- how many requests a job may have here at a time
 
-  // A request counts from its head to the end of its answer. At the job's share the
-  // feeds its requests come through hand nothing on, so what it sends next waits with
-  // its sender, and so does the news that it closed a connection, until a request ends
-  // by its answer or its time. A feed hands node one request head at a time, so none
-  // comes past the share. A feed node had paused itself, for a body nobody reads yet,
-  // stays paused when the stop ends: starting it would read the body into memory.
+  // A request counts from its head to the end of its answer. At the job's share its feeds
+  // hand nothing on, so what it sends next, a close included, waits with its sender until
+  // a request ends. A feed hands node one head at a time, so none comes past the share. A
+  // feed node paused itself, for a body nobody reads yet, stays paused when the stop
+  // ends: starting it would read the body into memory.
   function counted(job, req, res) {
     job.asked += 1;
     over(res, () => {
@@ -676,18 +617,13 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
 
   // ---- what a job may hold in this process's memory at a time
 
-  // A request whose body is read whole (a forge request, a model request) takes its
-  // place here first: the bytes it declares, or the most a request may carry when it
-  // declares none, and a place among the forge requests when its answer is held whole
-  // too. One the broker carries upstream itself (a model request, a plain http one)
-  // takes a place among the job's connections out. One that does not fit waits, unread.
-  // A lease is given back when the response is over.
+  // A request whose body is read whole reserves the bytes it declares (the cap when it
+  // declares none), a forge place when its answer is held whole too, and a connection out
+  // when the broker carries it upstream itself. One that does not fit waits, unread; the
+  // lease is given back when the response is over.
 
-  // Whoever fits is let in, the earlier first. One that waits for bytes keeps back the
-  // bodies behind it, and nothing else: a request with no body does not wait for one
-  // that has, and one that needs no place among the forge requests, or no connection
-  // out, does not wait for one. The queue is never longer than the job's share of
-  // requests.
+  // Whoever fits goes in, earlier first. One waiting for bytes keeps back only the bodies
+  // behind it: a request waits only for what it needs.
   function drain(job) {
     const { gate } = job;
     let bytesKept = false;
@@ -758,9 +694,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     });
   }
 
-  // The whole body: a Refusal(413) once it passes the cap, a Refusal(408) when it has
-  // not all come within bodyMs. It is copied into one buffer as it comes, whatever the
-  // chunks it comes in.
+  // Copied into one buffer as it comes, whatever the chunks.
   function collect(req) {
     return new Promise((resolve, reject) => {
       const declared = Number(req.headers['content-length'] ?? 0);
@@ -792,10 +726,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     });
   }
 
-  // A body passed on to `to` as it comes, in pieces of up to CARRY_BYTES: the parser
-  // hands it on in the chunks its sender framed it in, down to a byte, and each written
-  // on its own would be a write of its own all the way out. `req` waits while `to` is
-  // full, and what comes after `to` closed is read and dropped.
+  // Coalesced into pieces of up to CARRY_BYTES: the parser hands a body on in its sender's
+  // chunks, down to a byte, each of which would otherwise be a write all the way out.
   function carry(req, to) {
     let piece = null;
     let length = 0;
@@ -839,19 +771,15 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
 
   const feed = createFeeder();
   const hop = createHop(hopGiven);
-  // The connections that are no job's: those whose first request head has not come, and
-  // those refused, which are given a moment to read why. When there are as many as the
-  // broker keeps, the one that has waited longest is closed for the next.
+  // At the cap, the longest-waiting is closed for the next.
   const strangers = new Set();
 
   const onlyHttps = (host, port) => `the broker connects to ${host} on port 443 only, where its requests are read; ${port === 80 ? 'plain http' : `port ${port}`} would lead around that`;
   const noSsh = (job, host) => `the broker does not connect to ${host}: it serves ${job.info.pool.host} over ssh, around the requester, and no key for it is in this container. Use https://${job.info.pool.host}/`;
 
-  // A connection's first request head is read here, off the socket, before node's
-  // parser is given a byte of it: a connection that names no admitted job costs one
-  // look at one head, one answer and nothing after, whatever it sends and however much.
-  // A connection that opens with the hop's PREFACE comes from a job's relay, in frames
-  // (hop.js), and is read from there on as the bytes the frames carry.
+  // A connection naming no admitted job costs one look at one head and one answer,
+  // whatever it sends. One that opens with the hop's PREFACE comes from a relay, and is
+  // read from then on as the bytes its frames carry.
   const front = net.createServer({ allowHalfOpen: true, noDelay: true }, (socket) => arrive(socket, true));
   front.on('error', (e) => log('broker', `the listener: ${e.message}`));
 
@@ -901,9 +829,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     socket.on('data', more);
   }
 
-  // What the broker itself goes by in a first head: the request line, and the token.
-  // A CONNECT is answered from here. Any other request is node's to read, the bytes of
-  // its head with it, through a feed.
+  // Only the request line and the token are read here. Any request but a CONNECT goes to
+  // node, its head's bytes with it, through a feed.
   function first(socket, seen, end) {
     const lines = seen.latin1Slice(0, end).split(/\r?\n/);
     const line = /^([A-Z]+) (\S+) HTTP\/1\.[01]$/.exec(lines[0]);
@@ -952,12 +879,9 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     if (socket.destroyed) return upstream.destroy();
     hold(job, upstream);
     outbound.add(job, upstream);
-    // Each way ends on its own, and the job's connection is ended, not closed, once the
-    // far host's has: it closes once both ways have, what it was sent taken. One whose
-    // connection out is gone while the job's side is open has nowhere to send what the
-    // job writes: that is read and dropped, and it is closed as the job ends its side,
-    // or 5 s on. One whose connection out is gone before its far host's end is reset, so
-    // that the job never reads a cut as an end.
+    // Each way ends on its own. Once the connection out is gone, what the job writes is
+    // dropped and its side closes as it ends, or HOP_LINGER_MS on; one gone before the far
+    // host's end is reset, so the job never reads a cut as an end.
     upstream.allowHalfOpen = true;
     socket.on('close', () => outbound.close(upstream));
     upstream.on('close', () => {
@@ -975,10 +899,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     upstream.pipe(socket);
   });
 
-  // The requests of a connection that began with one that was no CONNECT. The
-  // connection is the job's whose token its first request carried, and a request on it
-  // that does not carry that token is its last. So is a CONNECT: node closes the
-  // connection of one that nobody listens for.
+  // A request without the token its connection's first carried is the connection's last.
+  // So is a CONNECT: node closes the connection of one nobody listens for.
   const plain = http.createServer(guard(async (req, res) => {
     begun(req, res);
     const { job } = req.socket.dn;
@@ -1053,8 +975,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
 
   // ---- the requests inside a terminated connection
 
-  // By the leaf the job's authority has for the host now: one near its end is replaced
-  // there, under a job that runs on.
+  // Keyed by leaf: one near its end is replaced in the authority under a running job.
   async function contextFor(job, host) {
     const leaf = await job.authority.leaf(host);
     if (!contexts.has(leaf)) contexts.set(leaf, tls.createSecureContext({ key: leaf.key, cert: leaf.cert }));
@@ -1080,10 +1001,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     reads(job, socket, requests);
   }
 
-  // Each request on a terminated connection is judged on its own, however many came
-  // before it: the job still admitted, the target a path, the Host the name the
-  // connection was opened to. A port beside that name decides nothing: clients that
-  // tunnel by hand write the wrong one.
+  // Each request is judged on its own, however many came before. The Host's port decides
+  // nothing: clients that tunnel by hand write the wrong one.
   const inner = http.createServer(guard((req, res) => {
     begun(req, res);
     const { job, host } = req.socket.dn;
@@ -1106,8 +1025,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
   inner.on('upgrade', (req, socket) => socket.destroy());
   inner.on('connect', (req, socket) => socket.destroy());
 
-  // The job's own repository, asked for the way git fetch and git clone ask: the two
-  // upload-pack requests. Every other request for the forge, push included, is not this.
+  // The two upload-pack requests of fetch and clone for the job's own repository; push and
+  // everything else go to the requester.
   function uploadPack(job, host, req) {
     const { pool } = job.info;
     const gitHost = pool.forge === 'github' && pool.host === 'github.com' ? 'github.com' : pool.host;
@@ -1212,10 +1131,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     });
   }
 
-  // What a job has had of the model. Its share is counted in the requests sent for it
-  // and the bytes carried for them, either way and whatever came of them. `bytes` is
-  // the part the provider took: the inference requests it answered with a 2xx, and
-  // those answers.
+  // The share is counted in `requests` and `carried` (either way, whatever came of them);
+  // `bytes` is the part the provider took: 2xx inference requests and their answers.
   const spentBy = (job) => ({ requests: job.spent.requests, bytes: job.spent.bytes, carried: job.spent.carried });
 
   function heard(job) {
@@ -1257,7 +1174,6 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
       }
       upRes = await upstreamRequest(job, host, req, res, headers, body);
       if (!(inject && upRes.statusCode === 401)) break;
-      // A refused credential gets one more try when the store has a newer one.
       const renewed = await llm.refused(headers);
       if (!renewed || attempt > 0) break;
       upRes.resume();
@@ -1289,11 +1205,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
 
   const count = (n) => (Number.isFinite(n) && n > 0 ? n : 0);
 
-  /// Admits a job: `{ runId, pool: { id, forge, host, owner, repo }, ... }`, handed to
-  /// onForge as it is. Resolves to `{ proxyUrl, token, caCertPath, generation }`. A job
-  /// that is already running, taken up by a later daemon, is admitted under the `token`
-  /// it was started with, the CA `generation` it trusts, and what it had `spent` of the
-  /// model by then, as `spent` gave it: its share does not start again.
+  /// A job a later daemon takes up is admitted under its original `token`, CA
+  /// `generation` and `spent`: its share does not start again.
   async function addJob(info, { token = crypto.randomBytes(32).toString('hex'), generation = null, spent = null } = {}) {
     if (!listening) throw new Error('the broker is not listening');
     if (jobs.has(info.runId)) throw new Error(`job ${info.runId} is already admitted`);
@@ -1320,8 +1233,6 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     return { proxyUrl: `http://dn:${token}@${RELAY_HOST}:${listening.port}`, token, caCertPath: authority.certPath, generation: authority.id };
   }
 
-  /// Ends a job's access: its token dies, its connections, its upstream connections and
-  /// its forwards close, and its requests still waiting their turn are dropped.
   function removeJob(runId) {
     const job = jobs.get(runId);
     if (!job) return;
@@ -1336,9 +1247,8 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     sparing.end(`job ${runId} `);
   }
 
-  /// Gives a job a way to `target` (`{ host, port }` on this machine, the adb server for
-  /// one) for as long as the job lives: a CONNECT to `<name>.forward.dn` under that
-  /// job's token leads there, and under any other token leads nowhere. Returns `{ name }`.
+  /// A CONNECT to `<name>.forward.dn` leads to `target` on this machine under this job's
+  /// token only.
   function addForward(runId, { name, target }) {
     const job = jobs.get(runId);
     if (!job) throw new Error(`job ${runId} is not admitted`);
@@ -1347,30 +1257,18 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     return { name };
   }
 
-  /// What a job has had of the model on this machine's credential, or null for a job
-  /// that is not admitted: `{ requests, bytes, carried }` - the requests sent for it, the
-  /// bytes of the inference requests the provider accepted and of its answers to them,
-  /// and every byte carried either way, whatever came of it. It is what `addJob` takes
-  /// back as `spent`.
+  /// What `addJob` takes back as `spent`.
   function spent(runId) {
     const job = jobs.get(runId);
     return job ? spentBy(job) : null;
   }
 
-  /// Calls `fn(runId, spent)`, `spent` as above, when a job's spend has grown: as a request is
-  /// counted, and again when its answer has been passed on. Returns the function that
-  /// ends the listening.
+  /// Called as a request is counted, and again once its answer has been passed on.
   function onSpend(fn) {
     spendHeard.add(fn);
     return () => spendHeard.delete(fn);
   }
 
-  /// What a job holds of the broker now: `{ connections, requests, bytes, forgeRequests,
-  /// upstreams, waiting, held }` - its container's connections, its requests that have no
-  /// answer yet, the bodies read whole, the forge requests in flight, the requests being
-  /// carried upstream, the requests waiting their turn for any of those three, and the
-  /// bytes its connections have on the hop from its relay (hop.js). Null for a job that
-  /// is not admitted.
   function load(runId) {
     const job = jobs.get(runId);
     if (!job) return null;
@@ -1378,9 +1276,7 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     return { connections: job.clients.size, requests: job.asked, bytes: gate.bytes, forgeRequests: gate.slots, upstreams: gate.outs, waiting: gate.queue.size, held: hop.held(job) };
   }
 
-  /// Starts listening, on `port` when given: the port the jobs of an earlier daemon were
-  /// told. Otherwise on the port the operator named, or one the next daemon can have
-  /// again. Resolves to `{ host, port }`.
+  /// `port`: the one an earlier daemon's jobs were told.
   async function start({ port = BROKER_PORT || quietPort() } = {}) {
     const host = await brokerBindAddress();
     await new Promise((resolve, reject) => {
@@ -1395,7 +1291,6 @@ export function createBroker({ log = () => {}, ca, llm, mirrors, onForge, trace 
     return listening;
   }
 
-  /// Ends every job and stops listening.
   async function stop() {
     for (const runId of [...jobs.keys()]) removeJob(runId);
     if (!listening) return;

@@ -1,13 +1,9 @@
-// The hop between a job container's relay and the broker. It is the part of a job's
-// connection whose socket buffers are this machine's: the broker's end and, through
-// Docker Desktop, the end Docker opens for the relay on the Mac; on Linux the relay's
-// end is this machine's kernel as well. Left to TCP, each end grows its buffers to
-// megabytes, as much as the job keeps unread on either side, and node can set no limit
-// on them. So the relay (image/relay.mjs) carries a connection in frames, and neither
-// side sends more than the other has made room for: the broker grants the relay what
-// it may send, and sends the relay only so much that is not yet passed on to the job.
-// What is on the hop is then counted here, for every connection of every job at once,
-// against a fixed total.
+// The hop between a job container's relay and the broker: the stretch of a job's
+// connection whose socket buffers are this machine's (the broker's end and, on Docker
+// Desktop, the end Docker opens for the relay; on Linux the relay's too). Left to TCP each
+// end grows to megabytes of whatever the job leaves unread, and node can cap neither, so
+// the relay (image/relay.mjs) frames each connection under credit flow control, and what
+// is on the hop across every job is counted here against a fixed total.
 //
 // A frame is a type byte, a length of four bytes (big-endian) and, for DATA, that many
 // bytes of the connection. The relay opens with PREFACE, which no HTTP request begins
@@ -28,59 +24,50 @@ export const CREDIT = 3;
 export const ACK = 5;
 const HEADER_BYTES = 5;
 
-/// The most bytes one DATA frame of the broker's carries, and the fewest that room is
-/// made for at a time when more are waiting.
+/// The most one broker DATA frame carries; LEAST_BYTES is the least room granted at once
+/// while more is waiting.
 export const FRAME_BYTES = 64 * 1024;
 const LEAST_BYTES = 2 * 1024;
-// What a connection's bytes are kept in while nothing takes them: copied together, so that
-// however small the frames they came in, they cost the daemon about what they count.
+// Untaken bytes are copied together, so however small their frames they cost the daemon
+// about what they count.
 const STASH_BYTES = 16 * 1024;
-/// How long an ended hop waits for the relay to end its side before it is closed.
 export const HOP_LINGER_MS = 5000;
 
-/// What one connection may have on its way each way: granted to the relay and read by
-/// the broker but not yet passed on, and sent but not yet passed on to the job. A
-/// connection whose first request has not named a job gets HOP_STRANGER_WINDOW.
+/// Per connection, each way: granted or sent and not yet passed on. A connection whose
+/// first request has not named a job gets HOP_STRANGER_WINDOW.
 export const HOP_WINDOW = 128 * 1024;
 export const HOP_STRANGER_WINDOW = 2 * 1024;
 
-/// What is on the hop at once - granted to relays and not yet come, and sent to them
-/// and not yet passed on - for the connections of all jobs, shared out equally among
-/// the jobs admitted, and for those that are no job's.
+/// Hop-wide totals: the jobs' one shared equally among admitted jobs, and one for
+/// connections that are no job's.
 export const HOP_JOB_BYTES = 14 * 1024 * 1024;
 export const HOP_STRANGER_BYTES = 2 * 1024 * 1024;
 
-/// A job that has kept more than its share on the hop for this long, while another job
-/// has been held back by it as long, loses the connections that hold the most of it
-/// until it is within its share, and none that hold nothing, which would free nothing.
-/// A job gets no room while it is past its share, so one whose connections are read is
-/// within it as soon as what it was sent is.
+/// A job past its share this long, while another has been held back by it as long, loses
+/// its fullest connections until within its share (never one holding nothing). A job past
+/// its share gets no room, so one whose connections are read soon falls back within it.
 export const HOP_RECLAIM_MS = 2000;
 
-/// `createHop()` makes the count shared by every connection that comes in frames:
-/// `framed(raw, first)` is the Duplex the connection's bytes come out of and go into,
-/// counted as no job's, `raw` the socket the frames come on, `first` what was read of it
-/// already. `admit(job)` gives a job its share until `leave(job)`, and `seat(link, job)`
-/// counts a link as that job's from then on. `held(job)` is what a job's connections
-/// have on the hop, and `held()` `{ jobs, strangers }`.
+/// `framed(raw, first)` is the Duplex carried in frames on `raw`, counted as no job's
+/// until `seat(link, job)`; `admit(job)` gives a job its share until `leave(job)`.
 export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANGER_BYTES, window = HOP_WINDOW, strangerWindow = HOP_STRANGER_WINDOW, reclaimMs = HOP_RECLAIM_MS, lingerMs = HOP_LINGER_MS } = {}) {
   const groups = {
     jobs: { held: 0, limit: jobBytes },
     strangers: { held: 0, limit: strangerBytes },
   };
   const strangers = { group: groups.strangers, held: 0, links: new Set(), window: strangerWindow };
-  const jobs = new Map(); // job -> its bucket, while it is admitted
-  // Links held back by what the others have on the hop, and not by their own window.
+  const jobs = new Map();
+  // Links held back by what the others have on the hop, not by their own window.
   const waiting = new Set();
   let waking = false;
-  // A wake is handing out room: the links it woke are out of `waiting` until each has
-  // gone, so the reclaim is reckoned once it is over.
+  // A wake is handing out room: its links are out of `waiting` until each has gone, so the
+  // reclaim is reckoned after.
   let going = false;
   let reclaim = null;
 
   const shareOf = (bucket) => (bucket === strangers ? strangerBytes : Math.floor(jobBytes / jobs.size));
 
-  // Since when a job has been past its share as it is now.
+  // bucket.past: since when a job has been past its share.
   function judge(bucket, now = Date.now()) {
     if (bucket === strangers) return;
     if (bucket.held <= shareOf(bucket)) bucket.past = 0;
@@ -90,12 +77,12 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
     }
   }
 
-  // What a link may be given now, of the `need` it has, `own` counting against its window.
+  // What a link may be given now of its `need`, `own` counting against its window.
   function room(link, bucket, own, need) {
     const n = Math.min(need, bucket.window - own, shareOf(bucket) - bucket.held, bucket.group.limit - bucket.group.held);
     if (n >= Math.min(need, LEAST_BYTES)) {
-      // Given part of what it needs, it is held back still: what it takes and does not
-      // pass on frees nothing for the others.
+      // Given part of its need it is still held back: what it takes and does not pass on
+      // frees nothing for the others.
       if (n === need) link.since = 0;
       return n;
     }
@@ -125,8 +112,8 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
     });
   }
 
-  // A job with room left in its share is held back by jobs past theirs: each of those is
-  // due once it and the longest held back have been so for reclaimMs.
+  // A job past its share is due once it, and the longest held-back link, have been so for
+  // reclaimMs.
   function reclaimSoon() {
     if (going) return;
     clearTimeout(reclaim);
@@ -157,17 +144,17 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
   function framed(raw, first) {
     let bucket = strangers;
     let held = 0; // what this link counts in its bucket
-    let credit = 0; // granted to the relay and not yet sent
-    let asked = 0; // what the relay asked room for and has not been granted
-    let inFlight = 0; // sent to the relay and not yet passed on
-    const queue = []; // { chunk, at, done } written and not yet sent
+    let credit = 0; // granted to the relay, not yet sent by it
+    let asked = 0; // asked for by the relay, not yet granted
+    let inFlight = 0; // sent to the relay, not yet ACKed
+    const queue = []; // written, not yet sent
     let dead = false;
     let ended = false; // the relay sent END
-    let preface = 0; // how much of PREFACE has come
-    let kept = null; // a frame not all of which has come
-    const stash = []; // { buf, used }: bytes come and not yet handed on, oldest first
+    let preface = 0;
+    let kept = null; // a partial frame
+    const stash = []; // come, not yet handed on, oldest first
     let stashed = 0;
-    let wanted = false; // the link's reader asked for bytes and was handed none
+    let wanted = false; // the reader asked and was handed nothing
 
     function sync() {
       const now = dead ? 0 : credit + inFlight;
@@ -243,8 +230,7 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
       if (ended && stash.length === 0 && !link.readableEnded) link.push(null);
     }
 
-    // What the relay sends: a broken frame, or more than it was granted or was sent,
-    // ends the connection.
+    // A broken frame, or more than was granted or sent, ends the connection.
     function take(chunk) {
       let buf = kept ? Buffer.concat([kept, chunk]) : chunk;
       kept = null;
@@ -287,7 +273,7 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
     }
 
     const link = new (class extends Duplex {
-      // What is read of the connection's bytes makes room in its window for more.
+      // Reading makes room in the window.
       read(n) {
         const r = super.read(n);
         grant();
@@ -306,7 +292,7 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
       }
     })({
       allowHalfOpen: true,
-      // What is not taken is kept in the stash, and the link itself holds one chunk.
+      // The stash keeps what is not taken; the link itself holds one chunk.
       readableHighWaterMark: 1,
       read() {
         wanted = true;
@@ -325,9 +311,8 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
         waiting.delete(link);
         sync();
         bucket.links.delete(link);
-        // A socket closed while the relay still sends is reset, and the relay loses what
-        // it had not read yet of the broker's: the hop is ended instead, and closed when
-        // the relay ends its side too.
+        // Closing while the relay still sends would reset it, losing what it had not read:
+        // end instead, and close once the relay ends too.
         if (err) raw.destroy();
         else {
           raw.end();
@@ -354,7 +339,7 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
     };
     raw.on('timeout', () => link.emit('timeout'));
     raw.on('data', take);
-    // The relay ends what it carries with END; a hop that ends without it is gone.
+    // The relay ends what it carries with END; a hop ending without it is gone.
     raw.on('end', () => link.destroy());
     raw.on('close', () => link.destroy());
     raw.resume();
@@ -362,8 +347,7 @@ export function createHop({ jobBytes = HOP_JOB_BYTES, strangerBytes = HOP_STRANG
     return link;
   }
 
-  // The shares change for every job: how long each is past its own counts from when it
-  // was first past it as it is now.
+  // Every share changed: judge each job against its new one.
   function reshare() {
     const now = Date.now();
     for (const bucket of jobs.values()) judge(bucket, now);

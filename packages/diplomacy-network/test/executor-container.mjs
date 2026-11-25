@@ -1,8 +1,8 @@
-// Containers and jobs against the stand-in docker: one container per peer and
-// repository, its by its labels and not by its name, on a network of its own with a
-// relay as its one way out, many jobs in it, each stopped on its own; what it may take
-// of the machine, its disk included; the image built once per tag; the real runner
-// script cloning through the real broker from a real mirror, with a stand-in for the agent.
+// Containers and jobs against the stand-in docker: one per peer and repository, owned by
+// labels not name, on its own network with a relay as its one way out; many jobs in it,
+// each stopped on its own; its share of the machine, disk included; the image built once
+// per tag; the real runner cloning through the real broker from a real mirror, with a
+// stand-in agent.
 // Run: node test/executor-container.mjs
 
 import assert from 'node:assert/strict';
