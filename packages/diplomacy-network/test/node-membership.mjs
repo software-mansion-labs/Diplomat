@@ -64,6 +64,41 @@ await check('hosts join a pool by invite and see one another; a stranger is refu
   await assert.rejects(late.node.join({ invite: own }), /^Error: That invite was made on this machine: it lets another machine in, not this one\.$/);
 });
 
+await check('a host refuses an invite said to be good for longer than a day, and waits on none for longer than a day from when it was pasted, after a restart too', async () => {
+  const w = createWorld({ seed: 47 });
+  const [a] = await w.pool(['a', 'b']);
+  const day = 24 * 3600;
+  const most = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
+  // A key in no pool, asking the most work of every request.
+  const s = w.stranger('s');
+  s.transport.onRequest(async (buf) => {
+    const request = JSON.parse(buf.toString('utf8'));
+    return canon(buildResponse(s.id, { re: requestDigest(request), error: { code: 'effort', detail: '' }, effort: most }));
+  });
+  const asked = [];
+  w.net.tap(({ from, to }) => from === 'a' && to === 's' && asked.push(w.net.now()));
+  const made = (secs) => inviteToken(createInvite(s.id, { pool: POOL, exp: w.net.now() + secs, nonce: w.net.rnd.bytes(16) }));
+  const joinOf = () => [w.view(a).joining, w.view(a).joinFailed];
+  await assert.rejects(a.node.join({ invite: made(3650 * day) }), /^Error: That invite says it is good for longer than a day, and no machine makes one for longer: ask for a new one\.$/);
+  assert.deepEqual([joinOf(), asked.length], [[false, ''], 0]);
+  // Made by a clock four minutes ahead: taken, and good for a day from the paste.
+  let pasted = w.net.now();
+  await a.node.join({ invite: made(day + 240) });
+  await w.run(day - 60);
+  assert.deepEqual(joinOf(), [true, '']);
+  await w.run(120);
+  assert.deepEqual(joinOf(), [false, 'the invite ran out before the machine that made it answered']);
+  assert.ok(asked.length > 0 && asked.every((at) => at < pasted + day), 'asked within the day alone');
+  // A store before this one kept the invite's own time, ten years on.
+  w.net.kill('a');
+  a.disk.write(poolFile(POOL), JSON.stringify({ ...w.doc(a), joining: { invite: made(day), by: s.pk, exp: w.net.now() + 3650 * day } }));
+  pasted = w.net.now();
+  await w.restart(a);
+  await w.run(day + 60);
+  const since = asked.filter((at) => at >= pasted);
+  assert.deepEqual([joinOf()[0], since.length > 0, since.every((at) => at < pasted + day)], [false, true, true]);
+});
+
 await check('a host that left a pool stays out of it, whatever its list of pools says and however often it restarts, until it joins again', async () => {
   const w = createWorld({ seed: 22 });
   const [a, b, c] = await w.pool(['a', 'b', 'c']);
@@ -1866,6 +1901,51 @@ await check('the keys one member seated take no more of the search\'s eighth tha
   const most = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
   const hour = Math.max(...paid.map(([at]) => paid.filter(([t]) => t >= at && t < at + 3600).reduce((x, [, e]) => x + e, 0)));
   assert.ok(hour <= Math.max(POW_HOURLY.search / 2, most), `${hour / POW_HOURLY.search} of the eighth paid x's keys in an hour`);
+});
+
+// What `a` paid the keys whose names `pattern` matches in its dearest hour.
+function dearest(w, pattern) {
+  const paid = [];
+  w.net.tap(({ from, to, body }) => from === 'a' && pattern.test(to ?? '') && paid.push([w.net.now(), JSON.parse(body.toString('utf8')).pow.effort]));
+  return () => Math.max(0, ...paid.map(([at]) => paid.filter(([t]) => t >= at && t < at + 3600).reduce((x, [, e]) => x + e, 0)));
+}
+
+await check('the members that seated the keys a machine looks for in every pool it is in count towards the share of each: one member\'s keys in one pool, beside sixteen members\' in another, take no more than one request at the most in an hour', async () => {
+  const w = createWorld({ seed: 31 });
+  const [a] = await w.pool(['a', 'b']);
+  const other = { id: 'github.com/acme/other', path: '/repos/other', forge: 'github', identity: 'Octocat' };
+  a.pools = [...a.pools, other];
+  a.node.setPools(a.pools);
+  await w.run(5);
+  const hour = dearest(w, /^k\d/);
+  const gone = goneFor(w, Array.from({ length: 16 }, (_, i) => `y${i}`));
+  w.net.kill('a');
+  a.disk.write(asksFile(POOL), JSON.stringify({ back: [], former: spread(w, draining(w, LIMITS.invitees), 'x') }));
+  a.disk.write(asksFile(other.id), JSON.stringify({ back: [], former: gone.map((s, i) => ({ pk: s.pk, by: `y${i}`, due: w.net.now() + 3600 })) }));
+  await w.restart(a);
+  await w.run(2 * 24 * 3600);
+  const most = Math.max(POW.memberBase * 2 ** POW.memberCap, POW.strangerBase * 2 ** POW.strangerCap);
+  assert.ok(hour() <= Math.max(POW_HOURLY.search / 17, most), `${hour() / POW_HOURLY.search} of the eighth paid x's keys in an hour`);
+});
+
+await check('however many members seated the keys a machine looks for, it pays them no more than the whole of its hour, and redeems an invite into another pool at once', async () => {
+  const w = createWorld({ seed: 39 });
+  const [a] = await w.pool(['a', 'b']);
+  const hour = dearest(w, /^k\d/);
+  // The keys of sixty members: one request at the most an hour for each member, past the
+  // search's eighth, would be more than the whole. The second day greets keys at the price
+  // they asked the first.
+  const keys = draining(w, 60 * LIMITS.invitees);
+  await asking(w, a, { former: keys.flatMap((s, i) => spread(w, [s], `x${i % 60}`)) });
+  await w.run(48 * 3600);
+  const link = { id: 'github.com/acme/gadgets', path: '/repos/gadgets', forge: 'github', identity: 'Octocat' };
+  const z = w.add('z', { pools: [link] });
+  await w.start(z);
+  a.node.setPools([...a.pools, link]);
+  const start = w.net.now();
+  await a.node.join(z.node.invite({ pool: link.id }));
+  await w.net.until(() => a.node.snapshot().pools.find((p) => p.id === link.id)?.members.some((m) => m.pk === z.pk), { what: 'a in z\'s pool' });
+  assert.deepEqual([hour() > POW_HOURLY.search, hour() <= POW_HOURLY.all, w.net.now() - start <= 60], [true, true, true], `${hour() / POW_HOURLY.all} of the whole hour paid them, the invite redeemed in ${w.net.now() - start} s`);
 });
 
 await check('a key that asks the most work there is is still asked each time it is due, though four members seated the keys a machine looks for', async () => {

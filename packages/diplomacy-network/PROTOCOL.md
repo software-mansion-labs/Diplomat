@@ -385,7 +385,10 @@ that makes it under `dn1/invite` and handed over out of band as a token, the bas
 of its canonical form. `nonce` is 16 random bytes. It is in no record and is shown to
 nobody but its maker: the host that was handed one sends `hello { invite }` to `by`,
 and is answered with a voucher. An invite is good until `exp`, for every key that
-brings it, each for a seat of its own.
+brings it, each for a seat of its own. A host makes one good for a day at most, and takes
+none good for longer: one whose `exp` is more than a day and 300 s on when it is handed over
+is refused then, and the host waits on any other for no longer than a day from then,
+whatever its `exp`.
 
 A **voucher** is `{ "pool", "by": "<pk>", "era", "pk", "seat", "at", "sig" }`, signed by
 `by` under `dn1/voucher`: the member `by`, in its membership numbered `era`, gave its

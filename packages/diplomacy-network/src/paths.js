@@ -156,6 +156,8 @@ export const MEMBER_RETENTION_SECS = agreed('DN_MEMBER_RETENTION_SECS', 30 * 24 
 // A host signs its member record and its open offers again this often, four times
 // inside their retention.
 export const RESIGN_INTERVAL_MS = agreed('DN_RESIGN_INTERVAL_MS', (RECORD_RETENTION_SECS * 1000) / 4);
+// What an invite is made good for, and the longest a host it is pasted into takes one as
+// good for from then.
 export const INVITE_TTL_SECS = 24 * 3600;
 export const OFFER_ATTEMPTS = 3;
 

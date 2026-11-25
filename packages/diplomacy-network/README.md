@@ -176,7 +176,7 @@ daemon is up; the transport comes up behind it, and over Tor that takes minutes.
 | `POST /admit` | `{ slots, reason? }` | `{ ok: true }` - how many more tasks this machine takes now |
 | `POST /offer` | `{ pool, kind, options?, item, title, prompt, base?, now? }` | `{ taskId }` - the same id again for an offer still open |
 | `POST /withdraw` | `{ taskId, reason? }` | `{ ok: true, ended: true }` - `reason` is free text, kept with the cancelled offer |
-| `POST /invite` | `{ pool, ttlSecs? }` | `{ invite }` |
+| `POST /invite` | `{ pool, ttlSecs? }` | `{ invite }` - good for `ttlSecs`, from 60 s to a day (the default) |
 | `POST /join` | `{ invite }` or `{ pool }` | `{ pool }` - by invite into someone's pool, or back into a pool this machine left |
 | `POST /leave` | `{ pool }` | `{ ok: true }` |
 | `POST /stop-run` | `{ runId }` | `{ ok: true }` - the run is stopped and its claim released; the task is in the pool again for another machine, and this one does not take it again while that offer stands |
